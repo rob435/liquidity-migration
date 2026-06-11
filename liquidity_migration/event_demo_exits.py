@@ -33,6 +33,8 @@ from .event_demo import (
     _empty_trades,
     _execution_summary,
     _fallback_tick_size,
+    _first_float,
+    _first_non_empty,
     _float,
     _normalized_position_side,
     _open_trades,
@@ -1802,3 +1804,129 @@ def _limit_chase_price(*, bybit_side: str, reference_price: float, bps: float, t
         return _round_price(raw, tick_size=tick_size or _fallback_tick_size(reference_price), rounding=ROUND_CEILING)
     raw = reference_price * (1.0 - bps / 10_000.0)
     return _round_price(raw, tick_size=tick_size or _fallback_tick_size(reference_price), rounding=ROUND_FLOOR)
+
+# --- risk-exit planning (relocated from event_demo_planning.py when the daily-short
+# entry stack was erased, operator order 2026-06-11; these serve the always-on risk
+# service for every sleeve) ---
+
+def _price_crosses_stop(*, side: str, price: float, stop_price: float) -> bool:
+    return price >= stop_price if side == "short" else price <= stop_price
+
+
+def _price_crosses_take_profit(*, side: str, price: float, take_profit_price: float) -> bool:
+    return price <= take_profit_price if side == "short" else price >= take_profit_price
+
+
+def plan_risk_exits(
+    open_trades: pl.DataFrame,
+    *,
+    position_by_symbol: dict[str, dict[str, Any]],
+    price_by_symbol: dict[str, float],
+    now_ms: int,
+    cap_qty_to_trade: bool = False,
+) -> list[dict[str, Any]]:
+    if open_trades.is_empty():
+        return []
+    exits: list[dict[str, Any]] = []
+    for trade in open_trades.to_dicts():
+        symbol = str(trade.get("symbol", ""))
+        position = position_by_symbol.get(symbol, {})
+        side = str(trade.get("side") or _normalized_position_side(position.get("side")) or "short")
+        # DEPLOY NOTE (reconcile-core-2): on the SHARED netted demo account (3 sleeves,
+        # one account) position.size is the SUM of every sleeve's leg on this symbol.
+        # Sizing a reduce-only risk exit to that netted size lets one sleeve's stop
+        # FLATTEN a sibling sleeve's leg (reduce_only caps at the netted position, not
+        # at this sleeve's leg). When cap_qty_to_trade (set by ws_risk whenever a
+        # sibling-sleeve ledger is configured) cap the exit at min(trade.qty,
+        # position.size) so a stop closes only this sleeve's exposure. Single-sleeve
+        # symbols are unaffected (trade.qty == position.size). If trade.qty is transiently
+        # smaller than the real position, the residual exposure beyond this sleeve's ledgered
+        # qty is recovered by the separate untracked-position flatten path — NOT by a re-emit
+        # here (plan_risk_exits only iterates OPEN ledger trades, so the just-closed trade is
+        # gone next pass). Under-closing is fail-safe; the cross-sleeve OVER-close it prevents
+        # is the non-self-healing failure. Off (default) preserves the legacy single-account
+        # 'prefer venue size'.
+        trade_qty = _float(trade.get("qty"))
+        position_size = _float(position.get("size"))
+        if cap_qty_to_trade and trade_qty > 0.0 and position_size > 0.0:
+            qty = _quantity_text(min(trade_qty, position_size))
+        else:
+            qty = str(_first_non_empty(position.get("size"), trade.get("qty")))
+        if not symbol or not qty:
+            continue
+        current_price = price_by_symbol.get(symbol, 0.0)
+        exit_checks: list[tuple[int, int, str, float | None]] = []
+        stop_price = _float(trade.get("stop_price"))
+        if current_price > 0.0 and stop_price > 0.0 and _price_crosses_stop(side=side, price=current_price, stop_price=stop_price):
+            exit_checks.append((now_ms, 0, "stop_loss", current_price))
+        take_profit_price = _float(trade.get("take_profit_price"))
+        if (
+            current_price > 0.0
+            and take_profit_price > 0.0
+            and _price_crosses_take_profit(side=side, price=current_price, take_profit_price=take_profit_price)
+        ):
+            exit_checks.append((now_ms, 1, "take_profit", current_price))
+        planned_exit_ts_ms = int(trade.get("planned_exit_ts_ms") or 0)
+        if planned_exit_ts_ms > 0 and now_ms >= planned_exit_ts_ms:
+            exit_checks.append((planned_exit_ts_ms, 2, "max_hold", current_price if current_price > 0.0 else None))
+        if not exit_checks:
+            continue
+        trigger_ts_ms, _, reason, planned_price = sorted(exit_checks, key=lambda item: (item[0], item[1]))[0]
+        exits.append(
+            {
+                "trade_id": str(trade["trade_id"]),
+                "symbol": symbol,
+                "side": side,
+                "qty": qty,
+                "exit_reason": reason,
+                "exit_trigger_ts_ms": trigger_ts_ms,
+                "planned_exit_price": planned_price if planned_price is not None else current_price,
+                "planned_exit_ts_ms": planned_exit_ts_ms,
+            }
+        )
+    return exits
+
+def plan_stop_repairs(
+    open_trades: pl.DataFrame,
+    *,
+    position_by_symbol: dict[str, dict[str, Any]],
+    skip_symbols: set[str] | None = None,
+    tolerance_bps: float = 1.0,
+) -> list[dict[str, Any]]:
+    if open_trades.is_empty():
+        return []
+    skip = skip_symbols or set()
+    repairs: list[dict[str, Any]] = []
+    for trade in open_trades.to_dicts():
+        symbol = str(trade.get("symbol", ""))
+        if not symbol or symbol in skip:
+            continue
+        position = position_by_symbol.get(symbol)
+        if not position:
+            continue
+        stop_price = _float(trade.get("stop_price"))
+        take_profit_price = _float(trade.get("take_profit_price"))
+        current_stop = _first_float(position, ("stopLoss", "stop_loss", "sl", "stopLossPrice"))
+        current_take_profit = _first_float(position, ("takeProfit", "take_profit", "tp", "takeProfitPrice"))
+        needs_stop = stop_price > 0.0 and not _prices_close(current_stop, stop_price, tolerance_bps=tolerance_bps)
+        needs_take_profit = take_profit_price > 0.0 and not _prices_close(
+            current_take_profit,
+            take_profit_price,
+            tolerance_bps=tolerance_bps,
+        )
+        if not needs_stop and not needs_take_profit:
+            continue
+        repairs.append(
+            {
+                "trade_id": str(trade.get("trade_id", "")),
+                "symbol": symbol,
+                "side": str(trade.get("side") or _normalized_position_side(position.get("side")) or ""),
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
+                "current_stop_price": current_stop,
+                "current_take_profit_price": current_take_profit,
+                "needs_stop_repair": needs_stop,
+                "needs_take_profit_repair": needs_take_profit,
+            }
+        )
+    return repairs

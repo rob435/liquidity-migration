@@ -135,7 +135,7 @@ def test_hedge_row_is_tracked_but_never_force_exited() -> None:
     import polars as pl
 
     from liquidity_migration.continuous_hedge_manager import build_hedge_trade_row
-    from liquidity_migration.event_demo_planning import plan_risk_exits
+    from liquidity_migration.event_demo_exits import plan_risk_exits
 
     row = build_hedge_trade_row(
         ContinuousHedgeConfig(), qty=0.01, entry_price=100_000.0, now_ms=1_700_000_000_000,

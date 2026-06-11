@@ -3,6 +3,11 @@ name: pit-reconcile
 description: "Run the demo-forward reconciliation for promoted short/long sleeves and optional continuous diagnostics, and fix/diagnose PIT membership (archive_trade_manifest) problems. Use whenever asked to reconcile the demo/paper/backtest, when a reconcile shows paper-only / backtest-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest/klines are stale. Drives scripts/reconcile.sh, which AUTO-provisions (pulls ledgers, refreshes the manifest, auto-downloads recent klines) and backtests a MINIMAL forward window. The canonical fix for the manifest-lag / missing-recent-coverage class of friction. Continuous is live research-stage demo/paper as of 2026-06-09; include it explicitly with --sleeves continuous for diagnostics."
 ---
 
+> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
+> ERASED from the system — the short backtest<->paper<->demo reconcile legs and
+> short commands NO LONGER EXIST. reconcile.sh now covers LONG (paper<->demo)
+> + continuous diagnostics only; ignore short instructions below.
+
 # PIT reconcile + membership runbook
 
 The one command for a demo-forward reconciliation of the **promoted sleeves (short + long)** is:

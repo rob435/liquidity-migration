@@ -1,29 +1,26 @@
 # liquidity-migration
 
-A research codebase for a Bybit liquidity-migration short strategy — a
-cross-sectional strategy that ranks the perpetual-futures universe by a
-volume / liquidity-migration signal and shorts the weakest-ranked names.
-A long-only sleeve (`MultiStratV1` / v11a, FOMO-chase) is promoted alongside it
-but is currently toggled off on the live box; see [STATE.md](STATE.md).
+A research codebase for Bybit crypto-perp trading research. Two systems remain:
+the CONTINUOUS fade book (the live demo system — a rolling intraday
+liquidity-migration fade ensemble with a BTC+ETH hedge) and the LONG-only
+sleeve (`MultiStratV1` / v11a, FOMO-chase), promoted-in-code but currently
+toggled off on the live box; see [STATE.md](STATE.md).
 
-## Status: research-stage — selection + execution, live demo running
+**The original daily SHORT strategy was ERASED from the system 2026-06-11 by
+operator order** (engine, daemon, CLI, deploy units, scripts, tests, docs); git
+history is the archive.
 
-The strategy is a **selection signal** (a liquidity-migration event picks a
-candidate pool) + an **execution signal** (the in-migrated flow exhausts and
-fades — short the *confirmed* fade, not the top; this is a fade strategy, not a
-catch-the-top strategy). The earlier "Round 2 = documented null" verdict has been
-**retracted** (substantially a methodology artifact). Under realistic capped stop
-fills at `max_active=12`, the daily strategy is **gross-positive on both venues
-in-sample**. It stays in-sample; the Bybit demo forward test is the arbiter;
-nothing is promoted to real money. Dated numbers + full record (the one
-research file): [docs/research_summary.md](docs/research_summary.md); live state +
-what's next: [STATE.md](STATE.md).
+## Status: research-stage — live demo running
+
+Nothing is promoted to real money; the Bybit demo forward test is the arbiter.
+Dated numbers + full record (the one research file):
+[docs/research_summary.md](docs/research_summary.md); live state + what's next:
+[STATE.md](STATE.md).
 
 A Bybit demo account on a VPS hosts the forward tests. As of 2026-06-09 the box
 runs only the continuous sleeve (research-stage, demo orders + paper shadow) plus
-the risk engine and a dry-run BTC hedge timer; the frozen promoted short profile
-and v11a long sleeve are toggled off in `deploy/sleeves.env` but remain
-promoted-in-code and redeployable. Forward demo is the arbiter; clocks restarted
+the risk engine and the hedge timer; the v11a long sleeve is toggled off in
+`deploy/sleeves.env` but remains promoted-in-code and redeployable. Forward demo is the arbiter; clocks restarted
 2026-06-09. No real-money trading is active: a real-money execution path exists in the code but
 the account is a plain `.env` toggle (`DEMO` / `REAL_MONEY`, mutually
 exclusive) that defaults to demo. The strategy is not validated for real

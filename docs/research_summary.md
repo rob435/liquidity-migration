@@ -1,5 +1,13 @@
 # Research Summary - Liquidity Migration
 
+> **DAILY SHORT SLEEVE ERASED — 2026-06-11 (operator order).** The daily
+> event/short product (engine `volume_events`, demo daemon, CLI, deploy units,
+> scripts, tests, runbooks) was removed from the system in full; git history is
+> the archive. Sections below describing the daily short are the HISTORICAL
+> RESEARCH RECORD of an erased product, kept because the methodology lessons and
+> the long/continuous findings interleave with them — they describe nothing that
+> can run today. The continuous fade book and the long v11a sleeve are what remain.
+
 **Updated:** 2026-06-10
 **Status:** research-stage only. Demo and paper evidence are allowed; real-money promotion is not.
 

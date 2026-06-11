@@ -65,9 +65,9 @@ def test_off_sleeve_is_disabled_on_sleeve_is_enabled(tmp_path: Path) -> None:
 
 def test_verify_passes_for_on_after_enable_and_off_after_disable(tmp_path: Path) -> None:
     rc, _calls, err = _run(tmp_path, """
-        apply_sleeve_enable on  $SHORT_SLEEVE_UNITS
+        apply_sleeve_enable on  $LONG_SLEEVE_UNITS
         apply_sleeve_enable off $CONTINUOUS_SLEEVE_UNITS
-        verify_sleeve on  $SHORT_SLEEVE_UNITS        # enabled+active -> passes
+        verify_sleeve on  $LONG_SLEEVE_UNITS         # enabled+active -> passes
         verify_sleeve off $CONTINUOUS_SLEEVE_UNITS    # not active     -> passes
     """)
     assert rc == 0, f"verify should pass for a correctly-applied toggle:\n{err}"
@@ -76,39 +76,10 @@ def test_verify_passes_for_on_after_enable_and_off_after_disable(tmp_path: Path)
 def test_verify_fails_when_on_sleeve_is_not_running(tmp_path: Path) -> None:
     # An "on" sleeve that was never enabled must FAIL verify (deploy would abort loudly).
     rc, _calls, err = _run(tmp_path, """
-        verify_sleeve on $SHORT_SLEEVE_UNITS
+        verify_sleeve on $LONG_SLEEVE_UNITS
     """)
     assert rc != 0, "verify_sleeve on must fail when the units are not active"
     assert "not active" in err
-
-
-def test_short_paper_split_keeps_demo_retires_paper(tmp_path: Path) -> None:
-    # The short DEMO and its PAPER shadow are independently toggled, so a small host can run the
-    # real forward demo (SHORT_SLEEVE on) while retiring the second full-universe paper process
-    # (SHORT_PAPER_SLEEVE off). Demo => enabled+active; paper => disable --now + verified DOWN.
-    rc, calls, err = _run(tmp_path, """
-        apply_sleeve_enable on  $SHORT_SLEEVE_UNITS
-        apply_sleeve_enable off $SHORT_PAPER_SLEEVE_UNITS
-        verify_sleeve on  $SHORT_SLEEVE_UNITS
-        verify_sleeve off $SHORT_PAPER_SLEEVE_UNITS
-        echo "SPLIT_OK"
-    """)
-    assert rc == 0, err
-    assert "enable liquidity-migration-bybit-demo.service" in calls
-    assert "disable --now liquidity-migration-bybit-paper.service" in calls
-    # Dropping the paper shadow must NOT drag the demo daemon down with it.
-    assert "disable --now liquidity-migration-bybit-demo.service" not in calls
-
-
-def test_short_paper_unit_moved_out_of_short_sleeve_units(tmp_path: Path) -> None:
-    # The paper unit must live in SHORT_PAPER_SLEEVE_UNITS, not SHORT_SLEEVE_UNITS — else the
-    # short toggle would still drag the paper shadow up/down and the split would be cosmetic.
-    rc, _calls, err = _run(tmp_path, """
-        case " $SHORT_SLEEVE_UNITS " in *bybit-paper.service*) echo "paper still in SHORT_SLEEVE_UNITS" >&2; exit 1 ;; esac
-        case " $SHORT_SLEEVE_UNITS " in *bybit-demo.service*) ;; *) echo "demo missing from SHORT_SLEEVE_UNITS" >&2; exit 1 ;; esac
-        case " $SHORT_PAPER_SLEEVE_UNITS " in *bybit-paper.service*) ;; *) echo "paper missing from SHORT_PAPER_SLEEVE_UNITS" >&2; exit 1 ;; esac
-    """)
-    assert rc == 0, err
 
 
 def test_continuous_paper_split_keeps_demo_orders_off_runs_paper(tmp_path: Path) -> None:
@@ -126,16 +97,12 @@ def test_continuous_paper_split_keeps_demo_orders_off_runs_paper(tmp_path: Path)
     assert "enable liquidity-migration-bybit-continuous-demo.service" not in calls
 
 
-def test_loaded_toggles_short_long_papers_on_continuous_demo_off_paper_on(tmp_path: Path) -> None:
-    # Loaded toggles (2026-06-04): SHORT + SHORT_PAPER + LONG all run — short demo measured ~535 MB
-    # on the 4 GB box, leaving headroom for the long sleeve + paper shadows. CONTINUOUS stays OFF
-    # (look-ahead-disabled 2026-06-03). Versioned in deploy/sleeves.env so a host rebuild can't
-    # silently resurrect continuous.
+def test_loaded_toggles_continuous_on_long_off(tmp_path: Path) -> None:
+    # Loaded toggles (2026-06-09 operator re-shape; daily-short ERASED 2026-06-11):
+    # the VPS runs ONLY the continuous system; LONG stays off until re-enabled.
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
-        test "$SHORT_SLEEVE" = on && test "$SHORT_PAPER_SLEEVE" = on \
-            && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off \
-            && test "$CONTINUOUS_PAPER_SLEEVE" = on
+        test "$LONG_SLEEVE" = off && test "$CONTINUOUS_SLEEVE" = on             && test "$CONTINUOUS_PAPER_SLEEVE" = on
         echo "TOGGLES_OK"
     """)
     assert rc == 0, err
@@ -158,14 +125,11 @@ def test_lib_fallback_defaults_continuous_demo_off_papers_on(tmp_path: Path) -> 
 
 def test_committed_sleeves_env_continuous_only() -> None:
     # The committed file is the source of truth. 2026-06-09 operator instruction: the VPS
-    # runs ONLY the continuous system. 2026-06-11 operator instruction: continuous must
-    # not depend on the short AT ALL — SHORT_PAPER stays off; the continuous-vs-daily
-    # comparator degrades to continuous-only instead (reconciliation.py). Each line must
-    # be systemd-EnvironmentFile-safe (plain KEY=value, no inline comment).
+    # runs ONLY the continuous system. 2026-06-11: the daily-short sleeve was ERASED —
+    # no SHORT toggles remain. Each line must be systemd-EnvironmentFile-safe
+    # (plain KEY=value, no inline comment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
-        "SHORT_SLEEVE": "off",
-        "SHORT_PAPER_SLEEVE": "off",
         "LONG_SLEEVE": "off",
         "CONTINUOUS_SLEEVE": "on",
         "CONTINUOUS_PAPER_SLEEVE": "on",

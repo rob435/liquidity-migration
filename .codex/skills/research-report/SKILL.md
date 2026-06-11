@@ -3,6 +3,12 @@ name: research-report
 description: "Read, interpret, and label research and backtest reports in this quant repo. Use when reading a volume_event_research_report.md, extracting run metrics like return, drawdown, OOS and split stability, comparing runs, or assigning a run label. If available, the liqmig-research MCP tools parse_report, list_reports, and audit_run_artifacts are useful accelerators; otherwise read report files directly."
 ---
 
+> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
+> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
+> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
+> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
+> below that references them; long + continuous guidance still applies.
+
 # Research reports
 
 Reports live under `<DATA_ROOT>/reports/...`. The main kind:

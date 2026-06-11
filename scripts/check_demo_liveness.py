@@ -56,7 +56,7 @@ def _sleeve_on(env_var: str, *, default: str = "on") -> bool:
     """A sleeve is active unless its kill-switch toggle (deploy/sleeves.env, loaded into this
     watchdog's env via the liveness service EnvironmentFile) is off. ``default`` is the
     last-resort value when the toggle is UNSET; it mirrors deploy/lib_sleeves.sh exactly
-    (SHORT/LONG default on, CONTINUOUS defaults off — look-ahead-disabled), so this watchdog
+    (LONG defaults on, CONTINUOUS defaults off), so this watchdog
     can never page for a retired sleeve nor expect the disabled continuous sleeve to be up
     on a stripped/manual invocation. In production the EnvironmentFile always sets the
     toggle, so the default only matters off-VPS."""
@@ -316,10 +316,6 @@ def _unit_states(units: list[str]) -> dict[str, str]:
 
 def _default_units_for_toggles() -> list[str]:
     units = ["liquidity-migration-bybit-risk.service"]
-    if _sleeve_on("SHORT_SLEEVE"):
-        units.append("liquidity-migration-bybit-demo.service")
-    if _sleeve_on("SHORT_PAPER_SLEEVE"):
-        units.append("liquidity-migration-bybit-paper.service")
     if _sleeve_on("LONG_SLEEVE"):
         units.extend(
             [
@@ -381,45 +377,6 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
         pass
 
 
-def gather_alerts(*, data_root: Path, units: list[str], now_ms: int, args: argparse.Namespace) -> list[Alert]:
-    label = data_root.name
-    alerts: list[Alert] = []
-
-    cycles_root = data_root / "event_demo_cycles"
-    df = _latest_cycle_df(cycles_root)
-    latest_ts = int(df.select(pl.col("ts_ms").max()).item()) if df is not None and not df.is_empty() else None
-    live = evaluate_cycle_liveness(
-        latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
-    )
-    if live:
-        alerts.append(live)
-
-    alerts.extend(evaluate_unit_states(_unit_states(units)))
-
-    open_trades = _open_trades(data_root)
-    if open_trades:
-        positions, perr = _venue_positions(args.settle_coin)
-        if perr is not None:
-            alerts.append(
-                Alert(
-                    key="stop_verify_unavailable",
-                    severity=WARNING,
-                    message=f"could not verify stop protection ({perr}); {len(open_trades)} open trade(s) unchecked.",
-                )
-            )
-        else:
-            alerts.extend(evaluate_stop_protection(open_trades=open_trades, venue_positions=positions))
-
-    if df is not None and not df.is_empty():
-        store_max = int(df.select(pl.col("kline_store_max_ts_ms").max()).item() or 0) if "kline_store_max_ts_ms" in df.columns else None
-        ws = evaluate_ws_staleness(store_max_ts_ms=store_max, now_ms=now_ms, max_lag_hours=args.max_ws_lag_hours, label=label)
-        if ws:
-            alerts.append(ws)
-        alerts.extend(evaluate_exchange_errors(recent=df.tail(20).to_dicts(), label=label))
-
-    return alerts
-
-
 def gather_continuous_alerts(
     *,
     continuous_root: Path,
@@ -432,7 +389,7 @@ def gather_continuous_alerts(
     """Per-sleeve liveness for the continuous-fade daemon: cycle-age (hung/down), rmom-gate freshness
     (the silent-blackout class), and server-side stop protection on its own open trades. The
     continuous sleeve writes a SEPARATE ledger root + an unpartitioned cycle dataset, so it needs
-    its own gather (the short-root ``gather_alerts`` never sees it). Paper mode passes the
+    its own gather. Paper mode passes the
     ``continuous_fade_paper_*`` datasets and skips live stop checks because it submits no orders."""
     if not continuous_root.exists():
         return []
@@ -489,7 +446,7 @@ def gather_continuous_alerts(
         if perr is None:
             alerts.extend(evaluate_stop_protection(open_trades=open_ct, venue_positions=positions))
         else:
-            # Mirror the short sleeve (gather_alerts): a creds/API failure must not silently leave
+            # A creds/API failure must not silently leave
             # the continuous open positions unverified.
             alerts.append(Alert(
                 key="stop_verify_unavailable_continuous", severity=WARNING,
@@ -502,7 +459,7 @@ def gather_long_alerts(*, long_root: Path, now_ms: int, args: argparse.Namespace
     """Per-sleeve liveness for the long-native demo daemon: cycle-age (hung/down-but-active, which
     the systemd-failed check never catches under Restart=always), WS-staleness, and server-side stop
     protection on its own open trades. The long sleeve writes a SEPARATE ledger root +
-    ``long_native_demo_cycles``/``long_native_demo_trades``, so the short-root ``gather_alerts`` never
+    ``long_native_demo_cycles``/``long_native_demo_trades``.
     sees it. No rmom check (the long sleeve has no residual-momentum gate)."""
     if not long_root.exists():
         return []
@@ -548,7 +505,6 @@ def gather_long_alerts(*, long_root: Path, now_ms: int, args: argparse.Namespace
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--data-root", type=Path, default=Path("data/bybit-demo-event"))
     p.add_argument(
         "--unit",
         action="append",
@@ -573,15 +529,13 @@ def main() -> int:
     args = p.parse_args()
 
     units = args.unit or _default_units_for_toggles()
-    state_file = args.state_file or (args.data_root / ".cache" / "liveness_watchdog.json")
+    state_file = args.state_file or (args.continuous_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
 
     # Per-sleeve kill-switch: skip an intentionally-off sleeve so a deliberately-retired daemon
-    # doesn't false-page as "down". Unset-defaults mirror deploy/lib_sleeves.sh: SHORT/LONG on,
-    # CONTINUOUS off (look-ahead-disabled — never page for it nor expect it up if env is missing).
+    # doesn't false-page as "down". Unset-defaults mirror deploy/lib_sleeves.sh: LONG on,
+    # CONTINUOUS off. (The daily-short sleeve was erased 2026-06-11.)
     alerts = evaluate_unit_states(_unit_states(units))
-    if _sleeve_on("SHORT_SLEEVE"):
-        alerts.extend(gather_alerts(data_root=args.data_root, units=[], now_ms=now_ms, args=args))
     if str(args.continuous_root) and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
         alerts.extend(gather_continuous_alerts(continuous_root=args.continuous_root, now_ms=now_ms, args=args))
     if str(args.continuous_paper_root) and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):

@@ -22,7 +22,7 @@ from liquidity_migration.continuous_events import (
     run_continuous_event_research,
 )
 from liquidity_migration.storage import write_dataset
-from liquidity_migration.volume_events import _indexed_price_bars_by_symbol
+from liquidity_migration.trade_lifecycle import _indexed_price_bars_by_symbol
 
 
 def test_panel_cache_stale_invalidates_when_rmom_is_newer(tmp_path) -> None:

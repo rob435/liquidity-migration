@@ -95,3 +95,62 @@ forward trades ONLY; a lead graduates to a pre-registered gate proposal iff its
 forward direction matches the atlas AND the pooled forward effect is ≥2σ. Until
 then neither may be cited as evidence. No other atlas finding may be revisited on
 the 2023-04→2026-05 window.
+
+## OPERATOR OVERRIDE (2026-06-11) — gates backtested and wired into the demo
+
+The operator explicitly overrode the forward-only application path ("give me the
+backtest with [both leads] and get it wired up into the demo. i know what im doing
+here"). Executed as ordered, with the label discipline intact:
+
+- **Implementation**: repeat-name penalty → `cooldown_days=30` (the engine cooldown
+  is post-exit, slightly stricter than the atlas's entry-to-entry definition —
+  declared). Weekend bonus → `weekend_size_mult=1.5` (new engine knob, both engines,
+  Sat/Sun entries; the atlas measured a win-rate delta — the 1.5× size tilt is the
+  chosen application form, declared).
+- **Backtests (RUN 2026-06-11, all 16 cells clean `full_pit_universe`, untainted)**:
+  `short_atlas_gates_2026-06-11` + `long_regularity_2026-06-10/TA4*`, both venues,
+  exact deployed profiles ± gates, window 2023-04-01→2026-05-28 (3.16y). MAR =
+  CAGR/|maxDD|. These numbers are IN-SAMPLE-DERIVED-GATE descriptives on the spent
+  window (the features were selected on these very trades) — recorded for
+  transparency, NEVER promotion evidence. The forward-watch graduation bar above
+  remains the only evidence path.
+
+  | book | cell | trades | return | maxDD | MAR | dMAR | Sharpe |
+  |---|---|---|---|---|---|---|---|
+  | SHORT bybit | baseline | 367 | +81.8% | −7.2% | 2.92 | — | 1.75 |
+  | SHORT bybit | **TA40 cd30** | 348 | +85.3% | −6.2% | **3.51** | **+0.59** | 1.82 |
+  | SHORT bybit | TA41 we1.5 | 367 | +89.6% | −7.7% | 2.93 | +0.02 | 1.64 |
+  | SHORT bybit | TA42 both | 348 | +92.3% | −7.5% | 3.06 | +0.14 | 1.69 |
+  | SHORT binance | baseline | 198 | +7.2% | −14.4% | 0.15 | — | 0.35 |
+  | SHORT binance | TA40 cd30 | 190 | +9.5% | −12.5% | 0.23 | +0.08 | 0.45 |
+  | SHORT binance | TA41 we1.5 | 198 | +12.8% | −13.8% | 0.28 | +0.13 | 0.51 |
+  | SHORT binance | TA42 both | 190 | +14.3% | −12.4% | 0.35 | +0.19 | 0.57 |
+  | LONG bybit | baseline | 192 | +29.0% | −3.5% | 2.40 | — | 1.96 |
+  | LONG bybit | TA40 cd30 | 161 | +26.0% | −3.6% | 2.13 | −0.28 | 1.91 |
+  | LONG bybit | **TA41 we1.5** | 192 | +33.6% | −3.6% | **2.65** | **+0.25** | 1.97 |
+  | LONG bybit | TA42 both | 161 | +29.8% | −3.7% | 2.32 | −0.09 | 1.92 |
+  | LONG binance | baseline | 195 | +22.8% | −3.9% | 1.74 | — | 1.45 |
+  | LONG binance | TA40 cd30 | 165 | +19.8% | −3.9% | 1.52 | −0.22 | 1.37 |
+  | LONG binance | **TA41 we1.5** | 195 | +27.8% | −4.0% | 2.02 | **+0.28** | 1.51 |
+  | LONG binance | TA42 both | 165 | +23.7% | −4.0% | 1.74 | +0.00 | 1.41 |
+
+- **Best values (MAR-primary, Sharpe secondary, both venues — the wired choice)**:
+  per-book, NOT both-gates-everywhere. **SHORT: `cooldown_days=30` only** (dMAR
+  +0.59/+0.08, Sharpe up both venues; the weekend tilt is return-only dilution on
+  bybit — Sharpe 1.75→1.64 at dMAR +0.02 — and was rejected for this book,
+  consistent with the atlas, where weekend was flat-negative on bybit short).
+  **LONG: `weekend_size_mult=1.5` only, cooldown stays 7** (dMAR +0.25/+0.28,
+  Sharpe up both venues; the 30d post-exit cooldown HURTS the long book on both
+  venues, dMAR −0.28/−0.22 — the all-4-books atlas direction did not survive the
+  engine's stricter post-exit form there). Each book ships exactly the gate whose
+  atlas evidence was strongest for it.
+- **Sweep-base note**: the sweep scripts pin the PRE-gate base
+  (`cooldown 5/7, weekend 1.0`) explicitly, because the deployed profiles now carry
+  the gates — without the pin, every cell would silently inherit them.
+- **Wiring (final)**: `event_demo._demo_event_config("promoted")` carries
+  `cooldown_days=30`; `_v11a_long_native_config()` carries `weekend_size_mult=1.5`
+  (cooldown 7). Both sleeves are currently OFF on the VPS, so the gates are dormant
+  until the operator deploys/enables.
+- Standing risk, stated plainly: if the leads are window noise, the demo books
+  will trade them anyway when enabled; the forward-watch recompute is the
+  detection mechanism either way.

@@ -3,6 +3,12 @@ name: repo-map
 description: "Orient in the liquidity-migration codebase: module map, core abstractions, key docs, and the graphify knowledge-graph workflow. Use when answering architecture or where-does-X-live questions, navigating modules, tracing how modules relate, or before cross-module changes."
 ---
 
+> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
+> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
+> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
+> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
+> below that references them; long + continuous guidance still applies.
+
 # Repo map
 
 A Bybit (+Binance) research codebase for a liquidity-migration **short** strategy

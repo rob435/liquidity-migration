@@ -7,7 +7,6 @@ residual-momentum panel when continuous diagnostics are selected), runs a
 MINIMAL-window backtest (only as far back as the forward ledger needs — not a
 fixed 150-day slab), and reconciles each promoted sleeve:
 
-    SHORT  (event/daily) : backtest <-> paper <-> demo  (+ Bybit on request)
     LONG   (v11a)        : paper <-> demo
 
 CONTINUOUS (fade) is no longer promoted/deployed (de-promoted 2026-06-05, look-ahead
@@ -27,9 +26,8 @@ Pipeline (each step maps to an opt-out flag):
 
 Safe by default: read-only against the VPS, demo only, never real money.
 
-    bash scripts/reconcile.sh                       # promoted sleeves (short + long), fully auto
+    bash scripts/reconcile.sh                       # promoted sleeve (long), fully auto
     bash scripts/reconcile.sh --sleeves continuous  # continuous diagnostics only
-    bash scripts/reconcile.sh --sleeves short        # just the short sleeve
     bash scripts/reconcile.sh --dry-run              # print every command, run nothing
     bash scripts/reconcile.sh --full-window          # 150-day backtest (old behaviour)
     bash scripts/reconcile.sh --with-bybit           # also reconcile demo<->Bybit
@@ -86,10 +84,9 @@ DEFAULT_CONFIG = "configs/volume_alpha.default.yaml"
 # COMPARISON to the paper ledger's first signal, so warm-up trades never produce
 # false "backtest-only" rows. The strategy's deepest KLINE lookback is 30d
 # features + 5d cooldown + 3d hold = ~38d; the 300d age gate is MANIFEST-derived
-# (volume_events_features: first_manifest_date) so it needs ZERO extra klines.
+# (first_manifest_date) so it needs ZERO extra klines.
 # 45d is exact with margin. --full-window restores the old conservative slab.
 MINIMAL_WARMUP_DAYS = 45
-FULL_WARMUP_DAYS = 150
 # rmom factor panel needs a few months of history for the 6-factor fit + 7d momentum.
 RMOM_WARMUP_DAYS = 150
 
@@ -97,12 +94,6 @@ RMOM_WARMUP_DAYS = 150
 # extra_files are pulled from the DEMO root (rmom panel + the WS kline store the
 # continuous signal-check replays).
 SLEEVES: dict[str, dict[str, object]] = {
-    "short": {
-        "label": "SHORT (event/daily)",
-        "demo": ("bybit-demo-event", "data/bybit-demo-event", ("event_demo_trades", "event_demo_orders")),
-        "paper": ("bybit-paper-event", "data/bybit-paper-event", ("event_demo_trades", "event_demo_orders")),
-        "extra_files": (),
-    },
     "long": {
         "label": "LONG (v11a)",
         "demo": ("bybit-long-demo-event", "data/bybit-long-demo-event",
@@ -269,67 +260,6 @@ def print_coverage(root: str, today: dt.date) -> pc.CoverageStatus:
     return status
 
 
-def backtest_window(short_paper: Path, short_demo: Path, *, warmup_days: int, today: dt.date) -> tuple[str, str]:
-    """[start, end) for the SHORT backtest. Start = earliest forward ledger signal
-    minus warm-up (minimal & exact); fall back to today-(warmup+14) if the ledgers
-    are empty. End = today+1 (exclusive) so today's signals are included."""
-    sigs = _read_signal_days(short_paper, "event_demo_trades") + _read_signal_days(short_demo, "event_demo_trades")
-    if sigs:
-        earliest = dt.datetime.fromtimestamp(min(sigs) / 1000, dt.timezone.utc).date()
-        start = earliest - dt.timedelta(days=warmup_days)
-    else:
-        start = today - dt.timedelta(days=warmup_days + 14)
-    end = today + dt.timedelta(days=1)
-    return start.isoformat(), end.isoformat()
-
-
-def run_backtest(step: Step, *, root: str, config: str, start: str, end: str, diagnostic: bool) -> Path:
-    span_days = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days
-    step.banner(f"Backtest the promoted profile over the forward window ({start}..{end}, {span_days}d)")
-    report_dir = REPO / "data" / "reconcile" / f"backtest_{_today().isoformat()}"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    args = [
-        "--config", config, "--data-root", root, "volume-events",
-        "--start", start, "--end", end,
-        "--report-dir", str(report_dir),
-        # Per-trade PIT membership (the trading-day fix) still applies; the
-        # universe-completeness gate is irrelevant to a recent-window reconcile.
-        "--allow-partial-pit",
-    ]
-    if diagnostic:
-        args += ["--pit-membership", "current-universe"]
-    step.run(_cli(*args))
-    return report_dir
-
-
-def find_backtest_csv(report_dir: Path) -> Path | None:
-    hits = sorted(report_dir.rglob("volume_event_best_trades.csv"))
-    return hits[-1] if hits else None
-
-
-def reconcile_short(step: Step, *, paper: str, demo: str, csv: Path | None, with_bybit: bool, today: dt.date) -> str:
-    step.banner("Reconcile SHORT: backtest <-> paper <-> demo" + (" <-> Bybit" if with_bybit else ""))
-    out = REPO / "data" / "reconcile" / f"report_{today.isoformat()}"
-    out.mkdir(parents=True, exist_ok=True)
-    args = ["reconcile-all", "--paper-data-root", paper, "--demo-data-root", demo, "--output-dir", str(out)]
-    if csv is not None:
-        args += ["--backtest-trades-csv", str(csv)]
-    else:
-        print("⚠️  no backtest CSV — running paper<->demo(<->Bybit) only.")
-    if not with_bybit:
-        args += ["--skip-bybit"]
-    step.run(_cli(*args))
-    # Pull the two headline lines out of the combined report for the unified summary.
-    combined = out / "full_reconciliation.md"
-    lines = []
-    if combined.exists():
-        for ln in combined.read_text(encoding="utf-8").splitlines():
-            s = ln.strip()
-            if s.startswith("- **backtest↔paper**") or s.startswith("- **paper↔demo**") or s.startswith("- **demo↔Bybit**"):
-                lines.append(s.lstrip("- "))
-    return " | ".join(lines) if lines else "(see report)"
-
-
 def reconcile_long(step: Step, *, paper: str, demo: str) -> str:
     step.banner("Reconcile LONG: paper <-> demo")
     _, out = step.run_capture(_cli("reconcile-long-paper-demo", "--paper-data-root", paper, "--demo-data-root", demo))
@@ -361,25 +291,14 @@ def main() -> int:
         description="One-command self-provisioning reconciliation for promoted sleeves.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--sleeves", default="short,long",
-                   help="Comma list of sleeves to reconcile (short,long); add 'continuous' "
+    p.add_argument("--sleeves", default="long",
+                   help="Comma list of sleeves to reconcile (long); add 'continuous' "
                         "explicitly for diagnostics (de-promoted, OFF).")
     p.add_argument("--bybit-root", default=DEFAULT_BYBIT_ROOT, help="Research root for the backtest + provisioning.")
     p.add_argument("--config", default=DEFAULT_CONFIG, help="Strategy config (the promoted profile).")
     p.add_argument("--vps", default=VPS_HOST, help="VPS ssh target for the ledger pull.")
     p.add_argument("--no-pull", action="store_true", help="Skip the VPS ledger rsync; use local ledgers.")
-    p.add_argument("--no-manifest", action="store_true", help="Skip the archive-manifest refresh.")
-    p.add_argument("--no-kline-fill", action="store_true", help="Skip the automatic recent-kline download.")
     p.add_argument("--no-rmom", action="store_true", help="Skip the automatic residual_momentum recompute.")
-    p.add_argument("--no-backtest", action="store_true", help="Skip the SHORT backtest; reconcile ledgers only.")
-    p.add_argument("--full-window", action="store_true",
-                   help=f"Backtest a fixed {FULL_WARMUP_DAYS}-day window instead of the minimal forward window.")
-    p.add_argument("--warmup-days", type=int, default=None,
-                   help=f"Override the backtest warm-up (default {MINIMAL_WARMUP_DAYS}; --full-window uses {FULL_WARMUP_DAYS}).")
-    p.add_argument("--diagnostic", action="store_true",
-                   help="Use current-universe membership for the backtest (labeled biased; same-day check).")
-    p.add_argument("--with-bybit", action="store_true", help="Also reconcile demo<->Bybit (needs API creds).")
-    p.add_argument("--force", action="store_true", help="Run the backtest even if the manifest is stale.")
     p.add_argument("--dry-run", action="store_true", help="Print every command without running anything.")
     args = p.parse_args()
 
@@ -390,54 +309,25 @@ def main() -> int:
     today = _today()
     root = args.bybit_root
     step = Step(args.dry_run)
-    warmup = args.warmup_days if args.warmup_days is not None else (FULL_WARMUP_DAYS if args.full_window else MINIMAL_WARMUP_DAYS)
 
     print(f"liquidity-migration reconcile — {today.isoformat()} (UTC)")
     print(f"  sleeves       : {', '.join(sleeves)}")
     print(f"  research root : {root}")
-    print(f"  backtest warm : {warmup}d {'(full window)' if args.full_window else '(minimal)'}")
 
     # 1. Pull every selected sleeve's ledgers.
     if not args.no_pull:
         for s in sleeves:
             pull_sleeve(step, args.vps, s)
 
-    # 2-5. Provision research data (only the SHORT backtest needs the research root).
-    short_active = "short" in sleeves and not args.no_backtest
-    csv: Path | None = None
-    if short_active:
-        if not args.no_manifest:
-            refresh_manifest(step, root, today)
-        if not args.no_kline_fill:
-            status = print_coverage(root, today)
-            auto_kline_fill(step, root, status, today)
-        if "continuous" in sleeves and not args.no_rmom:
-            refresh_rmom(step, root, today)
-        step.banner("PIT coverage check")
-        status = print_coverage(root, today)
-        if status.is_stale and not (args.diagnostic or args.force or args.dry_run):
-            raise SystemExit(
-                "\n❌ archive manifest is stale — recent signals would hard-reject with "
-                "pit_membership_fail.\n   Re-run with the manifest refresh enabled, or pass "
-                "--diagnostic (current-universe, biased) / --force to proceed anyway."
-            )
-        s_paper = REPO / SLEEVES["short"]["paper"][1]  # type: ignore[index]
-        s_demo = REPO / SLEEVES["short"]["demo"][1]  # type: ignore[index]
-        start, end = backtest_window(s_paper, s_demo, warmup_days=warmup, today=today)
-        report_dir = run_backtest(step, root=root, config=args.config, start=start, end=end, diagnostic=args.diagnostic)
-        csv = find_backtest_csv(report_dir)
-        if csv is None and not args.dry_run:
-            print(f"⚠️  no volume_event_best_trades.csv under {report_dir}; reconciling without the backtest leg.")
+    # 2-5. Research-data provisioning: the SHORT backtest leg was erased with the
+    # daily-short sleeve (operator order 2026-06-11). Only the continuous
+    # signal-check's rmom refresh remains.
+    if "continuous" in sleeves and not args.no_rmom:
+        refresh_rmom(step, root, today)
 
     # 7. Per-sleeve reconcile. (The continuous signal-check uses the pulled
     # live-root rmom panel, so a continuous-only run needs no research provisioning.)
     summary: dict[str, str] = {}
-    if "short" in sleeves:
-        sp = SLEEVES["short"]["paper"][1]  # type: ignore[index]
-        sd = SLEEVES["short"]["demo"][1]  # type: ignore[index]
-        if args.no_backtest:
-            csv = None
-        summary["short"] = reconcile_short(step, paper=sp, demo=sd, csv=csv, with_bybit=args.with_bybit, today=today)
     if "long" in sleeves:
         lp = SLEEVES["long"]["paper"][1]  # type: ignore[index]
         ld = SLEEVES["long"]["demo"][1]  # type: ignore[index]

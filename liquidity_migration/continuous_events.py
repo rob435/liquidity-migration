@@ -48,8 +48,12 @@ import polars as pl
 from ._common import MS_PER_DAY, MS_PER_HOUR
 from .config import DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .signal_harness import _autodetect_dataset_names, _date_str_to_ms, _read_window
-from .trade_lifecycle import _empty_trades, _funding_lookup
-from .volume_events import _indexed_price_bars_by_symbol, _simulate_indexed_trade
+from .trade_lifecycle import (
+    _empty_trades,
+    _funding_lookup,
+    _indexed_price_bars_by_symbol,
+    _simulate_indexed_trade,
+)
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
 

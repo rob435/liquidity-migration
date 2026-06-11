@@ -1,6 +1,6 @@
 # Research Program State
 
-**Last updated:** 2026-06-10
+**Last updated:** 2026-06-11
 Live/operational state plus binding decision rules. Research conclusions live in
 [docs/research_summary.md](docs/research_summary.md); the active research charter is
 [docs/research_plan_alpha_hunt_2026-06-10.md](docs/research_plan_alpha_hunt_2026-06-10.md)
@@ -18,8 +18,11 @@ the archive.
 
 Liquidity-migration is research-stage. **Nothing is approved for real money**
 (`REAL_MONEY=false`; demo/paper only). The VPS runs ONLY the continuous system
-(operator re-shape 2026-06-09); SHORT/LONG sleeves stay promoted-in-code but toggled
-OFF (`deploy/sleeves.env`).
+(operator re-shape 2026-06-09). **The daily SHORT sleeve was ERASED from the
+system 2026-06-11 by operator order** — engine, demo daemon, CLI, deploy units,
+scripts, tests and docs are gone (git history is the archive; shared infra the
+short hosted was relocated to `trade_lifecycle`/`_common`/`event_demo_exits`).
+The LONG sleeve stays promoted-in-code but toggled OFF (`deploy/sleeves.env`).
 
 ## What's Running / Wired (2026-06-10)
 
@@ -44,10 +47,11 @@ OFF (`deploy/sleeves.env`).
 - **Shared kline data plane (2026-06-10 parallel session):** the paper shadow
   follows the demo root's flushed kline snapshot read-only (`KLINES_FOLLOW_ROOT`,
   hardened follower: prune/staleness/self-follow guard) — one WS pool per box.
-- SHORT (off-box, promoted-in-code): `drop_all_4 + age300 + ff6 + btc_trend_gate=
-  uptrend` (gate Tier-2 validated; rmom inactive sentinel 10.0).
-- LONG (off-box, promoted-in-code): `div` + volup125 accepted candidate — NOT
-  deployed; rides with the operator's 10x leverage-cap decision.
+- SHORT: ERASED 2026-06-11 (operator order). No profile, daemon, units, or CLI
+  remain; ws_risk still protects any legacy short ledger rows generically.
+- LONG (off-box, promoted-in-code): `div` + volup125 + weekend 1.5x tilt (TA1
+  gate, 2026-06-11) — NOT deployed; rides with the operator's 10x leverage-cap
+  decision.
 - **VPS:** Hetzner demo host (full rebuild 2026-06-09; forward Tier-3 clocks restart
   then). Local working tree is AHEAD of the VPS — a push auto-deploys.
 
@@ -86,8 +90,8 @@ OFF (`deploy/sleeves.env`).
 8. FIXED (2026-06-11, operator-directed): the continuous-vs-daily comparator no
    longer depends on the short sleeve at all — with no/insufficient daily-leg data
    it degrades to a CONTINUOUS-ONLY forward report (return/MAR over the continuous
-   ledger's own window) instead of a blocking STALE. `SHORT_PAPER_SLEEVE` stays
-   off per the same instruction.
+   ledger's own window) instead of a blocking STALE. (Superseded 2026-06-11: the
+   short sleeve was ERASED outright; no SHORT toggles remain.)
 9. ARMED (data-refresh-triggered, no operator action needed until then): PE2
    long provisional-entry OOS re-judgment — when BOTH full-PIT roots extend ≥60d
    past 2026-05-28 (and ≥30 prov trades/venue), run the pre-registered cells per
@@ -136,7 +140,7 @@ Forward demo/paper is the arbiter. MAR primary (pooled), Sharpe secondary.
 ## Methodology Debts (open)
 
 - **rmom latency knife-edge** (shift3-only; grid audited correct — genuine fast
-  decay): no continuous promotion case until resolved; deployed SHORT unaffected.
+  decay): no continuous promotion case until resolved.
 - Impact calibration at deployed size (R4 — blocked on the fill-ledger pull).
 - Continuous forward window immature (clock starts at the data-root refresh).
 - Closed 2026-06-09 (receipts kept): binance funding coverage+accrual, live-vs-PIT
@@ -144,8 +148,7 @@ Forward demo/paper is the arbiter. MAR primary (pooled), Sharpe secondary.
 
 ## Helpers
 
-- Reconcile sleeves: `bash scripts/reconcile.sh`
-- Daily research cell: `scripts/volume_events_cell.sh --cell-id X --overrides ...`
+- Reconcile sleeves: `bash scripts/reconcile.sh` (long + continuous)
 - Tier-2 robustness: `python scripts/r1_robustness.py --sweep-tag <TAG>`
 - Continuous readiness: `python -m liquidity_migration continuous-forward-readiness --paper-only`
 - Hedge dry-run: `.venv/bin/python scripts/run_continuous_hedge.py --venue bybit`

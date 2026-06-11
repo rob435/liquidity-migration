@@ -62,6 +62,10 @@ CELLS: dict[str, dict[str, object]] = {
     # (docs/preregistration/long-provisional-entry-engine-2026-06-10.md)
     "LR30_prov": {"fc_provisional_entry": True},
     "LR31_prov_cost2x": {"fc_provisional_entry": True, "cost_multiplier": 2.0},
+    # TA1 atlas gates (operator override 2026-06-11, trade-atlas-2026-06-11.md)
+    "TA40_repeat30": {"cooldown_days": 30},
+    "TA41_weekend15": {"weekend_size_mult": 1.5},
+    "TA42_both": {"cooldown_days": 30, "weekend_size_mult": 1.5},
 }
 
 
@@ -85,6 +89,11 @@ def main() -> int:
         _v11a_long_native_config(),
         start_date=args.start, end_date=args.end,
         require_pit_membership=True, require_full_pit_universe=True,
+        # The deployed profile now carries the TA1 atlas gates (2026-06-11 wiring);
+        # this sweep's cells are defined relative to the PRE-gate profile, so reset
+        # the gate knobs here — 00_baseline and the LR/structural cells keep their
+        # original meaning and the TA4* cells opt in explicitly.
+        cooldown_days=7, weekend_size_mult=1.0,
     )
 
     names = [c.strip() for c in args.cells.split(",") if c.strip()]

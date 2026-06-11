@@ -1,7 +1,13 @@
 ---
 name: run-strategy
-description: "Correct command invocations for the liquidity_migration CLI: the volume-events backtest, event-demo-cycle forward runner, data builders, and audits. Use whenever running or constructing a 'python -m liquidity_migration' command, so the right data root, end-date boundary, and point-in-time flags are applied."
+description: "Correct command invocations for the liquidity_migration CLI: data builders, audits, and the long/continuous forward runners. Use whenever running or constructing a 'python -m liquidity_migration' command, so the right data root, end-date boundary, and point-in-time flags are applied."
 ---
+
+> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
+> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
+> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
+> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
+> below that references them; long + continuous guidance still applies.
 
 # Running the liquidity_migration CLI
 

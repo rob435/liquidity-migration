@@ -70,32 +70,17 @@ fi
 
 "$PYTHON" -m pytest \
   tests/test_runtime_scripts.py \
-  tests/test_liquidity_migration_cli.py::test_cli_volume_events_defaults_to_selected_liquidity_migration \
-  tests/test_liquidity_migration_event_demo_cycle.py::test_demo_relaxed_profile_lowers_gates_for_more_demo_trades
-
+  tests/test_promoted_profiles.py
 "$PYTHON" - <<'PY'
-from liquidity_migration.event_demo import _demo_event_config, _demo_strategy_id
-from liquidity_migration.volume_events import VolumeEventResearchConfig
+# The daily-short sleeve was ERASED 2026-06-11 (operator order); the long profile
+# is the one promoted sleeve and is pinned by tests/test_promoted_profiles.py above.
+from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 
-promoted = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
-demo = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
-
-assert _demo_strategy_id("promoted") == "liqmig_union_q40_h3_tp26_g100_qsqueeze"
-assert _demo_strategy_id("demo_relaxed") == "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
-assert promoted.take_profit_pcts == (0.26,)
-# promoted = drop_all_4 (2026-05-30) + age300 + ff6_4pct (2026-05-31).
-assert promoted.max_active_symbols == 12
-assert promoted.universe_rank_max == 99999
-assert promoted.liquidity_migration_pit_age_days_min == 300
-assert promoted.failed_fade_exit_hours == 6
-assert promoted.failed_fade_min_mfe_pct == 0.01
-assert promoted.failed_fade_loss_pct == 0.04
-assert promoted.failed_fade_close_location_min == 0.0
-assert demo.take_profit_pcts == (0.21,)
-assert demo.failed_fade_exit_hours == 6
-assert demo.failed_fade_min_mfe_pct == 0.01
-assert demo.failed_fade_loss_pct == 0.04
-assert demo.failed_fade_close_location_min == 0.0
+long_cfg = _v11a_long_native_config()
+assert long_cfg.universe_size == 50
+assert long_cfg.max_concurrent_positions == 10
+assert long_cfg.cooldown_days == 7
+assert long_cfg.weekend_size_mult == 1.5
 
 # Continuous-fade sleeve (OFF / de-promoted 2026-06-05, look-ahead invalidated): these
 # assertions still pin its config so a silent drift can't ship IF it is ever re-enabled —
@@ -150,7 +135,7 @@ systemctl daemon-reload
 # positions protected until they exit (no flatten). The risk service always runs.
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
-echo "sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
+echo "sleeves: LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
 systemctl enable liquidity-migration-bybit-risk.service
 # Forward-only data collection (P3, operator-approved 2026-06-10): liquidation
 # history is unbuyable, so the collector runs always-on like the risk service.
@@ -159,8 +144,14 @@ systemctl enable liquidity-migration-bybit-risk.service
 # so a bounce loses at most the in-flight websocket messages.
 systemctl enable liquidity-migration-liquidation-collector.service
 systemctl restart liquidity-migration-liquidation-collector.service
-apply_sleeve_enable "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
-apply_sleeve_enable "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
+# One-time cleanup for the ERASED daily-short sleeve (2026-06-11): stop, disable,
+# and remove its units from the host so stale enabled units can't crash-loop on a
+# deleted entrypoint.
+for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liquidity-migration-demo-health.service; do
+    systemctl disable --now "$_retired" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$_retired"
+done
+systemctl daemon-reload
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
@@ -168,7 +159,6 @@ apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # start the timer, so on a fresh VPS the demo-health watchdog + daily combined-
 # book Telegram report would sit dormant until someone ran systemctl by hand.
 # --now schedules them immediately; subsequent deploys are idempotent.
-systemctl enable --now liquidity-migration-demo-health.timer
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
 # Daily refresh of the continuous-fade rmom gate + the gate seed run when either the
@@ -215,8 +205,6 @@ apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Long/continuous share the liquidity_migration package with the short side, so any Python
 # change requires restarting every running sleeve to pick up the new code.
 systemctl restart liquidity-migration-bybit-risk.service
-if sleeve_on "$SHORT_SLEEVE"; then systemctl restart liquidity-migration-bybit-demo.service; fi
-if sleeve_on "$SHORT_SLEEVE" && sleeve_on "$SHORT_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-paper.service; fi
 if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
 if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service; fi
 if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-paper.service; fi
@@ -228,8 +216,6 @@ fi
 # Risk always runs; each sleeve is verified per its toggle (on => active+enabled, off => NOT active).
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
-verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
-verify_sleeve "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS

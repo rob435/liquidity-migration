@@ -4,12 +4,11 @@
   block an improvement on reproducing prior output byte-for-byte. Performance /
   refactor changes are gated by **numerical equivalence within a tight tolerance**
   (`np.allclose`, NaN positions matching), NOT bit-identical output — last-bit
-  float-order differences carry no alpha. The strategy is a SELECTION signal (the
-  liquidity-migration event = candidate pool) + an EXECUTION signal (short the
-  *confirmed fade* — pop then giveback — NOT the top; a fade strategy, not
-  catch-the-top). Current direction, status, and the (retracted) Round-2-null
-  postmortem live in STATE.md + `docs/research_summary.md` — defer to them; don't
-  restate dated numbers or results here. What stays strict is the real-money
+  float-order differences carry no alpha. Current direction and status live in
+  STATE.md + `docs/research_summary.md` — defer to them; don't restate dated
+  numbers or results here. (The original daily SHORT strategy was ERASED
+  2026-06-11 by operator order; the continuous fade book and the long v11a
+  sleeve are what remain.) What stays strict is the real-money
   promotion gate (forward demo + the cross-venue bar is the arbiter; there is no
   internal pre-2023 OOS root — see `docs/data_roots.md`) and the
   methodology-correctness gates (PIT / no look-ahead / no survivorship — those are
@@ -17,7 +16,7 @@
 - Be honest and call out wrong decisions directly.
 - Ask for exact intent, constraints, and success metrics when a request is vague.
 - Do not optimize for a vague goal; define the objective before expensive research.
-- The liquidity-migration short signal is statistically real but regime-conditional; the strategy is research-stage — see `docs/research_summary.md`. Promoted profiles deploy to demo + paper only (forward-demo arbiter); which sleeves actually run is operator-toggled in `deploy/sleeves.env` (see STATE.md "What's Running"); nothing is promoted to real money. Do not make real-money deployment or promotion claims — the bar is the three-tier demo-arbiter gate in STATE.md (Tier-3 pass + funding costed).
+- The system is research-stage — see `docs/research_summary.md`. Promoted profiles deploy to demo + paper only (forward-demo arbiter); which sleeves actually run is operator-toggled in `deploy/sleeves.env` (see STATE.md "What's Running"); nothing is promoted to real money. Do not make real-money deployment or promotion claims — the bar is the three-tier demo-arbiter gate in STATE.md (Tier-3 pass + funding costed).
 - A real-money (mainnet) execution path exists; the account is a `.env` toggle (`DEMO` / `REAL_MONEY`, mutually exclusive) read by `bybit.resolve_private_credentials()`, defaulting to demo. Keep it on demo — do not set `REAL_MONEY=true` without explicit owner instruction. The strategy is not validated for real money.
 - Telegram may notify; it must not approve or submit orders.
 - Serious research runs should leave enough report output to audit the decision.

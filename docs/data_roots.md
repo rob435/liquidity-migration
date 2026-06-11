@@ -81,13 +81,15 @@ Do not point the live demo order/trade ledgers at any research root. Each
 demo root contains its forward kline cache, order ledgers, trade ledgers,
 cycle reports, and risk-watchdog reports.
 
-Each sleeve has a paper (dry-run) shadow on its own root (short:
-`data/bybit-paper-event`, long: `data/bybit-long-paper-event`, continuous:
-`data/bybit-continuous-paper-event`) — same profile/universe/cadence, no
-orders, idealized fills at signal price. Comparing the paper and demo ledgers
-measures demo-vs-paper execution slippage. Run `bash scripts/reconcile.sh`
-(skill: `pit-reconcile`) for the full demo↔paper↔backtest↔Bybit reconcile — it is
-the only reconcile entrypoint; do not hand-assemble the `reconcile-*` calls.
+Each sleeve has a paper (dry-run) shadow on its own root (long:
+`data/bybit-long-paper-event`, continuous: `data/bybit-continuous-paper-event`)
+— same profile/universe/cadence, no orders, idealized fills at signal price.
+Comparing the paper and demo ledgers measures demo-vs-paper execution slippage.
+Run `bash scripts/reconcile.sh` (skill: `pit-reconcile`) for the demo↔paper
+reconcile — it is the only reconcile entrypoint; do not hand-assemble the
+`reconcile-*` calls. (The daily-short sleeve and its roots were erased
+2026-06-11; legacy `data/bybit-demo-event` / `data/bybit-paper-event` dirs on a
+live host are inert history.)
 
 Do not use ad hoc current-universe or temporary recent roots for promotion
 evidence. Current-universe research is biased by construction unless

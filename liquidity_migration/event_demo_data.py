@@ -24,10 +24,6 @@ from .downloaders import _normalize_instruments, _normalize_klines
 from .storage import read_dataset, write_dataset
 from .universe import build_current_universe_table
 from ._common import MS_PER_HOUR
-from .volume_features import build_volume_features
-from .volume_events import (
-    _enriched_event_features,
-)
 
 
 from .event_demo import (  # noqa: F401  (shared hub helpers)
@@ -586,37 +582,3 @@ def _write_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any], fea
         temp_parquet.unlink(missing_ok=True)
         temp_metadata.unlink(missing_ok=True)
 
-def _build_demo_features(
-    klines: pl.DataFrame,
-    universe: pl.DataFrame,
-    *,
-    cache_root: Path | None = None,
-) -> pl.DataFrame:
-    if klines.is_empty():
-        return pl.DataFrame()
-    fingerprint: dict[str, Any] | None = None
-    if cache_root is not None:
-        fingerprint = _demo_feature_cache_fingerprint(klines, universe)
-        cached = _read_demo_feature_cache(cache_root, fingerprint)
-        if cached is not None:
-            return cached
-    features = _enriched_event_features(build_volume_features(klines), klines, pl.DataFrame())
-    if not universe.is_empty() and "listing_age_days" in universe.columns:
-        ages = universe.select(["symbol", "listing_age_days"]).unique(subset=["symbol"], keep="first")
-        for column in ("symbol_age_days", "pit_age_days"):
-            if column in features.columns:
-                features = features.drop(column)
-        features = (
-            features.join(ages, on="symbol", how="left")
-            .with_columns(
-                [
-                    pl.col("listing_age_days").cast(pl.Int64, strict=False).alias("symbol_age_days"),
-                    pl.col("listing_age_days").cast(pl.Float64, strict=False).alias("pit_age_days"),
-                ]
-            )
-            .drop("listing_age_days")
-        )
-    if fingerprint is not None:
-        assert cache_root is not None  # fingerprint is only set when cache_root is not None (see above)
-        _write_demo_feature_cache(cache_root, fingerprint, features)
-    return features

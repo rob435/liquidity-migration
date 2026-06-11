@@ -28,7 +28,6 @@ from .event_demo import (
     _build_private_client,
     _column_values,
     _decimal_text,
-    _demo_event_config,
     _empty_trades,
     _execution_summary,
     _execute_risk_exits,
@@ -44,7 +43,6 @@ from .event_demo import (
     _risk_order_link_id,
     _risk_reconcile_missing_positions,
     _reconcile_pending_order_fills,
-    _selected_scenario,
     _split_order_link_id,
     _split_qty_for_max_order_size,
     _live_open_order_symbols,
@@ -65,7 +63,6 @@ from .event_demo import (
     summarize_position_pnl,
 )
 from .long_native_event_demo import MULTI_STRAT_V1_STRATEGY_ID
-from .volume_events import VolumeEventResearchConfig
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
 from . import cross_sleeve as _cross_sleeve
 from .event_demo import wallet_equity_usdt
@@ -152,9 +149,8 @@ class EventWebSocketRiskConfig:
     adopt_hold_days: float = 3.0
     # Strategy IDs used to reconstruct the deterministic trade_id when an
     # adopted position's orderLinkId decodes back to a known signal_ts.
-    # Empty string means "use the canonical promoted scenario_id at startup"
-    # (derived once via _demo_event_config to avoid hardcoding it here).
-    # Set explicitly if running a non-default strategy profile.
+    # adopt_short_strategy_id: legacy-ledger support only — the daily-short
+    # sleeve was erased 2026-06-11; set explicitly to adopt old short rows.
     adopt_short_strategy_id: str = ""
     adopt_long_strategy_id: str = ""
     # How many recent orders per symbol to scan when looking for the
@@ -1908,18 +1904,11 @@ class EventWebSocketRiskEngine:
             from .continuous_demo import CONTINUOUS_ADDON_STRATEGY_ID
             return self.risk.adopt_continuous_addon_strategy_id or CONTINUOUS_ADDON_STRATEGY_ID
         if sleeve == "short":
-            if self.risk.adopt_short_strategy_id:
-                return self.risk.adopt_short_strategy_id
-            # Match the canonical promoted scenario the live demo daemon runs.
-            # Derived via _selected_scenario(_demo_event_config(...)) so any
-            # change to the promoted scenario's deterministic id automatically
-            # flows through here.
-            try:
-                strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
-                scenario = _selected_scenario(strategy)
-            except Exception:  # noqa: BLE001 - never let derivation break adoption
-                return ""
-            return str(getattr(scenario, "scenario_id", "") or "")
+            # The daily-short sleeve was erased (operator order 2026-06-11). Legacy
+            # ledger rows tagged sleeve="short" can still be adopted, but only with
+            # an explicitly configured strategy_id — there is no canonical scenario
+            # to derive any more.
+            return self.risk.adopt_short_strategy_id or ""
         return ""
 
     def exit_untracked_positions(self) -> None:

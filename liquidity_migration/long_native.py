@@ -50,16 +50,13 @@ from .trade_lifecycle import (
     summarize_baskets,
     summarize_trade_backtest,
 )
-from .volume_events import (
+from ._common import _date_range, _exclude_symbols, _iso_date, _iso_month
+from .volume_events_charts import _write_equity_benchmark_chart
+from .volume_events_pit import (
     _covered_kline_date_symbol_set,
-    _date_range,
-    _exclude_symbols,
     _full_pit_universe_error,
     _full_pit_universe_pass,
-    _iso_date,
-    _iso_month,
     _pit_manifest_metadata,
-    _write_equity_benchmark_chart,
 )
 
 
@@ -187,6 +184,10 @@ class LongNativeConfig:
     # --- FC v13: ADAPTIVE sniper — retrace pct = K × coin's ATR_14d/close ---
     fc_sniper_use_atr_retrace: bool = False  # if True, retrace_pct = atr_mult × atr_14d_pct
     fc_sniper_atr_mult: float = 0.5          # 0.5 × ATR = ~half-day move retrace
+    # TA1 atlas weekend lead (operator-directed 2026-06-11, receipt
+    # trade-atlas-2026-06-11.md): scale entry size on Sat/Sun entries. 1.0 = off.
+    # In-sample-derived gate — the in-sample numbers are NOT promotion evidence.
+    weekend_size_mult: float = 1.0
     # --- PE2: provisional trigger-hour entry (long-provisional-entry-engine-2026-06-10) ---
     # Enter at the FIRST hourly close where the trailing-24h FC condition fires (same
     # thresholds as the daily trigger, gates read from the PRIOR day's feature row),
@@ -1904,6 +1905,8 @@ def _run_long_pipeline(
                     config, _safe_float(row_prev.get("btc_rv_30")))
                 if config.enable_dd_throttle and dd_cur <= config.dd_throttle_trigger:
                     position_weight = position_weight * config.dd_throttle_scale
+                if config.weekend_size_mult != 1.0 and ((int(trig_ts) // MS_PER_DAY) + 3) % 7 >= 5:
+                    position_weight = position_weight * config.weekend_size_mult
                 if config.max_per_symbol_weight > 0.0:
                     effective_gross = notional_weight * position_weight
                     if effective_gross > config.max_per_symbol_weight:
@@ -2133,6 +2136,10 @@ def _run_long_pipeline(
             # (caps the worst peak-to-trough -> lifts MAR), restore on recovery.
             if config.enable_dd_throttle and dd_cur <= config.dd_throttle_trigger:
                 position_weight = position_weight * config.dd_throttle_scale
+
+            # TA1 weekend lead (operator-directed): tilt Sat/Sun entries.
+            if config.weekend_size_mult != 1.0 and ((int(entry_ts_ms) // MS_PER_DAY) + 3) % 7 >= 5:
+                position_weight = position_weight * config.weekend_size_mult
 
             # B.3: per-symbol weight cap on final gross exposure. This must bind
             # after all entry quality, vol-target and drawdown multipliers; otherwise

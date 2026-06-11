@@ -4,8 +4,6 @@
 # Tier-3 30-day clock restarts on the new config.
 #
 # WHAT IT TOUCHES (only these per-root datasets):
-#   data/bybit-demo-event       : event_demo_trades  event_demo_orders  event_demo_cycles
-#   data/bybit-paper-event      : event_demo_trades  event_demo_orders  event_demo_cycles
 #   data/bybit-long-demo-event  : long_native_demo_trades  long_native_demo_orders  long_native_demo_cycles
 #   data/bybit-long-paper-event : long_native_paper_trades long_native_paper_orders long_native_paper_cycles
 #   data/bybit-continuous-demo-event  : continuous_fade_demo_trades  continuous_fade_demo_orders  continuous_fade_demo_cycles
@@ -54,12 +52,6 @@ fi
 # (root, dataset) pairs. Keep this list in sync with the deployed systemd units'
 # DATA_ROOT values and storage.py dataset names.
 PAIRS="
-data/bybit-demo-event:event_demo_trades
-data/bybit-demo-event:event_demo_orders
-data/bybit-demo-event:event_demo_cycles
-data/bybit-paper-event:event_demo_trades
-data/bybit-paper-event:event_demo_orders
-data/bybit-paper-event:event_demo_cycles
 data/bybit-long-demo-event:long_native_demo_trades
 data/bybit-long-demo-event:long_native_demo_orders
 data/bybit-long-demo-event:long_native_demo_cycles

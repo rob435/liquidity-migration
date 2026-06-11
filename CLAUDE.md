@@ -1,10 +1,10 @@
 # liquidity-migration
 
-A research codebase for a Bybit liquidity-migration short strategy. The
-strategy is under **active research** — its signal is statistically real but
-regime-conditional. All research findings are consolidated in
-`docs/research_summary.md` (see `STATE.md` for live/operational state). Python
-3.11+; package `liquidity_migration/`.
+A research codebase for Bybit crypto-perp trading research (continuous fade
+book + long-only v11a sleeve). **The original daily SHORT strategy was ERASED
+2026-06-11 by operator order** — git history is the archive. All research
+findings are consolidated in `docs/research_summary.md` (see `STATE.md` for
+live/operational state). Python 3.11+; package `liquidity_migration/`.
 
 @AGENTS.md
 
@@ -21,7 +21,6 @@ regime-conditional. All research findings are consolidated in
   removed 2026-06-02; git history is the backstop. **Read this for all research; it
   is the one file.**
 - `docs/data_roots.md` — which data root to use (research vs. live demo vs. OOS).
-- `docs/event_demo_daemon.md` — demo daemon runbook + live-infra hardening changelog.
 - `README.md` — repo overview and status.
 
 ## Running
@@ -55,8 +54,8 @@ exceptions.
   - `data_roots` — canonical data-root index
   - `list_reports`, `parse_report`, `audit_run_artifacts` — report tooling
   - `apply_decision_rule(summary_csv)` — programmatic verdict (legacy strict Sharpe bar; the Tier-2 demo-candidate verdict comes from `scripts/r1_robustness.py`; tier definitions in STATE.md)
-- Research + reconcile helper scripts (`volume_events_cell.sh`, `r1_robustness.py`,
-  `apply_decision_rule.py`, `reconcile.sh`, …) are driven by the `research-phase-runner`
-  and `pit-reconcile` skills; STATE.md "Helpers" is the canonical roster. Use those
-  rather than hand-assembling the calls.
+- Research + reconcile helper scripts (`r1_robustness.py`, `apply_decision_rule.py`,
+  `reconcile.sh`, …) are driven by the `research-phase-runner` and `pit-reconcile`
+  skills; STATE.md "Helpers" is the canonical roster. Use those rather than
+  hand-assembling the calls.
 - For architecture questions, read `graphify-out/GRAPH_REPORT.md` first.

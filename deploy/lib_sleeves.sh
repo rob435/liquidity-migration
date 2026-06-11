@@ -5,12 +5,11 @@
 
 # Space-separated unit lists per sleeve (entry/exit daemons + paper shadow). The risk service
 # is intentionally NOT here — it always runs and protects every sleeve's open positions.
-# The short sleeve = its demo daemon only (the real forward demo). Its PAPER shadow is a SEPARATE
-# toggle (SHORT_PAPER_SLEEVE) so a small/low-RAM host can run the demo without the second
-# full-universe paper process. Continuous is split the same way: the DEMO order-submitting
-# sleeve stays off while the no-order PAPER evidence collector can run.
-SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service"
-SHORT_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-paper.service"
+# The daily SHORT sleeve was ERASED from the system (operator order 2026-06-11);
+# its units are gone and the deploy actively removes them from a live host.
+# Continuous is split: the DEMO order-submitting sleeve vs the no-order PAPER
+# evidence collector.
+RETIRED_SLEEVE_UNITS="liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service"
 LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"
 CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"
 CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"
@@ -27,14 +26,10 @@ lm_load_sleeve_toggles() {
     _lm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     [ -f "$_lm_dir/sleeves.env" ] && . "$_lm_dir/sleeves.env"
     [ -f /etc/liquidity-migration/sleeves.env ] && . /etc/liquidity-migration/sleeves.env
-    # Fallbacks if NEITHER file set a toggle (a stripped checkout). SHORT/LONG are
-    # validated + running so default on; CONTINUOUS defaults OFF (look-ahead-disabled
-    # 2026-06-03) so even a missing config can never resurrect the broken sleeve. The
-    # committed deploy/sleeves.env is the real source of truth; these are last-resort.
-    : "${SHORT_SLEEVE:=on}"
-    # SHORT_PAPER defaults on (a stripped checkout keeps the historical demo+paper pair); the
-    # committed sleeves.env is the real source of truth and may turn it off for a small host.
-    : "${SHORT_PAPER_SLEEVE:=on}"
+    # Fallbacks if NEITHER file set a toggle (a stripped checkout). LONG is
+    # validated so defaults on; CONTINUOUS defaults OFF so even a missing config
+    # can never resurrect a disabled sleeve. The committed deploy/sleeves.env is
+    # the real source of truth; these are last-resort.
     : "${LONG_SLEEVE:=on}"
     : "${CONTINUOUS_SLEEVE:=off}"
     : "${CONTINUOUS_PAPER_SLEEVE:=on}"

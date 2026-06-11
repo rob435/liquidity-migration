@@ -5,7 +5,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
 from .archive_manifest import ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig
@@ -22,29 +21,22 @@ from .storage import ensure_data_root
 from .data_layer import DEFAULT_DATA_LAYER_DATASETS, DataLayerAuditConfig, run_data_layer_audit
 from .downloaders import download_binance_usdm_proxy_data, download_market_data, parse_date_ms
 from .event_demo import (
-    EventDemoCycleConfig,
     EventRiskCycleConfig,
     build_event_risk_private_client,
-    run_event_demo_cycle,
     run_event_risk_cycle,
 )
 from .ingestion import generate_fixture_data
 from .pit_coverage import coverage_status, format_coverage
 from .reconciliation import (
-    run_backtest_paper_reconciliation,
     run_continuous_forward_readiness,
     run_continuous_paper_demo_reconciliation,
     run_continuous_rebalance_cycle_audit,
     run_continuous_vs_daily_forward_comparison,
-    run_demo_bybit_reconciliation,
-    run_full_reconciliation,
     run_long_paper_demo_reconciliation,
-    run_paper_demo_reconciliation,
 )
 from .continuous_addon_shadow import ContinuousAddonShadowAuditConfig, run_continuous_addon_shadow_audit
 from .universe import run_discover_universe
 from .continuous_events import ContinuousEventConfig, run_continuous_event_research
-from .volume_events import VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
 from .cli_parsers import (  # argparse subcommand builders (extracted); build_parser() calls these
     _add_archive_download_klines_1h_api_parser,
@@ -62,18 +54,12 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
     _add_discover_universe_parser,
     _add_download_binance_proxy_parser,
     _add_download_data_parser,
-    _add_event_demo_cycle_parser,
     _add_event_risk_cycle_parser,
     _add_event_risk_ws_parser,
     _add_long_native_event_demo_cycle_parser,
-    _add_reconcile_all_parser,
-    _add_reconcile_backtest_paper_parser,
     _add_reconcile_continuous_paper_demo_parser,
-    _add_reconcile_demo_bybit_parser,
     _add_reconcile_long_paper_demo_parser,
-    _add_reconcile_paper_demo_parser,
     _add_signal_harness_parser,
-    _add_volume_events_parser,
 )
 
 
@@ -104,30 +90,6 @@ def _event_risk_report_path(payload: dict) -> Path:
         else "latest_event_risk_cycle.md"
     )
     return Path(payload["report_dir"]) / filename
-
-
-def format_event_demo_cycle_summary(payload: dict) -> str:
-    """One-line `event demo cycle ...` summary used by both the legacy bash-loop
-    runner (printed once per cycle, via main()) and the long-running daemon
-    (printed once per cycle, via EventDemoDaemon._run_one_cycle). Keeping the
-    format identical means operators don't need to learn a new line — the
-    grep patterns and dashboards they already have keep working when they
-    flip USE_DAEMON.
-    """
-    cycle = payload.get("cycle", {})
-    report_dir = payload.get("report_dir", "")
-    return (
-        "event demo cycle "
-        f"mode={cycle.get('mode')} "
-        f"profile={cycle.get('strategy_profile')} "
-        f"symbols={cycle.get('symbols')} "
-        f"features={cycle.get('feature_rows')} "
-        f"entries={cycle.get('entries_executed')}/{cycle.get('entry_candidates')} "
-        f"exits={cycle.get('exits_executed')}/{cycle.get('exit_candidates')} "
-        f"open={cycle.get('open_trades_after')} "
-        f"{_event_demo_timing_text(cycle)}"
-        f"path={Path(report_dir) / 'latest_event_demo_cycle.md'}"
-    )
 
 
 def _event_demo_timing_text(cycle: dict) -> str:
@@ -223,25 +185,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_download_klines_parser(subparsers)
     _add_archive_download_klines_1h_parser(subparsers)
     _add_archive_download_klines_1h_api_parser(subparsers)
-    _add_volume_events_parser(subparsers)
     _add_continuous_events_parser(subparsers)
     _add_signal_harness_parser(subparsers)
-    _add_event_demo_cycle_parser(subparsers)
     _add_event_risk_cycle_parser(subparsers)
     _add_event_risk_ws_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
     _add_continuous_event_demo_cycle_parser(subparsers)
     _add_combined_book_report_parser(subparsers)
-    _add_reconcile_paper_demo_parser(subparsers)
     _add_reconcile_long_paper_demo_parser(subparsers)
     _add_reconcile_continuous_paper_demo_parser(subparsers)
     _add_continuous_rebalance_cycle_audit_parser(subparsers)
     _add_continuous_forward_readiness_parser(subparsers)
     _add_continuous_vs_daily_forward_parser(subparsers)
     _add_continuous_addon_shadow_audit_parser(subparsers)
-    _add_reconcile_demo_bybit_parser(subparsers)
-    _add_reconcile_backtest_paper_parser(subparsers)
-    _add_reconcile_all_parser(subparsers)
 
     return parser
 
@@ -254,13 +210,9 @@ _COMMANDS_WITHOUT_DATA_ROOT = frozenset(
         # --demo-data-root / --backtest-trades-csv arguments; the global
         # research data_root they would otherwise check doesn't exist on the
         # VPS (where the demo runs) and doesn't need to.
-        "reconcile-paper-demo",
         "reconcile-long-paper-demo",
         "reconcile-continuous-paper-demo",
         "continuous-addon-shadow-audit",
-        "reconcile-demo-bybit",
-        "reconcile-backtest-paper",
-        "reconcile-all",
     }
 )
 
@@ -271,7 +223,6 @@ _COMMANDS_WITHOUT_DATA_ROOT = frozenset(
 # root is a misconfiguration to surface loudly, not silently create.
 _COMMANDS_THAT_OWN_DATA_ROOT = frozenset(
     {
-        "event-demo-cycle",
         "event-risk-cycle",
         "event-risk-ws",
         "long-native-event-demo-cycle",
@@ -589,81 +540,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1 if payload["failures"] else 0
 
-    if args.command == "event-demo-cycle":
-        # Read optional ws_klines_* defaults off a throwaway default INSTANCE: on a
-        # slots dataclass a field accessed via the class is the member_descriptor, not
-        # the value, so an instance read is both correct and mypy-clean (no ignores).
-        _ws_defaults = EventDemoCycleConfig()
-        demo_config = EventDemoCycleConfig(
-            lookback_days=args.lookback_days,
-            universe_rank_end=args.universe_rank_end,
-            universe_max_symbols=args.universe_max_symbols,
-            universe_min_turnover_24h=args.universe_min_turnover_24h,
-            workers=args.workers,
-            max_order_notional_pct_equity=args.max_order_notional_pct_equity,
-            wallet_balance_fraction=args.wallet_balance_fraction,
-            fallback_equity_usdt=args.fallback_equity_usdt,
-            max_entry_lag_minutes=args.max_entry_lag_minutes,
-            max_new_entries_per_cycle=args.max_new_entries_per_cycle,
-            max_active_symbols=args.max_active_symbols,
-            entry_leverage=args.entry_leverage,
-            entry_order_type=args.entry_order_type,
-            exit_order_type=args.exit_order_type,
-            order_fill_confirm_seconds=args.order_fill_confirm_seconds,
-            order_fill_poll_interval_seconds=args.order_fill_poll_interval_seconds,
-            submit_orders=args.submit_orders,
-            confirm_demo_orders=args.confirm_demo_orders,
-            telegram=args.telegram,
-            record_dry_run=args.record_dry_run,
-            data_name=args.data_name,
-            strategy_profile=args.strategy_profile,
-            ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
-            ws_klines_bootstrap_workers=getattr(args, "ws_klines_bootstrap_workers", _ws_defaults.ws_klines_bootstrap_workers),
-            ws_klines_lookback_days=getattr(args, "ws_klines_lookback_days", _ws_defaults.ws_klines_lookback_days),
-            ws_klines_universe_refresh_seconds=getattr(args, "ws_klines_universe_refresh_seconds", _ws_defaults.ws_klines_universe_refresh_seconds),
-            ws_klines_topics_per_connection=getattr(args, "ws_klines_topics_per_connection", _ws_defaults.ws_klines_topics_per_connection),
-            ws_klines_stale_warning_seconds=getattr(args, "ws_klines_stale_warning_seconds", _ws_defaults.ws_klines_stale_warning_seconds),
-            ws_klines_stale_reconnect_seconds=getattr(args, "ws_klines_stale_reconnect_seconds", _ws_defaults.ws_klines_stale_reconnect_seconds),
-        )
-        if getattr(args, "daemon", False):
-            from liquidity_migration.event_demo_daemon import EventDemoDaemon
-            daemon_timing_kwargs: dict[str, Any] = {}  # heterogeneous daemon kwargs (float|str) passed via **
-            if getattr(args, "ticker_reconcile_interval_seconds", None) is not None:
-                daemon_timing_kwargs["ticker_reconcile_interval_seconds"] = args.ticker_reconcile_interval_seconds
-            if getattr(args, "state_cache_stale_seconds", None) is not None:
-                daemon_timing_kwargs["state_cache_stale_seconds"] = args.state_cache_stale_seconds
-            # De-hard-coded daemon knobs: the daemon already accepts these; surface
-            # them so they are tunable (were pinned at construction defaults).
-            if getattr(args, "min_cycle_interval_seconds", None) is not None:
-                daemon_timing_kwargs["min_cycle_interval_seconds"] = args.min_cycle_interval_seconds
-            if getattr(args, "order_submit_mode", None) is not None:
-                daemon_timing_kwargs["order_submit_mode"] = args.order_submit_mode
-            if getattr(args, "ws_trade_timeout_seconds", None) is not None:
-                daemon_timing_kwargs["ws_trade_timeout_seconds"] = args.ws_trade_timeout_seconds
-            if getattr(args, "ws_gap_threshold_seconds", None) is not None:
-                daemon_timing_kwargs["ws_gap_threshold_seconds"] = args.ws_gap_threshold_seconds
-            daemon = EventDemoDaemon(
-                data_root,
-                config=config,
-                demo_config=demo_config,
-                interval_seconds=args.interval_seconds,
-                event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
-                **daemon_timing_kwargs,
-            )
-            daemon.install_signal_handlers()
-            stats = daemon.run()
-            print(
-                "event demo daemon stopped "
-                f"cycles_run={stats['cycles_run']} "
-                f"cycle_errors={stats['cycle_errors']} "
-                f"router={stats['router_stats']}",
-                flush=True,
-            )
-            return 0
-        payload = run_event_demo_cycle(data_root, config=config, demo_config=demo_config)
-        print(format_event_demo_cycle_summary(payload))
-        return 0
-
     if args.command == "event-risk-cycle":
         risk_config = EventRiskCycleConfig(
             submit_orders=args.submit_orders,
@@ -921,219 +797,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "volume-events":
-        event_config = VolumeEventResearchConfig(
-            event_types=_csv_str(args.event_types, VolumeEventResearchConfig().event_types),
-            thresholds=_csv_float(args.thresholds, VolumeEventResearchConfig().thresholds),
-            hold_days=_csv_int(args.hold_days, VolumeEventResearchConfig().hold_days),
-            side_hypotheses=_csv_str(args.sides, VolumeEventResearchConfig().side_hypotheses),
-            stop_loss_pcts=_csv_float(args.stop_loss_pcts, VolumeEventResearchConfig().stop_loss_pcts),
-            stop_fill_mode=args.stop_fill_mode,
-            stop_slippage_cap_pct=args.stop_slippage_cap_pct,
-            take_profit_pcts=_csv_float(args.take_profit_pcts, VolumeEventResearchConfig().take_profit_pcts),
-            cost_multipliers=_csv_float(args.cost_multipliers, VolumeEventResearchConfig().cost_multipliers),
-            mfe_giveback_trigger_pct=args.mfe_giveback_trigger_pct,
-            mfe_giveback_retain_pct=args.mfe_giveback_retain_pct,
-            failed_fade_exit_hours=args.failed_fade_exit_hours,
-            failed_fade_min_mfe_pct=args.failed_fade_min_mfe_pct,
-            failed_fade_loss_pct=args.failed_fade_loss_pct,
-            failed_fade_close_location_min=args.failed_fade_close_location_min,
-            start_date=args.start,
-            end_date=args.end,
-            entry_delay_hours=args.entry_delay_hours,
-            entry_policy=args.entry_policy,
-            entry_quality_squeeze_h1_return_bps=args.entry_quality_squeeze_h1_return_bps,
-            entry_quality_squeeze_h1_close_location_min=args.entry_quality_squeeze_h1_close_location_min,
-            entry_quality_squeeze_pop_bps=args.entry_quality_squeeze_pop_bps,
-            entry_quality_squeeze_giveback_bps=args.entry_quality_squeeze_giveback_bps,
-            entry_quality_squeeze_wait_hours=args.entry_quality_squeeze_wait_hours,
-            entry_execution_veto_close_location_max=args.entry_execution_veto_close_location_max,
-            gross_exposure=args.gross_exposure,
-            max_active_symbols=args.max_active_symbols,
-            position_weighting=args.position_weighting,
-            position_weight_vol_field=args.position_weight_vol_field,
-            position_weight_clamp=args.position_weight_clamp,
-            target_vol_per_name=args.target_vol_per_name,
-            taker_imbalance_size_field=args.taker_imbalance_size_field,
-            taker_imbalance_size_scale=args.taker_imbalance_size_scale,
-            cooldown_days=args.cooldown_days,
-            rank_exit_threshold=args.rank_exit_threshold,
-            require_full_pit_universe=not args.allow_partial_pit,
-            require_pit_membership=(args.pit_membership == "strict"),
-            universe_rank_min=args.universe_rank_min,
-            universe_rank_max=args.universe_rank_max,
-            universe_min_daily_turnover=args.universe_min_daily_turnover,
-            tail_rank_min=args.tail_rank_min,
-            tail_rank_max=args.tail_rank_max,
-            tail_rank_improvement_min=args.tail_rank_improvement_min,
-            liquidity_migration_rank_improvement_min=args.liquidity_migration_rank_improvement_min,
-            liquidity_migration_rank_direction=args.liquidity_migration_rank_direction,
-            liquidity_migration_turnover_ratio_min=args.liquidity_migration_turnover_ratio_min,
-            liquidity_migration_prior_rank_min=args.liquidity_migration_prior_rank_min,
-            liquidity_migration_current_rank_max=args.liquidity_migration_current_rank_max,
-            liquidity_migration_event_rank_fraction_max=args.liquidity_migration_event_rank_fraction_max,
-            liquidity_migration_event_rank_fraction_exclude_min=args.liquidity_migration_event_rank_fraction_exclude_min,
-            liquidity_migration_event_rank_fraction_exclude_max=args.liquidity_migration_event_rank_fraction_exclude_max,
-            liquidity_migration_score_max=args.liquidity_migration_score_max,
-            liquidity_migration_day_return_min=args.liquidity_migration_day_return_min,
-            liquidity_migration_day_return_max=args.liquidity_migration_day_return_max,
-            liquidity_migration_return_7d_min=args.liquidity_migration_return_7d_min,
-            liquidity_migration_return_7d_max=args.liquidity_migration_return_7d_max,
-            liquidity_migration_residual_return_min=args.liquidity_migration_residual_return_min,
-            liquidity_migration_residual_return_max=args.liquidity_migration_residual_return_max,
-            liquidity_migration_close_to_high_7d_min=args.liquidity_migration_close_to_high_7d_min,
-            liquidity_migration_close_to_high_30d_min=args.liquidity_migration_close_to_high_30d_min,
-            liquidity_migration_prior30_max_return_min=args.liquidity_migration_prior30_max_return_min,
-            liquidity_migration_prior30_max_return_max=args.liquidity_migration_prior30_max_return_max,
-            liquidity_migration_prior7_return_volatility_min=args.liquidity_migration_prior7_return_volatility_min,
-            liquidity_migration_prior7_return_volatility_max=args.liquidity_migration_prior7_return_volatility_max,
-            liquidity_migration_intraday_range_max=args.liquidity_migration_intraday_range_max,
-            liquidity_migration_funding_rate_last_min=args.liquidity_migration_funding_rate_last_min,
-            liquidity_migration_funding_rate_last_max=args.liquidity_migration_funding_rate_last_max,
-            liquidity_migration_funding_3d_sum_min=args.liquidity_migration_funding_3d_sum_min,
-            liquidity_migration_funding_3d_sum_max=args.liquidity_migration_funding_3d_sum_max,
-            liquidity_migration_funding_7d_sum_min=args.liquidity_migration_funding_7d_sum_min,
-            liquidity_migration_funding_7d_sum_max=args.liquidity_migration_funding_7d_sum_max,
-            liquidity_migration_open_interest_return_3d_min=args.liquidity_migration_open_interest_return_3d_min,
-            liquidity_migration_open_interest_return_3d_max=args.liquidity_migration_open_interest_return_3d_max,
-            liquidity_migration_open_interest_return_7d_min=args.liquidity_migration_open_interest_return_7d_min,
-            liquidity_migration_open_interest_return_7d_max=args.liquidity_migration_open_interest_return_7d_max,
-            liquidity_migration_volume_to_oi_quote_min=args.liquidity_migration_volume_to_oi_quote_min,
-            liquidity_migration_volume_to_oi_quote_max=args.liquidity_migration_volume_to_oi_quote_max,
-            liquidity_migration_mark_index_basis_3d_mean_min=args.liquidity_migration_mark_index_basis_3d_mean_min,
-            liquidity_migration_mark_index_basis_3d_mean_max=args.liquidity_migration_mark_index_basis_3d_mean_max,
-            liquidity_migration_premium_index_3d_mean_min=args.liquidity_migration_premium_index_3d_mean_min,
-            liquidity_migration_premium_index_3d_mean_max=args.liquidity_migration_premium_index_3d_mean_max,
-            liquidity_migration_taker_imbalance_1d_min=args.liquidity_migration_taker_imbalance_1d_min,
-            liquidity_migration_taker_imbalance_1d_max=args.liquidity_migration_taker_imbalance_1d_max,
-            liquidity_migration_taker_imbalance_3d_min=args.liquidity_migration_taker_imbalance_3d_min,
-            liquidity_migration_taker_imbalance_3d_max=args.liquidity_migration_taker_imbalance_3d_max,
-            liquidity_migration_market_pct_up_max=args.liquidity_migration_market_pct_up_max,
-            liquidity_migration_hot_market_day_return_min=args.liquidity_migration_hot_market_day_return_min,
-            liquidity_migration_hot_market_day_return_band=args.liquidity_migration_hot_market_day_return_band,
-            liquidity_migration_market_median_return_30d_max=args.liquidity_migration_market_median_return_30d_max,
-            liquidity_migration_market_median_return_7d_max=args.liquidity_migration_market_median_return_7d_max,
-            liquidity_migration_market_pct_up_30d_max=args.liquidity_migration_market_pct_up_30d_max,
-            liquidity_migration_market_pct_up_7d_max=args.liquidity_migration_market_pct_up_7d_max,
-            liquidity_migration_close_location_min=args.liquidity_migration_close_location_min,
-            liquidity_migration_close_location_max=args.liquidity_migration_close_location_max,
-            liquidity_migration_up_volume_concentration_min=args.liquidity_migration_up_volume_concentration_min,
-            liquidity_migration_pit_age_days_min=args.liquidity_migration_pit_age_days_min,
-            liquidity_migration_residual_momentum_max=args.liquidity_migration_residual_momentum_max,
-            liquidity_migration_pit_age_days_max=args.liquidity_migration_pit_age_days_max,
-            liquidity_migration_crowding_filter=args.liquidity_migration_crowding_filter,
-            liquidity_migration_crowding_min_signals=args.liquidity_migration_crowding_min_signals,
-            liquidity_migration_crowding_stalled_last6h_return_max=(
-                args.liquidity_migration_crowding_stalled_last6h_return_max
-            ),
-            liquidity_migration_crowding_stalled_close_location_min=(
-                args.liquidity_migration_crowding_stalled_close_location_min
-            ),
-            liquidity_migration_crowding_stalled_turnover_ratio_max=(
-                args.liquidity_migration_crowding_stalled_turnover_ratio_max
-            ),
-            liquidity_migration_crowding_late_max_turnover_share_min=(
-                args.liquidity_migration_crowding_late_max_turnover_share_min
-            ),
-            liquidity_migration_crowding_late_last6h_return_min=(
-                args.liquidity_migration_crowding_late_last6h_return_min
-            ),
-            liquidity_migration_crowding_late_turnover_ratio_min=(
-                args.liquidity_migration_crowding_late_turnover_ratio_min
-            ),
-            liquidity_migration_crowding_weak_market_pct_up_max=(
-                args.liquidity_migration_crowding_weak_market_pct_up_max
-            ),
-            liquidity_migration_crowding_weak_avg_turnover_share_min=(
-                args.liquidity_migration_crowding_weak_avg_turnover_share_min
-            ),
-            liquidity_migration_signal_last6h_turnover_share_max=(
-                args.liquidity_migration_signal_last6h_turnover_share_max
-            ),
-            market_median_return_1d_min=args.market_median_return_1d_min,
-            market_median_return_1d_max=args.market_median_return_1d_max,
-            market_pct_up_1d_min=args.market_pct_up_1d_min,
-            market_pct_up_1d_max=args.market_pct_up_1d_max,
-            btc_return_1d_min=args.btc_return_1d_min,
-            btc_return_1d_max=args.btc_return_1d_max,
-            btc_trend_gate=args.btc_trend_gate,
-            stop_pressure_window_days=args.stop_pressure_window_days,
-            stop_pressure_stop_count=args.stop_pressure_stop_count,
-            realized_loss_pressure_window_days=args.realized_loss_pressure_window_days,
-            realized_loss_pressure_loss_count=args.realized_loss_pressure_loss_count,
-            realized_loss_pressure_min_loss_abs=args.realized_loss_pressure_min_loss_abs,
-            exhaustion_min_day_return=args.exhaustion_min_day_return,
-            selloff_exhaustion_min_abs_day_return=args.selloff_exhaustion_min_abs_day_return,
-            absorption_max_abs_day_return=args.absorption_max_abs_day_return,
-            dryup_prior_volume_rank_max=args.dryup_prior_volume_rank_max,
-            dryup_prior_abs_day_return_max=args.dryup_prior_abs_day_return_max,
-            top_volume_rank_max=args.top_volume_rank_max,
-            top_volume_prior_rank_min=args.top_volume_prior_rank_min,
-            top_volume_min_age_days=args.top_volume_min_age_days,
-            top_volume_turnover_ratio_min=args.top_volume_turnover_ratio_min,
-            top_volume_day_return_min=args.top_volume_day_return_min,
-            top_volume_residual_return_min=args.top_volume_residual_return_min,
-            top_volume_close_position_min=args.top_volume_close_position_min,
-            leadership_pullback_rank_max=args.leadership_pullback_rank_max,
-            leadership_pullback_min_age_days=args.leadership_pullback_min_age_days,
-            leadership_pullback_prior7_return_min=args.leadership_pullback_prior7_return_min,
-            leadership_pullback_prior7_return_max=args.leadership_pullback_prior7_return_max,
-            leadership_pullback_day_return_min=args.leadership_pullback_day_return_min,
-            leadership_pullback_day_return_max=args.leadership_pullback_day_return_max,
-            leadership_pullback_residual_return_min=args.leadership_pullback_residual_return_min,
-            leadership_pullback_close_position_min=args.leadership_pullback_close_position_min,
-            leadership_pullback_abs_day_return_max=args.leadership_pullback_abs_day_return_max,
-            shelf_reclaim_min_age_days=args.shelf_reclaim_min_age_days,
-            shelf_reclaim_prior7_volume_rank_max=args.shelf_reclaim_prior7_volume_rank_max,
-            shelf_reclaim_prior7_abs_return_mean_max=args.shelf_reclaim_prior7_abs_return_mean_max,
-            shelf_reclaim_day_return_min=args.shelf_reclaim_day_return_min,
-            shelf_reclaim_day_return_max=args.shelf_reclaim_day_return_max,
-            shelf_reclaim_residual_return_min=args.shelf_reclaim_residual_return_min,
-            shelf_reclaim_close_position_min=args.shelf_reclaim_close_position_min,
-            shelf_reclaim_close_vs_prior20_high_min=args.shelf_reclaim_close_vs_prior20_high_min,
-            shelf_reclaim_close_vs_prior20_high_max=args.shelf_reclaim_close_vs_prior20_high_max,
-            long_reclaim_day_return_min=args.long_reclaim_day_return_min,
-            long_reclaim_residual_return_min=args.long_reclaim_residual_return_min,
-            long_reclaim_close_position_min=args.long_reclaim_close_position_min,
-            long_reclaim_prior7_abs_return_mean_max=args.long_reclaim_prior7_abs_return_mean_max,
-            long_breakout_prior20_high_buffer_min=args.long_breakout_prior20_high_buffer_min,
-            long_breakout_prior20_high_buffer_max=args.long_breakout_prior20_high_buffer_max,
-            capitulation_reclaim_prior7_return_max=args.capitulation_reclaim_prior7_return_max,
-            capitulation_reclaim_prior20_drawdown_max=args.capitulation_reclaim_prior20_drawdown_max,
-            capitulation_reclaim_close_vs_prior20_high_max=args.capitulation_reclaim_close_vs_prior20_high_max,
-            exclude_symbols=_csv_str(args.exclude_symbols, VolumeEventResearchConfig().exclude_symbols),
-            workers=args.scenario_workers,
-            explain_rejections=args.explain_rejections,
-        )
-        cost_config = config.costs
-        if args.maker_fill_probability is not None:
-            from dataclasses import replace
-
-            cost_config = replace(cost_config, maker_fill_probability=args.maker_fill_probability)
-        payload = run_volume_event_research(
-            data_root,
-            event_config=event_config,
-            cost_config=cost_config,
-            report_dir=_expanded_report_dir(
-                args.report_dir,
-                default=data_root / "reports" / "volume_event_research",
-            ),
-        )
-        best = payload.get("best_scenario", {})
-        print(
-            "volume events "
-            f"scenarios={payload['rows']['scenarios']} "
-            f"promotable={payload['rows']['promotable']} "
-            f"best_return={best.get('total_return', 0.0):.2%} "
-            f"path={Path(payload['report_dir']) / 'volume_event_research_report.md'}"
-        )
-        if not event_config.require_pit_membership:
-            print(
-                "⚠️  current_universe_biased diagnostic — NOT promotion evidence "
-                "(--pit-membership current-universe drops the PIT archive-membership gate)."
-            )
-        return 0
-
     if args.command == "continuous-events":
         cont_config = ContinuousEventConfig(
             start_date=args.start, end_date=args.end, side=args.side, decile=args.decile,
@@ -1197,25 +860,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "signal-harness":
         return _run_signal_harness(args, data_root)
-
-    if args.command == "reconcile-paper-demo":
-        payload = run_paper_demo_reconciliation(
-            args.paper_data_root,
-            args.demo_data_root,
-            entry_tolerance_ms=args.entry_tolerance_ms,
-            output_dir=args.output_dir,
-        )
-        summary = payload["result"]["summary"]
-        print(
-            "paper-demo reconciliation "
-            f"paired={summary['paired']} "
-            f"paper_only={summary['paper_only']} "
-            f"demo_only={summary['demo_only']} "
-            f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
-            f"path={payload['report_path']} "
-            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}"
-        )
-        return 0
 
     if args.command == "reconcile-long-paper-demo":
         payload = run_long_paper_demo_reconciliation(
@@ -1544,95 +1188,6 @@ def main(argv: list[str] | None = None) -> int:
             for failure in gate["failures"]:
                 print(f"continuous add-on shadow audit gate failure: {failure}", file=sys.stderr)
         return 1 if args.fail_on_threshold_breach and not gate["passed"] else 0
-
-    if args.command == "reconcile-demo-bybit":
-        # Build the trading client lazily here so a credential-less environment
-        # (e.g. CI) doesn't fail import of cli.py.
-        from .bybit import BybitPrivateClient, resolve_private_credentials
-
-        api_key, api_secret, demo_flag = resolve_private_credentials()
-        if not api_key or not api_secret:
-            raise SystemExit(
-                "reconcile-demo-bybit needs Bybit API credentials in env "
-                "(BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET, etc.) — "
-                "see bybit.resolve_private_credentials."
-            )
-        trading_client = BybitPrivateClient(
-            category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret
-        )
-        payload = run_demo_bybit_reconciliation(
-            args.demo_data_root,
-            trading_client=trading_client,
-            lookback_hours=args.lookback_hours,
-            output_dir=args.output_dir,
-        )
-        summary = payload["result"]["summary"]
-        print(
-            "demo-bybit reconciliation "
-            f"paired_closed={summary['paired_closed']} "
-            f"orphan_in_bybit={summary['orphan_in_bybit']} "
-            f"orphan_in_ledger={summary['orphan_in_ledger']} "
-            f"open_only_in_ledger={summary['open_only_in_ledger']} "
-            f"open_only_in_bybit={summary['open_only_in_bybit']} "
-            f"pnl_gap_usdt_total={summary['pnl_gap_usdt_total']:.3f} "
-            f"path={payload['report_path']} "
-            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}"
-        )
-        return 0
-
-    if args.command == "reconcile-backtest-paper":
-        payload = run_backtest_paper_reconciliation(
-            args.backtest_trades_csv,
-            args.paper_data_root,
-            signal_tolerance_ms=args.signal_tolerance_ms,
-            window_start_ms=args.window_start_ms,
-            window_end_ms=args.window_end_ms,
-            output_dir=args.output_dir,
-        )
-        summary = payload["result"]["summary"]
-        print(
-            "backtest-paper reconciliation "
-            f"paired={summary['paired']} "
-            f"backtest_only={summary['backtest_only']} "
-            f"paper_only={summary['paper_only']} "
-            f"entry_gap_bps_worst={summary['entry_price_gap_bps_worst']:.2f} "
-            f"exit_gap_bps_worst={summary['exit_price_gap_bps_worst']:.2f} "
-            f"return_gap_pct_worst={summary['return_gap_pct_worst']:.4f} "
-            f"path={payload['report_path']} "
-            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}"
-        )
-        return 0
-
-    if args.command == "reconcile-all":
-        recon_trading_client: BybitPrivateClient | None = None
-        if not args.skip_bybit:
-            from .bybit import BybitPrivateClient, resolve_private_credentials
-
-            api_key, api_secret, demo_flag = resolve_private_credentials()
-            if api_key and api_secret:
-                recon_trading_client = BybitPrivateClient(
-                    category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret
-                )
-            else:
-                print(
-                    "reconcile-all: Bybit credentials unavailable; skipping demo↔Bybit leg. "
-                    "Pass --skip-bybit to silence this notice."
-                )
-        payload = run_full_reconciliation(
-            paper_root=args.paper_data_root,
-            demo_root=args.demo_data_root,
-            trading_client=recon_trading_client,
-            backtest_trades_csv=args.backtest_trades_csv,
-            entry_tolerance_ms=args.entry_tolerance_ms,
-            signal_tolerance_ms=args.signal_tolerance_ms,
-            lookback_hours=args.lookback_hours,
-            output_dir=args.output_dir,
-        )
-        sub_keys = ",".join(sorted(payload["sub_reports"].keys()))
-        print(
-            f"full reconciliation legs={sub_keys} path={payload['combined_report_path']}"
-        )
-        return 0
 
     raise AssertionError(f"unhandled command: {args.command}")
 

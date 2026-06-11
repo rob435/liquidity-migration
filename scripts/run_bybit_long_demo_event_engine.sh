@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Long-sleeve (MultiStratV1, v11a uni10 sniper retrace 1%/6h fall-through)
-# forward-testing engine. Runs on the same Bybit demo account as the short
+# forward-testing engine. Runs on the same Bybit demo account as the other sleeves
 # sleeve but with order-link prefix lm-en-l-* so the extended ws_risk routes
 # fills back to the long ledger.
 #

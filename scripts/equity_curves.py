@@ -8,8 +8,7 @@ equity CSV if the engine doesn't draw one). The run_label is printed for every r
 a biased/partial-PIT result can never masquerade as clean.
 
     bash scripts/equity_curves.sh                      # both promoted sleeves, last 3 years, bybit_full_pit
-    bash scripts/equity_curves.sh --sleeves short      # just one
-    bash scripts/equity_curves.sh --years 2            # shorter window (lighter on RAM)
+        bash scripts/equity_curves.sh --years 2            # shorter window (lighter on RAM)
     bash scripts/equity_curves.sh --start 2023-06-01 --end 2026-06-02
     bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit_strategy   # other venue
 
@@ -38,17 +37,6 @@ def _today() -> dt.date:
     return dt.datetime.now(dt.timezone.utc).date()
 
 
-def _run_short(root: str, costs, start: str, end: str, out: Path, pit_tol: float,
-               short_notional: float | None = None) -> dict:
-    from liquidity_migration.volume_events import run_volume_event_research
-    cfg = promoted.short_profile(start=start, end=end)
-    if short_notional is not None:
-        # the short sizes via gross_exposure / max_active; scale gross to draw the curve at a
-        # higher (e.g. 3x) leverage — pure leverage on the same signal (costs scale too).
-        cfg = replace(cfg, gross_exposure=cfg.gross_exposure * float(short_notional))
-    return run_volume_event_research(root, event_config=cfg, cost_config=costs, report_dir=out)
-
-
 def _run_long(root: str, costs, start: str, end: str, out: Path, pit_tol: float,
               long_notional: float | None = None) -> dict:
     # long_native has its own PIT label (require_full_pit_universe=False → it reports,
@@ -63,7 +51,7 @@ def _run_long(root: str, costs, start: str, end: str, out: Path, pit_tol: float,
     return run_long_native_research(root, config=cfg, cost_config=costs, report_dir=out)
 
 
-RUNNERS = {"short": _run_short, "long": _run_long}
+RUNNERS = {"long": _run_long}
 
 
 def _find_png(out: Path) -> Path | None:
@@ -161,18 +149,15 @@ def _headline(payload: dict) -> str:
 def main() -> int:
     p = argparse.ArgumentParser(description="Promoted-profile equity curves, one command.",
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--sleeves", default="short,long", help="Comma list (short,long).")
+    p.add_argument("--sleeves", default="long", help="Comma list (long).")
     p.add_argument("--long-notional-multiplier", type=float, default=None,
                    help="Override the long sleeve's notional_multiplier (research default 1x; "
                         "e.g. 5 for a legible/levered curve — pure leverage on the same signal).")
-    p.add_argument("--short-notional-multiplier", type=float, default=None,
-                   help="Scale the short sleeve's gross_exposure (research default 1x; e.g. 3 for a "
-                        "matched/levered curve — pure leverage on the same signal).")
     p.add_argument("--years", type=int, default=3, help="Window length in years (ignored if --start given).")
     p.add_argument("--start", default=None, help="Window start YYYY-MM-DD (overrides --years).")
     p.add_argument("--end", default=None, help="Window end YYYY-MM-DD (exclusive; default tomorrow UTC).")
     p.add_argument("--root", default=DEFAULT_ROOT, help="Per-venue full-PIT data root.")
-    p.add_argument("--config", default=DEFAULT_CONFIG, help="Cost-model config (short/long).")
+    p.add_argument("--config", default=DEFAULT_CONFIG, help="Cost-model config.")
     p.add_argument("--out", default=None, help="Report dir (default <root>/reports/equity_curves).")
     args = p.parse_args()
 
@@ -198,9 +183,6 @@ def main() -> int:
             if s == "long":
                 payload = RUNNERS[s](root, costs, start, end, out, 0.0,
                                      long_notional=args.long_notional_multiplier)
-            elif s == "short":
-                payload = RUNNERS[s](root, costs, start, end, out, 0.0,
-                                     short_notional=args.short_notional_multiplier)
             else:
                 payload = RUNNERS[s](root, costs, start, end, out, 0.0)
         except Exception as exc:  # noqa: BLE001 — report per-sleeve, keep going

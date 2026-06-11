@@ -12,7 +12,8 @@ import polars as pl
 
 from ._common import trading_day_expr
 
-from .volume_events import _date_symbol_set, _has_columns, _symbol_set  # hub helpers (see module docstring)
+from ._common import _date_symbol_set, _symbol_set
+from .trade_lifecycle import _has_columns
 
 
 def _pit_membership_pass(trades: pl.DataFrame, *, required: bool) -> bool:

@@ -3,6 +3,12 @@ name: research-phase-runner
 description: "Execution workflow for running a pre-registered research experiment in this quant repo. Current open experiments are tracked in STATE.md ('Open actions') + docs/research_summary.md; the per-arc forward plans were consolidated there. Use any time you are about to run, conditionally-run, or write up an experiment — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), the verdict receipt, STATE.md update, and the commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
 ---
 
+> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
+> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
+> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
+> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
+> below that references them; long + continuous guidance still applies.
+
 # Running a research experiment
 
 Use this every time you run, conditionally-run, or write up an experiment. **The current

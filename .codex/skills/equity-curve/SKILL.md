@@ -1,7 +1,13 @@
 ---
 name: equity-curve
-description: "Produce equity curves for the two promoted trading sleeves (SHORT event/daily, LONG v11a) from their EXACT deployed profiles, and the official strategy-vs-BTC PNG. Use when asked for any sleeve's equity curve, to backtest the promoted/deployed profile, to get the equity chart PNG, or to compare sleeves/venues. The zero-friction path for both sleeves is scripts/equity_curves.sh (profiles from liquidity_migration/promoted.py); the long-only deep-dive is scripts/long_native_sweep_fc_min_day.py. Covers per-venue full-PIT roots, outputs, and run-label interpretation. (Continuous was de-promoted 2026-06-05 and is no longer part of the equity tool.)"
+description: "Produce equity curves for the promoted LONG v11a sleeve from its EXACT deployed profile, and the official strategy-vs-BTC PNG. Use when asked for any sleeve's equity curve, to backtest the promoted/deployed profile, to get the equity chart PNG, or to compare sleeves/venues. The zero-friction path for both sleeves is scripts/equity_curves.sh (profiles from liquidity_migration/promoted.py); the long-only deep-dive is scripts/long_native_sweep_fc_min_day.py. Covers per-venue full-PIT roots, outputs, and run-label interpretation. (Continuous was de-promoted 2026-06-05 and is no longer part of the equity tool.)"
 ---
+
+> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
+> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
+> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
+> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
+> below that references them; long + continuous guidance still applies.
 
 # Equity curves — promoted profiles, one command
 

@@ -2,9 +2,9 @@
 
 The deployable VPS units are:
 
-- `liquidity-migration-bybit-demo.service`: short event entry/normal lifecycle runner.
-- `liquidity-migration-bybit-paper.service`: dry-run paper shadow of the short runner
-  on `data/bybit-paper-event` — submits no orders.
+- (The daily-short sleeve's units — `bybit-demo` / `bybit-paper` — and the
+  `demo-health` entry watchdog were ERASED with the sleeve, operator order
+  2026-06-11; the deploy removes them from a live host.)
 - `liquidity-migration-bybit-long-demo.service` and
   `liquidity-migration-bybit-long-paper.service`: long-native v11a demo/paper pair.
 - `liquidity-migration-bybit-risk.service`: shared fast exit-only risk runner for every
@@ -18,7 +18,7 @@ The deployable VPS units are:
 Which sleeve units actually run is governed by `deploy/sleeves.env` plus optional
 `/etc/liquidity-migration/sleeves.env` are the source of truth for which sleeves are
 enabled. As of 2026-06-09 the live set is the continuous pair only
-(`CONTINUOUS_SLEEVE=on`, `CONTINUOUS_PAPER_SLEEVE=on`); short/short-paper/long are
+(`CONTINUOUS_SLEEVE=on`, `CONTINUOUS_PAPER_SLEEVE=on`); long is
 off but redeployable.
 
 Install or refresh it on the VPS from a trusted local checkout:
@@ -142,7 +142,6 @@ systemctl daemon-reload
 systemctl enable --now liquidity-migration-bybit-risk.service
 systemctl enable --now liquidity-migration-bybit-continuous-demo.service
 systemctl enable --now liquidity-migration-bybit-continuous-paper.service
-systemctl enable --now liquidity-migration-demo-health.timer
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
 systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
@@ -162,17 +161,7 @@ expected target, preserving the API secrets and bot token. Telegram is enabled
 for material alerts only: entries, exits, position reconciliation, or
 position-report errors. Quiet no-trade cycles still write local reports but must
 not notify. The services submit demo orders only.
-The short entry service (currently toggled off via `SHORT_SLEEVE=off` but
-promoted-in-code and redeployable) pins `STRATEGY_PROFILE=promoted` at `close_location_min = 0.30`
-with `MAX_ACTIVE_SYMBOLS=12` — the de-concentrated (12 concurrent positions)
-`drop_all_4` package plus the age300 gate, ff6 failed-fade exit, and
-`btc_trend_gate=uptrend`, on the conservative
-`promoted_quality_squeeze` entry router. It runs match-the-backtest universe mode
-(`UNIVERSE_RANK_END=0 / UNIVERSE_MAX_SYMBOLS=0`, the full perp universe) — the
-`drop_all_4` package drops the rank-max band so the strategy trades from rank 31
-upward, and submits demo (paper) orders only. This is a
-demo-only paper forward test — not real-money validated. See `STATE.md` for
-live status and `docs/event_demo_daemon.md` for the daemon runbook. The risk
+The risk
 service does not open entries; it repairs exchange-native stop/TP state, listens to
 demo private WebSocket position/order/execution streams plus the mainnet public
 ticker stream, and submits reduce-only exits. On the demo account, WebSocket

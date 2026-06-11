@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 
 from .config import TradeLifecycleConfig
-from ._common import MS_PER_DAY, MS_PER_HOUR, date_boundary_ms
+from ._common import MS_PER_DAY, MS_PER_HOUR, _iso_date, _iso_month, date_boundary_ms
 
 
 def summarize_baskets(trades: pl.DataFrame, *, config: TradeLifecycleConfig) -> pl.DataFrame:
@@ -652,3 +652,301 @@ def _exit_reason_rows(trades: pl.DataFrame) -> list[dict[str, Any]]:
         .sort("net_return", descending=True)
         .to_dicts()
     )
+
+# --- shared indexed-bar simulation core (relocated from volume_events.py when the
+# daily-short research engine was erased, operator order 2026-06-11; used by the
+# continuous engine and any future event-trade simulation) ---
+
+def _indexed_price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, Any]]:
+    # Wraps the per-symbol parallel arrays from _price_bars_by_symbol with an
+    # `ends` Python-int list (for bisect_right against entry/exit ts) and a
+    # `by_end` map from bar_end_ts_ms -> row index. Downstream consumers read
+    # bar fields via symbol_bars["close"][idx] etc. -- no per-bar dict.
+    indexed: dict[str, dict[str, Any]] = {}
+    for symbol, arrays in _price_bars_by_symbol(klines).items():
+        ends = arrays["bar_end_ts_ms"].tolist()
+        indexed[symbol] = {
+            **arrays,
+            "ends": ends,
+            "by_end": {end_ts: idx for idx, end_ts in enumerate(ends)},
+        }
+    return indexed
+
+
+
+
+def _bar_close_location(high: float, low: float, close: float) -> float:
+    if abs(high - low) <= 1e-12:
+        return 0.5
+    return max(0.0, min(1.0, (close - low) / (high - low)))
+
+
+
+
+def _event_decay_exit_hit(
+    *,
+    symbol: str,
+    bar_end_ts_ms: int,
+    rank_lookup: dict[tuple[str, int], float],
+    threshold: float,
+) -> bool:
+    rank_fraction = rank_lookup.get((symbol, bar_end_ts_ms))
+    return rank_fraction is not None and rank_fraction < threshold
+
+
+def _simulate_indexed_trade(
+    *,
+    symbol: str,
+    side: str,
+    score: float,
+    rank: int,
+    basket_id: str,
+    signal_ts_ms: int,
+    entry_bar: int,
+    symbol_bars: dict[str, Any],
+    planned_exit_ts_ms: int,
+    notional_weight: float,
+    position_weight: float = 1.0,
+    config: TradeLifecycleConfig,
+    round_trip_cost_bps: float,
+    stop_pct: float | None,
+    rank_lookup: dict[tuple[str, int], float],
+    event_decay_threshold: float,
+    funding_lookup: dict[str, dict[str, Any]] | None,
+    stop_fill_mode: str = "stop",
+    stop_slippage_cap_pct: float = 0.10,
+) -> dict[str, Any] | None:
+    bar_end_ts_arr = symbol_bars["bar_end_ts_ms"]
+    high_arr = symbol_bars["high"]
+    low_arr = symbol_bars["low"]
+    close_arr = symbol_bars["close"]
+    entry_ts_ms = int(bar_end_ts_arr[entry_bar])
+    entry_price = float(close_arr[entry_bar])
+    if entry_price <= 0.0:
+        return None
+    ends = symbol_bars["ends"]
+    start = bisect_right(ends, entry_ts_ms)
+    end = bisect_right(ends, planned_exit_ts_ms)
+    if start >= end:
+        return None
+
+    stop_price = _stop_price(entry_price, side=side, stop_loss_pct=stop_pct or 0.0)
+    loose_stop_price = (
+        _stop_price(entry_price, side=side, stop_loss_pct=config.stop_loose_pct)
+        if config.stop_loose_window_hours > 0 and config.stop_loose_pct > 0.0
+        else None
+    )
+    take_profit_price = _take_profit_price(entry_price, side=side, take_profit_pct=config.take_profit_pct)
+    exit_price = None
+    exit_ts_ms = None
+    exit_reason = "max_hold"
+    mae = 0.0
+    mfe = 0.0
+    bars_held = 0
+    breakeven_armed = False
+    profit_lock_armed = False
+    for idx in range(start, end):
+        bars_held += 1
+        bar_high = float(high_arr[idx])
+        bar_low = float(low_arr[idx])
+        bar_close = float(close_arr[idx])
+        bar_end_ts_ms_val = int(bar_end_ts_arr[idx])
+        adverse, favorable = _bar_excursion(entry_price, side=side, high=bar_high, low=bar_low)
+        mae = min(mae, adverse)
+        mfe = max(mfe, favorable)
+        effective_stop_price = (
+            loose_stop_price
+            if loose_stop_price is not None and bars_held <= config.stop_loose_window_hours
+            else stop_price
+        )
+        stop_hit, take_profit_hit = _bar_exit_hits(
+            side=side,
+            high=bar_high,
+            low=bar_low,
+            stop_price=effective_stop_price,
+            take_profit_price=take_profit_price,
+        )
+        if stop_hit:
+            exit_price = _stop_fill_price(
+                side=side, stop_price=effective_stop_price, high=bar_high, low=bar_low,
+                mode=stop_fill_mode, cap_pct=stop_slippage_cap_pct,
+            )
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "stop_loss"
+            break
+        if take_profit_hit:
+            exit_price = take_profit_price
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "take_profit"
+            break
+        close_return = _side_return(entry_price, bar_close, side=side)
+        if (
+            config.mfe_giveback_trigger_pct > 0.0
+            and config.mfe_giveback_retain_pct > 0.0
+            and mfe >= config.mfe_giveback_trigger_pct
+            and close_return <= mfe * config.mfe_giveback_retain_pct
+        ):
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "mfe_giveback"
+            break
+        if config.profit_lock_arm_pct > 0.0 and not profit_lock_armed and mfe >= config.profit_lock_arm_pct:
+            profit_lock_armed = True
+        if profit_lock_armed and close_return <= config.profit_lock_floor_pct:
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "profit_lock"
+            break
+        if config.breakeven_arm_pct > 0.0 and not breakeven_armed and mfe >= config.breakeven_arm_pct:
+            breakeven_armed = True
+        if breakeven_armed and close_return <= 0.0:
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "breakeven_stop"
+            break
+        if _failed_fade_exit_hit(
+            side=side,
+            high=bar_high,
+            low=bar_low,
+            close=bar_close,
+            bars_held=bars_held,
+            close_return=close_return,
+            mfe=mfe,
+            config=config,
+        ):
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "failed_fade"
+            break
+        if _event_decay_exit_hit(
+            symbol=symbol,
+            bar_end_ts_ms=bar_end_ts_ms_val,
+            rank_lookup=rank_lookup,
+            threshold=event_decay_threshold,
+        ):
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "event_decay"
+            break
+        if _rank_exit_hit(
+            symbol=symbol,
+            side=side,
+            side_mode=config.side_mode,
+            bar_end_ts_ms=bar_end_ts_ms_val,
+            rank_lookup=rank_lookup,
+            enabled=config.rank_exit_enabled,
+            threshold=config.rank_exit_threshold,
+        ):
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "rank_exit"
+            break
+    if exit_price is None:
+        last_idx = end - 1
+        exit_price = float(close_arr[last_idx])
+        exit_ts_ms = int(bar_end_ts_arr[last_idx])
+        if exit_ts_ms < planned_exit_ts_ms:
+            exit_reason = "data_end"
+
+    gross_trade_return = _side_return(entry_price, exit_price, side=side)
+    raw_funding_return, funding_mode, funding_event_count = _perp_funding_return(
+        funding_lookup,
+        symbol=symbol,
+        side=side,
+        entry_ts_ms=entry_ts_ms,
+        exit_ts_ms=int(exit_ts_ms),
+    )
+    effective_weight = notional_weight * position_weight
+    funding_return = abs(effective_weight) * raw_funding_return
+    cost_return = -abs(effective_weight) * round_trip_cost_bps / 10_000.0
+    gross_return = abs(effective_weight) * gross_trade_return
+    net_return = gross_return + cost_return + funding_return
+    trade_id = f"{basket_id}-{side[0]}-{symbol}"
+    return {
+        "trade_id": trade_id,
+        "basket_id": basket_id,
+        "entry_signal_ts_ms": signal_ts_ms,
+        "entry_ts_ms": entry_ts_ms,
+        "exit_ts_ms": int(exit_ts_ms),
+        "entry_date": _iso_date(entry_ts_ms),
+        "exit_date": _iso_date(int(exit_ts_ms)),
+        "exit_month": _iso_month(int(exit_ts_ms)),
+        "symbol": symbol,
+        "side": side,
+        "score": score,
+        "rank": rank,
+        "entry_price": entry_price,
+        "exit_price": float(exit_price),
+        "exit_reason": exit_reason,
+        "planned_exit_ts_ms": planned_exit_ts_ms,
+        "stop_price": stop_price,
+        "take_profit_price": take_profit_price,
+        "notional_weight": abs(effective_weight),
+        "position_weight": position_weight,
+        "gross_trade_return": gross_trade_return,
+        "gross_return": gross_return,
+        "cost_return": cost_return,
+        "funding_return": funding_return,
+        "funding_mode": funding_mode,
+        "funding_event_count": funding_event_count,
+        "net_return": net_return,
+        "mae": mae,
+        "mfe": mfe,
+        "bars_held": bars_held,
+        "hold_hours": (int(exit_ts_ms) - entry_ts_ms) / MS_PER_HOUR,
+    }
+
+
+def _failed_fade_exit_hit(
+    *,
+    side: str,
+    high: float,
+    low: float,
+    close: float,
+    bars_held: int,
+    close_return: float,
+    mfe: float,
+    config: TradeLifecycleConfig,
+) -> bool:
+    if (
+        config.failed_fade_exit_hours <= 0
+        or config.failed_fade_loss_pct <= 0.0
+        or config.failed_fade_min_mfe_pct < 0.0
+        or not 0.0 <= config.failed_fade_close_location_min <= 1.0
+        or bars_held < config.failed_fade_exit_hours
+    ):
+        return False
+    if mfe >= config.failed_fade_min_mfe_pct:
+        return False
+    if close_return > -config.failed_fade_loss_pct:
+        return False
+    close_location = _bar_close_location(high, low, close)
+    if side == "short":
+        return close_location >= config.failed_fade_close_location_min
+    return close_location <= 1.0 - config.failed_fade_close_location_min
+
+
+def _stop_fill_price(
+    *, side: str, stop_price: float | None, high: float, low: float, mode: str, cap_pct: float = 0.10
+) -> float:
+    if stop_price is None:
+        return float("nan")
+    if mode == "stop":
+        return float(stop_price)
+    if mode == "bar_extreme":
+        return float(min(stop_price, low) if side == "long" else max(stop_price, high))
+    if mode == "bar_extreme_capped":
+        # Bar extreme, but cap adverse slippage at cap_pct beyond the trigger so a single
+        # thin 1h wick cannot dictate the fill (the realistic-bad-case default).
+        if side == "long":
+            return float(max(min(stop_price, low), stop_price * (1.0 - max(cap_pct, 0.0))))
+        return float(min(max(stop_price, high), stop_price * (1.0 + max(cap_pct, 0.0))))
+    raise ValueError(f"Unknown stop_fill_mode: {mode}")
+
+
+def _has_columns(frame: pl.DataFrame, *columns: str) -> bool:
+    available = set(frame.columns)
+    return all(column in available for column in columns)
+
+
+

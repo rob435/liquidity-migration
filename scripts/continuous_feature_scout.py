@@ -25,7 +25,7 @@ from liquidity_migration._common import MS_PER_DAY  # noqa: E402
 from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS  # noqa: E402
 from liquidity_migration.continuous_events import per_symbol_timeseries_features  # noqa: E402
 from liquidity_migration.signal_harness import _autodetect_dataset_names, _date_str_to_ms, _read_window  # noqa: E402
-from liquidity_migration.volume_events_features import _cal_roll  # noqa: E402
+from liquidity_migration._common import _cal_roll  # noqa: E402
 
 
 ROOTS = {

@@ -41,7 +41,7 @@ from liquidity_migration.signal_harness import (  # noqa: E402
     _read_window,
 )
 from liquidity_migration.trade_lifecycle import _funding_lookup  # noqa: E402
-from liquidity_migration.volume_events import _indexed_price_bars_by_symbol  # noqa: E402
+from liquidity_migration.trade_lifecycle import _indexed_price_bars_by_symbol  # noqa: E402
 
 # Live-sleeve-matching base (same as cb1).
 BASE = ContinuousEventConfig(

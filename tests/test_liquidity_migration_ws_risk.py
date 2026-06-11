@@ -2462,8 +2462,7 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     This is what makes paper/demo reconciliation pair-able across a VPS
     rebuild: same orderLinkId on Bybit's side → same signal_ts → same
     trade_id on both ledgers."""
-    from liquidity_migration.event_demo import _order_link_id, _demo_event_config, _selected_scenario
-    from liquidity_migration.volume_events import VolumeEventResearchConfig
+    from liquidity_migration.event_demo import _order_link_id
     import time
 
     # signal_ts derived from wall-clock so the planned_exit (signal_ts + 3h
@@ -2478,9 +2477,10 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     now_ms = (int(time.time() * 1000) // 1000) * 1000
     signal_ts_ms = now_ms - 24 * 60 * 60 * 1000  # 1 day ago — enough for fill but before max-hold
     entry_link = _order_link_id("en", symbol="AAAUSDT", signal_ts_ms=signal_ts_ms)
-    promoted_strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
-    promoted_scenario = _selected_scenario(promoted_strategy)
-    expected_trade_id = f"{promoted_scenario.scenario_id}-AAAUSDT-{signal_ts_ms}"
+    # The daily-short sleeve was erased (2026-06-11): legacy short rows are only
+    # recoverable with an explicitly configured adopt_short_strategy_id.
+    legacy_strategy_id = "legacy-short-strategy"
+    expected_trade_id = f"{legacy_strategy_id}-AAAUSDT-{signal_ts_ms}"
 
     # Bybit createdTime is typically 1-6h AFTER signal_ts (the cycle waits
     # for the feature pipeline before submitting). Use a realistic offset so
@@ -2521,6 +2521,7 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            adopt_short_strategy_id=legacy_strategy_id,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -2537,7 +2538,7 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     assert trade["trade_id"] == expected_trade_id, (
         f"expected recovered trade_id {expected_trade_id!r}, got {trade['trade_id']!r}"
     )
-    assert trade["strategy_id"] == promoted_scenario.scenario_id  # type: ignore[union-attr]
+    assert trade["strategy_id"] == legacy_strategy_id
     # entry_ts_ms must reflect the actual venue fill time, NOT signal_ts.
     # The cycle's exit logic computes planned_exit_ts_ms + event_decay rank
     # checks from entry_ts_ms — putting signal_ts there (1-6h before fill)
@@ -2971,18 +2972,17 @@ def test_rebuild_flow_end_to_end_preserves_trade_ids_for_reconciliation(tmp_path
       - planned_exit_ts_ms ≤ entry_ts_ms (hold-window math wrong)
     """
     import polars as pl
-    from liquidity_migration.event_demo import _order_link_id, _demo_event_config, _selected_scenario
-    from liquidity_migration.reconciliation import run_paper_demo_reconciliation
+    from liquidity_migration.event_demo import _order_link_id
+    from liquidity_migration.reconciliation import _run_reconciliation
     from liquidity_migration.storage import write_dataset
-    from liquidity_migration.volume_events import VolumeEventResearchConfig
 
     # Three signals at the same 1h-bar boundary, three different symbols.
     signal_ts_ms = 1_779_667_200_000
     bybit_created_ms = signal_ts_ms + 3 * 3600 * 1000  # +3h, realistic fill lag
     symbols = ["AAAUSDT", "BBBUSDT", "CCCUSDT"]
-    promoted_strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
-    promoted_scenario = _selected_scenario(promoted_strategy)
-    scenario_id = promoted_scenario.scenario_id  # type: ignore[union-attr]
+    # The daily-short sleeve was erased (2026-06-11): legacy short rows are only
+    # recoverable with an explicitly configured adopt_short_strategy_id.
+    scenario_id = "legacy-short-strategy"
 
     # Bybit state: 3 open short positions with valid bot orderLinkIds (this is
     # what survives a VPS rebuild — Bybit retains state).
@@ -3031,6 +3031,7 @@ def test_rebuild_flow_end_to_end_preserves_trade_ids_for_reconciliation(tmp_path
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            adopt_short_strategy_id=scenario_id,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -3078,7 +3079,12 @@ def test_rebuild_flow_end_to_end_preserves_trade_ids_for_reconciliation(tmp_path
     write_dataset(pl.DataFrame(paper_rows), paper_root, "event_demo_trades", partition_by=())
 
     # Reconciliation should pair all 3.
-    payload = run_paper_demo_reconciliation(paper_root=paper_root, demo_root=demo_root)
+    payload = _run_reconciliation(
+        paper_root=paper_root, demo_root=demo_root,
+        paper_dataset="event_demo_trades", demo_dataset="event_demo_trades",
+        report_subdir="reconciliation", report_filename="paper_demo_reconciliation.md",
+        entry_tolerance_ms=6 * 3600 * 1000, output_dir=None,
+    )
     summary = payload["result"]["summary"]
     assert summary["paired"] == 3, (
         f"reconciliation must pair all 3 trades after rebuild; got {summary}"

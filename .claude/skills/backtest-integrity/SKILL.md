@@ -3,6 +3,12 @@ name: backtest-integrity
 description: "Mandatory methodology gate for any backtest, research run, strategy or feature change, or result interpretation in this Bybit quant repo. Use before running a backtest, when designing a research run, when reviewing results, and before calling a result alpha, edge, candidate, or promotion evidence. Enforces the non-negotiable gates and run labels from docs/backtesting_errors_we_never_repeat.md."
 ---
 
+> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
+> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
+> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
+> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
+> below that references them; long + continuous guidance still applies.
+
 # Backtest integrity gate
 
 `docs/backtesting_errors_we_never_repeat.md` is a **mandatory standard** for

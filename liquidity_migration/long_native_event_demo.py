@@ -254,7 +254,7 @@ def _v11a_long_native_config() -> LongNativeConfig:
         fc_sniper_skip_on_no_retrace=False,  # fall through after deadline
         # Portfolio
         max_concurrent_positions=10,  # div (was 5): more concurrent slots for the wider book
-        cooldown_days=7,
+        cooldown_days=7,  # TA1 30d cooldown sweep-REJECTED for the long book (dMAR -0.28/-0.22)
         entry_delay_hours=1,
         gross_exposure=1.0,
         sizing="vol_parity",
@@ -271,6 +271,15 @@ def _v11a_long_native_config() -> LongNativeConfig:
         vol_target_annual=0.60,
         vol_target_max_scale=1.25,
         vol_target_min_scale=0.30,
+        # TA1 atlas gate (2026-06-11, OPERATOR-DIRECTED wiring — owner override of the
+        # TA1 receipt's forward-only path; demo/paper only, sleeve currently OFF).
+        # weekend bonus -> 1.5x Sat/Sun size: the sweep WINNER for the LONG book
+        # (long_regularity TA41: dMAR +0.25 bybit / +0.28 binance, Sharpe up on both).
+        # The 30d cooldown was sweep-rejected here (hurts both venues: dMAR -0.28/-0.22;
+        # it ships on the SHORT book instead — cooldown_days stays 7 above).
+        # In-sample-derived; sweep numbers are descriptive, never promotion evidence.
+        # Receipt: docs/preregistration/trade-atlas-2026-06-11.md.
+        weekend_size_mult=1.5,
         cost_multiplier=3.0,
         require_pit_membership=False,
         require_full_pit_universe=False,

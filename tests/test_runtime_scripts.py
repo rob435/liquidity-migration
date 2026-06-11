@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -56,7 +55,6 @@ def test_sweep_runtime_enforces_full_pit_by_default(tmp_path, monkeypatch) -> No
 def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
     repo = Path(__file__).resolve().parents[1]
     scripts = [
-        repo / "scripts" / "run_bybit_demo_event_engine.sh",
         repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh",
     ]
 
@@ -294,36 +292,6 @@ def test_combined_book_report_includes_continuous_roots_and_sleeve_toggles() -> 
     assert "--continuous-hedge-data-root data/bybit-continuous-hedge-event" in service
 
 
-def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
-    repo = Path(__file__).resolve().parents[1]
-    text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
-
-    assert 'INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"' in text
-    assert "cycle_elapsed_seconds=$(($(date +%s) - cycle_start_epoch))" in text
-    assert "starting next cycle immediately" in text
-    assert '--max-active-symbols "$MAX_ACTIVE_SYMBOLS"' in text
-
-
-def test_systemd_entry_runner_uses_vps_cadence() -> None:
-    repo = Path(__file__).resolve().parents[1]
-    text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-demo.service").read_text(
-        encoding="utf-8"
-    )
-
-    assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=STRATEGY_PROFILE=promoted" in text
-    # Match-the-backtest mode: 0 disables the rank-end / max-symbols
-    # ticker-turnover pre-filter so the demo's daily-aggregated
-    # liquidity_rank is computed across the same denominator the
-    # backtest uses. See the service file's comment block for the
-    # 2026-05-26 DRIFTUSDT divergence that motivated the switch.
-    assert "Environment=UNIVERSE_RANK_END=0" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
-    assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
-    assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
-    assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
-
-
 def test_long_units_lookback_days_satisfies_validation_floor() -> None:
     """ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
     lookback_days floor (>=95) — else every long cycle crash-fails (ValueError) and the sleeve
@@ -345,40 +313,12 @@ def test_long_units_lookback_days_satisfies_validation_floor() -> None:
         )
 
 
-def test_event_entry_runner_submit_profile_allowlist_safe_by_default() -> None:
-    """The submit-profile gate is now a CONFIGURABLE allowlist, but still
-    safe-by-default: SUBMIT_ORDERS is opt-in and ALLOWED_SUBMIT_PROFILES
-    defaults to 'promoted' (so a non-promoted profile is refused unless the
-    operator explicitly widens the allowlist)."""
-    repo = Path(__file__).resolve().parents[1]
-    text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
-
-    assert 'SUBMIT_ORDERS:-0}" == "1"' in text
-    # Safe default: allowlist falls back to 'promoted' when unset.
-    assert 'ALLOWED_SUBMIT_PROFILES:-promoted}' in text
-    # Membership check refuses a profile outside the allowlist.
-    assert 'ALLOWED_SUBMIT_PROFILES " != *" $STRATEGY_PROFILE "*' in text
-
-
-def test_event_entry_runner_wires_record_dry_run() -> None:
-    """Both short + long bash runners must surface --record-dry-run via the
-    RECORD_DRY_RUN env var so paper services can persist their planned
-    orders/trades for reconciliation against demo. Found 2026-05-24: paper
-    services were firing entries=1/1 every cycle but writing nothing to disk."""
-    repo = Path(__file__).resolve().parents[1]
-    for script_name in ("run_bybit_demo_event_engine.sh", "run_bybit_long_demo_event_engine.sh"):
-        text = (repo / "scripts" / script_name).read_text(encoding="utf-8")
-        assert 'RECORD_DRY_RUN:-0}" == "1"' in text, f"{script_name} missing RECORD_DRY_RUN gate"
-        assert "--record-dry-run" in text, f"{script_name} does not pass --record-dry-run"
-
-
 def test_paper_services_enable_record_dry_run() -> None:
     """Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles
     persist trades — otherwise paper-vs-demo reconciliation has no paper-side
     data to pair against the live demo ledger."""
     repo = Path(__file__).resolve().parents[1]
     for unit in (
-        "liquidity-migration-bybit-paper.service",
         "liquidity-migration-bybit-long-paper.service",
     ):
         text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
@@ -431,34 +371,6 @@ def test_long_runner_and_units_default_to_safe_1x_sizing() -> None:
         assert "Environment=MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY=0.5" in text
 
 
-def test_demo_services_use_unblocked_entry_lag() -> None:
-    """2026-05-24 found 15min lag rejected every signal as stale (the legacy
-    REST-only kline path made the feature pipeline build 3-4h late). Demo
-    and paper were bumped to 360min (6h). 2026-05-25 follow-up: paper moved
-    to USE_DAEMON=1 so its cycle latency matches demo's ~20s, which let us
-    drop the lag back to 180min (3h) without losing entries. Anything tighter
-    than 180 risks dropping paper entries during deploy churn (cycle bootstrap
-    takes ~60s); 360 leaves too much room to chase stale-alpha signals."""
-    repo = Path(__file__).resolve().parents[1]
-    for unit in (
-        "liquidity-migration-bybit-demo.service",
-        "liquidity-migration-bybit-paper.service",
-    ):
-        text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
-        assert "Environment=MAX_ENTRY_LAG_MINUTES=180" in text, f"{unit}: MAX_ENTRY_LAG_MINUTES regression"
-
-
-def test_paper_service_uses_daemon_mode() -> None:
-    """Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made
-    each cycle ~30-60s slower than demo's ~1-2s. The asymmetry forced
-    MAX_ENTRY_LAG_MINUTES=360 to keep paper from dropping entries, which
-    polluted the alert chain with stale re-detections. As of 2026-05-25 paper
-    runs the same daemon as demo so both fire within seconds of ready_ts."""
-    repo = Path(__file__).resolve().parents[1]
-    text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-paper.service").read_text(encoding="utf-8")
-    assert "Environment=USE_DAEMON=1" in text, "paper service must run in daemon mode (USE_DAEMON=1)"
-
-
 def test_services_enable_ws_klines() -> None:
     """All four demo services (short+long, demo+paper) must enable the WS
     kline manager. WS_KLINES_ENABLED=1 flips the daemon onto the in-memory
@@ -466,8 +378,6 @@ def test_services_enable_ws_klines() -> None:
     entries on the legacy path."""
     repo = Path(__file__).resolve().parents[1]
     for unit in (
-        "liquidity-migration-bybit-demo.service",
-        "liquidity-migration-bybit-paper.service",
         "liquidity-migration-bybit-long-demo.service",
         "liquidity-migration-bybit-long-paper.service",
     ):
@@ -476,12 +386,11 @@ def test_services_enable_ws_klines() -> None:
 
 
 def test_bash_runners_wire_ws_klines_env() -> None:
-    """Both short + long bash runners must expose the WS_KLINES_* env vars
-    as CLI args. Without this, the systemd Environment lines are silently
-    dropped and the daemon stays on the legacy REST path."""
+    """The long bash runner must expose the WS_KLINES_* env vars as CLI args.
+    Without this, the systemd Environment lines are silently dropped and the
+    daemon stays on the legacy REST path."""
     repo = Path(__file__).resolve().parents[1]
     for script_name in (
-        "run_bybit_demo_event_engine.sh",
         "run_bybit_long_demo_event_engine.sh",
     ):
         text = (repo / "scripts" / script_name).read_text(encoding="utf-8")
@@ -503,210 +412,10 @@ def test_bash_runners_wire_ws_klines_env() -> None:
         assert "--ws-klines-stale-reconnect-seconds" in text
 
 
-def test_demo_health_watchdog_units_present() -> None:
-    """The hourly entry-health watchdog timer + service must ship together so
-    'no entries in 24h' regressions don't go silent. Validates wire-up of the
-    check_demo_entry_health.py script behind a systemd timer + Telegram alert."""
-    repo = Path(__file__).resolve().parents[1]
-    service = (repo / "deploy" / "systemd" / "liquidity-migration-demo-health.service").read_text(encoding="utf-8")
-    timer = (repo / "deploy" / "systemd" / "liquidity-migration-demo-health.timer").read_text(encoding="utf-8")
-    script = (repo / "scripts" / "check_demo_entry_health.py").read_text(encoding="utf-8")
-
-    assert "check_demo_entry_health.py" in service
-    assert "--telegram" in service
-    assert "EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env" in service
-    assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" in service
-    assert "--sleeve-env-var SHORT_SLEEVE" in service
-    assert "SuccessExitStatus=0 1" in service, "alert exit code 1 must not register as failure"
-    assert "OnCalendar=" in timer
-    assert "--window-hours" in script and "--telegram" in script
-    assert "sleeve_enabled" in script
-
-
-def _write_demo_cycle_parquet(
-    root: Path,
-    *,
-    cycles: list[dict],
-    date: str = "2026-05-24",
-) -> None:
-    """Helper for the watchdog tests: write cycles to the date-partitioned
-    layout the script reads (data/{root}/event_demo_cycles/date=YYYY-MM-DD/*.parquet)."""
-    import polars as pl  # local: keep top-level imports lean
-
-    cycles_dir = root / "event_demo_cycles" / f"date={date}"
-    cycles_dir.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame(cycles).write_parquet(cycles_dir / "cycles.parquet")
-
-
-def test_health_watchdog_alerts_on_universe_coverage_gap(tmp_path: Path) -> None:
-    """Even with entries > 0, a non-zero coverage_gap means the universe
-    doesn't reach the rank ceiling and the strategy is effectively
-    signal-starved. The Composer audit caught this: 1 entry/24h was
-    reported "healthy" while observed_prior7_rank_max=150 < required=300
-    blocked the entire signal pipeline.
-
-    The watchdog reads coverage_gap from the LATEST cycle (gap is a
-    point-in-time bootstrap state, not an accumulator) so a 24h window
-    with one early entry must still alert when the current cycle shows
-    the gap is back."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    ts_ms = int(time.time() * 1000) - 60_000
-    # Ascending ts_ms — first cycle had a working strategy (entry+no gap),
-    # latest cycle shows the coverage gap reopened.
-    cycles = [
-        {
-            "mode": "submit", "ts_ms": ts_ms - (1499 - i) * 60_000,
-            "entries_executed": 1 if i == 0 else 0,
-            "entry_candidates": 1 if i == 0 else 0,
-            "skipped_stale": 50,
-            "universe_coverage": {"coverage_gap": 0 if i < 1400 else 150},
-        }
-        for i in range(1500)  # ~25h of cycles
-    ]
-    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
-
-    code, msg = check_entries(data_root=tmp_path, window_hours=24)
-    assert code == 1
-    assert "coverage gap=150" in msg
-
-
-def test_health_watchdog_alerts_on_cycle_starvation(tmp_path: Path) -> None:
-    """A daemon that's stuck in bootstrap or OOM-looping emits far fewer
-    cycles than the expected 60/h cadence. Composer's pre-fix snapshot
-    showed 19 minutes between cycles — the watchdog should catch this
-    rather than waiting 24h for the entries==0 alert to fire."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    ts_ms = int(time.time() * 1000) - 60_000
-    # Only 5 cycles in 24h — well below the 0.8/hr * 24h = ~19 expected.
-    cycles = [
-        {
-            "mode": "submit", "ts_ms": ts_ms - i * 3_600_000,
-            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 0,
-            "universe_coverage": {"coverage_gap": 0},
-        }
-        for i in range(5)
-    ]
-    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
-
-    code, msg = check_entries(data_root=tmp_path, window_hours=24)
-    assert code == 1
-    assert "cycles in last 24h" in msg
-
-
-def test_health_watchdog_sleeve_off_skip(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The short entry-health timer must not page when SHORT_SLEEVE is intentionally off."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import sleeve_enabled
-
-    monkeypatch.setenv("SHORT_SLEEVE", "off")
-    assert sleeve_enabled("SHORT_SLEEVE") is False
-    monkeypatch.setenv("SHORT_SLEEVE", "on")
-    assert sleeve_enabled("SHORT_SLEEVE") is True
-    monkeypatch.delenv("SHORT_SLEEVE", raising=False)
-    assert sleeve_enabled("SHORT_SLEEVE", default="on") is True
-    assert sleeve_enabled("SHORT_SLEEVE", default="off") is False
-
-
-def test_health_watchdog_main_skips_before_reading_retired_sleeve(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The systemd timer path should return OK without requiring any short-root cycle files."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    import check_demo_entry_health as health
-
-    monkeypatch.setenv("SHORT_SLEEVE", "off")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "check_demo_entry_health.py",
-            "--data-root",
-            str(tmp_path / "missing-short-root"),
-            "--window-hours",
-            "24",
-            "--sleeve-env-var",
-            "SHORT_SLEEVE",
-        ],
-    )
-
-    assert health.main() == 0
-    assert "OK (skipped): SHORT_SLEEVE=off" in capsys.readouterr().out
-
-
-def test_health_watchdog_passes_when_coverage_ok_and_entries_present(tmp_path: Path) -> None:
-    """Sanity: the happy path still returns 0 when coverage gap is 0,
-    cycle cadence is healthy, and at least one entry fired."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    ts_ms = int(time.time() * 1000) - 60_000
-    cycles = [
-        {
-            "mode": "submit", "ts_ms": ts_ms - i * 60_000,
-            "entries_executed": 2 if i == 0 else 0,
-            "entry_candidates": 2 if i == 0 else 0,
-            "skipped_stale": 0,
-            "universe_coverage": {"coverage_gap": 0},
-        }
-        for i in range(60)  # 60 cycles in last hour
-    ]
-    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
-
-    code, msg = check_entries(data_root=tmp_path, window_hours=1)
-    assert code == 0
-    assert "healthy" in msg
-
-
-def test_health_watchdog_no_false_alert_after_fresh_deploy(tmp_path: Path) -> None:
-    """After a VPS rebuild the daemon has only been running a few hours.
-    The 24h window sees no data before the rebuild, so cycle count is
-    proportionally healthy even though it's well below the 24h threshold.
-    The watchdog must NOT alert in this case."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    now_ms = int(time.time() * 1000)
-    # Daemon running for 6h at normal 60s cadence → 360 cycles
-    cycles = [
-        {
-            "mode": "submit",
-            "ts_ms": now_ms - (359 - i) * 60_000,
-            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 0,
-            "universe_coverage": {"coverage_gap": 0},
-        }
-        for i in range(360)
-    ]
-    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
-
-    # window=24h but data only spans ~6h — expected scales to ~6h worth
-    code, msg = check_entries(data_root=tmp_path, window_hours=24)
-    assert code != 1 or "coverage" in msg, f"false cycle-starvation alert after fresh deploy: {msg}"
-
-
 def test_live_runners_do_not_write_repo_bytecode() -> None:
     repo = Path(__file__).resolve().parents[1]
     paths = [
-        repo / "scripts" / "run_bybit_demo_event_engine.sh",
         repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh",
-        repo / "deploy" / "systemd" / "liquidity-migration-bybit-demo.service",
         repo / "deploy" / "systemd" / "liquidity-migration-bybit-risk.service",
     ]
 
@@ -726,14 +435,10 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "http.https://github.com/.extraheader" in text
     assert "x-access-token:%s" in text
     assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text
-    assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
-    assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
-    assert "demo.take_profit_pcts == (0.21,)" in text
-    assert "demo.failed_fade_exit_hours == 6" in text
-    # promoted profile carries age300 + ff6 (2026-05-31 promotion) — pin the
-    # deploy-time guard so the live promoted gate/exit can't silently drift.
-    assert "promoted.liquidity_migration_pit_age_days_min == 300" in text
-    assert "promoted.failed_fade_exit_hours == 6" in text
+    # The daily-short sleeve was erased (2026-06-11): the deploy gate now pins the
+    # LONG profile (the one promoted sleeve) instead of the old short scenario ids.
+    assert "long_cfg.universe_size == 50" in text
+    assert "long_cfg.weekend_size_mult == 1.5" in text
     assert "TELEGRAM_CHAT_ID" in text
     assert "bybit-demo.env.backup" in text
     assert "sed -i \"s/^TELEGRAM_CHAT_ID=" in text
@@ -744,7 +449,8 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # 2026-06-09 audit: the model050426 retired-unit cleanup/assertions were removed —
     # the 2026-06-04 box (116.202.15.128) is a fresh host that never ran those units.
     assert "model050426" not in text
-    assert "liquidity-migration-bybit-demo.service" in text
+    # Erased daily-short sleeve: the deploy actively removes the retired units.
+    assert "RETIRED_SLEEVE_UNITS" in text
     assert "liquidity-migration-bybit-risk.service" in text
     # The risk service has NO sleeve toggle — it is the shared reconcile authority for
     # all three sleeves and must always enable/restart/verify regardless of which
@@ -760,17 +466,13 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # still can't silently drop a unit — the names just live in one canonical place.
     assert "lib_sleeves.sh" in text
     assert "lm_load_sleeve_toggles" in text
-    # SHORT_PAPER is a sub-toggle of the short sleeve (demo runs without its paper shadow on a
-    # small host), wired with the same apply_sleeve_enable/verify_sleeve helpers as the sleeves.
-    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
+    for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The canonical unit set (what each sleeve enables/restarts/verifies, and what the
-    # liveness watchdog/recovery must bring up) lives in the lib — pin it there. The short
-    # sleeve = its demo daemon only; the paper shadow is its own SHORT_PAPER_SLEEVE_UNITS.
+    # liveness watchdog/recovery must bring up) lives in the lib — pin it there.
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
-    assert 'SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service"' in lib
-    assert 'SHORT_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-paper.service"' in lib
+    assert 'RETIRED_SLEEVE_UNITS="liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service"' in lib
     assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
     assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
     assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
@@ -785,23 +487,12 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # Timers ship with the unit files but `systemctl enable` is required to
     # actually schedule them. Pin both timers so a deploy can't silently leave
     # the demo-health watchdog or daily combined-book report inactive.
-    assert "systemctl enable --now liquidity-migration-demo-health.timer" in text
     assert "systemctl enable --now liquidity-migration-demo-liveness.timer" in text
     assert "systemctl enable --now liquidity-migration-combined-book-report.timer" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
-    assert "systemctl is-active --quiet liquidity-migration-demo-health.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
-    assert "Environment=STRATEGY_PROFILE=promoted" in text
-    assert "Environment=INTERVAL_SECONDS=60" in text
-    # Match-the-backtest mode: rank-end / max-symbols of 0 disables the
-    # ticker pre-filter so demo and backtest see the same symbol universe.
-    assert "Environment=UNIVERSE_RANK_END=0" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
-    assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
-    assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
@@ -892,14 +583,6 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
     assert "TELEGRAM_CHAT_ID" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
-    assert "Environment=STRATEGY_PROFILE=promoted" in text
-    assert "Environment=INTERVAL_SECONDS=60" in text
-    # Match-the-backtest mode: rank-end / max-symbols of 0 disables the
-    # ticker pre-filter so demo and backtest see the same symbol universe.
-    assert "Environment=UNIVERSE_RANK_END=0" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
-    assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
-    assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     # Per-sleeve kill-switch: verify is toggle-aware — it sources the shared lib, loads
     # the toggles, and routes per-sleeve active+enabled checks through verify_sleeve (so
@@ -909,7 +592,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "lm_load_sleeve_toggles" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
-    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
+    for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The exact unit set each sleeve must bring up is pinned in the shared lib, so a
     # regression that stops/disables a sleeve's daemon still fails verify.
@@ -920,10 +603,8 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
     # Read-only verify must catch a missing-timer regression that the deploy
     # script would have caused — parity check, no-write semantics.
-    assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
-    assert "systemctl is-active --quiet liquidity-migration-demo-health.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): its daily rmom-refresh timer is
@@ -1000,14 +681,10 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "scripts/vps_restore_ssh_access.sh" in text
     assert "scripts/vps_rescue_restore_ssh_access.sh" in text
     assert "scripts/vps_console_recover_and_deploy.sh" in text
-    # demo-health.service launches check_demo_entry_health.py; pin it so
-    # script-only changes to the health check still trigger the deploy.
-    assert "scripts/check_demo_entry_health.py" in text
     # The deploy script runs this smoke subset on the VPS. If a test-only fix is
     # needed to unblock deploy, the push must trigger the workflow again.
     assert "tests/test_runtime_scripts.py" in text
-    assert "tests/test_liquidity_migration_cli.py" in text
-    assert "tests/test_liquidity_migration_event_demo_cycle.py" in text
+    assert "tests/test_promoted_profiles.py" in text
     assert "EXPECTED_COMMIT=\"$GITHUB_SHA\"" in text
     assert "EXPECTED_TELEGRAM_CHAT_ID" in text
 
@@ -1173,7 +850,8 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "systemctl disable --now" in lib
     # 2026-06-09 audit: retired-unit (model050426) cleanup removed — fresh 2026-06-04 box.
     assert "model050426" not in text
-    assert "liquidity-migration-bybit-demo.service" in text
+    # Erased daily-short sleeve: the deploy actively removes the retired units.
+    assert "RETIRED_SLEEVE_UNITS" in text
     assert "liquidity-migration-bybit-risk.service" in text
     # Recovery routes sleeve enable/restart/verify through the SAME kill-switch as
     # deploy_vps_live.sh (single source of truth) — NO hardcoded per-sleeve enables that
@@ -1183,20 +861,12 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "systemctl enable liquidity-migration-bybit-risk.service" in text
     assert "systemctl restart liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
-    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
+    for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The continuous rmom timer + its go-live asserts are gated behind the toggle, so a
     # recovery with CONTINUOUS_SLEEVE=off cannot bring the disabled sleeve back.
     assert "continuous_rmom_refresh_on" in text
-    assert "Environment=STRATEGY_PROFILE=promoted" in text
-    assert "Environment=INTERVAL_SECONDS=60" in text
-    # Match-the-backtest mode: rank-end / max-symbols of 0 disables the
-    # ticker pre-filter so demo and backtest see the same symbol universe.
-    assert "Environment=UNIVERSE_RANK_END=0" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
-    assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
-    assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
@@ -1210,222 +880,6 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "Environment=STOP_LOSS_PCT=0.25" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
-
-
-def test_health_watchdog_distinguishes_stale_klines_from_sparse_strategy(tmp_path: Path) -> None:
-    """The 2026-05-25 alert chain confused operators by saying "feature
-    pipeline behind, check ws_klines may be disconnected" for what was
-    actually just a sparse-event strategy (q40 promoted, no new events
-    since 04:00 UTC, but klines themselves were perfectly fresh up to
-    13:00 UTC). The watchdog now reads kline_store_max_ts_ms separately
-    so it can:
-      - ALERT (exit 1, telegram fires) when the WS feed actually is behind
-      - OK (exit 0, NO telegram) when feed is fresh but no events fire —
-        the sparse-strategy state isn't a bug worth pinging the operator
-        about hourly. The text still lands in journalctl for diagnosis.
-    """
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    now_ms = int(time.time() * 1000)
-
-    # Scenario 1: SPARSE STRATEGY — kline feed fresh (15min old), latest
-    # event 14h old, 44 stale-skips per cycle. Should return exit 0 (no
-    # telegram spam) because the state is normal sparse-event behavior.
-    sparse_cycles = [
-        {
-            "mode": "submit",
-            "ts_ms": now_ms - i * 60_000,
-            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 44,
-            "universe_coverage": {"coverage_gap": 0},
-            "latest_feature_ts_ms": now_ms - 14 * 3_600_000,
-            "kline_store_max_ts_ms": now_ms - 15 * 60_000,
-        }
-        for i in range(60)
-    ]
-    _write_demo_cycle_parquet(tmp_path / "sparse", cycles=sparse_cycles, date=today)
-    code, msg = check_entries(data_root=tmp_path / "sparse", window_hours=1)
-    assert code == 0, f"sparse strategy should not spam telegram: code={code}, msg={msg!r}"
-    assert "OK (sparse)" in msg
-    assert "WS klines" not in msg, "must not blame WS feed when kline is fresh"
-    assert "ALERT" not in msg
-
-    # Scenario 2: KLINE FEED ACTUALLY STALE — kline_store_max_ts is 8h old.
-    # WS klines silently disconnected. Should ALERT (exit 1) with telegram.
-    stale_feed_cycles = [
-        {
-            "mode": "submit",
-            "ts_ms": now_ms - i * 60_000,
-            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 44,
-            "universe_coverage": {"coverage_gap": 0},
-            "latest_feature_ts_ms": now_ms - 14 * 3_600_000,
-            "kline_store_max_ts_ms": now_ms - 8 * 3_600_000,
-        }
-        for i in range(60)
-    ]
-    _write_demo_cycle_parquet(tmp_path / "stale_feed", cycles=stale_feed_cycles, date=today)
-    code, msg = check_entries(data_root=tmp_path / "stale_feed", window_hours=1)
-    assert code == 1, f"stale feed should ALERT (exit 1): code={code}"
-    assert "kline feed stale" in msg.lower() or "WS klines" in msg
-
-
-def test_health_watchdog_silent_strategy_does_not_spam_telegram(tmp_path: Path) -> None:
-    """The truly-silent case (no candidates, no stale-skips, kline feed
-    fresh) is just a quiet hour — must return exit 0 so the telegram
-    timer doesn't ping every hour during low-activity periods."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    now_ms = int(time.time() * 1000)
-    cycles = [
-        {
-            "mode": "submit",
-            "ts_ms": now_ms - i * 60_000,
-            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 0,
-            "universe_coverage": {"coverage_gap": 0},
-            "latest_feature_ts_ms": now_ms - 60 * 60_000,
-            "kline_store_max_ts_ms": now_ms - 30 * 60_000,
-        }
-        for i in range(60)
-    ]
-    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
-    code, msg = check_entries(data_root=tmp_path, window_hours=1)
-    assert code == 0
-    assert "OK (silent)" in msg
-    assert "ALERT" not in msg
-
-
-def test_health_watchdog_reports_per_cycle_stale_not_cumulative(tmp_path: Path) -> None:
-    """Pre-2026-05-25 the watchdog summed skipped_stale across all cycles
-    in the window. The cycle row's skipped_stale field is a PER-CYCLE
-    count (e.g. 44 candidates rejected this cycle), so summing 60 cycles
-    × 44 per cycle = 2640 "stale-skips" was wildly inflated and led to
-    the misleading 32833-magnitude alert chain. Now the watchdog reads
-    the LATEST cycle's per-cycle count and labels it accordingly.
-
-    This test pins the per-cycle semantics so a future refactor can't
-    silently re-introduce the cumulative-summing bug."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    now_ms = int(time.time() * 1000)
-    # 60 cycles, each reporting 44 stale-skips. Cumulative would be 2640.
-    # Per-cycle should report 44.
-    cycles = [
-        {
-            "mode": "submit",
-            "ts_ms": now_ms - i * 60_000,
-            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 44,
-            "universe_coverage": {"coverage_gap": 0},
-            "latest_feature_ts_ms": now_ms - 14 * 3_600_000,
-            "kline_store_max_ts_ms": now_ms - 15 * 60_000,
-        }
-        for i in range(60)
-    ]
-    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
-    code, msg = check_entries(data_root=tmp_path, window_hours=1)
-    assert code == 0, "sparse strategy must not page (exit 0)"
-    assert "44 stale-skips/cycle" in msg, (
-        f"watchdog must report per-cycle stale, not cumulative — got: {msg!r}"
-    )
-    assert "2640" not in msg, "cumulative count must not appear"
-    assert "same 44 candidates" in msg, (
-        "OK (sparse) text must reference the per-cycle figure for clarity"
-    )
-
-
-def test_health_watchdog_no_alert_on_few_nonconverting_candidates(tmp_path: Path) -> None:
-    """Regression for the 2026-05-30 false page. The exact telemetry that paged
-    the operator — 1 fresh candidate + 52 stale-skips/cycle + 0 entries + a
-    fresh kline feed — flipped the old catch-all from OK-sparse to ALERT. A
-    single non-converting candidate (free slots full / symbol already holds an
-    open position / a demo entry order still pending its fill) is normal sparse
-    operation, not an anomaly. The watchdog must NOT page below the floor."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    now_ms = int(time.time() * 1000)
-    cycles = [
-        {
-            "mode": "submit",
-            "ts_ms": now_ms - i * 60_000,
-            "entries_executed": 0,
-            "entry_candidates": 1 if i == 0 else 0,  # sum over window = 1, below floor
-            "skipped_stale": 52,
-            "universe_coverage": {"coverage_gap": 0},
-            "latest_feature_ts_ms": now_ms - 18 * 3_600_000,
-            "kline_store_max_ts_ms": now_ms - 78 * 60_000,  # 1.3h old → fresh (<2h)
-        }
-        for i in range(60)
-    ]
-    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
-    code, msg = check_entries(data_root=tmp_path, window_hours=1)
-    assert code == 0, f"a single non-converting candidate must not page: {msg!r}"
-    assert "OK (sparse)" in msg
-    assert "ALERT" not in msg
-
-
-def test_health_watchdog_alerts_on_many_nonconverting_candidates(tmp_path: Path) -> None:
-    """The genuine-anomaly half of the floor: many submitted candidates with
-    zero entries and a fresh feed means entry execution or the live-state gates
-    are broken (not mere sparsity). That must still ALERT (exit 1) so the
-    floor fix does not silence a real entries-not-landing regression."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import check_entries
-
-    from datetime import datetime, timezone
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    now_ms = int(time.time() * 1000)
-    cycles = [
-        {
-            "mode": "submit",
-            "ts_ms": now_ms - i * 60_000,
-            "entries_executed": 0,
-            "entry_candidates": 1,  # sum over window = 60, well above floor
-            "skipped_stale": 0,
-            "universe_coverage": {"coverage_gap": 0},
-            "latest_feature_ts_ms": now_ms - 1 * 3_600_000,
-            "kline_store_max_ts_ms": now_ms - 15 * 60_000,  # fresh feed
-        }
-        for i in range(60)
-    ]
-    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
-    code, msg = check_entries(data_root=tmp_path, window_hours=1)
-    assert code == 1, f"many candidates + 0 entries on a fresh feed must ALERT: {msg!r}"
-    assert "should have produced entries" in msg
-
-
-def test_ws_first_ratio_surfaces_ws_vs_rest_mix() -> None:
-    """JS observability: the health watchdog surfaces the WS-first % so a
-    silently-dead WS feed (production stuck on the slow REST path) is visible."""
-    import sys
-
-    import polars as pl
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from check_demo_entry_health import ws_first_ratio
-
-    df = pl.DataFrame({
-        "ticker_source": ["ws_cache", "ws_cache", "ws_cache", "rest"],  # 75% WS
-        "private_snapshot_source": ["rest", "rest", "rest", "rest"],    # 0% WS
-    })
-    r = ws_first_ratio(df)
-    assert r["ticker_pct"] == pytest.approx(75.0)
-    assert r["private_pct"] == pytest.approx(0.0)
-    # Legacy ledger without the source columns -> empty (safe for the f-string).
-    assert ws_first_ratio(pl.DataFrame({"x": [1, 2]})) == {}
 
 
 def test_resolve_max_workers_explicit_override_always_wins(monkeypatch):
@@ -1475,9 +929,9 @@ def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Pat
 
     # Synthetic repo root: the safety check requires liquidity_migration/ + data/.
     (tmp_path / "liquidity_migration").mkdir()
-    ledger = tmp_path / "data" / "bybit-demo-event" / "event_demo_trades"
-    cycles = tmp_path / "data" / "bybit-demo-event" / "event_demo_cycles"
-    klines = tmp_path / "data" / "bybit-demo-event" / "event_demo_klines_1h"  # must survive
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    cycles = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_cycles"
+    klines = tmp_path / "data" / "bybit-long-demo-event" / "event_demo_klines_1h"  # must survive
     for d in (ledger, cycles, klines):
         d.mkdir(parents=True)
         (d / "part.parquet").write_bytes(b"x")
@@ -1487,7 +941,7 @@ def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Pat
         ["bash", str(script), "--dry-run"], cwd=tmp_path, capture_output=True, text=True
     )
     assert dry.returncode == 0, dry.stderr
-    assert "event_demo_trades" in dry.stdout
+    assert "long_native_demo_trades" in dry.stdout
     assert ledger.exists() and cycles.exists() and klines.exists()
     assert not (tmp_path / "data" / "_archive").exists()
 

@@ -6,21 +6,16 @@ import shutil
 from pathlib import Path
 
 import polars as pl
-import pytest
 
 from liquidity_migration.config import ResearchConfig
 from liquidity_migration.event_demo import (
     EventDemoCycleConfig,
-    _build_demo_features,
     _build_demo_universe,
     _collect_private_snapshots,
-    _demo_feature_cache_fingerprint,
-    _demo_feature_cache_paths,
     _demo_instruments,
     _demo_kline_fetch_ranges,
     _download_recent_1h_klines,
     _refresh_positions_and_orders,
-    warm_demo_kline_cache,
 )
 from liquidity_migration.storage import read_dataset, write_dataset
 from liquidity_migration._common import MS_PER_HOUR
@@ -543,73 +538,6 @@ def test_resolve_private_snapshot_falls_back_to_rest_when_cache_unseeded() -> No
     assert snap["equity_usdt"] == 5_000.0
 
 
-def test_build_demo_features_cache_returns_identical_frame_on_hit(tmp_path: Path) -> None:
-    """The feature build is a pure function of (klines, universe). With a
-    cache_root, an unchanged input must serve a parquet cache hit identical to
-    a fresh recompute — this is what lets 59 of every 60 demo cycles skip the
-    whole feature pipeline."""
-    klines = _feature_cache_klines()
-    universe = _feature_cache_universe()
-
-    fresh = _build_demo_features(klines, universe)
-    cold = _build_demo_features(klines, universe, cache_root=tmp_path)  # miss -> compute + write
-    parquet_path, metadata_path = _demo_feature_cache_paths(tmp_path)
-    assert parquet_path.exists() and metadata_path.exists()
-
-    warm = _build_demo_features(klines, universe, cache_root=tmp_path)  # hit -> parquet read
-    assert not fresh.is_empty()
-    assert warm.equals(fresh)
-    assert cold.equals(fresh)
-
-
-def test_build_demo_features_cache_misses_when_a_bar_is_appended(tmp_path: Path) -> None:
-    """A new closed bar must change the fingerprint so the cache recomputes —
-    a stale feature frame would silently freeze the entry signal."""
-    klines = _feature_cache_klines()
-    universe = _feature_cache_universe()
-    _build_demo_features(klines, universe, cache_root=tmp_path)
-
-    next_bar = klines.filter(pl.col("symbol") == "SYM00USDT").tail(1).with_columns(
-        pl.col("ts_ms") + MS_PER_HOUR
-    )
-    grown = pl.concat([klines, next_bar])
-    assert _demo_feature_cache_fingerprint(grown, universe) != _demo_feature_cache_fingerprint(klines, universe)
-
-    recomputed = _build_demo_features(grown, universe, cache_root=tmp_path)
-    assert recomputed.equals(_build_demo_features(grown, universe))
-
-
-def test_build_demo_features_cache_survives_subday_age_drift(tmp_path: Path) -> None:
-    """listing_age_days creeps up every cycle — it is (now - launch_time)/day.
-    The cache fingerprint must key on whole-day ages, so an otherwise-unchanged
-    universe still hits across cycles. Without this the feature cache misses
-    100% of the time in production (the bug live telemetry caught)."""
-    klines = _feature_cache_klines()
-    universe = _feature_cache_universe()  # whole-number listing_age_days
-    drifted = universe.with_columns(
-        (pl.col("listing_age_days").cast(pl.Float64) + 0.37).alias("listing_age_days")
-    )
-    assert _demo_feature_cache_fingerprint(klines, universe) == _demo_feature_cache_fingerprint(klines, drifted)
-
-    fresh = _build_demo_features(klines, universe)
-    _build_demo_features(klines, universe, cache_root=tmp_path)  # miss -> compute + write
-    parquet_path, _ = _demo_feature_cache_paths(tmp_path)
-    written_at = parquet_path.stat().st_mtime_ns
-
-    warm = _build_demo_features(klines, drifted, cache_root=tmp_path)  # must HIT despite drift
-    assert parquet_path.stat().st_mtime_ns == written_at, "cache rewritten — fingerprint missed on sub-day drift"
-    assert warm.equals(fresh)
-
-
-def test_build_demo_features_without_cache_root_writes_nothing(tmp_path: Path) -> None:
-    """cache_root=None (the default, used by tests and any non-cycle caller)
-    must never touch disk."""
-    klines = _feature_cache_klines()
-    universe = _feature_cache_universe()
-    _build_demo_features(klines, universe)
-    assert not (tmp_path / ".cache" / "event_demo_features").exists()
-
-
 def test_event_demo_cycles_dataset_is_date_partitioned(tmp_path: Path) -> None:
     """event_demo_cycles is append-only telemetry written every cycle. It must
     be date-partitioned so the per-cycle write stays bounded to the current
@@ -668,54 +596,6 @@ def test_demo_instruments_falls_back_to_stale_cache_on_fetch_error(tmp_path: Pat
 
     served = _demo_instruments(_BrokenInstrumentsMarket(), cache_root=tmp_path, now_ms=now + 2 * 60 * 60 * 1000)
     assert served.equals(cached)
-
-
-def test_warm_demo_kline_cache_populates_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """warm_demo_kline_cache pre-fetches the universe's 1h klines into the same
-    event_demo_klines_1h cache a cycle reads — so the post-bar-close cycle finds
-    the cache warm and skips the per-symbol REST burst."""
-    monkeypatch.setattr(
-        "liquidity_migration.event_demo._build_demo_universe",
-        lambda *args, **kwargs: pl.DataFrame({"symbol": ["AAAUSDT", "BBBUSDT"]}),
-    )
-
-    class _WarmMarket:
-        def get_instruments_info(self) -> list[dict[str, str]]:
-            return [{"symbol": "AAAUSDT"}, {"symbol": "BBBUSDT"}]
-
-        def get_tickers(self) -> list[dict[str, str]]:
-            return [{"symbol": "AAAUSDT", "markPrice": "100", "lastPrice": "100"}]
-
-        def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list[list[str]]:
-            return [
-                [str(ts_ms), "100", "110", "90", "105", "1.5", "157.5"]
-                for ts_ms in range(start, end + 1, MS_PER_HOUR)
-            ]
-
-    stats = warm_demo_kline_cache(
-        tmp_path,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(lookback_days=1, workers=1),
-        market_client=_WarmMarket(),
-        now_ms=100 * MS_PER_HOUR,
-    )
-    assert stats["symbols"] == 2
-    cached = read_dataset(tmp_path, "event_demo_klines_1h")
-    assert not cached.is_empty()
-    assert set(cached["symbol"].to_list()) == {"AAAUSDT", "BBBUSDT"}
-
-
-def test_warm_demo_kline_cache_handles_empty_universe(tmp_path: Path) -> None:
-    """An empty universe (no tradable symbols) must yield a zero-stats no-op,
-    not an error — the warmer runs unattended on a background thread."""
-    stats = warm_demo_kline_cache(
-        tmp_path,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
-        market_client=MinimalEventMarket(),
-        now_ms=100 * MS_PER_HOUR,
-    )
-    assert stats == {"symbols": 0, "fetch_symbols": 0, "fetched_rows": 0, "cache_rows": 0}
 
 
 def test_collect_private_snapshots_neutral_without_client() -> None:
