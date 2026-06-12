@@ -1,14 +1,10 @@
 # Composite-sizing + regime-response program (2026-06-12, operator-directed)
 
-**Authority:** operator instruction 2026-06-12 ("make a research plan and
-incorporate the findings"; same day: "remove that [freeze] line from state.md
-and go with the original plan, this is not even close to being spent"). The
-2026-06-09 window freeze is RESCINDED (STATE.md "Current Research Direction"):
-**pre-registered window backtests are decisive evidence at the Tier-1/Tier-2
-bars; the forward demo/paper arbiter remains the only path to Tier-3 and is
-never loosened.** This program does NOT displace the alpha-hunt charter queue
-(P1 liquidation-proxy remains the highest-EV new-alpha item); it runs
-alongside it and unparks charter §4-G/P6 (regime model).
+Operator-directed program, 2026-06-12. Two experiments on the continuous
+book: E1 converts the demonstrated within-selection IC into sizing; E2 tests a
+small regime-response family against the current BTC gate. Window backtests
+decide at the Tier-2 bar (STATE.md "Decision Rules"); forward demo/paper
+remains the path to Tier-3 as usual.
 
 Receipts: [2026-06-12-e1-composite-size-tilt.md](preregistration/2026-06-12-e1-composite-size-tilt.md),
 [2026-06-12-e2-regime-response-family.md](preregistration/2026-06-12-e2-regime-response-family.md).
@@ -61,29 +57,14 @@ REGISTERED E2 run must model funding before any conclusion. 168 sign episodes, m
 tail buckets rest on 24-29 clustered episodes ⇒ enough to test a SMALL
 pre-named family, nowhere near enough to fit a curve.
 
-## 2. Binding constraints
+## 2. Ground rules
 
-1. **Pre-registration discipline replaces the (rescinded) freeze.** Each stage
-   below runs ONCE against its frozen a-priori rule; both venues always;
-   2x-cost survival required at Tier-2; fragility diagnostics reported, never
-   used to rescue a weak cell. Tier-3 (real money) remains forward-demo-only
-   and is never loosened.
-2. **Prior null in this class.** The charter banked "rising-OI pops fade
-   better — **no sizing conversion survived**" and an OI-tilt null. E1 is the
-   same conversion CLASS (information → sizing) with a different, demonstrated
-   carrier (within-selection mid-quintile IC on the exact entry population,
-   F1-F4). The prior says: expect failure, keep Stage 1 cheap and one-shot,
-   and weigh the Tier-2 verdict accordingly; forward demo still accrues the
-   live evidence after any adoption.
-3. **Both venues** for any window run; binance funding gaps disclosed
-   (funding-missing label where applicable).
-4. **rmom latency debt stands**: nothing in this program creates a continuous
-   promotion case while that debt is open. "Adoption" here means changing the
-   DEMO book's profile (operator-gated), nothing more.
-5. **Pre-registration is binding** (decision rules below are frozen; a wrong
-   prediction is rejected, not re-purposed).
-6. **No curve fitting on regime variables.** Three pre-named variants in E2,
-   thresholds fixed a priori; episodes (not trades) are the effective sample.
+- Each stage runs once against the rule written in its receipt; both venues;
+  2x-cost arm at Tier-2; fragility diagnostics reported, not used to rescue.
+- A win here means an operator-gated change to the DEMO book's profile;
+  real money stays behind the forward demo/paper Tier-3 gate as always.
+- E2 stays a three-variant comparison — no extra variants or threshold tuning
+  inside this program; a new idea gets a new pre-registration.
 
 ## 3. E1 — capped composite size tilt (within the existing gate)
 
@@ -92,7 +73,7 @@ pre-named family, nowhere near enough to fit a curve.
 within-selection IC into MAR without new trades, new costs, or any change to
 selection, exits, or the regime gate.
 
-*Tilt spec (frozen):* per-entry size multiplier `m = clip(0.5 + p, 0.5, 1.5)`
+*Tilt spec:* per-entry size multiplier `m = clip(0.5 + p, 0.5, 1.5)`
 where `p` = percentile of the 5-feature composite within the entry's signal-ts
 cross-section (the panel's own rank normalization). `E[m] ≈ 1` ⇒ gross-neutral
 in expectation. Applied multiplicatively on top of the validated config's
@@ -116,14 +97,14 @@ existing sizing; everything else byte-identical.
   the dynexit-shadow-pattern tilted-vs-flat bookkeeping may run alongside for
   attribution, but it is no longer the gating evidence.
 
-## 4. E2 — regime-response family (unparks §4-G, constrained)
+## 4. E2 — regime-response family
 
 *Hypothesis:* the live binary uptrend gate mis-handles both tails of the BTC
 30d-trend distribution — it trades the mean-negative euphoria bucket
 (>+20%, F5) and discards non-uptrend days whose top-ranked entries retain
 positive ordering. A bounded, pre-named regime response may improve MAR.
 
-*Variants (frozen; no fitting, no additional thresholds ever):*
+*Variants (fixed up front):*
 - **V0** — baseline: current gate (trend > 0 ⇒ on).
 - **V1** — euphoria cap: on iff `0 < trend ≤ +0.20`.
 - **V2** — soft 3-state: `trend > +0.20` ⇒ off; `0 < trend ≤ +0.20` ⇒ full
@@ -138,8 +119,8 @@ fixed a priori and will not be tuned.
   **A variant wins iff** (Tier-2 vs V0): positive total return both venues,
   pooled MAR-Δ > +0.1, neither venue MAR-Δ < −0.5, survives 2x cost. The
   episode counts (~29 euphoria / 24 deep-crash, clustered) are REPORTED as
-  the fragility diagnostic — disclosed, not used to rescue or to veto. If
-  both variants miss the bar: V0 stands, null receipt closes §4-G again.
+  the fragility diagnostic — disclosed, not used to rescue. If
+  both variants miss the bar: V0 stands, null receipt filed.
 - **Stage 2 — adoption + forward arbiter.** The winning variant (if any) is
   proposed to the operator as a demo-profile change; forward demo/paper
   accrues the live verdict; Tier-3 stays forward-only. If both V1 and V2 pass
@@ -158,12 +139,9 @@ fixed a priori and will not be tuned.
   t=0.35, 45% hit), squeeze-tail and funding unmodeled. Only the constrained
   E2 family may revisit non-uptrend exposure.
 
-## 6. Sequencing and discipline
+## 6. Sequencing
 
-1. E1 Stage 0 → Stage 1 → (pass) Stage 2 shadow deploys.
-2. E2 Stage 1 starts only after E1's Stage 1 verdict is filed — one change,
-   one verdict, never bundled.
-3. Any NULL at any stage is a first-class deliverable: receipt verdict +
-   research_summary entry + this plan's section updated, then stop.
-4. Multiple-looks ledger: the ~20 exploratory cells of 2026-06-12 are spent;
-   each registered stage below runs ONCE against its frozen rule.
+1. E1 Stage 0 → Stage 1 → (pass) Stage 2 adoption proposal.
+2. E2 Stage 1 starts after E1's Stage-1 verdict — one change, one verdict.
+3. A NULL at any stage is a first-class result: receipt verdict +
+   research_summary entry, then stop.

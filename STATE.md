@@ -1,7 +1,7 @@
 # Research Program State
 
 **Last updated:** 2026-06-12
-Live/operational state plus binding decision rules. Research conclusions live in
+Live/operational state plus the decision rules. Research conclusions live in
 [docs/research_summary.md](docs/research_summary.md); the active research charter is
 [docs/research_plan_alpha_hunt_2026-06-10.md](docs/research_plan_alpha_hunt_2026-06-10.md)
 (§8 = the forward pipeline + Wave-1/2 outcomes).
@@ -147,49 +147,32 @@ re-verified.
 
 ## Current Research Direction
 
-**Window freeze RESCINDED by operator instruction 2026-06-12** ("this is not
-even close to being spent"). The 2026-06-09 "SPENT" declaration on the
-2023-04→2026-05 window no longer binds: pre-registered window backtests are
-again decisive evidence at the Tier-1/Tier-2 bars below. What protects the
-evidence record is the discipline that REMAINS mandatory: pre-registration
-with frozen a-priori decision rules (one run per registered rule), both-venue
-agreement, 2x-cost survival, and the forward demo/paper arbiter for Tier-3 —
-which is never loosened. The charter §8/P6 "parked-for-forward-data" notes are
-superseded to this extent. The per-result do-not-re-mine lists (registered
-NULLs) stay binding — a NULL is rescinded by new mechanism or new data, not by
-re-running it.
+Clean slate as of 2026-06-12 (operator): the full window is open for
+pre-registered research. Prior waves' results, banked wins, and closed
+questions live in [docs/research_summary.md](docs/research_summary.md) — read
+them there, don't restate them here. Working practice: pre-register a run
+before it touches a per-venue root, test both venues, judge by the tier
+ladder below.
 
-The 2026-06-10 charter session results stand: **banked** — BTC+ETH 2f hedge
-(pooled ΔSharpe +0.146/ΔMAR +0.56 at max4); **information PASS** — rising-OI
-pops fade better (no sizing conversion survived); **nulls** — cov-sizer,
-participation-cap dominance, shrunk/basket hedges, OI tilt + down-only,
-dynamic exits (§4-D closed permanently), passive-at-touch entries;
-**analyses** — residual attribution (residual-alpha-positive vs the 6-factor
-model; beta is ETH-shaped), capacity frontier (~$5M → pooled MAR ~3.8).
-Details: research_summary 2026-06-10 sections; charter §8. New data layers
-(`binance_usdm_metrics_5m` complete; `binance_usdm_bookdepth_1h` ingesting)
-remain the highest-EV new-alpha ground (charter P1).
+Active programs:
 
-**Charter Wave 3 (2026-06-12) — taker-flow stack:** `bybit_full_pit/taker_flow_5m`
-building 2026-06-12 (event-anchored 5-min signed taker flow from the public tick
-archive, survivorship-free — the previously-unbuilt taker-flow stack). Queue: P10
-taker-flow squeeze-proxy Stage-1 (pre-registered
-`continuous-taker-flow-scout-2026-06-12.md`, external priors
-`research_notes_external_priors_2026-06-12.md`), P11 full-universe taker-flow
-completion (idle-time), P12 liquidation-proxy calibration (blocked ~30d on the
-forward `allLiquidation` tape — healthy at 27k events/2d as of 2026-06-12).
+- **Composite sizing + regime response (operator-directed):**
+  [docs/research_plan_composite_sizing_2026-06-12.md](docs/research_plan_composite_sizing_2026-06-12.md)
+  — E1 capped 5-feature-composite size tilt; E2 BTC-trend regime family
+  (V0 current gate / V1 +20% euphoria cap / V2 soft 3-state). Window runs
+  decide at Tier-2; pre-regs `2026-06-12-e1-*` / `2026-06-12-e2-*`. The
+  motivating diagnostics also closed four dead ends (plan §5): linear regime
+  scores, regime-tail catastrophe trimming, per-component max_ret168 tilts,
+  unconditional all-days trading.
+- **Taker-flow stack (Wave 3):** `bybit_full_pit/taker_flow_5m` building
+  2026-06-12 (event-anchored 5-min signed taker flow from the public tick
+  archive, survivorship-free). Queue: P10 squeeze-proxy Stage-1
+  (`continuous-taker-flow-scout-2026-06-12.md` + external priors notes),
+  P11 full-universe completion (idle-time), P12 liquidation-proxy calibration
+  (~30d, waiting on the forward `allLiquidation` tape — healthy at 27k
+  events/2d).
 
-**Active operator-directed program (2026-06-12):**
-[docs/research_plan_composite_sizing_2026-06-12.md](docs/research_plan_composite_sizing_2026-06-12.md)
-— E1 capped 5-feature-composite size tilt and E2 BTC-trend regime-response
-family (3 pre-named variants incl. the +20% euphoria cap). Window runs are
-DECISIVE at the Tier-2 bar; forward demo/paper remains the Tier-3 arbiter.
-Pre-regs: `2026-06-12-e1-*`, `2026-06-12-e2-*`. The same diagnostics CLOSED:
-linear regime scores (non-monotone response), regime-tail catastrophe trimming
-(disasters are uniform across trend buckets), per-component max_ret168 tilts,
-and unconditional all-days trading — see plan §5 before proposing any of those.
-
-## Binding Decision Rules
+## Decision Rules (three-tier demo-arbiter)
 
 Forward demo/paper is the arbiter. MAR primary (pooled), Sharpe secondary.
 

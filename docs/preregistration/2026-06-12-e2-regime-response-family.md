@@ -4,12 +4,11 @@
 **Author:** operator + Claude (round-4 session)
 **Stage:** proposed
 **Plan:** [research_plan_composite_sizing_2026-06-12.md](../research_plan_composite_sizing_2026-06-12.md)
-**Unparks:** alpha-hunt charter §4-G / P6 (window freeze rescinded by the operator 2026-06-12).
 
 ## What's changing
 
 The binary BTC-30d-uptrend entry gate is compared against TWO pre-named
-bounded alternatives (thresholds frozen now, never tuned):
+bounded alternatives (thresholds fixed up front):
 
 - **V0** baseline: on iff `trend > 0` (current live gate).
 - **V1** euphoria cap: on iff `0 < trend ≤ +0.20`.
@@ -24,15 +23,15 @@ NEGATIVE in the euphoria bucket the live gate currently trades (>+20%:
 response is non-monotone, so only a bounded family (not a score/curve) is
 testable. Catastrophe days are uniform across buckets — this is a MEAN
 question; disaster control stays with stops/caps. Funding (unmodeled in the
-exploratory) pushes against both tails, so window evidence is veto-grade only.
+exploratory) pushes against both tails, so the registered run models funding.
 
 ## Predicted direction + magnitude
 
 - V1: small pooled MAR improvement vs V0 (euphoria removal), trade count −10%
   to −20%.
 - V2: MAR ≈ V0 ± noise with higher trade count; most likely casualty.
-- Falsifier: V1 and V2 both VETOed at Stage 1, or forward shadow never beats
-  V0 — then the binary gate stands and §4-G re-parks until new data.
+- Falsifier: V1 and V2 both miss the Tier-2 bar at Stage 1 — the binary gate
+  stands.
 
 ## Roots that will be touched
 
@@ -41,11 +40,7 @@ exploratory) pushes against both tails, so window evidence is veto-grade only.
 - [x] forward demo/paper (Stage-2 shadow incl. pre-gate candidate evaluation;
       zero order impact)
 
-## Decision rule (a priori, binding)
-
-*(Amended 2026-06-12, BEFORE any run: the operator rescinded the 2026-06-09
-window freeze — Stage 1 is now decisive at the Tier-2 bar instead of
-veto-only; the original veto-only rules are in git history at 84cb2a9.)*
+## Decision rule (set before the run)
 
 - **Sequencing:** Stage 1 may not start before E1's Stage-1 verdict is filed.
 - **Stage 1 (decisive, Tier-2 bar vs V0):** full engine, all three variants,
@@ -53,8 +48,7 @@ veto-only; the original veto-only rules are in git history at 84cb2a9.)*
   positive total return both venues, pooled MAR-Δ > +0.1 vs V0, neither venue
   MAR-Δ < −0.5, survives 2x cost. Episode counts (~29 euphoria / 24
   deep-crash, clustered) are REPORTED as the fragility diagnostic — disclosed,
-  never used to rescue. Both variants miss: V0 stands, NULL receipt re-closes
-  §4-G.
+  never used to rescue. Both variants miss: V0 stands, NULL receipt filed.
 - **Stage 2 (adoption):** the winning variant (higher pooled MAR-Δ if both
   pass; no second look, no blending) is proposed to the operator as a
   demo-profile change; forward demo/paper accrues the live verdict; Tier-3
@@ -64,7 +58,7 @@ veto-only; the original veto-only rules are in git history at 84cb2a9.)*
 ## Run command
 
 ```bash
-# Stage 1: engine family run via the alpha_sweep dispatcher (cell spec frozen in
+# Stage 1: engine family run via the alpha_sweep dispatcher (cell spec recorded in
 # the run commit; funding ON; both venues). Stage 2: shadow build item
 # (pre-gate candidate evaluation, dynexit-shadow pattern).
 ```

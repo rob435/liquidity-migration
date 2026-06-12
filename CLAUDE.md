@@ -16,8 +16,7 @@ live/operational state). Python 3.11+; package `liquidity_migration/`.
   methodology standard. Read it before any backtest or strategy work.
 - **`docs/research_summary.md`** — THE single consolidated research record:
   every result, verdict, useful finding, open methodology debt. The three-tier
-  **demo-arbiter** decision framework is defined in STATE.md "Binding Decision
-  Rules" (MAR-primary). All per-arc write-ups + research scripts were consolidated
+  **demo-arbiter** decision framework is defined in STATE.md "Decision Rules (three-tier demo-arbiter)" (MAR-primary). All per-arc write-ups + research scripts were consolidated
   here and removed 2026-06-02; git history is the backstop. **Read this for all
   research; it is the one file.**
 - `docs/data_roots.md` — which data root to use (research vs. live demo vs. OOS).

@@ -32,7 +32,7 @@ already-mined price-volume data. The full record + open methodology debts are in
 ## The decision framework — three-tier, demo-arbiter
 
 Ordered by how expensive a false positive is. **The exact thresholds are owned by
-STATE.md ("Binding Decision Rules") — read them there; do not copy the
+STATE.md ("Decision Rules (three-tier demo-arbiter)") — read them there; do not copy the
 numbers here (that is how they drift).**
 
 1. **Investigation** — keep studying? Loose (MAR-Δ direction + trade minimums).

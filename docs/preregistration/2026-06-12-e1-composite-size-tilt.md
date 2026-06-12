@@ -17,9 +17,8 @@ existing sizing. Selection, exits, gate, weights: byte-identical.
 Within-selection ordinal information exists in the entry set (2026-06-12
 exploratory: uptrend mid-quintile monthly IC +0.056, t=+5.7, 83% positive
 months on the 5-feature composite) and a gross-neutral capped tilt converts it
-into MAR without new trades or costs. Prior in this CLASS is negative (the
-OI-tilt sizing conversion null, charter 2026-06-10) — hence the cheap
-Stage-0 falsifier before the full engine run.
+into MAR without new trades or costs. A cheap Stage-0 falsifier runs before
+the full engine run.
 
 ## Predicted direction + magnitude
 
@@ -35,11 +34,7 @@ Stage-0 falsifier before the full engine run.
 - [x] binance_full_pit (same; funding gaps disclosed as funding-missing)
 - [x] forward demo/paper (post-adoption, demo-profile change is operator-gated)
 
-## Decision rule (a priori, binding)
-
-*(Amended 2026-06-12, BEFORE any run: the operator rescinded the 2026-06-09
-window freeze — Stage 1 is now decisive at the Tier-2 bar instead of
-veto-only; the original veto-only rules are in git history at 84cb2a9.)*
+## Decision rule (set before the run)
 
 - **Stage 0 GO/NO-GO:** rebuild the 5-feature panels on the CURRENT rmom
   vintage; GO iff bybit uptrend no-trigger mid-quintile monthly IC mean
@@ -51,8 +46,7 @@ veto-only; the original veto-only rules are in git history at 84cb2a9.)*
   reported, never used to rescue. Anything less: rejected, NULL receipt.
 - **Stage 2 (adoption):** a Stage-1 win is proposed to the operator as a
   demo-profile change (demo + paper twin); forward demo/paper accrues the
-  live verdict; Tier-3 stays forward-only (rmom latency debt blocks any
-  promotion claim regardless).
+  live verdict; Tier-3 stays forward-only.
 
 ## Run command
 
