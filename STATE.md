@@ -164,6 +164,17 @@ survivorship-free 5-min OI/taker; `binance_usdm_bookdepth_1h` ingesting; taker-f
 tick stack unbuilt). Future agents: work the operator queue and forward clocks; do
 NOT re-mine the window.
 
+**Operator-directed program (2026-06-12, freeze-compatible):**
+[docs/research_plan_composite_sizing_2026-06-12.md](docs/research_plan_composite_sizing_2026-06-12.md)
+— E1 capped 5-feature-composite size tilt (within-selection IC demonstrated
+exploratory; window runs are VETO-ONLY, forward shadow decides) and E2
+BTC-trend regime-response family (3 pre-named variants incl. the euphoria cap;
+unparks §4-G/P6 in veto-only form). Pre-regs filed (`2026-06-12-e1-*`,
+`2026-06-12-e2-*`). The same diagnostics CLOSED: linear regime scores
+(non-monotone response), regime-tail catastrophe trimming (disasters are
+uniform across trend buckets), per-component max_ret168 tilts, and
+unconditional all-days trading — see plan §5 before proposing any of those.
+
 ## Binding Decision Rules
 
 Forward demo/paper is the arbiter. MAR primary (pooled), Sharpe secondary.
