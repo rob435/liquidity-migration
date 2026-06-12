@@ -723,7 +723,10 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
         # rewrite, that file is the only copy of the bucket's whole history
         # (the demo-forward evidence record). Cost is negligible at ledger
         # write rates.
-        fd = os.open(temp_path, os.O_RDONLY)
+        # O_RDWR, not O_RDONLY: Windows fsync (_commit) requires a WRITABLE
+        # descriptor — a read-only fd raises EBADF and broke every dataset
+        # write on the dev box (208 test failures, 2026-06-12).
+        fd = os.open(temp_path, os.O_RDWR)
         try:
             os.fsync(fd)
         finally:

@@ -1151,11 +1151,16 @@ def test_wrapper_unit_env_builds_argv_that_parses(unit_name: str, wrapper_name: 
         pytest.skip(f"{unit_name} not present")
     argv_out = tmp_path / "argv.bin"
     stub = tmp_path / "python_stub.sh"
-    stub.write_text(f"#!/usr/bin/env bash\nprintf '%s\\0' \"$@\" > {argv_out}\n", encoding="utf-8")
+    # as_posix() + quoting: a raw WindowsPath embeds backslashes into the bash
+    # script/redirect, which bash strips — the stub then writes to a mangled
+    # filename and the test false-fails on any Windows dev box.
+    stub.write_text(
+        f"#!/usr/bin/env bash\nprintf '%s\\0' \"$@\" > '{argv_out.as_posix()}'\n", encoding="utf-8"
+    )
     stub.chmod(0o755)
 
     env = {**os.environ, **_unit_environment(unit_path)}
-    env["PYTHON_BIN"] = str(stub)
+    env["PYTHON_BIN"] = stub.as_posix()
     # The wrappers fail loud on missing telegram/API creds (correct on the box,
     # where the EnvironmentFile provides them) — supply dummies here. The stub
     # never reaches the network.
