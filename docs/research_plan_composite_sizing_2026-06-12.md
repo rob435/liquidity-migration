@@ -1,13 +1,14 @@
 # Composite-sizing + regime-response program (2026-06-12, operator-directed)
 
 **Authority:** operator instruction 2026-06-12 ("make a research plan and
-incorporate the findings"). This program does NOT displace the alpha-hunt
-charter queue (P1 liquidation-proxy remains the highest-EV new-alpha item); it
-runs alongside it. It UNPARKS charter §4-G/P6 (regime model) in a constrained,
-freeze-compatible form: **the spent 2023-04→2026-05 window is used as a VETO
-only; forward demo/paper shadow evidence is the decisive arbiter** — consistent
-with STATE.md "Current Research Direction" (do not re-mine the window) and the
-P6 parking rationale.
+incorporate the findings"; same day: "remove that [freeze] line from state.md
+and go with the original plan, this is not even close to being spent"). The
+2026-06-09 window freeze is RESCINDED (STATE.md "Current Research Direction"):
+**pre-registered window backtests are decisive evidence at the Tier-1/Tier-2
+bars; the forward demo/paper arbiter remains the only path to Tier-3 and is
+never loosened.** This program does NOT displace the alpha-hunt charter queue
+(P1 liquidation-proxy remains the highest-EV new-alpha item); it runs
+alongside it and unparks charter §4-G/P6 (regime model).
 
 Receipts: [2026-06-12-e1-composite-size-tilt.md](preregistration/2026-06-12-e1-composite-size-tilt.md),
 [2026-06-12-e2-regime-response-family.md](preregistration/2026-06-12-e2-regime-response-family.md).
@@ -55,23 +56,25 @@ TRADED by the live uptrend gate). Worst-day and p5-day basket losses are
 roughly uniform across buckets (−7% to −34% pre-stop): the trend value
 localizes the MEAN, not the disasters. Disaster control stays with the
 per-name stop + position cap. Funding is unmodeled and pushes against both
-extremes (shorts collect funding in euphoria, pay in crashes) — a key reason
-window evidence here is veto-grade at best. 168 sign episodes, median 3 days;
+extremes (shorts collect funding in euphoria, pay in crashes) — the reason the
+REGISTERED E2 run must model funding before any conclusion. 168 sign episodes, median 3 days;
 tail buckets rest on 24-29 clustered episodes ⇒ enough to test a SMALL
 pre-named family, nowhere near enough to fit a curve.
 
 ## 2. Binding constraints
 
-1. **Window freeze.** The 2023-04→2026-05 window is SPENT. In this program a
-   window run may only VETO (kill an idea cheaply); a window pass earns a
-   forward shadow trial and is never citable as alpha. This is the freeze-
-   compatible reading of "loosen cheap gates, strict promotion."
+1. **Pre-registration discipline replaces the (rescinded) freeze.** Each stage
+   below runs ONCE against its frozen a-priori rule; both venues always;
+   2x-cost survival required at Tier-2; fragility diagnostics reported, never
+   used to rescue a weak cell. Tier-3 (real money) remains forward-demo-only
+   and is never loosened.
 2. **Prior null in this class.** The charter banked "rising-OI pops fade
    better — **no sizing conversion survived**" and an OI-tilt null. E1 is the
    same conversion CLASS (information → sizing) with a different, demonstrated
    carrier (within-selection mid-quintile IC on the exact entry population,
-   F1-F4). The prior says: expect failure, make the veto cheap, let forward
-   evidence decide.
+   F1-F4). The prior says: expect failure, keep Stage 1 cheap and one-shot,
+   and weigh the Tier-2 verdict accordingly; forward demo still accrues the
+   live evidence after any adoption.
 3. **Both venues** for any window run; binance funding gaps disclosed
    (funding-missing label where applicable).
 4. **rmom latency debt stands**: nothing in this program creates a continuous
@@ -100,17 +103,18 @@ existing sizing; everything else byte-identical.
   within-selection diagnostic once. **GO iff** bybit uptrend no-trigger
   mid-quintile monthly IC mean ≥ +0.04 with ≥65% positive months, AND binance
   not sign-opposed. Anything less: program ends, null receipt filed.
-- **Stage 1 — window VETO run.** Full engine A/B (flat vs tilted), both
-  venues, funding on where the root carries it, identical seeds/entries.
-  **VETO iff** pooled MAR-Δ ≤ 0 OR either venue's total return flips sign vs
-  baseline. A pass is NOT evidence of alpha (spent window) — it unlocks
-  Stage 2 only.
-- **Stage 2 — forward shadow (decisive).** Dynexit-shadow-pattern bookkeeping
-  on the live cycles: record each entry's composite percentile + the tilted
-  shadow size; accrue tilted-vs-flat shadow PnL. Zero order impact. **Bar
-  (frozen): ≥60 forward days AND ≥40 shadowed entries; adopt iff tilted
-  forward MAR ≥ flat forward MAR and tilted worst-day ≤ 1.5× flat worst-day.**
-  Adoption = operator flips the demo profile; the paper twin mirrors it.
+- **Stage 1 — DECISIVE window run (Tier-2 bar).** Full engine A/B (flat vs
+  tilted), both venues, funding on where the root carries it, identical
+  entries/exits, plus the 2x-cost stress arm. **Win iff** (Tier-2): positive
+  total return both venues, pooled MAR-Δ > +0.1 vs flat, neither venue
+  MAR-Δ < −0.5, survives 2x cost; fragility diagnostics reported. Anything
+  less: rejected, null receipt filed.
+- **Stage 2 — adoption + forward arbiter.** A Stage-1 win is proposed to the
+  operator as a demo-profile change (demo + paper twin together). Forward
+  demo/paper then accrues the live verdict as usual — Tier-3 consideration
+  stays forward-only and is unaffected by this plan. Optional belt-and-braces:
+  the dynexit-shadow-pattern tilted-vs-flat bookkeeping may run alongside for
+  attribution, but it is no longer the gating evidence.
 
 ## 4. E2 — regime-response family (unparks §4-G, constrained)
 
@@ -128,20 +132,18 @@ positive ordering. A bounded, pre-named regime response may improve MAR.
 The `+0.20` threshold comes from the exploratory bucket edge (disclosed); it is
 fixed a priori and will not be tuned.
 
-- **Stage 1 — window VETO run.** Full engine, both venues, **funding
-  mandatory** (it pushes against both tails; a fundingless regime result is
-  meaningless). ~29 euphoria / 24 deep-crash episodes ⇒ underpowered by
-  construction: **the window can only VETO** (a variant whose pooled MAR-Δ ≤ 0
-  vs V0, or that flips a venue's return sign, is dead). Survivors go forward.
-- **Stage 2 — forward shadow (decisive).** Requires the shadow to evaluate
-  candidates the live gate blocks (compute the candidate set pre-gate in
-  shadow mode — small engineering item, dynexit-shadow pattern, zero order
-  impact). Bar (frozen): ≥60 forward days; adopt a variant iff its shadow MAR
-  beats V0's live/shadow MAR over the common window AND it never exceeds V0's
-  worst-day by >1.5×. Ties or insufficient data: V0 stands. Given median
-  3-day regime episodes, 60 days contains enough regime variation to be
-  informative at veto/keep grade; the charter's P6 ≥60d forward-clock
-  condition is thereby honored.
+- **Stage 1 — DECISIVE window run (Tier-2 bar vs V0).** Full engine, all
+  three variants, both venues, **funding mandatory** (it pushes against both
+  tails; a fundingless regime result is meaningless), plus the 2x-cost arm.
+  **A variant wins iff** (Tier-2 vs V0): positive total return both venues,
+  pooled MAR-Δ > +0.1, neither venue MAR-Δ < −0.5, survives 2x cost. The
+  episode counts (~29 euphoria / 24 deep-crash, clustered) are REPORTED as
+  the fragility diagnostic — disclosed, not used to rescue or to veto. If
+  both variants miss the bar: V0 stands, null receipt closes §4-G again.
+- **Stage 2 — adoption + forward arbiter.** The winning variant (if any) is
+  proposed to the operator as a demo-profile change; forward demo/paper
+  accrues the live verdict; Tier-3 stays forward-only. If both V1 and V2 pass
+  Stage 1, the higher pooled MAR-Δ is proposed (no second look, no blending).
 
 ## 5. Closed by the 2026-06-12 diagnostics — do NOT re-mine
 

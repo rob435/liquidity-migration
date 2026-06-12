@@ -4,7 +4,7 @@
 **Author:** operator + Claude (round-4 session)
 **Stage:** proposed
 **Plan:** [research_plan_composite_sizing_2026-06-12.md](../research_plan_composite_sizing_2026-06-12.md)
-**Unparks:** alpha-hunt charter §4-G / P6, in the freeze-compatible veto-only form.
+**Unparks:** alpha-hunt charter §4-G / P6 (window freeze rescinded by the operator 2026-06-12).
 
 ## What's changing
 
@@ -43,15 +43,23 @@ exploratory) pushes against both tails, so window evidence is veto-grade only.
 
 ## Decision rule (a priori, binding)
 
+*(Amended 2026-06-12, BEFORE any run: the operator rescinded the 2026-06-09
+window freeze — Stage 1 is now decisive at the Tier-2 bar instead of
+veto-only; the original veto-only rules are in git history at 84cb2a9.)*
+
 - **Sequencing:** Stage 1 may not start before E1's Stage-1 verdict is filed.
-- **Stage 1 VETO (per variant):** dead iff pooled MAR-Δ ≤ 0 vs V0 OR either
-  venue's total return flips sign. Episodes are the effective sample
-  (~29 euphoria / 24 deep-crash, clustered) — a pass is veto-survival only,
-  never alpha.
-- **Stage 2 (decisive):** forward shadow ≥60 days; adopt a surviving variant
-  iff its shadow MAR > V0's over the common forward window AND its worst-day
-  ≤ 1.5× V0's. Ties / thin data: V0 stands. No new variants, no threshold
-  adjustment, ever — a different idea requires a new pre-registration.
+- **Stage 1 (decisive, Tier-2 bar vs V0):** full engine, all three variants,
+  both venues, funding ON (mandatory), + 2x-cost arm. A variant WINS iff
+  positive total return both venues, pooled MAR-Δ > +0.1 vs V0, neither venue
+  MAR-Δ < −0.5, survives 2x cost. Episode counts (~29 euphoria / 24
+  deep-crash, clustered) are REPORTED as the fragility diagnostic — disclosed,
+  never used to rescue. Both variants miss: V0 stands, NULL receipt re-closes
+  §4-G.
+- **Stage 2 (adoption):** the winning variant (higher pooled MAR-Δ if both
+  pass; no second look, no blending) is proposed to the operator as a
+  demo-profile change; forward demo/paper accrues the live verdict; Tier-3
+  stays forward-only. No new variants, no threshold adjustment, ever — a
+  different idea requires a new pre-registration.
 
 ## Run command
 

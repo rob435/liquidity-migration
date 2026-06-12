@@ -24,8 +24,9 @@ OI-tilt sizing conversion null, charter 2026-06-10) — hence veto-first staging
 
 - Stage-1 window: pooled MAR-Δ in (+0.05, +0.3); trade count Δ = 0 by
   construction; both venue returns keep sign.
-- Falsifier: mid-quintile IC vanishes on the fresh panel (Stage 0), or window
-  MAR-Δ ≤ 0 (Stage 1), or forward shadow MAR(tilted) < MAR(flat) (Stage 2).
+- Falsifier: mid-quintile IC vanishes on the fresh panel (Stage 0), or the
+  Tier-2 bar missed (Stage 1), or post-adoption forward demo/paper degrades
+  vs the flat baseline.
 
 ## Roots that will be touched
 
@@ -35,17 +36,22 @@ OI-tilt sizing conversion null, charter 2026-06-10) — hence veto-first staging
 
 ## Decision rule (a priori, binding)
 
+*(Amended 2026-06-12, BEFORE any run: the operator rescinded the 2026-06-09
+window freeze — Stage 1 is now decisive at the Tier-2 bar instead of
+veto-only; the original veto-only rules are in git history at 84cb2a9.)*
+
 - **Stage 0 GO/NO-GO:** rebuild the 5-feature panels on the CURRENT rmom
   vintage; GO iff bybit uptrend no-trigger mid-quintile monthly IC mean
   ≥ +0.04 with ≥65% positive months AND binance not sign-opposed. Else: NULL
   receipt, program over.
-- **Stage 1 VETO:** full-engine A/B both venues. VETO iff pooled MAR-Δ ≤ 0 OR
-  either venue's total return flips sign vs flat baseline. A pass earns
-  Stage 2 ONLY (spent window — not citable as alpha).
-- **Stage 2 (decisive):** forward shadow ≥60 days AND ≥40 shadowed entries;
-  adopt iff tilted forward MAR ≥ flat forward MAR AND tilted worst-day ≤ 1.5×
-  flat worst-day. Adoption = operator-gated demo-profile change only (rmom
-  latency debt blocks any promotion claim).
+- **Stage 1 (decisive, Tier-2 bar):** full-engine A/B both venues + 2x-cost
+  arm. WIN iff positive total return both venues, pooled MAR-Δ > +0.1 vs
+  flat, neither venue MAR-Δ < −0.5, survives 2x cost; fragility diagnostics
+  reported, never used to rescue. Anything less: rejected, NULL receipt.
+- **Stage 2 (adoption):** a Stage-1 win is proposed to the operator as a
+  demo-profile change (demo + paper twin); forward demo/paper accrues the
+  live verdict; Tier-3 stays forward-only (rmom latency debt blocks any
+  promotion claim regardless).
 
 ## Run command
 

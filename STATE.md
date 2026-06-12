@@ -147,33 +147,38 @@ re-verified.
 
 ## Current Research Direction
 
-The 2023-04→2026-05 window is **SPENT** (freeze, 2026-06-09) and the 2026-06-10
-charter session completed every agent-runnable direction with a pre-registered
-receipt: **banked** — BTC+ETH 2f hedge (supersedes single-BTC; pooled ΔSharpe +0.146/
-ΔMAR +0.56 at max4); **information PASS** — rising-OI pops fade better (no sizing
-conversion survived); **nulls** — cov-sizer (book too thin), participation-cap
-dominance, shrunk/basket hedges, OI tilt + down-only, dynamic exits (§4-D closed
-permanently), passive-at-touch entries; **analyses** — residual attribution
-(book is residual-alpha-positive vs the 6-factor model; beta is ETH-shaped),
-capacity frontier (~$5M → pooled MAR ~3.8 under the trust-region cap). Details +
-do-not-re-mine lists: research_summary 2026-06-10 sections; charter §8.
+**Window freeze RESCINDED by operator instruction 2026-06-12** ("this is not
+even close to being spent"). The 2026-06-09 "SPENT" declaration on the
+2023-04→2026-05 window no longer binds: pre-registered window backtests are
+again decisive evidence at the Tier-1/Tier-2 bars below. What protects the
+evidence record is the discipline that REMAINS mandatory: pre-registration
+with frozen a-priori decision rules (one run per registered rule), both-venue
+agreement, 2x-cost survival, and the forward demo/paper arbiter for Tier-3 —
+which is never loosened. The charter §8/P6 "parked-for-forward-data" notes are
+superseded to this extent. The per-result do-not-re-mine lists (registered
+NULLs) stay binding — a NULL is rescinded by new mechanism or new data, not by
+re-running it.
 
-**New evidence comes only from:** operator actions above, forward demo/paper
-accumulation, and new data layers (`binance_usdm_metrics_5m` complete —
-survivorship-free 5-min OI/taker; `binance_usdm_bookdepth_1h` ingesting; taker-flow
-tick stack unbuilt). Future agents: work the operator queue and forward clocks; do
-NOT re-mine the window.
+The 2026-06-10 charter session results stand: **banked** — BTC+ETH 2f hedge
+(pooled ΔSharpe +0.146/ΔMAR +0.56 at max4); **information PASS** — rising-OI
+pops fade better (no sizing conversion survived); **nulls** — cov-sizer,
+participation-cap dominance, shrunk/basket hedges, OI tilt + down-only,
+dynamic exits (§4-D closed permanently), passive-at-touch entries;
+**analyses** — residual attribution (residual-alpha-positive vs the 6-factor
+model; beta is ETH-shaped), capacity frontier (~$5M → pooled MAR ~3.8).
+Details: research_summary 2026-06-10 sections; charter §8. New data layers
+(`binance_usdm_metrics_5m` complete; `binance_usdm_bookdepth_1h` ingesting)
+remain the highest-EV new-alpha ground (charter P1).
 
-**Operator-directed program (2026-06-12, freeze-compatible):**
+**Active operator-directed program (2026-06-12):**
 [docs/research_plan_composite_sizing_2026-06-12.md](docs/research_plan_composite_sizing_2026-06-12.md)
-— E1 capped 5-feature-composite size tilt (within-selection IC demonstrated
-exploratory; window runs are VETO-ONLY, forward shadow decides) and E2
-BTC-trend regime-response family (3 pre-named variants incl. the euphoria cap;
-unparks §4-G/P6 in veto-only form). Pre-regs filed (`2026-06-12-e1-*`,
-`2026-06-12-e2-*`). The same diagnostics CLOSED: linear regime scores
-(non-monotone response), regime-tail catastrophe trimming (disasters are
-uniform across trend buckets), per-component max_ret168 tilts, and
-unconditional all-days trading — see plan §5 before proposing any of those.
+— E1 capped 5-feature-composite size tilt and E2 BTC-trend regime-response
+family (3 pre-named variants incl. the +20% euphoria cap). Window runs are
+DECISIVE at the Tier-2 bar; forward demo/paper remains the Tier-3 arbiter.
+Pre-regs: `2026-06-12-e1-*`, `2026-06-12-e2-*`. The same diagnostics CLOSED:
+linear regime scores (non-monotone response), regime-tail catastrophe trimming
+(disasters are uniform across trend buckets), per-component max_ret168 tilts,
+and unconditional all-days trading — see plan §5 before proposing any of those.
 
 ## Binding Decision Rules
 
