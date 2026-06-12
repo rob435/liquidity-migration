@@ -454,6 +454,14 @@ LEDGER_BUCKET_SOURCE: dict[str, str] = {
     "continuous_fade_demo_orders": "ts_ms",
     "continuous_fade_paper_trades": "entry_ts_ms",
     "continuous_fade_paper_orders": "ts_ms",
+    # Cycle heartbeat rows (~1440/day, wide payload, written every ~60s on the
+    # order-submitting cycle path while holding the dataset lock): without a
+    # bucket the per-cycle write read-concat-rewrote the WHOLE history monolith
+    # — the same unbounded-growth class reconcile-ledger-5 fixed for trades/
+    # orders (round 4). Cycle rows are append-once (cycle_id-keyed, never
+    # updated), so ts_ms is immutable and bucket-stable.
+    "continuous_fade_demo_cycles": "ts_ms",
+    "continuous_fade_paper_cycles": "ts_ms",
 }
 
 
@@ -709,6 +717,17 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
         output.write_parquet(temp_path)
+        # fsync before the rename (round 4): the rename is atomic against a
+        # PROCESS crash, but a hard power loss inside the page-cache window can
+        # surface a truncated part file — and because this is a read-modify-
+        # rewrite, that file is the only copy of the bucket's whole history
+        # (the demo-forward evidence record). Cost is negligible at ledger
+        # write rates.
+        fd = os.open(temp_path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         temp_path.replace(path)
     finally:
         temp_path.unlink(missing_ok=True)

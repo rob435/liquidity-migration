@@ -622,7 +622,19 @@ def _reconcile_pending_order_fills(
             # reduce_only path) sums the legs and stays idempotent across cycles
             # because `filled_qty` is written back onto the order row each pass.
             delta_qty = max(filled_qty - previous_filled_qty, 0.0)
-            if str(existing_trade.get("status")) != "closed" and delta_qty > 0.0:
+            # Adoption double-book guard (round 4): if ws_risk ADOPTED this trade
+            # from the venue POSITION (submit_mode adopted_*), the adopted qty
+            # already INCLUDES this order's fill — the position is the sum of its
+            # fills. On the first reconcile pass after adoption the order row
+            # still carries filled_qty="" (previous=0), so the delta-add would
+            # add the full fill a second time onto the adopted row. Mark the
+            # order reconciled (the order_update above records its cumulative
+            # fill) but skip the trade-qty add; later passes delta-add normally.
+            adoption_covers_fill = (
+                previous_filled_qty <= 0.0
+                and str(existing_trade.get("submit_mode") or "").startswith("adopted")
+            )
+            if str(existing_trade.get("status")) != "closed" and delta_qty > 0.0 and not adoption_covers_fill:
                 prior_qty = _float(existing_trade.get("qty"))
                 prior_entry = _float(existing_trade.get("entry_price"))
                 # This ORDER contributed `previous_filled_qty` to the trade last
@@ -673,6 +685,17 @@ def _reconcile_pending_order_fills(
                 "trade_id": trade_id,
                 "symbol": symbol,
                 "side": trade_side,
+                # Identity fields ride the ORDER row for exactly this recovery
+                # path. Without them the recovered trade had no sleeve tag —
+                # _sleeve_of() defaults empty to "short", so a recovered
+                # CONTINUOUS entry was mis-filed into the erased short sleeve's
+                # ledger and became invisible to the continuous cycle's exits
+                # and rebalance; a component row without component_weight would
+                # additionally be resized to full base notional (round 4).
+                "sleeve": str(order.get("sleeve") or ""),
+                "strategy_id": str(order.get("strategy_id") or ""),
+                "component": str(order.get("component") or ""),
+                "component_weight": _float(order.get("component_weight")),
                 "signal_ts_ms": int(order.get("signal_ts_ms") or opened_at_ms),
                 "ts_ms": now_ms,
                 "status": "open",

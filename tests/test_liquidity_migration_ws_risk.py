@@ -1133,6 +1133,10 @@ def test_ws_risk_reconcile_flat_pending_exit_backfills_exit_price_from_closed_pn
     assert closed.select("status").item() == "closed"
     # The fix: exit_price comes from the closed-PnL backfill, not 0.
     assert float(closed.select("exit_price").item()) == pytest.approx(112.5)
+    # ROUND 4: the backfill's realized-PnL fields must land on the closed row
+    # too — they were previously extracted for price/time only and discarded.
+    assert float(closed.select("gross_trade_return").item()) == pytest.approx((100.0 - 112.5) / 100.0)
+    assert closed.select("net_return").item() is not None
 
 
 def _submit_exit_engine(tmp_path: Path, trade_client: "FakeTradeClient") -> "EventWebSocketRiskEngine":
@@ -2696,6 +2700,12 @@ def test_adoption_rebuilds_component_tagged_trade_id(tmp_path: Path) -> None:
     assert row is not None
     assert str(row["trade_id"]).endswith("-p3"), row["trade_id"]
     assert row["sleeve"] == "continuous"
+    # ROUND 4: the adopted row must also carry the ensemble sizing weight —
+    # without it the daily rebalance defaults the missing weight to 1.0 and
+    # resizes a 0.30x p3 entry to FULL base notional (the round-3 CRITICAL
+    # re-entering through the adoption door).
+    assert row["component"] == "p3"
+    assert float(row["component_weight"]) == pytest.approx(0.30)
 
 
 def test_ws_risk_falls_back_to_adopted_when_order_history_has_no_bot_link(tmp_path: Path) -> None:
@@ -3898,3 +3908,73 @@ def test_state_mutators_assert_consumer_thread(tmp_path: Path) -> None:
     t.join(2.0)
     assert len(errors) == 4, "every mutator must fail-fast when called off the consumer thread"
     assert all("off the consumer thread" in e for e in errors)
+
+
+def test_tracked_stream_fill_full_close_books_realized_pnl(tmp_path: Path) -> None:
+    """ROUND 4: the WS-stream close is the STEADY-STATE close path under
+    ORDER_SUBMIT_MODE=ws_then_rest, and it stamped status=closed WITHOUT
+    gross_trade_return/net_return/exit_fee_usdt — and once closed, the
+    pending-fill reconciler skips the row, so the PnL was never backfilled
+    (the adverse-exit entry-pause breaker read the loss as net 0)."""
+    write_dataset(
+        pl.DataFrame(
+            [{"trade_id": "t1", "symbol": "AAAUSDT", "side": "short", "status": "open",
+              "qty": "1", "entry_price": 100.0, "notional_usdt": 100.0,
+              "equity_usdt": 10_000.0, "stop_price": 112.0, "take_profit_price": 80.0,
+              "planned_exit_ts_ms": 9_999_999_999_999}]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    trade_client = FakeTradeClient()
+    engine = _submit_exit_engine(tmp_path, trade_client)
+    _rows, orders = engine.ws_exit({**_SUBMIT_EXIT_PLAN, "exit_trigger_ts_ms": int(time.time() * 1000)})
+    link = str(orders[0]["order_link_id"])
+    engine.state.submitted_link_to_trade_id[link] = "t1"
+    engine.record_tracked_exit_stream_fill(
+        order_link_id=link, filled_qty=1.0, exit_price=90.0, source="execution", fee_usdt=0.05,
+    )
+    closed = read_dataset(tmp_path, "event_demo_trades").filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    assert closed["status"] == "closed"
+    assert float(closed["gross_trade_return"]) == pytest.approx(0.10)  # short 100 -> 90
+    assert float(closed["net_return"]) == pytest.approx(0.10 * 100.0 / 10_000.0)
+    assert float(closed["exit_fee_usdt"]) == pytest.approx(0.05)
+
+
+def test_adoption_treats_eth_hedge_leg_as_externally_managed(tmp_path: Path) -> None:
+    """ROUND 4: BOTH 2f hedge legs (BTC + ETH) share the hedge link prefix and
+    the externally-managed contract (track, NEVER force-exit). The BTC-only
+    check sent an orphaned ETH leg down the generic recovered path, which
+    stamps adopt stop/TP/3d hold — ws_risk would force-exit the leg and the
+    next daily hedge run would re-buy it, a silent churn loop."""
+    from liquidity_migration.continuous_hedge_manager import hedge_order_link_id
+
+    now = int(time.time() * 1000)
+    link = hedge_order_link_id(now - 60_000, symbol="ETHUSDT")
+    private_client = FakePrivateClient(order_history=[
+        {"symbol": "ETHUSDT", "side": "Buy", "orderLinkId": link, "createdTime": str(now - 60_000)},
+    ])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False, repair_stops=False, rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0, untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    row = engine._build_adopted_trade(
+        {"symbol": "ETHUSDT", "side": "Buy", "size": "1", "avgPrice": "2500.0",
+         "createdTime": str(now - 60_000)},
+        now_ms=now,
+    )
+    assert row is not None
+    assert row["sleeve"] == "continuous_addon"
+    assert row["symbol"] == "ETHUSDT"
+    assert float(row["stop_price"]) == 0.0
+    assert float(row["take_profit_price"]) == 0.0
+    assert int(row["planned_exit_ts_ms"]) == 0
+    assert row["submit_mode"] == "adopted_recovered"

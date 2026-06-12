@@ -307,3 +307,47 @@ def test_plan_rebalance_resizes_skips_tiny_and_unmarked_positions() -> None:
     )
 
     assert plans == []
+
+
+def test_plan_skips_component_tagged_row_without_weight() -> None:
+    """ROUND 4 fail-safe: a row whose trade_id carries a recognized ensemble
+    component suffix but no positive component_weight (a crash-recovery row
+    whose weight stamp was lost) must be SKIPPED, never defaulted to weight=1.0
+    — defaulting resizes a 0.10-0.40x component entry to FULL base notional
+    (the round-3 CRITICAL re-entering through the recovery door). Legacy rows
+    without a component suffix keep the 1.0 default."""
+    base_trade = {
+        "symbol": "AAAUSDT",
+        "qty": "1",
+        "side": "short",
+        "status": "open",
+    }
+    prices = {"AAAUSDT": 100.0}
+    kwargs = dict(
+        price_by_symbol=prices,
+        equity_usdt=10_000.0,
+        base_notional_pct_equity=2.0,
+        target_scale=1.0,
+        component_tags_requiring_weight=("p3", "tp14"),
+    )
+
+    # Component-suffixed row with NO weight -> skipped entirely.
+    plans = plan_continuous_rebalance_resizes(
+        [{**base_trade, "trade_id": "cf-AAAUSDT-1700000000000-p3"}], **kwargs
+    )
+    assert plans == []
+
+    # Same row WITH its weight -> planned against base * weight.
+    plans = plan_continuous_rebalance_resizes(
+        [{**base_trade, "trade_id": "cf-AAAUSDT-1700000000000-p3", "component_weight": 0.30}],
+        **kwargs,
+    )
+    assert len(plans) == 1
+    assert plans[0].target_notional_usdt == pytest.approx(10_000.0 * 0.02 * 0.30)
+
+    # Legacy single-component row (no recognized suffix) keeps the 1.0 default.
+    plans = plan_continuous_rebalance_resizes(
+        [{**base_trade, "trade_id": "cf-AAAUSDT-1700000000000"}], **kwargs
+    )
+    assert len(plans) == 1
+    assert plans[0].target_notional_usdt == pytest.approx(10_000.0 * 0.02)

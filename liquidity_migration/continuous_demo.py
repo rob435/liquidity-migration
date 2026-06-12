@@ -1268,6 +1268,27 @@ def _known_ensemble_component_tags() -> tuple[str, ...]:
     return tuple(tags)
 
 
+def ensemble_component_weight_for_tag(tag: str) -> float | None:
+    """Entry-sizing weight for a recovered component tag, scanned across every
+    continuous profile (round 4). ws_risk's crash-recovery adoption decodes the
+    component tag from the orderLinkId but the venue position carries no weight —
+    and a component row without a positive ``component_weight`` is exactly the
+    round-3 CRITICAL re-entering through the adoption door: the daily rebalance
+    defaults a missing weight to 1.0 and resizes a 0.10-0.40x component entry to
+    FULL base notional. Returns None when the tag is unknown or two profiles
+    disagree on the weight (ambiguous — callers must then leave the row un-stamped
+    and the rebalance planner fail-safes by SKIPPING it, never by defaulting)."""
+    weights: set[float] = set()
+    for name in CONTINUOUS_DEMO_PROFILES:
+        cfg = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile=name))
+        for comp in cfg.ensemble_components:
+            if str(comp[0]) == str(tag) and _float(comp[4]) > 0.0:
+                weights.add(_float(comp[4]))
+    if len(weights) == 1:
+        return next(iter(weights))
+    return None
+
+
 def recover_snipe_trade_id_from_link(
     link: str,
     *,
@@ -1391,10 +1412,12 @@ def continuous_sleeve_name(config: ContinuousDemoCycleConfig) -> str:
 def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> ContinuousDemoCycleConfig:
     """Resolve named demo profiles into explicit knobs.
 
-    ``continuous_rebalance_v1`` is the current research-stage implementation
-    target pinned in promoted.py. It stays outside PROFILES and remains
-    default-off; selecting the profile makes a paper/demo cycle reproduce the
-    candidate contract instead of the older de-promoted continuous sleeve.
+    ``continuous_ensemble_v1`` is the live demo book (the validated winner_base
+    4-component ensemble, operator-wired 2026-06-10; both live units pin it via
+    STRATEGY_PROFILE). ``continuous_rebalance_v1`` is its DEPRECATED
+    single-component predecessor, kept resolvable for old ledgers. Both stay
+    outside promoted.PROFILES — the continuous sleeve is research-stage, not
+    promoted.
     """
     if config.strategy_profile == "continuous_ensemble_v1":
         # The validated winner_base ensemble (frozen receipt weights; receipts:
@@ -1538,7 +1561,7 @@ from .event_demo import (  # noqa: E402
 )
 from .event_demo_data import _download_recent_1h_klines  # noqa: E402
 from .event_demo_exits import _partial_exit_trade_update  # noqa: E402
-from .storage import exclusive_file_lock, read_dataset, write_dataset  # noqa: E402
+from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset  # noqa: E402
 from . import cross_sleeve as _cross_sleeve  # noqa: E402
 
 _logger = logging.getLogger(__name__)
@@ -2367,6 +2390,8 @@ def _execute_continuous_entries(
                                       "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "qty": qty, "reduce_only": False,
                                       "submit_mode": "preflight", "status": "submitted", "trade_side": "short",
                                       "sleeve": continuous_sleeve_name(demo),
+                                      "component": component, "component_weight": component_weight,
+                                      "equity_usdt": equity_usdt,
                                       "signal_ts_ms": signal_ts_ms, "stop_price": stop_price})
                 try:
                     order_result = trading_client.place_order(**_order_params(
@@ -2430,6 +2455,12 @@ def _execute_continuous_entries(
             "notional_usdt": filled_notional, "status": order_status, "trade_side": "short", "signal_ts_ms": signal_ts_ms,
             "equity_usdt": equity_usdt, "tick_size": tick_size, "qty_step": qty_step, "stop_price": stop_price,
             "stop_loss_pct": stop_loss_pct, "error": error, "sleeve": continuous_sleeve_name(demo),
+            # component/component_weight ride the ORDER row so the pending-fill
+            # reconciler's recovered trade keeps its ensemble sizing — a recovered
+            # row without the weight gets resized to FULL base by the daily
+            # rebalance (round-3 CRITICAL re-entering via recovery; round 4).
+            "component": component, "component_weight": component_weight,
+            "take_profit_pct": take_profit_pct, "take_profit_price": take_profit_price,
             # filled_qty/target_qty: ws_risk's pending-fill reconciler delta-adds
             # (venue cumulative − filled_qty); without filled_qty a "partial" entry's
             # already-booked leg double-added on the next reconcile (audit 2026-06-11).
@@ -2805,7 +2836,17 @@ def run_continuous_demo_cycle(
 
         all_trades = read_dataset(root, trades_dataset)
         all_orders = read_dataset(root, orders_dataset)
-        all_cycles = read_dataset(root, cycles_dataset) if demo.daily_rebalance_enabled else pl.DataFrame()
+        # Windowed cycles read (round 4): the rebalance state consumes at most
+        # max(realized-vol window 90d, strategy-momentum window 180d) of prior
+        # daily rows plus today's resize-checked flag — 8 month buckets always
+        # cover that, and the legacy pre-bucket monolith is included by
+        # read_ledger_window until it ages out. A full-history read here grew
+        # without bound (~525k rows/yr) inside the cycle's hot path.
+        all_cycles = (
+            read_ledger_window(root, cycles_dataset, months_back=8)
+            if demo.daily_rebalance_enabled
+            else pl.DataFrame()
+        )
         rebalance_rule = continuous_rebalance_rule(demo) if demo.daily_rebalance_enabled else None
         rebalance_target_scale = (
             compute_continuous_rebalance_scale(
@@ -2841,9 +2882,20 @@ def run_continuous_demo_cycle(
         exit_plans = plan_continuous_exits(
             open_trades.to_dicts(), entry_state, now_ms=cycle_now_ms, config=demo,
             klines=klines, price_by_symbol=price_by_symbol)
-        # don't double-submit a symbol that already has a live reduce-only order
+        # don't double-submit a symbol that already has a live reduce-only order,
+        # OR one whose open trade row already carries an exit_order_link_id (an
+        # exit submitted but fill-unconfirmed — e.g. a Market cover whose confirm
+        # timed out: it is no longer an OPEN venue order, so live_exit_syms misses
+        # it and the next cycle would re-plan a second cover). Same ledger-based
+        # in-flight guard the fast protective loop applies (round 4).
         live_exit_syms = _live_open_order_symbols(raw_open_orders, reduce_only=True)
-        exit_plans = [p for p in exit_plans if str(p["symbol"]) not in live_exit_syms]
+        exit_in_flight = {
+            str(t["symbol"]) for t in open_trades.to_dicts() if str(t.get("exit_order_link_id") or "")
+        }
+        exit_plans = [
+            p for p in exit_plans
+            if str(p["symbol"]) not in live_exit_syms and str(p["symbol"]) not in exit_in_flight
+        ]
         exec_exits, exit_orders = _execute_continuous_exits(
             exit_plans, all_trades, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms,
             execution_event_router=execution_event_router, record_preflight=preflight_cb,
@@ -3061,7 +3113,16 @@ def run_continuous_demo_cycle(
                 strategy_id=strategy_id, price_by_symbol=price_by_symbol,
                 record_preflight=preflight_cb)
             if sniper_orders and (demo.submit_orders or demo.record_dry_run):
-                cycle_order_rows.extend(sniper_orders)
+                # Flush placement rows IMMEDIATELY (round 4): a crash between a
+                # successful snipe place_order and the end-of-cycle flush left a
+                # live +8% PostOnly Sell whose only ledger trace was the
+                # preflight row — invisible to reconcile_continuous_snipes (never
+                # cancelled with the base) and never resolved by the pending
+                # reconciler while the base position kept the symbol live. The
+                # crash window spans the dynexit sweep + rebalance + cycle write.
+                write_dataset(
+                    pl.DataFrame(sniper_orders, infer_schema_length=None), root, orders_dataset, partition_by=()
+                )
         sniper_errors = sum(
             1
             for r in (sniper_orders + snipe_updates + snipe_exit_orders)
@@ -3095,6 +3156,9 @@ def run_continuous_demo_cycle(
                 base_notional_pct_equity=demo.per_position_notional_pct_equity,
                 target_scale=rebalance_target_scale,
                 exclude_trade_id_suffixes=(SNIPER_TRADE_SUFFIX,),
+                # Fail safe (round 4): never default a component-tagged row whose
+                # weight stamp was lost in crash recovery to full base notional.
+                component_tags_requiring_weight=_known_ensemble_component_tags(),
             )
             resize_rows, resize_orders = _execute_continuous_rebalance_resizes(
                 resize_plans,
@@ -3161,7 +3225,13 @@ def run_continuous_demo_cycle(
             # day can lead cur_day -> a raw diff would read negative; "0 = fresh" is the meaningful floor.
             "rmom_stale_days": max(0, (cur_day_ts - max_rmom_day_ts) // MS_PER_DAY) if max_rmom_day_ts else None,
             "live_d9_symbols": live_d9, "open_positions": open_count,
-            "entries": len([r for r in exec_entries if r.get("status") in ("filled", "partial", "planned")]),
+            # exec_entries are TRADE rows — appended only when an entry actually
+            # opened (filled_qty > 0) or was dry-run planned, always status="open".
+            # The old filter used the ORDER-row status vocabulary
+            # ("filled"/"partial"/"planned"), which no trade row ever carries, so
+            # `entries` was permanently 0 and continuous_entry_executed could
+            # never page a successful live entry (round 4 — telegram plane).
+            "entries": len([r for r in exec_entries if r.get("status") == "open"]),
             "exits": len(exec_exits), "candidates": len(candidates), "equity_usdt": equity_usdt,
             # Sniper lifecycle visibility: a snipe FILL is a NEW live short on the account
             # and an error is a stuck/ghost resting order — both must reach the cycle row,

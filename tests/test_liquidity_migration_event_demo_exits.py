@@ -2352,3 +2352,126 @@ def test_account_closed_pnl_does_not_merge_distinct_orderidless_legs() -> None:
     assert len(rows) == 2  # both legs kept (no content-tuple merge)
     backfill = _orphan_close_pnl_from_records(trade, now_ms=now, records=rows)
     assert backfill["exit_fee_usdt"] == pytest.approx(0.3)  # 0.1 + 0.2 summed, not 0.1
+
+
+def test_pending_entry_recovery_carries_identity_fields() -> None:
+    """ROUND 4: the new-trade recovery branch built the trade row WITHOUT
+    sleeve/strategy_id/component fields. _sleeve_of() defaults an empty sleeve
+    to "short", so a recovered CONTINUOUS entry was mis-filed into the erased
+    short sleeve's ledger — invisible to the continuous cycle's exits and
+    rebalance — and a component row without its weight would be resized to
+    full base notional. The identity fields ride the ORDER row for exactly
+    this path."""
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "lm-en-cp3-AAA-1",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "cf-AAAUSDT-1700000000000-p3",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": False,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 0.0,
+                "status": "submitted_unconfirmed",
+                "trade_side": "short",
+                "signal_ts_ms": 1_700_000_000_000,
+                "equity_usdt": 10_000.0,
+                "tick_size": 0.1,
+                "qty_step": 0.1,
+                "stop_price": 112.0,
+                "take_profit_price": 80.0,
+                "sleeve": "continuous",
+                "strategy_id": "continuous_fade_v1",
+                "component": "p3",
+                "component_weight": 0.30,
+                "filled_qty": "",
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
+
+    trades, _order_updates = _reconcile_pending_order_fills(
+        orders,
+        pl.DataFrame(),
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert len(trades) == 1
+    recovered = trades[0]
+    assert recovered["sleeve"] == "continuous"
+    assert recovered["strategy_id"] == "continuous_fade_v1"
+    assert recovered["component"] == "p3"
+    assert float(recovered["component_weight"]) == 0.30
+
+
+def test_pending_entry_fill_not_double_added_onto_adopted_row() -> None:
+    """ROUND 4: if ws_risk ADOPTED the trade from the venue POSITION, the
+    adopted qty already includes this order's fill. On the first reconcile
+    pass the order row still carries filled_qty="" (previous=0), so the
+    delta-add would add the full fill a SECOND time onto the adopted row —
+    the same double-book class as the round-1 hedge BUY finding. The order
+    must be marked reconciled while the adopted trade qty stays put."""
+    existing = pl.DataFrame(
+        [
+            {
+                "trade_id": "cf-AAAUSDT-1700000000000-p3",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+                "notional_usdt": 100.0,
+                "entry_leverage": 2.0,
+                "equity_usdt": 10_000.0,
+                "entry_ts_ms": 1_700_000_000_000,
+                "submit_mode": "adopted_recovered",
+            }
+        ]
+    )
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "lm-en-cp3-AAA-1",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "cf-AAAUSDT-1700000000000-p3",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": False,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 100.0,
+                "status": "submitted_unconfirmed",
+                "trade_side": "short",
+                "signal_ts_ms": 1_700_000_000_000,
+                "equity_usdt": 10_000.0,
+                "tick_size": 0.1,
+                "qty_step": 0.1,
+                "stop_price": 112.0,
+                "take_profit_price": 80.0,
+                "filled_qty": "",  # first reconcile pass after adoption
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        existing,
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    # No trade-row qty mutation; the order row records its cumulative fill so
+    # the NEXT pass delta-adds normally (delta = cumulative - recorded = 0).
+    assert trades == []
+    assert order_updates[0]["status"] == "filled"
+    assert order_updates[0]["filled_qty"] == "1"

@@ -300,6 +300,20 @@ def _unit_states(units: list[str]) -> dict[str, str]:
     return states
 
 
+def _unit_enabled(unit: str) -> bool:
+    """systemctl is-enabled, fail-quiet (a watchdog must never crash)."""
+    try:
+        return (
+            subprocess.run(
+                ["systemctl", "is-enabled", "--quiet", unit],
+                capture_output=True, text=True, timeout=10,
+            ).returncode
+            == 0
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _default_units_for_toggles() -> list[str]:
     units = [
         "liquidity-migration-bybit-risk.service",
@@ -343,6 +357,12 @@ def _default_units_for_toggles() -> list[str]:
         )
     if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         units.append("liquidity-migration-bybit-continuous-paper.service")
+    # The depth collector is operator-gated (deploy installs but never enables
+    # it). When the operator HAS enabled it, monitor it like the liquidation
+    # leg — same unbuyable-history argument; it could reach terminal 'failed'
+    # with nothing paging (round 4).
+    if _unit_enabled("liquidity-migration-depth-collector.service"):
+        units.append("liquidity-migration-depth-collector.service")
     return units
 
 
@@ -443,6 +463,38 @@ def gather_liquidation_capture_alerts(
                 f"liquidation capture STALE — newest JSONL {age_h:.1f}h old (> {max_age_hours:.0f}h). "
                 f"The collector unit is alive-but-not-writing (it cannot reach systemd 'failed'); "
                 f"check its journal. Every silent hour is forward history lost."
+            ),
+        )]
+    return []
+
+
+def gather_depth_capture_alerts(
+    *, depth_root: Path, now_ms: int, max_age_hours: float
+) -> list[Alert]:
+    """Freshness of the forward depth capture, gated on the operator having
+    enabled the collector (round 4 — it was monitored by nothing). Mirrors the
+    liquidation gather: a stale newest-JSONL mtime means capture stopped while
+    the unit looks alive; Bybit has no historical book data, so every silent
+    hour is deployed-venue capacity data lost forever."""
+    if not depth_root.exists() or not _unit_enabled("liquidity-migration-depth-collector.service"):
+        return []
+    try:
+        newest_mtime_ms = max(
+            (int(p.stat().st_mtime * 1000) for p in depth_root.glob("*/*.jsonl")),
+            default=0,
+        )
+    except OSError:
+        newest_mtime_ms = 0
+    if newest_mtime_ms <= 0:
+        return []  # nothing ever captured (collector just enabled) — the unit check covers a dead service
+    age_h = (now_ms - newest_mtime_ms) / 3_600_000.0
+    if age_h > max_age_hours:
+        return [Alert(
+            key="depth_capture_stale",
+            severity=WARNING,
+            message=(
+                f"depth capture STALE — newest JSONL {age_h:.1f}h old (> {max_age_hours:.0f}h) "
+                f"with the collector enabled. Check its journal; Bybit book history is unbuyable."
             ),
         )]
     return []
@@ -615,6 +667,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="forward liquidation-capture root for the newest-JSONL freshness check ('' to skip)")
     p.add_argument("--max-liquidation-age-hours", type=float, default=3.0,
                    help="warn if the newest captured liquidation JSONL is older than this")
+    p.add_argument("--depth-root", default="data/depth",
+                   help="forward depth-capture root for the newest-JSONL freshness check; "
+                        "only checked when the depth collector unit is enabled ('' to skip)")
+    p.add_argument("--max-depth-age-hours", type=float, default=3.0,
+                   help="warn if the newest captured depth JSONL is older than this (enabled collector only)")
     p.add_argument("--max-rmom-stale-days", type=float, default=2.0,
                    help="alert if the continuous rmom signal gate's newest day is older than this (silent-blackout guard)")
     p.add_argument("--settle-coin", default="USDT", help="settle coin for the Bybit get_positions stop-protection check")
@@ -652,6 +709,12 @@ def main() -> int:
         alerts.extend(gather_liquidation_capture_alerts(
             liquidations_root=liquidations_root, now_ms=now_ms,
             max_age_hours=args.max_liquidation_age_hours,
+        ))
+    depth_root = Path(args.depth_root) if str(args.depth_root).strip() else None
+    if depth_root is not None:
+        alerts.extend(gather_depth_capture_alerts(
+            depth_root=depth_root, now_ms=now_ms,
+            max_age_hours=args.max_depth_age_hours,
         ))
     if continuous_root is not None:
         alerts.extend(gather_continuous_alerts(

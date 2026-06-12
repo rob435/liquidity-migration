@@ -56,13 +56,10 @@ no_implicit_optional = true
 module = [
     "liquidity_migration.trade_lifecycle",
     "liquidity_migration.kline_store",
-    "liquidity_migration.volume_events",
     "liquidity_migration.volume_events_charts",
-    "liquidity_migration.volume_events_features",
     "liquidity_migration.continuous_events",
     "liquidity_migration.signal_harness",
     "liquidity_migration.universe",
-    "liquidity_migration.volume_features",
 ]
 disable_error_code = ["arg-type"]
 

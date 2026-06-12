@@ -647,3 +647,51 @@ def test_warmstart_loader_keeps_eth_aligned_on_malformed_unit_ret(tmp_path) -> N
     assert eth == [0.02, 0.04]  # 0.03 dropped WITH its unit row — no off-by-one
     # the divergent private loader is gone; the manager's 2f loader is the only path
     assert not hasattr(hedge_runner, "_load_warmstart_eth")
+
+
+def test_armed_run_blocked_when_wallet_equity_unavailable(monkeypatch, tmp_path, capsys) -> None:
+    """ROUND 4: an armed run with no --equity-usdt override must size off the
+    LIVE wallet, never the $10k fallback constant — a failed wallet read blocks
+    the run (nonzero exit -> watchdog pages) instead of silently under/over-
+    hedging a wallet of unknown size."""
+    _setup_runner(monkeypatch, tmp_path, argv=["--submit", "--btc-price", "100000"])
+    monkeypatch.setattr(
+        hedge_runner, "_live_wallet_equity_usdt",
+        lambda: (_ for _ in ()).throw(RuntimeError("wallet read down")),
+    )
+    monkeypatch.setattr(hedge_runner, "compute_hedge_decision", lambda *a, **k: _single_decision(None))
+
+    assert hedge_runner.main() == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "submit_blocked_equity_unavailable"
+    assert out["equity_source"] == "fallback"
+    assert "wallet" in out["error"]
+
+
+def test_armed_run_sizes_off_live_wallet_equity(monkeypatch, tmp_path, capsys) -> None:
+    """ROUND 4 companion: with the wallet readable, the armed run sizes off the
+    live equity (and says so), not the fallback constant."""
+    _setup_runner(monkeypatch, tmp_path, argv=["--submit", "--btc-price", "100000"])
+    monkeypatch.setattr(hedge_runner, "_live_wallet_equity_usdt", lambda: 5_432.0)
+    monkeypatch.setattr(hedge_runner, "compute_hedge_decision", lambda *a, **k: _single_decision(None))
+
+    assert hedge_runner.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "submit_no_action"
+    assert out["equity_usdt"] == 5_432.0
+    assert out["equity_source"] == "wallet"
+
+
+def test_dry_run_keeps_fallback_equity_without_wallet_read(monkeypatch, tmp_path, capsys) -> None:
+    """Dry-run behavior is unchanged: no wallet read, fallback equity."""
+    _setup_runner(monkeypatch, tmp_path, argv=["--btc-price", "100000"])
+
+    def _boom() -> float:
+        raise AssertionError("dry-run must not read the wallet")
+
+    monkeypatch.setattr(hedge_runner, "_live_wallet_equity_usdt", _boom)
+    monkeypatch.setattr(hedge_runner, "compute_hedge_decision", lambda *a, **k: _single_decision(None))
+
+    assert hedge_runner.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["equity_source"] == "fallback"

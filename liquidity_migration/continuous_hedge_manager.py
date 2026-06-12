@@ -21,7 +21,6 @@ Demo only. REAL_MONEY must be false. This is execution evidence, not alpha proof
 from __future__ import annotations
 
 import csv
-import datetime as dt
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -370,5 +369,5 @@ def hedge_order_link_id(now_ms: int, symbol: str = HEDGE_SYMBOL) -> str:
     return _order_link_id(HEDGE_LINK_PREFIX, symbol=symbol, signal_ts_ms=int(now_ms))
 
 
-def utc_today_iso() -> str:
-    return dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+

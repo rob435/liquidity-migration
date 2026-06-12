@@ -40,6 +40,7 @@ from .event_demo import (
     _price_lookup_from_positions,
     _prune_cycle_reports,
     _quantity_text,
+    _ratio_or_zero,
     _risk_order_link_id,
     _risk_reconcile_missing_positions,
     _reconcile_pending_order_fills,
@@ -52,6 +53,7 @@ from .event_demo import (
     _take_profit_price_for_entry,
     _terminalize_stale_pending_entry_orders,
     _telegram_notification_reason,
+    _trade_return,
     _upsert_rows,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
@@ -333,6 +335,14 @@ class EventWebSocketRiskEngine:
         # operator-facing message stops hardcoding equity=$0.00 (audit r3) without
         # adding a wallet call to the 10s heartbeat path.
         self._last_equity_usdt: float = 0.0
+        # High-water marks for the notify REASON filter (round 4): the payload's
+        # exits/stop_repairs/reconciliations slices are cumulative since-start
+        # state, so after the first reconciliation every later alert computed
+        # reason="position_reconciled" — a fresh stop_repair_failed or
+        # untracked_position paged under the wrong header. The reason filter now
+        # sees only rows added since the previous report (the message BODY and
+        # persisted report keep the cumulative slices).
+        self._reason_high_water: dict[str, int] = {}
         # Captured by run(): the one thread allowed to mutate self.state.
         self._consumer_thread_ident: int | None = None
         # Telegram notifications are sent on a background daemon thread so the
@@ -356,6 +366,15 @@ class EventWebSocketRiskEngine:
         self._private_disconnected_since: float | None = None
         self._last_private_reconnect_monotonic = 0.0
         self._private_ws_reconnects = 0
+        # Public ticker stream health (see _maybe_reconnect_public_stream, round 4):
+        # the public socket feeds price_by_symbol for the intrabar stop checks and
+        # had NO reconnect treatment — pybit's permanent give-up froze ticker
+        # prices for the daemon's lifetime (REST reconcile + venue stops bounded
+        # the damage, but tick-latency stop enforcement silently degraded).
+        self._last_ticker_event_monotonic = 0.0
+        self._public_stream_built_monotonic = time.monotonic()
+        self._last_public_reconnect_monotonic = 0.0
+        self._public_ws_reconnects = 0
 
     def _maybe_reconnect_private_stream(self, now: float) -> None:
         """Rebuild the private WS stream when its SOCKET is genuinely down (not merely
@@ -410,6 +429,52 @@ class EventWebSocketRiskEngine:
         )
         if sub_error:
             self.state.errors.append(sub_error)
+
+    def _maybe_reconnect_public_stream(self, now: float) -> None:
+        """Rebuild the public TICKER stream when it has gone silent while symbols
+        are subscribed (round 4). Bybit perp tickers tick near-continuously for a
+        subscribed symbol, so a prolonged silence with live subscriptions means a
+        dead socket (pybit's documented permanent give-up), not a quiet market.
+        Mirrors the private-stream treatment: rebuild past the bound, cooldown
+        against thrash, clear subscribed_symbols so re-subscription is real.
+        REST reconcile + venue-side stops cover the gap; best-effort throughout."""
+        bound = self.risk.private_ws_reconnect_seconds
+        if self.public_stream is None or bound <= 0.0 or not self.state.subscribed_symbols:
+            return
+        last_alive = max(self._last_ticker_event_monotonic, self._public_stream_built_monotonic)
+        silence_bound = max(bound, 60.0)
+        if now - last_alive <= silence_bound or now - self._last_public_reconnect_monotonic <= bound:
+            return
+        self._last_public_reconnect_monotonic = now
+        self._public_ws_reconnects += 1
+        _logger.warning(
+            "public ticker WS silent %.0fs > bound %.0fs with %d subscribed symbols; rebuilding",
+            now - last_alive, silence_bound, len(self.state.subscribed_symbols),
+        )
+        try:
+            close = getattr(self.public_stream, "close", None)
+            if callable(close):
+                close()
+        except Exception:  # noqa: BLE001 - close errors must not break reconcile
+            pass
+        self.public_stream = None
+        resubscribe = set(self.state.subscribed_symbols)
+        self.state.subscribed_symbols = set()
+        stream, error = _call_with_timeout(
+            "public ticker websocket stream reconnect",
+            lambda: BybitPublicTickerStream(
+                category=self.config.exchange.category,
+                testnet=self.config.exchange.testnet,
+                demo=False,
+            ),
+            timeout_seconds=self.risk.stream_start_timeout_seconds,
+        )
+        if error:
+            self.state.errors.append(error)
+            return
+        self.public_stream = stream
+        self._public_stream_built_monotonic = now
+        self.subscribe_tickers(resubscribe | set(self.state.positions_by_symbol))
 
     # ------------------------------------------------------------------
     # Dual-side ledger routing
@@ -912,6 +977,7 @@ class EventWebSocketRiskEngine:
         self.evaluate_symbols(changed_symbols)
 
     def on_ticker_message(self, message: dict[str, Any]) -> None:
+        self._last_ticker_event_monotonic = time.monotonic()
         changed_symbols: set[str] = set()
         for row in _message_rows(message):
             symbol = str(row.get("symbol", ""))
@@ -961,6 +1027,7 @@ class EventWebSocketRiskEngine:
                             filled_qty=filled_qty,
                             exit_price=avg_price,
                             source="order",
+                            fee_usdt=_float(row.get("cumExecFee") or row.get("cum_exec_fee")),
                         )
                     else:
                         updates.extend(
@@ -1016,9 +1083,12 @@ class EventWebSocketRiskEngine:
             link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
             if not link:
                 continue
-            agg = self.state.executions_by_link.setdefault(link, {"filled_qty": 0.0, "value": 0.0})
+            agg = self.state.executions_by_link.setdefault(link, {"filled_qty": 0.0, "value": 0.0, "fee": 0.0})
             agg["filled_qty"] += _float(row.get("execQty"))
             agg["value"] += _float(row.get("execValue")) or _float(row.get("execQty")) * _float(row.get("execPrice"))
+            # Cumulative venue fee for the link — the WS close path stamps it as
+            # exit_fee_usdt; without it a ws-stream close booked fee=0 (round 4).
+            agg["fee"] = agg.get("fee", 0.0) + _float(row.get("execFee"))
             filled_qty = agg["filled_qty"]
             value = agg["value"]
             exit_price = value / filled_qty if filled_qty > 0.0 else 0.0
@@ -1028,6 +1098,7 @@ class EventWebSocketRiskEngine:
                     filled_qty=filled_qty,
                     exit_price=exit_price,
                     source="execution",
+                    fee_usdt=agg.get("fee", 0.0),
                 )
             else:
                 order_updates = self.mark_order_filled_from_execution(
@@ -1046,6 +1117,7 @@ class EventWebSocketRiskEngine:
         filled_qty: float,
         exit_price: float,
         source: str,
+        fee_usdt: float = 0.0,
     ) -> None:
         trade_id = self.state.submitted_link_to_trade_id.get(order_link_id, "")
         if not trade_id or self.state.all_trades.is_empty():
@@ -1084,12 +1156,29 @@ class EventWebSocketRiskEngine:
         exit_price = exit_price if exit_price > 0.0 else _float(order.get("avg_price")) or _float(trade.get("exit_price"))
         exit_reason = str(order.get("exit_reason") or trade.get("exit_reason") or f"{source}_confirmed")
         if fully_filled:
+            # A closed trade must carry gross_trade_return and net_return — the
+            # ws-stream close is the STEADY-STATE close path under
+            # ORDER_SUBMIT_MODE=ws_then_rest, and once status=closed lands the
+            # pending-fill reconciler skips the row, so a missing PnL stamp here
+            # was never backfilled (round 4). Same formula as the cycle exit /
+            # pending-fill close / orphan backfill.
+            entry_price = _float(trade.get("entry_price"))
+            gross_trade_return = (
+                _trade_return(entry_price, exit_price, side=str(trade.get("side") or "short"))
+                if entry_price > 0.0 and exit_price > 0.0
+                else 0.0
+            )
+            notional_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
             trade.update(
                 {
                     "status": "closed",
                     "exit_ts_ms": now_ms,
                     "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
                     "exit_price": exit_price,
+                    "exit_fee_usdt": fee_usdt or _float(order.get("fee_usdt")),
+                    "exit_exec_time_ms": now_ms,
+                    "gross_trade_return": gross_trade_return,
+                    "net_return": gross_trade_return * notional_weight,
                     "exit_reason": exit_reason,
                     "exit_order_link_id": order_link_id,
                     "exit_order_id": order.get("order_id", ""),
@@ -1753,11 +1842,18 @@ class EventWebSocketRiskEngine:
             if decoded_sleeve == "continuous_addon":
                 from .continuous_hedge_manager import (
                     HEDGE_SYMBOL,
+                    HEDGE_SYMBOL_2,
                     ContinuousHedgeConfig,
                     build_hedge_tracking_row,
                 )
 
-                if symbol == HEDGE_SYMBOL and side == "long":
+                # BOTH 2f hedge legs (BTC + ETH) share the hedge link prefix and
+                # the externally-managed safety contract (track, NEVER force-exit).
+                # The old BTC-only check sent an orphaned ETH leg down the generic
+                # recovered path, which stamps adopt stop/TP/3d-hold — ws_risk
+                # would force-exit the leg and the next daily hedge run would
+                # re-buy it, a silent churn loop (round 4).
+                if symbol in (HEDGE_SYMBOL, HEDGE_SYMBOL_2) and side == "long":
                     return build_hedge_tracking_row(
                         ContinuousHedgeConfig(),
                         qty=_float(qty),
@@ -1768,6 +1864,7 @@ class EventWebSocketRiskEngine:
                         order_id="",
                         signal_ts_ms=signal_ts_ms,
                         submit_mode="adopted_recovered",
+                        symbol=symbol,
                     )
             # Rebuild the deterministic trade_id, carrying the continuous re-entry seq so a rebuilt
             # same-signal-window re-entry reconstructs its DISTINCT id (continuous-2). seq=0 (every
@@ -1781,6 +1878,7 @@ class EventWebSocketRiskEngine:
             # link's -x{crc} suffix lets us recover the exact live trade_id by enumerating
             # the known components (round 3) — falling back to the lossy {base}-snipe form
             # when no/ambiguous match.
+            component_fields: dict[str, Any] = {}
             if decoded_sleeve == "continuous" and component_tag:
                 if component_tag == "s":
                     from .continuous_demo import recover_snipe_trade_id_from_link
@@ -1791,6 +1889,21 @@ class EventWebSocketRiskEngine:
                     trade_id = recovered_snipe or (trade_id + "-snipe")
                 else:
                     trade_id += f"-{component_tag}"
+                    # Stamp the ensemble entry-sizing weight back onto the adopted
+                    # row. Without it the daily rebalance defaults the missing
+                    # weight to 1.0 and resizes a 0.10-0.40x component entry to
+                    # FULL base notional — the round-3 CRITICAL re-entering via
+                    # the adoption path (round 4). Unknown/ambiguous tags stay
+                    # un-stamped; the rebalance planner now fail-safes by
+                    # skipping such rows instead of defaulting.
+                    from .continuous_demo import ensemble_component_weight_for_tag
+
+                    component_weight = ensemble_component_weight_for_tag(component_tag)
+                    if component_weight is not None:
+                        component_fields = {
+                            "component": component_tag,
+                            "component_weight": component_weight,
+                        }
             # entry_ts_ms must reflect the actual fill time (Bybit's
             # createdTime) not signal_ts. The cycle's exit logic computes
             # planned_exit_ts_ms = entry_ts_ms + hold_days*MS_PER_DAY and
@@ -1809,6 +1922,7 @@ class EventWebSocketRiskEngine:
                 "status": "open",
                 "qty": qty,
                 "entry_price": entry_price,
+                **component_fields,
                 # Adopted positions carry zero fee/venue-time on the ledger by
                 # default; the demo↔Bybit reconciliation will surface the real
                 # fee as a pnl_gap on this trade, which is the correct semantic
@@ -2194,6 +2308,7 @@ class EventWebSocketRiskEngine:
             # backfill helper the orphan reconciler uses. Observed live as
             # a DRIFT-style close: failed lm-rx, closed trade, null
             # exit_price — broken audit / reconciliation downstream.
+            pnl_fields: dict[str, Any] = {}
             if close_exit_price <= 0.0 and self.private_client is not None:
                 backfill = _orphan_close_pnl_backfill(
                     trade, now_ms=now_ms, trading_client=self.private_client
@@ -2206,6 +2321,32 @@ class EventWebSocketRiskEngine:
                     )
                     close_submit_mode = str(backfill.get("submit_mode") or close_submit_mode)
                     close_exit_order_id = backfill.get("exit_order_id") or close_exit_order_id
+                    # The backfill ALREADY computes the realized-PnL fields; they
+                    # were previously extracted for price/time only and the PnL
+                    # was discarded — the closed row carried no gross/net return
+                    # (round 4).
+                    pnl_fields = {
+                        "exit_fee_usdt": _float(backfill.get("exit_fee_usdt")),
+                        "exit_exec_time_ms": int(backfill.get("exit_exec_time_ms") or 0),
+                        "gross_trade_return": _float(backfill.get("gross_trade_return")),
+                        "net_return": _float(backfill.get("net_return")),
+                    }
+            if not pnl_fields and close_exit_price > 0.0:
+                # No backfill ran (the recovered order carried a usable
+                # avg_price): book PnL from it directly — a closed trade must
+                # carry both gross_trade_return and net_return (round 4).
+                entry_price = _float(trade.get("entry_price"))
+                gross_trade_return = (
+                    _trade_return(entry_price, close_exit_price, side=str(trade.get("side") or "short"))
+                    if entry_price > 0.0
+                    else 0.0
+                )
+                pnl_fields = {
+                    "exit_fee_usdt": _float(order.get("fee_usdt")),
+                    "gross_trade_return": gross_trade_return,
+                    "net_return": gross_trade_return
+                    * _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt")),
+                }
             trade.update(
                 {
                     "status": "closed",
@@ -2218,6 +2359,7 @@ class EventWebSocketRiskEngine:
                     "submit_mode": close_submit_mode,
                     "closed_at_ms": close_exit_ts_ms,
                     "updated_at_ms": now_ms,
+                    **pnl_fields,
                 }
             )
             trade_updates.append(trade)
@@ -2300,6 +2442,7 @@ class EventWebSocketRiskEngine:
     def on_idle(self) -> None:
         now = time.monotonic()
         self._maybe_reconnect_private_stream(now)
+        self._maybe_reconnect_public_stream(now)
         self.reconcile_stale_websocket(now)
         if self.risk.rest_reconcile_seconds > 0 and now - self.state.last_reconcile_monotonic >= self.risk.rest_reconcile_seconds:
             self.rest_reconcile()
@@ -2635,10 +2778,34 @@ class EventWebSocketRiskEngine:
             self._telegram_thread.start()
         self._telegram_queue.put((key, text))
 
+    def _reason_payload_view(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Shallow payload clone whose cumulative state slices are reduced to the
+        rows added since the previous report, for the notify REASON only (round
+        4). Marks advance per report; on the rare un-recorded failed send the
+        same rows no longer re-derive the reason (accepted fire-once tradeoff —
+        the persisted report and ledger stay authoritative)."""
+        view = dict(payload)
+        for key, rows, evicted in (
+            ("exits", self.state.exits, self.state.exits_evicted),
+            ("exit_orders", self.state.orders, self.state.orders_evicted),
+            ("stop_repairs", self.state.repairs, self.state.repairs_evicted),
+            ("reconciliations", self.state.reconciliations, self.state.reconciliations_evicted),
+            (
+                "pending_fill_reconciliations",
+                self.state.pending_fill_reconciliations,
+                self.state.pending_fill_reconciliations_evicted,
+            ),
+        ):
+            total = len(rows) + evicted
+            fresh = max(total - self._reason_high_water.get(key, 0), 0)
+            self._reason_high_water[key] = total
+            view[key] = rows[-fresh:] if fresh > 0 else []
+        return view
+
     def maybe_notify(self, payload: dict[str, Any]) -> tuple[bool, str]:
         if not self.risk.telegram:
             return False, "disabled"
-        reason = _telegram_notification_reason(payload)
+        reason = _telegram_notification_reason(self._reason_payload_view(payload))
         if not reason:
             return False, "quiet_no_material_event"
         key = _telegram_dedupe_key(reason, payload)

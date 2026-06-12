@@ -190,7 +190,7 @@ When the new IP or host fingerprint is stable, update **in lockstep**:
 Run before push:
 
 ```bash
-.venv/bin/python -m ruff check liquidity_migration tests
+.venv/bin/python -m ruff check liquidity_migration tests scripts
 .venv/bin/python -m pytest -q tests/test_runtime_scripts.py -k vps_deploy
 ```
 

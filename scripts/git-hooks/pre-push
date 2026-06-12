@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Mandatory pre-push gates (CLAUDE.md): ruff + the full pytest suite.
+# There is NO GitHub-side full-suite CI — the only workflow is vps-deploy.yml,
+# which deploys straight to the live VPS on push to main. This hook is the
+# only gate between a bad commit and a live deploy.
+# Bypass with `git push --no-verify` if you truly need to (don't).
+#
+# CANONICAL SOURCE (round 4): this file is the tracked copy; .git/hooks/ is
+# untracked, so a fresh clone or second machine silently has NO gate. Install:
+#   cp scripts/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    PYTHON_BIN="$(command -v python3 || command -v python)"
+fi
+
+echo "[pre-push] ruff check..."
+"$PYTHON_BIN" -m ruff check liquidity_migration tests scripts
+
+echo "[pre-push] pytest -q..."
+"$PYTHON_BIN" -m pytest -q
+
+echo "[pre-push] OK — pushing."

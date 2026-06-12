@@ -86,51 +86,6 @@ def _clean_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
     return cleaned
 
 
-def _clean_backtest_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
-    """Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)
-    to the same dict shape that `_clean_trades` produces for paper/demo. The
-    backtest carries `entry_signal_ts_ms` (the signal-bar time) rather than the
-    paper ledger's `signal_ts_ms`; entry/exit times in the backtest are
-    deterministic from the strategy clock, not real wall-clock, so they are the
-    primary pairing keys."""
-    if trades.is_empty():
-        return []
-    cleaned: list[dict[str, Any]] = []
-    for row in trades.to_dicts():
-        symbol = str(row.get("symbol") or "")
-        side = _normalized_side(row.get("side"))
-        entry_price = _float(row.get("entry_price"))
-        if not symbol or side not in {"long", "short"} or entry_price <= 0.0:
-            continue
-        exit_price = _float(row.get("exit_price"))
-        exit_ts_ms = _int(row.get("exit_ts_ms"))
-        cleaned.append(
-            {
-                "trade_id": str(row.get("trade_id") or ""),
-                "symbol": symbol,
-                "side": side,
-                "signal_ts_ms": _int(row.get("entry_signal_ts_ms") or row.get("signal_ts_ms")),
-                "entry_ts_ms": _int(row.get("entry_ts_ms")),
-                # No exec_time / fee on the backtest path — it's a strategy-clock
-                # model with idealized fills + a per-side cost penalty baked into
-                # cost_return. Fee residual will be backtest gross vs paper gross,
-                # which by construction should match exactly.
-                "entry_exec_time_ms": 0,
-                "entry_price": entry_price,
-                "entry_fee_usdt": 0.0,
-                "qty": 0.0,  # backtest doesn't track qty; uses notional_weight
-                "notional_weight": _float(row.get("notional_weight")),
-                "status": "closed" if exit_price > 0.0 and exit_ts_ms > 0 else "open",
-                "exit_price": exit_price,
-                "exit_ts_ms": exit_ts_ms,
-                "exit_exec_time_ms": 0,
-                "exit_reason": str(row.get("exit_reason") or ""),
-                "exit_fee_usdt": 0.0,
-                "gross_trade_return": _float(row.get("gross_trade_return")),
-                "net_return": _float(row.get("net_return")),
-            }
-        )
-    return cleaned
 
 
 def _entry_slippage_bps(*, side: str, paper_entry: float, demo_entry: float) -> float:

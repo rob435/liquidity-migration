@@ -361,27 +361,6 @@ def _filter_universe(part: pl.DataFrame, config: TradeLifecycleConfig) -> pl.Dat
     return filtered
 
 
-def _rank_lookup(
-    features: pl.DataFrame,
-    *,
-    score_col: str,
-    entry_delay_hours: int,
-    config: TradeLifecycleConfig,
-) -> dict[tuple[str, int], float]:
-    output: dict[tuple[str, int], float] = {}
-    if features.is_empty() or score_col not in features.columns:
-        return output
-    for part in features.sort(["ts_ms", "symbol"]).partition_by("ts_ms", maintain_order=True):
-        part = _filter_universe(part, config)
-        values = part.select(["symbol", score_col]).drop_nulls().sort(score_col)
-        values = values.filter(pl.col(score_col).is_finite())
-        if values.height < 2:
-            continue
-        exit_check_ts_ms = int(part["ts_ms"][0]) + entry_delay_hours * MS_PER_HOUR
-        denom = max(values.height - 1, 1)
-        for rank, row in enumerate(values.to_dicts()):
-            output[(str(row["symbol"]), exit_check_ts_ms)] = rank / denom
-    return output
 
 
 def _rank_exit_hit(

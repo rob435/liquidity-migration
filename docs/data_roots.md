@@ -63,8 +63,9 @@ The live Bybit demo runner intentionally uses a separate operational root,
 **on the VPS** (these are not local on the research machine):
 
 ```text
-/opt/liquidity-migration/data/bybit-demo-event
-/opt/liquidity-migration/data/bybit-paper-event
+/opt/liquidity-migration/data/bybit-demo-event            # ws_risk ENGINE root (heartbeat cycles + reports;
+                                                          # its legacy short ledger is inert history)
+/opt/liquidity-migration/data/bybit-paper-event           # INERT legacy (erased short paper root, no writer)
 /opt/liquidity-migration/data/bybit-long-demo-event
 /opt/liquidity-migration/data/bybit-long-paper-event
 /opt/liquidity-migration/data/bybit-continuous-demo-event

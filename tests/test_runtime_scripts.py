@@ -1072,3 +1072,119 @@ def test_unit_execstart_args_parse_against_their_script_parsers() -> None:
         checked += 1
     # the units this test exists for must actually be covered
     assert checked >= 4, f"expected at least 4 argv-driven units, checked {checked}"
+
+
+def test_vps_deploy_paths_filter_covers_every_unit_invoked_script() -> None:
+    """Round 4: the workflow paths-filter class bit twice (configs/ in round 2,
+    hedge warmstart CSVs in round 3) because the filter is hand-listed with no
+    structural guard. Derive the required entries from the units themselves —
+    every repo-relative script referenced by a unit (ExecStart + continuation
+    lines) and every scripts/* file a run_*.sh wrapper invokes must be in the
+    workflow paths filter, else a change to it deploys NOTHING."""
+    import re
+
+    repo = Path(__file__).resolve().parents[1]
+    workflow = (repo / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
+    script_ref = re.compile(r"(?:/opt/liquidity-migration/)?(scripts/[A-Za-z0-9_./-]+\.(?:py|sh))")
+
+    required: set[str] = set()
+    for unit in sorted((repo / "deploy" / "systemd").glob("liquidity-migration-*.service")):
+        for line in unit.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            for match in script_ref.findall(line):
+                if (repo / match).exists():
+                    required.add(match)
+    for wrapper in sorted((repo / "scripts").glob("run_*.sh")):
+        for line in wrapper.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            for match in script_ref.findall(line):
+                if (repo / match).exists():
+                    required.add(match)
+    # Runtime data/config files units read at startup or on every timer run.
+    required |= {"deploy/sleeves.env", "deploy/lib_sleeves.sh", "configs/volume_alpha.default.yaml"}
+
+    missing = sorted(p for p in required if f'"{p}"' not in workflow)
+    assert not missing, f"vps-deploy.yml paths filter is missing unit-invoked files: {missing}"
+    # Globbed entries the derivation above can't see.
+    assert '"deploy/systemd/*.service"' in workflow
+    assert '"deploy/systemd/*.timer"' in workflow
+    # The armed hedge reads these CSVs every run; the operator-pending
+    # warmstart-refresh commit deploys ONLY if this entry stays (round 3/4).
+    assert '"deploy/hedge_warmstart/*.csv"' in workflow
+
+
+def _unit_environment(unit_path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line in unit_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("Environment=") and "=" in line[len("Environment="):]:
+            key, value = line[len("Environment="):].split("=", 1)
+            env[key] = value.strip('"')
+    return env
+
+
+@pytest.mark.parametrize(
+    ("unit_name", "wrapper_name"),
+    [
+        ("liquidity-migration-bybit-continuous-demo.service", "run_bybit_continuous_demo_event_engine.sh"),
+        ("liquidity-migration-bybit-continuous-paper.service", "run_bybit_continuous_demo_event_engine.sh"),
+        ("liquidity-migration-bybit-long-demo.service", "run_bybit_long_demo_event_engine.sh"),
+        ("liquidity-migration-bybit-long-paper.service", "run_bybit_long_demo_event_engine.sh"),
+        ("liquidity-migration-bybit-risk.service", "run_bybit_demo_ws_risk_engine.sh"),
+    ],
+)
+def test_wrapper_unit_env_builds_argv_that_parses(unit_name: str, wrapper_name: str, tmp_path: Path) -> None:
+    """Round 4: the ExecStart<->argparse parity test deliberately skips the
+    env-driven run_*.sh wrapper units — so a dropped/renamed CLI flag bricked
+    the ORDER-SUBMITTING daemon at restart instead of failing the pre-restart
+    smoke gate. Run each wrapper with PYTHON_BIN pointed at an argv-capturing
+    stub under the unit's own Environment= values, then parse the captured argv
+    with the real CLI parser."""
+    import os
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[1]
+    unit_path = repo / "deploy" / "systemd" / unit_name
+    if not unit_path.exists():
+        pytest.skip(f"{unit_name} not present")
+    argv_out = tmp_path / "argv.bin"
+    stub = tmp_path / "python_stub.sh"
+    stub.write_text(f"#!/usr/bin/env bash\nprintf '%s\\0' \"$@\" > {argv_out}\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    env = {**os.environ, **_unit_environment(unit_path)}
+    env["PYTHON_BIN"] = str(stub)
+    # The wrappers fail loud on missing telegram/API creds (correct on the box,
+    # where the EnvironmentFile provides them) — supply dummies here. The stub
+    # never reaches the network.
+    env.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
+    env.setdefault("TELEGRAM_CHAT_ID", "1")
+    env.setdefault("BYBIT_DEMO_API_KEY", "test-key")
+    env.setdefault("BYBIT_DEMO_API_SECRET", "test-secret")
+
+    # Daemon-mode wrappers exec the stub and return immediately; the legacy
+    # single-cycle loop (USE_DAEMON=0, the long paper unit) loops forever, so a
+    # timeout there is expected — the first iteration already captured argv.
+    try:
+        result = subprocess.run(
+            ["bash", str(repo / "scripts" / wrapper_name)],
+            env=env, cwd=repo, capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, f"{wrapper_name} failed under {unit_name} env: {result.stderr}"
+    except subprocess.TimeoutExpired:
+        assert argv_out.exists(), f"{wrapper_name} looped without ever invoking PYTHON_BIN"
+    raw = argv_out.read_bytes().decode("utf-8")
+    tokens = [t for t in raw.split("\0") if t]
+    assert tokens[:2] == ["-m", "liquidity_migration"], tokens[:4]
+
+    from liquidity_migration.cli import build_parser
+
+    try:
+        build_parser().parse_args(tokens[2:])
+    except SystemExit as exc:
+        raise AssertionError(
+            f"{unit_name} -> {wrapper_name}: wrapper argv does not parse against the CLI "
+            f"(exit {exc.code}): {tokens[2:]}"
+        ) from exc

@@ -826,10 +826,14 @@ def run_long_native_demo_cycle(
             "report_dir": str(report_dir),
         }
 
-        telegram_sent, telegram_error = _maybe_long_notify(payload, enabled=demo.telegram)
-        cycle_row["telegram_sent"] = telegram_sent
-        cycle_row["telegram_error"] = telegram_error
-        mark_stage("telegram")
+        # Telegram moves OUTSIDE the cycle file lock (round 4 — the same
+        # lock-held-I/O contract the continuous sleeve adopted in the solo
+        # sweep): the send can stall up to its 10s timeout and must never hold
+        # the cycle lock through it. The persisted cycle row below keeps its
+        # schema with quiet defaults; the live outcome rides on the returned
+        # payload.
+        cycle_row["telegram_sent"] = False
+        cycle_row["telegram_error"] = ""
 
         # Persist cycle telemetry — matches the short sleeve's event_demo write path.
         # Without this the long sleeve has zero observability: no cycle history,
@@ -863,7 +867,13 @@ def run_long_native_demo_cycle(
         cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row
 
-        return payload
+    # Per-cycle telegram AFTER the ledger writes and OUTSIDE the cycle file lock
+    # (round 4); exception-isolated inside _maybe_long_notify.
+    telegram_sent, telegram_error = _maybe_long_notify(payload, enabled=demo.telegram)
+    cycle_row["telegram_sent"] = telegram_sent
+    if telegram_error:
+        cycle_row["telegram_error"] = telegram_error
+    return payload
 
 
 def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:

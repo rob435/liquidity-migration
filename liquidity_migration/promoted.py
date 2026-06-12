@@ -81,6 +81,10 @@ class ContinuousRebalanceCandidate:
     research_note: str
 
 
+# NOTE on *_artifact_root fields below: the C:\Users\... paths are HISTORICAL —
+# they identify the originating research box's artifact dirs at banking time and
+# exist on no current machine. They are provenance labels, not live paths;
+# recover the artifacts via git history / docs/research_summary.md (round 4).
 CONTINUOUS_OVERLAY_OPERATING_CANDIDATE = ContinuousOverlayCandidate(
     name="fresh_pop15_pop25_cap22_13_binance_pnl_m50",
     status="research-stage demo-watch candidate; not promoted and not real-money",
@@ -123,7 +127,10 @@ CONTINUOUS_STANDALONE_RETURN_CANDIDATE = ContinuousStandaloneCandidate(
 
 CONTINUOUS_REBALANCE_BASE_CANDIDATE = ContinuousRebalanceCandidate(
     name="q25_liq500k_btcup_turn4_pop4_decomp_rebalance_w90_tv25_max4_dd4_trend180_hurdle2",
-    status="research-stage stress-passing implementation target; not promoted, not paper-ready, not real-money",
+    status=(
+        "research-stage; superseded as implementation target by continuous_ensemble_v1 "
+        "(2026-06-10) — kept as the banked single-component receipt; not promoted, not real-money"
+    ),
     signal="rmom q25 + max_ret168 D9 + BTC 30d uptrend + turnover spike >=4x and current 1h pop >=4%",
     portfolio_rule={
         "accounting": "decomposed_daily_rebalance",

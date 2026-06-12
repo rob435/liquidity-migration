@@ -92,29 +92,6 @@ def _event_risk_report_path(payload: dict) -> Path:
     return Path(payload["report_dir"]) / filename
 
 
-def _event_demo_timing_text(cycle: dict) -> str:
-    try:
-        elapsed_ms = float(cycle.get("cycle_elapsed_ms") or cycle.get("cycle_elapsed_pre_persist_ms"))  # type: ignore[arg-type]  # dict value; guarded by except
-    except (TypeError, ValueError):
-        elapsed_ms = 0.0
-    timing_items: list[tuple[str, float]] = []
-    for key, value in cycle.items():
-        if not key.startswith("timing_") or not key.endswith("_ms"):
-            continue
-        try:
-            timing_items.append((key.removeprefix("timing_").removesuffix("_ms"), float(value)))
-        except (TypeError, ValueError):
-            continue
-    parts = [f"elapsed={elapsed_ms / 1000.0:.1f}s"] if elapsed_ms > 0 else []
-    if timing_items:
-        # Top-3 slowest stages, descending. Makes it obvious from journalctl
-        # which phase to target next (klines vs entries vs reconciles).
-        top = sorted(timing_items, key=lambda item: item[1], reverse=True)[:3]
-        parts.append("slowest=" + ",".join(f"{name}:{ms / 1000.0:.1f}s" for name, ms in top))
-    workers = cycle.get("entries_parallel_workers")
-    if workers and int(workers) > 1:
-        parts.append(f"parallel_workers={int(workers)}")
-    return (" ".join(parts) + " ") if parts else ""
 
 
 def _event_risk_payload_material(payload: dict) -> bool:
@@ -1216,12 +1193,6 @@ def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
-def _csv_int(value: str | None, default: tuple[int, ...]) -> tuple[int, ...]:
-    return tuple(int(item) for item in _csv_str(value, tuple(str(item) for item in default)))
-
-
-def _csv_float(value: str | None, default: tuple[float, ...]) -> tuple[float, ...]:
-    return tuple(float(item) for item in _csv_str(value, tuple(str(item) for item in default)))
 
 
 def _universe_config_from_args(base: UniverseConfig, args: argparse.Namespace) -> UniverseConfig:

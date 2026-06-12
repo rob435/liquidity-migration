@@ -733,90 +733,6 @@ def _split_qty_for_max_order_size(
 
 
 
-def _filter_pending_entry_orders(
-    candidates: list[dict[str, Any]],
-    orders: pl.DataFrame,
-    *,
-    now_ms: int,
-) -> tuple[list[dict[str, Any]], int]:
-    if not candidates:
-        return candidates, 0
-    pending_trade_ids, pending_symbols = _pending_order_refs(orders, reduce_only=False, now_ms=now_ms)
-    kept: list[dict[str, Any]] = []
-    skipped = 0
-    for candidate in candidates:
-        if str(candidate.get("trade_id", "")) in pending_trade_ids or str(candidate.get("symbol", "")) in pending_symbols:
-            skipped += 1
-            continue
-        kept.append(candidate)
-    return kept, skipped
-
-
-def _filter_live_position_entry_orders(
-    candidates: list[dict[str, Any]],
-    live_position_symbols: set[str],
-) -> tuple[list[dict[str, Any]], int]:
-    if not candidates or not live_position_symbols:
-        return candidates, 0
-    kept: list[dict[str, Any]] = []
-    skipped = 0
-    for candidate in candidates:
-        if str(candidate.get("symbol", "")) in live_position_symbols:
-            skipped += 1
-            continue
-        kept.append(candidate)
-    return kept, skipped
-
-
-def _filter_live_open_entry_orders(
-    candidates: list[dict[str, Any]],
-    live_order_symbols: set[str],
-) -> tuple[list[dict[str, Any]], int]:
-    if not candidates or not live_order_symbols:
-        return candidates, 0
-    kept: list[dict[str, Any]] = []
-    skipped = 0
-    for candidate in candidates:
-        if str(candidate.get("symbol", "")) in live_order_symbols:
-            skipped += 1
-            continue
-        kept.append(candidate)
-    return kept, skipped
-
-
-def _filter_live_open_exit_orders(
-    exits: list[dict[str, Any]],
-    live_order_symbols: set[str],
-) -> tuple[list[dict[str, Any]], int]:
-    if not exits or not live_order_symbols:
-        return exits, 0
-    kept: list[dict[str, Any]] = []
-    skipped = 0
-    for exit_plan in exits:
-        if str(exit_plan.get("symbol", "")) in live_order_symbols:
-            skipped += 1
-            continue
-        kept.append(exit_plan)
-    return kept, skipped
-
-
-def _filter_pending_exit_orders(
-    exits: list[dict[str, Any]],
-    orders: pl.DataFrame,
-    *,
-    now_ms: int,
-) -> tuple[list[dict[str, Any]], int]:
-    if not exits:
-        return exits, 0
-    pending_trade_ids, pending_symbols = _pending_order_refs(orders, reduce_only=True, now_ms=now_ms)
-    kept: list[dict[str, Any]] = []
-    skipped = 0
-    for exit_plan in exits:
-        if str(exit_plan.get("trade_id", "")) in pending_trade_ids or str(exit_plan.get("symbol", "")) in pending_symbols:
-            skipped += 1
-            continue
-        kept.append(exit_plan)
-    return kept, skipped
 
 
 def _pending_order_refs(orders: pl.DataFrame, *, reduce_only: bool, now_ms: int) -> tuple[set[str], set[str]]:
@@ -842,19 +758,6 @@ def _pending_order_refs(orders: pl.DataFrame, *, reduce_only: bool, now_ms: int)
             symbols.add(symbol)
     return trade_ids, symbols
 
-
-def _free_entry_slots(max_active: int, open_trades: pl.DataFrame, orders: pl.DataFrame, *, now_ms: int) -> int:
-    """Entry slots still available under max_active = max_active - open trade rows - in-flight entry
-    orders that have not yet become trade rows.
-
-    Counting only ``open_trades.height`` would let an entry whose place_order succeeded with the fill
-    UNCONFIRMED (a pending entry ORDER with no trade row) leak a slot, so the live position count could
-    transiently exceed max_active (EXEC-4). A partial fill (which DOES have a trade row) must not be
-    double-counted, so only pending-ENTRY symbols ABSENT from open_trades are subtracted."""
-    open_symbols = set(open_trades["symbol"].to_list()) if not open_trades.is_empty() else set()
-    _ids, pending_entry_symbols = _pending_order_refs(orders, reduce_only=False, now_ms=now_ms)
-    inflight = len(pending_entry_symbols - open_symbols)
-    return max(int(max_active) - open_trades.height - inflight, 0)
 
 
 
@@ -1508,18 +1411,6 @@ def _trade_return(entry_price: float, exit_price: float, *, side: str) -> float:
     return 0.0
 
 
-def _row_realized_return(row: dict[str, Any]) -> float | None:
-    for key in ("net_return", "gross_trade_return"):
-        if key in row and row.get(key) not in (None, ""):
-            value = _float(row.get(key))
-            if math.isfinite(value):
-                return value
-    entry_price = _float(row.get("entry_price"))
-    exit_price = _float(row.get("exit_price"))
-    side = str(row.get("side") or "short")
-    if entry_price <= 0.0 or exit_price <= 0.0:
-        return None
-    return _trade_return(entry_price, exit_price, side=side)
 
 
 def _bool(value: Any) -> bool:
@@ -1544,18 +1435,6 @@ def _quantity_text(value: float) -> str:
     return _decimal_text(Decimal(f"{max(value, 0.0):.12f}"))
 
 
-def _empty_skip_counts() -> dict[str, int]:
-    return {
-        "not_ready": 0,
-        "stale": 0,
-        "stop_pressure": 0,
-        "realized_loss_pressure": 0,
-        "already_traded": 0,
-        "active_symbol": 0,
-        "cooldown": 0,
-        "no_entry_bar": 0,
-        "duplicate_symbol": 0,
-    }
 
 
 def _empty_klines() -> pl.DataFrame:

@@ -15,6 +15,14 @@ EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env
 EnvironmentFile=-/etc/liquidity-migration/sleeves.env
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Hardening + memory-cap parity with the sibling units (round 4): handles
+# credentials and pings external URLs as root.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration
+MemoryMax=512M
 # Alerts on daemon-down/hung, an UNPROTECTED open position (no/wrong venue
 # stopLoss), ledger<->venue mismatch, WS feed stall, and exchange errors so the
 # operator can manually close. Exits 0 always (a watchdog must never crash-loop).

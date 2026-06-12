@@ -90,3 +90,27 @@ def test_pass_after_common_window_matures() -> None:
     payload = _payload(daily_days=31, daily_latest=today, cont_days=31,
                        cont_latest=today, common_days=31, ok=True)
     assert "continuous-vs-daily forward: PASS" in mod.format_message(payload)
+
+
+def test_main_exits_nonzero_when_attempted_send_fails(monkeypatch, tmp_path) -> None:
+    """ROUND 4 (pins the round-3 fix): the watchdog monitors this oneshot on
+    the premise that a failed ATTEMPTED telegram send exits nonzero. Exiting 0
+    meant a STALE/FAIL day with Telegram down vanished silently."""
+    module = _load_module()
+    today = _today_ms()
+    stale = _payload(
+        daily_days=40, daily_latest=today, cont_days=40, cont_latest=today - 5 * MS_PER_DAY,
+        common_days=40, ok=True,
+    )
+    monkeypatch.setattr(module, "run_continuous_vs_daily_forward_comparison", lambda *a, **k: stale)
+    monkeypatch.setattr(module, "send_telegram_message", lambda *a, **k: False)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["continuous_forward_report.py", "--daily-data-root", str(tmp_path),
+         "--continuous-data-root", str(tmp_path), "--telegram"],
+    )
+    assert module.main() == 1
+
+    # And exit 0 when the send goes through.
+    monkeypatch.setattr(module, "send_telegram_message", lambda *a, **k: True)
+    assert module.main() == 0

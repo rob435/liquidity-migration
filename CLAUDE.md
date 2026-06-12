@@ -44,6 +44,14 @@ push to `main` auto-deploys to the live VPS (`.github/workflows/vps-deploy.yml`,
 which emails the operator on failure), pushing broken code is operator pain. No
 exceptions.
 
+The hook's canonical tracked source is `scripts/git-hooks/pre-push`
+(`.git/hooks/` is untracked, so a fresh clone has NO gate). Install on any new
+clone/machine:
+
+```bash
+cp scripts/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+```
+
 ## Working here
 
 - Project skills in `.claude/skills/` auto-load by description when relevant

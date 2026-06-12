@@ -55,14 +55,21 @@ unset GITHUB_TOKEN
 # Capture the previously-deployed commit BEFORE checkout — used below to decide
 # whether the dependency manifests changed and the venv needs a pip refresh.
 previous_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
-git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
-
 if [ -n "$EXPECTED_COMMIT" ]; then
-  actual_commit="$(git rev-parse HEAD)"
-  if [ "$actual_commit" != "$EXPECTED_COMMIT" ]; then
-    echo "Refusing deploy: expected commit $EXPECTED_COMMIT but VPS has $actual_commit" >&2
+  # Deploy EXACTLY the commit that triggered this run, not whatever the remote
+  # branch head is by fetch time (round 4): with the old check-after-checkout, a
+  # second push landing in the trigger->fetch window failed the run AFTER the
+  # checkout — box left disk=newer / processes=old, and if the second push was
+  # docs-only (outside the workflow paths filter) no later run ever redeployed
+  # the first commit. Each run now deploys its own SHA; a queued newer run then
+  # moves the box forward.
+  if ! git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH"; then
+    echo "Refusing deploy: expected commit $EXPECTED_COMMIT is not on $REMOTE/$BRANCH" >&2
     exit 1
   fi
+  git checkout -B "$BRANCH" "$EXPECTED_COMMIT"
+else
+  git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 fi
 
 if [ -x .venv/bin/python ]; then
@@ -176,6 +183,13 @@ for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liqu
     rm -f "/etc/systemd/system/$_retired"
 done
 systemctl daemon-reload
+# Restart already-running repo timers (round 4): on several systemd versions an
+# ACTIVE timer does not reschedule a changed OnCalendar= until restarted, so a
+# cadence edit silently kept firing on the old schedule. try-restart is a no-op
+# for inactive/disabled timers; the per-toggle enables below start those fresh.
+for unit in deploy/systemd/liquidity-migration-*.timer; do
+    systemctl try-restart "$(basename "$unit")" 2>/dev/null || true
+done
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS

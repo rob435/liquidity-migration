@@ -256,6 +256,7 @@ def plan_continuous_rebalance_resizes(
     target_scale: float,
     min_resize_notional_usdt: float = 5.0,
     exclude_trade_id_suffixes: tuple[str, ...] = (),
+    component_tags_requiring_weight: tuple[str, ...] = (),
 ) -> list[ContinuousRebalanceResizePlan]:
     """Plan resize orders needed to match a daily rebalance scale.
 
@@ -293,6 +294,14 @@ def plan_continuous_rebalance_resizes(
             continue
         weight = _finite_float(trade.get("component_weight"))
         if weight <= 0.0:
+            # Fail safe: a row whose trade_id carries a recognized ensemble
+            # component suffix but no positive component_weight (a crash-recovery
+            # adoption/reconcile row whose weight stamp was lost) must be SKIPPED,
+            # not defaulted to 1.0 — defaulting resizes a 0.10-0.40x component
+            # entry to FULL base notional (the round-3 CRITICAL re-entering
+            # through the recovery door; round 4).
+            if any(tag and trade_id.endswith(f"-{tag}") for tag in component_tags_requiring_weight):
+                continue
             weight = 1.0
         target = base * scale * weight
         current = qty * price

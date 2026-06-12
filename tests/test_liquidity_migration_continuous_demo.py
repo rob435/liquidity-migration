@@ -2405,3 +2405,86 @@ def test_suborder_link_uniquifies_and_still_decodes() -> None:
     assert decode_entry_order_link_id(resize) == ("continuous", expected_ts, 0, "p3")
     snipe_place = _continuous_suborder_link_id("en-cs", symbol="WIFUSDT", signal_ts_ms=sig, trade_id="STRAT-WIFUSDT-1-p3-snipe")
     assert decode_entry_order_link_id(snipe_place) == ("continuous", expected_ts, 0, "s")
+
+
+def test_cycle_counts_entries_notifies_and_sends_outside_lock(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROUND 4 triple pin. (1) payload["entries"] counted TRADE rows with the
+    ORDER-row status vocabulary ("filled"/"partial"/"planned") that no trade
+    row ever carries — it was permanently 0, so (2) the
+    continuous_entry_executed telegram could never fire for a successful live
+    entry. (3) The send must run OUTSIDE the cycle file lock (lock-held-I/O
+    contract): the lock file must be released by the time the transport runs."""
+    import liquidity_migration.continuous_demo as cd
+    import liquidity_migration.telegram as tg
+    from liquidity_migration.config import ResearchConfig
+
+    cfg = ContinuousDemoCycleConfig(
+        submit_orders=False,
+        record_dry_run=True,
+        telegram=True,
+    )
+    root = tmp_path / "continuous-entry-notify"
+    now = 1_700_000_000_000
+
+    def fake_resolve_cycle_universe(**_kwargs: object):
+        universe = pl.DataFrame(
+            [{"symbol": "ABCUSDT", "tick_size": 0.0001, "qty_step": 0.1,
+              "min_order_qty": 0.1, "min_notional_value": 1.0,
+              "max_market_order_qty": 10_000.0}],
+            infer_schema_length=None,
+        )
+        tickers = pl.DataFrame(
+            [{"symbol": "ABCUSDT", "mark_price": 100.0, "last_price": 100.0}],
+            infer_schema_length=None,
+        )
+        return universe, ["ABCUSDT"], tickers, "test"
+
+    def fake_klines(*_args: object, **_kwargs: object):
+        return pl.DataFrame(), {"store_rows": 0}
+
+    entry_trade_row = {
+        "trade_id": "cf-ABCUSDT-1700000000000-p3", "strategy_id": "continuous_fade_v1",
+        "symbol": "ABCUSDT", "side": "short", "sleeve": "continuous", "status": "open",
+        "ts_ms": now, "entry_ts_ms": now, "opened_at_ms": now, "updated_at_ms": now,
+        "signal_ts_ms": now - 3_600_000, "entry_price": 100.0, "qty": "1",
+        "notional_usdt": 100.0, "equity_usdt": 10_000.0,
+        "component": "p3", "component_weight": 0.30, "submit_mode": "dry_run",
+    }
+    entry_order_row = {
+        "order_link_id": "lm-en-cp3-ABC-1", "ts_ms": now,
+        "trade_id": entry_trade_row["trade_id"], "strategy_id": "continuous_fade_v1",
+        "symbol": "ABCUSDT", "side": "Sell", "qty": "1", "reduce_only": False,
+        "submit_mode": "dry_run", "status": "planned", "trade_side": "short",
+        "sleeve": "continuous", "signal_ts_ms": now - 3_600_000,
+        "equity_usdt": 10_000.0, "component": "p3", "component_weight": 0.30,
+    }
+
+    def fake_execute_entries(*_args: object, **_kwargs: object):
+        return [dict(entry_trade_row)], [dict(entry_order_row)]
+
+    sends: list[tuple[str, bool]] = []
+
+    def fake_send(text: str, **_kwargs: object) -> bool:
+        lock_held = (root / ".locks" / "continuous_demo_cycle.lock").exists()
+        sends.append((text, lock_held))
+        return True
+
+    monkeypatch.setattr(cd, "_resolve_cycle_universe", fake_resolve_cycle_universe)
+    monkeypatch.setattr(cd, "_download_recent_1h_klines", fake_klines)
+    monkeypatch.setattr(cd, "_execute_continuous_entries", fake_execute_entries)
+    monkeypatch.setattr(tg, "send_telegram_message", fake_send)
+
+    payload = cd.run_continuous_demo_cycle(
+        root, config=ResearchConfig(), demo_config=cfg, now_ms=now
+    )
+
+    # (1) the entry is counted.
+    assert payload["entries"] == 1
+    # (2) the material-event filter fires for it and the send goes out.
+    assert payload["telegram_sent"] is True
+    assert sends, "telegram send was never attempted"
+    # (3) the cycle lock was already released when the transport ran.
+    assert sends[0][1] is False, "telegram send ran while the cycle file lock was held"

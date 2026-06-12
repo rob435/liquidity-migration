@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""One command → the promoted-profile equity curve for both promoted sleeves.
+"""One command → the promoted LONG sleeve's equity curve from its deployed profile.
 
-Zero friction: no flag archaeology, no reverse-engineering "what's deployed". Each
-sleeve's curve is run from its EXACT deployed profile (`liquidity_migration.promoted`),
+Zero friction: no flag archaeology, no reverse-engineering "what's deployed". The
+curve is run from the EXACT deployed profile (`liquidity_migration.promoted`),
 over a window you pick, and the equity-vs-BTC PNG is emitted (or plotted from the
 equity CSV if the engine doesn't draw one). The run_label is printed for every run so
 a biased/partial-PIT result can never masquerade as clean.
 
-    bash scripts/equity_curves.sh                      # both promoted sleeves, last 3 years, bybit_full_pit
-        bash scripts/equity_curves.sh --years 2            # shorter window (lighter on RAM)
+    bash scripts/equity_curves.sh                      # promoted LONG sleeve, last 3 years, bybit_full_pit
+    bash scripts/equity_curves.sh --years 2            # shorter window (lighter on RAM)
     bash scripts/equity_curves.sh --start 2023-06-01 --end 2026-06-02
-    bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit_strategy   # other venue
+    bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit   # other venue
 
 The promoted profiles live in ONE place: `liquidity_migration/promoted.py`. Change a
 profile there (or in its daemon factory) and this tool follows — see that module.

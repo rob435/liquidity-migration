@@ -19,4 +19,13 @@ Environment=HEDGE_MODE=2f
 # REAL_MONEY=true). Set SUBMIT_HEDGE=0 to fall back to dry-run logging.
 Environment=SUBMIT_HEDGE=1
 Environment=CONFIRM_DEMO_ORDERS=1
+# Hardening + memory-cap parity with the sibling units (round 4): this submits
+# live demo orders and parses venue JSON as root — it must not be the one
+# unconfined unit in the fleet.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration
+MemoryMax=512M
 ExecStart=/bin/bash /opt/liquidity-migration/scripts/run_continuous_hedge.sh

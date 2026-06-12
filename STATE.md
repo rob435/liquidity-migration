@@ -36,8 +36,25 @@ no ws_risk liveness check (erased with the short sleeve), the forward report
 exiting 0 on failed sends, the fast protective-exit loop invisible to telegram,
 and LONG failing OPEN on a missing sleeves.env (every sleeve now fails safe to
 off). All fixed same-day; live test order + telegram smoke re-verified.
+A FOURTH 5-agent audit ran 2026-06-12 targeting what rounds 1-3 missed plus
+regression checks: the crash-RECOVERY paths re-introduced the round-3 sizing
+CRITICAL (adopted/reconciled component rows lost `component_weight` → the
+rebalance planner now fail-safes by skipping un-weighted component rows, and
+both recovery paths stamp the weight), pending-fill recovery mis-filed
+continuous trades into the erased short's ledger (identity fields now ride the
+order rows), ws_risk's two close paths never booked realized PnL (breaking the
+adverse-exit breaker), and `payload["entries"]` was permanently 0 — a
+successful live entry would have paged nobody. Also: hedge sizes off LIVE
+wallet equity when armed (blocked+paged on read failure) and telegrams on
+submit, ETH hedge-leg adoption keeps the never-force-exit contract, cycles
+ledgers month-bucketed (unbounded-growth class), sniper placements flushed
+crash-safe, deploy pins the triggering SHA, wrapper-unit argv parity tests,
+depth-collector watchdog coverage, canonical pre-push hook
+(`scripts/git-hooks/pre-push`), and a docs/dead-code sweep (14 zero-caller
+functions deleted). All fixed same-day; live test order + telegram smoke
+re-verified.
 
-## What's Running / Wired (2026-06-10)
+## What's Running / Wired (updated 2026-06-12)
 
 - **CONTINUOUS demo book — live default is now the validated winner_base 4-component
   ensemble** (`continuous_ensemble_v1`: p3 .30 / p4p3 .20 / p4p5 .40 / tp14 .10,
@@ -58,11 +75,13 @@ off). All fixed same-day; live test order + telegram smoke re-verified.
   regenerate `deploy/hedge_warmstart/*.csv` (and decide a refresh cadence) or
   disarm the timer — until then the hedge pages the first time a non-flat book
   needs a Buy leg.
-- **Sniper (Tier-2 demo candidate): fully wired, default OFF.** PostOnly +8%
-  quarter-size Sell limit per fresh entry with disaster stop attached; per-cycle fill
-  reconcile → first-class trade rows; cancel/exit with the base. Arm with
-  `CONTINUOUS_SNIPER=1` AFTER confirming ws_risk adopts a between-cycle fill (venue
-  stop present; ledger row arrives at next reconcile, ≤1h).
+- **Sniper (Tier-2 demo candidate): fully wired — ARMED in the demo unit since
+  2026-06-10 (`CONTINUOUS_SNIPER=1`; code default off).** PostOnly +8%
+  quarter-size Sell limit per fresh entry with disaster stop attached; per-cycle
+  fill reconcile → first-class trade rows; cancel/exit with the base. No
+  placements yet (zero book entries since the 06-09 rebuild — signal-side, not
+  a fault). ws_risk adopts a between-cycle fill (venue stop present; ledger row
+  arrives at next reconcile, ≤1h).
 - **Dynamic exit: forward PAPER-SHADOW only** (in-sample NULL — cross-venue mirage).
   `continuous_dynexit_shadow.jsonl`, zero order impact, pre-registered 60d/40-shadow
   forward bar (`continuous-dynexit-forward-shadow-2026-06-10.md`).
@@ -92,8 +111,11 @@ off). All fixed same-day; live test order + telegram smoke re-verified.
 3. ~~R4 pull~~ transport fixed (ssh; no rsync needed) — finding: the VPS ledgers
    hold NO trades yet (book restarted 06-09; no entries fired). R4 calibration
    waits for fills to accrue under the ensemble.
-4. ~~Data-root refresh~~ bybit_full_pit extended to 2026-06-09 (forward replay
-   clock can tick); binance klines+manifest extended to 2026-05-31 (vision).
+4. ~~Data-root refresh~~ bybit_full_pit extended to 2026-06-09 (data fresh
+   enough for the forward clock — but the replay ORCHESTRATOR that re-runs the
+   4 component configs to feed `continuous_forward_replay` is NOT yet built;
+   see the 2026-06-12 addendum in `continuous-forward-clock-spec-2026-06-09.md`);
+   binance klines+manifest extended to 2026-05-31 (vision).
    Binance fapi ancillary June top-ups FAILED from this box (fapi unreachable
    locally — same block as the futures WS; the completeness guard refused a
    biased write). To finish: run `bash scripts/build_full_pit_binance.sh`

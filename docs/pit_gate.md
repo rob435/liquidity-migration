@@ -139,3 +139,9 @@ manifest is the manual command above
    backtest is possible but is biased and must be labelled as such).
 3. `paper↔demo` measures execution slippage and is independent of all of the
    above; if it is clean the live executor matches the model.
+
+## Design receipt
+
+The trading-day membership convention (membership keys on
+`date(ts_ms − 1ms)`, the BINDING decision this gate implements) is recorded in
+[docs/preregistration/pit-membership-trading-day-fix.md](preregistration/pit-membership-trading-day-fix.md).

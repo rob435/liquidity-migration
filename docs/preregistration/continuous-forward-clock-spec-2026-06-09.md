@@ -84,3 +84,18 @@ Audit complete. Build items 1+2 were completed on 2026-06-09:
 `liquidity_migration/continuous_forward_replay.py` plus tests, seeded on real data
 (clock 0 days, awaiting data-root refresh; see
 `continuous-capacity-impact-2026-06-09.md`).
+
+## Addendum (2026-06-12, round-4 audit — API correction)
+
+The build-plan name `run_continuous_forward_replay(research_root, state_dir,
+end_day)` was never implemented as a single function. The shipped API in
+`liquidity_migration/continuous_forward_replay.py` is:
+`init_or_check_state(state_dir)` → `build_full_ledger(pieces, hedge_returns,
+hedge_funding)` → `update_forward_ledger(state_dir, venue, full_ledger)` →
+`forward_readiness_summary(state_dir, venue, forward_start_ms=...)`. The
+orchestration layer that produces `pieces` (re-running the 4 frozen component
+configs through `run_continuous_event_research` over a refreshed research root)
+is NOT yet built — the consolidated research scripts that did this were removed
+2026-06-02 (git history is the backstop). Until that runner exists, the forward
+clock does not tick automatically; building it is an explicit work item, not a
+scheduling detail.

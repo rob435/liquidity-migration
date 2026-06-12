@@ -372,6 +372,22 @@ def _apply_hedge_reduce_to_trades(
         write_dataset(pl.DataFrame(updates, infer_schema_length=None), data_root, cfg.trades_dataset, append=True)
 
 
+def _live_wallet_equity_usdt() -> float:
+    """Live demo wallet equity for ARMED sizing (round 4). The hedge previously
+    sized every armed leg off the $10k ``fallback_equity_usdt`` constant — as the
+    demo account drifts from $10k the armed hedge silently under/over-hedges.
+    Raises on any credential/transport failure; the caller blocks the armed run
+    with ``submit_blocked_equity_unavailable`` (nonzero exit -> watchdog pages)."""
+    from liquidity_migration.bybit import BybitPrivateClient, resolve_private_credentials
+    from liquidity_migration.event_demo import wallet_equity_usdt
+
+    api_key, api_secret, demo_flag = resolve_private_credentials()
+    if not api_key or not api_secret or not demo_flag:
+        raise RuntimeError("hedge equity read requires DEMO Bybit credentials in env")
+    client = BybitPrivateClient(category="linear", demo=True, api_key=api_key, api_secret=api_secret)
+    return wallet_equity_usdt(client.get_wallet_balance())
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--venue", default="bybit", choices=["bybit", "binance"])
@@ -420,7 +436,22 @@ def main() -> int:
 
     btc_price = args.btc_price or _latest_close(primary_root, HEDGE_SYMBOL)
     eth_price = args.eth_price or _latest_close(primary_root, HEDGE_SYMBOL_2)
+    # Sizing equity: explicit override > live wallet (ARMED runs only) > the
+    # $10k fallback constant (dry-run reference). An armed run must never size
+    # real legs off the constant (round 4) — a failed wallet read blocks below.
     equity = args.equity_usdt if args.equity_usdt > 0.0 else cfg.fallback_equity_usdt
+    equity_source = "override" if args.equity_usdt > 0.0 else "fallback"
+    equity_error = ""
+    if args.submit and args.equity_usdt <= 0.0:
+        try:
+            live_equity = _live_wallet_equity_usdt()
+        except Exception as exc:  # noqa: BLE001 — surfaced as a blocked status below
+            equity_error = f"wallet equity read failed: {exc}"[:300]
+        else:
+            if live_equity > 0.0:
+                equity, equity_source = live_equity, "wallet"
+            else:
+                equity_error = "wallet equity read returned <= 0"
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
     submit_guard_error = ""
@@ -441,6 +472,7 @@ def main() -> int:
         "hedge_mode": "2f" if use_2f else "btc",
         "mode": "submit" if args.submit else "dry_run",
         "btc_price": btc_price, "eth_price": eth_price, "equity_usdt": equity,
+        "equity_source": equity_source,
         "gross_short_frac": round(live_book.gross_short_frac, 4),
         "gross_short_frac_known": live_book.gross_short_frac_known,
         "gross_short_frac_source": live_book.gross_short_frac_source,
@@ -490,6 +522,11 @@ def main() -> int:
     if submit_guard_error:
         out["status"] = "submit_blocked_order_submit_guard"
         out["error"] = submit_guard_error
+    elif args.submit and equity_source == "fallback":
+        # The wallet read failed and no override was passed: leg targets would be
+        # sized off the $10k constant against a wallet of unknown size (round 4).
+        out["status"] = "submit_blocked_equity_unavailable"
+        out["error"] = equity_error or "live wallet equity unavailable"
     elif btc_price <= 0.0:
         # No BTC price (kline store missing/unreadable and no --btc-price): the plan
         # is necessarily None. Without an explicit status this read as a healthy
@@ -547,10 +584,32 @@ def main() -> int:
     else:
         out["status"] = "dry_run_ok"
     print(json.dumps(out))
+    # SUCCESS notify (round 4): blocks/failures already page via the nonzero-exit
+    # watchdog contract below, but real submitted hedge legs (live Market orders
+    # on the demo account) were silent — the first-ever hedge submission is
+    # exactly the event the operator needs to see. Best-effort and exception-
+    # isolated; the send can never change the exit code.
+    if out.get("status") in {"submitted", "submit_partial"}:
+        try:
+            from liquidity_migration.telegram import send_telegram_message
+
+            legs = "; ".join(
+                f"{r.get('side')} {r.get('qty')} {r.get('symbol')}" for r in out.get("submitted") or []
+            )
+            errors = out.get("submit_errors") or []
+            message = (
+                f"hedge {out['status']} ({out.get('hedge_mode')}): {legs or 'no legs'}"
+                f" | equity ${equity:,.0f} ({equity_source})"
+                + (f" | {len(errors)} leg error(s)" if errors else "")
+            )
+            send_telegram_message(message, enabled=True)
+        except Exception as exc:  # noqa: BLE001 — notify must never mask the submit result
+            print(f"hedge telegram notify failed: {exc}", file=sys.stderr)
     # Paging contract: a blocked or failed ARMED run exits nonzero so the systemd
     # oneshot lands `failed` and the liveness watchdog pages (see module docstring).
     failing_statuses = {
         "submit_blocked_order_submit_guard",
+        "submit_blocked_equity_unavailable",
         "submit_blocked_btc_price_unavailable",
         "submit_blocked_book_state_unknown",
         "submit_blocked_eth_price_unavailable",

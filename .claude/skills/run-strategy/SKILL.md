@@ -85,9 +85,10 @@ subcommand list — do not maintain a copy here.
   `require_full_pit_universe=False` / `require_pit_membership=False` — the old
   `--allow-partial-pit` flag was erased with the volume-events CLI) are only for
   explicitly biased diagnostics, and that run must be labelled biased.
-- Demo order submission is allowed only for the deployed `STRATEGY_PROFILE`
-  (see STATE.md > What's running) — the runner refuses `SUBMIT_ORDERS=1`
-  otherwise. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle
+- Demo order submission requires `SUBMIT_ORDERS=1` + `CONFIRM_DEMO_ORDERS=1`
+  and a known `STRATEGY_PROFILE`; the DEPLOYED profile is pinned by the
+  deploy/verify scripts, not refused at runtime — check STATE.md > What's
+  Running before changing it. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle
   (`bybit.resolve_private_credentials`), which defaults to demo; keep it on demo
   without explicit owner instruction.
 - Event-driven entries are the strategy path; legacy fixed-day rebalance-grid

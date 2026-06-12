@@ -154,14 +154,16 @@ else
 fi
 git_with_optional_github_token fetch "$REMOTE" "$BRANCH"
 unset GITHUB_TOKEN
-git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
-
 if [ -n "$EXPECTED_COMMIT" ]; then
-  actual_commit="$(git rev-parse HEAD)"
-  if [ "$actual_commit" != "$EXPECTED_COMMIT" ]; then
-    echo "Refusing deploy: expected commit $EXPECTED_COMMIT but VPS has $actual_commit" >&2
+  # Deploy EXACTLY the requested commit (round 4) — see deploy_vps_live.sh for
+  # the trigger->fetch race this closes.
+  if ! git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH"; then
+    echo "Refusing deploy: expected commit $EXPECTED_COMMIT is not on $REMOTE/$BRANCH" >&2
     exit 1
   fi
+  git checkout -B "$BRANCH" "$EXPECTED_COMMIT"
+else
+  git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 fi
 
 if [ ! -x .venv/bin/python ]; then

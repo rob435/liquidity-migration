@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -12,6 +14,11 @@ class TelegramConfig:
     token_env: str = "TELEGRAM_BOT_TOKEN"
     chat_id_env: str = "TELEGRAM_CHAT_ID"
     timeout_seconds: float = 10.0
+    # Single in-process retry after a 429, honoring Telegram's retry_after up
+    # to this cap. Most send sites are deliberately fire-once (the ledger stays
+    # authoritative); a brief rate-limit wait inside the transport keeps a
+    # burst of alerts from silently dropping pages (round 4).
+    rate_limit_retry_cap_seconds: float = 5.0
 
 
 def format_usd(value: object, *, signed: bool = False) -> str:
@@ -73,7 +80,10 @@ def send_telegram_message(
     # token/chat_id env vars are absent. Transport errors (timeout, HTTPError,
     # URLError) propagate to the caller — every call site wraps this in
     # try/except and treats failure as cycle telemetry, not a crash. Don't add
-    # exception handling here without updating those call sites first.
+    # exception handling here without updating those call sites first. The ONE
+    # internal retry is the 429 rate-limit case below — bounded by
+    # rate_limit_retry_cap_seconds, after which the 429 propagates like any
+    # other HTTPError.
     if not enabled:
         return False
     cfg = config or TelegramConfig()
@@ -95,5 +105,29 @@ def send_telegram_message(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=cfg.timeout_seconds) as response:
-        return 200 <= int(response.status) < 300
+    try:
+        with urllib.request.urlopen(request, timeout=cfg.timeout_seconds) as response:
+            return 200 <= int(response.status) < 300
+    except urllib.error.HTTPError as exc:
+        retry_after = _rate_limit_retry_seconds(exc, cap_seconds=cfg.rate_limit_retry_cap_seconds)
+        if retry_after is None:
+            raise
+        time.sleep(retry_after)
+        with urllib.request.urlopen(request, timeout=cfg.timeout_seconds) as response:
+            return 200 <= int(response.status) < 300
+
+
+def _rate_limit_retry_seconds(exc: urllib.error.HTTPError, *, cap_seconds: float) -> float | None:
+    """Seconds to wait before the single 429 retry, or None when the error is
+    not a retryable rate limit (any non-429, or a Retry-After beyond the cap —
+    sleeping longer than the cap inside a trading-loop send is worse than
+    dropping the page)."""
+    if int(getattr(exc, "code", 0)) != 429:
+        return None
+    try:
+        retry_after = float(exc.headers.get("Retry-After", "1") or 1.0)
+    except (TypeError, ValueError):
+        retry_after = 1.0
+    if retry_after > cap_seconds:
+        return None
+    return max(retry_after, 0.5)
