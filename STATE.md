@@ -170,6 +170,15 @@ Details: research_summary 2026-06-10 sections; charter §8. New data layers
 (`binance_usdm_metrics_5m` complete; `binance_usdm_bookdepth_1h` ingesting)
 remain the highest-EV new-alpha ground (charter P1).
 
+**Charter Wave 3 (2026-06-12) — taker-flow stack:** `bybit_full_pit/taker_flow_5m`
+building 2026-06-12 (event-anchored 5-min signed taker flow from the public tick
+archive, survivorship-free — the previously-unbuilt taker-flow stack). Queue: P10
+taker-flow squeeze-proxy Stage-1 (pre-registered
+`continuous-taker-flow-scout-2026-06-12.md`, external priors
+`research_notes_external_priors_2026-06-12.md`), P11 full-universe taker-flow
+completion (idle-time), P12 liquidation-proxy calibration (blocked ~30d on the
+forward `allLiquidation` tape — healthy at 27k events/2d as of 2026-06-12).
+
 **Active operator-directed program (2026-06-12):**
 [docs/research_plan_composite_sizing_2026-06-12.md](docs/research_plan_composite_sizing_2026-06-12.md)
 — E1 capped 5-feature-composite size tilt and E2 BTC-trend regime-response

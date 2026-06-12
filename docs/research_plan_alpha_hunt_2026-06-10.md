@@ -255,3 +255,44 @@ from: (1) operator actions — R4 fill pull, data-root refresh (starts all forwa
 clocks), 2f-hedge live wiring, P3 collectors, commit of this tree; (2) forward
 demo/paper accumulation; (3) new data layers (P9 spec, taker-flow tick stack).**
 Future agents: do not re-mine; work the operator list and the forward clocks.
+
+### Wave 3 (added 2026-06-12: the taker-flow stack — the last unbuilt free data layer)
+
+Authority: standing /goal autonomous-research directive (operator-set, 2026-06-12)
++ this charter's own rule ("extend this section FIRST, then work it top-down").
+External priors assembled BEFORE any in-repo test:
+`docs/research_notes_external_priors_2026-06-12.md` (taker-flow imbalance is the
+dominant short-horizon crypto-futures feature family; manipulated pumps revert with
+identifiable volume composition; forced-covering rallies fully reverse; practitioner
+CVD-divergence corpus; OI feeds lag during cascades ⇒ flow-primary designs). Ranked:
+
+**P10. Taker-flow squeeze-proxy Stage-1 (event-anchored information test, runnable
+NOW).** The untested half of the liquidation proxy — Stage-1/Stage-2/P8 only ever
+tested the OI leg. New data layer: `bybit_full_pit/taker_flow_5m` (5-min signed
+taker flow from public.bybit.com side-flagged tick archive, survivorship-FREE where
+bybit OI was survivor-only; event-anchored coverage, builder
+`scripts/bybit_taker_flow_backfill.py`) + binance `metrics_5m` taker ratio (already
+local, survivorship-free). ONE primary feature (`flow_support_6h`), two-sided with
+cross-venue sign agreement as the gate (the sign-prior conflict is documented ex
+ante in the priors note), lag/window/turnover-proxy/OI-proxy falsifiers. Receipt:
+`docs/preregistration/continuous-taker-flow-scout-2026-06-12.md`. A PASS arms a
+Stage-2 per-event ENTRY-VETO design (fresh receipt); explicitly NOT a size tilt
+(closed family). A FAIL retires event-level taker-flow conditioning on this window.
+
+**P11. bybit taker_flow_5m → full-universe completion + forward maintenance (data
+layer only, idle-time).** Extend event-anchored coverage progressively toward the
+full kline universe; absence-auditable manifest; no signal claim, no receipt until
+a test is proposed. Insurance value: public archives get deleted (Binance 2024-Q2
+precedent); the tick tape is the one layer that cannot be reconstructed later.
+
+**P12. Liquidation-proxy honesty calibration (blocked ~30d: needs forward
+`allLiquidation` capture to mature).** Measure whether taker-burst × OI-drop
+proxies actually coincide with REAL liquidation events on the forward bybit
+collector tape (started 2026-06-10). Measurement receipt only, no alpha claim —
+makes any future proxy-conditioned claim honest, and prices the OI-lag caveat.
+
+Parked/blocked (unchanged): P2 execution layer (R4), P6 regime-v2 (forward data),
+W2 OI cross-venue confirmation (the new priors note supports the FLOW family, not
+OI re-tests — prior 5 argues against OI-primary intraday designs), PE2 OOS
+re-judgment (armed, data-refresh-triggered), TA1 forward-watch leads (≥100
+trades/book).
