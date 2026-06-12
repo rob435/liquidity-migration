@@ -2065,9 +2065,16 @@ def format_combined_book_summary(
             continuous_cycles,
             now_ms=now_ms,
         ),
-        # The daily SHORT sleeve was ERASED 2026-06-11 (no toggle remains) — its
-        # legacy ledger is shown for residual-position wind-down only, never as ON.
-        _format_book_line("Short (erased)", _state_label(states.get("SHORT_SLEEVE"), default="off"), short, None, now_ms=now_ms),
+    ])
+    # The daily SHORT sleeve was ERASED 2026-06-11. Its legacy ledger line existed for
+    # residual-position wind-down only — with nothing residual it is pure noise, so it
+    # renders ONLY while legacy open rows remain (operator request 2026-06-12). The
+    # ledger still counts toward the tracked totals above either way.
+    if short.open_count > 0:
+        lines.append(
+            _format_book_line("Short (erased)", _state_label(states.get("SHORT_SLEEVE"), default="off"), short, None, now_ms=now_ms)
+        )
+    lines.extend([
         _format_book_line("Long", _state_label(states.get("LONG_SLEEVE"), default="on"), long, None, now_ms=now_ms),
         # The hedge timer rides the continuous toggle (deploy: apply_timer_enable
         # "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS). Never hardcode a mode label:

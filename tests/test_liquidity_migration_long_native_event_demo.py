@@ -591,8 +591,10 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
     assert "Combined book" in text
     assert "Live sleeves" in text
     assert "Continuous demo (ON)" in text
-    # 2026-06-11 erasure: the short line is a legacy-ledger wind-down view, never ON.
-    assert "Short (erased) (OFF)" in text
+    # 2026-06-11 erasure + 2026-06-12 operator request: the legacy short line renders
+    # ONLY while residual OPEN rows remain — a closed-only ledger shows no line (its
+    # realized PnL still counts in the tracked totals, asserted below).
+    assert "Short (erased)" not in text
     assert "Long (OFF)" in text
     # The hedge label rides the continuous toggle — never a hardcoded "DRY-RUN"
     # (the live unit ships SUBMIT_HEDGE=1; a hardcoded dry-run label misstated it).
@@ -606,6 +608,25 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
     # Continuous open notional: 2 * 2_000 = 4,000
     assert "$4,000.00" in text
     assert "trades=0" not in text
+
+
+def test_combined_book_summary_shows_erased_short_only_while_residual_open(tmp_path: Path) -> None:
+    """The erased short's legacy line is a wind-down view: an OPEN residual row must
+    still surface (never as ON); flat/empty ledgers render nothing (operator request
+    2026-06-12 — the permanent 'Short (erased): flat $0.00' line was noise)."""
+    short_root = tmp_path / "short"
+    write_dataset(
+        pl.DataFrame([{
+            "trade_id": "s-open", "sleeve": "short", "symbol": "AAAUSDT", "side": "short",
+            "status": "open", "qty": 1.0, "entry_price": 100.0,
+        }]),
+        short_root, "event_demo_trades", partition_by=(),
+    )
+    text = format_combined_book_summary(
+        short_root=short_root, long_root=None,
+        now_ms=1_700_000_000_000, sleeve_states={"SHORT_SLEEVE": "off"},
+    )
+    assert "Short (erased) (OFF)" in text  # residual open row: wind-down view stays
 
 
 def test_combined_book_summary_fails_open_on_missing_roots(tmp_path: Path) -> None:
