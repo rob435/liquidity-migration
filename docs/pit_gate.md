@@ -58,8 +58,11 @@ of the signal's **trading day** (`2026-05-29`). Two consequences:
 The fix (`_attach_event_archive_membership`): membership is keyed on the trading
 day = `date of (ts_ms - 1 ms)`. The stamp-day `date` column is preserved as-is for
 the age features, so nothing else moves. Numerically this only changes
-listing/delisting-boundary and recent-tail rows; the regression lock is
-`tests/test_pit_membership_trading_day.py`.
+listing/delisting-boundary and recent-tail rows. (The original regression lock,
+`tests/test_pit_membership_trading_day.py`, was deleted with the short engine in
+e03e9ab; the surviving trading-day keying lives in
+`liquidity_migration/volume_events_pit.py` and is exercised via
+`tests/test_pit_coverage.py`.)
 
 After the fix, a `2026-05-30 00:00` signal validates against the `2026-05-29`
 manifest day — which Bybit publishes on `2026-05-30`. So a same-day reconcile
@@ -81,18 +84,21 @@ asymmetry is the original trap. Two guards now exist:
 
 ## Membership modes
 
-| mode | flag | meaning | use for |
+(The `--pit-membership` / `--allow-partial-pit` CLI flags were erased with the
+`volume-events` subcommand in e03e9ab; the knobs survive as run-config fields.)
+
+| mode | config | meaning | use for |
 | --- | --- | --- | --- |
-| strict (default) | *(none)* | archive PIT membership on the trading day | all evidence / promotion |
-| current-universe | `--pit-membership current-universe` | drop the per-trade PIT gate; trade whatever the manifest's current listing covers | a same-day diagnostic / reconcile before the archive publishes |
+| strict (default) | `require_pit_membership=True` | archive PIT membership on the trading day | all evidence / promotion |
+| current-universe | `require_pit_membership=False` | drop the per-trade PIT gate; trade whatever the manifest's current listing covers | a same-day diagnostic / reconcile before the archive publishes |
 
-`--pit-membership current-universe` sets `require_pit_membership=False` and the run
-is labelled `biased_benchmark` / `current_universe_biased` — **never** promotion
-evidence (it is exactly the survivorship surface the methodology doc forbids for
-real decisions). It exists only so a same-day reconcile can include a signal whose
-trading-day archive has not published yet.
+`require_pit_membership=False` runs are labelled `biased_benchmark` /
+`current_universe_biased` — **never** promotion evidence (it is exactly the
+survivorship surface the methodology doc forbids for real decisions). It exists
+only so a same-day reconcile can include a signal whose trading-day archive has
+not published yet.
 
-Note: `--allow-partial-pit` is a *different* knob — it relaxes only the
+Note: `require_full_pit_universe` is a *different* knob — it relaxes only the
 universe-*completeness* abort (every manifest symbol must have klines), not the
 per-trade membership gate. Per-trade membership stays strict either way.
 

@@ -3172,15 +3172,19 @@ def test_failed_background_send_unrecords_dedupe_key(tmp_path: Path, monkeypatch
     round-trip and a failed send was only logged — a single timeout/429 on an
     UNPROTECTED/stop_repair_failed alert silently suppressed that exact alert for 24h.
     The sender loop now un-records the key (disk + memory) so the next material cycle
-    re-fires it."""
+    re-fires it. Round 3: the un-record happens only for a CONFIGURED transport —
+    creds present + False return = transport failure worth retrying; a missing env
+    is permanent, so keeping the key avoids per-cycle dedupe-file churn."""
     import threading as _threading
 
     attempted = _threading.Event()
 
     def _failing_send(text, *, enabled):
         attempted.set()
-        return False  # non-2xx / env-missing shape: returns False, no exception
+        return False  # non-2xx with creds present: a transport failure, no exception
 
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "test-chat")
     monkeypatch.setattr(ws_risk, "_telegram_notification_reason", lambda payload: "stop_filled")
     monkeypatch.setattr(ws_risk, "_telegram_dedupe_key", lambda reason, payload: "k-fail")
     monkeypatch.setattr(ws_risk, "format_telegram_status_message", lambda payload: "rendered-text")
@@ -3197,6 +3201,39 @@ def test_failed_background_send_unrecords_dedupe_key(tmp_path: Path, monkeypatch
     assert "k-fail" not in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
     # the alert re-fires on the next material event
     assert engine.maybe_notify({"cycle": {}}) == (True, "enqueued")
+    engine.close()
+
+
+def test_unconfigured_telegram_keeps_dedupe_key(tmp_path: Path, monkeypatch) -> None:
+    """Round 3: send_telegram_message returns False BOTH for a transport failure and
+    for missing TELEGRAM_* env. Un-recording on the latter re-rendered and rewrote
+    the dedupe file on every material cycle (heartbeat-cadence disk churn + log
+    noise masking real failures). Not-configured keeps the key."""
+    import threading as _threading
+
+    attempted = _threading.Event()
+
+    def _failing_send(text, *, enabled):
+        attempted.set()
+        return False  # env missing: permanent, not a transport failure
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setattr(ws_risk, "_telegram_notification_reason", lambda payload: "stop_filled")
+    monkeypatch.setattr(ws_risk, "_telegram_dedupe_key", lambda reason, payload: "k-noenv")
+    monkeypatch.setattr(ws_risk, "format_telegram_status_message", lambda payload: "rendered-text")
+    monkeypatch.setattr(ws_risk, "send_telegram_message", _failing_send)
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
+    )
+    assert engine.maybe_notify({"cycle": {}}) == (True, "enqueued")
+    assert attempted.wait(2.0), "background telegram sender did not run"
+    engine.close()
+    assert "k-noenv" in engine.state.telegram_keys_sent
+    assert "k-noenv" in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
+    # ...and the same material event stays deduped (no per-cycle churn)
+    assert engine.maybe_notify({"cycle": {}}) == (False, "duplicate_material_event")
     engine.close()
 
 

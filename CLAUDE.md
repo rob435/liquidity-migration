@@ -34,7 +34,7 @@ live/operational state). Python 3.11+; package `liquidity_migration/`.
 hook (`.git/hooks/pre-push`) enforces:**
 
 ```bash
-.venv/bin/python -m ruff check liquidity_migration tests
+.venv/bin/python -m ruff check liquidity_migration tests scripts
 .venv/bin/python -m pytest -q
 ```
 

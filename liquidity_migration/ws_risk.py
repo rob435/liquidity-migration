@@ -66,7 +66,7 @@ from .long_native_event_demo import MULTI_STRAT_V1_STRATEGY_ID
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
 from . import cross_sleeve as _cross_sleeve
 from .event_demo import wallet_equity_usdt
-from .telegram import send_telegram_message
+from .telegram import send_telegram_message, telegram_configured
 
 
 _logger = logging.getLogger("liquidity_migration.ws_risk")
@@ -328,6 +328,11 @@ class EventWebSocketRiskEngine:
         self.report_dir = self.root / "reports" / self.risk.data_name
         self.report_dir.mkdir(parents=True, exist_ok=True)
         self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
+        # Last wallet equity observed by _refresh_cross_sleeve_account_state (one
+        # REST read per reconcile pass) — reused by the cycle row/telegram so the
+        # operator-facing message stops hardcoding equity=$0.00 (audit r3) without
+        # adding a wallet call to the 10s heartbeat path.
+        self._last_equity_usdt: float = 0.0
         # Captured by run(): the one thread allowed to mutate self.state.
         self._consumer_thread_ident: int | None = None
         # Telegram notifications are sent on a background daemon thread so the
@@ -585,12 +590,14 @@ class EventWebSocketRiskEngine:
         unit's EnvironmentFile) AND owned by this engine (root configured). This is the
         denominator for the equal-split IM budget = 1/len(active): toggle a sleeve off and the
         remaining sleeves' shares grow on the next reconcile pass. The unset-defaults mirror
-        deploy/lib_sleeves.sh EXACTLY (LONG on, CONTINUOUS off) so this denominator can never
-        drift from the kill-switch; in production the risk unit's EnvironmentFile always sets
-        the toggles explicitly, so the default only matters off-VPS. The daily-short sleeve
-        was ERASED 2026-06-11 — no toggle exists and it can never trade, so it must not claim
-        a budget share (the legacy root stays read-only reconciled regardless)."""
-        _defaults = {"SHORT_SLEEVE": "off", "LONG_SLEEVE": "on", "CONTINUOUS_SLEEVE": "off"}
+        deploy/lib_sleeves.sh EXACTLY (every sleeve fails safe to OFF since audit 2026-06-12
+        round 3 — a missing sleeves.env must never resurrect an order-submitting sleeve) so
+        this denominator can never drift from the kill-switch; in production the risk unit's
+        EnvironmentFile always sets the toggles explicitly, so the default only matters
+        off-VPS. The daily-short sleeve was ERASED 2026-06-11 — no toggle exists and it can
+        never trade, so it must not claim a budget share (the legacy root stays read-only
+        reconciled regardless)."""
+        _defaults = {"SHORT_SLEEVE": "off", "LONG_SLEEVE": "off", "CONTINUOUS_SLEEVE": "off"}
 
         def _on(var: str) -> bool:
             return os.environ.get(var, _defaults[var]).strip().lower() in {"on", "1", "true", "yes"}
@@ -622,6 +629,8 @@ class EventWebSocketRiskEngine:
     def _refresh_cross_sleeve_account_state(self) -> None:
         try:
             equity = self._account_equity_usdt()
+            if equity > 0.0:
+                self._last_equity_usdt = equity
             account_pct, im_by_sleeve = _cross_sleeve.compute_im_used(
                 self.state.open_trades, equity_usdt=equity, sleeve_leverage=self._sleeve_entry_leverage()
             )
@@ -1764,10 +1773,20 @@ class EventWebSocketRiskEngine:
             # the deployed continuous_ensemble_v1 emits ONLY component-tagged links, so a
             # component-less reconstruction matched NO paper-twin row — every post-rebuild
             # adoption broke reconciliation pairing (audit 2026-06-12). The sniper tag "s"
-            # maps to the -snipe suffix but cannot recover the BASE component from the link
-            # alone ({base}-{component}-snipe) — still strictly closer than dropping it.
+            # maps to the -snipe suffix; the BASE component is not in the link, but the
+            # link's -x{crc} suffix lets us recover the exact live trade_id by enumerating
+            # the known components (round 3) — falling back to the lossy {base}-snipe form
+            # when no/ambiguous match.
             if decoded_sleeve == "continuous" and component_tag:
-                trade_id += "-snipe" if component_tag == "s" else f"-{component_tag}"
+                if component_tag == "s":
+                    from .continuous_demo import recover_snipe_trade_id_from_link
+
+                    recovered_snipe = recover_snipe_trade_id_from_link(
+                        link, strategy_id=strategy_id, symbol=symbol, signal_ts_ms=signal_ts_ms,
+                    )
+                    trade_id = recovered_snipe or (trade_id + "-snipe")
+                else:
+                    trade_id += f"-{component_tag}"
             # entry_ts_ms must reflect the actual fill time (Bybit's
             # createdTime) not signal_ts. The cycle's exit logic computes
             # planned_exit_ts_ms = entry_ts_ms + hold_days*MS_PER_DAY and
@@ -2403,9 +2422,18 @@ class EventWebSocketRiskEngine:
             link = str(order.get("order_link_id") or "")
             trade_id = str(order.get("trade_id") or "")
             trade_open = trade_id != "" and trade_id in live_trade_ids
-            # Retain: open-trade orders (in-flight), the recent grace window, and
-            # any order without a link or trade_id (can't prove it is closed).
-            if trade_open or idx >= grace_start or not link or not trade_id:
+            # untracked_position exit rows carry trade_id="" by construction, so
+            # the can't-prove-closed retention kept them FOREVER (and the
+            # exit_untracked_positions attempt-counter scan grows with them —
+            # audit 2026-06-12 round 3). A link-bearing TERMINAL untracked exit
+            # beyond the grace window is provably done: evict it.
+            untracked_terminal = (
+                not trade_id
+                and link
+                and str(order.get("exit_reason") or "") == "untracked_position"
+                and str(order.get("status") or "") in ("filled", "cancelled", "rejected")
+            )
+            if idx >= grace_start or trade_open or (not untracked_terminal and (not link or not trade_id)):
                 kept.append(order)
             else:
                 evicted_links.append(link)
@@ -2477,7 +2505,10 @@ class EventWebSocketRiskEngine:
             "bybit_live_exit_open_orders": len(self.state.live_exit_order_symbols),
             "open_trades_before": self.state.open_trades.height,
             "open_trades_after": self.state.open_trades.height,
-            "equity_usdt": 0.0,
+            # Last equity seen by the reconcile pass (0.0 until the first wallet
+            # read succeeds) — was hardcoded 0.0, so every operator-facing
+            # ws_risk telegram said equity=$0.00 (audit 2026-06-12 round 3).
+            "equity_usdt": self._last_equity_usdt,
             "bybit_positions": bybit_summary["positions"],
             "bybit_position_value_usdt": bybit_summary["position_value_usdt"],
             "bybit_unrealized_pnl_usdt": bybit_summary["unrealized_pnl_usdt"],
@@ -2567,6 +2598,14 @@ class EventWebSocketRiskEngine:
             except Exception as exc:  # noqa: BLE001 - a notification must never crash the daemon
                 _logger.warning("background telegram send failed: %s", exc)
             if sent:
+                continue
+            if not telegram_configured():
+                # "Not configured" is not a transport failure: un-recording here
+                # made every material cycle re-render + rewrite the dedupe file at
+                # heartbeat cadence and buried real send failures in the noise
+                # (audit 2026-06-12 round 3). Keep the key; if creds appear later,
+                # the next NEW material event notifies normally.
+                _logger.warning("telegram not configured (TELEGRAM_* env missing); keeping dedupe key: %s", key)
                 continue
             _logger.warning("telegram send failed; un-recording dedupe key so the alert can re-fire: %s", key)
             try:

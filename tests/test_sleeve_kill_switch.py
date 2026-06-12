@@ -108,14 +108,14 @@ def test_loaded_toggles_continuous_on_long_off(tmp_path: Path) -> None:
     assert rc == 0, err
 
 
-def test_lib_fallback_defaults_continuous_demo_off_papers_on(tmp_path: Path) -> None:
+def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     """Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):
-    LONG defaults on, CONTINUOUS OFF (a missing config can never resurrect a
-    disabled order-submitting sleeve), CONTINUOUS_PAPER on. Exercises the lib's
-    ACTUAL lm_load_sleeve_toggles against a copy with no sleeves.env beside it —
-    the previous version of this test set the defaults itself inside the snippet
-    and asserted its own assignments (vacuous; audit 2026-06-11), while still
-    pinning SHORT toggles that were erased from the system."""
+    EVERY sleeve defaults OFF since audit 2026-06-12 round 3 — LONG previously
+    failed OPEN, so an accidentally deleted/renamed sleeves.env would have
+    enabled and restarted the order-submitting long demo against the operator's
+    LONG=off intent. A missing config disables everything; it can never
+    resurrect a sleeve. Exercises the lib's ACTUAL lm_load_sleeve_toggles
+    against a copy with no sleeves.env beside it."""
     import pytest
 
     if Path("/etc/liquidity-migration/sleeves.env").exists():
@@ -128,9 +128,9 @@ def test_lib_fallback_defaults_continuous_demo_off_papers_on(tmp_path: Path) -> 
         unset LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE 2>/dev/null || true
         . "{lib_dir}/lib_sleeves.sh"
         lm_load_sleeve_toggles
-        test "$LONG_SLEEVE" = on
+        test "$LONG_SLEEVE" = off
         test "$CONTINUOUS_SLEEVE" = off
-        test "$CONTINUOUS_PAPER_SLEEVE" = on
+        test "$CONTINUOUS_PAPER_SLEEVE" = off
         echo "FALLBACK_OK"
     """)
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)

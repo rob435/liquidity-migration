@@ -130,6 +130,12 @@ def _add_archive_manifest_parser(subparsers) -> None:
     archive_manifest.add_argument("--end", default=None, help="Exclusive archive end date YYYY-MM-DD (the named day is not included).")
     archive_manifest.add_argument("--max-symbols", type=int, default=0, help="Maximum symbols to scan; 0 disables.")
     archive_manifest.add_argument("--workers", type=int, default=8, help="Directory fetch workers.")
+    archive_manifest.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help="Override the PIT gate: write the manifest even when the v5 supplement failed "
+             "or the universe shrank vs the persisted manifest (intentional rebuilds only).",
+    )
 
 
 def _add_archive_download_klines_parser(subparsers) -> None:

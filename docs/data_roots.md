@@ -7,8 +7,10 @@ vs. forward OOS). Whether a root is currently built/present is live state — se
 
 The per-venue full-PIT roots (`~/SHARED_DATA/bybit_full_pit`,
 `~/SHARED_DATA/binance_full_pit`) are data, not code — not committed. If a root is
-ever lost, the rebuild scripts below are the recovery path. `binance_full_pit_strategy`
-(derived long-sleeve reports + the canonical funding dataset) is a separate root.
+ever lost, the rebuild scripts below are the recovery path. (The canonical Binance
+funding dataset is `binance_full_pit/binance_usdm_funding` — rebuilt full-coverage
+2026-06-09; the old `binance_full_pit_strategy` side-root no longer exists on this
+box.)
 
 ## Per-venue full-PIT working datasets (intended state)
 

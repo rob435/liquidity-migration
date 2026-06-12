@@ -48,9 +48,11 @@ python -m liquidity_migration <subcommand> --help
 
 ## Canonical commands
 
-Research sweeps — write a `scripts/_sweep_runtime.py`-based dispatcher (declare
-`BASELINE_PARAMS` + a list of `Cell`s and import the runtime; existing examples:
-`scripts/alpha_sweep.py`, `scripts/long_improve_sweep.py`). The erased
+Research sweeps — `scripts/_sweep_runtime.py` is DEAD pending repoint (its
+dispatcher shells to the ERASED `volume-events` subcommand; see its docstring).
+Current patterns: continuous sweeps use an in-memory config-override driver
+(see `scripts/alpha_sweep.py`); long sweeps call `run_long_native_research`
+directly per cell (see `scripts/long_improve_sweep.py`). The erased
 `volume_events_cell.sh` single-cell path has NO replacement — the daily-short
 engine it drove is gone.
 
@@ -79,8 +81,10 @@ subcommand list — do not maintain a copy here.
 
 ## Guardrails
 
-- Every backtest engine requires full PIT by default; `--allow-partial-pit` is
-  only for explicitly biased diagnostics, and that run must be labelled biased.
+- Every backtest engine requires full PIT by default; partial-PIT runs (config
+  `require_full_pit_universe=False` / `require_pit_membership=False` — the old
+  `--allow-partial-pit` flag was erased with the volume-events CLI) are only for
+  explicitly biased diagnostics, and that run must be labelled biased.
 - Demo order submission is allowed only for the deployed `STRATEGY_PROFILE`
   (see STATE.md > What's running) — the runner refuses `SUBMIT_ORDERS=1`
   otherwise. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle

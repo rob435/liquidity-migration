@@ -42,13 +42,15 @@ def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch
 
     for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CONTINUOUS_ADDON_SLEEVE"):
         monkeypatch.delenv(var, raising=False)
-    # Unset toggles mirror deploy/lib_sleeves.sh: LONG defaults ON, CONTINUOUS OFF. The
-    # daily-short sleeve was ERASED 2026-06-11 — no toggle exists and it can never trade,
-    # so it must NOT claim a budget share by default (an "on" default would starve the
-    # live sleeves the day the equal-split budget is ever wired).
+    # Unset toggles mirror deploy/lib_sleeves.sh: since audit 2026-06-12 round 3
+    # EVERY sleeve fails safe to OFF — a missing sleeves.env must never resurrect
+    # an order-submitting sleeve (LONG previously failed OPEN). In production the
+    # EnvironmentFile always sets the toggles explicitly.
+    assert engine._active_sleeves() == []
+    # Explicit toggles always win.
+    monkeypatch.setenv("LONG_SLEEVE", "on")
     assert engine._active_sleeves() == ["long"]
     assert equal_split_budget(engine._active_sleeves()) == {"long": 1.0}
-    # Explicitly turn continuous ON ⇒ 2 active ⇒ 1/2 each.
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
     assert engine._active_sleeves() == ["long", "continuous"]
     assert equal_split_budget(engine._active_sleeves()) == {"long": 0.5, "continuous": 0.5}

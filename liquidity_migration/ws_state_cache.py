@@ -525,6 +525,16 @@ class PrivateStateCache:
         snapshot_started_monotonic: float,
         local_update_monotonic: float,
     ) -> None:
+        # Prune stale tombstones: only entries newer than the in-flight snapshot
+        # can ever suppress anything (seconds old), but the map grew ~2 entries
+        # per terminal order for the daemon's lifetime — a slow unbounded leak
+        # (audit 2026-06-12 round 3). 600s is orders of magnitude beyond any
+        # snapshot's start-to-apply window.
+        prune_before = snapshot_started_monotonic - 600.0
+        if self._order_tombstone_monotonic:
+            self._order_tombstone_monotonic = {
+                key: ts for key, ts in self._order_tombstone_monotonic.items() if ts > prune_before
+            }
         rest_by_id: dict[str, dict[str, Any]] = {}
         for row in rows:
             order_id, _link = self._order_keys(row)

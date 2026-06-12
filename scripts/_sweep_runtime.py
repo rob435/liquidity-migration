@@ -1,11 +1,15 @@
 """Shared parallel-sweep runtime for the research program's cell sweeps.
 
-Reusable infrastructure for any multi-cell sweep dispatcher: a dispatcher
-declares baseline params + a list of Cells and imports these primitives. (The
-Round-2 R-phase dispatchers that originally used this were retired once their
-findings were consolidated into docs/research_summary.md; new-plan dispatchers
-import the same primitives.)
+*** DEAD DISPATCHER — DO NOT BUILD NEW SWEEPS ON run_cell() (audit 2026-06-12
+round 3). run_cell shells out to `python -m liquidity_migration volume-events`,
+which was ERASED with the daily SHORT sleeve (e03e9ab): every cell now fails
+with "invalid choice". The module is kept because its tests pin the full-PIT
+default contract and _resolve_max_workers is still sound; repoint run_cell to a
+surviving engine before reuse. Current sweep patterns instead:
+  - continuous sweeps: in-memory config-override driver (see scripts/alpha_sweep.py)
+  - long sweeps: direct run_long_native_research cells (see scripts/long_improve_sweep.py)
 
+Original design (historical):
   Cell                — (cell_id, description, overrides)
   run_cell()          — invoke `python -m liquidity_migration volume-events`
                         for one (cell, venue), parse the report JSON,

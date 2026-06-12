@@ -181,7 +181,10 @@ def test_run_archive_manifest_writes_symbol_date_dataset(tmp_path, monkeypatch) 
     payload = run_archive_manifest(
         tmp_path,
         # `--end` is end-exclusive; end is the day after the manifest date.
-        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture"),
+        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture",
+                                     # v5 stubbed to {} above: a degraded build needs the explicit
+                                     # override since the round-3 PIT write gate.
+                                     allow_degraded=True),
     )
 
     manifest = read_dataset(tmp_path, "archive_trade_manifest")
@@ -190,6 +193,51 @@ def test_run_archive_manifest_writes_symbol_date_dataset(tmp_path, monkeypatch) 
         {"symbol": "BTCUSDT", "date": "2025-01-01"},
         {"symbol": "ETHUSDT", "date": "2025-01-01"},
     ]
+
+
+def test_run_archive_manifest_refuses_degraded_write_without_override(tmp_path, monkeypatch) -> None:
+    """REGRESSION (audit 2026-06-12 round 3): a rebuild whose v5 supplement failed
+    (or whose universe shrank vs the persisted manifest) replaces good PIT-membership
+    date partitions with degraded ones — tradable_membership silently flips False for
+    the v5-only symbols. PIT/survivorship are correctness gates: the write must
+    REFUSE without an explicit override; the diagnostic report is still written."""
+    pages = {
+        "https://public.bybit.com/trading/": '<a href="BTCUSDT/">BTCUSDT/</a>',
+        "https://public.bybit.com/trading/BTCUSDT/": '<a href="BTCUSDT2025-01-01.csv.gz">file</a>',
+    }
+    monkeypatch.setattr(manifest_module, "fetch_directory_html", lambda url, *, timeout_seconds=60: pages[url])
+    monkeypatch.setattr(manifest_module, "fetch_v5_trading_perp_listings", lambda **_kw: {})  # degraded v5
+
+    cfg = ArchiveManifestConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture")
+    with pytest.raises(RuntimeError, match="REFUSED.*v5 instruments-info"):
+        run_archive_manifest(tmp_path, config=cfg)
+    # No dataset write landed; the diagnostic report did.
+    assert not (tmp_path / "archive_trade_manifest").exists()
+    assert (tmp_path / "reports" / "archive_manifest_fixture.json").exists()
+
+    # Universe shrink is gated the same way: persist a wider manifest first, then
+    # rebuild (healthy v5) with a narrower scrape.
+    write_dataset(
+        pl.DataFrame([
+            {"symbol": "BTCUSDT", "date": "2025-01-01", "url": "u", "source": "s"},
+            {"symbol": "GONEUSDT", "date": "2025-01-01", "url": "u", "source": "s"},
+        ]),
+        tmp_path, "archive_trade_manifest", partition_by=("date",), append=False,
+    )
+    monkeypatch.setattr(
+        manifest_module, "fetch_v5_trading_perp_listings",
+        lambda **_kw: {"BTCUSDT": 1_577_836_800_000},  # launchTime ms
+    )
+    with pytest.raises(RuntimeError, match="REFUSED.*shrank"):
+        run_archive_manifest(tmp_path, config=cfg)
+    # ...and the explicit override writes.
+    payload = run_archive_manifest(
+        tmp_path,
+        config=ArchiveManifestConfig(
+            start="2025-01-01", end="2025-01-02", workers=1, name="fixture", allow_degraded=True
+        ),
+    )
+    assert payload["rows"] >= 1
 
 
 def test_archive_manifest_fetches_requested_symbol_missing_from_root_listing(tmp_path, monkeypatch) -> None:
@@ -210,6 +258,9 @@ def test_archive_manifest_fetches_requested_symbol_missing_from_root_listing(tmp
             symbols=("SPKUSDT",),
             workers=1,
             name="fixture",
+            # v5 stubbed to {} in this test: degraded builds need the explicit
+            # override since the round-3 PIT write gate.
+            allow_degraded=True,
         ),
     )
 
@@ -681,7 +732,10 @@ def test_archive_manifest_downloader_resumes_and_writes_klines(tmp_path, monkeyp
     run_archive_manifest(
         tmp_path,
         # `--end` is end-exclusive; end is the day after the archive date.
-        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture"),
+        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture",
+                                     # v5 stubbed to {} above: a degraded build needs the explicit
+                                     # override since the round-3 PIT write gate.
+                                     allow_degraded=True),
     )
 
     monkeypatch.setattr(manifest_module, "download_public_trade_archive", lambda _url, destination: destination)

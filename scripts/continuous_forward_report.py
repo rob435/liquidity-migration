@@ -154,14 +154,21 @@ def main() -> int:
     print(message)
     status = _status(payload, stale_coverage_gap_days=args.stale_coverage_gap_days)
     sent = False
+    attempted = False
     quiet = status in ("COLLECTING", "CONTINUOUS-ONLY")  # routine accumulation — no Telegram noise
     if args.telegram and (args.telegram_before_min_common_days or not quiet):
+        attempted = True
         try:
             sent = send_telegram_message(message, enabled=True)
         except Exception as exc:  # noqa: BLE001 - report must not fail because Telegram is down
             print(f"telegram_send_error={type(exc).__name__}: {exc}", file=sys.stderr)
     print(f"telegram_sent={sent}")
-    return 0
+    # Exit 1 on a failed ATTEMPTED send: the watchdog monitors this unit on the
+    # premise that the oneshot reports exit nonzero when their message did not go
+    # out (combined-book already does). Exiting 0 here meant a STALE/FAIL day with
+    # Telegram down vanished silently — unit "inactive", never "failed", no page
+    # (audit 2026-06-12 round 3).
+    return 0 if (not attempted or sent) else 1
 
 
 if __name__ == "__main__":

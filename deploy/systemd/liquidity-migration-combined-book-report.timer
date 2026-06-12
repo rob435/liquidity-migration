@@ -7,7 +7,7 @@ Description=Daily combined-book aggregate Telegram report (08:00 UTC)
 # Fires daily at 08:00 UTC. Use OnCalendar=Mon *-*-* 08:00:00 for a
 # weekly-only schedule. Persistent=true runs a missed firing on next
 # boot, so a box down over 08:00 UTC doesn't silently skip a day.
-OnCalendar=*-*-* 08:00:00
+OnCalendar=*-*-* 08:00:00 UTC
 AccuracySec=1m
 Persistent=true
 Unit=liquidity-migration-combined-book-report.service

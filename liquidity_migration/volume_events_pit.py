@@ -135,7 +135,8 @@ def _full_pit_universe_error(
     if not manifest_symbols:
         return (
             "volume-events requires full PIT archive membership by default, but archive_trade_manifest is empty. "
-            "Run archive-manifest and archive-download-klines-1h first, or pass --allow-partial-pit only for explicitly biased diagnostics."
+            "Run archive-manifest and archive-download-klines-1h first; an explicitly biased diagnostic may set "
+            "require_full_pit_universe=False in the run config (the old --allow-partial-pit flag was erased with the volume-events CLI)."
         )
     return (
         "volume-events requires a full PIT universe by default, but klines_1h does not cover every archive manifest symbol/date. "

@@ -79,6 +79,13 @@ class ArchiveManifestConfig:
     name: str = "bybit-public-trading"
     v5_instruments_url: str = DEFAULT_BYBIT_V5_INSTRUMENTS_URL
     v5_category: str = "linear"
+    # PIT-correctness gate (audit 2026-06-12 round 3): a rebuild whose v5
+    # supplement failed (or whose universe SHRANK vs the persisted manifest)
+    # replaces good date partitions with degraded ones — tradable_membership
+    # silently flips False for the v5-only symbols. Such a build now REFUSES
+    # to write unless this explicit override is set (the report/CSV are still
+    # produced either way for diagnosis).
+    allow_degraded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +345,7 @@ def build_archive_trade_manifest(
     workers: int = 8,
     v5_instruments_url: str = DEFAULT_BYBIT_V5_INSTRUMENTS_URL,
     v5_category: str = "linear",
+    diagnostics: dict[str, Any] | None = None,
 ) -> pl.DataFrame:
     """Build the Bybit PIT trade manifest by merging two sources:
 
@@ -389,6 +397,10 @@ def build_archive_trade_manifest(
     except (HTTPError, URLError, TimeoutError, ssl.SSLError) as exc:
         _logger.warning("v5 instruments-info supplement skipped: %s", exc)
         listings = {}
+    if diagnostics is not None:
+        # A degraded v5 supplement is a PIT-correctness event for the caller to
+        # gate on, not just a log line (audit 2026-06-12 round 3).
+        diagnostics["v5_supplement_ok"] = bool(listings)
     if listings:
         existing_symbol_dates = {
             (str(row["symbol"]).upper(), str(row["date"])) for row in scrape_rows
@@ -422,6 +434,7 @@ def run_archive_manifest(
     config: ArchiveManifestConfig,
     report_dir: str | Path | None = None,
 ) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
     manifest = build_archive_trade_manifest(
         base_url=config.base_url,
         quote_suffix=config.quote_suffix,
@@ -432,6 +445,7 @@ def run_archive_manifest(
         workers=config.workers,
         v5_instruments_url=config.v5_instruments_url,
         v5_category=config.v5_category,
+        diagnostics=diagnostics,
     )
     symbols = manifest["symbol"].unique().sort().to_list() if not manifest.is_empty() else []
     # Survivorship guard: detect (and loudly warn about) any symbol the previous
@@ -465,6 +479,25 @@ def run_archive_manifest(
     (output_dir / f"archive_manifest_{safe_name}.md").write_text(format_archive_manifest_report(payload), encoding="utf-8")
     if not manifest.is_empty():
         manifest.write_csv(output_dir / f"archive_manifest_{safe_name}.csv")
+        # PIT-correctness gate (audit 2026-06-12 round 3): write_dataset with
+        # append=False REPLACES every date partition present in the new frame, so
+        # a degraded build (v5 supplement down -> the v5-only symbols' rows gone;
+        # or a shrunken universe) silently flips tradable_membership False for
+        # those (symbol, day)s in the persisted manifest. Survivorship/PIT are
+        # correctness gates, not warnings — refuse the write unless the operator
+        # explicitly overrides (intentional narrower rebuilds set allow_degraded).
+        degraded_reasons: list[str] = []
+        if not diagnostics.get("v5_supplement_ok"):
+            degraded_reasons.append("v5 instruments-info supplement failed/empty")
+        if survivorship_warning:
+            degraded_reasons.append("universe shrank vs the persisted manifest")
+        if degraded_reasons and not config.allow_degraded:
+            raise RuntimeError(
+                "archive-manifest write REFUSED (degraded build would overwrite good "
+                f"PIT-membership partitions): {'; '.join(degraded_reasons)}. The report/CSV "
+                f"in {output_dir} were still written for diagnosis. Re-run when the v5 "
+                "endpoint is healthy, or pass --allow-degraded for an intentional override."
+            )
         write_dataset(manifest, data_root, "archive_trade_manifest", partition_by=("date",), append=False)
     return payload
 

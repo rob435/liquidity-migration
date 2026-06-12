@@ -111,7 +111,8 @@ def _resting_order_row(link="lnk1", symbol="AAAUSDT", base="t1", submitted=True)
 
 
 def _trades_df(base_open=True, with_snipe=False, snipe_open=True):
-    rows = [{"trade_id": "t1", "status": "open" if base_open else "closed", "symbol": "AAAUSDT"}]
+    rows = [{"trade_id": "t1", "status": "open" if base_open else "closed", "symbol": "AAAUSDT",
+             "equity_usdt": 10_000.0}]
     if with_snipe:
         rows.append({"trade_id": "t1-snipe", "status": "open" if snipe_open else "closed",
                      "symbol": "AAAUSDT", "base_trade_id": "t1"})
@@ -131,6 +132,10 @@ def test_reconcile_fill_creates_open_trade_row() -> None:
     f = fills[0]
     assert f["trade_id"] == "t1-snipe" and f["status"] == "open" and f["side"] == "short"
     assert f["entry_price"] == 108.0 and f["base_trade_id"] == "t1"
+    # REGRESSION (audit 2026-06-12 round 3): snipe fill rows must inherit the
+    # base trade's equity — a hardcoded 0.0 zeroed snipe net_return and blocked
+    # the armed hedge's book-state resolution while any snipe was open.
+    assert f["equity_usdt"] == 10_000.0
     assert any(u["status"] == "filled" for u in updates)
     assert exits == []
 
@@ -159,6 +164,37 @@ def test_reconcile_nonterminal_partial_fill_is_not_booked() -> None:
     assert any(u["status"] == "filled" for u in updates)
 
 
+def test_recover_snipe_trade_id_from_link_round_trips_component_and_seq() -> None:
+    """Round 3: a snipe link carries no base component / re-entry seq, but its
+    -x{crc} suffix is crc32(trade_id) — adoption can recover the EXACT live
+    trade_id by enumerating the known component tags."""
+    from liquidity_migration.continuous_demo import (
+        _continuous_sniper_link_prefix,
+        _continuous_suborder_link_id,
+        _continuous_trade_id,
+        recover_snipe_trade_id_from_link,
+    )
+
+    demo = _cfg()
+    strategy_id = "continuous_fade_ensemble_v1"
+    sig = 1_765_400_000_000
+    for component in ("p3", "p4p3", "p4p5", "tp14", ""):
+        for seq in (0, 1):
+            base = _continuous_trade_id(strategy_id, "WIFUSDT", sig, seq)
+            trade_id = (f"{base}-{component}-snipe" if component else f"{base}-snipe")
+            link = _continuous_suborder_link_id(
+                _continuous_sniper_link_prefix(demo), symbol="WIFUSDT",
+                signal_ts_ms=sig, trade_id=trade_id,
+            )
+            assert recover_snipe_trade_id_from_link(
+                link, strategy_id=strategy_id, symbol="WIFUSDT", signal_ts_ms=sig,
+            ) == trade_id, (component, seq)
+    # no -x suffix -> no recovery claim
+    assert recover_snipe_trade_id_from_link(
+        "lm-en-cs-WIFUSDT-abc123", strategy_id=strategy_id, symbol="WIFUSDT", signal_ts_ms=sig,
+    ) is None
+
+
 def test_reconcile_cancels_resting_snipe_when_base_closed() -> None:
     client = FakeClient()
     client.open_orders = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT"}]  # still resting
@@ -167,6 +203,37 @@ def test_reconcile_cancels_resting_snipe_when_base_closed() -> None:
         trading_client=client, demo=_cfg(), now_ms=2)
     assert fills == []
     assert client.cancelled == [("AAAUSDT", "lnk1")]
+    # REGRESSION (audit 2026-06-12 round 3): the cancel ack must NOT terminalize
+    # the row — a PostOnly wick order can be PartiallyFilled before the base
+    # exits, and a terminal "cancelled" here permanently unbooked the executed
+    # leg. The row stays resting; history resolution terminalizes next cycle.
+    assert all(u["status"] != "cancelled" for u in updates)
+    assert any(u["status"] == "resting" and u["submit_mode"] == "cancel" for u in updates)
+
+    # Next cycle: the venue reports the terminal truth — a partial fill before
+    # our cancel. The executed leg books as a first-class trade row.
+    client.open_orders = []
+    client.history = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "1.0",
+                       "avgPrice": "108.0", "updatedTime": "1700000200000",
+                       "orderStatus": "PartiallyFilledCanceled"}]
+    fills, updates, _exits = reconcile_continuous_snipes(
+        _trades_df(base_open=False), _orders_df([_resting_order_row()]),
+        trading_client=client, demo=_cfg(), now_ms=3)
+    assert len(fills) == 1 and fills[0]["trade_id"] == "t1-snipe"
+    assert fills[0]["qty"] == "1"
+    assert any(u["status"] == "filled" for u in updates)
+
+
+def test_reconcile_cancel_with_zero_fill_converges_to_cancelled() -> None:
+    client = FakeClient()
+    client.open_orders = []
+    client.history = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "0",
+                       "avgPrice": "0", "updatedTime": "1700000200000",
+                       "orderStatus": "Cancelled"}]
+    fills, updates, _exits = reconcile_continuous_snipes(
+        _trades_df(base_open=False), _orders_df([_resting_order_row()]),
+        trading_client=client, demo=_cfg(), now_ms=3)
+    assert fills == []
     assert any(u["status"] == "cancelled" for u in updates)
 
 

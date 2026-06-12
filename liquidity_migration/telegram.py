@@ -52,6 +52,17 @@ def format_age_ms(*, now_ms: int, then_ms: int | None) -> str:
     return f"{age_h / 24.0:.1f}d ago"
 
 
+def telegram_configured(*, config: TelegramConfig | None = None) -> bool:
+    """True when the token + chat-id env vars are both present (a send can be
+    attempted). Lets callers distinguish "not configured" — a False return from
+    ``send_telegram_message`` that no retry will ever fix — from a transport
+    failure worth retrying (audit 2026-06-12 round 3: ws_risk un-recorded its
+    dedupe key and rewrote the dedupe file at heartbeat cadence when the env was
+    simply absent)."""
+    cfg = config or TelegramConfig()
+    return bool(os.environ.get(cfg.token_env)) and bool(os.environ.get(cfg.chat_id_env))
+
+
 def send_telegram_message(
     text: str,
     *,

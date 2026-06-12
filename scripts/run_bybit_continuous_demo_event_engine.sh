@@ -73,7 +73,16 @@ if [[ "${PAPER_MODE:-0}" == "1" ]]; then
     order_args+=(--paper-mode)
 fi
 [[ "${RECORD_DRY_RUN:-0}" == "1" ]] && order_args+=(--record-dry-run)
-[[ "${TELEGRAM_ENABLED:-0}" == "1" ]] && order_args+=(--telegram)
+# Same fail-loud guard as the ws_risk/long runners: TELEGRAM_ENABLED=1 with a
+# missing token/chat-id previously came up "healthy" with telegram silently
+# broken on the one LIVE order-submitting daemon (audit 2026-06-12 round 3).
+if [[ "${TELEGRAM_ENABLED:-0}" == "1" ]]; then
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+        echo "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID when TELEGRAM_ENABLED=1." >&2
+        exit 2
+    fi
+    order_args+=(--telegram)
+fi
 if [[ "$DAILY_REBALANCE_ENABLED" == "1" ]]; then
     order_args+=(--daily-rebalance-enabled)
 fi

@@ -156,8 +156,9 @@ def format_coverage(status: CoverageStatus) -> str:
             "to refresh PIT membership (download-data does NOT touch the manifest),"
         )
         lines.append(
-            "           or pass `--pit-membership current-universe` for a clearly "
-            "biased same-day diagnostic (never promotion evidence)."
+            "           or set require_pit_membership=False in the run config for a clearly "
+            "biased same-day diagnostic (never promotion evidence; the old "
+            "--pit-membership flag was erased with the volume-events CLI)."
         )
     if status.manifest_lag_vs_klines_days is not None and status.manifest_lag_vs_klines_days > 0:
         lines.append(

@@ -284,7 +284,7 @@ def download_public_trade_archive(
 def _download_archive_to_path(url: str, output: Path, *, timeout_seconds: int) -> None:
     backend = os.environ.get(ARCHIVE_BACKEND_ENV, "").strip().lower()
     if backend == "curl":
-        subprocess.run(
+        result = subprocess.run(
             [
                 "curl",
                 "-L",
@@ -295,12 +295,29 @@ def _download_archive_to_path(url: str, output: Path, *, timeout_seconds: int) -
                 str(min(int(timeout_seconds), 15)),
                 "--max-time",
                 str(int(timeout_seconds)),
+                "--write-out",
+                "%{http_code}",
                 "--output",
                 str(output),
                 url,
             ],
-            check=True,
+            check=False,
+            capture_output=True,
+            text=True,
         )
+        if result.returncode != 0:
+            http_code = (result.stdout or "").strip()[-3:]
+            # Map the permanent 404 to the same typed error the urllib backend
+            # raises — otherwise a symbol that didn't trade on that date burned
+            # the full retry budget and ABORTED the multi-symbol build instead
+            # of being skipped (audit 2026-06-12 round 3). curl exit 22 = HTTP
+            # error with --fail.
+            if result.returncode == 22 and http_code == "404":
+                raise ArchiveFileNotFoundError(url)
+            raise RuntimeError(
+                f"curl download failed rc={result.returncode} http={http_code or 'unknown'}: "
+                f"{(result.stderr or '').strip()[:300]} url={url}"
+            )
         return
     output.write_bytes(download_archive_bytes(url, timeout_seconds=timeout_seconds))
 

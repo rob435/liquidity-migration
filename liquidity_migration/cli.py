@@ -449,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
             max_symbols=args.max_symbols,
             workers=args.workers,
             name=args.name,
+            allow_degraded=args.allow_degraded,
         )
         payload = run_archive_manifest(data_root, config=manifest_config)
         print(
@@ -645,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
         continuous_hedge_root = Path(args.continuous_hedge_data_root or continuous_hedge_default).expanduser()
         bybit_position_summary: dict[str, object] | None = None
         bybit_positions: list[dict[str, object]] | None = None
+        live_positions_error: str | None = None
         if args.include_live_positions:
             try:
                 client = _build_private_client(config)
@@ -652,7 +654,14 @@ def main(argv: list[str] | None = None) -> int:
                 if not error:
                     bybit_positions = build_position_pnl_snapshot(raw_positions)
                     bybit_position_summary = summarize_position_pnl(bybit_positions)
+                else:
+                    # A non-empty error with no raise previously fell through
+                    # SILENTLY and the report claimed "flat" off an unverified
+                    # read (audit 2026-06-12 round 3).
+                    live_positions_error = str(error)
+                    print(f"WARN: failed to fetch live Bybit positions: {error}", flush=True)
             except Exception as exc:  # noqa: BLE001 - aggregate roll-up must never fail on REST issues
+                live_positions_error = f"{type(exc).__name__}: {exc}"
                 print(f"WARN: failed to fetch live Bybit positions: {exc}", flush=True)
         message = format_combined_book_summary(
             short_root=short_root,
@@ -663,13 +672,16 @@ def main(argv: list[str] | None = None) -> int:
             now_ms=_utc_now_ms(),
             bybit_position_summary=bybit_position_summary,
             bybit_positions=bybit_positions,
+            live_positions_error=live_positions_error,
             sleeve_states={
                 # SHORT was ERASED 2026-06-11 — no toggle exists, so the unset default
                 # must be "off" (an "on" default rendered the erased sleeve live forever).
+                # LONG/PAPER unset-defaults are "off" too since round 3 — every reader
+                # of the sleeve toggles fails safe the same way (deploy/lib_sleeves.sh).
                 "SHORT_SLEEVE": os.environ.get("SHORT_SLEEVE", "off"),
-                "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "on"),
+                "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "off"),
                 "CONTINUOUS_SLEEVE": os.environ.get("CONTINUOUS_SLEEVE", "off"),
-                "CONTINUOUS_PAPER_SLEEVE": os.environ.get("CONTINUOUS_PAPER_SLEEVE", "on"),
+                "CONTINUOUS_PAPER_SLEEVE": os.environ.get("CONTINUOUS_PAPER_SLEEVE", "off"),
             },
         )
         if args.print_only:

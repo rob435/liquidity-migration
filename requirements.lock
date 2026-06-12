@@ -1,9 +1,10 @@
-# Exact-pinned lockfile — snapshot of the production VPS venv (deployed
-# commit b49e6e1, captured 2026-05-29). requirements.txt keeps range bounds
-# (which already block major-version bumps); this lock captures the exact
-# tested transitive set for fully-reproducible deploys / debugging.
-#
-# Recreate the exact environment with:
+# Exact-pinned snapshot of a known-good venv (captured 2026-05-29 at commit
+# b49e6e1) — a DEBUGGING REFERENCE, not a deploy input. HONESTY NOTE (audit
+# 2026-06-12 round 3): no deploy path installs from this file. The VPS deploy
+# (scripts/deploy_vps_live.sh) runs `pip install -e ".[dev]"`, resolving fresh
+# from pyproject.toml's range bounds; this lock only TRIGGERS a redeploy via the
+# workflow paths filter when it changes. Use it to reconstruct/compare an
+# environment when chasing a dependency regression:
 #   python -m pip install -r requirements.lock
 #
 # Regenerate after an intentional dependency change:

@@ -48,7 +48,9 @@ honest number wins, no rescue.
 
 ```bash
 POLARS_MAX_THREADS=4 .venv/bin/python scripts/backfill_binance_funding_vision.py
-# then re-measure:
+# then re-measure (NOTE 2026-06-12: scripts/btc_trend_gate_run.py was deleted in
+# the script cleanup and never replaced — re-running this leg needs the script
+# restored from git history into a scratch checkout):
 .venv/bin/python scripts/btc_trend_gate_run.py --gate off     --root ~/SHARED_DATA/binance_full_pit --start 2023-04-01 --end 2026-05-28 --out ~/SHARED_DATA/binance_full_pit/reports/btc_gate_tier2_2026-06-09_refunded/00_baseline
 .venv/bin/python scripts/btc_trend_gate_run.py --gate uptrend --root ~/SHARED_DATA/binance_full_pit --start 2023-04-01 --end 2026-05-28 --out ~/SHARED_DATA/binance_full_pit/reports/btc_gate_tier2_2026-06-09_refunded/01_uptrend
 ```

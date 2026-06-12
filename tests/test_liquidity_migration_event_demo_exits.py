@@ -826,6 +826,62 @@ def test_pending_exit_partial_fill_reduces_open_trade_qty() -> None:
     assert order_updates[0]["filled_qty"] == "0.4"
 
 
+def test_pending_reduce_full_fill_smaller_than_trade_reduces_not_closes() -> None:
+    # Regression (audit 2026-06-12 round 3): a reduce order (e.g. rebalance_reduce)
+    # that targets only PART of the trade and fully fills must shrink the trade,
+    # not close it — order-level fullness is not position-level fullness. The old
+    # `fully_filled or ...` close erased the live remainder from the ledger.
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "lm-ex-pending",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "Buy",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": True,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 0.0,
+                "notional_usdt": 0.0,
+                "status": "submitted_unconfirmed",
+                "exit_reason": "rebalance_reduce",
+                "target_qty": "1",
+                "filled_qty": "",
+            }
+        ]
+    )
+    trades_df = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "3",
+                "entry_price": 99.0,
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-ex-",), fill_qty="1")
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        trades_df,
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    # The ORDER fully filled (1 of target 1) but the POSITION is 3: shrink to 2.
+    assert trades[0]["status"] == "open"
+    assert trades[0]["qty"] == "2"
+    assert order_updates[0]["status"] == "filled"
+    assert order_updates[0]["filled_qty"] == "1"
+
+
 def test_pending_entry_additional_fill_updates_open_trade_qty() -> None:
     orders = pl.DataFrame(
         [

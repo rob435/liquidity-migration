@@ -5,7 +5,7 @@ place to look. Each accessor returns the **exact** strategy config the live slee
 runs, pulled from that sleeve's canonical factory (no flag duplication, no drift):
 
     long_profile()   -> the deployed LONG v11a profile (the `div` risk-engineering:
-                        universe 50, max_concurrent 10, de-risk-only vol-target),
+                        universe 50, max_concurrent 10, vol-target 0.60 cap 1.25x = volup125),
                         from long_native_event_demo._v11a_long_native_config()
 
 There is exactly ONE promoted sleeve (LONG). The daily SHORT sleeve was ERASED

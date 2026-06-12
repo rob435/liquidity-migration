@@ -26,18 +26,22 @@ lm_load_sleeve_toggles() {
     _lm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     [ -f "$_lm_dir/sleeves.env" ] && . "$_lm_dir/sleeves.env"
     [ -f /etc/liquidity-migration/sleeves.env ] && . /etc/liquidity-migration/sleeves.env
-    # Fallbacks if NEITHER file set a toggle (a stripped checkout). LONG is
-    # validated so defaults on; CONTINUOUS defaults OFF so even a missing config
-    # can never resurrect a disabled sleeve. The committed deploy/sleeves.env is
-    # the real source of truth; these are last-resort.
-    : "${LONG_SLEEVE:=on}"
+    # Fallbacks if NEITHER file set a toggle (a stripped checkout): EVERY sleeve
+    # fails safe to OFF (audit 2026-06-12 round 3 — LONG previously failed OPEN,
+    # so an accidentally deleted/renamed sleeves.env would have enabled and
+    # restarted the order-submitting long demo against the operator's LONG=off
+    # intent). The committed deploy/sleeves.env is the real source of truth;
+    # these are last-resort. A missing config disables everything; it can never
+    # resurrect a sleeve.
+    : "${LONG_SLEEVE:=off}"
     : "${CONTINUOUS_SLEEVE:=off}"
-    : "${CONTINUOUS_PAPER_SLEEVE:=on}"
+    : "${CONTINUOUS_PAPER_SLEEVE:=off}"
 }
 
 # sleeve_on <value> -> 0 (true) if the toggle means "run this sleeve".
+# An EMPTY/unset value is OFF (fail-safe, round 3) — callers load toggles first.
 sleeve_on() {
-    case "${1:-on}" in
+    case "${1:-off}" in
         on|ON|On|1|true|TRUE|yes|YES) return 0 ;;
         *) return 1 ;;
     esac

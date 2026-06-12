@@ -63,6 +63,82 @@ def test_unit_states_alert_only_on_terminal_failed() -> None:
     assert alerts[0].severity == M.CRITICAL
 
 
+def test_unit_states_timers_alert_on_not_active() -> None:
+    """REGRESSION (audit 2026-06-12 round 3): a stopped/disabled TIMER reports
+    'inactive', never 'failed' — under failed-only alerting a dead hedge timer
+    meant a silently unhedged book forever. Timers must be 'active' (waiting)."""
+    states = {
+        "good.timer": "active",
+        "stopped.timer": "inactive",
+        "failed.timer": "failed",
+        "ok.service": "inactive",  # services: inactive is a normal deploy state
+    }
+    alerts = {a.key: a for a in M.evaluate_unit_states(states)}
+    assert set(alerts) == {"unit:stopped.timer", "unit:failed.timer"}
+    assert "never fire" in alerts["unit:stopped.timer"].message
+
+
+def test_gather_risk_alerts_pages_on_stale_or_missing_heartbeat(tmp_path) -> None:
+    """REGRESSION (audit 2026-06-12 round 3): the short-sleeve erasure deleted the
+    only ws_risk liveness check — a STOPPED ('inactive') or HUNG ('active') risk
+    engine paged nobody while stop repair / orphan adoption / fill reconciliation
+    were all dead. The engine heartbeats a cycle row every ~10s; its age is the
+    only reliable liveness signal."""
+    import argparse
+
+    import polars as pl
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10)
+    root = tmp_path / "bybit-demo-event"
+
+    # Root missing entirely -> dev-box convention: no alert (other gathers match).
+    assert M.gather_risk_alerts(risk_root=root, now_ms=now, args=args) == []
+
+    # Root exists but no cycles ever written -> CRITICAL (never started).
+    root.mkdir(parents=True)
+    alerts = M.gather_risk_alerts(risk_root=root, now_ms=now, args=args)
+    assert [a.key for a in alerts] == ["liveness:ws_risk"]
+    assert alerts[0].severity == M.CRITICAL
+
+    # Fresh heartbeat -> clean; stale heartbeat -> CRITICAL.
+    cyc_dir = root / "event_demo_cycles" / "date=2024-01-01"
+    cyc_dir.mkdir(parents=True)
+    pl.DataFrame([{"ts_ms": now - 2 * MIN}]).write_parquet(cyc_dir / "part.parquet")
+    assert M.gather_risk_alerts(risk_root=root, now_ms=now, args=args) == []
+    pl.DataFrame([{"ts_ms": now - 45 * MIN}]).write_parquet(cyc_dir / "part.parquet")
+    alerts = M.gather_risk_alerts(risk_root=root, now_ms=now, args=args)
+    assert [a.key for a in alerts] == ["liveness:ws_risk"]
+    assert "DOWN/HUNG" in alerts[0].message
+
+
+def test_gather_liquidation_capture_alerts_freshness(tmp_path) -> None:
+    """The collector unit can never reach systemd 'failed' (RestartSec spaces starts
+    beyond the start-limit window), so capture death must be caught by JSONL
+    freshness (audit 2026-06-12 round 3). Venues that never wrote (region-blocked
+    Binance leg) contribute nothing and never alarm."""
+    import os
+
+    now_ms = 1_000 * HOUR
+    root = tmp_path / "liquidations"
+    # Missing root / nothing ever captured -> no alert.
+    assert M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3) == []
+    (root / "bybit").mkdir(parents=True)
+    assert M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3) == []
+
+    f = root / "bybit" / "2024-01-01.jsonl"
+    f.write_text("{}\n")
+    fresh_s = (now_ms - 30 * MIN) / 1000.0
+    os.utime(f, (fresh_s, fresh_s))
+    assert M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3) == []
+
+    stale_s = (now_ms - 5 * HOUR) / 1000.0
+    os.utime(f, (stale_s, stale_s))
+    alerts = M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3)
+    assert [a.key for a in alerts] == ["liquidation_capture_stale"]
+    assert alerts[0].severity == M.WARNING
+
+
 def test_stop_protection_flags_missing_and_wrong_and_mismatch() -> None:
     open_trades = [
         {"symbol": "OKUSDT", "stop_price": 100.0},
@@ -177,9 +253,20 @@ def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tm
                   root, "continuous_fade_demo_trades", partition_by=())
     monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": ({}, "RuntimeError: api down"))
     keys = {a.key for a in M.gather_continuous_alerts(continuous_root=root, now_ms=now, args=args)}
-    assert "continuous_universe_empty" in keys
-    assert "continuous_kline_store_empty" in keys
+    assert "continuous_universe_empty:bybit-continuous-demo-event" in keys
+    assert "continuous_kline_store_empty:bybit-continuous-demo-event" in keys
     assert "stop_verify_unavailable_continuous" in keys
+
+    # Sleeve toggled OFF (cycle_checks=False): daemon-liveness/rmom/universe checks
+    # skip — an off daemon is intentional — but the stop/mismatch check on the
+    # residual open row STILL runs, because "off" does not flatten (round 3).
+    keys_off = {
+        a.key
+        for a in M.gather_continuous_alerts(
+            continuous_root=root, now_ms=now, args=args, cycle_checks=False
+        )
+    }
+    assert keys_off == {"stop_verify_unavailable_continuous"}
 
 
 def test_gather_continuous_paper_alerts_uses_paper_datasets_without_stop_check(tmp_path, monkeypatch) -> None:
@@ -229,28 +316,32 @@ def test_gather_continuous_paper_alerts_uses_paper_datasets_without_stop_check(t
 
     assert "liveness:bybit-continuous-paper-event" in keys
     assert "rmom:bybit-continuous-paper-event" in keys
-    assert "continuous_universe_empty" in keys
-    assert "continuous_kline_store_empty" in keys
+    # Label-keyed (audit 2026-06-12 round 3): demo and paper trip these
+    # independently; a shared fixed key let one sleeve's cooldown suppress the
+    # other's alert.
+    assert "continuous_universe_empty:bybit-continuous-paper-event" in keys
+    assert "continuous_kline_store_empty:bybit-continuous-paper-event" in keys
     assert "stop_verify_unavailable_continuous" not in keys
 
 
 def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
     """The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
-    unset-default is per-sleeve and mirrors deploy/lib_sleeves.sh (continuous off, short/long on)."""
+    unset-default mirrors deploy/lib_sleeves.sh: EVERY sleeve fails safe to OFF
+    (audit 2026-06-12 round 3 — a missing sleeves.env must never resurrect an
+    order-submitting sleeve)."""
     for off in ("off", "OFF", "false", "0", "no"):
         monkeypatch.setenv("CONTINUOUS_SLEEVE", off)
         assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is False, off
     for on in ("on", "ON", "1", "true", "yes"):
         monkeypatch.setenv("CONTINUOUS_SLEEVE", on)
         assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is True, on
-    # Unset -> per-sleeve default: continuous OFF (cannot resurrect the disabled sleeve),
-    # short/long ON (identical to before the kill-switch).
+    # Unset -> fail-safe default OFF for every sleeve.
     monkeypatch.delenv("CONTINUOUS_SLEEVE", raising=False)
     assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is False
-    monkeypatch.delenv("SHORT_SLEEVE", raising=False)
-    assert M._sleeve_on("SHORT_SLEEVE") is True
+    monkeypatch.delenv("LONG_SLEEVE", raising=False)
+    assert M._sleeve_on("LONG_SLEEVE") is False
     monkeypatch.delenv("CONTINUOUS_PAPER_SLEEVE", raising=False)
-    assert M._sleeve_on("CONTINUOUS_PAPER_SLEEVE") is True
+    assert M._sleeve_on("CONTINUOUS_PAPER_SLEEVE") is False
 
 
 def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
@@ -289,6 +380,7 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
         "sys.argv",
         ["check_demo_liveness.py", "--telegram",
          "--continuous-root", "", "--continuous-paper-root", "", "--long-root", "",
+         "--risk-root", "", "--liquidations-root", "",
          "--state-file", str(state_file)],
     )
     assert M.main() == 0

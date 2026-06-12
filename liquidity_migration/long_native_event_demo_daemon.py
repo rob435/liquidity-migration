@@ -216,21 +216,32 @@ class LongNativeDemoDaemon:
         # Wake the event-driven wait so SIGTERM drains promptly.
         self._bar_event.set()
 
-    def _send_telegram(self, text: str) -> None:
+    def _send_telegram(self, text: str) -> bool:
+        """Returns True only on a confirmed delivery. A False return from the
+        transport (TELEGRAM_* env missing / API non-2xx) was previously swallowed
+        with no log line at all — a missing token suppressed every daemon page
+        forever with zero trace (audit 2026-06-12 round 3)."""
         if not self.demo_config.telegram:
-            return
+            return False
         sender = self._telegram_sender
         if sender is None:
             try:
                 from .telegram import send_telegram_message
             except Exception:  # noqa: BLE001
-                return
+                return False
             def sender(t):
                 return send_telegram_message(t, enabled=True)
         try:
-            sender(text)
+            delivered = bool(sender(text))
         except Exception as exc:  # noqa: BLE001
             _logger.warning("telegram send failed: %s", exc)
+            return False
+        if not delivered:
+            _logger.warning(
+                "telegram send returned False (TELEGRAM_* env missing or API non-2xx); message dropped: %s",
+                text[:120],
+            )
+        return delivered
 
     def _open_ws(self) -> None:
         try:
@@ -463,6 +474,15 @@ class LongNativeDemoDaemon:
         last = self._cycle_failure_telegram_sent.get(key)
         if last is not None and now - last < self._CYCLE_FAILURE_TELEGRAM_COOLDOWN_SECONDS:
             return
+        delivered = self._send_telegram(
+            f"❌ liquidity-migration | {self._sleeve_label} sleeve cycle failed: {str(exc)[:200]}"
+        )
+        if not delivered:
+            # Cooldown advances ONLY on confirmed delivery: recording it before the
+            # send meant a transient Telegram outage at the FIRST failure suppressed
+            # the page for the whole window, and a missing token suppressed it
+            # forever (audit 2026-06-12 round 3). The next failure retries.
+            return
         self._cycle_failure_telegram_sent[key] = now
         # Bound the signature map — a daemon cycling through many distinct failure
         # messages (e.g. a timestamp inside the message) must not grow it unbounded.
@@ -470,9 +490,6 @@ class LongNativeDemoDaemon:
             oldest = sorted(self._cycle_failure_telegram_sent.items(), key=lambda kv: kv[1])
             for stale_key, _ in oldest[: len(oldest) - 32]:
                 self._cycle_failure_telegram_sent.pop(stale_key, None)
-        self._send_telegram(
-            f"❌ liquidity-migration | {self._sleeve_label} sleeve cycle failed: {str(exc)[:200]}"
-        )
 
     def _run_one_cycle(self) -> None:
         cycle_started = time.monotonic()

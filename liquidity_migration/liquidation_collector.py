@@ -116,6 +116,12 @@ class JsonlDayWriter:
         # that on 2026-06-10 (binance leg quiet for 70+ min, indistinguishable
         # from healthy in the journal).
         self.written_by_venue: dict[str, int] = {}
+        # Rows lost to writer OSErrors (disk full / permissions). Counted, not
+        # raised: an OSError previously propagated into websocket-client's
+        # dispatcher and tore down the WS connection on EVERY message — a
+        # reconnect storm against the venue while the disk stayed full, with
+        # rows silently dropped anyway (audit 2026-06-12 round 3).
+        self.dropped = 0
 
     def write(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
@@ -130,9 +136,14 @@ class JsonlDayWriter:
                 venue = str(r["venue"])
                 venue_counts[venue] = venue_counts.get(venue, 0) + 1
             for p, lines in by_path.items():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                with p.open("a", encoding="utf-8") as fh:
-                    fh.write("\n".join(lines) + "\n")
+                try:
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    with p.open("a", encoding="utf-8") as fh:
+                        fh.write("\n".join(lines) + "\n")
+                except OSError as exc:
+                    self.dropped += len(lines)
+                    _logger.warning("liquidation writer OSError (%s): dropped %d row(s) for %s", exc, len(lines), p)
+                    continue
                 self.written += len(lines)
             for venue, count in venue_counts.items():
                 self.written_by_venue[venue] = self.written_by_venue.get(venue, 0) + count
@@ -273,7 +284,8 @@ def main() -> int:
                 f"{venue}={writer.written_by_venue.get(venue, 0)}" for venue in sorted(venues)
             )
             _logger.info(
-                "liquidation collector alive: %d rows written (%s)", writer.written, per_venue,
+                "liquidation collector alive: %d rows written (%s) dropped=%d",
+                writer.written, per_venue, writer.dropped,
             )
     except KeyboardInterrupt:
         stop.set()

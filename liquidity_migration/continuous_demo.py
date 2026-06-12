@@ -768,6 +768,16 @@ def reconcile_continuous_snipes(
     known_trade_ids: set[str] = (
         set(all_trades["trade_id"].cast(pl.String).to_list()) if have_trades and "trade_id" in all_trades.columns else set()
     )
+    # Base-trade equity for snipe fill rows. A hardcoded 0.0 equity (audit
+    # 2026-06-12 round 3) zeroed every snipe's net_return AND made the armed
+    # hedge's book state unknowable (partial notional/equity -> submit blocked)
+    # whenever any snipe was open.
+    equity_by_trade_id: dict[str, float] = {}
+    if have_trades and "equity_usdt" in all_trades.columns:
+        for t in all_trades.select(["trade_id", "equity_usdt"]).to_dicts():
+            eq = _float(t.get("equity_usdt"))
+            if eq > 0.0:
+                equity_by_trade_id[str(t.get("trade_id", ""))] = eq
 
     fill_rows: list[dict[str, Any]] = []
     update_rows: list[dict[str, Any]] = []
@@ -790,7 +800,14 @@ def reconcile_continuous_snipes(
             if not base_open:
                 try:
                     trading_client.cancel_order(symbol=symbol, order_link_id=link)
-                    update_rows.append({**row, "ts_ms": now_ms, "status": "cancelled", "submit_mode": "cancel"})
+                    # Do NOT terminalize on our own cancel ack: a PostOnly wick
+                    # order can be PartiallyFilled before the base exits, and
+                    # writing "cancelled" here permanently unbooked the executed
+                    # leg (audit 2026-06-12 round 3). Leave the row resting; the
+                    # next cycle's history resolution books any cumExecQty>0 from
+                    # positive terminal evidence (PartiallyFilledCanceled) and
+                    # converges to "cancelled" when exec qty is zero.
+                    update_rows.append({**row, "ts_ms": now_ms, "status": "resting", "submit_mode": "cancel"})
                 except Exception as exc:  # noqa: BLE001
                     update_rows.append({**row, "ts_ms": now_ms, "status": "resting",
                                         "error": f"sniper cancel failed: {exc}"[:300]})
@@ -824,7 +841,8 @@ def reconcile_continuous_snipes(
                 "status": "open", "ts_ms": exec_ts, "entry_ts_ms": exec_ts, "opened_at_ms": exec_ts,
                 "updated_at_ms": now_ms, "signal_ts_ms": int(_float(row.get("signal_ts_ms")) or exec_ts),
                 "entry_price": avg_price, "qty": _decimal_text(Decimal(str(exec_qty))),
-                "notional_usdt": abs(avg_price * exec_qty), "equity_usdt": 0.0,
+                "notional_usdt": abs(avg_price * exec_qty),
+                "equity_usdt": equity_by_trade_id.get(base_id, 0.0),
                 "entry_leverage": demo.entry_leverage, "tick_size": _float(row.get("tick_size")),
                 "qty_step": _float(row.get("qty_step")), "stop_price": _float(row.get("stop_price")),
                 "stop_loss_pct": demo.stop_loss_pct, "entry_order_link_id": link,
@@ -1232,6 +1250,54 @@ def _continuous_suborder_link_id(prefix: str, *, symbol: str, signal_ts_ms: int,
     return f"{link[: 36 - len(suffix)]}{suffix}"
 
 
+def _known_ensemble_component_tags() -> tuple[str, ...]:
+    """Every component tag any continuous profile can emit (link/trade_id vocabulary)."""
+    tags: list[str] = []
+    for name in CONTINUOUS_DEMO_PROFILES:
+        cfg = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile=name))
+        for comp in cfg.ensemble_components:
+            tag = str(comp[0])
+            if tag and tag not in tags:
+                tags.append(tag)
+    return tuple(tags)
+
+
+def recover_snipe_trade_id_from_link(
+    link: str,
+    *,
+    strategy_id: str,
+    symbol: str,
+    signal_ts_ms: int,
+    components: tuple[str, ...] | None = None,
+    max_seq: int = 3,
+) -> str | None:
+    """Recover the EXACT live snipe trade_id from a snipe orderLinkId (audit
+    2026-06-12 round 3). A snipe link carries no base component and no re-entry
+    seq, so adoption previously reconstructed ``{base}-snipe`` while the live twin
+    row is ``{base}[-{seq}][-{component}]-snipe`` — breaking paper<->demo pairing
+    after a rebuild. But the link's ``-x{3xbase36}`` suffix IS
+    ``crc32(trade_id) % 46656``: enumerate every known component (and the
+    component-less base) x seq 0..max_seq and return the UNIQUE candidate whose
+    crc matches the suffix; None when there is no (or an ambiguous) match —
+    callers fall back to the lossy form."""
+    match = re.search(r"-x([0-9a-z]{3})$", str(link))
+    if not match:
+        return None
+    want = match.group(1)
+    comps = components if components is not None else _known_ensemble_component_tags()
+    found: set[str] = set()
+    for seq in range(max_seq + 1):
+        base = _continuous_trade_id(strategy_id, symbol, int(signal_ts_ms), seq)
+        for comp in (*comps, ""):
+            candidate = f"{base}-{comp}-snipe" if comp else f"{base}-snipe"
+            suffix = _base36(zlib.crc32(candidate.encode("utf-8")) % 46656).rjust(3, "0")
+            if suffix == want:
+                found.add(candidate)
+    if len(found) == 1:
+        return next(iter(found))
+    return None
+
+
 def _continuous_trade_id(strategy_id: str, symbol: str, signal_ts_ms: int, reentry_seq: int = 0) -> str:
     """Deterministic continuous trade_id. seq=0 is byte-identical to the legacy
     ``{strategy}-{symbol}-{signal_ts}`` form (existing rows unchanged); a same-signal-window re-entry
@@ -1423,6 +1489,7 @@ def _continuous_exit_link_prefix(config: ContinuousDemoCycleConfig) -> str:
 # side=Sell, lm-en-c- prefix; reuses the shared event_demo execution helpers).
 # ============================================================================
 import logging  # noqa: E402
+import re  # noqa: E402
 import time  # noqa: E402
 import zlib  # noqa: E402
 from decimal import Decimal  # noqa: E402
@@ -1743,6 +1810,7 @@ def _execute_continuous_exits(
     now_ms: int,
     execution_event_router: Any | None = None,
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
+    price_by_symbol: dict[str, float] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Close a held SHORT (buy-to-cover reduce-only). Mirrors _execute_long_exits, side=Buy."""
     if not exits:
@@ -1809,7 +1877,16 @@ def _execute_continuous_exits(
         if not demo.submit_orders or filled_qty > 0.0 or status == "submitted_unconfirmed":
             upd = dict(trade)
             if status == "filled" or not demo.submit_orders:
-                final_exit = exit_price or _float(trade.get("entry_price"))
+                # Paper/dry-run carries no venue fill price: mark the close at the
+                # live price, NOT entry (entry-price fallback booked every paper
+                # round-trip at 0% PnL and made paper<->demo reconciliation
+                # meaningless — audit 2026-06-12 round 3; mirrors the long
+                # sleeve's fix). Entry price stays as the last-resort fallback.
+                final_exit = (
+                    exit_price
+                    or _float((price_by_symbol or {}).get(symbol))
+                    or _float(trade.get("entry_price"))
+                )
                 gtr = _trade_return(_float(trade.get("entry_price")), final_exit, side="short")
                 nw = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
                 upd.update({"status": "closed", "exit_ts_ms": now_ms, "exit_price": final_exit,
@@ -1991,6 +2068,10 @@ def _build_continuous_rebalance_resize_rows(
                 "side": plan.side,
                 "order_type": "Market",
                 "qty": order_qty_text,
+                # SUBMITTED qty, not the filled qty — the pending-fill reconciler
+                # derives order fullness from target_qty and a filled-qty fallback
+                # marks a partial resize spuriously "filled" (audit 2026-06-12 r3).
+                "target_qty": str(execution.get("target_qty") or order_qty_text),
                 "reduce_only": bool(plan.reduce_only),
                 "order_id": order_id,
                 "submit_mode": submit_mode,
@@ -2089,6 +2170,7 @@ def _execute_continuous_rebalance_resizes(
             "side": plan.side,
             "order_type": "Market",
             "qty": qty,
+            "target_qty": qty,
             "reduce_only": bool(plan.reduce_only),
             "submit_mode": "preflight",
             "status": "submitted",
@@ -2156,6 +2238,7 @@ def _execute_continuous_rebalance_resizes(
         execution_row = {
             "order_link_id": order_link,
             "qty": filled_qty,
+            "target_qty": qty,
             "avg_price": avg_price,
             "fee_usdt": fee_usdt,
             "exec_time_ms": exec_time_ms,
@@ -2417,13 +2500,23 @@ def _continuous_telegram_reason(
 ) -> str:
     """Material-event filter for the continuous per-cycle telegram — quiet cycles send nothing.
     Mirrors long_native_event_demo._long_telegram_reason."""
-    if any(
+    # Submit failures live on ORDER rows, surfaced via payload counts: a failed
+    # live entry/exit appends NO trade row, so the trade-row checks below never
+    # fired for real venue rejects (audit 2026-06-12 round 3). The trade-row
+    # checks stay for dry-run/legacy callers that pass error rows directly.
+    if int(payload.get("entry_errors") or 0) > 0 or any(
         str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
         for r in entry_rows
     ):
         return "continuous_entry_error"
-    if any(str(r.get("submit_mode", "")) == "error" for r in exit_rows):
+    if int(payload.get("exit_errors") or 0) > 0 or any(
+        str(r.get("submit_mode", "")) == "error" for r in exit_rows
+    ):
         return "continuous_exit_error"
+    # Daily-rebalance resizes are real Market orders resizing live positions —
+    # both their failures and their executions must page (audit 2026-06-12 r3).
+    if int(payload.get("resize_errors") or 0) > 0:
+        return "continuous_resize_error"
     # Sniper lifecycle (payload counts — the rows live in separate lists): a snipe fill
     # is a NEW live short, an error is a stuck/ghost resting order. Until 2026-06-12
     # the armed sniper was invisible to this filter entirely.
@@ -2435,6 +2528,8 @@ def _continuous_telegram_reason(
         return "continuous_entry_executed"
     if int(payload.get("exits") or 0) > 0 or int(payload.get("sniper_exits") or 0) > 0:
         return "continuous_exit_executed"
+    if int(payload.get("rebalance_resizes") or 0) > 0:
+        return "continuous_rebalance_resize"
     return ""
 
 
@@ -2451,15 +2546,27 @@ def format_continuous_telegram_status_message(
         except (TypeError, ValueError):
             return 0.0
 
+    # "NA" when the payload carries no equity (the fast protective loop is
+    # network-free and never reads the wallet) — printing $0.00 for a missing
+    # read misstates the account on an operator-facing message (audit r3).
+    equity = payload.get("equity_usdt")
+    equity_text = f"${_f(equity):,.2f}" if equity is not None else "NA"
     lines = [
         "[Continuous sleeve] Bybit demo",
         f"reason={reason}",
-        f"mode={payload.get('mode')} equity=${_f(payload.get('equity_usdt')):,.2f}",
+        f"mode={payload.get('mode')} equity={equity_text}",
         f"entries={payload.get('entries')} exits={payload.get('exits')} "
         f"open={payload.get('open_positions')} cand={payload.get('candidates')}",
-        f"rmom={'present' if payload.get('rmom_present') else 'MISSING'} "
-        f"paused={payload.get('entry_paused')}",
     ]
+    if payload.get("fast_loop"):
+        # The fast protective loop never evaluates the rmom gate or entry pause —
+        # don't print a line it has no knowledge of.
+        lines.insert(2, "(fast protective-exit loop)")
+    else:
+        lines.append(
+            f"rmom={'present' if payload.get('rmom_present') else 'MISSING'} "
+            f"paused={payload.get('entry_paused')}"
+        )
     sniper_counts = (
         int(payload.get("sniper_fills") or 0),
         int(payload.get("sniper_exits") or 0),
@@ -2469,6 +2576,18 @@ def format_continuous_telegram_status_message(
         lines.append(
             f"sniper: fills={sniper_counts[0]} exits={sniper_counts[1]} errors={sniper_counts[2]}"
         )
+    error_counts = (
+        int(payload.get("entry_errors") or 0),
+        int(payload.get("exit_errors") or 0),
+        int(payload.get("resize_errors") or 0),
+    )
+    if any(error_counts):
+        lines.append(
+            f"submit errors: entries={error_counts[0]} exits={error_counts[1]} resizes={error_counts[2]}"
+        )
+    resizes = int(payload.get("rebalance_resizes") or 0)
+    if resizes:
+        lines.append(f"rebalance resizes: {resizes}")
     if entry_rows:
         lines.append("Entries:")
         for row in entry_rows[:6]:
@@ -2721,7 +2840,8 @@ def run_continuous_demo_cycle(
         exit_plans = [p for p in exit_plans if str(p["symbol"]) not in live_exit_syms]
         exec_exits, exit_orders = _execute_continuous_exits(
             exit_plans, all_trades, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms,
-            execution_event_router=execution_event_router, record_preflight=preflight_cb)
+            execution_event_router=execution_event_router, record_preflight=preflight_cb,
+            price_by_symbol=price_by_symbol)
         if exec_exits:
             all_trades = _upsert_rows(all_trades, exec_exits, key="trade_id")
             if demo.submit_orders or demo.record_dry_run:
@@ -2755,7 +2875,7 @@ def run_continuous_demo_cycle(
                 snipe_exits, snipe_exit_orders = _execute_continuous_exits(
                     snipe_exit_plans, all_trades, trading_client=trading_client, demo=demo,
                     now_ms=cycle_now_ms, execution_event_router=execution_event_router,
-                    record_preflight=preflight_cb)
+                    record_preflight=preflight_cb, price_by_symbol=price_by_symbol)
                 if snipe_exits:
                     all_trades = _upsert_rows(all_trades, snipe_exits, key="trade_id")
                     if demo.submit_orders or demo.record_dry_run:
@@ -2914,6 +3034,19 @@ def run_continuous_demo_cycle(
             cycle_trade_rows.extend(exec_entries)
         if entry_orders and (demo.submit_orders or demo.record_dry_run):
             cycle_order_rows.extend(entry_orders)
+        if demo.submit_orders and candidates:
+            # LON-9 parity (audit 2026-06-12 round 3): a claimed candidate whose
+            # entry did NOT open a trade row (sizing reject / place failed / fill
+            # unconfirmed) must release its reservation now instead of blocking
+            # sibling sleeves from the symbol for the full TTL. Fail-open; the
+            # TTL + closed_trade_ids GC remain the backstop.
+            opened_symbols = {str(r.get("symbol", "")) for r in exec_entries}
+            for cand in candidates:
+                cand_symbol = str(cand.get("symbol", ""))
+                if cand_symbol and cand_symbol not in opened_symbols:
+                    _cross_sleeve.release_symbol_reservation(
+                        _cs_root, symbol=cand_symbol, sleeve=sleeve_name,
+                        trade_id=str(cand.get("trade_id", "")), now_ms=cycle_now_ms)
         # Sniper placement (S1 Amendment 6): one resting PostOnly Sell limit per fresh
         # short at entry*(1+wick), quarter-size, disaster stop attached venue-side.
         if demo.sniper_enabled and exec_entries:
@@ -2952,9 +3085,10 @@ def run_continuous_demo_cycle(
             resize_plans = plan_continuous_rebalance_resizes(
                 _open_continuous_trades(post_trade_ledger, strategy_id).to_dicts(),
                 price_by_symbol=price_by_symbol,
-                equity_usdt=equity_usdt,
+                equity_usdt=equity_usdt * demo.wallet_balance_fraction,
                 base_notional_pct_equity=demo.per_position_notional_pct_equity,
                 target_scale=rebalance_target_scale,
+                exclude_trade_id_suffixes=(SNIPER_TRADE_SUFFIX,),
             )
             resize_rows, resize_orders = _execute_continuous_rebalance_resizes(
                 resize_plans,
@@ -3028,6 +3162,24 @@ def run_continuous_demo_cycle(
             # the journald summary and the telegram reason filter (audit 2026-06-12).
             "sniper_fills": len(snipe_fills), "sniper_exits": len(snipe_exits),
             "sniper_errors": sniper_errors,
+            # Submit failures live on ORDER rows only — a failed live entry/exit
+            # produces NO trade row, so the trade-row error check in the telegram
+            # reason filter never fired for them (audit 2026-06-12 round 3; the
+            # sniper got the same fix in round 2). Resize orders were invisible
+            # to the notify plane entirely.
+            "entry_errors": sum(
+                1 for r in entry_orders
+                if str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
+            ),
+            "exit_errors": sum(
+                1 for r in exit_orders + snipe_exit_orders
+                if str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
+            ),
+            "rebalance_resizes": len(resize_orders),
+            "resize_errors": sum(
+                1 for r in resize_orders
+                if str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
+            ),
             "entry_signal_ts_ms": signal_ts,
             "btc_trend_gate": demo.btc_trend_gate,
             "btc_trend_gate_allows_entry": btc_trend_gate_allows_entry,
@@ -3159,13 +3311,37 @@ def run_continuous_protective_exit_cycle(
 
         exec_exits, exit_orders = _execute_continuous_exits(
             exit_plans, all_trades, trading_client=trading_client, demo=demo, now_ms=now,
-            execution_event_router=execution_event_router, record_preflight=_record_preflight)
+            execution_event_router=execution_event_router, record_preflight=_record_preflight,
+            price_by_symbol=price_by_symbol)
         # orders first, then trades (crash-durability ordering, same as the main cycle)
         if exit_orders:
             write_dataset(pl.DataFrame(exit_orders, infer_schema_length=None), root, orders_dataset, partition_by=())
         if exec_exits:
             write_dataset(pl.DataFrame(exec_exits, infer_schema_length=None), root, trades_dataset, partition_by=())
-        return {
+        result = {
             "exits": len(exec_exits), "open_positions": len(held),
             "reasons": sorted({str(p.get("exit_reason")) for p in exit_plans}),
         }
+        # Per-event telegram AFTER the ledger writes, exception-isolated. The fast
+        # loop runs at ~2s cadence vs the main cycle's 60s, so it WINS the race for
+        # most protective exits — which made the common protective-exit path (and
+        # its submit errors) invisible to the operator (audit 2026-06-12 round 3).
+        # The main cycle's `exits` count never includes these.
+        notify_payload = {
+            "mode": "submit" if demo.submit_orders else "dry_run",
+            "fast_loop": True,
+            "entries": 0,
+            "exits": len(exec_exits),
+            "exit_errors": sum(
+                1 for r in exit_orders
+                if str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
+            ),
+            "open_positions": len(held),
+        }
+        telegram_sent, telegram_error = _maybe_continuous_notify(
+            notify_payload, [], exec_exits, enabled=demo.telegram
+        )
+        result["telegram_sent"] = telegram_sent
+        if telegram_error:
+            result["telegram_error"] = telegram_error
+        return result

@@ -124,6 +124,12 @@ if sleeve_on "$CONTINUOUS_SLEEVE"; then
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
 fi
+# MONEY-SAFETY parity with deploy_vps_live.sh (audit 2026-06-12 round 3): the
+# continuous PAPER shadow must NEVER submit orders — UNCONDITIONAL regardless of
+# toggle. A mis-edited paper unit previously passed this script.
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=0'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=PAPER_MODE=1'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=DATA_ROOT=data/bybit-continuous-paper-event'
 
 systemctl show liquidity-migration-bybit-risk.service \
   --property=ActiveState \

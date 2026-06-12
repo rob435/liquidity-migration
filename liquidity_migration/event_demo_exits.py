@@ -563,7 +563,13 @@ def _reconcile_pending_order_fills(
                 continue
             delta_qty = max(filled_qty - previous_filled_qty, 0.0)
             remaining_qty = max(_float(trade.get("qty")) - delta_qty, 0.0)
-            if fully_filled or remaining_qty <= max(_float(trade.get("qty")) * 1e-8, 1e-12):
+            # Close only when the POSITION is gone. `fully_filled` is ORDER-level
+            # fullness; a reduce order may target only part of the trade (e.g. a
+            # rebalance_reduce), and closing on order fullness erased the unfilled
+            # remainder from the ledger while it stayed live on the venue
+            # (audit 2026-06-12 round 3). `fully_filled` still drives the order
+            # row's status above.
+            if remaining_qty <= max(_float(trade.get("qty")) * 1e-8, 1e-12):
                 # gross_trade_return / net_return must land on the close so the
                 # ledger carries realized PnL without depending on the orphan
                 # reconciler. Both fields use the same formula as the cycle-exit

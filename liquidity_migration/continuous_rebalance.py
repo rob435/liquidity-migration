@@ -255,13 +255,20 @@ def plan_continuous_rebalance_resizes(
     base_notional_pct_equity: float,
     target_scale: float,
     min_resize_notional_usdt: float = 5.0,
+    exclude_trade_id_suffixes: tuple[str, ...] = (),
 ) -> list[ContinuousRebalanceResizePlan]:
     """Plan resize orders needed to match a daily rebalance scale.
 
     The continuous demo ledger stores one row per open short. The promoted
     research rule scales the per-name base notional, so each open row targets:
 
-    ``equity * base_notional_pct_equity / 100 * target_scale``.
+    ``equity * base_notional_pct_equity / 100 * target_scale * component_weight``
+
+    where ``component_weight`` is the row's own entry-sizing weight (ensemble
+    components enter at 0.10-0.40 of base; legacy single-component rows default
+    to 1.0). Rows whose trade_id ends with one of ``exclude_trade_id_suffixes``
+    (sniper fills — deliberately quarter-size, lifecycle-managed by the sniper)
+    are never resized.
 
     Positive delta means increase the short with a non-reduce-only Sell. Negative
     delta means reduce the short with a reduce-only Buy. This planner deliberately
@@ -270,7 +277,6 @@ def plan_continuous_rebalance_resizes(
     """
     base = max(_finite_float(equity_usdt), 0.0) * max(_finite_float(base_notional_pct_equity), 0.0) / 100.0
     scale = max(_finite_float(target_scale), 0.0)
-    target = base * scale
     floor = max(_finite_float(min_resize_notional_usdt), 0.0)
     plans: list[ContinuousRebalanceResizePlan] = []
 
@@ -278,10 +284,17 @@ def plan_continuous_rebalance_resizes(
         symbol = str(trade.get("symbol") or "")
         if not symbol:
             continue
+        trade_id = str(trade.get("trade_id") or "")
+        if any(suffix and trade_id.endswith(suffix) for suffix in exclude_trade_id_suffixes):
+            continue
         price = _finite_float(price_by_symbol.get(symbol))
         qty = abs(_finite_float(trade.get("qty")))
         if price <= 0.0 or qty <= 0.0:
             continue
+        weight = _finite_float(trade.get("component_weight"))
+        if weight <= 0.0:
+            weight = 1.0
+        target = base * scale * weight
         current = qty * price
         delta = target - current
         if abs(delta) < floor:
@@ -300,7 +313,7 @@ def plan_continuous_rebalance_resizes(
             continue
         plans.append(
             ContinuousRebalanceResizePlan(
-                trade_id=str(trade.get("trade_id") or ""),
+                trade_id=trade_id,
                 symbol=symbol,
                 side=side,
                 reduce_only=reduce_only,

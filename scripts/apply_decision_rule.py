@@ -530,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mar-delta-min", type=float, default=None, help="Min MAR Δ for investigation-positive (investigation; default 0.0)")
     parser.add_argument("--mar-delta-tolerance", type=float, default=None, help="Max negative MAR Δ on the non-positive venue (investigation; default 0.5)")
     parser.add_argument("--mar-falsify", type=float, default=None, help="MAR Δ ≤ this is a falsifier (investigation; default -1.0)")
-    parser.add_argument("--dd-falsify", type=float, default=None, help="|DD| > this is a falsifier (investigation; default 0.70 = 70%)")
+    parser.add_argument("--dd-falsify", type=float, default=None, help="|DD| > this is a falsifier (investigation; default 0.70 = 70%%)")
     parser.add_argument("--window-days", type=float, default=None, help="Window length in calendar days for MAR annualization (investigation; only used when summary CSV lacks a window_days column)")
     parser.add_argument("--min-trades-bybit", type=int, default=None)
     parser.add_argument("--min-trades-binance", type=int, default=None)

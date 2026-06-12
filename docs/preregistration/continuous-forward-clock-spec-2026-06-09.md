@@ -1,7 +1,7 @@
 # R3 audit + design: the forward Tier-3 clock for the banked continuous object
 
 **Date:** 2026-06-09. **Type:** infrastructure audit + design decision (no strategy run).
-**Program:** `docs/research_plan_continuous_live_readiness_2026-06-09.md` R3.
+**Program:** `docs/research_plan_continuous_live_readiness_2026-06-09.md (deleted in the doc consolidation; recover via git history)` R3.
 
 ## Audit: what tracks forward evidence today
 

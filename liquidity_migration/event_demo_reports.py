@@ -46,7 +46,7 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         f"- Target gross / initial margin: {_float(cycle.get('target_gross_exposure')):.2%} / {_float(cycle.get('target_initial_margin_pct_equity')):.2%} of equity",
         f"- Bybit positions: {cycle.get('bybit_positions', 0)} / uPnL ${_float(cycle.get('bybit_unrealized_pnl_usdt')):,.2f}",
         f"- Ledger positions: {cycle.get('ledger_positions', 0)} / uPnL ${_float(cycle.get('ledger_unrealized_pnl_usdt')):,.2f}",
-        f"- Telegram sent: {cycle.get('telegram_sent', False)}",
+        f"- Telegram: {('enqueued (async send; delivery outcome in journald)' if str(cycle.get('telegram_error') or '') == 'enqueued' else cycle.get('telegram_error') or ('sent' if cycle.get('telegram_sent') else 'not sent'))}",
         "",
         "## Entries",
         "",
@@ -114,7 +114,7 @@ def format_event_risk_cycle_report(payload: dict[str, Any]) -> str:
         f"- Bybit positions: {cycle.get('bybit_positions', 0)} / uPnL ${_float(cycle.get('bybit_unrealized_pnl_usdt')):,.2f}",
         f"- Ledger positions: {cycle.get('ledger_positions', 0)} / uPnL ${_float(cycle.get('ledger_unrealized_pnl_usdt')):,.2f}",
         f"- Untracked Bybit positions: {cycle.get('untracked_positions', 0)}",
-        f"- Telegram sent: {cycle.get('telegram_sent', False)}",
+        f"- Telegram: {('enqueued (async send; delivery outcome in journald)' if str(cycle.get('telegram_error') or '') == 'enqueued' else cycle.get('telegram_error') or ('sent' if cycle.get('telegram_sent') else 'not sent'))}",
         "",
         "## Exits",
         "",
@@ -184,12 +184,33 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
     bybit_summary = payload.get("bybit_position_summary", {})
     ledger_summary = payload.get("ledger_position_summary", {})
     reason = _telegram_notification_reason(payload)
+    mode = str(cycle.get("mode", ""))
+    # equity 0.0 means "no successful wallet read yet", not a $0 account — never
+    # print $0.00 on an operator-facing safety message (audit 2026-06-12 round 3).
+    equity = _float(cycle.get("equity_usdt"))
+    equity_text = f"${equity:,.2f}" if equity > 0.0 else "NA"
+    if mode.startswith("ws_risk"):
+        # ws_risk counters are CUMULATIVE since engine start, and exit_candidates
+        # is the tracked-order count — presenting them as per-cycle "exits=37/41"
+        # misread a quiet cycle as a mass exit (audit 2026-06-12 round 3).
+        header = "liquidity-migration | Bybit ws_risk engine"
+        counters = (
+            f"since-start: exits={cycle['exits_executed']} "
+            f"stop_repairs={cycle.get('stop_repairs', 0)} "
+            f"orders_tracked={cycle['exit_candidates']}"
+        )
+    else:
+        header = "liquidity-migration | Bybit demo cycle"
+        counters = (
+            f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} "
+            f"exits={cycle['exits_executed']}/{cycle['exit_candidates']}"
+        )
     lines = [
-        "liquidity-migration | Bybit demo cycle",
+        header,
         f"time={_iso_dt(cycle['ts_ms'])}",
         f"reason={reason or 'manual_status'}",
-        f"mode={cycle['mode']} equity=${_float(cycle['equity_usdt']):,.2f}",
-        f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} exits={cycle['exits_executed']}/{cycle['exit_candidates']}",
+        f"mode={cycle['mode']} equity={equity_text}",
+        counters,
         f"pending_fills={cycle.get('pending_order_fills_reconciled', 0)}",
         f"bybit_positions={bybit_summary.get('positions', 0)} "
         f"value=${_float(bybit_summary.get('position_value_usdt')):,.2f} "

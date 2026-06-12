@@ -236,6 +236,63 @@ def test_plan_rebalance_resizes_zero_scale_covers_without_overbuying() -> None:
     assert plans[0].qty == pytest.approx(3.0)
 
 
+def test_plan_rebalance_resizes_scales_target_by_component_weight() -> None:
+    # Regression (audit 2026-06-12 round 3): a weight-0.30 ensemble component must
+    # target 0.30x the per-name base, NOT the full base — otherwise the daily
+    # rebalance silently upsizes every component to 100% and destroys the frozen
+    # ensemble weighting.
+    plans = plan_continuous_rebalance_resizes(
+        [
+            {"trade_id": "t-p3", "symbol": "ABCUSDT", "qty": "0.6", "component_weight": 0.30},
+            {"trade_id": "t-legacy", "symbol": "DEFUSDT", "qty": "1.0"},
+        ],
+        price_by_symbol={"ABCUSDT": 100.0, "DEFUSDT": 100.0},
+        equity_usdt=10_000.0,
+        base_notional_pct_equity=2.0,
+        target_scale=1.0,
+    )
+
+    # Component row already sits at its weighted target (0.30 * 200 = 60): no plan.
+    # The legacy weightless row targets the full base (200) and needs +100.
+    assert len(plans) == 1
+    assert plans[0].trade_id == "t-legacy"
+    assert plans[0].target_notional_usdt == pytest.approx(200.0)
+    assert plans[0].delta_notional_usdt == pytest.approx(100.0)
+
+
+def test_plan_rebalance_resizes_never_touches_snipe_rows() -> None:
+    # Regression (audit 2026-06-12 round 3): sniper fills are deliberately
+    # quarter-size and lifecycle-managed by the sniper — the daily rebalance
+    # must never upsize them to base notional.
+    plans = plan_continuous_rebalance_resizes(
+        [{"trade_id": "lm-en-x-ABCUSDT-1-snipe", "symbol": "ABCUSDT", "qty": "0.5"}],
+        price_by_symbol={"ABCUSDT": 100.0},
+        equity_usdt=10_000.0,
+        base_notional_pct_equity=2.0,
+        target_scale=1.0,
+        exclude_trade_id_suffixes=("-snipe",),
+    )
+
+    assert plans == []
+
+
+def test_plan_rebalance_resizes_component_weight_reduce_targets_weighted_base() -> None:
+    plans = plan_continuous_rebalance_resizes(
+        [{"trade_id": "t-p4p5", "symbol": "ABCUSDT", "qty": "2.0", "component_weight": 0.40}],
+        price_by_symbol={"ABCUSDT": 100.0},
+        equity_usdt=10_000.0,
+        base_notional_pct_equity=2.0,
+        target_scale=1.0,
+    )
+
+    assert len(plans) == 1
+    assert plans[0].side == "Buy"
+    assert plans[0].reduce_only is True
+    # target = 200 * 0.40 = 80; current = 200 -> reduce 120 notional = 1.2 qty
+    assert plans[0].target_notional_usdt == pytest.approx(80.0)
+    assert plans[0].qty == pytest.approx(1.2)
+
+
 def test_plan_rebalance_resizes_skips_tiny_and_unmarked_positions() -> None:
     plans = plan_continuous_rebalance_resizes(
         [

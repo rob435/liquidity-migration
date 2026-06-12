@@ -102,11 +102,16 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   signal under research, the decision timestamp is the rolling bar-close and the entry
   delay may be 0 *only because the feature is already a causal trailing window*
   (research-gated) — never relax the delay for the daily profile.
-- Run sweeps via a `scripts/_sweep_runtime.py`-based dispatcher — do not
-  hand-assemble engine flags. The Tier-2 verdict comes from
+- Run sweeps via a dispatcher script, not hand-assembled engine flags.
+  `scripts/_sweep_runtime.py` is DEAD pending repoint (it shells to the erased
+  `volume-events` subcommand); current patterns are `scripts/alpha_sweep.py`
+  (continuous, in-memory config overrides) and `scripts/long_improve_sweep.py`
+  (long, direct `run_long_native_research` cells). The Tier-2 verdict comes from
   `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
   `scripts/apply_decision_rule.py`. Every engine requires full PIT by default;
-  `--allow-partial-pit` is for explicitly biased diagnostics only, labelled biased.
+  partial-PIT runs (config `require_full_pit_universe=False` — the old
+  `--allow-partial-pit` flag was erased with the volume-events CLI) are for
+  explicitly biased diagnostics only, labelled biased.
 - Funding is a known gap on roots without a funding dataset — mark such runs
   fee/slippage stressed but funding-missing.
 - Legacy fixed-day rebalance-grid benchmarks are retired — do not cite their

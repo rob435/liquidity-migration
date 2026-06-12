@@ -25,6 +25,11 @@ on:
       # effect — deploy_vps_live.sh sources both at runtime to enable/disable sleeves.
       - "deploy/sleeves.env"
       - "deploy/lib_sleeves.sh"
+      # The armed hedge timer reads these CSVs at every 00:35 UTC run; a
+      # warmstart-refresh commit (the operator-pending fix for the stale-blocked
+      # hedge) is otherwise a CSV-only push that deploys NOTHING — the box keeps
+      # the stale file and the hedge keeps paging (audit 2026-06-12 round 3).
+      - "deploy/hedge_warmstart/*.csv"
       # Hand-list every script that is either invoked by this workflow
       # OR launched by a deployed systemd unit. A glob would auto-deploy
       # anything new in scripts/, which tests pin to a strict allowlist

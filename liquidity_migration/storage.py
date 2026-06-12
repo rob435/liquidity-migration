@@ -696,8 +696,12 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
         # no updated_at_ms — first) so the max updated_at_ms lands last and
         # unique(keep="last") wins it; among ties / nulls the concat order
         # (existing then new) still lets a same-version new row win.
+        # maintain_order=True is load-bearing: continuous order rows (preflight ->
+        # final) often share a null/equal updated_at_ms, and an UNSTABLE sort may
+        # reorder ties — letting a stale preflight win the dedup and resurrecting
+        # the double-book class (audit 2026-06-12 round 3 hardening).
         if "updated_at_ms" in output.columns:
-            output = output.sort("updated_at_ms", nulls_last=False)
+            output = output.sort("updated_at_ms", nulls_last=False, maintain_order=True)
         output = output.unique(subset=keys, keep="last")
     sort_cols = [col for col in ("symbol", "ts_ms") if col in output.columns]
     if sort_cols:

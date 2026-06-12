@@ -26,7 +26,9 @@ if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "INTERVAL_SECONDS must be a non-negative integer number of seconds." >&2
     exit 2
 fi
-LOOKBACK_DAYS="${LOOKBACK_DAYS:-90}"
+# 100, not 90: the engine hard-validates lookback_days >= 95 (factor windows),
+# so the old 90 default crash-failed every bare manual run; the units set 100.
+LOOKBACK_DAYS="${LOOKBACK_DAYS:-100}"
 UNIVERSE_SIZE="${UNIVERSE_SIZE:-50}"  # div promotion 2026-05-30 (was 10); systemd unit also sets 50
 WORKERS="${WORKERS:-4}"
 NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"

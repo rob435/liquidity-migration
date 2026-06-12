@@ -3,7 +3,7 @@
 **Date:** 2026-06-09 (registered BEFORE the run)
 **Run label:** `exploratory` (inference diagnostic; outputs a selection-haircut number and
 a weight policy for the deployable — not itself promotion evidence)
-**Program:** `docs/research_plan_continuous_live_readiness_2026-06-09.md` R1.
+**Program:** `docs/research_plan_continuous_live_readiness_2026-06-09.md (deleted in the doc consolidation; recover via git history)` R1.
 
 ## Question
 

@@ -136,6 +136,10 @@ def snapshot_symbol(symbol: str) -> dict[str, Any] | None:
 
 
 def collect_cycle(root: Path, symbols: list[str]) -> dict[str, int]:
+    # CONSUMER CONTRACT: the filename day is stamped at CYCLE START, so a cycle
+    # that straddles UTC midnight (only under extreme HTTP latency; cycles are
+    # top-of-hour aligned) appends its tail rows to the PREVIOUS day's file.
+    # Always key on each row's `recv_ms`, never on the filename day.
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     out_path = root / "bybit" / f"{day}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)

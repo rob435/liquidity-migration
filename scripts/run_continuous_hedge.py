@@ -461,12 +461,18 @@ def main() -> int:
             cfg, unit_returns=unit, btc_returns=btc, live_gross_short_frac=live_book.gross_short_frac,
             btc_price=btc_price, current_hedge_qty=current_hedge_qty, equity_usdt=equity,
         )
+        # Single-leg mode never plans for the ETH leg — an ETH hedge position
+        # opened by prior 2f runs would ride unmanaged forever after a mode flip
+        # to HEDGE_MODE=btc (audit 2026-06-12 round 3). Surface it; an armed run
+        # blocks below until the operator closes/transfers the leg.
+        unmanaged_eth_qty = _current_hedge_qty(data_root, cfg.trades_dataset, HEDGE_SYMBOL_2)
         out.update({
             "hedge_ratio_equity_frac": round(single.hedge_ratio_equity_frac, 5),
             "target_notional_usdt": round(single.target_notional_usdt, 2),
             "current_hedge_qty": round(current_hedge_qty, 8),
             "current_notional_usdt": round(single.current_notional_usdt, 2),
             "n_obs": single.n_obs, "plan": _plan_json(single.plan),
+            "unmanaged_eth_qty": round(unmanaged_eth_qty, 8),
         })
         plans = [single.plan] if single.plan is not None else []
 
@@ -489,6 +495,10 @@ def main() -> int:
         # In 2f mode a dead ETH price silently drops the ETH leg; an armed run must
         # surface it instead of part-hedging.
         out["status"] = "submit_blocked_eth_price_unavailable"
+    elif args.submit and not use_2f and float(out.get("unmanaged_eth_qty") or 0.0) > 0.0:
+        # Mode flipped 2f -> single-leg while an ETH hedge leg is still open: the
+        # single-leg path would never reduce/close it (round 3). Block + page.
+        out["status"] = "submit_blocked_unmanaged_eth_leg"
     elif args.submit and warmstart_stale and any(not p.reduce_only for p in plans):
         # A stale beta window blocks only risk-INCREASING legs; trimming/closing a
         # hedge is risk-reducing and proceeds (all-reduce-only plans fall through).
@@ -533,6 +543,7 @@ def main() -> int:
         "submit_blocked_btc_price_unavailable",
         "submit_blocked_book_state_unknown",
         "submit_blocked_eth_price_unavailable",
+        "submit_blocked_unmanaged_eth_leg",
         "submit_blocked_stale_warmstart",
         "submit_failed",
         "submit_partial",

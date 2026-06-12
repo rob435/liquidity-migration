@@ -193,8 +193,10 @@ For the current liquidity-migration strategy:
 - Promotion requires archive-derived point-in-time symbol/date membership,
   including delisted instruments and historical status changes.
 - Every backtest engine must require full PIT universe coverage by default
-  (the erased short engine's `volume-events` rule, carried forward). Use
-  `--allow-partial-pit` only for explicitly biased diagnostics.
+  (the erased short engine's `volume-events` rule, carried forward). Relax it
+  (run-config `require_full_pit_universe=False`; the old `--allow-partial-pit`
+  flag was erased with the volume-events CLI) only for explicitly biased
+  diagnostics.
 - Liquidity rank, rank improvement, turnover expansion, and event-rank filters
   must use prior/current data available at the event decision time.
 - Event-decay exits, max hold, cooldown, max-active, and stop-pressure state

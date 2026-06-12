@@ -1155,7 +1155,7 @@ COMPLETE from data.binance.vision daily `metrics` (670 symbols / 112.3M 5-min ro
 OI + taker/top-trader ratios, 2023-01→, survivorship-FREE — delisted symbols served;
 `scripts/backfill_binance_metrics_vision.py`; also satisfies the ridge-rerun OI
 precondition). The pre-registered **OI-flow scout PASSED 4/4** (receipt
-`continuous-oi-flow-scout-2026-06-10.md`): pops with RISING OI (new-long-driven) fade
+`continuous-oi-flow-scout-2026-06-10.md` — consolidated into this section before commit; the receipt FILE was never committed, this paragraph is the only record): pops with RISING OI (new-long-driven) fade
 better — IC(ΔOI_6h, net_return) +0.082 binance (n=852, 100% coverage, positive EVERY
 year) / +0.086 bybit (survivor subset, 67% coverage — pooled IC carried by 2026,
 2023-25 ≈ 0 there; do not cite bybit early years); 24h/tercile/lag falsifiers all
@@ -1164,7 +1164,7 @@ serves NO historical OI for delisted symbols (REST verified) — bybit OI histor
 structurally survivor-only for 2023-25; binance Vision is the only survivorship-clean
 derivatives-history source, hence the primary arm. Economic size at event level is
 modest (~1e-4/trade tercile spread) — information real, money unproven. **Stage-2 RAN
-same day — pre-registered NULL** (receipt `continuous-oi-tilt-stage2-2026-06-10.md`):
+same day — pre-registered NULL** (receipt `continuous-oi-tilt-stage2-2026-06-10.md` — consolidated into this section before commit; the receipt FILE was never committed, this paragraph is the only record):
 the tanh size tilt fails Tier-2 (pooled ΔMAR −1.07) for two documented reasons —
 (1) ΔOI_6h right-skew made mean-centering mechanically de-lever 6-8% (caught by the
 pre-registered ±5% gross guard), and (2) beyond leverage, binance ΔSharpe −0.183:
@@ -1192,7 +1192,7 @@ bybit headline is 2026-carried (per-year Δ: −7/+17/+17/+94bps) while binance 
 negative every year — even the attractive half of the mirage is recency-tilted.
 
 **8. §8-P7 passive-first entries — pre-registered NULL (receipt:**
-`continuous-passive-entry-2026-06-10.md`**).** Lower-bound maker-fill test (limit at
+`continuous-passive-entry-2026-06-10.md` — consolidated into this section before commit; the receipt FILE was never committed, this paragraph is the only record**).** Lower-bound maker-fill test (limit at
 signal close, strictly-through fill, escalate to the ledger's taker entry): fill rate
 96-99% at 1h granularity (not selective), and the squeeze-continuation TAIL destroys
 the risk profile — bybit return +1.1pp but ΔMAR −0.77 (DD/Sharpe damage), binance
@@ -1202,7 +1202,7 @@ the working passive form. Naive passive-at-touch base entries CLOSED; the execut
 path = sniper ladder + R4-calibrated sub-hour designs.
 
 **9. §8-P8 down-only OI de-sizing — pre-registered NULL; the OI sizing arc is FULLY
-closed (receipt:** `continuous-oi-downsize-2026-06-10.md`**).** De-sizing falling-OI
+closed (receipt:** `continuous-oi-downsize-2026-06-10.md` — consolidated into this section before commit; the receipt FILE was never committed, this paragraph is the only record**).** De-sizing falling-OI
 pops to 0.5× (trailing q25, causal): bybit ΔMAR −0.94 (its de-sized survivor-subset
 events were profitable, not riskier), binance +0.33 (mild, under bar, gross band
 violated); pooled −0.305. With the tilt NULL: no daily-granularity sizing form
@@ -1378,14 +1378,30 @@ cross-venue consistency as the filter, and the application path fixed up front
   tier, trailing book PnL, btc30 magnitude) showed no consistently-signed effect.
   The spent window again declined to mint in-sample alpha; the leads now ride the
   forward clocks where they can be judged for free.
-- **TA2 follow-on (`trade-atlas-2-funding-2026-06-11.md`, the LAST atlas on this
-  window): funding-at-entry and its 30d percentile are NULL in all four books**
+- **TA2 follow-on (`trade-atlas-2-funding-2026-06-11.md`): funding-at-entry and
+  its 30d percentile are NULL in all four books**
   (the crowding price doesn't separate winners from losers at entry), and the
   cross-book feature is DEGENERATE in the most informative way possible: **zero
   same-name overlaps within 30d across all 952 trades — the SHORT and LONG books
   are structurally name-disjoint**, which upgrades the combined-book corr ≈ −0.03
-  finding from statistical to structural. Cumulative atlas harvest (14 features):
-  2 forward-armed leads, 1 causality catch, 1 structural discovery, rest null.
+  finding from statistical to structural.
+- **TC1 — third (and actually last) atlas, on the CONTINUOUS winner_base book
+  (`trade-atlas-continuous-2026-06-11.md`, committed at e03e9ab AFTER TA2;
+  operator-directed, exploratory label intact).** Ran the 9-feature causal atlas
+  on the pooled deduped winner_base book (999 bybit / 852 binance unique
+  entries). Headline: **the two TA1 leads DO NOT EXIST on the continuous book**
+  (sign flips) — atlas leads are book-specific, never portable. Gate conversion
+  through the parity-verified engine path failed again, making TC1 the **FOURTH
+  no-sizing-conversion receipt** on this book (after OI tilt, down-only sizing,
+  participation cap): the w90/tv0.045/max4/ddh-0.04 rule already normalizes the
+  book and its MAR is breadth-carried — do not re-mine sizing/filter forms.
+  **A THIRD forward-watch lead is ARMED:** the session US-penalty — at ≥100
+  forward demo trades on the continuous book, recompute the US-vs-rest win-rate
+  delta on forward trades only; graduates to a gate proposal iff direction
+  matches and the pooled effect is ≥2σ (`mkt_prevday` and `log_turn_prev`
+  recorded but NOT armed; their gate forms already failed at book level).
+  Cumulative atlas harvest across TA1/TA2/TC1 (23 feature-tests): **3
+  forward-armed leads**, 1 causality catch, 1 structural discovery, rest null.
 
 ## What To Keep In Repo
 
@@ -1399,6 +1415,8 @@ Keep only:
 - `docs/pit_gate.md` (the PIT membership gate + reconcile design);
 - `docs/timestamp_glossary.md` (the timestamp semantics reference);
 - `docs/research_plan_alpha_hunt_2026-06-10.md` (the active research charter);
+- `docs/research_notes_new_data_scoping_2026-06-10.md` (the new-data-layer
+  scoping notes the charter's §8 references);
 - a minimal `docs/preregistration/_template.md`;
 - only preregistration receipts that still represent an active deployment/promotion decision.
 

@@ -121,7 +121,11 @@ the hedge only partially fixes.
 
 ## 6. Reproduction & tooling (so you don't rediscover it)
 
-- Data roots (this box): `C:\Users\user\SHARED_DATA\{bybit,binance}_full_pit`; cap `--end
+- Data roots — SUPERSEDED, see STATE.md + docs/data_roots.md (dated charter:
+  the Windows paths below were the 2026-06-10 box; the current dev box uses
+  `~/SHARED_DATA/{bybit,binance}_full_pit`, and the roots were extended
+  2026-06-10 — bybit to 2026-06-09, binance to 2026-05-31 — so the `--end
+  2026-05-27` cap is stale). Original text: `C:\Users\user\SHARED_DATA\{bybit,binance}_full_pit`; cap `--end
   2026-05-27`; `PYTHONPATH=...`, `POLARS_MAX_THREADS=8`, `.venv/bin/python`,
   `PYTHONIOENCODING=utf-8`. Verified daily panel builder: `scripts/continuous_rs_squeeze_probe.py`
   `load_daily_panel` (float-exact daily close/turnover per symbol; the cheap, trustworthy primitive).
@@ -192,7 +196,7 @@ closes §4-D permanently.
 **P6. Regime model v2 (§4-G, parked).** Needs forward data to be honest (the 2023-26
 window is spent for regime fitting). Revisit when the forward replay clock has ≥60 days.
 
-**Standing operator items (not agent-runnable):** R4 fill pull (`bash
+**Standing operator items (not agent-runnable) — SUPERSEDED: all five executed 2026-06-10, see STATE.md "Operator queue — EXECUTED":** R4 fill pull (`bash
 scripts/reconcile.sh`), data-root refresh (starts all forward clocks), 2f hedge second
 leg in `continuous_hedge_manager`, commit/push of the session tree, P3 collector deploy.
 

@@ -430,11 +430,33 @@ def test_execute_exits_dry_run_closes_short() -> None:
     all_trades = pl.DataFrame([trade])
     plan = [{**trade, "exit_reason": "left_decile"}]
     rows, orders = _execute_continuous_exits(plan, all_trades, trading_client=None, demo=cfg,
-                                             now_ms=1_700_100_000_000, record_preflight=None)
+                                             now_ms=1_700_100_000_000, record_preflight=None,
+                                             price_by_symbol={"WIFUSDT": 92.0})
     assert len(rows) == 1 and orders[0]["side"] == "Buy" and orders[0]["reduce_only"] is True
     assert rows[0]["status"] == "closed" and rows[0]["exit_reason"] == "left_decile"
     assert rows[0]["sleeve"] == "continuous"             # exit row inherits the entry's sleeve tag (dict(trade))
     assert orders[0]["sleeve"] == "continuous" and orders[0]["order_link_id"].startswith("lm-ux-c-")
+    # Regression (audit 2026-06-12 round 3): paper/dry-run closes must mark at the
+    # LIVE price, not the entry price — the entry fallback booked every paper
+    # round-trip at exactly 0% PnL and gutted paper<->demo reconciliation.
+    assert rows[0]["exit_price"] == pytest.approx(92.0)
+    # short 100 -> 92: gross = (100-92)/100 = +8%; net = gross * (200/10000)
+    assert rows[0]["gross_trade_return"] == pytest.approx(0.08)
+    assert rows[0]["net_return"] == pytest.approx(0.08 * 0.02)
+
+
+def test_execute_exits_dry_run_without_live_price_falls_back_to_entry() -> None:
+    from liquidity_migration.continuous_demo import _execute_continuous_exits
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
+    trade = {"trade_id": "continuous_fade_v1-WIFUSDT-1700000000", "symbol": "WIFUSDT", "side": "short",
+             "sleeve": "continuous",
+             "status": "open", "entry_price": 100.0, "qty": "2", "equity_usdt": 10_000.0, "notional_usdt": 200.0}
+    plan = [{**trade, "exit_reason": "left_decile"}]
+    rows, _orders = _execute_continuous_exits(plan, pl.DataFrame([trade]), trading_client=None, demo=cfg,
+                                              now_ms=1_700_100_000_000, record_preflight=None)
+    assert rows[0]["status"] == "closed"
+    assert rows[0]["exit_price"] == pytest.approx(100.0)
 
 
 def test_rebalance_resize_rows_reduce_open_short() -> None:
@@ -1622,6 +1644,49 @@ def test_protective_exit_cycle_covers_stop_approach_dry_run(tmp_path) -> None:
     assert closed["exit_reason"].to_list() == ["stop_approach"]
 
 
+def test_protective_exit_cycle_sends_telegram(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """REGRESSION (audit 2026-06-12 round 3): the fast loop runs at ~2s vs the main
+    cycle's 60s, so it wins the race for most protective exits — those covers (and
+    their submit errors) were invisible to every notify path. The fast cycle must
+    notify after its ledger writes; the price comes from the live ticker, not entry."""
+    from liquidity_migration.config import ResearchConfig
+    from liquidity_migration.continuous_demo import continuous_strategy_id
+    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.ws_state_cache import TickerCache
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True,
+                                    stop_loss_pct=0.25, stop_approach_frac=0.8, telegram=True)
+    root = tmp_path / "bybit-continuous-demo-event"
+    trades_ds, _orders, _cycles = continuous_dataset_names(cfg)
+    now = 1_700_000_000_000
+    strat = continuous_strategy_id(cfg)
+    write_dataset(pl.DataFrame([{
+        "trade_id": f"{strat}-WIFUSDT-1699", "strategy_id": strat, "symbol": "WIFUSDT", "side": "short",
+        "status": "open", "entry_price": 100.0, "qty": "2", "notional_usdt": 200.0, "equity_usdt": 10_000.0,
+        "entry_ts_ms": now - 3 * MS_PER_HOUR, "updated_at_ms": now - 3 * MS_PER_HOUR,
+    }], infer_schema_length=None), root, trades_ds, partition_by=())
+
+    tc = TickerCache()
+    tc.seed([{"symbol": "WIFUSDT", "lastPrice": "130.0"}])
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "liquidity_migration.telegram.send_telegram_message",
+        lambda text, enabled=True: sent.append(text) or True,
+    )
+
+    payload = run_continuous_protective_exit_cycle(
+        root, config=ResearchConfig(), demo_config=cfg, trading_client=None,
+        kline_store=None, ticker_cache=tc, private_state_cache=None, now_ms=now)
+    assert payload["exits"] == 1
+    assert payload["telegram_sent"] is True
+    assert len(sent) == 1
+    assert "reason=continuous_exit_executed" in sent[0]
+    assert "(fast protective-exit loop)" in sent[0]
+    assert "stop_approach" in sent[0]
+    # paper marks at the live ticker price, not entry (round-3 exit-price fix)
+    assert "@$130" in sent[0]
+
+
 def test_continuous_same_window_reentry_both_rows_survive(tmp_path) -> None:
     """continuous-8: a same-signal-window cover-then-re-enter must produce DISTINCT trade_ids so the
     closed row is NOT overwritten by storage's trade_id dedup (the continuous-2 ledger data loss).
@@ -2188,6 +2253,33 @@ def test_continuous_telegram_sniper_reasons(monkeypatch: pytest.MonkeyPatch) -> 
     assert "telegram=boom" in line
 
 
+def test_continuous_telegram_order_row_errors_reach_reason_via_payload() -> None:
+    """REGRESSION (audit 2026-06-12 round 3): a failed live entry/exit submit appends
+    NO trade row — errors live on ORDER rows only, surfaced through payload counts.
+    Resize orders (real daily Market orders) must be visible too."""
+    import liquidity_migration.continuous_demo as cd
+
+    base = {"entries": 0, "exits": 0, "mode": "submit", "equity_usdt": 10_000.0}
+    assert cd._continuous_telegram_reason({**base, "entry_errors": 1}, [], []) == "continuous_entry_error"
+    assert cd._continuous_telegram_reason({**base, "exit_errors": 2}, [], []) == "continuous_exit_error"
+    assert cd._continuous_telegram_reason({**base, "resize_errors": 1}, [], []) == "continuous_resize_error"
+    assert (
+        cd._continuous_telegram_reason({**base, "rebalance_resizes": 3}, [], [])
+        == "continuous_rebalance_resize"
+    )
+    # errors outrank executions
+    assert (
+        cd._continuous_telegram_reason({**base, "entries": 1, "entry_errors": 1}, [], [])
+        == "continuous_entry_error"
+    )
+    msg = cd.format_continuous_telegram_status_message(
+        {**base, "entry_errors": 1, "exit_errors": 0, "resize_errors": 2, "rebalance_resizes": 2},
+        [], [], reason="continuous_resize_error",
+    )
+    assert "submit errors: entries=1 exits=0 resizes=2" in msg
+    assert "rebalance resizes: 2" in msg
+
+
 def test_continuous_telegram_failure_is_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
     """A telegram/formatter fault must degrade to a reported error, never raise into
     the cycle (orders have already executed by the time the notify runs)."""
@@ -2260,7 +2352,9 @@ def test_cycle_failure_telegram_cooldown(monkeypatch: pytest.MonkeyPatch) -> Non
     daemon = LongNativeDemoDaemon.__new__(LongNativeDemoDaemon)  # behavior-only: skip heavy __init__
     daemon._cycle_failure_telegram_sent = {}
     daemon._sleeve_label = "continuous"
-    daemon._send_telegram = sent.append  # type: ignore[method-assign]
+    # _send_telegram returns True only on CONFIRMED delivery (round 3): the
+    # cooldown must advance only then.
+    daemon._send_telegram = lambda text: sent.append(text) or True  # type: ignore[method-assign]
 
     daemon._maybe_send_cycle_failure_telegram(RuntimeError("schema mismatch"))
     daemon._maybe_send_cycle_failure_telegram(RuntimeError("schema mismatch"))
@@ -2274,6 +2368,17 @@ def test_cycle_failure_telegram_cooldown(monkeypatch: pytest.MonkeyPatch) -> Non
     }
     daemon._maybe_send_cycle_failure_telegram(RuntimeError("schema mismatch"))
     assert len(sent) == 3
+
+    # REGRESSION (round 3): a FAILED delivery must NOT advance the cooldown —
+    # recording-before-send suppressed the page for the whole window on a
+    # transient outage (and forever on a missing token). The next failure retries.
+    attempts: list[str] = []
+    daemon._cycle_failure_telegram_sent = {}
+    daemon._send_telegram = lambda text: attempts.append(text) or False  # type: ignore[method-assign]
+    daemon._maybe_send_cycle_failure_telegram(RuntimeError("schema mismatch"))
+    daemon._maybe_send_cycle_failure_telegram(RuntimeError("schema mismatch"))
+    assert len(attempts) == 2  # retried — cooldown never advanced
+    assert daemon._cycle_failure_telegram_sent == {}
 
 
 def test_suborder_link_uniquifies_and_still_decodes() -> None:

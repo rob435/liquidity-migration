@@ -1,3 +1,8 @@
+# LEGACY CONVENIENCE FILE — pyproject.toml is the dependency source of truth.
+# Nothing in the repo or the deploy installs from this file (the VPS deploy runs
+# `pip install -e ".[dev]"`); it exists for ad-hoc `pip install -r` bootstraps
+# only and mirrors pyproject's runtime ranges (audit 2026-06-12 round 3 note:
+# it previously drifted silently). Update pyproject.toml first, then mirror.
 certifi>=2024.0.0
 numpy>=2.1,<3.0
 Pillow>=10.0,<12

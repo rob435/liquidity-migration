@@ -61,17 +61,19 @@ is crypto-native and long-only — separate from the volume-events short sleeve.
 | Venue | Root | Why |
 |---|---|---|
 | Bybit | `~/SHARED_DATA/bybit_full_pit` | funding dataset named `funding`, 764 symbols → funding modeled |
-| Binance | `~/SHARED_DATA/binance_full_pit_strategy` (if present) else `~/SHARED_DATA/binance_full_pit` | both funding-readable; coverage is partial (~51 symbols) → `funding_mode=partial` |
+| Binance | `~/SHARED_DATA/binance_full_pit` | `binance_usdm_funding` rebuilt 2026-06-09: 697 symbols / ~2.23M rows with true settlement intervals → funding modeled |
 
 **Funding now auto-resolves — no symlink/rename needed.** As of the run-diagnostics
 refactor, `read_dataset(root,"funding")` transparently falls back to the
 venue-specific dataset present on the root (`binance_usdm_funding`) when a canonical
 `funding/` dir is absent (`storage.resolve_dataset_name`). So `binance_full_pit` is
-funding-readable directly; you do **not** need `binance_full_pit_strategy` or a hand
-symlink. The remaining caveat is *coverage*, not naming: Binance funding only spans
-~51 symbols, so historical windows come back `funding_mode=partial` (some cost
-uncharged) — surfaced as a `FUNDING_PARTIAL` warning, not a silent gap. Prefer
-`binance_full_pit_strategy` only if it exists with broader funding coverage.
+funding-readable directly; you do **not** need `binance_full_pit_strategy` (it does
+not exist on this box) or a hand symlink. The old ~51-symbol partial-coverage caveat
+is GONE since the 2026-06-09 rebuild (receipt
+`docs/preregistration/binance-funding-rebuild-2026-06-09.md`; pre-rebuild dataset
+kept as `binance_usdm_funding.pre_rebuild_2026-06-09.bak`) — all future Binance
+numbers use the full-coverage basis. A `FUNDING_PARTIAL` warning on a new run now
+indicates a real gap worth investigating, not the known-old coverage hole.
 
 Every run now prints a named **warnings block** (and the report JSON carries
 `warnings[]` + a machine `tainted` bool) — read that instead of decoding `run_label`

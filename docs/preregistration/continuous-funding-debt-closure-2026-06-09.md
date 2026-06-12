@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-09. **Type:** correctness audit (no new strategy run; evidence
 verification against raw datasets). **Program:** live-readiness R0
-(`docs/research_plan_continuous_live_readiness_2026-06-09.md`).
+(`docs/research_plan_continuous_live_readiness_2026-06-09.md (deleted in the doc consolidation; recover via git history)`).
 
 ## The debt (STATE.md "Methodology Debts": binance funding interval handling)
 

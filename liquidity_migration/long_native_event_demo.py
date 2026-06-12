@@ -210,9 +210,10 @@ def _v11a_long_native_config() -> LongNativeConfig:
     long_native_FC_v11a_retrace1pct_6h_fallthru research run). The `div`
     risk-engineering overlay was promoted 2026-05-30 after cross-venue
     confirmation (Bybit MAR 1.46->1.58, Binance 0.91->1.30, both DD lower,
-    trades ~2x): universe 10->50, max_concurrent 5->10, de-risk-only vol
-    targeting (vol_target_annual=0.60, max_scale=1.0 — sizes the book DOWN in
-    high-BTC-vol regimes, never levers above 1.0). It is risk-engineering, not
+    trades ~2x): universe 10->50, max_concurrent 5->10, vol
+    targeting (vol_target_annual=0.60, floor 0.30, max_scale=1.25 — sizes the
+    book DOWN in high-BTC-vol regimes and up to 1.25x in calm ones; the cap was
+    1.0 until the volup125 promotion 2026-06-09). It is risk-engineering, not
     a new signal (FC remains the alpha ceiling). See
     docs/preregistration/div-promotion.md and git history for pre-div values.
     """
@@ -2008,6 +2009,7 @@ def format_combined_book_summary(
     bybit_position_summary: dict[str, Any] | None = None,
     bybit_positions: list[dict[str, Any]] | None = None,
     sleeve_states: dict[str, str] | None = None,
+    live_positions_error: str | None = None,
 ) -> str:
     """Build a human daily aggregate message across every demo/paper sleeve.
 
@@ -2036,7 +2038,14 @@ def format_combined_book_summary(
     live_upnl = _float((bybit_position_summary or {}).get("unrealized_pnl_usdt"))
     live_pnl_pct = _float((bybit_position_summary or {}).get("pnl_pct"))
 
-    if live_positions == 0 and tracked_open_count == 0:
+    if live_positions_error:
+        # A failed venue read must never be presented as "flat" — the daily
+        # heartbeat asserted an unverified claim as fact (audit 2026-06-12 r3).
+        status = (
+            f"live position check UNAVAILABLE ({str(live_positions_error)[:120]}); "
+            f"ledger shows {tracked_open_count} tracked open trade(s)."
+        )
+    elif live_positions == 0 and tracked_open_count == 0:
         status = "flat: no open Bybit positions and no open tracked live-sleeve trades."
     elif live_positions > 0:
         status = (
@@ -2075,7 +2084,7 @@ def format_combined_book_summary(
             _format_book_line("Short (erased)", _state_label(states.get("SHORT_SLEEVE"), default="off"), short, None, now_ms=now_ms)
         )
     lines.extend([
-        _format_book_line("Long", _state_label(states.get("LONG_SLEEVE"), default="on"), long, None, now_ms=now_ms),
+        _format_book_line("Long", _state_label(states.get("LONG_SLEEVE"), default="off"), long, None, now_ms=now_ms),
         # The hedge timer rides the continuous toggle (deploy: apply_timer_enable
         # "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS). Never hardcode a mode label:
         # "DRY-RUN" misstated the SUBMIT_HEDGE=1-armed hedge (operator-armed 2026-06-10).
@@ -2084,7 +2093,7 @@ def format_combined_book_summary(
         "Evidence collectors",
         _format_book_line(
             "Continuous paper",
-            _state_label(states.get("CONTINUOUS_PAPER_SLEEVE"), default="on"),
+            _state_label(states.get("CONTINUOUS_PAPER_SLEEVE"), default="off"),
             continuous_paper,
             continuous_paper_cycles,
             now_ms=now_ms,

@@ -59,13 +59,14 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    off-menu cells without a dated amendment (a new pre-registration receipt) first.
 
 3. **Dispatch.** (`volume_events_cell.sh` was erased with the short engine —
-   single-cell runs now go through a dispatcher too.) Sweeps: write a
-   `scripts/_sweep_runtime.py`-based dispatcher for the experiment (the old R-phase
-   dispatchers were deleted — `_sweep_runtime.py` is the reusable primitive: a
-   dispatcher declares `BASELINE_PARAMS` + a list of `Cell`s and imports it).
-   Full-PIT sweeps are memory-bound — use the `SWEEP_MAX_WORKERS` /
-   `POLARS_MAX_THREADS` env knobs documented at the top of
-   `scripts/_sweep_runtime.py` (memory-aware default); over-parallelizing OOMs
+   single-cell runs now go through a dispatcher too.) Sweeps: write a dispatcher
+   following the current patterns — continuous sweeps use an in-memory
+   config-override driver (see `scripts/alpha_sweep.py`); long sweeps call
+   `run_long_native_research` directly per cell (see
+   `scripts/long_improve_sweep.py`). `scripts/_sweep_runtime.py` is DEAD pending
+   repoint (it shells to the erased `volume-events` subcommand — see its
+   docstring); its `SWEEP_MAX_WORKERS` / `POLARS_MAX_THREADS` memory-knob
+   discipline still applies to any parallel sweep: over-parallelizing OOMs
    the box. Always run **both venues**.
 
 4. **Apply the decision rule.**
@@ -84,10 +85,11 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    the forward pointer, AND a one-paragraph roll-up into `docs/research_summary.md`.
 
 6. **Update STATE.md.** Move the experiment to its terminal state; add new helpers /
-   open questions. Keep STATE.md under ~120 lines.
+   open questions. Keep STATE.md tight — one page of signal, not a changelog
+   (~200 lines is the practical ceiling).
 
 7. **Commit + propose push to operator.** Pre-push gate
-   (`.venv/bin/python -m ruff check liquidity_migration tests` +
+   (`.venv/bin/python -m ruff check liquidity_migration tests scripts` +
    `.venv/bin/python -m pytest -q`) MUST pass. NEVER push without operator confirmation.
 
 ## Pre-committed behaviours (non-negotiable)

@@ -19,9 +19,11 @@ few minutes so the operator can manually close positions when something breaks.
 
 Alerts are de-duplicated with a cooldown state file: a new condition alerts
 immediately, a persisting one re-alerts at most every --cooldown-min, and a
-cleared one sends a one-line "resolved" note. An optional --heartbeat-url is
-pinged on every healthy run so an EXTERNAL dead-man's-switch (e.g.
-healthchecks.io) catches a total box death the on-box watchdog cannot.
+cleared one sends a one-line "resolved" note. --heartbeat-url (or the
+LIVENESS_HEARTBEAT_URL env var) is pinged on every healthy run so an EXTERNAL
+dead-man's-switch (e.g. healthchecks.io) catches a total box death the on-box
+watchdog cannot — NOTE: no URL is provisioned by default, so until the operator
+sets one this protection does not exist (audit 2026-06-12 round 3).
 
 Reads TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID and (for the stop-protection check)
 the Bybit demo creds from the daemon environment. Exits 0 always (a watchdog
@@ -51,14 +53,15 @@ CRITICAL = "CRITICAL"
 WARNING = "WARNING"
 
 
-def _sleeve_on(env_var: str, *, default: str = "on") -> bool:
+def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
     """A sleeve is active unless its kill-switch toggle (deploy/sleeves.env, loaded into this
     watchdog's env via the liveness service EnvironmentFile) is off. ``default`` is the
     last-resort value when the toggle is UNSET; it mirrors deploy/lib_sleeves.sh exactly
-    (LONG defaults on, CONTINUOUS defaults off), so this watchdog
-    can never page for a retired sleeve nor expect the disabled continuous sleeve to be up
-    on a stripped/manual invocation. In production the EnvironmentFile always sets the
-    toggle, so the default only matters off-VPS."""
+    (EVERY sleeve fails safe to off since audit 2026-06-12 round 3 — a missing config
+    must never resurrect an order-submitting sleeve), so this watchdog can never page
+    for a retired sleeve nor expect a disabled sleeve to be up on a stripped/manual
+    invocation. In production the EnvironmentFile always sets the toggle, so the
+    default only matters off-VPS."""
     return os.environ.get(env_var, default).strip().lower() in {"on", "1", "true", "yes"}
 
 
@@ -96,16 +99,35 @@ def evaluate_cycle_liveness(
 
 
 def evaluate_unit_states(unit_states: dict[str, str]) -> list[Alert]:
-    """Alert only on the TERMINAL systemd ``failed`` state.
+    """SERVICES alert only on the TERMINAL systemd ``failed`` state; TIMERS alert
+    on anything not ``active``.
 
-    A deploy (or any ``Restart=always`` recovery) walks a unit through
+    A deploy (or any ``Restart=always`` recovery) walks a service through
     activating -> active -> deactivating -> inactive -> activating, so alerting
     on anything-not-active would fire on EVERY deploy. ``failed`` is the only
     unambiguous "systemd gave up" state; a daemon that is merely down/hung/stopped
-    is caught (naturally debounced) by the per-data-root cycle-age check instead."""
+    is caught (naturally debounced) by the per-data-root cycle-age check instead.
+
+    TIMERS are different: a timer essentially never enters ``failed`` — a stopped
+    or disabled timer reports ``inactive`` and its scheduled job (hedge, daily
+    reports) simply never fires again, silently and forever (audit 2026-06-12
+    round 3). A healthy monitored timer is ``active`` (waiting), so not-active IS
+    the alarm; deploys restart timers in well under one watchdog interval."""
     alerts: list[Alert] = []
     for unit, state in sorted(unit_states.items()):
-        if state == "failed":
+        if unit.endswith(".timer"):
+            if state != "active":
+                alerts.append(
+                    Alert(
+                        key=f"unit:{unit}",
+                        severity=CRITICAL,
+                        message=(
+                            f"systemd timer {unit} is {state.upper()} (not active) — its scheduled "
+                            f"job will never fire. Re-enable it: systemctl enable --now {unit}"
+                        ),
+                    )
+                )
+        elif state == "failed":
             alerts.append(
                 Alert(
                     key=f"unit:{unit}",
@@ -284,11 +306,15 @@ def _default_units_for_toggles() -> list[str]:
         # Always-on forward-evidence collector (enabled by every deploy): a failed
         # collector is unbuyable history silently lost — page on it (audit 2026-06-12).
         "liquidity-migration-liquidation-collector.service",
-        # The daily reports are the operator's heartbeat; the oneshot services exit 1
-        # on a failed send, so monitoring them pages instead of "the report just
-        # never arrived" (audit 2026-06-12). Timers run regardless of sleeve toggles.
+        # The daily reports are the operator's heartbeat; BOTH oneshot services exit 1
+        # on a failed send (combined-book since round 2, forward-report since round 3),
+        # so monitoring them pages instead of "the report just never arrived". Their
+        # TIMERS are monitored too: a stopped timer is "inactive", never "failed",
+        # and a dead timer means the report silently never runs again (round 3).
         "liquidity-migration-combined-book-report.service",
+        "liquidity-migration-combined-book-report.timer",
         "liquidity-migration-continuous-forward-report.service",
+        "liquidity-migration-continuous-forward-report.timer",
     ]
     if _sleeve_on("LONG_SLEEVE"):
         units.extend(
@@ -307,6 +333,12 @@ def _default_units_for_toggles() -> list[str]:
                 # hedge run would otherwise never page — is-active on a failed oneshot
                 # reports "failed", which evaluate_unit_states alerts on.
                 "liquidity-migration-continuous-hedge.service",
+                # The daily rmom refresh feeds the live entry gate; unmonitored, a
+                # failing refresh was silent until the rmom-staleness CRITICAL at
+                # ~2 days — the order-submitting sleeve traded against an aging
+                # gate the whole time (audit 2026-06-12 round 3).
+                "liquidity-migration-continuous-rmom-refresh.service",
+                "liquidity-migration-continuous-rmom-refresh.timer",
             ]
         )
     if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
@@ -356,6 +388,66 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
         pass
 
 
+def gather_risk_alerts(*, risk_root: Path, now_ms: int, args: argparse.Namespace) -> list[Alert]:
+    """Liveness for the ws_risk engine — THE single reconcile/stop-repair authority.
+
+    It writes a heartbeat cycle row every ~10s to ``<risk-root>/event_demo_cycles``;
+    no fresh row within --max-cycle-age-min means the engine is STOPPED or HUNG.
+    ``systemctl is-active`` catches neither (a stopped unit is "inactive", a hung
+    one "active") — only a fast crash-loop ever reaches "failed". The short-sleeve
+    erasure (e03e9ab) deleted the only check that covered this; while ws_risk is
+    down, stop repair, orphan adoption and fill reconciliation are all silently
+    dead (audit 2026-06-12 round 3). The risk service has no sleeve toggle, so
+    this gather is unconditional (skip with --risk-root '')."""
+    if not risk_root.exists():
+        return []
+    cyc = _latest_cycle_df(risk_root / "event_demo_cycles")
+    latest_ts = (
+        int(cyc.select(pl.col("ts_ms").max()).item())
+        if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns) else None
+    )
+    live = evaluate_cycle_liveness(
+        latest_cycle_ts_ms=latest_ts, now_ms=now_ms,
+        max_age_minutes=args.max_cycle_age_min, label="ws_risk",
+    )
+    return [live] if live else []
+
+
+def gather_liquidation_capture_alerts(
+    *, liquidations_root: Path, now_ms: int, max_age_hours: float
+) -> list[Alert]:
+    """Freshness of the forward liquidation capture. The collector unit can never
+    reach systemd "failed" (Restart=always with RestartSec=15 spaces starts beyond
+    the default start-limit window), so a crash-looping or hung-but-connected
+    collector loses unbuyable history silently forever (audit 2026-06-12 round 3).
+    Bybit liquidations on a 400+ symbol universe arrive near-continuously; a stale
+    newest-file mtime means capture stopped. Venues that have never written (the
+    region-blocked Binance leg) contribute no files and never alarm."""
+    if not liquidations_root.exists():
+        return []
+    try:
+        newest_mtime_ms = max(
+            (int(p.stat().st_mtime * 1000) for p in liquidations_root.glob("*/*.jsonl")),
+            default=0,
+        )
+    except OSError:
+        newest_mtime_ms = 0
+    if newest_mtime_ms <= 0:
+        return []  # nothing ever captured here (fresh box) — the unit check covers a dead service
+    age_h = (now_ms - newest_mtime_ms) / 3_600_000.0
+    if age_h > max_age_hours:
+        return [Alert(
+            key="liquidation_capture_stale",
+            severity=WARNING,
+            message=(
+                f"liquidation capture STALE — newest JSONL {age_h:.1f}h old (> {max_age_hours:.0f}h). "
+                f"The collector unit is alive-but-not-writing (it cannot reach systemd 'failed'); "
+                f"check its journal. Every silent hour is forward history lost."
+            ),
+        )]
+    return []
+
+
 def gather_continuous_alerts(
     *,
     continuous_root: Path,
@@ -364,52 +456,60 @@ def gather_continuous_alerts(
     cycles_dataset: str = "continuous_fade_demo_cycles",
     trades_dataset: str = "continuous_fade_demo_trades",
     check_stops: bool = True,
+    cycle_checks: bool = True,
 ) -> list[Alert]:
     """Per-sleeve liveness for the continuous-fade daemon: cycle-age (hung/down), rmom-gate freshness
     (the silent-blackout class), and server-side stop protection on its own open trades. The
     continuous sleeve writes a SEPARATE ledger root + an unpartitioned cycle dataset, so it needs
     its own gather. Paper mode passes the
-    ``continuous_fade_paper_*`` datasets and skips live stop checks because it submits no orders."""
+    ``continuous_fade_paper_*`` datasets and skips live stop checks because it submits no orders.
+    ``cycle_checks=False`` (sleeve toggled OFF) skips the daemon-liveness/rmom/universe checks —
+    an off daemon is intentional — but stop/mismatch checks still run on any residual open rows,
+    because "off" does NOT flatten: positions ride until natural exit and stayed unverified the
+    moment the toggle flipped (audit 2026-06-12 round 3)."""
     if not continuous_root.exists():
         return []
     label = continuous_root.name
     alerts: list[Alert] = []
-    try:
-        cyc = read_dataset(continuous_root, cycles_dataset)
-    except Exception:  # noqa: BLE001 — watchdog never crashes
-        cyc = pl.DataFrame()
-    latest_ts = (
-        int(cyc.select(pl.col("ts_ms").max()).item())
-        if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns) else None
-    )
-    live = evaluate_cycle_liveness(
-        latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
-    )
-    if live:
-        alerts.append(live)
-    if cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns:
-        row = cyc.sort("ts_ms").tail(1).to_dicts()[0]
-        rmom_alert = evaluate_rmom_staleness(
-            max_rmom_day_ts=int(row.get("max_rmom_day_ts") or 0), now_ms=now_ms,
-            max_stale_days=args.max_rmom_stale_days, label=label,
+    if cycle_checks:
+        try:
+            cyc = read_dataset(continuous_root, cycles_dataset)
+        except Exception:  # noqa: BLE001 — watchdog never crashes
+            cyc = pl.DataFrame()
+        latest_ts = (
+            int(cyc.select(pl.col("ts_ms").max()).item())
+            if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns) else None
         )
-        if rmom_alert:
-            alerts.append(rmom_alert)
-        # Zero universe / empty kline store is the SAME silent-zero-signal failure as a stale rmom
-        # gate but via a different upstream cause (discover/ingestion or WS-kline failure) the rmom
-        # guard does not see -- both produce zero candidates that read like a quiet market.
-        universe_n = row.get("universe_symbols")
-        if universe_n is not None and int(universe_n) == 0:
-            alerts.append(Alert(
-                key="continuous_universe_empty", severity=WARNING,
-                message="continuous sleeve resolved an EMPTY universe (discover/ingestion failure?); zero candidates -- looks like a quiet market.",
-            ))
-        kline_rows = row.get("kline_store_rows")
-        if kline_rows is not None and int(kline_rows) == 0:
-            alerts.append(Alert(
-                key="continuous_kline_store_empty", severity=WARNING,
-                message="continuous sleeve WS kline store is EMPTY (kline_store_rows=0); zero candidates -- looks like a quiet market.",
-            ))
+        live = evaluate_cycle_liveness(
+            latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
+        )
+        if live:
+            alerts.append(live)
+        if cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns:
+            row = cyc.sort("ts_ms").tail(1).to_dicts()[0]
+            rmom_alert = evaluate_rmom_staleness(
+                max_rmom_day_ts=int(row.get("max_rmom_day_ts") or 0), now_ms=now_ms,
+                max_stale_days=args.max_rmom_stale_days, label=label,
+            )
+            if rmom_alert:
+                alerts.append(rmom_alert)
+            # Zero universe / empty kline store is the SAME silent-zero-signal failure as a stale rmom
+            # gate but via a different upstream cause (discover/ingestion or WS-kline failure) the rmom
+            # guard does not see -- both produce zero candidates that read like a quiet market.
+            # Keys carry the {label} so the demo and paper gathers can't collide in
+            # the cooldown map and suppress each other (audit 2026-06-12 round 3).
+            universe_n = row.get("universe_symbols")
+            if universe_n is not None and int(universe_n) == 0:
+                alerts.append(Alert(
+                    key=f"continuous_universe_empty:{label}", severity=WARNING,
+                    message=f"{label}: continuous sleeve resolved an EMPTY universe (discover/ingestion failure?); zero candidates -- looks like a quiet market.",
+                ))
+            kline_rows = row.get("kline_store_rows")
+            if kline_rows is not None and int(kline_rows) == 0:
+                alerts.append(Alert(
+                    key=f"continuous_kline_store_empty:{label}", severity=WARNING,
+                    message=f"{label}: continuous sleeve WS kline store is EMPTY (kline_store_rows=0); zero candidates -- looks like a quiet market.",
+                ))
     # Stop protection on the continuous sleeve's own open trades. Account-wide same-symbol exclusion
     # (Rule A) means each netted venue position maps to one sleeve, so the same check is valid here.
     try:
@@ -434,34 +534,39 @@ def gather_continuous_alerts(
     return alerts
 
 
-def gather_long_alerts(*, long_root: Path, now_ms: int, args: argparse.Namespace) -> list[Alert]:
+def gather_long_alerts(
+    *, long_root: Path, now_ms: int, args: argparse.Namespace, cycle_checks: bool = True
+) -> list[Alert]:
     """Per-sleeve liveness for the long-native demo daemon: cycle-age (hung/down-but-active, which
     the systemd-failed check never catches under Restart=always), WS-staleness, and server-side stop
     protection on its own open trades. The long sleeve writes a SEPARATE ledger root +
     ``long_native_demo_cycles``/``long_native_demo_trades``.
-    sees it. No rmom check (the long sleeve has no residual-momentum gate)."""
+    sees it. No rmom check (the long sleeve has no residual-momentum gate).
+    ``cycle_checks=False`` (sleeve OFF) keeps the stop/mismatch checks on residual
+    open rows — "off" does not flatten (audit 2026-06-12 round 3)."""
     if not long_root.exists():
         return []
     label = long_root.name
     alerts: list[Alert] = []
-    try:
-        cyc = read_dataset(long_root, "long_native_demo_cycles")
-    except Exception:  # noqa: BLE001 — watchdog never crashes
-        cyc = pl.DataFrame()
-    latest_ts = (
-        int(cyc.select(pl.col("ts_ms").max()).item())
-        if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns) else None
-    )
-    live = evaluate_cycle_liveness(
-        latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
-    )
-    if live:
-        alerts.append(live)
-    if cyc is not None and not cyc.is_empty() and "kline_store_max_ts_ms" in cyc.columns:
-        store_max = int(cyc.select(pl.col("kline_store_max_ts_ms").max()).item() or 0)
-        ws = evaluate_ws_staleness(store_max_ts_ms=store_max, now_ms=now_ms, max_lag_hours=args.max_ws_lag_hours, label=label)
-        if ws:
-            alerts.append(ws)
+    if cycle_checks:
+        try:
+            cyc = read_dataset(long_root, "long_native_demo_cycles")
+        except Exception:  # noqa: BLE001 — watchdog never crashes
+            cyc = pl.DataFrame()
+        latest_ts = (
+            int(cyc.select(pl.col("ts_ms").max()).item())
+            if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns) else None
+        )
+        live = evaluate_cycle_liveness(
+            latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
+        )
+        if live:
+            alerts.append(live)
+        if cyc is not None and not cyc.is_empty() and "kline_store_max_ts_ms" in cyc.columns:
+            store_max = int(cyc.select(pl.col("kline_store_max_ts_ms").max()).item() or 0)
+            ws = evaluate_ws_staleness(store_max_ts_ms=store_max, now_ms=now_ms, max_lag_hours=args.max_ws_lag_hours, label=label)
+            if ws:
+                alerts.append(ws)
     try:
         tdf = read_dataset(long_root, "long_native_demo_trades")
         open_ct = (
@@ -504,11 +609,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="continuous-fade paper root for no-order evidence cycle-age + rmom-freshness checks ('' to skip)")
     p.add_argument("--long-root", default="data/bybit-long-demo-event",
                    help="long-native sleeve root for its per-sleeve cycle-age + WS-staleness + stop checks ('' to skip)")
+    p.add_argument("--risk-root", default="data/bybit-demo-event",
+                   help="ws_risk engine root for its heartbeat cycle-age check — the risk service has no sleeve toggle ('' to skip)")
+    p.add_argument("--liquidations-root", default="data/liquidations",
+                   help="forward liquidation-capture root for the newest-JSONL freshness check ('' to skip)")
+    p.add_argument("--max-liquidation-age-hours", type=float, default=3.0,
+                   help="warn if the newest captured liquidation JSONL is older than this")
     p.add_argument("--max-rmom-stale-days", type=float, default=2.0,
                    help="alert if the continuous rmom signal gate's newest day is older than this (silent-blackout guard)")
     p.add_argument("--settle-coin", default="USDT", help="settle coin for the Bybit get_positions stop-protection check")
     p.add_argument("--cooldown-min", type=float, default=30.0, help="re-alert interval for a persisting condition")
-    p.add_argument("--heartbeat-url", default=None, help="ping this URL on a healthy run (external dead-man's-switch)")
+    p.add_argument("--heartbeat-url", default=os.environ.get("LIVENESS_HEARTBEAT_URL") or None,
+                   help="ping this URL on a healthy run (external dead-man's-switch); "
+                        "defaults to the LIVENESS_HEARTBEAT_URL env var so the unit can wire it via EnvironmentFile")
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")
     p.add_argument("--state-file", type=Path, default=None, help="cooldown state file (default: <continuous-root>/.cache/liveness_watchdog.json)")
     return p
@@ -521,16 +634,30 @@ def main() -> int:
     continuous_root = Path(args.continuous_root) if str(args.continuous_root).strip() else None
     continuous_paper_root = Path(args.continuous_paper_root) if str(args.continuous_paper_root).strip() else None
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
+    risk_root = Path(args.risk_root) if str(args.risk_root).strip() else None
+    liquidations_root = Path(args.liquidations_root) if str(args.liquidations_root).strip() else None
     _state_root = continuous_root or long_root or Path("data")
     state_file = args.state_file or (_state_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
 
-    # Per-sleeve kill-switch: skip an intentionally-off sleeve so a deliberately-retired daemon
-    # doesn't false-page as "down". Unset-defaults mirror deploy/lib_sleeves.sh: LONG on,
-    # CONTINUOUS off. (The daily-short sleeve was erased 2026-06-11.)
+    # Per-sleeve kill-switch: skip an intentionally-off sleeve's DAEMON checks so a
+    # deliberately-retired daemon doesn't false-page as "down" — but stop/mismatch
+    # checks on residual open rows always run ("off" does not flatten). Unset-defaults
+    # mirror deploy/lib_sleeves.sh: LONG off (round-3 fail-safe change), CONTINUOUS off.
+    # (The daily-short sleeve was erased 2026-06-11.)
     alerts = evaluate_unit_states(_unit_states(units))
-    if continuous_root is not None and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
-        alerts.extend(gather_continuous_alerts(continuous_root=continuous_root, now_ms=now_ms, args=args))
+    if risk_root is not None:
+        alerts.extend(gather_risk_alerts(risk_root=risk_root, now_ms=now_ms, args=args))
+    if liquidations_root is not None:
+        alerts.extend(gather_liquidation_capture_alerts(
+            liquidations_root=liquidations_root, now_ms=now_ms,
+            max_age_hours=args.max_liquidation_age_hours,
+        ))
+    if continuous_root is not None:
+        alerts.extend(gather_continuous_alerts(
+            continuous_root=continuous_root, now_ms=now_ms, args=args,
+            cycle_checks=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
+        ))
     if continuous_paper_root is not None and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         alerts.extend(
             gather_continuous_alerts(
@@ -542,8 +669,11 @@ def main() -> int:
                 check_stops=False,
             )
         )
-    if long_root is not None and _sleeve_on("LONG_SLEEVE"):
-        alerts.extend(gather_long_alerts(long_root=long_root, now_ms=now_ms, args=args))
+    if long_root is not None:
+        alerts.extend(gather_long_alerts(
+            long_root=long_root, now_ms=now_ms, args=args,
+            cycle_checks=_sleeve_on("LONG_SLEEVE"),
+        ))
     state = _load_state(state_file)
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min
@@ -575,11 +705,17 @@ def main() -> int:
         line = f"✅ liquidity-migration {ts}: resolved — {key}"
         print(line)
         if args.telegram:
+            delivered = False
             try:
-                if not send_telegram_message(line):
-                    print("(telegram send returned False — TELEGRAM_* env missing or API non-2xx)")
+                delivered = send_telegram_message(line)
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
+            if not delivered and key in state:
+                # Keep the key in state so the next run re-detects the resolution
+                # and retries the note — a dropped "resolved" left the operator
+                # believing the condition was still active (audit 2026-06-12 r3).
+                new_state[key] = state[key]
+                print("(telegram send returned False — resolved note will retry next run)")
     # State saved AFTER the sends so an undelivered alert's cooldown stays unset.
     _save_state(state_file, new_state)
 

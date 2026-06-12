@@ -28,7 +28,14 @@ orders, telegram, deploy/VPS, docs, data plane): all findings fixed same-day —
 headline items were the inert armed hedge (below), an exit orderLinkId collision
 on the armed sniper path, and a sniper partial-fill ghost window; live test
 orders + a telegram smoke test verified the venue path and notify transport
-end-to-end.
+end-to-end. A THIRD 5-agent audit ran later the same day: 1 CRITICAL — the
+live-armed daily rebalance resized every ensemble-component (and snipe) trade
+to FULL base notional, silently destroying the frozen ensemble weights — plus
+a reduce-fill ledger-erasure bug, paper exits booked at entry price (0% PnL),
+no ws_risk liveness check (erased with the short sleeve), the forward report
+exiting 0 on failed sends, the fast protective-exit loop invisible to telegram,
+and LONG failing OPEN on a missing sleeves.env (every sleeve now fails safe to
+off). All fixed same-day; live test order + telegram smoke re-verified.
 
 ## What's Running / Wired (2026-06-10)
 
@@ -40,8 +47,10 @@ end-to-end.
   Demo fills = execution evidence, not alpha proof; the rmom latency caveat stands.
 - **2f BTC+ETH hedge (banked, Tier-2 ceiling): live path wired, armed, but has
   NEVER submitted** (audit 2026-06-12): every armed run since 2026-06-10 was
-  `submit_blocked_stale_warmstart` — the committed warmstart CSV ends 2026-05-23
-  (>3d limit) and NO refresh pipeline exists. Audit fixes: a flat book now
+  `submit_blocked_stale_warmstart` — the committed warmstart CSVs are stale
+  (bybit ends 2026-05-23, binance 2026-04-29; >3d limit) and NO refresh pipeline
+  exists; BOTH `deploy/hedge_warmstart/*.csv` need regenerating (the CSVs are in
+  the deploy paths filter since round 3, so the refresh commit auto-deploys). Audit fixes: a flat book now
   correctly hedges zero (`submit_no_action`, healthy); blocked/failed armed runs
   exit NONZERO so the watchdog pages; stale warmstart blocks only risk-INCREASING
   legs (reduce-to-flat always allowed); leg qtys floor to the venue step

@@ -238,6 +238,9 @@ for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liqu
     systemctl disable --now "$_retired" 2>/dev/null || true
     rm -f "/etc/systemd/system/$_retired"
 done
+# Reload AFTER removing retired unit files (deploy_vps_live.sh parity) so stale
+# erased-unit definitions don't linger in systemd memory on a recovered host.
+systemctl daemon-reload
 systemctl enable liquidity-migration-bybit-risk.service
 # Forward-only data collection — parity with scripts/deploy_vps_live.sh: liquidation
 # history is unbuyable, so the collector runs always-on like the risk service.
@@ -325,6 +328,12 @@ if sleeve_on "$CONTINUOUS_SLEEVE"; then
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
 fi
+# MONEY-SAFETY parity with deploy_vps_live.sh (audit 2026-06-12 round 3): the
+# continuous PAPER shadow must NEVER submit orders — UNCONDITIONAL regardless of
+# toggle. A mis-edited paper unit previously passed this script.
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=0'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=PAPER_MODE=1'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=DATA_ROOT=data/bybit-continuous-paper-event'
 
 echo "deploy-verify-ok commit=$(git rev-parse --short HEAD)"
 
