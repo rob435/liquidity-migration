@@ -3688,6 +3688,58 @@ def test_ws_exit_and_tracked_fill_use_filtered_single_trade_lookup(tmp_path: Pat
                         "exit_trigger_ts_ms": int(time.time() * 1000)})
 
 
+def test_tracked_stream_fill_partial_target_reduce_shrinks_not_closes(tmp_path: Path) -> None:
+    """REGRESSION (solo sweep 2026-06-12): the WS-path twin of the round-3
+    pending-fill fix. A reduce order targeting only PART of the position (a
+    rebalance_reduce) that FULLY fills via the execution stream must shrink the
+    trade, not close it — the old order-fullness clause (filled >= target)
+    erased the live remainder from the ledger."""
+    write_dataset(
+        pl.DataFrame(
+            [{"trade_id": "t2", "symbol": "BBBUSDT", "side": "short", "status": "open",
+              "qty": "3", "entry_price": 50.0, "stop_price": 56.0, "take_profit_price": 40.0,
+              "planned_exit_ts_ms": 9_999_999_999_999}]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    trade_client = FakeTradeClient()
+    engine = _submit_exit_engine(tmp_path, trade_client)
+    link = "lm-ux-c-BBBUSDT-resize-x0aa"
+    engine._record_orders([{
+        "order_link_id": link, "trade_id": "t2", "symbol": "BBBUSDT", "side": "Buy",
+        "reduce_only": True, "status": "submitted", "qty": "1", "target_qty": "1",
+        "filled_qty": "", "exit_reason": "rebalance_reduce",
+    }])
+    engine.state.submitted_link_to_trade_id[link] = "t2"
+
+    engine.record_tracked_exit_stream_fill(
+        order_link_id=link, filled_qty=1.0, exit_price=49.0, source="execution",
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    row = stored.filter(pl.col("trade_id") == "t2").to_dicts()[0]
+    # The ORDER fully filled (1 of target 1) but the POSITION is 3: shrink to 2.
+    assert row["status"] == "open"
+    assert float(row["qty"]) == pytest.approx(2.0)
+    assert row["partial_exit_reason"] == "rebalance_reduce"
+
+    # The remaining 2 close when a FULL exit later fills.
+    link2 = "lm-ux-c-BBBUSDT-final-x0ab"
+    engine._record_orders([{
+        "order_link_id": link2, "trade_id": "t2", "symbol": "BBBUSDT", "side": "Buy",
+        "reduce_only": True, "status": "submitted", "qty": "2", "target_qty": "2",
+        "filled_qty": "", "exit_reason": "max_hold",
+    }])
+    engine.state.submitted_link_to_trade_id[link2] = "t2"
+    engine.record_tracked_exit_stream_fill(
+        order_link_id=link2, filled_qty=2.0, exit_price=48.0, source="execution",
+    )
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert stored.filter(pl.col("trade_id") == "t2").select("status").item() == "closed"
+
+
 def test_ws_risk_consumer_loop_isolates_handler_exception(tmp_path: Path) -> None:
     """A single raise out of on_idle/handle_event must NOT crash the sole reconcile
     authority. The loop logs+records the error and continues to max_runtime (WSR-2)."""

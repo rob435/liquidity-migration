@@ -56,6 +56,45 @@ def test_live_book_state_distinguishes_flat_from_unknown(monkeypatch, tmp_path) 
     assert unknown.gross_short_frac_source == "unknown"
 
 
+def test_live_book_state_unstamped_row_borrows_known_equity(monkeypatch, tmp_path) -> None:
+    """Solo sweep 2026-06-12: every row's equity_usdt is a snapshot of the SAME
+    netted account, so a legacy row missing it (pre-round-3 snipe fills, adopted
+    rows) borrows the median of the known ones — ONE un-stamped row previously
+    flipped the whole book to unknown and BLOCKED the armed hedge. A row with
+    unknown NOTIONAL still blocks (truly unmeasured exposure)."""
+    monkeypatch.setattr(
+        hedge_runner,
+        "read_dataset",
+        lambda root, dataset: pl.DataFrame(
+            [
+                {"status": "open", "side": "short", "notional_usdt": 1_000.0, "equity_usdt": 10_000.0},
+                {"status": "open", "side": "short", "notional_usdt": 2_000.0, "equity_usdt": 10_000.0},
+                # legacy zero-equity row: borrows the 10k median -> 0.05
+                {"status": "open", "side": "short", "notional_usdt": 500.0, "equity_usdt": 0.0},
+            ]
+        ),
+    )
+    state = hedge_runner._live_book_state(tmp_path, "continuous_fade_demo_trades")
+    assert state.gross_short_frac_known is True
+    assert state.gross_short_frac_source == "notional_over_equity"
+    assert abs(state.gross_short_frac - 0.35) < 1e-12
+
+    # Zero NOTIONAL is not borrowable — exposure unmeasured -> still blocked.
+    monkeypatch.setattr(
+        hedge_runner,
+        "read_dataset",
+        lambda root, dataset: pl.DataFrame(
+            [
+                {"status": "open", "side": "short", "notional_usdt": 1_000.0, "equity_usdt": 10_000.0},
+                {"status": "open", "side": "short", "notional_usdt": 0.0, "equity_usdt": 10_000.0},
+            ]
+        ),
+    )
+    state = hedge_runner._live_book_state(tmp_path, "continuous_fade_demo_trades")
+    assert state.gross_short_frac_known is False
+    assert state.gross_short_frac_source == "partial_notional_over_equity"
+
+
 def test_current_hedge_qty_reads_open_btc_long_from_hedge_ledger(monkeypatch, tmp_path) -> None:
     def fake_read_dataset(root, dataset):
         return pl.DataFrame(

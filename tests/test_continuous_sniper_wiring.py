@@ -208,16 +208,22 @@ def test_reconcile_cancels_resting_snipe_when_base_closed() -> None:
     # exits, and a terminal "cancelled" here permanently unbooked the executed
     # leg. The row stays resting; history resolution terminalizes next cycle.
     assert all(u["status"] != "cancelled" for u in updates)
-    assert any(u["status"] == "resting" and u["submit_mode"] == "cancel" for u in updates)
+    cancel_ack = next(u for u in updates if u.get("cancel_requested_ms"))
+    # CONTRACT (solo sweep 2026-06-12): the orders ledger dedupes by link, so the
+    # cancel-ack row REPLACES the original after read-back — it must itself still
+    # qualify for the resting view (status=resting, submit_mode=submitted), else
+    # the link vanishes: invisible, never re-resolved, partial fill never booked.
+    assert cancel_ack["status"] == "resting" and cancel_ack["submit_mode"] == "submitted"
 
-    # Next cycle: the venue reports the terminal truth — a partial fill before
+    # Next cycle sees the DEDUPED ledger state (the cancel-ack row, not the
+    # original): the venue reports the terminal truth — a partial fill before
     # our cancel. The executed leg books as a first-class trade row.
     client.open_orders = []
     client.history = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "1.0",
                        "avgPrice": "108.0", "updatedTime": "1700000200000",
                        "orderStatus": "PartiallyFilledCanceled"}]
     fills, updates, _exits = reconcile_continuous_snipes(
-        _trades_df(base_open=False), _orders_df([_resting_order_row()]),
+        _trades_df(base_open=False), _orders_df([cancel_ack]),
         trading_client=client, demo=_cfg(), now_ms=3)
     assert len(fills) == 1 and fills[0]["trade_id"] == "t1-snipe"
     assert fills[0]["qty"] == "1"

@@ -803,11 +803,17 @@ def reconcile_continuous_snipes(
                     # Do NOT terminalize on our own cancel ack: a PostOnly wick
                     # order can be PartiallyFilled before the base exits, and
                     # writing "cancelled" here permanently unbooked the executed
-                    # leg (audit 2026-06-12 round 3). Leave the row resting; the
-                    # next cycle's history resolution books any cumExecQty>0 from
-                    # positive terminal evidence (PartiallyFilledCanceled) and
-                    # converges to "cancelled" when exec qty is zero.
-                    update_rows.append({**row, "ts_ms": now_ms, "status": "resting", "submit_mode": "cancel"})
+                    # leg (audit 2026-06-12 round 3). The row must stay in the
+                    # RESTING view, and the orders ledger dedupes by link — so
+                    # the update must keep submit_mode="submitted" (a
+                    # submit_mode="cancel" row replaced the original after
+                    # read-back and _sniper_order_state dropped the link from
+                    # the resting view entirely: an invisible, never-resolved
+                    # order — solo sweep 2026-06-12). The next cycle's history
+                    # resolution books any cumExecQty>0 from positive terminal
+                    # evidence (PartiallyFilledCanceled) and converges to
+                    # "cancelled" when exec qty is zero.
+                    update_rows.append({**row, "ts_ms": now_ms, "cancel_requested_ms": now_ms})
                 except Exception as exc:  # noqa: BLE001
                     update_rows.append({**row, "ts_ms": now_ms, "status": "resting",
                                         "error": f"sniper cancel failed: {exc}"[:300]})
@@ -3198,16 +3204,20 @@ def run_continuous_demo_cycle(
         if reactivity_stats:
             payload.update({f"rx_{k}": v for k, v in reactivity_stats.items()})
         write_dataset(pl.DataFrame([payload], infer_schema_length=None), root, cycles_dataset, partition_by=())
-        # Per-cycle telegram AFTER the ledger write (a notify failure can never cost a
-        # row) and exception-isolated. Outcome rides only on the returned payload — the
-        # persisted cycle row above keeps its schema.
-        telegram_sent, telegram_error = _maybe_continuous_notify(
-            payload, exec_entries, exec_exits + snipe_exits, enabled=demo.telegram
-        )
-        payload["telegram_sent"] = telegram_sent
-        if telegram_error:
-            payload["telegram_error"] = telegram_error
-        return payload
+    # Per-cycle telegram AFTER the ledger write (a notify failure can never cost a
+    # row), exception-isolated, and OUTSIDE the cycle file lock — the Telegram
+    # round-trip can stall up to its 10s timeout, and holding the shared lock
+    # through it blocks ws_risk (the stop-repair authority) and the fast
+    # protective loop from the ledger (lock-held-I/O class; solo sweep
+    # 2026-06-12). Outcome rides only on the returned payload — the persisted
+    # cycle row above keeps its schema.
+    telegram_sent, telegram_error = _maybe_continuous_notify(
+        payload, exec_entries, exec_exits + snipe_exits, enabled=demo.telegram
+    )
+    payload["telegram_sent"] = telegram_sent
+    if telegram_error:
+        payload["telegram_error"] = telegram_error
+    return payload
 
 
 def _live_prices_from_ticker_cache(ticker_cache: Any | None, symbols: set[str]) -> dict[str, float]:
@@ -3322,11 +3332,6 @@ def run_continuous_protective_exit_cycle(
             "exits": len(exec_exits), "open_positions": len(held),
             "reasons": sorted({str(p.get("exit_reason")) for p in exit_plans}),
         }
-        # Per-event telegram AFTER the ledger writes, exception-isolated. The fast
-        # loop runs at ~2s cadence vs the main cycle's 60s, so it WINS the race for
-        # most protective exits — which made the common protective-exit path (and
-        # its submit errors) invisible to the operator (audit 2026-06-12 round 3).
-        # The main cycle's `exits` count never includes these.
         notify_payload = {
             "mode": "submit" if demo.submit_orders else "dry_run",
             "fast_loop": True,
@@ -3338,10 +3343,18 @@ def run_continuous_protective_exit_cycle(
             ),
             "open_positions": len(held),
         }
-        telegram_sent, telegram_error = _maybe_continuous_notify(
-            notify_payload, [], exec_exits, enabled=demo.telegram
-        )
-        result["telegram_sent"] = telegram_sent
-        if telegram_error:
-            result["telegram_error"] = telegram_error
-        return result
+    # Per-event telegram AFTER the ledger writes, exception-isolated, and OUTSIDE
+    # the cycle file lock: the Telegram round-trip can stall up to its 10s
+    # timeout, and at the fast loop's ~2s cadence a lock-held send would starve
+    # the main cycle AND ws_risk (the stop-repair authority) of the ledger
+    # (lock-held-I/O class; solo sweep 2026-06-12). The fast loop wins the race
+    # for most protective exits, which previously made this path (and its submit
+    # errors) invisible to the operator (round 3); the main cycle's `exits`
+    # count never includes these.
+    telegram_sent, telegram_error = _maybe_continuous_notify(
+        notify_payload, [], exec_exits, enabled=demo.telegram
+    )
+    result["telegram_sent"] = telegram_sent
+    if telegram_error:
+        result["telegram_error"] = telegram_error
+    return result

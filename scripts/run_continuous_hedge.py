@@ -131,11 +131,22 @@ def _live_book_state(
         if gross > 0.0:
             return LiveBookState({}, gross, True, "notional_weight")
     if "notional_usdt" in open_now.columns and "equity_usdt" in open_now.columns:
+        # Every row's equity_usdt is a snapshot of the SAME netted account at
+        # entry, so a row missing it (legacy snipe fills / adopted rows written
+        # before the round-3 stamping fixes) borrows the median of the known
+        # ones — ONE un-stamped row previously flipped the whole book state to
+        # unknown and blocked the armed hedge (solo sweep 2026-06-12 hardening;
+        # rows with unknown NOTIONAL still block, that exposure is truly
+        # unmeasured).
+        known_equities = sorted(
+            eq for eq in (_float(row.get("equity_usdt")) for row in rows) if eq > 0.0
+        )
+        fallback_equity = known_equities[len(known_equities) // 2] if known_equities else 0.0
         gross = 0.0
         valid = 0
         for row in rows:
             notional = abs(_float(row.get("notional_usdt")))
-            equity = _float(row.get("equity_usdt"))
+            equity = _float(row.get("equity_usdt")) or fallback_equity
             if notional <= 0.0 or equity <= 0.0:
                 continue
             gross += notional / equity

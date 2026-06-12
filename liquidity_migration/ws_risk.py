@@ -1067,13 +1067,17 @@ class EventWebSocketRiskEngine:
         order = self.order_row(order_link_id)
         previous_filled_qty = _float(order.get("filled_qty"))
         delta_qty = max(filled_qty - previous_filled_qty, 0.0)
-        order_target_qty = self.order_target_qty(order_link_id)
         current_trade_qty = _float(trade.get("qty"))
         remaining_qty = max(current_trade_qty - delta_qty, 0.0)
-        fully_filled = (
-            order_target_qty > 0.0
-            and filled_qty + max(order_target_qty * 1e-8, 1e-12) >= order_target_qty
-        ) or remaining_qty <= max(current_trade_qty * 1e-8, 1e-12)
+        # Close only when the POSITION is gone. The old order-fullness clause
+        # (filled_qty >= order_target_qty) closed the WHOLE trade when a reduce
+        # order that targets only PART of the position (a rebalance_reduce)
+        # fully filled via the WS execution stream — the live remainder was
+        # erased from the ledger. Same class as the round-3 pending-fill
+        # reconciler fix; this is its WS-path twin (solo sweep 2026-06-12).
+        # A plain full exit (target == position) still closes here because the
+        # final delta drives remaining_qty to ~0.
+        fully_filled = remaining_qty <= max(current_trade_qty * 1e-8, 1e-12)
         if delta_qty <= 0.0 and not fully_filled:
             return
         now_ms = _now_ms()
@@ -1813,6 +1817,11 @@ class EventWebSocketRiskEngine:
                 "entry_fee_usdt": 0.0,
                 "entry_exec_time_ms": opened_ms,
                 "notional_usdt": abs(entry_price * _float(qty)),
+                # Equity snapshot so per-row notional/equity consumers (the armed
+                # hedge's book-state resolver) never see an un-stamped row — a
+                # zero-equity row flips the WHOLE book to unknown and blocks the
+                # hedge (snipe-fill twin, audit 2026-06-12 round 3 / solo sweep).
+                "equity_usdt": self._last_equity_usdt or self._account_equity_usdt(),
                 "ts_ms": now_ms,
                 "entry_ts_ms": opened_ms,
                 "opened_at_ms": opened_ms,
@@ -1854,6 +1863,8 @@ class EventWebSocketRiskEngine:
             "entry_fee_usdt": 0.0,
             "entry_exec_time_ms": opened_ms,
             "notional_usdt": abs(entry_price * _float(qty)),
+            # See the recovered path: never write an equity-less open row.
+            "equity_usdt": self._last_equity_usdt or self._account_equity_usdt(),
             "ts_ms": now_ms,
             "entry_ts_ms": opened_ms,
             "opened_at_ms": opened_ms,
