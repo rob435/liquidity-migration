@@ -20,7 +20,8 @@ several places a real desk would never tolerate. Those are your hunting grounds.
   `downtrend-sniper-program-2026-06-09`, `continuous-live-readiness-program`,
   `alpha-hunt-2026-06-03`, `p3-residual-momentum-lead`, `p2-1-mostly-factor-exposure`.
 - The 2026-06-09/10 receipts under `docs/preregistration/continuous-*`, `sniper-*`,
-  `wp4-*`, `downtrend-*`.
+  `wp4-*`, `downtrend-*` (some receipts since consolidated into
+  `docs/research_summary.md`; git history is the archive).
 - **Invoke the `backtest-integrity` skill before any run and `research-phase-runner`
   for the pre-register → run → verdict → STATE-update loop.** Both venues, always.
 
@@ -129,7 +130,7 @@ the hedge only partially fixes.
   `scripts/continuous_walkforward_allocator.py` is the causal-OOS harness to copy for any
   "is this selection-overfit?" check. `scripts/sniper_entries_bar_accurate.py` shows bar-accurate
   fill simulation from raw 1h klines (reuse for execution work).
-- Forward evidence: `continuous_forward_replay.py` (no-order, exact-engine replay; config-hash
+- Forward evidence: `liquidity_migration/continuous_forward_replay.py` (no-order, exact-engine replay; config-hash
   pinned). Live calibration input: the continuous demo fills now accruing on the VPS.
 
 ## 7. Mindset

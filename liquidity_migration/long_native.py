@@ -1,7 +1,7 @@
 """Crypto-native long-only event sleeve — NOT derived from academic papers.
 
 Three asymmetric setups that exploit specific crypto market-structure patterns
-the short sleeve does not cover:
+the (erased 2026-06-11) daily short sleeve did not cover:
 
 1. CAPITULATION_REBOUND
    Violent 5-day flush + same-day absorption + volume spike + broad-regime

@@ -52,6 +52,9 @@ else
 fi
 git_with_optional_github_token fetch "$REMOTE" "$BRANCH"
 unset GITHUB_TOKEN
+# Capture the previously-deployed commit BEFORE checkout — used below to decide
+# whether the dependency manifests changed and the venv needs a pip refresh.
+previous_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
 git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 
 if [ -n "$EXPECTED_COMMIT" ]; then
@@ -68,6 +71,18 @@ else
   PYTHON=python3
 fi
 
+# Venv refresh on dependency change: deploying code whose deps aren't installed
+# fails loud at the smoke tests below but leaves recovery manual. If the diff from
+# the previously-deployed commit touches a dependency manifest — or the previous
+# commit can't be determined — reinstall. Fail-loud: a pip failure aborts (set -e).
+if [ -x .venv/bin/pip ]; then
+  if [ -z "$previous_commit" ] \
+    || ! git diff --quiet "$previous_commit" HEAD -- requirements.lock pyproject.toml; then
+    echo "Dependency manifests changed (or previous commit unknown) — refreshing venv ..."
+    .venv/bin/pip install -q -e ".[dev]"
+  fi
+fi
+
 "$PYTHON" -m pytest \
   tests/test_runtime_scripts.py \
   tests/test_promoted_profiles.py
@@ -82,10 +97,10 @@ assert long_cfg.max_concurrent_positions == 10
 assert long_cfg.cooldown_days == 7
 assert long_cfg.weekend_size_mult == 1.5
 
-# Continuous-fade sleeve (OFF / de-promoted 2026-06-05, look-ahead invalidated): these
-# assertions still pin its config so a silent drift can't ship IF it is ever re-enabled —
-# the order-submitting sleeve is disabled by default (CONTINUOUS_SLEEVE=off). rmom 0.33;
-# breaker w24/n8; 25% stop.
+# Continuous-fade sleeve (de-promoted 2026-06-05, look-ahead invalidated): these
+# assertions pin its config so a silent drift can't ship. Whether the order-submitting
+# sleeve actually runs is toggled per-sleeve in deploy/sleeves.env (the single source
+# of truth — don't hardcode its state here). rmom 0.33; breaker w24/n8; 25% stop.
 from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
 cont = ContinuousDemoCycleConfig()
 assert cont.rmom_quantile == 0.33, cont.rmom_quantile
@@ -101,6 +116,9 @@ if [ ! -f /etc/liquidity-migration/bybit-demo.env ]; then
 fi
 
 cp /etc/liquidity-migration/bybit-demo.env "/etc/liquidity-migration/bybit-demo.env.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+# One backup accumulates per deploy — keep only the 5 newest. (The cp above just
+# wrote one, so the glob always matches and ls can't fail under pipefail.)
+ls -1t /etc/liquidity-migration/bybit-demo.env.backup.* 2>/dev/null | tail -n +6 | xargs -r rm -f
 if grep -Eq '^TELEGRAM_CHAT_ID=' /etc/liquidity-migration/bybit-demo.env; then
   sed -i "s/^TELEGRAM_CHAT_ID=.*/TELEGRAM_CHAT_ID=$EXPECTED_TELEGRAM_CHAT_ID/" /etc/liquidity-migration/bybit-demo.env
 else
@@ -162,7 +180,7 @@ apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # Timers must be enabled --now: enable alone writes the symlink but does not
-# start the timer, so on a fresh VPS the demo-health watchdog + daily combined-
+# start the timer, so on a fresh VPS the demo-liveness watchdog + daily combined-
 # book Telegram report would sit dormant until someone ran systemctl by hand.
 # --now schedules them immediately; subsequent deploys are idempotent.
 systemctl enable --now liquidity-migration-demo-liveness.timer

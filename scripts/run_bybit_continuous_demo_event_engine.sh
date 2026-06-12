@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Continuous-fade demo sleeve — SUB-HOURLY, ticker-driven, SEPARATE ledger.
 #
-# Continuous fade runner. The order-submitting demo service uses this script but is
-# disabled by default via CONTINUOUS_SLEEVE=off; the paper service uses the same runner
-# with SUBMIT_ORDERS=0, RECORD_DRY_RUN=1, PAPER_MODE=1. Order-link prefix lm-en-c-*
+# Continuous fade runner. The order-submitting demo service uses this script; whether
+# it runs is toggled per-sleeve in deploy/sleeves.env (CONTINUOUS_SLEEVE — the single
+# source of truth, don't hardcode its state here). The paper service uses the same
+# runner with SUBMIT_ORDERS=0, RECORD_DRY_RUN=1, PAPER_MODE=1. Order-link prefix lm-en-c-*
 # lets ws_risk route any continuous fills to data/bybit-continuous-demo-event. "No 1h":
 # the decile is recomputed off the live ticker price every INTERVAL_SECONDS heartbeat,
 # not gated on the hourly bar close.

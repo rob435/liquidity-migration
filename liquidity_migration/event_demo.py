@@ -67,10 +67,10 @@ class EventDemoCycleConfig:
     settle_coin: str = "USDT"
     data_name: str = "event-demo"
     strategy_profile: str = "promoted"
-    # long-sleeve-5/-6: shared cross-sleeve control root (owned by ws_risk; lives in the
-    # short/authority root). None => auto-resolve from this sleeve's root. The short sleeve
-    # IS the authority root, so it is live as soon as ws_risk writes; NO-OP until then / until
-    # the operator sets a budget split (read-only, fail-open).
+    # long-sleeve-5/-6: shared cross-sleeve control root (owned and written by ws_risk in
+    # ITS configured root; the erased daily-short sleeve was the original authority root —
+    # legacy roots still resolve). None => auto-resolve from this sleeve's root. NO-OP until
+    # ws_risk writes it / until the operator sets a budget split (read-only, fail-open).
     cross_sleeve_account_root: str | None = None
     max_active_symbols: int = 0  # 0 = use the strategy profile's value; >0 overrides it
     # FAIL-CLOSED orphan invariant (default True): a ledger trade whose Bybit

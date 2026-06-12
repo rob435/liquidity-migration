@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 
 import scripts.run_continuous_hedge as hedge_runner
+from liquidity_migration.continuous_hedge_manager import HedgeDecision, HedgeDecision2F
+from liquidity_migration.continuous_rebalance import ContinuousRebalanceResizePlan
 
 
 def test_live_book_state_uses_notional_over_equity(monkeypatch, tmp_path) -> None:
@@ -71,36 +73,80 @@ def test_current_hedge_qty_reads_open_btc_long_from_hedge_ledger(monkeypatch, tm
     assert abs(hedge_runner._current_hedge_qty(tmp_path, "continuous_fade_demo_trades") - 0.05) < 1e-12
 
 
-def test_submit_uses_central_real_money_guard(monkeypatch, tmp_path, capsys) -> None:
+def _setup_runner(
+    monkeypatch,
+    tmp_path,
+    *,
+    warm_eth: list[float | None] | None = None,
+    warmstart_last: date | None = None,
+    book_state: "hedge_runner.LiveBookState | None" = None,
+    argv: list[str] | None = None,
+) -> None:
+    """Common main() seams: warm-start, book state, hedge-qty reads, env, argv."""
     unit = [-0.002, 0.002] * 45
     btc = [0.01, -0.01] * 45
+    eth = [None] * 90 if warm_eth is None else warm_eth
 
-    monkeypatch.setattr(hedge_runner, "REPO", tmp_path)
-    monkeypatch.setattr(hedge_runner, "load_warmstart", lambda path: (unit, btc))
-    monkeypatch.setattr(hedge_runner, "_warmstart_last_date", lambda path: date.today())
+    monkeypatch.setattr(hedge_runner, "REPO", tmp_path)  # no .cache/ws_klines under tmp
+    monkeypatch.setattr(hedge_runner, "load_warmstart_2f", lambda path: (unit, btc, eth))
     monkeypatch.setattr(
-        hedge_runner,
-        "_live_book_state",
-        lambda root, dataset: hedge_runner.LiveBookState({}, 0.5, True, "test"),
+        hedge_runner, "_warmstart_last_date", lambda path: warmstart_last or date.today()
     )
-    monkeypatch.setattr(hedge_runner, "_current_hedge_qty", lambda root, dataset: 0.0)
+    state = book_state or hedge_runner.LiveBookState({}, 0.5, True, "test")
+    monkeypatch.setattr(
+        hedge_runner, "_live_book_state", lambda root, dataset, cycles_dataset=None: state
+    )
+    monkeypatch.setattr(
+        hedge_runner, "_current_hedge_qty", lambda root, dataset, symbol=None: 0.0
+    )
     monkeypatch.setenv("CONFIRM_DEMO_ORDERS", "1")
-    monkeypatch.setenv("REAL_MONEY", "YES")
+    monkeypatch.delenv("REAL_MONEY", raising=False)
     monkeypatch.delenv("DEMO", raising=False)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "run_continuous_hedge.py",
-            "--submit",
-            "--btc-price",
-            "100000",
-            "--equity-usdt",
-            "10000",
-        ],
+    monkeypatch.delenv("HEDGE_MODE", raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_continuous_hedge.py", *(argv or [])])
+
+
+def _resize_plan(
+    symbol: str = "BTCUSDT",
+    side: str = "Buy",
+    qty: float = 0.003348,
+    reduce_only: bool = False,
+    delta_notional: float = 334.8,
+    reason: str = "hedge_increase",
+) -> ContinuousRebalanceResizePlan:
+    return ContinuousRebalanceResizePlan(
+        trade_id="hedge", symbol=symbol, side=side, reduce_only=reduce_only, qty=qty,
+        current_notional_usdt=0.0, target_notional_usdt=abs(delta_notional),
+        delta_notional_usdt=delta_notional, reason=reason,
     )
 
-    assert hedge_runner.main() == 0
+
+def _single_decision(plan: ContinuousRebalanceResizePlan | None) -> HedgeDecision:
+    return HedgeDecision(
+        beta_window_days=90, hedge_ratio_equity_frac=0.05, target_notional_usdt=500.0,
+        current_notional_usdt=0.0, n_obs=90, plan=plan,
+    )
+
+
+def _decision_2f(
+    plan_btc: ContinuousRebalanceResizePlan | None,
+    plan_eth: ContinuousRebalanceResizePlan | None,
+) -> HedgeDecision2F:
+    return HedgeDecision2F(
+        beta_window_days=90, ratio_btc=0.03, ratio_eth=0.02,
+        target_btc_usdt=300.0, target_eth_usdt=200.0, n_obs_joint=90,
+        plan_btc=plan_btc, plan_eth=plan_eth, fell_back_to_btc=False,
+    )
+
+
+SUBMIT_ARGS = ["--submit", "--btc-price", "100000", "--equity-usdt", "10000"]
+
+
+def test_submit_uses_central_real_money_guard(monkeypatch, tmp_path, capsys) -> None:
+    _setup_runner(monkeypatch, tmp_path, argv=SUBMIT_ARGS)
+    monkeypatch.setenv("REAL_MONEY", "YES")
+
+    assert hedge_runner.main() == 1  # blocked armed run fails the oneshot -> watchdog pages
     out = json.loads(capsys.readouterr().out)
 
     assert out["status"] == "submit_blocked_order_submit_guard"
@@ -110,19 +156,7 @@ def test_submit_uses_central_real_money_guard(monkeypatch, tmp_path, capsys) -> 
 def test_missing_btc_price_is_surfaced_not_silent(monkeypatch, tmp_path, capsys) -> None:
     """No kline store + no --btc-price -> plan is None; the status must SAY the
     input was dead instead of reading as a healthy dry_run_ok no-op."""
-    unit = [-0.002, 0.002] * 45
-    btc = [0.01, -0.01] * 45
-
-    monkeypatch.setattr(hedge_runner, "REPO", tmp_path)  # no .cache/ws_klines under tmp
-    monkeypatch.setattr(hedge_runner, "load_warmstart", lambda path: (unit, btc))
-    monkeypatch.setattr(hedge_runner, "_warmstart_last_date", lambda path: date.today())
-    monkeypatch.setattr(
-        hedge_runner,
-        "_live_book_state",
-        lambda root, dataset: hedge_runner.LiveBookState({}, 0.5, True, "test"),
-    )
-    monkeypatch.setattr(hedge_runner, "_current_hedge_qty", lambda root, dataset: 0.0)
-    monkeypatch.setattr(sys, "argv", ["run_continuous_hedge.py", "--equity-usdt", "10000"])
+    _setup_runner(monkeypatch, tmp_path, argv=["--equity-usdt", "10000"])
 
     assert hedge_runner.main() == 0
     out = json.loads(capsys.readouterr().out)
@@ -224,3 +258,353 @@ def test_hedge_buy_order_row_is_terminal_for_ws_risk_reconciler() -> None:
     # terminal order row -> the reconciler must not touch the runner-booked trade
     assert trades == []
     assert order_updates == []
+
+
+# ---------------------------------------------------------------------------
+# Flat-book detection via the cycles dataset (audit 2026-06-12: a rebuilt book
+# with ZERO trade rows ever read as "unknown" 0.5 and the armed hedge would
+# have BOUGHT against a flat book the day staleness unblocked)
+# ---------------------------------------------------------------------------
+
+
+def test_live_book_state_flat_when_cycles_present_but_no_trades(monkeypatch, tmp_path) -> None:
+    def fake_read_dataset(root, dataset):
+        if dataset == "continuous_fade_demo_cycles":
+            return pl.DataFrame([{"cycle_id": "c-1", "ts_ms": 1}])
+        return pl.DataFrame()
+
+    monkeypatch.setattr(hedge_runner, "read_dataset", fake_read_dataset)
+
+    state = hedge_runner._live_book_state(tmp_path, "continuous_fade_demo_trades")
+
+    assert state.gross_short_frac == 0.0
+    assert state.gross_short_frac_known is True
+    assert state.gross_short_frac_source == "ledger_present_no_rows"
+
+
+def test_live_book_state_stays_unknown_when_cycles_missing_or_empty(monkeypatch, tmp_path) -> None:
+    def missing_cycles(root, dataset):
+        if dataset == "continuous_fade_demo_cycles":
+            raise FileNotFoundError(dataset)
+        return pl.DataFrame()
+
+    monkeypatch.setattr(hedge_runner, "read_dataset", missing_cycles)
+    state = hedge_runner._live_book_state(tmp_path, "continuous_fade_demo_trades")
+    assert state.gross_short_frac_known is False
+    assert state.gross_short_frac == 0.5
+    assert state.gross_short_frac_source == "ledger_empty_or_missing_status"
+
+    monkeypatch.setattr(hedge_runner, "read_dataset", lambda root, dataset: pl.DataFrame())
+    state = hedge_runner._live_book_state(tmp_path, "continuous_fade_demo_trades")
+    assert state.gross_short_frac_known is False
+    assert state.gross_short_frac_source == "ledger_empty_or_missing_status"
+
+
+# ---------------------------------------------------------------------------
+# Armed-run blocking + exit-code paging contract (audit 2026-06-12: every
+# blocked armed run exited 0, so the watchdog never paged)
+# ---------------------------------------------------------------------------
+
+
+def test_submit_blocked_when_book_state_unknown(monkeypatch, tmp_path, capsys) -> None:
+    """Never submit orders sized off the 0.5 'unknown' default."""
+    _setup_runner(
+        monkeypatch, tmp_path, argv=SUBMIT_ARGS,
+        book_state=hedge_runner.LiveBookState({}, 0.5, False, "unknown"),
+    )
+    monkeypatch.setattr(
+        hedge_runner, "compute_hedge_decision",
+        lambda cfg, **kw: _single_decision(_resize_plan()),
+    )
+    submit_calls: list = []
+    monkeypatch.setattr(hedge_runner, "_submit_plan", lambda *a, **k: submit_calls.append(a))
+
+    assert hedge_runner.main() == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["status"] == "submit_blocked_book_state_unknown"
+    assert submit_calls == []
+
+
+def test_submit_blocked_when_eth_price_unavailable_in_2f_mode(monkeypatch, tmp_path, capsys) -> None:
+    """2f mode used to silently drop the ETH leg when its price feed was dead."""
+    _setup_runner(monkeypatch, tmp_path, warm_eth=[0.001] * 90, argv=SUBMIT_ARGS)  # no --eth-price
+    monkeypatch.setattr(
+        hedge_runner, "compute_hedge_decision_2f",
+        lambda cfg, **kw: _decision_2f(_resize_plan(), None),
+    )
+    submit_calls: list = []
+    monkeypatch.setattr(hedge_runner, "_submit_plan", lambda *a, **k: submit_calls.append(a))
+
+    assert hedge_runner.main() == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["hedge_mode"] == "2f"
+    assert out["eth_price"] == 0.0
+    assert out["status"] == "submit_blocked_eth_price_unavailable"
+    assert submit_calls == []
+
+
+def test_stale_warmstart_blocks_risk_increasing_legs(monkeypatch, tmp_path, capsys) -> None:
+    buy = _resize_plan(side="Buy", reduce_only=False)
+    _setup_runner(
+        monkeypatch, tmp_path, argv=SUBMIT_ARGS,
+        warmstart_last=date.today() - timedelta(days=10),
+    )
+    monkeypatch.setattr(hedge_runner, "compute_hedge_decision", lambda cfg, **kw: _single_decision(buy))
+    submit_calls: list = []
+    monkeypatch.setattr(hedge_runner, "_submit_plan", lambda *a, **k: submit_calls.append(a))
+
+    assert hedge_runner.main() == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["warmstart_stale"] is True
+    assert out["status"] == "submit_blocked_stale_warmstart"
+    assert [leg["side"] for leg in out["blocked_legs"]] == ["Buy"]
+    assert out["would_run_legs"] == []
+    assert submit_calls == []
+
+
+def test_stale_warmstart_lets_all_reduce_only_plans_proceed(monkeypatch, tmp_path, capsys) -> None:
+    """Trimming/closing a hedge is risk-REDUCING — a stale beta window must not block it."""
+    sell = _resize_plan(side="Sell", reduce_only=True, qty=0.003, delta_notional=-300.0, reason="hedge_reduce")
+    _setup_runner(
+        monkeypatch, tmp_path, argv=SUBMIT_ARGS,
+        warmstart_last=date.today() - timedelta(days=10),
+    )
+    monkeypatch.setattr(hedge_runner, "compute_hedge_decision", lambda cfg, **kw: _single_decision(sell))
+    monkeypatch.setattr(
+        hedge_runner, "_submit_plan",
+        lambda plan, cfg, data_root, primary_root, now_ms: {
+            "symbol": plan.symbol, "side": plan.side, "qty": plan.qty,
+            "reduce_only": plan.reduce_only, "order_id": "oid-1", "link": "l-1",
+        },
+    )
+
+    assert hedge_runner.main() == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["warmstart_stale"] is True
+    assert out["status"] == "submitted"
+    assert [leg["side"] for leg in out["submitted"]] == ["Sell"]
+
+
+def test_submit_failed_exits_nonzero(monkeypatch, tmp_path, capsys) -> None:
+    _setup_runner(monkeypatch, tmp_path, argv=SUBMIT_ARGS)
+    monkeypatch.setattr(
+        hedge_runner, "compute_hedge_decision", lambda cfg, **kw: _single_decision(_resize_plan())
+    )
+
+    def boom(plan, cfg, data_root, primary_root, now_ms):
+        raise RuntimeError("venue down")
+
+    monkeypatch.setattr(hedge_runner, "_submit_plan", boom)
+
+    assert hedge_runner.main() == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["status"] == "submit_failed"
+    assert out["submit_errors"][0]["error"] == "venue down"
+
+
+def test_submit_partial_exits_nonzero(monkeypatch, tmp_path, capsys) -> None:
+    _setup_runner(
+        monkeypatch, tmp_path, warm_eth=[0.001] * 90,
+        argv=[*SUBMIT_ARGS, "--eth-price", "3000"],
+    )
+    monkeypatch.setattr(
+        hedge_runner, "compute_hedge_decision_2f",
+        lambda cfg, **kw: _decision_2f(
+            _resize_plan(),
+            _resize_plan(symbol="ETHUSDT", qty=0.05, delta_notional=150.0),
+        ),
+    )
+
+    def one_leg_fails(plan, cfg, data_root, primary_root, now_ms):
+        if plan.symbol == "ETHUSDT":
+            raise RuntimeError("eth leg rejected")
+        return {"symbol": plan.symbol, "side": plan.side, "qty": plan.qty,
+                "reduce_only": plan.reduce_only, "order_id": "oid-1", "link": "l-1"}
+
+    monkeypatch.setattr(hedge_runner, "_submit_plan", one_leg_fails)
+
+    assert hedge_runner.main() == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["status"] == "submit_partial"
+    assert [leg["symbol"] for leg in out["submitted"]] == ["BTCUSDT"]
+    assert [err["symbol"] for err in out["submit_errors"]] == ["ETHUSDT"]
+
+
+def test_all_legs_skipped_is_no_action_and_exits_zero(monkeypatch, tmp_path, capsys) -> None:
+    _setup_runner(monkeypatch, tmp_path, argv=SUBMIT_ARGS)
+    monkeypatch.setattr(
+        hedge_runner, "compute_hedge_decision",
+        lambda cfg, **kw: _single_decision(_resize_plan(qty=0.0004, delta_notional=40.0)),
+    )
+    monkeypatch.setattr(
+        hedge_runner, "_submit_plan",
+        lambda plan, cfg, data_root, primary_root, now_ms: {
+            "symbol": plan.symbol, "side": plan.side, "qty": 0.0,
+            "planned_qty": plan.qty, "reduce_only": plan.reduce_only,
+            "skipped": "below_min_qty",
+        },
+    )
+
+    assert hedge_runner.main() == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["status"] == "submit_no_action"
+    assert out["submitted"] == []
+    assert [leg["skipped"] for leg in out["skipped"]] == ["below_min_qty"]
+
+
+def test_no_warmstart_fails_only_armed_runs(monkeypatch, tmp_path, capsys) -> None:
+    _setup_runner(monkeypatch, tmp_path, argv=SUBMIT_ARGS)
+    monkeypatch.setattr(hedge_runner, "load_warmstart_2f", lambda path: ([], [], []))
+
+    assert hedge_runner.main() == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "no_warmstart"
+
+    monkeypatch.setattr(sys, "argv", ["run_continuous_hedge.py"])  # dry-run
+    assert hedge_runner.main() == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "no_warmstart"
+
+
+# ---------------------------------------------------------------------------
+# Venue qty-step / min-filter alignment in _submit_plan (audit 2026-06-12:
+# planned 0.003348 BTC vs qtyStep 0.001 -> guaranteed venue reject)
+# ---------------------------------------------------------------------------
+
+
+def _wire_submit_seams(monkeypatch, *, filters: dict[str, float]):
+    """Stub credentials/client/instrument-filters/ledger writes around _submit_plan.
+
+    Returns (placed_orders, written_datasets, reduce_calls) capture lists.
+    """
+    import liquidity_migration.bybit as bybit_mod
+
+    placed: list[dict] = []
+    written: list[tuple[str, pl.DataFrame]] = []
+    reduces: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def place_order(self, **params):
+            placed.append(params)
+            return {"orderId": "oid-1"}
+
+    monkeypatch.setattr(bybit_mod, "resolve_private_credentials", lambda: ("k", "s", True))
+    monkeypatch.setattr(bybit_mod, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(hedge_runner, "_instrument_filters", lambda symbol, root: dict(filters))
+    monkeypatch.setattr(
+        hedge_runner, "write_dataset",
+        lambda df, root, dataset, **kw: written.append((dataset, df)),
+    )
+    monkeypatch.setattr(
+        hedge_runner, "_apply_hedge_reduce_to_trades",
+        lambda data_root, cfg, **kw: reduces.append(kw),
+    )
+    return placed, written, reduces
+
+
+def test_submit_plan_floors_qty_to_step_everywhere(monkeypatch, tmp_path) -> None:
+    placed, written, _ = _wire_submit_seams(
+        monkeypatch, filters={"qty_step": 0.001, "min_order_qty": 0.001, "min_notional_value": 5.0}
+    )
+    cfg = hedge_runner.ContinuousHedgeConfig()
+    plan = _resize_plan(qty=0.003348, delta_notional=334.8)  # implied price 100k
+
+    result = hedge_runner._submit_plan(plan, cfg, tmp_path, tmp_path, now_ms=1_700_000_000_000)
+
+    assert result["qty"] == 0.003
+    assert "skipped" not in result
+    assert placed[0]["qty"] == "0.003"
+    rows_by_dataset = {dataset: df.to_dicts()[0] for dataset, df in written}
+    order_row = rows_by_dataset[cfg.orders_dataset]
+    assert order_row["qty"] == 0.003
+    assert order_row["filled_qty"] == 0.003
+    assert order_row["target_qty"] == 0.003
+    trade_row = rows_by_dataset[cfg.trades_dataset]
+    assert trade_row["qty"] == 0.003
+    assert abs(trade_row["entry_price"] - 100_000.0) < 1e-6  # implied price, float-division noise
+
+
+def test_submit_plan_skips_below_min_qty_without_submitting(monkeypatch, tmp_path) -> None:
+    placed, written, _ = _wire_submit_seams(
+        monkeypatch, filters={"qty_step": 0.001, "min_order_qty": 0.001, "min_notional_value": 5.0}
+    )
+    plan = _resize_plan(qty=0.0004, delta_notional=40.0)  # floors to 0.0
+
+    result = hedge_runner._submit_plan(
+        plan, hedge_runner.ContinuousHedgeConfig(), tmp_path, tmp_path, now_ms=1_700_000_000_000
+    )
+
+    assert result["skipped"] == "below_min_qty"
+    assert result["planned_qty"] == 0.0004
+    assert placed == []
+    assert written == []
+
+
+def test_submit_plan_skips_below_min_notional_for_risk_increasing_legs(monkeypatch, tmp_path) -> None:
+    placed, written, _ = _wire_submit_seams(
+        monkeypatch, filters={"qty_step": 0.001, "min_order_qty": 0.001, "min_notional_value": 5.0}
+    )
+    # implied price 1000 -> floored qty 0.001 -> notional 1.0 < minNotional 5.0
+    plan = _resize_plan(qty=0.0015, delta_notional=1.5)
+
+    result = hedge_runner._submit_plan(
+        plan, hedge_runner.ContinuousHedgeConfig(), tmp_path, tmp_path, now_ms=1_700_000_000_000
+    )
+
+    assert result["skipped"] == "below_min_notional"
+    assert placed == []
+    assert written == []
+
+
+def test_submit_plan_reduce_only_is_exempt_from_min_notional(monkeypatch, tmp_path) -> None:
+    """Bybit semantics: reduce-only legs bypass minNotional (still step/minQty bound)."""
+    placed, written, reduces = _wire_submit_seams(
+        monkeypatch, filters={"qty_step": 0.001, "min_order_qty": 0.001, "min_notional_value": 5.0}
+    )
+    plan = _resize_plan(
+        side="Sell", reduce_only=True, qty=0.0015, delta_notional=-1.5, reason="hedge_reduce"
+    )
+
+    result = hedge_runner._submit_plan(
+        plan, hedge_runner.ContinuousHedgeConfig(), tmp_path, tmp_path, now_ms=1_700_000_000_000
+    )
+
+    assert "skipped" not in result
+    assert result["qty"] == 0.001
+    assert placed[0]["qty"] == "0.001"
+    assert placed[0]["reduceOnly"] is True
+    assert reduces and abs(reduces[0]["sold_qty"] - 0.001) < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# Warm-start eth alignment (audit 2026-06-12: the old _load_warmstart_eth used a
+# different row-skip rule than load_warmstart — a non-numeric unit_ret desynced
+# the eth column by one)
+# ---------------------------------------------------------------------------
+
+
+def test_warmstart_loader_keeps_eth_aligned_on_malformed_unit_ret(tmp_path) -> None:
+    csv_path = tmp_path / "warmstart.csv"
+    csv_path.write_text(
+        "date,unit_ret,btc_ret,eth_ret\n"
+        "2026-01-01,0.001,0.01,0.02\n"
+        "2026-01-02,n/a,0.011,0.03\n"  # malformed unit_ret: whole row must drop
+        "2026-01-03,0.002,0.012,0.04\n",
+        encoding="utf-8",
+    )
+
+    unit, btc, eth = hedge_runner.load_warmstart_2f(csv_path)
+
+    assert unit == [0.001, 0.002]
+    assert btc == [0.01, 0.012]
+    assert eth == [0.02, 0.04]  # 0.03 dropped WITH its unit row — no off-by-one
+    # the divergent private loader is gone; the manager's 2f loader is the only path
+    assert not hasattr(hedge_runner, "_load_warmstart_eth")

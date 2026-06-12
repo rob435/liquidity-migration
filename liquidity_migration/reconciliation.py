@@ -1204,7 +1204,7 @@ def run_continuous_vs_daily_forward_comparison(
     if not daily_returns:
         notes.append(
             f"daily return series is empty from {daily_root_p}/{daily_cycles_dataset}+{daily_trades_dataset} "
-            "(short sleeve off — continuous-only mode)"
+            "(short sleeve ERASED 2026-06-11 — continuous-only mode)"
         )
     if not continuous_returns:
         issues.append(f"continuous return series is empty from {continuous_root_p}/{continuous_source}")

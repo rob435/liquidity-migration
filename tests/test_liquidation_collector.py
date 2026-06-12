@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
 
 from liquidity_migration.liquidation_collector import (
+    MAX_CONNECTION_AGE_SECONDS,
     JsonlDayWriter,
+    connection_expired,
     parse_binance_event,
     parse_bybit_event,
 )
@@ -78,3 +81,21 @@ def test_writer_counts_rows_per_venue(tmp_path) -> None:
     )
     assert writer.written == 3
     assert writer.written_by_venue == {"bybit": 2, "binance": 1}
+
+
+def test_connection_expired_age_check() -> None:
+    """Max-connection-age seam for new-listing pickup: the bybit leg's symbol
+    list is fetched once per connection, so a connection older than the cap
+    must be flagged expired (the message/heartbeat path then closes it and the
+    reconnect loop re-fetches the universe and resubscribes)."""
+    assert MAX_CONNECTION_AGE_SECONDS == 24 * 60 * 60
+    opened = 1_000.0
+    assert not connection_expired(opened, now_monotonic=opened)
+    assert not connection_expired(opened, now_monotonic=opened + MAX_CONNECTION_AGE_SECONDS - 1)
+    assert connection_expired(opened, now_monotonic=opened + MAX_CONNECTION_AGE_SECONDS)
+    assert connection_expired(opened, now_monotonic=opened + MAX_CONNECTION_AGE_SECONDS + 1)
+    # custom cap (and the boundary is inclusive at exactly max age)
+    assert connection_expired(0.0, now_monotonic=5.0, max_age_seconds=5.0)
+    assert not connection_expired(0.0, now_monotonic=4.9, max_age_seconds=5.0)
+    # default clock: a just-opened connection is not expired
+    assert not connection_expired(time.monotonic())

@@ -65,8 +65,8 @@ def _split_order_link_id(base: str, idx: int) -> str:
     return f"{base[:36 - len(suffix)]}{suffix}"
 
 
-def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int] | None:
-    """Recover ``(sleeve, signal_ts_ms, reentry_seq)`` from a bot-generated entry orderLinkId.
+def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int, str] | None:
+    """Recover ``(sleeve, signal_ts_ms, reentry_seq, component_tag)`` from a bot entry orderLinkId.
 
     The strategy generates entry orderLinkIds as
     ``lm-en-{base}-{base36(signal_ts // 1000)}`` (short),
@@ -77,12 +77,30 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int] | Non
     rebuild-safe way to reconstruct the deterministic strategy trade_id (avoids the lossy
     ``adopted-*`` fallback that drops strategy context).
 
-    Returns ``(sleeve, signal_ts_ms, reentry_seq)`` (reentry_seq is 0 for every form except a
-    continuous re-entry), or ``None`` if the link is not a bot-generated entry pattern (hand-placed
-    positions, risk-side ``lm-ux-*`` links, legacy formats). None means "fall back to adopted-*"."""
+    ``component_tag`` is the continuous family's sub-tag ("" plain book / long / short; "p3"… for
+    ensemble components; "s" for the sniper; addon sub-tag after "ca") — the live continuous trade_id
+    carries the component (``{base_id}-{component}``), so the rebuild reconstruction needs it to pair
+    with the paper twin (audit 2026-06-12: every component-tagged adoption rebuilt a component-less
+    id that matched no paper row).
+
+    Returns ``None`` if the link is not a bot-generated entry pattern (hand-placed positions,
+    risk-side ``lm-ux-*`` links, legacy formats). None means "fall back to adopted-*"."""
     if not order_link_id or not order_link_id.startswith("lm-en"):
         return None
     parts = order_link_id.split("-")
+    # `-x{3×base36}` sub-order uniquifier (continuous resize/sniper/exit links carry a short
+    # trade-id hash so two same-symbol orders in the same second never share a link — Bybit
+    # accepts a reused link once the first order is terminal, which cross-wired WS fill
+    # attribution; audit 2026-06-12). It is ORDER-level identity, not entry identity: strip it
+    # before decoding. A real ts36 tail is 6-7 chars and a re-entry seq is a plain int, so the
+    # exact "x"+3-char shape cannot collide with either.
+    if len(parts) >= 5 and len(parts[-1]) == 4 and parts[-1][0] == "x":
+        try:
+            int(parts[-1][1:], 36)
+        except ValueError:
+            pass
+        else:
+            parts = parts[:-1]
     reentry_seq = 0
     # Short:      lm-en-{base}-{ts36}                → 4 parts, sleeve="short" (legacy adoption)
     # Long:       lm-en-l-{base}-{ts36}              → 5 parts (parts[2]=="l"), sleeve="long"
@@ -93,6 +111,7 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int] | Non
     #             fallback as sleeve="short" on rebuild (audit 2026-06-11).
     # Addon:      lm-en-ca-{base}-{ts36}[-{seq}]     → sleeve="continuous_addon" (hedge). Checked
     #             BEFORE the generic "c" family; component tags must never start with "a".
+    component_tag = ""
     if len(parts) == 4 and parts[0] == "lm" and parts[1] == "en":
         sleeve = "short"
         ts36 = parts[3]
@@ -102,8 +121,10 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int] | Non
             sleeve = "long"
         elif tag.startswith("ca"):
             sleeve = "continuous_addon"
+            component_tag = tag[2:]
         elif tag.startswith("c"):
             sleeve = "continuous"
+            component_tag = tag[1:]
         else:
             return None
         ts36 = parts[4]
@@ -124,4 +145,4 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int] | Non
         return None
     if signal_ts_s <= 0:
         return None
-    return sleeve, signal_ts_s * 1000, reentry_seq
+    return sleeve, signal_ts_s * 1000, reentry_seq, component_tag

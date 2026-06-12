@@ -33,9 +33,12 @@ public trades on that UTC calendar day.
   `public.bybit.com/trading` archive scrape (deep history) **and** the Bybit v5
   `instruments-info` listing (currently-Trading perps), the latter filling both
   the archive's symbol-coverage gaps and its ~24h publishing lag.
-- Consumed by: `volume_events_features._attach_event_archive_membership`, which
-  sets `tradable_membership_flag`. `volume_events_filters` drops any event whose
-  flag is `False`; the run is then labelled `pit_membership_fail`.
+- Consumed by (historical): `volume_events_features._attach_event_archive_membership`
+  / `volume_events_filters` — both erased with the SHORT sleeve 2026-06-11. The
+  gate survives standalone as `liquidity_migration/volume_events_pit.py` (PIT
+  membership + full-PIT universe validation), consumed by the surviving engines'
+  membership attach (`long_native.py`, with shared frame helpers from
+  `trade_lifecycle.py`); a failed gate still labels the run `pit_membership_fail`.
 
 ## The off-by-one (fixed 2026-05-30)
 
@@ -74,8 +77,7 @@ asymmetry is the original trap. Two guards now exist:
   when the manifest lags the klines, plus `--refresh-manifest` to do both at once.
 - `liquidity_migration.pit_coverage.coverage_status(root)` /
   `format_coverage(...)` is the cheap, reusable staleness check (it reads the
-  `date=` partition names only). `scripts/reconcile.sh` calls it before the
-  backtest and refuses a stale strict run.
+  `date=` partition names only).
 
 ## Membership modes
 
@@ -92,53 +94,42 @@ trading-day archive has not published yet.
 
 Note: `--allow-partial-pit` is a *different* knob — it relaxes only the
 universe-*completeness* abort (every manifest symbol must have klines), not the
-per-trade membership gate. `scripts/reconcile.sh` uses it so a bounded forward
-window doesn't trip the whole-history universe check; per-trade membership stays
-strict.
+per-trade membership gate. Per-trade membership stays strict either way.
 
 ## The one-command workflow
 
-`scripts/reconcile.sh` (driver: `scripts/reconcile.py`) is self-provisioning and
-reconciles the promoted LONG sleeve by default (`--sleeves long`). Continuous is
-opt-in diagnostics only via `--sleeves continuous`. In order:
+`scripts/reconcile.sh` (driver: `scripts/reconcile.py`) reconciles the promoted
+LONG sleeve by default (`--sleeves long`). Continuous is opt-in diagnostics only
+via `--sleeves continuous`. In order:
 
 1. **pull** — rsync every selected sleeve's demo + paper ledgers from the VPS
    (long `long_native_{demo,paper}_*`; when explicitly selected, continuous
    `continuous_fade_{demo,paper}_*` + the continuous rmom panel + WS kline
-   store), read-only.
-2. **manifest** — refresh `archive_trade_manifest` to `today+2` on the research root.
-3. **kline-fill** — if `klines_1h` is behind today, auto-download the missing recent
-   klines via `archive-download-klines-1h-api` (manifest-gated). This closes the
-   "the local root won't have recent coverage" gap that used to be a hand-run step.
-   Skip with `--no-kline-fill`.
-4. **rmom** — when continuous is selected, auto-recompute `residual_momentum.parquet`
+   store), read-only. Skip with `--no-pull`.
+2. **rmom** — when continuous is selected, auto-recompute `residual_momentum.parquet`
    (the continuous gate) on the research root. Skip with `--no-rmom`.
-5. **coverage** — print the PIT coverage table; abort the strict backtest if the
-   manifest can't validate the latest signal day (override: `--diagnostic` / `--force`).
-6. **backtest** — run the promoted LONG profile over a **minimal** forward
-   window: `[earliest forward-ledger signal − ~45d warm-up, today+1]`, not a fixed
-   150-day slab. The `backtest_paper` reconcile auto-windows the *comparison* to the
-   paper ledger's first signal, so warm-up trades never become false `backtest-only`
-   rows; the 45d warm-up covers the deepest kline lookback (30d features + 5d cooldown
-   + 3d hold) and the 300d age gate is **manifest-derived**, so it needs no extra
-   klines. `--full-window` restores the 150d slab; `--warmup-days N` overrides.
-7. **reconcile** — per sleeve: LONG `reconcile-long-paper-demo`, and, only when
-   selected, CONTINUOUS `continuous-forward-readiness --paper-only` + a
-   signal-consistency replay. (The SHORT `reconcile-all` path was erased with
+3. **reconcile** — per sleeve: LONG `reconcile-long-paper-demo` (paper ↔ demo),
+   and, only when selected, CONTINUOUS `continuous-forward-readiness --paper-only`
+   + a signal-consistency replay. (The SHORT `reconcile-all` path was erased with
    the sleeve, 2026-06-11.)
-8. **summary** — one consolidated headline across selected sleeves.
+4. **summary** — one unified headline across selected sleeves.
 
-Common flags: `--sleeves long,continuous`, `--dry-run`, `--no-pull`,
-`--no-manifest`, `--no-kline-fill`, `--no-rmom`, `--no-backtest`, `--full-window`,
-`--warmup-days N`, `--diagnostic`, `--with-bybit`, `--force`. The matching skill is
-`.codex/skills/pit-reconcile`.
+Flags: `--sleeves long,continuous`, `--dry-run`, `--no-pull`, `--no-rmom`,
+`--bybit-root PATH`, `--config PATH`, `--vps HOST`. The matching skills are
+`.claude/skills/pit-reconcile` / `.codex/skills/pit-reconcile`.
+
+The old manifest-refresh / kline-fill / coverage / backtest provisioning steps
+were removed with the erased SHORT sleeve's backtest leg. Refreshing the
+manifest is the manual command above
+(`python -m liquidity_migration --data-root <root> archive-manifest`).
 
 ## When a reconcile shows `paper-only` / `pit_membership_fail`
 
-1. Run `bash scripts/reconcile.sh` (it refreshes the manifest first). If the
-   coverage table says ✅, the strict run is valid.
+1. Refresh the manifest manually
+   (`python -m liquidity_migration --data-root <root> archive-manifest`), then
+   re-run `bash scripts/reconcile.sh`.
 2. If a single very-recent signal is still `paper-only`, the trading-day archive
-   has not published yet — wait for the next day, or use `--diagnostic` for a
-   labelled current-universe check.
+   has not published yet — wait for the next day (a current-universe diagnostic
+   backtest is possible but is biased and must be labelled as such).
 3. `paper↔demo` measures execution slippage and is independent of all of the
    above; if it is clean the live executor matches the model.

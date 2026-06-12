@@ -17,14 +17,17 @@ per-arc forward plans (intraday kernel, continuous-fade) concluded and were cons
 the summary (git history has the originals). Always read **STATE.md** first — it tells you
 what's done, what's pending, and the current binding decision rules.
 
-## The thesis you are testing
+## The program you are working (post-erasure, 2026-06-11)
 
-The alpha is the **SELECTION** signal — the discrete liquidity-migration event picks the
-candidate pool (a fade short on seasoned names, not catch-the-top). E1 settled the EXECUTION
-question: entry *timing* is a non-lever (fade-confirmation ≈ immediate), so the forward work
-is **SELECTION refinement** (the validated age + residual-momentum gates), NOT a new selector.
-Don't swap in the rank-all continuous decile as the daily selector (regime-conditional). The
-full record + open methodology debts are in `docs/research_summary.md`.
+Two research lines survive: the **CONTINUOUS fade book** (the live demo book —
+research-stage, NOT promoted) and the **long-native v11a sleeve** (promoted-in-code,
+toggled off). The daily SHORT selection program was ERASED 2026-06-11 by operator
+order — do not propose short work or re-mine its window. The 2023-04→2026-05
+in-sample window is **SPENT**: new evidence comes from forward demo/paper
+accumulation and NEW data layers only, not from new recombinations of the
+already-mined price-volume data. The full record + open methodology debts are in
+`docs/research_summary.md`; the active charter is
+`docs/research_plan_alpha_hunt_2026-06-10.md`.
 
 ## The decision framework — three-tier, demo-arbiter
 
@@ -75,7 +78,7 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    reference only, not the promotion gate (run with `--help` for args).
    Do not move thresholds downward to rescue a cell (see non-negotiables).
 
-5. **Write the verdict.** Dated receipt under `docs/preregistration/<YYYY-MM-DD>-<exp>-verdict.md`
+5. **Write the verdict.** Dated receipt under `docs/preregistration/<exp>-<YYYY-MM-DD>.md`
    with: experiment, full per-arm/cell metrics, the Tier-2 verdict + fragility, the
    verdict paragraph (incl. the falsifier outcome — a negative result is first-class),
    the forward pointer, AND a one-paragraph roll-up into `docs/research_summary.md`.

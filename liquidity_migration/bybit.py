@@ -749,10 +749,20 @@ class BybitPrivateClient:
                 # wastes the backoff. Transport errors and rate-limits still retry.
                 if isinstance(exc, BybitDataError) and not _is_rate_limit(exc):
                     raise
+                # pybit (5.x) raises InvalidRequestError for a non-zero retCode BEFORE our
+                # retCode check ever runs, so the branch above never classified live venue
+                # rejects -- they were retried with backoff and the final raise dropped the
+                # retCode/retMsg (every ledgered error read a bare "failed after retries";
+                # live-measured 846ms on a cancel-nonexistent, audit 2026-06-12). Matched by
+                # class NAME so this needs no hard pybit import and survives module moves.
+                if type(exc).__name__ == "InvalidRequestError" and not _is_rate_limit(exc):
+                    raise BybitDataError(f"Bybit {method_name} failed: {exc}") from exc
                 if attempt + 1 >= self.retries:
                     break
                 time.sleep(self.retry_sleep_seconds * (2**attempt))
-        raise BybitDataError(f"Bybit {method_name} failed after retries") from last_error
+        # Keep the venue's last words in the surfaced message -- callers ledger
+        # str(exc), and __cause__ does not survive into those error columns.
+        raise BybitDataError(f"Bybit {method_name} failed after retries: {last_error}") from last_error
 
 
 def _leverage_text(value: float) -> str:

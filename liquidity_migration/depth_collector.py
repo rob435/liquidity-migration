@@ -7,7 +7,7 @@ Hourly public-REST snapshots (no credentials, no order path) aggregated to the
 binance-bookdepth-compatible band schema: cumulative quote notional within
 ±{0.2, 1, 2, 3, 4, 5}% of mid.
 
-Honesty rule: a 200-level snapshot may not REACH a band on deep books — bands
+Honesty rule: a 500-level snapshot may not REACH a band on deep books — bands
 beyond the snapshot's span are written as NULL, never zero, and ``bid_span_pct`` /
 ``ask_span_pct`` record how far each side actually reaches.
 
@@ -82,9 +82,16 @@ def _get_json(url: str) -> dict[str, Any]:
 
 
 def trading_universe() -> list[str]:
+    """All currently-trading USDT linear perps (cursor-paginated public REST).
+
+    Pagination is capped at 10 pages (mirrors the liquidation collector's
+    defensive cap) and a repeating cursor breaks the loop — a misbehaving
+    endpoint must not spin this into an unbounded request loop.
+    """
     symbols: list[str] = []
     cursor = ""
-    while True:
+    seen_cursors: set[str] = set()
+    for _ in range(10):  # paginate defensively
         payload = _get_json(BYBIT_INSTRUMENTS.format(cursor=cursor))
         result = payload.get("result") or {}
         for item in result.get("list") or []:
@@ -92,8 +99,29 @@ def trading_universe() -> list[str]:
             if item.get("status") == "Trading" and sym.endswith("USDT"):
                 symbols.append(sym)
         cursor = str(result.get("nextPageCursor") or "")
-        if not cursor:
-            return sorted(set(symbols))
+        if not cursor or cursor in seen_cursors:
+            break
+        seen_cursors.add(cursor)
+    return sorted(set(symbols))
+
+
+def _refresh_universe(previous: list[str]) -> list[str]:
+    """Fetch the live Trading universe; on failure keep ``previous``.
+
+    A transient instruments-info failure used to raise out of main()'s loop and
+    kill the daemon. Network/HTTP errors (URLError/HTTPError/timeouts are all
+    OSError) and bad-payload errors (JSONDecodeError is a ValueError) are
+    logged and the previous universe is kept until the next cycle's refresh.
+    """
+    try:
+        return trading_universe()
+    except (OSError, ValueError) as exc:
+        _logger.warning(
+            "universe refresh failed (%s); keeping previous universe of %d symbols",
+            exc,
+            len(previous),
+        )
+        return list(previous)
 
 
 def snapshot_symbol(symbol: str) -> dict[str, Any] | None:
@@ -140,8 +168,17 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     root = Path(args.root)
+    symbols: list[str] = []
     while True:
-        symbols = [s.strip() for s in args.symbols.split(",")] if args.symbols else trading_universe()
+        if args.symbols:
+            symbols = [s.strip() for s in args.symbols.split(",")]
+        else:
+            symbols = _refresh_universe(symbols)
+        if not symbols:
+            # First refresh failed and there is no previous universe to fall
+            # back on — wait and retry instead of dying or spinning hot.
+            time.sleep(60.0)
+            continue
         _logger.info("depth collector: %d symbols", len(symbols))
         collect_cycle(root, symbols)
         if args.once:

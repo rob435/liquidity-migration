@@ -1,6 +1,6 @@
 # Research Program State
 
-**Last updated:** 2026-06-11
+**Last updated:** 2026-06-12
 Live/operational state plus binding decision rules. Research conclusions live in
 [docs/research_summary.md](docs/research_summary.md); the active research charter is
 [docs/research_plan_alpha_hunt_2026-06-10.md](docs/research_plan_alpha_hunt_2026-06-10.md)
@@ -23,6 +23,12 @@ system 2026-06-11 by operator order** — engine, demo daemon, CLI, deploy units
 scripts, tests and docs are gone (git history is the archive; shared infra the
 short hosted was relocated to `trade_lifecycle`/`_common`/`event_demo_exits`).
 The LONG sleeve stays promoted-in-code but toggled OFF (`deploy/sleeves.env`).
+A second 5-agent full-repo audit ran 2026-06-12 (execution + live demo test
+orders, telegram, deploy/VPS, docs, data plane): all findings fixed same-day —
+headline items were the inert armed hedge (below), an exit orderLinkId collision
+on the armed sniper path, and a sniper partial-fill ghost window; live test
+orders + a telegram smoke test verified the venue path and notify transport
+end-to-end.
 
 ## What's Running / Wired (2026-06-10)
 
@@ -32,10 +38,17 @@ The LONG sleeve stays promoted-in-code but toggled OFF (`deploy/sleeves.env`).
   ddh-0.04, NO momentum hurdle, rmom q25 + BTC-uptrend gate). Replaces the deprecated
   single-component `continuous_rebalance_v1` (kept resolvable for old ledgers).
   Demo fills = execution evidence, not alpha proof; the rmom latency caveat stands.
-- **2f BTC+ETH hedge (banked, Tier-2 ceiling): live path wired.** `HEDGE_MODE=2f`
-  default in `run_continuous_hedge.py` (per-leg plans, warm-starts carry eth_ret,
-  ETH-thin fallback to single-BTC). REAL submit branch exists but is double-gated:
-  `SUBMIT_HEDGE=1` + `CONFIRM_DEMO_ORDERS=1` (default off, dry-run logs daily).
+- **2f BTC+ETH hedge (banked, Tier-2 ceiling): live path wired, armed, but has
+  NEVER submitted** (audit 2026-06-12): every armed run since 2026-06-10 was
+  `submit_blocked_stale_warmstart` — the committed warmstart CSV ends 2026-05-23
+  (>3d limit) and NO refresh pipeline exists. Audit fixes: a flat book now
+  correctly hedges zero (`submit_no_action`, healthy); blocked/failed armed runs
+  exit NONZERO so the watchdog pages; stale warmstart blocks only risk-INCREASING
+  legs (reduce-to-flat always allowed); leg qtys floor to the venue step
+  (previously off-grid → would have been rejected). OPERATOR DECISION pending:
+  regenerate `deploy/hedge_warmstart/*.csv` (and decide a refresh cadence) or
+  disarm the timer — until then the hedge pages the first time a non-flat book
+  needs a Buy leg.
 - **Sniper (Tier-2 demo candidate): fully wired, default OFF.** PostOnly +8%
   quarter-size Sell limit per fresh entry with disaster stop attached; per-cycle fill
   reconcile → first-class trade rows; cancel/exit with the base. Arm with
@@ -63,8 +76,10 @@ The LONG sleeve stays promoted-in-code but toggled OFF (`deploy/sleeves.env`).
    operator; fix the variable if the deploy mail arrives.
 2. ~~Env flips~~ DONE in the units: hedge `HEDGE_MODE=2f SUBMIT_HEDGE=1
    CONFIRM_DEMO_ORDERS=1` (submit still guard+staleness-gated at runtime);
-   demo `CONTINUOUS_SNIPER=1`. Verify the first hedge cycle + a sniper placement
-   in the journal after deploy.
+   demo `CONTINUOUS_SNIPER=1`. VERIFIED 2026-06-12: the hedge has NEVER fired
+   (blocked on the stale warmstart — see "What's Running"); no sniper placement
+   yet because the book has had zero entries since the rebuild (BTC-trend +
+   rmom gates; signal-side, not a fault).
 3. ~~R4 pull~~ transport fixed (ssh; no rsync needed) — finding: the VPS ledgers
    hold NO trades yet (book restarted 06-09; no entries fired). R4 calibration
    waits for fills to accrue under the ensemble.
@@ -140,7 +155,10 @@ Forward demo/paper is the arbiter. MAR primary (pooled), Sharpe secondary.
 ## Methodology Debts (open)
 
 - **rmom latency knife-edge** (shift3-only; grid audited correct — genuine fast
-  decay): no continuous promotion case until resolved.
+  decay): no continuous promotion case until resolved. NOTE (2026-06-12): the
+  falsification harness (`scripts/rmom_latency_falsification.py`) is broken
+  pending git-restore — its comparator script was deleted with the short-sleeve
+  erasure; re-running requires restoring from `e03e9ab^` into a scratch checkout.
 - Impact calibration at deployed size (R4 — blocked on the fill-ledger pull).
 - Continuous forward window immature (clock starts at the data-root refresh).
 - Closed 2026-06-09 (receipts kept): binance funding coverage+accrual, live-vs-PIT

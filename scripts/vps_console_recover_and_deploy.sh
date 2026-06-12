@@ -239,6 +239,18 @@ for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liqu
     rm -f "/etc/systemd/system/$_retired"
 done
 systemctl enable liquidity-migration-bybit-risk.service
+# Forward-only data collection — parity with scripts/deploy_vps_live.sh: liquidation
+# history is unbuyable, so the collector runs always-on like the risk service.
+# RESTART (not just enable --now, which is a no-op on a running unit) so recovered
+# collector code actually takes effect — append-only JSONL, no order path.
+systemctl enable liquidity-migration-liquidation-collector.service
+systemctl restart liquidity-migration-liquidation-collector.service
+# The depth collector is operator-gated (recovery installs the unit but must NEVER
+# enable it). If the operator HAS enabled it, restart it for the same reason as the
+# liquidation collector: recovered collector code must take effect now.
+if systemctl is-enabled --quiet liquidity-migration-depth-collector.service 2>/dev/null; then
+    systemctl restart liquidity-migration-depth-collector.service
+fi
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS

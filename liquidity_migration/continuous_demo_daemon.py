@@ -37,6 +37,7 @@ from .continuous_demo import (
 from .kline_follower import FollowerKlineStreamManager
 from .kline_stream_manager import KlineStreamManager
 from .long_native_event_demo_daemon import LongNativeDemoDaemon
+from .order_link_id import decode_entry_order_link_id
 
 if TYPE_CHECKING:
     # Only referenced in the cast annotations below (the base daemon's config type); the continuous
@@ -55,15 +56,24 @@ def _message_row_count(message: Mapping[str, Any]) -> int:
 
 
 def _continuous_links_in_message(message: Mapping[str, Any]) -> bool:
-    """True if any execution row in the message belongs to the continuous sleeve (lm-en-c-/lm-ux-c-).
-    Used by Tier 4 to nudge a state refresh only on OUR fills, not the short/long sleeves'."""
+    """True if any execution row in the message belongs to the continuous family.
+    Used by Tier 4 to nudge a state refresh only on OUR fills, not the short/long sleeves'.
+
+    Entry links are DECODED, not prefix-matched: the deployed continuous_ensemble_v1 emits
+    only component-tagged links (lm-en-cp3-…, sniper lm-en-cs-…) which a literal
+    "lm-en-c-" prefix never matched — entry/snipe fills (exactly the between-cycle sniper
+    window Tier 4 exists for) fell through to the 60s heartbeat (audit 2026-06-12). Exits
+    keep the prefix match ("lm-ux-c" covers the plain book and the ca addon family)."""
     data = message.get("data", message)
     rows = data if isinstance(data, list) else [data]
     for row in rows:
         if not isinstance(row, dict):
             continue
         link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
-        if link.startswith("lm-en-c-") or link.startswith("lm-ux-c-"):
+        if link.startswith("lm-ux-c"):
+            return True
+        decoded = decode_entry_order_link_id(link)
+        if decoded is not None and decoded[0] in ("continuous", "continuous_addon"):
             return True
     return False
 

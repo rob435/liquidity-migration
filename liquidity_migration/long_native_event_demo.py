@@ -1,8 +1,9 @@
 """Long-side execution module — live counterpart to long_native.run_long_native_research.
 
 Mirrors event_demo.py for the v11a long sleeve (uni10 FC sniper retrace 1%/6h
-fall-through). The short sleeve (event_demo.py) is untouched. This module
-runs alongside it on the same Bybit demo account with order-link prefix
+fall-through). (`event_demo.py` survives as shared execution infrastructure —
+the daily SHORT sleeve itself was ERASED 2026-06-11.) This module
+runs alongside the continuous book on the same Bybit demo account with order-link prefix
 `lm-en-l-*` for entries and `lm-ux-l-*` for exits so the existing ws_risk
 service can route fill events per sleeve.
 
@@ -1350,6 +1351,9 @@ def _execute_long_exits(
                         fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
                         fast_poll_seconds=demo.order_fill_fast_poll_seconds,
                         execution_event_router=execution_event_router,
+                        # EXEC-6: without target_qty the first WS leg of a multi-fill
+                        # (book-walk) market order returns immediately and books 'partial'.
+                        target_qty=_float(qty),
                     )
                 except Exception as exc:  # noqa: BLE001 - ws_risk will reconcile
                     status = "submitted_unconfirmed"
@@ -1370,6 +1374,10 @@ def _execute_long_exits(
                         status = "partial"
                     else:
                         status = "submitted_unconfirmed"
+                finally:
+                    # Router contract: drop the reconciled link's WS buffer.
+                    if execution_event_router is not None:
+                        execution_event_router.clear(exit_link)
         # Ledger update for the trade
         if not demo.submit_orders or filled_qty > 0.0 or status == "submitted_unconfirmed":
             trade_update = dict(trade)
@@ -1675,6 +1683,9 @@ def _execute_single_long_entry(
                     fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
                     fast_poll_seconds=demo.order_fill_fast_poll_seconds,
                     execution_event_router=execution_event_router,
+                    # EXEC-6: without target_qty the first WS leg of a multi-fill
+                    # (book-walk) market order returns immediately and books 'partial'.
+                    target_qty=_float(qty),
                 )
             except Exception as exc:  # noqa: BLE001
                 order_status = "submitted_unconfirmed"
@@ -1695,6 +1706,10 @@ def _execute_single_long_entry(
                     order_status = "partial"
                 else:
                     order_status = "submitted_unconfirmed"
+            finally:
+                # Router contract: drop the reconciled link's WS buffer.
+                if execution_event_router is not None:
+                    execution_event_router.clear(entry_link)
             if filled_qty > 0.0:
                 filled_stop_price = _stop_price_for_entry(
                     entry_price=entry_price, side="long",

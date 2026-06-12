@@ -8,8 +8,15 @@ continuous-addon ledger root (adopted by the risk service).
 
 Demo only. Dry-run is the safe default; --submit requires CONFIRM_DEMO_ORDERS=1 and
 demo credentials (the central order-submit guard hard-refuses REAL_MONEY=true), and
-is additionally blocked while the warm-start is stale. HEDGE_MODE=btc falls back to
-the single-leg WP3 form.
+is additionally blocked from ADDING hedge exposure while the warm-start is stale
+(all-reduce-only resizes still proceed — trimming a hedge is risk-reducing).
+HEDGE_MODE=btc falls back to the single-leg WP3 form.
+
+Exit-code contract (paging): an ARMED (--submit) run that is blocked or fails —
+any submit_blocked_* status, submit_failed, or submit_partial — exits NONZERO, so
+the daily systemd oneshot lands in `failed` and the liveness watchdog pages the
+operator. Dry-run statuses and genuine no-action runs always exit 0. (Before
+2026-06-12 a blocked armed run exited 0 and the book sat unhedged silently.)
 
 Usage:
     .venv/bin/python scripts/run_continuous_hedge.py --venue bybit            # dry-run
@@ -25,6 +32,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -43,7 +51,7 @@ from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
     compute_hedge_decision_2f,
     extend_with_live_days,
     hedge_order_link_id,
-    load_warmstart,
+    load_warmstart_2f,
 )
 from liquidity_migration.storage import read_dataset, write_dataset  # noqa: E402
 
@@ -83,18 +91,34 @@ def _is_long_hedge_trade(row: dict[str, object]) -> bool:
     return side in {"long", "buy"}
 
 
-def _live_book_state(primary_root: Path, primary_dataset: str) -> LiveBookState:
+def _live_book_state(
+    primary_root: Path, primary_dataset: str, cycles_dataset: str | None = None
+) -> LiveBookState:
     """Return live unit returns and current gross short exposure from the live ledger.
 
     Conservative when the live book is empty (fresh deploy): no live days, gross_short
     falls back to the 0.5 reference only when exposure is unknown. A present ledger
     with no open rows is a known flat book and sizes the hedge to zero.
+
+    A trades dataset with NO rows ever is disambiguated via the sibling cycles
+    dataset: a sleeve that writes cycle heartbeats but has never traded is
+    demonstrably alive AND flat (gross_short=0.0, known). Without this, a
+    rebuilt/never-traded book read as "unknown" 0.5 and the armed hedge would BUY
+    against a flat book the day it unblocked (audit 2026-06-12).
     """
+    if cycles_dataset is None:
+        cycles_dataset = primary_dataset.replace("_trades", "_cycles")
     try:
         trades = read_dataset(primary_root, primary_dataset)
     except (FileNotFoundError, OSError):
         return LiveBookState({}, 0.5, False, "ledger_unavailable")
     if trades.is_empty() or "status" not in trades.columns:
+        try:
+            cycles = read_dataset(primary_root, cycles_dataset)
+        except (FileNotFoundError, OSError):
+            cycles = None
+        if cycles is not None and not cycles.is_empty():
+            return LiveBookState({}, 0.0, True, "ledger_present_no_rows")
         return LiveBookState({}, 0.5, False, "ledger_empty_or_missing_status")
     open_now = trades.filter(pl.col("status") == "open")
     if open_now.is_empty():
@@ -161,28 +185,6 @@ def _warmstart_last_date(path: Path) -> date | None:
     return last
 
 
-def _load_warmstart_eth(path: Path) -> list[float | None]:
-    """The optional eth_ret column, aligned to the warm-start rows (None when absent).
-
-    Kept separate from ``load_warmstart`` so the (unit, btc) loading path — and its
-    test seams — are unchanged; a warm-start without eth_ret simply yields no joint
-    observations and the runner falls back to the single-leg BTC form.
-    """
-    out: list[float | None] = []
-    if not path.exists():
-        return out
-    with path.open(encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh):
-            if row.get("unit_ret") in (None, ""):
-                continue
-            v = row.get("eth_ret")
-            try:
-                out.append(float(v) if v not in (None, "") else None)
-            except (TypeError, ValueError):
-                out.append(None)
-    return out
-
-
 def _latest_close(primary_root: Path, symbol: str) -> float:
     store = primary_root / ".cache" / "ws_klines" / "store.parquet"
     if not store.exists():
@@ -202,21 +204,75 @@ def _plan_json(plan) -> dict | None:
             "delta_notional_usdt": round(plan.delta_notional_usdt, 2)}
 
 
-def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, now_ms: int) -> dict:
+# Per-run instrument-filter memo (at most 2 symbols/run; the daily oneshot exits
+# after one pass, so this never goes stale).
+_INSTRUMENT_FILTERS_CACHE: dict[str, dict[str, float]] = {}
+
+
+def _instrument_filters(symbol: str, cache_root: Path) -> dict[str, float]:
+    """qtyStep / minOrderQty / minNotionalValue for one symbol.
+
+    Reuses the demo engine's cached instruments fetch (``_demo_instruments``:
+    normalised Bybit get_instruments_info behind a 1h parquet TTL at
+    ``cache_root/.cache/event_demo_instruments``). The continuous demo daemon keeps
+    that cache warm at the primary root, so this is usually a local parquet read.
+    """
+    cached = _INSTRUMENT_FILTERS_CACHE.get(symbol)
+    if cached is not None:
+        return cached
+    from liquidity_migration.bybit import BybitMarketData
+    from liquidity_migration.event_demo_data import _demo_instruments
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    instruments = _demo_instruments(BybitMarketData(), cache_root=cache_root, now_ms=now_ms)
+    rows = instruments.filter(pl.col("symbol") == symbol).to_dicts()
+    row = rows[0] if rows else {}
+    out = {
+        "qty_step": _float(row.get("qty_step")),
+        "min_order_qty": _float(row.get("min_order_qty")),
+        "min_notional_value": _float(row.get("min_notional_value")),
+    }
+    _INSTRUMENT_FILTERS_CACHE[symbol] = out
+    return out
+
+
+def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root: Path, now_ms: int) -> dict:
     """Submit one leg's resize as a Market order and append the ledger rows.
 
     The central guard (``validate_order_submit_allowed``) has already passed by the
     time this runs; demo credentials are re-asserted here regardless.
+
+    The planner emits a raw notional/price qty; the venue rejects anything off the
+    qtyStep grid (planned 0.003348 BTC vs qtyStep 0.001 — audit 2026-06-12), so the
+    qty is floored to the symbol's qtyStep first. A floored qty below minOrderQty —
+    or, for non-reduce-only legs, a floored notional below minNotionalValue — is
+    returned as a ``skipped`` leg instead of a guaranteed venue reject (reduce-only
+    legs are exempt from minNotional per Bybit semantics).
     """
     from liquidity_migration.bybit import BybitPrivateClient, resolve_private_credentials
-    from liquidity_migration.event_demo import _order_params
+    from liquidity_migration.event_demo import _decimal_text, _order_params
 
     api_key, api_secret, demo_flag = resolve_private_credentials()
     if not api_key or not api_secret or not demo_flag:
         raise RuntimeError("hedge submit requires DEMO Bybit credentials in env")
+    filters = _instrument_filters(plan.symbol, primary_root)
+    step = Decimal(str(filters["qty_step"] if filters["qty_step"] > 0.0 else 0.001))
+    qty_dec = (Decimal(str(plan.qty)) // step) * step
+    qty = float(qty_dec)
+    price = abs(plan.delta_notional_usdt) / max(plan.qty, 1e-12)
+    skip_base = {"symbol": plan.symbol, "side": plan.side, "qty": qty,
+                 "planned_qty": plan.qty, "reduce_only": plan.reduce_only}
+    if qty <= 0.0 or (filters["min_order_qty"] > 0.0 and qty < filters["min_order_qty"]):
+        return {**skip_base, "skipped": "below_min_qty"}
+    if (
+        not plan.reduce_only
+        and filters["min_notional_value"] > 0.0
+        and qty * price < filters["min_notional_value"]
+    ):
+        return {**skip_base, "skipped": "below_min_notional"}
     client = BybitPrivateClient(category="linear", demo=True, api_key=api_key, api_secret=api_secret)
     link = hedge_order_link_id(now_ms, symbol=plan.symbol)
-    qty_text = f"{plan.qty:.6f}".rstrip("0").rstrip(".")
+    qty_text = _decimal_text(qty_dec)
     result = client.place_order(**_order_params(
         symbol=plan.symbol, side=plan.side, qty=qty_text, order_type="Market",
         order_link_id=link, reduce_only=plan.reduce_only,
@@ -225,7 +281,7 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, now_ms: int)
     order_row = {
         "order_link_id": link, "ts_ms": now_ms, "trade_id": f"hedge-{link}",
         "strategy_id": cfg.strategy_id, "symbol": plan.symbol, "side": plan.side,
-        "order_type": "Market", "qty": plan.qty, "reduce_only": plan.reduce_only,
+        "order_type": "Market", "qty": qty, "reduce_only": plan.reduce_only,
         # status "filled" + filled_qty/target_qty: this runner books the market
         # fill itself (trade row below / reduce booking below), so the order row
         # must say so. ws_risk's pending-fill reconciler delta-adds
@@ -233,25 +289,24 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, now_ms: int)
         # "submitted" with no filled_qty read previous=0 and re-added the FULL
         # fill — every armed BUY double-booked (audit 2026-06-11).
         "order_id": order_id, "submit_mode": "submitted", "status": "filled",
-        "filled_qty": plan.qty, "target_qty": plan.qty,
+        "filled_qty": qty, "target_qty": qty,
         "trade_side": "long", "sleeve": "continuous_addon",
-        "notional_usdt": abs(plan.delta_notional_usdt), "reason": plan.reason,
+        "notional_usdt": abs(qty * price), "reason": plan.reason,
         "updated_at_ms": now_ms,
     }
     write_dataset(pl.DataFrame([order_row]), data_root, cfg.orders_dataset, append=True)
-    price = abs(plan.delta_notional_usdt) / max(plan.qty, 1e-12)
     if plan.side == "Buy" and not plan.reduce_only:
         trade_row = build_hedge_trade_row(
-            cfg, qty=plan.qty, entry_price=max(price, 0.0), now_ms=now_ms,
+            cfg, qty=qty, entry_price=max(price, 0.0), now_ms=now_ms,
             order_link_id=link, order_id=order_id, symbol=plan.symbol,
         )
         write_dataset(pl.DataFrame([trade_row]), data_root, cfg.trades_dataset, append=True)
     elif plan.side == "Sell" and plan.reduce_only:
         _apply_hedge_reduce_to_trades(
-            data_root, cfg, symbol=plan.symbol, sold_qty=plan.qty,
+            data_root, cfg, symbol=plan.symbol, sold_qty=qty,
             exit_price=max(price, 0.0), now_ms=now_ms,
         )
-    return {"symbol": plan.symbol, "side": plan.side, "qty": plan.qty,
+    return {"symbol": plan.symbol, "side": plan.side, "qty": qty,
             "reduce_only": plan.reduce_only, "order_id": order_id, "link": link}
 
 
@@ -331,17 +386,24 @@ def main() -> int:
     primary_root = REPO / args.primary_root
 
     warmstart_path = REPO / warmstart if not Path(warmstart).is_absolute() else Path(warmstart)
-    warm_unit, warm_btc = load_warmstart(warmstart_path)
+    # Single loader for all three columns: unit/btc/eth rows are skipped together
+    # (iff float(unit_ret) raises), so a malformed unit_ret can never desync the
+    # eth column from the unit/btc pair (audit 2026-06-12).
+    warm_unit, warm_btc, warm_eth = load_warmstart_2f(warmstart_path)
     if len(warm_unit) < 60:
         print(json.dumps({"status": "no_warmstart", "rows": len(warm_unit)}))
-        return 0
+        # An ARMED run with no usable warm-start cannot hedge — fail the oneshot
+        # so the watchdog pages; a dry-run stays a quiet no-op.
+        return 1 if args.submit else 0
     warmstart_last = _warmstart_last_date(warmstart_path)
     warmstart_age_days = None if warmstart_last is None else (datetime.now(timezone.utc).date() - warmstart_last).days
     warmstart_stale = warmstart_age_days is None or warmstart_age_days > MAX_WARMSTART_STALE_DAYS
 
-    live_book = _live_book_state(primary_root, "continuous_fade_demo_trades")
+    primary_trades_dataset = "continuous_fade_demo_trades"
+    live_book = _live_book_state(
+        primary_root, primary_trades_dataset, primary_trades_dataset.replace("_trades", "_cycles")
+    )
     unit, btc = extend_with_live_days(warm_unit, warm_btc, live_book.live_unit_by_day, {})
-    warm_eth = _load_warmstart_eth(warmstart_path)
     eth: list[float | None] = list(warm_eth) + [None] * max(0, len(unit) - len(warm_eth))
     eth = eth[: len(unit)]
 
@@ -418,25 +480,45 @@ def main() -> int:
         out["status"] = (
             "submit_blocked_btc_price_unavailable" if args.submit else "dry_run_btc_price_unavailable"
         )
-    elif args.submit and warmstart_stale:
+    elif args.submit and not live_book.gross_short_frac_known:
+        # The 0.5 gross-short default is a sizing REFERENCE, not an observation —
+        # never submit orders sized off it (it would buy a hedge against a book
+        # whose exposure nobody measured).
+        out["status"] = "submit_blocked_book_state_unknown"
+    elif args.submit and use_2f and eth_price <= 0.0:
+        # In 2f mode a dead ETH price silently drops the ETH leg; an armed run must
+        # surface it instead of part-hedging.
+        out["status"] = "submit_blocked_eth_price_unavailable"
+    elif args.submit and warmstart_stale and any(not p.reduce_only for p in plans):
+        # A stale beta window blocks only risk-INCREASING legs; trimming/closing a
+        # hedge is risk-reducing and proceeds (all-reduce-only plans fall through).
         out["status"] = "submit_blocked_stale_warmstart"
+        out["blocked_legs"] = [_plan_json(p) for p in plans if not p.reduce_only]
+        out["would_run_legs"] = [_plan_json(p) for p in plans if p.reduce_only]
     elif args.submit and plans:
         submitted = []
+        skipped = []
         errors = []
         for plan in plans:
             try:
-                submitted.append(_submit_plan(plan, cfg, data_root, now_ms))
+                result = _submit_plan(plan, cfg, data_root, primary_root, now_ms)
             except Exception as exc:  # noqa: BLE001 — one leg failing must not kill the other's report
                 errors.append({"symbol": plan.symbol, "error": str(exc)[:300]})
+                continue
+            (skipped if result.get("skipped") else submitted).append(result)
         out["submitted"] = submitted
+        out["skipped"] = skipped
         out["submit_errors"] = errors
-        out["status"] = "submitted" if submitted and not errors else ("submit_partial" if submitted else "submit_failed")
+        if errors:
+            out["status"] = "submit_partial" if submitted else "submit_failed"
+        elif submitted:
+            out["status"] = "submitted"
+        else:
+            # Every leg fell below the venue's qty-step/min filters: no order was
+            # warranted at this size — a no-action run, not a failure.
+            out["status"] = "submit_no_action"
     elif args.submit:
         out["status"] = "submit_no_action"
-    elif btc_price <= 0.0:
-        # No BTC price (kline store missing/unreadable and no --btc-price): the plan
-        # is None for a dead-input reason — surface it, never a healthy-looking no-op.
-        out["status"] = "dry_run_btc_price_unavailable"
     elif use_2f and eth_price <= 0.0:
         out["status"] = "dry_run_eth_price_unavailable"
     elif warmstart_stale:
@@ -444,7 +526,18 @@ def main() -> int:
     else:
         out["status"] = "dry_run_ok"
     print(json.dumps(out))
-    return 0
+    # Paging contract: a blocked or failed ARMED run exits nonzero so the systemd
+    # oneshot lands `failed` and the liveness watchdog pages (see module docstring).
+    failing_statuses = {
+        "submit_blocked_order_submit_guard",
+        "submit_blocked_btc_price_unavailable",
+        "submit_blocked_book_state_unknown",
+        "submit_blocked_eth_price_unavailable",
+        "submit_blocked_stale_warmstart",
+        "submit_failed",
+        "submit_partial",
+    }
+    return 1 if args.submit and out["status"] in failing_statuses else 0
 
 
 if __name__ == "__main__":

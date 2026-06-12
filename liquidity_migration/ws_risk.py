@@ -338,7 +338,7 @@ class EventWebSocketRiskEngine:
         # state error (the dedupe + state mutation stay on the consumer thread).
         # Pre-rendered message STRINGS (not the live payload dict), so the background
         # sender never reads structures the consumer concurrently mutates (WS-R-001).
-        self._telegram_queue: queue.Queue[str | None] = queue.Queue()
+        self._telegram_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
         self._telegram_thread: threading.Thread | None = None
         # Background reconcile-prefetcher (opt-in via reconcile_prefetch_enabled).
         # Holds the latest positions + open-orders REST snapshot so rest_reconcile
@@ -1736,7 +1736,7 @@ class EventWebSocketRiskEngine:
         # rebuild positions instead of seeing 3 demo_only / 3 paper_only.
         recovered = self._recover_entry_link_metadata(symbol=symbol, side=side)
         if recovered is not None:
-            link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq = recovered
+            link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq, component_tag = recovered
             if decoded_sleeve == "continuous_addon":
                 from .continuous_hedge_manager import (
                     HEDGE_SYMBOL,
@@ -1760,6 +1760,14 @@ class EventWebSocketRiskEngine:
             # same-signal-window re-entry reconstructs its DISTINCT id (continuous-2). seq=0 (every
             # short/long link + a first continuous entry) reproduces the legacy form verbatim.
             trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}" + (f"-{reentry_seq}" if reentry_seq > 0 else "")
+            # The live continuous trade_id carries the ensemble component ({base}-{component});
+            # the deployed continuous_ensemble_v1 emits ONLY component-tagged links, so a
+            # component-less reconstruction matched NO paper-twin row — every post-rebuild
+            # adoption broke reconciliation pairing (audit 2026-06-12). The sniper tag "s"
+            # maps to the -snipe suffix but cannot recover the BASE component from the link
+            # alone ({base}-{component}-snipe) — still strictly closer than dropping it.
+            if decoded_sleeve == "continuous" and component_tag:
+                trade_id += "-snipe" if component_tag == "s" else f"-{component_tag}"
             # entry_ts_ms must reflect the actual fill time (Bybit's
             # createdTime) not signal_ts. The cycle's exit logic computes
             # planned_exit_ts_ms = entry_ts_ms + hold_days*MS_PER_DAY and
@@ -1846,9 +1854,9 @@ class EventWebSocketRiskEngine:
 
     def _recover_entry_link_metadata(
         self, *, symbol: str, side: str,
-    ) -> tuple[str, str, int, str, int] | None:  # (link, strategy_id, signal_ts_ms, sleeve, reentry_seq)
+    ) -> tuple[str, str, int, str, int, str] | None:  # (link, strategy_id, signal_ts_ms, sleeve, reentry_seq, component_tag)
         """Find the original bot-placed entry order for ``symbol`` and decode
-        its orderLinkId into (link, strategy_id, signal_ts_ms, sleeve).
+        its orderLinkId into (link, strategy_id, signal_ts_ms, sleeve, seq, component_tag).
         Returns None when the symbol has no bot-generated entry in the recent
         order history — the caller falls back to the lossy adopted-* path
         (typically hand-placed positions or positions older than the order
@@ -1873,7 +1881,7 @@ class EventWebSocketRiskEngine:
         # — deterministic regardless of Bybit's get_order_history ordering (re-audit
         # scan-continuous-identity-1). seq=0-only history (the common case) is unaffected.
         best_key: tuple[int, int] | None = None
-        best: tuple[str, str, int, str, int] | None = None
+        best: tuple[str, str, int, str, int, str] | None = None
         for order in history:
             order_side = str(order.get("side") or "")
             if order_side != venue_side:
@@ -1882,7 +1890,7 @@ class EventWebSocketRiskEngine:
             decoded = decode_entry_order_link_id(link)
             if decoded is None:
                 continue
-            decoded_sleeve, signal_ts_ms, reentry_seq = decoded
+            decoded_sleeve, signal_ts_ms, reentry_seq, component_tag = decoded
             strategy_id = self._adopt_strategy_id_for_sleeve(decoded_sleeve)
             if not strategy_id:
                 continue
@@ -1890,7 +1898,7 @@ class EventWebSocketRiskEngine:
             key = (reentry_seq, created_ts)
             if best_key is None or key > best_key:
                 best_key = key
-                best = (link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq)
+                best = (link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq, component_tag)
         return best
 
     def _adopt_strategy_id_for_sleeve(self, sleeve: str) -> str:
@@ -2538,25 +2546,44 @@ class EventWebSocketRiskEngine:
         return payload
 
     def _telegram_sender_loop(self) -> None:
-        """Background daemon: drain pre-rendered message strings and do the blocking
-        HTTP send. A None item is the shutdown sentinel. The string is frozen on the
-        consumer thread (WS-R-001), so this thread touches no shared mutable state."""
+        """Background daemon: drain (dedupe_key, pre-rendered text) pairs and do the
+        blocking HTTP send. A None item is the shutdown sentinel. The string is frozen
+        on the consumer thread (WS-R-001), so this thread touches no shared mutable
+        payload state. On a FAILED send the dedupe key is un-recorded (disk + memory):
+        the optimistic dedupe wrote the key before the HTTP round-trip, so a single
+        timeout/429 on an UNPROTECTED/stop_repair_failed alert silently suppressed
+        that exact alert for 24h (audit 2026-06-12). Un-recording lets the next
+        material cycle re-fire it. The disk file is the authority (atomic tempfile
+        helpers); a racing consumer re-add at worst restores today's suppress-once
+        behavior — never a crash, never a spam loop."""
         while True:
-            text = self._telegram_queue.get()
-            if text is None:
+            item = self._telegram_queue.get()
+            if item is None:
                 return
+            key, text = item
+            sent = False
             try:
-                send_telegram_message(text, enabled=True)
+                sent = send_telegram_message(text, enabled=True)
             except Exception as exc:  # noqa: BLE001 - a notification must never crash the daemon
                 _logger.warning("background telegram send failed: %s", exc)
+            if sent:
+                continue
+            _logger.warning("telegram send failed; un-recording dedupe key so the alert can re-fire: %s", key)
+            try:
+                keys = set(_read_telegram_dedupe_keys(self.report_dir))
+                keys.discard(key)
+                _write_telegram_dedupe_keys(self.report_dir, keys)
+                self.state.telegram_keys_sent.discard(key)
+            except Exception as exc:  # noqa: BLE001 - dedupe repair is best-effort telemetry
+                _logger.warning("telegram dedupe un-record failed: %s", exc)
 
-    def _enqueue_telegram(self, text: str) -> None:
+    def _enqueue_telegram(self, key: str, text: str) -> None:
         if self._telegram_thread is None or not self._telegram_thread.is_alive():
             self._telegram_thread = threading.Thread(
                 target=self._telegram_sender_loop, name="ws-risk-telegram", daemon=True
             )
             self._telegram_thread.start()
-        self._telegram_queue.put(text)
+        self._telegram_queue.put((key, text))
 
     def maybe_notify(self, payload: dict[str, Any]) -> tuple[bool, str]:
         if not self.risk.telegram:
@@ -2587,7 +2614,7 @@ class EventWebSocketRiskEngine:
         # (the write above just pruned it), so a long-lived daemon's set can't grow
         # without bound (WSR-5).
         self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
-        self._enqueue_telegram(text)
+        self._enqueue_telegram(key, text)
         return True, "enqueued"
 
     def close(self) -> None:

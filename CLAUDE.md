@@ -15,11 +15,11 @@ live/operational state). Python 3.11+; package `liquidity_migration/`.
 - **`docs/backtesting_errors_we_never_repeat.md`** — mandatory research
   methodology standard. Read it before any backtest or strategy work.
 - **`docs/research_summary.md`** — THE single consolidated research record:
-  every result, verdict, useful finding, open methodology debt, and the three-tier
-  **demo-arbiter** decision framework (Investigation → Demo-candidate → Real-money),
-  MAR-primary. All per-arc write-ups + research scripts were consolidated here and
-  removed 2026-06-02; git history is the backstop. **Read this for all research; it
-  is the one file.**
+  every result, verdict, useful finding, open methodology debt. The three-tier
+  **demo-arbiter** decision framework is defined in STATE.md "Binding Decision
+  Rules" (MAR-primary). All per-arc write-ups + research scripts were consolidated
+  here and removed 2026-06-02; git history is the backstop. **Read this for all
+  research; it is the one file.**
 - `docs/data_roots.md` — which data root to use (research vs. live demo vs. OOS).
 - `README.md` — repo overview and status.
 
@@ -48,7 +48,8 @@ exceptions.
 
 - Project skills in `.claude/skills/` auto-load by description when relevant
   (methodology gate, CLI invocations, reconcile, equity curve, research workflow,
-  report interpretation, repo navigation). `ls .claude/skills/` for the current set.
+  report interpretation, repo navigation, VPS migration/rebuild).
+  `ls .claude/skills/` for the current set.
 - The `liqmig-research` MCP server exposes:
   - `current_state` — STATE.md, in 60 seconds
   - `data_roots` — canonical data-root index

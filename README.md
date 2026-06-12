@@ -19,7 +19,7 @@ Dated numbers + full record (the one research file):
 
 A Bybit demo account on a VPS hosts the forward tests. As of 2026-06-09 the box
 runs only the continuous sleeve (research-stage, demo orders + paper shadow) plus
-the risk engine and the hedge timer; the v11a long sleeve is toggled off in
+the risk engine, the hedge timer, and the liquidation collector; the v11a long sleeve is toggled off in
 `deploy/sleeves.env` but remains promoted-in-code and redeployable. Forward demo is the arbiter; clocks restarted
 2026-06-09. No real-money trading is active: a real-money execution path exists in the code but
 the account is a plain `.env` toggle (`DEMO` / `REAL_MONEY`, mutually

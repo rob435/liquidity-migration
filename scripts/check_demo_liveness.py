@@ -279,7 +279,17 @@ def _unit_states(units: list[str]) -> dict[str, str]:
 
 
 def _default_units_for_toggles() -> list[str]:
-    units = ["liquidity-migration-bybit-risk.service"]
+    units = [
+        "liquidity-migration-bybit-risk.service",
+        # Always-on forward-evidence collector (enabled by every deploy): a failed
+        # collector is unbuyable history silently lost — page on it (audit 2026-06-12).
+        "liquidity-migration-liquidation-collector.service",
+        # The daily reports are the operator's heartbeat; the oneshot services exit 1
+        # on a failed send, so monitoring them pages instead of "the report just
+        # never arrived" (audit 2026-06-12). Timers run regardless of sleeve toggles.
+        "liquidity-migration-combined-book-report.service",
+        "liquidity-migration-continuous-forward-report.service",
+    ]
     if _sleeve_on("LONG_SLEEVE"):
         units.extend(
             [
@@ -538,25 +548,40 @@ def main() -> int:
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min
     )
-    _save_state(state_file, new_state)
 
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     for alert in to_send:
         line = f"🚨 [{alert.severity}] liquidity-migration {ts}\n{alert.message}"
         print(line)
         if args.telegram:
+            delivered = False
             try:
-                send_telegram_message(line)
+                delivered = send_telegram_message(line)
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
+            if not delivered:
+                # send_telegram_message returns False (no exception) when the
+                # TELEGRAM_* env is missing or the API answers non-2xx — previously
+                # invisible AND recorded as sent, so a CRITICAL alert was suppressed
+                # for the whole cooldown without ever reaching the operator (audit
+                # 2026-06-12). Surface it and DON'T advance this alert's cooldown:
+                # the next run retries.
+                print("(telegram send returned False — TELEGRAM_* env missing or API non-2xx; will retry next run)")
+                if alert.key in state:
+                    new_state[alert.key] = state[alert.key]
+                else:
+                    new_state.pop(alert.key, None)
     for key in resolved:
         line = f"✅ liquidity-migration {ts}: resolved — {key}"
         print(line)
         if args.telegram:
             try:
-                send_telegram_message(line)
+                if not send_telegram_message(line):
+                    print("(telegram send returned False — TELEGRAM_* env missing or API non-2xx)")
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
+    # State saved AFTER the sends so an undelivered alert's cooldown stays unset.
+    _save_state(state_file, new_state)
 
     # Healthy run -> ping the external dead-man's-switch so a TOTAL box death is
     # caught by the external monitor (the on-box watchdog cannot alert if the box

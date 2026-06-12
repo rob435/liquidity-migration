@@ -340,10 +340,11 @@ def test_continuous_order_link_prefix_routes_as_distinct_sleeve() -> None:
     # ws_risk must decode it as the CONTINUOUS sleeve (not short/long), recovering signal_ts
     decoded = decode_entry_order_link_id(link)
     assert decoded is not None
-    sleeve, signal_ts_ms, reentry_seq = decoded
+    sleeve, signal_ts_ms, reentry_seq, component_tag = decoded
     assert sleeve == "continuous"
     assert signal_ts_ms == (sig // 1000) * 1000
     assert reentry_seq == 0  # a first-entry (5-part) link carries no re-entry seq
+    assert component_tag == ""  # plain book — no ensemble component
     # the short (4-part) and long (en-l) links still decode as their own sleeves
     assert decode_entry_order_link_id("lm-en-BTC-abcd")[0] == "short"
     assert decode_entry_order_link_id("lm-en-l-BTC-abcd")[0] == "long"
@@ -356,10 +357,10 @@ def test_continuous_order_link_prefix_routes_as_distinct_sleeve() -> None:
     link1 = _continuous_order_link_id("en-c", symbol="WIFUSDT", signal_ts_ms=sig, reentry_seq=1)
     assert link0 == link  # seq=0 is byte-identical to the legacy form
     assert link1 != link0 and link1 == f"{link0}-1"
-    assert decode_entry_order_link_id(link1) == ("continuous", (sig // 1000) * 1000, 1)
+    assert decode_entry_order_link_id(link1) == ("continuous", (sig // 1000) * 1000, 1, "")
     addon_link = _continuous_order_link_id("en-ca", symbol="WIFUSDT", signal_ts_ms=sig, reentry_seq=1)
     assert addon_link.startswith("lm-en-ca-")
-    assert decode_entry_order_link_id(addon_link) == ("continuous_addon", (sig // 1000) * 1000, 1)
+    assert decode_entry_order_link_id(addon_link) == ("continuous_addon", (sig // 1000) * 1000, 1, "")
     tid0 = _continuous_trade_id("STRAT", "WIFUSDT", sig, 0)
     tid1 = _continuous_trade_id("STRAT", "WIFUSDT", sig, 1)
     assert tid0 == f"STRAT-WIFUSDT-{sig}"  # seq=0 byte-identical to legacy
@@ -2157,6 +2158,36 @@ def test_continuous_telegram_entry_and_error_reasons(monkeypatch: pytest.MonkeyP
     assert cd._continuous_telegram_reason(payload, [bad], []) == "continuous_entry_error"
 
 
+def test_continuous_telegram_sniper_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """REGRESSION (audit 2026-06-12): the ARMED sniper's fills/exits/errors were invisible
+    to the notify plane — a snipe fill is a NEW live short and an error a stuck resting
+    order; both must page. Counts ride the payload; errors outrank fills."""
+    import liquidity_migration.continuous_demo as cd
+
+    base = {"entries": 0, "exits": 0, "mode": "submit", "equity_usdt": 10_000.0}
+    assert cd._continuous_telegram_reason({**base, "sniper_fills": 1}, [], []) == "continuous_sniper_fill"
+    assert cd._continuous_telegram_reason({**base, "sniper_exits": 2}, [], []) == "continuous_exit_executed"
+    assert (
+        cd._continuous_telegram_reason({**base, "sniper_fills": 1, "sniper_errors": 1}, [], [])
+        == "continuous_sniper_error"
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "liquidity_migration.telegram.send_telegram_message",
+        lambda text, enabled=True: sent.append(text) or True,
+    )
+    ok, why = cd._maybe_continuous_notify({**base, "sniper_fills": 1, "sniper_exits": 1}, [], [], enabled=True)
+    assert ok and why == ""
+    assert "sniper: fills=1 exits=1" in sent[0]
+    # the journald cycle line carries the sniper counts and the telegram OUTCOME
+    line = cd.format_continuous_demo_cycle_summary(
+        {**base, "sniper_fills": 1, "sniper_exits": 0, "sniper_errors": 0, "telegram_sent": True}
+    )
+    assert "sniper=1/0/0" in line and "telegram=sent" in line
+    line = cd.format_continuous_demo_cycle_summary({**base, "telegram_error": "boom"})
+    assert "telegram=boom" in line
+
+
 def test_continuous_telegram_failure_is_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
     """A telegram/formatter fault must degrade to a reported error, never raise into
     the cycle (orders have already executed by the time the notify runs)."""
@@ -2184,11 +2215,88 @@ def test_component_and_sniper_links_decode_as_continuous() -> None:
     # components) + the sniper form, first-entry and re-entry
     for component in ("p3", "p4p3", "p4p5", "tp14", "s"):
         link = _continuous_order_link_id(f"en-c{component}", symbol="WLDUSDT", signal_ts_ms=sig)
-        assert decode_entry_order_link_id(link) == ("continuous", expected_ts, 0), link
+        assert decode_entry_order_link_id(link) == ("continuous", expected_ts, 0, component), link
         relink = _continuous_order_link_id(f"en-c{component}", symbol="WLDUSDT", signal_ts_ms=sig, reentry_seq=2)
-        assert decode_entry_order_link_id(relink) == ("continuous", expected_ts, 2), relink
+        assert decode_entry_order_link_id(relink) == ("continuous", expected_ts, 2, component), relink
     # the addon (hedge) prefix must NOT be swallowed by the component family
     addon = _continuous_order_link_id("en-ca", symbol="BTCUSDT", signal_ts_ms=sig)
-    assert decode_entry_order_link_id(addon) == ("continuous_addon", expected_ts, 0)
+    assert decode_entry_order_link_id(addon) == ("continuous_addon", expected_ts, 0, "")
     # junk tags still fall back to None (adopted-*)
     assert decode_entry_order_link_id("lm-en-x9-BTC-abcd") is None
+
+
+def test_tier4_link_matcher_catches_component_and_sniper_fills() -> None:
+    """REGRESSION (audit 2026-06-12): the Tier-4 fill nudge matched only the literal
+    'lm-en-c-' prefix — the deployed ensemble emits ONLY component-tagged entry links
+    (lm-en-cp3-…) and sniper links (lm-en-cs-…), so entry/snipe fills (exactly the
+    between-cycle sniper window the nudge exists for) fell through to the 60s heartbeat."""
+    from liquidity_migration.continuous_demo import _continuous_suborder_link_id
+    from liquidity_migration.continuous_demo_daemon import _continuous_links_in_message
+
+    sig = 1_765_400_000_000
+
+    def _msg(link: str) -> dict:
+        return {"data": [{"orderLinkId": link}]}
+
+    for prefix in ("en-cp3", "en-cp4p3", "en-cp4p5", "en-ctp14", "en-cs", "en-c", "en-ca"):
+        link = _continuous_order_link_id(prefix, symbol="WIFUSDT", signal_ts_ms=sig)
+        assert _continuous_links_in_message(_msg(link)), link
+    # exits (incl. hash-suffixed) and addon exits match by prefix
+    exit_link = _continuous_suborder_link_id("ux-c", symbol="WIFUSDT", signal_ts_ms=sig, trade_id="t-p3")
+    assert _continuous_links_in_message(_msg(exit_link))
+    # other sleeves' fills must NOT nudge the continuous daemon
+    assert not _continuous_links_in_message(_msg(_continuous_order_link_id("en-l", symbol="WIFUSDT", signal_ts_ms=sig)))
+    assert not _continuous_links_in_message(_msg("lm-en-BTC-abcd"))  # legacy short
+    assert not _continuous_links_in_message(_msg("manual-order-1"))
+
+
+def test_cycle_failure_telegram_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """REGRESSION (audit 2026-06-12): a wedged 60s-cycle daemon paged on EVERY failure
+    (~1440/day — guaranteed Telegram 429s drowning real alerts). Same signature is
+    deduped within the cooldown; a NEW failure signature pages immediately."""
+    from liquidity_migration.long_native_event_demo_daemon import LongNativeDemoDaemon
+
+    sent: list[str] = []
+    daemon = LongNativeDemoDaemon.__new__(LongNativeDemoDaemon)  # behavior-only: skip heavy __init__
+    daemon._cycle_failure_telegram_sent = {}
+    daemon._sleeve_label = "continuous"
+    daemon._send_telegram = sent.append  # type: ignore[method-assign]
+
+    daemon._maybe_send_cycle_failure_telegram(RuntimeError("schema mismatch"))
+    daemon._maybe_send_cycle_failure_telegram(RuntimeError("schema mismatch"))
+    assert len(sent) == 1  # same wedge within cooldown: one page
+    daemon._maybe_send_cycle_failure_telegram(ValueError("different failure"))
+    assert len(sent) == 2  # a NEW signature pages immediately
+    # after the cooldown elapses the same wedge re-pages
+    daemon._cycle_failure_telegram_sent = {
+        k: v - daemon._CYCLE_FAILURE_TELEGRAM_COOLDOWN_SECONDS - 1
+        for k, v in daemon._cycle_failure_telegram_sent.items()
+    }
+    daemon._maybe_send_cycle_failure_telegram(RuntimeError("schema mismatch"))
+    assert len(sent) == 3
+
+
+def test_suborder_link_uniquifies_and_still_decodes() -> None:
+    """REGRESSION (audit 2026-06-12): two same-symbol orders in the same second (sniper
+    base+snipe exits, multi-component resizes/snipes) shared one orderLinkId — Bybit
+    accepts a reused link once the first order is terminal, and the WS execution router
+    buffers per link, so the second order inherited the first's fills. The sub-order
+    hash makes links distinct per trade_id, deterministic per retry, and the decoder
+    strips the suffix so entry-prefix (resize/sniper) links still decode."""
+    from liquidity_migration.continuous_demo import _continuous_suborder_link_id
+
+    sig = 1_765_400_000_000
+    expected_ts = (sig // 1000) * 1000
+    base = _continuous_suborder_link_id("ux-c", symbol="WIFUSDT", signal_ts_ms=sig, trade_id="STRAT-WIFUSDT-1-p3")
+    snipe = _continuous_suborder_link_id("ux-c", symbol="WIFUSDT", signal_ts_ms=sig, trade_id="STRAT-WIFUSDT-1-p3-snipe")
+    other = _continuous_suborder_link_id("ux-c", symbol="WIFUSDT", signal_ts_ms=sig, trade_id="STRAT-WIFUSDT-1-p4p5")
+    assert len({base, snipe, other}) == 3  # same symbol+second, three distinct links
+    assert all(link.startswith("lm-ux-c-") and len(link) <= 36 for link in (base, snipe, other))
+    # deterministic: a crash-retry of the same logical order reuses the same link
+    assert base == _continuous_suborder_link_id("ux-c", symbol="WIFUSDT", signal_ts_ms=sig, trade_id="STRAT-WIFUSDT-1-p3")
+    # entry-prefix sub-orders (resize increases, sniper placements) still DECODE: the
+    # -x suffix is stripped and the component tag survives
+    resize = _continuous_suborder_link_id("en-cp3", symbol="WIFUSDT", signal_ts_ms=sig, trade_id="STRAT-WIFUSDT-1-p3")
+    assert decode_entry_order_link_id(resize) == ("continuous", expected_ts, 0, "p3")
+    snipe_place = _continuous_suborder_link_id("en-cs", symbol="WIFUSDT", signal_ts_ms=sig, trade_id="STRAT-WIFUSDT-1-p3-snipe")
+    assert decode_entry_order_link_id(snipe_place) == ("continuous", expected_ts, 0, "s")

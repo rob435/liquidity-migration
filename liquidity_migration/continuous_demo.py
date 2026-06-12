@@ -674,10 +674,13 @@ def _execute_sniper_placements(
             entry_price=limit_price, side="short", stop_loss_pct=demo.stop_loss_pct, tick_size=tick
         )
         signal_ts = int(plan.get("signal_ts_ms") or now_ms)
-        link = _continuous_order_link_id(
-            _continuous_sniper_link_prefix(demo), symbol=symbol, signal_ts_ms=signal_ts
-        )
         trade_id = _sniper_trade_id(str(plan.get("base_trade_id", "")))
+        # Trade-id-hashed link: two components' snipes on the SAME symbol share signal_ts
+        # (both candidates come from the same confirmed bar) — a shared link cross-wires
+        # their fill attribution (see _continuous_suborder_link_id).
+        link = _continuous_suborder_link_id(
+            _continuous_sniper_link_prefix(demo), symbol=symbol, signal_ts_ms=signal_ts, trade_id=trade_id
+        )
         qty_text = _decimal_text(Decimal(str(qty)))
         submit_mode, status, order_id, error = "dry_run", "resting", "", ""
         if demo.submit_orders:
@@ -809,7 +812,12 @@ def reconcile_continuous_snipes(
             exec_ts = int(_float(h.get("updatedTime")) or now_ms)
             history_status = str(h.get("orderStatus", ""))
             break
-        if exec_qty > 0.0 and avg_price > 0.0 and trade_id not in known_trade_ids:
+        if (
+            history_status in _SNIPER_TERMINAL_ORDER_STATUSES
+            and exec_qty > 0.0
+            and avg_price > 0.0
+            and trade_id not in known_trade_ids
+        ):
             fill_rows.append({
                 "trade_id": trade_id, "strategy_id": str(row.get("strategy_id", "")),
                 "symbol": symbol, "side": "short", "sleeve": continuous_sleeve_name(demo),
@@ -832,8 +840,12 @@ def reconcile_continuous_snipes(
         # else: empty/lagging history or a non-terminal orderStatus — the open-orders
         # snapshot may have been empty/partial (the empty-fetch-as-deletion class,
         # audit 2026-06-11: terminalizing here ghosted a still-resting PostOnly order
-        # forever — no cancel ever issued, no trade row if it later filled). Leave the
-        # row as-is and re-resolve next cycle; never terminalize without evidence.
+        # forever — no cancel ever issued, no trade row if it later filled). The fill
+        # branch above requires terminal status too (audit 2026-06-12: a PartiallyFilled
+        # order missing from a torn open-orders snapshot booked the partial AND
+        # terminalized the row "filled" — the still-resting remainder became a ghost).
+        # Leave the row as-is and re-resolve next cycle; never terminalize without
+        # evidence. known_trade_ids dedup makes the eventual terminal booking idempotent.
 
     snipe_exit_plans = [
         {**t, "exit_reason": "base_exited", "exit_trigger_ts_ms": now_ms}
@@ -1205,6 +1217,21 @@ def _continuous_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, re
     return link
 
 
+def _continuous_suborder_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, trade_id: str) -> str:
+    """Order link with a ``-x{3×base36}`` trade-id hash — for the continuous order families that can
+    place TWO same-symbol orders in the same second: the sniper base-exit + snipe exit in one sweep,
+    multi-component same-symbol trades exiting/resizing together, and two components' snipes. Bybit
+    accepts a REUSED link once the first order is terminal, and the WS execution router buffers rows
+    per link — a shared link made _wait_for_execution_summary adopt the FIRST order's buffered fills
+    as the second's, closing the second trade with the first order's price/fee (audit 2026-06-12).
+    Deterministic per trade_id, so a crash-retry of the same logical order reuses the same link
+    (idempotent). decode_entry_order_link_id strips the suffix (entry-prefix resize/sniper links
+    still decode); exit links are prefix-matched only (is_exit_link) and never decoded."""
+    link = _continuous_order_link_id(prefix, symbol=symbol, signal_ts_ms=signal_ts_ms)
+    suffix = "-x" + _base36(zlib.crc32(str(trade_id).encode("utf-8")) % 46656).rjust(3, "0")
+    return f"{link[: 36 - len(suffix)]}{suffix}"
+
+
 def _continuous_trade_id(strategy_id: str, symbol: str, signal_ts_ms: int, reentry_seq: int = 0) -> str:
     """Deterministic continuous trade_id. seq=0 is byte-identical to the legacy
     ``{strategy}-{symbol}-{signal_ts}`` form (existing rows unchanged); a same-signal-window re-entry
@@ -1397,6 +1424,7 @@ def _continuous_exit_link_prefix(config: ContinuousDemoCycleConfig) -> str:
 # ============================================================================
 import logging  # noqa: E402
 import time  # noqa: E402
+import zlib  # noqa: E402
 from decimal import Decimal  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable  # noqa: E402
@@ -1413,6 +1441,7 @@ from .config import ResearchConfig  # noqa: E402
 from .event_demo import (  # noqa: E402
     EventDemoCycleConfig,
     _active_position_by_symbol,
+    _base36,
     _build_private_client,
     _contract_lookup,
     _decimal_text,
@@ -1727,7 +1756,13 @@ def _execute_continuous_exits(
         qty = str(plan.get("qty") or trade.get("qty") or "")
         if not qty or _float(qty) <= 0.0:
             continue
-        exit_link = _continuous_order_link_id(_continuous_exit_link_prefix(demo), symbol=symbol, signal_ts_ms=now_ms)
+        # Trade-id-hashed link: the snipe exit and its base exit run in the SAME cycle at the
+        # SAME now_ms for the SAME symbol (and multi-component same-symbol trades exit together)
+        # — a shared link cross-wires fill attribution (see _continuous_suborder_link_id).
+        exit_link = _continuous_suborder_link_id(
+            _continuous_exit_link_prefix(demo), symbol=symbol, signal_ts_ms=now_ms,
+            trade_id=str(trade.get("trade_id") or plan.get("trade_id") or symbol),
+        )
         order_result: dict[str, Any] = {}
         submit_mode, status, error = "dry_run", "planned", ""
         exit_price = exit_fee = 0.0
@@ -1755,7 +1790,8 @@ def _execute_continuous_exits(
                         poll_interval_seconds=demo.order_fill_poll_interval_seconds,
                         fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
                         fast_poll_seconds=demo.order_fill_fast_poll_seconds,
-                        execution_event_router=execution_event_router)
+                        execution_event_router=execution_event_router,
+                        target_qty=_float(qty))
                 except Exception as exc:  # noqa: BLE001
                     status, error, filled_qty = "submitted_unconfirmed", f"fill confirm failed: {exc}"[:500], 0.0
                 else:
@@ -1765,6 +1801,11 @@ def _execute_continuous_exits(
                     exit_exec_time_ms = int(_float(summ.get("exec_time_ms") or 0))
                     tgt = _float(qty)
                     status = "filled" if (tgt > 0 and filled_qty + max(tgt * 1e-8, 1e-12) >= tgt) else ("partial" if filled_qty > 0 else "submitted_unconfirmed")
+                finally:
+                    # Router contract: drop the WS buffer once this link is reconciled
+                    # (or given up on) — never leave rows a later link could inherit.
+                    if execution_event_router is not None:
+                        execution_event_router.clear(exit_link)
         if not demo.submit_orders or filled_qty > 0.0 or status == "submitted_unconfirmed":
             upd = dict(trade)
             if status == "filled" or not demo.submit_orders:
@@ -2033,7 +2074,12 @@ def _execute_continuous_rebalance_resizes(
             continue
 
         link_prefix = _continuous_exit_link_prefix(demo) if plan.reduce_only else _continuous_entry_link_prefix(demo)
-        order_link = _continuous_order_link_id(link_prefix, symbol=symbol, signal_ts_ms=now_ms)
+        # Trade-id-hashed link: multi-component same-symbol trades resize in the same cycle at
+        # the same now_ms — a shared link cross-wires fill attribution; the increase side uses
+        # the ENTRY prefix and decode_entry_order_link_id strips the hash suffix.
+        order_link = _continuous_suborder_link_id(
+            link_prefix, symbol=symbol, signal_ts_ms=now_ms, trade_id=str(plan.trade_id)
+        )
         preflight = {
             "order_link_id": order_link,
             "ts_ms": now_ms,
@@ -2087,6 +2133,7 @@ def _execute_continuous_rebalance_resizes(
                     fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
                     fast_poll_seconds=demo.order_fill_fast_poll_seconds,
                     execution_event_router=execution_event_router,
+                    target_qty=_float(qty),
                 )
             except Exception as exc:  # noqa: BLE001
                 error = f"fill confirm failed: {exc}"[:500]
@@ -2101,6 +2148,10 @@ def _execute_continuous_rebalance_resizes(
                     if target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
                     else ("partial" if filled_qty > 0.0 else "submitted_unconfirmed")
                 )
+            finally:
+                # Router contract: drop the reconciled link's WS buffer (see exits).
+                if execution_event_router is not None:
+                    execution_event_router.clear(order_link)
 
         execution_row = {
             "order_link_id": order_link,
@@ -2242,7 +2293,8 @@ def _execute_continuous_entries(
                         trading_client, symbol=symbol, order_link_id=entry_link,
                         poll_seconds=demo.order_fill_confirm_seconds, poll_interval_seconds=demo.order_fill_poll_interval_seconds,
                         fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
-                        fast_poll_seconds=demo.order_fill_fast_poll_seconds, execution_event_router=execution_event_router)
+                        fast_poll_seconds=demo.order_fill_fast_poll_seconds, execution_event_router=execution_event_router,
+                        target_qty=_float(qty))
                 except Exception as exc:  # noqa: BLE001
                     order_status, error, filled_qty, filled_notional = "submitted_unconfirmed", f"fill confirm failed: {exc}"[:500], 0.0, 0.0
                 else:
@@ -2253,6 +2305,10 @@ def _execute_continuous_entries(
                     filled_notional = abs(entry_price * filled_qty) if filled_qty > 0 else 0.0
                     tgt = _float(qty)
                     order_status = "filled" if (tgt > 0 and filled_qty + max(tgt * 1e-8, 1e-12) >= tgt) else ("partial" if filled_qty > 0 else "submitted_unconfirmed")
+                finally:
+                    # Router contract: drop the reconciled link's WS buffer (see exits).
+                    if execution_event_router is not None:
+                        execution_event_router.clear(entry_link)
         entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0 else ""
         if not demo.submit_orders or filled_qty > 0.0:
             # trade_id (computed above via _continuous_trade_id) carries the re-entry seq so a same-
@@ -2341,10 +2397,16 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"max_rmom_day_ts={payload.get('max_rmom_day_ts')} stale_days={payload.get('rmom_stale_days')} "
         f"d9={payload.get('live_d9_symbols')} cand={payload.get('candidates')} "
         f"entries={payload.get('entries')} exits={payload.get('exits')} open={payload.get('open_positions')} "
+        f"sniper={payload.get('sniper_fills', 0)}/{payload.get('sniper_exits', 0)}/{payload.get('sniper_errors', 0)} "
         f"equity=${_f(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')} "
         f"same_signal_reentry_skips={payload.get('skipped_same_signal_reentry', 0)} "
         f"addon_entry_cooldown_symbols={payload.get('addon_same_symbol_entry_cooldown_symbols', 0)} "
-        f"addon_pnl_gate_skips={payload.get('addon_primary_pnl_gate_skips', 0)}"
+        f"addon_pnl_gate_skips={payload.get('addon_primary_pnl_gate_skips', 0)} "
+        # telegram OUTCOME on the journald line: the daemon prints this summary after the
+        # cycle returns (telegram_sent/telegram_error are set by then) — a persistently
+        # broken notify path was previously indistinguishable from a quiet book here
+        # (audit 2026-06-12; the long sleeve and ws_risk persist the same fields).
+        f"telegram={'sent' if payload.get('telegram_sent') else str(payload.get('telegram_error') or 'none')[:60]}"
     )
 
 
@@ -2362,9 +2424,16 @@ def _continuous_telegram_reason(
         return "continuous_entry_error"
     if any(str(r.get("submit_mode", "")) == "error" for r in exit_rows):
         return "continuous_exit_error"
+    # Sniper lifecycle (payload counts — the rows live in separate lists): a snipe fill
+    # is a NEW live short, an error is a stuck/ghost resting order. Until 2026-06-12
+    # the armed sniper was invisible to this filter entirely.
+    if int(payload.get("sniper_errors") or 0) > 0:
+        return "continuous_sniper_error"
+    if int(payload.get("sniper_fills") or 0) > 0:
+        return "continuous_sniper_fill"
     if int(payload.get("entries") or 0) > 0:
         return "continuous_entry_executed"
-    if int(payload.get("exits") or 0) > 0:
+    if int(payload.get("exits") or 0) > 0 or int(payload.get("sniper_exits") or 0) > 0:
         return "continuous_exit_executed"
     return ""
 
@@ -2391,6 +2460,15 @@ def format_continuous_telegram_status_message(
         f"rmom={'present' if payload.get('rmom_present') else 'MISSING'} "
         f"paused={payload.get('entry_paused')}",
     ]
+    sniper_counts = (
+        int(payload.get("sniper_fills") or 0),
+        int(payload.get("sniper_exits") or 0),
+        int(payload.get("sniper_errors") or 0),
+    )
+    if any(sniper_counts):
+        lines.append(
+            f"sniper: fills={sniper_counts[0]} exits={sniper_counts[1]} errors={sniper_counts[2]}"
+        )
     if entry_rows:
         lines.append("Entries:")
         for row in entry_rows[:6]:
@@ -2655,6 +2733,14 @@ def run_continuous_demo_cycle(
         # Sniper lifecycle sweep (S1 Amendment 6, wired 2026-06-10): resolve fills of
         # resting snipes into first-class open trade rows, cancel snipes whose base
         # closed, and exit filled snipes alongside their base (reason base_exited).
+        # Lists initialized here so the cycle payload/telegram can count sniper
+        # activity even when the sweep is disabled or finds nothing (audit
+        # 2026-06-12: armed sniper fills/errors were invisible to every notify path).
+        snipe_fills: list[dict[str, Any]] = []
+        snipe_updates: list[dict[str, Any]] = []
+        snipe_exits: list[dict[str, Any]] = []
+        snipe_exit_orders: list[dict[str, Any]] = []
+        sniper_orders: list[dict[str, Any]] = []
         if demo.sniper_enabled:
             snipe_fills, snipe_updates, snipe_exit_plans = reconcile_continuous_snipes(
                 all_trades, all_orders, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms)
@@ -2837,6 +2923,11 @@ def run_continuous_demo_cycle(
                 record_preflight=preflight_cb)
             if sniper_orders and (demo.submit_orders or demo.record_dry_run):
                 cycle_order_rows.extend(sniper_orders)
+        sniper_errors = sum(
+            1
+            for r in (sniper_orders + snipe_updates + snipe_exit_orders)
+            if str(r.get("submit_mode", "")) == "error" or str(r.get("error") or "")
+        )
 
         # Dynamic-exit forward shadow (paper-only bookkeeping; can never affect orders).
         if demo.dynexit_shadow_enabled:
@@ -2932,6 +3023,11 @@ def run_continuous_demo_cycle(
             "live_d9_symbols": live_d9, "open_positions": open_count,
             "entries": len([r for r in exec_entries if r.get("status") in ("filled", "partial", "planned")]),
             "exits": len(exec_exits), "candidates": len(candidates), "equity_usdt": equity_usdt,
+            # Sniper lifecycle visibility: a snipe FILL is a NEW live short on the account
+            # and an error is a stuck/ghost resting order — both must reach the cycle row,
+            # the journald summary and the telegram reason filter (audit 2026-06-12).
+            "sniper_fills": len(snipe_fills), "sniper_exits": len(snipe_exits),
+            "sniper_errors": sniper_errors,
             "entry_signal_ts_ms": signal_ts,
             "btc_trend_gate": demo.btc_trend_gate,
             "btc_trend_gate_allows_entry": btc_trend_gate_allows_entry,
@@ -2954,7 +3050,7 @@ def run_continuous_demo_cycle(
         # row) and exception-isolated. Outcome rides only on the returned payload — the
         # persisted cycle row above keeps its schema.
         telegram_sent, telegram_error = _maybe_continuous_notify(
-            payload, exec_entries, exec_exits, enabled=demo.telegram
+            payload, exec_entries, exec_exits + snipe_exits, enabled=demo.telegram
         )
         payload["telegram_sent"] = telegram_sent
         if telegram_error:

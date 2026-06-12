@@ -94,7 +94,7 @@ non-blocking and tell you exactly what to backfill.
 ## Canonical v11a profile (for context when reporting)
 
 - Universe / regime parameters (universe size, turnover lookback, BTC regime
-  gate) come from `_v11a_long_native_config()` in `liquidity_migration/long_native.py`
+  gate) come from `_v11a_long_native_config()` in `liquidity_migration/long_native_event_demo.py`
   — read them there rather than trusting a copy here. Membership is PIT-recomputed
   daily, so the count of distinct symbols traded exceeds the universe size as it
   rotates over the years.
@@ -119,8 +119,7 @@ From `long_native._run_label`, best → worst:
 
 A PIT failure means a kline/manifest coverage gap; the run_label and report name
 it. To refresh membership and re-check coverage, follow the **`pit-reconcile`**
-skill (it drives `scripts/reconcile.sh`, which refreshes the archive manifest and
-checks coverage). Fix Bybit kline gaps with `archive-download-klines-1h`; fix
+skill. Fix Bybit kline gaps with `archive-download-klines-1h`; fix
 Binance funding gaps by backfilling funding.
 
 ## Cross-venue read
@@ -137,4 +136,4 @@ venue funding-partial, the other funding-modeled; different history start).
 - `research-report` — interpret the JSON/MD report and assign a run label.
 - `pit-reconcile` — refresh PIT membership / diagnose manifest-vs-kline coverage
   gaps (the official fix for a PIT-failed run_label).
-- `run-strategy` — the short/volume-events sleeve and the rest of the CLI.
+- `run-strategy` — the rest of the CLI (data builders, audits, forward runners).

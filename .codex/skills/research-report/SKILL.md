@@ -11,9 +11,12 @@ description: "Read, interpret, and label research and backtest reports in this q
 
 # Research reports
 
-Reports live under `<DATA_ROOT>/reports/...`. The main kind:
+Reports live under `<DATA_ROOT>/reports/...`. The main kinds:
 
-- `volume_event_research_report.md` — a `volume-events` strategy run.
+- `long_native_research_report.md` — a long-native v11a strategy run.
+- continuous report files — the continuous fade book's runs/forward reports.
+- (legacy `volume_event_research_report.md` files are the erased short engine's —
+  historical only.)
 
 ## Fast path — optional `liqmig-research` MCP tools
 

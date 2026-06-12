@@ -28,10 +28,32 @@ BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_INSTRUMENTS = "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000"
 BINANCE_WS = "wss://fstream.binance.com/ws/!forceOrder@arr"
 BYBIT_TOPICS_PER_SUBSCRIBE = 10
+# Force a clean reconnect once a connection is this old. The bybit leg
+# subscribes a symbol list fetched once per connection, so a weeks-long healthy
+# connection would never subscribe newly listed perps; closing hands control
+# back to the reconnect loop, which re-fetches the universe and resubscribes.
+MAX_CONNECTION_AGE_SECONDS = 24 * 60 * 60
 
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def connection_expired(
+    opened_monotonic: float,
+    now_monotonic: float | None = None,
+    max_age_seconds: float = MAX_CONNECTION_AGE_SECONDS,
+) -> bool:
+    """True when a WS connection opened at ``opened_monotonic`` has outlived
+    ``max_age_seconds`` (monotonic clock — immune to wall-clock jumps).
+
+    Checked in the message/heartbeat path so the age cap needs no extra timer
+    thread; an expired connection is closed cleanly and the existing
+    reconnect/backoff machinery re-fetches the symbol universe.
+    """
+    if now_monotonic is None:
+        now_monotonic = time.monotonic()
+    return (now_monotonic - opened_monotonic) >= max_age_seconds
 
 
 def parse_bybit_event(msg: dict[str, Any], recv_ms: int) -> list[dict[str, Any]]:
@@ -143,20 +165,43 @@ def _run_bybit(writer: JsonlDayWriter, stop: threading.Event) -> None:
         try:
             symbols = bybit_linear_symbols()
             _logger.info("bybit collector: subscribing allLiquidation for %d symbols", len(symbols))
+            opened = {"monotonic": time.monotonic()}
+
+            def _close_if_expired(ws: Any) -> bool:
+                """Max-connection-age guard: the symbol list above is fetched once
+                per connection, so a long-lived connection never subscribes newly
+                listed perps. Closing returns control to this reconnect loop,
+                which re-fetches the universe and resubscribes."""
+                if not connection_expired(opened["monotonic"]):
+                    return False
+                _logger.info(
+                    "bybit collector: connection older than %ds; closing to refresh the symbol universe",
+                    MAX_CONNECTION_AGE_SECONDS,
+                )
+                ws.close()
+                return True
 
             def on_open(ws: Any) -> None:
+                opened["monotonic"] = time.monotonic()
                 for i in range(0, len(symbols), BYBIT_TOPICS_PER_SUBSCRIBE):
                     chunk = symbols[i:i + BYBIT_TOPICS_PER_SUBSCRIBE]
                     ws.send(json.dumps({"op": "subscribe",
                                         "args": [f"allLiquidation.{s}" for s in chunk]}))
 
-            def on_message(_ws: Any, message: str) -> None:
+            def on_message(ws: Any, message: str) -> None:
+                if _close_if_expired(ws):
+                    return
                 try:
                     writer.write(parse_bybit_event(json.loads(message), now_ms()))
                 except (json.JSONDecodeError, TypeError, ValueError):
                     pass
 
-            ws = websocket.WebSocketApp(BYBIT_WS, on_open=on_open, on_message=on_message)
+            def on_pong(ws: Any, _message: Any) -> None:
+                # Heartbeat path: pongs arrive every ping_interval, so the age
+                # check fires even when the liquidation stream itself is silent.
+                _close_if_expired(ws)
+
+            ws = websocket.WebSocketApp(BYBIT_WS, on_open=on_open, on_message=on_message, on_pong=on_pong)
             ws.run_forever(ping_interval=20, ping_timeout=10)
         except Exception:  # noqa: BLE001 — collector must outlive any disconnect
             _logger.exception("bybit collector error; reconnecting")

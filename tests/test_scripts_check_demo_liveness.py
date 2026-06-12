@@ -270,3 +270,34 @@ def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     assert "liquidity-migration-bybit-continuous-demo.service" in units
     assert "liquidity-migration-continuous-hedge.timer" in units
     assert "liquidity-migration-bybit-continuous-paper.service" not in units
+
+
+def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, capsys) -> None:
+    """REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception)
+    when the TELEGRAM_* env is missing or the API answers non-2xx — the alert was
+    invisible AND its cooldown was recorded as sent, suppressing a CRITICAL alert for
+    the whole window. An undelivered alert must not advance its cooldown (next run
+    retries) and the False outcome must be visible in the journal."""
+    state_file = tmp_path / "state.json"
+    alert = M.Alert(key="unit:fake.service", severity=M.CRITICAL, message="fake unit failed")
+
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["fake.service"])
+    monkeypatch.setattr(M, "_unit_states", lambda units: {"fake.service": "failed"})
+    monkeypatch.setattr(M, "evaluate_unit_states", lambda states: [alert])
+    monkeypatch.setattr(M, "send_telegram_message", lambda line: False)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["check_demo_liveness.py", "--telegram",
+         "--continuous-root", "", "--continuous-paper-root", "", "--long-root", "",
+         "--state-file", str(state_file)],
+    )
+    assert M.main() == 0
+    out = capsys.readouterr().out
+    assert "telegram send returned False" in out
+    # cooldown NOT advanced: the alert key must be absent from the persisted state
+    assert "unit:fake.service" not in M._load_state(state_file)
+
+    # delivered send DOES advance the cooldown
+    monkeypatch.setattr(M, "send_telegram_message", lambda line: True)
+    assert M.main() == 0
+    assert "unit:fake.service" in M._load_state(state_file)

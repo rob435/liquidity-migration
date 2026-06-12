@@ -124,6 +124,8 @@ class LongNativeDemoDaemon:
         self._ws_stream: Any | None = None
         self._cycles_run = 0
         self._cycle_errors = 0
+        # cycle-failure telegram dedupe: signature -> last-sent monotonic time
+        self._cycle_failure_telegram_sent: dict[str, float] = {}
         self._ws_gap_threshold_seconds = float(ws_gap_threshold_seconds)
         self._last_ws_event_monotonic: float | None = None
         self._ws_gap_count = 0
@@ -445,6 +447,33 @@ class LongNativeDemoDaemon:
         a subclass need not duplicate the whole telemetry-laden ``_run_one_cycle`` to add one kwarg."""
         return {}
 
+    # Re-page a PERSISTENT cycle failure at most this often. Every failure is still
+    # logged; only the telegram is deduped. The continuous sleeve cycles every 60s —
+    # a wedged cycle (schema error, corrupt parquet) otherwise paged ~1440x/day,
+    # guaranteed Telegram 429s drowning real alerts (audit 2026-06-12). The watchdog's
+    # 30-min alert cooldown is the precedent.
+    _CYCLE_FAILURE_TELEGRAM_COOLDOWN_SECONDS = 30 * 60
+
+    def _maybe_send_cycle_failure_telegram(self, exc: Exception) -> None:
+        """Send the cycle-failure page, deduped by (exception type, message head) with a
+        cooldown. A NEW failure signature pages immediately; the SAME wedge re-pages at
+        most every cooldown window."""
+        key = f"{type(exc).__name__}:{str(exc)[:100]}"
+        now = time.monotonic()
+        last = self._cycle_failure_telegram_sent.get(key)
+        if last is not None and now - last < self._CYCLE_FAILURE_TELEGRAM_COOLDOWN_SECONDS:
+            return
+        self._cycle_failure_telegram_sent[key] = now
+        # Bound the signature map — a daemon cycling through many distinct failure
+        # messages (e.g. a timestamp inside the message) must not grow it unbounded.
+        if len(self._cycle_failure_telegram_sent) > 64:
+            oldest = sorted(self._cycle_failure_telegram_sent.items(), key=lambda kv: kv[1])
+            for stale_key, _ in oldest[: len(oldest) - 32]:
+                self._cycle_failure_telegram_sent.pop(stale_key, None)
+        self._send_telegram(
+            f"❌ liquidity-migration | {self._sleeve_label} sleeve cycle failed: {str(exc)[:200]}"
+        )
+
     def _run_one_cycle(self) -> None:
         cycle_started = time.monotonic()
         payload: dict[str, Any] | None = None
@@ -471,9 +500,7 @@ class LongNativeDemoDaemon:
         except Exception as exc:  # noqa: BLE001
             self._cycle_errors += 1
             _logger.exception("%s cycle failed: %s", self._sleeve_label, exc)
-            self._send_telegram(
-                f"❌ liquidity-migration | {self._sleeve_label} sleeve cycle failed: {str(exc)[:200]}"
-            )
+            self._maybe_send_cycle_failure_telegram(exc)
         elapsed = time.monotonic() - cycle_started
         self._max_cycle_seconds = max(self._max_cycle_seconds, elapsed)
         if payload is not None and self._kline_stream_manager is not None:

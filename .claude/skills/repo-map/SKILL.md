@@ -11,9 +11,10 @@ description: "Orient in the liquidity-migration codebase: module map, core abstr
 
 # Repo map
 
-A Bybit (+Binance) research codebase for a liquidity-migration **short** strategy
-(plus a long-native v11a sleeve). Research-stage; a frozen `promoted` profile runs
-on demo + paper only, not real money. Live state + what's next live in **STATE.md**;
+A Bybit (+Binance) research codebase for the **CONTINUOUS fade book** (the live
+demo system) + the **long-native v11a sleeve** (the daily SHORT strategy was
+erased 2026-06-11; git history is the archive). Research-stage; demo + paper only,
+not real money. Live state + what's next live in **STATE.md**;
 the single consolidated research record is **docs/research_summary.md** — this file is
 just the map.
 
@@ -66,7 +67,6 @@ and `graphify-out/GRAPH_REPORT.md`.
   (all results, verdicts, open methodology debts). The one research file.
 - `docs/pit_gate.md` — PIT membership + the one-command all-sleeve reconcile design.
 - `docs/data_roots.md` — canonical research / live demo / OOS root contract.
-- `docs/event_demo_daemon.md` — demo forward-cycle daemon runbook + infra-hardening changelog.
 - `README.md` — repo overview and status.
 
 ## Tests

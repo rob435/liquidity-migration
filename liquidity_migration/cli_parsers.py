@@ -478,7 +478,8 @@ def _add_combined_book_report_parser(subparsers) -> None:
     report.add_argument(
         "--short-data-root",
         default=None,
-        help="Data root of the short sleeve (event_demo_trades). Defaults to global --data-root.",
+        help="Legacy daily-short ledger root (sleeve ERASED 2026-06-11; inert history only). "
+             "Defaults to global --data-root.",
     )
     report.add_argument(
         "--long-data-root",
@@ -743,7 +744,8 @@ def _add_continuous_vs_daily_forward_parser(subparsers) -> None:
     compare.add_argument(
         "--daily-data-root",
         default="data/bybit-paper-event",
-        help="Daily short paper/demo root holding the event_demo_trades ledger.",
+        help="Legacy daily-short root (sleeve ERASED 2026-06-11; optional — absent/insufficient "
+             "data degrades to a continuous-only report).",
     )
     compare.add_argument(
         "--continuous-data-root",

@@ -881,3 +881,48 @@ def test_bybit_market_data_still_retries_rate_limit(monkeypatch) -> None:
     assert client.get_tickers() == [{"symbol": "BTCUSDT"}]
     assert client.stats()["http_calls"] == 2
     assert client.stats()["retry_events"] == 1
+
+
+def test_private_call_definite_reject_no_retry_and_message_preserved(monkeypatch) -> None:
+    """REGRESSION (audit 2026-06-12, live-measured): pybit 5.x raises InvalidRequestError
+    for a non-zero retCode BEFORE the wrapper's own retCode check, so definite venue
+    rejects were retried with backoff (846ms on a cancel-nonexistent) and the final
+    raise dropped the retCode/retMsg — every ledgered error read a bare
+    'failed after retries'. Rejects must raise immediately WITH the venue message."""
+    InvalidRequestError = type("InvalidRequestError", (Exception,), {})  # pybit shape, no hard dep
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.cancel_calls = 0
+
+        def cancel_order(self, **params):
+            self.cancel_calls += 1
+            raise InvalidRequestError("order not exists or too late to cancel (ErrCode: 110001)")
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client.retry_sleep_seconds = 0.0
+    with pytest.raises(bybit.BybitDataError) as excinfo:
+        client.cancel_order(symbol="BTCUSDT", order_link_id="lm-x")
+    assert client._client.cancel_calls == 1  # definite reject: NO retry
+    assert "110001" in str(excinfo.value)  # venue message survives into str(exc)
+
+
+def test_private_call_transport_retries_and_final_message_carries_cause(monkeypatch) -> None:
+    """Transport errors still retry; the exhausted-retries raise now carries the last
+    error's text (callers ledger f"{exc}" — __cause__ never reached those columns)."""
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.calls = 0
+
+        def cancel_order(self, **params):
+            self.calls += 1
+            raise ConnectionError("connection reset by venue")
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client.retry_sleep_seconds = 0.0
+    with pytest.raises(bybit.BybitDataError) as excinfo:
+        client.cancel_order(symbol="BTCUSDT", order_link_id="lm-x")
+    assert client._client.calls == client.retries  # transport: retried to exhaustion
+    assert "connection reset by venue" in str(excinfo.value)

@@ -11,21 +11,20 @@ description: "Produce equity curves for the promoted LONG v11a sleeve from its E
 
 # Equity curves — promoted profiles, one command
 
-**For either/both promoted sleeves' deployed-profile equity curve, use the zero-friction tool:**
+**For ANY/ALL sleeves' deployed-profile equity curve, use the zero-friction tool:**
 
 ```bash
-bash scripts/equity_curves.sh                 # short + long, last 3 years
-bash scripts/equity_curves.sh --sleeves long  # one sleeve
+bash scripts/equity_curves.sh                 # the promoted LONG sleeve, last 3 years
 bash scripts/equity_curves.sh --years 2       # shorter window (lighter on the 16 GB box)
 ```
 
-It runs each sleeve's EXACT deployed profile — sourced from the single source of truth
-`liquidity_migration/promoted.py` (`short_profile`/`long_profile`, pinned by
-`tests/test_promoted_profiles.py`) — emits the equity PNG, and prints the `run_label`
-for every run (a biased/partial-PIT result is flagged, never hidden). No flag archaeology,
-no "what's deployed?" guessing. SHORT requires clean full-PIT (it aborts + names the gap
-if coverage is incomplete); LONG reports its label. Use `--long-notional-multiplier N` to
-draw the long curve at a higher (e.g. 5x) sizing — pure leverage on the same signal.
+It runs the promoted sleeve's EXACT deployed profile — sourced from the single source
+of truth `liquidity_migration/promoted.py` (`long_profile`; `PROFILES == {"long"}`
+since the 2026-06-11 short-sleeve erasure, pinned by `tests/test_promoted_profiles.py`)
+— emits the equity PNG, and prints the `run_label` for the run (a biased/partial-PIT
+result is flagged, never hidden). No flag archaeology, no "what's deployed?" guessing.
+Use `--long-notional-multiplier N` to draw the long curve at a higher (e.g. 5x)
+sizing — pure leverage on the same signal.
 
 The rest of this skill is the **long-only deep-dive** — use it when you need more than the
 one-command run.
@@ -61,16 +60,24 @@ is crypto-native and long-only — separate from the volume-events short sleeve.
 
 | Venue | Root | Why |
 |---|---|---|
-| Bybit | `~/SHARED_DATA/bybit_full_pit` | funding dataset named `funding` → funding modeled |
-| Binance | `~/SHARED_DATA/binance_full_pit_strategy` | has `funding` (~129k rows) → funding partial/modeled |
+| Bybit | `~/SHARED_DATA/bybit_full_pit` | funding dataset named `funding`, 764 symbols → funding modeled |
+| Binance | `~/SHARED_DATA/binance_full_pit_strategy` (if present) else `~/SHARED_DATA/binance_full_pit` | both funding-readable; coverage is partial (~51 symbols) → `funding_mode=partial` |
 
-**Root note:** `~/SHARED_DATA/binance_full_pit` stores funding as
-`binance_usdm_funding`; since the venue-alias resolver landed,
-`read_dataset(root, "funding")` resolves that name automatically (no symlink),
-so funding IS modeled there — the old "returns 0 rows" warning is obsolete.
-The `_strategy` root remains the proven default path for these backtests
-(prior long_native reports live there); check the report's funding warnings
-rather than assuming either way.
+**Funding now auto-resolves — no symlink/rename needed.** As of the run-diagnostics
+refactor, `read_dataset(root,"funding")` transparently falls back to the
+venue-specific dataset present on the root (`binance_usdm_funding`) when a canonical
+`funding/` dir is absent (`storage.resolve_dataset_name`). So `binance_full_pit` is
+funding-readable directly; you do **not** need `binance_full_pit_strategy` or a hand
+symlink. The remaining caveat is *coverage*, not naming: Binance funding only spans
+~51 symbols, so historical windows come back `funding_mode=partial` (some cost
+uncharged) — surfaced as a `FUNDING_PARTIAL` warning, not a silent gap. Prefer
+`binance_full_pit_strategy` only if it exists with broader funding coverage.
+
+Every run now prints a named **warnings block** (and the report JSON carries
+`warnings[]` + a machine `tainted` bool) — read that instead of decoding `run_label`
+by hand. `tainted: true` (e.g. `PIT_SURVIVORSHIP`) means survivorship/look-ahead
+biased → not citable; data-gap warnings (`FUNDING_PARTIAL`, `WINDOW_CLIPPED_*`) are
+non-blocking and tell you exactly what to backfill.
 
 ## Outputs — `<ROOT>/reports/<subdir>/fc_min_day_015/`
 
@@ -112,8 +119,7 @@ From `long_native._run_label`, best → worst:
 
 A PIT failure means a kline/manifest coverage gap; the run_label and report name
 it. To refresh membership and re-check coverage, follow the **`pit-reconcile`**
-skill (it drives `scripts/reconcile.sh`, which refreshes the archive manifest and
-checks coverage). Fix Bybit kline gaps with `archive-download-klines-1h`; fix
+skill. Fix Bybit kline gaps with `archive-download-klines-1h`; fix
 Binance funding gaps by backfilling funding.
 
 ## Cross-venue read
@@ -130,4 +136,4 @@ venue funding-partial, the other funding-modeled; different history start).
 - `research-report` — interpret the JSON/MD report and assign a run label.
 - `pit-reconcile` — refresh PIT membership / diagnose manifest-vs-kline coverage
   gaps (the official fix for a PIT-failed run_label).
-- `run-strategy` — the short/volume-events sleeve and the rest of the CLI.
+- `run-strategy` — the rest of the CLI (data builders, audits, forward runners).

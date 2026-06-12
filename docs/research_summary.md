@@ -33,23 +33,27 @@ change is meant to become a formal candidate/promotion decision.
 
 ## Current Map
 
-There are two separate research lines:
-
-1. **Daily liquidity-migration short.** The current promoted short profile is
-   `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`. It does **not** use rmom;
-   `liquidity_migration_residual_momentum_max=10.0` is the inactive sentinel.
+1. **Daily liquidity-migration short (ERASED 2026-06-11).** The final promoted
+   profile was `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend` (historical).
+   It did **not** use rmom; `liquidity_migration_residual_momentum_max=10.0` was
+   the inactive sentinel. The sleeve was erased by operator order — git history
+   is the archive.
 2. **Continuous fade.** Research-only, NOT promoted. Canonical object: the uptrend-core
    ensemble at max4-6 with the banked BTC-beta hedge; the downtrend extension was
    demoted 2026-06-09. The 2023-04→2026-05 window is frozen for continuous variant
    adjudication. New continuous evidence is forward demo/paper only, which the rebuilt
    VPS is now collecting.
+3. **Long-native v11a sleeve.** Promoted-in-code
+   (`liquidity_migration/promoted.py` `long_profile`), currently toggled OFF in
+   `deploy/sleeves.env`; it rides the operator's leverage decision. Its edge is
+   in-sample-fragile — isolated re-tuning is mining; it stands alone post-erasure.
 
 ## Daily Short - Durable Findings
 
 The daily strategy is a **selection signal** plus simple short execution. Earlier work
 over-weighted execution timing; the evidence says selection is the real lever.
 
-Current promoted short, resolved from code:
+Final promoted short at erasure (historical; no longer resolvable from code):
 
 ```text
 drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend
@@ -71,11 +75,6 @@ Durable daily findings:
   default. `bar_extreme_capped` is the current more realistic bad-case model.
 - **Binance matters.** Single-venue Bybit wins are not sufficient; Binance frequently exposes
   overfit or microstructure-specific results.
-
-Open daily issue:
-
-- Keep docs and runbooks aligned to the code-resolved profile above. If rmom is ever
-  reconsidered, it needs a fresh, explicit decision and current causality check.
 
 ## Continuous - Old Rebalance Candidate
 
@@ -1396,6 +1395,10 @@ Keep only:
 - `STATE.md` for live operational state and binding decision rules;
 - `docs/backtesting_errors_we_never_repeat.md`;
 - `docs/parameter_pre_registration.md`;
+- `docs/data_roots.md` (the data-root contract);
+- `docs/pit_gate.md` (the PIT membership gate + reconcile design);
+- `docs/timestamp_glossary.md` (the timestamp semantics reference);
+- `docs/research_plan_alpha_hunt_2026-06-10.md` (the active research charter);
 - a minimal `docs/preregistration/_template.md`;
 - only preregistration receipts that still represent an active deployment/promotion decision.
 

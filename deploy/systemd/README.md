@@ -12,13 +12,22 @@ The deployable VPS units are:
 - `liquidity-migration-bybit-continuous-demo.service`: continuous-fade demo runner.
 - `liquidity-migration-bybit-continuous-paper.service`: no-order continuous evidence
   collector.
+- `liquidity-migration-liquidation-collector.service`: always-on live liquidation
+  collectors (Bybit `allLiquidation` + Binance `forceOrder`; append-only JSONL, no
+  order path). Enabled by the deploy.
+- `liquidity-migration-depth-collector.service`: Bybit forward order-book depth
+  collector (hourly band snapshots; public REST, append-only JSONL, no order path).
+  Built but **NOT auto-enabled** — operator-gated (`systemctl enable --now
+  liquidity-migration-depth-collector.service`); the deploy installs the unit and
+  restarts it only if already enabled.
 - Timers include the demo-liveness watchdog, combined-book report, continuous rmom
   refresh, the daily continuous BTC+ETH hedge (submit-armed; see below), and the
   continuous forward report. (The demo-health timer was erased with the short sleeve.)
 
-Which sleeve units actually run is governed by `deploy/sleeves.env` plus optional
-`/etc/liquidity-migration/sleeves.env` are the source of truth for which sleeves are
-enabled. As of 2026-06-09 the live set is the continuous pair only
+Which sleeve units actually run is governed by `deploy/sleeves.env` plus the
+optional host override `/etc/liquidity-migration/sleeves.env` (the host file
+wins); together they are the source of truth for which sleeves are enabled.
+As of 2026-06-09 the live set is the continuous pair only
 (`CONTINUOUS_SLEEVE=on`, `CONTINUOUS_PAPER_SLEEVE=on`); long is
 off but redeployable.
 
@@ -143,6 +152,7 @@ systemctl daemon-reload
 systemctl enable --now liquidity-migration-bybit-risk.service
 systemctl enable --now liquidity-migration-bybit-continuous-demo.service
 systemctl enable --now liquidity-migration-bybit-continuous-paper.service
+systemctl enable --now liquidity-migration-liquidation-collector.service
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
 systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer

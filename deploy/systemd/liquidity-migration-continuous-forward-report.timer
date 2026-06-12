@@ -1,6 +1,7 @@
 [Unit]
 Description=Daily continuous-vs-daily forward comparator report (08:10 UTC)
-Requires=liquidity-migration-continuous-forward-report.service
+# NO Requires=<service> here: it makes every deploy's `systemctl enable --now <timer>`
+# also START the service -> duplicate daily Telegram reports on every push (observed live).
 
 [Timer]
 # Fires after the combined-book report. The script suppresses Telegram while the

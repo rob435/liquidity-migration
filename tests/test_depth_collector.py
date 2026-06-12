@@ -1,10 +1,14 @@
-"""Tests for the Bybit forward depth collector's band aggregation."""
+"""Tests for the Bybit forward depth collector: band aggregation + universe hardening."""
 
 from __future__ import annotations
 
+import json
+import urllib.error
+
 import pytest
 
-from liquidity_migration.depth_collector import band_notionals
+import liquidity_migration.depth_collector as depth_collector
+from liquidity_migration.depth_collector import _refresh_universe, band_notionals, trading_universe
 
 
 def test_band_cumulative_notional_and_null_beyond_span() -> None:
@@ -40,3 +44,69 @@ def test_deep_book_measures_all_bands() -> None:
 def test_empty_side_returns_none() -> None:
     assert band_notionals([], [(100.1, 1.0)]) is None
     assert band_notionals([(99.9, 1.0)], []) is None
+
+
+def test_trading_universe_breaks_on_repeating_cursor(monkeypatch) -> None:
+    """A misbehaving endpoint that returns the same nextPageCursor forever must
+    not spin trading_universe into an unbounded request loop."""
+    calls: list[str] = []
+
+    def fake_get_json(url: str) -> dict:
+        calls.append(url)
+        return {
+            "result": {
+                "list": [{"symbol": "AAAUSDT", "status": "Trading"}],
+                "nextPageCursor": "samecursor",
+            }
+        }
+
+    monkeypatch.setattr(depth_collector, "_get_json", fake_get_json)
+    assert trading_universe() == ["AAAUSDT"]
+    # page 1 (empty cursor) yields "samecursor"; page 2 repeats it -> break
+    assert len(calls) == 2
+
+
+def test_trading_universe_caps_at_ten_pages(monkeypatch) -> None:
+    """Distinct cursors forever: pagination is hard-capped at 10 pages
+    (mirrors the liquidation collector's defensive cap)."""
+    counter = {"n": 0}
+
+    def fake_get_json(url: str) -> dict:
+        counter["n"] += 1
+        return {
+            "result": {
+                "list": [
+                    {"symbol": f"S{counter['n']:02d}USDT", "status": "Trading"},
+                    {"symbol": f"X{counter['n']:02d}USDT", "status": "PreLaunch"},
+                    {"symbol": f"P{counter['n']:02d}USDC", "status": "Trading"},
+                ],
+                "nextPageCursor": f"cursor-{counter['n']}",
+            }
+        }
+
+    monkeypatch.setattr(depth_collector, "_get_json", fake_get_json)
+    symbols = trading_universe()
+    assert counter["n"] == 10
+    # only Trading USDT perps survive the filter, one per page
+    assert symbols == sorted(f"S{i:02d}USDT" for i in range(1, 11))
+
+
+def test_refresh_universe_failure_keeps_previous_universe(monkeypatch) -> None:
+    """A transient instruments-info failure must not propagate out of the
+    periodic refresh (it used to raise out of main() and kill the daemon)."""
+
+    def network_boom() -> list[str]:
+        raise urllib.error.URLError("instruments endpoint down")
+
+    monkeypatch.setattr(depth_collector, "trading_universe", network_boom)
+    assert _refresh_universe(["BTCUSDT", "ETHUSDT"]) == ["BTCUSDT", "ETHUSDT"]
+    assert _refresh_universe([]) == []  # nothing to fall back on -> empty, no raise
+
+    def payload_boom() -> list[str]:
+        raise json.JSONDecodeError("bad payload", "doc", 0)
+
+    monkeypatch.setattr(depth_collector, "trading_universe", payload_boom)
+    assert _refresh_universe(["BTCUSDT"]) == ["BTCUSDT"]
+
+    monkeypatch.setattr(depth_collector, "trading_universe", lambda: ["NEWUSDT"])
+    assert _refresh_universe(["BTCUSDT"]) == ["NEWUSDT"]  # success replaces previous

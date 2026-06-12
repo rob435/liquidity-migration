@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """rmom latency-delay falsification — does the continuous line's rmom edge survive delay?
 
+BROKEN PENDING GIT-RESTORE (2026-06-12): this harness subprocess-invokes
+scripts/continuous_causal_rmom_vs_daily.py, which was deleted in the SHORT-sleeve
+erasure (e03e9ab) and itself imported the erased volume_events engine — re-running
+the open rmom-latency methodology debt (STATE.md) requires restoring BOTH from git
+history (e03e9ab^) into a scratch checkout, not this tree.
+
 Closes methodology debt #3 (residual-momentum causality at the decision timestamp), the
 site of the codebase's worst historical failure (the ~25h shift1 look-ahead). Receipt:
 docs/preregistration/rmom-latency-falsification-2026-06-09.md (read it; the decision

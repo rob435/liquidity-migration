@@ -122,7 +122,8 @@ def test_reconcile_fill_creates_open_trade_row() -> None:
     client = FakeClient()
     client.open_orders = []  # no longer resting on venue
     client.history = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "2.5",
-                       "avgPrice": "108.0", "updatedTime": "1700000200000"}]
+                       "avgPrice": "108.0", "updatedTime": "1700000200000",
+                       "orderStatus": "Filled"}]
     fills, updates, exits = reconcile_continuous_snipes(
         _trades_df(base_open=True), _orders_df([_resting_order_row()]),
         trading_client=client, demo=_cfg(), now_ms=1_700_000_300_000)
@@ -132,6 +133,30 @@ def test_reconcile_fill_creates_open_trade_row() -> None:
     assert f["entry_price"] == 108.0 and f["base_trade_id"] == "t1"
     assert any(u["status"] == "filled" for u in updates)
     assert exits == []
+
+
+def test_reconcile_nonterminal_partial_fill_is_not_booked() -> None:
+    """REGRESSION (audit 2026-06-12): a PartiallyFilled order missing from a torn
+    open-orders snapshot must NOT be booked/terminalized off the partial — the fill
+    branch requires positive terminal orderStatus evidence, exactly like the cancel
+    branch. Otherwise the still-resting remainder becomes a ghost (never cancelled
+    at base exit; later fills unledgered until position reconcile)."""
+    client = FakeClient()
+    client.open_orders = []  # torn/empty snapshot while the order actually still rests
+    client.history = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "1.0",
+                       "avgPrice": "108.0", "updatedTime": "1700000200000",
+                       "orderStatus": "PartiallyFilled"}]
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True), _orders_df([_resting_order_row()]),
+        trading_client=client, demo=_cfg(), now_ms=1_700_000_300_000)
+    assert fills == [] and updates == [] and exits == []
+    # PartiallyFilledCanceled IS terminal: the partial books as the trade row.
+    client.history[0]["orderStatus"] = "PartiallyFilledCanceled"
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True), _orders_df([_resting_order_row()]),
+        trading_client=client, demo=_cfg(), now_ms=1_700_000_300_000)
+    assert len(fills) == 1 and fills[0]["trade_id"] == "t1-snipe"
+    assert any(u["status"] == "filled" for u in updates)
 
 
 def test_reconcile_cancels_resting_snipe_when_base_closed() -> None:

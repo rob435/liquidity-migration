@@ -11,8 +11,9 @@ description: "Orient in the liquidity-migration codebase: module map, core abstr
 
 # Repo map
 
-A Bybit (+Binance) research codebase for a liquidity-migration **short** strategy
-(plus long-native v11a and continuous-fade research sleeves). Research-stage;
+A Bybit (+Binance) research codebase for the **CONTINUOUS fade book** (the live
+demo system) + the **long-native v11a sleeve** (the daily SHORT strategy was
+erased 2026-06-11; git history is the archive). Research-stage;
 promoted profiles are demo/paper only and actual running sleeves are operator-toggled
 in `deploy/sleeves.env`; never real money. Live state + what's next live in **STATE.md**;
 the single consolidated research record is **docs/research_summary.md** — this file is
@@ -41,14 +42,16 @@ and `graphify-out/GRAPH_REPORT.md`.
 
 - `cli.py` — argparse entry point for `python -m liquidity_migration` (run
   `--help` for the subcommand list).
-- `volume_events.py` — the active event-driven **short** strategy (full-PIT gates,
-  ledger, reports); `volume_features.py` builds its features.
-- `event_demo.py` / `event_demo_daemon.py` / `ws_risk.py` — the live demo
-  forward-cycle runner + websocket-first risk watchdog (REST fallback).
+- `continuous_demo.py` / `continuous_demo_daemon.py` / `continuous_events.py` —
+  the LIVE continuous-fade system (the demo book; sub-hourly ticker-driven).
+  (The daily SHORT engine — `volume_events.py` + `event_demo_daemon.py` — was
+  ERASED 2026-06-11 by operator order; git history is the archive.)
+- `event_demo.py` / `event_demo_exits.py` / `ws_risk.py` — shared live-execution
+  helpers + the websocket-first risk watchdog (REST fallback; always-on).
+- `trade_lifecycle.py` / `_common.py` / `momentum_signals.py` — the shared
+  simulate stack, date/frame utils, and the rmom builder (relocated from the
+  erased hub).
 - `long_native.py` — the long-native v11a sleeve (the `equity-curve` skill drives it).
-- `continuous_demo.py` / `continuous_demo_daemon.py` / `continuous_rebalance.py` /
-  `continuous_hedge_manager.py` — continuous-fade demo/paper collector, rebalance
-  engine, and BTC-hedge dry-run path.
 - `kline_store.py` / `kline_stream_manager.py` / `ws_state_cache.py` — the
   WS-driven event runtime.
 - `risk_model.py` — factor model + per-trade residual-P&L decomposition
@@ -65,7 +68,6 @@ and `graphify-out/GRAPH_REPORT.md`.
   (all results, verdicts, open methodology debts). The one research file.
 - `docs/pit_gate.md` — PIT membership + the one-command all-sleeve reconcile design.
 - `docs/data_roots.md` — canonical research / live demo / OOS root contract.
-- `docs/event_demo_daemon.md` — demo forward-cycle daemon runbook + infra-hardening changelog.
 - `README.md` — repo overview and status.
 
 ## Tests

@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +23,9 @@ import polars as pl
 from .bybit import BybitMarketData, BybitRestRateLimiter
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_klines
-from .storage import read_dataset, write_dataset
+from .storage import dataset_path, read_dataset, write_dataset
 from .universe import build_current_universe_table
-from ._common import MS_PER_HOUR
+from ._common import MS_PER_DAY, MS_PER_HOUR
 
 
 from .event_demo import (  # noqa: F401  (shared hub helpers)
@@ -260,6 +262,18 @@ def _download_recent_1h_klines(
     stats["fetched_rows"] = fetched.height
     if cache_root is not None and not fetched.is_empty():
         write_dataset(fetched, cache_root, "event_demo_klines_1h")
+        # After a successful write, drop date= partitions the cycle can never
+        # read again. The clock is anchored to end_ms (== now snapped to the
+        # latest closed hour in the live cycle — at most 1h behind wall clock,
+        # dwarfed by the 3-day safety margin) so the prune is deterministic
+        # under test windows. max() with the actual requested window keeps a
+        # wider-than-default lookback config safe from its own prune.
+        window_days = int(-(-(end_ms - start_ms) // MS_PER_DAY))
+        _prune_event_demo_kline_cache(
+            cache_root,
+            lookback_days=max(_KLINE_CACHE_PRUNE_LOOKBACK_DAYS, window_days),
+            now_ms=end_ms,
+        )
 
     frames = [frame for frame in (store_frame, cached, fetched) if not frame.is_empty()]
     output = _dedupe_recent_klines(
@@ -299,6 +313,82 @@ def _read_demo_kline_cache(
     # so this write would be immediately overwritten. Skipping it saves one full-window parquet
     # serialization per slow-path cache-miss cycle.
     return output
+
+_KLINE_CACHE_PRUNE_SAFETY_MARGIN_DAYS = 3
+# The cycle only ever reads the trailing lookback window (EventDemoCycleConfig
+# default); date= partitions older than that are dead weight on disk.
+_KLINE_CACHE_PRUNE_LOOKBACK_DAYS = EventDemoCycleConfig().lookback_days
+# UTC date of the last prune attempt per dataset dir: the prune is invoked on
+# every REST write (~once per ~60s cycle) but only needs to do work when the
+# date rolls, so anything else is a single dict lookup.
+_kline_cache_last_prune_utc_date: dict[str, str] = {}
+
+
+def _prune_event_demo_kline_cache(
+    cache_root: Path,
+    *,
+    lookback_days: int = _KLINE_CACHE_PRUNE_LOOKBACK_DAYS,
+    now_ms: int | None = None,
+) -> list[str]:
+    """Delete ``date=YYYY-MM-DD`` partitions older than the demo lookback window.
+
+    The REST writer appends date= partitions to event_demo_klines_1h forever
+    (~6.8MB/day/root; live box reached 49 partitions vs a 45-day lookback,
+    ~5GB/yr across demo+paper) while nothing ever reads past the trailing
+    ``lookback_days``. Cutoff = today - lookback_days - a 3-day safety margin.
+
+    Constraints honoured here:
+      - only directories named ``date=<parseable ISO date>`` directly under this
+        ONE dataset dir are deleted; symlinks are never followed (skipped);
+      - any failure is logged and swallowed — pruning must never break the
+        write path;
+      - cheap per cycle: the scan is skipped entirely unless the UTC date
+        changed since the last prune of this dataset dir.
+
+    Returns the deleted partition dir names (for logging/tests).
+    """
+    deleted: list[str] = []
+    try:
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+        today = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).date()
+        dataset_dir = dataset_path(cache_root, "event_demo_klines_1h")
+        marker_key = str(dataset_dir)
+        if _kline_cache_last_prune_utc_date.get(marker_key) == today.isoformat():
+            return deleted
+        _kline_cache_last_prune_utc_date[marker_key] = today.isoformat()
+        if not dataset_dir.is_dir():
+            return deleted
+        cutoff = today - timedelta(days=int(lookback_days) + _KLINE_CACHE_PRUNE_SAFETY_MARGIN_DAYS)
+        for entry in sorted(dataset_dir.iterdir()):
+            name = entry.name
+            if not name.startswith("date="):
+                continue
+            try:
+                partition_date = date.fromisoformat(name[len("date="):])
+            except ValueError:
+                continue
+            if partition_date >= cutoff:
+                continue
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            try:
+                shutil.rmtree(entry)
+            except OSError as exc:
+                _logger.warning("kline cache prune failed for %s: %s", entry, exc)
+            else:
+                deleted.append(name)
+        if deleted:
+            _logger.info(
+                "pruned %d stale event_demo_klines_1h partitions (older than %s) under %s",
+                len(deleted),
+                cutoff.isoformat(),
+                dataset_dir,
+            )
+    except Exception as exc:  # noqa: BLE001 - the prune must never break the write path
+        _logger.warning("event_demo_klines_1h cache prune skipped: %s", exc)
+    return deleted
+
 
 def _demo_kline_compact_cache_paths(cache_root: Path) -> tuple[Path, Path]:
     root = Path(cache_root).expanduser() / ".cache" / "event_demo_klines_1h"

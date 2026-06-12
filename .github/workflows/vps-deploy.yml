@@ -1,7 +1,15 @@
 name: VPS Deploy
 
-# Host key was last rotated 2026-05-25 after a Hetzner rebuild — pinned
-# fingerprint default is in the VPS_ED25519_FINGERPRINT env below.
+# Host key was last rotated 2026-06-09 (operator full Hetzner rebuild of
+# 116.202.15.128) — pinned fingerprint default is in the
+# VPS_ED25519_FINGERPRINT env below.
+
+# Serialize deploys: two quick pushes must not interleave their remote
+# scripts on the same box. No cancel-in-progress — a running deploy
+# finishes; the queued one then deploys the newer commit.
+concurrency:
+  group: vps-deploy
+  cancel-in-progress: false
 
 on:
   push:
@@ -42,6 +50,13 @@ on:
       # restarts services. Test-only fixes to that gate must trigger a redeploy.
       - "tests/test_runtime_scripts.py"
       - "tests/test_promoted_profiles.py"
+      # Every daemon unit reads this config at startup — a config-only commit
+      # must trigger a deploy, else it sits inert on the box.
+      - "configs/volume_alpha.default.yaml"
+      # Dependency manifests: deploy_vps_live.sh refreshes the on-box venv when
+      # these change between deploys, so they must trigger a deploy.
+      - "pyproject.toml"
+      - "requirements.lock"
   workflow_dispatch:
     inputs:
       mode:

@@ -2657,9 +2657,45 @@ def test_recover_entry_link_metadata_prefers_latest_reentry(tmp_path: Path) -> N
     )
     recovered = engine._recover_entry_link_metadata(symbol="WIFUSDT", side="short")
     assert recovered is not None
-    link, _strategy_id, signal_ts_ms, sleeve, reentry_seq = recovered
+    link, _strategy_id, signal_ts_ms, sleeve, reentry_seq, component_tag = recovered
     assert (sleeve, reentry_seq, link) == ("continuous", 1, link1)
     assert signal_ts_ms == (sig // 1000) * 1000
+    assert component_tag == ""  # bare "en-c" prefix carries no ensemble component
+
+
+def test_adoption_rebuilds_component_tagged_trade_id(tmp_path: Path) -> None:
+    """REGRESSION (audit 2026-06-12): the deployed continuous_ensemble_v1 emits ONLY
+    component-tagged links (lm-en-cp3-…) and the live trade_id carries the component
+    ({base}-p3). The rebuild reconstruction dropped it, so every post-rebuild adoption
+    produced an id that matched no paper-twin row — reconciliation pairing broke."""
+    import time
+
+    from liquidity_migration.continuous_demo import _continuous_order_link_id
+
+    sig = (int(time.time() * 1000) // 1000) * 1000 - 24 * 60 * 60 * 1000
+    link = _continuous_order_link_id("en-cp3", symbol="WIFUSDT", signal_ts_ms=sig)
+    private_client = FakePrivateClient(order_history=[
+        {"symbol": "WIFUSDT", "side": "Sell", "orderLinkId": link, "createdTime": str(sig + 60_000)},
+    ])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False, repair_stops=False, rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0, untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    row = engine._build_adopted_trade(
+        {"symbol": "WIFUSDT", "side": "Sell", "size": "100", "avgPrice": "2.0",
+         "createdTime": str(sig + 60_000)},
+        now_ms=sig + 120_000,
+    )
+    assert row is not None
+    assert str(row["trade_id"]).endswith("-p3"), row["trade_id"]
+    assert row["sleeve"] == "continuous"
 
 
 def test_ws_risk_falls_back_to_adopted_when_order_history_has_no_bot_link(tmp_path: Path) -> None:
@@ -3129,6 +3165,39 @@ def test_maybe_notify_offloads_send_off_consumer_thread(tmp_path: Path, monkeypa
     assert engine.maybe_notify({"cycle": {}}) == (False, "duplicate_material_event")
     engine.close()  # drains + stops the sender thread
     assert len(calls) == 1
+
+
+def test_failed_background_send_unrecords_dedupe_key(tmp_path: Path, monkeypatch) -> None:
+    """REGRESSION (audit 2026-06-12): the optimistic dedupe wrote the key BEFORE the HTTP
+    round-trip and a failed send was only logged — a single timeout/429 on an
+    UNPROTECTED/stop_repair_failed alert silently suppressed that exact alert for 24h.
+    The sender loop now un-records the key (disk + memory) so the next material cycle
+    re-fires it."""
+    import threading as _threading
+
+    attempted = _threading.Event()
+
+    def _failing_send(text, *, enabled):
+        attempted.set()
+        return False  # non-2xx / env-missing shape: returns False, no exception
+
+    monkeypatch.setattr(ws_risk, "_telegram_notification_reason", lambda payload: "stop_filled")
+    monkeypatch.setattr(ws_risk, "_telegram_dedupe_key", lambda reason, payload: "k-fail")
+    monkeypatch.setattr(ws_risk, "format_telegram_status_message", lambda payload: "rendered-text")
+    monkeypatch.setattr(ws_risk, "send_telegram_message", _failing_send)
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
+    )
+    ok, status = engine.maybe_notify({"cycle": {}})
+    assert (ok, status) == (True, "enqueued")
+    assert attempted.wait(2.0), "background telegram sender did not run"
+    engine.close()  # drains the queue → the un-record has completed by here
+    assert "k-fail" not in engine.state.telegram_keys_sent
+    assert "k-fail" not in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
+    # the alert re-fires on the next material event
+    assert engine.maybe_notify({"cycle": {}}) == (True, "enqueued")
+    engine.close()
 
 
 def test_maybe_notify_disabled_does_not_enqueue(tmp_path: Path) -> None:

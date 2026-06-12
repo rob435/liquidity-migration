@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shutil
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
@@ -17,8 +19,9 @@ from liquidity_migration.event_demo import (
     _download_recent_1h_klines,
     _refresh_positions_and_orders,
 )
+from liquidity_migration.event_demo_data import _prune_event_demo_kline_cache
 from liquidity_migration.storage import read_dataset, write_dataset
-from liquidity_migration._common import MS_PER_HOUR
+from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 
 from _event_demo_fixtures import *  # noqa: F401,F403  (shared fakes/helpers)
 from _event_demo_fixtures import (  # noqa: F401  explicit for the linters
@@ -689,3 +692,152 @@ def test_build_demo_universe_legacy_mode_applies_30_day_age_floor() -> None:
     assert "BANUSDT" in symbols  # ~500 days old
     assert "NEWUSDT" not in symbols, "Legacy narrow-universe mode keeps the 30-day age floor"
 
+
+
+# ---------------------------------------------------------------------------
+# event_demo_klines_1h REST-cache prune (date= partitions accumulated forever:
+# live box hit 49 partitions vs a 45-day lookback, ~6.8MB/day/root).
+# ---------------------------------------------------------------------------
+
+_PRUNE_BASE = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+_PRUNE_NOW_MS = int(_PRUNE_BASE.timestamp() * 1000)
+
+
+def _date_partition_name(days_ago: int) -> str:
+    return f"date={(_PRUNE_BASE.date() - timedelta(days=days_ago)).isoformat()}"
+
+
+def _make_partition(dataset_dir: Path, name: str) -> Path:
+    part = dataset_dir / name / "symbol=AAAUSDT"
+    part.mkdir(parents=True)
+    # a VALID parquet part: the wiring test reads the dataset through the
+    # normal cache path before the prune runs
+    pl.DataFrame(
+        {
+            "symbol": ["AAAUSDT"],
+            "ts_ms": [0],
+            "open": [100.0],
+            "high": [110.0],
+            "low": [90.0],
+            "close": [105.0],
+            "volume": [1.5],
+            "turnover": [157.5],
+        }
+    ).write_parquet(part / "part.parquet")
+    return dataset_dir / name
+
+
+def test_prune_kline_cache_deletes_only_stale_date_partitions(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "event_demo_klines_1h"
+    # lookback 45 + safety margin 3 -> cutoff = base - 48d; older is deleted.
+    stale_60 = _make_partition(dataset_dir, _date_partition_name(60))
+    stale_49 = _make_partition(dataset_dir, _date_partition_name(49))
+    at_cutoff = _make_partition(dataset_dir, _date_partition_name(48))
+    recent = _make_partition(dataset_dir, _date_partition_name(10))
+    unparseable = _make_partition(dataset_dir, "date=not-a-date")
+    non_partition = _make_partition(dataset_dir, "symbol=ZZZUSDT")
+    # a stale-dated plain FILE is not a partition dir and must be left alone
+    stale_file = dataset_dir / _date_partition_name(65)
+    stale_file.write_text("not a directory", encoding="utf-8")
+    # a stale-dated SYMLINK must never be followed or deleted
+    link_target = tmp_path / "outside"
+    link_target.mkdir()
+    (link_target / "keep.txt").write_text("precious", encoding="utf-8")
+    stale_link = dataset_dir / _date_partition_name(70)
+    stale_link.symlink_to(link_target, target_is_directory=True)
+
+    deleted = _prune_event_demo_kline_cache(tmp_path, lookback_days=45, now_ms=_PRUNE_NOW_MS)
+
+    assert sorted(deleted) == sorted([_date_partition_name(60), _date_partition_name(49)])
+    assert not stale_60.exists() and not stale_49.exists()
+    assert at_cutoff.exists()
+    assert recent.exists()
+    assert unparseable.exists()
+    assert non_partition.exists()
+    assert stale_file.exists()
+    assert stale_link.is_symlink()
+    assert (link_target / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+def test_prune_kline_cache_skipped_until_utc_date_changes(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "event_demo_klines_1h"
+    first_stale = _make_partition(dataset_dir, _date_partition_name(60))
+
+    assert _prune_event_demo_kline_cache(tmp_path, lookback_days=45, now_ms=_PRUNE_NOW_MS) == [
+        _date_partition_name(60)
+    ]
+    assert not first_stale.exists()
+
+    # Same UTC date: the scan is skipped entirely — a freshly created stale
+    # partition survives and nothing is reported deleted.
+    second_stale = _make_partition(dataset_dir, _date_partition_name(59))
+    assert _prune_event_demo_kline_cache(tmp_path, lookback_days=45, now_ms=_PRUNE_NOW_MS) == []
+    assert second_stale.exists()
+
+    # Date roll: the prune runs again.
+    assert _prune_event_demo_kline_cache(
+        tmp_path, lookback_days=45, now_ms=_PRUNE_NOW_MS + MS_PER_DAY
+    ) == [_date_partition_name(59)]
+    assert not second_stale.exists()
+
+
+def test_prune_kline_cache_tolerates_failures(tmp_path: Path, monkeypatch) -> None:
+    import liquidity_migration.event_demo_data as event_demo_data_module
+
+    # (a) one partition's rmtree fails with OSError: the failure is swallowed,
+    # the OTHER stale partition is still pruned.
+    root_a = tmp_path / "a"
+    dataset_a = root_a / "event_demo_klines_1h"
+    failing = _make_partition(dataset_a, _date_partition_name(60))
+    succeeding = _make_partition(dataset_a, _date_partition_name(55))
+    real_rmtree = shutil.rmtree
+
+    def flaky_rmtree(path, *args, **kwargs):
+        if Path(path).name == failing.name:
+            raise OSError("permission denied (simulated)")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(event_demo_data_module.shutil, "rmtree", flaky_rmtree)
+    deleted = _prune_event_demo_kline_cache(root_a, lookback_days=45, now_ms=_PRUNE_NOW_MS)
+    assert deleted == [succeeding.name]
+    assert failing.exists() and not succeeding.exists()
+
+    # (b) an unexpected non-OSError failure must never escape the prune.
+    root_b = tmp_path / "b"
+    dataset_b = root_b / "event_demo_klines_1h"
+    untouched = _make_partition(dataset_b, _date_partition_name(60))
+
+    def exploding_rmtree(path, *args, **kwargs):
+        raise RuntimeError("simulated unexpected failure")
+
+    monkeypatch.setattr(event_demo_data_module.shutil, "rmtree", exploding_rmtree)
+    assert _prune_event_demo_kline_cache(root_b, lookback_days=45, now_ms=_PRUNE_NOW_MS) == []
+    assert untouched.exists()
+
+
+def test_prune_kline_cache_missing_dataset_dir_is_a_noop(tmp_path: Path) -> None:
+    assert _prune_event_demo_kline_cache(tmp_path, lookback_days=45, now_ms=_PRUNE_NOW_MS) == []
+
+
+def test_download_recent_1h_klines_prunes_stale_partitions_after_rest_write(tmp_path: Path) -> None:
+    """Call-site wiring: a successful REST write prunes out-of-window date=
+    partitions of the SAME dataset (anchored to end_ms, default lookback)."""
+    dataset_dir = tmp_path / "event_demo_klines_1h"
+    stale = _make_partition(dataset_dir, "date=2020-01-01")
+    end_ms = int(time.time() * 1000) // MS_PER_HOUR * MS_PER_HOUR
+
+    output, stats = _download_recent_1h_klines(
+        ["AAAUSDT"],
+        start_ms=end_ms - 2 * MS_PER_HOUR,
+        end_ms=end_ms,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=FakeKlineMarket(),
+        cache_root=tmp_path,
+    )
+
+    assert stats["fetched_rows"] == 3
+    assert output.height == 3
+    assert not stale.exists(), "out-of-window partition must be pruned after the REST write"
+    # today's freshly written partitions survive
+    assert read_dataset(tmp_path, "event_demo_klines_1h").height == 3

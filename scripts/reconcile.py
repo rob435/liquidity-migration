@@ -1,37 +1,31 @@
 #!/usr/bin/env python3
-"""One-command, self-provisioning demo-forward reconciliation for the promoted sleeves.
+"""One-command demo-forward reconciliation for the promoted LONG sleeve.
 
-This is the zero-friction reconcile: one command pulls the live ledgers, AUTO-
-provisions the research data it needs (PIT manifest + recent klines, plus the
-residual-momentum panel when continuous diagnostics are selected), runs a
-MINIMAL-window backtest (only as far back as the forward ledger needs — not a
-fixed 150-day slab), and reconciles each promoted sleeve:
+Pulls the live ledgers and reconciles each selected sleeve:
 
     LONG   (v11a)        : paper <-> demo
 
-CONTINUOUS (fade) is no longer promoted/deployed (de-promoted 2026-06-05, look-ahead
-invalidated; sleeve OFF). It is NOT reconciled by default; pass `--sleeves continuous`
-for diagnostics only (paper <-> demo + signal-consistency vs the engine).
+CONTINUOUS (fade) is the LIVE demo book since 2026-06-09 but is research-stage,
+NOT promoted. It is not reconciled by default; pass `--sleeves continuous` for
+diagnostics (paper <-> demo readiness + signal-consistency vs the engine).
 
-Pipeline (each step maps to an opt-out flag):
-    1. pull        — rsync the live demo+paper ledgers for every selected sleeve
-    2. manifest    — refresh archive_trade_manifest (PIT membership)            [--no-manifest]
-    3. kline-fill  — auto-download the recent klines the manifest now covers but [--no-kline-fill]
-                     the local root is missing (the old "think for hours" gap)
-    4. rmom        — auto-recompute residual_momentum when continuous selected  [--no-rmom]
-    5. coverage    — print the PIT coverage table; refuse a stale strict backtest
-    6. backtest    — promoted profile over the MINIMAL forward window            [--full-window]
-    7. reconcile   — per-sleeve paper/demo (+ backtest, + signal check)          [--sleeves]
-    8. summary     — one consolidated headline across selected sleeves
+Pipeline:
+    1. pull        — rsync the live demo+paper ledgers for every selected sleeve  [--no-pull]
+    2. rmom        — auto-recompute residual_momentum when continuous selected    [--no-rmom]
+    3. reconcile   — per-sleeve paper/demo (+ continuous signal check)            [--sleeves]
+    4. summary     — one consolidated headline across selected sleeves
+
+The old manifest-refresh / kline-fill / coverage / backtest provisioning steps
+served the erased daily-SHORT sleeve's backtest leg (operator order 2026-06-11)
+and are gone; refresh the PIT manifest manually when needed:
+`python -m liquidity_migration --data-root <root> archive-manifest`.
 
 Safe by default: read-only against the VPS, demo only, never real money.
 
     bash scripts/reconcile.sh                       # promoted sleeve (long), fully auto
     bash scripts/reconcile.sh --sleeves continuous  # continuous diagnostics only
-    bash scripts/reconcile.sh --dry-run              # print every command, run nothing
-    bash scripts/reconcile.sh --full-window          # 150-day backtest (old behaviour)
-    bash scripts/reconcile.sh --with-bybit           # also reconcile demo<->Bybit
-    bash scripts/reconcile.sh --help                 # all options
+    bash scripts/reconcile.sh --dry-run             # print every command, run nothing
+    bash scripts/reconcile.sh --help                # all options
 
 See docs/pit_gate.md.
 """
@@ -48,9 +42,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-
-from liquidity_migration import pit_coverage as pc  # noqa: E402
-
 
 def _load_dotenv(path: Path) -> None:
     """Load KEY=VALUE pairs from a .env file into os.environ (without overriding
@@ -80,13 +71,6 @@ VPS_BASE = "/opt/liquidity-migration/data"
 DEFAULT_BYBIT_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_CONFIG = "configs/volume_alpha.default.yaml"
 
-# Minimal backtest warm-up. The backtest<->paper reconcile auto-windows the
-# COMPARISON to the paper ledger's first signal, so warm-up trades never produce
-# false "backtest-only" rows. The strategy's deepest KLINE lookback is 30d
-# features + 5d cooldown + 3d hold = ~38d; the 300d age gate is MANIFEST-derived
-# (first_manifest_date) so it needs ZERO extra klines.
-# 45d is exact with margin. --full-window restores the old conservative slab.
-MINIMAL_WARMUP_DAYS = 45
 # rmom factor panel needs a few months of history for the 6-factor fit + 7d momentum.
 RMOM_WARMUP_DAYS = 150
 
@@ -214,35 +198,6 @@ def pull_sleeve(step: Step, host: str, sleeve: str) -> None:
         step.run(["rsync", "-azq", remote, str(dest)], check=False)
 
 
-def refresh_manifest(step: Step, root: str, today: dt.date) -> None:
-    step.banner(f"Refresh archive_trade_manifest (PIT membership) on {root}")
-    end = (today + dt.timedelta(days=2)).isoformat()  # exclusive; v5 fill covers the tail to `today`
-    step.run(_cli("--data-root", root, "archive-manifest", "--end", end))
-
-
-def auto_kline_fill(step: Step, root: str, status: pc.CoverageStatus, today: dt.date) -> None:
-    """Fill the recent klines the manifest now covers but the local root lacks.
-
-    The manifest (PIT membership) is refreshed to ~today, but `klines_1h` is only
-    as fresh as the last download — so a same-day reconcile would otherwise miss
-    every forward trade whose signal day is newer than the local klines (exactly
-    the gap that used to need a hand-run archive-download-klines-1h-api). Fill from
-    the kline end (inclusive, to rebuild a possibly-partial last day) to today+1.
-    """
-    step.banner("Auto-fill recent klines (close the forward coverage gap)")
-    target = today  # we want klines through today (the current, in-progress day)
-    kline_end = status.kline_end
-    if kline_end is not None and kline_end >= target:
-        print(f"✅ klines_1h end {kline_end.isoformat()} already covers today ({target.isoformat()}); no fill needed.")
-        return
-    # Rebuild from the last present day (it may be partial) through today inclusive.
-    start = (kline_end or (target - dt.timedelta(days=MINIMAL_WARMUP_DAYS))).isoformat()
-    end = (target + dt.timedelta(days=1)).isoformat()  # exclusive
-    print(f"klines_1h end={kline_end} < today={target}; filling {start}..{end} (manifest-gated, v5 API).")
-    step.run(_cli("--data-root", root, "archive-download-klines-1h-api",
-                  "--start", start, "--end", end, "--include-existing", "--workers", "8"))
-
-
 def refresh_rmom(step: Step, root: str, today: dt.date) -> None:
     """Recompute residual_momentum.parquet on the research root so the continuous
     engine/signal tooling never trips over a stale panel. Bounded window keeps it
@@ -252,12 +207,6 @@ def refresh_rmom(step: Step, root: str, today: dt.date) -> None:
     start = (today - dt.timedelta(days=RMOM_WARMUP_DAYS)).isoformat()
     end = (today + dt.timedelta(days=1)).isoformat()
     step.run(_script("precompute_residual_momentum.py", "--root", root, "--start", start, "--end", end))
-
-
-def print_coverage(root: str, today: dt.date) -> pc.CoverageStatus:
-    status = pc.coverage_status(root, today=today)
-    print("\n" + pc.format_coverage(status))
-    return status
 
 
 def reconcile_long(step: Step, *, paper: str, demo: str) -> str:
@@ -293,7 +242,7 @@ def main() -> int:
     )
     p.add_argument("--sleeves", default="long",
                    help="Comma list of sleeves to reconcile (long); add 'continuous' "
-                        "explicitly for diagnostics (de-promoted, OFF).")
+                        "explicitly for diagnostics (live demo book, research-stage, NOT promoted).")
     p.add_argument("--bybit-root", default=DEFAULT_BYBIT_ROOT, help="Research root for the backtest + provisioning.")
     p.add_argument("--config", default=DEFAULT_CONFIG, help="Strategy config (the promoted profile).")
     p.add_argument("--vps", default=VPS_HOST, help="VPS ssh target for the ledger pull.")
@@ -319,13 +268,13 @@ def main() -> int:
         for s in sleeves:
             pull_sleeve(step, args.vps, s)
 
-    # 2-5. Research-data provisioning: the SHORT backtest leg was erased with the
+    # 2. Research-data provisioning: the SHORT backtest leg was erased with the
     # daily-short sleeve (operator order 2026-06-11). Only the continuous
     # signal-check's rmom refresh remains.
     if "continuous" in sleeves and not args.no_rmom:
         refresh_rmom(step, root, today)
 
-    # 7. Per-sleeve reconcile. (The continuous signal-check uses the pulled
+    # 3. Per-sleeve reconcile. (The continuous signal-check uses the pulled
     # live-root rmom panel, so a continuous-only run needs no research provisioning.)
     summary: dict[str, str] = {}
     if "long" in sleeves:
@@ -338,7 +287,7 @@ def main() -> int:
         pd_sum, sig_sum = reconcile_continuous(step, paper=cp, demo=cd)
         summary["continuous"] = f"{pd_sum}  ||  signal: {sig_sum}"
 
-    # 8. Unified headline.
+    # 4. Unified headline.
     if not args.dry_run:
         print(f"\n{'=' * 72}\nRECONCILIATION SUMMARY — SELECTED SLEEVES\n{'=' * 72}")
         for s in sleeves:
