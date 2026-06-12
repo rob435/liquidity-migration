@@ -18,7 +18,8 @@ Within-selection ordinal information exists in the entry set (2026-06-12
 exploratory: uptrend mid-quintile monthly IC +0.056, t=+5.7, 83% positive
 months on the 5-feature composite) and a gross-neutral capped tilt converts it
 into MAR without new trades or costs. Prior in this CLASS is negative (the
-OI-tilt sizing conversion null, charter 2026-06-10) — hence veto-first staging.
+OI-tilt sizing conversion null, charter 2026-06-10) — hence the cheap
+Stage-0 falsifier before the full engine run.
 
 ## Predicted direction + magnitude
 
@@ -32,7 +33,7 @@ OI-tilt sizing conversion null, charter 2026-06-10) — hence veto-first staging
 
 - [x] bybit_full_pit (fresh 5-feature panel rebuild + Stage-1 A/B)
 - [x] binance_full_pit (same; funding gaps disclosed as funding-missing)
-- [x] forward demo/paper (Stage-2 shadow JSONL only; zero order impact)
+- [x] forward demo/paper (post-adoption, demo-profile change is operator-gated)
 
 ## Decision rule (a priori, binding)
 
