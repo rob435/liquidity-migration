@@ -97,6 +97,7 @@ def _write_equity_benchmark_chart(
     overlay_series = _overlay_series_dicts(overlays or [])
     series.extend(overlay_series)
     monthly_rows = _monthly_table_rows(equity=equity, monthly=monthly)
+    has_real_monthly = monthly is not None and not monthly.is_empty() and _has_columns(monthly, "month", "strategy_return")
     _remove_stale_chart_artifacts(output_dir)
     png_path = output_dir / png_name
     header: dict[str, Any] = {}
@@ -110,6 +111,9 @@ def _write_equity_benchmark_chart(
         start=start,
         end=end,
         monthly_rows=monthly_rows,
+        # The equity-derived fallback counts rows-with-marks per month, NOT trades —
+        # label it honestly (a padded flat June showed "11 trades" with zero taken).
+        count_label="Trades" if has_real_monthly else "Days",
         **header,
     )
     return {
@@ -153,6 +157,7 @@ def _write_equity_benchmark_png(
     monthly_rows: list[dict[str, Any]] | None = None,
     title: str = "Strategy Equity vs BTC",
     subtitle: str = "Strategy and BTC are normalised to $1 at the strategy start; gridlines mark monthly dates and growth levels.",
+    count_label: str = "Trades",
 ) -> None:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -171,11 +176,23 @@ def _write_equity_benchmark_png(
     image = Image.new("RGBA", (width * scale, height * scale), (255, 255, 255, 255))
     draw = ImageDraw.Draw(image, "RGBA")
     font_regular = _chart_font(ImageFont, 22 * scale)
-    font_small = _chart_font(ImageFont, 17 * scale)
     font_tiny = _chart_font(ImageFont, 14 * scale)
     font_table = _chart_font(ImageFont, 16 * scale)
     font_table_header = _chart_font(ImageFont, 15 * scale, bold=True)
-    font_title = _chart_font(ImageFont, 32 * scale, bold=True)
+
+    def _fit_font(content: str, base_px: int, *, bold: bool, min_px: int) -> Any:
+        # Shrink-to-fit: a long header (e.g. "... — refreshed to 2026-06-12") must not run
+        # off the canvas — the truncated part is usually the load-bearing claim.
+        max_w = (width - left - 24) * scale
+        size = base_px
+        font = _chart_font(ImageFont, size * scale, bold=bold)
+        while size > min_px and draw.textlength(content, font=font) > max_w:
+            size -= 1
+            font = _chart_font(ImageFont, size * scale, bold=bold)
+        return font
+
+    font_title = _fit_font(title, 32, bold=True, min_px=18)
+    font_subtitle = _fit_font(subtitle, 17, bold=False, min_px=11)
 
     all_points = [point for item in series for point in item["points"]]
     if not all_points:
@@ -186,6 +203,12 @@ def _write_equity_benchmark_png(
     max_day = _parse_day(end) or _parse_day(all_points[-1]["date"]) or min_day
     if max_day <= min_day:
         max_day = date.fromordinal(min_day.toordinal() + 1)
+    # Small right-side headroom on the x domain so the final month tick (often the freshest,
+    # most-looked-at label) sits inside the plot instead of flush against the right spine.
+    # Ticks stay derived from the data end — no tick is drawn in the pad zone.
+    axis_end_day = date.fromordinal(
+        max_day.toordinal() + max(2, round((max_day.toordinal() - min_day.toordinal()) * 0.015))
+    )
     values = [float(point["value"]) for point in all_points if math.isfinite(float(point["value"]))]
     y_min, y_max, y_ticks = _nice_axis(min(values), max(values), target_ticks=12)
 
@@ -197,7 +220,7 @@ def _write_equity_benchmark_png(
 
     def x_pos(day_text: str) -> float:
         day = _parse_day(day_text) or min_day
-        return left + (day.toordinal() - min_day.toordinal()) / (max_day.toordinal() - min_day.toordinal()) * plot_w
+        return left + (day.toordinal() - min_day.toordinal()) / (axis_end_day.toordinal() - min_day.toordinal()) * plot_w
 
     def y_pos(value: float) -> float:
         return top + (y_max - value) / (y_max - y_min) * plot_h
@@ -246,7 +269,7 @@ def _write_equity_benchmark_png(
 
     rect((0, 0, width, height), (255, 255, 255, 255))
     text(left, 46, title, (7, 14, 31, 255), font_title)
-    text(left, 78, subtitle, (75, 85, 99, 255), font_small)
+    text(left, 78, subtitle, (75, 85, 99, 255), font_subtitle)
     rounded((left, top, left + plot_w, top + plot_h), 4, (249, 250, 251, 255), (229, 231, 235, 255))
 
     for value in y_ticks:
@@ -293,26 +316,51 @@ def _write_equity_benchmark_png(
             width=plot_w,
             font_table=font_table,
             font_table_header=font_table_header,
+            count_label=count_label,
         )
 
     image = image.resize((width, height), Image.Resampling.LANCZOS).convert("RGB")
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, format="PNG", optimize=True)
 
+def _fill_month_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Insert +0.00%/count-0 rows for months absent between the first and last row. A month
+    where the book sat flat must show as zero, not vanish — a missing month reads as a
+    rendering bug and hides that the strategy was alive but idle."""
+    if not rows:
+        return rows
+    by_month = {row["month"]: row for row in rows}
+    year, month = (int(part) for part in rows[0]["month"].split("-"))
+    last = rows[-1]["month"]
+    filled: list[dict[str, Any]] = []
+    while True:
+        key = f"{year:04d}-{month:02d}"
+        filled.append(by_month.get(key, {"month": key, "return": 0.0, "count": 0}))
+        if key >= last:
+            return filled
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+
+
 def _monthly_table_rows(*, equity: pl.DataFrame, monthly: pl.DataFrame | None) -> list[dict[str, Any]]:
+    """Rows are {month, return, count}; `count` is real trades when `monthly` carries them,
+    otherwise the number of equity rows in the month (rendered as "Days", not "Trades")."""
     if monthly is not None and not monthly.is_empty() and _has_columns(monthly, "month", "strategy_return"):
         columns = ["month", "strategy_return"]
         if "trades" in monthly.columns:
             columns.append("trades")
-        return [
+        rows = [
             {
                 "month": str(row["month"]),
                 "return": _float_or_nan(row.get("strategy_return")),
-                "trades": int(row.get("trades") or 0),
+                "count": int(row.get("trades") or 0),
             }
             for row in monthly.select(columns).sort("month").to_dicts()
             if math.isfinite(_float_or_nan(row.get("strategy_return")))
         ]
+        return _fill_month_gaps(rows)
     if equity.is_empty() or not _has_columns(equity, "date", "basket_return"):
         return []
     frame = (
@@ -321,20 +369,21 @@ def _monthly_table_rows(*, equity: pl.DataFrame, monthly: pl.DataFrame | None) -
         .agg(
             [
                 ((pl.col("basket_return") + 1.0).product() - 1.0).alias("strategy_return"),
-                pl.len().alias("trades"),
+                pl.len().alias("count"),
             ]
         )
         .sort("month")
     )
-    return [
+    rows = [
         {
             "month": str(row["month"]),
             "return": _float_or_nan(row.get("strategy_return")),
-            "trades": int(row.get("trades") or 0),
+            "count": int(row.get("count") or 0),
         }
         for row in frame.to_dicts()
         if math.isfinite(_float_or_nan(row.get("strategy_return")))
     ]
+    return _fill_month_gaps(rows)
 
 def _draw_monthly_return_table(
     *,
@@ -346,6 +395,7 @@ def _draw_monthly_return_table(
     width: float,
     font_table: Any,
     font_table_header: Any,
+    count_label: str = "Trades",
 ) -> None:
     if not rows:
         return
@@ -366,7 +416,7 @@ def _draw_monthly_return_table(
         rect((x, top, x + block_w, top + header_h), (241, 245, 249, 255), (226, 232, 240, 255))
         text(x + 10, top + 9, "Month", (51, 65, 85, 255), font_table_header)
         text(x + block_w * 0.48, top + 9, "Return", (51, 65, 85, 255), font_table_header)
-        text(x + block_w - 10, top + 9, "Trades", (51, 65, 85, 255), font_table_header, anchor="ra")
+        text(x + block_w - 10, top + 9, count_label, (51, 65, 85, 255), font_table_header, anchor="ra")
         for row_index, row in enumerate(block_rows):
             y = top + header_h + row_index * row_h
             if row_index % 2 == 1:
@@ -375,7 +425,7 @@ def _draw_monthly_return_table(
             color = (22, 101, 52, 255) if value >= 0.0 else (185, 28, 28, 255)
             text(x + 10, y + 7, str(row.get("month", "")), (51, 65, 85, 255), font_table)
             text(x + block_w * 0.48, y + 7, f"{value:+.2%}", color, font_table)
-            text(x + block_w - 10, y + 7, str(int(row.get("trades") or 0)), (51, 65, 85, 255), font_table, anchor="ra")
+            text(x + block_w - 10, y + 7, str(int(row.get("count") or 0)), (51, 65, 85, 255), font_table, anchor="ra")
 
 def _chart_font(image_font: Any, size: int, *, bold: bool = False) -> Any:
     # Windows paths included: without them the loop exhausts and falls back to

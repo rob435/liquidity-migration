@@ -411,6 +411,56 @@ def test_portfolio_mtm_marks_open_positions_and_aggregates_correlated_days() -> 
     assert eq["drawdown"].min() < 0.0       # a real portfolio drawdown shows up
 
 
+def test_portfolio_mtm_preserves_ledger_day_semantics() -> None:
+    """The persisted MTM series is the validated input of the ensemble rebalance pipeline,
+    whose vol/beta/momentum windows are defined over trailing LEDGER rows and whose hedge
+    sizes every input row. It must therefore keep ledger-day shape: NO calendar zero-fill
+    between positions and NO tail past the last position day. (Calendar-filling re-levered
+    the validated deployed book 103%->87% and fabricated hedge PnL on flat days,
+    observed 2026-06-12.) Flat-day presentation is chart-layer-only."""
+    from liquidity_migration.continuous_events import _portfolio_mtm_equity
+
+    d = MS_PER_DAY
+    rows = [
+        {"ts_ms": i * d, "symbol": "A", "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
+        for i in range(9)  # klines cover days 0..8, well past the last exit
+    ]
+    klines = pl.DataFrame(rows)
+    trades = pl.DataFrame({
+        "symbol": ["A", "A"], "side": ["short", "short"],
+        "entry_ts_ms": [0, 5 * d], "exit_ts_ms": [1 * d, 6 * d],
+        "entry_price": [100.0, 100.0], "exit_price": [100.0, 100.0],
+        "notional_weight": [0.02, 0.02], "cost_return": [0.0, 0.0], "funding_return": [0.0, 0.0],
+    })
+    eq = _portfolio_mtm_equity(trades, klines)
+    # only position days appear: days 0-1 (first trade) and 5-6 (second); no gap fill, no tail
+    assert eq["ts_ms"].to_list() == [0, 1 * d, 5 * d, 6 * d]
+
+
+def test_extend_equity_flat_for_chart_pads_zero_days_to_boundary() -> None:
+    """The chart-only helper carries equity/drawdown flat through the data boundary so a
+    gate-blocked flat spell renders as a flat line (and its months reach the axis) without
+    ever touching the persisted ledger-day series."""
+    from liquidity_migration.continuous_events import _extend_equity_flat_for_chart
+
+    d = MS_PER_DAY
+    eq = pl.DataFrame({
+        "ts_ms": [0, 1 * d, 2 * d],
+        "equity": [1.0, 1.01, 1.005],
+        "drawdown": [0.0, 0.0, -0.005],
+        "basket_return": [0.0, 0.01, -0.005],
+    })
+    out = _extend_equity_flat_for_chart(eq, through_ts_ms=6 * d)
+    assert out["ts_ms"].to_list() == [i * d for i in range(7)]
+    tail = out.filter(pl.col("ts_ms") > 2 * d)
+    assert tail["basket_return"].to_list() == [0.0] * 4
+    assert set(tail["equity"].to_list()) == {1.005}
+    assert set(tail["drawdown"].to_list()) == {-0.005}
+    # no-op when the boundary is not past the series end
+    same = _extend_equity_flat_for_chart(eq, through_ts_ms=2 * d)
+    assert same["ts_ms"].to_list() == eq["ts_ms"].to_list()
+
+
 def test_run_trades_funding_to_exit_credits_short() -> None:
     bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 40))
     from liquidity_migration.trade_lifecycle import _funding_lookup

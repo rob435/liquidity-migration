@@ -737,7 +737,16 @@ def _portfolio_mtm_equity(trades: pl.DataFrame, klines: pl.DataFrame) -> pl.Data
     days it is held; cost is booked on the entry day, funding on the exit day. Concurrent correlated
     moves therefore aggregate into the daily series → a real portfolio drawdown. Gross daily marks
     telescope to the trade's realized gross, so total return is unchanged; only the PATH (and thus DD
-    and Sharpe) differ."""
+    and Sharpe) differ.
+
+    LEDGER-DAY SEMANTICS ARE LOAD-BEARING — do NOT calendar-fill this series. The persisted
+    `continuous_mtm_equity.csv` is the validated input of the ensemble rebalance pipeline
+    (`continuous_rebalance` vol/beta/momentum windows are defined over trailing LEDGER rows, and
+    `apply_rebalance_rule` hedges every input row). Zero-filling flat days dilutes the w90 vol
+    window (re-levering the whole validated path) and fabricates hedge PnL on days the book has
+    zero exposure — observed 2026-06-12: bybit deployed-ensemble total return shifted 103%→87%
+    from exactly this. Flat-tail/gap presentation belongs to the chart layer
+    (`_extend_equity_flat_for_chart`, `_step_fill_daily`, monthly gap-fill)."""
     if trades.is_empty() or klines.is_empty():
         return _additive_equity(trades)  # empty-safe schema
     dc = (
@@ -773,6 +782,32 @@ def _portfolio_mtm_equity(trades: pl.DataFrame, klines: pl.DataFrame) -> pl.Data
     ).with_columns(
         (pl.col("equity") - pl.col("equity").cum_max()).alias("drawdown")
     ).select("ts_ms", "equity", "drawdown", "basket_return")
+
+
+def _extend_equity_flat_for_chart(equity: pl.DataFrame, *, through_ts_ms: int) -> pl.DataFrame:
+    """CHART-ONLY flat-tail extension: append zero-return days (equity/drawdown carried) through
+    ``through_ts_ms`` so a book that goes flat near the data end renders as a flat line to the
+    boundary (and the final months appear on the axis) instead of the curve silently truncating
+    at the last exit. Never persist this shape — the stored mtm CSV must keep ledger-day rows
+    (see `_portfolio_mtm_equity`)."""
+    if equity.is_empty():
+        return equity
+    last_ts = int(equity["ts_ms"].max())
+    if through_ts_ms <= last_ts:
+        return equity
+    tail = equity.sort("ts_ms").tail(1)
+    last_equity = float(tail["equity"][0])
+    last_dd = float(tail["drawdown"][0])
+    n_days = (through_ts_ms - last_ts) // MS_PER_DAY
+    pad = pl.DataFrame(
+        {
+            "ts_ms": [last_ts + (i + 1) * MS_PER_DAY for i in range(n_days)],
+            "equity": [last_equity] * n_days,
+            "drawdown": [last_dd] * n_days,
+            "basket_return": [0.0] * n_days,
+        }
+    ).select(equity.columns)
+    return pl.concat([equity, pad]).sort("ts_ms")
 
 
 def _split_metrics(trades: pl.DataFrame, config: ContinuousEventConfig) -> dict[str, dict[str, Any]]:
@@ -897,8 +932,15 @@ def run_continuous_event_research(
             trades.write_csv(out_dir / "continuous_trades.csv")
             equity.write_csv(out_dir / "continuous_equity.csv")
             mtm_equity.write_csv(out_dir / "continuous_mtm_equity.csv")
+            # Charts render an extended copy so a book that goes flat near the end (e.g. the
+            # BTC-trend gate blocking all entries) draws as a flat line through the data
+            # boundary; the persisted CSVs above keep the validated ledger-day shape.
+            chart_boundary = end_ms - MS_PER_DAY
+            if not klines.is_empty():
+                chart_boundary = min(chart_boundary, (int(klines["ts_ms"].max()) // MS_PER_DAY) * MS_PER_DAY)
+            mtm_chart = _extend_equity_flat_for_chart(mtm_equity, through_ts_ms=chart_boundary)
             _write_equity_png(
-                mtm_equity, out_dir / "continuous_mtm_equity.png",
+                mtm_chart, out_dir / "continuous_mtm_equity.png",
                 title=(f"PORTFOLIO MARK-TO-MARKET — {config.side} D{config.decile} | hold {config.hold_hours}h "
                        f"({config.exit_mode}) | MAR {mtm.get('mar')} DD {abs(mtm.get('max_drawdown') or 0)*100:.1f}%  [EXPLORATORY]"),
             )
@@ -914,7 +956,7 @@ def run_continuous_event_research(
             try:
                 from .volume_events_charts import _write_equity_benchmark_chart
                 _date = pl.from_epoch("ts_ms", time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
-                eq_dated = mtm_equity.with_columns(_date)
+                eq_dated = mtm_chart.with_columns(_date)
                 btc_klines = (
                     klines.filter(pl.col("symbol") == "BTCUSDT").with_columns(_date)
                     if not klines.is_empty() else klines

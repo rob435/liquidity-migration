@@ -59,6 +59,38 @@ def test_overlay_series_dicts_auto_colors_and_drops_empty() -> None:
     assert dicts[2]["color"] == (1, 2, 3)
 
 
+def test_monthly_table_rows_fills_gap_months() -> None:
+    """A month where the book sat flat must appear as a +0.00% row, not vanish — a missing
+    month is indistinguishable from a rendering bug and hides that the strategy was alive
+    but idle (observed: 2025-11 / 2026-02 absent from the deployed-refresh table)."""
+    from liquidity_migration.volume_events_charts import _monthly_table_rows
+
+    equity = pl.DataFrame({
+        "date": ["2025-01-10", "2025-01-20", "2025-03-05"],
+        "basket_return": [0.01, 0.02, -0.01],
+        "equity": [1.01, 1.03, 1.02],
+    })
+    rows = _monthly_table_rows(equity=equity, monthly=None)
+    assert [r["month"] for r in rows] == ["2025-01", "2025-02", "2025-03"]
+    gap = rows[1]
+    assert gap["return"] == 0.0
+    assert gap["count"] == 0
+
+
+def test_monthly_table_rows_real_monthly_counts_trades_and_fills_gaps() -> None:
+    from liquidity_migration.volume_events_charts import _monthly_table_rows
+
+    monthly = pl.DataFrame({
+        "month": ["2025-01", "2025-03"],
+        "strategy_return": [0.05, -0.02],
+        "trades": [7, 3],
+    })
+    rows = _monthly_table_rows(equity=pl.DataFrame(), monthly=monthly)
+    assert [r["month"] for r in rows] == ["2025-01", "2025-02", "2025-03"]
+    assert rows[0]["count"] == 7
+    assert rows[1]["count"] == 0
+
+
 def test_chart_renders_with_overlay(tmp_path: Path) -> None:
     pytest.importorskip("PIL")
     days = ["2021-01-01", "2021-01-02", "2021-01-03"]
