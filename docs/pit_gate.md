@@ -144,4 +144,4 @@ manifest is the manual command above
 
 The trading-day membership convention (membership keys on
 `date(ts_ms − 1ms)`, the BINDING decision this gate implements) is recorded in
-[docs/preregistration/pit-membership-trading-day-fix.md](preregistration/pit-membership-trading-day-fix.md).
+the archived `pit-membership-trading-day-fix` receipt in git history.

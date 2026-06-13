@@ -1,55 +1,8 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
-
-
-def _load_sweep_module(name: str):
-    repo = Path(__file__).resolve().parents[1]
-    scripts_dir = str(repo / "scripts")
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)  # so `from _sweep_runtime import ...` resolves
-    spec = importlib.util.spec_from_file_location(name, repo / "scripts" / f"{name}.py")
-    module = importlib.util.module_from_spec(spec)
-    # Register before exec so a @dataclass in the module (Cell) can resolve
-    # cls.__module__ via sys.modules during decoration.
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_sweep_runtime_enforces_full_pit_by_default(tmp_path, monkeypatch) -> None:
-    """The sweep runtime must NOT pass --allow-partial-pit by default — that flag
-    disables the engine's full-PIT survivorship guard, producing a current-universe
-    (survivors-only) biased run. It may be passed ONLY when allow_partial_pit=True
-    is explicitly requested (an intentionally biased EXPLORATORY sweep)."""
-    sweep = _load_sweep_module("_sweep_runtime")
-
-    captured: dict[str, list[str]] = {}
-
-    class _Proc:
-        returncode = 1  # non-zero -> run_cell returns a 'failed' row without reading a report
-        stdout = ""
-        stderr = ""
-
-    def _fake_run(cmd, **_kw):
-        captured["cmd"] = list(cmd)
-        return _Proc()
-
-    monkeypatch.setattr(sweep.subprocess, "run", _fake_run)
-    cell = sweep.Cell("c0", "desc")
-    common = dict(baseline_params={}, start_date="2023-01-01", end_date="2023-02-01", sweep_tag="t")
-
-    # Default: full-PIT -> the flag must be ABSENT.
-    sweep.run_cell(cell, "bybit", tmp_path, **common)
-    assert "--allow-partial-pit" not in captured["cmd"], "full PIT must be the default"
-
-    # Explicit opt-in -> the flag must be PRESENT.
-    sweep.run_cell(cell, "bybit", tmp_path, allow_partial_pit=True, **common)
-    assert "--allow-partial-pit" in captured["cmd"], "explicit opt-in must pass the flag"
 
 
 def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
@@ -890,37 +843,6 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "Environment=STOP_LOSS_PCT=0.25" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
-
-
-def test_resolve_max_workers_explicit_override_always_wins(monkeypatch):
-    m = _load_sweep_module("_sweep_runtime")
-    monkeypatch.setenv("SWEEP_MAX_WORKERS", "1")
-    assert m._resolve_max_workers() == 1
-    monkeypatch.setenv("SWEEP_MAX_WORKERS", "12")
-    assert m._resolve_max_workers() == 12  # explicit beats the memory cap
-
-
-def test_resolve_max_workers_heavy_cell_drops_to_one_on_32gb(monkeypatch):
-    m = _load_sweep_module("_sweep_runtime")
-    monkeypatch.delenv("SWEEP_MAX_WORKERS", raising=False)
-    monkeypatch.setattr(m, "_total_ram_gb", lambda: 32.0)
-    monkeypatch.setenv("SWEEP_CELL_GB", "23")  # full-PIT klines read ~23 GB/cell
-    assert m._resolve_max_workers() == 1  # 0.85*32/23 = 1.18 -> 1 (was 8 -> OOM)
-
-
-def test_resolve_max_workers_light_cell_default_cap(monkeypatch):
-    m = _load_sweep_module("_sweep_runtime")
-    monkeypatch.delenv("SWEEP_MAX_WORKERS", raising=False)
-    monkeypatch.delenv("SWEEP_CELL_GB", raising=False)
-    monkeypatch.setattr(m, "_total_ram_gb", lambda: 64.0)
-    assert m._resolve_max_workers() == 8  # 0.85*64/4 = 13.6 -> capped at 8
-
-
-def test_resolve_max_workers_unknown_ram_falls_back_to_eight(monkeypatch):
-    m = _load_sweep_module("_sweep_runtime")
-    monkeypatch.delenv("SWEEP_MAX_WORKERS", raising=False)
-    monkeypatch.setattr(m, "_total_ram_gb", lambda: None)
-    assert m._resolve_max_workers() == 8
 
 
 def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Path) -> None:

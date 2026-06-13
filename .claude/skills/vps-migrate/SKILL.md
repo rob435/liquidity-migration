@@ -62,7 +62,8 @@ ssh-keyscan -T 20 -t ed25519 "$NEW_HOST" | ssh-keygen -lf - -E sha256
 Set GitHub **repository variable** (not secret):
 
 - `VPS_ED25519_FINGERPRINT` → e.g. `SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4`
-  (the 2026-06-09 rebuild's pin — ALWAYS re-derive from the box; never copy an old doc)
+  (the 2026-06-09 rebuild pin; canonical default lives in
+  `.github/workflows/vps-deploy.yml`, and every rebuild changes it)
 
 Optional: `VPS_HOST`, `VPS_USER` (default `root`).
 
@@ -76,20 +77,21 @@ Workflow fallback default lives in `vps-deploy.yml` env block; vars override it.
 ## 3. GitHub Actions deploy key (do not confuse with host key)
 
 The workflow **rejects** arbitrary private keys. Secret `VPS_SSH_PRIVATE_KEY`
-must derive to this fingerprint (checked in workflow + `tests/test_runtime_scripts.py`
-— `.github/workflows/vps-deploy.yml` `GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT` is the
-canonical value; if this doc and the workflow disagree, the workflow wins):
+must derive to this fingerprint (checked in workflow + `tests/test_runtime_scripts.py`):
 
 ```text
 SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU
 ```
 
-Matching **public** key (must be in VPS `authorized_keys`; also the
-`GITHUB_ACTIONS_SSH_PUBLIC_KEY` default in `scripts/vps_restore_ssh_access.sh`):
+Matching **public** key (must be in VPS `authorized_keys`):
 
 ```text
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv liquidity-migration-github-actions-20260609
 ```
+
+Source of truth: `GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT` in
+`.github/workflows/vps-deploy.yml` and the public key in
+`scripts/vps_restore_ssh_access.sh`.
 
 Operator console key (also installed by recovery scripts):
 

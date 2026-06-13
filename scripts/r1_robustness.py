@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 # Windows cp1252 stdout crashes on the box-drawing / Δ / ⚠️ chars this script
-# prints; force UTF-8 (matches scripts/_sweep_runtime.py).
+# prints; force UTF-8 for captured dispatcher logs.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8")

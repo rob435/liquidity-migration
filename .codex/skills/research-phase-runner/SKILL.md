@@ -19,15 +19,13 @@ what's done, what's pending, and the current binding decision rules.
 
 ## The program you are working (post-erasure, 2026-06-11)
 
-Two research lines survive: the **CONTINUOUS fade book** (the live demo book —
+Two research lines survive: the **CONTINUOUS fade book** (the live demo book,
 research-stage, NOT promoted) and the **long-native v11a sleeve** (promoted-in-code,
 toggled off). The daily SHORT selection program was ERASED 2026-06-11 by operator
-order — do not propose short work or re-mine its window. The 2023-04→2026-05
-in-sample window is **SPENT**: new evidence comes from forward demo/paper
-accumulation and NEW data layers only, not from new recombinations of the
-already-mined price-volume data. The full record + open methodology debts are in
-`docs/research_summary.md`; the active charter is
-`docs/research_plan_alpha_hunt_2026-06-10.md`.
+order — do not propose short work or re-mine its window. As of 2026-06-12 the
+window is open again only for pre-registered, tightly scoped research; closed
+families in `docs/research_summary.md` stay closed. The active queue and decision
+rules live in STATE.md plus `docs/research_summary.md`.
 
 ## The decision framework — three-tier, demo-arbiter
 
@@ -63,11 +61,9 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    following the current patterns — continuous sweeps use an in-memory
    config-override driver (see `scripts/alpha_sweep.py`); long sweeps call
    `run_long_native_research` directly per cell (see
-   `scripts/long_improve_sweep.py`). `scripts/_sweep_runtime.py` is DEAD pending
-   repoint (it shells to the erased `volume-events` subcommand — see its
-   docstring); its `SWEEP_MAX_WORKERS` / `POLARS_MAX_THREADS` memory-knob
-   discipline still applies to any parallel sweep: over-parallelizing OOMs
-   the box. Always run **both venues**.
+   `scripts/long_improve_sweep.py`). Preserve the old sweep discipline:
+   predeclare worker/thread counts for memory-heavy cells because
+   over-parallelizing OOMs the box. Always run **both venues**.
 
 4. **Apply the decision rule.**
    ```bash

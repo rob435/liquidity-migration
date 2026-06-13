@@ -1,7 +1,7 @@
 """Forward paper-shadow of the fade-completion dynamic exit (P5 follow-up, 2026-06-10).
 
 The dynamic exit (tp = entry*(1-0.5*anchor)) was a pre-registered in-sample NULL —
-a bybit-only, 2026-carried result (receipt continuous-dynamic-exit-2026-06-10.md).
+a bybit-only, 2026-carried historical in-sample result.
 Per the forward-shadow receipt (continuous-dynexit-forward-shadow-2026-06-10.md)
 the ONLY legitimate way it can ever be adopted is FORWARD evidence: this module
 computes, per live entry, what the dynamic exit WOULD have done, and logs it to an

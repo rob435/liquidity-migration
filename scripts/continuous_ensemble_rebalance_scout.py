@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import math
 import sys
 from collections import defaultdict
@@ -28,7 +29,7 @@ from liquidity_migration.continuous_rebalance import (  # noqa: E402
 )
 
 VENUES = ("bybit", "binance")
-BASE = Path(r"C:\Users\user\SHARED_DATA")
+BASE = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
 
 
 @dataclass(frozen=True)

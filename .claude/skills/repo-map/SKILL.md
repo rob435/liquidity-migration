@@ -13,8 +13,9 @@ description: "Orient in the liquidity-migration codebase: module map, core abstr
 
 A Bybit (+Binance) research codebase for the **CONTINUOUS fade book** (the live
 demo system) + the **long-native v11a sleeve** (the daily SHORT strategy was
-erased 2026-06-11; git history is the archive). Research-stage; demo + paper only,
-not real money. Live state + what's next live in **STATE.md**;
+erased 2026-06-11; git history is the archive). Research-stage;
+promoted profiles are demo/paper only and actual running sleeves are operator-toggled
+in `deploy/sleeves.env`; never real money. Live state + what's next live in **STATE.md**;
 the single consolidated research record is **docs/research_summary.md** — this file is
 just the map.
 

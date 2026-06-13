@@ -95,16 +95,15 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   remain are the real-money promotion gate and the correctness gates below (look-ahead,
   survivorship, accounting). Do not invoke "preserve the exact old numbers" to block an
   improvement.
-- Signal features use only data known at the **decision timestamp**. For the
-  deployed daily signal that is the daily signal close, and entry is delayed **+1h**
-  to prevent same-bar leakage — the signal close is not an executable fill; this +1h
-  guard for daily features is **non-negotiable**. For the continuous rolling-window
-  signal under research, the decision timestamp is the rolling bar-close and the entry
-  delay may be 0 *only because the feature is already a causal trailing window*
-  (research-gated) — never relax the delay for the daily profile.
+- Signal features use only data known at the **decision timestamp**. For LONG
+  daily FC signals, the daily close is not an executable fill and the configured
+  delayed/provisional lifecycle must be honored. For continuous rolling-window
+  signals, the decision timestamp is the causal trailing-window bar close; any
+  zero-delay entry must be justified by that causal construction and remains
+  research-gated.
 - Run sweeps via a dispatcher script, not hand-assembled engine flags.
-  `scripts/_sweep_runtime.py` is DEAD pending repoint (it shells to the erased
-  `volume-events` subcommand); current patterns are `scripts/alpha_sweep.py`
+  The old volume-events dispatcher was erased with the short-sleeve cleanup;
+  current patterns are `scripts/alpha_sweep.py`
   (continuous, in-memory config overrides) and `scripts/long_improve_sweep.py`
   (long, direct `run_long_native_research` cells). The Tier-2 verdict comes from
   `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
@@ -114,9 +113,9 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   explicitly biased diagnostics only, labelled biased.
 - Funding is a known gap on roots without a funding dataset — mark such runs
   fee/slippage stressed but funding-missing.
-- Legacy fixed-day rebalance-grid benchmarks are retired — do not cite their
-  results as evidence for the event-driven system. (The fade-confirmation
-  *execution* is the live strategy, a different thing — see STATE.md.)
+- Legacy fixed-day rebalance-grid benchmarks and erased short-sleeve results are
+  retired evidence. Do not cite them as evidence for the surviving continuous or
+  LONG systems.
 - Demo/forward execution is execution evidence only, never alpha proof.
 
 If the `liqmig-research` MCP server is available, its `audit_run_artifacts` tool

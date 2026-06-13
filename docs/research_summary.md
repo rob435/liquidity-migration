@@ -1,1435 +1,210 @@
 # Research Summary - Liquidity Migration
 
-> **DAILY SHORT SLEEVE ERASED — 2026-06-11 (operator order).** The daily
-> event/short product (engine `volume_events`, demo daemon, CLI, deploy units,
-> scripts, tests, runbooks) was removed from the system in full; git history is
-> the archive. Sections below describing the daily short are the HISTORICAL
-> RESEARCH RECORD of an erased product, kept because the methodology lessons and
-> the long/continuous findings interleave with them — they describe nothing that
-> can run today. The continuous fade book and the long v11a sleeve are what remain.
-
 **Updated:** 2026-06-12
-**Status:** research-stage only. Demo and paper evidence are allowed; real-money promotion is not.
-
-This file is the single research source of truth. Old per-experiment receipts and one-off
-writeups were consolidated here; git history is the archive. New research should add a
-short dated section here, not another pile of preregistration files, unless a parameter
-change is meant to become a formal candidate/promotion decision.
-
-## Non-Negotiable Status
-
-- Nothing is approved for real money.
-- The daily SHORT sleeve was ERASED from the system 2026-06-11 (operator order)
-  — it is gone, not toggled off; git history is the archive. The LONG sleeve can
-  run on demo/paper only; it is currently toggled off on the live box but
-  remains promoted-in-code and redeployable.
-- The continuous sleeve is not promoted. As of the 2026-06-09 rebuilt VPS, it is
-  the only live sleeve: demo orders ON plus a no-order paper shadow, collecting
-  forward execution evidence. Demo fills are not alpha proof.
-- Forward demo/paper is the real out-of-sample arbiter. There is no clean internal pre-2023
-  OOS root.
-- Full-PIT data, causal features, cost/funding awareness, and trade/equity ledgers are
-  correctness requirements, not optional research preferences.
-
-## Current Map
-
-1. **Daily liquidity-migration short (ERASED 2026-06-11).** The final promoted
-   profile was `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend` (historical).
-   It did **not** use rmom; `liquidity_migration_residual_momentum_max=10.0` was
-   the inactive sentinel. The sleeve was erased by operator order — git history
-   is the archive.
-2. **Continuous fade.** Research-only, NOT promoted. Canonical object: the uptrend-core
-   ensemble at max4-6 with the banked BTC-beta hedge; the downtrend extension was
-   demoted 2026-06-09. The 2023-04→2026-05 window is frozen for continuous variant
-   adjudication. New continuous evidence is forward demo/paper only, which the rebuilt
-   VPS is now collecting.
-3. **Long-native v11a sleeve.** Promoted-in-code
-   (`liquidity_migration/promoted.py` `long_profile`), currently toggled OFF in
-   `deploy/sleeves.env`; it rides the operator's leverage decision. Its edge is
-   in-sample-fragile — isolated re-tuning is mining; it stands alone post-erasure.
-
-## Daily Short - Durable Findings
-
-The daily strategy is a **selection signal** plus simple short execution. Earlier work
-over-weighted execution timing; the evidence says selection is the real lever.
-
-Final promoted short at erasure (historical; no longer resolvable from code):
-
-```text
-drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend
-rmom inactive: liquidity_migration_residual_momentum_max = 10.0
-```
-
-Durable daily findings:
-
-- **Execution timing is not load-bearing.** Fade-confirmation entry and plain delayed entry
-  were near-equivalent in the main E1 tests. The alpha is the candidate pool, not clever
-  intraday entry timing.
-- **Age gate is robust.** Dropping young listings materially improves both venues. Age
-  thresholds around 300 days were the most important daily refinement.
-- **Rmom is not currently used.** Historical rmom work should be treated as research-only,
-  not as a current profile instruction. The operator chose the promoted short without rmom.
-- **Concentration matters.** `max_active=3` was too concentrated. Wider books such as
-  `max_active=12` reduce worst-day and drawdown risk materially.
-- **Worst-case stop modeling caused false nulls.** `bar_extreme` was too punitive as the
-  default. `bar_extreme_capped` is the current more realistic bad-case model.
-- **Binance matters.** Single-venue Bybit wins are not sufficient; Binance frequently exposes
-  overfit or microstructure-specific results.
-
-## Continuous - Old Rebalance Candidate
-
-The old continuous rebalance candidate is still the strongest continuous result on Bybit.
-It should be treated as the risk-engine baseline to improve, not discarded.
-
-Canonical old candidate:
-
-```python
-q25_liq500k_btcup_turn4_pop4_decomp_rebalance_w90_tv25_max4_dd4_trend180_hurdle2
-```
-
-Key mechanics:
-
-- signal: `rmom q25 + max_ret168 D9 + BTC 30d uptrend + turn4_pop4`
-- accounting: decomposed daily rebalance
-- realized vol window: 90 days
-- target daily vol: 2.5%
-- max scale: 4x
-- drawdown half-scale: -4%
-- resize cost: 10 bps
-- strategy-equity momentum gate: 180d return must be at least +2%; otherwise scale to zero
-
-Primary artifacts:
-
-- `C:\Users\user\SHARED_DATA\continuous_daily_rebalance_strategy_hurdle_2026-06-07`
-- `C:\Users\user\SHARED_DATA\continuous_daily_rebalance_strategy_hurdle_cost200_2026-06-07`
-- `C:\Users\user\SHARED_DATA\continuous_rebalance_robustness_strategy_hurdle_2026-06-07`
-
-Bybit 3-year comparison:
-
-| Curve | Return | Max DD | MAR | Worst day |
-|---|---:|---:|---:|---:|
-| Old rebalance candidate | +238.23% | -10.65% | 7.32 | -8.77% |
-| Independent current raw | +16.03% | -1.56% | 3.37 | -0.91% |
-| Independent current + no-momentum rebalance | +58.92% | -6.25% | 3.09 | -3.66% |
-
-Conclusion: the old candidate is not just a trade signal; its portfolio engine and
-strategy-equity momentum gate are doing major work. That is useful, but it also means we
-must isolate whether any new entry/exit change improves the underlying trades.
-
-## Continuous - Independent Entry/Exit Work
-
-Goal of the independent branch: clean the trade logic so the system is not dependent on
-trading its own equity curve and does not carry catastrophic raw trade tails.
-
-Current independent branch before the latest merge idea:
-
-```text
-short, rmom q25, max_ret168 D9, liq >= 500k,
-BTC 30d uptrend,
-age >= 240d,
-turn3_pop4,
-crowd cap 2,
-take profit 10%,
-24h hold,
-inverse-vol per-name sizing,
-no stop, no rank decay, no equity-curve momentum
-```
-
-Important independent findings:
-
-- **TP helps versus the old raw no-TP/no-stop engine.** The old raw engine had more trades
-  and higher raw return, but carried unacceptable raw tails including <= -91% trade hits.
-- **TP10 and 24h hold are the best current default.** TP12/14/16 were close, but TP10 had
-  the cleaner pooled MAR/cost-stress balance.
-- **Hard stops hurt.** Stop25/stop35 and failed-fade style loss cutters reduced expectancy.
-  They removed some large raw losers but damaged the system more than they helped.
-- **MFE giveback and breakeven exits did not help.** They cut winners/expectancy and did
-  not improve the final profile enough to keep.
-- **Rank decay exits did not matter enough.** Rank70/80 barely changed results; rank90
-  increased exits but did not improve the profile.
-- **Crowding cap matters.** Crowd cap 2 is cleaner than 3/4/off. Higher caps add trades but
-  weaken stress behavior and can reintroduce ugly tails.
-- **Entry can be loosened.** `turn3_pop3` improves the no-equity-momentum rebalance version
-  versus current `turn3_pop4`, adds trades, and keeps the <= -91% raw tail count at zero in
-  the selected sweep.
-
-Main independent artifacts:
-
-- `C:\Users\user\SHARED_DATA\independent_continuous_tp_hold_sweep_exploratory_2026-06-07`
-- `C:\Users\user\SHARED_DATA\independent_continuous_entry_filter_sweep_exploratory_2026-06-07`
-- `C:\Users\user\SHARED_DATA\independent_continuous_guardrail_sweep_exploratory_2026-06-07`
-- `C:\Users\user\SHARED_DATA\independent_continuous_rank_crowd_final_sweep_exploratory_2026-06-07`
-- `C:\Users\user\SHARED_DATA\independent_continuous_selected_variants_rebalance_nomom_2026-06-07`
-- `C:\Users\user\SHARED_DATA\independent_continuous_turn3pop3_nomom_curves_2026-06-07`
-
-## Continuous - Current Synthesis
-
-The right next candidate is a **merged** system, not a separate independent system:
-
-```text
-q25_liq500k_btcup_turn3_pop3_age240_tp10_crowd2_decomp_rebalance_w90_tv25_max4_dd4
-```
-
-Formal merged test completed 2026-06-07:
-
-- `C:\Users\user\SHARED_DATA\continuous_merged_signal_rebalance_2026-06-07`
-- `C:\Users\user\SHARED_DATA\continuous_merged_signal_rebalance_cost200_2026-06-07`
-- `C:\Users\user\SHARED_DATA\continuous_merged_signal_rebalance_robustness_2026-06-07`
-
-The winning arm is **no strategy-equity momentum**. Soft 0.25x, soft 0.5x, and the
-original hard-off 180d/+2% hurdle all reduced MAR; hard-off was especially bad under
-2x costs. The useful inherited component is the decomposed rebalance/vol/DD engine,
-not the strategy-equity momentum throttle.
-
-Selected no-equity-momentum rebalance comparison:
-
-| Variant | Pooled trades | Mean return | Mean MAR | Min MAR | Raw <= -91% |
-|---|---:|---:|---:|---:|---:|
-| current `turn3_pop4`, crowd2 | 1468 | +58.54% | 3.57 | 3.09 | 0 |
-| best `turn3_pop3`, crowd2 | 1579 | +62.60% | 4.01 | 3.88 | 0 |
-
-Per-venue for `turn3_pop3` no-momentum rebalance:
-
-| Venue | Return | Max DD | MAR | Worst day | Trades |
-|---|---:|---:|---:|---:|---:|
-| Bybit | +67.57% | -5.56% | 3.88 | -3.66% | 857 |
-| Binance | +57.63% | -4.52% | 4.14 | -2.52% | 722 |
-
-Merged arm comparison:
-
-| Arm | Mean return | Mean MAR | Min MAR | Worst DD | 2x-cost min MAR |
-|---|---:|---:|---:|---:|---:|
-| no momentum | +62.60% | 4.01 | 3.88 | -5.56% | 2.35 |
-| soft 0.50x | +56.05% | 3.52 | 3.15 | -5.89% | 1.82 |
-| soft 0.25x | +53.77% | 3.40 | 3.09 | -5.78% | 1.39 |
-| hard off | +50.31% | 3.20 | 2.87 | -5.72% | 0.94 |
-
-Interpretation:
-
-- `turn3_pop3` is the best current independent entry improvement.
-- It beats `turn3_pop4` on trades and MAR after the same no-momentum rebalance overlay.
-- It still does not beat the old hard-momentum rebalance candidate on Bybit max-return.
-- It does beat the old hard-momentum candidate as a cleaner cross-venue individual object:
-  old Binance was +54.85% / MAR 1.23 / -14.87% DD, while merged no-momentum is
-  +57.63% / MAR 4.14 / -4.52% DD.
-- The next continuous research state is no longer "independent system replaces old
-  candidate." It is: merged trade logic + decomposed rebalance engine, **without** the
-  180d hard-off momentum throttle, unless forward evidence later proves otherwise.
-
-### Derivatives-positioning filter frontier
-
-Formal derivatives-positioning filter test completed 2026-06-08:
-
-- `C:\Users\user\SHARED_DATA\continuous_derivatives_positioning_frontier_2026-06-08`
-
-This tested causal 24h funding, premium-index, and mark-index-basis filters on the accepted
-merged trade stream, then rebuilt MTM and decomposed rebalance ledgers. Historical OI and
-taker flow were excluded from the formal decision because Binance only has the recent
-rolling REST window in this root, not 2023-04-01 to 2026-05-28.
-
-Feature coverage was effectively complete: Bybit 100.0% on funding/premium/basis; Binance
-99.9% funding, 99.7% premium, 99.4% basis.
-
-Verdict: rejected as a signal improvement. Every pre-registered derivatives hard filter
-lost MAR versus the unfiltered merged stream under the base risk rule. The "crowded long
-perp unwind" story is not the missing MAR-6 lever in this form; positive funding/premium/
-basis mostly removed winners and did not cut drawdown enough.
-
-Top base-cost pooled rows by minimum MAR:
-
-| Filter | Risk rule | Min return | Mean return | Min MAR | Mean MAR | Worst DD |
-|---|---|---:|---:|---:|---:|---:|
-| all | high | +112.77% | +125.11% | 4.39 | 4.54 | -10.00% |
-| all | mid | +80.70% | +88.96% | 4.19 | 4.34 | -7.41% |
-| all | tight | +98.03% | +115.36% | 3.88 | 4.05 | -10.05% |
-| all | base | +57.63% | +62.60% | 3.88 | 4.01 | -5.56% |
-| funding_24h_ge0 | base | +46.54% | +48.32% | 2.80 | 3.40 | -5.32% |
-
-The closest retarget was not a filter; it was unfiltered `high`:
-
-| Venue | Return | MAR | DD |
-|---|---:|---:|---:|
-| Bybit | +137.46% | 4.39 | -10.00% |
-| Binance | +112.77% | 4.70 | -7.79% |
-
-That fails the user's current target: Binance return is below +120%, and both venues are
-well below MAR 6. Under 2x costs, no row met min MAR >= 3.0; the best minimum MAR remained
-the unfiltered base rule at min return +38.85% and min MAR 2.35.
-
-### Adjacent-signal ensemble and weight frontier
-
-Formal adjacent ensemble and retarget tests completed 2026-06-08:
-
-- `C:\Users\user\SHARED_DATA\continuous_adjacent_signal_ensemble_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_ensemble_retarget_extension_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_ensemble_weight_frontier_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_weight_winner_validation_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_weight_winner_validation_cost200_2026-06-08`
-
-The hand-picked component ensembles improved the merged signal but did not hit the target.
-The retarget extension produced a near-miss: `equal_p3_p4p3_p4p5_tp14` with
-`w90_tv0.045_max10_ddh-0.04` reached min return +138.12% and min MAR 5.21.
-That proved return was no longer the binding issue; Binance shock drawdown was.
-
-A coarse weight simplex over adjacent components then found the first base-cost
-continuous individual target hit:
-
-```text
-winner_p3_30_p4p3_20_p4p5_40_tp14_10
-turn3p3=0.30, turn4p3=0.20, turn4p5=0.40, age210tp14=0.10
-rebalance: w90_tv0.045_max10_ddh-0.04
-```
-
-Base validation:
-
-| Venue | Return | MAR | DD | Worst day | Avg scale |
-|---|---:|---:|---:|---:|---:|
-| Bybit | +226.22% | 6.18 | -11.69% | -5.57% | 7.47 |
-| Binance | +142.48% | 6.01 | -7.71% | -6.26% | 7.98 |
-
-2x-cost validation:
-
-| Venue | Return | MAR | DD | Worst day | Avg scale |
-|---|---:|---:|---:|---:|---:|
-| Bybit | +150.51% | 4.02 | -11.94% | -5.73% | 7.24 |
-| Binance | +94.27% | 3.24 | -9.46% | -6.33% | 7.68 |
-
-Verdict: accepted as the current best continuous **research lead**, not paper-ready
-evidence. It clears the user's base-cost target on both venues and is not immediately
-destroyed by 2x costs, but it is grid-selected and still depends on modeled impact. It
-needs robustness diagnostics, exact raw rerun if possible, and forward demo/paper before
-any deployment-style claim.
-
-### Downtrend regime extension
-
-Formal downtrend extension completed 2026-06-08:
-
-- `C:\Users\user\SHARED_DATA\continuous_downtrend_regime_extension_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_downtrend_regime_extension_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_downtrend_cost_robust_frontier_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_uptrend_weight_robustness_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_uptrend_weight_robustness_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_early_regime_stabilizer_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_early_regime_stabilizer_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_uptrend_component_filter_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_uptrend_component_filter_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_partial_tp14_filter_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_partial_tp14_filter_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_market_context_component_filter_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_market_context_component_filter_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_downtrend_microcontext_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_downtrend_microcontext_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_downtrend_scale40_risk_polish_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_downtrend_scale40_risk_polish_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_scale_window_interpolation_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_scale_window_interpolation_cost200_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_tp14_stress_repair_dt40w70_base_2026-06-08`
-- `C:\Users\user\SHARED_DATA\continuous_tp14_stress_repair_dt40w70_cost200_2026-06-08`
-
-The uptrend-only weighted ensemble structurally could not trade BTC downtrends. The
-downtrend scout found that raw downtrend shorts were weak, but the stricter `turn4_pop5`
-stream became useful when gated by causal 24h positive premium-index mean. Current best
-research lead:
-
-```text
-winner_up_p3_30_p4p3_20_p4p5_30_tp14_20_plus_dt40_turn4p5_premium_decomp_rebalance_w70_tv45_max10_dd4
-uptrend sleeve: turn3p3=0.30, turn4p3=0.20, turn4p5=0.30, age210tp14=0.20
-downtrend add-on: 40% * dt_turn4p5, premium_24h_mean >= 0
-rebalance: w70_tv0.045_max10_ddh-0.04
-```
-
-Base validation:
-
-| Venue | Return | MAR | DD | Worst day | Green months | Downtrend trades |
-|---|---:|---:|---:|---:|---:|---:|
-| Bybit | +265.24% | 7.50 | -11.28% | -5.57% | 31/38 | 85 |
-| Binance | +190.87% | 6.84 | -9.06% | -6.33% | 29/36 | 91 |
-
-Pooled base result: min return +190.87%, min MAR 6.84, worst DD -11.28%, and
-common both-venue green months improved from 20/35 on the uptrend-only winner to
-28/38.
-
-2x-cost stress:
-
-| Venue | Return | MAR | DD | Worst day | Green months |
-|---|---:|---:|---:|---:|---:|
-| Bybit | +177.28% | 5.11 | -11.07% | -5.72% | 28/38 |
-| Binance | +134.13% | 4.85 | -8.98% | -6.40% | 27/36 |
-
-Pooled 2x-cost result: min return +134.13%, min MAR 4.85, worst DD -11.07%,
-and common both-venue green months 24/38. The plotted equity curve is:
-
-```text
-C:\Users\user\SHARED_DATA\continuous_scale_window_interpolation_base_2026-06-08\winner_scale40_w70_equity_curve_base_and_cost200.png
-```
-
-Verdict: scale/window interpolation accepted the 40% downtrend add-on with a 70d
-vol window as the new strict continuous research winner. It improves base min
-return, base min MAR, base common green months, 2x min return, and 2x min MAR
-versus the prior 30%/90d strict winner while preserving 2x common green months at
-24/38. Worst-DD differences are float-noise equal under the repo's numerical
-equivalence rule. This is still research-only, not paper-ready and not promotion
-evidence.
-
-Premium-threshold follow-up rejected stricter thresholds (`premium_24h_mean >=
-0.0001/0.00025/0.0005/0.001`) as replacements. They improved some stressed rows
-but lost the base min-MAR/trade/monthly constraints. Keep the sign-only premium
-filter.
-
-Risk-retarget follow-up rejected lower max-scale / earlier drawdown half-scale
-rules as replacements. They reduced drawdown but failed the base return/MAR rule.
-Lower target-vol settings did not change the accepted max-10 row because scale was
-max-bound.
-
-Early-regime stabilizer follow-up rejected 72h downtrend positioning filters and
-5/10/20d soft strategy-equity throttles as replacements. The best 72h premium
-rows bought one extra common green month (28/38) but cut base min MAR to 6.08
-and 2x-cost min MAR to 4.08. The named stress months (2023-07 Binance,
-2023-12 Bybit, 2024-12 both venues, 2025-04 both venues) were unchanged, so the
-next useful target is component-specific uptrend filtering/reshaping, especially
-the noisy `turn4p5` source, not more downtrend add-on gating.
-
-Component-specific uptrend filters were also tested. Hard-filtering `turn4p5`
-by premium/funding cut too much return and MAR. Full replacement of
-`age210tp14` with a premium-positive `tp14_prem24` source improved common green
-months to 29/38 and cut drawdown, but failed the replacement bars on base return
-and 2x-cost MAR/return. A partial follow-up found the best risk-stability lead:
-
-```text
-u_tp14f15_up_plus_dt0.3_dtgrid_turn4p54
-uptrend: turn3p3=0.30, turn4p3=0.20, turn4p5=0.30,
-         age210tp14=0.05, tp14_prem24=0.15
-downtrend/risk unchanged
-```
-
-`u_tp14f15` improves base min MAR from 6.37 to 6.57, worst DD from -11.28% to
--10.19%, worst day from -6.33% to -4.73%, and 2x min MAR from 4.29 to 4.30,
-while keeping base common green months at 27/38. It is not accepted as the new
-winner because min return falls from +166.49% to +158.09% and it improves only
-two of the six named stress checks; 2024-12 and 2025-04 get worse. Treat it as
-a risk-stability lead, not a replacement.
-
-Market-context component filters were tested next: partial `age210tp14` and
-small `turn4p5` replacements gated by causal trailing 24h alt-market mean return,
-alt-market breadth, or BTC 24h return. They improved smoothness but failed the
-replacement bars. Best green-month row `u_tp14m15` raised base common green months
-to 28/38 and reduced DD to -10.22%, but cut min return to +152.39%, base min MAR
-to 5.97, and 2x min MAR to 3.86. The useful diagnostic was `u_tp14btc15`: it fixed
-2023-12 Bybit (-6.36% to -4.17%) and cut DD to -9.21%, but min return fell to
-+136.25% and 2x min MAR to 3.60. Keep the current winner unchanged.
-
-The same TP14 stress-repair idea was retried under the accepted 40% downtrend /
-70d risk-window engine. It still failed as a replacement. Control stayed at base
-min return +190.87%, min MAR 6.84, worst DD -11.28%, both-green 28/38, and 2x
-min return +134.13% / min MAR 4.85 / both-green 24/38. The best 2023-12 repair,
-`u_tp14btc15`, improved Bybit 2023-12 from -6.36% to -4.17%, but cut base min
-return to +139.50%, base min MAR to 3.72, and 2x min MAR to 4.17. The milder
-`u_tp14btc05` held base both-green at 28/38 and improved 2x both-green to 26/38,
-but still cut base min return to +164.20%, min MAR to 4.54, and worsened base DD
-to -11.75%. Keep the current 40%/70d winner unchanged; TP14 filtering is only a
-stress diagnostic.
-
-Raw OI/taker-flow feasibility was checked before the next downtrend run. Bybit OI
-is full-history (`2021-01-01` to `2026-05-27`), but Binance OI and taker-flow only
-cover late 2026-04 to 2026-05, and Bybit has no taker-flow folder. These are not
-valid cross-venue historical filters yet; use them only as forward diagnostics
-unless Binance historical coverage is rebuilt.
-
-Downtrend micro-context filters (`premium + market/BTC short-window context`) did
-not beat the simple sign-only premium filter. The useful discovery was that the
-plain 40% downtrend add-on is a near-miss: base min return +176.53%, base min MAR
-6.33, base common green months 28/38, 2x min return +122.90%, and 2x min MAR 4.45.
-It missed the base min-MAR replacement bar by about 0.04, so a tight risk-polish
-grid was run.
-
-The risk-polish grid first found the strongest aggressive risk-return lead:
-
-```text
-aggressive_downtrend_scale40_w60
-uptrend: turn3p3=0.30, turn4p3=0.20, turn4p5=0.30, age210tp14=0.20
-downtrend add-on: 40% * dt_turn4p5, premium_24h_mean >= 0
-rebalance: w60_tv0.045_max10_ddh-0.04
-```
-
-Base: Bybit +263.96% / MAR 7.47 / -11.28% DD / 31-of-38 green months; Binance
-+187.78% / MAR 6.73 / -9.06% DD / 28-of-36 green months. 2x cost: Bybit
-+175.80% / MAR 5.07; Binance +131.49% / MAR 4.76. It is rejected as a strict
-replacement only because 2x common both-green months fall from 24/38 to 23/38.
-Keep the 30% row as the strict default winner, but track the 40%/60d row as the
-aggressive risk-return lead. Equity curve:
-
-```text
-C:\Users\user\SHARED_DATA\continuous_downtrend_scale40_risk_polish_base_2026-06-08\aggressive_scale40_w60_equity_curve_base_and_cost200.png
-```
-
-The follow-up scale/window interpolation recovered the missing 2x common-green
-month: `0.4` downtrend scale with `w70_tv0.045_max10_ddh-0.04` improved the 60d
-lead's 2x common-green count from 23/38 to 24/38 while retaining materially better
-return/MAR than the previous 30%/90d winner. This supersedes the 40%/60d row as
-the current strict research winner.
-
-### 2026-06-09 — rmom latency falsification: FAIL (methodology debt #3 verdict)
-
-The pre-registered latency-delay falsification
-(`docs/preregistration/rmom-latency-falsification-2026-06-09.md`,
-`scripts/rmom_latency_falsification.py`) ran the merged-candidate selection layer
-(q25/liq500k/btcup/turn3_pop3/age240/h24) with rmom rebuilt at shifts {2,3,4,5,7} —
-residuals computed once, 100.0% exact replication of the production shift3 table,
-production parquets restored after.
-
-Pooled short-stream MAR by shift: 0.67 (s2, 1h-leak diagnostic) → **1.13 (s3,
-control)** → 0.10 (s4) → −0.01 (s5) → −0.16 (s7). Bybit return sign-flips at s4.
-Per-day selection Jaccard vs control: ~0.56 at ±1 day.
-
-**Verdict: FAIL.** The rmom edge is a knife-edge at exactly the freshest legal
-staleness — not a 7-day momentum factor. shift2 (more information) being WORSE argues
-against a simple leak, but a noise-peak/timing-artifact reading fits everything: the
-edge has zero operational margin (one day of data delay live reproduces shift4 = dead).
-Consequences (binding, pre-registered): rmom supports NO deployment-grade claim; the
-frozen continuous winner rests on a boundary-concentrated feature and is downgraded
-accordingly; any future continuous promotion requires resolving debts #3+#4 at the
-data layer first (factor/residual day-grid alignment audit, then re-test). The
-deployed SHORT is unaffected (rmom inactive, sentinel 10.0).
-
-## 2026-06-09 — Continuous window freeze (binding)
-
-The 2023-04→2026-05 window is declared **spent** for continuous variant
-adjudication. Rationale: the continuous winner is the product of a long
-selection chain on a single window — component weight simplex → retarget grid →
-downtrend add-on → premium gate → scale/window interpolation — with the
-replacement bars themselves computed on the same window. After that much
-selection, the reported MAR (6.8–7.5 base) is an order statistic, not an
-expectation; the honest forward prior is heavy shrinkage toward the unweighted
-base (~MAR 4) or below. Every additional sweep on this window makes the number
-we will eventually trust *worse*, because it spends researcher degrees of
-freedom without adding any out-of-window information.
-
-Binding consequences (mirrored in STATE.md):
-
-1. The 40%/70d downtrend-extended ensemble is frozen as-is. (A same-day parallel
-   session's pre-registered fragility receipt DEMOTED it and re-anchored the
-   canonical to the uptrend core @ max4-6 — see the regime-robustness section
-   below; the freeze governs everything after these completed decisions.)
-2. No further accept/reject sweeps, weight tweaks, filter frontiers, or
-   risk-rule retargets on this window.
-3. New continuous evidence = forward no-order paper only.
-4. Exempt: methodology-falsification/causality audits (they can only kill the
-   line, not improve it) and bug-fix re-runs of the frozen winner.
-
-*(The following regime-robustness program ran in a PARALLEL session the same day, without awareness of the freeze above. Its receipts stand as pre-registered records; its continuous results inherit the rmom latency-knife-edge caveat; the freeze binds all future continuous adjudication including any revival of its Tier-1 leads.)*
-
-### Regime-robustness program (2026-06-09) — demotion, re-anchor, RS-gate null
-
-The 2026-06-09 sessions (commit 5e1c960 + working tree) closed the refinement era
-and opened the regime program (plan folded 2026-06-10; git history is the archive):
-
-- **Winner robustness battery (5/5 PASS, pre-registered):** the uptrend ensemble
-  `winner_base = {turn3p3:0.30, turn4p3:0.20, turn4p5:0.40, age210tp14:0.10}` @ w90
-  is a robust plateau, not weight-overfit — all 286 simplex vectors both-venue
-  positive; survives de-lever to max4 (bybit +84%/MAR 5.0, binance +60%/4.6) and 3x
-  cost; all sub-periods positive. `tv` is a dead knob (scale pins at `max_scale`).
-  Real residual risks: recent-tilt, uncalibrated impact at max10, funding-interval
-  debt, no forward OOS. Receipt:
-  `docs/preregistration/continuous-winner-robustness-2026-06-09.md`.
-- **Downtrend extension DEMOTED (WP2):** the 7.50/6.84 downtrend-extended headline
-  rests on a fragile sliver (85/91 trades on ~10 active days; `dt_scale=0.4` at a
-  cliff — binance collapses to MAR 3.3/-17% DD at a=0.7). Canonical re-anchored to
-  the uptrend core at max4-6. Receipt:
-  `docs/preregistration/continuous-demote-downtrend-extension-2026-06-09.md`.
-- **Refinement levers tapped out:** parsimony (DoF-only), carry/funding (rank-IC
-  +0.04/+0.06), multi-horizon (bybit-only; 24h is the cross-venue horizon),
-  conviction-by-score (weak), entry circuit-breaker (null on component pool),
-  rmom-gate loosening (0.25 optimal; looser adds correlated breadth, blows out DD).
-  Ridge within-pool combiner rejected at Tier-1 (negative OOF IC; receipt folded
-  2026-06-10; git history is the archive).
-- **WP1a alt-RS squeeze probe (pre-registered, NO-GO):** trailing EW-alt-minus-BTC
-  relative strength does NOT predict forward squeezes — primary Spearman ICs
-  +0.004..+0.061 (bybit) / -0.010..+0.055 (binance) vs the a-priori <= -0.08 bar;
-  all sensitivities agree; squeeze days at the 51st RS-percentile. The mechanism is
-  real but CONTEMPORANEOUS: same-day RS vs per-unit book return -0.26/-0.30 (raw
-  alt-market return -0.30/-0.36), while alt-RS itself is a daily martingale
-  (AR1 +0.02/+0.03; trailing RS does not predict next-day RS). Conclusion: the
-  alt-season exposure cannot be timed at daily granularity — gate forms (WP1b) are
-  dead a-priori; the treatment is a HEDGE. Receipt folded 2026-06-10; artifacts
-  `~/SHARED_DATA/continuous_rs_probe_2026-06-09/`.
-- **BTC-beta hedge BANKED (WP3, two pre-registered stages, both PASS):**
-  - *Stage-A instrument comparison (PASS 6/6, overlay-level):* btc vs alt_ew vs
-    alt_top10, causal 90d beta, long-only, REAL funding charged. BTC selected — the
-    only instrument improving MAR on both venues (ΔMAR +0.34/+1.07); alt_ew (highest
-    ΔSharpe +0.34/+0.51) confirms the WP1a mechanism ceiling but is non-tradeable
-    and worsens bybit MAR/DD; alt_top10 dominated. Quirk: alt funding was
-    net-receivable for longs on book-on days. Receipt:
-    `docs/preregistration/continuous-hedge-overlay-2026-06-09.md`.
-  - *Stage-B through the engine (PASS 8/8, engine-grade `candidate`):* hedge leg
-    integrated into `apply_rebalance_rule` (`ContinuousHedgeRule(w90/min60/cap2)`,
-    causal beta on trailing ledger days, DD-half state on HEDGED equity, gap
-    close/reopen turnover; unhedged path byte-identical; 8 tests). Controls
-    reproduce the benchmark bit-close. Binding max4: ΔMAR +0.50 bybit / +1.07
-    binance, ΔSharpe +0.233/+0.382, 2023-24 Sharpe +0.436/+0.627. Survives 2x/4x
-    hedge cost, funding-off, 60-150d window grid, 1-day beta latency, and 2x BOOK
-    cost — where the hedge helps MORE (ΔMAR +0.89/+1.03, bybit DD +0.58pp better).
-    At max10: hedged MAR 8.39/8.17 vs 6.17/6.00. Mean hedge ~4-6% of equity (max4).
-    Receipt: `docs/preregistration/continuous-hedge-engine-2026-06-09.md`; artifacts
-    `~/SHARED_DATA/continuous_hedge_{overlay,engine}_2026-06-09/`.
-  - Durable claim = REGIME-ROBUSTNESS (the recent-tilt flattens, 2025 unchanged);
-    part of the raw return gain is bull-sample-specific long-BTC drift. In-sample
-    candidate — Tier-2 ceiling; forward demo is the only Tier-3 arbiter. Remaining
-    (operator): observe the daily dry-run (deployed 2026-06-09:
-    `continuous-hedge.timer`, `SUBMIT_HEDGE=0` gate), then explicitly flip
-    `SUBMIT_HEDGE=1` for live demo hedge submission + forward-demo accumulation.
-- **Live-readiness R0+R1 (2026-06-09, operator full-authority mandate):** the binance
-  funding-interval debt is CLOSED for the continuous path (accrual verified vs raw
-  datasets 40/40 to 5e-20; receipt `continuous-funding-debt-closure-2026-06-09.md`),
-  and the walk-forward causal-allocator falsifier KILLED the weight-overfit concern
-  (pre-registered): causal-chooser OOS haircut 13.8% (≤15% bar), equal-weight matches
-  the fixed winner OOS (pooled Sharpe 2.334 vs 2.317 → weights not load-bearing), and
-  adaptive re-weighting actively hurts (wandering choices + switch costs). Live weight
-  policy: FROZEN receipt weights, no re-estimation. Receipt:
-  `continuous-walkforward-allocator-2026-06-09.md`. Program doc:
-  `docs/research_plan_continuous_live_readiness_2026-06-09.md` *(deleted in the 2026-06-10/11 receipt consolidation — recover via git history)*.
-
-## Rejected Continuous Ideas
-
-Do not re-run these unless there is a new reason:
-
-- Hard stop losses as currently implemented.
-- Failed-fade loss exits for independent continuous.
-- Breakeven arm exits.
-- MFE giveback exits.
-- Rank-decay exits as primary edge.
-- Crowd caps above 2 as default.
-- Drawdown-zero threshold in the old rebalance candidate; it slightly helped one stress
-  metric but hurt base-cost Binance and robustness.
-- Giveback-style entry triggers (`turn*_gb*`, `pop*_gb*`); they reintroduced ugly tails.
-- Trailing alt-vs-BTC relative-strength entry gates at daily granularity (hard gate,
-  size-down, BTC-30d replacement): alt-RS is a daily martingale, so trailing RS cannot
-  forecast the squeeze it causes contemporaneously (2026-06-09 WP1a, pre-registered NO-GO).
-- Weak-market skip; it reduced opportunity and did not improve the profile.
-- Funding, premium-index, or mark-index-basis hard filters on the merged continuous
-  stream; they lost MAR versus the unfiltered stream in the 2026-06-08 frontier.
-- The old coarse 40% downtrend add-on with the 90d risk window as default; it had
-  higher return but missed the base min-MAR bar before scale/window interpolation.
-- Stricter downtrend premium thresholds as the default; they over-filtered and failed
-  the base replacement rule.
-- Current-winner risk retargeting with lower max scale or earlier half-scale; it
-  protected drawdown but lost too much return/MAR.
-- Short-window soft strategy-equity throttles on the current continuous winner;
-  they did not improve the accepted profile in the 2026-06-08 stabilizer scout.
-- 72h downtrend premium/funding/basis filters as replacements; they added one
-  green month at best but failed the MAR and 2x-cost bars.
-- Hard-filtering the full `turn4p5` uptrend component by premium/funding; it cut
-  too much return and MAR.
-- Full or partial premium-positive `age210tp14` replacement as the default
-  winner; `u_tp14f15` is a useful risk-stability lead but misses the stress-month
-  replacement rule.
-- Market-context hard filters on partial uptrend components; they smooth some
-  months but cut Binance return/MAR and fail the base plus 2x replacement bars.
-- Downtrend micro-context filters using premium plus short-term market/BTC state;
-  the simple sign-only premium filter remained better.
-- The aggressive 40%/60d downtrend add-on as strict default; it missed the 2x
-  common-green replacement bar by one month and was superseded by the 40%/70d row.
-- TP14 stress-repair replacements under the accepted 40%/70d engine; they fixed
-  2023-12 Bybit only by giving up too much broad return/MAR or base drawdown.
-- Pure retargeting of the hand-picked ensemble; it reached return but stalled at min
-  MAR 5.21, so the final improvement came from component weighting, not another DD knob.
-
-## 2026-06-09 — BTC-trend gate Tier-2 validation: DEMO-ELIGIBLE
-
-The deployed `btc_trend_gate=uptrend` (operator-directed 2026-06-04, validation was
-PENDING) got its binding Tier-2 battery: gate off vs uptrend, both venues, full-PIT
-clean, exact deployed profile. Receipt with full numbers:
-`docs/preregistration/btc-gate-tier2-validation-2026-06-09.md` *(deleted in the 2026-06-10/11 receipt consolidation — recover via git history)*.
-
-Verdict line: `by MARΔ +1.52  bn MARΔ −0.12  pooled +0.70 → DEMO-ELIGIBLE`.
-
-Read: on Bybit the gate is a genuine risk transform (DD −15.6%→−7.2%, MAR 1.38→2.89,
-bootstrap P(MAR Δ>0)=98%, all thirds positive) at the cost of ~4% of return. On
-Binance it is a coin flip (P=59%) that cuts return by more than half — the gate is NOT
-cross-venue evidence of regime alpha; it is venue-fit risk engineering for the deployed
-Bybit book. A run-quality note: the first battery attempt was TAINTED
-(PIT_SURVIVORSHIP) by a single missing kline partition (WDCUSDT 2026-05-29; manifest
-row carried a `bybit_v5_listing` sentinel URL the downloader can't fetch); it was
-killed, the partition backfilled from the public archive, and the battery re-run clean.
-The same sentinel-URL failure mode can silently break future backfills — worth a
-downloader fix.
-
-## 2026-06-09 — Levered long-sleeve stress (10x stress vs 1x evidence)
-
-The long sleeve's code and systemd defaults now use the 1x-validated v11a+div+volup125
-profile. Levered demo sizing is explicit opt-in and rejected if projected full-book
-initial margin exceeds the configured cap. This section is the historical stress test
-that explains why 10x must not be treated as a default. The levered read
-(`scripts/long_sleeve_10x_stress.py` over the 1x backtest ledger, 189 trades
-2023-06→2026-05; report `.../reports/equity_curves/long/levered_stress_10x.md`):
-
-| metric | 1x (evidence) | 10x (live config) |
-|---|---:|---:|
-| max drawdown | −8.4% | **−60.5%** |
-| worst single exit-day | −2.28% | −22.8% |
-| funding P&L (sum) | −1.68% | −16.8% |
-
-Key findings:
-
-1. **Zero isolated liquidations**: no trade's intratrade MAE (computed from klines; the
-   ledger's mae column is NaN) reached the −9.5% 10x liq distance — the ~−5% ATR stops
-   protect single names. No near-misses either (≤80% of liq distance: 0).
-2. **But the stop→liq cushion is thinner than one hourly bar**: in 139/189 trades a
-   single bar's open→low range exceeded the stop→liquidation cushion — if such a bar
-   arrives with price just above the stop, the fill is at/past liquidation. Gap risk is
-   structural on FC names (entered *because* they pumped ≥15%).
-3. **Margin exhaustion**: peak 8 concurrent positions → peak account gross leverage
-   **11.6x**, peak margin demand **116% of equity** (5 events >100%). The live book
-   cannot replicate the backtest at 10x — entries would be rejected at the margin
-   boundary, so the levered backtest curve is not executable as modeled.
-4. **Correlated-crash wipeout**: at peak gross leverage a uniform **−8.6%** book move
-   ends the account. FC entries cluster in same-day FOMO names; crypto-wide flash-crash
-   days of that size occur in-window. Median in-market gross leverage is only 2.5x —
-   the danger is episodic concentration at peaks, which coincide with peak-FOMO markets.
-5. The 10x exit-compounded "return" (+12,023%) is a linear fantasy — it ignores (3) and
-   (4); do not cite it.
-
-Caveat: ledger vintage is the 2026-06-05 equity-curves run (pre PIT-gap fix,
-current-universe-labeled). The risk *shape* is robust to that; the headline 1x return is
-not the point here.
-
-**Recommendation to owner**: either cap live concurrency/notional so peak gross
-leverage stays ≤ ~5x (wipe threshold −20%), or produce levered forward-demo evidence
-with margin telemetry before trusting any 10x extrapolation. The 1x evidence does not
-transfer linearly to 10x.
-
-## 2026-06-09 — Book-level regime concentration (one trade, three wrappers)
-
-`scripts/book_regime_concentration.py` over the fresh ungated short baseline ledger
-(btc_gate_tier2 00_baseline) + the long ledger, window 2023-04→2026-05 (1,153 days).
-Report: `.../btc_gate_tier2_2026-06-09/00_baseline/book_regime_concentration.md`.
-
-- SHORT regime-on (btc_ret30>0, lag1): **57%** of days. LONG regime-on (BTC&ETH>SMA30):
-  40%. Both deployed sleeves simultaneously on: **37%**; P(long_on | short_on) = 65%.
-  The frozen continuous uptrend ensemble shares the short indicator.
-- **The 37% both-on days carry ~82% of total book P&L** (+102.9% of ~+126% combined at
-  1x). The book is, quantitatively, one BTC-regime trade expressed three ways.
-- Regime flips in-window: 107 (short) / 95 (long) — the 30d-return-sign indicator
-  chatters; many flips are day-scale whipsaws, so effective independent regime
-  observations are well below 107 but well above the naive "one bull cycle = 2-3".
-- **Regime-transition chop is where the short bleeds**: the 2025-04 flip cluster shows
-  −5.8%/−6.9%/−9.4%/−5.8%/−7.4% 11-day short P&L windows around successive flips. The
-  deployed uptrend gate removes downtrend entries but cannot remove boundary chop (the
-  gate itself flips late by construction).
-- The "10 worst BTC days" joint table shows no booked blowups, but it books P&L on
-  EXIT days — open-position marks on crash days surface later; treat that table as a
-  lower bound on crash-day pain, not proof of immunity.
-
-Consequence: portfolio-level risk work should treat "BTC-uptrend-on" as THE factor
-exposure of the whole program; diversification claims between sleeves measured on
-full-sample daily correlation overstate independence (see long-sleeve-diversifier note).
-
-## 2026-06-09 — Funding-interval debt quantified (methodology debt #1 closed-as-scoped)
-
-Empirical audit of both roots' funding datasets vs the code's assumptions.
-
-**Data-layer facts:**
-
-- Bybit `funding`: 764 symbols, 2.44M settlement rows — coverage is effectively
-  complete. Empirical modal settlement interval per symbol: 349 @8h, 322 @4h, 17 @2h,
-  **76 @1h**. By 2025-2026, **76-86% of settlement rows are ≤4h-spaced**.
-- Binance `binance_usdm_funding`: **only 51 symbols** have any funding data (39 @4h,
-  10 @8h). This is a COVERAGE hole, not an interval bug — every trade on the other
-  ~700 symbols books `funding_mode=missing` → zero funding.
-- The stored `funding_interval_min` is **480 for every row on both venues** (the
-  ingestion default), regardless of true interval.
-
-**Code-path consequences:**
-
-1. **P&L path: CORRECT since 2026-06-03.** `_funding_lookup` exact-stamp dedup counts
-   every settlement row present in data; the old interval-bucketing undercount is fixed.
-   Bybit funding P&L is therefore right; Binance funding P&L is right *only* for the 51
-   covered symbols.
-2. **Window-SUM features are correct** (`funding_24h_sum`, `funding_3d/7d_sum`, daily
-   sums): because stored interval=480 makes `funding_rate_8h_equiv == funding_rate`,
-   summing raw per-settlement rates over a window gives the true window funding. The
-   2026-06-08 derivatives frontier's `funding_24h_sum` was computed correctly.
-3. **Per-settlement LEVEL features are mis-scaled** for sub-8h symbols
-   (`funding_rate_last`, `funding_recent`, `fs_recent_funding_min` thresholds): a 4h
-   symbol's last-rate is ~half the true 8h-equivalent, 1h symbols ~1/8. **No deployed
-   profile consumes these** (short funding gates at sentinel ±10; long funding-squeeze
-   pattern disabled) — research-only exposure.
-4. **Binance results are biased OPTIMISTIC by missing funding** — empirically, this
-   strategy's shorts PAY funding on net (Bybit baseline ledger: funding_return sums to
-   **−11.6%** across 596 trades, 595 fully modeled, vs +65.4% total net; post-pop
-   shorts sit in negative-funding regimes). Missing Binance coverage therefore omits a
-   real COST. The trade-level bias band is quantified in the Binance-gap section below.
-   (The naive "shorts collect positive funding" prior is wrong for THIS event
-   population.)
-
-**Recommendations (data work, operator-schedulable):**
-
-- Rebuild Binance funding coverage (`download-data --datasets funding` reach-back, or
-  archive source) — this directly moves the cross-venue arbiter for the short sleeve.
-- At ingestion, set `funding_interval_min` from the empirical per-symbol modal spacing
-  (or instruments `fundingInterval*`) instead of defaulting 480, so `8h_equiv` level
-  features become trustworthy before any research consumes them.
-
-## 2026-06-09 — Binance gap decomposed (selection vs execution vs universe)
-
-`scripts/binance_gap_decomposition.py` over the fresh full-PIT ungated baseline ledgers
-(btc_gate_tier2 00_baseline, both venues; Binance window clipped at its data end
-2026-04-30). Report: `.../binance_full_pit/.../00_baseline/binance_gap_decomposition.md`.
-
-| | bybit | binance |
-|---|---:|---:|
-| trades / symbols | 596 / 272 | 307 / 182 |
-| mean gross fade per trade | +0.167% | +0.101% (60% of bybit) |
-| **shared-symbol** mean gross | +0.203% (316 tr) | +0.159% (252 tr) — **79% of bybit** |
-| gross win rate | 61.9% | 57.3% |
-| mean net per trade | +0.110% | +0.062% |
-| sum net | +65.4% | +19.1% |
-
-Verdict on the three hypotheses:
-
-- **NOT pure Bybit microstructure**: on the like-for-like shared-name pool the fade
-  transfers at ~79% of Bybit's per-trade gross with a comparable win rate. The
-  cross-venue arbiter remains meaningful.
-- **UNIVERSE composition is the biggest drag**: each venue's exclusive names are weaker
-  than the shared pool (bybit-only names dilute bybit's mean too); Binance's 41
-  exclusive traded names drag it hardest, and Binance fires only ~half the events.
-- **EXECUTION costs are symmetric** (identical mean cost) — but the **funding hole is
-  not**: 296/307 Binance trades book zero funding (coverage). Using Bybit's per-trade
-  funding distribution as proxy, unbooked Binance funding ≈ **−5.8%** total (band
-  −3.1%..+1.5%) → honest Binance sum-net ≈ **+13%**, i.e. the published +19.1% is
-  ~30% optimistic. Risk-adjusted (ret/DD 1.10 vs 5.42) the venue gap stays severe:
-  fewer, lumpier trades against a similar DD.
-
-Actionable: (1) the Binance funding-coverage rebuild directly de-biases the arbiter;
-(2) a shared-universe-only profile variant is a legitimate FUTURE pre-registerable idea
-(both venues' exclusive names underperform the shared pool) — not run here.
-
-## 2026-06-09 — Long-sleeve improvement program (structural sweep + TSMOM overlay)
-
-Operator-directed improvement pass on the long sleeve ("better returns, better MAR,
-fix the step-function curve"). Constraint honored: the 5-wave signal-family search is
-exhausted (FC is the selection ceiling) — this program tested PORTFOLIO/EXECUTION
-structure plus one literature-sourced new mechanism. All cells EXPLORATORY, full-PIT
-clean, both venues, window 2023-04-01→2026-05-28 (`scripts/long_improve_sweep.py`,
-`scripts/long_tsmom_overlay.py`; reports under `.../reports/long_improve_2026-06-09/`).
-
-**Accepted candidate (receipt: `docs/preregistration/long-volup-candidate-2026-06-09.md`):**
-`vol_target_max_scale` 1.0 → **1.25** — return +23.3%→+28.9% (bybit) / +19.0%→+23.6%
-(binance) with ret/DD ≥ 99.6% of baseline and Sharpe unchanged on both venues.
-Identical trade set — pure Moreira-Muir exposure timing (lever the calm regimes), the
-symmetric half of the already-promoted div de-risking. Both 1.25 and 1.5 passed the
-pre-registered rule; the pre-committed tie-break picked 1.25 because of the leverage
-interaction. PROMOTED into the code profile by operator 2026-06-09
-(`vol_target_max_scale=1.25` in `_v11a_long_native_config`). The long sleeve is not
-redeployed on the rebuilt VPS; any levered demo sizing is explicit opt-in and must
-pass the projected full-book initial-margin guard.
-
-**Clean nulls (do not re-run):**
-
-- Candidate breadth (fc_top_volume_rank_max 10→20/30, daily-best-N): ret/DD collapses
-  ~50-65% on both venues. The top-10-liquidity gate is load-bearing for FC quality.
-- Hold extension (3d→7d), ATR trailing stop, scaled exits: all materially worse —
-  the 72h time-stop is right; FC's edge is fully decayed by day 3.
-- Pyramiding (max_per_symbol_concurrent 2): no-op (cooldown binds first).
-- **Majors TSMOM/Donchian overlay**: literature-mined (Zarattini/Han/Man — published
-  Sharpe 1.5+ spot, no funding). On 2023-26 perp data with REAL funding the anomaly
-  survives but degrades to MAR 0.92 (sma50 best; published Donchian ensemble: 0.42),
-  corr +0.35 to the FC stream — every blend weight DILUTES combined MAR
-  monotonically (2.38 → 2.25 @ 10% → 1.73 @ 50%). Anti-finding from the same
-  literature pass: post-listing drift is a SHORT phenomenon (89% of 2025 listings
-  negative) — never a long candidate.
-
-**The step-function curve was substantially an accounting artifact.** The engine books
-P&L on exit only. Rendered as daily mark-to-market (every open trade marks daily;
-costs+funding on exit day; same per-trade totals), the FC book's honest curve is
-already continuous-ish: MAR 2.38, DD −8.5%, Sharpe(daily) 1.66, active 26% of days.
-The right "fix" was rendering, not diluting the book with a weaker always-on sleeve.
-
-## 2026-06-09 — Cross-listing filter: REJECTED (Tier-1 fail, with a sharpened insight)
-
-Follow-up to the Binance-gap decomposition. Hypothesis: "listed on both venues at
-decision time" is a PIT-computable quality proxy (single-venue listings = the scammier
-tail). Ledger-level scout on tonight's clean cells (PIT cross-listing from the other
-venue's kline coverage at entry date, 1000x-prefix symbol normalization, trailing-7d
-window; ledger filtering is conservative — freed slots aren't reallocated):
-
-| venue/cell | unfiltered MAR | cross-listed-only MAR | dropped P&L |
-|---|---:|---:|---:|
-| bybit baseline | 2.17 | 1.28 | +18.4% (165 tr) |
-| bybit uptrend | 7.89 | 4.12 | +24.1% (105 tr) |
-| binance baseline | 0.52 | 0.75 | −2.3% (25 tr) |
-| binance uptrend | 0.38 | 0.62 | −2.4% (14 tr) |
-
-**Verdict: REJECTED as a universal filter** — helps Binance, materially hurts Bybit
-(Tier-1 fail: MAR Δ −0.89 / +0.23). The outcome-side proxy in the gap decomposition
-("traded on both venues") had conditioned on the name also EVENTING on Binance — a far
-stronger condition than being listed there. Sharpened conclusion: **Bybit-exclusive
-listings carry real, diversifying edge; only Binance's own exclusive listings are
-toxic.** A Binance-only gate would be venue-specific tuning and is not proposed.
-Do not re-run as a cross-venue candidate.
-
-## 2026-06-09 — Binance funding REBUILT + gate re-verified; ridge combiner REJECTED
-
-**Funding rebuild (receipt: `docs/preregistration/binance-funding-rebuild-2026-06-09.md`):**
-`binance_usdm_funding` rebuilt from the survivorship-free data.binance.vision monthly
-fundingRate archives (+ fapi top-up): **51 → 697 symbols**, ~2.23M rows, TRUE
-per-settlement intervals stored (1.26M of 2.23M rows are sub-8h — closing both halves
-of the old funding debt). Old dataset kept as `.bak`. Re-measured Binance gate cells on
-honest funding: baseline +18.7%→+14.2% (−4.5% abs, inside the predicted −3..−6 band),
-uptrend +8.1%→+6.9%, trades unchanged. **Gate Tier-2 verdict re-checked and HOLDS:
-binance MAR Δ −0.05 (better than the pre-rebuild −0.12), pooled +0.73 → DEMO-ELIGIBLE.**
-All future Binance numbers use this basis; pre-rebuild Binance results are ~3-6% abs
-optimistic on 3y windows.
-
-**Ridge combiner (operator's pre-registered scout): REJECTED.** Bybit pooled
-out-of-fold rank-IC **−0.04** (anti-predictive, 7 folds, coefficients stable);
-Binance arm unmeasurable (0 folds — OI history there starts ~2026-04). The Tier-1
-gate (positive IC both venues) fails; engine-sizing wiring does not proceed. A re-run
-needs a Binance OI backfill (vision metrics archive reaches 2020-09) + a freshly
-pre-registered feature set. Receipt folded 2026-06-10; git history is the archive.
-
-## 2026-06-09 — Day-grid alignment audit: GRID CORRECT (debt #4 closed)
-
-End-to-end audit of the factor/residual day-grid timeline (the blocking prerequisite
-for any continuous revival, and the prime suspect behind the rmom knife-edge):
-
-1. **Producer verified.** Panel rows are start-of-day 00:00-UTC stamps; features at
-   row D are EOD-of-D observables; `fwd_ret_1d` = first-bar close (D+1)01:00 →
-   (D+2)01:00 via calendar-exact joins (gap days null, never misaligned).
-   **Empirically recomputed from raw klines for sample (symbol, day)s: bit-exact
-   match.** `residual_return[d]` therefore completes (d+2)01:00 as documented, and
-   rmom[D]'s newest term completes (D−1)01:00.
-2. **Consumers verified.** Continuous engine joins rmom[bar's own day] — causal for
-   every hourly bar with ≥24h margin to the newest residual. The volume-events
-   trading-day join consumes rmom one further day stale (extra-conservative;
-   feature inactive in the deployed short anyway). The falsification driver's
-   shift3 rebuild matched the production table 100.0% — pipeline self-consistent.
-
-**Verdict: no off-by-one anywhere.** Consequences:
-
-- The rmom latency-FAIL is re-interpreted: NOT leakage — a **genuine ultra-fast-decay
-  idiosyncratic reversal effect** (alive at 23–47h staleness, dead past 47h). The
-  binding consequence is unchanged (zero operational margin for a daily system; rmom
-  still supports no deployment-grade claim), but the mechanism is now understood.
-- The residual-Sharpe machinery (Tier-3 gate input) is methodologically trustworthy.
-- Methodology debt #4 is CLOSED; any future continuous revival now needs an
-  intraday-class execution design (to consume a <2-day-half-life signal), not a
-  data-layer fix.
-
-## 2026-06-09 — Live-vs-backtest age definition audited (debt #2 closed-as-acceptable)
-
-The two definitions: backtest `pit_age_days` = trading day − first archive-manifest
-date; live `listing_age_days` = now − instruments `launchTime`. Quantified against a
-live Bybit instruments snapshot × the manifest (569 symbols compared):
-
-- **Median divergence 0 days; 564/569 within ±3 days.** The definitions agree for
-  essentially the whole universe.
-- 5 outliers, ALL with live age YOUNGER (launchTime resets on contract
-  relaunch/migration: ETH/SOL/UNI/SUSHI — ancient either way, no gate impact — and
-  FHEUSDT: backtest 419d vs live 153d, the known 54-day archive-gap name).
-- **Exactly 1 symbol flips the age-300 gate today (FHEUSDT), and in the SAFE
-  direction: live skips a name the backtest would trade.** There is no case where
-  live trades something the backtest's gate would reject.
-
-Verdict: divergence is rare (≈0.2% of the universe) and conservative-by-direction.
-Accepted as-is; no code change. If a relaunched major ever re-enters the young-age
-band, the live gate errs toward skipping — acceptable for a fade strategy.
-
-## 2026-06-09/10 — Downtrend sleeve + sniper program closure
-
-This folds the terminal downtrend/sniper/WP4 program receipts into the research source of
-truth. The original preregistration files were closed/dead questions; git history remains
-the archive.
-
-- **D1 opportunity map:** BTC-30d-down regimes showed real cross-sectional reversal
-  structure (ret_7d/ret_1d, D10-D1 about -51/-24 bps, both-venue sign agreement, sign
-  flips in up-regime). This was descriptive structure, not net-tradeable proof.
-- **D2 reversal L/S:** FAILED Stage-A. The long leg (buy 7d losers) carried real gross
-  alpha both venues, but the short leg's bear-market funding + turnover killed the L/S
-  book; Binance had 0/8 net-positive cells.
-- **D3 bounce-long:** standalone bounce alpha was real and funding-positive, but combined
-  bars failed catastrophically because the sleeve is a -30% to -44% drawdown object,
-  outside the deployable risk class. Standing close-out: **downtrend question CLOSED for
-  this program; hedge + cash is final; no further downtrend constructions.**
-- **2026-06-10 epilogue — the question is now closed in FULL, including the "separate
-  product" clause.** Under an explicit operator directive the two remaining paths were
-  executed same-day and terminated: (1) **DR1 hedged-bounce (pre-registered): FAIL,
-  hypothesis falsified** — a WP3-mirrored causal short-BTC hedge (mean H ~0.70) moved the
-  bounce sleeve's DD only ~2pp (bybit −29.6→−27.9, binance −35.6→−33.5) while dragging
-  −19..−21% return; the DD is alt-idiosyncratic crash risk, not index beta, and the
-  trailing-down regime has mildly positive forward BTC drift, so a standing short-BTC
-  overlay is systematically losing. (2) The D3-frozen **standalone paper product
-  (downtrend_bounce_v1) was built, seeded, equity-curved — and KILLED by the operator on
-  review** (bybit +266%/DD −30% is regime-concentrated and stair-stepped; binance +48%/DD
-  −36% with multi-year underwater stretches; the risk class IS the strategy). Code +
-  receipts reverted (build c0f9717, reverted same day; run artifacts remain in
-  `~/SHARED_DATA/downtrend_hedged_bounce_2026-06-10/`). **Operator instruction on
-  record: do not go down this path again — no downtrend sleeve, no standalone bounce
-  product, no hedged variant. Down-regime capital = hedge + cash, FINAL.**
-- **Sniper conditional walk-forward:** fixed P0 x8/b25 stands. Stitched-OOS hedged-max4
-  deltas were +1.06 bybit / +0.60 binance, pooled +0.83; adaptive/fitted variants lagged.
-  Durable lesson: simple fixed parameters beat adaptive/fitted ones out-of-window.
-- **Sniper staged entries:** quarter-size +8% snipe is additive at the Tier-2 bar:
-  pooled MAR 5.58 -> 6.30 at 1x, and the 2x-cost overlay still passed the reported
-  margin (+0.375 pooled). Amendment 6 made it a Tier-2 demo candidate by operator
-  decision on 2026-06-10. Live planner scaffold exists (`plan_continuous_sniper_orders`)
-  and remains default-off until daemon wiring/demo enablement.
-- **WP4 rmom standalone L/S:** FAILED Stage-A. No cell passed the standalone bar and the
-  combined-book bar failed everywhere (best delta bybit -0.20 / binance -2.80). Returns
-  were dominated by funding carry but drawdowns (-18% to -37%) and costs were the wrong
-  risk class. Selection-gate evidence remains research-only and must be read with the
-  rmom latency verdict: causal, but no deployment-grade operational margin.
-
-Program lesson: the edge here is **event selection + execution**. Daily cross-sectional
-books built from recombinations of the mined daily/hourly factors fail on drawdown class,
-costs, or funding at our scale. New alpha needs new data (order book, L2, ticks), not
-another sweep of the spent 2023-04->2026-05 continuous window.
-
-## 2026-06-09 — Combined-book construction (deployed short × volup125 long)
-
-Daily-grid combination of the two real books (bybit, window 2023-04→2026-05): the
-deployed gated short (exit-day booked, 3d holds) × the accepted long volup125
-candidate (honest daily-MTM stream).
-
-- **corr(short, long) daily = −0.03** — effectively zero.
-- | book | total | ann | maxDD | MAR | Sharpe | worst day |
-  |---|---:|---:|---:|---:|---:|---:|
-  | short only (deployed) | +81.0% | +20.7% | −7.2% | 2.89 | 1.67 | −2.87% |
-  | long only (volup125) | +28.2% | +8.2% | −3.6% | 2.25 | 1.68 | −1.66% |
-  | **combined 30% short** | +42.9% | +12.0% | **−2.5%** | **4.87** | **2.40** | −1.33% |
-  | combined 50% short | +53.3% | +14.5% | −3.8% | 3.82 | 2.20 | −1.56% |
-  | combined 70% short | +64.1% | +17.0% | −5.1% | 3.30 | 1.94 | −2.08% |
-
-Caveats (attach when citing): mixed booking conventions slightly flatter the short
-side; in-sample, 1x research scale, bybit only; daily corr ≈ 0 does NOT remove the
-regime-flip joint-tail exposure (see the regime-concentration section) — both sleeves'
-crash risk clusters at BTC-trend transitions. The split row is a research
-illustration, not a deployment instruction; the live netted account currently runs no
-explicit budget split (margin-budget feature shipped OFF). Notable: the combined-book
-case strengthens the volup125 sign-off — the long candidate composes with the short
-book at near-zero daily correlation.
-
-**Binance addendum (same session, honest refunded ledgers):** corr(short, long) =
-**−0.037 — the near-zero correlation REPLICATES cross-venue** (structure, not a Bybit
-artifact). But the venues mirror: Binance's strong leg is the LONG (MAR 1.80 vs the
-refunded gated short's 0.17), so any fixed blend dilutes the stronger sleeve there
-(30% short: 1.80→1.38). Cross-venue-robust conclusion: two structurally uncorrelated
-sleeves, each venue's book dominated by its stronger leg; a single global split
-prescription does NOT fall out of the data — venue-level sizing is an operator
-risk-preference decision, not a fitted parameter.
-
-## 2026-06-09 — Capacity quantified for the deployed short (Tier-3 input)
-
-First explicit capacity computation (per-trade participation = per-trade notional
-[C × gross/max_active = C/12] ÷ entry-day symbol turnover; gated cells, both venues):
-
-| venue | entry-day turnover (median / p10) | C @ 1% participation (median trade / p10 thinnest) | C @ 5% |
-|---|---|---|---|
-| bybit | $9M / $1.9M | **$1.1M / $0.2M** | $5.6M / $1.2M |
-| binance | $36M / $7.3M | $4.3M / $0.9M | $21.6M / $4.4M |
-
-Read: the strategy shorts thin names BY CONSTRUCTION (the liquidity-migration event
-selects them), so capacity is structurally small — disciplined (1%-participation)
-capacity is **single-digit $M on Bybit**, with the thin tail binding well below $1M.
-Tier-3's "capacity ≥ 10x deployment" passes comfortably at personal scale (≤$100k
-deployment) and becomes binding around $0.5-1M deployment. The research configs'
-$1M deploy-capital / 50bps impact assumptions sit right at this edge — cost-stress
-results should be read with that in mind. This closes the "nobody has computed
-capacity" gap in the Tier-3 checklist.
-
-## 2026-06-09 — Funding-settlement-aware exits: NULL at the bound (don't build)
-
-With full settlement timestamps now in data, scouted whether the short book pays
-funding it could dodge by exiting just before a settlement: of the gated Bybit book's
-+4.51% total funding cost (equity-rel, 3y, 339 funded trades), only **+0.55%** sits at
-settlements ≤1h before exit (51 trades) — the hard upper bound on any exit-timing
-recovery is ~0.18%/yr. Not worth an engine change; recorded so it's never mined.
-
-## 2026-06-09 — PROPOSED (operator gate): intraday-class harvest of the fast-decay residual signal
-
-Status: **design proposal only — nothing runs without operator greenlight + a fresh
-pre-registration.** This is the one creative direction tonight's falsification work
-actually EARNED, written down before it's forgotten.
-
-**What we verified (not conjecture):** the residual-reversal signal (rmom family) is
-real but lives at 23–47h staleness and is dead past 47h (latency falsification,
-shifts 2-7, grid audited bit-exact). A daily-rebalanced system structurally cannot
-harvest a <2-day-half-life signal with margin — that's WHY continuous failed, not
-because the idio reversal doesn't exist.
-
-**Design sketch (the only shape that fits the verified physics):**
-- Decision cadence: hourly bar close (infrastructure EXISTS: the continuous engine is
-  hourly; live WS klines + state caches are deployed).
-- Signal: residual-return reversal computed on a rolling intraday grid — residuals
-  vs the same 4-factor model, but fit on hourly/6h windows so the newest legal
-  information is hours old, not 23h. (The day-grid machinery is verified correct;
-  this is a finer grid, same construction.)
-- Holding: 12–24h max (inside the verified decay window), TP/time exits only (hard
-  stops are a documented null in this family).
-- Costs are the killer risk: hourly-cadence shorts on thin alts at 45bps+ round trip
-  — the EDGE PER TRADE must clear ~2x the daily system's because turnover doubles.
-  The capacity ceiling (single-digit $M) gets TIGHTER, not looser.
-
-**Validation plan (freeze-compatible):** ONE pre-registered backtest shot (no
-iterative sweeps — design frozen on paper first, exactly like the ridge receipt),
-then no-order paper collection. The 2023-26 window freeze covers continuous VARIANT
-adjudication; a single pre-committed test of a structurally new design with
-forward-first emphasis is the carve-out the freeze anticipated — but the operator
-owns that call.
-
-**Recommendation:** park until (a) the forward demo has produced its first
-Tier-3-relevant evidence on the existing book and (b) the operator decides the
-program wants a second research arc. Written here so the option is preserved with
-its rationale, not re-derived from scratch later.
-
-## 2026-06-10 — Alpha-hunt charter session 1: cov-sizer dead a priori; BTC+ETH two-factor hedge beats the banked hedge (Stage-A PASS)
-
-Charter: `docs/research_plan_alpha_hunt_2026-06-10.md`. Two results:
-
-**1. §4-A covariance-aware within-book sizing — KILLED BY FEASIBILITY PROBE (no shot
-burned).** The continuous winner_base book is too thin for a within-book correlation
-allocator: at entry the median trade has **1 peer** open, 28–30% have zero, only 38% have
-≥2 (bybit 3184 / binance 2617 component trades, symbol-deduped). The allocator is
-mechanically a no-op for ~62% of trades and noise for most of the rest. The "correlated
-breadth blew out DD" failure came from *loosened* gates — re-loosening is a pre-registered
-null. Do not re-mine §4-A at current book breadth; it only becomes live again if the book
-is ever structurally broadened (which the freeze forbids on this window).
-
-**2. §4-C hedge upgrade Stage-A — `btc_eth_2f` PASS 6/6, SELECTED (pre-registered:**
-`docs/preregistration/continuous-hedge-upgrade-2026-06-10.md`**).** Two-factor causal
-90d-OLS of unit book return on (BTC, ETH), separate long legs, joint 2×scale cap, real
-funding, same machinery as the banked WP3 hedge (c0 parity exact). vs the banked BTC-only
-hedge at max4: ΔSharpe +0.200/+0.079 (pooled +0.140), ΔMAR +0.37/+0.50 (pooled +0.43),
-survives 2× hedge cost, funding-off, 1-day beta lag, W{60,120,150}, and 23-24 sub-period;
-improves 2025 on both venues (bybit 3.52→4.09) where the BTC-only hedge was flat —
-mechanism = ETH is the tradeable proxy for the alt-factor exposure WP1a/WP3 identified
-(alt_ew ceiling). `shrunk_btc` near-miss (pooled ΔSh +0.036 < +0.05 bar, dominated);
-`basket5050` dead (fixed 50/50 destroys the free split's information). In-sample, Tier-2
-ceiling, rmom caveat inherited; part of the return gain is bull-sample ETH drift — the
-durable claim is variance/regime-robustness. Artifacts:
-`C:\Users\user\SHARED_DATA\continuous_hedge_upgrade_2026-06-10\`.
-
-**3. §4-C Stage-B — engine-grade PASS s0–s8 (pre-registered:**
-`docs/preregistration/continuous-hedge-2f-engine-2026-06-10.md`**): the BTC+ETH
-two-factor hedge is the new recommended hedge form (in-sample candidate, Tier-2
-ceiling).** Two-leg mode added to `apply_rebalance_rule` (`compute_hedge_betas_2f`
-bivariate causal betas, joint 2×scale cap, per-leg funding/turnover, live twin
-`compute_continuous_hedge_ratios_2f`; 10 new tests; unhedged/single-leg paths
-byte-identical — s0 parity reproduced the banked WP3 numbers to the digit). Binding
-max4 vs the banked single-BTC engine hedge: bybit +102.99%/MAR 6.12/Sh 2.862
-(ΔSharpe +0.212, ΔMAR +0.60), binance +76.95%/6.17/2.463 (+0.080, +0.53); pooled
-ΔSharpe +0.146 / ΔMAR +0.56; survives 2× hedge cost, funding-off, lag-1, W-grid, 2×
-book cost; DD not worse; improves 2024 AND 2025 on bybit (per-year Sharpe 1.55→1.70,
-3.52→4.14). Remaining (operator): second-leg hedge-manager wiring + forward demo.
-
-**4. §4-B participation-capped sizing — pre-registered NULL on dominance (B3), with a
-usable capacity frontier (receipt:**
-`docs/preregistration/continuous-participation-cap-2026-06-10.md` *(deleted in the 2026-06-10/11 receipt consolidation — recover via git history)***).** Per-trade
-participation at $1M inverted EXACTLY from the ledger cost model; cap m=min(1,
-5%/(k·4·cw·π)); daily paths rebuilt per-trade from panel midnight closes (P0 parity vs
-the official control: corr 0.9999/0.9998, deltas ≈0 — the split machinery is a verified
-reusable primitive). B1/B2/B4 pass; **B3 fails: at 5×$1M the capped book (pooled MAR
-3.83) does not beat uncapped (4.17)**. Venue asymmetry is the finding: binance capping
-mildly HELPS at scale (k10: 4.42 vs 4.02; deeper books, ~3% trades capped); bybit
-capping destroys MAR (k5: 3.31 vs 4.10; 25% of trades capped) — **bybit's thin-name
-fade tail carries its MAR** (consistent with CV1). Honest frontier (trust-region,
-all-capped): ~$5M combined → pooled MAR ~3.8, ~$10M → ~3.6, both venues positive,
-survives 2× cost — graceful, but uncapped k≥5 numbers ride the untrusted √π
-extrapolation, so any >$1M sizing decision waits on R4 fill calibration. Cap NOT
-adopted; binance-only cap not proposed (venue-specific tuning). Do not re-mine without
-calibrated impact.
-
-**5. §8-P4 residual attribution of the continuous book (analysis, receipt:**
-`docs/preregistration/continuous-residual-attribution-2026-06-10.md` *(deleted in the 2026-06-10/11 receipt consolidation — recover via git history)***):
-residual-alpha-positive vs the validated 6-factor model + market legs.** S3 residual
-Sharpe 3.91/3.91 (on-joined-days convention — don't mix with calendar-grid receipt
-Sharpes), S3 R² of the 2f-hedged book just 1.5%/6.8%, alpha ≈ +40%/yr at max4. The
-hedge mechanism confirmed independently at daily granularity: the raw book's market
-beta is **ETH-shaped not BTC-shaped** (β_eth −0.03/−0.04 vs β_btc ≈ 0); BTC-only
-hedging leaves β_eth untouched; the 2f hedge zeroes BOTH legs and raw Sharpe rises as
-R² falls (the removed exposure was uncompensated). Caveats: the factor set contains no
-short-horizon-reversal factor, so "residual" includes any systematic STR premium
-(p0/p2-1 say the fade is substantially STR-shaped); coverage = 633/401 joined days.
-
-**6. §8-P1 data layer + Stage-1 scout PASS:** `binance_usdm_metrics_5m` backfilled
-COMPLETE from data.binance.vision daily `metrics` (670 symbols / 112.3M 5-min rows of
-OI + taker/top-trader ratios, 2023-01→, survivorship-FREE — delisted symbols served;
-`scripts/backfill_binance_metrics_vision.py`; also satisfies the ridge-rerun OI
-precondition). The pre-registered **OI-flow scout PASSED 4/4** (receipt
-`continuous-oi-flow-scout-2026-06-10.md` — consolidated into this section before commit; the receipt FILE was never committed, this paragraph is the only record): pops with RISING OI (new-long-driven) fade
-better — IC(ΔOI_6h, net_return) +0.082 binance (n=852, 100% coverage, positive EVERY
-year) / +0.086 bybit (survivor subset, 67% coverage — pooled IC carried by 2026,
-2023-25 ≈ 0 there; do not cite bybit early years); 24h/tercile/lag falsifiers all
-hold; not a turnover proxy (corr with trigger score +0.07). Discovered en route: Bybit
-serves NO historical OI for delisted symbols (REST verified) — bybit OI history is
-structurally survivor-only for 2023-25; binance Vision is the only survivorship-clean
-derivatives-history source, hence the primary arm. Economic size at event level is
-modest (~1e-4/trade tercile spread) — information real, money unproven. **Stage-2 RAN
-same day — pre-registered NULL** (receipt `continuous-oi-tilt-stage2-2026-06-10.md` — consolidated into this section before commit; the receipt FILE was never committed, this paragraph is the only record):
-the tanh size tilt fails Tier-2 (pooled ΔMAR −1.07) for two documented reasons —
-(1) ΔOI_6h right-skew made mean-centering mechanically de-lever 6-8% (caught by the
-pre-registered ±5% gross guard), and (2) beyond leverage, binance ΔSharpe −0.183:
-up-sizing crowded pumps adds squeeze VARIANCE faster than the mean edge. The Stage-1
-information stands; the daily-granularity size-tilt conversion is CLOSED. Legitimate
-future forms (fresh receipts only): down-only asymmetric sizing, intraday
-burst-anchored OI features, forward liquidation-collector data. Do not re-tune tanh/
-rank variants on this window.
-
-**7. §8-P5 dynamic exit — pre-registered NULL; §4-D CLOSED PERMANENTLY (receipt:**
-`continuous-dynamic-exit-2026-06-10.md`**).** Bar-accurate fade-completion target
-(tp = entry×(1−0.5·anchor), anchor = trailing-24h run-up) vs the fixed-TP/24h clock,
-with a PERFECT T0 (100.0% trade-level exit replay both venues — the re-simulator is
-now a verified primitive for §8-P2 execution work). Result: the cleanest cross-venue
-mirage on record — bybit ΔMAR **+1.74**/ΔSharpe +0.485 (would have shipped in a
-single-venue shop), binance ΔMAR **−2.10**/ΔSharpe −0.300; pooled −0.18 → NULL. The
-fade's realizable depth profile is venue-specific; the 24h clock + fixed TP stands.
-Per the pre-commitment, no future exit work on this window absent fundamentally new
-data. **Forensic addendum (trade-ledger comparison, in the receipt):** populations
-near-identical, within-venue logic identical (delta monotone in pump size on BOTH
-venues) — the divergence is the post-TP10 continuation profile: riding past −10%
-pays +40bps/trade on bybit but −261bps on binance (binance fades exhaust at ~7-10%
-and bounce; bybit's thin-tail names keep collapsing — consistent with CV1). And the
-bybit headline is 2026-carried (per-year Δ: −7/+17/+17/+94bps) while binance is
-negative every year — even the attractive half of the mirage is recency-tilted.
-
-**8. §8-P7 passive-first entries — pre-registered NULL (receipt:**
-`continuous-passive-entry-2026-06-10.md` — consolidated into this section before commit; the receipt FILE was never committed, this paragraph is the only record**).** Lower-bound maker-fill test (limit at
-signal close, strictly-through fill, escalate to the ledger's taker entry): fill rate
-96-99% at 1h granularity (not selective), and the squeeze-continuation TAIL destroys
-the risk profile — bybit return +1.1pp but ΔMAR −0.77 (DD/Sharpe damage), binance
-ΔMAR −3.74; pooled −2.26. The ~6-8bps maker savings can't pay for selection against
-continuation tails. Mechanically explains why the sniper's wick-deep resting ladder IS
-the working passive form. Naive passive-at-touch base entries CLOSED; the execution
-path = sniper ladder + R4-calibrated sub-hour designs.
-
-**9. §8-P8 down-only OI de-sizing — pre-registered NULL; the OI sizing arc is FULLY
-closed (receipt:** `continuous-oi-downsize-2026-06-10.md` — consolidated into this section before commit; the receipt FILE was never committed, this paragraph is the only record**).** De-sizing falling-OI
-pops to 0.5× (trailing q25, causal): bybit ΔMAR −0.94 (its de-sized survivor-subset
-events were profitable, not riskier), binance +0.33 (mild, under bar, gross band
-violated); pooled −0.305. With the tilt NULL: no daily-granularity sizing form
-converts the OI-flow information into Tier-2 economics on this window. Stage-1's
-event-level fact stands; remaining OI value = intraday designs / forward collector
-data / (separate-receipt) daily-short selection. **P9 bookDepth: LAUNCHED** (idle-time,
-same session) — `backfill_binance_bookdepth_vision.py`, hourly-aggregated per-band
-depth into `binance_usdm_bookdepth_1h/` (execution-realism input for P2 +
-deletion-risk insurance); smoke-verified, resume-safe.
-
-**10. LIVE WIRING (operator-directed, 2026-06-10 second pass):** the demo daemon's
-default book is now `continuous_ensemble_v1` — the validated winner_base 4-component
-ensemble live (per-component triggers/age floors/venue-side TPs, frozen receipt
-weights, weighted sizing, component-tagged trade ids; research rule w90/tv0.045/max4/
-ddh-0.04, momentum hurdle OFF per the merged test). The single-component
-`continuous_rebalance_v1` is deprecated (kept resolvable). Also wired same day:
-2f hedge live path (HEDGE_MODE=2f, gated submit), sniper full lifecycle
-(CONTINUOUS_SNIPER=1, default off), dynamic-exit forward shadow (paper-only).
-Repo cleanse: concluded receipts/plan docs consolidated here and deleted
-(36→23 receipts); STATE.md rewritten to current state.
-
-**11. §4-F new-data scoping (background recon, no run):**
-`docs/research_notes_new_data_scoping_2026-06-10.md`. Key facts: Binance Vision
-`metrics` (5-min OI + taker ratios, every UM perp, 2020-09→current) is free and
-PIT-clean — it also satisfies the Binance-OI-backfill precondition on the ridge re-run
-door. Raw liquidation HISTORY for 2023-2025 is **unbuyable**: Binance deleted its
-`liquidationSnapshot` archive, Bybit never published one, and Tardis has a Bybit gap
-2023-04→2025-02; every liquidation feed is also 1-per-second sampled (undercounts
-cascades). Consequence: a liquidation signal must be a cross-venue PROXY (taker-flow
-bursts + OI drops from free tick/metrics data), and a live `allLiquidation`/`forceOrder`
-collector should start ASAP (forward history cannot be bought later — operator/deploy
-decision). Binance `bookDepth` (2023-01→) is a free depth option; options skew via
-Tardis/Laevitas if ever needed.
-
-## Open Methodology Debts
-
-These are still real and can move numbers:
-
-1. **Binance funding — RESOLVED on both axes (2026-06-09, two parallel sessions).**
-   COVERAGE: dataset rebuilt from data.binance.vision (51→697 symbols, true settlement
-   intervals); pre-rebuild Binance numbers are ~3-6% abs optimistic (receipt:
-   `binance-funding-rebuild-2026-06-09.md`). ACCRUAL: per-event arithmetic verified
-   end-to-end vs raw datasets — 40/40 sampled continuous trades to 5e-20, interval-
-   agnostic exact-stamp dedup (receipt:
-   `continuous-funding-debt-closure-2026-06-09.md`).
-2. **Age definition — CLOSED-AS-ACCEPTABLE 2026-06-09.** Audit above: median
-   divergence 0 days, 564/569 within ±3 days, and the single gate-flipping name errs
-   in the safe direction.
-3. **Residual-momentum causality — CLOSED-WITH-VERDICT 2026-06-09.** Latency
-   falsification + day-grid audit above: causal/no leak, but zero operational margin;
-   rmom supports no deployment-grade claim without an intraday-class design.
-4. **Residual/factor day grid — CLOSED 2026-06-09.** End-to-end audit above found no
-   off-by-one; residual-Sharpe machinery is methodologically trustworthy.
-5. **Forward evidence.** Continuous-vs-daily forward comparison is immature locally; current
-   common-window evidence is not enough to claim success.
-
-## 2026-06-10 — LR long-regularity program: densification closed by evidence; MTM rendering shipped; PE1 lead recorded
-
-Operator directive ("the long system looks like a step function; concentrated
-months; make it more frequent like the continuous system"). Two pre-registered
-receipts: `long-regularity-program-2026-06-10.md` (LR), `long-provisional-entry-2026-06-10.md` (PE1).
-
-- **Complaint quantified (cross-venue):** baseline v11a+div+volup125 is active
-  27%/26% of days; top-3 months carry **81%/76%** of total net. The concentration is
-  the FC signal's nature.
-- **LR cells ALL FAIL their bars** (clean full-PIT, both venues): same-day entry
-  throttles best2/best3 (best3 improves ret/DD 1.04× both venues — below the 1.10×
-  bar; not adopted), and the dormant intraday trigger `intra6` fails decisively
-  (2.2× trades, ret/DD 8.30→1.85 bybit / 5.90→0.41 binance).
-- **Hourly-cadence scout: GO bar FAIL.** Extra (unconfirmed-by-close) events are
-  NEGATIVE at 24/48/72h on both venues. With intra6 + the v11a-era non-selection,
-  this is the third independent confirmation: **the daily-close confirmation IS the
-  FC signal.** Six densification constructions across two programs are now closed.
-- **PE1 (execution timing, fresh receipt): FAIL on its bar-2 tail (binance cut p10
-  −12.8% < −10%) but a STRONG recorded lead** — on confirmed events the
-  trigger-hour entry nets +11.0%/+6.1% vs +1.7%/−1.4% for the day-late proxy entry
-  (cross-venue agreement): most of FC's continuation happens in the first hours.
-  Revival path (fresh receipt, engine-grade only): provisional trigger-hour entry
-  with ATR stops active from entry + cut at unconfirmed close, judged against the
-  REAL engine lifecycle. The proxy EV ratio (~5×) is NOT citable (no sniper
-  retrace / ATR exits in the proxy).
-- **Shipped (rendering, not strategy): honest daily-MTM artifacts** in every
-  long_native run — `long_native_equity_mtm.csv` + `long_native_equity_mtm.png` +
-  `equity_mtm` report block (`_mtm_daily_curve`, tests). The step-function LOOK was
-  substantially exit-day booking (2026-06-09 finding, now first-class). Bybit
-  baseline honest view: MTM Sharpe ~1.9-class, DD −3.5%-class at 1x — the
-  deployment-true curve for operator review.
-- Book-level note (unchanged evidence): drawdown balancing comes from COMPOSITION —
-  corr(short,long) ≈ −0.03 both venues; combined 30%-short MAR 4.87 vs 2.89/2.25
-  single-sleeve (2026-06-09 section). Sleeve allocation remains an operator
-  risk-preference decision.
-- **PE2 engine-grade provisional entry (same night, fresh receipt
-  `long-provisional-entry-engine-2026-06-10.md`): FAIL by 1% on the binance bar —
-  the frequency question is now FULLY closed (LR + PE1 + PE2).** The build is real
-  and shipped (`fc_provisional_entry` flag, trigger panel, confirmation-cut
-  lifecycle, 3 tests, flag-off byte-identical, 1585 suite green): enter at the
-  trigger hour with ATR stops live, cut at an unconfirmed daily close. At the
-  deployed 3× cost stress it transformed bybit (ret/DD 8.30→12.75, return
-  +28.9%→+38.6%, worst-day −1.50%→−1.09%, active days 27.6%→32.6%, all years
-  positive) and improved binance on most axes (worst-day −1.51%→−1.12%, active
-  27.0%→31.8%, return +22.8%→+24.5%) — but binance ret/DD landed 6.42 vs the
-  6.49 the 1.10× bar required, and partial-2026 flipped to −1.2%. Conjunctive
-  cross-venue bars: NOT adopted, no rescue. The flag stays in the engine, default
-  OFF; only NEW (forward) evidence may re-judge it.
-
-## 2026-06-10 — IR1 intraday residual-reversal scout: signal CONFIRMED, economics FAIL; the intraday-class proposal closes
-
-The one operator-gated creative direction the 2026-06-09 falsification work earned
-(hourly-cadence harvest of the fast-decay residual signal) was run under blanket
-operator authority with a pre-registered scout + one pre-registered amendment
-(`intraday-residual-scout-2026-06-10.md`).
-
-- **The physics is now CONFIRMED on the hourly grid, cross-venue:** trailing-24h
-  single-factor residual momentum REVERSES (IC −0.030..−0.038 at 6/12/24h, p=0.0,
-  ~28k hourly cross-sections per venue) and the information decays exactly as the
-  audited day-grid latency work said (fresh −0.038 → 24h-stale −0.009 → 48h-stale
-  −0.003). Universe-wide it is a REVERSAL; P3's "idio-weak keeps falling" sign is
-  event-conditional, not universe-wide — a genuinely useful clarification.
-- **The economics FAIL by an order of magnitude:** gross D1−D10 spread +13/+32 bps
-  per 12h/24h vs 45 bps RT taker costs; every pre-registered costed form negative
-  on both venues (long-bottom −65 bps/period; L/S −29..−40). The proposal's own
-  killer-risk caveat ("edge per trade must clear ~2× the daily system's") was
-  exactly right. Recorded, not proposed: maker-economics after R4 calibration is
-  the only conceivable revival (~25–32 bps gross vs ~10–15 bps maker costs —
-  marginal at best).
-- **IR1 CLOSED per its FAIL clause.** With LR/PE1/PE2 (long sleeve) and this, every
-  agent-runnable creative direction in the record now has a receipt; remaining
-  evidence sources are exclusively operator-gated (forward clocks, R4 fills, fapi
-  stage-2, liquidation/bookdepth maturation).
-
-## 2026-06-10 — DC1 depth-based impact calibration: the books INVERT (first bookdepth-layer use)
-
-Measurement receipt `depth-impact-calibration-2026-06-10.md` (no alpha claims) —
-the deployed books' binance entries joined to entry-hour entry-side depth
-(notional within 1% of mid; 91–99% join coverage):
-
-- **SHORT (deployed gated profile): median entry name has $98k of bid depth within
-  1% (p10 $23k)** → implied taker impact at the modeled $83k/trade is 85 bps
-  median / 366 p90; 50 bps median impact is reached at **~$0.59M deploy** — the
-  50bps-at-$1M assumption is OPTIMISTIC for instantaneous execution on the DEEPER
-  venue. Reconciliation: the turnover-based frontier ($4.3M median) measures
-  patient daily flow; depth measures the instant book. Taker capacity ~$0.5M,
-  patient capacity single-digit $M — execution style IS the capacity decision.
-  At personal scale (≤$100k) median implied impact ~8.5 bps: comfortably inside
-  the modeled stresses.
-- **LONG (accepted v11a): $2.5M median to move 1%** → 4 bps median impact at
-  $100k/trade, 50 bps at ~$12.5M deploy. **The long book is the structurally
-  scalable product (~10–20× the short's depth capacity)** — composition and
-  scaling decisions should weight that.
-- Partially closes the R4-class impact debt with market data (instant-impact
-  curves per entry); realized-fill calibration still awaits VPS fills. Any cost-
-  model change motivated by this gets its own receipt.
-
-## 2026-06-11 — TA1 trade-outcome atlas: no clean survivor; two forward-watch leads armed
-
-Operator-directed winner/loser characterization done the honest way (receipt
-`trade-atlas-2026-06-11.md`): 952 trades across the four deployed-profile ledgers
-(SHORT/LONG × venues), an 11-feature FIXED entry-context menu, cross-book +
-cross-venue consistency as the filter, and the application path fixed up front
-(forward/OOS only — never spent-window promotion).
-
-- The strongest pattern (`mkt_day_ret`, mirror-signed across all four books with
-  3/4 CIs excluding zero) was DISQUALIFIED in review: the entry-day market return
-  is ~23h of future information at the 01:00 entries — it re-confirms the
-  contemporaneous-beta structure the hedge already treats. A menu-causality slip
-  caught by the process; recorded as such.
-- **Forward-watch leads armed** (recompute on forward trades when ≥100/book
-  accumulate; graduation needs matching direction + pooled ≥2σ forward):
-  #1 repeat-name penalty (repeat30d entries win less in ALL FOUR books,
-  −0.8..−13.3pp, individually ns); #2 weekend-entry bonus (+10..+17pp on three
-  books, flat on bybit short).
-- Everything else (depth-at-entry, imbalance, crowding, concurrency, turnover
-  tier, trailing book PnL, btc30 magnitude) showed no consistently-signed effect.
-  The spent window again declined to mint in-sample alpha; the leads now ride the
-  forward clocks where they can be judged for free.
-- **TA2 follow-on (`trade-atlas-2-funding-2026-06-11.md`): funding-at-entry and
-  its 30d percentile are NULL in all four books**
-  (the crowding price doesn't separate winners from losers at entry), and the
-  cross-book feature is DEGENERATE in the most informative way possible: **zero
-  same-name overlaps within 30d across all 952 trades — the SHORT and LONG books
-  are structurally name-disjoint**, which upgrades the combined-book corr ≈ −0.03
-  finding from statistical to structural.
-- **TC1 — third (and actually last) atlas, on the CONTINUOUS winner_base book
-  (`trade-atlas-continuous-2026-06-11.md`, committed at e03e9ab AFTER TA2;
-  operator-directed, exploratory label intact).** Ran the 9-feature causal atlas
-  on the pooled deduped winner_base book (999 bybit / 852 binance unique
-  entries). Headline: **the two TA1 leads DO NOT EXIST on the continuous book**
-  (sign flips) — atlas leads are book-specific, never portable. Gate conversion
-  through the parity-verified engine path failed again, making TC1 the **FOURTH
-  no-sizing-conversion receipt** on this book (after OI tilt, down-only sizing,
-  participation cap): the w90/tv0.045/max4/ddh-0.04 rule already normalizes the
-  book and its MAR is breadth-carried — do not re-mine sizing/filter forms.
-  **A THIRD forward-watch lead is ARMED:** the session US-penalty — at ≥100
-  forward demo trades on the continuous book, recompute the US-vs-rest win-rate
-  delta on forward trades only; graduates to a gate proposal iff direction
-  matches and the pooled effect is ≥2σ (`mkt_prevday` and `log_turn_prev`
-  recorded but NOT armed; their gate forms already failed at book level).
-  Cumulative atlas harvest across TA1/TA2/TC1 (23 feature-tests): **3
-  forward-armed leads**, 1 causality catch, 1 structural discovery, rest null.
-
-## What To Keep In Repo
-
-Keep only:
-
-- this file;
-- `STATE.md` for live operational state and binding decision rules;
-- `docs/backtesting_errors_we_never_repeat.md`;
-- `docs/parameter_pre_registration.md`;
-- `docs/data_roots.md` (the data-root contract);
-- `docs/pit_gate.md` (the PIT membership gate + reconcile design);
-- `docs/timestamp_glossary.md` (the timestamp semantics reference);
-- `docs/research_plan_alpha_hunt_2026-06-10.md` (the active research charter);
-- `docs/research_notes_new_data_scoping_2026-06-10.md` (the new-data-layer
-  scoping notes the charter's §8 references);
-- a minimal `docs/preregistration/_template.md`;
-- only preregistration receipts that still represent an active deployment/promotion decision.
-
-Everything else belongs in git history or `SHARED_DATA` artifacts, not as active repo clutter.
-
-## Preregistration Policy Going Forward
-
-Default mode is now:
-
-- Exploratory sweeps: write a short dated result section here after the run.
-- Formal candidate/promotion changes: create one concise preregistration receipt, then add the
-  verdict back into this file and keep only the receipt if it remains binding.
-- Failed exploratory branches: consolidate here and delete the receipt.
-
-The repository should make the current conclusion obvious without reading dozens of stale
-experiment files.
+
+This is the research decision surface, not an archive. Closed receipts and
+one-off scripts belong in git history or run artifacts. Keep this file short
+enough that a new agent can read it before making a decision.
+
+## Non-Negotiable State
+
+- Research-stage only. Nothing is approved for real money.
+- Forward demo/paper is the arbiter. There is no clean internal pre-2023 OOS
+  root to rescue a result.
+- Both venues matter. A Bybit-only win is a warning, not a candidate.
+- Full-PIT membership, causal features, cost/funding treatment, ledgers, and
+  reconstructable run records are correctness gates.
+- The daily SHORT sleeve was erased on 2026-06-11 by operator order. It is not
+  disabled, dormant, or available for restart; git history is the archive.
+
+## Current Objects
+
+**Continuous fade book**
+
+- Live on demo only as `continuous_ensemble_v1`: p3 .30 / p4p3 .20 / p4p5
+  .40 / tp14 .10, w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25,
+  BTC-uptrend gate.
+- Research-stage, not promoted. Demo fills are execution evidence, not alpha
+  proof.
+- Known caveat: rmom is causal but has almost no latency margin. The day-grid
+  audit found no off-by-one; the effect is genuinely fast-decay.
+- Live gate can correctly produce a flat book. If the gate is closed, no-entry
+  silence is expected; if the gate is open and the book stays flat for two
+  days, that is page-worthy.
+
+**Continuous 2f hedge**
+
+- BTC+ETH 2-factor hedge is banked as an in-sample candidate with a Tier-2
+  ceiling only.
+- Live path is wired/armed, but stale warmstart CSVs block risk-increasing legs.
+  Operator must either regenerate `deploy/hedge_warmstart/*.csv` with a refresh
+  cadence or disarm the timer.
+
+**Continuous sniper**
+
+- Tier-2 demo candidate. Armed in the demo unit, code default off.
+- No placements yet because the base book has had zero entries since the 2026-06-09
+  rebuild. That is signal-side until the gate is open.
+
+**Dynamic exit**
+
+- In-sample cross-venue result was null: Bybit looked good, Binance failed.
+- Only the no-order forward paper shadow remains live as a possible revival
+  path. The fixed TP/24h clock stands unless the forward shadow clears its
+  frozen bar.
+
+**Long-native v11a**
+
+- Promoted-in-code for demo/paper only, toggled off on the live box.
+- Current profile is `div` + volup125 + weekend 1.5x tilt.
+- It remains subject to the operator's leverage/capital decision and the same
+  forward demo/paper bar. No real-money claim is allowed.
+
+## Active Binding Receipts
+
+Keep only receipts that still bind an active deployment, candidate, or
+methodology decision:
+
+- `docs/preregistration/2026-06-12-e2-regime-response-family.md` - CLOSED
+  2026-06-12 (NULL; V0 stands); kept while it documents the V1/V2
+  `btc_trend_gate` engine modes that shipped with it.
+- `docs/preregistration/continuous-capacity-impact-2026-06-09.md` - active R4
+  fill-calibration/capacity receipt.
+- `docs/preregistration/continuous-dynexit-forward-shadow-2026-06-10.md` -
+  active forward-only dynamic-exit shadow bar.
+- `docs/preregistration/continuous-forward-clock-spec-2026-06-09.md` - active
+  forward evidence design/debt.
+- `docs/preregistration/continuous-hedge-2f-engine-2026-06-10.md` - binding
+  2f hedge candidate receipt.
+- `docs/preregistration/continuous-walkforward-allocator-2026-06-09.md` -
+  binding frozen-weight/no-adaptive-reweighting policy.
+- `docs/preregistration/continuous-winner-robustness-2026-06-09.md` - binding
+  frozen ensemble/winner_base evidence.
+- `docs/preregistration/div-promotion.md` - binding long `div` profile receipt.
+- `docs/preregistration/long-volup-candidate-2026-06-09.md` - binding long
+  volup125 receipt.
+- `docs/preregistration/long-provisional-entry-engine-2026-06-10.md` - active
+  future-OOS-only PE2 re-judgment path.
+- `docs/preregistration/r4-risk-model-verdict.md` - Tier-3 residual-Sharpe
+  model foundation.
+- `docs/preregistration/rmom-latency-falsification-2026-06-09.md` - binding
+  rmom latency verdict.
+- `docs/preregistration/sniper-staged-entries-2026-06-09.md` - binding sniper
+  staged-entry candidate receipt.
+- `docs/preregistration/trade-atlas-2026-06-11.md` - binding long weekend tilt
+  plus forward-watch bars; trim if it starts duplicating closed short-era detail.
+- `docs/preregistration/_template.md` - template.
+
+Closed receipts not listed here have been folded into this summary. Do not add
+them back unless they again bind an active decision.
+
+## Failure Ledger
+
+These are closed on the spent 2023-04 -> 2026-05 window. Do not re-mine them
+without genuinely new data, a new lifecycle, or a fresh forward-only bar.
+
+**Continuous**
+
+- Rmom latency: causal/no leak, but a shift beyond the freshest legal daily
+  availability kills the edge. This blocks any deployment-grade continuous
+  claim that relies on daily rmom.
+- Downtrend extension: demoted. The headline rested on a fragile narrow slice;
+  down-regime capital is hedge/cash, not a new sleeve.
+- Daily-granularity sizing conversion: closed after OI tilt, OI downsize,
+  participation caps, continuous atlas gates, and E1 all failed to convert
+  feature ordering into deployable MAR. Stop calling this "one more tilt away".
+  E1's numbers for the record (receipt folded here; artifacts
+  `~/SHARED_DATA/e1_stage0_2026-06-12/`): bybit mid-quintile monthly IC
+  +0.051 but only 54% positive months (bar 65%), sign-flips under the
+  pooled-cut sensitivity; registered tilt formula worth +0.15bp/trade bybit
+  (t 0.02) / −2.3bp binance vs a 15-20bp/trade base book.
+- Dynamic exit: in-sample null across venues. Bybit-only continuation was a
+  mirage until forward shadow proves otherwise.
+- Event-level taker flow: P10 failed both ex-ante mechanisms on this window.
+  Flow composition did not separate winners from losers; the informative
+  squeeze-proxy leg is OI/liquidation context, not taker-flow composition.
+  Numbers for the record (receipt folded here; artifacts
+  `~/SHARED_DATA/continuous_taker_flow_scout_2026-06-12/`): IC(flow_support_6h)
+  +0.006 bybit (p=.84, cov 88%) / −0.014 binance (p=.60, cov 99.9%), signs
+  disagree, flow-tercile spread −0.5bp/trade both venues; events were the
+  locally reproduced component ledgers (parity p3 858/857, binance 722 exact).
+- BTC-regime response family (E2): NULL. V1 euphoria cap and V2 soft 3-state
+  both destroy MAR vs the live binary gate (pooled −1.96 / −2.52; worse DD,
+  both venues, both cost arms). The euphoria bucket's raw negative mean did
+  not survive the engine: those trades are net book contributors once
+  funding, exits, and rebalance dynamics are modeled. The binary uptrend
+  gate stands; down/euphoria treatment stays hedge + stops/caps.
+- Naive passive-at-touch entries: null. Maker savings were not enough to pay
+  for adverse continuation tails. Sniper-style deeper resting ladders are the
+  only passive form still alive.
+- Ridge combiner: rejected. Bybit out-of-fold IC was negative and Binance was
+  unmeasurable without the OI rebuild.
+- Hard stops, MFE/giveback exits, breakeven variations, rank-decay exits, and
+  broader crowding caps did not improve the book enough to keep.
+
+**Long**
+
+- Long regularity/densification: closed. Extra unconfirmed events were negative;
+  daily-close confirmation is the FC signal.
+- PE2 provisional trigger-hour entry failed the in-window cross-venue bar by a
+  small amount, especially on Binance. It is not adopted.
+- Long-only leverage beyond the validated profile is an operator risk decision,
+  not alpha evidence.
+
+**Cross-book / exploratory**
+
+- Intraday residual reversal: physics confirmed, economics failed by an order of
+  magnitude at taker costs. Maker/depth evidence would need a fresh receipt.
+- Downtrend bounce and hedged bounce products: killed by drawdown class and
+  operator instruction. Do not revive.
+- Funding-at-entry and most atlas features were null. The useful harvest is only
+  the forward-watch queue below.
+- Old daily SHORT evidence is historical only. It may teach methodology lessons;
+  it cannot justify a current sleeve.
+
+## Revisit Queue
+
+These are not promotion evidence. They are the only things worth keeping in
+view because the prior negative read may have been too pessimistic or because
+they can be judged forward without spending the window again.
+
+- **E2 regime response:** CLOSED 2026-06-12 — NULL (receipt
+  `2026-06-12-e2-regime-response-family.md`). V0 stands; no regime variant
+  may be revisited without genuinely new data or a forward-only bar.
+- **PE2 long provisional entry:** failed in-window, but the engine exists
+  default-off and has a pre-registered future-OOS re-judgment path once both
+  full-PIT roots extend at least 60 days past 2026-05-28 and trade counts clear.
+- **Dynamic-exit forward shadow:** only live forward evidence can decide whether
+  the Bybit continuation profile was real or just venue/window luck.
+- **Forward-watch atlas leads:** repeat-name penalty, weekend bonus for long
+  books, and continuous US-session penalty. Recompute only on forward trades
+  when the pre-stated sample thresholds are met.
+- **Liquidation / squeeze proxy:** historical raw liquidation data cannot be
+  bought cleanly. The forward liquidation tape plus OI and depth layers are the
+  credible path.
+- **R4 realized-fill / depth calibration:** capacity and maker economics remain
+  unsettled until demo fills and depth collector data mature.
+- **Intraday residual maker design:** only worth revisiting after R4/depth shows
+  the cost bar can plausibly clear.
+
+## Methodology Debts
+
+- Continuous forward window is immature; clocks restarted with the 2026-06-09
+  rebuild/data refresh.
+- Continuous forward replay orchestrator still needs to rerun the four frozen
+  component configs into `continuous_forward_replay`; until then, the forward
+  signal clock is incomplete.
+- Binance FAPI ancillary June top-ups were blocked from the dev box. Finish on
+  the VPS or another permitted host.
+- Bybit forward depth collector is built but not operator-enabled; every month
+  disabled loses live capacity data.
+
+## Repo Policy
+
+- `STATE.md` is the operational state and decision rules.
+- This file is the research decision surface.
+- `docs/preregistration/` keeps only active/binding receipts.
+- Exploratory failures get one concise entry here, then the receipt/script is
+  deleted unless it remains active.
+- If a result is missing PIT, funding, cost, ledger, or a clean run record, label
+  it exploratory at best. Do not launder it into a candidate.

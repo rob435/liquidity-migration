@@ -1,6 +1,6 @@
 ---
 name: research-report
-description: "Read, interpret, and label research and backtest reports in this quant repo. Use when reading a volume_event_research_report.md, extracting run metrics like return, drawdown, OOS and split stability, comparing runs, or assigning a run label. Pairs with the liqmig-research MCP tools parse_report, list_reports, and audit_run_artifacts."
+description: "Read, interpret, and label research and backtest reports in this quant repo. Use when reading a volume_event_research_report.md, extracting run metrics like return, drawdown, OOS and split stability, comparing runs, or assigning a run label. If available, the liqmig-research MCP tools parse_report, list_reports, and audit_run_artifacts are useful accelerators; otherwise read report files directly."
 ---
 
 > **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
@@ -18,15 +18,16 @@ Reports live under `<DATA_ROOT>/reports/...`. The main kinds:
 - (legacy `volume_event_research_report.md` files are the erased short engine's —
   historical only.)
 
-## Fast path — the `liqmig-research` MCP tools
+## Fast path — optional `liqmig-research` MCP tools
 
-- `list_reports {root}` — find report files under a data root, newest first.
-- `parse_report {path}` — extract metrics as JSON (best-effort line capture).
-- `audit_run_artifacts {path}` — check a run dir for required artifacts and
+- `list_reports {root}` - find report files under a data root, newest first.
+- `parse_report {path}` - extract metrics as JSON (best-effort line capture).
+- `audit_run_artifacts {path}` - check a run dir for required artifacts and
   return an artifact-completeness verdict.
 
-Always sanity-check tool output against the report body — the parser captures
-raw lines and can mislabel unusual formatting.
+If these tools are not available, locate reports with shell search and read the
+Markdown/JSON directly. Always sanity-check parser output against the report body;
+the parser captures raw lines and can mislabel unusual formatting.
 
 ## Metrics every strategy report should carry
 

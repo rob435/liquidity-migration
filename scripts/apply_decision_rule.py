@@ -76,7 +76,7 @@ class CellMetrics:
     max_drawdown: float
     trades: int
     total_return: float
-    # Optional — emitted by `_sweep_runtime.run_cell` for Round 2 sweeps so the
+    # Optional — emitted by the archived Round 2 sweep runtime so the
     # investigation rule can compute MAR per cell without a CLI flag. Missing
     # for legacy summary CSVs.
     window_days: float | None = None

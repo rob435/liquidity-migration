@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rebuild binance_usdm_funding from data.binance.vision monthly fundingRate archives.
 
-Receipt: docs/preregistration/binance-funding-rebuild-2026-06-09.md. Fixes the
+Basis: docs/research_summary.md / docs/data_roots.md. Fixes the
 51-symbol coverage hole (296/307 baseline short trades booked zero funding) AND the
 funding_interval_min=480 hardcode (the vision CSVs carry the TRUE per-settlement
 funding_interval_hours). Survivorship-free: the archive serves delisted symbols.

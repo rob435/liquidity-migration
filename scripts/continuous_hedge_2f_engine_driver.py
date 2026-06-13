@@ -40,8 +40,8 @@ FUNDING_ROOT = {
     "binance": SHARED / "binance_full_pit" / "binance_usdm_funding",
 }
 
-# banked numbers (parity preconditions s0a/s0b), from
-# docs/preregistration/continuous-hedge-engine-2026-06-09.md at binding max4
+# banked numbers (parity preconditions s0a/s0b), from the archived single-BTC
+# hedge Stage-B receipt at binding max4.
 S0A_CONTROL = {"bybit": {"ret": 84.01, "mar": 5.02}, "binance": {"ret": 60.00, "mar": 4.57}}
 S0B_HEDGED = {
     "bybit": {"ret": 93.18, "d_mar": 0.50, "d_sharpe": 0.233},

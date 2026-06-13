@@ -1,7 +1,7 @@
 # Pre-registration: dynamic-exit FORWARD paper-shadow (2026-06-10, operator-directed wiring)
 
 **Context:** the fade-completion dynamic exit was a pre-registered in-sample NULL
-(`continuous-dynamic-exit-2026-06-10.md`): bybit ΔMAR +1.74 but 2026-carried, binance
+(historical in-sample dynamic-exit run): bybit ΔMAR +1.74 but 2026-carried, binance
 −2.10 — a cross-venue mirage whose attractive half may or may not be a real recent
 bybit-microstructure effect. In-sample evidence CANNOT decide that; forward evidence
 can. The operator directed live wiring 2026-06-10; per house rules a failed-Tier-2

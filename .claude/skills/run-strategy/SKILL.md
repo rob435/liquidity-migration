@@ -43,14 +43,12 @@ python -m liquidity_migration <subcommand> --help
   OOS surface; both per-venue roots span their full available history. Cite
   the forward ledger as the OOS evidence.
 - Pass `--data-root` only when intentionally running a non-default audited
-  root. See `docs/data_roots.md` and the `liqmig-research` MCP `data_roots`
-  tool.
+  root. See `docs/data_roots.md`; if a `liqmig-research` MCP server is available,
+  its `data_roots` tool can be used as a convenience check.
 
 ## Canonical commands
 
-Research sweeps — `scripts/_sweep_runtime.py` is DEAD pending repoint (its
-dispatcher shells to the ERASED `volume-events` subcommand; see its docstring).
-Current patterns: continuous sweeps use an in-memory config-override driver
+Research sweeps: continuous sweeps use an in-memory config-override driver
 (see `scripts/alpha_sweep.py`); long sweeps call `run_long_native_research`
 directly per cell (see `scripts/long_improve_sweep.py`). The erased
 `volume_events_cell.sh` single-cell path has NO replacement — the daily-short
@@ -91,10 +89,11 @@ subcommand list — do not maintain a copy here.
   Running before changing it. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle
   (`bybit.resolve_private_credentials`), which defaults to demo; keep it on demo
   without explicit owner instruction.
-- Event-driven entries are the strategy path; legacy fixed-day rebalance-grid
-  benchmarks are retired — do not revive them or cite their results as evidence.
-- What is deployed vs. research-gated (the daily-close signal vs. the continuous
-  variant) is tracked in STATE.md and `docs/research_summary.md` — defer to them.
+- Continuous and LONG have separate lifecycles; do not transfer assumptions
+  between them. Legacy fixed-day rebalance grids and erased short-sleeve paths
+  are retired evidence only.
+- What is deployed vs. research-gated is tracked in STATE.md and
+  `docs/research_summary.md` — defer to them.
 - Every serious run must leave enough report output to audit the decision.
 - Before constructing a run, apply the **backtest-integrity** skill. After a
   run, read the output with the **research-report** skill before calling it a

@@ -26,6 +26,7 @@ import datetime as dt
 import gzip
 import io
 import json
+import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,14 +43,18 @@ from liquidity_migration.archive import (  # noqa: E402
     download_public_trade_archive,
 )
 
-SHARED = Path("C:/Users/user/SHARED_DATA")
+SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
 ROOT = SHARED / "bybit_full_pit"
 DATASET = ROOT / "taker_flow_5m"
 MANIFEST = DATASET / "_manifest.json"
+OHLC_DATASET = ROOT / "tick_ohlc_1m"
+OHLC_MANIFEST = OHLC_DATASET / "_manifest.json"
+EMIT_OHLC = False  # set by --ohlc: also write 1m OHLC-from-ticks partitions
 TMP = SHARED / "_bybit_taker_flow_tmp"
 COMP_PRIORITY = ["turn4p5", "turn3p3", "turn4p3", "age210tp14"]
 MS_H = 3_600_000
 MS_5M = 300_000
+MS_1M = 60_000
 LOOKBACK_H = 50  # covers a 48h causal baseline + the 2h staleness guard
 BASE_URL = "https://public.bybit.com/trading"
 
@@ -73,7 +78,10 @@ def load_bybit_events() -> pl.DataFrame:
     )
 
 
-def needed_symbol_dates(events: pl.DataFrame) -> list[tuple[str, str]]:
+def needed_symbol_dates(events: pl.DataFrame, *, forward_hours: int = 0) -> list[tuple[str, str]]:
+    """Dates covering [t0 - LOOKBACK_H, t0 + forward_hours] per event. forward_hours=0
+    is the original pre-entry layer; >0 extends to the POST-entry intra-trade path
+    (execution-realism input: stop/TP/sniper fill calibration from the tick tape)."""
     need: set[tuple[str, str]] = set()
     rows = events.select(
         pl.col("symbol").cast(pl.Utf8),
@@ -81,7 +89,7 @@ def needed_symbol_dates(events: pl.DataFrame) -> list[tuple[str, str]]:
     )
     for sym, t0 in rows.iter_rows():
         d0 = dt.datetime.fromtimestamp((t0 - LOOKBACK_H * MS_H) / 1000, tz=dt.timezone.utc).date()
-        d1 = dt.datetime.fromtimestamp(t0 / 1000, tz=dt.timezone.utc).date()
+        d1 = dt.datetime.fromtimestamp((t0 + forward_hours * MS_H) / 1000, tz=dt.timezone.utc).date()
         d = d0
         while d <= d1:
             need.add((sym, d.isoformat()))
@@ -126,17 +134,48 @@ def aggregate_taker_flow_5m(csv_bytes: bytes, *, symbol: str) -> pl.DataFrame:
     return out
 
 
-def load_manifest() -> dict[str, str]:
-    if MANIFEST.exists():
-        return json.loads(MANIFEST.read_text(encoding="utf-8"))
+def aggregate_tick_ohlc_1m(csv_bytes: bytes, *, symbol: str) -> pl.DataFrame:
+    """1m OHLC + activity from the side-flagged tick tape (the intra-trade PRICE
+    path the 5m flow aggregation discards — execution-realism input: stop/TP
+    ordering, fill severity, sniper wick verification)."""
+    frame = pl.read_csv(
+        io.BytesIO(csv_bytes),
+        columns=["timestamp", "size", "price"],
+        schema_overrides={"timestamp": pl.Float64, "size": pl.Float64, "price": pl.Float64},
+    )
+    if frame.is_empty():
+        return pl.DataFrame()
+    return (
+        frame.with_columns(
+            ((pl.col("timestamp") * 1000).cast(pl.Int64)).alias("tms"),
+        )
+        .sort("tms")
+        .with_columns((pl.col("tms") // MS_1M * MS_1M).alias("ts_ms"))
+        .group_by("ts_ms", maintain_order=True)
+        .agg(
+            pl.col("price").first().alias("open"),
+            pl.col("price").max().alias("high"),
+            pl.col("price").min().alias("low"),
+            pl.col("price").last().alias("close"),
+            (pl.col("price") * pl.col("size")).sum().alias("quote_volume"),
+            pl.len().alias("n_trades"),
+        )
+        .with_columns(pl.lit(symbol).alias("symbol"), pl.lit("bybit_public_trades").alias("source"))
+        .sort("ts_ms")
+    )
+
+
+def load_manifest(path: Path = MANIFEST) -> dict[str, str]:
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
     return {}
 
 
-def save_manifest(manifest: dict[str, str]) -> None:
-    MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-    tmp = MANIFEST.with_suffix(".json.tmp")
+def save_manifest(manifest: dict[str, str], path: Path = MANIFEST) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(manifest, indent=0, sort_keys=True), encoding="utf-8")
-    tmp.replace(MANIFEST)
+    tmp.replace(path)
 
 
 def process_one(sym: str, date: str) -> tuple[str, str]:
@@ -148,13 +187,25 @@ def process_one(sym: str, date: str) -> tuple[str, str]:
         archive_path = download_public_trade_archive(url, local)
         raw = Path(archive_path).read_bytes()
         csv_bytes = gzip.decompress(raw) if str(archive_path).endswith(".gz") else raw
-        flows = aggregate_taker_flow_5m(csv_bytes, symbol=sym)
-        if flows.is_empty():
-            status = "empty"
+        flow_part = part_dir / "part.parquet"
+        if not flow_part.exists():
+            flows = aggregate_taker_flow_5m(csv_bytes, symbol=sym)
+            if flows.is_empty():
+                status = "empty"
+            else:
+                part_dir.mkdir(parents=True, exist_ok=True)
+                flows.write_parquet(flow_part)
+                status = "ok"
         else:
-            part_dir.mkdir(parents=True, exist_ok=True)
-            flows.write_parquet(part_dir / "part.parquet")
             status = "ok"
+        if EMIT_OHLC:
+            ohlc = aggregate_tick_ohlc_1m(csv_bytes, symbol=sym)
+            if not ohlc.is_empty():
+                ohlc_dir = OHLC_DATASET / f"date={date}" / f"symbol={sym}"
+                ohlc_dir.mkdir(parents=True, exist_ok=True)
+                ohlc.write_parquet(ohlc_dir / "part.parquet")
+            elif status == "ok":
+                status = "empty"
         Path(archive_path).unlink(missing_ok=True)
         return key, status
     except ArchiveFileNotFoundError:
@@ -168,17 +219,24 @@ def main() -> None:
     ap.add_argument("--scope-only", action="store_true", help="report the download set and exit")
     ap.add_argument("--max-files", type=int, default=0, help="stop after N downloads (0 = all)")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--forward-hours", type=int, default=0,
+                    help="also cover [t0, t0+N hours] per event (post-entry intra-trade path)")
+    ap.add_argument("--ohlc", action="store_true",
+                    help="ALSO write 1m OHLC-from-ticks partitions (tick_ohlc_1m, own manifest)")
     args = ap.parse_args()
+    global EMIT_OHLC
+    EMIT_OHLC = bool(args.ohlc)
+    manifest_path = OHLC_MANIFEST if args.ohlc else MANIFEST
 
     events = load_bybit_events()
-    pairs = needed_symbol_dates(events)
+    pairs = needed_symbol_dates(events, forward_hours=args.forward_hours)
     print(f"events={events.height} unique_symbol_dates={len(pairs)} "
           f"symbols={len({s for s, _ in pairs})} "
           f"date_range=[{min(d for _, d in pairs)} .. {max(d for _, d in pairs)}]", flush=True)
     if args.scope_only:
         return
 
-    manifest = load_manifest()
+    manifest = load_manifest(manifest_path)
     todo = [(s, d) for s, d in pairs if f"{s}|{d}" not in manifest
             or manifest[f"{s}|{d}"].startswith("failed")]
     if args.max_files:
@@ -200,9 +258,9 @@ def main() -> None:
                 manifest[key] = status
                 done += 1
                 if done % 200 == 0:
-                    save_manifest(manifest)
+                    save_manifest(manifest, manifest_path)
                     print(f"  {done}/{len(todo)} {counts}", flush=True)
-    save_manifest(manifest)
+    save_manifest(manifest, manifest_path)
     print(f"DONE {done}/{len(todo)} {counts}", flush=True)
 
 

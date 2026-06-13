@@ -183,11 +183,13 @@ not be called proof, candidate alpha, promotion evidence, or real-money support.
 
 ## Repo Application
 
-For the current liquidity-migration strategy:
+For the surviving liquidity-migration systems:
 
-- Signal features must use only data known at the daily signal close.
-- Entry is delayed by the configured 1h delay; the signal close is not an
-  executable fill.
+- Signal features must use only data known at the decision timestamp. For LONG
+  daily FC signals, the daily close is not an executable fill and the configured
+  delayed/provisional lifecycle must be honored. For continuous rolling-window
+  signals, the decision timestamp is the causal trailing-window bar close and
+  any zero-delay entry must be justified by that causal construction.
 - Current-top Bybit universes are benchmarks only and must carry
   `current_universe_biased`.
 - Promotion requires archive-derived point-in-time symbol/date membership,
@@ -199,8 +201,9 @@ For the current liquidity-migration strategy:
   diagnostics.
 - Liquidity rank, rank improvement, turnover expansion, and event-rank filters
   must use prior/current data available at the event decision time.
-- Event-decay exits, max hold, cooldown, max-active, and stop-pressure state
-  must be initialized exactly as a forward/demo executor would initialize them.
+- Adaptive exits, max hold, cooldown, max-active, sniper/add-on state, hedge
+  state, and stop-pressure state must be initialized exactly as a forward/demo
+  executor would initialize them.
 - Funding is still a known gap when the data root has no funding dataset. Mark
   those runs as fee/slippage stressed but funding-missing.
 - Report promotion tests by full distribution and split stability, not by the
@@ -208,11 +211,10 @@ For the current liquidity-migration strategy:
 
 For retired paths:
 
-- The fixed daily-close short fade is no longer an active strategy.
-- Old daily-close profit-protection test results must not be cited as
-  promotion evidence for the current event-driven system.
-- Fixed-day volume rebalance grids are legacy benchmarks only, not the strategy
-  path.
+- The daily SHORT sleeve is erased and no longer an active strategy.
+- Old daily-close short tests and fixed-day volume rebalance grids are legacy
+  evidence only. They must not be cited as promotion evidence for the surviving
+  continuous or LONG systems.
 
 For paper/demo:
 

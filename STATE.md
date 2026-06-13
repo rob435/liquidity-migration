@@ -1,211 +1,138 @@
 # Research Program State
 
 **Last updated:** 2026-06-12
-Live/operational state plus the decision rules. Research conclusions live in
-[docs/research_summary.md](docs/research_summary.md); the active research charter is
-[docs/research_plan_alpha_hunt_2026-06-10.md](docs/research_plan_alpha_hunt_2026-06-10.md)
-(§8 = the forward pipeline + Wave-1/2 outcomes).
+
+Read this first for live state and binding decision rules. Research conclusions
+live in [docs/research_summary.md](docs/research_summary.md).
 
 ## First Read
 
-1. `STATE.md` — what is running and what rules bind us.
-2. `docs/research_summary.md` — consolidated findings and next direction.
+1. `STATE.md` - what is running, what is open, and what rules bind us.
+2. `docs/research_summary.md` - current research decisions, failure ledger, and
+   revisit queue.
 
-Old one-off receipts were consolidated and deleted (again 2026-06-10). Git history is
-the archive.
+Git history is the archive. Do not keep closed one-off receipts in the hot path.
 
 ## Current Status
 
 Liquidity-migration is research-stage. **Nothing is approved for real money**
-(`REAL_MONEY=false`; demo/paper only). The VPS runs ONLY the continuous system
-(operator re-shape 2026-06-09). **The daily SHORT sleeve was ERASED from the
-system 2026-06-11 by operator order** — engine, demo daemon, CLI, deploy units,
-scripts, tests and docs are gone (git history is the archive; shared infra the
-short hosted was relocated to `trade_lifecycle`/`_common`/`event_demo_exits`).
-The LONG sleeve stays promoted-in-code but toggled OFF (`deploy/sleeves.env`).
-A second 5-agent full-repo audit ran 2026-06-12 (execution + live demo test
-orders, telegram, deploy/VPS, docs, data plane): all findings fixed same-day —
-headline items were the inert armed hedge (below), an exit orderLinkId collision
-on the armed sniper path, and a sniper partial-fill ghost window; live test
-orders + a telegram smoke test verified the venue path and notify transport
-end-to-end. A THIRD 5-agent audit ran later the same day: 1 CRITICAL — the
-live-armed daily rebalance resized every ensemble-component (and snipe) trade
-to FULL base notional, silently destroying the frozen ensemble weights — plus
-a reduce-fill ledger-erasure bug, paper exits booked at entry price (0% PnL),
-no ws_risk liveness check (erased with the short sleeve), the forward report
-exiting 0 on failed sends, the fast protective-exit loop invisible to telegram,
-and LONG failing OPEN on a missing sleeves.env (every sleeve now fails safe to
-off). All fixed same-day; live test order + telegram smoke re-verified.
-A FOURTH 5-agent audit ran 2026-06-12 targeting what rounds 1-3 missed plus
-regression checks: the crash-RECOVERY paths re-introduced the round-3 sizing
-CRITICAL (adopted/reconciled component rows lost `component_weight` → the
-rebalance planner now fail-safes by skipping un-weighted component rows, and
-both recovery paths stamp the weight), pending-fill recovery mis-filed
-continuous trades into the erased short's ledger (identity fields now ride the
-order rows), ws_risk's two close paths never booked realized PnL (breaking the
-adverse-exit breaker), and `payload["entries"]` was permanently 0 — a
-successful live entry would have paged nobody. Also: hedge sizes off LIVE
-wallet equity when armed (blocked+paged on read failure) and telegrams on
-submit, ETH hedge-leg adoption keeps the never-force-exit contract, cycles
-ledgers month-bucketed (unbounded-growth class), sniper placements flushed
-crash-safe, deploy pins the triggering SHA, wrapper-unit argv parity tests,
-depth-collector watchdog coverage, canonical pre-push hook
-(`scripts/git-hooks/pre-push`), and a docs/dead-code sweep (14 zero-caller
-functions deleted). All fixed same-day; live test order + telegram smoke
-re-verified.
+(`REAL_MONEY=false`; demo/paper only). The daily SHORT sleeve was erased from
+the system on 2026-06-11 by operator order; only continuous fade and long v11a
+remain.
 
-## What's Running / Wired (updated 2026-06-12)
+The VPS runs the continuous demo system. LONG is promoted-in-code for demo/paper
+only but toggled off in `deploy/sleeves.env`. Continuous is live demo evidence,
+not promoted and not paper-ready.
 
-- **CONTINUOUS demo book — live default is now the validated winner_base 4-component
-  ensemble** (`continuous_ensemble_v1`: p3 .30 / p4p3 .20 / p4p5 .40 / tp14 .10,
-  frozen receipt weights, per-component age floors + venue-side TPs, w90/tv0.045/max4/
-  ddh-0.04, NO momentum hurdle, rmom q25 + BTC-uptrend gate). Replaces the deprecated
-  single-component `continuous_rebalance_v1` (kept resolvable for old ledgers).
-  Demo fills = execution evidence, not alpha proof; the rmom latency caveat stands.
-- **2f BTC+ETH hedge (banked, Tier-2 ceiling): live path wired, armed, but has
-  NEVER submitted** (audit 2026-06-12): every armed run since 2026-06-10 was
-  `submit_blocked_stale_warmstart` — the committed warmstart CSVs are stale
-  (bybit ends 2026-05-23, binance 2026-04-29; >3d limit) and NO refresh pipeline
-  exists; BOTH `deploy/hedge_warmstart/*.csv` need regenerating (the CSVs are in
-  the deploy paths filter since round 3, so the refresh commit auto-deploys). Audit fixes: a flat book now
-  correctly hedges zero (`submit_no_action`, healthy); blocked/failed armed runs
-  exit NONZERO so the watchdog pages; stale warmstart blocks only risk-INCREASING
-  legs (reduce-to-flat always allowed); leg qtys floor to the venue step
-  (previously off-grid → would have been rejected). OPERATOR DECISION pending:
-  regenerate `deploy/hedge_warmstart/*.csv` (and decide a refresh cadence) or
-  disarm the timer — until then the hedge pages the first time a non-flat book
-  needs a Buy leg.
-- **Sniper (Tier-2 demo candidate): fully wired — ARMED in the demo unit since
-  2026-06-10 (`CONTINUOUS_SNIPER=1`; code default off).** PostOnly +8%
-  quarter-size Sell limit per fresh entry with disaster stop attached; per-cycle
-  fill reconcile → first-class trade rows; cancel/exit with the base. No
-  placements yet (zero book entries since the 06-09 rebuild — signal-side, not
-  a fault). ws_risk adopts a between-cycle fill (venue stop present; ledger row
-  arrives at next reconcile, ≤1h).
-- **Dynamic exit: forward PAPER-SHADOW only** (in-sample NULL — cross-venue mirage).
-  `continuous_dynexit_shadow.jsonl`, zero order impact, pre-registered 60d/40-shadow
-  forward bar (`continuous-dynexit-forward-shadow-2026-06-10.md`).
-- **Shared kline data plane (2026-06-10 parallel session):** the paper shadow
-  follows the demo root's flushed kline snapshot read-only (`KLINES_FOLLOW_ROOT`,
-  hardened follower: prune/staleness/self-follow guard) — one WS pool per box.
-- SHORT: ERASED 2026-06-11 (operator order). No profile, daemon, units, or CLI
-  remain; ws_risk still protects any legacy short ledger rows generically.
-- LONG (off-box, promoted-in-code): `div` + volup125 + weekend 1.5x tilt (TA1
-  gate, 2026-06-11) — NOT deployed; rides with the operator's 10x leverage-cap
-  decision.
-- **VPS:** Hetzner demo host (full rebuild 2026-06-09; forward Tier-3 clocks restart
-  then). Local working tree is AHEAD of the VPS — a push auto-deploys.
+Several 2026-06-12 audit rounds found and fixed live execution bugs
+(component-weight sizing, recovery/adoption identity, ws_risk realized PnL,
+telegram visibility, deploy pinning, liveness checks, and ledger bucketing).
+Details are in git history; the current behavior below is what matters.
 
-## Operator queue — EXECUTED 2026-06-10 (operator-directed)
+## What's Running / Wired
 
-1. ~~Commit/push~~ DONE: `7d871e4` (ensemble+hedge+sniper+shadow wiring, repo
-   cleanse) + `a461ab7` (liquidation collectors), both auto-deploying. CI deploy
-   uses the possibly-stale `VPS_ED25519_FINGERPRINT` variable — failure emails the
-   operator; fix the variable if the deploy mail arrives.
-2. ~~Env flips~~ DONE in the units: hedge `HEDGE_MODE=2f SUBMIT_HEDGE=1
-   CONFIRM_DEMO_ORDERS=1` (submit still guard+staleness-gated at runtime);
-   demo `CONTINUOUS_SNIPER=1`. VERIFIED 2026-06-12: the hedge has NEVER fired
-   (blocked on the stale warmstart — see "What's Running"); no sniper placement
-   yet because the book has had zero entries since the rebuild (BTC-trend +
-   rmom gates; signal-side, not a fault).
-3. ~~R4 pull~~ transport fixed (ssh; no rsync needed) — finding: the VPS ledgers
-   hold NO trades yet (book restarted 06-09; no entries fired). R4 calibration
-   waits for fills to accrue under the ensemble.
-4. ~~Data-root refresh~~ bybit_full_pit extended to 2026-06-09 (data fresh
-   enough for the forward clock — but the replay ORCHESTRATOR that re-runs the
-   4 component configs to feed `continuous_forward_replay` is NOT yet built;
-   see the 2026-06-12 addendum in `continuous-forward-clock-spec-2026-06-09.md`);
-   binance klines+manifest extended to 2026-05-31 (vision).
-   Binance fapi ancillary June top-ups FAILED from this box (fapi unreachable
-   locally — same block as the futures WS; the completeness guard refused a
-   biased write). To finish: run `bash scripts/build_full_pit_binance.sh`
-   stage 2 on the VPS (Hetzner reaches fapi) or any non-blocked host.
-5. ~~P3 collectors~~ DONE (operator-approved): `liquidation_collector.py` +
-   always-on unit, deployed. Bybit leg CAPTURING (1.5k+ rows day one). Binance
-   leg: VERIFIED silently region-restricted from the Hetzner IP (WS connects,
-   zero data even on btcusdt@aggTrade) — same for the dev box. Binance forward
-   liquidation capture needs a host in a permitted region (operator decision);
-   the leg idles harmlessly and will capture if access ever opens.
-6. OPEN: volup125 + long-sleeve leverage-cap decision (long sleeve is off).
-7. OPEN (one command, operator-gated enable): bybit forward DEPTH collector built +
-   smoke-tested (`liquidity_migration/depth_collector.py`, unit
-   `liquidity-migration-depth-collector.service`, NOT auto-enabled by deploy).
-   Bybit has no historical book data — every month unenabled is deployed-venue
-   capacity data lost forever (DC1 measured binance only). Enable on the VPS:
+- **Continuous demo book:** live default is `continuous_ensemble_v1`
+  (`winner_base`: p3 .30 / p4p3 .20 / p4p5 .40 / tp14 .10,
+  w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25,
+  BTC-uptrend gate). Demo fills are execution evidence only.
+- **2f BTC+ETH hedge:** wired and armed, but risk-increasing legs are blocked by
+  stale warmstart CSVs (`deploy/hedge_warmstart/*.csv`). Flat/no-action runs are
+  healthy; failed/blocked armed runs page.
+- **Sniper:** wired and armed in demo (`CONTINUOUS_SNIPER=1`; code default off).
+  No placements yet because the base book has had zero entries since the
+  2026-06-09 rebuild.
+- **Dynamic exit:** no-order forward paper shadow only. The in-sample result was
+  a cross-venue null; the shadow is the only possible revival path.
+- **Shared kline data plane:** paper shadow follows the demo root's flushed
+  kline snapshot read-only (`KLINES_FOLLOW_ROOT`).
+- **LONG:** `div` + volup125 + weekend 1.5x tilt, toggled off, awaiting operator
+  leverage/capital decision.
+- **VPS:** Hetzner demo host. A push to the deployment branch can auto-deploy;
+  do not push without operator confirmation and the pre-push gate.
+
+## Open Operator Decisions
+
+1. Regenerate `deploy/hedge_warmstart/*.csv` and define refresh cadence, or
+   disarm the hedge timer.
+2. Enable the Bybit forward depth collector on the VPS if capacity data matters:
    `systemctl enable --now liquidity-migration-depth-collector`.
-8. FIXED (2026-06-11, operator-directed): the continuous-vs-daily comparator no
-   longer depends on the short sleeve at all — with no/insufficient daily-leg data
-   it degrades to a CONTINUOUS-ONLY forward report (return/MAR over the continuous
-   ledger's own window) instead of a blocking STALE. (Superseded 2026-06-11: the
-   short sleeve was ERASED outright; no SHORT toggles remain.)
-9. ARMED (data-refresh-triggered, no operator action needed until then): PE2
-   long provisional-entry OOS re-judgment — when BOTH full-PIT roots extend ≥60d
-   past 2026-05-28 (and ≥30 prov trades/venue), run the pre-registered cells per
-   `docs/preregistration/long-provisional-entry-engine-2026-06-10.md` §OOS. The
-   in-sample near-miss (bybit ret/DD 8.30→12.75; binance 1.088× vs 1.10× bar) is
-   context only.
+3. Finish Binance FAPI ancillary June top-ups from the VPS or another permitted
+   host; the dev box is region/network blocked.
+4. Decide LONG leverage/capital. The sleeve is off until then.
+5. PE2 long provisional-entry OOS re-judgment is armed only after both full-PIT
+   roots extend at least 60 days past 2026-05-28 and have enough trades.
+6. Build the continuous forward replay orchestrator that reruns the four frozen
+   component configs into `continuous_forward_replay`.
+7. Binance forward liquidation capture needs a permitted-region host. The current
+   host idles harmlessly with zero Binance data.
 
 ## Current Research Direction
 
-Clean slate as of 2026-06-12 (operator): the full window is open for
-pre-registered research. Prior waves' results, banked wins, and closed
-questions live in [docs/research_summary.md](docs/research_summary.md) — read
-them there, don't restate them here. Working practice: pre-register a run
-before it touches a per-venue root, test both venues, judge by the tier
-ladder below.
+The full window is open for pre-registered research again, but the methodology
+bar did not change: both venues, full PIT, causal features, cost/funding, and
+pre-stated decision rules.
 
 Active programs:
 
-- **Composite sizing + regime response (operator-directed):**
-  [docs/research_plan_composite_sizing_2026-06-12.md](docs/research_plan_composite_sizing_2026-06-12.md)
-  — E1 capped 5-feature-composite size tilt; E2 BTC-trend regime family
-  (V0 current gate / V1 +20% euphoria cap / V2 soft 3-state). Window runs
-  decide at Tier-2; pre-regs `2026-06-12-e1-*` / `2026-06-12-e2-*`. The
-  motivating diagnostics also closed four dead ends (plan §5): linear regime
-  scores, regime-tail catastrophe trimming, per-component max_ret168 tilts,
-  unconditional all-days trading.
-- **Taker-flow stack (Wave 3):** `bybit_full_pit/taker_flow_5m` building
-  2026-06-12 (event-anchored 5-min signed taker flow from the public tick
-  archive, survivorship-free). Queue: P10 squeeze-proxy Stage-1
-  (`continuous-taker-flow-scout-2026-06-12.md` + external priors notes),
-  P11 full-universe completion (idle-time), P12 liquidation-proxy calibration
-  (~30d, waiting on the forward `allLiquidation` tape — healthy at 27k
-  events/2d).
+- **Forward data stack:** P11 taker-flow full-universe completion is idle-time;
+  P12 liquidation-proxy calibration waits on a mature forward liquidation tape
+  (~2026-07-10). All remaining evidence paths are forward-only: demo fills →
+  R4 calibration, dynexit shadow, forward-watch leads (≥100 trades/book).
 
-## Decision Rules (three-tier demo-arbiter)
+Closed same-day (2026-06-12) and not to be rescued:
 
-Forward demo/paper is the arbiter. MAR primary (pooled), Sharpe secondary.
+- E1 composite size tilt ended at Stage-0 NO-GO (+0.15bp/trade bybit).
+- P10 event-level taker-flow conditioning failed and is retired on this window.
+- E2 regime family NULL — V1/V2 destroy MAR vs the live gate (pooled −1.96 /
+  −2.52); the binary uptrend gate stands.
+- Daily-granularity sizing-conversion on the continuous book is closed.
+
+## Decision Rules
+
+Forward demo/paper is the arbiter. MAR is primary, Sharpe secondary.
 
 ### Tier 1 - Investigation
-- MAR delta positive on majority venues, or one venue positive with the other not
-  badly worse. No return sign-flip vs control. ≥30 bybit / ≥20 binance trades
-  (unless a labeled tiny scout).
+
+- MAR delta positive on a majority of venues, or one venue positive with the
+  other not badly worse.
+- No return sign-flip vs control.
+- At least 30 Bybit / 20 Binance trades unless explicitly labeled a tiny scout.
 
 ### Tier 2 - Demo Candidate
-- Positive return on both venues. Pooled MAR delta > +0.1. Neither venue worse than
-  MAR delta −0.5. Trade counts clear Tier 1. Fragility diagnostics reported, not
-  used to rescue weak cells.
 
-### Tier 3 - Real Money (strict, never loosened)
-- ≥30 days forward demo/paper. Forward MAR > 0 both venues. Drawdown < 50%. Daily
-  reconciliation. Bootstrap pooled MAR-delta left tail ≥ 0. Residual Sharpe ≥ +0.3.
-  Stress pass and capacity ≥ 10x deployment size. No internal pre-2023 OOS exists.
+- Positive return on both venues.
+- Pooled MAR delta > +0.1.
+- Neither venue worse than MAR delta -0.5.
+- Trade counts clear Tier 1.
+- Fragility diagnostics reported, never used to rescue a weak cell.
 
-## Methodology Debts (open)
+### Tier 3 - Real Money
 
-- **rmom latency knife-edge** (shift3-only; grid audited correct — genuine fast
-  decay): no continuous promotion case until resolved. NOTE (2026-06-12): the
-  falsification harness (`scripts/rmom_latency_falsification.py`) is broken
-  pending git-restore — its comparator script was deleted with the short-sleeve
-  erasure; re-running requires restoring from `e03e9ab^` into a scratch checkout.
-- Impact calibration at deployed size (R4 — blocked on the fill-ledger pull).
-- Continuous forward window immature (clock starts at the data-root refresh).
-- Closed 2026-06-09 (receipts kept): binance funding coverage+accrual, live-vs-PIT
-  age, factor day-grid.
+Strict and currently unmet:
+
+- At least 30 days forward demo/paper.
+- Forward MAR > 0 on both venues.
+- Drawdown < 50%.
+- Daily reconciliation.
+- Bootstrap pooled MAR-delta left tail >= 0.
+- Residual Sharpe >= +0.3.
+- Stress pass and capacity >= 10x deployment size.
+- No internal pre-2023 OOS exists.
+
+## Open Methodology Debts
+
+- **Rmom latency:** causal but knife-edge. No continuous promotion case until a
+  design proves the effect can be harvested with operational margin.
+- **Impact/capacity:** R4 realized-fill calibration waits on live fills and depth
+  collector data.
+- **Forward evidence:** continuous forward window is immature and signal replay
+  orchestration is incomplete.
+- **Funding/data freshness:** Binance June ancillary top-up remains blocked from
+  the dev box.
 
 ## Helpers
 
-- Reconcile sleeves: `bash scripts/reconcile.sh` (long + continuous)
+- Reconcile: `bash scripts/reconcile.sh`
 - Tier-2 robustness: `python scripts/r1_robustness.py --sweep-tag <TAG>`
 - Continuous readiness: `python -m liquidity_migration continuous-forward-readiness --paper-only`
 - Hedge dry-run: `.venv/bin/python scripts/run_continuous_hedge.py --venue bybit`
@@ -215,7 +142,7 @@ Forward demo/paper is the arbiter. MAR primary (pooled), Sharpe secondary.
 
 1. Never set `REAL_MONEY=true` without explicit owner instruction.
 2. Never present continuous as promoted or paper-ready.
-3. Both venues matter; single-venue Bybit wins are not enough.
+3. Both venues matter; single-venue wins are not enough.
 4. Full-PIT, causal features, ledgers, and cost modeling are correctness gates.
 5. Do not loosen Tier 3 to rescue a result.
 6. Pre-push gate before any push: ruff plus pytest.
@@ -223,6 +150,6 @@ Forward demo/paper is the arbiter. MAR primary (pooled), Sharpe secondary.
 
 ## How To Update
 
-Keep this file short. Research results go in `docs/research_summary.md`. Keep
-`docs/preregistration/` only for receipts that still bind an active deployment,
-candidate, or methodology decision.
+Keep this file short. Research results go in `docs/research_summary.md`.
+`docs/preregistration/` keeps only receipts that still bind an active
+deployment, candidate, or methodology decision.

@@ -65,8 +65,41 @@ exploratory) pushes against both tails, so the registered run models funding.
 
 ## Post-run results
 
-(fill in after each stage; include report paths + commit SHA)
+**Stage 1 ran 2026-06-12** (`scripts/e2_regime_family.py`; artifacts
+`~/SHARED_DATA/e2_regime_family_2026-06-12/report.json`). Engine support for
+V1/V2 added same-day (`uptrend_capped` + `soft3` gate modes, 2 tests,
+existing paths byte-identical). V0 cells = the parity-verified rebuilt
+component ledgers (p3 858/857 bybit, 722 exact binance); V1/V2 = the same 4
+cells re-run per variant per venue; combine on frozen winner weights through
+w90/tv0.045/max4/ddh-0.04; funding ON (bybit modeled / binance partial —
+disclosed); 2x-cost arm via the scout cost-multiplier convention.
+
+| variant/venue | base ret | base MAR | base DD | 2x ret | 2x MAR |
+|---|---:|---:|---:|---:|---:|
+| V0 bybit | +69.9% | 4.18 | −5.3% | +47.1% | 2.44 |
+| V0 binance | +57.2% | 4.46 | −4.2% | +43.5% | 3.20 |
+| V1 bybit | +50.6% | 2.48 | −6.6% | +36.8% | 1.57 |
+| V1 binance | +34.6% | 2.24 | −5.1% | +26.8% | 1.72 |
+| V2 bybit | +43.8% | 1.85 | −7.6% | +35.2% | 1.55 |
+| V2 binance | +32.3% | 1.76 | −6.0% | +18.9% | 1.03 |
+
+MAR-deltas vs V0: V1 pooled **−1.96** base / −1.18 at 2x; V2 pooled
+**−2.52** base / −1.53 at 2x. Both variants fail every Tier-2 condition
+except positive returns. The receipt's own prediction (V1 = small MAR
+improvement) is FALSIFIED — recorded as such.
 
 ## Verdict
 
-(pending)
+**NULL — V0 (the live binary uptrend gate) stands; both pre-named variants
+are rejected and the family is closed.** The exploratory F5 bucket table
+(euphoria mean −136bps on the no-trigger population) did NOT survive
+conversion through the real engine: removing >+20%-trend days costs ~20pp
+return, near-halves MAR, and worsens drawdown on BOTH venues — the
+trigger-selected book's euphoria trades are net contributors once TP/exit
+mechanics, funding (shorts collect in euphoria), and the rebalance rule's
+equity dynamics are modeled. Methodology note for the record: this is the
+mirror image of E1 — a same-trades reweighting could be adjudicated at trade
+level, but a gate change alters the trade POPULATION and therefore required
+the full engine, and the engine reversed the naive diagnostic's sign. No new
+variants, no threshold tuning, per the registration. Down/euphoria-regime
+treatment remains: hedge + per-name stops/caps.

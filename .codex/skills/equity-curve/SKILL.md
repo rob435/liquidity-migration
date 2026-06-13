@@ -11,14 +11,14 @@ description: "Produce equity curves for the promoted LONG v11a sleeve from its E
 
 # Equity curves — promoted profiles, one command
 
-**For ANY/ALL sleeves' deployed-profile equity curve, use the zero-friction tool:**
+**For the promoted-in-code LONG sleeve equity curve, use the zero-friction tool:**
 
 ```bash
-bash scripts/equity_curves.sh                 # the promoted LONG sleeve, last 3 years
+bash scripts/equity_curves.sh                 # LONG only, last 3 years
 bash scripts/equity_curves.sh --years 2       # shorter window (lighter on the 16 GB box)
 ```
 
-It runs the promoted sleeve's EXACT deployed profile — sourced from the single source
+It runs the LONG sleeve's EXACT promoted-in-code profile — sourced from the single source
 of truth `liquidity_migration/promoted.py` (`long_profile`; `PROFILES == {"long"}`
 since the 2026-06-11 short-sleeve erasure, pinned by `tests/test_promoted_profiles.py`)
 — emits the equity PNG, and prints the `run_label` for the run (a biased/partial-PIT

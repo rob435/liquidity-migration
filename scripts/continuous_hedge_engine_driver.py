@@ -1,6 +1,7 @@
 """WP3 Stage-B: BTC hedge leg through the rebalance engine (winner_base ensemble).
 
-Pre-registered in docs/preregistration/continuous-hedge-engine-2026-06-09.md.
+Historical single-BTC hedge Stage-B helper. The receipt is archived in git; the
+active hedge receipt is docs/preregistration/continuous-hedge-2f-engine-2026-06-10.md.
 Hedge params fixed a-priori from Stage-A (W90/min60/cap2); instrument BTCUSDT with
 real funding. Controls must reproduce the Stage-A controls.
 
@@ -210,7 +211,7 @@ def main() -> None:
     verdict = {"deltas": d, "pooled_dmar": round(pooled, 2), "conditions": conds, "PASS": all(conds.values())}
 
     report = {
-        "preregistration": "docs/preregistration/continuous-hedge-engine-2026-06-09.md",
+        "preregistration": "archived: continuous-hedge-engine-2026-06-09.md",
         "winner_weights": WINNER_WEIGHTS,
         "rows": rows,
         "verdict": verdict,

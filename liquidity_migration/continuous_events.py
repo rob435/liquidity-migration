@@ -103,7 +103,13 @@ class ContinuousEventConfig:
     entry_decel_lookback_h: int = 0       # 0=off; require close[t]/close[t-lookback]-1 <= entry_decel_max_ret
     entry_decel_max_ret: float = 0.0      # fade-started confirmation: recent move must be <= this
     market_min_ret_1d: float = -1.0       # skip entry if equal-weight market 1d return < this (-1 = off)
-    btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend"; causal prior-30d BTC return
+    btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend" | "uptrend_capped" | "soft3"
+    # E2 regime family (receipt 2026-06-12-e2-regime-response-family.md). uptrend_capped (V1):
+    # on iff 0 < trend <= cap. soft3 (V2): trend > cap -> off; 0 < trend <= cap -> full size;
+    # trend <= 0 -> btc_soft3_size_frac x notional, top-composite-quintile candidates only
+    # (quintile within the fresh-entry pool at the same signal ts, ties kept).
+    btc_trend_euphoria_cap: float = 0.20  # threshold on the engine's prior-30d return-SUM trend
+    btc_soft3_size_frac: float = 0.25
     entry_event_trigger: str = "none"      # hourly catalyst gate; "none" preserves continuous spell entries
     failed_fade_hours: int = 0            # 0=off; cut a fade that hasn't worked after N hours
     failed_fade_loss_pct: float = 0.0
@@ -531,15 +537,28 @@ def _run_trades(
     last_entry: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
     btc_gate = config.btc_trend_gate
-    if btc_gate not in ("off", "uptrend", "downtrend"):
-        raise ValueError(f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}")
+    if btc_gate not in ("off", "uptrend", "downtrend", "uptrend_capped", "soft3"):
+        raise ValueError(
+            "btc_trend_gate must be 'off', 'uptrend', 'downtrend', 'uptrend_capped', or 'soft3'; "
+            f"got {btc_gate!r}"
+        )
     skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
-    skipped_crowding = 0
+    skipped_crowding = skipped_soft3_quintile = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
     turns = entries["turnover_quote"].to_list()
     spell_ends = entries["spell_end_ts"].to_list() if "spell_end_ts" in entries.columns else tss
+    # soft3: per-signal-ts top-quintile composite threshold over the fresh-candidate pool
+    # (>= keeps ties; a singleton pool keeps its only candidate).
+    soft3_q80: dict[int, float] = {}
+    if btc_gate == "soft3":
+        by_ts: dict[int, list[float]] = {}
+        for ts_i, comp_i in zip(tss, comps):
+            if comp_i is not None and np.isfinite(float(comp_i)):
+                by_ts.setdefault(int(ts_i), []).append(float(comp_i))
+        for ts_i, vals in by_ts.items():
+            soft3_q80[ts_i] = float(np.quantile(np.asarray(vals), 0.8))
     for sym, sig_ts, comp, turn, spell_end in zip(syms, tss, comps, turns, spell_ends):
         bars = symbol_bars.get(sym)
         if bars is None:
@@ -575,6 +594,7 @@ def _run_trades(
         if age_min_ms > 0 and (entry_bar_end - int(bars["bar_end_ts_ms"][0])) < age_min_ms:
             skipped_gate += 1
             continue
+        regime_size_mult = 1.0
         if btc_gate != "off":
             trend = (btc_trend_daily or {}).get((int(sig_ts) // MS_PER_DAY) * MS_PER_DAY)
             if trend is None:
@@ -586,6 +606,20 @@ def _run_trades(
             if btc_gate == "downtrend" and trend > 0.0:
                 skipped_btc_trend += 1
                 continue
+            if btc_gate == "uptrend_capped" and not (0.0 < trend <= config.btc_trend_euphoria_cap):
+                skipped_btc_trend += 1
+                continue
+            if btc_gate == "soft3":
+                if trend > config.btc_trend_euphoria_cap:
+                    skipped_btc_trend += 1
+                    continue
+                if trend <= 0.0:
+                    thr = soft3_q80.get(int(sig_ts))
+                    comp_v = float(comp) if comp is not None else float("-inf")
+                    if thr is None or comp_v < thr:
+                        skipped_soft3_quintile += 1
+                        continue
+                    regime_size_mult = config.btc_soft3_size_frac
         if decel_h > 0 and entry_bar - decel_h >= 0:
             base_px = float(close_arr[entry_bar - decel_h])
             recent_ret = (float(close_arr[entry_bar]) / base_px - 1.0) if base_px > 0 else 0.0
@@ -603,6 +637,7 @@ def _run_trades(
             rv = _entry_vol(close_arr, int(entry_bar))
             mult = min(max(config.target_vol_per_name / rv, 1.0 / clamp), clamp) if rv > 0 else 1.0
             nw = base_nw * mult
+        nw *= regime_size_mult
         # vol-scaled stop (default off): k * trailing hourly vol, clamped; else the fixed stop_pct.
         trade_stop = stop_pct
         if config.stop_vol_mult > 0.0:
@@ -639,6 +674,7 @@ def _run_trades(
         "skipped_breaker": skipped_breaker,
         "skipped_btc_trend": skipped_btc_trend,
         "skipped_crowding": skipped_crowding,
+        "skipped_soft3_quintile": skipped_soft3_quintile,
     }
     if not rows:
         return _empty_trades(), skips

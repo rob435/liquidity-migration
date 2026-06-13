@@ -62,23 +62,52 @@ DATA_ROOTS = [
         ),
     },
     {
-        "id": "live_demo",
-        "path": "data/bybit-demo-event",
+        "id": "continuous_demo",
+        "path": "data/bybit-continuous-demo-event",
         "purpose": (
-            "Live Bybit demo operational root: order/trade ledgers, cycle "
-            "reports, risk-watchdog reports. Never point a research run here."
+            "Live continuous demo operational root: order/trade ledgers, cycle "
+            "reports, and risk-watchdog reports. Never point a research run here."
         ),
         "boundary": "Operational forward ledgers only, not a research dataset.",
     },
     {
-        "id": "paper_shadow",
-        "path": "data/bybit-paper-event",
+        "id": "continuous_paper",
+        "path": "data/bybit-continuous-paper-event",
         "purpose": (
-            "Paper-shadow ledger: same profile as live_demo with no order "
-            "submission and idealised fills. Used by reconcile-paper-demo / "
-            "reconcile-long-paper-demo to measure execution slippage."
+            "Continuous paper/shadow operational root: no-order forward "
+            "bookkeeping and diagnostics. Never point a research run here."
         ),
         "boundary": "Operational forward ledger, not a research dataset.",
+    },
+    {
+        "id": "long_demo",
+        "path": "data/bybit-long-demo-event",
+        "purpose": (
+            "LONG demo operational root. The sleeve is currently toggled off; "
+            "use only for demo/paper reconciliation, not research runs."
+        ),
+        "boundary": "Operational forward ledger, not a research dataset.",
+    },
+    {
+        "id": "long_paper",
+        "path": "data/bybit-long-paper-event",
+        "purpose": (
+            "LONG paper operational root. Use only for demo/paper "
+            "reconciliation, not research runs."
+        ),
+        "boundary": "Operational forward ledger, not a research dataset.",
+    },
+    {
+        "id": "legacy_short_demo",
+        "path": "data/bybit-demo-event",
+        "purpose": "Inert legacy root from the erased daily SHORT sleeve.",
+        "boundary": "Historical/compatibility only; never a research or live target.",
+    },
+    {
+        "id": "legacy_short_paper",
+        "path": "data/bybit-paper-event",
+        "purpose": "Inert legacy paper root from the erased daily SHORT sleeve.",
+        "boundary": "Historical/compatibility only; never a research or live target.",
     },
 ]
 
@@ -136,9 +165,9 @@ def tool_data_roots(args):
                 out.append("- entries       : (unreadable: %s)" % exc)
         out.append("")
     out.append(
-        "Rule: serious research and promotion evidence MUST use "
-        "canonical_research. Never run research against live_demo. OOS roots "
-        "are validation-only and no longer pristine. See docs/data_roots.md."
+        "Rule: serious research evidence uses the per-venue full-PIT roots. "
+        "Operational demo/paper roots are for reconciliation and forward "
+        "evidence only. See docs/data_roots.md and STATE.md."
     )
     return "\n".join(out)
 
@@ -149,7 +178,7 @@ REPORT_NAME_HINTS = ("_report.md", "research_report.md")
 
 
 def tool_list_reports(args):
-    root_arg = args.get("root") or "canonical_research"
+    root_arg = args.get("root") or "bybit_full_pit"
     base = resolve_path(root_arg)
     if not os.path.isdir(base):
         raise ValueError("data root not found on disk: %s" % base)
@@ -661,17 +690,17 @@ TOOLS = [
         "name": "list_reports",
         "description": (
             "Find research/backtest report files (*_report.md) under a data "
-            "root, newest first. 'root' accepts a data-root id "
-            "(canonical_research, oos_bybit_pre2023, oos_binance_pit, "
-            "live_demo) or an absolute/repo-relative path; default "
-            "canonical_research."
+            "root, newest first. 'root' accepts a current data-root id "
+            "(bybit_full_pit, binance_full_pit, continuous_demo, "
+            "continuous_paper, long_demo, long_paper) or an "
+            "absolute/repo-relative path; default bybit_full_pit."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "root": {
                     "type": "string",
-                    "description": "Data-root id or path. Default canonical_research.",
+                    "description": "Data-root id or path. Default bybit_full_pit.",
                 }
             },
             "additionalProperties": False,
@@ -741,13 +770,10 @@ TOOLS = [
     {
         "name": "apply_decision_rule",
         "description": (
-            "Apply the Strictness Manifesto decision rule (pre-registered in "
-            "docs/research_summary.md) to a sweep "
-            "summary CSV. Returns the per-cell verdict table "
-            "(candidate / reject / inconclusive) plus a candidate ranking "
-            "by combined-venue Sharpe (honours the FDR ceiling). Single-"
-            "sourced from scripts/apply_decision_rule.py; equivalent to "
-            "running that script directly."
+            "Apply the legacy/reference decision-rule helper to a sweep "
+            "summary CSV. Tier-2 decisions now use scripts/r1_robustness.py "
+            "and Tier-3 is forward demo/paper; this tool is for historical "
+            "strict/legacy comparisons only."
         ),
         "inputSchema": {
             "type": "object",
@@ -762,8 +788,8 @@ TOOLS = [
                 },
                 "rule": {
                     "type": "string",
-                    "enum": ["manifesto", "legacy"],
-                    "description": "Decision-rule preset. Default: manifesto (stricter).",
+                    "enum": ["manifesto", "legacy", "investigation"],
+                    "description": "Decision-rule preset. Default: manifesto (historical strict helper).",
                 },
             },
             "required": ["summary_csv"],
