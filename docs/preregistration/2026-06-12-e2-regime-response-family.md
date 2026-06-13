@@ -3,7 +3,8 @@
 **Date:** 2026-06-12
 **Author:** operator + Claude (round-4 session)
 **Stage:** proposed
-**Plan:** [research_plan_composite_sizing_2026-06-12.md](../research_plan_composite_sizing_2026-06-12.md)
+**Plan:** folded into [research_summary.md](../research_summary.md); git history
+is the archive for the old 2026-06-12 planning stub.
 
 ## What's changing
 

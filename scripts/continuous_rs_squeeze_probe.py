@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 
-SHARED = Path("C:/Users/user/SHARED_DATA")
+SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
 OUT = SHARED / "continuous_rs_probe_2026-06-09"
 LEDGER_TPL = (
     SHARED

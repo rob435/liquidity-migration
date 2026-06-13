@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -30,7 +31,7 @@ from liquidity_migration.continuous_rebalance import (  # noqa: E402
     apply_rebalance_rule,
 )
 
-SHARED = Path("C:/Users/user/SHARED_DATA")
+SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
 OUT = SHARED / "continuous_hedge_2f_engine_2026-06-10"
 WINNER_WEIGHTS = {"turn3p3": 0.30, "turn4p3": 0.20, "turn4p5": 0.40, "age210tp14": 0.10}
 ANN = 365.25

@@ -1,9 +1,9 @@
 # Research Summary - Liquidity Migration
 
-**Updated:** 2026-06-12
+**Updated:** 2026-06-13
 
-This is the research decision surface, not an archive. Closed receipts and
-one-off scripts belong in git history or run artifacts. Keep this file short
+This is the research decision surface, not an archive. Obsolete receipts and
+run-specific helper scripts belong in git history or run artifacts. Keep this file short
 enough that a new agent can read it before making a decision.
 
 ## Non-Negotiable State
@@ -36,15 +36,20 @@ enough that a new agent can read it before making a decision.
 
 - BTC+ETH 2-factor hedge is banked as an in-sample candidate with a Tier-2
   ceiling only.
-- Live path is wired/armed, but stale warmstart CSVs block risk-increasing legs.
-  Operator must either regenerate `deploy/hedge_warmstart/*.csv` with a refresh
-  cadence or disarm the timer.
+- Live path is wired/armed. Warmstart CSVs were regenerated and validated on
+  2026-06-13; the remaining risk is calendar-age staleness after a flat spell,
+  so the first post-flat risk-increasing leg may still block and page unless
+  the operator asks for ledger-aware staleness.
 
 **Continuous sniper**
 
 - Tier-2 demo candidate. Armed in the demo unit, code default off.
 - No placements yet because the base book has had zero entries since the 2026-06-09
   rebuild. That is signal-side until the gate is open.
+- W4 Stage 2 recheck (2026-06-13) supports only the fixed live form for forward
+  watch: +8% quarter-size PostOnly add-on, 25% stop, exit with base lifecycle.
+  Historical fill rates were 37.2% bybit / 33.4% binance; R1 pooled MAR delta
+  +0.14, but Binance bootstrap MAR was weak. No promotion or forward-fill claim.
 
 **Dynamic exit**
 
@@ -80,6 +85,17 @@ methodology decision:
   binding frozen-weight/no-adaptive-reweighting policy.
 - `docs/preregistration/continuous-winner-robustness-2026-06-09.md` - binding
   frozen ensemble/winner_base evidence.
+- `docs/preregistration/2026-06-13-w4-continuous-program.md` - active staged
+  Wave-4 replacement program; deleted prior W4 materials remain non-evidence.
+- `docs/preregistration/2026-06-13-w4-continuous-stage0-data-clock.md` -
+  current W4 data/forward-clock gate.
+- `docs/preregistration/2026-06-13-w4-continuous-stage1-stop-exit-realism.md` -
+  CLOSED 2026-06-13; exact registered stop/protective-exit overlays rejected.
+- `docs/preregistration/2026-06-13-w4-continuous-stage2-sniper-fill-validity.md` -
+  CLOSED 2026-06-13; fixed sniper historically supported for forward watch only.
+- `docs/preregistration/2026-06-13-w4-continuous-stage3-path-shape.md` -
+  CLOSED 2026-06-13; path-shape measurements admissible only for a neutralized
+  follow-up receipt.
 - `docs/preregistration/div-promotion.md` - binding long `div` profile receipt.
 - `docs/preregistration/long-volup-candidate-2026-06-09.md` - binding long
   volup125 receipt.
@@ -121,8 +137,9 @@ without genuinely new data, a new lifecycle, or a fresh forward-only bar.
 - Dynamic exit: in-sample null across venues. Bybit-only continuation was a
   mirage until forward shadow proves otherwise.
 - Event-level taker flow: P10 failed both ex-ante mechanisms on this window.
-  Flow composition did not separate winners from losers; the informative
-  squeeze-proxy leg is OI/liquidation context, not taker-flow composition.
+  Flow composition did not separate winners from losers in that registered
+  form; the informative squeeze-proxy leg is OI/liquidation/depth context, not
+  a reason to promote raw taker-flow composition.
   Numbers for the record (receipt folded here; artifacts
   `~/SHARED_DATA/continuous_taker_flow_scout_2026-06-12/`): IC(flow_support_6h)
   +0.006 bybit (p=.84, cov 88%) / −0.014 binance (p=.60, cov 99.9%), signs
@@ -141,6 +158,22 @@ without genuinely new data, a new lifecycle, or a fresh forward-only bar.
   unmeasurable without the OI rebuild.
 - Hard stops, MFE/giveback exits, breakeven variations, rank-decay exits, and
   broader crowding caps did not improve the book enough to keep.
+- **Wave 4 owner-erased 2026-06-13:** by explicit owner override, the W4 plan,
+  receipts, scripts, and local artifacts were removed from the active
+  workspace. Deleted W4 materials must not be cited as active evidence. Any
+  replacement Wave-4-style work should be a serious staged program with dated
+  preregistration, both venues, full artifacts, effect sizes, fragility, and
+  explicit decision gates. Important feature families are not closed by one
+  small script; each mechanism/stage is judged on its own registered evidence.
+- **W4 replacement Stage 1 stop/exit realism (2026-06-13):** exact registered
+  capped 25% disaster stop plus failed-fade/breakeven overlay rejected on the
+  amended full-PIT common window (`2023-04-01 <= signal_ts < 2026-05-01`).
+  Primary `02_stop_ff6_be10` vs frozen control: bybit return 0.026 vs 0.714,
+  MAR delta -4.31, DD worse -9.9% vs -5.3%; binance return 0.044 vs 0.675,
+  MAR delta -5.33, DD worse -7.0% vs -4.0%. R1 pooled MAR delta -3.97 and
+  bootstrap P(delta > 0)=0%; uncapped stop-fill falsifier flips Binance
+  negative. This blocks only that exact stop/protective-exit mechanism, not the
+  broader exit-realism family.
 
 **Long**
 
@@ -168,14 +201,19 @@ These are not promotion evidence. They are the only things worth keeping in
 view because the prior negative read may have been too pessimistic or because
 they can be judged forward without spending the window again.
 
-- **E2 regime response:** CLOSED 2026-06-12 — NULL (receipt
-  `2026-06-12-e2-regime-response-family.md`). V0 stands; no regime variant
-  may be revisited without genuinely new data or a forward-only bar.
+- **E2 regime response:** NULL in the registered V1/V2 form (receipt
+  `2026-06-12-e2-regime-response-family.md`). V0 stands until a materially
+  different, preregistered regime mechanism clears both-venue evidence.
 - **PE2 long provisional entry:** failed in-window, but the engine exists
   default-off and has a pre-registered future-OOS re-judgment path once both
   full-PIT roots extend at least 60 days past 2026-05-28 and trade counts clear.
 - **Dynamic-exit forward shadow:** only live forward evidence can decide whether
   the Bybit continuation profile was real or just venue/window luck.
+- **W4 Stage 3 path-shape:** `pre_6h_return`, `pre_24h_return`, and
+  `pre_24h_realized_vol` cleared the fixed two-venue admissibility screen for a
+  later neutralized Stage 3b receipt. Do not use them directly: the
+  `symbol_hash_bucket` negative control had a large 97 bps pooled spread, so
+  symbol/component/time mix must be neutralized before any intervention test.
 - **Forward-watch atlas leads:** repeat-name penalty, weekend bonus for long
   books, and continuous US-session penalty. Recompute only on forward trades
   when the pre-stated sample thresholds are met.
@@ -191,13 +229,22 @@ they can be judged forward without spending the window again.
 
 - Continuous forward window is immature; clocks restarted with the 2026-06-09
   rebuild/data refresh.
-- Continuous forward replay orchestrator still needs to rerun the four frozen
-  component configs into `continuous_forward_replay`; until then, the forward
-  signal clock is incomplete.
+- Continuous forward replay orchestrator is built and initialized; it must run
+  at each data-root refresh, and overlap drift is a hard alarm.
+- W4 replacement program is active. Stage 0 says current local roots are stale
+  for June forward claims, Binance ends at 2026-04-30, and forward replay has
+  `forward_days=0`; later W4 stages need fresh dated preregistration before
+  touching full-PIT roots.
+- W5 continuous signal alpha draft plan lives at
+  `docs/research_plans/w5_continuous_signal_alpha/`. It is the working plan for
+  same-breadth score-entry, entry, exit, sniper, sizing, interaction, and
+  forward gates. It is not itself a preregistration.
+- W4 Stage 2 sniper result does not remove the live-fill debt: current evidence
+  is historical bar-validity only until demo sniper placements/fills exist.
 - Binance FAPI ancillary June top-ups were blocked from the dev box. Finish on
   the VPS or another permitted host.
-- Bybit forward depth collector is built but not operator-enabled; every month
-  disabled loses live capacity data.
+- Bybit forward depth collector is enabled on the VPS; depth still needs time
+  to mature before R4/capacity conclusions.
 
 ## Repo Policy
 

@@ -2,10 +2,10 @@
 """Backfill Binance UM `metrics` (5-min OI + taker/top-trader ratios) from
 data.binance.vision daily archives into the research root.
 
-Charter §8-P1 (docs/research_plan_alpha_hunt_2026-06-10.md): the PIT-clean
-liquidation-PROXY data layer. Also satisfies the pre-registered ridge-rerun
-precondition (Binance OI backfill). Survivorship-free: the archive serves
-delisted symbols; the symbol set is everything with kline coverage in the root.
+PIT-clean liquidation/OI proxy data layer. Current research state lives in
+STATE.md and docs/research_summary.md; historical alpha-hunt plan stubs were
+folded into the summary. Survivorship-free: the archive serves delisted symbols;
+the symbol set is everything with kline coverage in the root.
 
 Mechanics (resume-safe):
   1. symbol set = kline coverage spans in <root>/klines_1h, clipped to --start;

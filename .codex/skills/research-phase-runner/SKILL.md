@@ -53,8 +53,9 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    the next, the earlier phase must have passed first). Confirm required code is merged.
    Confirm data roots present (`~/SHARED_DATA/{bybit,binance}_full_pit`).
 
-2. **Plan the arms/cells.** Re-read the experiment's section in the plan. Do NOT add
-   off-menu cells without a dated amendment (a new pre-registration receipt) first.
+2. **Plan the arms/cells.** Re-read the experiment's section in the plan. For
+   any added arm, cell, metric, data source, or mechanism, write a dated
+   amendment or a new pre-registration receipt first.
 
 3. **Dispatch.** (`volume_events_cell.sh` was erased with the short engine —
    single-cell runs now go through a dispatcher too.) Sweeps: write a dispatcher
@@ -88,18 +89,28 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    (`.venv/bin/python -m ruff check liquidity_migration tests scripts` +
    `.venv/bin/python -m pytest -q`) MUST pass. NEVER push without operator confirmation.
 
-## Pre-committed behaviours (non-negotiable)
+## Research discipline (non-negotiable)
 
-- **No FURTHER loosening.** The framework was loosened ONCE, on principle,
-  pre-registered. Do not loosen again to rescue a near-miss; the Tier-3 real-money
-  gate stays strict. A cell short of the Tier-2 bar is descriptive, not a candidate.
-- **No off-menu cells.** New cells need a dated pre-registration amendment first.
-- **Gates are real.** A failed gate (E1 says selection-only; E2 doesn't clear Tier-2;
-  E3 doesn't beat the 1h squeeze) means file a one-paragraph negative-trigger note and
-  stop — don't look for excuses to run the gated phase. **Failure is a first-class
-  outcome**; the strategy stays frozen. There is no "ship something" obligation.
-- **Both venues.** Cross-venue agreement is the robustness bar; a single-venue edge
-  does not clear Tier-2.
+- **No unregistered mining.** Important feature families may be studied in
+  multiple stages; each stage needs a dated pre-registration or amendment before
+  it touches the per-venue working roots. The amendment must explain why the
+  prior stage was insufficient, what new information or mechanism is being
+  tested, and which outcomes would change the decision.
+- **No tiny-script verdicts for important features.** A serious feature decision
+  must leave enough artifacts to audit: population, data-root identity, code
+  version/config hash, per-venue ledgers or event rows, effect sizes in return
+  units where applicable, fragility diagnostics, and a written falsifier. A
+  small script can be a measurement tool, not the whole decision record.
+- **Gates are real but not terminal for the whole research family.** A failed
+  registered stage blocks that exact mechanism from being promoted or cited as
+  evidence. It does not prohibit a later, better-designed stage with a fresh
+  preregistration, new data, a corrected lifecycle, or a genuinely different
+  mechanism.
+- **No threshold lowering to rescue a near-miss.** Revisions can expand the
+  program or improve measurement quality, but they cannot move the previously
+  declared bar after seeing the result. The Tier-3 real-money gate stays strict.
+- **Both venues.** Cross-venue agreement is the robustness bar; a single-venue
+  edge does not clear Tier-2.
 
 ## Optional MCP tools
 
