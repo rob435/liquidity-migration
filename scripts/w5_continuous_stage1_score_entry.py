@@ -24,6 +24,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -45,7 +46,7 @@ from liquidity_migration.continuous_forward_replay import (  # noqa: E402
     build_full_ledger,
     frozen_config_hash,
 )
-from scripts.w4_continuous_stop_exit_realism import (  # noqa: E402
+from scripts._w5_shared import (  # noqa: E402
     COMPONENTS,
     _btc_inputs,
     _component_config,
@@ -88,7 +89,7 @@ def _sha256_file(path: Path) -> str:
 def _code_hash() -> str:
     paths = [
         REPO / "scripts" / "w5_continuous_stage1_score_entry.py",
-        REPO / "scripts" / "w4_continuous_stop_exit_realism.py",
+        REPO / "scripts" / "_w5_shared.py",
         REPO / "scripts" / "rebuild_winner_base_component_ledgers.py",
         REPO / "liquidity_migration" / "continuous_events.py",
         REPO / "liquidity_migration" / "continuous_forward_replay.py",
@@ -265,6 +266,56 @@ def _block_bootstrap_delta(delta_rets: list[float], *, block: int = 3, reps: int
     return {"p_sum_gt_0": wins / reps, "reps": reps, "block": block}
 
 
+def _equity_allclose(s0_equity: list[float], a1_equity: list[float], *, tol: float = 1e-9) -> bool:
+    """True iff two equity series match within ``tol`` AND share NaN positions.
+
+    w4-w5-stages-3: the prior check was ``all(d < tol or isnan(d) for d in diffs)``
+    where ``d = abs(x - y)``. Because ``abs(nan - finite) == nan``, the ``isnan(d)``
+    clause classified a one-sided NaN (exactly one ledger NaN at a row, a genuine
+    mismatch) as "close". The repo equivalence rule is "NaN positions matching",
+    not "any NaN passes", so a wiring/data regression injecting a NaN into one
+    ledger could be masked as an exact match. This compares NaN positions
+    explicitly: a row passes only if both sides are NaN, or both are finite and
+    within ``tol``.
+    """
+    if len(s0_equity) != len(a1_equity):
+        return False
+    for x, y in zip(s0_equity, a1_equity):
+        xf, yf = float(x), float(y)
+        x_nan, y_nan = math.isnan(xf), math.isnan(yf)
+        if x_nan or y_nan:
+            if not (x_nan and y_nan):
+                return False  # one-sided NaN is a real mismatch
+            continue  # both NaN at the same position -> matching
+        if abs(xf - yf) >= tol:
+            return False
+    return True
+
+
+def _a0_wiring_ok(a0_reconcile: dict[str, Any], venues: list[str]) -> bool:
+    """True iff EVERY venue's A0 control reproduced the Stage 0 control exactly.
+
+    w4-w5-stages-2: the Stage 1 prereg requires "A0 must reproduce the Stage 0
+    control ledgers exactly (0 selected-only / 0 trade-only) as a wiring sanity
+    check BEFORE any arm is interpreted." This is the load-bearing gate for that
+    invariant: a venue passes only when its reconciliation is ``available`` AND
+    ``rows_match`` AND ``equity_allclose_1e-9``. A missing Stage 0 ledger
+    (available=False) or any drift FAILS wiring, so arm interpretation /
+    advancement must be blocked rather than measured against a mis-wired control.
+    """
+    if not venues:
+        return False
+    for venue in venues:
+        rec = a0_reconcile.get(venue)
+        if not rec or not rec.get("available"):
+            return False
+        if not rec.get("rows_match"):
+            return False
+        if not rec.get("equity_allclose_1e-9"):
+            return False
+    return True
+
+
 def _arm_summary_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for venue, vb in payload["venues"].items():
@@ -357,14 +408,24 @@ def run_stage(args: argparse.Namespace) -> dict[str, Any]:
             a1 = pl.read_csv(vb["arms"][CONTROL]["report_dir"] + "/ensemble_hedged_ledger.csv")
             rec["rows_match"] = int(s0.height) == int(a1.height)
             if "equity" in s0.columns and "equity" in a1.columns and s0.height == a1.height:
-                import math
-                diffs = [
-                    abs(float(x) - float(y))
-                    for x, y in zip(s0["equity"].to_list(), a1["equity"].to_list())
+                s0_eq = [float(v) for v in s0["equity"].to_list()]
+                a1_eq = [float(v) for v in a1["equity"].to_list()]
+                # finite-only diffs for the reported magnitude; the pass/fail
+                # decision handles NaN positions explicitly (w4-w5-stages-3).
+                finite_diffs = [
+                    abs(x - y) for x, y in zip(s0_eq, a1_eq)
+                    if not (math.isnan(x) or math.isnan(y))
                 ]
-                rec["max_equity_abs_diff"] = max(diffs) if diffs else 0.0
-                rec["equity_allclose_1e-9"] = all(d < 1e-9 or math.isnan(d) for d in diffs)
+                rec["max_equity_abs_diff"] = max(finite_diffs) if finite_diffs else 0.0
+                rec["equity_allclose_1e-9"] = _equity_allclose(s0_eq, a1_eq, tol=1e-9)
         payload["a0_reconcile"][venue] = rec
+
+    # ---- A0 wiring gate (load-bearing, w4-w5-stages-2) ----
+    # The prereg requires A0 to reproduce Stage 0 EXACTLY on every venue BEFORE
+    # any arm is interpreted. Make that a hard gate, not a passive diagnostic:
+    # if wiring fails, no arm may advance and the overall verdict aborts.
+    a0_wiring_ok = _a0_wiring_ok(payload["a0_reconcile"], venues)
+    payload["a0_wiring_ok"] = a0_wiring_ok
 
     # ---- pooled metrics + per-arm verdict ----
     eval_arms = [a for a in requested if a != CONTROL]
@@ -425,6 +486,7 @@ def run_stage(args: argparse.Namespace) -> dict[str, Any]:
             and (pooled_mar_delta - (a5_pooled_mar - a0_pooled_mar)) >= 0.1
         )
         gates = {
+            "a0_wiring_ok": a0_wiring_ok,  # w4-w5-stages-2: load-bearing wiring sanity gate
             "return_positive_both_venues": per_venue_ok and len(venue_rows) == len(venues),
             "pooled_mar_delta_gt_0.1": pooled_mar_delta is not None and pooled_mar_delta > 0.1,
             "no_venue_mar_delta_below_-0.5": all(
@@ -435,7 +497,10 @@ def run_stage(args: argparse.Namespace) -> dict[str, Any]:
             "two_thirds_same_direction": thirds["same_direction_count"] >= 2,
             "has_contention": total_repl > 0,
         }
-        advance = arm != NEG_CONTROL and all(
+        # An arm may advance only if the wiring gate passed AND every scored gate
+        # (excluding the has_contention diagnostic) is True. a0_wiring_ok is in
+        # `gates` so it is enforced by the all(...) below as well as explicitly.
+        advance = a0_wiring_ok and arm != NEG_CONTROL and all(
             v for k, v in gates.items() if v is not None and k != "has_contention"
         )
         verdicts[arm] = {
@@ -486,20 +551,35 @@ def run_stage(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     # ---- overall verdict ----
+    # w4-w5-stages-2: if A0 did not reproduce Stage 0 exactly on every venue the
+    # harness is mis-wired to the frozen control — ABORT before interpreting any
+    # arm. No arm can advance (a0_wiring_ok is in every arm's gates), and we say so
+    # explicitly rather than letting it read as an ordinary "no arm cleared" null.
     advancing = [a for a in eval_arms if verdicts[a]["advances_to_stage6"]
                  and (payload["cost_stress"].get(a) == "skipped (did not clear base pass bar)"
                       or (isinstance(payload["cost_stress"].get(a), dict)
                           and payload["cost_stress"][a].get("survives")))]
-    payload["verdict"] = {
-        "arms_advancing_to_stage6": advancing,
-        "a1_structural_null": verdicts.get("A1_current_score_priority", {}).get("structural_null"),
-        "interpretation": (
-            f"Arms advancing: {advancing}."
-            if advancing
-            else "No arm cleared the same-breadth score-entry pass bar on both venues. "
+    if not a0_wiring_ok:
+        interpretation = (
+            "ABORT: A0 did not reproduce the Stage 0 control exactly on every venue "
+            "(a0_wiring_ok=False) — the harness is mis-wired to the frozen control, so no "
+            "arm result is interpretable. Fix the wiring (config drift / missing Stage 0 "
+            "ledger / one-sided NaN) and re-run before reading any arm verdict."
+        )
+    elif advancing:
+        interpretation = f"Arms advancing: {advancing}."
+    else:
+        interpretation = (
+            "No arm cleared the same-breadth score-entry pass bar on both venues. "
             "Bank as a NULL for this mechanism; the replacement-count diagnostic shows whether the "
             "contention room even exists (structural null) — if so the lever moves to Stage 7/8."
-        ),
+        )
+    payload["verdict"] = {
+        "a0_wiring_ok": a0_wiring_ok,
+        "aborted_on_wiring": not a0_wiring_ok,
+        "arms_advancing_to_stage6": advancing,
+        "a1_structural_null": verdicts.get("A1_current_score_priority", {}).get("structural_null"),
+        "interpretation": interpretation,
     }
 
     _write_csv(out / "stage1_summary.csv", _arm_summary_rows(payload))
@@ -530,6 +610,8 @@ def _write_markdown(payload: dict[str, Any], path: Path) -> None:
         "",
         "## A0 reconciliation vs Stage 0 control",
         "",
+        f"- **a0_wiring_ok (gate): {payload.get('a0_wiring_ok')}** "
+        "(must be True before any arm is interpreted — w4-w5-stages-2)",
     ]
     for venue, rec in payload.get("a0_reconcile", {}).items():
         lines.append(
