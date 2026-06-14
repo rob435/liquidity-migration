@@ -108,13 +108,7 @@ class ContinuousEventConfig:
     entry_decel_lookback_h: int = 0       # 0=off; require close[t]/close[t-lookback]-1 <= entry_decel_max_ret
     entry_decel_max_ret: float = 0.0      # fade-started confirmation: recent move must be <= this
     market_min_ret_1d: float = -1.0       # skip entry if equal-weight market 1d return < this (-1 = off)
-    btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend" | "uptrend_capped" | "soft3"
-    # E2 regime family (receipt 2026-06-12-e2-regime-response-family.md). uptrend_capped (V1):
-    # on iff 0 < trend <= cap. soft3 (V2): trend > cap -> off; 0 < trend <= cap -> full size;
-    # trend <= 0 -> btc_soft3_size_frac x notional, top-composite-quintile candidates only
-    # (quintile within the fresh-entry pool at the same signal ts, ties kept).
-    btc_trend_euphoria_cap: float = 0.20  # threshold on the engine's prior-30d return-SUM trend
-    btc_soft3_size_frac: float = 0.25
+    btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend"
     entry_event_trigger: str = "none"      # hourly catalyst gate; "none" preserves continuous spell entries
     failed_fade_hours: int = 0            # 0=off; cut a fade that hasn't worked after N hours
     failed_fade_loss_pct: float = 0.0
@@ -674,6 +668,79 @@ def _assert_funding_one_per_settlement(funding: pl.DataFrame, *, root: Path) -> 
         )
 
 
+def _build_lifecycle_config(config: ContinuousEventConfig) -> TradeLifecycleConfig:
+    """Translate the continuous-event config into the daily engine's exit-ladder config.
+
+    The exit ladder is inherited from the daily engine and is off unless the config sets it.
+    Pure; lifted verbatim out of `_run_trades` so the setup reads in one place."""
+    return TradeLifecycleConfig(
+        start_date=config.start_date, end_date=config.end_date,
+        hold_days=max(1, round(config.hold_hours / 24)), take_profit_pct=max(config.take_profit_pct, 0.0),
+        failed_fade_exit_hours=config.failed_fade_hours,
+        failed_fade_loss_pct=config.failed_fade_loss_pct,
+        failed_fade_min_mfe_pct=config.failed_fade_min_mfe_pct,
+        failed_fade_close_location_min=0.0 if config.failed_fade_hours > 0 else 1.0,
+        breakeven_arm_pct=config.breakeven_arm_pct,
+        mfe_giveback_trigger_pct=config.mfe_giveback_trigger_pct,
+        mfe_giveback_retain_pct=config.mfe_giveback_retain_pct,
+        side_mode="long_low_short_high",
+        rank_exit_enabled=config.rank_exit_threshold > 0.0,
+        rank_exit_threshold=config.rank_exit_threshold,
+    )
+
+
+def _compute_size_and_stop(
+    config: ContinuousEventConfig,
+    close_arr: Any,
+    entry_bar: int,
+    *,
+    base_nw: float,
+    inverse_vol: bool,
+    clamp: float,
+    regime_size_mult: float,
+    stop_pct: float | None,
+) -> tuple[float, float | None]:
+    """Per-trade notional weight (flat or inverse-vol, then x regime size mult) and the effective
+    stop (k * trailing hourly vol clamped to [0.05, 0.50] when stop_vol_mult>0, else the fixed
+    stop). Pure; arithmetic expressions preserved verbatim so float ordering is identical to the
+    prior inline form."""
+    nw = base_nw
+    if inverse_vol:
+        rv = _entry_vol(close_arr, int(entry_bar))
+        mult = min(max(config.target_vol_per_name / rv, 1.0 / clamp), clamp) if rv > 0 else 1.0
+        nw = base_nw * mult
+    nw *= regime_size_mult
+    trade_stop = stop_pct
+    if config.stop_vol_mult > 0.0:
+        sv = _entry_vol(close_arr, int(entry_bar))
+        trade_stop = min(max(config.stop_vol_mult * sv, 0.05), 0.50) if sv > 0 else stop_pct
+    return nw, trade_stop
+
+
+def _plan_exit(
+    *,
+    state_mode: bool,
+    spell_end: int,
+    entry_bar_end: int,
+    delay_ms: int,
+    max_hold_ms: int,
+    hold_ms: int,
+) -> int:
+    """Planned exit ts. State exit: cover when the name has left D9. spell_end is the last in-decile
+    hour (bar START), so spell_end + delay_ms (= +2h at entry_delay=1) is the close of the FIRST bar
+    the name is out of D9 — the same close at which "left-decile" becomes known. This close-on-
+    detection fill is INTENTIONAL and causal (deciding at a bar's close and filling at that close is
+    the convention every early-exit path in _simulate_indexed_trade uses for stop/TP/rank). It is
+    mildly asymmetric with the +1h entry gap, but the live book exits FASTER (tick-driven
+    left_decile / protective covers), so the backtest exit is not optimistic relative to live
+    (pit-engine-4). Clamped to >= entry+1h so a same-bar spell still holds at least one bar, and
+    capped at max_hold. Fixed-timer mode just holds hold_ms."""
+    if state_mode:
+        planned_exit = min(int(spell_end) + delay_ms, entry_bar_end + max_hold_ms)
+        return max(planned_exit, entry_bar_end + MS_PER_HOUR)
+    return entry_bar_end + hold_ms
+
+
 def _run_trades(
     entries: pl.DataFrame,
     symbol_bars: dict[str, Any],
@@ -699,20 +766,7 @@ def _run_trades(
     if entries.is_empty():
         return _empty_trades(), {}
     # Exit ladder inherited from the daily engine (off unless the config sets them).
-    lifecycle = TradeLifecycleConfig(
-        start_date=config.start_date, end_date=config.end_date,
-        hold_days=max(1, round(config.hold_hours / 24)), take_profit_pct=max(config.take_profit_pct, 0.0),
-        failed_fade_exit_hours=config.failed_fade_hours,
-        failed_fade_loss_pct=config.failed_fade_loss_pct,
-        failed_fade_min_mfe_pct=config.failed_fade_min_mfe_pct,
-        failed_fade_close_location_min=0.0 if config.failed_fade_hours > 0 else 1.0,
-        breakeven_arm_pct=config.breakeven_arm_pct,
-        mfe_giveback_trigger_pct=config.mfe_giveback_trigger_pct,
-        mfe_giveback_retain_pct=config.mfe_giveback_retain_pct,
-        side_mode="long_low_short_high",
-        rank_exit_enabled=config.rank_exit_threshold > 0.0,
-        rank_exit_threshold=config.rank_exit_threshold,
-    )
+    lifecycle = _build_lifecycle_config(config)
     base_nw = config.notional_weight
     inverse_vol = config.sizing_mode == "inverse_vol"
     clamp = max(config.vol_weight_clamp, 1.0)
@@ -737,28 +791,17 @@ def _run_trades(
     last_entry: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
     btc_gate = config.btc_trend_gate
-    if btc_gate not in ("off", "uptrend", "downtrend", "uptrend_capped", "soft3"):
+    if btc_gate not in ("off", "uptrend", "downtrend"):
         raise ValueError(
-            "btc_trend_gate must be 'off', 'uptrend', 'downtrend', 'uptrend_capped', or 'soft3'; "
-            f"got {btc_gate!r}"
+            f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}"
         )
     skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
-    skipped_crowding = skipped_soft3_quintile = 0
+    skipped_crowding = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
     turns = entries["turnover_quote"].to_list()
     spell_ends = entries["spell_end_ts"].to_list() if "spell_end_ts" in entries.columns else tss
-    # soft3: per-signal-ts top-quintile composite threshold over the fresh-candidate pool
-    # (>= keeps ties; a singleton pool keeps its only candidate).
-    soft3_q80: dict[int, float] = {}
-    if btc_gate == "soft3":
-        by_ts: dict[int, list[float]] = {}
-        for ts_i, comp_i in zip(tss, comps):
-            if comp_i is not None and np.isfinite(float(comp_i)):
-                by_ts.setdefault(int(ts_i), []).append(float(comp_i))
-        for ts_i, vals in by_ts.items():
-            soft3_q80[ts_i] = float(np.quantile(np.asarray(vals), 0.8))
     def _emit(
         reason: str,
         *,
@@ -859,28 +902,6 @@ def _run_trades(
                 _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
-            if btc_gate == "uptrend_capped" and not (0.0 < trend <= config.btc_trend_euphoria_cap):
-                _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
-                skipped_btc_trend += 1
-                continue
-            if btc_gate == "soft3":
-                if trend > config.btc_trend_euphoria_cap:
-                    _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
-                    skipped_btc_trend += 1
-                    continue
-                if trend <= 0.0:
-                    thr = soft3_q80.get(int(sig_ts))
-                    comp_v = float(comp) if comp is not None else float("-inf")
-                    if thr is None or comp_v < thr:
-                        _emit(
-                            "soft3_quintile",
-                            entry_bar_end=entry_bar_end,
-                            active_count=len(active),
-                            regime_trend=cand_trend,
-                        )
-                        skipped_soft3_quintile += 1
-                        continue
-                    regime_size_mult = config.btc_soft3_size_frac
         if decel_h > 0 and entry_bar - decel_h >= 0:
             base_px = float(close_arr[entry_bar - decel_h])
             recent_ret = (float(close_arr[entry_bar]) / base_px - 1.0) if base_px > 0 else 0.0
@@ -899,32 +920,16 @@ def _run_trades(
                 _emit("market", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
-        # --- sizing ---
-        nw = base_nw
-        if inverse_vol:
-            rv = _entry_vol(close_arr, int(entry_bar))
-            mult = min(max(config.target_vol_per_name / rv, 1.0 / clamp), clamp) if rv > 0 else 1.0
-            nw = base_nw * mult
-        nw *= regime_size_mult
-        # vol-scaled stop (default off): k * trailing hourly vol, clamped; else the fixed stop_pct.
-        trade_stop = stop_pct
-        if config.stop_vol_mult > 0.0:
-            sv = _entry_vol(close_arr, int(entry_bar))
-            trade_stop = min(max(config.stop_vol_mult * sv, 0.05), 0.50) if sv > 0 else stop_pct
-        if state_mode:
-            # State exit: cover when the name has left D9. spell_end is the last in-decile hour
-            # (bar START), so spell_end + delay_ms (= +2h at entry_delay=1) is the close of the
-            # FIRST bar the name is out of D9 — the same close at which "left-decile" becomes known.
-            # This close-on-detection fill is INTENTIONAL and causal (deciding at a bar's close and
-            # filling at that close is the convention every early-exit path in _simulate_indexed_trade
-            # uses for stop/TP/rank). It is mildly asymmetric with the +1h entry gap, but the live book
-            # exits FASTER (tick-driven left_decile / protective covers), so the backtest exit is not
-            # optimistic relative to live (pit-engine-4). Clamped to >= entry+1h so a same-bar spell
-            # still holds at least one bar, and capped at max_hold.
-            planned_exit = min(int(spell_end) + delay_ms, entry_bar_end + max_hold_ms)
-            planned_exit = max(planned_exit, entry_bar_end + MS_PER_HOUR)
-        else:
-            planned_exit = entry_bar_end + hold_ms
+        # --- sizing + stop + exit planning (verbatim logic, extracted to helpers) ---
+        nw, trade_stop = _compute_size_and_stop(
+            config, close_arr, int(entry_bar),
+            base_nw=base_nw, inverse_vol=inverse_vol, clamp=clamp,
+            regime_size_mult=regime_size_mult, stop_pct=stop_pct,
+        )
+        planned_exit = _plan_exit(
+            state_mode=state_mode, spell_end=int(spell_end), entry_bar_end=entry_bar_end,
+            delay_ms=delay_ms, max_hold_ms=max_hold_ms, hold_ms=hold_ms,
+        )
         trade = _simulate_indexed_trade(
             symbol=sym, side=config.side, score=float(comp) if comp is not None else 0.0,
             rank=int(config.decile), basket_id=_iso_day(entry_bar_end), signal_ts_ms=int(sig_ts),
@@ -961,7 +966,6 @@ def _run_trades(
         "skipped_breaker": skipped_breaker,
         "skipped_btc_trend": skipped_btc_trend,
         "skipped_crowding": skipped_crowding,
-        "skipped_soft3_quintile": skipped_soft3_quintile,
     }
     if not rows:
         return _empty_trades(), skips

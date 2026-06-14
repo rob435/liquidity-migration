@@ -373,67 +373,6 @@ def test_run_trades_market_gate_reads_prior_day_not_entry_day() -> None:
     assert trades_block.height == 0, "causal gate must block on the bad prior day"
 
 
-def test_run_trades_uptrend_capped_gate_blocks_euphoria_and_downtrend() -> None:
-    """V1 (E2 receipt): on iff 0 < trend <= cap — euphoria AND non-uptrend both skip."""
-    bars = _indexed_price_bars_by_symbol(_grid_klines(["A", "B", "C"], 100))
-    entries = pl.DataFrame(
-        {
-            "symbol": ["A", "B", "C"],
-            "ts_ms": [0, MS_PER_DAY, 2 * MS_PER_DAY],
-            "composite": [0.9] * 3,
-            "turnover_quote": [1e6] * 3,
-        }
-    )
-    btc_trend = {0: 0.10, MS_PER_DAY: 0.30, 2 * MS_PER_DAY: -0.05}
-    cfg = ContinuousEventConfig(
-        btc_trend_gate="uptrend_capped",
-        btc_trend_euphoria_cap=0.20,
-        max_active=5,
-        hold_hours=1,
-        entry_delay_hours=1,
-        use_funding=False,
-        flat_round_trip_bps=0.0,
-    )
-    trades, skips = _run_trades(entries, bars, None, cfg, btc_trend_daily=btc_trend)
-    assert trades.height == 1
-    assert trades["symbol"][0] == "A"          # in-band uptrend trades
-    assert skips["skipped_btc_trend"] == 2     # euphoria + downtrend both blocked
-
-
-def test_run_trades_soft3_gate_quarter_sizes_top_quintile_in_downtrend() -> None:
-    """V2 (E2 receipt): euphoria off; in-band full size; downtrend = size_frac x notional,
-    top-composite-quintile candidates only (within the same signal-ts pool)."""
-    bars = _indexed_price_bars_by_symbol(_grid_klines(["A", "B", "C", "D"], 100))
-    entries = pl.DataFrame(
-        {
-            "symbol": ["A", "B", "C", "D"],
-            "ts_ms": [0, MS_PER_DAY, 2 * MS_PER_DAY, 2 * MS_PER_DAY],
-            "composite": [0.9, 0.9, 0.9, 0.5],
-            "turnover_quote": [1e6] * 4,
-        }
-    )
-    btc_trend = {0: 0.10, MS_PER_DAY: 0.30, 2 * MS_PER_DAY: -0.05}
-    cfg = ContinuousEventConfig(
-        btc_trend_gate="soft3",
-        btc_trend_euphoria_cap=0.20,
-        btc_soft3_size_frac=0.25,
-        max_active=5,
-        hold_hours=1,
-        entry_delay_hours=1,
-        use_funding=False,
-        flat_round_trip_bps=0.0,
-    )
-    trades, skips = _run_trades(entries, bars, None, cfg, btc_trend_daily=btc_trend)
-    assert trades.height == 2
-    by_sym = {t["symbol"]: t for t in trades.to_dicts()}
-    assert set(by_sym) == {"A", "C"}           # B = euphoria off; D = below the ts-pool quintile
-    assert skips["skipped_btc_trend"] == 1
-    assert skips["skipped_soft3_quintile"] == 1
-    base_nw = cfg.notional_weight
-    assert abs(by_sym["A"]["notional_weight"] - base_nw) < 1e-12          # in-band: full size
-    assert abs(by_sym["C"]["notional_weight"] - 0.25 * base_nw) < 1e-12   # downtrend: quarter size
-
-
 def test_state_exit_holds_only_while_in_decile() -> None:
     """state mode: a name in D9 for hours 0..2 then gone must exit ~at the spell end (+1h),
     NOT run a fixed 12h timer. The fresh entry carries spell_end_ts = last in-decile hour."""

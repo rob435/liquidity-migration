@@ -70,9 +70,6 @@ enough that a new agent can read it before making a decision.
 Keep only receipts that still bind an active deployment, candidate, or
 methodology decision:
 
-- `docs/preregistration/2026-06-12-e2-regime-response-family.md` - CLOSED
-  2026-06-12 (NULL; V0 stands); kept while it documents the V1/V2
-  `btc_trend_gate` engine modes that shipped with it.
 - `docs/preregistration/continuous-capacity-impact-2026-06-09.md` - active R4
   fill-calibration/capacity receipt.
 - `docs/preregistration/continuous-dynexit-forward-shadow-2026-06-10.md` -
@@ -162,7 +159,10 @@ without genuinely new data, a new lifecycle, or a fresh forward-only bar.
   both venues, both cost arms). The euphoria bucket's raw negative mean did
   not survive the engine: those trades are net book contributors once
   funding, exits, and rebalance dynamics are modeled. The binary uptrend
-  gate stands; down/euphoria treatment stays hedge + stops/caps.
+  gate stands; down/euphoria treatment stays hedge + stops/caps. The V1/V2
+  engine modes (`uptrend_capped`/`soft3` + the `btc_trend_euphoria_cap` /
+  `btc_soft3_size_frac` knobs), the E2 receipt, and `scripts/e2_regime_family.py`
+  were removed 2026-06-14 as dead knobs (git history is the archive).
 - Naive passive-at-touch entries: null. Maker savings were not enough to pay
   for adverse continuation tails. Sniper-style deeper resting ladders are the
   only passive form still alive.
@@ -224,9 +224,10 @@ These are not promotion evidence. They are the only things worth keeping in
 view because the prior negative read may have been too pessimistic or because
 they can be judged forward without spending the window again.
 
-- **E2 regime response:** NULL in the registered V1/V2 form (receipt
-  `2026-06-12-e2-regime-response-family.md`). V0 stands until a materially
-  different, preregistered regime mechanism clears both-venue evidence.
+- **E2 regime response:** NULL in the registered V1/V2 form (receipt + V1/V2
+  engine modes removed 2026-06-14; git history is the archive). V0 (the binary
+  uptrend gate) stands until a materially different, preregistered regime
+  mechanism clears both-venue evidence — a new mechanism gets its own receipt.
 - **PE2 long provisional entry:** failed in-window, but the engine exists
   default-off and has a pre-registered future-OOS re-judgment path once both
   full-PIT roots extend at least 60 days past 2026-05-28 and trade counts clear.

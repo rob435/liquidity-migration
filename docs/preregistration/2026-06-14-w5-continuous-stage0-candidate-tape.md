@@ -32,7 +32,11 @@ and the component's event trigger (`turn3_pop3` / `turn4_pop3` / `turn4_pop5` /
 `none`). Each candidate is then tagged **selected** or **rejected** with the
 exact reason the engine applied, in engine order: `no_bar_symbol`, `crowding`,
 `breaker`, `cooldown`, `capacity`, `no_bar_entry`, `age`, `btc_trend_unknown`,
-`btc_trend`, `soft3_quintile`, `decel`, `market`, `no_fill`, `selected`.
+`btc_trend`, `decel`, `market`, `no_fill`, `selected`.
+(The E2 `uptrend_capped`/`soft3` regime modes were removed from the engine on
+2026-06-14 as dead knobs; the `soft3_quintile` reason is therefore no longer
+emitted. The live control reconstruction uses the binary uptrend gate and never
+emitted it, so the PASS above is unaffected.)
 
 The D9 cross-section that failed the trigger/liquidity/spell gates is *not* a
 candidate (it never became actionable); its size is reported only as a coverage
