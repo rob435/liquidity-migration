@@ -20,6 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3,<9.0",
+    "pytest-cov>=5.0,<8.0",
     "ruff>=0.6,<1.0",
     "mypy>=1.11,<2.0",
 ]
@@ -65,3 +66,23 @@ disable_error_code = ["arg-type"]
 
 [tool.setuptools.packages.find]
 include = ["liquidity_migration*"]
+
+# Coverage. Run: `.venv/bin/python -m pytest --cov` (config below is picked up
+# automatically). Measures the package only (not tests/scripts). No fail_under
+# gate yet — the number is for visibility, not a hard CI bar; raise it
+# deliberately once a baseline is agreed.
+[tool.coverage.run]
+source = ["liquidity_migration"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.",
+]

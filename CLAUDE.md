@@ -21,6 +21,9 @@ Do not use old receipts as active guidance unless they still exist under
 
 - CLI: `python -m liquidity_migration <subcommand>`
 - Tests: `.venv/bin/python -m pytest -q`
+- Coverage: `.venv/bin/python -m pytest --cov` (needs `pip install -e .[dev]`;
+  config in `pyproject.toml [tool.coverage.*]`, package-only, branch coverage —
+  ~77% baseline 2026-06-14, no hard gate yet).
 
 Before any push:
 
