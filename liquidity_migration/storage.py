@@ -22,6 +22,37 @@ _DATASET_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _DATASET_THREAD_LOCKS_GUARD = threading.Lock()
 
 
+# storage-concurrency-2: per-acquisition tokens currently OWNED by THIS live
+# process. _lock_owner_is_dead short-circuits a pid==os.getpid() payload to
+# "alive" so a process never evicts its own live lock. But a singleton lock
+# taken with stale_seconds=0 (event_ws_risk_cycle.lock) has no age-eviction
+# backstop: if the daemon crashes holding the lock and systemd restarts it
+# within RestartSec and the kernel hands the SAME pid back (Linux pids cycle to
+# pid_max), the new process reads its dead predecessor's pid==getpid() and would
+# block forever. The token written into every payload (line ~286) is the
+# tiebreaker: a token NOT in this set is from a previous incarnation that merely
+# reused our pid, so the owner is genuinely dead and the lock is evictable.
+_LIVE_OWNED_TOKENS: set[str] = set()
+_LIVE_OWNED_TOKENS_GUARD = threading.Lock()
+
+
+def _register_owned_token(token: str) -> None:
+    with _LIVE_OWNED_TOKENS_GUARD:
+        _LIVE_OWNED_TOKENS.add(token)
+
+
+def _unregister_owned_token(token: str) -> None:
+    with _LIVE_OWNED_TOKENS_GUARD:
+        _LIVE_OWNED_TOKENS.discard(token)
+
+
+def _token_is_live_owned(token: str | None) -> bool:
+    if not token:
+        return False
+    with _LIVE_OWNED_TOKENS_GUARD:
+        return token in _LIVE_OWNED_TOKENS
+
+
 def _thread_lock_for(lock_path: Path) -> threading.Lock:
     key = str(lock_path.resolve())
     with _DATASET_THREAD_LOCKS_GUARD:
@@ -173,6 +204,25 @@ _DATASET_FALLBACKS: dict[str, tuple[str, ...]] = {
 }
 
 
+# pit-data-6: Bybit-native marker datasets. A per-venue Binance root stores its
+# klines as `binance_usdm_klines_1h` and never carries a native canonical
+# `klines_1h/` (or `funding/`/`open_interest/`); a Bybit root stores them under
+# the canonical names. So the presence of a native canonical klines dir means
+# "this root is Bybit-native", and funding/OI must NOT silently fall back to the
+# Binance variant — funding is a modeled COST, and serving the wrong venue's
+# funding curve to a Bybit strategy flatters/penalises returns with the wrong
+# sign/magnitude. The cross-venue fallback is intended ONLY for an unambiguous
+# pure-Binance root (no Bybit-native marker present).
+_BYBIT_NATIVE_MARKERS: tuple[str, ...] = ("klines_1h", "klines_1m", "klines_5m")
+
+
+def _root_has_bybit_native_marker(root: Path) -> bool:
+    """True if ``root`` carries any native canonical Bybit kline dataset — the
+    discriminator that this is a Bybit (not pure-Binance) root. Used to suppress
+    the funding/OI Binance fallback on a mixed/Bybit root (pit-data-6)."""
+    return any((root / marker).exists() for marker in _BYBIT_NATIVE_MARKERS)
+
+
 def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
     """Map a canonical dataset request to the variant actually present in ``root``.
 
@@ -180,12 +230,24 @@ def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
     fallback applies); otherwise the first known venue-variant that exists on
     disk. The returned name is always a member of :data:`DATASETS`, so the lock
     and path helpers stay valid.
+
+    pit-data-6: the cross-venue (Binance) fallback for funding/open_interest is
+    gated on the root being unambiguously single-venue. If the root carries a
+    Bybit-native marker (a native canonical kline dataset) it is a Bybit root,
+    and a missing canonical funding/OI dir resolves to the canonical name (which
+    yields an empty read -> funding_mode=missing) rather than silently
+    substituting the WRONG venue's modeled funding/OI cost curve.
     """
     fallbacks = _DATASET_FALLBACKS.get(dataset)
     if not fallbacks:
         return dataset
     root = Path(data_root).expanduser()
     if (root / dataset).exists():
+        return dataset
+    # Only cross-venue-substitute on a pure-Binance root. A Bybit-native marker
+    # means this is a Bybit root whose funding/OI dir is simply absent -> fail
+    # safe to the canonical (empty) name, never the Binance variant.
+    if _root_has_bybit_native_marker(root):
         return dataset
     for alt in fallbacks:
         if (root / alt).exists():
@@ -281,11 +343,17 @@ def exclusive_file_lock(
         # successor's lock file created at the same path. A per-acquisition token
         # in the payload is the tiebreaker the inode check can't provide.
         owned_token = os.urandom(16).hex()
+        # Register the token as live-owned BEFORE writing the payload: once the
+        # bytes are on disk a concurrent _lock_owner_is_dead read could observe
+        # our pid+token, and it must find the token live (not a reused-pid
+        # ghost). Registering first closes that window.
+        _register_owned_token(owned_token)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps({"pid": os.getpid(), "created": time.time(), "token": owned_token}))
             yield
         finally:
+            _unregister_owned_token(owned_token)
             if owned_key is None:
                 _unlink_with_retry(lock_path)  # legacy path (fstat failed)
             else:
@@ -374,10 +442,25 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
         payload = json.loads(text)
         pid = int(payload.get("pid") or 0)
         created_ts = float(payload.get("created") or 0.0)
+        token = payload.get("token")
     except (json.JSONDecodeError, TypeError, ValueError):
         return False
-    if pid <= 0 or pid == os.getpid():
+    if pid <= 0:
         return False
+    if pid == os.getpid():
+        # Normally a lock bearing our own pid is our own LIVE lock -> not dead.
+        # But after a crash+fast-restart the kernel can hand the same pid to the
+        # successor (Linux pids cycle to pid_max). The successor would then read
+        # its dead predecessor's pid==getpid() and, with no age backstop on a
+        # stale_seconds=0 singleton lock, block forever (storage-concurrency-2).
+        # The per-acquisition token disambiguates: if the payload's token is one
+        # WE currently own it is genuinely our live lock; otherwise it is a
+        # predecessor that merely reused our pid and is dead -> evictable. A
+        # legacy payload with no token is conservatively treated as our own live
+        # lock (token is None -> not live-owned only when a token field exists).
+        if token is None:
+            return False
+        return not _token_is_live_owned(token)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -504,6 +587,47 @@ def _recent_ledger_month_dirs(path: Path, months_back: int) -> list[Path]:
     return recent + legacy
 
 
+# storage-concurrency-4: how stale an orphaned `.*.tmp` part file must be before
+# the sweep removes it. The temp file only exists for the brief window between
+# write_parquet and the atomic rename in _write_part; any `.tmp` older than this
+# is from a process that was SIGKILLed (OOM / TimeoutStopSec->SIGKILL / hard
+# crash) mid-write, whose `finally: temp_path.unlink()` never ran. Generous so a
+# slow in-flight write on another (impossible here — we hold the dataset lock)
+# path is never clobbered.
+_STALE_TMP_SECONDS = 600.0
+
+
+def _sweep_orphaned_tmp_parts(path: Path, *, stale_seconds: float = _STALE_TMP_SECONDS) -> None:
+    """Remove orphaned `.*.tmp` part files left by a crash between
+    ``write_parquet`` and the atomic rename in :func:`_write_part`.
+
+    _write_part writes to ``.{name}.{pid}.{ns}.tmp`` then renames; a SIGKILL in
+    that window orphans the temp file because the ``finally`` unlink never runs.
+    Readers never consume them (``glob('**/*.parquet')`` cannot match a leading-
+    dot `.tmp` name), so this is a pure resource leak — but a long-lived
+    Restart=always daemon that occasionally crashes accumulates them until the
+    disk fills, which then fails the very ledger writes that record live orders.
+
+    MUST be called while holding the dataset lock (every caller is inside
+    :func:`write_dataset`'s ``exclusive_file_lock``), so there is no live writer
+    whose in-flight temp could be deleted. The age gate is a second belt: only
+    temp files older than ``stale_seconds`` are removed."""
+    if not path.exists():
+        return
+    now = time.time()
+    for tmp in path.glob("**/.*.tmp"):
+        try:
+            if now - tmp.stat().st_mtime <= stale_seconds:
+                continue
+            tmp.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            # Best-effort cleanup: a transient stat/unlink failure (e.g. Windows
+            # delete-pending) must never break the write that triggered the sweep.
+            continue
+
+
 def write_dataset(
     df: pl.DataFrame,
     data_root: str | Path,
@@ -526,6 +650,10 @@ def _write_dataset_unlocked(
     append: bool,
 ) -> Path:
     path = dataset_path(root, dataset)
+    # storage-concurrency-4: opportunistically sweep orphaned `.*.tmp` part files
+    # left by a prior crash before this write. Safe here because we hold the
+    # dataset lock (no concurrent writer's in-flight temp can be clobbered).
+    _sweep_orphaned_tmp_parts(path)
     if df.is_empty():
         path.mkdir(parents=True, exist_ok=True)
         return path
@@ -654,7 +782,11 @@ def _collect_ledger_files(
         keys = [c for c in DATASET_KEYS.get(dataset, ()) if c in out.columns]
         if keys:
             if "updated_at_ms" in out.columns:
-                out = out.sort("updated_at_ms", nulls_last=False)
+                # maintain_order=True mirrors _write_part: an UNSTABLE sort can
+                # reorder rows that share a null/equal updated_at_ms (preflight ->
+                # final continuous order rows), letting a stale preflight win the
+                # cross-bucket dedup and resurrecting the double-book class.
+                out = out.sort("updated_at_ms", nulls_last=False, maintain_order=True)
             out = out.unique(subset=keys, keep="last")
     return out
 
@@ -732,5 +864,23 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
         finally:
             os.close(fd)
         temp_path.replace(path)
+        # storage-concurrency-5: fsync the PARENT DIRECTORY after the rename.
+        # The file-fsync above makes the temp file's CONTENTS durable, but on
+        # POSIX the rename itself (the directory entry now pointing `path` at the
+        # new inode) is only durable after fsync of the containing directory fd.
+        # Without it a hard power loss after replace() can revert the name to the
+        # OLD inode, losing the most recent ledger update on a read-modify-rewrite
+        # single-copy part file. Directory fsync is a no-op / unsupported on
+        # Windows (O_RDONLY on a dir raises), so failures here are swallowed:
+        # contents durability (the file-fsync) is the important guarantee and is
+        # already met; this only tightens rename durability where the OS allows.
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
     finally:
         temp_path.unlink(missing_ok=True)

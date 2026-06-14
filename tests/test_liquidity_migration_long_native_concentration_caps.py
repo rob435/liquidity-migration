@@ -205,7 +205,6 @@ def test_sector_cap_blocks_third_meme_when_cap_is_two(tmp_path: Path) -> None:
         sector_map_path=str(sector_path),
         cooldown_days=0,
         gross_exposure=1.0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )
@@ -248,7 +247,6 @@ def test_no_sector_cap_when_disabled(tmp_path: Path) -> None:
         sector_map_path=str(sector_path),
         cooldown_days=0,
         gross_exposure=1.0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )
@@ -289,7 +287,6 @@ def test_max_per_symbol_weight_caps_position_weight(tmp_path: Path) -> None:
         max_per_symbol_weight=0.10,  # clamp at 10% of gross
         max_per_sector_concurrent=0,
         cooldown_days=0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )
@@ -332,7 +329,6 @@ def test_max_per_symbol_weight_disabled_passes_through() -> None:
         max_per_symbol_weight=0.0,  # disabled
         max_per_sector_concurrent=0,
         cooldown_days=0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )
@@ -374,7 +370,6 @@ def test_equal_sizing_uses_equal_position_weight() -> None:
         max_per_symbol_weight=0.0,
         max_per_sector_concurrent=0,
         cooldown_days=0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )
@@ -415,7 +410,6 @@ def test_symbol_weight_cap_binds_after_vol_target_scale() -> None:
         max_per_symbol_weight=0.10,
         max_per_sector_concurrent=0,
         cooldown_days=0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )
@@ -456,7 +450,6 @@ def test_sniper_fallthrough_skips_when_deadline_bar_missing() -> None:
         max_per_symbol_weight=0.0,
         max_per_sector_concurrent=0,
         cooldown_days=0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )
@@ -492,7 +485,6 @@ def test_final_exit_scan_catches_stop_when_no_later_feature_rows() -> None:
         max_per_symbol_weight=0.0,
         max_per_sector_concurrent=0,
         cooldown_days=0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )
@@ -535,7 +527,6 @@ def test_windowed_force_close_uses_configured_end_date() -> None:
         max_per_symbol_weight=0.0,
         max_per_sector_concurrent=0,
         cooldown_days=0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
     )

@@ -64,9 +64,12 @@ class ArchiveManifestConfig:
 
     Synthesised rows carry ``url=bybit_v5_listing`` and
     ``source="bybit_v5_listing"`` (not a real archive zip). The downstream
-    1m archive download path bails on those rows; the v5 1h kline path
+    scrape-based 1m and 1h archive download paths SKIP those rows with an
+    explicit ``status="skipped_v5_listing"`` (they have no real archive URL to
+    fetch — attempting a download would burn the full retry budget on a bogus
+    URL and inflate the report's failure count); the v5 1h kline API path
     treats ``(symbol, date)`` as the key and ignores ``url``, so the
-    full-PIT 1h pipeline picks them up transparently.
+    full-PIT 1h pipeline (the canonical Bybit build) picks them up transparently.
     """
 
     base_url: str = DEFAULT_BYBIT_PUBLIC_TRADING_URL
@@ -498,8 +501,43 @@ def run_archive_manifest(
                 f"in {output_dir} were still written for diagnosis. Re-run when the v5 "
                 "endpoint is healthy, or pass --allow-degraded for an intentional override."
             )
-        write_dataset(manifest, data_root, "archive_trade_manifest", partition_by=("date",), append=False)
+        # pit-data-4: write_dataset(partition_by=date, append=False) REPLACES every
+        # date partition present in the written frame, so a narrow rebuild (e.g.
+        # --symbols allowlist) would erase every OTHER symbol's PIT membership on
+        # those dates — a survivorship hole. UNION the rebuilt rows with the
+        # previously-persisted manifest (dedup on symbol/date/url) so a rebuild
+        # AUGMENTS coverage and never silently drops a once-covered (symbol, date).
+        # A genuinely delisted symbol stays in the membership set (conservative:
+        # the full-PIT gate then still requires its history), which is the safe
+        # anti-survivorship direction.
+        to_persist = _union_with_persisted_manifest(data_root, manifest)
+        write_dataset(to_persist, data_root, "archive_trade_manifest", partition_by=("date",), append=False)
     return payload
+
+
+def _union_with_persisted_manifest(data_root: str | Path, manifest: pl.DataFrame) -> pl.DataFrame:
+    """Union ``manifest`` with the previously-persisted ``archive_trade_manifest``.
+
+    pit-data-4: returns the de-duplicated union (key = symbol/date/url) of the new
+    rows and any prior rows, so persisting it with a per-date overwrite augments
+    rather than replaces coverage. Falls back to the new ``manifest`` unchanged
+    when there is no readable prior manifest (first build / corrupt store).
+    """
+    try:
+        previous = read_dataset(data_root, "archive_trade_manifest")
+    except Exception as exc:  # noqa: BLE001 - a missing/unreadable prior manifest must not block the write
+        _logger.debug("could not read previous archive_trade_manifest for union merge: %s", exc)
+        return manifest
+    if previous.is_empty() or not {"symbol", "date", "url"}.issubset(previous.columns):
+        return manifest
+    # Align to the columns BOTH frames carry so the concat is schema-stable even
+    # if the prior manifest predates a column the new frame added (or vice-versa).
+    # Preserve the new frame's column order.
+    common = [c for c in manifest.columns if c in previous.columns]
+    combined = pl.concat(
+        [manifest.select(common), previous.select(common)], how="vertical_relaxed"
+    )
+    return combined.unique(subset=["symbol", "date", "url"], keep="first").sort(["date", "symbol", "url"])
 
 
 def _detect_universe_shrink(data_root: str | Path, *, new_symbols: list[str]) -> str:
@@ -528,8 +566,10 @@ def _detect_universe_shrink(data_root: str | Path, *, new_symbols: list[str]) ->
     message = (
         f"Universe shrank vs the previous manifest: {len(dropped)} symbol(s) present before are now "
         f"missing ({preview}). The Bybit archive root listing has historically lagged, so this may be a "
-        f"survivorship hole rather than a real delisting. Pass an explicit --symbols allowlist to retain them "
-        f"if they still have archive directories."
+        f"survivorship hole rather than a real delisting. The persist step now UNIONs with the prior "
+        f"manifest (pit-data-4), so these previously-covered (symbol, date) pairs are RETAINED rather "
+        f"than dropped; re-run a full (unfiltered) rebuild once the root listing recovers to refresh them. "
+        f"Do NOT rely on a narrow --symbols rebuild to 'fix' coverage — it can only add, never prune."
     )
     _logger.warning("archive-manifest survivorship: %s", message)
     return message
@@ -579,6 +619,9 @@ def run_archive_klines_download(
     downloaded = result_frame.filter(pl.col("status") == "downloaded").height if not result_frame.is_empty() else 0
     cached = result_frame.filter(pl.col("status") == "cached").height if not result_frame.is_empty() else 0
     empty = result_frame.filter(pl.col("status") == "empty").height if not result_frame.is_empty() else 0
+    skipped_v5_listing = (
+        result_frame.filter(pl.col("status") == "skipped_v5_listing").height if not result_frame.is_empty() else 0
+    )
     archives_deleted = (
         result_frame.filter(pl.col("archive_deleted")).height
         if not result_frame.is_empty() and "archive_deleted" in result_frame.columns
@@ -591,6 +634,7 @@ def run_archive_klines_download(
         "downloaded": downloaded,
         "cached": cached,
         "empty": empty,
+        "skipped_v5_listing": skipped_v5_listing,
         "failures": failures,
         "archives_deleted": archives_deleted,
         "created_at": datetime.now(tz=UTC).isoformat(),
@@ -667,6 +711,9 @@ def run_archive_hourly_klines_download(
     downloaded = result_frame.filter(pl.col("status") == "downloaded").height if not result_frame.is_empty() else 0
     cached = result_frame.filter(pl.col("status") == "cached").height if not result_frame.is_empty() else 0
     empty = result_frame.filter(pl.col("status") == "empty").height if not result_frame.is_empty() else 0
+    skipped_v5_listing = (
+        result_frame.filter(pl.col("status") == "skipped_v5_listing").height if not result_frame.is_empty() else 0
+    )
     archives_deleted = (
         result_frame.filter(pl.col("archive_deleted")).height
         if not result_frame.is_empty() and "archive_deleted" in result_frame.columns
@@ -681,6 +728,7 @@ def run_archive_hourly_klines_download(
         "downloaded": downloaded,
         "cached": cached,
         "empty": empty,
+        "skipped_v5_listing": skipped_v5_listing,
         "failures": failures,
         "archives_deleted": archives_deleted,
         "created_at": datetime.now(tz=UTC).isoformat(),
@@ -1039,6 +1087,7 @@ def format_archive_klines_report(payload: dict[str, Any]) -> str:
         f"| Downloaded | {payload['downloaded']} |",
         f"| Cached | {payload['cached']} |",
         f"| Empty | {payload['empty']} |",
+        f"| Skipped (v5 listing) | {payload.get('skipped_v5_listing', 0)} |",
         f"| Failed | {payload['failures']} |",
         f"| Archives deleted | {payload.get('archives_deleted', 0)} |",
         "",
@@ -1137,6 +1186,19 @@ def _rows_by_symbol(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return list(grouped.values())
 
 
+def _is_v5_listing_row(row: dict[str, Any]) -> bool:
+    """True for a synthesised v5-listing sentinel row (no real archive zip).
+
+    The scrape-based download paths must skip these — see pit-data-7. Matches on
+    either the sentinel ``url`` or ``source`` so a row is recognised even if only
+    one field was populated upstream.
+    """
+    return (
+        str(row.get("url", "")) == V5_LISTING_URL_SENTINEL
+        or str(row.get("source", "")) == V5_LISTING_SOURCE
+    )
+
+
 def _download_one_archive_kline(
     data_root: str | Path,
     row: dict[str, Any],
@@ -1148,6 +1210,14 @@ def _download_one_archive_kline(
     symbol = str(row["symbol"])
     archive_date = str(row["date"])
     url = str(row["url"])
+    if _is_v5_listing_row(row):
+        # pit-data-7: v5-listing sentinel rows have no real archive zip; the
+        # scrape path must SKIP (not attempt download), else download_public_trade_archive
+        # retries the bogus 'bybit_v5_listing' string the full retry budget then
+        # records status='failed', inflating the report's failure count and masking
+        # real archive failures. The 1h API path keys on (symbol,date) and picks
+        # these up transparently.
+        return _download_result(row, status="skipped_v5_listing", bar_rows=0, valid_bar_rows=0)
     existing_bar_rows = _kline_partition_bar_rows(data_root, dataset="klines_1m", symbol=symbol, date=archive_date)
     existing_valid_bar_rows = _kline_partition_valid_bar_rows(data_root, dataset="klines_1m", symbol=symbol, date=archive_date)
     if missing_only and existing_valid_bar_rows >= max(int(min_existing_bars), 1):
@@ -1191,6 +1261,10 @@ def _download_one_archive_hourly_kline(
     symbol = str(row["symbol"])
     archive_date = str(row["date"])
     url = str(row["url"])
+    if _is_v5_listing_row(row):
+        # pit-data-7: see _download_one_archive_kline — skip v5-listing sentinel
+        # rows on the scrape path rather than burning the retry budget on a bogus URL.
+        return _download_result(row, status="skipped_v5_listing", bar_rows=0, valid_bar_rows=0)
     existing_bar_rows = _kline_partition_bar_rows(data_root, dataset="klines_1h", symbol=symbol, date=archive_date)
     existing_valid_bar_rows = _kline_partition_valid_bar_rows(data_root, dataset="klines_1h", symbol=symbol, date=archive_date)
     required_bars = max(int(min_existing_bars), 1)

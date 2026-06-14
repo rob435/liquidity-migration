@@ -197,6 +197,32 @@ def _beta_window_observation_count(
     return sum(1 for b in btc_returns[start:end] if b is not None)
 
 
+def _beta_window_joint_observation_count(
+    btc_returns: list[float | None],
+    eth_returns: list[float | None],
+    hedge_rule: ContinuousHedgeRule,
+) -> int:
+    """Joint BTC+ETH observation count over the SAME trailing window the 2f beta
+    actually uses (``compute_hedge_betas_2f``: rows in ``[lo, end)`` where both legs
+    are known, with ``end = len - beta_extra_lag_days`` and
+    ``lo = max(0, end - beta_window_days)``).
+
+    The 2f fallback gate MUST use this windowed count, not a full-series count: the
+    betas are estimated on the trailing window only, so a series whose full history
+    has >= beta_min_obs joint obs but whose trailing window has < beta_min_obs would
+    yield (0, 0) betas WITHOUT tripping a full-series fallback gate — silently
+    leaving the book completely unhedged (audit hedge-1)."""
+    end = len(btc_returns) - int(hedge_rule.beta_extra_lag_days)
+    if end <= 0:
+        return 0
+    start = max(0, end - int(hedge_rule.beta_window_days))
+    return sum(
+        1
+        for b, e in zip(btc_returns[start:end], eth_returns[start:end])
+        if b is not None and e is not None
+    )
+
+
 @dataclass(slots=True)
 class HedgeDecision2F:
     """The computed two-leg (BTC+ETH) hedge action for one daily run (pure; no I/O)."""
@@ -230,15 +256,22 @@ def compute_hedge_decision_2f(
 
     Per-leg ratios come from the parity-tested live twin
     (``compute_continuous_hedge_ratios_2f``, frozen Stage-B rule). If the joint
-    BTC+ETH observation count is below ``beta_min_obs`` the twin returns (0, 0);
-    in that case this falls back to the single-leg BTC decision so a thin ETH
-    history can never leave the book unhedged. The TOTAL is hard-capped at
-    ``max_hedge_equity_frac`` (legs scaled proportionally).
+    BTC+ETH observation count WITHIN THE TRAILING BETA WINDOW is below
+    ``beta_min_obs`` the twin returns (0, 0); in that case this falls back to the
+    single-leg BTC decision so a thin ETH window can never leave the book unhedged.
+    The fallback gate is measured over the same trailing window the beta uses (not
+    the full series) so an ETH-thin window with a deep full history still falls
+    back instead of silently producing a zero hedge (audit hedge-1). The TOTAL is
+    hard-capped at ``max_hedge_equity_frac`` (legs scaled proportionally).
     """
     from .continuous_rebalance import plan_continuous_hedge_resize
 
     target_scale = max(live_gross_short_frac, 0.0) / REFERENCE_GROSS_SHORT_FRAC
-    n_joint = sum(1 for b, e in zip(btc_returns, eth_returns) if b is not None and e is not None)
+    # Count joint obs over the SAME trailing window the beta uses (not the full
+    # series): a full-series count would miss the case where the trailing window is
+    # ETH-thin (betas -> 0) yet the full history is not, leaving the book silently
+    # unhedged with no fallback (audit hedge-1).
+    n_joint = _beta_window_joint_observation_count(btc_returns, eth_returns, FROZEN_HEDGE_RULE)
     state = ContinuousHedge2FState(
         prior_raw_returns=tuple(unit_returns),
         prior_hedge_returns_1=tuple(btc_returns),

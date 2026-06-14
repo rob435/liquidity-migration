@@ -50,13 +50,21 @@ class _PybitRateLimitLogFilter(logging.Filter):
 logging.getLogger("pybit._http_manager").addFilter(_PybitRateLimitLogFilter())
 
 
+_logger_market_data = logging.getLogger("liquidity_migration.bybit.market_data")
+_logger_account = logging.getLogger("liquidity_migration.bybit.account")
+
+
 class BybitDataError(RuntimeError):
     pass
 
 
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSEY_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
 def _env_flag(name: str) -> bool:
     """True when environment variable ``name`` is set to a truthy value."""
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
 
 
 def resolve_private_credentials() -> tuple[str | None, str | None, bool]:
@@ -71,7 +79,16 @@ def resolve_private_credentials() -> tuple[str | None, str | None, bool]:
 
     Demo is the default, so an unset toggle stays on the demo account. Setting
     both ``DEMO`` and ``REAL_MONEY`` true is a contradiction and raises.
+
+    ``REAL_MONEY`` is the single most consequential operator switch, so a value
+    that is set but neither clearly truthy ({1,true,yes,on}) nor clearly falsey
+    ({"",0,false,no,off}) is rejected LOUDLY rather than silently coerced to
+    demo: an operator who typed ``REAL_MONEY=enabled`` expecting mainnet must not
+    discover the misconfiguration only by inspecting fills. The resolved account
+    is logged once at INFO so "which account did this process use" is auditable
+    from the log rather than from indirect evidence.
     """
+    _reject_ambiguous_flag("REAL_MONEY")
     demo = _env_flag("DEMO")
     real_money = _env_flag("REAL_MONEY")
     if demo and real_money:
@@ -80,15 +97,35 @@ def resolve_private_credentials() -> tuple[str | None, str | None, bool]:
             "DEMO=true for the demo account, REAL_MONEY=true for mainnet."
         )
     if real_money:
+        _logger_account.info("resolved account: REAL_MONEY (mainnet)")
         return (
             os.environ.get("BYBIT_REAL_API_KEY"),
             os.environ.get("BYBIT_REAL_API_SECRET"),
             False,
         )
+    _logger_account.info("resolved account: demo")
     return (
         os.environ.get("BYBIT_DEMO_API_KEY"),
         os.environ.get("BYBIT_DEMO_API_SECRET"),
         True,
+    )
+
+
+def _reject_ambiguous_flag(name: str) -> None:
+    """Raise if ``name`` is set to a value that is neither clearly true nor
+    clearly false. Keeps the fail-safe direction (an unrecognised value never
+    silently means 'on'), but surfaces a typo'd high-stakes toggle at startup
+    instead of letting it coerce to the default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return
+    normalised = raw.strip().lower()
+    if normalised in _TRUTHY_ENV_VALUES or normalised in _FALSEY_ENV_VALUES:
+        return
+    raise RuntimeError(
+        f"{name}={raw!r} is not a recognised boolean. Use one of "
+        f"{sorted(_TRUTHY_ENV_VALUES)} to enable or {sorted(_FALSEY_ENV_VALUES - {''})} "
+        f"(or unset) to disable -- refusing to guess for a safety-critical toggle."
     )
 
 
@@ -136,22 +173,37 @@ class BybitRestRateLimiter:
         # checking the window for the full sleep. We re-acquire + re-check after the
         # sleep, so the sliding-window semantics are preserved (a slot is only ever
         # claimed when len < max), while concurrent workers can make progress.
+        #
+        # Throttle stats are counted ONCE per acquire that actually blocked: we
+        # accumulate the real slept time across however many re-loops it takes to
+        # claim a slot and record a single throttle_event at the end. The earlier
+        # per-loop counting inflated both counters under contention (a re-loop that
+        # still found len>=max counted again), misleading throttled_seconds — the
+        # very metric used to size the REST budget.
+        slept = 0.0
         while True:
             with self._lock:
                 now = time.monotonic()
                 cutoff = now - self._per
-                while self._timestamps and self._timestamps[0] < cutoff:
+                # Pop slots at OR before the cutoff: a slot exactly at the window
+                # edge has aged out, so leaving it (strict `<`) produced wait<=0 and
+                # a tight busy-spin (continue with no sleep) until the clock advanced
+                # past the boundary. `<=` frees that slot immediately.
+                while self._timestamps and self._timestamps[0] <= cutoff:
                     self._timestamps.popleft()
                 if len(self._timestamps) < self._max:
                     self._timestamps.append(now)
+                    if slept > 0.0:
+                        self._throttle_events += 1
+                        self._throttled_seconds += slept
                     return
                 wait = self._per - (now - self._timestamps[0])
                 if wait <= 0.0:
-                    # Window already rolled at the boundary; re-evaluate immediately.
+                    # Window boundary; the oldest slot rolls off on the next pop —
+                    # re-evaluate immediately without sleeping or double-counting.
                     continue
-                self._throttle_events += 1
-                self._throttled_seconds += wait
             time.sleep(wait)
+            slept += wait
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
@@ -201,25 +253,46 @@ class BybitMarketData:
     slow_call_ms: float = field(init=False, default=0.0)
     last_error: str = field(init=False, default="")
     _client: Any = field(init=False, repr=False)
+    # The bootstrap ThreadPoolExecutor (16 workers) shares ONE BybitMarketData,
+    # so every stat-counter mutation is a concurrent read-modify-write. Guard
+    # them with a lock; without it, increments were lost and stats() under-
+    # reported retries/slow-calls during a cold start (an operator relying on
+    # that telemetry to judge REST health saw a degrading startup as healthy).
+    # The lock only wraps the cheap counter arithmetic, never the HTTP call.
+    _stats_lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if HTTP is None:
             raise RuntimeError("pybit is required for BybitMarketData")
+        self._stats_lock = threading.Lock()
         self._client = HTTP(testnet=self.testnet)
 
-    def get_instruments_info(self) -> list[dict[str, Any]]:
+    def get_instruments_info(self, *, max_pages: int = 50) -> list[dict[str, Any]]:
+        # Bound the cursor walk (mirrors get_closed_pnl / get_funding_settlements /
+        # _cursor_result_list): a Bybit response that returns a stable, non-empty
+        # nextPageCursor would otherwise loop forever, hanging whatever thread
+        # called it (each _get is bounded by pybit's 10s, but the loop is not).
+        # 50 pages * 1000 rows comfortably covers the full linear universe; we
+        # break on a non-advancing cursor too, so a repeated cursor cannot spin.
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
-        while True:
+        for _ in range(max(1, int(max_pages))):
             params: dict[str, Any] = {"category": self.category, "limit": 1000}
             if cursor:
                 params["cursor"] = cursor
             payload = self._get("get_instruments_info", **params)
             result = payload.get("result", {})
             rows.extend(result.get("list", []))
-            cursor = result.get("nextPageCursor") or None
-            if not cursor:
+            next_cursor = result.get("nextPageCursor") or None
+            if not next_cursor or next_cursor == cursor:
                 return rows
+            cursor = next_cursor
+        _logger_market_data.warning(
+            "get_instruments_info hit max_pages=%d with a live cursor still set; "
+            "returning %d rows (truncated). nextPageCursor may be non-advancing.",
+            max_pages, len(rows),
+        )
+        return rows
 
     def get_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[dict[str, Any]]:
         interval_ms = INTERVAL_MS[interval] if interval in INTERVAL_MS else int(interval) * 60_000
@@ -317,14 +390,40 @@ class BybitMarketData:
         end = int(params["endTime"])
         cursor_end = end
         limit = int(params.get("limit", 200))
+        # A prior FULL page (len == limit) is the only reason this loop continues
+        # to a second request, so it means "more rows are expected below `oldest`".
+        # An empty/no-timestamp page that follows such a full page is therefore a
+        # suspicious mid-range hole, not a genuine end-of-data: if we just `break`
+        # we return a truncated frame, and _download_symbol_dataset (downloaders.py)
+        # sees frame.height>0 and writes the FULL-requested-range completeness
+        # marker -> a permanent, silent coverage gap in funding/open_interest that
+        # _marked_complete never re-fetches (audit ingestion-1). Raise instead so
+        # the fetch fails and the symbol-range is retried rather than marked done.
+        # A first-page empty (cursor_end still == end, no full page yet) is the
+        # legitimate "no data in range" case and must NOT raise.
+        prior_full_page = False
         while cursor_end >= start:
             request_params = {**params, "startTime": start, "endTime": cursor_end}
             payload = self._get(method_name, category=self.category, **request_params)
             batch = payload.get("result", {}).get("list", [])
             if not batch:
+                if prior_full_page:
+                    raise BybitDataError(
+                        f"Bybit {method_name} returned an empty page mid-range "
+                        f"(symbol={params.get('symbol')!r}, startTime={start}, "
+                        f"endTime={cursor_end}) after a full page; refusing to "
+                        f"truncate the fetch silently"
+                    )
                 break
             timestamps = sorted(int(item[timestamp_key]) for item in batch)
             if not timestamps:
+                if prior_full_page:
+                    raise BybitDataError(
+                        f"Bybit {method_name} returned a page with no usable "
+                        f"timestamps mid-range (symbol={params.get('symbol')!r}, "
+                        f"startTime={start}, endTime={cursor_end}) after a full "
+                        f"page; refusing to truncate the fetch silently"
+                    )
                 break
             for item in batch:
                 ts = int(item[timestamp_key])
@@ -341,18 +440,24 @@ class BybitMarketData:
             if next_cursor_end >= cursor_end:
                 break
             cursor_end = next_cursor_end
+            # We only reach here on a full page that did not hit `start`, so the
+            # next iteration is expected to return more rows. Arm the mid-range
+            # empty-page guard for that next request.
+            prior_full_page = True
         return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
 
     def _get(self, method_name: str, **params: Any) -> dict[str, Any]:
         method = getattr(self._client, method_name)
         last_error: Exception | None = None
-        self.logical_calls += 1
+        with self._stats_lock:
+            self.logical_calls += 1
         for attempt in range(self.retries):
             if self.rate_limiter is not None:
                 self.rate_limiter.acquire()
             started = time.perf_counter()
             try:
-                self.http_calls += 1
+                with self._stats_lock:
+                    self.http_calls += 1
                 payload = method(**params)
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
                 ret_code = payload.get("retCode")
@@ -374,46 +479,53 @@ class BybitMarketData:
                     raise
                 if attempt + 1 >= self.retries:
                     break
-                self.retry_events += 1
+                with self._stats_lock:
+                    self.retry_events += 1
                 time.sleep(self.retry_sleep_seconds * (2**attempt))
         raise BybitDataError(f"Bybit {method_name} failed after retries") from last_error
 
     def _record_call(self, elapsed_ms: float, *, error_text: str = "", rate_limited: bool = False) -> None:
-        self.total_call_ms += elapsed_ms
-        if elapsed_ms >= self.slow_call_threshold_ms:
-            self.slow_calls += 1
-            self.slow_call_ms += elapsed_ms
-        if error_text:
-            self.error_events += 1
-            self.last_error = error_text[:500]
-        if rate_limited:
-            self.rate_limit_events += 1
+        # Guarded so the shared-instance bootstrap pool cannot lose increments.
+        with self._stats_lock:
+            self.total_call_ms += elapsed_ms
+            if elapsed_ms >= self.slow_call_threshold_ms:
+                self.slow_calls += 1
+                self.slow_call_ms += elapsed_ms
+            if error_text:
+                self.error_events += 1
+                self.last_error = error_text[:500]
+            if rate_limited:
+                self.rate_limit_events += 1
 
     def stats(self) -> dict[str, Any]:
-        backoff_events = self.retry_events + self.rate_limit_events + self.slow_calls
-        return {
-            "logical_calls": self.logical_calls,
-            "http_calls": self.http_calls,
-            "retry_events": self.retry_events,
-            "rate_limit_events": self.rate_limit_events,
-            "error_events": self.error_events,
-            "slow_calls": self.slow_calls,
-            "total_call_ms": round(self.total_call_ms, 3),
-            "slow_call_ms": round(self.slow_call_ms, 3),
-            "backoff_events": backoff_events,
-            "last_error": self.last_error,
-        }
+        # Snapshot under the lock so a concurrent worker can't mutate a counter
+        # mid-read and produce an internally inconsistent dict.
+        with self._stats_lock:
+            backoff_events = self.retry_events + self.rate_limit_events + self.slow_calls
+            return {
+                "logical_calls": self.logical_calls,
+                "http_calls": self.http_calls,
+                "retry_events": self.retry_events,
+                "rate_limit_events": self.rate_limit_events,
+                "error_events": self.error_events,
+                "slow_calls": self.slow_calls,
+                "total_call_ms": round(self.total_call_ms, 3),
+                "slow_call_ms": round(self.slow_call_ms, 3),
+                "backoff_events": backoff_events,
+                "last_error": self.last_error,
+            }
 
     def reset_stats(self) -> None:
-        self.logical_calls = 0
-        self.http_calls = 0
-        self.retry_events = 0
-        self.rate_limit_events = 0
-        self.error_events = 0
-        self.slow_calls = 0
-        self.total_call_ms = 0.0
-        self.slow_call_ms = 0.0
-        self.last_error = ""
+        with self._stats_lock:
+            self.logical_calls = 0
+            self.http_calls = 0
+            self.retry_events = 0
+            self.rate_limit_events = 0
+            self.error_events = 0
+            self.slow_calls = 0
+            self.total_call_ms = 0.0
+            self.slow_call_ms = 0.0
+            self.last_error = ""
 
 
 @dataclass(slots=True)
@@ -426,6 +538,14 @@ class BybitPrivateClient:
     retries: int = 2
     retry_sleep_seconds: float = 0.5
     rate_limiter: BybitRestRateLimiter | None = None
+    # Defense in depth: the demo-only invariant is enforced once at config
+    # validation (validate_order_submit_allowed), but that runs three call
+    # layers away from where the order is actually signed. Re-assert it HERE,
+    # at the signing client, so a real-money account can only ever mutate
+    # orders when the caller explicitly opted in. Reads (get_*) are never
+    # gated; only state-changing submissions are. Defaults off, matching the
+    # repo rule that REAL_MONEY is never enabled without explicit instruction.
+    confirm_real_money: bool = False
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -440,6 +560,18 @@ class BybitPrivateClient:
             api_secret=self.api_secret,
         )
 
+    def _assert_submit_allowed(self, action: str) -> None:
+        """Refuse a state-changing submission on a real-money account unless
+        the caller explicitly opted in at construction. Asserted at the layer
+        that signs the order, so the demo-only invariant survives a future
+        submit path that forgets the config-time guard."""
+        if not self.demo and not self.confirm_real_money:
+            raise RuntimeError(
+                f"Refusing to {action} on a REAL_MONEY account: this client was "
+                "built without confirm_real_money=True. The strategy is not "
+                "validated for real money; keep it on demo."
+            )
+
     def get_wallet_balance(self, *, account_type: str = "UNIFIED", coin: str = "USDT") -> dict[str, Any]:
         payload = self._call("get_wallet_balance", accountType=account_type, coin=coin)
         return payload.get("result", {})
@@ -447,14 +579,66 @@ class BybitPrivateClient:
     def place_order(self, **params: Any) -> dict[str, Any]:
         if "orderLinkId" not in params:
             raise ValueError("orderLinkId is required for idempotent Bybit order submission")
-        payload = self._call_once("place_order", category=self.category, **params)
+        self._assert_submit_allowed("place_order")
+        try:
+            payload = self._call_once("place_order", category=self.category, **params)
+        except BybitDataError as exc:
+            # A duplicate-orderLinkId reject (110089) is NOT a failure: it means
+            # Bybit already accepted an order under this idempotency key — almost
+            # always our own prior submit (e.g. the trade router's WS submit
+            # reached the venue, the ack was lost, and the REST fallback re-sent
+            # the same orderLinkId). Resubmitting a second order would be wrong;
+            # raising would orphan a LIVE position (the caller records an error
+            # and writes no ledger row). Probe by orderLinkId and return the
+            # existing order so the submit is idempotent end to end.
+            if not _is_duplicate_order_link(exc):
+                raise
+            existing = self._lookup_order_by_link(
+                symbol=params.get("symbol"),
+                order_link_id=params["orderLinkId"],
+            )
+            if existing is None:
+                # Bybit reported a duplicate but we cannot see the order — surface
+                # the original reject rather than silently swallowing it.
+                raise
+            return existing
         return payload.get("result", {})
 
+    def _lookup_order_by_link(
+        self, *, symbol: str | None, order_link_id: str,
+    ) -> dict[str, Any] | None:
+        """Return a place_order-shaped dict for an order already at Bybit under
+        ``order_link_id`` (open orders first, then order history), else None.
+        Used to make a duplicate-link reject idempotent."""
+        if not order_link_id:
+            return None
+        try:
+            open_rows = self.get_open_orders(symbol=symbol) if symbol else self.get_open_orders()
+        except Exception:  # noqa: BLE001 - probe must never make the reject worse
+            open_rows = []
+        for row in open_rows or []:
+            if str(row.get("orderLinkId") or "") == order_link_id:
+                return dict(row)
+        try:
+            history = self.get_order_history(
+                symbol=symbol, order_link_id=order_link_id, limit=10,
+            )
+        except Exception:  # noqa: BLE001
+            history = []
+        for row in history or []:
+            if str(row.get("orderLinkId") or "") == order_link_id and str(
+                row.get("orderStatus") or row.get("order_status") or ""
+            ).lower() in _PROBE_PRESENT_STATUSES:
+                return dict(row)
+        return None
+
     def cancel_order(self, *, symbol: str, order_link_id: str) -> dict[str, Any]:
+        self._assert_submit_allowed("cancel_order")
         payload = self._call("cancel_order", category=self.category, symbol=symbol, orderLinkId=order_link_id)
         return payload.get("result", {})
 
     def cancel_all_orders(self, *, symbol: str | None = None, settle_coin: str | None = "USDT") -> dict[str, Any]:
+        self._assert_submit_allowed("cancel_all_orders")
         params: dict[str, Any] = {"category": self.category}
         if symbol:
             params["symbol"] = symbol
@@ -643,6 +827,7 @@ class BybitPrivateClient:
         effective_sell = buy_leverage if sell_leverage is None else sell_leverage
         if effective_sell <= 0.0:
             raise ValueError("sell_leverage must be positive")
+        self._assert_submit_allowed("set_leverage")
         # Retry a transient set_leverage failure rather than silently dropping an
         # otherwise-valid entry. _call_once (not _call) keeps the original error
         # text -- which carries the "110043 not modified" marker -- intact, and a
@@ -688,6 +873,7 @@ class BybitPrivateClient:
         tp_trigger_by: str | None = "MarkPrice",
         sl_trigger_by: str | None = "MarkPrice",
     ) -> dict[str, Any]:
+        self._assert_submit_allowed("set_trading_stop")
         params: dict[str, Any] = {
             "category": self.category,
             "symbol": symbol,
@@ -771,9 +957,28 @@ def _leverage_text(value: float) -> str:
     return str(value)
 
 
+def _safe_int(value: Any) -> int:
+    """int(value) that returns 0 instead of raising on a non-numeric/None value."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
+
+
 def _is_rate_limit(value: Any) -> bool:
     text = str(value).lower()
     return "10006" in text or "rate limit" in text or "too many visits" in text
+
+
+def _is_duplicate_order_link(value: Any) -> bool:
+    """True for Bybit's duplicate-orderLinkId reject (retCode 110089).
+
+    Bybit returns 110089 / "orderLinkID exists" when an order has already been
+    accepted under the same idempotency key. Treated as idempotent success at
+    the submit layer, not a failure. Matched by code AND message text so a
+    re-worded retMsg still classifies."""
+    text = str(value).lower()
+    return "110089" in text or ("orderlinkid" in text and "exist" in text)
 
 
 @dataclass(slots=True)
@@ -983,6 +1188,32 @@ class BybitTradeRouter:
             try:
                 return self._ws_call_sync("place_order", **params)
             except _RouterWsFailed as failure:
+                # On a WS timeout / exception / malformed-ack the submit may have
+                # reached Bybit before the ack was lost or garbled, so the order
+                # could be LIVE. Probe by orderLinkId FIRST — independent of
+                # rest_fallback — and return the existing order if present. A
+                # "rejected" kind is a definitive venue reject (the order did NOT
+                # take), so it is excluded from the probe; REST resubmits and
+                # re-rejects cleanly (audit 2026-06-02 #44).
+                #
+                # The probe runs even in strict-WS (rest_fallback=False): without
+                # it, strict-WS gave LESS orphan protection than the default mode
+                # — a lost-ack-but-order-took race recorded an error while the
+                # position was live, with no way to recover the orderId. The probe
+                # never resubmits, so strict-WS still won't double-submit; it just
+                # recovers the order it already placed before raising.
+                if failure.kind in ("timeout", "exception", "malformed_ack"):
+                    probed = self._probe_existing_order(
+                        symbol=params.get("symbol"),
+                        order_link_id=params["orderLinkId"],
+                    )
+                    if probed is not None:
+                        _logger_trade_router.info(
+                            "place_order WS %s but order present on probe; "
+                            "returning existing order symbol=%s link=%s",
+                            failure.kind, params.get("symbol"), params["orderLinkId"],
+                        )
+                        return probed
                 if not self._rest_fallback:
                     raise
                 _logger_trade_router.info(
@@ -991,28 +1222,6 @@ class BybitTradeRouter:
                 )
                 with self._lock:
                     self._rest_fallbacks += 1
-                # On a WS timeout / exception / malformed-ack the submit may have
-                # reached Bybit before the ack was lost or garbled. A REST resubmit
-                # then races: Bybit's per-orderLinkId dedup USUALLY catches it
-                # (retCode=110089), but the window between Bybit ingesting the WS
-                # submit and processing the REST submit is not formally guaranteed
-                # to dedup. Probe by orderLinkId first; if Bybit already has the
-                # (active/filled) order, return it instead of resubmitting. A
-                # "rejected" kind is a definitive venue reject (the order did NOT
-                # take), so it is excluded — REST resubmits and re-rejects cleanly
-                # (audit 2026-06-02 #44).
-                if failure.kind in ("timeout", "exception", "malformed_ack"):
-                    probed = self._probe_existing_order(
-                        symbol=params.get("symbol"),
-                        order_link_id=params["orderLinkId"],
-                    )
-                    if probed is not None:
-                        _logger_trade_router.info(
-                            "place_order WS timeout but order present on probe; "
-                            "skipping REST resubmit symbol=%s link=%s",
-                            params.get("symbol"), params["orderLinkId"],
-                        )
-                        return probed
         else:
             with self._lock:
                 self._rest_only += 1
@@ -1166,10 +1375,15 @@ class BybitTradeRouter:
             return None
         # Pick the most-recently-created row (history is usually newest-first
         # already, but be defensive — only one orderLinkId per UID per window,
-        # so this is conservative).
+        # so this is conservative). _safe_int guards the venue-supplied
+        # createdTime/updatedTime: a malformed (non-numeric) timestamp degrades
+        # to "pick any matching row" rather than raising a ValueError that would
+        # escape the probe and turn a recoverable WS-timeout fallback into a hard
+        # place_order failure — honouring the probe's "never make things worse"
+        # contract (the two REST calls above are already guarded).
         chosen = max(
             rows,
-            key=lambda r: int(r.get("createdTime") or r.get("updatedTime") or 0),
+            key=lambda r: _safe_int(r.get("createdTime") or r.get("updatedTime")),
         )
         with self._lock:
             self._ws_timeout_probe_recovered += 1
@@ -1302,8 +1516,14 @@ def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
     background thread with a join timeout means a stuck close costs us
     `timeout_seconds` per WS instead of unbounded blocking; the resources
     leak (until process exit) but shutdown proceeds."""
-    timer = getattr(client, "_agc_ping_timer", None)
-    if timer is not None:
+    # Cancel the ping timer under whichever attribute it lives on: our patch sets
+    # both _agc_ping_timer and custom_ping_timer, but stock pybit (and a future
+    # bump that stops calling our patched _send_initial_ping) uses only
+    # custom_ping_timer. Checking both keeps shutdown-cleanup correct regardless
+    # of whether the monkeypatch applied — so a pybit upgrade can't silently turn
+    # this cancel into a no-op and reintroduce a shutdown-blocking timer thread.
+    for attr in ("_agc_ping_timer", "custom_ping_timer"):
+        timer = getattr(client, attr, None)
         cancel = getattr(timer, "cancel", None)
         if callable(cancel):
             try:
@@ -1337,6 +1557,21 @@ def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
 
 
 def _patch_pybit_daemon_ping_timer() -> None:
+    """Ensure pybit's ping timer is a daemon thread that does not block shutdown.
+
+    pybit 5.16.0 already creates a daemon ``custom_ping_timer`` and cancels the
+    prior one via ``_stop_custom_ping_timer`` on every (re)connect, so the patch
+    is redundant against that version. We keep it as defense-in-depth against an
+    older/forked pybit whose ``_send_initial_ping`` left a non-daemon timer (the
+    timer thread then blocks process exit). The patched version is written so it
+    is SAFE on reconnect: it cancels any prior timer (stock ``custom_ping_timer``
+    or our own ``_agc_ping_timer``) before installing a new one, so reconnects
+    cannot accumulate orphan Timer threads — the bug the earlier patch had, where
+    each reconnect overwrote ``_agc_ping_timer`` without cancelling it. It also
+    mirrors the timer onto BOTH ``custom_ping_timer`` (so pybit's own
+    ``exit()``/``_stop_custom_ping_timer`` cancels it) and ``_agc_ping_timer`` (so
+    ``_close_ws_client`` cancels it regardless of which attribute pybit reads).
+    """
     try:
         _websocket_stream = importlib.import_module("pybit._websocket_stream")
     except ModuleNotFoundError:  # pragma: no cover - dependency may be absent before install
@@ -1346,8 +1581,22 @@ def _patch_pybit_daemon_ping_timer() -> None:
         return
 
     def _send_initial_ping(self: Any) -> None:
+        # Cancel any timer still live from a prior connect before replacing it,
+        # so a reconnect (pybit re-invokes _send_initial_ping per connect) does
+        # not leave an orphan daemon Timer running.
+        for attr in ("custom_ping_timer", "_agc_ping_timer"):
+            prior = getattr(self, attr, None)
+            cancel = getattr(prior, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:  # noqa: BLE001 - never let cleanup break the ping loop
+                    pass
         timer = threading.Timer(self.ping_interval, self._send_custom_ping)
         timer.daemon = True
+        # Set both so pybit's exit()/_stop_custom_ping_timer AND our
+        # _close_ws_client can each cancel the live timer.
+        self.custom_ping_timer = timer
         self._agc_ping_timer = timer
         timer.start()
 
@@ -1669,14 +1918,24 @@ class BybitKlineStreamPool:
         pybit delivers the full message dict: ``{"topic": "kline.60.SYMBOL",
         "data": [{"start": ..., "confirm": True, ...}, ...]}``. The pool's
         contract with consumers is ``on_bar(symbol, bar_dict, confirmed)`` —
-        one call per bar in the message."""
-        on_bar = self._on_bar
-        if on_bar is None:  # defensive — subscribe() always sets this first
+        one call per bar in the message.
+
+        The closure reads ``self._on_bar`` at dispatch time (not at build
+        time). subscribe() documents that a re-subscribe with a different
+        callback replaces the sink "for every connection" — capturing the
+        callback here would silently break that for already-subscribed topics
+        (they would keep firing the OLD sink). Dereferencing live makes the
+        swap honoured everywhere, matching the documented contract."""
+        if self._on_bar is None:  # defensive — subscribe() always sets this first
             raise RuntimeError("internal error: on_bar callback not set")
 
         def _callback(message: dict[str, Any]) -> None:
             state.message_count += 1
             state.last_message_monotonic = time.monotonic()
+            on_bar = self._on_bar
+            if on_bar is None:  # defensive — a swap should never clear it to None
+                state.dropped_messages += 1
+                return
             try:
                 topic = message.get("topic", "")
                 data = message.get("data", [])

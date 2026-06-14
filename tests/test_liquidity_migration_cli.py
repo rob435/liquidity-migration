@@ -108,15 +108,19 @@ def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
 def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
     """The deployed runner is 100%% taker; maker_fill_probability=0.0 must yield
     the full taker round-trip cost (2 * (taker_fee + taker_slippage) = 15 bps),
-    removing the maker-blend under-costing (M2)."""
+    removing the maker-blend under-costing (M2). The dataclass DEFAULT now also
+    models 100%% taker, so an ad-hoc CostConfig() no longer under-costs.
+    (cli-config-2 / cost-funding-1)"""
     from dataclasses import replace
 
     from liquidity_migration.config import CostConfig
 
     taker = replace(CostConfig(), maker_fill_probability=0.0)
     assert taker.base_entry_exit_cost_bps == pytest.approx(15.0)
-    # The default 0.60 maker blend is cheaper (the under-costing the flag fixes).
-    assert CostConfig().base_entry_exit_cost_bps < taker.base_entry_exit_cost_bps
+    # The default must equal the full-taker cost (no silent maker-blend discount).
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(taker.base_entry_exit_cost_bps)
+    # An explicit maker blend is still cheaper (and must be opted into explicitly).
+    assert replace(CostConfig(), maker_fill_probability=0.60).base_entry_exit_cost_bps < taker.base_entry_exit_cost_bps
 
 
 def test_cli_archive_kline_default_requires_dense_utc_day(tmp_path: Path) -> None:

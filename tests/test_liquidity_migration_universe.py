@@ -81,14 +81,73 @@ def test_universe_report_contains_symbol_csv() -> None:
     assert "21-80" in report
 
 
-def _instrument(symbol: str, launch_time_ms: int, *, status: str = "Trading") -> dict:
+def test_current_universe_table_excludes_non_perp_and_non_usdt_contracts() -> None:
+    """universe-pit-2: the 'perpetuals-only, USDT-settled by construction' invariant
+    (docs/data_roots.md; backtesting_errors_we_never_repeat.md rule 12, instrument
+    lifecycle) must hold at the universe.py boundary. The positive test only ever fed
+    LinearPerpetual/USDT rows, so a refactor could silently let a dated-delivery future,
+    an inverse/USDC contract, or a row with a missing contractType through. Inject one of
+    each alongside two clean perps and assert ONLY the clean perps survive."""
+    snapshot_ts_ms = 1_800_000_000_000
+    old = snapshot_ts_ms - 100 * MS_PER_DAY
+    instruments = pl.DataFrame(
+        [
+            _instrument("AAAUSDT", old),  # clean LinearPerpetual / USDT -> kept
+            _instrument("BBBUSDT", old),  # clean LinearPerpetual / USDT -> kept
+            # dated-delivery future: contract_type is the operative exclusion.
+            _instrument("FUT0101USDT", old, contract_type="LinearFutures"),
+            # inverse perp settled in the coin (not USDT) -> excluded by settle_coin AND contract_type.
+            _instrument("INVUSD", old, contract_type="InversePerpetual", settle_coin="USD"),
+            # USDC-margined contract -> excluded by the USDT settle filter.
+            _instrument("USDCPERP", old, settle_coin="USDC"),
+            # missing/None contractType -> the is_in filter drops a null, so it is excluded.
+            _instrument("NOCTUSDT", old, contract_type=None),
+        ]
+    )
+    tickers = pl.DataFrame(
+        [
+            _ticker("AAAUSDT", 50_000_000.0),
+            _ticker("BBBUSDT", 40_000_000.0),
+            _ticker("FUT0101USDT", 90_000_000.0),  # high turnover would rank it FIRST if not excluded
+            _ticker("INVUSD", 80_000_000.0),
+            _ticker("USDCPERP", 70_000_000.0),
+            _ticker("NOCTUSDT", 60_000_000.0),
+        ]
+    )
+
+    table = build_current_universe_table(
+        instruments,
+        tickers,
+        universe_config=UniverseConfig(
+            min_turnover_24h=5_000_000.0,
+            min_age_days=30,
+            rank_start=1,
+            rank_end=10,
+            max_symbols=10,
+        ),
+        snapshot_ts_ms=snapshot_ts_ms,
+    )
+
+    assert table["symbol"].to_list() == ["AAAUSDT", "BBBUSDT"]
+    assert "LinearFutures" not in table["contract_type"].to_list()
+    assert set(table["settle_coin"].to_list()) == {"USDT"}
+
+
+def _instrument(
+    symbol: str,
+    launch_time_ms: int,
+    *,
+    status: str = "Trading",
+    contract_type: str | None = "LinearPerpetual",
+    settle_coin: str = "USDT",
+) -> dict:
     return {
         "ts_ms": 1,
         "symbol": symbol,
         "category": "linear",
-        "contract_type": "LinearPerpetual",
+        "contract_type": contract_type,
         "status": status,
-        "settle_coin": "USDT",
+        "settle_coin": settle_coin,
         "launch_time_ms": launch_time_ms,
         "tick_size": 0.01,
         "qty_step": 0.001,

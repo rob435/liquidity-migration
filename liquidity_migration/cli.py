@@ -19,9 +19,16 @@ from .config import (
 )
 from .storage import ensure_data_root
 from .data_layer import DEFAULT_DATA_LAYER_DATASETS, DataLayerAuditConfig, run_data_layer_audit
-from .downloaders import download_binance_usdm_proxy_data, download_market_data, parse_date_ms
+from .downloaders import (
+    BINANCE_PROXY_DATASET_MAP,
+    REST_DATASETS,
+    download_binance_usdm_proxy_data,
+    download_market_data,
+    parse_date_ms,
+)
 from .event_demo import (
     EventRiskCycleConfig,
+    _validate_risk_config,
     build_event_risk_private_client,
     run_event_risk_cycle,
 )
@@ -338,10 +345,14 @@ def main(argv: list[str] | None = None) -> int:
             outputs = download_market_data(
                 data_root,
                 config=config,
-                symbols=[item.strip().upper() for item in args.symbols.split(",") if item.strip()],
+                symbols=_parse_symbols(args.symbols),
                 start_ms=parse_date_ms(args.start),
                 end_ms=parse_date_ms(args.end),
-                datasets={item.strip() for item in args.datasets.split(",") if item.strip()},
+                datasets=_validate_datasets(
+                    {item.strip() for item in args.datasets.split(",") if item.strip()},
+                    _KNOWN_BYBIT_DATASETS,
+                    venue="Bybit",
+                ),
                 archive_url_template=args.archive_url_template,
                 workers=args.workers,
                 open_interest_interval=args.open_interest_interval,
@@ -376,10 +387,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "download-binance-proxy":
         outputs = download_binance_usdm_proxy_data(
             data_root,
-            symbols=[item.strip().upper() for item in args.symbols.split(",") if item.strip()],
+            symbols=_parse_symbols(args.symbols),
             start_ms=parse_date_ms(args.start),
             end_ms=parse_date_ms(args.end),
-            datasets={item.strip() for item in args.datasets.split(",") if item.strip()},
+            datasets=_validate_datasets(
+                {item.strip() for item in args.datasets.split(",") if item.strip()},
+                _KNOWN_BINANCE_PROXY_DATASETS,
+                venue="Binance proxy",
+            ),
             workers=args.workers,
             interval=args.interval,
             period=args.period,
@@ -540,6 +555,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("interval-seconds must be non-negative")
             if args.max_cycles < 0:
                 raise ValueError("max-cycles must be non-negative")
+            # Fail fast on order-safety / config errors BEFORE the loop (CCR-3):
+            # the per-cycle broad except below must only swallow transient
+            # (network/REST) failures, never a fatal misconfig such as
+            # --submit-orders without --confirm-demo-orders or REAL_MONEY=true,
+            # which would otherwise spin forever logging the same error.
+            _validate_risk_config(risk_config)
             private_client = build_event_risk_private_client(config, risk_config)
             cycles = 0
             while True:
@@ -900,7 +921,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "continuous-rebalance-cycle-audit":
         payload = run_continuous_rebalance_cycle_audit(
-            args.data_root,
+            args.audit_data_root,
             cycles_dataset=args.cycles_dataset,
             orders_dataset=args.orders_dataset,
             output_dir=args.output_dir,
@@ -1193,9 +1214,60 @@ def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _parse_symbols(value: str | None) -> list[str]:
+    """Parse a comma-separated --symbols string into upper-cased symbols.
+
+    Single source of truth for the download paths so a missing .strip()/.upper()
+    can't drift between branches (code-quality-9).
+    """
+    if not value:
+        return []
+    return [item.strip().upper() for item in value.split(",") if item.strip()]
+
+
+# Known dataset tokens accepted by each download path. The downloaders dispatch
+# purely via `if "<name>" in datasets`, so an unknown/typo'd name is otherwise a
+# silent no-op (exit 0, zero output) that leaves a coverage/PIT gap. We assert
+# requested-vs-known here so a typo fails loud, mirroring the survivorship gate
+# the repo uses for missing symbols.
+_KNOWN_BYBIT_DATASETS = frozenset(REST_DATASETS | {"archive_klines_1m"})
+# Binance proxy accepts either the short alias (map keys, e.g. "funding") or the
+# already-resolved canonical name (map values, e.g. "binance_usdm_funding"); both
+# match a dispatch branch after _resolve_binance_dataset_name.
+_KNOWN_BINANCE_PROXY_DATASETS = frozenset(
+    set(BINANCE_PROXY_DATASET_MAP) | set(BINANCE_PROXY_DATASET_MAP.values())
+)
+
+
+def _validate_datasets(requested: set[str], known: frozenset[str], *, venue: str) -> set[str]:
+    """Fail loud if any requested dataset name is not a known/served dataset.
+
+    The downloaders silently skip unknown dataset tokens, so without this guard a
+    typo (e.g. ``klines_1hr`` or ``funidng``) downloads nothing for that dataset
+    and returns exit 0 — a silent data-coverage hole. Raises with the offending
+    tokens listed and the known names for the venue.
+    """
+    unknown = sorted(requested - known)
+    if unknown:
+        raise RuntimeError(
+            f"Unknown {venue} dataset(s): {', '.join(unknown)}. "
+            f"Known datasets: {', '.join(sorted(known))}."
+        )
+    return requested
+
+
 
 
 def _universe_config_from_args(base: UniverseConfig, args: argparse.Namespace) -> UniverseConfig:
+    # --include-excluded (include_majors) and --exclude-defaults (exclude_majors)
+    # are contradictory: one clears the excluded-symbol list, the other applies
+    # it. The precedence below would silently let include win and drop the
+    # exclude flag with no warning, producing a PIT-relevant universe membership
+    # the operator did not intend. Fail loud on the contradiction instead.
+    if args.include_majors and args.exclude_majors:
+        raise RuntimeError(
+            "--include-excluded and --exclude-defaults are mutually exclusive; pass at most one."
+        )
     if args.exclude_symbols is not None:
         exclude_symbols = _csv_str(args.exclude_symbols, ())
     elif args.include_majors:

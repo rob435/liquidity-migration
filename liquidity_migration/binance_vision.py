@@ -22,6 +22,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import re
@@ -120,17 +121,38 @@ def list_symbol_months(symbol: str, *, max_month: str) -> list[str]:
     return sorted(months)
 
 
-def discover(*, max_month: str, workers: int = 16) -> dict[str, list[str]]:
-    """Map every USDT symbol that has 1h klines on/before max_month to its month list."""
+def discover(
+    *,
+    max_month: str,
+    workers: int = 16,
+    max_listing_failure_ratio: float = 0.005,
+) -> dict[str, list[str]]:
+    """Map every USDT symbol that has 1h klines on/before max_month to its month list.
+
+    A transient per-symbol S3 listing failure must NOT abort the whole (hundreds-
+    of-symbols) OOS build: a single flaky ``list_symbol_months`` exception is caught
+    and accumulated, then routed through the same survivorship gate used for
+    download failures (``_assert_download_completeness``). A few transient failures
+    are tolerated; a failure rate above ``max_listing_failure_ratio`` still aborts so
+    a silently under-enumerated (survivorship-biased) universe is never built.
+    """
     symbols = list_usdm_usdt_symbols()
     result: dict[str, list[str]] = {}
+    failed_listings: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(list_symbol_months, s, max_month=max_month): s for s in symbols}
         for fut in as_completed(futs):
             sym = futs[fut]
-            months = fut.result()
+            try:
+                months = fut.result()
+            except Exception as exc:  # noqa: BLE001 - transient S3 listing; accumulate, gate by ratio
+                failed_listings.append((sym, f"listing:{type(exc).__name__}"))
+                continue
             if months:
                 result[sym] = months
+    _assert_download_completeness(
+        failed_listings, len(symbols), max_failure_ratio=max_listing_failure_ratio,
+    )
     return result
 
 
@@ -170,14 +192,66 @@ def parse_month_csv(symbol: str, raw: bytes) -> list[dict]:
     return rows
 
 
+_SHA256_HEX_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
+
+
+def _fetch_expected_sha256(zip_url: str, *, timeout: int = 30) -> str | None:
+    """Fetch the ``<zip>.CHECKSUM`` sidecar and return its leading sha256 hex.
+
+    data.binance.vision publishes a ``<file>.zip.CHECKSUM`` object next to every
+    archive whose first token is the file's SHA256. Returns the lowercase hex
+    digest, or None when the sidecar is absent (older months) or unparseable —
+    the caller falls back to a Content-Length check in that case."""
+    try:
+        body = urllib.request.urlopen(f"{zip_url}.CHECKSUM", timeout=timeout).read()  # noqa: S310 - public archive
+    except Exception:  # noqa: BLE001 - missing/old sidecar or transient network
+        return None
+    m = _SHA256_HEX_RE.search(body.decode("utf-8", "replace"))
+    return m.group(1).lower() if m else None
+
+
+def _verify_download(raw: bytes, expected_sha256: str | None, content_length: int | None) -> None:
+    """Fail-closed integrity gate for a downloaded archive body.
+
+    A byte-corrupt body that is still a structurally-valid zip would parse
+    silently into the PIT root and degrade the cross-venue OOS comparison, which
+    the M5 download-completeness gate (it only counts hard download FAILURES) does
+    NOT catch. Verify against the published SHA256 when available; otherwise fall
+    back to the advertised Content-Length. Raises on mismatch so the caller treats
+    it as a retryable failure (and ultimately a counted failed job)."""
+    if expected_sha256 is not None:
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != expected_sha256:
+            raise ValueError(
+                f"sha256 mismatch: expected {expected_sha256}, got {actual} "
+                f"({len(raw)} bytes)"
+            )
+        return
+    if content_length is not None and content_length != len(raw):
+        raise ValueError(
+            f"Content-Length mismatch: header {content_length} != body {len(raw)} bytes"
+        )
+
+
 def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict]:
-    """Download and parse one monthly 1h kline file. Returns [] on hard failure."""
+    """Download, integrity-verify, and parse one monthly 1h kline file.
+
+    Verifies the body against the published ``.CHECKSUM`` SHA256 (or, when that
+    sidecar is missing, the advertised Content-Length) BEFORE parsing, so a
+    corrupt-but-parseable archive is treated as a retryable failure rather than
+    silently entering the survivorship-complete PIT root (M5 only catches hard
+    download failures, not silent corruption). Returns [] on hard failure."""
     url = f"{VISION_FILES}/{MONTHLY_KLINES_PREFIX}{symbol}/1h/{symbol}-1h-{ym}.zip"
     for attempt in range(retries):
         try:
-            raw = urllib.request.urlopen(url, timeout=60).read()  # noqa: S310 - public archive
+            with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - public archive
+                raw = resp.read()
+                header_len = resp.getheader("Content-Length")
+            content_length = int(header_len) if header_len is not None else None
+            expected_sha256 = _fetch_expected_sha256(url)
+            _verify_download(raw, expected_sha256, content_length)
             return parse_month_csv(symbol, raw)
-        except Exception:  # noqa: BLE001 - network; retry then give up
+        except Exception:  # noqa: BLE001 - network/integrity; retry then give up
             if attempt == retries - 1:
                 return []
             time.sleep(0.5 * (attempt + 1))
@@ -240,12 +314,13 @@ def _assert_download_completeness(
 ) -> None:
     """Refuse to build a survivorship-biased OOS root.
 
-    A monthly archive file that fails all download retries currently just
-    vanishes from the dataset — silently dropping that (symbol, month) from the
-    PIT universe, exactly the survivorship failure
-    docs/backtesting_errors_we_never_repeat.md rules 1 & 12 forbid. Persist the
-    failed-jobs list for audit, then raise when the failure rate exceeds the
-    tolerance so a holey root can never be cited as OOS evidence."""
+    A monthly archive file that fails all download retries (or a symbol whose S3
+    listing fails) currently just vanishes from the dataset — silently dropping
+    that (symbol, month/listing) from the PIT universe, exactly the survivorship
+    failure docs/backtesting_errors_we_never_repeat.md rules 1 & 12 forbid. Persist
+    the failed-jobs list for audit, then raise when the failure rate exceeds the
+    tolerance so a holey root can never be cited as OOS evidence. Reused for both
+    the discovery (listing) and download phases."""
     if artifact_path is not None:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_path.write_text(
@@ -257,11 +332,30 @@ def _assert_download_completeness(
     if ratio > max_failure_ratio:
         sample = ", ".join(f"{s}:{m}" for s, m in failed_jobs[:10])
         raise RuntimeError(
-            f"binance OOS build incomplete: {len(failed_jobs)}/{total_jobs} monthly "
-            f"files failed to download ({ratio:.2%} > {max_failure_ratio:.2%} tolerance). "
+            f"binance OOS build incomplete: {len(failed_jobs)}/{total_jobs} "
+            f"jobs failed ({ratio:.2%} > {max_failure_ratio:.2%} tolerance). "
             f"Refusing to write a survivorship-biased PIT root. First failures: {sample}. "
             f"Failed-jobs artifact: {artifact_path}."
         )
+
+
+def _persisted_kline_symbols(root: Path) -> set[str]:
+    """Symbols already present on disk under ``klines_1h`` (via partition dirs).
+
+    Reads the ``symbol=...`` partition directory names rather than loading the
+    dataset, so it is cheap on a large prior build. Empty set when no prior
+    klines_1h exists."""
+    kroot = root / "klines_1h"
+    if not kroot.exists():
+        return set()
+    symbols: set[str] = set()
+    for date_dir in kroot.iterdir():
+        if not date_dir.name.startswith("date="):
+            continue
+        for sym_dir in date_dir.iterdir():
+            if sym_dir.name.startswith("symbol="):
+                symbols.add(sym_dir.name.split("=", 1)[1])
+    return symbols
 
 
 def build_binance_oos(
@@ -270,6 +364,7 @@ def build_binance_oos(
     end_date: str = "2023-05-01",
     workers: int = 24,
     max_failure_ratio: float = 0.005,
+    allow_degraded: bool = False,
 ) -> dict:
     """Build a Bybit-shaped PIT data root from the Binance Vision archive.
 
@@ -279,6 +374,16 @@ def build_binance_oos(
     Fails (does NOT write) when more than ``max_failure_ratio`` of the monthly
     archive files fail to download, so a holey, survivorship-biased universe is
     never silently produced (M5).
+
+    The klines_1h dataset is REWRITTEN clean (not appended) so a rerun that
+    discovers a narrower universe — e.g. after a transient S3 listing shortfall —
+    can never leave stale ``symbol=...`` partitions from a prior wider build in the
+    PIT root (those would otherwise be silently retained by
+    ``rewrite_manifest_to_coverage``). When the freshly-built universe is strictly
+    narrower than what is already persisted, the build REFUSES unless
+    ``allow_degraded=True`` is set explicitly — mirroring run_archive_manifest's
+    universe-shrink gate, since a silent universe shrink is a survivorship
+    corruption.
     """
     root = Path(data_root).expanduser()
     end_ms = int(pl.Series([end_date]).str.to_datetime().dt.timestamp("ms")[0])
@@ -289,6 +394,20 @@ def build_binance_oos(
     jobs = [(sym, ym) for sym, months in inventory.items() for ym in months]
     print(f"[binance_vision] {len(inventory)} symbols, {len(jobs)} monthly files to fetch",
           file=sys.stderr)
+
+    # Universe-shrink gate: a rerun that discovers symbols NOT covering a prior
+    # wider build would leave that build's now-absent symbols stranded on disk.
+    # Refuse rather than silently retain stale symbol-days (survivorship corruption).
+    persisted = _persisted_kline_symbols(root)
+    dropped_symbols = persisted - set(inventory)
+    if dropped_symbols and not allow_degraded:
+        sample = ", ".join(sorted(dropped_symbols)[:10])
+        raise RuntimeError(
+            f"binance OOS build REFUSED: discovered universe ({len(inventory)} symbols) "
+            f"shrank vs the persisted klines_1h ({len(persisted)} symbols) — "
+            f"{len(dropped_symbols)} symbols would be stranded: {sample}. "
+            f"Pass allow_degraded=True to overwrite with the narrower universe."
+        )
 
     all_rows: list[dict] = []
     failed_jobs: list[tuple[str, str]] = []
@@ -324,7 +443,14 @@ def build_binance_oos(
     )
     print(f"[binance_vision] writing klines_1h: {df.height:,} rows, "
           f"{df['symbol'].n_unique()} symbols", file=sys.stderr)
-    write_dataset(df, root, "klines_1h", partition_by=("date", "symbol"))
+    # Clean rewrite: clear any prior klines_1h so stale symbol/date partitions from
+    # a previous (wider) build cannot survive into the new universe. append=False
+    # alone would only overwrite partitions present in df; a removed symbol's
+    # partition dir would persist, so the directory is dropped first.
+    kdst = root / "klines_1h"
+    if kdst.exists():
+        shutil.rmtree(kdst)
+    write_dataset(df, root, "klines_1h", partition_by=("date", "symbol"), append=False)
 
     manifest_rows = rewrite_manifest_to_coverage(root)
     print(f"[binance_vision] archive_trade_manifest: {manifest_rows:,} covered symbol-days",
@@ -350,6 +476,11 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--data-root", required=True)
     b.add_argument("--end", default="2023-05-01", help="Exclusive signal-date upper bound YYYY-MM-DD.")
     b.add_argument("--workers", type=int, default=24)
+    b.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help="Permit overwriting an existing klines_1h with a strictly narrower discovered universe.",
+    )
 
     f = sub.add_parser("filter-manifest", help="Rewrite archive_trade_manifest to kline coverage.")
     f.add_argument("--data-root", required=True)
@@ -357,7 +488,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.mode == "build-binance-oos":
-        summary = build_binance_oos(args.data_root, end_date=args.end, workers=args.workers)
+        summary = build_binance_oos(
+            args.data_root, end_date=args.end, workers=args.workers,
+            allow_degraded=args.allow_degraded,
+        )
         print(summary)
     elif args.mode == "filter-manifest":
         n = rewrite_manifest_to_coverage(args.data_root, min_hourly_bars=args.min_hourly_bars)

@@ -9,7 +9,11 @@ from liquidity_migration import pit_coverage as pc
 
 def _mk(root, dataset, dates):
     for d in dates:
-        (root / dataset / f"date={d}" / "symbol=FOOUSDT").mkdir(parents=True, exist_ok=True)
+        part = root / dataset / f"date={d}" / "symbol=FOOUSDT"
+        part.mkdir(parents=True, exist_ok=True)
+        # A real (downloaded) partition carries a parquet; coverage only counts
+        # partitions that actually hold data, not bare mkdir'd dirs.
+        (part / "part.parquet").touch()
 
 
 def test_latest_signal_trading_day_is_yesterday():
@@ -21,12 +25,28 @@ def test_max_partition_date_handles_symbol_first_layout(tmp_path):
     # the staleness guard must find the max date in either layout (and never crash).
     ds = tmp_path / pc.MANIFEST_DATASET
     (ds / "symbol=FOOUSDT" / "date=2026-05-28").mkdir(parents=True)
+    (ds / "symbol=FOOUSDT" / "date=2026-05-28" / "part.parquet").touch()
     (ds / "symbol=BARUSDT" / "date=2026-05-29").mkdir(parents=True)
+    (ds / "symbol=BARUSDT" / "date=2026-05-29" / "part.parquet").touch()
     assert pc._max_partition_date(ds) == dt.date(2026, 5, 29)
 
 
 def test_max_partition_date_missing_dataset_is_none(tmp_path):
     assert pc._max_partition_date(tmp_path / "does_not_exist") is None
+
+
+def test_max_partition_date_ignores_empty_partition_without_parquet(tmp_path):
+    # write_dataset mkdir's the partition before writing the part; a crashed or
+    # refused build leaves an empty date= dir that must NOT count as coverage
+    # (else a stale manifest reads as FRESH).
+    ds = tmp_path / pc.MANIFEST_DATASET
+    (ds / "date=2026-05-29" / "symbol=FOOUSDT").mkdir(parents=True)  # empty, no parquet
+    assert pc._max_partition_date(ds) is None
+    # A partition that actually holds a parquet IS counted.
+    real = ds / "date=2026-05-28" / "symbol=FOOUSDT"
+    real.mkdir(parents=True)
+    (real / "part.parquet").touch()
+    assert pc._max_partition_date(ds) == dt.date(2026, 5, 28)
 
 
 def test_coverage_fresh_manifest_is_not_stale(tmp_path):

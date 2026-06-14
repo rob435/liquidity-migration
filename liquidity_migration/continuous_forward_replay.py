@@ -9,7 +9,11 @@ Safety properties (all tested):
 - the frozen configuration is hash-pinned: a state dir created under one config
   refuses to update under another;
 - overlap days are re-verified against the stored ledger on every run (any drift is
-  a same-code regression alarm -> hard error, nothing appended);
+  a same-code regression alarm -> hard error, nothing appended). The ONLY exception
+  is the explicit, operator-gated ``allow_history_revision`` self-heal path: when a
+  data root is legitimately revised (a late-arriving/backfilled partition, not a code
+  regression), the drifting overlap days are re-based to the rebuilt values and the
+  rewrite is logged instead of raising. The default stays hard-error;
 - appends are idempotent (re-running with the same end day adds nothing).
 
 This collector emits NO orders. It is the STATE.md-compliant "no-order paper
@@ -20,11 +24,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from .continuous_rebalance import (
@@ -34,6 +40,7 @@ from .continuous_rebalance import (
     apply_rebalance_rule,
     combine_continuous_components,
 )
+from .trade_lifecycle import annualized_sharpe  # metrics-3: shared Sharpe convention
 
 MS_PER_DAY = 86_400_000
 
@@ -53,7 +60,20 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
         "strategy_momentum_window_days": 0,
     },
     "hedge": {
+        # BTC+ETH 2f hedge — tracks the SAME object the live demo book executes
+        # (deploy/systemd/liquidity-migration-continuous-hedge.service, HEDGE_MODE=2f,
+        # banked 2026-06-10), so forward readiness validates the deployed strategy
+        # (operator decision 2026-06-14, forward-replay-1; receipt
+        # docs/preregistration/2026-06-14-forward-clock-2f.md). frozen_hedge_mode()
+        # reads "2f" from instrument2 and stamps it into every readiness summary.
+        # NOTE: adding instrument2 changes frozen_config_hash, so the prior BTC-only
+        # forward ledger is VOIDED by the config-hash pin — init_or_check_state will
+        # refuse the old state dir. The operator archives the btc_only state dir and
+        # starts a fresh 2f clock at the next data-root refresh (a clean reset, not a
+        # drift alarm). build_full_ledger wires the second (ETH) leg from the
+        # orchestrator's hedge_returns_2 / hedge_funding_2 inputs.
         "instrument": "BTCUSDT",
+        "instrument2": "ETHUSDT",
         "beta_window_days": 90,
         "beta_min_obs": 60,
         "hedge_cap": 2.0,
@@ -62,7 +82,38 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
     "inception_day_ms": 1_680_307_200_000,  # 2023-04-01 (ledger history start)
 }
 
+# basket_return is a few-term per-day sum — a tight pure-absolute tol catches a
+# genuine input/config regression. equity is a cum_prod over up to ~700 rows, so a
+# pure-absolute tol is stricter than the repo's progressive-equivalence policy
+# (AGENTS.md: np.allclose, "last-bit float-order differences carry no alpha"): a
+# legitimate alpha-neutral reassociation of the compounding path (vectorised/polars
+# cum_prod, numpy version bump) could exceed 1e-9 absolute on a >1.0 equity and trip
+# a spurious hard-drift stall. Use a relative+absolute tolerance for the cumulative
+# column so real regressions still alarm but last-bit reassociation does not.
 OVERLAP_ABS_TOL = 1e-9
+EQUITY_REL_TOL = 1e-9
+ANN_DAYS = 365.25
+
+_logger = logging.getLogger(__name__)
+
+
+def frozen_hedge_mode(config: dict[str, Any] | None = None) -> str:
+    """Object-identity tag for the hedge leg(s): 'btc_only' or '2f'.
+
+    Derived (not hashed) so a reader/audit can tell this forward clock apart from
+    the live BTC+ETH 2f demo book without voiding the accrued ledger. A second
+    instrument in the frozen hedge block ('instrument2') marks the 2f object.
+    """
+    hedge = (config or FROZEN_FORWARD_CONFIG).get("hedge", {})
+    return "2f" if hedge.get("instrument2") else "btc_only"
+
+
+def frozen_hedge_instruments(config: dict[str, Any] | None = None) -> list[str]:
+    hedge = (config or FROZEN_FORWARD_CONFIG).get("hedge", {})
+    legs = [hedge.get("instrument")]
+    if hedge.get("instrument2"):
+        legs.append(hedge["instrument2"])
+    return [leg for leg in legs if leg]
 
 
 def frozen_config_hash(config: dict[str, Any] | None = None) -> str:
@@ -91,6 +142,11 @@ class ForwardUpdateResult:
     verified_overlap_days: int
     total_days: int
     last_day_ms: int | None
+    # Count of stored overlap days re-based to the rebuilt values under an
+    # explicit history-revision opt-in (default 0 = no re-base, the only path
+    # that runs unless ``allow_history_revision=True``). Trailing field with a
+    # default so existing positional/keyword constructions stay valid.
+    rebased_days: int = 0
 
 
 def _ledger_path(state_dir: Path, venue: str) -> Path:
@@ -129,12 +185,21 @@ def build_full_ledger(
     pieces: dict[str, ContinuousRebalanceComponents],
     hedge_returns: dict[int, float],
     hedge_funding: dict[int, float],
+    hedge_returns_2: dict[int, float] | None = None,
+    hedge_funding_2: dict[int, float] | None = None,
 ) -> pl.DataFrame:
     """Rebuild the full-history hedged ledger from component pieces (frozen params).
 
     The rebalance/hedge layer is path-dependent from inception (drawdown state,
     beta warm-up), so the canonical forward ledger is always recomputed over the
     FULL component history and then diffed against the stored ledger.
+
+    The single-leg BTC hedge is the default (frozen ``btc_only`` object). Passing
+    ``hedge_returns_2``/``hedge_funding_2`` routes the second leg through
+    ``apply_rebalance_rule`` (the deployed BTC+ETH 2f object); callers must also
+    promote ``FROZEN_FORWARD_CONFIG['hedge']`` to carry ``instrument2`` so the
+    config hash and the stamped ``hedge_mode`` reflect the 2f object. Mixing a 2f
+    ledger into a ``btc_only`` state dir is caught by the config-hash pin.
     """
     combined = combine_continuous_components(pieces, FROZEN_FORWARD_CONFIG["weights"])
     return apply_rebalance_rule(
@@ -143,6 +208,8 @@ def build_full_ledger(
         frozen_hedge_rule(),
         hedge_returns,
         hedge_funding,
+        hedge_returns_2,
+        hedge_funding_2,
     )
 
 
@@ -152,36 +219,83 @@ def update_forward_ledger(
     full_ledger: pl.DataFrame,
     *,
     end_day_ms: int | None = None,
+    allow_history_revision: bool = False,
 ) -> ForwardUpdateResult:
     """Verify overlap against the stored ledger, then append only new days.
 
     ``full_ledger`` is the freshly rebuilt full-history ledger. Every stored day must
     re-verify (basket_return and equity within OVERLAP_ABS_TOL) — drift means the
     inputs or code changed and the forward evidence chain is broken (hard error).
+
+    ``allow_history_revision`` is the opt-in self-heal path for a LEGITIMATE
+    historical data revision (e.g. a late-arriving / backfilled funding or kline
+    partition that the operator has confirmed is a real root refresh, not a code
+    regression — see STATE.md "late top-ups" and research_summary.md late-arrival
+    notes). It is threaded from the orchestrator's ``--allow-history-revision``
+    flag and defaults to ``False`` so the default contract is UNCHANGED: any
+    overlap drift is a same-code regression alarm and still raises a hard
+    ``RuntimeError`` with nothing appended. When ``True``, an overlap day that
+    drifts is RE-BASED to the rebuilt value (the rebuilt full-history ledger
+    becomes authoritative for the overlap window) and the rewrite is logged at
+    WARNING level for the audit trail, instead of raising. A stored day that is
+    entirely missing from the rebuilt ledger is never auto-healed (that is a
+    coverage loss, not a value revision) and always raises.
     """
     init_or_check_state(Path(state_dir))
     path = _ledger_path(Path(state_dir), venue)
     new = full_ledger if end_day_ms is None else full_ledger.filter(pl.col("ts_ms") <= end_day_ms)
 
+    rebased = 0
     if path.exists():
         stored = pl.read_csv(path)
         new_by_day = {int(r["ts_ms"]): r for r in new.to_dicts()}
+        drifted_days: list[tuple[int, str, Any, Any]] = []
         for row in stored.to_dicts():
             day = int(row["ts_ms"])
             fresh = new_by_day.get(day)
             if fresh is None:
+                # A vanished stored day is a coverage loss, not a value revision,
+                # so it is never auto-healed even under allow_history_revision.
                 raise RuntimeError(f"{venue}: stored forward day {day} missing from the rebuilt ledger")
+            day_drifted = False
             for col in ("basket_return", "equity"):
-                if not math.isclose(float(row[col]), float(fresh[col]), rel_tol=0.0, abs_tol=OVERLAP_ABS_TOL):
-                    raise RuntimeError(
-                        f"{venue}: forward-ledger drift on day {day} column {col}: "
-                        f"stored {row[col]!r} vs rebuilt {fresh[col]!r}. Same-code regression "
-                        "alarm — nothing appended."
-                    )
+                rel_tol = EQUITY_REL_TOL if col == "equity" else 0.0
+                if not math.isclose(
+                    float(row[col]), float(fresh[col]), rel_tol=rel_tol, abs_tol=OVERLAP_ABS_TOL
+                ):
+                    if not allow_history_revision:
+                        raise RuntimeError(
+                            f"{venue}: forward-ledger drift on day {day} column {col}: "
+                            f"stored {row[col]!r} vs rebuilt {fresh[col]!r}. Same-code regression "
+                            "alarm — nothing appended."
+                        )
+                    drifted_days.append((day, col, row[col], fresh[col]))
+                    day_drifted = True
+            if day_drifted:
+                rebased += 1
         last_stored = int(stored["ts_ms"].max())
         append = new.filter(pl.col("ts_ms") > last_stored)
-        verified = stored.height
-        out = pl.concat([stored.select(new.columns), append]) if append.height else stored.select(new.columns)
+        verified = stored.height - rebased
+        if rebased:
+            # Re-base: the rebuilt full-history ledger is authoritative for the
+            # overlap window, so the canonical output IS the rebuilt ledger up to
+            # the stored horizon plus the new appends — i.e. ``new`` restricted to
+            # days <= last appended day. ``new`` already spans stored + appended
+            # days, so it is exactly the re-based + extended ledger.
+            for day, col, old_val, new_val in drifted_days:
+                _logger.warning(
+                    "%s: forward-ledger HISTORY REVISION re-base on day %d column %s: "
+                    "stored %r -> rebuilt %r (allow_history_revision=True; rewriting stored ledger)",
+                    venue, day, col, old_val, new_val,
+                )
+            _logger.warning(
+                "%s: re-based %d stored forward day(s) to a revised data root; "
+                "the forward evidence chain now reflects the revised inputs.",
+                venue, rebased,
+            )
+            out = new
+        else:
+            out = pl.concat([stored.select(new.columns), append]) if append.height else stored.select(new.columns)
     else:
         append = new
         verified = 0
@@ -195,6 +309,7 @@ def update_forward_ledger(
         verified_overlap_days=verified,
         total_days=out.height,
         last_day_ms=int(out["ts_ms"].max()) if out.height else None,
+        rebased_days=rebased,
     )
 
 
@@ -215,25 +330,62 @@ def forward_readiness_summary(
     df = pl.read_csv(path).filter(pl.col("ts_ms") >= forward_start_ms).sort("ts_ms")
     if df.is_empty():
         return {"venue": venue, "forward_days": 0}
-    rets = df["basket_return"].to_numpy()
-    eq = (1.0 + pl.Series(rets)).cum_prod().to_numpy()
-    peak = pl.Series(eq).cum_max().to_numpy()
-    dd = float(min(eq / peak - 1.0))
+
+    # The forward ledger has only OBSERVED rows (the continuous book has flat /
+    # no-entry spells, research_summary.md:47), so calendar gaps are expected.
+    # Compounding/vol/dd over observed rows alone would drop the zero-return
+    # calendar days, collapsing the span out of the return numerator while the
+    # year denominator stayed calendar — an inconsistent MAR and an inflated
+    # Sharpe (forward-replay-2/6, metrics-3/6). Build the same gap-filled calendar
+    # series the deployed-equity reference uses (scripts/continuous_deployed_equity
+    # .stats()) so total, dd, years AND Sharpe all share the calendar basis and the
+    # two engines agree whenever gaps exist.
+    ts = df["ts_ms"].to_numpy()
+    first_ms, last_ms = int(ts[0]), int(ts[-1])
+    span_days = int((last_ms - first_ms) // MS_PER_DAY) + 1  # calendar span (inclusive)
+    rets_obs = df["basket_return"].to_numpy()
+    series = np.zeros(span_days, dtype=float)
+    idx = ((ts - first_ms) // MS_PER_DAY).astype(int)
+    series[idx] = rets_obs  # scatter observed returns onto the calendar grid
+
+    eq = np.cumprod(1.0 + series)
+    dd = float((eq / np.maximum.accumulate(eq) - 1.0).min())
     total = float(eq[-1] - 1.0)
-    span_days = int((int(df["ts_ms"].max()) - int(df["ts_ms"].min())) // MS_PER_DAY) + 1
-    years = span_days / 365.25
-    mar = (total / years) / abs(dd) if dd < 0 else float("inf")
-    std = float(rets.std())
-    sharpe = float(rets.mean() / std * (365.25**0.5)) if std > 0 else 0.0
+    # Calendar-span years WITHOUT the +1 the gate basis carries — aligns the
+    # annualizer denominator with the sibling annualizers (continuous_events
+    # ._daily_pnl_metrics, reconciliation._calendar_metrics), which use the raw
+    # span and not span+1 (metrics-6).
+    years = (last_ms - first_ms) / (ANN_DAYS * MS_PER_DAY) or (1.0 / ANN_DAYS)
+    # No measurable drawdown (dd >= 0) -> MAR is a divide-by-~0 artifact, not
+    # "infinitely good". Emit JSON null (None) rather than float("inf"), which
+    # serialises to the non-strict "Infinity" token and breaks strict JSON
+    # readers in the orchestrator/audit pipeline.
+    mar = (total / years) / abs(dd) if dd < 0 else None
+    # Sharpe on the SAME gap-filled calendar series, through the shared canonical
+    # convention (ddof=1, sqrt(365.25)) so it matches the sibling reports
+    # (forward-replay-6, metrics-3).
+    sharpe = annualized_sharpe(series, ann_days=ANN_DAYS)
+    ledger_days = df.height
     return {
         "venue": venue,
+        "hedge_mode": frozen_hedge_mode(),
+        "hedge_instruments": frozen_hedge_instruments(),
+        # forward_days is the CALENDAR span (inclusive); ledger_days is the count
+        # of OBSERVED rows. They differ whenever the book skips days.
         "forward_days": span_days,
-        "ledger_days": df.height,
+        "ledger_days": ledger_days,
         "forward_return_pct": round(total * 100, 2),
-        "forward_mar": round(mar, 2),
+        "forward_mar": (round(mar, 2) if mar is not None else None),
         "forward_sharpe": round(sharpe, 2),
         "forward_dd_pct": round(dd * 100, 2),
-        "tier3_days_gate_30": span_days >= 30,
-        "tier3_mar_positive": total > 0,
+        # Gate on OBSERVED rows, not calendar span: a 30-day gate must require 30
+        # actually-observed days, otherwise coverage gaps could satisfy it on
+        # fewer real observations (forward-replay-2).
+        "tier3_days_gate_30": ledger_days >= 30,
+        # Named for what it tests: positive total return. sign(MAR) == sign(total)
+        # when dd < 0, and a positive return with no/negative drawdown is
+        # unambiguously MAR > 0, so this is also the Tier-3 "MAR > 0" sign gate;
+        # kept return-based so a null MAR (no drawdown) still gates (metrics-5).
+        "tier3_return_positive": total > 0,
         "tier3_dd_under_50pct": dd > -0.50,
     }

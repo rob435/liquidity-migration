@@ -20,6 +20,7 @@ fold alone. These are pinned by tests (poison-future invariance, fold isolation)
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -65,6 +66,21 @@ class RidgeCombinerConfig:
             raise ValueError(f"target_col {self.target_col!r} must not be a feature (leak)")
         if any(lam <= 0 for lam in self.lambda_grid):
             raise ValueError("lambda_grid values must be positive (PD guarantee)")
+        # Causality: the embargo must cover the target's forward horizon so the
+        # newest training target (a fwd_ret_Nd realising N+1 days after the
+        # decision) is fully resolved before the first test decision. Enforce the
+        # WalkForwardConfig docstring invariant in code instead of by convention,
+        # so wiring a multi-day target (e.g. fwd_ret_3d) without bumping embargo
+        # is a hard error rather than silent in-fold target leakage (fake alpha).
+        horizon_match = re.search(r"fwd_ret_(\d+)d", self.target_col)
+        if horizon_match is not None:
+            horizon = int(horizon_match.group(1))
+            if self.walk_forward.embargo_days < horizon + 1:
+                raise ValueError(
+                    f"embargo_days ({self.walk_forward.embargo_days}) must be >= "
+                    f"forward horizon + 1 ({horizon + 1}) for target_col "
+                    f"{self.target_col!r}, else the test fold leaks into training"
+                )
 
 
 @dataclass(frozen=True)

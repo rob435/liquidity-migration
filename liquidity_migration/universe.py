@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,8 @@ from .config import ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_tickers
 from .storage import write_dataset
 from ._common import MS_PER_DAY, safe_name
+
+_logger = logging.getLogger(__name__)
 
 
 def run_discover_universe(
@@ -68,7 +71,33 @@ def build_current_universe_table(
     snapshot_ts_ms = snapshot_ts_ms or int(datetime.now(tz=UTC).timestamp() * 1000)
     exclude = {symbol.upper() for symbol in universe_config.exclude_symbols}
     joined = instruments.join(tickers, on="symbol", how="inner", suffix="_ticker")
-    required = {"symbol", "status", "settle_coin", "is_prelisting", "turnover_24h"}
+    # universe-pit-3: the inner join silently drops any symbol present on only
+    # one side (a freshly-listed perp in instruments-info before it has a ticker
+    # row, or a partial/throttled get_tickers response). That narrows the live
+    # tradable universe with no signal. Surface the dropped-instrument count so
+    # an anomalous partial-ticker fetch is observable per cycle rather than only
+    # when it trips the downstream _universe_shrink_floor. Not PIT leakage (it
+    # only ever REMOVES symbols, never adds future ones).
+    if "symbol" in instruments.columns and "symbol" in tickers.columns:
+        dropped = instruments.height - joined.height
+        if dropped > 0:
+            _logger.info(
+                "universe join dropped %d instrument symbol(s) lacking a ticker row "
+                "(instruments=%d, tickers=%d, joined=%d)",
+                dropped,
+                instruments.height,
+                tickers.height,
+                joined.height,
+            )
+    # universe-pit-1: contract_type is REQUIRED, not optional. Bybit's v5 `linear`
+    # category returns LinearPerpetual AND dated LinearFutures (delivery
+    # contracts), both USDT-settled — so the settle_coin==USDT filter below does
+    # NOT exclude dated futures; the contract_type allow-list is the SOLE barrier
+    # keeping the universe perpetuals-only. Requiring the column (rather than the
+    # old `if "contract_type" in columns` soft guard) makes the perp invariant a
+    # hard schema requirement: a frame missing it fails loudly instead of
+    # silently admitting dated-delivery contracts onto the live tradable path.
+    required = {"symbol", "status", "settle_coin", "is_prelisting", "turnover_24h", "contract_type"}
     missing = required - set(joined.columns)
     if missing:
         raise RuntimeError(f"Universe inputs missing required columns: {sorted(missing)}")
@@ -82,8 +111,18 @@ def build_current_universe_table(
     )
     if exclude:
         filtered = filtered.filter(~pl.col("symbol").is_in(sorted(exclude)))
-    if "contract_type" in filtered.columns:
-        filtered = filtered.filter(pl.col("contract_type").is_in(["LinearPerpetual", "linear", "Linear"]))
+    # universe-pit-1: perpetuals-only is now an UNCONDITIONAL filter (contract_type
+    # is a required column above). A None contract_type is conservatively dropped
+    # (None not in the allow-list).
+    filtered = filtered.filter(pl.col("contract_type").is_in(["LinearPerpetual", "linear", "Linear"]))
+    # Defense-in-depth: Bybit sets a non-null/non-zero delivery_time_ms ONLY on
+    # dated delivery contracts; a true perpetual has it null/0. Exclude any row
+    # that carries a real delivery time even if its contract_type slipped through
+    # the allow-list. Skipped if the column is absent (older instruments frames).
+    if "delivery_time_ms" in filtered.columns:
+        filtered = filtered.filter(
+            pl.col("delivery_time_ms").is_null() | (pl.col("delivery_time_ms") <= 0)
+        )
 
     filtered = filtered.with_columns(
         [
@@ -92,6 +131,24 @@ def build_current_universe_table(
             ((pl.lit(snapshot_ts_ms) - pl.col("launch_time_ms")) / MS_PER_DAY).alias("listing_age_days"),
         ]
     )
+    # universe-pit-5: a symbol with null launch_time_ms has a null listing_age_days
+    # and is therefore INVISIBLE to the age gates (each requires is_not_null). When
+    # an age floor is active such a symbol is conservatively dropped; but in the
+    # unlimited-universe mode (min_age_days==0 && max_age_days==0) NO age filter
+    # runs and an unknown-age contract passes through silently. Surface the count
+    # of null-launchTime symbols so the operator sees how many unknown-age
+    # contracts entered the candidate pool (no numeric change — observability only).
+    if "launch_time_ms" in filtered.columns:
+        null_launch = int(filtered.select(pl.col("launch_time_ms").is_null().sum()).item() or 0)
+        if null_launch > 0:
+            age_gated = universe_config.min_age_days > 0 or universe_config.max_age_days > 0
+            _logger.info(
+                "universe has %d symbol(s) with null launch_time_ms (unknown listing age); "
+                "%s",
+                null_launch,
+                "dropped by the active age gate" if age_gated
+                else "PASSED THROUGH (no age gate active in unlimited mode)",
+            )
     if universe_config.min_age_days > 0:
         filtered = filtered.filter(pl.col("listing_age_days").is_not_null() & (pl.col("listing_age_days") >= universe_config.min_age_days))
     if universe_config.max_age_days > 0:

@@ -487,16 +487,19 @@ def test_worst_rolling_equity_return_finds_largest_window_loss():
     assert _worst_rolling_equity_return(equity, 99) == 0.0
 
 
-def test_worst_volume_day_return_compounds_within_each_exit_date():
+def test_worst_volume_day_return_sums_within_each_exit_date():
     baskets = pl.DataFrame(
         {
             "exit_date": ["2024-01-01", "2024-01-01", "2024-01-02"],
             "basket_return": [0.10, -0.20, 0.05],
         }
     )
-    # 2024-01-01 compounds two baskets: 1.10 * 0.80 - 1 = -0.12.
+    # metrics-4: same-day baskets are SUMMED to match build_equity_curve's
+    # additive same-exit-day combination (0.10 + -0.20 = -0.10), NOT compounded
+    # (which would give 1.10 * 0.80 - 1 = -0.12). The reported worst_day_return
+    # must use the same day-return definition as the equity curve it accompanies.
     worst = _worst_volume_day_return(baskets)
-    assert worst == pytest.approx(1.10 * 0.80 - 1.0)
+    assert worst == pytest.approx(0.10 - 0.20)
     assert _worst_volume_day_return(pl.DataFrame()) == 0.0
 
 

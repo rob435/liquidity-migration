@@ -68,6 +68,22 @@ if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
   exit 1
 fi
 
+# DEFENSE-IN-DEPTH on the highest-stakes toggle (deploy-ci-6): the VPS runs
+# order-submitting demo units (continuous-demo, long-demo, risk) against the
+# account this env file defines; demo-only operation otherwise depends solely on
+# the per-process runtime guard validate_order_submit_allowed(). Make the VERIFY
+# itself fail-closed — parity with the same guard in scripts/deploy_vps_live.sh —
+# so a mis-edited bybit-demo.env that ever set REAL_MONEY truthy is caught here,
+# not just at submission time. The strategy is NOT validated for real money.
+case "${REAL_MONEY:-}" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    echo "Verification failed: REAL_MONEY='${REAL_MONEY}' in /etc/liquidity-migration/bybit-demo.env." \
+         "This box runs order-submitting demo units; real money is not validated. Fix the env file to" \
+         "demo (unset/false REAL_MONEY) before relying on this host." >&2
+    exit 1
+    ;;
+esac
+
 # Per-sleeve kill-switch: source the toggle lib so an intentionally-off sleeve is
 # verified DOWN, not flagged as a failed deploy. (Unit FILES are always synced by
 # deploy regardless of toggle, so the `systemctl cat` env checks below still work for

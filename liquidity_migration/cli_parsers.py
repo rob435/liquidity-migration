@@ -20,8 +20,18 @@ def _add_download_data_parser(subparsers) -> None:
     download = subparsers.add_parser("download-data", help="Download or create research datasets.")
     download.add_argument("--fixture", action="store_true", help="Create deterministic tiny fixture data instead of calling Bybit.")
     download.add_argument("--symbols", default="", help="Comma-separated symbols for real Bybit downloads.")
-    download.add_argument("--start", default=None, help="ISO start timestamp/date for real Bybit downloads.")
-    download.add_argument("--end", default=None, help="ISO end timestamp/date for real Bybit downloads.")
+    download.add_argument(
+        "--start",
+        default=None,
+        help="Inclusive ISO start timestamp/date for real Bybit downloads.",
+    )
+    download.add_argument(
+        "--end",
+        default=None,
+        help="Exclusive ISO end timestamp/date for real Bybit downloads (the named day/timestamp "
+             "is NOT included; the REST range is fetched as [start, end) and the archive day loop "
+             "stops at end-1ms). Matches the archive-* / data-layer-audit boundary convention.",
+    )
     download.add_argument(
         "--datasets",
         default="instruments,klines_1h",
@@ -61,7 +71,12 @@ def _add_download_binance_proxy_parser(subparsers) -> None:
     )
     binance_proxy.add_argument("--symbols", required=True, help="Comma-separated Binance USD-M symbols.")
     binance_proxy.add_argument("--start", required=True, help="Inclusive ISO start timestamp/date.")
-    binance_proxy.add_argument("--end", required=True, help="ISO end timestamp/date used as the upper bound for paged REST requests.")
+    binance_proxy.add_argument(
+        "--end",
+        required=True,
+        help="Exclusive ISO end timestamp/date (the named day/timestamp is NOT included; the upper "
+             "bound for paged REST requests, fetched as [start, end)). Matches download-data.",
+    )
     binance_proxy.add_argument(
         "--datasets",
         default="klines_1h,funding,mark_price_1h,index_price_1h,premium_index_1h",
@@ -101,20 +116,27 @@ def _add_discover_universe_parser(subparsers) -> None:
     universe.add_argument("--min-age-days", type=int, default=None, help="Minimum listing age in days.")
     universe.add_argument("--max-age-days", type=int, default=None, help="Maximum listing age in days; 0 disables.")
     universe.add_argument("--exclude-symbols", default=None, help="Comma-separated symbols to exclude.")
-    universe.add_argument(
+    # --exclude-defaults/--exclude-majors (exclude_majors) and --include-excluded/--include-majors
+    # (include_majors) are contradictory: cli._universe_config_from_args resolves the include branch
+    # before the exclude branch, so passing both silently dropped --exclude-defaults (cli-config-7).
+    # Group all four into one mutually-exclusive group so a contradictory pair is a hard parse-time
+    # error instead of a silent precedence pick. The two legacy aliases stay argparse.SUPPRESS
+    # (hidden in --help) for backward compatibility.
+    exclusion_group = universe.add_mutually_exclusive_group()
+    exclusion_group.add_argument(
         "--exclude-defaults",
         dest="exclude_majors",
         action="store_true",
         help="Use the default stable/peg excluded-symbol list.",
     )
-    universe.add_argument("--exclude-majors", dest="exclude_majors", action="store_true", help=argparse.SUPPRESS)
-    universe.add_argument(
+    exclusion_group.add_argument("--exclude-majors", dest="exclude_majors", action="store_true", help=argparse.SUPPRESS)
+    exclusion_group.add_argument(
         "--include-excluded",
         dest="include_majors",
         action="store_true",
         help="Do not exclude symbols from config.",
     )
-    universe.add_argument("--include-majors", dest="include_majors", action="store_true", help=argparse.SUPPRESS)
+    exclusion_group.add_argument("--include-majors", dest="include_majors", action="store_true", help=argparse.SUPPRESS)
 
 
 def _add_archive_manifest_parser(subparsers) -> None:
@@ -686,6 +708,7 @@ def _add_continuous_rebalance_cycle_audit_parser(subparsers) -> None:
     )
     audit.add_argument(
         "--data-root",
+        dest="audit_data_root",
         default="data/bybit-continuous-paper-event",
         help="Continuous paper/demo data root to audit.",
     )
@@ -1299,7 +1322,12 @@ def _add_continuous_events_parser(subparsers) -> None:
         help="Execution-grade backtest of the continuous (any-hour) liquidity-migration fade.",
     )
     p.add_argument("--start", default=d.start_date, help="Signal window start (YYYY-MM-DD).")
-    p.add_argument("--end", default=d.end_date, help="Signal window end (exclusive, YYYY-MM-DD).")
+    p.add_argument(
+        "--end",
+        default=d.end_date,
+        help="Signal window end (exclusive, YYYY-MM-DD). Empty (default) = data-driven: "
+             "clamp to the day after the data root's last available kline.",
+    )
     p.add_argument("--side", default=d.side, choices=["short", "long"], help="Trade side.")
     p.add_argument("--decile", type=int, default=d.decile, help="Composite decile to trade (9 = top/short).")
     p.add_argument("--rmom-quantile", type=float, default=d.rmom_quantile,

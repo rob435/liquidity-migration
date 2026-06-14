@@ -84,9 +84,16 @@ def test_readiness_summary_gates(tmp_path) -> None:
     update_forward_ledger(tmp_path, "bybit", full)
     start = T0 + 40 * MS_PER_DAY
     s = forward_readiness_summary(tmp_path, "bybit", forward_start_ms=start)
+    # Contiguous fixture: calendar span == observed rows.
     assert s["forward_days"] == 40
+    assert s["ledger_days"] == 40
     assert s["tier3_days_gate_30"] is True
-    assert s["tier3_mar_positive"] == (s["forward_return_pct"] > 0)
+    assert s["tier3_return_positive"] == (s["forward_return_pct"] > 0)
+    # object-identity stamp: the forward clock now tracks the live BTC+ETH 2f
+    # object (forward-replay-1, operator decision 2026-06-14), so a readiness PASS
+    # is forward evidence for the DEPLOYED book.
+    assert s["hedge_mode"] == "2f"
+    assert s["hedge_instruments"] == ["BTCUSDT", "ETHUSDT"]
     # empty venue -> zero days
     s2 = forward_readiness_summary(tmp_path, "binance", forward_start_ms=start)
     assert s2["forward_days"] == 0

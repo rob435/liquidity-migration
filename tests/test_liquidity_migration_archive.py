@@ -627,7 +627,10 @@ def test_archive_download_retries_and_removes_partial_temp(tmp_path, monkeypatch
         assert timeout_seconds == 123
         if attempts == 1:
             raise TimeoutError("socket read timed out")
-        return b"ok"
+        # A VALID gzip body: archive-integrity-4 now drains the fresh temp before
+        # promoting it (validated with the destination's .gz suffix), so a non-gzip
+        # placeholder would be correctly rejected — the retry must yield real data.
+        return gzip.compress(b"ok")
 
     monkeypatch.setattr(archive_module, "download_archive_bytes", flaky_download)
     monkeypatch.setattr(archive_module.time, "sleep", lambda _seconds: None)
@@ -639,7 +642,7 @@ def test_archive_download_retries_and_removes_partial_temp(tmp_path, monkeypatch
         timeout_seconds=123,
     )
 
-    assert output.read_bytes() == b"ok"
+    assert gzip.decompress(output.read_bytes()) == b"ok"
     assert attempts == 2
     assert not list(tmp_path.glob("*.tmp"))
 

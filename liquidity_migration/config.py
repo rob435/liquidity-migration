@@ -103,12 +103,18 @@ class CostConfig:
     maker_adverse_selection_bps: float = 1.0
     taker_slippage_bps_liquid: float = 2.0
     # Share of fills assumed passive (maker). The LIVE runner sends Market orders
-    # on both legs = 100% taker, so set this to 0.0 to model the deployed
-    # execution exactly (base becomes 2*(taker_fee+taker_slippage)=15 bps) rather
-    # than relying on the scenario cost_multiplier to paper over a maker blend
-    # the live engine never gets. Raise it only once passive execution (R12
-    # sniper / limit-chase exit) is actually deployed. (E3)
-    maker_fill_probability: float = 0.60
+    # on both legs = 100% taker, so the dataclass default is 0.0 to model the
+    # deployed execution exactly (base becomes 2*(taker_fee+taker_slippage)=15 bps)
+    # rather than relying on the scenario cost_multiplier to paper over a maker
+    # blend the live engine never gets. The committed config YAML
+    # (configs/volume_alpha.default.yaml) also sets 0.0, so this is a no-op for the
+    # official entrypoints that load it; making it the default hardens every other
+    # consumer (ad-hoc backtest, REPL, a future CLI/sweep, a refactor that drops
+    # cost_config) against the ~36% under-costing that a 0.60 maker blend produces
+    # — the canonical "cost-too-low flatters returns" error. Raise it only once
+    # passive execution (R12 sniper / limit-chase exit) is actually deployed. (E3;
+    # M2-audit reconciliation-drift errors #6/#24)
+    maker_fill_probability: float = 0.0
     # E4: per-leg cost asymmetry. The exit leg of a short is a buy-to-close,
     # which is more expensive than the sell-to-open entry — especially covering
     # into a stress spike. exit_cost_multiplier scales ONLY the exit leg's cost.

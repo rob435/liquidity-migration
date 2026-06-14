@@ -56,19 +56,26 @@ def test_merge_dataclass_rejects_unknown_keys() -> None:
         _merge_dataclass(CostConfig, {"maker_fee_bps": 1.0, "not_a_real_field": 99})
 
 
-def test_cost_config_default_base_cost_unchanged_and_e3_e4_knobs() -> None:
-    # Default (60% maker blend, symmetric legs) must equal the legacy 2*blended
-    # so existing/running cells are byte-identical.
-    blended = 0.60 * (2.0 + 1.0) + 0.40 * (5.5 + 2.0)  # 4.8
-    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(2.0 * blended)  # 9.6
-    assert CostConfig(exit_cost_multiplier=1.0).base_entry_exit_cost_bps == pytest.approx(9.6)
-    # E3: model the live 100%-taker market execution exactly (no maker blend).
-    assert CostConfig(maker_fill_probability=0.0).base_entry_exit_cost_bps == pytest.approx(
-        2.0 * (5.5 + 2.0)  # 15.0 bps round-trip
+def test_cost_config_default_models_live_100pct_taker() -> None:
+    # The dataclass default must model the deployed 100%-taker market execution
+    # (maker_fill_probability=0.0), NOT a 0.60 maker blend. A maker-blend default
+    # under-costs by ~36% (9.6 vs 15.0 bps) and silently flatters returns on any
+    # consumer that does not pass the YAML — the canonical cost-too-low error.
+    # (cli-config-2 / cost-funding-1)
+    assert CostConfig().maker_fill_probability == pytest.approx(0.0)
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(
+        2.0 * (5.5 + 2.0)  # 15.0 bps round-trip, 100% taker
     )
-    # E4: a costlier cover (exit) leg — only the exit leg scales.
+    assert CostConfig(exit_cost_multiplier=1.0).base_entry_exit_cost_bps == pytest.approx(15.0)
+    # A maker blend must still be expressible when explicitly opted into (E3).
+    assert CostConfig(maker_fill_probability=0.60).base_entry_exit_cost_bps == pytest.approx(
+        2.0 * (0.60 * (2.0 + 1.0) + 0.40 * (5.5 + 2.0))  # 9.6 bps
+    )
+    # E4: a costlier cover (exit) leg — only the exit leg scales. Symmetric base
+    # is now the 100%-taker blend (taker_fee+taker_slippage = 7.5 bps/leg).
+    taker_leg = 5.5 + 2.0
     assert CostConfig(exit_cost_multiplier=2.0).base_entry_exit_cost_bps == pytest.approx(
-        blended * 3.0  # entry(1) + exit(2) legs
+        taker_leg * 3.0  # entry(1) + exit(2) legs
     )
 
 

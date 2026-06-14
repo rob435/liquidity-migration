@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import polars as pl
-from pathlib import Path
 
 from ._common import MS_PER_DAY, calendar_shift
 
@@ -98,53 +97,4 @@ def add_returns_and_age(daily: pl.DataFrame) -> pl.DataFrame:
             ]
         )
         .sort(["ts_ms", "symbol"])
-    )
-
-
-def _attach_residual_momentum(features: pl.DataFrame, root: Path) -> pl.DataFrame:
-    """Left-join the precomputed residual-momentum signal onto the daily feature panel.
-
-    Candidates with no signal row get a null ``residual_momentum`` and are dropped by the gate's
-    is_not_null() guard. Raises if the signal file is absent (the gate needs it).
-
-    DAY ALIGNMENT (fixed 2026-06-03 — was a join-key off-by-one): the two sides use DIFFERENT ts_ms
-    conventions, so each is mapped to the same TRADING DAY before matching:
-      * residual table ts_ms = START-of-day grid (00:00 UTC of decision day D) -> trading day =
-        ``ts_ms // MS_PER_DAY`` = day_start(D).
-      * this feature panel ts_ms = END-of-day stamp (day_start(D)+MS_PER_DAY = 00:00 of D+1) ->
-        trading day = ``(ts_ms - 1) // MS_PER_DAY`` = day_start(D) (the date of ts_ms-1ms; see
-        _common.trading_day_expr).
-    Flooring BOTH raw (the old bug) mapped the day-D event to D+1 and attached residual_momentum[D+1]
-    (= sum residual_return[D-6..D]) instead of [D] — a whole-day shift that pulled residual_return[D]
-    (the event day's own forward residual) into the gate. The precompute is independently made causal
-    via shift(3) (scripts/precompute_residual_momentum.py). Pinned by
-    test_residual_momentum_join_attaches_decision_day_value.
-
-    NOTE: this fix + the precompute shift re-base the rmom gate, so the rmom-gate MAR verdict and the
-    live continuous rmom_quantile must be re-validated before deploy.
-    """
-    sig_path = Path(root) / "residual_momentum.parquet"
-    if not sig_path.exists():
-        raise RuntimeError(
-            f"liquidity_migration_residual_momentum_max is active but {sig_path} is missing; "
-            "run scripts/precompute_residual_momentum.py first."
-        )
-    ms_per_day = 86_400_000
-    sig = (
-        pl.read_parquet(sig_path)
-        .select(
-            pl.col("symbol"),
-            # residual table ts_ms is the start-of-day grid -> trading day = floor(ts_ms).
-            ((pl.col("ts_ms") // ms_per_day) * ms_per_day).alias("_rm_day"),
-            pl.col("residual_momentum"),
-        )
-        .unique(["symbol", "_rm_day"], keep="first")
-    )
-    return (
-        features.with_columns(
-            # panel ts_ms is the END-of-day stamp (00:00 of D+1) -> trading day = floor(ts_ms - 1ms).
-            (((pl.col("ts_ms") - 1) // ms_per_day) * ms_per_day).alias("_rm_day")
-        )
-        .join(sig, on=["symbol", "_rm_day"], how="left")
-        .drop("_rm_day")
     )

@@ -389,20 +389,31 @@ def _pooled(rows: list[dict[str, Any]]) -> pl.DataFrame:
     if not rows:
         return pl.DataFrame()
     frame = pl.DataFrame(rows, infer_schema_length=None)
+    # NULL-MAR HAZARD (alpha-scripts-1): _daily_pnl_metrics returns mar=None on a
+    # degenerate near-zero-drawdown path (abs(maxdd) <= 1e-9), and a missing source
+    # artifact yields a venue row with no finite mar. Polars `.all()` and `.min()`
+    # SKIP nulls, so a combo valid on only one venue ([7.0, None]) would otherwise
+    # flag target_mar_both=True and sort by that lone venue's MAR — claiming a
+    # cross-venue pass that never happened. Treat a missing MAR as a HARD FAIL of
+    # the cross-venue gate: every venue must have a finite MAR (`is_not_null().all()`)
+    # AND every venue must clear the bar. For the min_mar tiebreak, fill nulls with
+    # -inf so a venue with no MAR can never win. `n_venues_with_mar` exposes coverage.
     return (
         frame.group_by(["portfolio", "risk_rule"])
         .agg(
             pl.col("component_trades").sum().alias("component_trades"),
             pl.col("return").min().alias("min_return"),
             pl.col("return").mean().alias("mean_return"),
-            pl.col("mar").min().alias("min_mar"),
+            pl.col("mar").fill_null(float("-inf")).min().alias("min_mar"),
             pl.col("mar").mean().alias("mean_mar"),
+            pl.col("mar").is_not_null().sum().alias("n_venues_with_mar"),
+            pl.col("mar").len().alias("n_venues"),
             pl.col("max_drawdown").min().alias("worst_dd"),
             pl.col("worst_day_return").min().alias("worst_day"),
             pl.col("delta_return_vs_turn3p3").mean().alias("mean_delta_return_vs_turn3p3"),
             pl.col("delta_mar_vs_turn3p3").mean().alias("mean_delta_mar_vs_turn3p3"),
             (pl.col("return") >= 1.20).all().alias("target_return_both"),
-            (pl.col("mar") >= 6.0).all().alias("target_mar_both"),
+            (pl.col("mar").is_not_null().all() & (pl.col("mar") >= 6.0).all()).alias("target_mar_both"),
             (pl.col("max_drawdown") >= -0.12).all().alias("target_dd_ok_both"),
         )
         .sort(
@@ -525,6 +536,22 @@ def main() -> int:
     _write_csv(args.out / "summary.csv", rows)
     pooled = _pooled(rows)
     pooled.write_csv(args.out / "pooled.csv")
+    # IN-SAMPLE SELECTION HAZARD (alpha-scripts-2): _pooled sorts the ENTIRE searched
+    # space (weight-grid simplex x risk-rule grid) best-first by FULL-SAMPLE pooled
+    # metrics — there is no train/holdout, no era split, and no multiple-testing
+    # correction here. The top pooled.csv row is therefore in-sample grid mining
+    # (house-rules #17/#18/#19); its forward performance is expected to be overstated.
+    # Stamp the grid cardinality and an explicit machine-readable flag so the output
+    # cannot be silently cited as candidate/promotion-grade evidence. The demo-forward
+    # arbiter (not this ranking) remains the gate; split-stability/bootstrap validation
+    # must be run separately and pre-registered before any promotion claim.
+    grid_cardinality = len(selected_portfolios) * len(risk_rules)
+    selection_caveat = (
+        "Top pooled.csv row is the FULL-SAMPLE grid maximizer over "
+        f"{grid_cardinality} (portfolio x risk_rule) cells with NO holdout / era split / "
+        "multiple-testing correction. In-sample selection only — NOT candidate-grade. "
+        "Run split-stability + block-bootstrap and pre-register before any promotion claim."
+    )
     receipt = {
         "sources": {
             name: {"root": str(spec.root), "cell": spec.cell}
@@ -538,6 +565,11 @@ def main() -> int:
         "manual_portfolios": manual_portfolios,
         "cost_multiplier": args.cost_multiplier,
         "risk_rules": [{"name": item.name, "rule_id": rebalance_rule_id(item.rule)} for item in risk_rules],
+        "selection_is_in_sample": True,
+        "n_portfolios": len(selected_portfolios),
+        "n_risk_rules": len(risk_rules),
+        "grid_cardinality": grid_cardinality,
+        "selection_caveat": selection_caveat,
         "outputs": {
             "summary": str(args.out / "summary.csv"),
             "pooled": str(args.out / "pooled.csv"),
@@ -546,6 +578,7 @@ def main() -> int:
     (args.out / "run_receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
     print(f"summary={args.out / 'summary.csv'}")
     print(f"pooled={args.out / 'pooled.csv'}")
+    print(f"WARNING: {selection_caveat}")
     return 0
 
 

@@ -124,8 +124,14 @@ def _rate_limit_retry_seconds(exc: urllib.error.HTTPError, *, cap_seconds: float
     dropping the page)."""
     if int(getattr(exc, "code", 0)) != 429:
         return None
+    # HTTPError can carry headers=None (it is constructed that way across the repo's own
+    # tests and by urllib for some errors), so guard the .get before touching it — else a
+    # 429 with null headers raises AttributeError out of the HTTPError handler instead of
+    # the intended graceful behavior (telegram-alert-3). Missing/garbage Retry-After -> 1s.
+    hdrs = getattr(exc, "headers", None)
+    raw = hdrs.get("Retry-After", "1") if hdrs is not None else "1"
     try:
-        retry_after = float(exc.headers.get("Retry-After", "1") or 1.0)
+        retry_after = float(raw or 1.0)
     except (TypeError, ValueError):
         retry_after = 1.0
     if retry_after > cap_seconds:

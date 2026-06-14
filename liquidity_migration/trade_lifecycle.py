@@ -77,6 +77,21 @@ def build_equity_curve(baskets: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def annualized_sharpe(daily_returns: "np.ndarray | list[float]", *, ann_days: float = 365.25) -> float:
+    """Canonical annualised Sharpe = mean / std(ddof=1) * sqrt(ann_days) over a daily
+    return series — the SINGLE convention shared by trade_lifecycle, continuous_events,
+    and continuous_forward_replay so cross-report Sharpes are directly comparable
+    (metrics-3). Returns 0.0 for fewer than 2 finite points or zero variance. Callers
+    pass the daily series (the equity-based sites forward-fill the calendar grid first)."""
+    arr = np.asarray(
+        [float(x) for x in daily_returns if x is not None and math.isfinite(float(x))], dtype=float
+    )
+    if arr.size < 2:
+        return 0.0
+    sd = float(arr.std(ddof=1))
+    return float(arr.mean() / sd * math.sqrt(ann_days)) if sd > 1e-12 else 0.0
+
+
 def _daily_sharpe(equity: pl.DataFrame) -> float:
     """Annualised Sharpe from the daily equity series.
 
@@ -111,14 +126,8 @@ def _daily_sharpe(equity: pl.DataFrame) -> float:
             j += 1
         grid_eq[i] = eq[j]
     daily_ret = np.diff(grid_eq) / grid_eq[:-1]
-    daily_ret = daily_ret[np.isfinite(daily_ret)]
-    if daily_ret.size < 2:
-        return 0.0
-    mu = float(daily_ret.mean())
-    sd = float(daily_ret.std(ddof=1))
-    if sd <= 1e-12:
-        return 0.0
-    return mu / sd * math.sqrt(365.0)
+    # metrics-3: one shared Sharpe convention (ddof=1, sqrt(365.25)) across all reports.
+    return annualized_sharpe(daily_ret)
 
 
 def summarize_trade_backtest(
@@ -142,6 +151,7 @@ def summarize_trade_backtest(
             "cost_return": 0.0,
             "funding_return": 0.0,
             "funding_mode": "missing",
+            "funding_modeled_fraction": 0.0,
             "funding_event_count": 0,
             "worst_basket_return": 0.0,
             "worst_day_return": 0.0,
@@ -182,6 +192,7 @@ def summarize_trade_backtest(
         "cost_return": float(trades["cost_return"].sum()),
         "funding_return": float(trades["funding_return"].sum()) if "funding_return" in trades.columns else 0.0,
         "funding_mode": _funding_mode_summary(trades),
+        "funding_modeled_fraction": _funding_modeled_fraction(trades),
         "funding_event_count": int(trades["funding_event_count"].sum()) if "funding_event_count" in trades.columns else 0,
         "worst_basket_return": float(basket_returns.min()) if basket_returns.size else 0.0,
         "worst_day_return": _worst_volume_day_return(baskets),
@@ -274,10 +285,47 @@ def _funding_mode_summary(trades: pl.DataFrame) -> str:
     return "partial"
 
 
+def _funding_modeled_fraction(trades: pl.DataFrame) -> float:
+    """Fraction of traded gross notional whose funding was fully modeled.
+
+    cost-funding-3: ``funding_mode`` collapses to "partial" for ANY mix of
+    modeled/missing/partial trades, so the 3-state summary cannot tell a
+    coverage-edge book (one newly-listed alt lacking funding data) from a book
+    where half the notional was charged ZERO funding. This weights each trade's
+    funding coverage by its absolute notional so a downstream gate can require a
+    minimum coverage fraction instead of treating any non-all-missing book as
+    acceptable. A symbol absent from the funding dataset reads ``funding_mode ==
+    'missing'`` (zero funding charged) and so drops the modeled fraction.
+
+    Returns 1.0 for a fully-modeled book and 0.0 for an empty / all-missing one;
+    weight falls back to equal-per-trade when ``notional_weight`` is unavailable.
+    """
+    if trades.is_empty() or "funding_mode" not in trades.columns:
+        return 0.0
+    if "notional_weight" in trades.columns:
+        weighted = trades.select(
+            pl.col("notional_weight").abs().alias("_w"),
+            (pl.col("funding_mode") == "modeled").cast(pl.Float64).alias("_modeled"),
+        ).drop_nulls("_w")
+        total = float(weighted["_w"].sum())
+        if total > 0.0:
+            return float((weighted["_w"] * weighted["_modeled"]).sum()) / total
+    modes = trades["funding_mode"].to_list()
+    if not modes:
+        return 0.0
+    return sum(1 for m in modes if str(m) == "modeled") / len(modes)
+
+
 def _worst_volume_day_return(baskets: pl.DataFrame) -> float:
     if baskets.is_empty() or "exit_date" not in baskets.columns:
         return 0.0
-    daily = baskets.group_by("exit_date").agg(((pl.col("basket_return") + 1.0).product() - 1.0).alias("day_return"))
+    # Same-day baskets are SUMMED (not compounded) to match build_equity_curve,
+    # which adds same-exit-day fractional slices and only compounds across days
+    # (see its docstring). Compounding here invented a different "day return"
+    # definition than the curve that produces total_return / max_drawdown, so on
+    # multi-basket days the reported worst_day_return did not correspond to any
+    # actual single-day move of that equity curve (metrics-4).
+    daily = baskets.group_by("exit_date").agg(pl.col("basket_return").sum().alias("day_return"))
     return float(daily["day_return"].min()) if not daily.is_empty() else 0.0
 
 
@@ -342,25 +390,6 @@ def _filter_signal_window(features: pl.DataFrame, config: TradeLifecycleConfig) 
 
 def _date_boundary_ms(value: str) -> int | None:
     return date_boundary_ms(value)
-
-
-def _filter_universe(part: pl.DataFrame, config: TradeLifecycleConfig) -> pl.DataFrame:
-    filtered = part
-    include = {symbol.upper() for symbol in config.include_symbols}
-    exclude = {symbol.upper() for symbol in config.exclude_symbols}
-    if include:
-        filtered = filtered.filter(pl.col("symbol").is_in(sorted(include)))
-    if exclude:
-        filtered = filtered.filter(~pl.col("symbol").is_in(sorted(exclude)))
-    if config.universe_min_daily_turnover > 0.0 and "turnover_quote" in filtered.columns:
-        filtered = filtered.filter(pl.col("turnover_quote") >= config.universe_min_daily_turnover)
-    if "liquidity_rank" in filtered.columns:
-        filtered = filtered.filter(pl.col("liquidity_rank") >= config.universe_rank_min)
-        if config.universe_rank_max > 0:
-            filtered = filtered.filter(pl.col("liquidity_rank") <= config.universe_rank_max)
-    return filtered
-
-
 
 
 def _rank_exit_hit(
@@ -820,6 +849,16 @@ def _simulate_indexed_trade(
         exit_ts_ms=int(exit_ts_ms),
     )
     effective_weight = notional_weight * position_weight
+    # NOTE (cost-funding-4): funding is charged on the CONSTANT entry-time notional
+    # weight, not the marked notional that floats with price at each settlement.
+    # Real perp funding is rate * position_notional AT each settlement; here every
+    # in-window settlement rate (raw_funding_return) is scaled by one flat entry
+    # weight. This slightly over-credits a winning short / over-charges a losing
+    # short (symmetric small error for longs); the bias is second-order over a
+    # 12-48h hold but grows with hold length and volatility. A higher-fidelity
+    # per-settlement marked-notional weighting would shift a promotion-relevant
+    # number and needs the bar price path at each settlement, so it is left as a
+    # documented approximation here rather than silently applied.
     funding_return = abs(effective_weight) * raw_funding_return
     cost_return = -abs(effective_weight) * round_trip_cost_bps / 10_000.0
     gross_return = abs(effective_weight) * gross_trade_return

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -11,6 +12,8 @@ import pyarrow.parquet as pq
 
 from ._common import date_ms, parse_date, pct
 from .storage import dataset_path
+
+_logger = logging.getLogger(__name__)
 
 
 NATIVE_AUX_DATASETS = (
@@ -438,8 +441,16 @@ def _partition_coverage_snapshot(
             max_ts = _date_start_ms(max_day) + 24 * 60 * 60_000 - 1
     else:
         for file in partition_files:
-            parquet_file = pq.ParquetFile(file)
-            metadata = parquet_file.metadata
+            # A single corrupt/zero-byte/truncated partition parquet must not abort
+            # the whole coverage audit (a diagnostic that exists to FIND data
+            # problems). Degrade per-file to a zero row contribution, mirroring
+            # archive_manifest._kline_partition_bar_rows.
+            try:
+                parquet_file = pq.ParquetFile(file)
+                metadata = parquet_file.metadata
+            except Exception as exc:  # noqa: BLE001 - any unreadable parquet degrades, never crashes
+                _logger.warning("data-layer coverage: skipping unreadable partition %s (%s)", file, exc)
+                continue
             row_count += int(metadata.num_rows)
             file_min, file_max = _parquet_ts_bounds(parquet_file)
             if file_min is not None:

@@ -34,9 +34,19 @@ def test_continuous_rebalance_cycle_audit_parser_defaults() -> None:
     args = parser.parse_args(["continuous-rebalance-cycle-audit"])
 
     assert args.command == "continuous-rebalance-cycle-audit"
-    assert args.data_root == "data/bybit-continuous-paper-event"
+    # The audit's own root lives on a unique dest so it no longer shadows the
+    # global --data-root (argparse subparser-default collision); the global stays
+    # at its own default (None) unless the operator passes it.
+    assert args.audit_data_root == "data/bybit-continuous-paper-event"
+    assert args.data_root is None
     assert args.cycles_dataset == "continuous_fade_paper_cycles"
     assert args.orders_dataset == "continuous_fade_paper_orders"
+
+    # A global --data-root before the subcommand is preserved (was silently
+    # clobbered by the subparser default before the dest rename).
+    args2 = parser.parse_args(["--data-root", "data/custom", "continuous-rebalance-cycle-audit"])
+    assert args2.data_root == "data/custom"
+    assert args2.audit_data_root == "data/bybit-continuous-paper-event"
 
 
 def test_continuous_forward_readiness_parser_defaults() -> None:
@@ -238,7 +248,10 @@ def test_combined_book_report_includes_continuous_roots_and_sleeve_toggles() -> 
 
     assert "EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env" in service
     assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" in service
-    assert "--short-data-root data/bybit-demo-event" in service
+    # deploy-ci-4: the daily-SHORT sleeve was ERASED 2026-06-11, so the report
+    # unit no longer wires its --short-data-root (the erased root). Guard against
+    # the dead-sleeve arg drifting back in.
+    assert "--short-data-root" not in service
     assert "--long-data-root data/bybit-long-demo-event" in service
     assert "--continuous-data-root data/bybit-continuous-demo-event" in service
     assert "--continuous-paper-data-root data/bybit-continuous-paper-event" in service
@@ -452,8 +465,15 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "liquidity-migration-bybit-continuous-demo.service" in text
     assert "liquidity-migration-bybit-continuous-paper.service" in text
     assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
-    assert 'apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
-    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
+    # deploy-env-timers-1: the hedge timer is gated on a computed _hedge_timer_state
+    # (not raw CONTINUOUS_SLEEVE) so retiring continuous does NOT orphan an open,
+    # stopless hedge leg — when continuous is off it keeps the timer enabled (and
+    # pages CRITICAL) while the hedge addon ledger holds open rows, disabling only
+    # once flat. apply and verify must use the SAME computed state.
+    assert 'apply_timer_enable "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert "data/bybit-continuous-hedge-event" in text  # the open-hedge ledger check
+    assert "_hedge_timer_state=on" in text              # fail-safe keeps it enabled while open
     assert "continuous_rmom_refresh_on" in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text

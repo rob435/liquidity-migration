@@ -19,6 +19,8 @@ from typing import Any
 
 import polars as pl
 
+from ._common import finite_float
+
 MS_PER_DAY = 86_400_000
 
 
@@ -89,13 +91,13 @@ class ContinuousRebalanceScaleState:
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return default
-    if out != out or out in (float("inf"), float("-inf")):
-        return default
-    return out
+    # Delegates to the canonical finite-guarded _common.finite_float (quality-dup-1
+    # consolidation, code-quality-5) so the NaN/inf-out-of-size/PnL-math policy has a
+    # single source of truth. Keeps the positional ``default`` and float (never None)
+    # return so every existing caller stays a drop-in; finite_float returns
+    # ``default`` (here a float) on a missing/non-finite value.
+    out = finite_float(value, default=default)
+    return out if out is not None else default
 
 
 def fixed_cost_bps(config: dict[str, Any]) -> float:
@@ -629,15 +631,23 @@ def apply_rebalance_rule(
             b1, b2 = compute_hedge_betas_2f(raw_rets, hedge_rets, hedge_rets2, idx, hedge_rule)
             day_h1 = hedge_rets[idx]
             day_h2 = hedge_rets2[idx]
-            r1, r2 = _capped_hedge_legs(
-                b1, b2, scale, float(hedge_rule.hedge_cap), day_h1 is not None, day_h2 is not None
-            )
+            # sizing-rebalance-1: size each leg from beta UNCONDITIONALLY so the
+            # backtest engine matches the parity-tested live twin
+            # (compute_continuous_hedge_ratios_2f passes True,True). A missing-today
+            # hedge return no longer zeroes the held position and books a spurious
+            # full close+reopen turnover — the live book holds the hedge through a
+            # data-gap day. Only the realized PnL/funding CONTRIBUTION is gated on
+            # the day's value being present. On fully-populated series (all days
+            # known) this is numerically identical to the prior per-leg gating, so
+            # the parity tests are unchanged.
+            r1, r2 = _capped_hedge_legs(b1, b2, scale, float(hedge_rule.hedge_cap), True, True)
             hedge_ratio = r1 + r2
             if day_h1 is not None:
                 hedge_return += r1 * float(day_h1)
+                hedge_funding_return += -(r1 * float(h_fund.get(day, 0.0)))
             if day_h2 is not None:
                 hedge_return += r2 * float(day_h2)
-            hedge_funding_return = -(r1 * float(h_fund.get(day, 0.0)) + r2 * float(h_fund2.get(day, 0.0)))
+                hedge_funding_return += -(r2 * float(h_fund2.get(day, 0.0)))
             if idx == 0 or days[idx] - days[idx - 1] == MS_PER_DAY:
                 turnover = abs(r1 - prev_r1) + abs(r2 - prev_r2)
             else:
@@ -652,8 +662,16 @@ def apply_rebalance_rule(
             assert hedge_rule is not None
             beta = compute_hedge_beta(raw_rets, hedge_rets, idx, hedge_rule)
             day_h = hedge_rets[idx]
+            # sizing-rebalance-1: hold the hedge from beta UNCONDITIONALLY to match
+            # compute_continuous_hedge_ratio (the parity-tested twin), which sizes
+            # off the prior series alone and has no 'today' gate. Previously a None
+            # most-recent (or interior) hedge return left hedge_ratio=0.0 here while
+            # the live book held a full hedge, and the turnover logic then charged a
+            # phantom close+reopen for the gap day. Only the realized PnL/funding
+            # contribution stays gated on the day's value. Identical to the old code
+            # on fully-populated series, so parity tests are unchanged.
+            hedge_ratio = min(max(-beta, 0.0), float(hedge_rule.hedge_cap)) * scale
             if day_h is not None:
-                hedge_ratio = min(max(-beta, 0.0), float(hedge_rule.hedge_cap)) * scale
                 hedge_return = hedge_ratio * float(day_h)
                 hedge_funding_return = -hedge_ratio * float(h_fund.get(day, 0.0))
             if idx == 0 or days[idx] - days[idx - 1] == MS_PER_DAY:

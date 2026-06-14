@@ -218,6 +218,24 @@ if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
   exit 1
 fi
 
+# DEFENSE-IN-DEPTH on the highest-stakes toggle (deploy-ci-6): this recovery path
+# enables+restarts order-submitting demo units (continuous-demo, long-demo, risk)
+# against the account this env file defines; demo-only operation otherwise depends
+# solely on the per-process runtime guard validate_order_submit_allowed(). Make the
+# RECOVERY itself fail-closed — parity with scripts/deploy_vps_live.sh — so a
+# mis-edited bybit-demo.env that ever set REAL_MONEY truthy refuses the deploy
+# rather than restarting live order-submitting daemons against a real-money
+# account. The strategy is NOT validated for real money; promotion is
+# operator-gated, never a deploy side effect.
+case "${REAL_MONEY:-}" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    echo "Refusing deploy: REAL_MONEY='${REAL_MONEY}' in /etc/liquidity-migration/bybit-demo.env." \
+         "This box deploys order-submitting demo units; real money is not validated and must not be" \
+         "enabled by a deploy. Fix the env file to demo (unset/false REAL_MONEY) and redeploy." >&2
+    exit 1
+    ;;
+esac
+
 # Sync every .service / .timer in deploy/systemd/ so disaster recovery brings
 # up the same unit set scripts/deploy_vps_live.sh does — paper, both long
 # sleeves, and the demo-health + combined-book-report timers. Hand-listing
@@ -297,6 +315,14 @@ fi
 # off => NOT active) — identical to deploy_vps_live.sh.
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
+# The liquidation collector is always-on (enabled+restarted above). Verify it the
+# SAME way as the risk service so a recovered code change that crashes the collector
+# on startup FAILS the recovery loud — otherwise a broken collector still reaches
+# 'deploy-verify-ok' and the data loss (unbuyable forward liquidation history) is
+# only caught out-of-band by the ~3-minute watchdog (deploy-ci-3). is-active catches
+# a crash-loop reaching 'failed'; is-enabled catches "we never enabled it".
+systemctl is-active --quiet liquidity-migration-liquidation-collector.service
+systemctl is-enabled --quiet liquidity-migration-liquidation-collector.service
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS

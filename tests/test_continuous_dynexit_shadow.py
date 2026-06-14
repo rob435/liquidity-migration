@@ -46,6 +46,20 @@ def test_anchor_uses_max_of_runup_and_ret1_clipped() -> None:
     assert compute_shadow_anchor(k, symbol="MISSING", signal_ts_ms=T0 + 25 * MS_H) is None
 
 
+def test_anchor_requires_both_refs_no_ret1_only_arm() -> None:
+    # Signal + 1h-ago bars exist, but the 24h-ago bar is missing (cold start /
+    # gap). The anchor is clip(max(runup24h, ret1)); arming on ret1 alone would
+    # shadow a different exit, so it must NOT arm (counted, not imputed).
+    sig = T0 + 25 * MS_H
+    k = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "ts_ms": sig - MS_H, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+            {"symbol": "AAAUSDT", "ts_ms": sig, "open": 120.0, "high": 121.0, "low": 119.0, "close": 120.0},
+        ]
+    )
+    assert compute_shadow_anchor(k, symbol="AAAUSDT", signal_ts_ms=sig) is None
+
+
 def test_arm_then_dyn_tp_exit_on_low_touch(tmp_path) -> None:
     closes = [100.0] * 30
     closes[25] = 120.0

@@ -36,7 +36,7 @@ from typing import Callable, Iterable, cast
 
 import polars as pl
 
-from liquidity_migration._common import MS_PER_DAY
+from liquidity_migration._common import MS_PER_DAY, calendar_roll, calendar_shift
 from liquidity_migration.storage import read_dataset_columns
 TRADING_DAYS_PER_YEAR = 365  # crypto trades 7 days/week; annualisation is calendar-day-based
 
@@ -320,8 +320,15 @@ def _make_xs_rank_ret_Nd(n: int):
     def builder(ctx: FeatureContext) -> pl.DataFrame:
         if ctx.daily_returns.is_empty():
             return pl.DataFrame()
+        # Calendar-exact: resolve the D-n close by an explicit ts_ms - n*MS_PER_DAY
+        # match (calendar_shift), NOT a positional shift(n). On a gapped symbol a
+        # positional shift reaches the n-th PRESENT row, so an "Nd return" would
+        # silently span more than N calendar days — the same gap-blindness
+        # _attach_daily_returns / _attach_forward_returns deliberately avoid. A
+        # gapped row gets a null ret_Nd (no exact D-n partner) instead of a
+        # misaligned horizon. Byte-identical to shift(n) on a contiguous series.
         df = ctx.daily_returns.sort(["symbol", "ts_ms"]).with_columns(
-            (pl.col("close") / pl.col("close").shift(n).over("symbol") - 1.0).alias("ret_Nd")
+            (pl.col("close") / calendar_shift(pl.col("close"), n) - 1.0).alias("ret_Nd")
         )
         ranked = _xs_rank(df, "ret_Nd", out_col=f"xs_rank_ret_{n}d")
         return _select_cols(ranked, "symbol", "ts_ms", f"xs_rank_ret_{n}d")
@@ -337,9 +344,13 @@ def _build_liquidity_rank(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.daily_klines.is_empty():
         return pl.DataFrame()
+    # Calendar-bounded 7d mean (calendar_roll): a missing day shrinks the window
+    # rather than stretching the "7d" mean across >7 calendar days on a gapped
+    # symbol. shifted=False => trailing 7d INCLUDING today (turnover[D-6..D]).
+    # Numerically identical to rolling_mean(window_size=7, min_samples=1) on a
+    # contiguous daily grid.
     df = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
-        pl.col("turnover_quote")
-        .rolling_mean(window_size=7, min_samples=1)
+        calendar_roll(pl.col("turnover_quote"), "mean", 7, shifted=False, min_samples=1)
         .over("symbol")
         .alias("turnover_7d_mean")
     )
@@ -360,8 +371,12 @@ def _make_liquidity_rank_delta(n: int):
         lr = _build_liquidity_rank(ctx)
         if lr.is_empty():
             return lr
+        # Calendar-exact prior rank (calendar_shift): the D-n rank must be the
+        # one EXACTLY n calendar days back, else a gapped symbol's "Nd rank
+        # delta" silently compares against a >n-day-old rank. Null across a gap
+        # rather than misaligned; identical to shift(n) on contiguous data.
         df = lr.sort(["symbol", "ts_ms"]).with_columns(
-            (pl.col("liquidity_rank").shift(n).over("symbol") - pl.col("liquidity_rank")).alias(
+            (calendar_shift(pl.col("liquidity_rank"), n) - pl.col("liquidity_rank")).alias(
                 f"liquidity_rank_delta_{n}d"
             )
         )
@@ -380,10 +395,13 @@ def _make_turnover_delta(n: int):
     def builder(ctx: FeatureContext) -> pl.DataFrame:
         if ctx.daily_klines.is_empty():
             return pl.DataFrame()
+        # Calendar-bounded prior-N-day mean (calendar_roll, shifted=True =>
+        # closed="left", the prior N days EXCLUDING today). A positional
+        # shift(1).rolling_mean(N) would, on a gapped symbol, average rows that
+        # span >N calendar days and mislabel today's turnover_delta. Identical to
+        # the positional version on a contiguous daily grid.
         df = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
-            pl.col("turnover_quote")
-            .shift(1)
-            .rolling_mean(window_size=n, min_samples=1)
+            calendar_roll(pl.col("turnover_quote"), "mean", n, shifted=True, min_samples=1)
             .over("symbol")
             .alias("prior_mean")
         )
@@ -420,14 +438,18 @@ def _build_funding_rate_delta_7d(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.funding_daily.is_empty():
         return pl.DataFrame()
+    # Calendar-bounded 7d funding sum (trailing 7 days incl. today) and a
+    # calendar-exact 7-day-prior comparison. A positional rolling_sum(7).shift(7)
+    # on a gapped symbol would sum across >7 calendar days and compare against a
+    # window that is not exactly 7 days old. Identical to the positional form on
+    # a contiguous daily grid.
     df = ctx.funding_daily.sort(["symbol", "ts_ms"]).with_columns(
-        pl.col("funding_rate_1d_sum")
-        .rolling_sum(window_size=7, min_samples=1)
+        calendar_roll(pl.col("funding_rate_1d_sum"), "sum", 7, shifted=False, min_samples=1)
         .over("symbol")
         .alias("funding_7d_sum")
     )
     df = df.with_columns(
-        (pl.col("funding_7d_sum") - pl.col("funding_7d_sum").shift(7).over("symbol")).alias(
+        (pl.col("funding_7d_sum") - calendar_shift(pl.col("funding_7d_sum"), 7)).alias(
             "funding_rate_delta_7d"
         )
     )
@@ -445,12 +467,16 @@ def _build_oi_delta_7d(ctx: FeatureContext) -> pl.DataFrame:
         return pl.DataFrame()
     has_value = "open_interest_value" in ctx.open_interest_daily.columns
     oi_col = "open_interest_value" if has_value else "open_interest"
+    # Calendar-exact 7-day-prior OI (calendar_shift): on a gapped symbol a
+    # positional shift(7) compares against an OI snapshot >7 calendar days old.
+    # Null across the gap rather than mislabel the 7d OI change.
     df = ctx.open_interest_daily.sort(["symbol", "ts_ms"]).with_columns(
-        (pl.col(oi_col) - pl.col(oi_col).shift(7).over("symbol")).alias("oi_delta_raw")
+        (pl.col(oi_col) - calendar_shift(pl.col(oi_col), 7)).alias("oi_delta_raw")
     )
+    # Calendar-bounded 30d ADV (trailing 30 days incl. today). Identical to
+    # rolling_mean(window_size=30, min_samples=5) on a contiguous daily grid.
     adv = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
-        pl.col("turnover_quote")
-        .rolling_mean(window_size=30, min_samples=5)
+        calendar_roll(pl.col("turnover_quote"), "mean", 30, shifted=False, min_samples=5)
         .over("symbol")
         .alias("adv_30d")
     ).select(["symbol", "ts_ms", "adv_30d"])
@@ -470,9 +496,9 @@ def _build_oi_to_adv(ctx: FeatureContext) -> pl.DataFrame:
         return pl.DataFrame()
     has_value = "open_interest_value" in ctx.open_interest_daily.columns
     oi_col = "open_interest_value" if has_value else "open_interest"
+    # Calendar-bounded 30d ADV (trailing 30 days incl. today); see _build_oi_delta_7d.
     adv = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
-        pl.col("turnover_quote")
-        .rolling_mean(window_size=30, min_samples=5)
+        calendar_roll(pl.col("turnover_quote"), "mean", 30, shifted=False, min_samples=5)
         .over("symbol")
         .alias("adv_30d")
     ).select(["symbol", "ts_ms", "adv_30d"])
@@ -507,10 +533,14 @@ def _build_realized_vol_7d(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.daily_returns.is_empty():
         return pl.DataFrame()
+    # Calendar-bounded 7d vol (trailing 7 days incl. today). A positional
+    # rolling_std(7) on a gapped symbol spans >7 calendar days, so this FROZEN
+    # feature (also the inverse-vol sizing denominator) would mislabel its
+    # horizon. Identical to rolling_std(window_size=7, min_samples=3) on a
+    # contiguous daily grid.
     df = ctx.daily_returns.sort(["symbol", "ts_ms"]).with_columns(
         (
-            pl.col("ret_1d")
-            .rolling_std(window_size=7, min_samples=3)
+            calendar_roll(pl.col("ret_1d"), "std", 7, shifted=False, min_samples=3)
             .over("symbol")
             * math.sqrt(TRADING_DAYS_PER_YEAR)
         ).alias("realized_vol_7d")
@@ -525,10 +555,11 @@ def _build_vol_of_vol_30d(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.daily_returns.is_empty():
         return pl.DataFrame()
+    # Calendar-bounded 30d window over |daily return|. Identical to
+    # rolling_std(window_size=30, min_samples=10) on a contiguous daily grid;
+    # shrinks (not stretches) across a gap.
     df = ctx.daily_returns.sort(["symbol", "ts_ms"]).with_columns(
-        pl.col("ret_1d")
-        .abs()
-        .rolling_std(window_size=30, min_samples=10)
+        calendar_roll(pl.col("ret_1d").abs(), "std", 30, shifted=False, min_samples=10)
         .over("symbol")
         .alias("vol_of_vol_30d")
     )
@@ -563,10 +594,11 @@ def _build_range_extension_30d(ctx: FeatureContext) -> pl.DataFrame:
     df = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
         (pl.col("high") - pl.col("low")).alias("range_1d")
     )
+    # Calendar-bounded prior-30d mean range (shifted=True => prior 30 days
+    # EXCLUDING today). Identical to shift(1).rolling_mean(30, min_samples=5) on
+    # a contiguous daily grid; shrinks across a gap rather than stretching.
     df = df.with_columns(
-        pl.col("range_1d")
-        .shift(1)
-        .rolling_mean(window_size=30, min_samples=5)
+        calendar_roll(pl.col("range_1d"), "mean", 30, shifted=True, min_samples=5)
         .over("symbol")
         .alias("prior_range_mean")
     )
@@ -587,9 +619,10 @@ def _build_dist_from_30d_high(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.daily_klines.is_empty():
         return pl.DataFrame()
+    # Calendar-bounded 30d max (trailing 30 days incl. today). Identical to
+    # rolling_max(window_size=30, min_samples=5) on a contiguous daily grid.
     df = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
-        pl.col("high")
-        .rolling_max(window_size=30, min_samples=5)
+        calendar_roll(pl.col("high"), "max", 30, shifted=False, min_samples=5)
         .over("symbol")
         .alias("high_30d")
     )
@@ -610,9 +643,10 @@ def _build_dist_from_30d_low(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.daily_klines.is_empty():
         return pl.DataFrame()
+    # Calendar-bounded 30d min (trailing 30 days incl. today). Identical to
+    # rolling_min(window_size=30, min_samples=5) on a contiguous daily grid.
     df = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
-        pl.col("low")
-        .rolling_min(window_size=30, min_samples=5)
+        calendar_roll(pl.col("low"), "min", 30, shifted=False, min_samples=5)
         .over("symbol")
         .alias("low_30d")
     )
@@ -1064,9 +1098,17 @@ def build_combined_signal_portfolio(
     # want to short those; we want to short the low-signal names). Symmetric
     # cells exist in Phase 6's cell table (top vs bottom). Here we expose
     # both branches by returning a 'rank_frac' column the operator filters on.
+    #
+    # Ranking uses method="ordinal" (NOT "average") so every name gets a
+    # distinct integer rank 1..n. A `method="average"` rank collapses a tied
+    # group to its mean fraction, which can push a whole tied bottom group above
+    # `top_decile` and silently zero out the short side (the day's book then
+    # under-deploys vs the stated decile). Ordinal breaks ties arbitrarily but
+    # DETERMINISTICALLY, so the per-day count is exactly the configured decile
+    # regardless of ties — which is what the selection logic below relies on.
     df = df.with_columns(
         pl.col("combined_signal")
-        .rank(method="average")
+        .rank(method="ordinal")
         .over("ts_ms")
         .alias("_signal_rank"),
         pl.col("combined_signal").count().over("ts_ms").alias("_xs_n"),
@@ -1084,17 +1126,22 @@ def build_combined_signal_portfolio(
     ).otherwise(None)
     df = df.with_columns(raw_size.clip(0.001, 10.0).alias("size_factor"))
 
-    # Tag positions: 'short' for top_decile worst signals, 'long' for top_decile
-    # best signals, 'flat' otherwise. signal_rank_frac is in (0, 1].
-    # signal_rank_frac is in (0, 1] (rank/n, so smallest is 1/n, largest is 1).
-    # Use `<= top_decile` for shorts and strict `> 1 - top_decile` for longs
-    # so both sides include EXACTLY ceil(top_decile * day_count) names. (If
-    # instead we used `>= 1 - top_decile`, the boundary rank n*(1-top_decile)
-    # would have frac == 1-top_decile and the long side would have one extra.)
+    # Tag positions by ABSOLUTE per-day count, not a fractional threshold, so
+    # the book deploys EXACTLY k = ceil(top_decile * day_count) names per side
+    # every day. ``_signal_rank`` is the ordinal rank 1..n (1 = most negative).
+    #   short = the k lowest-signal names: rank <= k
+    #   long  = the k highest-signal names: rank > n - k
+    # When 2*k > n (large top_decile) the short cut (<=k) takes precedence so a
+    # name is never both; this matches the prior `<=`-before-`>` ordering. A
+    # fractional `frac <= top_decile` cut is NOT used because under tied signals
+    # an average-rank fraction collapses the tied group and can drop the count
+    # below k (the research-methodology-4 under-deployment bug).
+    k_expr = (pl.col("_xs_n").cast(pl.Float64) * top_decile).ceil().cast(pl.Int64)
+    df = df.with_columns(k_expr.alias("_decile_k"))
     df = df.with_columns(
-        pl.when(pl.col("signal_rank_frac") <= top_decile)
+        pl.when(pl.col("_signal_rank") <= pl.col("_decile_k"))
         .then(pl.lit("short"))
-        .when(pl.col("signal_rank_frac") > 1.0 - top_decile)
+        .when(pl.col("_signal_rank") > pl.col("_xs_n") - pl.col("_decile_k"))
         .then(pl.lit("long"))
         .otherwise(pl.lit("flat"))
         .alias("position_side")

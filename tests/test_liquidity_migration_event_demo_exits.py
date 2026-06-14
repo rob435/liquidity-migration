@@ -1498,10 +1498,14 @@ def test_orphan_close_pnl_backfill_pulls_exit_price_and_return() -> None:
 
 def test_orphan_close_pnl_backfill_aggregates_multi_leg_close() -> None:
     """M8: a position closed via several reduce-only legs must sum execFee and
-    qty-weight the exit price across legs, not price the close off one leg."""
+    qty-weight the exit price across legs, not price the close off one leg.
+
+    qty matches the legs' total closedSize (3+1=4) so this trade's OWN multi-leg
+    close is aggregated in full; the event-demo-core-3 sibling-fold cap only
+    truncates legs BEYOND the trade's ledgered qty."""
     trade = _open_trade_row(
         side="short", entry_price=100.0, entry_ts_ms=1_700_000_000_000,
-        notional_usdt=1_000.0, equity_usdt=10_000.0,
+        notional_usdt=1_000.0, equity_usdt=10_000.0, qty="4",
     )
     client = _ClosedPnlClient(
         records=[
@@ -2178,7 +2182,10 @@ def test_batched_orphan_close_matches_legacy_per_symbol_path() -> None:
         {"symbol": "BBBUSDT", "side": "Sell", "avgExitPrice": "190.0", "closedSize": "2",
          "execFee": "0.2", "orderId": "x-b", "createdTime": "1700000060000"},  # wrong side for a short
     ]
-    trade_a = _open_trade_row(trade_id="t-a", symbol="AAAUSDT", side="short", entry_price=100.0)
+    # qty=2 matches the two legs' total closedSize (1+1) so this trade's own
+    # multi-leg close aggregates in full (the event-demo-core-3 sibling-fold cap
+    # only excludes legs beyond the ledgered qty).
+    trade_a = _open_trade_row(trade_id="t-a", symbol="AAAUSDT", side="short", entry_price=100.0, qty="2")
     # Legacy per-symbol matcher (records pre-filtered to the symbol, as the venue would).
     from liquidity_migration.event_demo_exits import _orphan_close_pnl_from_records
     legacy = _orphan_close_pnl_from_records(
@@ -2338,8 +2345,11 @@ def test_account_closed_pnl_does_not_merge_distinct_orderidless_legs() -> None:
     )
 
     now = 1_700_000_000_000
+    # qty=2 matches the two legs' total closedSize (1+1) so both legs of THIS
+    # trade's own close are aggregated (the event-demo-core-3 sibling-fold cap
+    # only excludes legs beyond the ledgered qty).
     trade = _open_trade_row(trade_id="t-a", symbol="AAAUSDT", side="short",
-                            entry_price=100.0, entry_ts_ms=now - 3_600_000)
+                            entry_price=100.0, entry_ts_ms=now - 3_600_000, qty="2")
     records = [
         {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0", "closedSize": "1",
          "execFee": "0.1", "createdTime": str(now - 60_000)},  # no orderId

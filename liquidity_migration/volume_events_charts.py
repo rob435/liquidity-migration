@@ -97,7 +97,16 @@ def _write_equity_benchmark_chart(
     overlay_series = _overlay_series_dicts(overlays or [])
     series.extend(overlay_series)
     monthly_rows = _monthly_table_rows(equity=equity, monthly=monthly)
-    has_real_monthly = monthly is not None and not monthly.is_empty() and _has_columns(monthly, "month", "strategy_return")
+    # "Trades" is honest only when the monthly frame actually carries a trades
+    # column; a frame with month+strategy_return alone has no trade counts, so the
+    # counts come from equity-row days and must be labelled "Days" — labelling them
+    # "Trades" reintroduces the equity-derived "11 trades, zero taken" lie this gate
+    # was added to kill (audit 2026-06-14, reports-charts-4).
+    has_real_monthly = (
+        monthly is not None
+        and not monthly.is_empty()
+        and _has_columns(monthly, "month", "strategy_return", "trades")
+    )
     _remove_stale_chart_artifacts(output_dir)
     png_path = output_dir / png_name
     header: dict[str, Any] = {}
@@ -141,11 +150,41 @@ def _remove_stale_chart_artifacts(output_dir: Path) -> None:
             pass
 
 def _chart_final_values(series: list[dict[str, Any]]) -> dict[str, float]:
+    """Each series' legend multiple, measured at the LAST DATE COMMON to all series.
+
+    The legend invites a same-window benchmark comparison (subtitle: "normalised to
+    $1 at the strategy start"). Taking each series' own last point made the
+    comparison apples-to-oranges when BTC (or an overlay) ends before the strategy's
+    flat-extended end — the legend showed "Strategy 2.00x" (later date) next to
+    "BTC 1.20x" (earlier date), measured over different spans (audit 2026-06-14,
+    reports-charts-5). Anchor every series to the earliest series-end date so all
+    multiples are read over the same window; for the strategy that endpoint is in
+    its flat tail anyway, so its multiple is unchanged.
+    """
     finals: dict[str, float] = {}
+    last_dates: list[date] = []
     for item in series:
         points = item["points"]
         if points:
-            finals[str(item["name"])] = float(points[-1]["value"])
+            day = _parse_day(points[-1]["date"])
+            if day is not None:
+                last_dates.append(day)
+    common_end = min(last_dates) if last_dates else None
+    for item in series:
+        points = item["points"]
+        if not points:
+            continue
+        value: float | None = None
+        if common_end is not None:
+            for point in points:
+                day = _parse_day(point["date"])
+                if day is not None and day <= common_end:
+                    value = float(point["value"])
+                elif day is not None and day > common_end:
+                    break
+        if value is None:
+            value = float(points[-1]["value"])
+        finals[str(item["name"])] = value
     return finals
 
 def _write_equity_benchmark_png(
@@ -345,19 +384,50 @@ def _fill_month_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _monthly_table_rows(*, equity: pl.DataFrame, monthly: pl.DataFrame | None) -> list[dict[str, Any]]:
-    """Rows are {month, return, count}; `count` is real trades when `monthly` carries them,
-    otherwise the number of equity rows in the month (rendered as "Days", not "Trades")."""
-    if monthly is not None and not monthly.is_empty() and _has_columns(monthly, "month", "strategy_return"):
-        columns = ["month", "strategy_return"]
-        if "trades" in monthly.columns:
-            columns.append("trades")
+    """Rows are {month, return, count}; `count` is real trades when `monthly` carries
+    a ``trades`` column, otherwise the number of equity rows in the month (rendered
+    as "Days", not "Trades")."""
+    has_monthly_returns = (
+        monthly is not None and not monthly.is_empty() and _has_columns(monthly, "month", "strategy_return")
+    )
+    # Only take the trade-count fast-path when a real ``trades`` column is present.
+    # A monthly frame with month+strategy_return alone has NO trade counts — counting
+    # them as 0 under a "Trades" header asserts a count that does not exist; instead
+    # take returns from monthly and counts from per-month equity days (the caller
+    # labels the column "Days" since the trades column is absent) — audit 2026-06-14,
+    # reports-charts-4.
+    if has_monthly_returns and monthly is not None and "trades" in monthly.columns:
         rows = [
             {
                 "month": str(row["month"]),
                 "return": _float_or_nan(row.get("strategy_return")),
                 "count": int(row.get("trades") or 0),
             }
-            for row in monthly.select(columns).sort("month").to_dicts()
+            for row in monthly.select(["month", "strategy_return", "trades"]).sort("month").to_dicts()
+            if math.isfinite(_float_or_nan(row.get("strategy_return")))
+        ]
+        return _fill_month_gaps(rows)
+    if has_monthly_returns and monthly is not None:
+        # Monthly returns without a trades column: keep the real returns, derive the
+        # count from equity rows per month (0 when equity is unavailable).
+        day_counts: dict[str, int] = {}
+        if not equity.is_empty() and _has_columns(equity, "date"):
+            day_counts = {
+                str(r["month"]): int(r["count"] or 0)
+                for r in (
+                    equity.with_columns(pl.col("date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
+                    .group_by("month")
+                    .agg(pl.len().alias("count"))
+                    .to_dicts()
+                )
+            }
+        rows = [
+            {
+                "month": str(row["month"]),
+                "return": _float_or_nan(row.get("strategy_return")),
+                "count": day_counts.get(str(row["month"]), 0),
+            }
+            for row in monthly.select(["month", "strategy_return"]).sort("month").to_dicts()
             if math.isfinite(_float_or_nan(row.get("strategy_return")))
         ]
         return _fill_month_gaps(rows)
@@ -469,7 +539,13 @@ def _chart_opaque_fill(fill: tuple[int, ...]) -> tuple[int, int, int, int]:
 def _nice_axis(min_value: float, max_value: float, *, target_ticks: int) -> tuple[float, float, list[float]]:
     span = max(max_value - min_value, 1e-9)
     step = _nice_step(span / max(target_ticks - 1, 1))
-    low = math.floor(max(0.0, min_value - span * 0.05) / step) * step
+    # The floor clamps to 0 ONLY when the data is non-negative (the common case: a
+    # $1-normalised curve never drops below 0). When the data goes negative — a
+    # levered (e.g. 4x) equity curve blowing through zero on a day worse than
+    # -1/mult — the floor must follow the data so the wipeout is drawn, not hidden
+    # below the axis (audit 2026-06-14, reports-charts-3).
+    floor_candidate = min_value - span * 0.05
+    low = math.floor((floor_candidate if min_value < 0.0 else max(0.0, floor_candidate)) / step) * step
     high = math.ceil((max_value + span * 0.06) / step) * step
     ticks = []
     value = low

@@ -48,14 +48,14 @@ def test_panel_cache_path_is_keyed_by_feature_set(tmp_path) -> None:
     """Feature-set sweeps must not share the same cached decile panel."""
     a = ContinuousEventConfig(rmom_quantile=0.33, feature_set=("rv_168h", "max_ret168"))
     b = ContinuousEventConfig(rmom_quantile=0.33, feature_set=("rv_168h", "vov"))
-    assert _panel_cache_path(tmp_path, a) != _panel_cache_path(tmp_path, b)
+    assert _panel_cache_path(tmp_path, a, end_ms=0) != _panel_cache_path(tmp_path, b, end_ms=0)
 
 
 def test_panel_cache_path_is_keyed_by_date_window(tmp_path) -> None:
     """Short smoke runs must not poison full-window research caches."""
     a = ContinuousEventConfig(start_date="2023-04-01", end_date="2023-05-01")
     b = ContinuousEventConfig(start_date="2023-04-01", end_date="2026-05-28")
-    assert _panel_cache_path(tmp_path, a) != _panel_cache_path(tmp_path, b)
+    assert _panel_cache_path(tmp_path, a, end_ms=0) != _panel_cache_path(tmp_path, b, end_ms=0)
 
 
 # --------------------------------------------------------------------------- cost model
@@ -333,6 +333,46 @@ def test_run_trades_btc_trend_gate_uses_signal_day() -> None:
     assert skips["skipped_btc_trend"] == 1
 
 
+def test_run_trades_market_gate_reads_prior_day_not_entry_day() -> None:
+    """The market-context gate must key on the PRIOR completed day's market
+    return, never the entry day's own full-day (future) close-to-close return.
+
+    Poison-future check: a single entry on day 1 (signal ts = MS_PER_DAY). When
+    the prior day (0) is good and the entry day (1) is bad, a causal gate lets the
+    entry through; a look-ahead gate keyed on the entry day would block it. The
+    converse (prior bad, entry good) must block — proving the gate still works,
+    just lagged."""
+    entries = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "ts_ms": [MS_PER_DAY],
+            "composite": [0.9],
+            "turnover_quote": [1e6],
+        }
+    )
+    cfg = ContinuousEventConfig(
+        market_min_ret_1d=-0.10,
+        max_active=5,
+        hold_hours=1,
+        entry_delay_hours=1,
+        use_funding=False,
+        flat_round_trip_bps=0.0,
+    )
+    # Prior day (0) good, entry day (1) bad -> causal gate PASSES (look-ahead would block).
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 60))
+    trades_pass, _ = _run_trades(
+        entries, bars, None, cfg, market_daily={0: 0.05, MS_PER_DAY: -0.50}
+    )
+    assert trades_pass.height == 1, "causal gate must read the good prior day, not the bad entry day"
+
+    # Prior day (0) bad, entry day (1) good -> causal gate BLOCKS (look-ahead would pass).
+    bars2 = _indexed_price_bars_by_symbol(_grid_klines(["A"], 60))
+    trades_block, _ = _run_trades(
+        entries, bars2, None, cfg, market_daily={0: -0.50, MS_PER_DAY: 0.05}
+    )
+    assert trades_block.height == 0, "causal gate must block on the bad prior day"
+
+
 def test_run_trades_uptrend_capped_gate_blocks_euphoria_and_downtrend() -> None:
     """V1 (E2 receipt): on iff 0 < trend <= cap — euphoria AND non-uptrend both skip."""
     bars = _indexed_price_bars_by_symbol(_grid_klines(["A", "B", "C"], 100))
@@ -583,8 +623,15 @@ def _build_synthetic_root(tmp_path, *, n_symbols: int = 26, n_bars: int = 500, i
     klines = pl.DataFrame(rows)
     write_dataset(klines, root, "klines_1h")
 
-    fund = klines.select("ts_ms", "symbol").with_columns(
-        pl.lit(0.0001).alias("funding_rate"), pl.lit(480).alias("funding_interval_min")
+    # Funding history is one row per settlement (8h here, the canonical full-PIT shape) — NOT one
+    # row per hourly kline. A faithful one-per-settlement fixture also matches what the engine's
+    # snapshot-scrape guard (_assert_funding_one_per_settlement) expects of a real root.
+    fund = (
+        klines.select("ts_ms", "symbol")
+        .filter((pl.col("ts_ms") // MS_PER_HOUR) % 8 == 0)
+        .with_columns(
+            pl.lit(0.0001).alias("funding_rate"), pl.lit(480).alias("funding_interval_min")
+        )
     )
     write_dataset(fund, root, "funding")
 

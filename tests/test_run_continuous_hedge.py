@@ -400,7 +400,8 @@ def test_stale_warmstart_blocks_risk_increasing_legs(monkeypatch, tmp_path, caps
     assert out["warmstart_stale"] is True
     assert out["status"] == "submit_blocked_stale_warmstart"
     assert [leg["side"] for leg in out["blocked_legs"]] == ["Buy"]
-    assert out["would_run_legs"] == []
+    # No reduce-only sibling leg -> nothing submitted (the add is the only plan).
+    assert out["submitted"] == []
     assert submit_calls == []
 
 

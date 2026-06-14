@@ -110,13 +110,20 @@ def _build_demo_universe(
     config: EventDemoCycleConfig,
     snapshot_ts_ms: int,
 ) -> pl.DataFrame:
-    # In match-the-backtest mode (universe_rank_end == universe_max_symbols
-    # == 0), drop the 30-day age floor so the demo includes the same
-    # 7-29-day-old listings the backtest would (the backtest doesn't pre-
-    # filter by age — it lets `prior7_liquidity_rank` being null exclude
-    # symbols with insufficient history naturally inside the strategy
-    # filter). When the legacy narrow-universe is active the 30-day
-    # safety floor stays in place to mirror prior demo behaviour.
+    # In the unlimited-universe mode (universe_rank_end == universe_max_symbols
+    # == 0) used by the live continuous fade book, drop the 30-day age floor
+    # HERE: the continuous cycle re-applies its own listing-age gate downstream
+    # (`_continuous_age_eligible_symbols` in continuous_demo.py, off
+    # `listing_age_days` vs `age_days_min`), and that gate is the authoritative
+    # fresh-listing-squeezer defense — treating a null launch age as ineligible
+    # when age_days_min > 0. Filtering fresh listings twice (once here, once
+    # downstream) would just narrow the universe before the real gate runs.
+    # When the legacy narrow-universe is active the 30-day safety floor stays in
+    # place to mirror prior demo behaviour.
+    # (Historical note: this floor was previously justified by the erased daily
+    # SHORT strategy's `prior7_liquidity_rank` null-exclusion. That strategy was
+    # removed 2026-06-11; the age compensation that actually runs today is the
+    # continuous downstream gate referenced above.)
     unlimited_universe = (
         config.universe_rank_end == 0 and config.universe_max_symbols == 0
     )

@@ -424,6 +424,42 @@ def test_investigation_one_venue_positive_other_beyond_tolerance_is_descriptive(
     )
 
 
+def test_investigation_one_venue_positive_other_unmeasurable_is_descriptive(tmp_path):
+    """1/2 positive but the OTHER venue's MAR Δ is NaN (zero-drawdown, unmeasurable)
+    → descriptive, NOT investigation_positive. A NaN MAR Δ must not pass the
+    majority gate via `nan < -tol` being False (the falsifier path already
+    excludes NaN; the positive path must too)."""
+    import math
+
+    rows = [
+        {"cell_id": "00_baseline", "venue": "bybit",   "sharpe_like": 2.0,
+         "max_drawdown": -0.42, "trades": 400, "total_return": 5.0, "window_days": 365.25},
+        {"cell_id": "00_baseline", "venue": "binance", "sharpe_like": 1.0,
+         "max_drawdown": -0.50, "trades": 300, "total_return": 0.5, "window_days": 365.25},
+        # ZeroDD bybit: max_drawdown 0.0 -> MAR is NaN (unmeasurable) -> Δ is NaN.
+        {"cell_id": "ZeroDD", "venue": "bybit",   "sharpe_like": 2.4,
+         "max_drawdown": 0.0, "trades": 380, "total_return": 6.0, "window_days": 365.25},
+        # ZeroDD binance: MAR = 0.8/0.4 = 2.0 vs control 1.0 -> Δ = +1.0 (positive).
+        {"cell_id": "ZeroDD", "venue": "binance", "sharpe_like": 1.2,
+         "max_drawdown": -0.40, "trades": 290, "total_return": 0.8, "window_days": 365.25},
+    ]
+    csv_path = _write_csv_with_window(tmp_path, rows)
+    raw, _excluded = MOD._read_csv(csv_path)
+    indexed = MOD._index_by_cell(raw)
+    v = MOD.evaluate_cell_investigation(
+        cell_id="ZeroDD",
+        cell_rows=indexed["ZeroDD"],
+        control_rows=indexed["00_baseline"],
+        window_days=365.25,
+    )
+    assert math.isnan(v.bybit_mar_d), f"expected NaN bybit MAR Δ, got {v.bybit_mar_d}"
+    assert v.binance_mar_d > 0
+    assert v.verdict == "descriptive", (
+        f"expected descriptive (NaN other venue is unmeasurable), got {v.verdict} "
+        f"reasons={v.reasons}"
+    )
+
+
 def test_investigation_mar_falsify_at_minus_one(tmp_path):
     """MAR Δ ≤ -1.0 on either venue → falsifier."""
     rows = [

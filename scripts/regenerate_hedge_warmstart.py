@@ -14,11 +14,17 @@ Construction (matches the engine the betas were banked on):
 - btc_ret/eth_ret = same-calendar-day daily close-to-close from klines_1h.
 
 --validate compares the regenerated series against the existing CSV on
-overlapping dates before overwriting (semantics check; small diffs are the
-rebuilt-ledger vintage, e.g. p3 858 vs 857 trades).
+overlapping dates and GATES the overwrite (semantics check; small diffs are the
+rebuilt-ledger vintage, e.g. p3 858 vs 857 trades). The warm-start CSV feeds the
+live 2f hedge beta (continuous_hedge_manager.load_warmstart_2f) and auto-deploys
+on commit, so a regression must not be written silently: if the max |Δunit_ret|
+over the overlap exceeds --max-unit-drift, or the regeneration has FEWER rows
+than the banked CSV, the overwrite is REFUSED unless --force is given. --force
+keeps the manual escape hatch for a legitimate data-vintage shift.
 
     POLARS_MAX_THREADS=8 PYTHONPATH=. .venv/bin/python \
-        scripts/regenerate_hedge_warmstart.py [--validate-only] [--days 200]
+        scripts/regenerate_hedge_warmstart.py [--validate-only] [--days 200] \
+        [--max-unit-drift 1e-3] [--force]
 """
 
 from __future__ import annotations
@@ -95,36 +101,78 @@ def regenerate(venue: str, n_days: int) -> list[dict]:
     return rows
 
 
-def validate(venue: str, rows: list[dict]) -> None:
+def validate(venue: str, rows: list[dict]) -> dict:
+    """Compare the regenerated series against the banked CSV on overlapping dates.
+
+    Returns a dict the overwrite gate consumes:
+      max_drift : max |Δunit_ret| over the overlap (0.0 when no CSV/overlap)
+      old_rows  : row count of the existing CSV (0 when none)
+      new_rows  : row count of the regenerated series
+      overlap   : number of shared dates
+    """
     path = OUT_DIR / f"{venue}_warmstart.csv"
+    new_rows = len(rows)
     if not path.exists():
         print(f"  [{venue}] no existing CSV to validate against")
-        return
+        return {"max_drift": 0.0, "old_rows": 0, "new_rows": new_rows, "overlap": 0}
     old = {r["date"]: float(r["unit_ret"]) for r in csv.DictReader(path.open())}
     new = {r["date"]: float(r["unit_ret"]) for r in rows}
     overlap = sorted(set(old) & set(new))
     if not overlap:
         print(f"  [{venue}] no date overlap with existing CSV")
-        return
+        return {"max_drift": 0.0, "old_rows": len(old), "new_rows": new_rows, "overlap": 0}
     diffs = [abs(old[d] - new[d]) for d in overlap]
     import statistics
+    max_drift = max(diffs)
     print(
-        f"  [{venue}] overlap {len(overlap)}d: max|Δunit| {max(diffs):.2e}, "
+        f"  [{venue}] overlap {len(overlap)}d: max|Δunit| {max_drift:.2e}, "
         f"mean|Δ| {statistics.mean(diffs):.2e} (vintage drift expected at ledger-rebuild scale)"
     )
+    return {"max_drift": max_drift, "old_rows": len(old), "new_rows": new_rows, "overlap": len(overlap)}
+
+
+def overwrite_blocked(venue: str, report: dict, *, max_drift: float, force: bool) -> str | None:
+    """Reason the overwrite must be refused, or None to allow it.
+
+    Guards the live 2f-hedge warm-start CSV (backfill-writers-5): a regenerated
+    series that diverges materially from the banked one, or that has FEWER rows
+    (a short/regressed run), must not silently overwrite + auto-deploy. --force
+    is the explicit escape hatch for a known-good data-vintage shift.
+    """
+    if force:
+        return None
+    if report["overlap"] and report["max_drift"] > max_drift:
+        return (f"max|Δunit| {report['max_drift']:.2e} over {report['overlap']}d exceeds "
+                f"--max-unit-drift {max_drift:.2e}")
+    if report["old_rows"] and report["new_rows"] < report["old_rows"]:
+        return (f"regeneration has {report['new_rows']} rows < existing {report['old_rows']} "
+                f"(short/regressed run)")
+    return None
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=200)
     ap.add_argument("--validate-only", action="store_true")
+    ap.add_argument("--max-unit-drift", type=float, default=1e-3,
+                    help="Refuse the overwrite when max|Δunit_ret| over the overlap exceeds this "
+                         "(unless --force). Default 1e-3 admits ledger-rebuild vintage drift.")
+    ap.add_argument("--force", action="store_true",
+                    help="Overwrite even when the drift/row-count gate would refuse (known-good "
+                         "data-vintage shift).")
     args = ap.parse_args()
+    refused = False
     for venue in ROOTS:
         rows = regenerate(venue, args.days)
-        validate(venue, rows)
+        report = validate(venue, rows)
         last = rows[-1]["date"] if rows else "none"
         if args.validate_only:
             print(f"  [{venue}] would write {len(rows)} rows, last day {last}")
+            continue
+        block = overwrite_blocked(venue, report, max_drift=args.max_unit_drift, force=args.force)
+        if block is not None:
+            print(f"  [{venue}] ❌ REFUSING overwrite: {block}. Re-run with --force to override.")
+            refused = True
             continue
         path = OUT_DIR / f"{venue}_warmstart.csv"
         with path.open("w", newline="") as fh:
@@ -132,7 +180,7 @@ def main() -> int:
             w.writeheader()
             w.writerows(rows)
         print(f"  [{venue}] wrote {len(rows)} rows -> {path.name}, last day {last}")
-    return 0
+    return 1 if refused else 0
 
 
 if __name__ == "__main__":

@@ -231,7 +231,16 @@ class FollowerKlineStreamManager:
             self._check_snapshot_staleness()
             return False
         rows = self._store.recover_from_disk()
-        self._last_sig = sig
+        # Re-stat AFTER the read and record THAT signature, not the pre-read one.
+        # recover_from_disk() re-reads the file directly, so if the leader flushed
+        # between our stat above and that read (atomic rename → we still see a whole
+        # old-or-new file, never a partial), the merged content can be a NEWER
+        # generation than `sig`. Storing the pre-read `sig` would (a) make
+        # _snapshot_age_seconds() report a generation older than what we actually
+        # merged, and (b) cost a redundant re-read on the next poll when the post-
+        # read signature differs. Falling back to the pre-read `sig` keeps the old
+        # behaviour if the file vanished mid-refresh.
+        self._last_sig = self._snapshot_signature() or sig
         self._refreshes += 1
         self._last_recover_rows = rows
         if rows > 0:

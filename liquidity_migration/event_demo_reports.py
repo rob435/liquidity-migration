@@ -189,6 +189,13 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
     # print $0.00 on an operator-facing safety message (audit 2026-06-12 round 3).
     equity = _float(cycle.get("equity_usdt"))
     equity_text = f"${equity:,.2f}" if equity > 0.0 else "NA"
+    # A wallet-API failure makes _safe_wallet_equity_usdt substitute the fixed
+    # fallback equity (default $10,000), which would otherwise print as a clean
+    # read and silently mask the outage. When wallet_error is set, tag the equity
+    # as a fallback so the operator cannot mistake it for a successful read.
+    wallet_error = str(cycle.get("wallet_error") or "")
+    if wallet_error and equity > 0.0:
+        equity_text += " (FALLBACK — wallet read failed)"
     if mode.startswith("ws_risk"):
         # ws_risk counters are CUMULATIVE since engine start, and exit_candidates
         # is the tracked-order count — presenting them as per-cycle "exits=37/41"
@@ -219,6 +226,8 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
     ]
     if cycle.get("position_report_error"):
         lines.append(f"position_error={cycle['position_report_error']}")
+    if wallet_error:
+        lines.append(f"wallet_error={wallet_error}")
     bybit_rows = payload.get("bybit_positions", [])[:10]
     if bybit_rows:
         lines.append("Bybit positions:")
@@ -251,6 +260,12 @@ def _telegram_notification_reason(payload: dict[str, Any]) -> str:
     cycle = payload.get("cycle", {})
     if cycle.get("position_report_error"):
         return "position_report_error"
+    # A wallet-read outage must page the operator: it silently degrades equity to
+    # the fixed fallback (masking real equity drift and sizing off a phantom
+    # balance), so surface it as a notification trigger rather than letting a pure
+    # wallet outage pass as a quiet cycle.
+    if cycle.get("wallet_error"):
+        return "wallet_error"
     if payload.get("reconciliations"):
         return "position_reconciled"
     if any(

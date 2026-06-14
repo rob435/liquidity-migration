@@ -31,8 +31,8 @@ spell-fresh (gap > 1h), the liquidity gate (hourly `turnover_quote >= $500k`),
 and the component's event trigger (`turn3_pop3` / `turn4_pop3` / `turn4_pop5` /
 `none`). Each candidate is then tagged **selected** or **rejected** with the
 exact reason the engine applied, in engine order: `no_bar_symbol`, `crowding`,
-`breaker`, `cooldown`, `capacity`, `no_bar_entry`, `age`, `btc_trend`,
-`btc_trend_unknown`, `soft3_quintile`, `decel`, `market`, `no_fill`, `selected`.
+`breaker`, `cooldown`, `capacity`, `no_bar_entry`, `age`, `btc_trend_unknown`,
+`btc_trend`, `soft3_quintile`, `decel`, `market`, `no_fill`, `selected`.
 
 The D9 cross-section that failed the trigger/liquidity/spell gates is *not* a
 candidate (it never became actionable); its size is reported only as a coverage

@@ -60,6 +60,16 @@ def _max_partition_date(dataset_dir: Path) -> _dt.date | None:
             d = _dt.date.fromisoformat(m.group(1))
         except ValueError:
             continue
+        # An EMPTY date= partition must not count as coverage: write_dataset
+        # mkdir's date=X/symbol=Y BEFORE writing the part, so a crashed / refused
+        # / interrupted build leaves an empty partition dir. Counting its name
+        # would report a stale manifest as FRESH. Require a real parquet under it.
+        try:
+            has_parquet = next(child.rglob("*.parquet"), None) is not None
+        except OSError:
+            has_parquet = False
+        if not has_parquet:
+            continue
         if best is None or d > best:
             best = d
     return best
@@ -156,7 +166,7 @@ def format_coverage(status: CoverageStatus) -> str:
             "to refresh PIT membership (download-data does NOT touch the manifest),"
         )
         lines.append(
-            "           or set require_pit_membership=False in the run config for a clearly "
+            "           or set require_full_pit_universe=False in the run config for a clearly "
             "biased same-day diagnostic (never promotion evidence; the old "
             "--pit-membership flag was erased with the volume-events CLI)."
         )

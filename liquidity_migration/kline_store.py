@@ -247,6 +247,16 @@ class KlineStore:
             self._flush_path = None
         self._flush_thread: threading.Thread | None = None
         self._flush_stop = threading.Event()
+        # Serialize the WHOLE flush (snapshot + parquet write + atomic rename +
+        # bookkeeping). stop_flush_thread() joins with a timeout and returns even
+        # if the loop's flush is still in-flight on a slow disk; stop() then calls
+        # flush_to_disk() directly, so two flushes can overlap. The atomic rename
+        # keeps the on-disk file consistent, but the two would race on the
+        # _last_flush_version/_last_flush_rows bookkeeping (last-replace-wins could
+        # install an older snapshot or skip a later legitimate flush). This lock
+        # makes them strictly sequential (ws-pool-5). Distinct from the data RLock:
+        # WS inserts must never block on a multi-hundred-MB parquet write.
+        self._flush_io_lock = threading.Lock()
         self._flushes_total = 0
         self._flush_errors = 0
         self._last_flush_monotonic: float | None = None
@@ -369,19 +379,42 @@ class KlineStore:
                 self._last_eviction_ref_ts_ms = reference_ts
             return True
 
+    def _recompute_global_max_locked(self) -> None:
+        """Recompute _global_max_ts_ms from the bars actually present.
+
+        _global_max_ts_ms is advanced incrementally on insert/recovery and is
+        never decreased on the hot paths (that O(1) cache is the whole point).
+        But any path that REMOVES bars — eviction-by-age, keep_only_symbols —
+        can drop the lone symbol that held the global max, leaving the cache
+        too fresh. newest_ts_ms() (and so the manager's newest_ts_lag metric +
+        the follower's coverage cutoff) would then over-report freshness and
+        mask a stalled feed. Re-derive the max from the surviving bars; cheap
+        relative to the trim/eviction that just ran. Must hold self._lock.
+        """
+        self._global_max_ts_ms = max(
+            (max(symbol_bars) for symbol_bars in self._bars.values() if symbol_bars),
+            default=0,
+        )
+
     def _evict_old_locked(self, *, reference_ts_ms: int) -> None:
         cutoff_ts = reference_ts_ms - self._retain_ms
         empty_symbols: list[str] = []
+        removed_any = False
         for symbol, symbol_bars in self._bars.items():
             stale = [ts for ts in symbol_bars if ts < cutoff_ts]
             if stale:
                 for ts in stale:
                     del symbol_bars[ts]
                 self._adds_evicted += len(stale)
+                removed_any = True
             if not symbol_bars:
                 empty_symbols.append(symbol)
         for symbol in empty_symbols:
             del self._bars[symbol]
+        # A trim of the lone global-max holder must not leave a stale, too-fresh
+        # newest_ts (ws-pool-2). Only rescan when bars were actually removed.
+        if removed_any:
+            self._recompute_global_max_locked()
 
     # -- read path ------------------------------------------------------
 
@@ -510,6 +543,9 @@ class KlineStore:
                 del self._bars[symbol]
             if dropped > 0:
                 self._adds_evicted += dropped
+                # Trimming may have removed the lone global-max holder; keep
+                # newest_ts honest rather than over-reporting freshness (ws-pool-2).
+                self._recompute_global_max_locked()
         return dropped
 
     def symbols_with_coverage_in_window(self, *, start_ms: int, end_ms: int) -> set[str]:
@@ -630,9 +666,18 @@ class KlineStore:
         Snapshot collection holds the store lock only long enough to copy
         primitive values into column lists — ~400ms before, ~50ms now for
         614K rows. Dict construction + DataFrame build + parquet write all
-        happen WITHOUT the lock so WS bar inserts aren't stalled by the
+        happen WITHOUT the store lock so WS bar inserts aren't stalled by the
         ~30s flush cadence.
+
+        The whole flush is serialized by _flush_io_lock so the final stop()
+        flush can never overlap a lingering loop flush whose join timed out
+        (ws-pool-5): two concurrent flushes would race on the version/rows
+        bookkeeping and last-replace-wins could install an older snapshot.
         """
+        with self._flush_io_lock:
+            return self._flush_to_disk_locked()
+
+    def _flush_to_disk_locked(self) -> int:
         if self._cache_root is None or self._flush_path is None or self._flush_dir is None:
             return 0
         ts_col: list[int] = []

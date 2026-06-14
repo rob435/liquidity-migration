@@ -2,7 +2,10 @@
 
 Runs the actual bash helpers against a STATEFUL fake `systemctl` (tracks enabled/active
 state so is-active/is-enabled reflect reality), so we test real behavior — not just syntax:
-  * on  -> systemctl enable + the unit verifies active+enabled
+  * on  -> systemctl enable (wants-symlink only) THEN a separate start/restart; the
+           unit then verifies active+enabled. Bare `enable` alone is NOT enough —
+           verify_sleeve on fails until the unit is started, mirroring the live
+           deploy's enable-then-restart ordering (lib_sleeves.sh + deploy_vps_live.sh).
   * off -> systemctl disable --now + the unit verifies NOT active (and fails if still up)
 This is the contract the live deploy/verify rely on, on a tree we can't run systemd in.
 """
@@ -14,13 +17,22 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# NOTE: the `enable` branch deliberately matches real `systemctl enable` (without
+# --now): it writes the wants-symlink (.enabled) but does NOT start the unit
+# (.active). `enable --now`, `start`, and `restart` are what mark a unit active —
+# mirroring lib_sleeves.sh (bare `enable` for on-sleeves) + deploy_vps_live.sh
+# (separate `systemctl restart` for on-sleeves). A fake that set .active on bare
+# `enable` would let an on-path verify pass with no start step, so a regression
+# dropping the deploy's restart lines would stay green (kill-switch-3).
 _FAKE_SYSTEMCTL = r"""#!/usr/bin/env bash
 # Stateful fake systemctl: logs calls, tracks <unit>.enabled / <unit>.active under $STATE.
 echo "$@" >> "$LOG"
 cmd="$1"; shift
+# Detect --now BEFORE stripping it: `enable --now` both enables AND starts.
+now=0; for a in "$@"; do [ "$a" = "--now" ] && now=1; done
 args=(); for a in "$@"; do [ "$a" = "--quiet" ] || [ "$a" = "--now" ] || args+=("$a"); done
 case "$cmd" in
-  enable)  for u in "${args[@]}"; do touch "$STATE/$u.enabled" "$STATE/$u.active"; done ;;
+  enable)  for u in "${args[@]}"; do touch "$STATE/$u.enabled"; [ "$now" = 1 ] && touch "$STATE/$u.active"; done ;;
   disable) for u in "${args[@]}"; do rm -f "$STATE/$u.enabled" "$STATE/$u.active"; done ;;
   restart|start) for u in "${args[@]}"; do touch "$STATE/$u.active"; done ;;
   is-active)  for u in "${args[@]}"; do [ -f "$STATE/$u.active"  ] || exit 1; done ;;
@@ -64,13 +76,33 @@ def test_off_sleeve_is_disabled_on_sleeve_is_enabled(tmp_path: Path) -> None:
 
 
 def test_verify_passes_for_on_after_enable_and_off_after_disable(tmp_path: Path) -> None:
+    # Mirror the live deploy's enable-THEN-restart ordering for on-sleeves
+    # (apply_sleeve_enable does bare `enable`; deploy_vps_live.sh then `systemctl
+    # restart`s the on-sleeves before verify). verify_sleeve on requires BOTH
+    # enabled AND active, so the restart is load-bearing (kill-switch-3).
     rc, _calls, err = _run(tmp_path, """
         apply_sleeve_enable on  $LONG_SLEEVE_UNITS
+        systemctl restart $LONG_SLEEVE_UNITS          # the deploy's separate start step
         apply_sleeve_enable off $CONTINUOUS_SLEEVE_UNITS
-        verify_sleeve on  $LONG_SLEEVE_UNITS         # enabled+active -> passes
+        verify_sleeve on  $LONG_SLEEVE_UNITS          # enabled+active -> passes
         verify_sleeve off $CONTINUOUS_SLEEVE_UNITS    # not active     -> passes
     """)
     assert rc == 0, f"verify should pass for a correctly-applied toggle:\n{err}"
+
+
+def test_verify_on_fails_when_enabled_but_not_started(tmp_path: Path) -> None:
+    # The on-contract is enable + (separate) start. `systemctl enable` without
+    # --now writes the wants-symlink but does NOT start the unit, so verify_sleeve
+    # on must FAIL after enable alone — this is exactly the deploy bug (dropping
+    # the `systemctl restart` lines) the kill-switch test exists to catch. Before
+    # the fake-systemctl fix this could not be expressed: bare `enable` wrongly
+    # marked the unit active (kill-switch-3).
+    rc, _calls, err = _run(tmp_path, """
+        apply_sleeve_enable on $LONG_SLEEVE_UNITS
+        verify_sleeve on $LONG_SLEEVE_UNITS
+    """)
+    assert rc != 0, "verify_sleeve on must FAIL when units are enabled but never started"
+    assert "not active" in err
 
 
 def test_verify_fails_when_on_sleeve_is_not_running(tmp_path: Path) -> None:
@@ -86,6 +118,7 @@ def test_continuous_paper_split_keeps_demo_orders_off_runs_paper(tmp_path: Path)
     rc, calls, err = _run(tmp_path, """
         apply_sleeve_enable off $CONTINUOUS_SLEEVE_UNITS
         apply_sleeve_enable on  $CONTINUOUS_PAPER_SLEEVE_UNITS
+        systemctl restart $CONTINUOUS_PAPER_SLEEVE_UNITS   # the deploy's separate start step for on-sleeves
         verify_sleeve off $CONTINUOUS_SLEEVE_UNITS
         verify_sleeve on  $CONTINUOUS_PAPER_SLEEVE_UNITS
         case " $CONTINUOUS_SLEEVE_UNITS " in *continuous-paper.service*) echo "paper still bundled with demo" >&2; exit 1 ;; esac

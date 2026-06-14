@@ -135,7 +135,8 @@ def test_gather_liquidation_capture_alerts_freshness(tmp_path) -> None:
     stale_s = (now_ms - 5 * HOUR) / 1000.0
     os.utime(f, (stale_s, stale_s))
     alerts = M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3)
-    assert [a.key for a in alerts] == ["liquidation_capture_stale"]
+    # Per-venue keyed (audit 2026-06-12 round 4): the stale leg pages under its own key.
+    assert [a.key for a in alerts] == ["liquidation_capture_stale:bybit"]
     assert alerts[0].severity == M.WARNING
 
 
@@ -160,6 +161,30 @@ def test_stop_protection_flags_missing_and_wrong_and_mismatch() -> None:
     assert "CLOSE THE POSITION MANUALLY" in alerts["unprotected:NOSTOPUSDT"].message
 
 
+def test_orphan_hedge_pages_only_when_timer_off_with_open_leg() -> None:
+    # Timer enabled -> the daily hedge run manages the leg; never page.
+    assert M.evaluate_orphan_hedge(
+        hedge_timer_enabled=True,
+        open_hedge_trades=[{"symbol": "BTCUSDT", "status": "open"}],
+    ) is None
+    # Timer disabled but nothing open -> nothing to orphan.
+    assert M.evaluate_orphan_hedge(hedge_timer_enabled=False, open_hedge_trades=[]) is None
+    assert M.evaluate_orphan_hedge(
+        hedge_timer_enabled=False,
+        open_hedge_trades=[{"symbol": "BTCUSDT", "status": "closed"}],
+    ) is None
+    # Timer disabled WITH an open leg -> CRITICAL orphan page (the money risk).
+    a = M.evaluate_orphan_hedge(
+        hedge_timer_enabled=False,
+        open_hedge_trades=[
+            {"symbol": "BTCUSDT", "status": "open"},
+            {"symbol": "ETHUSDT", "status": "open"},
+        ],
+    )
+    assert a is not None and a.severity == M.CRITICAL
+    assert "ORPHANED HEDGE" in a.message and "BTCUSDT" in a.message and "ETHUSDT" in a.message
+
+
 def test_ws_staleness_threshold() -> None:
     now = 1_000 * HOUR
     assert M.evaluate_ws_staleness(store_max_ts_ms=now - 1 * HOUR, now_ms=now, max_lag_hours=6, label="demo") is None
@@ -171,10 +196,10 @@ def test_cooldown_sends_new_suppresses_persisting_then_reresends_and_resolves() 
     now = 1_000 * HOUR
     a = M.Alert(key="liveness:demo", severity=M.CRITICAL, message="down")
 
-    # New condition -> sent, state stamped.
+    # New condition -> sent, state stamped (cooldown ts + last-sent-severity marker).
     to_send, resolved, state = M.select_alerts_to_send(active=[a], state={}, now_ms=now, cooldown_minutes=30)
     assert [x.key for x in to_send] == ["liveness:demo"] and resolved == []
-    assert state == {"liveness:demo": now}
+    assert state == {"liveness:demo": now, f"{M._SEV_PREFIX}liveness:demo": M._SEVERITY_RANK[M.CRITICAL]}
 
     # Persisting within cooldown -> suppressed.
     to_send, resolved, state = M.select_alerts_to_send(active=[a], state=state, now_ms=now + 5 * MIN, cooldown_minutes=30)
@@ -374,7 +399,9 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["fake.service"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"fake.service": "failed"})
-    monkeypatch.setattr(M, "evaluate_unit_states", lambda states: [alert])
+    # main() now calls evaluate_unit_states(states, prior_not_active_timers=...) for the
+    # one-interval timer debounce, so the stub must accept that keyword (round 4).
+    monkeypatch.setattr(M, "evaluate_unit_states", lambda states, *, prior_not_active_timers=None: [alert])
     monkeypatch.setattr(M, "send_telegram_message", lambda line: False)
     monkeypatch.setattr(
         "sys.argv",

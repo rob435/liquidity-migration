@@ -4,7 +4,7 @@ import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 import polars as pl
@@ -842,23 +842,51 @@ def _normalize_funding(symbol: str, rows: list[dict]) -> list[dict]:
             "ts_ms": int(row["fundingRateTimestamp"]),
             "symbol": symbol,
             "funding_rate": float(row["fundingRate"]),
-            "funding_interval_min": int(row.get("fundingIntervalHour") or 8) * 60,
+            "funding_interval_min": _funding_interval_min(row.get("fundingIntervalHour")),
         }
         for row in rows
     ]
+
+
+def _funding_interval_min(funding_interval_hour: Any) -> int:
+    # The `or 8` idiom only catches None/empty; a literal "0" (string) is truthy so
+    # int("0")==0 would yield a 0-minute interval and make funding_rate_8h_equiv =
+    # funding_rate * (480/0) = inf downstream (ingestion.normalize_funding_history).
+    # A non-positive interval is not a real Bybit funding cadence (real values are
+    # 1/2/4/8h), so treat it as missing and fall back to the 8h default.
+    try:
+        hours = int(funding_interval_hour) if funding_interval_hour not in (None, "") else 8
+    except (TypeError, ValueError):
+        hours = 8
+    if hours <= 0:
+        hours = 8
+    return hours * 60
 
 
 def _normalize_open_interest(symbol: str, rows: list[dict], *, interval_time: str = "1h") -> list[dict]:
-    return [
-        {
-            "ts_ms": int(row["timestamp"]),
-            "symbol": symbol,
-            "open_interest": float(row.get("openInterest", 0.0)),
-            "open_interest_value": float(row.get("openInterestValue", row.get("openInterest", 0.0))),
-            "open_interest_interval": interval_time,
-        }
-        for row in rows
-    ]
+    # _float_or_none: an ABSENT field is genuinely-missing data (dropped downstream),
+    # NOT a fabricated 0.0 that survives the is_finite() filter in
+    # long_native.build_long_features and corrupts oi_chg_*d with a spurious
+    # 0->next-value -100% jump (and an inf on the following real value). Mirrors the
+    # Binance sibling _normalize_binance_open_interest (data-download-7). The
+    # open_interest fallback for open_interest_value only applies when openInterest
+    # is genuinely present, so a missing field stays null rather than coalescing.
+    output = []
+    for row in rows:
+        open_interest = _float_or_none(row.get("openInterest"))
+        open_interest_value = _float_or_none(row.get("openInterestValue"))
+        if open_interest_value is None:
+            open_interest_value = open_interest
+        output.append(
+            {
+                "ts_ms": int(row["timestamp"]),
+                "symbol": symbol,
+                "open_interest": open_interest,
+                "open_interest_value": open_interest_value,
+                "open_interest_interval": interval_time,
+            }
+        )
+    return output
 
 
 def _normalize_tickers(rows: list[dict]) -> pl.DataFrame:
