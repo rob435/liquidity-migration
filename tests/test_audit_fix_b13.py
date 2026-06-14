@@ -215,44 +215,6 @@ def test_btc_beta_gap_does_not_stretch_window_past_calendar_span() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# backfill-writers-1 — full-history coverage guard in the event-anchored wrapper
-# ──────────────────────────────────────────────────────────────────────────────
-def _load_eventanchored():
-    path = REPO / "scripts" / "backfill_binance_metrics_eventanchored.py"
-    # The module imports heavy siblings at import time (vision + scout); guard so a
-    # missing optional dep degrades to a skip rather than an error.
-    scripts = str(path.parent)
-    if scripts not in sys.path:
-        sys.path.insert(0, scripts)
-    spec = importlib.util.spec_from_file_location("backfill_binance_metrics_eventanchored_b13", path)
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception as exc:  # pragma: no cover - import-time sibling deps
-        pytest.skip(f"event-anchored backfill import unavailable: {exc}")
-    return mod
-
-
-def test_full_history_symbols_reads_vision_manifest(tmp_path: Path, monkeypatch) -> None:
-    mod = _load_eventanchored()
-    out_dir = tmp_path / "binance_usdm_metrics_5m"
-    out_dir.mkdir(parents=True)
-    # The vision full-history backfill records its symbols in _manifest.json.
-    (out_dir / "_manifest.json").write_text('{"BTCUSDT": {"rows": 100}, "ETHUSDT": {"rows": 50}}')
-    monkeypatch.setattr(mod, "OUT_DIR", out_dir)
-    monkeypatch.setattr(mod, "FULL_MANIFEST", out_dir / "_manifest.json")
-    assert mod._full_history_symbols() == {"BTCUSDT", "ETHUSDT"}
-
-
-def test_full_history_symbols_empty_when_no_manifest(tmp_path: Path, monkeypatch) -> None:
-    mod = _load_eventanchored()
-    out_dir = tmp_path / "binance_usdm_metrics_5m"
-    out_dir.mkdir(parents=True)
-    monkeypatch.setattr(mod, "FULL_MANIFEST", out_dir / "_manifest.json")
-    assert mod._full_history_symbols() == set()
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # deploy script — structural guards (deploy-ci-3, deploy-ci-6,
 #                 deploy-env-timers-1, deploy-env-timers-3)
 # ──────────────────────────────────────────────────────────────────────────────

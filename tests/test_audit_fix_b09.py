@@ -277,15 +277,15 @@ def test_is_weekend_ms_matches_old_inline_formula() -> None:
 # ============================================================================
 
 
-# NOTE (2026-06-14): backfill_binance_funding_vision.py lives ONLY under
-# scripts/archived/ — it is DEAD/archived code the live system does not run, and the
-# tests that imported it here used a wrong (non-archived) path. The backfill-writers
-# robustness (atomic temp write, transient-vs-404 sentinel, corrupt-cache recovery,
-# read-merge dedup) IS implemented and tested on the LIVE backfill
-# scripts/backfill_binance_metrics_vision.py — see tests/test_audit_int_iH.py and
-# tests/test_audit_fix_b14.py. The dead-archived funding-vision tests were removed;
-# the vision-first dedup ORDERING (backfill-writers-4) is pinned inline below, since
-# it is a provenance invariant independent of any one script.
+# NOTE (2026-06-14): scripts/backfill_binance_funding_vision.py is an IDLE manual
+# helper (the live runtime never invokes it; it exists for the pending Binance June
+# ancillary top-up — STATE.md Helpers + open operator decision #3). Its direct unit
+# tests were dropped; the backfill-writers robustness (atomic temp write,
+# transient-vs-404 sentinel, corrupt-cache recovery, read-merge dedup) IS implemented
+# and tested on the LIVE backfill scripts/backfill_binance_metrics_vision.py — see
+# tests/test_audit_int_iH.py and tests/test_audit_fix_b14.py. The vision-first dedup
+# ORDERING (backfill-writers-4) is pinned inline below, since it is a provenance
+# invariant independent of any one script.
 
 
 def test_funding_dedup_keeps_vision_row_deterministically(monkeypatch) -> None:
