@@ -723,11 +723,6 @@ def _simulate_indexed_trade(
         return None
 
     stop_price = _stop_price(entry_price, side=side, stop_loss_pct=stop_pct or 0.0)
-    loose_stop_price = (
-        _stop_price(entry_price, side=side, stop_loss_pct=config.stop_loose_pct)
-        if config.stop_loose_window_hours > 0 and config.stop_loose_pct > 0.0
-        else None
-    )
     take_profit_price = _take_profit_price(entry_price, side=side, take_profit_pct=config.take_profit_pct)
     exit_price = None
     exit_ts_ms = None
@@ -736,7 +731,6 @@ def _simulate_indexed_trade(
     mfe = 0.0
     bars_held = 0
     breakeven_armed = False
-    profit_lock_armed = False
     for idx in range(start, end):
         bars_held += 1
         bar_high = float(high_arr[idx])
@@ -746,21 +740,16 @@ def _simulate_indexed_trade(
         adverse, favorable = _bar_excursion(entry_price, side=side, high=bar_high, low=bar_low)
         mae = min(mae, adverse)
         mfe = max(mfe, favorable)
-        effective_stop_price = (
-            loose_stop_price
-            if loose_stop_price is not None and bars_held <= config.stop_loose_window_hours
-            else stop_price
-        )
         stop_hit, take_profit_hit = _bar_exit_hits(
             side=side,
             high=bar_high,
             low=bar_low,
-            stop_price=effective_stop_price,
+            stop_price=stop_price,
             take_profit_price=take_profit_price,
         )
         if stop_hit:
             exit_price = _stop_fill_price(
-                side=side, stop_price=effective_stop_price, high=bar_high, low=bar_low,
+                side=side, stop_price=stop_price, high=bar_high, low=bar_low,
                 mode=stop_fill_mode, cap_pct=stop_slippage_cap_pct,
             )
             exit_ts_ms = bar_end_ts_ms_val
@@ -781,13 +770,6 @@ def _simulate_indexed_trade(
             exit_price = bar_close
             exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "mfe_giveback"
-            break
-        if config.profit_lock_arm_pct > 0.0 and not profit_lock_armed and mfe >= config.profit_lock_arm_pct:
-            profit_lock_armed = True
-        if profit_lock_armed and close_return <= config.profit_lock_floor_pct:
-            exit_price = bar_close
-            exit_ts_ms = bar_end_ts_ms_val
-            exit_reason = "profit_lock"
             break
         if config.breakeven_arm_pct > 0.0 and not breakeven_armed and mfe >= config.breakeven_arm_pct:
             breakeven_armed = True
