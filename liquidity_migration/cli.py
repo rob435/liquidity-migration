@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
@@ -13,6 +14,7 @@ from .archive_manifest import run_archive_hourly_klines_api_download, run_archiv
 from .archive_manifest import run_archive_klines_download
 from .config import (
     DEFAULT_EXCLUDED_SYMBOLS,
+    ResearchConfig,
     UniverseConfig,
     ensure_data_root_exists,
     load_config,
@@ -331,12 +333,8 @@ def _run_signal_harness(args, data_root: Path) -> int:
     raise RuntimeError(f"unknown signal-harness action: {action!r}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    config = load_config(args.config, data_root=args.data_root)
-    data_root = _resolve_data_root(args.command, config.data_root)
 
-    if args.command == "download-data":
+def _cmd_download_data(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         if args.fixture:
             outputs = generate_fixture_data(data_root)
         else:
@@ -384,7 +382,8 @@ def main(argv: list[str] | None = None) -> int:
             print(line, file=sys.stderr)
         return 0
 
-    if args.command == "download-binance-proxy":
+
+def _cmd_download_binance_proxy(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         outputs = download_binance_usdm_proxy_data(
             data_root,
             symbols=_parse_symbols(args.symbols),
@@ -404,7 +403,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{dataset}: {path}")
         return 0
 
-    if args.command == "data-layer-audit":
+
+def _cmd_data_layer_audit(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_data_layer_audit(
             data_root,
             config=DataLayerAuditConfig(
@@ -424,14 +424,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "discover-universe":
+
+def _cmd_discover_universe(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         universe_config = _universe_config_from_args(config.universe, args)
         payload = run_discover_universe(data_root, config=config, universe_config=universe_config, name=args.name)
         print(f"universe rows={payload['rows']} path={data_root / 'reports' / ('universe_' + args.name + '.md')}")
         print(payload["symbol_csv"])
         return 0
 
-    if args.command == "archive-manifest":
+
+def _cmd_archive_manifest(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         manifest_config = ArchiveManifestConfig(
             base_url=args.base_url or DEFAULT_BYBIT_PUBLIC_TRADING_URL,
             quote_suffix=args.quote_suffix,
@@ -455,7 +457,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"WARNING: {survivorship_warning}")
         return 0
 
-    if args.command == "archive-download-klines":
+
+def _cmd_archive_download_klines(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         kline_config = ArchiveKlineDownloadConfig(
             start=args.start,
             end=args.end,
@@ -479,7 +482,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1 if payload["failures"] else 0
 
-    if args.command == "archive-download-klines-1h":
+
+def _cmd_archive_download_klines_1h(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         kline_config_1h = ArchiveHourlyKlineDownloadConfig(
             start=args.start,
             end=args.end,
@@ -503,7 +507,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1 if payload["failures"] else 0
 
-    if args.command == "archive-download-klines-1h-api":
+
+def _cmd_archive_download_klines_1h_api(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         kline_config_1h_api = ArchiveHourlyKlineApiDownloadConfig(
             api_url=args.api_url,
             category=args.category,
@@ -533,7 +538,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1 if payload["failures"] else 0
 
-    if args.command == "event-risk-cycle":
+
+def _cmd_event_risk_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         risk_config = EventRiskCycleConfig(
             submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders,
@@ -587,7 +593,8 @@ def main(argv: list[str] | None = None) -> int:
         _print_event_risk_summary(payload)
         return 0
 
-    if args.command == "event-risk-ws":
+
+def _cmd_event_risk_ws(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         ws_risk_config = EventWebSocketRiskConfig(
             submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders,
@@ -628,7 +635,8 @@ def main(argv: list[str] | None = None) -> int:
         _print_event_risk_summary(payload)
         return 0
 
-    if args.command == "combined-book-telegram-report":
+
+def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         from liquidity_migration.long_native_event_demo import format_combined_book_summary
         from liquidity_migration.event_demo import _build_private_client, _safe_raw_positions, _utc_now_ms
         from liquidity_migration.event_demo import build_position_pnl_snapshot, summarize_position_pnl
@@ -689,7 +697,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"combined-book telegram report sent={sent} chars={len(message)}")
         return 0 if sent else 1
 
-    if args.command == "long-native-event-demo-cycle":
+
+def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         from liquidity_migration.long_native_event_demo import (
             LongNativeDemoCycleConfig,
             format_long_demo_cycle_summary,
@@ -751,7 +760,8 @@ def main(argv: list[str] | None = None) -> int:
         print(format_long_demo_cycle_summary(payload))
         return 0
 
-    if args.command == "continuous-event-demo-cycle":
+
+def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, run_continuous_demo_cycle
         feature_set = tuple(part.strip() for part in str(args.feature_set).split(",") if part.strip())
         cont_demo_config = ContinuousDemoCycleConfig(
@@ -813,7 +823,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "continuous-events":
+
+def _cmd_continuous_events(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         cont_config = ContinuousEventConfig(
             start_date=args.start, end_date=args.end, side=args.side, decile=args.decile,
             rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
@@ -874,10 +885,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "signal-harness":
+
+def _cmd_signal_harness(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         return _run_signal_harness(args, data_root)
 
-    if args.command == "reconcile-long-paper-demo":
+
+def _cmd_reconcile_long_paper_demo(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_long_paper_demo_reconciliation(
             args.paper_data_root,
             args.demo_data_root,
@@ -898,7 +911,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "reconcile-continuous-paper-demo":
+
+def _cmd_reconcile_continuous_paper_demo(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_paper_demo_reconciliation(
             args.paper_data_root,
             args.demo_data_root,
@@ -919,7 +933,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "continuous-rebalance-cycle-audit":
+
+def _cmd_continuous_rebalance_cycle_audit(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_rebalance_cycle_audit(
             args.audit_data_root,
             cycles_dataset=args.cycles_dataset,
@@ -940,7 +955,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if result["ok"] else 1
 
-    if args.command == "continuous-forward-readiness":
+
+def _cmd_continuous_forward_readiness(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_forward_readiness(
             args.paper_data_root,
             args.demo_data_root,
@@ -965,7 +981,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if payload["ok"] else 1
 
-    if args.command == "continuous-vs-daily-forward":
+
+def _cmd_continuous_vs_daily_forward(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_vs_daily_forward_comparison(
             args.daily_data_root,
             args.continuous_data_root,
@@ -995,7 +1012,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if payload["ok"] else 1
 
-    if args.command == "continuous-addon-shadow-audit":
+
+def _cmd_continuous_addon_shadow_audit(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_addon_shadow_audit(
             ContinuousAddonShadowAuditConfig(
                 primary_data_root=args.primary_data_root,
@@ -1205,7 +1223,41 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"continuous add-on shadow audit gate failure: {failure}", file=sys.stderr)
         return 1 if args.fail_on_threshold_breach and not gate["passed"] else 0
 
-    raise AssertionError(f"unhandled command: {args.command}")
+
+_COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Path], int]] = {
+    "download-data": _cmd_download_data,
+    "download-binance-proxy": _cmd_download_binance_proxy,
+    "data-layer-audit": _cmd_data_layer_audit,
+    "discover-universe": _cmd_discover_universe,
+    "archive-manifest": _cmd_archive_manifest,
+    "archive-download-klines": _cmd_archive_download_klines,
+    "archive-download-klines-1h": _cmd_archive_download_klines_1h,
+    "archive-download-klines-1h-api": _cmd_archive_download_klines_1h_api,
+    "event-risk-cycle": _cmd_event_risk_cycle,
+    "event-risk-ws": _cmd_event_risk_ws,
+    "combined-book-telegram-report": _cmd_combined_book_telegram_report,
+    "long-native-event-demo-cycle": _cmd_long_native_event_demo_cycle,
+    "continuous-event-demo-cycle": _cmd_continuous_event_demo_cycle,
+    "continuous-events": _cmd_continuous_events,
+    "signal-harness": _cmd_signal_harness,
+    "reconcile-long-paper-demo": _cmd_reconcile_long_paper_demo,
+    "reconcile-continuous-paper-demo": _cmd_reconcile_continuous_paper_demo,
+    "continuous-rebalance-cycle-audit": _cmd_continuous_rebalance_cycle_audit,
+    "continuous-forward-readiness": _cmd_continuous_forward_readiness,
+    "continuous-vs-daily-forward": _cmd_continuous_vs_daily_forward,
+    "continuous-addon-shadow-audit": _cmd_continuous_addon_shadow_audit,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    config = load_config(args.config, data_root=args.data_root)
+    data_root = _resolve_data_root(args.command, config.data_root)
+    handler = _COMMAND_HANDLERS.get(args.command)
+    if handler is None:
+        raise AssertionError(f"unhandled command: {args.command}")
+    return handler(args, config, data_root)
+
 
 
 def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
