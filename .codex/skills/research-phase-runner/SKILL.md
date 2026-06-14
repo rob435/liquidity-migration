@@ -60,9 +60,9 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
 3. **Dispatch.** (`volume_events_cell.sh` was erased with the short engine —
    single-cell runs now go through a dispatcher too.) Sweeps: write a dispatcher
    following the current patterns — continuous sweeps use an in-memory
-   config-override driver (see `scripts/alpha_sweep.py`); long sweeps call
-   `run_long_native_research` directly per cell (see
-   `scripts/long_improve_sweep.py`). Preserve the old sweep discipline:
+   config-override driver (see `scripts/alpha_sweep.py`); long sweeps should
+   use a small dated dispatcher for the specific pre-registered cells and call
+   `run_long_native_research` directly per cell. Preserve the old sweep discipline:
    predeclare worker/thread counts for memory-heavy cells because
    over-parallelizing OOMs the box. Always run **both venues**.
 

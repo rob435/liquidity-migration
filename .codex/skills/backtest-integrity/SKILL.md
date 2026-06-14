@@ -104,8 +104,9 @@ If any answer is weak, the backtest is not ready to influence real-money work.
 - Run sweeps via a dispatcher script, not hand-assembled engine flags.
   The old volume-events dispatcher was erased with the short-sleeve cleanup;
   current patterns are `scripts/alpha_sweep.py`
-  (continuous, in-memory config overrides) and `scripts/long_improve_sweep.py`
-  (long, direct `run_long_native_research` cells). The Tier-2 verdict comes from
+  (continuous, in-memory config overrides) and small dated long dispatchers
+  that call `run_long_native_research` directly per pre-registered cell.
+  The Tier-2 verdict comes from
   `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
   `scripts/apply_decision_rule.py`. Every engine requires full PIT by default;
   partial-PIT runs (config `require_full_pit_universe=False` — the old

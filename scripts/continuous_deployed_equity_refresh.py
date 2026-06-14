@@ -45,6 +45,7 @@ from liquidity_migration.continuous_rebalance import (  # noqa: E402
     ContinuousHedgeRule,
     apply_rebalance_rule,
 )
+from liquidity_migration.storage import resolve_dataset_name  # noqa: E402
 from liquidity_migration.volume_events_charts import _write_equity_benchmark_chart  # noqa: E402
 
 SHARED = Path("C:/Users/user/SHARED_DATA")
@@ -63,7 +64,12 @@ def config_from_report(path: Path) -> ContinuousEventConfig:
 
 
 def frozen_config(
-    component: str, venue: str, *, end_date: str, fallback_root: Path | None = None
+    component: str,
+    venue: str,
+    *,
+    end_date: str,
+    start_date: str | None = None,
+    fallback_root: Path | None = None,
 ) -> ContinuousEventConfig:
     spec = scout.SOURCES[component]
     report_path = spec.root / venue / spec.cell / "continuous_report.json"
@@ -74,7 +80,10 @@ def frozen_config(
         report_path = fallback_root / "components" / venue / spec.cell / "continuous_report.json"
     if not report_path.exists():
         raise FileNotFoundError(f"missing frozen source report: {report_path}")
-    return replace(config_from_report(report_path), end_date=end_date)
+    cfg = replace(config_from_report(report_path), end_date=end_date)
+    if start_date is not None:
+        cfg = replace(cfg, start_date=start_date)
+    return cfg
 
 
 def load_extended_panel(venue: str, *, end_date: str, root: Path | None = None) -> pl.DataFrame:
@@ -146,10 +155,121 @@ def pad_flat_tail(df: pl.DataFrame, *, through_date: dt.date) -> pl.DataFrame:
     return pl.concat([df, pad], how="diagonal").sort("ts_ms")
 
 
+def funding_root(venue: str, data_root: Path | None = None) -> Path:
+    if data_root is None:
+        return deployed.FUNDING_ROOT[venue]
+    return data_root / resolve_dataset_name(data_root, "funding")
+
+
+def instrument_inputs(
+    venue: str,
+    days: list[int],
+    symbol: str,
+    panel: pl.DataFrame,
+    *,
+    data_root: Path | None = None,
+) -> tuple[dict[int, float], dict[int, float]]:
+    p = (
+        panel.filter(pl.col("symbol") == symbol).sort("d")
+        .with_columns(pl.col("close").shift(1).alias("prev"), pl.col("d").shift(1).alias("d_prev"))
+        .filter(((pl.col("d") - pl.col("d_prev")).dt.total_days() == 1) & (pl.col("prev") > 0))
+        .with_columns((pl.col("close") / pl.col("prev") - 1.0).alias("ret"))
+    )
+    rets = {
+        int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp() * 1000): float(r)
+        for d, r in p.select(["d", "ret"]).iter_rows()
+    }
+    fund: dict[int, float] = {}
+    root = funding_root(venue, data_root)
+    for day in days:
+        date = dt.datetime.fromtimestamp(day / 1000, tz=dt.timezone.utc).date().isoformat()
+        part = root / f"date={date}" / f"symbol={symbol}"
+        if part.exists():
+            fund[day] = float(pl.read_parquet(part, columns=["funding_rate"])["funding_rate"].sum())
+    return rets, fund
+
+
+def component_report_matches_window(payload: dict[str, Any], *, start_date: str | None, end_date: str) -> bool:
+    cfg = payload.get("config") or {}
+    if str(cfg.get("end_date")) != end_date:
+        return False
+    if start_date is not None and str(cfg.get("start_date")) != start_date:
+        return False
+    return True
+
+
+def monthly_trade_counts(*, output_root: Path, venue: str) -> pl.DataFrame:
+    frames: list[pl.DataFrame] = []
+    for component in deployed.WINNER_WEIGHTS:
+        spec = scout.SOURCES[component]
+        trades_path = output_root / "components" / venue / spec.cell / "continuous_trades.csv"
+        if not trades_path.exists():
+            continue
+        trades = pl.read_csv(trades_path)
+        required = {"entry_ts_ms", "symbol", "side"}
+        if trades.is_empty() or not required.issubset(set(trades.columns)):
+            continue
+        frames.append(
+            trades.select(["entry_ts_ms", "symbol", "side"])
+            .with_columns(pl.from_epoch(pl.col("entry_ts_ms"), time_unit="ms").dt.strftime("%Y-%m").alias("month"))
+            .select(["month", "entry_ts_ms", "symbol", "side"])
+        )
+    if not frames:
+        return pl.DataFrame({"month": pl.Series([], dtype=pl.String), "trades": pl.Series([], dtype=pl.Int64)})
+    return (
+        pl.concat(frames, how="vertical")
+        .unique(subset=["entry_ts_ms", "symbol", "side"])
+        .group_by("month")
+        .agg(pl.len().alias("trades"))
+        .sort("month")
+    )
+
+
+def monthly_returns_with_trades(equity: pl.DataFrame, trade_counts: pl.DataFrame) -> pl.DataFrame:
+    empty = pl.DataFrame(
+        {
+            "month": pl.Series([], dtype=pl.String),
+            "strategy_return": pl.Series([], dtype=pl.Float64),
+            "trades": pl.Series([], dtype=pl.Int64),
+        }
+    )
+    if equity.is_empty() or not {"date", "basket_return"}.issubset(set(equity.columns)):
+        return empty
+    monthly = (
+        equity.with_columns(pl.col("date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
+        .group_by("month")
+        .agg(((pl.col("basket_return") + 1.0).product() - 1.0).alias("strategy_return"))
+        .sort("month")
+    )
+    if trade_counts.is_empty():
+        return monthly.with_columns(pl.lit(0, dtype=pl.Int64).alias("trades"))
+    return (
+        monthly.join(trade_counts, on="month", how="left")
+        .with_columns(pl.col("trades").fill_null(0).cast(pl.Int64))
+        .select(["month", "strategy_return", "trades"])
+        .sort("month")
+    )
+
+
+def chart_leverages(extra_leverage: float | None) -> tuple[float, ...]:
+    values = [1.0]
+    if extra_leverage is not None and abs(float(extra_leverage) - 1.0) > 1e-12:
+        if extra_leverage <= 0.0:
+            raise ValueError("--chart-leverage must be positive")
+        values.append(float(extra_leverage))
+    return tuple(values)
+
+
 def run_components(
-    venue: str, *, output_root: Path, end_date: str, frozen_fallback: Path | None = None
+    venue: str,
+    *,
+    output_root: Path,
+    end_date: str,
+    start_date: str | None = None,
+    frozen_fallback: Path | None = None,
+    data_root: Path | None = None,
 ) -> dict[str, Any]:
-    data_root = SHARED / f"{venue}_full_pit"
+    data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
     for component in deployed.WINNER_WEIGHTS:
         spec = scout.SOURCES[component]
@@ -157,9 +277,24 @@ def run_components(
         report_path = cell_dir / "continuous_report.json"
         if report_path.exists():
             payload = json.loads(report_path.read_text(encoding="utf-8"))
-            resumed = True
+            resumed = component_report_matches_window(payload, start_date=start_date, end_date=end_date)
+            if not resumed:
+                cfg = frozen_config(
+                    component,
+                    venue,
+                    end_date=end_date,
+                    start_date=start_date,
+                    fallback_root=frozen_fallback,
+                )
+                payload = run_continuous_event_research(data_root, config=cfg, report_dir=cell_dir)
         else:
-            cfg = frozen_config(component, venue, end_date=end_date, fallback_root=frozen_fallback)
+            cfg = frozen_config(
+                component,
+                venue,
+                end_date=end_date,
+                start_date=start_date,
+                fallback_root=frozen_fallback,
+            )
             payload = run_continuous_event_research(data_root, config=cfg, report_dir=cell_dir)
             resumed = False
         meta[component] = {
@@ -185,8 +320,10 @@ def render_curves(
     raw_klines: pl.DataFrame,
     end_date: str,
     venue_summary: dict[str, Any],
+    monthly_trades: pl.DataFrame,
+    leverage: float | None = 4.0,
 ) -> None:
-    for mult in (1.0, 4.0):
+    for mult in chart_leverages(leverage):
         tag = "" if mult == 1.0 else f"_{mult:g}x"
         mdf = df
         if mult != 1.0:
@@ -199,6 +336,8 @@ def render_curves(
             pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.date().cast(pl.String).alias("date")
         )
         equity.write_csv(out_dir / f"continuous_equity{tag}.csv")
+        monthly = monthly_returns_with_trades(equity, monthly_trades)
+        monthly.write_csv(out_dir / f"continuous_monthly{tag}.csv")
         name = "Continuous (deployed cfg)" if mult == 1.0 else f"Continuous (deployed cfg) {mult:g}x"
         sub = "IN-SAMPLE RESEARCH refresh to June 2026 data (window spent; forward demo is the arbiter) — not a promotion claim"
         if mult != 1.0:
@@ -208,7 +347,7 @@ def render_curves(
             root=out_dir,
             equity=equity,
             raw_klines=raw_klines,
-            monthly=None,
+            monthly=monthly,
             png_name=f"continuous_equity_btc{tag}.png",
             title=(
                 f"CONTINUOUS deployed — winner_base ensemble + 2f hedge (max4)"
@@ -227,8 +366,11 @@ def run_venue(
     *,
     output_root: Path,
     end_date: str,
+    start_date: str | None = None,
     render_only: bool = False,
     frozen_fallback: Path | None = None,
+    data_root: Path | None = None,
+    chart_leverage: float | None = 4.0,
 ) -> dict[str, Any]:
     out_dir = output_root / venue
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -237,11 +379,16 @@ def run_venue(
         if not csv_path.exists():
             raise FileNotFoundError(f"--render-only needs an existing {csv_path}")
         df = pl.read_csv(csv_path).select(["ts_ms", "basket_return", "equity"])
-        panel = load_extended_panel(venue, end_date=end_date)
+        panel = load_extended_panel(venue, end_date=end_date, root=data_root)
         venue_summary: dict[str, Any] = {}
     else:
         component_meta = run_components(
-            venue, output_root=output_root, end_date=end_date, frozen_fallback=frozen_fallback
+            venue,
+            output_root=output_root,
+            end_date=end_date,
+            start_date=start_date,
+            frozen_fallback=frozen_fallback,
+            data_root=data_root,
         )
         pieces = {}
         for component in deployed.WINNER_WEIGHTS:
@@ -250,9 +397,9 @@ def run_venue(
             comp, _n, _cfg = scout._load_source(refreshed, venue)
             pieces[component] = comp
         combined = scout._combine_components(pieces, deployed.WINNER_WEIGHTS)
-        panel = load_extended_panel(venue, end_date=end_date)
-        btc_ret, btc_fund = deployed.instrument_inputs(venue, combined.days, "BTCUSDT", panel)
-        eth_ret, eth_fund = deployed.instrument_inputs(venue, combined.days, "ETHUSDT", panel)
+        panel = load_extended_panel(venue, end_date=end_date, root=data_root)
+        btc_ret, btc_fund = instrument_inputs(venue, combined.days, "BTCUSDT", panel, data_root=data_root)
+        eth_ret, eth_fund = instrument_inputs(venue, combined.days, "ETHUSDT", panel, data_root=data_root)
         df = apply_rebalance_rule(
             combined, deployed.winner_rule(), ContinuousHedgeRule(90, 60, 2.0, 5.0),
             btc_ret, btc_fund, eth_ret, eth_fund,
@@ -271,6 +418,8 @@ def run_venue(
     render_curves(
         venue, out_dir=out_dir, df=df, raw_klines=raw_klines,
         end_date=end_date, venue_summary=venue_summary,
+        monthly_trades=monthly_trade_counts(output_root=output_root, venue=venue),
+        leverage=chart_leverage,
     )
     return venue_summary
 
@@ -278,8 +427,18 @@ def run_venue(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--end-date", default="2026-06-12", help="engine end boundary (exclusive at date midnight UTC)")
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional engine start boundary. Omit to preserve each frozen component's original start.",
+    )
     parser.add_argument("--output-root", default=str(SHARED / "continuous_deployed_equity_refresh_2026-06-12"))
     parser.add_argument("--venues", nargs="+", default=["bybit", "binance"])
+    parser.add_argument(
+        "--data-root",
+        default=None,
+        help="Optional per-venue full-PIT root override; requires exactly one --venues entry.",
+    )
     parser.add_argument(
         "--render-only", action="store_true",
         help="re-render PNGs + stats from existing per-venue continuous_equity.csv (no engine runs)",
@@ -289,14 +448,26 @@ def main() -> int:
         default=str(SHARED / "continuous_deployed_equity_refresh_2026-06-12"),
         help="components root whose continuous_report.json configs stand in for the consolidated 2026-06-07 receipts",
     )
+    parser.add_argument(
+        "--chart-leverage",
+        type=float,
+        default=4.0,
+        help="Extra pure-leverage continuous chart to render alongside 1x. Use 1 to suppress the extra chart.",
+    )
     args = parser.parse_args()
-    output_root = Path(args.output_root)
+    data_root = Path(args.data_root).expanduser() if args.data_root else None
+    if data_root is not None and len(args.venues) != 1:
+        parser.error("--data-root requires exactly one --venues entry")
+    output_root = Path(args.output_root).expanduser()
     output_root.mkdir(parents=True, exist_ok=True)
-    summary: dict[str, Any] = {"end_date": args.end_date}
+    summary: dict[str, Any] = {"start_date": args.start_date, "end_date": args.end_date}
     for venue in args.venues:
         summary[venue] = run_venue(
             venue, output_root=output_root, end_date=args.end_date,
-            render_only=args.render_only, frozen_fallback=Path(args.frozen_fallback),
+            start_date=args.start_date,
+            render_only=args.render_only, frozen_fallback=Path(args.frozen_fallback).expanduser(),
+            data_root=data_root,
+            chart_leverage=args.chart_leverage,
         )
     if not args.render_only:
         (output_root / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")

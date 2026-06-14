@@ -49,8 +49,9 @@ python -m liquidity_migration <subcommand> --help
 ## Canonical commands
 
 Research sweeps: continuous sweeps use an in-memory config-override driver
-(see `scripts/alpha_sweep.py`); long sweeps call `run_long_native_research`
-directly per cell (see `scripts/long_improve_sweep.py`). The erased
+(see `scripts/alpha_sweep.py`); long sweeps should use a small dated dispatcher
+for the specific pre-registered cells and call `run_long_native_research`
+directly per cell. Do not revive the retired historical long-sweep helper. The erased
 `volume_events_cell.sh` single-cell path has NO replacement — the daily-short
 engine it drove is gone.
 
