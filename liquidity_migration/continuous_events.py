@@ -388,6 +388,40 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
     return d.select("symbol", "ts_ms", "composite", "turnover_quote", "spell_end_ts").sort(["ts_ms", "symbol"])
 
 
+def _symbol_priority_hash(symbol: str) -> int:
+    """Deterministic, market-content-free symbol hash (matches the W5 candidate-tape
+    ``symbol_hash_bucket`` ordering) — the negative-control entry priority."""
+    return int(hashlib.sha256(symbol.encode("utf-8")).hexdigest()[:8], 16) % 1000
+
+
+def _apply_entry_order(entries: pl.DataFrame, entry_order: str) -> pl.DataFrame:
+    """W5 Stage-1 hook: re-order candidates WITHIN each ``signal_ts`` by an entry-priority score,
+    leaving every gate / capacity / cooldown / sizing untouched. Reordering is causal (only same-ts
+    candidates ever swap; a later ts can never jump ahead of an earlier one). ``fcfs`` (default)
+    reproduces the frozen control's ``(ts_ms, symbol)`` order exactly.
+
+    - ``fcfs``: control order (symbol-alphabetical within ts).
+    - ``composite``: highest production composite first within ts (symbol tiebreak).
+    - ``symbol_hash``: ascending market-content-free symbol hash (negative control)."""
+    if entries.is_empty() or entry_order == "fcfs":
+        return entries
+    if entry_order == "composite":
+        return entries.sort(
+            ["ts_ms", "composite", "symbol"], descending=[False, True, False], nulls_last=True
+        )
+    if entry_order == "symbol_hash":
+        syms = entries["symbol"].unique().to_list()
+        hmap = pl.DataFrame(
+            {"symbol": syms, "_pri_hash": [_symbol_priority_hash(str(s)) for s in syms]}
+        )
+        return (
+            entries.join(hmap, on="symbol", how="left")
+            .sort(["ts_ms", "_pri_hash", "symbol"])
+            .drop("_pri_hash")
+        )
+    raise ValueError(f"unknown entry_order {entry_order!r}")
+
+
 def _continuous_rank_lookup(panel: pl.DataFrame, *, delay_ms: int) -> dict[tuple[str, int], float]:
     """Composite rank by symbol and actionable bar-end timestamp for rank-decay exits."""
     output: dict[tuple[str, int], float] = {}
@@ -490,10 +524,17 @@ def _run_trades(
     market_daily: dict[int, float] | None = None,
     btc_trend_daily: dict[int, float] | None = None,
     rank_lookup: dict[tuple[str, int], float] | None = None,
+    candidate_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
     (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
     daily engine's `_simulate_indexed_trade` (identical fills/funding/exit semantics).
+
+    `candidate_sink` (default None) is the W5 Stage-0 audit hook: when a list is supplied, every
+    candidate fed into this loop appends one decision row (selected OR the exact rejection reason,
+    in engine order) so the FULL eligible candidate set — not just executed trades — is recoverable
+    from the same code that makes the live decision. When it is None the loop is byte-identical to
+    the pre-hook engine (no work, no output change), so existing callers are unaffected.
 
     Returns (trades, skip-counts)."""
     if entries.is_empty():
@@ -559,15 +600,49 @@ def _run_trades(
                 by_ts.setdefault(int(ts_i), []).append(float(comp_i))
         for ts_i, vals in by_ts.items():
             soft3_q80[ts_i] = float(np.quantile(np.asarray(vals), 0.8))
+    def _emit(
+        reason: str,
+        *,
+        entry_bar_end: int | None = None,
+        active_count: int | None = None,
+        regime_trend: float | None = None,
+        regime_size_mult: float | None = None,
+        notional_weight: float | None = None,
+        exit_ts_ms: int | None = None,
+    ) -> None:
+        if candidate_sink is None:
+            return
+        candidate_sink.append(
+            {
+                "symbol": sym,
+                "signal_ts_ms": int(sig_ts),
+                "composite": float(comp) if comp is not None else None,
+                "turnover_quote": float(turn) if turn is not None else None,
+                "spell_end_ts_ms": int(spell_end) if spell_end is not None else None,
+                "entry_bar_end_ts_ms": int(entry_bar_end) if entry_bar_end is not None else None,
+                "crowding_count": int(signal_counts.get(int(sig_ts), 0)) if crowding_on else None,
+                "active_count": active_count,
+                "regime_trend": regime_trend,
+                "regime_size_mult": regime_size_mult,
+                "notional_weight": notional_weight,
+                "exit_ts_ms": exit_ts_ms,
+                "selected": reason == "selected",
+                "reason": reason,
+            }
+        )
+
     for sym, sig_ts, comp, turn, spell_end in zip(syms, tss, comps, turns, spell_ends):
         bars = symbol_bars.get(sym)
         if bars is None:
+            _emit("no_bar_symbol")
             skipped_no_bar += 1
             continue
         entry_bar_end = int(sig_ts) + delay_ms
+        cand_trend: float | None = None
         while active and active[0] <= entry_bar_end:
             heapq.heappop(active)
         if crowding_on and signal_counts.get(int(sig_ts), 0) > config.entry_crowding_max_fresh:
+            _emit("crowding", entry_bar_end=entry_bar_end, active_count=len(active))
             skipped_crowding += 1
             continue
         # Circuit breaker: pause this entry if too many net-negative covers have CLOSED in the trailing
@@ -577,46 +652,63 @@ def _run_trades(
             lo = bisect.bisect_left(adverse_exit_ts, entry_bar_end - pause_window_ms)
             hi = bisect.bisect_left(adverse_exit_ts, entry_bar_end)
             if hi - lo >= config.entry_pause_after_adverse_exits:
+                _emit("breaker", entry_bar_end=entry_bar_end, active_count=len(active))
                 skipped_breaker += 1
                 continue
         if sym in last_entry and entry_bar_end - last_entry[sym] < cooldown_ms:
+            _emit("cooldown", entry_bar_end=entry_bar_end, active_count=len(active))
             skipped_cooldown += 1
             continue
         if len(active) >= config.max_active:
+            _emit("capacity", entry_bar_end=entry_bar_end, active_count=len(active))
             skipped_capacity += 1
             continue
         entry_bar = bars["by_end"].get(entry_bar_end)
         if entry_bar is None:
+            _emit("no_bar_entry", entry_bar_end=entry_bar_end, active_count=len(active))
             skipped_no_bar += 1
             continue
         close_arr = bars["close"]
         # --- inherited selection gates (squeeze-defense) ---
         if age_min_ms > 0 and (entry_bar_end - int(bars["bar_end_ts_ms"][0])) < age_min_ms:
+            _emit("age", entry_bar_end=entry_bar_end, active_count=len(active))
             skipped_gate += 1
             continue
         regime_size_mult = 1.0
         if btc_gate != "off":
             trend = (btc_trend_daily or {}).get((int(sig_ts) // MS_PER_DAY) * MS_PER_DAY)
             if trend is None:
+                _emit("btc_trend_unknown", entry_bar_end=entry_bar_end, active_count=len(active))
                 skipped_btc_trend += 1
                 continue
+            cand_trend = float(trend)
             if btc_gate == "uptrend" and trend <= 0.0:
+                _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
             if btc_gate == "downtrend" and trend > 0.0:
+                _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
             if btc_gate == "uptrend_capped" and not (0.0 < trend <= config.btc_trend_euphoria_cap):
+                _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
             if btc_gate == "soft3":
                 if trend > config.btc_trend_euphoria_cap:
+                    _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                     skipped_btc_trend += 1
                     continue
                 if trend <= 0.0:
                     thr = soft3_q80.get(int(sig_ts))
                     comp_v = float(comp) if comp is not None else float("-inf")
                     if thr is None or comp_v < thr:
+                        _emit(
+                            "soft3_quintile",
+                            entry_bar_end=entry_bar_end,
+                            active_count=len(active),
+                            regime_trend=cand_trend,
+                        )
                         skipped_soft3_quintile += 1
                         continue
                     regime_size_mult = config.btc_soft3_size_frac
@@ -624,11 +716,13 @@ def _run_trades(
             base_px = float(close_arr[entry_bar - decel_h])
             recent_ret = (float(close_arr[entry_bar]) / base_px - 1.0) if base_px > 0 else 0.0
             if recent_ret > config.entry_decel_max_ret:   # still ripping up -> not a confirmed fade
+                _emit("decel", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
         if config.market_min_ret_1d > -1.0 and market_daily is not None:
             mkt = market_daily.get((entry_bar_end // MS_PER_DAY) * MS_PER_DAY)
             if mkt is not None and mkt < config.market_min_ret_1d:   # short into a weak tape = squeeze risk
+                _emit("market", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
         # --- sizing ---
@@ -659,9 +753,19 @@ def _run_trades(
             stop_fill_mode=config.stop_fill_mode, stop_slippage_cap_pct=config.stop_slippage_cap_pct,
         )
         if trade is None:
+            _emit("no_fill", entry_bar_end=entry_bar_end, active_count=len(active))
             skipped_no_bar += 1
             continue
         rows.append(trade)
+        _emit(
+            "selected",
+            entry_bar_end=entry_bar_end,
+            active_count=len(active),
+            regime_trend=cand_trend,
+            regime_size_mult=regime_size_mult,
+            notional_weight=nw,
+            exit_ts_ms=int(trade["exit_ts_ms"]),
+        )
         heapq.heappush(active, int(trade["exit_ts_ms"]))
         last_entry[sym] = entry_bar_end
         if breaker_on and float(trade.get("net_return") or 0.0) < 0.0:
@@ -892,8 +996,19 @@ def run_continuous_event_research(
     *,
     config: ContinuousEventConfig | None = None,
     report_dir: str | Path | None = None,
+    candidate_tape_path: str | Path | None = None,
+    entry_order: str = "fcfs",
 ) -> dict[str, Any]:
-    """Run the execution-grade continuous-fade backtest and (optionally) write artifacts."""
+    """Run the execution-grade continuous-fade backtest and (optionally) write artifacts.
+
+    When `candidate_tape_path` is set, the full eligible candidate set (selected + rejected,
+    with the exact engine reason) is written to that parquet for W5 Stage-0 reconstruction. The
+    extra emission is purely additive: with `candidate_tape_path=None` the run is unchanged.
+
+    `entry_order` (W5 Stage 1) re-orders candidates WITHIN each signal timestamp by an
+    entry-priority score before the unchanged selection loop; `"fcfs"` (default) reproduces the
+    frozen control exactly. See `_apply_entry_order`.
+    """
     config = config or ContinuousEventConfig()
     root = Path(str(data_root)).expanduser()
     if not root.is_dir():
@@ -901,6 +1016,8 @@ def run_continuous_event_research(
 
     panel = build_continuous_panel(root, config)
     entries = _fresh_entries(panel, config) if not panel.is_empty() else panel
+    if not entries.is_empty():
+        entries = _apply_entry_order(entries, entry_order)
 
     kname = _autodetect_dataset_names(root)["klines_dataset"]
     start_ms, end_ms = _date_str_to_ms(config.start_date), _date_str_to_ms(config.end_date)
@@ -933,9 +1050,11 @@ def run_continuous_event_research(
     if config.rank_exit_threshold > 0.0 and not panel.is_empty():
         rank_lookup = _continuous_rank_lookup(panel, delay_ms=(1 + config.entry_delay_hours) * MS_PER_HOUR)
 
+    candidate_sink: list[dict[str, Any]] | None = [] if candidate_tape_path is not None else None
     if not entries.is_empty() and symbol_bars:
         trades, skips = _run_trades(
-            entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup
+            entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup,
+            candidate_sink=candidate_sink,
         )
     else:
         trades, skips = _empty_trades(), {}
@@ -960,6 +1079,35 @@ def run_continuous_event_research(
         "metrics": splits,                 # realized-PnL-at-exit (additive, fixed-capital)
         "metrics_mtm": mtm,                # portfolio mark-to-market (correlated-DD aware)
     }
+
+    if candidate_tape_path is not None:
+        tape_path = Path(str(candidate_tape_path)).expanduser()
+        tape_path.parent.mkdir(parents=True, exist_ok=True)
+        tape_schema = {
+            "symbol": pl.Utf8,
+            "signal_ts_ms": pl.Int64,
+            "composite": pl.Float64,
+            "turnover_quote": pl.Float64,
+            "spell_end_ts_ms": pl.Int64,
+            "entry_bar_end_ts_ms": pl.Int64,
+            "crowding_count": pl.Int64,
+            "active_count": pl.Int64,
+            "regime_trend": pl.Float64,
+            "regime_size_mult": pl.Float64,
+            "notional_weight": pl.Float64,
+            "exit_ts_ms": pl.Int64,
+            "selected": pl.Boolean,
+            "reason": pl.Utf8,
+        }
+        tape_df = (
+            pl.DataFrame(candidate_sink).cast(tape_schema, strict=False)
+            if candidate_sink
+            else pl.DataFrame(schema=tape_schema)
+        )
+        tape_df.write_parquet(tape_path)
+        payload["candidate_tape_path"] = str(tape_path)
+        payload["n_candidates"] = int(tape_df.height)
+        payload["n_candidates_selected"] = int(tape_df.filter(pl.col("selected")).height) if tape_df.height else 0
 
     if report_dir is not None:
         out_dir = Path(str(report_dir)).expanduser()

@@ -36,11 +36,30 @@ Important current state:
   - Stage 3: pre_6h_return, pre_24h_return, and pre_24h_realized_vol are
     admissible only for a future neutralized test; the 97 bps symbol-hash
     negative-control spread is a confounding warning.
+- E2 regime work is binding context
+  (docs/preregistration/2026-06-12-e2-regime-response-family.md): the
+  bounded-threshold "trade more regimes" family is NULL — V1 euphoria cap and
+  V2 downtrend quarter-size each lost ~20pp return and roughly halved MAR on
+  both venues. The binary BTC-uptrend gate stands as the control. W5 Stage 8 may
+  only test a materially different regime mechanism that beats V0 on pooled MAR;
+  do NOT re-run V1/V2 in any form, and do NOT make "always trading" or trade
+  count a success metric. The objective is pooled MAR vs control on both venues,
+  net of funding and costs.
 
 Task:
 Start W5 Continuous Signal Alpha Program. The goal is score-based entry
-priority, entry alpha, exit alpha, sniper alpha, and sizing alpha with full
-artifact discipline. Do not run quick screens.
+priority, neutralized path-shape scoring (Stage 7), entry alpha, exit alpha,
+sniper alpha, sizing alpha, and a regime-response mechanism that beats the
+binary gate (Stage 8) — all with full artifact discipline. Do not run quick
+screens.
+
+Posture: be relentless and never give up on finding edge. A NULL closes one
+hypothesis, not the program — bank the honest verdict and queue the next
+mechanistically distinct experiment. Relentless means breadth of honest
+hypotheses, NOT re-running a dead mechanism, moving a threshold after seeing
+output, or letting one venue carry a claim. Every gate in
+00_methodology_contract.md and docs/backtesting_errors_we_never_repeat.md still
+binds.
 
 First implementation target:
 1. Write a dated preregistration for W5 Stage 0 under docs/preregistration/.
@@ -54,14 +73,10 @@ First implementation target:
 6. Only if Stage 0 passes, write the Stage 1 score-entry preregistration.
 
 Rules:
-- No unregistered mining.
-- No threshold movement after seeing output.
 - No single-venue claims.
-- No filters disguised as scoring. Score-entry arms must keep comparable breadth.
 - Negative controls are mandatory.
 - Every result needs event rows, ledgers, R1-compatible monthly returns where
   applicable, effect sizes, fragility diagnostics, and a clear falsifier.
-- If a result fails, it blocks only that exact mechanism.
 
-Be direct. Call out bad assumptions before running expensive work.
+run expensive work.
 ```

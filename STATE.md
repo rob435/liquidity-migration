@@ -114,13 +114,36 @@ Active programs:
   spread is a confounding warning, not a deploy signal. These do not close the
   broader feature families. Later W4 stages require their own dated receipt
   before touching full-PIT roots.
-- **W5 continuous signal alpha plan drafted 2026-06-13.** Draft folder:
-  `docs/research_plans/w5_continuous_signal_alpha/`. This is the next serious
-  program for score-based entry priority, entry execution, exit lifecycle,
-  sniper, sizing, interaction, and forward gates. The first runnable target is
-  Stage 0 candidate-tape reconstruction, then Stage 1 same-breadth score-entry.
-  The folder is not a run receipt; each stage still needs a dated
-  preregistration before touching full-PIT roots.
+- **W5 continuous signal alpha program.** Plan folder:
+  `docs/research_plans/w5_continuous_signal_alpha/`. Score-based entry priority,
+  entry/exit/sniper/sizing alpha, neutralized path-shape (Stage 7),
+  regime-response vs the binary gate (Stage 8), interaction + forward gates.
+  - **Stage 0 PASS 2026-06-14** (receipt
+    `docs/preregistration/2026-06-14-w5-continuous-stage0-candidate-tape.md`).
+    Built a per-cycle candidate tape (selected + rejected-but-eligible, with the
+    exact engine reason) emitted from the same decision code as the live engine
+    (additive `candidate_sink` in `continuous_events`, default off → 107 tests
+    unchanged). Both venues, window `2023-04-01 <= signal_ts < 2026-05-01`:
+    bybit 15362 candidates / 3223 selected, binance 16794 / 2966. PIT pass,
+    selected↔ledger exact, month reconcile, and W4-control overlap exact on all
+    8 cells; ensemble-hedged control rebuilt (bybit ret 0.714 / MAR 4.40,
+    binance 0.675 / MAR 5.53). No alpha claim — it is the reconstructability
+    gate. Artifacts `~/SHARED_DATA/w5_continuous_stage0_candidate_tape_2026-06-14/`.
+    Stage-0 code is uncommitted pending operator approval.
+  - **Stage 1 NULL (structural) 2026-06-14** (receipt
+    `docs/preregistration/2026-06-14-w5-continuous-stage1-score-entry.md`).
+    Same-breadth score-as-entry-priority (A1 composite, A5 symbol-hash neg
+    control) vs A0 control via an additive within-`signal_ts` `entry_order` knob
+    (fcfs reproduces the control byte-for-byte; `equity_allclose_1e-9` both
+    venues). Result: **0 replacements** across 3y × 4 components × 2 venues —
+    A1/A5 ledgers are byte-identical to A0. The per-component crowding gate
+    (max_fresh=2) + max_active=25 leave no within-cycle contention to reorder, so
+    entry priority is a mechanical no-op for the frozen control. Banked as a
+    clean kill; the score-as-information lever moves to Stage 7 (path-shape) and
+    Stage 5 (score-weighted sizing at constant breadth). A breadth-changing
+    score-conditioned crowding admission is a separate Stage 8 idea, not Stage 1.
+  - Next: Stage 7 neutralized path-shape (also unlocks Stage 1 A2/A3/A4), then
+    Stage 5 sizing. Stages 2/3/4/8 stay gated behind their own receipts.
 - **Forward data stack:** P11 taker-flow full-universe completion is idle-time;
   P12 liquidation-proxy calibration waits on a mature forward liquidation tape
   (~2026-07-10). All remaining evidence paths are forward-only: demo fills →

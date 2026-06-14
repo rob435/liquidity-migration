@@ -89,6 +89,18 @@ methodology decision:
   Wave-4 replacement program; deleted prior W4 materials remain non-evidence.
 - `docs/preregistration/2026-06-13-w4-continuous-stage0-data-clock.md` -
   current W4 data/forward-clock gate.
+- `docs/preregistration/2026-06-14-w5-continuous-stage0-candidate-tape.md` -
+  W5 Stage 0 PASS (both venues): per-cycle candidate tape (selected +
+  rejected-but-eligible) reconstructed from the live decision code, reconciles
+  exactly to the frozen control and the W4 overlap; PIT pass; ensemble-hedged
+  control rebuilt. Reconstructability gate for the W5 score/entry/exit/sniper/
+  sizing/path-shape/regime stages — no alpha claim. Stage-0 code uncommitted.
+- `docs/preregistration/2026-06-14-w5-continuous-stage1-score-entry.md` -
+  W5 Stage 1 NULL (structural, both venues): same-breadth score-as-entry-priority
+  is a mechanical no-op (0 replacements across 3y × 4 components × 2 venues; A1/A5
+  ledgers byte-identical to A0). The crowding gate already resolves within-cycle
+  contention. Score lever moves to Stage 7 (path-shape) + Stage 5 (sizing).
+  Code uncommitted.
 - `docs/preregistration/2026-06-13-w4-continuous-stage1-stop-exit-realism.md` -
   CLOSED 2026-06-13; exact registered stop/protective-exit overlays rejected.
 - `docs/preregistration/2026-06-13-w4-continuous-stage2-sniper-fill-validity.md` -
@@ -165,6 +177,17 @@ without genuinely new data, a new lifecycle, or a fresh forward-only bar.
   preregistration, both venues, full artifacts, effect sizes, fragility, and
   explicit decision gates. Important feature families are not closed by one
   small script; each mechanism/stage is judged on its own registered evidence.
+- **W5 Stage 1 score-as-entry-priority (2026-06-14): structural NULL.** Same-
+  breadth within-cycle entry priority (composite, and a symbol-hash negative
+  control) vs the frozen control produced **0 replacements** across 3y × 4
+  components × 2 venues — A1/A5 ledgers are byte-identical to A0 (fcfs reproduces
+  the control to 1e-9). The per-component crowding gate (max_fresh=2) plus
+  max_active=25 leave no within-cycle contention to reorder, so entry priority is
+  a mechanical no-op. Do not re-run within-cycle entry-priority on this control.
+  The score-as-information lever moves to Stage 7 (neutralized path-shape) and
+  Stage 5 (score-weighted sizing at constant breadth); a breadth-changing
+  score-conditioned crowding admission is a distinct Stage 8 idea. Receipt
+  `docs/preregistration/2026-06-14-w5-continuous-stage1-score-entry.md`.
 - **W4 replacement Stage 1 stop/exit realism (2026-06-13):** exact registered
   capped 25% disaster stop plus failed-fade/breakeven overlay rejected on the
   amended full-PIT common window (`2023-04-01 <= signal_ts < 2026-05-01`).

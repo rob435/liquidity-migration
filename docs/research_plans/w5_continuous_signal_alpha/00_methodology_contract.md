@@ -85,3 +85,41 @@ Each stage must state what makes the mechanism disappear. Examples:
 - pooled MAR delta fails the Tier-2 bar;
 - drawdown/worst-day loss worsens beyond the preregistered tolerance;
 - live fill sample is too small.
+
+## Objective Standard
+
+The objective of every stage is **risk-adjusted return (pooled MAR) vs the
+frozen control on both venues**, net of funding and costs. The following are
+never objectives and may not be a stage's success metric:
+
+- trade count, "uptime," or "the book is always trading";
+- raw total return without the drawdown/MAR and both-venue checks;
+- a single-venue or single-month improvement.
+
+A change that makes the book trade more (more regimes, more names, more often)
+passes only if it improves pooled MAR within the drawdown tolerance. More
+activity is an allowed *side effect*, never the target.
+
+## Regime / Closed-Mechanism Rule
+
+E2 (`docs/preregistration/2026-06-12-e2-regime-response-family.md`) closed the
+bounded-threshold "trade more regimes" family (V1 euphoria cap, V2 downtrend
+quarter-size): both lost ~20pp return and roughly halved MAR on both venues. Any
+regime work in W5 (Stage 8) must be **mechanistically distinct** from that
+family — a continuous regime to size map, a multifactor regime, score-
+conditioned admission, or regime-conditioned hedging — and must beat the V0
+binary gate, not merely V1/V2. More generally: a closed mechanism may be
+reopened only by a materially different form with a fresh dated preregistration.
+Re-running a falsified mechanism in its exact failed shape is prohibited, even
+under a "be relentless" directive.
+
+## Research Posture
+
+Be relentless and do not give up on finding edge. A NULL closes one hypothesis,
+not the program: when a mechanism fails, bank the honest verdict and propose the
+next mechanistically distinct hypothesis. Persistence lives in the *breadth and
+novelty of hypotheses* — entry, exit, path-shape, regime, sizing, interaction —
+run at full artifact discipline, with honest kills and forward-only promotion.
+Persistence does **not** live in re-running a dead mechanism, lowering a
+threshold after seeing output, or leaning on one venue. Relentless here means
+"always have the next real experiment queued," never "make this one pass."
