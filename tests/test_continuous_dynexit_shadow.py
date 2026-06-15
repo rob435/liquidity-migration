@@ -112,3 +112,82 @@ def test_idempotent_no_duplicate_events(tmp_path) -> None:
     update_dynexit_shadow(tmp_path, all_trades=trades, fresh_entries=[e], klines=k, now_ms=T0 + 28 * MS_H)
     rows = _read(tmp_path)
     assert sum(1 for r in rows if r["event"] == "arm") == 1
+
+
+# ---------------------------------------------------------------------------
+# audit2
+# [0] dyn-exit shadow: "whichever first" — a target touched AFTER the real exit
+# must NOT count as a dyn_tp (look-ahead vs the frozen pre-registration).
+# ---------------------------------------------------------------------------
+
+def _write_arm(root, *, target_price: float, entry_i: int) -> None:
+    rec = {
+        "event": "arm",
+        "trade_id": "t1",
+        "symbol": "AAAUSDT",
+        "target_price": target_price,
+        "entry_ts_ms": T0 + entry_i * MS_H,
+        "entry_price": 100.0,
+    }
+    (root / SHADOW_FILE).write_text(json.dumps(rec) + "\n", encoding="utf-8")
+
+
+def _closed_trade_df(*, exit_i: int, exit_price: float) -> pl.DataFrame:
+    return pl.DataFrame(
+        [{
+            "symbol": "AAAUSDT",
+            "status": "closed",
+            "trade_id": "t1",
+            "exit_price": exit_price,
+            "exit_ts_ms": T0 + exit_i * MS_H,
+        }]
+    )
+
+
+def _klines_with_low_touch(touch_i: int, *, low: float = 94.0) -> pl.DataFrame:
+    rows = []
+    for i in range(25):
+        rows.append({
+            "symbol": "AAAUSDT",
+            "ts_ms": T0 + i * MS_H,
+            "low": low if i == touch_i else 100.0,
+        })
+    return pl.DataFrame(rows)
+
+
+def _read_exits(root):
+    text = (root / SHADOW_FILE).read_text(encoding="utf-8")
+    return [json.loads(x) for x in text.splitlines() if x.strip() and json.loads(x).get("event") == "shadow_exit"]
+
+
+def test_dynexit_target_touch_after_real_exit_is_capped(tmp_path) -> None:
+    # Real trade force-closed at i=10 (price 99). The dyn target (95) is only touched
+    # at i=15 — AFTER the position was really closed. Must fall through to real_exit.
+    _write_arm(tmp_path, target_price=95.0, entry_i=7)
+    update_dynexit_shadow(
+        tmp_path,
+        all_trades=_closed_trade_df(exit_i=10, exit_price=99.0),
+        fresh_entries=[],
+        klines=_klines_with_low_touch(touch_i=15),
+        now_ms=T0 + 20 * MS_H,
+    )
+    exits = _read_exits(tmp_path)
+    assert len(exits) == 1
+    assert exits[0]["reason"] == "real_exit"  # NOT dyn_tp (was the look-ahead)
+    assert exits[0]["exit_price"] == 99.0
+
+
+def test_dynexit_target_touch_before_real_exit_still_fires(tmp_path) -> None:
+    # Control: the target is touched at i=8, BEFORE the real exit at i=10 -> dyn_tp.
+    _write_arm(tmp_path, target_price=95.0, entry_i=7)
+    update_dynexit_shadow(
+        tmp_path,
+        all_trades=_closed_trade_df(exit_i=10, exit_price=99.0),
+        fresh_entries=[],
+        klines=_klines_with_low_touch(touch_i=8),
+        now_ms=T0 + 20 * MS_H,
+    )
+    exits = _read_exits(tmp_path)
+    assert len(exits) == 1
+    assert exits[0]["reason"] == "dyn_tp"
+    assert exits[0]["exit_price"] == 95.0

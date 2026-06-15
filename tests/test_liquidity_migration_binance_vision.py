@@ -13,6 +13,7 @@ import zipfile
 import polars as pl
 import pytest
 
+import liquidity_migration.binance_vision as bv
 from liquidity_migration.binance_vision import (
     _assert_download_completeness,
     parse_month_csv,
@@ -134,3 +135,198 @@ def test_rewrite_manifest_to_coverage_synthesises_when_manifest_absent(tmp_path)
     out = read_dataset(root, "archive_trade_manifest")
     assert out["symbol"].to_list() == ["AAAUSDT"]
     assert out["url"].to_list() == ["kline_coverage"]
+
+
+# --------------------------------------------------------------------------
+# audit2b: valid-but-empty month must NOT count as a download failure.
+# --------------------------------------------------------------------------
+
+def _patch_listing(monkeypatch, inventory):
+    monkeypatch.setattr(bv, "discover", lambda **k: inventory)
+
+
+def test_valid_empty_month_not_counted_as_failed_job(tmp_path, monkeypatch):
+    """audit2b defect-1: one month parses to rows, one is a VALID header-only
+    month (empty parse). With a 0% failure tolerance the build must still
+    succeed — the empty-but-valid month is NOT a failed job.
+
+    OLD code: fetch_month_klines returned [] for the empty month, the caller
+    appended it to failed_jobs, ratio = 1/2 = 50% > 0% -> RuntimeError. NEW
+    code: the empty month is success-with-no-rows and is not counted."""
+    root = tmp_path / "root"
+    jan01 = 1704067200000  # 2024-01-01 00:00 UTC
+
+    _patch_listing(monkeypatch, {"AAAUSDT": ["2024-01", "2024-02"]})
+
+    def _fake_fetch(symbol, ym):
+        if ym == "2024-01":
+            # A full, valid month: 24 hourly bars.
+            return [{
+                "ts_ms": jan01 + i * MS_PER_HOUR, "symbol": symbol,
+                "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+                "volume_base": 1.0, "turnover_quote": 1.0, "source": "test",
+            } for i in range(24)]
+        # A valid month with no parseable bars (e.g. header-only CSV).
+        return []
+
+    monkeypatch.setattr(bv, "fetch_month_klines", _fake_fetch)
+
+    # Zero tolerance: a single miscounted failure would abort.
+    summary = bv.build_binance_oos(root, end_date="2024-03-01", max_failure_ratio=0.0)
+
+    assert summary["failed_files"] == 0          # empty-but-valid month not failed
+    assert summary["symbols"] == 1
+    klines = read_dataset(root, "klines_1h")
+    assert klines.height == 24                    # exactly the valid month's rows
+
+
+def test_real_download_failure_still_counted(tmp_path, monkeypatch):
+    """audit2b defect-1: a genuine hard failure (None) is still a failed job and
+    still trips the survivorship gate — the fix narrows what counts as failure,
+    it does not stop counting real failures."""
+    root = tmp_path / "root"
+    jan01 = 1704067200000
+
+    _patch_listing(monkeypatch, {"AAAUSDT": ["2024-01", "2024-02"]})
+
+    def _fake_fetch(symbol, ym):
+        if ym == "2024-01":
+            return [{
+                "ts_ms": jan01 + i * MS_PER_HOUR, "symbol": symbol,
+                "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+                "volume_base": 1.0, "turnover_quote": 1.0, "source": "test",
+            } for i in range(24)]
+        return None  # hard download/integrity failure
+
+    monkeypatch.setattr(bv, "fetch_month_klines", _fake_fetch)
+
+    with pytest.raises(RuntimeError, match="survivorship-biased"):
+        bv.build_binance_oos(root, end_date="2024-03-01", max_failure_ratio=0.0)
+
+
+def test_fetch_month_klines_returns_empty_list_on_valid_empty_zip(monkeypatch):
+    """audit2b defect-1: a successful fetch of a header-only month returns an
+    empty *list* (success), never None. A network failure returns None."""
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def getheader(self, _name):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    header_only = _zip_csv(
+        "open_time,open,high,low,close,volume,close_time,quote_volume,count,tb,tbq,ignore\n"
+    )
+    monkeypatch.setattr(bv.urllib.request, "urlopen", lambda *a, **k: _Resp(header_only))
+    monkeypatch.setattr(bv, "_fetch_expected_sha256", lambda *a, **k: None)
+
+    out = bv.fetch_month_klines("AAAUSDT", "2024-01")
+    assert out == []          # valid-but-empty success, NOT None
+    assert out is not None
+
+
+def test_normal_input_unchanged_happy_path(tmp_path, monkeypatch):
+    """audit2b: NORMAL (non-defective) input is numerically unchanged — a build
+    where every month has rows produces exactly the same klines and zero failed
+    files as before the fix (the happy path is untouched)."""
+    root = tmp_path / "root"
+    jan01 = 1704067200000
+
+    _patch_listing(monkeypatch, {"AAAUSDT": ["2024-01"], "BBBUSDT": ["2024-01"]})
+
+    def _fake_fetch(symbol, ym):
+        return [{
+            "ts_ms": jan01 + i * MS_PER_HOUR, "symbol": symbol,
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+            "volume_base": 1.0, "turnover_quote": 1.0, "source": "test",
+        } for i in range(24)]
+
+    monkeypatch.setattr(bv, "fetch_month_klines", _fake_fetch)
+    summary = bv.build_binance_oos(root, end_date="2024-02-01", max_failure_ratio=0.0)
+
+    assert summary["failed_files"] == 0
+    assert summary["symbols"] == 2
+    klines = read_dataset(root, "klines_1h")
+    assert klines.height == 48
+    assert set(klines["symbol"].unique().to_list()) == {"AAAUSDT", "BBBUSDT"}
+
+
+# --------------------------------------------------------------------------
+# audit2b: document the CURRENT _verify_download contract.
+# --------------------------------------------------------------------------
+
+def test_verify_download_no_checksum_no_length_requires_valid_zip():
+    """audit2c (operator-approved) SUPERSEDES the earlier audit2b 'flagged-not-fixed'
+    note: _verify_download now requires a valid non-empty zip when BOTH the .CHECKSUM
+    sidecar and the Content-Length header are absent, instead of being a no-op."""
+    # Both signals absent + a non-zip body -> now RAISES (was a silent no-op).
+    with pytest.raises(ValueError):
+        bv._verify_download(b"not-a-zip-but-no-signals", expected_sha256=None, content_length=None)
+    # Both signals absent + a VALID zip -> still passes.
+    bv._verify_download(_zip_csv("open_time,open\n1,2\n"), expected_sha256=None, content_length=None)
+    # A present, matching Content-Length still passes; a wrong one still raises.
+    raw = b"half-a-body"
+    bv._verify_download(raw, expected_sha256=None, content_length=len(raw))
+    with pytest.raises(ValueError, match="Content-Length mismatch"):
+        bv._verify_download(raw, expected_sha256=None, content_length=len(raw) + 100)
+
+
+# --------------------------------------------------------------------------
+# audit2c (binance_floor): _verify_download both-absent fail-closed contract.
+# --------------------------------------------------------------------------
+
+def _valid_zip_bytes() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("AAAUSDT-1h-2024-01.csv", "ts,open,high,low,close\n1,2,3,4,5\n")
+    return buf.getvalue()
+
+
+def test_non_zip_body_with_no_checksum_no_length_raises() -> None:
+    """audit2c: a non-zip body with no .CHECKSUM and no Content-Length must now
+    raise (the old both-absent path was a no-op that let garbage into the root)."""
+    raw = b"truncated-garbage-not-a-zip"
+    with pytest.raises(ValueError, match="unverifiable body rejected"):
+        bv._verify_download(raw, expected_sha256=None, content_length=None)
+
+
+def test_empty_body_with_no_checksum_no_length_raises() -> None:
+    """audit2c: an empty body is also rejected on the both-absent path."""
+    with pytest.raises(ValueError, match="unverifiable body rejected"):
+        bv._verify_download(b"", expected_sha256=None, content_length=None)
+
+
+def test_valid_zip_with_no_checksum_no_length_passes() -> None:
+    """audit2c: a genuine, structurally-valid zip with neither integrity signal
+    still passes — the fix only rejects unverifiable corruption, not real archives
+    from older months that publish no sidecar/header."""
+    bv._verify_download(_valid_zip_bytes(), expected_sha256=None, content_length=None)
+
+
+def test_checksum_and_length_branches_unchanged() -> None:
+    """audit2c guardrail: the sha256 and Content-Length branches are NOT weakened
+    by the new fail-closed both-absent path."""
+    import hashlib
+
+    raw = _valid_zip_bytes()
+    good_sha = hashlib.sha256(raw).hexdigest()
+    # sha256 authoritative: matches -> pass even with a deliberately wrong length.
+    bv._verify_download(raw, good_sha, content_length=1)
+    # sha256 mismatch still raises.
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        bv._verify_download(raw, "0" * 64, content_length=len(raw))
+    # Content-Length mismatch still raises (no checksum).
+    with pytest.raises(ValueError, match="Content-Length mismatch"):
+        bv._verify_download(raw, expected_sha256=None, content_length=len(raw) + 99)
+    # Matching Content-Length passes without reaching the zip check.
+    bv._verify_download(b"anything", expected_sha256=None, content_length=len(b"anything"))

@@ -6,6 +6,8 @@ root (panel build -> trades -> compounding equity -> artifacts).
 """
 from __future__ import annotations
 
+import dataclasses
+
 import polars as pl
 import pytest
 
@@ -14,6 +16,7 @@ from liquidity_migration.continuous_events import (
     ContinuousEventConfig,
     _btc_trend_returns,
     _fresh_entries,
+    _market_daily_returns,
     _panel_cache_path,
     _panel_cache_stale,
     _round_trip_bps,
@@ -654,3 +657,71 @@ def test_end_to_end_age_gate_loads_enough_history_for_age_test(tmp_path) -> None
     assert payload["n_fresh_entries"] > 0
     assert payload["n_trades"] > 0
     assert payload["skips"]["skipped_gate"] < payload["n_fresh_entries"]
+
+
+# --------------------------------------------------------------------------- market-regime gate
+# audit2c: the equal-weight market-regime gate computes gap-aware daily returns. A symbol with a
+# missing calendar day must NOT contribute a multi-day return mislabelled as that day's 1-day
+# return to the cross-sectional mean.
+
+D0, D1, D2 = 0, MS_PER_DAY, 2 * MS_PER_DAY
+
+
+def _bar(symbol, day_ts, close):
+    return {"ts_ms": day_ts + 3600_000, "symbol": symbol, "close": close}
+
+
+def test_market_daily_returns_excludes_gap_day() -> None:
+    klines = pl.DataFrame([
+        # Symbol A: contiguous days 0,1,2 -> +10% each day.
+        _bar("A", D0, 100.0), _bar("A", D1, 110.0), _bar("A", D2, 121.0),
+        # Symbol B: GAP at day 1 (present on day 0 and day 2 only).
+        _bar("B", D0, 100.0), _bar("B", D2, 120.0),
+    ])
+    out = _market_daily_returns(klines)
+    # Day 1: only A has a return (B has no day-1 bar).
+    assert out[D1] == pytest.approx(0.10)
+    # Day 2: A = +10%; B's return is gap-aware NULL (no calendar-consecutive day-1
+    # predecessor), so B is EXCLUDED — the mean is 0.10, NOT mean(0.10, 0.20)=0.15 that
+    # the old gap-blind shift(1) would have produced.
+    assert out[D2] == pytest.approx(0.10)
+
+
+def test_market_daily_returns_contiguous_unchanged() -> None:
+    klines = pl.DataFrame([
+        _bar("A", D0, 100.0), _bar("A", D1, 110.0),
+        _bar("B", D0, 200.0), _bar("B", D1, 210.0),
+    ])
+    out = _market_daily_returns(klines)
+    # A +10%, B +5% -> mean 7.5% (byte-identical to the plain-shift result on contiguous data).
+    assert out[D1] == pytest.approx(0.075)
+
+
+# ---------------------------------------------------------------------------
+# audit2
+# [11] continuous_events panel cache key must include exclude_symbols.
+# ---------------------------------------------------------------------------
+
+_T0 = 1_700_000_000_000  # arbitrary end_ms timestamp int for cache-path keying
+
+
+def test_panel_cache_key_distinguishes_exclude_symbols(tmp_path) -> None:
+    base = ContinuousEventConfig()
+    cfg_a = dataclasses.replace(base, exclude_symbols=("BTCUSDT",))
+    cfg_b = dataclasses.replace(base, exclude_symbols=("ETHUSDT",))
+    cfg_none = dataclasses.replace(base, exclude_symbols=())
+    pa = _panel_cache_path(tmp_path, cfg_a, end_ms=_T0)
+    pb = _panel_cache_path(tmp_path, cfg_b, end_ms=_T0)
+    pnone = _panel_cache_path(tmp_path, cfg_none, end_ms=_T0)
+    assert pa != pb  # different exclusion sets must not collide (was the bug)
+    assert pa != pnone and pb != pnone
+    # the empty-exclusion (live/default) filename must NOT carry an _excl tag, so no
+    # existing cache is invalidated.
+    assert "_excl" not in pnone.name
+
+
+def test_panel_cache_key_exclude_order_independent(tmp_path) -> None:
+    base = ContinuousEventConfig()
+    p1 = _panel_cache_path(tmp_path, dataclasses.replace(base, exclude_symbols=("AUSDT", "BUSDT")), end_ms=_T0)
+    p2 = _panel_cache_path(tmp_path, dataclasses.replace(base, exclude_symbols=("BUSDT", "AUSDT")), end_ms=_T0)
+    assert p1 == p2

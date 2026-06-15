@@ -926,3 +926,72 @@ def test_private_call_transport_retries_and_final_message_carries_cause(monkeypa
         client.cancel_order(symbol="BTCUSDT", order_link_id="lm-x")
     assert client._client.calls == client.retries  # transport: retried to exhaustion
     assert "connection reset by venue" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# audit2
+# B2 bybit._is_rate_limit must classify on retCode/retMsg, not the whole payload.
+# ---------------------------------------------------------------------------
+
+def test_is_rate_limit_ignores_orderid_substring() -> None:
+    # orderId contains "10006" but retCode is a definite reject -> NOT a rate limit.
+    assert bybit._is_rate_limit({"retCode": 110001, "result": {"orderId": "a10006b"}}) is False
+
+
+def test_is_rate_limit_true_on_retcode_10006() -> None:
+    assert bybit._is_rate_limit({"retCode": 10006, "retMsg": "Too many visits"}) is True
+
+
+def test_is_rate_limit_non_throttle_retmsg_not_matched_via_payload() -> None:
+    # A risk/leverage reject whose retMsg legitimately contains "rate limit" must not
+    # be misclassified when the code is a definite reject... but the retMsg text itself
+    # is the venue's throttle signal, so a retMsg-level match is still honoured:
+    assert bybit._is_rate_limit({"retCode": 110043, "retMsg": "set leverage not modified"}) is False
+
+
+def test_is_rate_limit_string_fallback() -> None:
+    assert bybit._is_rate_limit("rate limit exceeded") is True
+    assert bybit._is_rate_limit("position closed") is False
+
+
+# ---------------------------------------------------------------------------
+# B3 WS trade client carries the demo-only submit guard (defense in depth).
+# ---------------------------------------------------------------------------
+
+class _FakeWsTrading:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.calls = []
+
+    def place_order(self, callback, **params):
+        self.calls.append(("place", params))
+
+    def cancel_order(self, callback, **params):
+        self.calls.append(("cancel", params))
+
+
+def test_ws_trade_client_blocks_real_money_submit_without_confirm(monkeypatch) -> None:
+    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
+    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=False)
+    with pytest.raises(RuntimeError, match="REAL_MONEY"):
+        client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
+    with pytest.raises(RuntimeError, match="REAL_MONEY"):
+        client.cancel_order(object(), symbol="BTCUSDT", order_link_id="x")
+    assert client._client.calls == []  # nothing reached the venue
+
+
+def test_ws_trade_client_allows_real_money_with_confirm(monkeypatch) -> None:
+    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
+    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=False, confirm_real_money=True)
+    client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
+    assert client._client.calls == [("place", {
+        "category": "linear", "symbol": "BTCUSDT", "side": "Buy",
+        "orderType": "Market", "qty": "0.001", "orderLinkId": "x",
+    })]
+
+
+def test_ws_trade_client_demo_path_unaffected(monkeypatch) -> None:
+    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
+    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=True)
+    client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
+    assert len(client._client.calls) == 1

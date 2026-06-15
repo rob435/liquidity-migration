@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import math
+
+import polars as pl
 import pytest
 
+from liquidity_migration import downloaders
+from liquidity_migration.config import ResearchConfig
 from liquidity_migration.downloaders import (
     _archive_filename,
     _dates_between,
@@ -22,8 +27,10 @@ from liquidity_migration.downloaders import (
     _normalize_price_index_klines,
     _normalize_tickers,
     _resolve_binance_dataset_name,
+    download_market_data,
     parse_date_ms,
 )
+from liquidity_migration.storage import read_dataset
 
 
 # --- _normalize_klines (Bybit kline arrays) ---------------------------------
@@ -689,3 +696,205 @@ def test_download_symbol_dataset_clamped_window_marker_keys_on_covered_range(tmp
         start_ms=clamped_start, end_ms=end_ms, suffix="_1h",
     )
     assert covered_marker.exists()
+
+
+# --- audit2b: _normalize_binance_taker_flow non-finite / negative guard ------
+#
+# audit2b regression: _normalize_binance_taker_flow must guard non-finite /
+# negative taker volumes before computing the imbalance ratio, instead of
+# emitting a fabricated 0.0. A NaN/inf or negative buy/sell volume slips past the
+# `is None` check; `total = buy + sell` is then NaN or <= 0, so the
+# `(buy - sell) / total if total > 0 else 0.0` branch fabricates a 0.0 imbalance
+# (or a NaN) alongside a NaN/garbage signed volume — the spurious-zero corruption
+# the function's own docstring forbids for missing data. Fix: treat a non-finite
+# or negative volume as missing data and emit null derived fields.
+
+
+def _row(ts, buy, sell, ratio="1.0"):
+    return {"timestamp": ts, "buyVol": buy, "sellVol": sell, "buySellRatio": ratio}
+
+
+def test_happy_path_unchanged():
+    """Normal finite, non-negative volumes: derived fields are the exact prior values."""
+    rows = [
+        _row(1_000, "30", "10", ratio="3.0"),
+        _row(2_000, "0", "0", ratio="0.0"),  # both-zero -> total == 0 -> imbalance 0.0
+        _row(3_000, "5", "15", ratio="0.333"),
+    ]
+    out = _normalize_binance_taker_flow("BTCUSDT", rows, period="1h")
+    assert [r["ts_ms"] for r in out] == [1_000, 2_000, 3_000]
+
+    # ts=1000: imbalance (30-10)/40 = 0.5, signed = 20
+    assert out[0]["buy_volume_base"] == 30.0
+    assert out[0]["sell_volume_base"] == 10.0
+    assert out[0]["signed_volume_base"] == 20.0
+    assert out[0]["taker_imbalance"] == 0.5
+
+    # ts=2000: legitimate both-zero -> derived 0.0 / 0.0 preserved (NOT nulled)
+    assert out[1]["signed_volume_base"] == 0.0
+    assert out[1]["taker_imbalance"] == 0.0
+
+    # ts=3000: imbalance (5-15)/20 = -0.5, signed = -10
+    assert out[2]["signed_volume_base"] == -10.0
+    assert out[2]["taker_imbalance"] == -0.5
+
+    # buy_sell_ratio is passed through verbatim on every row
+    assert out[0]["buy_sell_ratio"] == 3.0
+    assert out[2]["buy_sell_ratio"] == 0.333
+
+
+def test_absent_field_still_nulls_derived():
+    """Existing behavior: a missing side nulls the derived fields (guard must not regress)."""
+    out = _normalize_binance_taker_flow(
+        "BTCUSDT", [{"timestamp": 5_000, "sellVol": "10", "buySellRatio": "1"}], period="1h"
+    )
+    assert len(out) == 1
+    assert out[0]["buy_volume_base"] is None
+    assert out[0]["signed_volume_base"] is None
+    assert out[0]["taker_imbalance"] is None
+
+
+def test_nan_volume_does_not_fabricate_zero_imbalance():
+    """A NaN volume must null the derived fields, not emit a spurious 0.0 imbalance."""
+    out = _normalize_binance_taker_flow(
+        "BTCUSDT", [_row(7_000, "nan", "10")], period="1h"
+    )
+    assert len(out) == 1
+    r = out[0]
+    # OLD code: signed_volume_base is NaN and taker_imbalance is a fabricated 0.0.
+    assert r["taker_imbalance"] is None
+    assert r["signed_volume_base"] is None
+
+
+def test_inf_volume_does_not_fabricate_imbalance():
+    """An inf volume must null derived fields rather than produce 0.0 / NaN."""
+    out = _normalize_binance_taker_flow(
+        "BTCUSDT", [_row(8_000, "inf", "10")], period="1h"
+    )
+    r = out[0]
+    assert r["taker_imbalance"] is None
+    assert r["signed_volume_base"] is None
+    # And it must never be a sneaky NaN that passes an `is not None` check downstream.
+    assert not (isinstance(r["taker_imbalance"], float) and math.isnan(r["taker_imbalance"]))
+
+
+def test_negative_volume_does_not_fabricate_zero_imbalance():
+    """A negative volume (physically impossible) must null derived fields, not emit 0.0."""
+    out = _normalize_binance_taker_flow(
+        "BTCUSDT", [_row(9_000, "-3", "1")], period="1h"
+    )
+    r = out[0]
+    # OLD code: total = -2, total > 0 is False -> taker_imbalance fabricated as 0.0.
+    assert r["taker_imbalance"] is None
+    assert r["signed_volume_base"] is None
+
+
+# --- audit2c: CLI archive_klines_1m path densifies like the PIT builder ------
+#
+# audit2c: the CLI archive_klines_1m path must densify like the canonical PIT
+# builder. Before the fix, download_market_data wrote RAW
+# aggregate_trade_klines_1m output for the archive_klines_1m dataset — a sparse,
+# gap-y frame with one row per traded minute and no carry-forward seed. That
+# diverged from archive_manifest._download_one_archive_kline, which densifies
+# onto the full 1440-row UTC-day grid with a previous_kline_close seed. The test
+# pins the corrected behavior (dense 1440-row grid, carry-forward prices).
+
+
+def _sparse_trades(symbol: str) -> pl.DataFrame:
+    # Two trades, one minute apart, at the very start of the UTC day. The rest of the
+    # 1440-minute grid is untraded, so a raw aggregate is sparse (2 rows).
+    return pl.DataFrame(
+        [
+            {
+                "trade_id": "a",
+                "seq": None,
+                "ts_ms": 1_735_689_600_000,  # 2025-01-01 00:00:00 UTC
+                "symbol": symbol,
+                "side": "Buy",
+                "price": 100.0,
+                "size_base": 1.0,
+                "quote_value": 100.0,
+                "is_block_trade": False,
+                "is_rpi_trade": False,
+            },
+            {
+                "trade_id": "b",
+                "seq": None,
+                "ts_ms": 1_735_689_660_000,  # 2025-01-01 00:01:00 UTC
+                "symbol": symbol,
+                "side": "Buy",
+                "price": 101.0,
+                "size_base": 1.0,
+                "quote_value": 101.0,
+                "is_block_trade": False,
+                "is_rpi_trade": False,
+            },
+        ]
+    )
+
+
+def test_cli_archive_path_densifies_sparse_bars(tmp_path, monkeypatch) -> None:
+    symbol = "AAAUSDT"
+
+    def fake_download(url, destination):
+        assert url == f"https://public.bybit.com/trading/{symbol}/{symbol}2025-01-01.csv.gz"
+        return destination
+
+    def fake_read(_path, *, symbol=None):
+        assert symbol == "AAAUSDT"
+        return _sparse_trades(symbol)
+
+    # The fix imports these helpers into the downloaders namespace, so patch them there.
+    monkeypatch.setattr(downloaders, "download_public_trade_archive", fake_download)
+    monkeypatch.setattr(downloaders, "read_public_trade_archive", fake_read)
+
+    outputs = download_market_data(
+        tmp_path,
+        config=ResearchConfig(),
+        symbols=(symbol,),
+        start_ms=parse_date_ms("2025-01-01"),
+        end_ms=parse_date_ms("2025-01-02"),  # end-exclusive -> single day 2025-01-01
+        datasets={"archive_klines_1m"},
+        archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
+    )
+
+    assert "klines_1m" in outputs
+    bars = read_dataset(tmp_path, "klines_1m").sort("ts_ms")
+
+    # audit2c: dense full-day grid, not the 2 sparse traded minutes the old path wrote.
+    assert bars.height == 1440
+
+    head = bars.select(["ts_ms", "symbol", "open", "close", "volume_base", "source"]).head(3).to_dicts()
+    assert head == [
+        {
+            "ts_ms": 1_735_689_600_000,
+            "symbol": symbol,
+            "open": 100.0,
+            "close": 100.0,
+            "volume_base": 1.0,
+            "source": "bybit_public_trades",
+        },
+        {
+            "ts_ms": 1_735_689_660_000,
+            "symbol": symbol,
+            "open": 101.0,
+            "close": 101.0,
+            "volume_base": 1.0,
+            "source": "bybit_public_trades",
+        },
+        {
+            # Untraded minute: price carries forward from the prior close, zero volume.
+            "ts_ms": 1_735_689_720_000,
+            "symbol": symbol,
+            "open": 101.0,
+            "close": 101.0,
+            "volume_base": 0.0,
+            "source": "bybit_public_trades",
+        },
+    ]
+
+    # The tail of the day is filled too (carry-forward), proving full densification.
+    tail = bars.tail(1).to_dicts()[0]
+    assert tail["ts_ms"] == 1_735_689_600_000 + 1439 * 60_000
+    assert tail["close"] == 101.0
+    assert tail["volume_base"] == 0.0

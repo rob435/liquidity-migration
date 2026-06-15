@@ -6,6 +6,8 @@ import polars as pl
 import pytest
 
 from liquidity_migration.reconciliation import (
+    _continuous_beats_daily_mar,
+    _fee_adjusted_return,
     _write_pairs_csv,
     format_reconciliation_report,
     reconcile_paper_demo,
@@ -265,4 +267,87 @@ def test_write_pairs_csv_emits_machine_readable_companion(tmp_path: Path) -> Non
     assert df["demo_exit_price"][0] == pytest.approx(91.0)
     # No paired trades -> no companion file.
     assert _write_pairs_csv(report_path, []) is None
+
+
+def test_absent_net_return_uses_notional_weighted_gross() -> None:
+    """audit2c: gross_trade_return is weighted by notional/equity before fees.
+
+    notional/equity = 5000/1000 = 5x. The gross return is scaled by that factor,
+    THEN the equity-fractional fee is subtracted — both terms now share the
+    notional-weighted, equity-fractional basis.
+    """
+    row = {
+        "gross_trade_return": 0.02,
+        "notional_usdt": 5000.0,
+        "equity_usdt": 1000.0,
+        "entry_fee_usdt": 0.5,
+        "exit_fee_usdt": 0.5,
+    }
+    out = _fee_adjusted_return(row, net_of_cost=False)
+
+    weight = 5000.0 / 1000.0
+    expected = 0.02 * weight - (0.5 + 0.5) / 1000.0
+    assert out == pytest.approx(expected)  # 0.1 - 0.001 = 0.099
+
+    # The old (unweighted) value subtracted fees from the RAW gross return.
+    old_unweighted = 0.02 - (0.5 + 0.5) / 1000.0  # 0.019
+    assert out != pytest.approx(old_unweighted)
+    # Delta vs the old basis: +0.08 (the gross part scaled by 5x).
+    assert out - old_unweighted == pytest.approx(0.02 * (weight - 1.0))
+
+
+def test_present_net_return_unchanged() -> None:
+    """audit2c guard: a trade WITH net_return (already notional-weighted) keeps the
+    exact same fee-adjusted return — only the gross_trade_return branch is touched."""
+    row = {
+        "net_return": 0.010,  # = gross_trade_return * notional_weight already
+        "notional_usdt": 5000.0,
+        "equity_usdt": 1000.0,
+        "entry_fee_usdt": 0.6,
+        "exit_fee_usdt": 0.6,
+    }
+    out = _fee_adjusted_return(row, net_of_cost=False)
+    assert out == pytest.approx(0.010 - (0.6 + 0.6) / 1000.0)
+
+
+def test_gross_without_notional_falls_back_to_raw() -> None:
+    """audit2c: with no usable notional/equity the weighting is a safe no-op, so the
+    raw gross return is used (no spurious zeroing) before fees are applied."""
+    row = {
+        "gross_trade_return": 0.02,
+        "equity_usdt": 1000.0,  # notional_usdt absent -> weight skipped
+        "entry_fee_usdt": 0.5,
+        "exit_fee_usdt": 0.5,
+    }
+    out = _fee_adjusted_return(row, net_of_cost=False)
+    assert out == pytest.approx(0.02 - (0.5 + 0.5) / 1000.0)
+
+
+# ---------------------------------------------------------------------------
+# audit2
+# [8] reconciliation: a zero-drawdown continuous book (mar=None) is the BEST
+# drawdown case, not a MAR failure.
+# ---------------------------------------------------------------------------
+
+def test_zero_drawdown_continuous_beats_finite_daily_mar() -> None:
+    continuous = {"mar": None, "max_drawdown": 0.0, "total_return": 0.20}
+    daily = {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15}
+    assert _continuous_beats_daily_mar(continuous, daily) is True  # was False (false alarm)
+
+
+def test_zero_drawdown_continuous_with_lower_return_does_not_beat() -> None:
+    continuous = {"mar": None, "max_drawdown": 0.0, "total_return": 0.05}
+    daily = {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15}
+    assert _continuous_beats_daily_mar(continuous, daily) is False
+
+
+def test_finite_mar_comparison_unchanged() -> None:
+    assert _continuous_beats_daily_mar(
+        {"mar": 5.0, "max_drawdown": -0.04, "total_return": 0.2},
+        {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15},
+    ) is True
+    assert _continuous_beats_daily_mar(
+        {"mar": 2.0, "max_drawdown": -0.08, "total_return": 0.1},
+        {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15},
+    ) is False
 

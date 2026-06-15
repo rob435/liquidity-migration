@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from liquidity_migration import cli
+from liquidity_migration.archive_manifest import _safe_name as _archive_safe_name
 from liquidity_migration.cli import _print_event_risk_summary, _resolve_data_root, build_parser
+from liquidity_migration.universe import _safe_name as _universe_safe_name
 
 
 def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Path) -> None:
@@ -284,3 +287,104 @@ def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
     )
     assert args.notional_multiplier == 1.0
     assert args.max_projected_initial_margin_pct_equity == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# audit2b unit ``cli_report_path``: discover-universe / archive-* must print the
+# slugified on-disk report path, not the raw ``--name``.
+# --------------------------------------------------------------------------- #
+def _run(monkeypatch, capsys, tmp_path: Path, argv: list[str]) -> str:
+    rc = cli.main(["--data-root", str(tmp_path), *argv])
+    assert rc == 0
+    return capsys.readouterr().out
+
+
+def _patch_universe(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "run_discover_universe",
+        lambda *a, **k: {"rows": 3, "symbol_csv": "BTCUSDT,ETHUSDT"},
+    )
+
+
+def _patch_archive(monkeypatch, func_name: str) -> None:
+    # The archive handlers print a "rows=/path=" line built from the payload; give
+    # them a minimal payload with every key each formatter reads.
+    payload = {
+        "rows": 7,
+        "symbols": 2,
+        "downloaded": 0,
+        "cached": 0,
+        "empty": 0,
+        "failures": 0,
+        "archives_deleted": 0,
+        "survivorship_warning": None,
+    }
+    monkeypatch.setattr(cli, func_name, lambda *a, **k: payload)
+
+
+# audit2b: discover-universe
+def test_discover_universe_prints_slugged_path_for_nontrivial_name(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    _patch_universe(monkeypatch)
+    out = _run(monkeypatch, capsys, tmp_path, ["discover-universe", "--name", "My Universe"])
+    # The slug the writer actually uses on disk:
+    expected_file = f"universe_{_universe_safe_name('My Universe')}.md"
+    assert expected_file == "universe_My-Universe.md"  # guards the slug rule itself
+    assert expected_file in out
+    # The buggy raw-name path must NOT appear (this is what the old code printed).
+    assert "universe_My Universe.md" not in out
+
+
+# audit2b: discover-universe
+def test_discover_universe_normal_name_path_unchanged(monkeypatch, capsys, tmp_path: Path) -> None:
+    # A name that is already a clean slug must print byte-identically to before.
+    _patch_universe(monkeypatch)
+    out = _run(monkeypatch, capsys, tmp_path, ["discover-universe", "--name", "auto"])
+    assert str(tmp_path / "reports" / "universe_auto.md") in out
+
+
+# audit2b: archive-manifest
+def test_archive_manifest_prints_slugged_path_for_nontrivial_name(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    _patch_archive(monkeypatch, "run_archive_manifest")
+    out = _run(monkeypatch, capsys, tmp_path, ["archive-manifest", "--name", "Q3 run/A"])
+    expected_file = f"archive_manifest_{_archive_safe_name('Q3 run/A')}.md"
+    assert expected_file == "archive_manifest_Q3-run-A.md"
+    assert expected_file in out
+    assert "archive_manifest_Q3 run/A.md" not in out
+
+
+# audit2b: archive-manifest
+def test_archive_manifest_normal_name_path_unchanged(monkeypatch, capsys, tmp_path: Path) -> None:
+    _patch_archive(monkeypatch, "run_archive_manifest")
+    out = _run(
+        monkeypatch, capsys, tmp_path, ["archive-manifest", "--name", "bybit-public-trading"]
+    )
+    assert str(tmp_path / "reports" / "archive_manifest_bybit-public-trading.md") in out
+
+
+# audit2b: archive-download-klines (1m / 1h / 1h-api) — all share the raw-name bug
+@pytest.mark.parametrize(
+    ("command", "func_name", "stem"),
+    [
+        ("archive-download-klines", "run_archive_klines_download", "archive_klines"),
+        ("archive-download-klines-1h", "run_archive_hourly_klines_download", "archive_klines_1h"),
+        (
+            "archive-download-klines-1h-api",
+            "run_archive_hourly_klines_api_download",
+            "archive_klines_1h_api",
+        ),
+    ],
+)
+def test_archive_klines_print_slugged_path(
+    monkeypatch, capsys, tmp_path: Path, command: str, func_name: str, stem: str
+) -> None:
+    _patch_archive(monkeypatch, func_name)
+    out = _run(monkeypatch, capsys, tmp_path, [command, "--name", "My Klines"])
+    expected_file = f"{stem}_{_archive_safe_name('My Klines')}.md"
+    assert expected_file == f"{stem}_My-Klines.md"
+    assert expected_file in out
+    assert f"{stem}_My Klines.md" not in out

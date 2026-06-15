@@ -3984,3 +3984,33 @@ def test_adoption_treats_eth_hedge_leg_as_externally_managed(tmp_path: Path) -> 
     assert float(row["take_profit_price"]) == 0.0
     assert int(row["planned_exit_ts_ms"]) == 0
     assert row["submit_mode"] == "adopted_recovered"
+
+
+def test_drain_failed_telegram_keys_unrecords_on_consumer_thread(tmp_path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
+    )
+    try:
+        engine.state.telegram_keys_sent.add("k-x")
+        ws_risk._write_telegram_dedupe_keys(engine.report_dir, engine.state.telegram_keys_sent)
+        # Sender thread hands a failed key back; consumer drains + un-records it.
+        engine._telegram_failed_keys.put("k-x")
+        engine._drain_failed_telegram_keys()
+        assert "k-x" not in engine.state.telegram_keys_sent
+        assert "k-x" not in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
+    finally:
+        engine.close()
+
+
+def test_drain_failed_telegram_keys_noop_when_queue_empty(tmp_path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
+    )
+    try:
+        engine.state.telegram_keys_sent.add("keep")
+        ws_risk._write_telegram_dedupe_keys(engine.report_dir, engine.state.telegram_keys_sent)
+        engine._drain_failed_telegram_keys()  # nothing queued -> no change
+        assert "keep" in engine.state.telegram_keys_sent
+        assert "keep" in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
+    finally:
+        engine.close()

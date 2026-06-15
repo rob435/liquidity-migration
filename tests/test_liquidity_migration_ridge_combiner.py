@@ -251,3 +251,47 @@ def test_coefficient_sign_consistency():
     cons = coefficient_sign_consistency(coefs)
     assert cons["a"] == pytest.approx(1.0)  # always positive
     assert cons["b"] == pytest.approx(2 / 3)  # 2 of 3 negative
+
+
+# ---------------------------------------------------------------------------
+# audit2
+# [12] ridge embargo leak guard must not be bypassable by the target name.
+# ---------------------------------------------------------------------------
+
+def test_ridge_embargo_enforced_for_explicit_horizon() -> None:
+    with pytest.raises(ValueError, match="embargo"):
+        RidgeCombinerConfig(
+            features=("a", "b"),
+            target_col="y_5d",
+            forward_horizon=5,
+            walk_forward=WalkForwardConfig(embargo_days=2),
+        )
+    # embargo >= horizon+1 is accepted.
+    RidgeCombinerConfig(
+        features=("a", "b"),
+        target_col="y_5d",
+        forward_horizon=5,
+        walk_forward=WalkForwardConfig(embargo_days=6),
+    )
+
+
+def test_ridge_forwardish_name_without_horizon_is_rejected() -> None:
+    with pytest.raises(ValueError, match="forward"):
+        RidgeCombinerConfig(
+            features=("a", "b"),
+            target_col="forward_return_5d",
+            walk_forward=WalkForwardConfig(embargo_days=2),
+        )
+
+
+def test_ridge_non_forward_target_is_unconstrained() -> None:
+    # A target with no forward-return shape needs no embargo coupling.
+    RidgeCombinerConfig(
+        features=("a", "b"),
+        target_col="alpha_label",
+        walk_forward=WalkForwardConfig(embargo_days=0),
+    )
+
+
+def test_ridge_default_fwd_ret_target_still_works() -> None:
+    RidgeCombinerConfig(features=("a", "b"), target_col="fwd_ret_1d")  # default embargo ok
