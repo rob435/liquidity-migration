@@ -1,15 +1,15 @@
-# Pre-registration: orderflow squeeze-proxy sizing tilt (engine intervention)
+# Pre-registration: W6 squeeze-proxy sizing tilt (engine intervention)
 
 **Date:** 2026-06-15
-**Author:** rob435 (operator-directed orderflow program, 2026-06-15)
+**Author:** rob435 (operator-directed W6 bybit-first program, 2026-06-15)
 **Stage:** run-pending (binding). Filed BEFORE the engine sweep, per AGENTS.md
 parameter pre-registration (touches the per-venue full-PIT working roots).
 
 ## Why this stage exists
 W5 closed the price/return lever space but left the OI/funding/depth squeeze proxy
 as the credible untested orderflow leg. The EXPLORATORY screen
-(`scripts/orderflow_squeeze_proxy_screen.py`, artifacts
-`~/SHARED_DATA/orderflow_squeeze_proxy_screen_2026-06-15/`, run_label exploratory)
+(`scripts/w6_squeeze_proxy_screen.py`, artifacts
+`~/SHARED_DATA/w6_squeeze_proxy_screen_2026-06-15/`, run_label exploratory)
 found, within-symbol partial rank-IC over the production composite (symbol-hash
 control DEGENERATE on both venues, as required):
 
@@ -86,10 +86,10 @@ operator-gated. Do NOT set `REAL_MONEY=true`.
 ## Run command (to fill at run time, on the data box)
 ```bash
 POLARS_MAX_THREADS=8 PYTHONPATH=. .venv/bin/python \
-    scripts/orderflow_squeeze_proxy_sizing.py \
+    scripts/w6_squeeze_proxy_sizing.py \
     --venues bybit,binance --start 2023-04-01 --end 2026-05-01 \
     --grid k=0.25,0.5 cap=0.5,1.0 --seeds 0..4 \
-    --out ~/SHARED_DATA/orderflow_squeeze_proxy_sizing_2026-06-15
+    --out ~/SHARED_DATA/w6_squeeze_proxy_sizing_2026-06-15
 # gate: ruff + pytest before any push.
 ```
 

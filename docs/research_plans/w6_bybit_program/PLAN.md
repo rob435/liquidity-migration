@@ -1,4 +1,8 @@
-# Post-W5 research program — bybit-first
+# W6 — bybit-first research program
+
+The successor wave to W5 (continuous signal alpha). W5 exhausted the price/return lever
+space on the existing panel; W6 opens the orderflow/squeeze axis, execution/cost alpha,
+and hedge deepening — bybit-first.
 
 **Date:** 2026-06-15 · **Author:** rob435 (operator-directed) · **Status:** working plan
 (not a pre-registration; each binding stage gets its own receipt under
@@ -66,7 +70,7 @@ p=0.013**, bybit +0.025 same sign. Admissibility ≠ harvestable — the engine 
 - **A1 — OI-buildup sizing tilt (P0, pre-registered).** Mean-1, gross-neutral size-up
   of high-squeeze fades via the merged `size_mult_lookup` hook; multi-seed shuffle +
   random controls, cost stress, thirds, bybit-robust bar. Receipt:
-  `docs/preregistration/2026-06-15-orderflow-squeeze-proxy-sizing.md`. **Run next.**
+  `docs/preregistration/2026-06-15-w6-squeeze-proxy-sizing.md`. **Run next.**
 - **A2 — funding both-venue.** Same harness, `sq = z(funding_level)` (the same-sign
   both-venue leg). Cheap add-on to A1's grid.
 - **A3 — squeeze COMPOSITE.** `sq = w1·z(oi_chg_24h) + w2·z(funding) (+ w3·z(LSR))`,
@@ -95,7 +99,7 @@ p=0.013**, bybit +0.025 same sign. Admissibility ≠ harvestable — the engine 
 - **A7 liquidation-cluster · A8 book-thinning · A9 LSR-crowding (P3, data-gated).**
   Add as causal features once the forward tapes mature (liquidation ~2026-07-10; depth
   ~weeks; LSR history shallow). Frozen design in
-  `docs/research_plans/orderflow_squeeze_proxy/PLAN.md` §2. Each enters the screen,
+  `docs/research_plans/w6_bybit_program/orderflow.md` §2. Each enters the screen,
   then A1/A4 if admissible.
 
 ## Track B — Execution / cost alpha (bybit microstructure, under-explored)
@@ -158,7 +162,7 @@ and zero diffuse-edge conflict — the highest-leverage untouched axis. bybit ha
 ## Track E — Data & infra (unblocks B/C/A7–9 and binance both-venue)
 
 - **E1 binance liquidation host** (operator) — start the binance forward liquidation
-  tape; runbook in `docs/research_plans/orderflow_squeeze_proxy/PLAN.md` §3. Every day
+  tape; runbook in `docs/research_plans/w6_bybit_program/orderflow.md` §3. Every day
   unfixed is unbackfillable binance history.
 - **E2 depth maturation (R4)** — bybit depth live since 2026-06-13; gates B2/B4.
 - **E3 P11 taker-flow completion** — richer taker features for a re-test (idle-time).

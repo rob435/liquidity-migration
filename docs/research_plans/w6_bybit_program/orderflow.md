@@ -1,7 +1,8 @@
-# Orderflow squeeze-proxy program — plan
+# W6 — orderflow squeeze-proxy track
 
-Operator-directed 2026-06-15. The W5 program closed the price/return lever space; this
-is the orderflow frontier W5 deliberately did not touch. Thesis: the continuous book
+Operator-directed 2026-06-15. The orderflow track of the W6 bybit-first program (see
+`docs/research_plans/w6_bybit_program/PLAN.md`). The W5 program closed the price/return
+lever space; this is the orderflow frontier W5 deliberately did not touch. Thesis: the continuous book
 SHORTS pumped names, so a pump on a CROWDED long (OI buildup, extreme funding,
 liquidation cluster, thinning book) is a squeeze that fades harder — the squeeze
 context is the signal, not raw taker-flow composition (P10's null).
@@ -10,13 +11,13 @@ Status legend: ✅ done · 🔬 evidence in hand · 🧱 data-gated · 📝 desi
 
 ## 1. Squeeze-proxy sizing (OI/funding) — testable NOW 🔬
 
-The exploratory screen (`scripts/orderflow_squeeze_proxy_screen.py`) found real
+The exploratory screen (`scripts/w6_squeeze_proxy_screen.py`) found real
 within-symbol IC over composite, symbol-hash control degenerate both venues:
 - `oi_chg_24h`: **bybit +0.0665, p=0.002, all thirds +** (binance OI-gated).
 - `funding_level`: **binance +0.056, p=0.013**; bybit +0.025 same sign.
 
 Next = the binding engine intervention, pre-registered at
-`docs/preregistration/2026-06-15-orderflow-squeeze-proxy-sizing.md`: a mean-1,
+`docs/preregistration/2026-06-15-w6-squeeze-proxy-sizing.md`: a mean-1,
 gross-neutral squeeze-proxy sizing tilt via the existing `size_mult_lookup` hook, with
 the multi-seed random/shuffle controls + cost stress + thirds + bybit-robust bar.
 Admissibility ≠ harvestable (Stage 7b path-shape was admissible, Stage 5 did not

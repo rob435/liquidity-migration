@@ -25,11 +25,11 @@ before the signal bar; lookbacks use values strictly earlier.
 
 Run:
     POLARS_MAX_THREADS=8 PYTHONPATH=. .venv/bin/python \
-        scripts/orderflow_squeeze_proxy_screen.py \
+        scripts/w6_squeeze_proxy_screen.py \
         --venues bybit,binance --start 2023-04-01 --end 2026-05-01 \
         --stage0 ~/SHARED_DATA/w5_continuous_stage0_candidate_tape_2026-06-14 \
         --permutations 1000 --seed 0 \
-        --out ~/SHARED_DATA/orderflow_squeeze_proxy_screen_2026-06-15
+        --out ~/SHARED_DATA/w6_squeeze_proxy_screen_2026-06-15
 """
 from __future__ import annotations
 
@@ -207,7 +207,7 @@ def run_stage(args: argparse.Namespace) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "out": str(out),
-        "stage": "orderflow_squeeze_proxy_screen", "run_label": "exploratory",
+        "stage": "w6_squeeze_proxy_screen", "run_label": "exploratory",
         "window": {"start": args.start, "end_exclusive": args.end},
         "git_head": _git_head(), "frozen_forward_config_hash": frozen_config_hash(),
         "statistic": "within_symbol_partial_spearman_over_composite",
@@ -303,7 +303,7 @@ def main() -> int:
     ap.add_argument("--stage0", default=str(s7.SHARED / s7.STAGE0_TAG))
     ap.add_argument("--permutations", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default=str(s7.SHARED / "orderflow_squeeze_proxy_screen_2026-06-15"))
+    ap.add_argument("--out", default=str(s7.SHARED / "w6_squeeze_proxy_screen_2026-06-15"))
     args = ap.parse_args()
     payload = run_stage(args)
     print(json.dumps({"out": payload["out"], "any_lead": payload["any_lead"],
