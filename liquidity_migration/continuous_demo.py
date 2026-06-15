@@ -1652,9 +1652,14 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
     ``continuous_ensemble_v1`` is the live demo book (the validated winner_base
     4-component ensemble, operator-wired 2026-06-10; both live units pin it via
     STRATEGY_PROFILE). ``continuous_rebalance_v1`` is its DEPRECATED
-    single-component predecessor, kept resolvable for old ledgers. Both stay
-    outside promoted.PROFILES — the continuous sleeve is research-stage, not
-    promoted.
+    single-component predecessor, kept resolvable for old ledgers.
+
+    As of the 2026-06-15 operator-override promotion, the deployed ensemble
+    (``continuous_ensemble_v1`` == ``continuous_forward_replay.FROZEN_FORWARD_CONFIG``,
+    incl. the BTC-vol regime-hedge) IS promoted via ``promoted.continuous_profile()``
+    — but demo/paper ONLY (``REAL_MONEY`` false; Tier-3 real-money gate unmet and
+    unchanged). The deprecated ``continuous_rebalance_v1`` predecessor stays
+    research-stage and is not the promoted object.
     """
     if config.strategy_profile == "continuous_ensemble_v1":
         # The validated winner_base ensemble (frozen receipt weights; receipts:

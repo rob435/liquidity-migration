@@ -8,11 +8,16 @@ runs, pulled from that sleeve's canonical factory (no flag duplication, no drift
                         universe 50, max_concurrent 10, vol-target 0.60 cap 1.25x = volup125),
                         from long_native_event_demo._v11a_long_native_config()
 
-There is exactly ONE promoted sleeve (LONG). The daily SHORT sleeve was ERASED
-from the system by operator order 2026-06-11 (git history is the archive). The
-CONTINUOUS-fade sleeve was REMOVED from the promoted set (2026-06-05): the live
-continuous book runs as a research-stage demo sleeve, is NOT promoted, and must
-not be presented as such.
+There are TWO promoted sleeves: LONG (v11a) and CONTINUOUS (the deployed fade book
+incl. the BTC-vol regime-hedge). The daily SHORT sleeve was ERASED from the system
+by operator order 2026-06-11 (git history is the archive).
+
+The CONTINUOUS-fade sleeve was REMOVED from the promoted set on 2026-06-05, then
+RE-ADDED on 2026-06-15 by EXPLICIT OPERATOR OVERRIDE (karlwitney183) — see
+``continuous_profile()`` for the full provenance. Critical: this promotion was an
+operator instruction, NOT a demo-arbiter gate pass. It is demo/paper ONLY;
+``REAL_MONEY`` stays false; the Tier-3 real-money gate is UNMET and UNCHANGED. Do
+not read "promoted" here as "real-money ready" or "paper-ready" for continuous.
 
 When a profile changes on deploy, change it in its factory (the live daemon already
 reads that) and this module follows automatically. `tests/test_promoted_profiles.py`
@@ -234,8 +239,54 @@ def long_profile(*, start: str | None = None, end: str | None = None):
     return _windowed(_v11a_long_native_config(), start, end)
 
 
+# CONTINUOUS (operator-override promotion 2026-06-15) -------------------------
+
+
+def continuous_profile(*, start: str | None = None, end: str | None = None):
+    """The deployed CONTINUOUS-fade book, INCLUDING the BTC-vol regime-hedge overlay
+    (W5 Stage 8c, lambda=0.5).
+
+    Source of truth: ``continuous_forward_replay.FROZEN_FORWARD_CONFIG`` — the exact
+    object the live demo book and the forward clock execute (winner_base 4-component
+    ensemble + BTC+ETH 2f hedge, with ``hedge.regime`` = the causal, mean-1 BTC-vol
+    regime intensity ``continuous_regime.FROZEN_BTCVOL_REGIME``). Returned as a deep
+    copy so callers cannot mutate the frozen config.
+
+    PROMOTION PROVENANCE — OPERATOR OVERRIDE 2026-06-15 (karlwitney183). Added to
+    ``PROFILES`` by explicit operator instruction, NOT by clearing the demo-arbiter
+    gate. The honest evidence state at promotion time is preserved here so this is
+    NEVER mistaken for a gate pass:
+      * demo/paper ONLY; ``REAL_MONEY`` stays false; NOT validated for real money.
+      * Tier-2 demo-candidate bar NOT met (pooled MAR delta +0.078 < +0.1).
+      * Tier-3 real-money gate UNMET and UNCHANGED (needs >=30d forward demo,
+        both-venue forward MAR>0, bootstrap left tail >=0, residual Sharpe >=0.3, ...).
+      * The regime-hedge is a modest, sub-period-variable both-venue tail-insurance
+        edge (~+0.05-0.08 pooled MAR, return-additive), best framed as squeeze
+        protection — not a smooth uniform edge.
+    Receipt: docs/preregistration/2026-06-15-operator-override-promote-continuous.md.
+
+    ``start``/``end`` are accepted for interface parity with ``long_profile`` but the
+    continuous window is applied downstream by the equity tool's continuous runner
+    (``scripts/equity_curves.py`` -> ``continuous_deployed_equity_refresh.run_venue``),
+    not by this frozen-config dict; when given they are surfaced under a non-hashed
+    ``_window`` key for the caller's reference only.
+    """
+    import copy
+
+    from .continuous_forward_replay import FROZEN_FORWARD_CONFIG
+
+    cfg = copy.deepcopy(FROZEN_FORWARD_CONFIG)
+    if start or end:
+        cfg["_window"] = {"start": start, "end": end}
+    return cfg
+
+
 # Registry --------------------------------------------------------------------
 
 PROFILES = {
     "long": long_profile,
+    # Operator-override promotion 2026-06-15 (demo/paper ONLY; Tier-3 real-money gate
+    # UNMET and unchanged; REAL_MONEY stays false). The promoted object is the deployed
+    # fade book incl. the BTC-vol regime-hedge — see continuous_profile() for provenance.
+    "continuous": continuous_profile,
 }

@@ -15,10 +15,14 @@ equity_curves = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(equity_curves)
 
 
-def test_continuous_is_runner_sleeve_not_promoted_profile() -> None:
+def test_continuous_is_runner_sleeve_and_promoted_profile() -> None:
+    # CONTINUOUS is both an equity-tool runner sleeve AND (since the 2026-06-15
+    # operator-override promotion) a promoted profile. demo/paper only; Tier-3 unmet.
     assert set(equity_curves.RUNNERS) == {"long", "continuous"}
-    assert promoted.PROFILES == {"long": promoted.long_profile}
-    assert "continuous" not in promoted.PROFILES
+    assert promoted.PROFILES == {
+        "long": promoted.long_profile,
+        "continuous": promoted.continuous_profile,
+    }
 
 
 def test_continuous_venue_inference_from_root() -> None:

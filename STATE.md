@@ -21,8 +21,14 @@ the system on 2026-06-11 by operator order; only continuous fade and long v11a
 remain.
 
 The VPS runs the continuous demo system. LONG is promoted-in-code for demo/paper
-only but toggled off in `deploy/sleeves.env`. Continuous is live demo evidence,
-not promoted and not paper-ready.
+only but toggled off in `deploy/sleeves.env`. **Continuous (the deployed ensemble
+incl. the BTC-vol regime-hedge) was added to `promoted.PROFILES` on 2026-06-15 by
+explicit OPERATOR OVERRIDE** (receipt
+`docs/preregistration/2026-06-15-operator-override-promote-continuous.md`) — this is
+a registry/label decision, NOT a gate pass: demo/paper ONLY, `REAL_MONEY` stays
+false, the Tier-2 bar was not met (+0.078<+0.1), and the Tier-3 real-money gate is
+UNMET and UNCHANGED. Continuous remains live demo evidence and is **still not
+paper-ready or real-money-ready.**
 
 Several 2026-06-12 audit rounds found and fixed live execution bugs
 (component-weight sizing, recovery/adoption identity, ws_risk realized PnL,
@@ -522,7 +528,10 @@ Strict and currently unmet:
 ## Non-Negotiables
 
 1. Never set `REAL_MONEY=true` without explicit owner instruction.
-2. Never present continuous as promoted or paper-ready.
+2. Continuous was added to `promoted.PROFILES` by operator override 2026-06-15
+   (demo/paper only). Even so, never present it as **paper-ready or real-money-ready**
+   — Tier-3 is unmet and unchanged. "Promoted" for continuous means demo/paper
+   registry membership by operator decision, not a gate pass.
 3. Both venues matter; single-venue wins are not enough.
 4. Full-PIT, causal features, ledgers, and cost modeling are correctness gates.
 5. Do not loosen Tier 3 to rescue a result.

@@ -2,17 +2,22 @@
 """One command for official equity curves.
 
 LONG runs from the exact promoted-in-code profile in `liquidity_migration.promoted`.
-CONTINUOUS runs from the research/demo-stage continuous ensemble reconstruction
-(`continuous_ensemble_v1` style winner_base + 2f hedge), not from promoted profiles
-and not as a promotion claim.
+CONTINUOUS is reconstructed from the deployed continuous ensemble
+(`continuous_ensemble_v1` winner_base + 2f hedge + BTC-vol regime-hedge) via the
+continuous refresh runner. As of the 2026-06-15 operator-override promotion the
+deployed continuous book is also promoted-in-code (`promoted.continuous_profile`),
+but demo/paper ONLY — REAL_MONEY stays false and the Tier-3 real-money gate is unmet
+and unchanged, so this tool's continuous output is still demo/forward evidence, not a
+real-money promotion claim.
 
     bash scripts/equity_curves.sh                      # promoted LONG sleeve, last 3 years, bybit_full_pit
     bash scripts/equity_curves.sh --sleeves continuous # research-stage continuous book
     bash scripts/equity_curves.sh --sleeves long,continuous
     bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
 
-The promoted LONG profile lives in ONE place: `liquidity_migration/promoted.py`.
-Continuous is deliberately outside `promoted.PROFILES`; the forward demo is its arbiter.
+Both promoted profiles live in ONE place: `liquidity_migration/promoted.py`
+(`long_profile`, `continuous_profile`). For continuous the forward demo remains the
+arbiter — its promotion was an operator override, not a gate pass.
 """
 from __future__ import annotations
 
