@@ -609,6 +609,16 @@ def test_build_continuous_panel_has_deciles(tmp_path) -> None:
     assert 9 in set(panel["decile"].to_list())  # top decile is populated
 
 
+def _matplotlib_available() -> bool:
+    """True if the optional matplotlib charting dependency can be imported (mirrors the
+    renderer's own guard so the PNG assertion only fires when a PNG can actually be drawn)."""
+    try:
+        import matplotlib  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def test_end_to_end_run_produces_trades_equity_and_artifacts(tmp_path) -> None:
     root, start, n_bars = _build_synthetic_root(tmp_path, n_symbols=26, n_bars=720)
     cfg = ContinuousEventConfig(
@@ -628,7 +638,11 @@ def test_end_to_end_run_produces_trades_equity_and_artifacts(tmp_path) -> None:
     # artifacts written
     assert (tmp_path / "rep" / "continuous_report.json").exists()
     assert (tmp_path / "rep" / "continuous_trades.csv").exists()
-    assert (tmp_path / "rep" / "continuous_equity.png").exists()
+    # The equity PNG is best-effort: matplotlib is an optional charting dependency
+    # (not in install_requires), so only assert the file when it's importable. Use the
+    # same import path the renderer uses so test and production agree on availability.
+    if _matplotlib_available():
+        assert (tmp_path / "rep" / "continuous_equity.png").exists()
 
 
 def test_end_to_end_btc_trend_gate_passes_computed_trend_to_trade_walker(tmp_path) -> None:

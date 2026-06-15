@@ -1173,7 +1173,12 @@ def _split_metrics(trades: pl.DataFrame, config: ContinuousEventConfig) -> dict[
 def _write_equity_png(equity: pl.DataFrame, path: Path, *, title: str) -> None:
     if equity.is_empty():
         return
-    import matplotlib
+    try:
+        import matplotlib
+    except ImportError:
+        # matplotlib is an optional charting dependency (not in install_requires — the
+        # canonical *_equity_btc.png uses Pillow). A research-only PNG must never fail the run.
+        return
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
