@@ -37,33 +37,63 @@ BLOCK = 10
 BYBIT_TAIL = ("2026-04-30", "2026-05-26")
 
 
+def _daily_panel_from_klines(root: Path, *, start_date: str = "2022-01-01") -> pl.DataFrame:
+    """Daily close(last)/turnover(sum) rollup from klines_1h — the on-demand
+    replacement for a missing frozen feature-panel parquet (same rollup it cached)."""
+    kroot = root / "klines_1h"
+    parts = sorted(p for p in kroot.glob("date=*") if p.is_dir() and p.name.split("=")[1] >= start_date)
+    frames = []
+    for part in parts:
+        raw = pl.read_parquet(part, columns=["ts_ms", "symbol", "close", "turnover_quote"])
+        frames.append(
+            raw.sort("ts_ms")
+            .group_by("symbol", maintain_order=True)
+            .agg(pl.col("close").last(), pl.col("turnover_quote").sum())
+            .with_columns(pl.lit(part.name.split("=")[1]).alias("date"))
+            .select(["symbol", "date", "close", "turnover_quote"])
+        )
+    if not frames:
+        return pl.DataFrame(
+            schema={"symbol": pl.String, "date": pl.String, "close": pl.Float64, "turnover_quote": pl.Float64}
+        )
+    return pl.concat(frames)
+
+
 def load_daily_panel(venue: str) -> pl.DataFrame:
     root = SHARED / f"{venue}_full_pit"
-    fp = pl.read_parquet(root / "feature_panel_2026-05-27.parquet", columns=["symbol", "ts_ms", "date", "close", "turnover_quote"])
-    n_before = fp.height
-    fp = fp.sort("ts_ms").group_by(["symbol", "date"], maintain_order=True).last()
-    dups = n_before - fp.height
-    frames = [fp.select(["symbol", "date", "close", "turnover_quote"])]
-    if venue == "bybit":
-        start = dt.date.fromisoformat(BYBIT_TAIL[0])
-        end = dt.date.fromisoformat(BYBIT_TAIL[1])
-        tail_frames = []
-        d = start
-        while d <= end:
-            part = root / "klines_1h" / f"date={d.isoformat()}"
-            if part.exists():
-                raw = pl.read_parquet(part, columns=["ts_ms", "symbol", "close", "turnover_quote"])
-                agg = (
-                    raw.sort("ts_ms")
-                    .group_by("symbol", maintain_order=True)
-                    .agg(pl.col("close").last(), pl.col("turnover_quote").sum())
-                    .with_columns(pl.lit(d.isoformat()).alias("date"))
-                )
-                tail_frames.append(agg.select(["symbol", "date", "close", "turnover_quote"]))
-            d += dt.timedelta(days=1)
-        if tail_frames:
-            frames.append(pl.concat(tail_frames))
-    panel = pl.concat(frames).sort(["symbol", "date"])
+    frozen = root / "feature_panel_2026-05-27.parquet"
+    dups = 0
+    if frozen.exists():
+        fp = pl.read_parquet(frozen, columns=["symbol", "ts_ms", "date", "close", "turnover_quote"])
+        n_before = fp.height
+        fp = fp.sort("ts_ms").group_by(["symbol", "date"], maintain_order=True).last()
+        dups = n_before - fp.height
+        frames = [fp.select(["symbol", "date", "close", "turnover_quote"])]
+        if venue == "bybit":
+            start = dt.date.fromisoformat(BYBIT_TAIL[0])
+            end = dt.date.fromisoformat(BYBIT_TAIL[1])
+            tail_frames = []
+            d = start
+            while d <= end:
+                part = root / "klines_1h" / f"date={d.isoformat()}"
+                if part.exists():
+                    raw = pl.read_parquet(part, columns=["ts_ms", "symbol", "close", "turnover_quote"])
+                    agg = (
+                        raw.sort("ts_ms")
+                        .group_by("symbol", maintain_order=True)
+                        .agg(pl.col("close").last(), pl.col("turnover_quote").sum())
+                        .with_columns(pl.lit(d.isoformat()).alias("date"))
+                    )
+                    tail_frames.append(agg.select(["symbol", "date", "close", "turnover_quote"]))
+                d += dt.timedelta(days=1)
+            if tail_frames:
+                frames.append(pl.concat(tail_frames))
+        panel = pl.concat(frames).sort(["symbol", "date"])
+    else:
+        # Frozen panel absent on this root -> build the daily rollup from klines on
+        # demand (it was only ever a cached rollup). Removes the hard-coded-filename
+        # crash that blocked the continuous tools on 2026-06-15.
+        panel = _daily_panel_from_klines(root).sort(["symbol", "date"])
     panel = panel.with_columns(pl.col("date").str.to_date().alias("d"))
     print(f"[{venue}] daily panel rows={panel.height} dup_ts_rows_collapsed={dups} dates {panel['date'].min()}..{panel['date'].max()}")
     return panel
