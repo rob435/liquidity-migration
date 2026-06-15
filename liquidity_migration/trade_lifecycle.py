@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 from bisect import bisect_right
 from typing import Any
@@ -804,6 +805,13 @@ def _simulate_indexed_trade(
             exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "rank_exit"
             break
+        if config.hash_exit_prob > 0.0:
+            _hh = int(hashlib.sha256(f"{symbol}:{bar_end_ts_ms_val}".encode()).hexdigest()[:8], 16) % 1_000_000 / 1_000_000.0
+            if _hh < config.hash_exit_prob:
+                exit_price = bar_close
+                exit_ts_ms = bar_end_ts_ms_val
+                exit_reason = "hash_exit"
+                break
     if exit_price is None:
         last_idx = end - 1
         exit_price = float(close_arr[last_idx])

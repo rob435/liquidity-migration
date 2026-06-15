@@ -117,6 +117,7 @@ class ContinuousEventConfig:
     breakeven_arm_pct: float = 0.0        # 0=off; once MFE>=this, exit if it returns to entry
     mfe_giveback_trigger_pct: float = 0.0
     mfe_giveback_retain_pct: float = 0.0
+    hash_exit_prob: float = 0.0           # W5 Stage 3 negative control: per-bar hash exit prob; 0=off
     # Portfolio circuit breaker (correlated-squeeze defense): PAUSE new entries when >= N net-negative
     # exits (the live sleeve's "adverse cover" footprint of a market-wide alt melt-up) have completed
     # within the trailing entry_pause_window_hours. Causal: counts only exits that closed strictly
@@ -525,6 +526,7 @@ def _run_trades(
     btc_trend_daily: dict[int, float] | None = None,
     rank_lookup: dict[tuple[str, int], float] | None = None,
     candidate_sink: list[dict[str, Any]] | None = None,
+    size_mult_lookup: dict[tuple[str, int], float] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
     (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
@@ -553,6 +555,7 @@ def _run_trades(
         side_mode="long_low_short_high",
         rank_exit_enabled=config.rank_exit_threshold > 0.0,
         rank_exit_threshold=config.rank_exit_threshold,
+        hash_exit_prob=config.hash_exit_prob,
     )
     base_nw = config.notional_weight
     inverse_vol = config.sizing_mode == "inverse_vol"
@@ -732,6 +735,12 @@ def _run_trades(
             mult = min(max(config.target_vol_per_name / rv, 1.0 / clamp), clamp) if rv > 0 else 1.0
             nw = base_nw * mult
         nw *= regime_size_mult
+        # W5 Stage 5 sizing hook (default None -> byte-identical): a per-entry, causal,
+        # gross-neutral notional multiplier keyed by (symbol, signal_ts). Applied AFTER all
+        # selection gates, so entries/breadth/exits are unchanged; resize/impact cost is
+        # recomputed at the new size by _round_trip_bps below.
+        if size_mult_lookup is not None:
+            nw *= float(size_mult_lookup.get((sym, int(sig_ts)), 1.0))
         # vol-scaled stop (default off): k * trailing hourly vol, clamped; else the fixed stop_pct.
         trade_stop = stop_pct
         if config.stop_vol_mult > 0.0:
@@ -998,6 +1007,7 @@ def run_continuous_event_research(
     report_dir: str | Path | None = None,
     candidate_tape_path: str | Path | None = None,
     entry_order: str = "fcfs",
+    size_mult_lookup: dict[tuple[str, int], float] | None = None,
 ) -> dict[str, Any]:
     """Run the execution-grade continuous-fade backtest and (optionally) write artifacts.
 
@@ -1054,7 +1064,7 @@ def run_continuous_event_research(
     if not entries.is_empty() and symbol_bars:
         trades, skips = _run_trades(
             entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup,
-            candidate_sink=candidate_sink,
+            candidate_sink=candidate_sink, size_mult_lookup=size_mult_lookup,
         )
     else:
         trades, skips = _empty_trades(), {}

@@ -78,6 +78,9 @@ class TradeLifecycleConfig:
     side_mode: str = "long_high_short_low"
     rank_exit_enabled: bool = False
     rank_exit_threshold: float = 0.50
+    # W5 Stage 3 negative control: deterministic per-(symbol,bar) hash exit at this
+    # per-bar probability (no market content). 0.0 = OFF (byte-identical).
+    hash_exit_prob: float = 0.0
     universe_rank_min: int = 1
     universe_rank_max: int = 0
     universe_min_daily_turnover: float = 0.0

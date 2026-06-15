@@ -129,12 +129,16 @@ def build_full_ledger(
     pieces: dict[str, ContinuousRebalanceComponents],
     hedge_returns: dict[int, float],
     hedge_funding: dict[int, float],
+    hedge_intensity: dict[int, float] | None = None,
 ) -> pl.DataFrame:
     """Rebuild the full-history hedged ledger from component pieces (frozen params).
 
     The rebalance/hedge layer is path-dependent from inception (drawdown state,
     beta warm-up), so the canonical forward ledger is always recomputed over the
     FULL component history and then diffed against the stored ledger.
+
+    ``hedge_intensity`` (W5 Stage 8, default None -> byte-identical) is a causal
+    per-day multiplier on the hedge leg only; the frozen control passes None.
     """
     combined = combine_continuous_components(pieces, FROZEN_FORWARD_CONFIG["weights"])
     return apply_rebalance_rule(
@@ -143,6 +147,7 @@ def build_full_ledger(
         frozen_hedge_rule(),
         hedge_returns,
         hedge_funding,
+        hedge_intensity=hedge_intensity,
     )
 
 

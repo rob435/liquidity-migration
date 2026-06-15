@@ -556,6 +556,7 @@ def apply_rebalance_rule(
     hedge_funding: dict[int, float] | None = None,
     hedge_returns_2: dict[int, float] | None = None,
     hedge_funding_2: dict[int, float] | None = None,
+    hedge_intensity: dict[int, float] | None = None,
 ) -> pl.DataFrame:
     """Apply a causal daily scale rule and rebuild decomposed equity.
 
@@ -624,13 +625,18 @@ def apply_rebalance_rule(
         hedge_cost_return = 0.0
         r1 = 0.0
         r2 = 0.0
+        # W5 Stage 8 regime-hedge hook (default None -> byte-identical): a causal,
+        # per-day hedge-intensity multiplier on the hedge leg(s) only — the book
+        # gross/funding/cost scale is untouched, so entries/breadth are unchanged and
+        # only the hedge notional (and its cost) is reallocated across regimes.
+        hedge_scale = scale * (float(hedge_intensity.get(day, 1.0)) if hedge_intensity else 1.0)
         if two_leg:
             assert hedge_rule is not None
             b1, b2 = compute_hedge_betas_2f(raw_rets, hedge_rets, hedge_rets2, idx, hedge_rule)
             day_h1 = hedge_rets[idx]
             day_h2 = hedge_rets2[idx]
             r1, r2 = _capped_hedge_legs(
-                b1, b2, scale, float(hedge_rule.hedge_cap), day_h1 is not None, day_h2 is not None
+                b1, b2, hedge_scale, float(hedge_rule.hedge_cap), day_h1 is not None, day_h2 is not None
             )
             hedge_ratio = r1 + r2
             if day_h1 is not None:
@@ -653,7 +659,7 @@ def apply_rebalance_rule(
             beta = compute_hedge_beta(raw_rets, hedge_rets, idx, hedge_rule)
             day_h = hedge_rets[idx]
             if day_h is not None:
-                hedge_ratio = min(max(-beta, 0.0), float(hedge_rule.hedge_cap)) * scale
+                hedge_ratio = min(max(-beta, 0.0), float(hedge_rule.hedge_cap)) * hedge_scale
                 hedge_return = hedge_ratio * float(day_h)
                 hedge_funding_return = -hedge_ratio * float(h_fund.get(day, 0.0))
             if idx == 0 or days[idx] - days[idx - 1] == MS_PER_DAY:
