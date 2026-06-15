@@ -840,3 +840,51 @@ def test_final_observation_appears_over_many_draws():
     rng_old = np.random.default_rng(0)
     starts_old = rng_old.integers(0, _max_start_old(n, block), 1)
     assert int(starts_old.max()) <= n - block - 1
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b03.py (decision-rule-2). Routes through
+# the module-loaded MOD (CellMetrics/evaluate_cell) like the rest of this suite.
+# ---------------------------------------------------------------------------
+def test_legacy_rule_rejects_zero_trade_binance_cell() -> None:
+    """decision-rule-2: with `--rule legacy`, min_trades_binance defaults to 0, so the
+    soft floor (`0 < 0`) never fires and a 0-trade Binance cell was rubber-stamped a
+    candidate on the Bybit numbers alone. The fix blocks any venue with 0 executed
+    trades regardless of preset (STATE.md non-negotiable #3: both venues matter)."""
+    def _m(*, sharpe: float, dd: float, ret: float, trades: int) -> "MOD.CellMetrics":
+        return MOD.CellMetrics(
+            cell_id="c", venue="x", sharpe_like=sharpe, max_drawdown=dd,
+            total_return=ret, trades=trades,
+        )
+
+    # Control with real drawdown/return on both venues.
+    control = {
+        "bybit": _m(sharpe=1.0, dd=-0.30, ret=1.0, trades=400),
+        "binance": _m(sharpe=1.0, dd=-0.30, ret=1.0, trades=400),
+    }
+    # Cell: bybit clears the legacy bar (Δsharpe +0.6, DD unchanged, positive return,
+    # 350 trades); binance is PRESENT but executed ZERO trades.
+    cell = {
+        "bybit": _m(sharpe=1.6, dd=-0.30, ret=1.5, trades=350),
+        "binance": _m(sharpe=1.6, dd=-0.30, ret=1.5, trades=0),
+    }
+    verdict = MOD.evaluate_cell(
+        "cell-degenerate", cell, control,
+        sharpe_delta_min=0.5, dd_delta_pp_max=-5.0,  # legacy preset values
+        min_trades_bybit=30, min_trades_binance=0,   # the buggy legacy floor
+    )
+    assert verdict.verdict != "candidate", "a 0-trade Binance venue must never be a candidate"
+    assert any("0 trades" in r for r in verdict.reasons)
+
+    # Sanity: the same cell with real trades on BOTH venues still passes the legacy bar
+    # (the guard targets only the degenerate 0-trade case, not legitimate cells).
+    good = {
+        "bybit": _m(sharpe=1.6, dd=-0.30, ret=1.5, trades=350),
+        "binance": _m(sharpe=1.6, dd=-0.30, ret=1.5, trades=350),
+    }
+    ok = MOD.evaluate_cell(
+        "cell-good", good, control,
+        sharpe_delta_min=0.5, dd_delta_pp_max=-5.0,
+        min_trades_bybit=30, min_trades_binance=0,
+    )
+    assert ok.verdict == "candidate"

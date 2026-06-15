@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import polars as pl
 
 from liquidity_migration._common import (
@@ -10,6 +12,11 @@ from liquidity_migration._common import (
     calendar_shift,
     is_weekend_ms,
 )
+
+
+def _date_ms(date_str: str) -> int:
+    # Provenance: relocated from tests/test_audit_fix_b09.py (audit bucket b09).
+    return int(datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
 def test_calendar_shift_nulls_across_a_gap_but_matches_shift_when_contiguous() -> None:
@@ -69,3 +76,15 @@ def test_is_weekend_ms() -> None:
     ts = int(dt.datetime(2026, 6, 7, 12, tzinfo=dt.timezone.utc).timestamp() * 1000)
     assert is_weekend_ms(ts)
     assert not is_weekend_ms(ts + MS_PER_DAY)
+
+
+def test_is_weekend_ms_matches_old_inline_formula() -> None:
+    """Numerical-equivalence gate: the helper is byte-identical to the inline math
+    it replaced, so the weekend tilt's selection is unchanged.
+
+    Relocated from tests/test_audit_fix_b09.py (audit bucket b09, long-sleeve-5).
+    """
+    base = _date_ms("2025-01-01")
+    for d in range(14):
+        ts = base + d * MS_PER_DAY + 12 * 3_600_000
+        assert is_weekend_ms(ts) == (((int(ts) // MS_PER_DAY) + 3) % 7 >= 5)

@@ -720,3 +720,268 @@ def test_warmstart_last_date_ordered_file_unchanged(tmp_path) -> None:
         encoding="utf-8",
     )
     assert hedge_runner._warmstart_last_date(p) == date(2026, 6, 12)
+
+
+# ---------------------------------------------------------------------------
+# audit b07 hedge-2 / hedge-3: _submit_plan books the ACTUAL venue fill
+# (relocated from tests/test_audit_fix_b07.py — pins the actual-fill booking,
+# the resolved-demo-flag threading, and the mixed-stale-run reduce/add split)
+# ---------------------------------------------------------------------------
+
+
+def _wire_submit_seams_b07(monkeypatch, *, executions: list[dict], filters: dict | None = None):
+    """Stub the credentials/client/instrument-filters/ledger writes around
+    _submit_plan.
+
+    ``_read_actual_fill`` reads the realized fill via the demo engine's
+    ``_wait_for_execution_summary``. We patch THAT (it is imported locally inside
+    _read_actual_fill from event_demo, so patching event_demo.* is picked up) to
+    return the summary that the real ``_execution_summary`` would build from
+    ``executions`` — deterministic and instant (no 3s venue poll). Empty
+    ``executions`` -> summary qty 0 -> _read_actual_fill's read_failed fallback."""
+    import liquidity_migration.bybit as bybit_mod
+    import liquidity_migration.event_demo as ed
+
+    placed: list[dict] = []
+    written: list[tuple[str, pl.DataFrame]] = []
+    reduces: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **params):
+            placed.append(params)
+            return {"orderId": "oid-1"}
+
+    monkeypatch.setattr(bybit_mod, "resolve_private_credentials", lambda: ("k", "s", True))
+    monkeypatch.setattr(bybit_mod, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(
+        ed, "_wait_for_execution_summary",
+        lambda client, **kw: ed._execution_summary(list(executions)),
+    )
+    monkeypatch.setattr(
+        hedge_runner, "_instrument_filters",
+        lambda symbol, root: dict(filters or {"qty_step": 0.001, "min_order_qty": 0.001, "min_notional_value": 5.0}),
+    )
+    monkeypatch.setattr(
+        hedge_runner, "write_dataset",
+        lambda df, root, dataset, **kw: written.append((dataset, df)),
+    )
+    monkeypatch.setattr(
+        hedge_runner, "_apply_hedge_reduce_to_trades",
+        lambda data_root, cfg, **kw: reduces.append(kw),
+    )
+    return placed, written, reduces
+
+
+def test_submit_plan_books_partial_buy_fill_not_requested_qty(monkeypatch, tmp_path) -> None:
+    """hedge-3: a market BUY that fills SHORT of the requested qty must book the
+    venue's actual filled_qty (and avg fill price), not the requested qty at the
+    planner's implied price. The original code wrote filled_qty=qty unconditionally
+    -> the next day's resize was computed against a hedge that never fully existed."""
+    placed, written, _ = _wire_submit_seams_b07(
+        monkeypatch,
+        # requested 0.5 BTC, only 0.3 filled at avg 101_000 (slippage above implied)
+        executions=[{"execQty": "0.3", "execPrice": "101000", "execValue": "30300", "execFee": "0", "execTime": "1"}],
+    )
+    plan = _resize_plan(qty=0.5, delta_notional=50_000.0)  # implied price 100k
+
+    result = hedge_runner._submit_plan(
+        plan, hedge_runner.ContinuousHedgeConfig(), tmp_path, tmp_path, now_ms=1_700_000_000_000
+    )
+
+    assert result["fill_source"] == "venue"
+    assert abs(result["qty"] - 0.3) < 1e-9          # booked the ACTUAL fill
+    assert abs(result["requested_qty"] - 0.5) < 1e-9
+    rows = {dataset: df.to_dicts()[0] for dataset, df in written}
+    cfg = hedge_runner.ContinuousHedgeConfig()
+    order_row = rows[cfg.orders_dataset]
+    assert abs(order_row["filled_qty"] - 0.3) < 1e-9
+    # short fill -> NOT terminal "filled" (so ws_risk's reconciler can delta-add a remainder)
+    assert order_row["status"] == "partial"
+    trade_row = rows[cfg.trades_dataset]
+    assert abs(trade_row["qty"] - 0.3) < 1e-9       # trade row sized off the real fill
+    assert abs(trade_row["entry_price"] - 101_000.0) < 1.0  # venue avg, not implied 100k
+
+
+def test_submit_plan_books_venue_capped_reduce_fill(monkeypatch, tmp_path) -> None:
+    """hedge-2: a reduce-only SELL venue-capped by cross-sleeve netting (a same-symbol
+    fade short on the shared one-way account) fills less than requested. The reduce
+    booked against the trade rows must be the ACTUAL filled qty, not the requested
+    qty — otherwise the ledger over-states the reduction and the planner re-BUYs a
+    hedge that partly still exists (over-hedge accumulation)."""
+    placed, written, reduces = _wire_submit_seams_b07(
+        monkeypatch,
+        # requested reduce of 0.5, venue only let 0.2 through (capped by the net)
+        executions=[{"execQty": "0.2", "execPrice": "99000", "execValue": "19800", "execFee": "0", "execTime": "1"}],
+    )
+    plan = _resize_plan(
+        side="Sell", reduce_only=True, qty=0.5, delta_notional=-50_000.0, reason="hedge_reduce",
+    )
+
+    result = hedge_runner._submit_plan(
+        plan, hedge_runner.ContinuousHedgeConfig(), tmp_path, tmp_path, now_ms=1_700_000_000_000
+    )
+
+    assert result["fill_source"] == "venue"
+    assert abs(result["qty"] - 0.2) < 1e-9
+    # the reduce booked against trade rows is the ACTUAL filled qty, never the requested 0.5
+    assert reduces and abs(reduces[0]["sold_qty"] - 0.2) < 1e-9
+    assert abs(reduces[0]["exit_price"] - 99_000.0) < 1.0
+
+
+def test_submit_plan_full_fill_is_terminal_filled(monkeypatch, tmp_path) -> None:
+    """A fully-filled BUY keeps the terminal status='filled' booking (the deliberate
+    2026-06-11 anti-double-booking design) — only short fills become 'partial'."""
+    _placed, written, _ = _wire_submit_seams_b07(
+        monkeypatch,
+        executions=[{"execQty": "0.5", "execPrice": "100000", "execValue": "50000", "execFee": "0", "execTime": "1"}],
+    )
+    result = hedge_runner._submit_plan(
+        _resize_plan(qty=0.5, delta_notional=50_000.0),
+        hedge_runner.ContinuousHedgeConfig(), tmp_path, tmp_path, now_ms=1_700_000_000_000,
+    )
+    assert result["fill_source"] == "venue"
+    cfg = hedge_runner.ContinuousHedgeConfig()
+    order_row = {dataset: df.to_dicts()[0] for dataset, df in written}[cfg.orders_dataset]
+    assert order_row["status"] == "filled"
+    assert abs(order_row["filled_qty"] - 0.5) < 1e-9
+
+
+def test_submit_plan_falls_back_when_fill_unreadable(monkeypatch, tmp_path) -> None:
+    """If the venue execution read fails/returns empty, the order is still accepted
+    (we hold an orderId), so the position we asked for must keep being tracked — the
+    fill is booked at the requested qty + implied price but flagged read_failed so the
+    operator can see it is unverified (no silent position drop)."""
+    placed, written, _ = _wire_submit_seams_b07(monkeypatch, executions=[])  # empty venue view
+    result = hedge_runner._submit_plan(
+        _resize_plan(qty=0.5, delta_notional=50_000.0),
+        hedge_runner.ContinuousHedgeConfig(), tmp_path, tmp_path, now_ms=1_700_000_000_000,
+    )
+    assert result["fill_source"] == "read_failed"
+    assert abs(result["qty"] - 0.5) < 1e-9  # tracks the requested qty, not dropped
+
+
+# ---------------------------------------------------------------------------
+# audit b07 realmoney-safety-2: the resolved demo flag is threaded into the client
+# ---------------------------------------------------------------------------
+
+
+class _TruthyFlag:
+    """A truthy, identity-distinct stand-in for the resolved demo flag — `is True`
+    would also hold for the inlined literal, so we forward a UNIQUE object and assert
+    identity to prove the resolved flag is threaded, not a hardcoded True."""
+
+    def __bool__(self) -> bool:
+        return True
+
+
+def test_submit_plan_threads_resolved_demo_flag_not_literal_true(monkeypatch, tmp_path) -> None:
+    """The BybitPrivateClient in _submit_plan must be constructed with the demo flag
+    RESOLVED by resolve_private_credentials(), not a hardcoded literal True. A
+    hardcoded True would silently mismatch the endpoint against the credential set if
+    the surrounding REAL_MONEY guard ever changed."""
+    import liquidity_migration.bybit as bybit_mod
+    import liquidity_migration.event_demo as ed
+
+    constructed: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            constructed.append(kwargs)
+
+        def place_order(self, **params):
+            return {"orderId": "oid-1"}
+
+    sentinel_demo = _TruthyFlag()
+    monkeypatch.setattr(bybit_mod, "resolve_private_credentials", lambda: ("k", "s", sentinel_demo))
+    monkeypatch.setattr(bybit_mod, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(
+        ed, "_wait_for_execution_summary",
+        lambda client, **kw: {"qty": "0.5", "avg_price": 100_000.0},
+    )
+    monkeypatch.setattr(
+        hedge_runner, "_instrument_filters",
+        lambda symbol, root: {"qty_step": 0.001, "min_order_qty": 0.001, "min_notional_value": 5.0},
+    )
+    monkeypatch.setattr(hedge_runner, "write_dataset", lambda *a, **k: None)
+    monkeypatch.setattr(hedge_runner, "_apply_hedge_reduce_to_trades", lambda *a, **k: None)
+
+    hedge_runner._submit_plan(
+        _resize_plan(qty=0.5, delta_notional=50_000.0),
+        hedge_runner.ContinuousHedgeConfig(), tmp_path, tmp_path, now_ms=1_700_000_000_000,
+    )
+    assert constructed and constructed[0]["demo"] is sentinel_demo
+
+
+def test_live_wallet_equity_threads_resolved_demo_flag(monkeypatch) -> None:
+    """The equity-read client path threads the resolved demo flag too (line 443)."""
+    import liquidity_migration.bybit as bybit_mod
+    import liquidity_migration.event_demo as ed
+
+    constructed: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            constructed.append(kwargs)
+
+        def get_wallet_balance(self):
+            return {}
+
+    sentinel_demo = _TruthyFlag()
+    monkeypatch.setattr(bybit_mod, "resolve_private_credentials", lambda: ("k", "s", sentinel_demo))
+    monkeypatch.setattr(bybit_mod, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(ed, "wallet_equity_usdt", lambda payload: 1234.0)
+
+    assert hedge_runner._live_wallet_equity_usdt() == 1234.0
+    assert constructed and constructed[0]["demo"] is sentinel_demo
+
+
+# ---------------------------------------------------------------------------
+# audit b07 hedge-5: mixed stale run submits the reduce-only leg, blocks the add
+# ---------------------------------------------------------------------------
+
+
+def test_stale_warmstart_mixed_run_submits_reduce_blocks_add(monkeypatch, tmp_path, capsys) -> None:
+    """hedge-5: in a MIXED run under a stale warm-start (one add leg + one reduce-only
+    leg) the risk-REDUCING reduce-only Sell must still submit; only the risk-increasing
+    add leg is blocked. The original terminal block rejected the whole run, holding a
+    risk-reducing trim hostage to a sibling add leg. The blocked add must still page
+    (nonzero exit via submit_partial_blocked_stale_warmstart)."""
+    add_btc = _resize_plan(symbol="BTCUSDT", side="Buy", reduce_only=False, qty=0.5)
+    reduce_eth = _resize_plan(
+        symbol="ETHUSDT", side="Sell", reduce_only=True, qty=0.05,
+        delta_notional=-150.0, reason="hedge_reduce",
+    )
+    _setup_runner(
+        monkeypatch, tmp_path,
+        warmstart_last=date.today() - timedelta(days=10),
+        argv=["--submit", "--btc-price", "100000", "--eth-price", "3000", "--equity-usdt", "10000"],
+        warm_eth=[0.001] * 90,  # >=60 non-None obs -> 2f mode (two legs in one run)
+    )
+    monkeypatch.setattr(
+        hedge_runner, "compute_hedge_decision_2f", lambda cfg, **kw: _decision_2f(add_btc, reduce_eth)
+    )
+    submitted_plans: list = []
+    monkeypatch.setattr(
+        hedge_runner, "_submit_plan",
+        lambda plan, cfg, data_root, primary_root, now_ms: (
+            submitted_plans.append(plan)
+            or {"symbol": plan.symbol, "side": plan.side, "qty": plan.qty,
+                "reduce_only": plan.reduce_only, "order_id": "oid-1", "link": "l-1"}
+        ),
+    )
+
+    rc = hedge_runner.main()
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["warmstart_stale"] is True
+    # only the reduce-only leg was actually submitted
+    assert [p.symbol for p in submitted_plans] == ["ETHUSDT"]
+    assert [leg["symbol"] for leg in out["submitted"]] == ["ETHUSDT"]
+    # the add leg is reported blocked, NOT submitted
+    assert [leg["symbol"] for leg in out["blocked_legs"]] == ["BTCUSDT"]
+    # a trim went through but an add was blocked -> partial-blocked status that PAGES
+    assert out["status"] == "submit_partial_blocked_stale_warmstart"
+    assert rc == 1

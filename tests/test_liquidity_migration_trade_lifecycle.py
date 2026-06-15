@@ -7,11 +7,13 @@ hand-built polars fixtures whose right answer is known by inspection.
 """
 from __future__ import annotations
 
+import inspect
 import math
 
 import polars as pl
 import pytest
 
+import liquidity_migration.trade_lifecycle as tl
 from liquidity_migration.config import TradeLifecycleConfig
 from liquidity_migration.trade_lifecycle import (
     _bar_excursion,
@@ -681,3 +683,96 @@ def test_intrahold_stats_all_nonfinite_mae_reads_as_not_measured() -> None:
     assert stats["worst_trade_mae"] == 0.0
     assert stats["mean_trade_mae"] == 0.0
     assert stats["worst_weighted_intrahold_loss"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b11.py (audit bucket b11).
+# ---------------------------------------------------------------------------
+
+
+# code-quality-2: dead _filter_universe removed
+def test_filter_universe_dead_function_removed() -> None:
+    assert not hasattr(tl, "_filter_universe"), (
+        "_filter_universe had zero call sites and re-implemented stale universe "
+        "filtering; it must stay deleted (code-quality-2)."
+    )
+
+
+# metrics-4: worst_day_return SUMS same-day baskets (matches build_equity_curve)
+def test_worst_volume_day_return_sums_multi_basket_day_matching_equity_curve() -> None:
+    baskets = pl.DataFrame(
+        {
+            "exit_date": ["2024-01-01", "2024-01-01", "2024-01-02"],
+            "basket_return": [0.10, -0.20, 0.05],
+        }
+    )
+    worst = tl._worst_volume_day_return(baskets)
+    # Additive same-day combination: 0.10 + -0.20 = -0.10. The COMPOUND value
+    # (1.10 * 0.80 - 1 = -0.12) is the original bug — a different day-return
+    # definition than build_equity_curve uses for total_return/max_drawdown.
+    assert worst == pytest.approx(-0.10)
+    assert worst != pytest.approx(-0.12)
+
+
+def test_worst_volume_day_return_matches_build_equity_curve_definition() -> None:
+    # The worst single-day move of the equity curve must equal worst_day_return.
+    baskets = pl.DataFrame(
+        {
+            "basket_id": ["b1", "b2", "b3"],
+            "exit_ts_ms": [
+                1_704_067_200_000,  # 2024-01-01
+                1_704_067_200_000,  # 2024-01-01 (same day, second basket)
+                1_704_153_600_000,  # 2024-01-02
+            ],
+            "exit_date": ["2024-01-01", "2024-01-01", "2024-01-02"],
+            "basket_return": [0.10, -0.20, 0.05],
+        }
+    )
+    curve = tl.build_equity_curve(baskets)
+    # Per-day equity returns implied by the summed curve.
+    eq = curve.sort("ts_ms")["equity"].to_list()
+    day_rets = [eq[0] - 1.0] + [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq))]
+    assert tl._worst_volume_day_return(baskets) == pytest.approx(min(day_rets))
+
+
+# cost-funding-3: notional-weighted funding_modeled_fraction surfaced
+def _funding_trades(modes_and_weights: list[tuple[str, float]]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "funding_mode": [m for m, _ in modes_and_weights],
+            "notional_weight": [w for _, w in modes_and_weights],
+        }
+    )
+
+
+def test_funding_modeled_fraction_distinguishes_coverage_edge_from_half_uncharged() -> None:
+    # Coverage-edge: one small alt missing, rest modeled -> high fraction.
+    edge = _funding_trades([("modeled", 1.0), ("modeled", 1.0), ("missing", 0.05)])
+    # Half the book uncharged -> low fraction. funding_mode == 'partial' for both,
+    # so the 3-state summary cannot tell them apart; the fraction can.
+    half = _funding_trades([("modeled", 1.0), ("missing", 1.0)])
+    f_edge = tl._funding_modeled_fraction(edge)
+    f_half = tl._funding_modeled_fraction(half)
+    assert f_edge == pytest.approx(2.0 / 2.05)
+    assert f_half == pytest.approx(0.5)
+    assert f_edge > f_half  # the whole point of the metric
+
+
+def test_funding_modeled_fraction_extremes_and_summary_wiring() -> None:
+    assert tl._funding_modeled_fraction(pl.DataFrame()) == 0.0
+    all_modeled = _funding_trades([("modeled", 1.0), ("modeled", 2.0)])
+    assert tl._funding_modeled_fraction(all_modeled) == pytest.approx(1.0)
+    all_missing = _funding_trades([("missing", 1.0), ("missing", 1.0)])
+    assert tl._funding_modeled_fraction(all_missing) == pytest.approx(0.0)
+    # Empty-payload summary carries the new key so downstream readers never KeyError.
+    empty = tl.summarize_trade_backtest(
+        pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), config=tl.TradeLifecycleConfig()
+    )
+    assert empty["funding_modeled_fraction"] == 0.0
+
+
+# cost-funding-4: entry-notional funding approximation is documented, not silent
+def test_funding_entry_notional_approximation_is_documented() -> None:
+    src = inspect.getsource(tl._simulate_indexed_trade)
+    assert "cost-funding-4" in src
+    assert "marked notional" in src.lower()

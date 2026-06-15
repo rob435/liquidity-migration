@@ -6,7 +6,16 @@ from pathlib import Path
 
 import polars as pl
 
+import pytest
+
+from liquidity_migration.continuous_rebalance import (
+    ContinuousRebalanceRule,
+    ContinuousRebalanceScaleState,
+    compute_continuous_rebalance_scale,
+)
 from liquidity_migration.reconciliation import (
+    _calendar_metrics,
+    _continuous_cycle_daily_returns,
     audit_continuous_rebalance_cycles,
     run_continuous_forward_readiness,
     run_continuous_paper_demo_reconciliation,
@@ -569,3 +578,195 @@ def test_run_continuous_rebalance_cycle_audit_writes_report(tmp_path: Path) -> N
 
     assert Path(payload["report_path"]).exists()
     assert read_dataset(root, "continuous_fade_paper_cycles").height == 1
+
+
+# --------------------------------------------------------------------------
+# metrics-2 + reconciliation-2: _calendar_metrics compounds (not additive)
+# (relocated from tests/test_audit_fix_b06.py)
+# --------------------------------------------------------------------------
+
+
+def test_calendar_metrics_compounds_equity_matching_engine() -> None:
+    """metrics-2 / reconciliation-2: equity must COMPOUND (equity *= 1+ret) to match
+    the engine's rebalance_scaled_equity, not sum additively (equity += ret)."""
+    start = 10 * MS_PER_DAY
+    rets = [0.02, -0.01, 0.03, 0.015]
+    returns_by_day = {start + i * MS_PER_DAY: r for i, r in enumerate(rets)}
+    out = _calendar_metrics(returns_by_day, start_day=start, end_day=start + 3 * MS_PER_DAY)
+
+    # Reference: engine-style compounding equity curve.
+    equity = 1.0
+    for r in rets:
+        equity *= 1.0 + r
+    expected_total = equity - 1.0
+    assert out["total_return"] == pytest.approx(expected_total)
+    # The additive (buggy) total would have been sum(rets); confirm we diverge from it.
+    additive_total = sum(rets)
+    assert out["total_return"] != pytest.approx(additive_total)
+    assert out["equity"][-1]["equity"] == pytest.approx(equity)
+
+
+def test_calendar_metrics_peak_relative_drawdown() -> None:
+    """metrics-2 / reconciliation-2: drawdown is peak-RELATIVE ((equity-peak)/peak),
+    not an absolute delta (equity-peak)."""
+    start = 10 * MS_PER_DAY  # must be > 0 (the guard returns empty for start_day<=0)
+    # up 10%, then down enough to draw down from the peak
+    rets = [0.10, -0.20]
+    returns_by_day = {start + i * MS_PER_DAY: r for i, r in enumerate(rets)}
+    out = _calendar_metrics(returns_by_day, start_day=start, end_day=start + MS_PER_DAY)
+    peak = 1.10
+    trough = 1.10 * (1.0 - 0.20)
+    expected_dd = (trough - peak) / peak
+    assert out["max_drawdown"] == pytest.approx(expected_dd)
+    # Absolute (buggy) drawdown would be trough-peak (a different number).
+    assert out["max_drawdown"] != pytest.approx(trough - peak)
+
+
+def test_calendar_metrics_continuous_leg_matches_persisted_engine_equity() -> None:
+    """reconciliation-2: driving the continuous leg through _calendar_metrics from
+    rebalance_scaled_return must reproduce the engine's persisted scaled equity."""
+    # Build cycle rows the way the engine persists them: scaled_equity compounds the
+    # per-day rebalance_scaled_return.
+    scaled_returns = [0.012, -0.008, 0.02, 0.005, -0.011]
+    rows = []
+    equity = 1.0
+    peak = 1.0
+    for i, sr in enumerate(scaled_returns):
+        equity *= 1.0 + sr
+        peak = max(peak, equity)
+        day = (100 + i) * MS_PER_DAY
+        rows.append(
+            {
+                "rebalance_day_ts": day,
+                "ts_ms": day + 3600_000,
+                "rebalance_scaled_return": sr,
+                "rebalance_scaled_equity": equity,
+                "rebalance_scaled_peak": peak,
+            }
+        )
+    cycles = pl.DataFrame(rows)
+    returns_by_day = _continuous_cycle_daily_returns(cycles)
+    start = min(returns_by_day)
+    end = max(returns_by_day)
+    out = _calendar_metrics(returns_by_day, start_day=start, end_day=end)
+    # The comparator's last equity point matches the engine's last persisted equity.
+    assert out["equity"][-1]["equity"] == pytest.approx(equity)
+    assert out["total_return"] == pytest.approx(equity - 1.0)
+
+
+# --------------------------------------------------------------------------
+# reconciliation-4: audit_continuous_rebalance_cycles is O(n) and correct
+# (relocated from tests/test_audit_fix_b06.py)
+# --------------------------------------------------------------------------
+
+
+def _build_consistent_cycle_frame(n_days: int) -> pl.DataFrame:
+    """Build a multi-day cycle frame whose persisted rebalance_target_scale and
+    scaled equity/peak are internally consistent with the engine rule, so a correct
+    audit reports zero scale_mismatches."""
+    rule = ContinuousRebalanceRule()
+    rows: list[dict] = []
+    raw_returns: list[float] = []
+    equity = 1.0
+    peak = 1.0
+    for i in range(n_days):
+        day = (200 + i) * MS_PER_DAY
+        state = ContinuousRebalanceScaleState(
+            prior_raw_returns=tuple(raw_returns),
+            prior_scaled_equity=equity if equity > 0.0 else 1.0,
+            prior_scaled_peak=max(peak, equity, 1.0),
+        )
+        # The builder PERSISTS whatever the engine rule computes (it does not assume a
+        # fixed scale), so the frame stays internally consistent for any window length.
+        scale = compute_continuous_rebalance_scale(state, rule)
+        # Small deterministic oscillation: non-zero variance (so the vol-target scale is
+        # a realistic varying value, not a degenerate divide-by-1e-6) and a net-positive
+        # drift (equity rises, no drawdown-half-scale, book stays solvent).
+        raw_ret = 0.004 + 0.001 * ((i % 5) - 2) * 0.1
+        scaled_ret = scale * raw_ret
+        equity *= 1.0 + scaled_ret
+        peak = max(peak, equity)
+        rows.append(
+            {
+                "cycle_id": f"c{i}",
+                "rebalance_day_ts": day,
+                "ts_ms": day + 3600_000,
+                "rebalance_raw_return": raw_ret,
+                "rebalance_target_scale": scale,
+                "rebalance_scaled_return": scaled_ret,
+                "rebalance_scaled_equity": equity,
+                "rebalance_scaled_peak": peak,
+                "rebalance_resize_orders": 0,
+                "rebalance_resize_skipped_same_day": "false",
+            }
+        )
+        raw_returns.append(raw_ret)
+    return pl.DataFrame(rows)
+
+
+def test_audit_continuous_rebalance_cycles_consistent_frame_passes() -> None:
+    """reconciliation-4: the refactored single-pass audit recomputes the SAME scale
+    per day as the engine; a consistent frame has zero scale_mismatches."""
+    cycles = _build_consistent_cycle_frame(40)
+    orders = pl.DataFrame(schema={"resize_reason": pl.Utf8})
+    out = audit_continuous_rebalance_cycles(cycles, orders)
+    assert out["summary"]["scale_mismatches"] == 0
+    assert out["summary"]["rebalance_cycles"] == 40
+    assert out["summary"]["days"] == 40
+    assert out["ok"] is True
+
+
+def test_audit_continuous_rebalance_cycles_detects_tampered_scale() -> None:
+    """reconciliation-4: the refactor must still DETECT a wrong persisted scale. The
+    prior-state for each day must come from the days STRICTLY BEFORE it (the per-day
+    forward reduction), not from the whole frame including the day itself."""
+    cycles = _build_consistent_cycle_frame(40)
+    # Corrupt one day's persisted scale.
+    rows = cycles.to_dicts()
+    rows[20]["rebalance_target_scale"] = rows[20]["rebalance_target_scale"] + 0.5
+    tampered = pl.DataFrame(rows)
+    orders = pl.DataFrame(schema={"resize_reason": pl.Utf8})
+    out = audit_continuous_rebalance_cycles(tampered, orders)
+    assert out["summary"]["scale_mismatches"] == 1
+    assert any(issue["kind"] == "scale_mismatch" for issue in out["issues"])
+
+
+def test_audit_prior_state_is_strictly_causal() -> None:
+    """reconciliation-4: equivalence with a brute-force O(n^2) reconstruction that
+    rescans the frame per row. The refactored single-pass reduction must produce the
+    SAME expected scale per day (prior state = days strictly before)."""
+    cycles = _build_consistent_cycle_frame(35)
+    rule = ContinuousRebalanceRule()
+    rows = cycles.to_dicts()
+
+    def brute_force_expected(rows: list[dict], current_day_ts: int) -> float:
+        # Independent O(n) rescan of the WHOLE frame for each row (the old shape).
+        current_day = (current_day_ts // MS_PER_DAY) * MS_PER_DAY
+        latest_by_day: dict[int, tuple[tuple[int, int], float, dict]] = {}
+        for idx, r in enumerate(rows):
+            d = int(r["rebalance_day_ts"])
+            d = (d // MS_PER_DAY) * MS_PER_DAY
+            key = (int(r["ts_ms"]), idx)
+            if d not in latest_by_day or key > latest_by_day[d][0]:
+                latest_by_day[d] = (key, float(r["rebalance_raw_return"]), r)
+        prior_days = sorted(d for d in latest_by_day if d < current_day)
+        if not prior_days:
+            state = ContinuousRebalanceScaleState(prior_raw_returns=())
+        else:
+            latest = latest_by_day[prior_days[-1]][2]
+            eq = float(latest["rebalance_scaled_equity"]) or 1.0
+            pk = float(latest["rebalance_scaled_peak"]) or max(eq, 1.0)
+            state = ContinuousRebalanceScaleState(
+                prior_raw_returns=tuple(latest_by_day[d][1] for d in prior_days),
+                prior_scaled_equity=eq if eq > 0.0 else 1.0,
+                prior_scaled_peak=max(pk, eq, 1.0),
+            )
+        return compute_continuous_rebalance_scale(state, rule)
+
+    # Every persisted scale equals the brute-force expectation -> audit must pass clean.
+    for r in rows:
+        assert r["rebalance_target_scale"] == pytest.approx(
+            brute_force_expected(rows, int(r["rebalance_day_ts"]))
+        )
+    out = audit_continuous_rebalance_cycles(cycles, pl.DataFrame(schema={"resize_reason": pl.Utf8}))
+    assert out["summary"]["scale_mismatches"] == 0

@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
 
 from liquidity_migration import cli
 from liquidity_migration.archive_manifest import _safe_name as _archive_safe_name
-from liquidity_migration.cli import _print_event_risk_summary, _resolve_data_root, build_parser
+from liquidity_migration.cli import (
+    _KNOWN_BINANCE_PROXY_DATASETS,
+    _KNOWN_BYBIT_DATASETS,
+    _parse_symbols,
+    _print_event_risk_summary,
+    _resolve_data_root,
+    _universe_config_from_args,
+    _validate_datasets,
+    build_parser,
+)
+from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS, UniverseConfig
 from liquidity_migration.universe import _safe_name as _universe_safe_name
 
 
@@ -388,3 +399,265 @@ def test_archive_klines_print_slugged_path(
     assert expected_file == f"{stem}_My-Klines.md"
     assert expected_file in out
     assert f"{stem}_My Klines.md" not in out
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b02.py (audit bucket b02 regressions):
+# build_parser() boundary-help and order-submission-default contracts.
+# ---------------------------------------------------------------------------
+def _subparser_actions(parser, name: str):
+    import argparse
+
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices[name]._actions
+    raise AssertionError(f"subparser {name} not found")
+
+
+# cli-config-6: download-data / binance-proxy --start/--end boundary semantics documented
+def test_download_data_end_help_documents_exclusive_boundary() -> None:
+    parser = build_parser()
+    help_by_dest = {a.dest: (a.help or "") for a in _subparser_actions(parser, "download-data")}
+    assert "Inclusive" in help_by_dest["start"]
+    assert "Exclusive" in help_by_dest["end"]
+    assert "not included" in help_by_dest["end"].lower()
+
+
+def test_binance_proxy_end_help_documents_exclusive_boundary() -> None:
+    parser = build_parser()
+    help_by_dest = {a.dest: (a.help or "") for a in _subparser_actions(parser, "download-binance-proxy")}
+    assert "Inclusive" in help_by_dest["start"]
+    assert "Exclusive" in help_by_dest["end"]
+    assert "not included" in help_by_dest["end"].lower()
+
+
+# test-gaps-5: order-submission safety defaults (store_true => off) are pinned
+@pytest.mark.parametrize(
+    "subcommand",
+    ["event-risk-cycle", "event-risk-ws", "long-native-event-demo-cycle", "continuous-event-demo-cycle"],
+)
+def test_order_submission_flags_default_off(subcommand: str) -> None:
+    """The never-arm-by-default contract: every order-submitting daemon parser must default
+    submit_orders and confirm_demo_orders to False. A store_true->default=True regression would
+    silently arm live order submission and otherwise go unnoticed."""
+    parser = build_parser()
+    args = parser.parse_args([subcommand])
+    assert args.submit_orders is False, f"{subcommand} must NOT submit orders by default"
+    assert args.confirm_demo_orders is False, f"{subcommand} must NOT confirm demo orders by default"
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b12.py (audit bucket b12 regressions):
+# cli-config-3 / cli-config-4 / cli-config-7 / code-quality-9 dataset+universe
+# argument validation and symbol parsing.
+# ---------------------------------------------------------------------------
+# cli-config-3: event-risk-cycle --loop must fail fast on order-safety misconfig.
+def test_event_risk_cycle_loop_validates_before_spinning(monkeypatch, tmp_path: Path) -> None:
+    # --submit-orders without --confirm-demo-orders is a fatal misconfig. In
+    # --loop mode it previously got swallowed by the per-cycle broad except and
+    # spun forever. It must now raise BEFORE the loop and never build a client or
+    # run a cycle.
+    built_client = {"count": 0}
+    ran_cycle = {"count": 0}
+
+    def fake_build_client(config, risk_config):  # pragma: no cover - must not run
+        built_client["count"] += 1
+        return object()
+
+    def fake_run_cycle(*args, **kwargs):  # pragma: no cover - must not run
+        ran_cycle["count"] += 1
+        return {}
+
+    monkeypatch.setattr(cli, "build_event_risk_private_client", fake_build_client)
+    monkeypatch.setattr(cli, "run_event_risk_cycle", fake_run_cycle)
+
+    argv = [
+        "--data-root",
+        str(tmp_path),
+        "event-risk-cycle",
+        "--loop",
+        "--submit-orders",
+        "--max-cycles",
+        "0",
+        "--interval-seconds",
+        "0.0",
+    ]
+    with pytest.raises(RuntimeError, match="confirm-demo-orders"):
+        cli.main(argv)
+    # The fatal config error must surface before the loop arms anything.
+    assert built_client["count"] == 0
+    assert ran_cycle["count"] == 0
+
+
+# cli-config-4: unknown/typo'd --datasets must fail loud, not silently no-op.
+def test_validate_datasets_rejects_unknown_bybit_dataset() -> None:
+    with pytest.raises(RuntimeError, match="funidng"):
+        _validate_datasets({"klines_1h", "funidng"}, _KNOWN_BYBIT_DATASETS, venue="Bybit")
+    # Every known token passes unchanged.
+    known = {"instruments", "klines_1h", "archive_klines_1m"}
+    assert _validate_datasets(known, _KNOWN_BYBIT_DATASETS, venue="Bybit") == known
+
+
+def test_validate_datasets_accepts_binance_alias_and_canonical_names() -> None:
+    # Aliases (map keys) and already-resolved binance_usdm_* names both pass.
+    assert _validate_datasets({"funding"}, _KNOWN_BINANCE_PROXY_DATASETS, venue="Binance proxy") == {"funding"}
+    assert _validate_datasets(
+        {"binance_usdm_funding"}, _KNOWN_BINANCE_PROXY_DATASETS, venue="Binance proxy"
+    ) == {"binance_usdm_funding"}
+    with pytest.raises(RuntimeError, match="klines_1hr"):
+        _validate_datasets({"klines_1hr"}, _KNOWN_BINANCE_PROXY_DATASETS, venue="Binance proxy")
+
+
+def test_download_command_defaults_are_known_datasets() -> None:
+    # The committed argparse defaults must not trip the new validation.
+    bybit_default = {item.strip() for item in "instruments,klines_1h".split(",")}
+    assert not (bybit_default - _KNOWN_BYBIT_DATASETS)
+    proxy_default = {
+        item.strip()
+        for item in "klines_1h,funding,mark_price_1h,index_price_1h,premium_index_1h".split(",")
+    }
+    assert not (proxy_default - _KNOWN_BINANCE_PROXY_DATASETS)
+
+
+# cli-config-7: contradictory --include-excluded + --exclude-defaults must error.
+def _universe_args(**overrides) -> argparse.Namespace:
+    base = dict(
+        exclude_symbols=None,
+        include_majors=False,
+        exclude_majors=False,
+        min_turnover_24h=None,
+        min_age_days=None,
+        max_age_days=None,
+        rank_start=None,
+        rank_end=None,
+        max_symbols=None,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_universe_config_rejects_contradictory_include_and_exclude() -> None:
+    base = UniverseConfig()
+    with pytest.raises(RuntimeError, match="mutually exclusive"):
+        _universe_config_from_args(base, _universe_args(include_majors=True, exclude_majors=True))
+
+
+def test_universe_config_single_flag_still_resolves() -> None:
+    base = UniverseConfig()
+    inc = _universe_config_from_args(base, _universe_args(include_majors=True))
+    assert inc.exclude_symbols == ()
+    exc = _universe_config_from_args(base, _universe_args(exclude_majors=True))
+    assert exc.exclude_symbols == DEFAULT_EXCLUDED_SYMBOLS
+
+
+def test_discover_universe_parser_rejects_both_exclusion_flags_at_parse() -> None:
+    # cli-config-7 (see test_audit_int_iK) made the four exclusion flags a parse-time
+    # mutually-exclusive group, so passing both is now an argparse error (SystemExit)
+    # BEFORE runtime. The runtime guard in _universe_config_from_args remains as
+    # defense-in-depth for a programmatic caller and is pinned above via _universe_args.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["discover-universe", "--include-excluded", "--exclude-defaults"])
+
+
+# code-quality-9: single symbol-parsing helper used by every download branch.
+def test_parse_symbols_strips_and_uppercases() -> None:
+    assert _parse_symbols(" btcusdt, ethusdt ,, solusdt ") == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    assert _parse_symbols("") == []
+    assert _parse_symbols(None) == []
+
+
+# cli-config-7 (relocated from test_audit_int_iK): discover-universe must reject the
+# contradictory exclusion flags (--exclude-defaults vs --include-excluded) at parse
+# time instead of silently picking the include branch. The fix groups all four
+# exclusion flags into one argparse mutually-exclusive group in
+# cli_parsers._add_discover_universe_parser, while keeping the two legacy aliases
+# (--exclude-majors / --include-majors) hidden (argparse.SUPPRESS) for backward compat.
+def _parse_discover_universe(args):
+    return build_parser().parse_args(["discover-universe", *args])
+
+
+def test_exclude_defaults_alone_parses() -> None:
+    ns = _parse_discover_universe(["--exclude-defaults"])
+    assert ns.exclude_majors is True
+    assert ns.include_majors is False
+
+
+def test_include_excluded_alone_parses() -> None:
+    ns = _parse_discover_universe(["--include-excluded"])
+    assert ns.include_majors is True
+    assert ns.exclude_majors is False
+
+
+def test_legacy_exclude_majors_alias_still_works() -> None:
+    # Backward compat: the hidden --exclude-majors alias keeps setting exclude_majors.
+    ns = _parse_discover_universe(["--exclude-majors"])
+    assert ns.exclude_majors is True
+    assert ns.include_majors is False
+
+
+def test_legacy_include_majors_alias_still_works() -> None:
+    # Backward compat: the hidden --include-majors alias keeps setting include_majors.
+    ns = _parse_discover_universe(["--include-majors"])
+    assert ns.include_majors is True
+    assert ns.exclude_majors is False
+
+
+def test_no_exclusion_flags_defaults_false() -> None:
+    ns = _parse_discover_universe([])
+    assert ns.exclude_majors is False
+    assert ns.include_majors is False
+
+
+def test_contradictory_exclude_and_include_is_parse_error() -> None:
+    # The core fix: contradictory pair must hard-error rather than silently drop
+    # --exclude-defaults (cli-config-7).
+    with pytest.raises(SystemExit) as exc:
+        _parse_discover_universe(["--exclude-defaults", "--include-excluded"])
+    assert exc.value.code == 2
+
+
+def test_contradictory_legacy_aliases_is_parse_error() -> None:
+    # The contradiction is detected through the hidden aliases too.
+    with pytest.raises(SystemExit) as exc:
+        _parse_discover_universe(["--exclude-majors", "--include-majors"])
+    assert exc.value.code == 2
+
+
+def test_contradictory_mixed_public_and_alias_is_parse_error() -> None:
+    with pytest.raises(SystemExit) as exc:
+        _parse_discover_universe(["--include-excluded", "--exclude-majors"])
+    assert exc.value.code == 2
+
+
+def test_exclusion_aliases_remain_hidden_in_help() -> None:
+    # The legacy aliases stay argparse.SUPPRESS: they must not appear in the
+    # discover-universe help text, only the public flags do.
+    parser = build_parser()
+    discover_subparser = parser._subparsers._group_actions[0].choices["discover-universe"]
+    help_text = discover_subparser.format_help()
+    assert "--exclude-defaults" in help_text
+    assert "--include-excluded" in help_text
+    assert "--exclude-majors" not in help_text
+    assert "--include-majors" not in help_text
+
+
+def test_exclusion_flags_are_in_a_mutually_exclusive_group() -> None:
+    # Structural assertion: the four exclusion flags share one mutually-exclusive
+    # group so the conflict is enforced by argparse, not by ad-hoc runtime logic.
+    parser = build_parser()
+    discover_subparser = parser._subparsers._group_actions[0].choices["discover-universe"]
+    target_options = {
+        "--exclude-defaults",
+        "--exclude-majors",
+        "--include-excluded",
+        "--include-majors",
+    }
+    for group in discover_subparser._mutually_exclusive_groups:
+        group_options = {
+            opt for action in group._group_actions for opt in action.option_strings
+        }
+        if target_options <= group_options:
+            assert isinstance(group, argparse._MutuallyExclusiveGroup)
+            break
+    else:  # pragma: no cover - defensive
+        pytest.fail("exclusion flags are not in a single mutually-exclusive group")

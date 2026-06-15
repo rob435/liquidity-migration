@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import gzip
+import logging
+import zipfile
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -8,7 +11,9 @@ import pytest
 from liquidity_migration import archive as archive_module
 from liquidity_migration import archive_manifest as manifest_module
 from liquidity_migration.archive import (
+    ArchiveDownloadIncompleteError,
     ArchiveFileNotFoundError,
+    download_archive_bytes,
     download_public_trade_archive,
     read_public_trade_archive,
     read_public_trade_archive_klines_1h,
@@ -1195,3 +1200,442 @@ def test_download_market_data_skips_archive_404_and_continues(tmp_path, monkeypa
     assert "AAAUSDT" in seen_urls[0]
     assert "BBBUSDT" in seen_urls[1]
     assert "klines_1m" not in outputs, "no successful download should mean no klines output"
+
+
+# ======================================================================================
+# Relocated from tests/test_audit_fix_b08.py (audit bucket b08).
+# ======================================================================================
+
+
+# --------------------------------------------------------------------------------------
+# archive-integrity-1: a truncated download (Content-Length mismatch) is rejected, not promoted
+# --------------------------------------------------------------------------------------
+class _FakeResponse:
+    """Minimal stand-in for urllib's HTTPResponse with a Content-Length header."""
+
+    def __init__(self, body: bytes, *, content_length: int | None) -> None:
+        self._body = body
+        self._content_length = content_length
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+    def getheader(self, name: str, default: object = None) -> object:
+        if name == "Content-Length" and self._content_length is not None:
+            return str(self._content_length)
+        return default
+
+
+def test_download_archive_bytes_rejects_truncated_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The server advertised 100 bytes but the socket closed mid-stream after 10. urlopen.read()
+    # returns the short body WITHOUT raising; the size check must reject it as incomplete.
+    def fake_urlopen(url, **_kwargs):  # noqa: ANN001
+        return _FakeResponse(b"x" * 10, content_length=100)
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    with pytest.raises(ArchiveDownloadIncompleteError):
+        download_archive_bytes("https://example.test/AAAUSDT2025-01-01.csv.gz")
+
+
+def test_download_archive_bytes_accepts_matching_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = b"timestamp,symbol\n1.0,AAAUSDT\n"
+
+    def fake_urlopen(url, **_kwargs):  # noqa: ANN001
+        return _FakeResponse(body, content_length=len(body))
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    assert download_archive_bytes("https://example.test/x.csv") == body
+
+
+def test_download_archive_bytes_accepts_when_no_content_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No Content-Length advertised -> we cannot assert, so accept (the cache-hit structural
+    # check and read-time parse remain as later defenses).
+    body = b"some bytes"
+
+    def fake_urlopen(url, **_kwargs):  # noqa: ANN001
+        return _FakeResponse(body, content_length=None)
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    assert download_archive_bytes("https://example.test/x.csv") == body
+
+
+def test_truncated_download_is_retried_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A truncated body is TRANSIENT: download_public_trade_archive must retry and succeed once a
+    # full body arrives, rather than promote the partial file. PRE-FIX the partial was accepted.
+    full = gzip.compress(
+        b"timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n"
+        b"1735689600.0,AAAUSDT,Buy,0.001,100.0,PlusTick,e1,0,0.001,0.1\n"
+    )
+    attempts = {"n": 0}
+
+    def fake_urlopen(url, **_kwargs):  # noqa: ANN001
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return _FakeResponse(full[:5], content_length=len(full))  # truncated
+        return _FakeResponse(full, content_length=len(full))  # complete
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(archive_module.time, "sleep", lambda _s: None)
+
+    dest = tmp_path / "AAAUSDT2025-01-01.csv.gz"
+    out = download_public_trade_archive("https://example.test/AAAUSDT2025-01-01.csv.gz", dest, retries=3)
+    assert out == dest
+    assert attempts["n"] == 2  # first truncated attempt rejected, second accepted
+    assert dest.read_bytes() == full
+
+
+# --------------------------------------------------------------------------------------
+# archive-integrity-3: a partial/corrupt CACHED archive is re-validated, not re-served forever
+# --------------------------------------------------------------------------------------
+def test_corrupt_gz_cache_is_unlinked_and_redownloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "AAAUSDT2025-01-01.csv.gz"
+    # a previously-written CORRUPT .gz cache (non-empty, so the old st_size>0 guard re-served it)
+    dest.write_bytes(b"\x1f\x8b corrupt not really gzip")
+    good = gzip.compress(b"timestamp,symbol\n1.0,AAAUSDT\n")
+
+    def fake_download(_url, *, timeout_seconds):  # noqa: ANN001, ANN002, ANN003
+        return good
+
+    monkeypatch.setattr(archive_module, "download_archive_bytes", fake_download)
+
+    out = download_public_trade_archive("https://example.test/AAAUSDT2025-01-01.csv.gz", dest)
+    # PRE-FIX: the corrupt cache was returned untouched (st_size>0). Now it is re-downloaded.
+    assert out == dest
+    assert dest.read_bytes() == good
+
+
+def test_valid_gz_cache_is_reserved_without_redownload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "AAAUSDT2025-01-01.csv.gz"
+    good = gzip.compress(b"timestamp,symbol\n1.0,AAAUSDT\n")
+    dest.write_bytes(good)
+
+    def fail_download(_url, *, timeout_seconds):  # noqa: ANN001, ANN002, ANN003
+        raise AssertionError("a valid cache hit must NOT re-download")
+
+    monkeypatch.setattr(archive_module, "download_archive_bytes", fail_download)
+    out = download_public_trade_archive("https://example.test/AAAUSDT2025-01-01.csv.gz", dest)
+    assert out == dest and dest.read_bytes() == good
+
+
+def test_corrupt_zip_cache_is_unlinked_and_redownloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "AAAUSDT2025-01-01.csv.zip"
+    dest.write_bytes(b"PK not really a zip file")  # non-empty but not a valid zip container
+
+    def fake_download(_url, *, timeout_seconds):  # noqa: ANN001, ANN002, ANN003
+        import io
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("AAAUSDT2025-01-01.csv", "timestamp,symbol\n1.0,AAAUSDT\n")
+        return buf.getvalue()
+
+    monkeypatch.setattr(archive_module, "download_archive_bytes", fake_download)
+    out = download_public_trade_archive("https://example.test/AAAUSDT2025-01-01.csv.zip", dest)
+    assert out == dest
+    # the re-downloaded file is now a valid zip
+    with zipfile.ZipFile(dest) as zf:
+        assert zf.namelist() == ["AAAUSDT2025-01-01.csv"]
+
+
+# --------------------------------------------------------------------------------------
+# code-quality-8: the 1h-kline fast-path fallbacks log at WARNING before falling back
+# --------------------------------------------------------------------------------------
+def test_scalar_1h_fastpath_failure_is_logged_before_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    archive = tmp_path / "BTCUSDT2025-01-01.csv.gz"
+    csv_text = (
+        "timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n"
+        "1735689600.0,BTCUSDT,Buy,0.001,100.0,PlusTick,e1,0,0.001,0.1\n"
+    )
+    archive.write_bytes(gzip.compress(csv_text.encode("utf-8")))
+
+    # Force the scalar fast path to blow up so the fallback fires.
+    import liquidity_migration.archive as am
+
+    def boom(*_a, **_k):  # noqa: ANN002, ANN003
+        raise RuntimeError("simulated scalar fast-path fault")
+
+    monkeypatch.setattr(am, "_public_trade_text_handle", boom)
+
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.archive"):
+        result = read_public_trade_archive_klines_1h(archive)
+
+    # correctness preserved: the slow aggregate path still produced the bar
+    assert not result.is_empty()
+    assert result.to_dicts()[0]["close"] == 100.0
+    # PRE-FIX: the exception was swallowed with no log. Now a WARNING surfaces the fault.
+    assert any(
+        rec.levelno == logging.WARNING and "fast path failed" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_vectorized_1h_fastpath_failure_is_logged_before_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    archive = tmp_path / "BTCUSDT2025-01-01.csv.gz"
+    csv_text = (
+        "timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n"
+        "1735689600.0,BTCUSDT,Buy,0.001,100.0,PlusTick,e1,0,0.001,0.1\n"
+    )
+    archive.write_bytes(gzip.compress(csv_text.encode("utf-8")))
+
+    import liquidity_migration.archive as am
+
+    monkeypatch.setenv(am.ARCHIVE_VECTORIZE_1H_ENV, "1")
+
+    def boom(*_a, **_k):  # noqa: ANN002, ANN003
+        raise RuntimeError("simulated vectorized fast-path fault")
+
+    monkeypatch.setattr(am, "_read_public_trade_archive_klines_1h_vectorized", boom)
+
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.archive"):
+        result = read_public_trade_archive_klines_1h(archive)
+
+    assert not result.is_empty()
+    assert any(
+        rec.levelno == logging.WARNING and "vectorized 1h-kline fast path failed" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+# ======================================================================================
+# Relocated from tests/test_audit_fix_b10.py (audit bucket b10, archive-integrity-4).
+# A truncated/short archive body is rejected, not written thin; a corrupt cached .gz is
+# fully drained and re-fetched. Carries its own `_FakeHttpResponse` stand-in.
+# ======================================================================================
+class _FakeHttpResponse:
+    """Minimal urlopen() context-manager stand-in carrying a body and an optional
+    Content-Length header, matching the `with urlopen(...) as r: r.read(); r.getheader(...)`
+    contract download_archive_bytes uses."""
+
+    def __init__(self, body: bytes, content_length: int | None) -> None:
+        self._body = body
+        self._content_length = content_length
+
+    def __enter__(self) -> "_FakeHttpResponse":
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+    def getheader(self, name: str) -> str | None:
+        if name == "Content-Length" and self._content_length is not None:
+            return str(self._content_length)
+        return None
+
+
+def test_archiveintegrity4_short_body_vs_content_length_raises(monkeypatch) -> None:
+    """download_archive_bytes must FAIL LOUD (retryable ArchiveDownloadIncompleteError)
+    when the received body is shorter than the advertised Content-Length — a clean
+    mid-stream socket close returns the partial bytes WITHOUT raising, which would
+    otherwise be promoted as a silently-thin day. Before the integrity check this
+    short read was accepted."""
+    full = gzip.compress(b"timestamp,symbol,side\n1,BTCUSDT,Buy\n")
+
+    def fake_urlopen(_url, **_kwargs):
+        # Body truncated to half, but the server advertised the full length.
+        return _FakeHttpResponse(full[: len(full) // 2], content_length=len(full))
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    with pytest.raises(ArchiveDownloadIncompleteError):
+        download_archive_bytes("https://example.test/BTCUSDT2025-01-01.csv.gz")
+
+
+def test_archiveintegrity4_complete_body_accepted(monkeypatch) -> None:
+    """Control: a body whose length matches the advertised Content-Length is
+    returned intact (the check is exact-match, not over-eager)."""
+    full = gzip.compress(b"timestamp,symbol,side\n1,BTCUSDT,Buy\n")
+
+    def fake_urlopen(_url, **_kwargs):
+        return _FakeHttpResponse(full, content_length=len(full))
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    assert download_archive_bytes("https://example.test/BTCUSDT2025-01-01.csv.gz") == full
+
+
+def test_archiveintegrity4_corrupt_cached_gz_rejected_and_refetched(tmp_path, monkeypatch) -> None:
+    """A cached `.gz` archive that is truncated/corrupt (decompresses partially) must
+    NOT be re-served on a size-only hit — _archive_cache_is_complete fully drains the
+    gzip and rejects it, so the download falls through to a fresh fetch. Before the
+    integrity check a previously-written partial archive was served forever. The
+    recovered file must be the valid body, with exactly one re-download."""
+    valid_gz = gzip.compress(
+        b"timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n"
+        b"1735689600.0,BTCUSDT,Buy,0.001,90000.0,PlusTick,e1,9000,0.001,90.0\n"
+    )
+    corrupt_gz = valid_gz[: len(valid_gz) // 2]  # truncated -> fails to fully decompress
+    out = tmp_path / "BTCUSDT2025-01-01.csv.gz"
+    out.write_bytes(corrupt_gz)  # pre-seed a CORRUPT non-empty cache (passes size-only)
+
+    calls = {"n": 0}
+
+    def fake_download(_url, *, timeout_seconds):
+        calls["n"] += 1
+        return valid_gz
+
+    monkeypatch.setattr(archive_module, "download_archive_bytes", fake_download)
+    monkeypatch.setattr(archive_module.time, "sleep", lambda _seconds: None)
+
+    result = download_public_trade_archive(
+        "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-01.csv.gz",
+        out,
+        retries=2,
+        timeout_seconds=5,
+    )
+    assert result == out
+    assert out.read_bytes() == valid_gz, "the corrupt cached body must be rejected, not re-served"
+    assert calls["n"] == 1, "the corrupt cache must trigger exactly one fresh download"
+    assert not list(tmp_path.glob("*.tmp")), "no temp file should leak"
+
+
+def test_archiveintegrity4_valid_cache_is_served_without_refetch(tmp_path, monkeypatch) -> None:
+    """Control: a VALID cached `.gz` passes the integrity check and is served from
+    cache with NO re-download (the check is not over-eager)."""
+    valid_gz = gzip.compress(
+        b"timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n"
+        b"1735689600.0,BTCUSDT,Buy,0.001,90000.0,PlusTick,e1,9000,0.001,90.0\n"
+    )
+    out = tmp_path / "BTCUSDT2025-01-01.csv.gz"
+    out.write_bytes(valid_gz)
+
+    def fail_download(_url, *, timeout_seconds):
+        raise AssertionError("a valid cached archive must not be re-downloaded")
+
+    monkeypatch.setattr(archive_module, "download_archive_bytes", fail_download)
+    result = download_public_trade_archive("https://example.test/BTCUSDT2025-01-01.csv.gz", out)
+    assert result == out
+    assert out.read_bytes() == valid_gz
+
+
+# ======================================================================================
+# Relocated from tests/test_audit_int_iE.py (audit bucket iE, archive-integrity-4 —
+# the FRESH-DOWNLOAD promotion gate). Complement to the b10 block above: there the lever
+# is urlopen / download_archive_bytes; here the lever is `_download_archive_to_path` (the
+# backend-agnostic writer that fills the temp file). Monkeypatching the writer to drop a
+# truncated gzip reproduces a header-less mid-stream socket close that bypasses the
+# download-time Content-Length guard — pinning "a short/corrupt fresh download must NOT be
+# promoted into the canonical full-PIT name."
+# ======================================================================================
+_CSV_HEADER = (
+    "timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n"
+)
+
+
+def _full_gzip_body() -> bytes:
+    """A complete, drainable gzip body (passes _archive_cache_is_complete)."""
+    payload = _CSV_HEADER.encode("utf-8") + (
+        b"1700000000.0,BTCUSDT,Buy,0.1,50000,ZeroMinusTick,abc,5000,0.1,5000\n" * 4000
+    )
+    return gzip.compress(payload)
+
+
+def _truncated_gzip_body() -> bytes:
+    """A gzip body cut mid-stream — fails to fully decompress, so the drain-to-end
+    integrity check rejects it. This is what a clean mid-stream socket close (with no
+    Content-Length to catch the short read) leaves behind."""
+    full = _full_gzip_body()
+    truncated = full[: len(full) // 2]
+    assert len(truncated) < len(full)
+    return truncated
+
+
+def test_fresh_truncated_gz_download_is_rejected_not_promoted(tmp_path, monkeypatch) -> None:
+    """archive-integrity-4: a truncated fresh download must NOT be promoted to the
+    canonical name. With retries exhausted the loop raises (transient failure), and
+    crucially the canonical output partition is never written thin."""
+    destination = tmp_path / "BTCUSDT2025-01-23.csv.gz"
+
+    calls = {"n": 0}
+
+    def fake_download(_url, output, *, timeout_seconds):
+        # Mock the writer itself (backend-agnostic, no network): a header-less
+        # truncated body lands in the temp file exactly as a mid-stream socket close
+        # would leave it — bypassing the download-time Content-Length guard.
+        calls["n"] += 1
+        output.write_bytes(_truncated_gzip_body())
+
+    monkeypatch.setattr(archive_module, "_download_archive_to_path", fake_download)
+    monkeypatch.setattr(archive_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError):  # retries exhausted -> RuntimeError wrapping the incomplete error
+        download_public_trade_archive(
+            "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-23.csv.gz",
+            destination,
+            retries=2,
+        )
+
+    assert calls["n"] == 2, f"a corrupt fresh download must be re-fetched (transient), got {calls['n']} attempts"
+    assert not destination.exists(), "a truncated body must NOT be promoted to the canonical full-PIT name"
+    assert not list(tmp_path.glob("*.tmp")), "the corrupt temp file must be cleaned up"
+
+
+def test_fresh_download_integrity_failure_recovers_on_next_attempt(tmp_path, monkeypatch) -> None:
+    """The integrity failure is TRANSIENT: a corrupt body on attempt 1 followed by a
+    complete body on attempt 2 must promote the good body — same recovery a corrupt
+    *cache* gets, just at the fresh-download boundary."""
+    destination = tmp_path / "BTCUSDT2025-01-24.csv.gz"
+    full = _full_gzip_body()
+    attempts = 0
+
+    def flaky_download(_url, output, *, timeout_seconds):
+        nonlocal attempts
+        attempts += 1
+        output.write_bytes(_truncated_gzip_body() if attempts == 1 else full)
+
+    monkeypatch.setattr(archive_module, "_download_archive_to_path", flaky_download)
+    monkeypatch.setattr(archive_module.time, "sleep", lambda _seconds: None)
+
+    output = download_public_trade_archive(
+        "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-24.csv.gz",
+        destination,
+        retries=3,
+    )
+
+    assert output == destination
+    assert attempts == 2, f"first (corrupt) attempt must be retried; got {attempts}"
+    assert destination.read_bytes() == full, "the complete body from the retry must be the promoted partition"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_complete_fresh_download_still_promotes(tmp_path, monkeypatch) -> None:
+    """Guard against over-rejection: a valid fresh .gz must still be promoted on the
+    first attempt (the integrity gate is not a blanket reject)."""
+    destination = tmp_path / "BTCUSDT2025-01-25.csv.gz"
+    full = _full_gzip_body()
+    calls = {"n": 0}
+
+    def fake_download(_url, *, timeout_seconds):
+        calls["n"] += 1
+        return full
+
+    monkeypatch.setattr(archive_module, "download_archive_bytes", fake_download)
+
+    output = download_public_trade_archive(
+        "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-25.csv.gz",
+        destination,
+        retries=2,
+    )
+
+    assert output == destination
+    assert calls["n"] == 1, "a complete fresh download must promote on the first attempt"
+    assert destination.read_bytes() == full
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_incomplete_error_is_transient_not_file_not_found() -> None:
+    """The fresh-download integrity failure must be a TRANSIENT error (retried), not
+    a permanent ArchiveFileNotFoundError (404, skipped). Pin the type hierarchy the
+    retry loop depends on."""
+    assert issubclass(ArchiveDownloadIncompleteError, RuntimeError)
+    assert not issubclass(ArchiveDownloadIncompleteError, archive_module.ArchiveFileNotFoundError)

@@ -686,3 +686,190 @@ def test_missing_funding_everywhere_returns_empty(tmp_path: Path) -> None:
 
     assert resolve_dataset_name(tmp_path, "funding") == "funding"
     assert read_dataset(tmp_path, "funding").is_empty()
+
+
+# --- audit bucket b10 (relocated from test_audit_fix_b10.py) -----------------
+# pit-data-6 / storage-concurrency-2 / -4 / -5: funding-fallback gating, the
+# reused-pid stale singleton-lock eviction, orphaned `.*.tmp` sweeping, and the
+# parent-dir fsync after the atomic rename. Each FAILs on the original bug.
+import threading  # noqa: E402
+
+from liquidity_migration import storage  # noqa: E402
+from liquidity_migration.storage import resolve_dataset_name as _b10_resolve_dataset_name  # noqa: E402
+
+
+def test_pitdata6_binance_funding_fallback_suppressed_on_bybit_root(tmp_path: Path) -> None:
+    """A Bybit root (native klines_1h present) that happens to ALSO carry a
+    binance_usdm_funding/ dir but lacks a canonical funding/ dir must NOT silently
+    serve BINANCE funding to a Bybit funding request — funding is a modeled cost,
+    and the wrong venue's curve mis-signs returns. Before the fix resolve_dataset_name
+    returned 'binance_usdm_funding' (cross-venue substitution); after, it fail-safes
+    to the canonical 'funding' (empty read -> funding_mode missing)."""
+    # Native Bybit kline marker -> this is a Bybit root.
+    write_dataset(
+        pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "close": [1.0]}),
+        tmp_path,
+        "klines_1h",
+        partition_by=(),
+    )
+    # A stray Binance funding dir on the same (mixed) root.
+    write_dataset(
+        pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "funding_rate": [0.0009]}),
+        tmp_path,
+        "binance_usdm_funding",
+        partition_by=(),
+    )
+
+    # The fallback must be suppressed: a Bybit funding request stays canonical.
+    assert _b10_resolve_dataset_name(tmp_path, "funding") == "funding"
+    # No canonical funding/ dir -> empty read (NOT the Binance funding rows).
+    assert read_dataset(tmp_path, "funding").is_empty()
+    # Open interest is gated identically.
+    assert _b10_resolve_dataset_name(tmp_path, "open_interest") == "open_interest"
+
+
+def test_pitdata6_pure_binance_root_still_resolves_fallback(tmp_path: Path) -> None:
+    """The intended pure-Binance per-venue root (NO Bybit-native kline marker)
+    still transparently resolves canonical funding -> binance_usdm_funding."""
+    write_dataset(
+        pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "funding_rate": [0.0009]}),
+        tmp_path,
+        "binance_usdm_funding",
+        partition_by=(),
+    )
+    # No klines_1h/ etc. -> unambiguously a Binance root -> fallback fires.
+    assert _b10_resolve_dataset_name(tmp_path, "funding") == "binance_usdm_funding"
+    assert read_dataset(tmp_path, "funding").height == 1
+
+
+def test_storageconcurrency2_reused_pid_stale_lock_is_dead(tmp_path: Path) -> None:
+    """A crashed daemon leaves a VALID-JSON lock bearing its pid + token. If a
+    fast restart reuses the SAME pid, the successor reads pid==os.getpid() and,
+    on a stale_seconds=0 singleton lock, would wedge forever (the age-eviction
+    and None-self-heal paths are both disabled). The per-acquisition token is the
+    tiebreaker: a token NOT in this process's live-owned set means the lock is a
+    predecessor that merely reused our pid -> the owner is dead. Before the fix
+    _lock_owner_is_dead short-circuited to False (alive) on pid==getpid()."""
+    lock_path = dataset_lock_path(tmp_path, "klines_1h")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # Plant a readable, valid-JSON lock with OUR pid but a foreign token (a dead
+    # predecessor that reused our pid). _read_lock_text_safe returns the real text
+    # here (NOT monkeypatched), so the None self-heal path cannot fire.
+    lock_path.write_text(
+        json.dumps({"pid": os.getpid(), "created": time.time(), "token": "deadbeef" * 4}),
+        encoding="utf-8",
+    )
+    assert storage._lock_owner_is_dead(lock_path) is True
+
+    # A live-owned token (one we currently hold) must still read as ALIVE.
+    live_token = os.urandom(16).hex()
+    storage._register_owned_token(live_token)
+    try:
+        lock_path.write_text(
+            json.dumps({"pid": os.getpid(), "created": time.time(), "token": live_token}),
+            encoding="utf-8",
+        )
+        assert storage._lock_owner_is_dead(lock_path) is False
+    finally:
+        storage._unregister_owned_token(live_token)
+
+    # A legacy payload with no token field is conservatively treated as our own
+    # live lock (unchanged behaviour).
+    lock_path.write_text(json.dumps({"pid": os.getpid(), "created": time.time()}), encoding="utf-8")
+    assert storage._lock_owner_is_dead(lock_path) is False
+
+
+def test_storageconcurrency2_acquire_recovers_over_reused_pid_lock(tmp_path: Path) -> None:
+    """End-to-end: exclusive_file_lock with stale_seconds=0 (the singleton-guard
+    config) must ACQUIRE over a reused-pid foreign-token lock instead of wedging.
+    Run in a thread with a join timeout so a regression cannot hang the suite."""
+    lock_path = dataset_lock_path(tmp_path, "funding")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps({"pid": os.getpid(), "created": time.time(), "token": "f00dface" * 4}),
+        encoding="utf-8",
+    )
+
+    acquired = threading.Event()
+
+    def _acquire() -> None:
+        with exclusive_file_lock(lock_path, stale_seconds=0, poll_seconds=0.0):
+            acquired.set()
+
+    worker = threading.Thread(target=_acquire, daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+    assert acquired.is_set(), "acquire wedged on a reused-pid stale singleton lock"
+    # Lock is released (our acquisition owned it, foreign token replaced on write).
+    assert not lock_path.exists()
+
+
+def test_storageconcurrency4_orphaned_tmp_swept_on_next_write(tmp_path: Path) -> None:
+    """A SIGKILL between write_parquet and the atomic rename orphans a
+    `.{name}.{pid}.{ns}.tmp` file (the finally unlink never runs). The next
+    write_dataset must sweep stale `.*.tmp` files so a Restart=always daemon does
+    not accumulate orphans until the disk fills. Before the fix there was no sweep
+    anywhere, so the orphan survived every subsequent write."""
+    dataset = "event_demo_orders"
+    # Seed the dataset so its dir exists.
+    write_dataset(
+        pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "order_id": ["a"]}),
+        tmp_path,
+        dataset,
+        partition_by=(),
+    )
+    dataset_dir = tmp_path / dataset
+    # Simulate an orphaned temp left by a crash mid-write, aged past the threshold.
+    orphan = dataset_dir / f".part.parquet.{os.getpid()}.123456789.tmp"
+    orphan.write_bytes(b"truncated parquet fragment")
+    old = time.time() - storage._STALE_TMP_SECONDS - 60
+    os.utime(orphan, (old, old))
+    # A FRESH temp (in-flight) must be preserved by the age gate.
+    fresh = dataset_dir / f".part.parquet.{os.getpid()}.987654321.tmp"
+    fresh.write_bytes(b"in-flight")
+
+    # The next write sweeps stale temps (it holds the dataset lock).
+    write_dataset(
+        pl.DataFrame({"ts_ms": [2], "symbol": ["ETHUSDT"], "order_id": ["b"]}),
+        tmp_path,
+        dataset,
+        partition_by=(),
+    )
+
+    assert not orphan.exists(), "stale orphaned .tmp should have been swept"
+    assert fresh.exists(), "a fresh in-flight .tmp must NOT be swept"
+    # The real data is intact and readers never saw the orphan.
+    got = read_dataset(tmp_path, dataset)
+    assert set(got["order_id"].to_list()) == {"a", "b"}
+
+
+def test_storageconcurrency5_parent_dir_fsynced_after_rename(tmp_path: Path, monkeypatch) -> None:
+    """_write_part must fsync the PARENT DIRECTORY fd after temp_path.replace(path),
+    not just the temp file — otherwise the rename is not power-loss durable. Pin it
+    by recording every os.fsync target and asserting a directory fd is fsync'd.
+    Before the fix only the temp file was fsync'd."""
+    import stat as stat_module
+
+    fsynced_kinds: list[str] = []
+    real_fsync = os.fsync
+    real_fstat = os.fstat
+
+    def recording_fsync(fd: int) -> None:
+        try:
+            mode = real_fstat(fd).st_mode
+            fsynced_kinds.append("dir" if stat_module.S_ISDIR(mode) else "file")
+        except OSError:
+            fsynced_kinds.append("unknown")
+        real_fsync(fd)
+
+    monkeypatch.setattr(storage.os, "fsync", recording_fsync)
+
+    write_dataset(
+        pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "close": [1.0]}),
+        tmp_path,
+        "klines_1h",
+        partition_by=(),
+    )
+
+    assert "file" in fsynced_kinds, "the temp part file must still be fsync'd"
+    assert "dir" in fsynced_kinds, "the parent directory must be fsync'd after the rename"

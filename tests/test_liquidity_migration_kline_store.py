@@ -767,3 +767,75 @@ def test_recover_into_empty_store_normal_path_unchanged(tmp_path: Path) -> None:
     assert follower.newest_ts_ms() == 4 * MS_PER_HOUR
     assert follower.newest_ts_ms() == _max_present_ts(follower)
     assert follower.row_count() == 10
+
+
+# --- audit bucket b15: newest_ts staleness + flush serialization (ws-pool-2/-5) ---
+def test_newest_ts_recomputed_after_keep_only_trims_max_holder() -> None:
+    # ws-pool-2: trimming the lone symbol that holds the global-max timestamp must
+    # drop newest_ts_ms to the surviving max — never leave it stale/too-fresh.
+    store = KlineStore(cache_root=None, retain_days=365, flush_interval_seconds=0.0)
+    store.add_bar("AAA", _ws_bar(10 * MS_PER_HOUR), confirmed=True)
+    store.add_bar("BBB", _ws_bar(50 * MS_PER_HOUR), confirmed=True)  # holds global max
+    assert store.newest_ts_ms() == 50 * MS_PER_HOUR
+    store.keep_only_symbols(["AAA"])  # drops the max holder
+    assert store.newest_ts_ms() == 10 * MS_PER_HOUR
+    assert store.stats()["newest_ts_ms"] == 10 * MS_PER_HOUR
+
+
+def test_newest_ts_recomputed_after_eviction_drops_max_holder() -> None:
+    # ws-pool-2: the same staleness applies to age-eviction. After a far-newer bar
+    # ages out an old symbol entirely, newest must reflect the surviving bars.
+    store = KlineStore(cache_root=None, retain_days=1, flush_interval_seconds=0.0)
+    store.add_bar("AAA", _ws_bar(1 * MS_PER_HOUR), confirmed=True)
+    # A bar > retain_days newer evicts AAA; newest must be the new bar, and after
+    # the new symbol becomes the only one, newest reflects it (not a stale cache).
+    store.add_bar("BBB", _ws_bar(72 * MS_PER_HOUR), confirmed=True)
+    assert store.newest_ts_ms() == 72 * MS_PER_HOUR
+    # AAA's stale bar should have been evicted (retain_days=1, 71h gap > 24h).
+    assert store.row_count() == 1
+
+
+def test_newest_ts_survives_keep_only_when_max_holder_kept() -> None:
+    # Guard the happy path: trimming a NON-max symbol leaves newest unchanged.
+    store = KlineStore(cache_root=None, retain_days=365, flush_interval_seconds=0.0)
+    store.add_bar("AAA", _ws_bar(10 * MS_PER_HOUR), confirmed=True)
+    store.add_bar("BBB", _ws_bar(50 * MS_PER_HOUR), confirmed=True)
+    store.keep_only_symbols(["BBB"])  # keep the max holder, drop AAA
+    assert store.newest_ts_ms() == 50 * MS_PER_HOUR
+
+
+def test_flush_has_dedicated_serialization_lock() -> None:
+    # ws-pool-5: a dedicated flush IO lock (separate from the data RLock) must
+    # serialize the whole flush so the final stop() flush can't race a lingering
+    # loop flush.
+    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
+    assert isinstance(store._flush_io_lock, type(threading.Lock()))
+    assert hasattr(store, "_flush_to_disk_locked")
+
+
+def test_concurrent_flushes_serialize_and_keep_file_consistent(tmp_path: Path) -> None:
+    # ws-pool-5: two concurrent flush_to_disk calls (the stop() race) must produce
+    # a consistent on-disk file and consistent version bookkeeping, not a torn file
+    # or a skipped subsequent flush.
+    store = KlineStore(cache_root=tmp_path, retain_days=365, flush_interval_seconds=0.0)
+    for i in range(8):
+        store.add_bar("AAA", _ws_bar((10 + i) * MS_PER_HOUR), confirmed=True)
+    errs: list[Exception] = []
+
+    def _flush() -> None:
+        try:
+            store.flush_to_disk()
+        except Exception as exc:  # noqa: BLE001 - record for the assertion
+            errs.append(exc)
+
+    threads = [threading.Thread(target=_flush) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errs == []
+    flush_path = tmp_path / ".cache" / "ws_klines" / "store.parquet"
+    df = pl.read_parquet(flush_path)
+    assert df.height == 8
+    # bookkeeping reflects the flushed state -> a later no-change flush is skipped.
+    assert store.flush_to_disk() == 0

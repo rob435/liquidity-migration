@@ -15,6 +15,7 @@ close. Tests verify the four lifecycle pillars:
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from pathlib import Path
@@ -971,4 +972,174 @@ def test_successful_refresh_counts_no_error(tmp_path: Path) -> None:
         assert result == {"added": 0, "removed": 0, "size": 2}
         assert manager.stats()["universe_refresh_errors"] == 0
     finally:
+        manager.stop()
+
+
+# ==========================================================================
+# Relocated from test_audit_fix_b14.py (ratelimit-rest-1, ws-pool-1 —
+# 2026-06-14 audit bucket b14).
+# ==========================================================================
+
+
+class _PaginatingMarketData:
+    """Mimics BybitMarketData: get_klines paginates and EACH page acquires the
+    wired rate_limiter once (as the real _get does). rate_limiter starts None
+    exactly like the daemons build it, so the manager must wire its own."""
+
+    def __init__(self, *, instruments, pages_per_symbol: int) -> None:
+        self._instruments = instruments
+        self._pages = pages_per_symbol
+        self.rate_limiter = None
+        self.kline_calls: list[str] = []
+
+    def get_instruments_info(self) -> list[dict]:
+        return list(self._instruments)
+
+    def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list:
+        self.kline_calls.append(symbol)
+        bars = []
+        for page in range(self._pages):
+            if self.rate_limiter is not None:
+                self.rate_limiter.acquire()  # one acquire per HTTP page, like _get
+            bars.append({
+                "ts_ms": start + page * MS_PER_HOUR, "open": 1.0, "high": 1.0,
+                "low": 1.0, "close": 1.0, "volume_base": 1.0, "turnover_quote": 1.0,
+            })
+        return bars
+
+
+class _CountingLimiter:
+    def __init__(self) -> None:
+        self.acquires = 0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            self.acquires += 1
+
+
+def test_bootstrap_symbol_no_longer_takes_a_manual_limiter() -> None:
+    """ratelimit-rest-1: the manual once-per-symbol acquire is gone — the
+    _bootstrap_symbol signature must no longer accept ``shared_limiter`` (the
+    limiter now lives on the market client, acquiring once per paginated call)."""
+    params = inspect.signature(KlineStreamManager._bootstrap_symbol).parameters
+    assert "shared_limiter" not in params
+
+
+def test_bootstrap_wires_limiter_and_acquires_once_per_page(tmp_path) -> None:
+    """ratelimit-rest-1: bootstrap must rate-limit each PAGINATED get_klines call,
+    not once per symbol. With a market client whose get_klines makes 3 pages, a
+    2-symbol bootstrap must acquire 6 times (the original once-per-symbol code
+    acquired only 2)."""
+    symbols = ["AAAUSDT", "BBBUSDT"]
+    market = _PaginatingMarketData(
+        instruments=_instruments_payload(symbols), pages_per_symbol=3,
+    )
+
+    class _NoopPool:
+        def subscribe(self, *a, **k): pass
+        def update_subscriptions(self, *a, **k): return {}
+        def close(self): pass
+        def start_watchdog(self): pass
+        def stop_watchdog(self): pass
+        def stats(self): return {}
+
+    manager = KlineStreamManager(
+        market_data=market, cache_root=tmp_path,
+        lookback_days=2, bootstrap_workers=2,
+        universe_refresh_interval_seconds=0.0,
+        bootstrap_completion_threshold=1.0,
+        bootstrap_timeout_seconds=30.0,
+        flush_interval_seconds=0.0, retain_days=30,
+        topics_per_connection=10, pool=_NoopPool(),
+    )
+    # The manager must have wired ITS limiter onto the (None-limiter) client.
+    assert market.rate_limiter is not None
+    # Swap in a counting limiter on the client to count per-page acquires.
+    counter = _CountingLimiter()
+    market.rate_limiter = counter
+    manager.start()
+    try:
+        # 2 symbols * 3 pages each = 6 acquires (NOT 2, the once-per-symbol bug).
+        assert counter.acquires == 6
+        assert sorted(market.kline_calls) == ["AAAUSDT", "BBBUSDT"]
+    finally:
+        manager.stop()
+
+
+def test_refresh_bootstrap_honors_shutdown_promptly(tmp_path) -> None:
+    """ws-pool-1: a universe-refresh bootstrap must honor the manager's refresh-
+    stop signal. With a slow REST fetch and only a couple of workers, setting
+    _refresh_stop mid-flight (what stop() does on SIGTERM) must cancel the pool and
+    return promptly instead of running to the 1200s bootstrap deadline. The
+    original code passed NO shutdown_event on this path, so it ignored the signal."""
+    refresh_targets = [f"SYM{i:02d}USDT" for i in range(20)]
+
+    def _instruments(call_n):
+        # Refresh (call >=2) adds the new listings to bootstrap.
+        base = ["BTCUSDT"]
+        return _instruments_payload(base + (refresh_targets if call_n >= 2 else []))
+
+    started = threading.Event()
+
+    def _slow_klines(symbol, interval, start, end):
+        started.set()
+        time.sleep(0.5)  # slow REST page
+        return [{
+            "ts_ms": start, "open": 1.0, "high": 1.0, "low": 1.0,
+            "close": 1.0, "volume_base": 1.0, "turnover_quote": 1.0,
+        }]
+
+    class _FakeMarket:
+        def __init__(self):
+            self.rate_limiter = None
+            self._n = 0
+
+        def get_instruments_info(self):
+            self._n += 1
+            return _instruments(self._n)
+
+        def get_klines(self, symbol, interval, start, end):
+            return _slow_klines(symbol, interval, start, end)
+
+    class _NoopPool:
+        def subscribe(self, *a, **k): pass
+        def update_subscriptions(self, *a, **k): return {}
+        def close(self): pass
+        def start_watchdog(self): pass
+        def stop_watchdog(self): pass
+        def stats(self): return {}
+
+    market = _FakeMarket()
+    manager = KlineStreamManager(
+        market_data=market, cache_root=tmp_path,
+        lookback_days=2, bootstrap_workers=2,
+        universe_refresh_interval_seconds=0.0,  # no auto refresh thread
+        bootstrap_completion_threshold=1.0,
+        bootstrap_timeout_seconds=1200.0,  # the deadline the orphan would run to
+        flush_interval_seconds=0.0, retain_days=30,
+        topics_per_connection=10, pool=_NoopPool(),
+    )
+    manager.start()  # bootstraps BTCUSDT only
+    try:
+        # Fire the refresh in a background thread; it will start a slow bootstrap
+        # of the 20 new listings. Set the manager's refresh-stop shortly after the
+        # first REST call begins — this is what stop() does on SIGTERM.
+        result: dict = {}
+
+        def _run_refresh():
+            result["out"] = manager.force_refresh_universe()
+
+        th = threading.Thread(target=_run_refresh)
+        t0 = time.monotonic()
+        th.start()
+        assert started.wait(timeout=5.0), "refresh bootstrap never issued a REST call"
+        manager._refresh_stop.set()  # SIGTERM-equivalent mid-bootstrap
+        th.join(timeout=10.0)
+        elapsed = time.monotonic() - t0
+        assert not th.is_alive(), "refresh bootstrap ignored shutdown — still running"
+        # Must return WELL under the 1200s deadline (proves the signal was honored).
+        assert elapsed < 30.0, f"refresh bootstrap blocked {elapsed:.1f}s past shutdown"
+    finally:
+        manager._refresh_stop.clear()
         manager.stop()

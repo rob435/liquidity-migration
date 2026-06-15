@@ -12,6 +12,7 @@ from liquidity_migration.downloaders import (
     _dates_between,
     _download_symbol_dataset,
     _float_or_none,
+    _funding_interval_min,
     _mark_complete,
     _marker_coverage_end_ms,
     _marker_path,
@@ -898,3 +899,52 @@ def test_cli_archive_path_densifies_sparse_bars(tmp_path, monkeypatch) -> None:
     assert tail["ts_ms"] == 1_735_689_600_000 + 1439 * 60_000
     assert tail["close"] == 101.0
     assert tail["volume_base"] == 0.0
+
+
+# --- relocated from test_audit_fix_b04.py (audit bucket b04) -----------------
+# ingestion-2: Bybit OI missing field is null, not a fabricated 0.0.
+
+
+def test_bybit_open_interest_missing_field_is_null_not_zero() -> None:
+    out = _normalize_open_interest("BTCUSDT", [{"timestamp": "1000"}])
+    assert out[0]["open_interest"] is None
+    # A missing openInterest must NOT coalesce into a fabricated 0.0 value.
+    assert out[0]["open_interest_value"] is None
+
+
+def test_bybit_open_interest_present_zero_is_real_zero() -> None:
+    out = _normalize_open_interest(
+        "BTCUSDT",
+        [{"timestamp": "1000", "openInterest": "0", "openInterestValue": "0"}],
+    )
+    assert out[0]["open_interest"] == 0.0
+    assert out[0]["open_interest_value"] == 0.0
+
+
+def test_bybit_open_interest_value_falls_back_to_present_open_interest() -> None:
+    # When openInterestValue is absent but openInterest is present, fall back.
+    out = _normalize_open_interest("BTCUSDT", [{"timestamp": "1000", "openInterest": "42"}])
+    assert out[0]["open_interest"] == 42.0
+    assert out[0]["open_interest_value"] == 42.0
+
+
+# --- ingestion-6: a literal "0" funding interval must not yield interval 0 --
+def test_funding_interval_zero_string_falls_back_to_8h() -> None:
+    # The `or 8` idiom failed here: int("0") == 0 is truthy as a STRING, so a 0h
+    # interval would become 0 minutes and produce funding_rate_8h_equiv = inf.
+    assert _funding_interval_min("0") == 8 * 60
+    assert _funding_interval_min(0) == 8 * 60
+    assert _funding_interval_min(None) == 8 * 60
+    assert _funding_interval_min("") == 8 * 60
+    assert _funding_interval_min(-1) == 8 * 60
+    # Real cadences pass through unchanged.
+    assert _funding_interval_min("1") == 60
+    assert _funding_interval_min(4) == 240
+    assert _funding_interval_min("8") == 480
+
+
+def test_normalize_funding_zero_interval_does_not_emit_zero_minutes() -> None:
+    rows = [{"fundingRateTimestamp": "1000", "fundingRate": "0.0001", "fundingIntervalHour": "0"}]
+    out = _normalize_funding("BTCUSDT", rows)
+    assert out[0]["funding_interval_min"] == 8 * 60  # not 0 -> no inf downstream
+    assert out[0]["funding_interval_min"] > 0

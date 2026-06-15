@@ -301,3 +301,48 @@ def test_precompute_residual_momentum_reaches_today(tmp_path: Path) -> None:
     # Blackout guard: the table must carry a row at "today" (the live join's day_ts), not stop ~2 days back.
     assert sig.filter(pl.col("ts_ms") == today_floor).height > 0, (
         f"no residual_momentum row for today {today_floor}; max={sig['ts_ms'].max()} -> live gate blackout")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# pit-signals-4 — compute_btc_beta calendar window  (from audit b13)
+# Uses an explicit-day-index returns frame (vs the position-indexed _daily_returns
+# above), so the helper is named _daily_returns_dayidx to avoid the collision.
+# ──────────────────────────────────────────────────────────────────────────────
+def _daily_returns_dayidx(symbol_to_rets: dict[str, list[tuple[int, float]]]) -> pl.DataFrame:
+    """symbol -> list of (day_index, ret_1d). Day index keys the 00:00-UTC grid."""
+    rows = []
+    for sym, pairs in symbol_to_rets.items():
+        for d, r in pairs:
+            rows.append({"symbol": sym, "ts_ms": d * _DAY, "ret_1d": r})
+    return pl.DataFrame(rows)
+
+
+def test_btc_beta_contiguous_matches_known_slope() -> None:
+    # Numerical-equivalence guard: on a CONTIGUOUS series the calendar window must give
+    # the same exact OLS slope the row-based window did (ALT = 1.5 * BTC -> beta 1.5).
+    rng = random.Random(1)
+    btc = [(d, rng.uniform(-0.05, 0.05)) for d in range(80)]
+    alt = [(d, 1.5 * r) for d, r in btc]
+    out = compute_btc_beta(_daily_returns_dayidx({"BTCUSDT": btc, "ALT": alt}), window=60, min_periods=30)
+    last = out.filter((pl.col("symbol") == "ALT") & (pl.col("ts_ms") == 79 * _DAY))["btc_beta"][0]
+    assert last is not None and abs(last - 1.5) < 1e-9, last
+
+
+def test_btc_beta_gap_does_not_stretch_window_past_calendar_span() -> None:
+    """A gapped symbol must NOT get a beta that spans >window CALENDAR days.
+
+    Pre-fix (row-based rolling): a symbol whose returns are present only on days
+    {0,1,...,29} then jumps to day 200 gets a 'window-day' window stitching the
+    pre-gap rows onto day 200 — a stale beta. With the calendar window, day 200 sees
+    far fewer than min_periods CALENDAR-recent rows -> null (correctly shrunk window).
+    """
+    # BTC present every day so a partner exists; ALT present only on days 0..29, then 200.
+    btc = [(d, 0.01 if d % 2 else -0.01) for d in range(201)]
+    alt_days = list(range(30)) + [200]
+    alt = [(d, 0.015 if d % 2 else -0.015) for d in alt_days]
+    out = compute_btc_beta(_daily_returns_dayidx({"BTCUSDT": btc, "ALT": alt}), window=60, min_periods=30)
+    beta_200 = out.filter((pl.col("symbol") == "ALT") & (pl.col("ts_ms") == 200 * _DAY))["btc_beta"][0]
+    # Only 1 calendar-recent ALT row within the trailing 60 days of day 200 (day 200
+    # itself) -> below min_periods -> null. A row-based window would have reached back
+    # to the pre-gap block and produced a (stale) non-null beta.
+    assert beta_200 is None, beta_200

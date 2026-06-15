@@ -6,6 +6,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from liquidity_migration import continuous_addon_shadow as cas
+from liquidity_migration._common import finite_float
 from liquidity_migration.cli import build_parser
 from liquidity_migration.cli import main as cli_main
 from liquidity_migration.continuous_addon_shadow import (
@@ -1906,3 +1908,183 @@ def test_cooldown_summary_already_net_row_unchanged() -> None:
     assert summary["skipped_trades"] == 1
     assert summary["skipped_trade_return_sum"] == -0.02
     assert summary["skipped_trade_return_mean"] == -0.02
+
+
+# --------------------------------------------------------------------------- #
+# Relocated from tests/test_audit_fix_b12.py (audit bucket b12 regressions):
+# shadows-3: same primary/addon source must fail loud (silent 2x double-count).
+# shadows-4: a trade keyed by entry_ts_ms must not flag its signal-keyed order
+# as an unmatched entry-order attempt.
+# --------------------------------------------------------------------------- #
+def _write_addon_fixture(root: Path, trades: list[dict], orders: list[dict]) -> None:
+    write_dataset(pl.DataFrame(trades), root, "continuous_fade_paper_trades", partition_by=())
+    write_dataset(pl.DataFrame(orders), root, "continuous_fade_paper_orders", partition_by=())
+    write_dataset(
+        pl.DataFrame([{"ts_ms": 1_000, "entry_candidates": 1, "entries": 1}]),
+        root,
+        "continuous_fade_paper_cycles",
+        partition_by=(),
+    )
+
+
+def test_addon_audit_same_root_and_dataset_raises(tmp_path: Path) -> None:
+    root = tmp_path / "shared"
+    root.mkdir()
+    trade = {
+        "symbol": "BTCUSDT",
+        "signal_ts_ms": 1_000,
+        "entry_ts_ms": 1_000 + 2 * 3_600_000,
+        "trade_id": "t1",
+        "strategy_id": "primary",
+    }
+    order = {
+        "symbol": "BTCUSDT",
+        "signal_ts_ms": 1_000,
+        "trade_id": "t1",
+        "status": "filled",
+        "order_link_id": "lm-en-ca-1",
+        "strategy_id": "primary",
+    }
+    _write_addon_fixture(root, [trade], [order])
+
+    config = cas.ContinuousAddonShadowAuditConfig(
+        primary_data_root=str(root),
+        addon_data_root=str(root),
+        output_dir=str(tmp_path / "out"),
+    )
+    with pytest.raises(ValueError, match="same trades source"):
+        cas.run_continuous_addon_shadow_audit(config)
+
+
+def test_addon_audit_same_root_with_strategy_split_is_allowed(tmp_path: Path) -> None:
+    root = tmp_path / "shared"
+    root.mkdir()
+    rows = [
+        {
+            "symbol": "BTCUSDT",
+            "signal_ts_ms": 1_000,
+            "entry_ts_ms": 1_000 + 2 * 3_600_000,
+            "trade_id": "p1",
+            "strategy_id": "primary_strat",
+        },
+        {
+            "symbol": "ETHUSDT",
+            "signal_ts_ms": 2_000,
+            "entry_ts_ms": 2_000 + 2 * 3_600_000,
+            "trade_id": "a1",
+            "strategy_id": "addon_strat",
+        },
+    ]
+    orders = [
+        {
+            "symbol": "BTCUSDT",
+            "signal_ts_ms": 1_000,
+            "trade_id": "p1",
+            "status": "filled",
+            "order_link_id": "lm-en-ca-p",
+            "strategy_id": "primary_strat",
+        },
+        {
+            "symbol": "ETHUSDT",
+            "signal_ts_ms": 2_000,
+            "trade_id": "a1",
+            "status": "filled",
+            "order_link_id": "lm-en-ca-a",
+            "strategy_id": "addon_strat",
+        },
+    ]
+    _write_addon_fixture(root, rows, orders)
+
+    config = cas.ContinuousAddonShadowAuditConfig(
+        primary_data_root=str(root),
+        addon_data_root=str(root),
+        expected_primary_strategy_id="primary_strat",
+        expected_addon_strategy_id="addon_strat",
+        output_dir=str(tmp_path / "out"),
+    )
+    # Must not raise, and the two sides must be disjoint (1 trade each), not 2/2.
+    payload = cas.run_continuous_addon_shadow_audit(config)
+    assert payload["summary"]["primary"]["trades"] == 1
+    assert payload["summary"]["addon"]["trades"] == 1
+
+
+def test_reconciliation_signal_ts_has_no_entry_ts_fallback() -> None:
+    # Healthy rows carry signal_ts_ms -> identical to _signal_ts.
+    healthy = {"signal_ts_ms": 5_000, "entry_ts_ms": 9_000}
+    assert cas._reconciliation_signal_ts(healthy) == 5_000
+    # A row that dropped the signal fields must NOT fall back to entry_ts_ms
+    # (that mis-keys the reconciliation, the shadows-4 bug).
+    degenerate = {"entry_ts_ms": 9_000}
+    assert cas._reconciliation_signal_ts(degenerate) == 0
+    assert cas._signal_ts(degenerate) == 9_000  # legacy fallback unchanged
+
+
+def test_signal_less_trade_does_not_falsely_flag_its_order_unmatched() -> None:
+    # Entry occurs 2 bars after the signal, so entry_ts_ms != signal_ts_ms.
+    signal_ts = 1_000_000
+    entry_ts = signal_ts + 2 * 3_600_000
+    # Trade DROPPED signal_ts_ms (future schema / crash-recovery row) but keeps
+    # entry_ts_ms and the authoritative trade_id.
+    trade = {"symbol": "BTCUSDT", "entry_ts_ms": entry_ts, "trade_id": "tid-1"}
+    # Its order carries signal_ts_ms and the same trade_id.
+    order = {
+        "symbol": "BTCUSDT",
+        "signal_ts_ms": signal_ts,
+        "trade_id": "tid-1",
+        "status": "filled",
+        "order_link_id": "lm-en-ca-1",
+    }
+
+    summary = cas._entry_order_trade_reconciliation_summary(order_rows=[order], trade_rows=[trade])
+    # trade_id reconciliation must match it -> NOT flagged unmatched.
+    assert summary["entry_order_attempts_without_trade_key"] == 0
+    assert summary["live_entry_order_attempts_without_trade_key"] == 0
+
+
+def test_genuinely_unmatched_order_is_still_flagged() -> None:
+    # An order with a valid signal key but no corresponding trade (no trade_id
+    # match, no signal-key match) must still be counted unmatched.
+    order = {
+        "symbol": "BTCUSDT",
+        "signal_ts_ms": 1_000_000,
+        "trade_id": "orphan",
+        "status": "filled",
+        "order_link_id": "lm-en-ca-9",
+    }
+    summary = cas._entry_order_trade_reconciliation_summary(order_rows=[order], trade_rows=[])
+    assert summary["entry_order_attempts_without_trade_key"] == 1
+
+
+def test_healthy_signal_keyed_trade_and_order_reconcile() -> None:
+    # The live path: trade and order share signal_ts_ms -> reconcile on the key.
+    signal_ts = 1_000_000
+    trade = {"symbol": "BTCUSDT", "signal_ts_ms": signal_ts, "entry_ts_ms": signal_ts + 3_600_000}
+    order = {
+        "symbol": "BTCUSDT",
+        "signal_ts_ms": signal_ts,
+        "status": "filled",
+        "order_link_id": "lm-en-ca-1",
+    }
+    summary = cas._entry_order_trade_reconciliation_summary(order_rows=[order], trade_rows=[trade])
+    assert summary["entry_order_attempts_without_trade_key"] == 0
+
+
+# --------------------------------------------------------------------------
+# code-quality-5 (relocated from audit bucket iF): continuous_addon_shadow._float
+# routes through the canonical _common.finite_float and drops the divergent
+# `float(value or 0.0)` idiom.
+# --------------------------------------------------------------------------
+
+
+def test_addon_shadow_float_drops_divergent_or_idiom() -> None:
+    """code-quality-5: the pre-fix continuous_addon_shadow._float used
+    `float(value or 0.0)`, which silently rewrites falsy-but-meaningful inputs
+    (e.g. 0, 0.0, "") via the `or`. Routing through finite_float makes it agree
+    with the canonical helper. Concretely: a string "0.0" still coerces to 0.0,
+    and a real 0 stays 0.0 -- but the coercion is now the one shared policy, not
+    a divergent local idiom."""
+    assert cas._float("0.0") == (finite_float("0.0", default=0.0) or 0.0)
+    assert cas._float(0) == 0.0
+    # math is still imported in addon_shadow (used elsewhere); the helper no
+    # longer re-implements the isfinite guard itself.
+    assert cas._float(2.5) == 2.5

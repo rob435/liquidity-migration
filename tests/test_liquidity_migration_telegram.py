@@ -463,3 +463,109 @@ def test_non_429_http_error_still_propagates(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(urllib.error.HTTPError):
         send_telegram_message("boom")
+
+
+# ======================================================================================
+# Relocated from tests/test_audit_fix_b08.py (audit bucket b08).
+#   telegram-alert-3 + telegram-alert-4: the 429 rate-limit retry branch.
+# Reuses this module's _http_error / _set_credentials_a2 / _Resp helpers.
+# ======================================================================================
+
+
+def test_429_with_none_headers_does_not_raise_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # telegram-alert-3: HTTPError(headers=None) on a 429 must NOT raise AttributeError out of
+    # the handler. With null headers the retry-after defaults to 1s; the retry below succeeds.
+    _set_credentials_a2(monkeypatch)
+    sleeps: list[float] = []
+    monkeypatch.setattr(telegram.time, "sleep", lambda s: sleeps.append(s))
+
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _http_error(429, hdrs=None)  # PRE-FIX: exc.headers.get(...) -> AttributeError
+        return _Resp(200)
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
+
+    assert send_telegram_message("hi") is True
+    assert calls["n"] == 2           # one retry happened
+    assert sleeps == [1.0]           # null headers -> default 1s wait (max(1.0, 0.5) == 1.0)
+
+
+def test_429_retry_sleeps_parsed_retry_after_then_returns_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    # telegram-alert-4: a 429 with a Retry-After inside the cap sleeps exactly once for the
+    # parsed duration and returns the retried response's 2xx/non-2xx verdict.
+    _set_credentials_a2(monkeypatch)
+    sleeps: list[float] = []
+    monkeypatch.setattr(telegram.time, "sleep", lambda s: sleeps.append(s))
+
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _http_error(429, hdrs={"Retry-After": "3"})
+        return _Resp(200)
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
+
+    assert send_telegram_message("hi") is True
+    assert calls["n"] == 2
+    assert sleeps == [3.0]  # exactly one sleep, of the parsed Retry-After
+
+
+def test_429_retry_after_beyond_cap_propagates_without_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
+    # telegram-alert-4: a Retry-After beyond the cap must NOT sleep and must propagate the 429
+    # (sleeping longer than the cap inside a cycle-thread send is worse than dropping the page).
+    _set_credentials_a2(monkeypatch)
+    sleeps: list[float] = []
+    monkeypatch.setattr(telegram.time, "sleep", lambda s: sleeps.append(s))
+
+    cfg = TelegramConfig(rate_limit_retry_cap_seconds=5.0)
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        calls["n"] += 1
+        raise _http_error(429, hdrs={"Retry-After": "30"})  # beyond the 5s cap
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(urllib.error.HTTPError) as info:
+        send_telegram_message("hi", config=cfg)
+    assert info.value.code == 429
+    assert calls["n"] == 1   # no retry attempted
+    assert sleeps == []      # never slept
+
+
+def test_429_retry_returns_false_on_non_2xx_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    # If the single retry itself comes back non-2xx, the send reports False (not a crash).
+    _set_credentials_a2(monkeypatch)
+    monkeypatch.setattr(telegram.time, "sleep", lambda _s: None)
+
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _http_error(429, hdrs={"Retry-After": "1"})
+        return _Resp(500)
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
+    assert send_telegram_message("hi") is False
+    assert calls["n"] == 2
+
+
+def test_non_429_http_error_still_propagates_b08(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The 429 branch must not change the contract for other HTTP errors: they propagate.
+    # (Renamed _b08 on relocation: this module already has a test_non_429_http_error_still_propagates.)
+    _set_credentials_a2(monkeypatch)
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        raise _http_error(502, hdrs=None)
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(urllib.error.HTTPError) as info:
+        send_telegram_message("hi")
+    assert info.value.code == 502

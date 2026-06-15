@@ -16,6 +16,7 @@ from Phase 5 are meaningless. These tests pin:
 """
 from __future__ import annotations
 
+import inspect
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,8 @@ from liquidity_migration.signal_harness import (
     _aggregate_daily_premium,
     _attach_daily_returns,
     _attach_forward_returns,
+    _make_turnover_delta,
+    _make_xs_rank_ret_Nd,
     build_combined_signal_portfolio,
     build_feature_panel,
     compute_univariate_ic,
@@ -50,6 +53,18 @@ MS_PER_DAY = 86_400_000
 
 def _date_ms(date_str: str) -> int:
     return int(datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _daily_returns_frame(symbol: str, day_indices: list[int], closes: list[float]) -> pl.DataFrame:
+    # Provenance: relocated from tests/test_audit_fix_b09.py (audit bucket b09).
+    base = _date_ms("2025-01-01")
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * len(day_indices),
+            "ts_ms": [base + d * MS_PER_DAY for d in day_indices],
+            "close": closes,
+        }
+    )
 
 
 def _make_hourly_klines(
@@ -913,3 +928,193 @@ def test_snapped_key_joins_kline_grid() -> None:
     joined = oi_daily.join(kline_grid, on=["symbol", "ts_ms"], how="inner")
     assert joined.height == 1
     assert joined["ts_ms"][0] == day_floor
+
+
+# ============================================================================
+# Relocated from tests/test_audit_fix_b09.py (audit bucket b09).
+# pit-signals-3 / research-methodology-2 / test-gaps-3 — gap-blind N-day builders
+# ============================================================================
+
+
+def test_xs_rank_ret_Nd_is_calendar_exact_across_a_gap() -> None:
+    """A symbol present on days {0,1,2,5,6} then ranked: the day-5/6 rows must NOT
+    treat shift(3) as a clean 3-calendar-day return. With the positional bug the
+    day-5 row's "ret_3d" used day-2's close (a 3-CALENDAR-day-misaligned span);
+    calendar_shift nulls it because there is no row exactly 3 days back.
+
+    Two contiguous control symbols keep the cross-section non-degenerate so the
+    rank denominator and ordering are well defined.
+    """
+    builder = _make_xs_rank_ret_Nd(3)
+    # GAPPED symbol: missing days 3 and 4.
+    gapped = _daily_returns_frame("GAP", [0, 1, 2, 5, 6], [10.0, 11.0, 12.0, 20.0, 21.0])
+    # Contiguous controls present every day 0..6.
+    ctrl_days = [0, 1, 2, 3, 4, 5, 6]
+    ctrl_a = _daily_returns_frame("AAA", ctrl_days, [100.0 + d for d in ctrl_days])
+    ctrl_b = _daily_returns_frame("BBB", ctrl_days, [200.0 - d for d in ctrl_days])
+    daily_returns = pl.concat([gapped, ctrl_a, ctrl_b]).sort(["symbol", "ts_ms"])
+    ctx = FeatureContext(
+        daily_klines=pl.DataFrame(),
+        daily_returns=daily_returns,
+        funding_daily=pl.DataFrame(),
+        open_interest_daily=pl.DataFrame(),
+        premium_daily=pl.DataFrame(),
+    )
+    out = builder(ctx)
+    base = _date_ms("2025-01-01")
+    gap_rows = {
+        (row["ts_ms"] - base) // MS_PER_DAY: row["xs_rank_ret_3d"]
+        for row in out.filter(pl.col("symbol") == "GAP").to_dicts()
+    }
+    # Day 5 and day 6 have no row EXACTLY 3 calendar days back (days 2 and 3 resp.;
+    # day 3 is missing entirely, day 2 is 3 days before day 5 but reached via a gap),
+    # so calendar_shift yields null ret_Nd -> null rank. The positional bug would have
+    # produced a finite (misaligned) rank for at least one of them.
+    assert gap_rows[5] is None
+    assert gap_rows[6] is None
+    # A contiguous row (day 3, exactly 3 days after day 0) is finite for the controls.
+    ctrl_day3 = [
+        row["xs_rank_ret_3d"]
+        for row in out.filter((pl.col("symbol") == "AAA")).to_dicts()
+        if (row["ts_ms"] - base) // MS_PER_DAY == 3
+    ]
+    assert ctrl_day3 and ctrl_day3[0] is not None
+
+
+def test_xs_rank_ret_Nd_matches_positional_shift_on_contiguous_data() -> None:
+    """Numerical-equivalence gate: on a CONTIGUOUS series calendar_shift(n) is
+    byte-identical to the old close/close.shift(n)-1, so the fix moves no number
+    on the happy path."""
+    builder = _make_xs_rank_ret_Nd(3)
+    days = list(range(8))
+    a = _daily_returns_frame("AAA", days, [100.0 * (1.0 + 0.01 * d) for d in days])
+    b = _daily_returns_frame("BBB", days, [50.0 * (1.0 + 0.02 * d) for d in days])
+    daily_returns = pl.concat([a, b]).sort(["symbol", "ts_ms"])
+    ctx = FeatureContext(
+        daily_klines=pl.DataFrame(),
+        daily_returns=daily_returns,
+        funding_daily=pl.DataFrame(),
+        open_interest_daily=pl.DataFrame(),
+        premium_daily=pl.DataFrame(),
+    )
+    out = builder(ctx).sort(["symbol", "ts_ms"])
+    # Reference: old positional definition + the same cross-sectional rank fraction.
+    ref = daily_returns.with_columns(
+        (pl.col("close") / pl.col("close").shift(3).over("symbol") - 1.0).alias("ret_Nd")
+    ).with_columns(
+        pl.col("ret_Nd").rank(method="average", descending=False).over("ts_ms").alias("_r")
+    ).with_columns(
+        (pl.col("_r") / pl.col("ret_Nd").count().over("ts_ms")).alias("ref_rank")
+    ).sort(["symbol", "ts_ms"])
+    got = out["xs_rank_ret_3d"].to_list()
+    exp = ref["ref_rank"].to_list()
+    assert len(got) == len(exp)
+    for g, e in zip(got, exp):
+        assert (g is None) == (e is None)
+        if g is not None:
+            assert g == pytest.approx(e)
+
+
+def test_turnover_delta_window_shrinks_across_a_gap_not_stretches() -> None:
+    """turnover_delta_7d's prior-mean is now calendar-bounded: a gapped symbol's
+    prior window covers <=7 CALENDAR days, never positionally back-filled rows from
+    >7 days ago. We assert the post-gap row's prior mean uses only in-window days."""
+    builder = _make_turnover_delta(7)
+    base = _date_ms("2025-01-01")
+    # Present days 0,1,2 (turnover 100) then a long gap, relist day 30 (turnover 100).
+    present = [0, 1, 2, 30]
+    daily_klines = pl.DataFrame(
+        {
+            "symbol": ["GAP"] * len(present),
+            "ts_ms": [base + d * MS_PER_DAY for d in present],
+            "turnover_quote": [100.0, 100.0, 100.0, 100.0],
+        }
+    ).sort(["symbol", "ts_ms"])
+    ctx = FeatureContext(
+        daily_klines=daily_klines,
+        daily_returns=pl.DataFrame(),
+        funding_daily=pl.DataFrame(),
+        open_interest_daily=pl.DataFrame(),
+        premium_daily=pl.DataFrame(),
+    )
+    out = builder(ctx)
+    by_day = {
+        (row["ts_ms"] - base) // MS_PER_DAY: row["turnover_delta_7d"]
+        for row in out.to_dicts()
+    }
+    # Day 30's prior-7-CALENDAR-day window (days 23..29) is empty, so prior_mean is
+    # null and turnover_delta_7d is null. The positional bug compared against days
+    # {0,1,2} (28+ days stale) and produced a finite (0.0) delta.
+    assert by_day[30] is None
+
+
+def test_calendar_helpers_are_imported_in_signal_harness() -> None:
+    """The module must actually route through the gap-aware primitives; importing
+    them is the structural part of the fix (test-gaps-3)."""
+    import liquidity_migration.signal_harness as sh
+
+    src = inspect.getsource(sh)
+    assert "calendar_shift" in src
+    assert "calendar_roll" in src
+    # No bare positional shift on the daily panel should survive in the N-day builders.
+    assert ".shift(n).over(\"symbol\")" not in src
+    assert ".shift(7).over(\"symbol\")" not in src
+
+
+# ============================================================================
+# research-methodology-4 — tied bottom signals must not shrink the short book
+# ============================================================================
+
+
+def _tie_panel() -> pl.DataFrame:
+    """10 symbols/day for 2 days; the 4 lowest feature values are TIED so an
+    average-rank fractional cut would zero out the short side."""
+    rows: list[dict] = []
+    n_symbols = 10
+    # 4 tied lowest (value 0.0), then 6 distinct higher values.
+    values = [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    for d in range(2):
+        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
+        for s in range(n_symbols):
+            rows.append(
+                {
+                    "symbol": f"S{s:02d}",
+                    "ts_ms": ts,
+                    "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+                    "feature_a": values[s],
+                    "realized_vol_7d": 0.5,
+                    "fwd_ret_3d": 0.0,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def test_tied_bottom_signals_still_deploy_exact_decile_short_count() -> None:
+    """top_decile=0.40 over 10 names => exactly 4 shorts and 4 longs per day, even
+    though the 4 lowest feature values tie. With the original rank(method="average")
+    + frac<=top_decile cut, the tied bottom group's average rank (2.5/10=0.25) was
+    NOT <= 0.40 for all four and could collapse the short count below 4."""
+    out = build_combined_signal_portfolio(
+        _tie_panel(),
+        surviving_features=["feature_a"],
+        weighting="equal",
+        top_decile=0.40,
+        vol_target_per_name=0.01,
+        forward_horizon=3,
+    )
+    per_day = out.group_by(["ts_ms", "position_side"]).agg(pl.len().alias("n"))
+    shorts = per_day.filter(pl.col("position_side") == "short")["n"].to_list()
+    longs = per_day.filter(pl.col("position_side") == "long")["n"].to_list()
+    assert shorts and all(n == 4 for n in shorts)
+    assert longs and all(n == 4 for n in longs)
+    # The short book is non-empty every day (the under-deployment bug produced 0).
+    assert (out.filter(pl.col("position_side") == "short")["weight"] < 0.0).all()
+
+
+def test_decile_selection_uses_ordinal_rank_not_average() -> None:
+    import liquidity_migration.signal_harness as sh
+
+    src = inspect.getsource(sh.build_combined_signal_portfolio)
+    assert 'rank(method="ordinal")' in src
+    # The selection must not fall back to the fractional <= top_decile cut.
+    assert "signal_rank_frac\") <= top_decile" not in src

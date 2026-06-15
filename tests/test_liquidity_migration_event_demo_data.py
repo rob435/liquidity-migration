@@ -9,6 +9,7 @@ from pathlib import Path
 
 import polars as pl
 
+from liquidity_migration import event_demo_data
 from liquidity_migration.config import ResearchConfig
 from liquidity_migration.event_demo import (
     EventDemoCycleConfig,
@@ -841,3 +842,57 @@ def test_download_recent_1h_klines_prunes_stale_partitions_after_rest_write(tmp_
     assert not stale.exists(), "out-of-window partition must be pruned after the REST write"
     # today's freshly written partitions survive
     assert read_dataset(tmp_path, "event_demo_klines_1h").height == 3
+
+
+# --------------------------------------------------------------------------
+# universe-pit-4 : _build_demo_universe doc-drift + age-floor behaviour
+# (relocated from the audit bucket b01)
+# --------------------------------------------------------------------------
+
+
+def _hour_floor_now_ms() -> int:
+    return (int(time.time() * 1000) // MS_PER_HOUR) * MS_PER_HOUR
+
+
+def test_build_demo_universe_comment_no_longer_references_erased_strategy() -> None:
+    """universe-pit-4: the _build_demo_universe justification must not reference
+    the erased SHORT strategy's prior7_liquidity_rank null-exclusion (it points
+    at code removed 2026-06-11). The live age compensation is the continuous
+    downstream gate; the comment must say so."""
+    import inspect
+
+    src = inspect.getsource(event_demo_data._build_demo_universe)
+    assert "prior7_liquidity_rank" not in src.split("Historical note")[0]
+    assert "_continuous_age_eligible_symbols" in src
+
+
+def test_build_demo_universe_unlimited_drops_age_floor(monkeypatch) -> None:
+    """universe-pit-4 guard: the actual behaviour the comment describes is
+    unchanged — unlimited-universe mode (rank_end == max_symbols == 0) drops the
+    local 30-day age floor (min_age_days=0) so the downstream continuous gate is
+    authoritative; the legacy narrow-universe mode keeps the 30-day floor."""
+    captured: list[int] = []
+
+    def spy_build(instruments, tickers, *, universe_config, snapshot_ts_ms):
+        del instruments, tickers, snapshot_ts_ms
+        captured.append(universe_config.min_age_days)
+        return pl.DataFrame()
+
+    monkeypatch.setattr(event_demo_data, "build_current_universe_table", spy_build)
+    empty = pl.DataFrame()
+
+    unlimited = event_demo_data.EventDemoCycleConfig(
+        universe_rank_end=0, universe_max_symbols=0,
+    )
+    event_demo_data._build_demo_universe(
+        empty, empty, config=unlimited, snapshot_ts_ms=_hour_floor_now_ms(),
+    )
+    assert captured[-1] == 0  # age floor dropped in unlimited mode
+
+    narrow = event_demo_data.EventDemoCycleConfig(
+        universe_rank_end=200, universe_max_symbols=50,
+    )
+    event_demo_data._build_demo_universe(
+        empty, empty, config=narrow, snapshot_ts_ms=_hour_floor_now_ms(),
+    )
+    assert captured[-1] == 30  # legacy floor preserved

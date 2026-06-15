@@ -11,6 +11,8 @@ exercise them by:
 """
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import json
 import math
 from pathlib import Path
@@ -22,10 +24,12 @@ import pytest
 from liquidity_migration._common import MS_PER_HOUR, date_ms
 from liquidity_migration.config import CostConfig
 from liquidity_migration.long_native import (
+    FUNDING_MODELED_FRACTION_THRESHOLD,
     LongNativeConfig,
     _evaluate_promotion,
     _finalize_trade,
     _load_sector_map,
+    _run_label,
     _run_long_pipeline,
 )
 
@@ -569,8 +573,6 @@ def test_run_long_native_research_precomputed_inputs_are_equivalent(tmp_path) ->
     """LON-6: the sweep hoist (precomputed_inputs) must yield a result identical to the
     default build-internally path — the read + feature panel are entry-param-independent,
     so reusing them across sweep cells is provably equivalent (the gate the verifier required)."""
-    import dataclasses
-
     from liquidity_migration.ingestion import generate_fixture_data
     from liquidity_migration.long_native import build_long_research_inputs, run_long_native_research
     from liquidity_migration.long_native_event_demo import _v11a_long_native_config
@@ -587,3 +589,144 @@ def test_run_long_native_research_precomputed_inputs_are_equivalent(tmp_path) ->
     assert default["rows"] == precomp["rows"]
     assert default["splits"] == precomp["splits"]
     assert default["run_label"] == precomp["run_label"]
+
+
+# ============================================================================
+# Relocated from tests/test_audit_fix_b09.py (audit bucket b09, long-sleeve-5).
+# The weekend tilt's two backtest sites must route through the shared helper.
+# ============================================================================
+
+
+def test_long_native_weekend_tilt_uses_shared_helper() -> None:
+    import liquidity_migration.long_native as ln
+
+    src = inspect.getsource(ln)
+    assert "is_weekend_ms" in src
+    # Neither backtest site may keep the inline weekday formula.
+    assert "((int(trig_ts) // MS_PER_DAY) + 3) % 7 >= 5" not in src
+    assert "((int(entry_ts_ms) // MS_PER_DAY) + 3) % 7 >= 5" not in src
+
+
+# --------------------------------------------------------------------------- #
+# cost-funding-3: funding-coverage gate-tightening
+# (relocated from tests/test_audit_int_iG.py)
+# --------------------------------------------------------------------------- #
+
+def _passing_summary(**overrides):
+    """A summary that clears every OTHER gate (Sharpe, DD) so the funding-coverage
+    check is the only thing under test."""
+    base = {"sharpe_like": 1.5, "max_drawdown": -0.10, "funding_modeled_fraction": 1.0}
+    base.update(overrides)
+    return base
+
+
+def test_promotion_fails_when_funding_coverage_below_threshold() -> None:
+    """A 'partial' book where a large slice of notional was charged ZERO funding
+    (fraction below threshold) must NOT pass the promotion gate."""
+    promo = _evaluate_promotion(
+        splits=[],
+        summary=_passing_summary(funding_modeled_fraction=0.50),
+        funding_mode="partial",
+        full_pit_universe_pass=True,
+    )
+    assert promo["promotion_gate_pass"] is False
+    assert "funding_coverage_below_threshold" in promo["promotion_reasons"]
+    # Distinct from the all-missing case: do not double-report funding_missing.
+    assert "funding_missing" not in promo["promotion_reasons"]
+    assert promo["funding_modeled_fraction"] == pytest.approx(0.50)
+    assert promo["funding_coverage_threshold"] == pytest.approx(FUNDING_MODELED_FRACTION_THRESHOLD)
+
+
+def test_promotion_passes_at_coverage_edge() -> None:
+    """A coverage-edge 'partial' (one funding-free alt, fraction >= threshold) is
+    still acceptable and must pass."""
+    promo = _evaluate_promotion(
+        splits=[],
+        summary=_passing_summary(funding_modeled_fraction=0.97),
+        funding_mode="partial",
+        full_pit_universe_pass=True,
+    )
+    assert promo["promotion_gate_pass"] is True
+    assert "funding_coverage_below_threshold" not in promo["promotion_reasons"]
+
+
+def test_promotion_all_missing_still_fails_as_funding_missing() -> None:
+    """The pre-existing all-missing failure path is preserved and reported as
+    funding_missing (not the new coverage reason)."""
+    promo = _evaluate_promotion(
+        splits=[],
+        summary=_passing_summary(funding_modeled_fraction=0.0),
+        funding_mode="missing",
+        full_pit_universe_pass=True,
+    )
+    assert promo["promotion_gate_pass"] is False
+    assert "funding_missing" in promo["promotion_reasons"]
+    assert "funding_coverage_below_threshold" not in promo["promotion_reasons"]
+
+
+def test_promotion_absent_fraction_defaults_to_full_coverage() -> None:
+    """Backward-compat: an older summary WITHOUT funding_modeled_fraction must not
+    invent a new failure (defaults to 1.0 == full coverage)."""
+    promo = _evaluate_promotion(
+        splits=[],
+        summary={"sharpe_like": 1.5, "max_drawdown": -0.10},  # no fraction key
+        funding_mode="partial",
+        full_pit_universe_pass=True,
+    )
+    assert promo["promotion_gate_pass"] is True
+    assert promo["funding_modeled_fraction"] == pytest.approx(1.0)
+
+
+def test_run_label_down_labels_low_coverage_partial() -> None:
+    """The single 'partial' label is split: a low-coverage partial down-labels to a
+    distinct run label so an auditor can tell it apart from a coverage-edge partial."""
+    low = _run_label(
+        full_pit_universe_pass=True,
+        funding_mode="partial",
+        archive_manifest_empty=False,
+        funding_modeled_fraction=0.50,
+    )
+    assert low == "full_pit_universe_funding_coverage_low"
+
+    edge = _run_label(
+        full_pit_universe_pass=True,
+        funding_mode="partial",
+        archive_manifest_empty=False,
+        funding_modeled_fraction=0.99,
+    )
+    assert edge == "full_pit_universe_funding_partial"
+
+
+def test_run_label_partial_default_fraction_is_backward_compatible() -> None:
+    """Callers that do not pass funding_modeled_fraction keep the prior partial label
+    (default 1.0 == coverage OK)."""
+    label = _run_label(
+        full_pit_universe_pass=True,
+        funding_mode="partial",
+        archive_manifest_empty=False,
+    )
+    assert label == "full_pit_universe_funding_partial"
+
+
+# --------------------------------------------------------------------------- #
+# pit-data-1: the inert require_pit_membership flag is fully removed
+# (relocated from tests/test_audit_int_iG.py)
+# --------------------------------------------------------------------------- #
+
+def test_require_pit_membership_field_is_removed() -> None:
+    field_names = {f.name for f in dataclasses.fields(LongNativeConfig)}
+    assert "require_pit_membership" not in field_names
+    # The live universe-completeness gate remains.
+    assert "require_full_pit_universe" in field_names
+
+
+def test_long_native_config_rejects_removed_flag() -> None:
+    with pytest.raises(TypeError):
+        LongNativeConfig(require_pit_membership=False)  # type: ignore[call-arg]
+
+
+def test_require_full_pit_universe_still_constructs() -> None:
+    cfg = LongNativeConfig(require_full_pit_universe=False)
+    assert cfg.require_full_pit_universe is False
+    cfg_default = LongNativeConfig()
+    assert cfg_default.require_full_pit_universe is True

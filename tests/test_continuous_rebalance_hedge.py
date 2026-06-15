@@ -253,3 +253,69 @@ def test_plan_continuous_sniper_orders() -> None:
     assert abs(p["limit_price"] - 108.0) < 1e-9  # entry * 1.08, above entry (squeeze wick)
     assert abs(p["qty"] - 2.5) < 1e-9 and abs(p["notional_usdt"] - 250.0) < 1e-9  # 0.25x base
     assert p["base_trade_id"] == "t1"
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b03.py (sizing-rebalance-1). Reuses the
+# module-level `_components`, `_rule`, `_hedge_rule` helpers above.
+# ---------------------------------------------------------------------------
+def test_hedge_engine_holds_position_on_none_today_like_the_live_twin() -> None:
+    """sizing-rebalance-1: when the most-recent hedge return is None (a data-gap day),
+    the backtest engine used to report hedge_ratio=0.0 (and charge a phantom
+    close+reopen) while the parity-tested live twin holds a fully-sized hedge. The fix
+    sizes the engine from beta UNCONDITIONALLY (matching the twin) and only gates the
+    realized PnL contribution on the day's value."""
+    n = 30
+    days = [T0 + i * MS_PER_DAY for i in range(n)]
+    h_vals = [0.01 if i % 2 == 0 else -0.01 for i in range(n)]
+    raw = [-0.5 * x + 0.001 for x in h_vals]
+    comp = _components(raw)
+    hr = _hedge_rule()
+
+    # Drop the MOST-RECENT hedge return (None today) — a real, supported live input.
+    h_with_gap = {d: v for d, v in zip(days, h_vals)}
+    h_with_gap.pop(days[-1])
+
+    df = apply_rebalance_rule(comp, _rule(), hr, h_with_gap, {})
+    engine_ratio_last = float(df["hedge_ratio"][-1])
+
+    # The live twin sizes from the prior series alone (no 'today' gate).
+    h_list = [h_with_gap.get(d) for d in days]
+    twin_last = compute_continuous_hedge_ratio(
+        ContinuousHedgeState(
+            prior_raw_returns=tuple(raw[: n - 1]),
+            prior_hedge_returns=tuple(h_list[: n - 1]),
+        ),
+        hr,
+        target_scale=float(df["scale"][-1]),
+    )
+    # The engine now HOLDS the hedge on the gap day, matching the twin (was 0.0).
+    assert engine_ratio_last > 0.0, "engine must hold the hedge on a None-today gap day"
+    assert math.isclose(engine_ratio_last, twin_last, rel_tol=0, abs_tol=1e-12)
+    # No realized hedge_return is booked for the missing day (contribution gated).
+    assert float(df["hedge_return"][-1]) == 0.0
+
+
+def test_hedge_engine_unchanged_on_fully_populated_series() -> None:
+    """sizing-rebalance-1 guard: the fix must be numerically identical to the prior
+    behaviour when every day has a hedge return (the parity-tested contiguous case)."""
+    n = 30
+    days = [T0 + i * MS_PER_DAY for i in range(n)]
+    h_vals = [0.01 if i % 2 == 0 else -0.01 for i in range(n)]
+    raw = [-0.5 * x + 0.001 for x in h_vals]
+    comp = _components(raw)
+    hr = _hedge_rule()
+    h = {d: v for d, v in zip(days, h_vals)}
+
+    df = apply_rebalance_rule(comp, _rule(), hr, h, {})
+    h_list = [h.get(d) for d in days]
+    for i in range(n):
+        twin = compute_continuous_hedge_ratio(
+            ContinuousHedgeState(
+                prior_raw_returns=tuple(raw[:i]),
+                prior_hedge_returns=tuple(h_list[:i]),
+            ),
+            hr,
+            target_scale=float(df["scale"][i]),
+        )
+        assert math.isclose(twin, float(df["hedge_ratio"][i]), rel_tol=0, abs_tol=1e-12), i

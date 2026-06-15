@@ -64,3 +64,35 @@ def test_contiguous_series_identical_to_naive() -> None:
     assert set(out) == {i * MS_DAY for i in range(1, 6)}
     # Spot-check a concrete value to anchor the equivalence.
     assert out[MS_DAY] == 101.0 / 100.0 - 1.0
+
+
+# --- audit bucket b15: overwrite drift/row gate (backfill-writers-5) ---
+def test_overwrite_allowed_within_drift_tolerance() -> None:
+    report = {"max_drift": 1e-5, "old_rows": 100, "new_rows": 100, "overlap": 100}
+    assert mod.overwrite_blocked("bybit", report, max_drift=1e-3, force=False) is None
+
+
+def test_overwrite_refused_on_large_drift() -> None:
+    # backfill-writers-5: a regenerated series that diverges materially from the
+    # banked one must be REFUSED (it feeds the live 2f hedge beta + auto-deploys).
+    report = {"max_drift": 5e-2, "old_rows": 100, "new_rows": 100, "overlap": 100}
+    reason = mod.overwrite_blocked("bybit", report, max_drift=1e-3, force=False)
+    assert reason is not None and "exceeds" in reason
+
+
+def test_overwrite_refused_on_fewer_rows() -> None:
+    # backfill-writers-5: a short/regressed regeneration (fewer rows than the banked
+    # CSV) must be refused without --force.
+    report = {"max_drift": 1e-5, "old_rows": 100, "new_rows": 80, "overlap": 80}
+    reason = mod.overwrite_blocked("bybit", report, max_drift=1e-3, force=False)
+    assert reason is not None and "rows" in reason
+
+
+def test_force_overrides_the_gate() -> None:
+    report = {"max_drift": 5e-2, "old_rows": 100, "new_rows": 80, "overlap": 80}
+    assert mod.overwrite_blocked("bybit", report, max_drift=1e-3, force=True) is None
+
+
+def test_no_existing_csv_is_not_blocked() -> None:
+    report = {"max_drift": 0.0, "old_rows": 0, "new_rows": 200, "overlap": 0}
+    assert mod.overwrite_blocked("bybit", report, max_drift=1e-3, force=False) is None

@@ -267,3 +267,69 @@ def test_rmom_parquet_is_read_from_the_followed_root(tmp_path: Path) -> None:
     assert table["symbol"].to_list() == ["AAAUSDT"]
     # without the follow root the sleeve's own (empty) root yields no gate
     assert _load_rmom_table(_signal_source_root(ContinuousDemoCycleConfig(), own)) is None
+
+
+# --------------------------------------------------------------------------
+# ws-pool-6 : follower _last_sig matches the generation actually merged
+# (relocated from the audit bucket b01)
+# --------------------------------------------------------------------------
+
+
+def test_follower_refresh_records_post_read_signature(tmp_path: Path) -> None:
+    """ws-pool-6: if the leader flushes a NEWER generation between the follower's
+    stat and recover_from_disk's read, the follower must record the signature of
+    the generation it actually merged (post-read), not the stale pre-read one.
+    Pre-fix _last_sig held the pre-read sig, so _snapshot_age_seconds lagged a
+    generation and the next poll did a redundant re-read."""
+    base = _hour_floor_now_ms() - 4 * MS_PER_HOUR
+
+    leader = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
+    for i in range(4):
+        leader.add_bar("AAAUSDT", _ws_bar(base + i * MS_PER_HOUR, close=100.0 + i), confirmed=True)
+    assert leader.flush_to_disk() > 0
+
+    follower = FollowerKlineStreamManager(leader_root=tmp_path, poll_seconds=3600.0)
+
+    snapshot_path = tmp_path / ".cache" / "ws_klines" / "store.parquet"
+    real_recover = follower._store.recover_from_disk
+
+    def recover_then_leader_flushes_again() -> int:
+        # Simulate the leader flushing a NEWER generation DURING our read: the
+        # merge below sees whichever generation, but the on-disk file ends newer.
+        rows = real_recover()
+        time.sleep(0.01)  # ensure a distinct mtime_ns
+        leader.add_bar("AAAUSDT", _ws_bar(base + 4 * MS_PER_HOUR, close=200.0), confirmed=True)
+        leader.flush_to_disk()
+        return rows
+
+    follower._store.recover_from_disk = recover_then_leader_flushes_again  # type: ignore[assignment]
+
+    follower._refresh()
+
+    # _last_sig must equal the CURRENT on-disk signature (the post-read
+    # generation), not a stale earlier one.
+    current_sig = (snapshot_path.stat().st_mtime_ns, snapshot_path.stat().st_size)
+    assert follower._last_sig == current_sig
+
+    # And a follow-up refresh with no further leader writes is a no-op (the
+    # recorded signature already matches the latest file -> no redundant re-read).
+    follower._store.recover_from_disk = real_recover  # type: ignore[assignment]
+    refreshes_before = follower._refreshes
+    follower._refresh()
+    assert follower._refreshes == refreshes_before
+
+
+def test_follower_refresh_no_change_is_noop(tmp_path: Path) -> None:
+    """ws-pool-6 guard: an unchanged snapshot is still a clean no-op (the
+    re-stat-after-read change must not break the steady-state path)."""
+    base = _hour_floor_now_ms() - 2 * MS_PER_HOUR
+    leader = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
+    for i in range(2):
+        leader.add_bar("AAAUSDT", _ws_bar(base + i * MS_PER_HOUR, close=10.0 + i), confirmed=True)
+    assert leader.flush_to_disk() > 0
+
+    follower = FollowerKlineStreamManager(leader_root=tmp_path, poll_seconds=3600.0)
+    assert follower._refresh() is True  # first read merges
+    refreshes = follower._refreshes
+    assert follower._refresh() is False  # no change -> no-op
+    assert follower._refreshes == refreshes

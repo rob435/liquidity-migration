@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import polars as pl
 
@@ -191,3 +192,50 @@ def test_dynexit_target_touch_before_real_exit_still_fires(tmp_path) -> None:
     assert len(exits) == 1
     assert exits[0]["reason"] == "dyn_tp"
     assert exits[0]["exit_price"] == 95.0
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b03.py (shadows-2). The incoming epoch
+# differs from this module's T0, so it is carried as a local constant.
+# ---------------------------------------------------------------------------
+_TORN_T0 = 1_680_652_800_000  # 2023-04-05 00:00 UTC (b03 epoch)
+
+
+def _shadow_klines(symbol: str, signal_ts: int) -> pl.DataFrame:
+    # Enough hourly closes for compute_shadow_anchor (signal close + 24h + 1h earlier),
+    # plus forward bars whose lows never touch the dynamic target (so the shadow stays
+    # armed, not exited).
+    rows = []
+    for h in range(-25, 6):
+        ts = signal_ts + h * 3_600_000
+        rows.append({"symbol": symbol, "ts_ms": ts, "close": 100.0, "low": 99.0, "high": 101.0})
+    return pl.DataFrame(rows)
+
+
+def test_torn_arm_is_recovered_from_open_ledger(tmp_path: Path) -> None:
+    """shadows-2: an arm whose JSONL line was torn by a mid-write crash is no longer
+    'fresh' next cycle (it is already open in the ledger), so the fresh-only arm loop
+    would never re-arm it and the shadow observation was lost forever. The fix scans
+    the open ledger trades and re-arms any not yet armed/exited from the row itself."""
+    signal_ts = _TORN_T0 + 30 * 3_600_000
+    klines = _shadow_klines("BBBUSDT", signal_ts)
+    open_trades = pl.DataFrame([{
+        "trade_id": "tlost", "symbol": "BBBUSDT", "status": "open",
+        "entry_price": 100.0, "signal_ts_ms": signal_ts, "entry_ts_ms": signal_ts,
+    }])
+
+    # The trade is ALREADY open in the ledger but is NOT in fresh_entries (its arm row
+    # was torn away on a prior cycle and replay dropped the truncated line).
+    stats = update_dynexit_shadow(
+        tmp_path, all_trades=open_trades, fresh_entries=[], klines=klines, now_ms=signal_ts + 4 * 3_600_000,
+    )
+    assert stats["armed"] == 1, "an open ledger trade with no arm row must be re-armed (self-heal)"
+
+    jsonl = (tmp_path / "continuous_dynexit_shadow.jsonl").read_text(encoding="utf-8")
+    assert '"event":"arm"' in jsonl and '"trade_id":"tlost"' in jsonl
+
+    # Idempotent: a second sweep with the trade now armed must NOT double-arm it.
+    stats2 = update_dynexit_shadow(
+        tmp_path, all_trades=open_trades, fresh_entries=[], klines=klines, now_ms=signal_ts + 5 * 3_600_000,
+    )
+    assert stats2["armed"] == 0, "re-arming must be idempotent across cycles"

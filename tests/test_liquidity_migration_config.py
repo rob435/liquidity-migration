@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -187,3 +188,20 @@ def test_default_config_load_unchanged() -> None:
     default = load_config()
     assert default.costs.base_entry_exit_cost_bps == pytest.approx(15.0)
     assert default.exchange.name == "bybit"
+
+
+# --------------------------------------------------------------------------- #
+# Relocated from tests/test_audit_fix_b12.py (audit bucket b12 regressions):
+# cli-config-2 / cost-funding-1: CostConfig default must model 100% taker.
+# --------------------------------------------------------------------------- #
+def test_cost_config_default_is_full_taker_not_maker_blend() -> None:
+    # The default must NOT be the 0.60 maker blend (9.6 bps) that under-costs by
+    # ~36% and silently flatters returns. It must be the deployed 100%-taker cost.
+    assert CostConfig().maker_fill_probability == pytest.approx(0.0)
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(15.0)
+    # A maker blend must still be expressible when explicitly opted into.
+    assert CostConfig(maker_fill_probability=0.60).base_entry_exit_cost_bps == pytest.approx(9.6)
+    # The default must never be cheaper than the explicit full-taker cost.
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(
+        replace(CostConfig(), maker_fill_probability=0.0).base_entry_exit_cost_bps
+    )

@@ -24,6 +24,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import polars as pl
+
 _MODULE_PATH = (
     Path(__file__).resolve().parent.parent
     / "scripts"
@@ -196,3 +198,29 @@ def test_fapi_topup_empty_response(monkeypatch):
     """No data at all -> empty result (unchanged)."""
     monkeypatch.setattr(_mod, "_fetch", lambda url, timeout=30: None)
     assert _mod._fapi_topup("NOPEUSDT", 1_700_000_000_000) == []
+
+
+# ============================================================================
+# Relocated from tests/test_audit_fix_b09.py (audit bucket b09, backfill-writers-4).
+# Vision-first cross-source dedup is a provenance invariant: when vision and fapi
+# emit the same (symbol, ts_ms), the VISION row must win deterministically.
+# ============================================================================
+
+
+def test_funding_dedup_keeps_vision_row_deterministically(monkeypatch) -> None:
+    """backfill-writers-4: vision-first ordering + unique(keep='first', maintain_order=True)
+    must keep the VISION row when vision and fapi emit the same (symbol, ts_ms)."""
+    all_rows = [
+        {"ts_ms": 100, "symbol": "ETHUSDT", "funding_rate": 0.0001, "mark_price": float("nan"),
+         "funding_interval_min": 240, "source": "binance_usdm_funding_vision"},
+        {"ts_ms": 100, "symbol": "ETHUSDT", "funding_rate": 0.0001, "mark_price": float("nan"),
+         "funding_interval_min": 480, "source": "binance_usdm_funding_fapi"},
+    ]
+    df = (
+        pl.DataFrame(all_rows)
+        .unique(["symbol", "ts_ms"], keep="first", maintain_order=True)
+        .sort(["symbol", "ts_ms"])
+    )
+    assert df.height == 1
+    assert df["source"].to_list() == ["binance_usdm_funding_vision"]
+    assert df["funding_interval_min"].to_list() == [240]

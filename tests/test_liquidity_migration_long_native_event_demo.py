@@ -13,6 +13,7 @@ Covers:
 """
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from dataclasses import replace
@@ -26,6 +27,7 @@ import liquidity_migration.long_native_event_demo as lnd
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.config import ResearchConfig
 from liquidity_migration.long_native_event_demo import (
+    FC_VOLUME_RANK_TELEMETRY_MARGIN,
     LONG_DEMO_STRATEGY_PROFILES,
     LONG_DEMO_TRADES_DATASET,
     LONG_ENTRY_LINK_PREFIX,
@@ -33,6 +35,9 @@ from liquidity_migration.long_native_event_demo import (
     LongNativeDemoCycleConfig,
     MULTI_STRAT_V1_STRATEGY_ID,
     _execute_long_entries,
+    _fc_rank_is_near_boundary,
+    _log_fc_rank_boundary,
+    _execute_long_exits,
     _filter_pending_long_entries,
     _long_demo_event_config,
     _long_demo_strategy_id,
@@ -1107,3 +1112,154 @@ def test_execute_long_entries_runs_on_single_thread_despite_max_workers() -> Non
     # placements is itself proof the burst was not short-circuited.
     assert len(client.place_threads) == 3
     assert set(client.place_threads) == {threading.get_ident()}
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b11.py (audit bucket b11).
+# ---------------------------------------------------------------------------
+
+
+# long-sleeve-1: live path applies the deployed weekend 1.5x size tilt
+def _fc_signal_features(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:
+    """Minimal feature row that passes detect_pattern_fomo_chase (mirrors the
+    long_native_event_demo test fixture)."""
+    return pl.DataFrame([
+        {
+            "ts_ms": signal_ts_ms,
+            "symbol": symbol,
+            "close": signal_close,
+            "in_universe": True,
+            "regime_on": True,
+            "eth_regime_on": True,
+            "today_volume_rank": 5,
+            "log_return": math.log(1.0 + 0.20),
+            "close_location": 0.85,
+            "atr_14d_pct": 0.05,
+            "sigma_daily_30d": 0.05,
+            "pump_3d_log": 0.10,
+            "pump_7d_log": 0.20,
+            "close_loc_3d": 0.7,
+            "close_loc_7d": 0.7,
+            "intra_max_Nh_pump_log": 0.0,
+            "realized_vol": 0.6,
+            "coin_30d_return": 0.5,
+            "coin_60d_return": 0.5,
+            "coin_fc_sma": None,
+            "btc_high_proximity": 0.5,
+            "btc_sma_dist": 0.05,
+            "vol_vs_30d_median": 2.0,
+            "own_pump_quantile_90d": 0.10,
+            "own_atr_quantile_90d": 0.10,
+            "atr_20d": 5.0,
+        }
+    ])
+
+
+# 2023-04-01 12:00Z is a Saturday; 2023-04-05 12:00Z is a Wednesday.
+_SAT_NOW_MS = 1_680_350_400_000
+_WED_NOW_MS = 1_680_696_000_000
+
+
+def _one_candidate_weight(now_ms: int) -> float:
+    strategy = _v11a_long_native_config()
+    assert strategy.weekend_size_mult == 1.5, "v11a profile must carry the 1.5x weekend tilt"
+    signal_ts = now_ms - 2 * MS_PER_HOUR  # fresh, same UTC day, retrace fired
+    features = _fc_signal_features(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
+    candidates, _ = _select_long_entry_candidates(
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now_ms,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.5},  # below the 1% retrace threshold
+        max_new_entries=5,
+    )
+    assert len(candidates) == 1, "expected exactly one FC retrace candidate"
+    return float(candidates[0]["position_weight"])
+
+
+def test_live_weekend_size_tilt_matches_backtest() -> None:
+    weekday_weight = _one_candidate_weight(_WED_NOW_MS)
+    weekend_weight = _one_candidate_weight(_SAT_NOW_MS)
+    assert weekday_weight > 0.0
+    # The live Sat entry must be sized 1.5x the live weekday entry, exactly as the
+    # backtest sizes Sat/Sun entries (long_native.py weekend_size_mult). Before the
+    # fix the live path ignored weekend_size_mult, so both were equal.
+    assert weekend_weight == pytest.approx(weekday_weight * 1.5)
+
+
+# long-sleeve-3: live per-trade net_return is NET of venue fees
+def test_live_long_exit_net_return_subtracts_fees() -> None:
+    from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
+
+    now = 2_000_000_000_000
+    # Trade carries an entry fee; equity 10k, notional 1k (weight 0.1), +10% move.
+    all_trades = pl.DataFrame([
+        {
+            "trade_id": "t1", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
+            "status": "open", "qty": "0.001", "entry_price": 100.0,
+            "notional_usdt": 1_000.0, "equity_usdt": 10_000.0,
+            "entry_fee_usdt": 0.6,  # taker fee on entry
+            "planned_exit_ts_ms": now - MS_PER_HOUR,
+        },
+    ])
+    plan = {"trade_id": "t1", "symbol": "BTCUSDT", "qty": "0.001", "exit_reason": "time_stop"}
+    demo = LongNativeDemoCycleConfig(submit_orders=False)  # dry-run -> exit_fee 0
+
+    rows, _ = _execute_long_exits(
+        [plan], all_trades, trading_client=None, demo=demo, now_ms=now,
+        price_by_symbol={"BTCUSDT": 110.0},  # +10%
+    )
+    assert len(rows) == 1 and rows[0]["status"] == "closed"
+    gross = 0.10 * (1_000.0 / 10_000.0)  # gross_trade_return * notional_weight
+    fee_return = (0.6 + 0.0) / 10_000.0
+    # net_return must be NET of fees; the original bug recorded the gross value.
+    assert float(rows[0]["net_return"]) == pytest.approx(gross - fee_return)
+    assert float(rows[0]["net_return"]) < gross
+
+
+# ratelimit-rest-4: stale "short never gets starved" claim removed
+def test_rate_limit_docstring_no_longer_overstates_cross_sleeve_protection() -> None:
+    from liquidity_migration.long_native_event_demo import (
+        _long_demo_private_rest_rate_limit_per_second,
+    )
+
+    doc = _long_demo_private_rest_rate_limit_per_second.__doc__ or ""
+    assert "ratelimit-rest-4" in doc
+    assert "per-IP" in doc  # explicitly states it is NOT a per-IP coordinator
+    assert "never gets starved" not in doc  # the stale erased-short claim is gone
+
+
+# --------------------------------------------------------------------------- #
+# long-sleeve-2: live FC rank-boundary telemetry (observability ONLY)
+# (relocated from tests/test_audit_int_iG.py)
+# --------------------------------------------------------------------------- #
+
+def test_fc_rank_near_boundary_predicate() -> None:
+    cutoff = 10
+    margin = FC_VOLUME_RANK_TELEMETRY_MARGIN
+    # Exactly at the cutoff -> in band.
+    assert _fc_rank_is_near_boundary(cutoff, cutoff) is True
+    # Within margin of the cutoff -> in band.
+    assert _fc_rank_is_near_boundary(cutoff - margin, cutoff) is True
+    assert _fc_rank_is_near_boundary(cutoff - 1, cutoff) is True
+    # Comfortably inside the top set -> NOT flagged.
+    assert _fc_rank_is_near_boundary(cutoff - margin - 1, cutoff) is False
+    assert _fc_rank_is_near_boundary(1, cutoff) is False
+    # Above the cutoff -> would not have fired the FC gate; not flagged.
+    assert _fc_rank_is_near_boundary(cutoff + 1, cutoff) is False
+    # Missing rank -> not flagged.
+    assert _fc_rank_is_near_boundary(None, cutoff) is False
+
+
+def test_log_fc_rank_boundary_emits_for_near_boundary_candidate(caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="liquidity_migration.long_native_event_demo"):
+        _log_fc_rank_boundary(symbol="WIFUSDT", today_volume_rank=9, fc_top_volume_rank_max=10)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("rank-boundary" in m and "WIFUSDT" in m for m in msgs)
+
+
+def test_log_fc_rank_boundary_silent_for_comfortable_rank(caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="liquidity_migration.long_native_event_demo"):
+        _log_fc_rank_boundary(symbol="ETHUSDT", today_volume_rank=2, fc_top_volume_rank_max=10)
+    assert caplog.records == []
