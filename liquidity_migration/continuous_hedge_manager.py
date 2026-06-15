@@ -33,6 +33,8 @@ from .continuous_rebalance import (
     compute_continuous_hedge_ratio,
     compute_continuous_hedge_ratios_2f,
 )
+from .continuous_forward_replay import frozen_hedge_regime
+from .continuous_regime import latest_btcvol_intensity
 
 HEDGE_SYMBOL = "BTCUSDT"
 HEDGE_SYMBOL_2 = "ETHUSDT"  # second leg of the banked 2f hedge (2026-06-10 Stage-B)
@@ -43,6 +45,21 @@ FROZEN_HEDGE_RULE = ContinuousHedgeRule(beta_window_days=90, beta_min_obs=60, he
 # The backtest book is 0.5-gross-short at scale 1; live H_equity_frac scales by the
 # live book's actual gross-short fraction relative to that reference.
 REFERENCE_GROSS_SHORT_FRAC = 0.5
+
+
+def _regime_hedge_intensity(btc_returns: list[float | None]) -> float:
+    """Today's BTC-vol regime-hedge intensity for the live book (1.0 when no regime
+    is frozen). Reads the authoritative, hash-pinned regime from
+    ``frozen_hedge_regime()`` so the live demo hedge applies the IDENTICAL signal the
+    forward ledger accrues (errors-we-never-repeat #16, same hedge object). Causal:
+    uses the prior BTC return series only (continuous_regime.latest_btcvol_intensity).
+    """
+    regime = frozen_hedge_regime()
+    if not regime:
+        return 1.0
+    return latest_btcvol_intensity(
+        btc_returns, regime["lam"], regime["vol_window"], regime["pct_window"]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +170,11 @@ def compute_hedge_decision(
         prior_raw_returns=tuple(unit_returns),
         prior_hedge_returns=tuple(btc_returns),
     )
-    target_scale = max(live_gross_short_frac, 0.0) / REFERENCE_GROSS_SHORT_FRAC
+    base_scale = max(live_gross_short_frac, 0.0) / REFERENCE_GROSS_SHORT_FRAC
+    # BTC-vol regime-hedge overlay: scale the hedge by today's causal intensity
+    # (1.0 when no regime is frozen). Identical to the backtest's hedge_scale.
+    hedge_intensity = _regime_hedge_intensity(btc_returns)
+    target_scale = base_scale * hedge_intensity
     ratio = compute_continuous_hedge_ratio(state, FROZEN_HEDGE_RULE, target_scale)
     ratio = min(ratio, config.max_hedge_equity_frac)
     n_obs = _beta_window_observation_count(btc_returns, FROZEN_HEDGE_RULE)
@@ -179,6 +200,8 @@ def compute_hedge_decision(
         plan=plan,
         diagnostics={
             "target_scale": target_scale,
+            "base_scale": base_scale,
+            "hedge_intensity": hedge_intensity,
             "live_gross_short_frac": live_gross_short_frac,
             "history_days": len(unit_returns),
             "beta_window_observations": n_obs,
@@ -266,7 +289,12 @@ def compute_hedge_decision_2f(
     """
     from .continuous_rebalance import plan_continuous_hedge_resize
 
-    target_scale = max(live_gross_short_frac, 0.0) / REFERENCE_GROSS_SHORT_FRAC
+    base_scale = max(live_gross_short_frac, 0.0) / REFERENCE_GROSS_SHORT_FRAC
+    # BTC-vol regime-hedge overlay: one causal intensity scales BOTH legs (and the
+    # single-leg fallback below, since it reuses target_scale) — identical to the
+    # backtest's hedge_scale. 1.0 when no regime is frozen.
+    hedge_intensity = _regime_hedge_intensity(btc_returns)
+    target_scale = base_scale * hedge_intensity
     # Count joint obs over the SAME trailing window the beta uses (not the full
     # series): a full-series count would miss the case where the trailing window is
     # ETH-thin (betas -> 0) yet the full history is not, leaving the book silently
@@ -317,6 +345,8 @@ def compute_hedge_decision_2f(
         fell_back_to_btc=fell_back,
         diagnostics={
             "target_scale": target_scale,
+            "base_scale": base_scale,
+            "hedge_intensity": hedge_intensity,
             "live_gross_short_frac": live_gross_short_frac,
             "history_days": len(unit_returns),
         },

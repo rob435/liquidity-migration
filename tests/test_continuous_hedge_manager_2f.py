@@ -24,6 +24,7 @@ from liquidity_migration.continuous_rebalance import (
     ContinuousHedge2FState,
     compute_continuous_hedge_ratios_2f,
 )
+from liquidity_migration.continuous_regime import latest_btcvol_intensity
 
 
 def _two_factor_series(n: int = 120):
@@ -41,9 +42,13 @@ def test_2f_decision_matches_live_twin_ratios() -> None:
         live_gross_short_frac=0.5, btc_price=50_000.0, eth_price=3_000.0,
         current_btc_qty=0.0, current_eth_qty=0.0, equity_usdt=10_000.0,
     )
+    # The live decision applies the BTC-vol regime-hedge overlay (deployed behavior),
+    # so the twin must be fed the same intensity to match (base target_scale = 1.0).
+    intensity = latest_btcvol_intensity(btc)
     r1, r2 = compute_continuous_hedge_ratios_2f(
-        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), FROZEN_HEDGE_RULE, 1.0
+        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), FROZEN_HEDGE_RULE, intensity
     )
+    assert math.isclose(d.diagnostics["hedge_intensity"], intensity, rel_tol=0, abs_tol=1e-15)
     assert math.isclose(d.ratio_btc, r1, rel_tol=0, abs_tol=1e-15)
     assert math.isclose(d.ratio_eth, r2, rel_tol=0, abs_tol=1e-15)
     assert d.ratio_btc > 0.0 and d.ratio_eth > 0.0
@@ -170,8 +175,9 @@ def test_2f_full_window_still_matches_live_twin() -> None:
         live_gross_short_frac=0.5, btc_price=50_000.0, eth_price=3_000.0,
         current_btc_qty=0.0, current_eth_qty=0.0, equity_usdt=10_000.0,
     )
+    intensity = latest_btcvol_intensity(btc)
     r1, r2 = compute_continuous_hedge_ratios_2f(
-        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), FROZEN_HEDGE_RULE, 1.0,
+        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), FROZEN_HEDGE_RULE, intensity,
     )
     assert not d.fell_back_to_btc
     assert d.ratio_btc == pytest.approx(r1, abs=1e-15)

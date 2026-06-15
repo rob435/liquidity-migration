@@ -28,11 +28,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import continuous_ensemble_rebalance_scout as scout  # noqa: E402
 import continuous_rs_squeeze_probe as probe  # noqa: E402
 
+from liquidity_migration.continuous_forward_replay import frozen_hedge_regime  # noqa: E402
 from liquidity_migration.continuous_rebalance import (  # noqa: E402
     ContinuousHedgeRule,
     ContinuousRebalanceRule,
     apply_rebalance_rule,
 )
+from liquidity_migration.continuous_regime import btcvol_intensity_series  # noqa: E402
 from liquidity_migration.volume_events_charts import _write_equity_benchmark_chart  # noqa: E402
 
 SHARED = Path("C:/Users/user/SHARED_DATA")
@@ -50,6 +52,19 @@ def winner_rule() -> ContinuousRebalanceRule:
         realized_vol_window_days=90, target_daily_vol=0.045, max_scale=4.0,
         drawdown_half_threshold=-0.04, drawdown_zero_threshold=None,
         resize_cost_bps=10.0, strategy_momentum_window_days=0,
+    )
+
+
+def deployed_hedge_intensity(days: list[int], btc_ret: dict[int, float]) -> dict[int, float] | None:
+    """The BTC-vol regime-hedge intensity for the deployed object (None when no
+    regime is frozen). Reads the same hash-pinned ``frozen_hedge_regime()`` the live
+    book and forward ledger use, so the reported equity curve tracks the identical
+    hedge policy (no silent divergence from demo/forward)."""
+    regime = frozen_hedge_regime()
+    if not regime:
+        return None
+    return btcvol_intensity_series(
+        days, btc_ret, regime["lam"], regime["vol_window"], regime["pct_window"]
     )
 
 
@@ -117,6 +132,7 @@ def main() -> None:
         df = apply_rebalance_rule(
             combined, winner_rule(), ContinuousHedgeRule(90, 60, 2.0, 5.0),
             btc_ret, btc_fund, eth_ret, eth_fund,
+            hedge_intensity=deployed_hedge_intensity(combined.days, btc_ret),
         )
         raw_klines = (
             panel.filter(pl.col("symbol") == "BTCUSDT")

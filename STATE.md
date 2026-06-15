@@ -40,6 +40,18 @@ Details are in git history; the current behavior below is what matters.
   block on calendar-age staleness and page unless the operator requests
   ledger-aware staleness. Flat/no-action runs are healthy; failed/blocked
   armed runs page.
+- **BTC-vol regime-hedge overlay (W5 Stage 8c, LIVE 2026-06-15):** the deployed
+  hedge is now modulated by a causal, mean-1 BTC-volatility regime intensity
+  `1 + 0.5·(2·pct − 1)` (trailing-30d BTC vol → trailing-250 percentile; bounded
+  [0.5, 1.5]) — hedge MORE in turbulence, LESS in calm. Scales BOTH 2f legs.
+  Single source: `liquidity_migration/continuous_regime.py`, read by the live
+  hedge manager, the forward orchestrator, AND the deployed-equity report (one
+  object). It is in `FROZEN_FORWARD_CONFIG['hedge']['regime']`, so it is part of
+  `frozen_config_hash` — turning it on **voided the prior 2f forward ledger**
+  (new hash `0668eb88c0d6…`). Operator action required on the VPS: archive the old
+  2f state dir and start a fresh clock (receipt
+  `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md`). Research-stage
+  forward-watch — evaluate as squeeze protection, NOT a promotion; Tier-3 unchanged.
 - **Sniper:** wired and armed in demo (`CONTINUOUS_SNIPER=1`; code default off).
   No placements yet because the base book has had zero entries since the
   2026-06-09 rebuild. W4 Stage 2 (2026-06-13) rechecked the fixed live form
@@ -402,23 +414,31 @@ Active programs:
     artifact). Applied rigorously, this does NOT rescue the sniper or dispersion — both have their
     robust edge on BINANCE and are NOISE on bybit. **The only bybit-ROBUST signal remains the
     BTC-vol regime-hedge (+0.108, robust λ/cost).**
+  - **DECISION (2026-06-15): option (a) TAKEN — the BTC-vol regime-hedge is now LIVE on demo +
+    forward** (whole 2f hedge, fresh clock; see "What's Running" + receipt
+    `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md`). Forward-watch evaluates it as
+    squeeze protection; Tier-3 real-money gate UNCHANGED. Options (b)/(c) below remain open for a
+    future direction.
   - **RECOMMENDATION / next = OPERATOR INPUT.** In-sample search is complete; further grinding is
     diminishing returns and risks false positives (Stage 4 lesson). Recommend the operator: (a)
     green-light demo/paper FORWARD-WATCH of the **BTC-vol regime-hedge on bybit** (operator-gated;
-    Tier-3 real-money gate UNCHANGED), evaluated on squeeze protection; (b) IF a binance sleeve
+    Tier-3 real-money gate UNCHANGED), evaluated on squeeze protection [DONE 2026-06-15]; (b) IF a binance sleeve
     also runs, a **per-venue hedge** — BTC-vol on bybit + **dispersion (Stage 10b) on binance**
     (binance +0.293, robust; or the BTC-vol×dispersion stack +0.368) — is a defensible
     forward-watch option (each independently robust on its venue; venue-specific tuning, not a
     both-venue signal); or (c) supply a new research direction / data source. The loop should
     consolidate, not manufacture low-prior experiments. All W5 code (stage
     0/1/2/3/3b/4/4c/4d/5/7/7b/8/8b/8c/8d/8e/8f/8g/9/10/10b scripts + 3 engine hooks) + receipts
-    UNCOMMITTED — no commit/push without operator approval.
+    were COMMITTED + merged to main (85e92b6, 2026-06-15); the Stage 8c deliverable is now promoted
+    live (see "What's Running").
 - **Forward data stack:** P11 taker-flow full-universe completion is idle-time;
   P12 liquidation-proxy calibration waits on a mature forward liquidation tape
   (~2026-07-10). All remaining evidence paths are forward-only: demo fills →
   R4 calibration, dynexit shadow, forward-watch leads (≥100 trades/book).
   Forward signal clock: `scripts/continuous_forward_replay_orchestrator.py`
-  (run at each data-root refresh; overlap drift = hard alarm).
+  (run at each data-root refresh; overlap drift = hard alarm). As of 2026-06-15 it
+  accrues the BTC-vol regime-hedge object (config hash `0668eb88c0d6…`); the prior
+  regime-free 2f clock is voided — archive it and start fresh (receipt above).
 
 Prior same-day results (2026-06-12) and current status:
 

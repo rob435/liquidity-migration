@@ -403,6 +403,7 @@ def run_venue(
         df = apply_rebalance_rule(
             combined, deployed.winner_rule(), ContinuousHedgeRule(90, 60, 2.0, 5.0),
             btc_ret, btc_fund, eth_ret, eth_fund,
+            hedge_intensity=deployed.deployed_hedge_intensity(combined.days, btc_ret),
         )
         panel_last = dt.date.fromisoformat(str(panel["date"].max()))
         df = pad_flat_tail(df, through_date=panel_last)

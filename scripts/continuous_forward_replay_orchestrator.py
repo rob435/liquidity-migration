@@ -49,8 +49,10 @@ from liquidity_migration.continuous_forward_replay import (  # noqa: E402
     FROZEN_FORWARD_CONFIG,
     build_full_ledger,
     forward_readiness_summary,
+    frozen_hedge_regime,
     update_forward_ledger,
 )
+from liquidity_migration.continuous_regime import btcvol_intensity_series  # noqa: E402
 
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
 ROOTS = {"bybit": SHARED / "bybit_full_pit", "binance": SHARED / "binance_full_pit"}
@@ -140,7 +142,23 @@ def venue_update(venue: str, state_dir: Path, forward_start_ms: int) -> dict:
     # carries instrument2=ETHUSDT (its config-hash voids any prior btc_only ledger).
     rets, fund = btc_inputs(venue, all_days, "BTCUSDT")
     rets2, fund2 = btc_inputs(venue, all_days, "ETHUSDT")
-    ledger = build_full_ledger(pieces, rets, fund, rets2, fund2)
+    # W5 Stage 8c BTC-vol regime-hedge overlay (operator-approved 2026-06-15;
+    # docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md): a causal,
+    # mean-1 daily intensity from the BTC return series scales BOTH 2f hedge legs
+    # (hedge more in turbulence). The same params are part of frozen_config_hash and
+    # the live demo book applies the identical signal, so demo and forward track one
+    # object. regime=None reduces build_full_ledger to the plain 2f hedge.
+    regime = frozen_hedge_regime()
+    hedge_intensity = (
+        btcvol_intensity_series(
+            all_days, rets, regime["lam"], regime["vol_window"], regime["pct_window"]
+        )
+        if regime
+        else None
+    )
+    ledger = build_full_ledger(
+        pieces, rets, fund, rets2, fund2, hedge_intensity=hedge_intensity
+    )
     res = update_forward_ledger(state_dir, venue, ledger)
     summary = forward_readiness_summary(state_dir, venue, forward_start_ms=forward_start_ms)
     return {

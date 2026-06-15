@@ -40,6 +40,7 @@ from .continuous_rebalance import (
     apply_rebalance_rule,
     combine_continuous_components,
 )
+from .continuous_regime import FROZEN_BTCVOL_REGIME
 from .trade_lifecycle import annualized_sharpe  # metrics-3: shared Sharpe convention
 
 MS_PER_DAY = 86_400_000
@@ -72,12 +73,23 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
         # starts a fresh 2f clock at the next data-root refresh (a clean reset, not a
         # drift alarm). build_full_ledger wires the second (ETH) leg from the
         # orchestrator's hedge_returns_2 / hedge_funding_2 inputs.
+        #
+        # 'regime' (W5 Stage 8c deliverable, operator-approved 2026-06-15; receipt
+        # docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md): the BTC-vol
+        # regime-hedge overlay. A causal, mean-1 daily intensity (continuous_regime.
+        # btcvol_intensity_series) multiplies BOTH 2f hedge legs — hedge more in
+        # turbulence, less in calm. Embedding it here puts it in frozen_config_hash, so
+        # turning it on VOIDS the prior 2f forward ledger (another clean reset: archive
+        # the old state dir, start a fresh clock). intensity=1 everywhere reduces to the
+        # plain 2f hedge byte-for-byte. The live demo book applies the identical signal
+        # (continuous_hedge_manager), so demo and forward track one hedge object.
         "instrument": "BTCUSDT",
         "instrument2": "ETHUSDT",
         "beta_window_days": 90,
         "beta_min_obs": 60,
         "hedge_cap": 2.0,
         "cost_bps": 5.0,
+        "regime": FROZEN_BTCVOL_REGIME,
     },
     "inception_day_ms": 1_680_307_200_000,  # 2023-04-01 (ledger history start)
 }
@@ -114,6 +126,15 @@ def frozen_hedge_instruments(config: dict[str, Any] | None = None) -> list[str]:
     if hedge.get("instrument2"):
         legs.append(hedge["instrument2"])
     return [leg for leg in legs if leg]
+
+
+def frozen_hedge_regime(config: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The active hedge-intensity regime (or None when the plain hedge is frozen).
+
+    Part of frozen_config_hash via the hedge block. The orchestrator builds the
+    intensity series from these params; the live hedge manager applies the same.
+    """
+    return (config or FROZEN_FORWARD_CONFIG).get("hedge", {}).get("regime")
 
 
 def frozen_config_hash(config: dict[str, Any] | None = None) -> str:
@@ -380,6 +401,7 @@ def forward_readiness_summary(
         "venue": venue,
         "hedge_mode": frozen_hedge_mode(),
         "hedge_instruments": frozen_hedge_instruments(),
+        "hedge_regime": frozen_hedge_regime(),
         # forward_days is the CALENDAR span (inclusive); ledger_days is the count
         # of OBSERVED rows. They differ whenever the book skips days.
         "forward_days": span_days,
