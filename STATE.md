@@ -98,6 +98,18 @@ Details are in git history; the current behavior below is what matters.
 
 ## Current Research Direction
 
+**W6 — bybit-first program (active, 2026-06-15).** The successor wave to W5. W5
+exhausted the price/return lever space; W6 opens the orderflow/squeeze axis,
+execution/cost alpha, and hedge deepening — bybit-primary (robust on bybit, not
+completely losing on binance). Plan: `docs/research_plans/w6_bybit_program/PLAN.md`
+(+ `orderflow.md`). First evidence already in hand: the exploratory squeeze-proxy
+screen (`scripts/w6_squeeze_proxy_screen.py`) found a real within-symbol IC over the
+composite — `oi_chg_24h` bybit **+0.0665, p=0.002** (all thirds +, symbol-hash control
+degenerate); `funding_level` binance +0.056 / bybit +0.025 same sign. Admissibility,
+NOT a harvest. **P0 next = the pre-registered squeeze-proxy sizing sweep**
+(`docs/preregistration/2026-06-15-w6-squeeze-proxy-sizing.md`) + the squeeze ×
+hedge-intensity overlay (A4). Full ranked roadmap + guardrails in the plan.
+
 The full window is open for pre-registered research again, but the methodology
 bar did not change: both venues, full PIT, causal features, cost/funding, and
 pre-stated decision rules.
