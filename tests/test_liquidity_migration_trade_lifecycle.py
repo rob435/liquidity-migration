@@ -243,6 +243,43 @@ def test_funding_lookup_returns_none_without_rate_column():
     assert _funding_lookup(pl.DataFrame()) is None
 
 
+def test_derive_funding_interval_min_genuine_snapshot_and_calm():
+    """The settlement interval is derived data-intrinsically from the rate-change
+    cadence, NOT the stale stored funding_interval_min (which is an 8h default)."""
+    hour = 3_600_000
+    # genuine 2h: rate changes every 2h stamp -> 120
+    bera = pl.DataFrame({"symbol": ["BERA"] * 12, "ts_ms": [h * 2 * hour for h in range(12)],
+                         "funding_rate": [0.0001 * i for i in range(12)], "funding_interval_min": [480] * 12})
+    # genuine 8h: rate changes every 8h stamp -> 480
+    btc = pl.DataFrame({"symbol": ["BTC"] * 12, "ts_ms": [h * 8 * hour for h in range(12)],
+                        "funding_rate": [0.0001 * i for i in range(12)], "funding_interval_min": [480] * 12})
+    # hourly SNAPSHOT of an 8h symbol: rate constant within each 8h block -> collapse to 480
+    snap = pl.DataFrame({"symbol": ["SNAP"] * 48, "ts_ms": [h * hour for h in range(48)],
+                         "funding_rate": [0.001 + 0.0001 * (h // 8) for h in range(48)],
+                         "funding_interval_min": [480] * 48})
+    out = tl.derive_funding_interval_min(pl.concat([bera, btc, snap]))
+    assert out == {"BERA": 120, "BTC": 480, "SNAP": 480}
+
+
+def test_funding_lookup_collapses_snapshot_to_one_charge_per_settlement():
+    """With the authoritative interval, _funding_lookup collapses sub-interval snapshot
+    rows to one event per settlement -> exact-stamp dedup no longer over-charges."""
+    hour = 3_600_000
+    # 6 settlements (8h apart), each sampled hourly (8 identical rows) -> 48 raw rows;
+    # the rate changes only across the 8h blocks.
+    rates = [0.001 + 0.0001 * (h // 8) for h in range(48)]
+    snap = pl.DataFrame({"symbol": ["AAA"] * 48, "ts_ms": [h * hour for h in range(48)],
+                         "funding_rate": rates, "funding_interval_min": [480] * 48})
+    # No interval -> exact-stamp keeps all 48 (would over-charge ~8x).
+    assert len(tl._funding_lookup(snap)["AAA"]["events_ts"]) == 48
+    # With the derived 480-min interval -> collapses to one event per 8h settlement.
+    intervals = tl.derive_funding_interval_min(snap)
+    assert intervals["AAA"] == 480
+    collapsed = tl._funding_lookup(snap, interval_by_symbol=intervals)["AAA"]
+    assert collapsed["events_ts"] == [h * 8 * hour for h in range(6)]
+    assert collapsed["events_rate"] == [0.001 + 0.0001 * b for b in range(6)]
+
+
 def test_perp_funding_return_signs_by_side_and_counts_events():
     funding = pl.DataFrame(
         {

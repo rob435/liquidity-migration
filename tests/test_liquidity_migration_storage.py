@@ -698,34 +698,57 @@ from liquidity_migration import storage  # noqa: E402
 from liquidity_migration.storage import resolve_dataset_name as _b10_resolve_dataset_name  # noqa: E402
 
 
-def test_pitdata6_binance_funding_fallback_suppressed_on_bybit_root(tmp_path: Path) -> None:
-    """A Bybit root (native klines_1h present) that happens to ALSO carry a
-    binance_usdm_funding/ dir but lacks a canonical funding/ dir must NOT silently
-    serve BINANCE funding to a Bybit funding request — funding is a modeled cost,
-    and the wrong venue's curve mis-signs returns. Before the fix resolve_dataset_name
-    returned 'binance_usdm_funding' (cross-venue substitution); after, it fail-safes
-    to the canonical 'funding' (empty read -> funding_mode missing)."""
-    # Native Bybit kline marker -> this is a Bybit root.
+def test_canonical_klines_root_with_binance_variant_resolves_to_binance_funding(tmp_path: Path) -> None:
+    """A Binance full-PIT root stores klines under the canonical ``klines_1h/`` name
+    AND its funding as ``binance_usdm_funding/`` with NO canonical ``funding/``.
+    resolve_dataset_name must use the present venue-variant (a binance_usdm_* dir only
+    ever exists on a Binance root), matching _autodetect_dataset_names. The old code
+    suppressed this on ANY root carrying a canonical kline marker and silently returned
+    empty funding -> funding_mode missing on a fully populated dataset (the 2026-06-15
+    resolver regression)."""
     write_dataset(
         pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "close": [1.0]}),
         tmp_path,
         "klines_1h",
         partition_by=(),
     )
-    # A stray Binance funding dir on the same (mixed) root.
     write_dataset(
         pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "funding_rate": [0.0009]}),
         tmp_path,
         "binance_usdm_funding",
         partition_by=(),
     )
+    assert _b10_resolve_dataset_name(tmp_path, "funding") == "binance_usdm_funding"
+    assert read_dataset(tmp_path, "funding").height == 1
 
-    # The fallback must be suppressed: a Bybit funding request stays canonical.
+
+def test_pitdata6_bybit_root_canonical_funding_wins_over_binance_proxy(tmp_path: Path) -> None:
+    """pit-data-6 safety, preserved by canonical-precedence: a real Bybit root ALWAYS
+    has its own canonical ``funding/`` dir, which takes precedence over any
+    ``binance_usdm_*`` PROXY dataset on the same root — the wrong-venue curve is never
+    served. (A real Bybit root never lacks canonical funding/, so the variant fallback
+    cannot mis-substitute; the only roots without canonical funding/ are Binance-native
+    roots, which SHOULD use the variant.)"""
+    write_dataset(
+        pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "close": [1.0]}),
+        tmp_path,
+        "klines_1h",
+        partition_by=(),
+    )
+    write_dataset(  # bybit's own native funding
+        pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "funding_rate": [0.0001]}),
+        tmp_path,
+        "funding",
+        partition_by=(),
+    )
+    write_dataset(  # a binance PROXY dataset on the same root
+        pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "funding_rate": [0.0009]}),
+        tmp_path,
+        "binance_usdm_funding",
+        partition_by=(),
+    )
     assert _b10_resolve_dataset_name(tmp_path, "funding") == "funding"
-    # No canonical funding/ dir -> empty read (NOT the Binance funding rows).
-    assert read_dataset(tmp_path, "funding").is_empty()
-    # Open interest is gated identically.
-    assert _b10_resolve_dataset_name(tmp_path, "open_interest") == "open_interest"
+    assert read_dataset(tmp_path, "funding")["funding_rate"].to_list() == [0.0001]
 
 
 def test_pitdata6_pure_binance_root_still_resolves_fallback(tmp_path: Path) -> None:

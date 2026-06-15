@@ -204,24 +204,10 @@ _DATASET_FALLBACKS: dict[str, tuple[str, ...]] = {
 }
 
 
-# pit-data-6: Bybit-native marker datasets. A per-venue Binance root stores its
-# klines as `binance_usdm_klines_1h` and never carries a native canonical
-# `klines_1h/` (or `funding/`/`open_interest/`); a Bybit root stores them under
-# the canonical names. So the presence of a native canonical klines dir means
-# "this root is Bybit-native", and funding/OI must NOT silently fall back to the
-# Binance variant — funding is a modeled COST, and serving the wrong venue's
-# funding curve to a Bybit strategy flatters/penalises returns with the wrong
-# sign/magnitude. The cross-venue fallback is intended ONLY for an unambiguous
-# pure-Binance root (no Bybit-native marker present).
-_BYBIT_NATIVE_MARKERS: tuple[str, ...] = ("klines_1h", "klines_1m", "klines_5m")
-
-
-def _root_has_bybit_native_marker(root: Path) -> bool:
-    """True if ``root`` carries any native canonical Bybit kline dataset — the
-    discriminator that this is a Bybit (not pure-Binance) root. Used to suppress
-    the funding/OI Binance fallback on a mixed/Bybit root (pit-data-6)."""
-    return any((root / marker).exists() for marker in _BYBIT_NATIVE_MARKERS)
-
+# pit-data-6 is now enforced by canonical-precedence in resolve_dataset_name (a real
+# Bybit root always carries its own canonical funding/ dir, which wins over any
+# binance_usdm_* proxy on the same root) rather than a klines-name marker — the marker
+# false-positived on Binance full-PIT roots that store klines under the canonical name.
 
 def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
     """Map a canonical dataset request to the variant actually present in ``root``.
@@ -231,12 +217,11 @@ def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
     disk. The returned name is always a member of :data:`DATASETS`, so the lock
     and path helpers stay valid.
 
-    pit-data-6: the cross-venue (Binance) fallback for funding/open_interest is
-    gated on the root being unambiguously single-venue. If the root carries a
-    Bybit-native marker (a native canonical kline dataset) it is a Bybit root,
-    and a missing canonical funding/OI dir resolves to the canonical name (which
-    yields an empty read -> funding_mode=missing) rather than silently
-    substituting the WRONG venue's modeled funding/OI cost curve.
+    pit-data-6: a missing canonical funding/OI dir must never silently resolve to
+    the WRONG venue's modeled cost curve. The safety invariant used here is that a
+    ``binance_usdm_*`` variant dir only ever exists on a Binance root, so a present
+    variant is authoritative and a Bybit root (which never carries one) falls back
+    to the canonical (empty) name -> funding_mode=missing.
     """
     fallbacks = _DATASET_FALLBACKS.get(dataset)
     if not fallbacks:
@@ -244,14 +229,20 @@ def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
     root = Path(data_root).expanduser()
     if (root / dataset).exists():
         return dataset
-    # Only cross-venue-substitute on a pure-Binance root. A Bybit-native marker
-    # means this is a Bybit root whose funding/OI dir is simply absent -> fail
-    # safe to the canonical (empty) name, never the Binance variant.
-    if _root_has_bybit_native_marker(root):
-        return dataset
+    # A present venue-variant dataset is AUTHORITATIVE: a ``binance_usdm_*`` dir only
+    # ever exists on a Binance root, so prefer it even when the root stores klines
+    # under the canonical ``klines_1h/`` name. The old code suppressed this whenever
+    # a Bybit-native kline marker was present, which false-positived on Binance
+    # full-PIT roots that use canonical kline naming -> funding/OI silently uncosted
+    # (the 2026-06-15 resolver regression: funding_mode=missing on a fully populated
+    # binance_usdm_funding).
     for alt in fallbacks:
         if (root / alt).exists():
             return alt
+    # No variant present. A Bybit root whose funding/OI dir is simply absent returns
+    # the canonical (empty) name -> funding_mode=missing, never substituting a
+    # wrong-venue cost curve (pit-data-6 safety preserved: a Bybit root never carries
+    # a binance_usdm_* dir, so the loop above cannot mis-substitute).
     return dataset
 
 

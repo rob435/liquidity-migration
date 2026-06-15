@@ -86,41 +86,102 @@ def frozen_config(
     return cfg
 
 
-def load_extended_panel(venue: str, *, end_date: str, root: Path | None = None) -> pl.DataFrame:
-    """Frozen feature-panel parquet + a kline-partition tail through end_date.
+# The frozen feature-panel filename is a CACHE key, not a hard dependency. It was
+# only ever a cached daily rollup of the same klines_1h partitions, so when it is
+# absent on a root we rebuild it on demand (and cache it back) instead of crashing
+# with a FileNotFoundError — the brittleness that blocked both venues on 2026-06-15.
+FROZEN_PANEL_NAME = "feature_panel_2026-05-27.parquet"
+# Daily-panel build floor: ample warm-up for the 2023-04 continuous inception and
+# the trailing-250d regime percentile of trailing-30d BTC vol.
+PANEL_BUILD_START = "2022-01-01"
 
-    Same construction as `continuous_rs_squeeze_probe.load_daily_panel`, but the
-    tail is generic: both venues, from the frozen panel's last date + 1 through
-    end_date (exclusive), reading whatever klines_1h partitions exist.
+
+def _klines_daily_agg(root: Path, date_str: str) -> pl.DataFrame | None:
+    """One day's (symbol -> close[last], turnover_quote[sum]) rollup from klines_1h."""
+    part = root / "klines_1h" / f"date={date_str}"
+    if not part.exists():
+        return None
+    raw = pl.read_parquet(part, columns=["ts_ms", "symbol", "close", "turnover_quote"])
+    return (
+        raw.sort("ts_ms")
+        .group_by("symbol", maintain_order=True)
+        .agg(pl.col("close").last(), pl.col("turnover_quote").sum())
+        .with_columns(pl.lit(date_str).alias("date"))
+        .select(["symbol", "date", "close", "turnover_quote"])
+    )
+
+
+def _daily_panel_from_klines(root: Path, *, start_date: str, end_date: str) -> pl.DataFrame:
+    """Build the daily close/turnover panel directly from klines_1h over [start, end).
+
+    This is the on-demand replacement for the frozen feature-panel parquet: the
+    frozen file was identical to this rollup (close=last, turnover_quote=sum per
+    symbol/date), so building it removes the hard-coded-filename dependency.
+    """
+    d = dt.date.fromisoformat(start_date)
+    boundary = dt.date.fromisoformat(end_date)
+    frames = []
+    while d < boundary:
+        agg = _klines_daily_agg(root, d.isoformat())
+        if agg is not None:
+            frames.append(agg)
+        d += dt.timedelta(days=1)
+    if not frames:
+        return pl.DataFrame(
+            schema={"symbol": pl.String, "date": pl.String, "close": pl.Float64, "turnover_quote": pl.Float64}
+        )
+    return pl.concat(frames)
+
+
+def load_extended_panel(venue: str, *, end_date: str, root: Path | None = None) -> pl.DataFrame:
+    """Daily close/turnover panel through end_date, robust to a missing frozen file.
+
+    If the cached frozen panel parquet is present, use it + a kline-partition tail
+    from its last date + 1 through end_date (the fast path). If it is ABSENT, build
+    the whole panel from the klines_1h partitions (the same rollup the frozen file
+    held) and cache it back so later runs hit the fast path — no more hard
+    FileNotFoundError on a root that simply never received the frozen snapshot.
     """
     root = root if root is not None else SHARED / f"{venue}_full_pit"
-    fp = pl.read_parquet(root / "feature_panel_2026-05-27.parquet", columns=PANEL_COLUMNS)
-    n_before = fp.height
-    fp = fp.sort("ts_ms").group_by(["symbol", "date"], maintain_order=True).last()
-    dups = n_before - fp.height
-    frames = [fp.select(["symbol", "date", "close", "turnover_quote"])]
-    panel_end = dt.date.fromisoformat(str(fp["date"].max()))
     boundary = dt.date.fromisoformat(end_date)
-    tail_frames = []
-    d = panel_end + dt.timedelta(days=1)
-    while d < boundary:
-        part = root / "klines_1h" / f"date={d.isoformat()}"
-        if part.exists():
-            raw = pl.read_parquet(part, columns=["ts_ms", "symbol", "close", "turnover_quote"])
-            agg = (
-                raw.sort("ts_ms")
-                .group_by("symbol", maintain_order=True)
-                .agg(pl.col("close").last(), pl.col("turnover_quote").sum())
-                .with_columns(pl.lit(d.isoformat()).alias("date"))
-            )
-            tail_frames.append(agg.select(["symbol", "date", "close", "turnover_quote"]))
-        d += dt.timedelta(days=1)
-    if tail_frames:
-        frames.append(pl.concat(tail_frames))
-    panel = pl.concat(frames).sort(["symbol", "date"])
+    frozen = root / FROZEN_PANEL_NAME
+    dups = 0
+    if frozen.exists():
+        fp = pl.read_parquet(frozen, columns=PANEL_COLUMNS)
+        n_before = fp.height
+        fp = fp.sort("ts_ms").group_by(["symbol", "date"], maintain_order=True).last()
+        dups = n_before - fp.height
+        frames = [fp.select(["symbol", "date", "close", "turnover_quote"])]
+        panel_end = dt.date.fromisoformat(str(fp["date"].max()))
+        tail_frames = []
+        d = panel_end + dt.timedelta(days=1)
+        while d < boundary:
+            agg = _klines_daily_agg(root, d.isoformat())
+            if agg is not None:
+                tail_frames.append(agg)
+            d += dt.timedelta(days=1)
+        if tail_frames:
+            frames.append(pl.concat(tail_frames))
+        panel = pl.concat(frames).sort(["symbol", "date"])
+        source = "frozen+tail"
+    else:
+        panel = _daily_panel_from_klines(root, start_date=PANEL_BUILD_START, end_date=end_date).sort(
+            ["symbol", "date"]
+        )
+        source = "klines"
+        # Cache it as the frozen snapshot (close=last/turnover=sum, with a ts_ms per
+        # row) so subsequent runs take the fast path. Best-effort: a read-only root
+        # just keeps rebuilding.
+        try:
+            cache = panel.with_columns(
+                (pl.col("date").str.to_date().cast(pl.Datetime("ms")).dt.timestamp("ms")).alias("ts_ms")
+            ).select(PANEL_COLUMNS)
+            cache.write_parquet(frozen)
+        except Exception as exc:  # noqa: BLE001 - caching is best-effort, never fatal
+            print(f"[{venue}] WARN: could not cache rebuilt panel to {frozen}: {exc}", flush=True)
     panel = panel.with_columns(pl.col("date").str.to_date().alias("d"))
     print(
-        f"[{venue}] daily panel rows={panel.height} dup_ts_rows_collapsed={dups} "
+        f"[{venue}] daily panel rows={panel.height} source={source} dup_ts_rows_collapsed={dups} "
         f"dates {panel['date'].min()}..{panel['date'].max()}",
         flush=True,
     )

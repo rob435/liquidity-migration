@@ -19,6 +19,7 @@ from liquidity_migration.continuous_events import (
     _assert_funding_one_per_settlement,
     _assert_rmom_covers_window,
     _btc_trend_returns,
+    derive_funding_interval_min,
     _daily_pnl_metrics,
     _fresh_entries,
     _listing_ts_by_symbol,
@@ -776,9 +777,18 @@ def _build_root(tmp_path, *, n_symbols: int = 26, n_bars: int = 720, funding_8h:
     fund = klines.select("ts_ms", "symbol")
     if funding_8h:
         fund = fund.filter((pl.col("ts_ms") // MS_PER_HOUR) % 8 == 0)
-    fund = fund.with_columns(
-        pl.lit(0.0001).alias("funding_rate"), pl.lit(480).alias("funding_interval_min")
-    )
+        fund = fund.with_columns(
+            pl.lit(0.0001).alias("funding_rate"), pl.lit(480).alias("funding_interval_min")
+        )
+    else:
+        # Realistic hourly SNAPSHOT scrape of an 8h-settling symbol: the rate is
+        # constant within each 8h settlement block and changes across blocks, so
+        # naive exact-stamp dedup would over-charge ~8x. The engine must collapse it
+        # via the derived true interval (480), not over-charge or reject.
+        fund = fund.with_columns(
+            (0.0001 + 0.00001 * ((pl.col("ts_ms") // (8 * MS_PER_HOUR)) % 7)).alias("funding_rate"),
+            pl.lit(480).alias("funding_interval_min"),
+        )
     write_dataset(fund, root, "funding")
 
     days = sorted({(start + i * MS_PER_HOUR) // MS_PER_DAY * MS_PER_DAY for i in range(n_bars)})
@@ -1047,46 +1057,71 @@ def test_entry_order_composite_preserves_trade_set_when_capacity_non_binding(tmp
     assert fcfs["n_trades"] == comp["n_trades"]
 
 
-# cost-funding-5: snapshot-scrape funding must be rejected (would over-charge a short book)
-def test_assert_funding_one_per_settlement_rejects_hourly_snapshots(tmp_path) -> None:
-    """Hourly funding stamps with an 8h declared interval = a snapshot scrape; exact-stamp dedup
-    would count every hour as a settlement and OVER-charge funding. Must raise."""
+# cost-funding-5: a realistic SNAPSHOT scrape (rate constant within the true settlement
+# interval, changing across settlements) would over-charge a short book under naive
+# exact-stamp dedup. Detection is now DATA-INTRINSIC (rate-change cadence, not the stale
+# declared funding_interval_min). Uncorrected -> raise; corrected by the derived interval
+# -> collapsed; genuine sub-8h settlements -> NEVER flagged (the 2026-06-15 false-positive).
+def test_assert_funding_one_per_settlement_rejects_uncorrected_hourly_snapshot(tmp_path) -> None:
+    """A realistic hourly snapshot of an 8h-settling symbol (rate constant within each 8h
+    block) must raise when no collapsing interval is supplied — exact-stamp dedup would
+    over-charge ~8x."""
     hour = MS_PER_HOUR
+    # 6 settlements x 8 hourly snapshots each; rate changes only across the 8h blocks.
+    rates = [0.001 + 0.0001 * (h // 8) for h in range(48)]
     funding = pl.DataFrame(
-        {"symbol": ["AAA"] * 24, "ts_ms": [h * hour for h in range(24)],
-         "funding_rate": [0.001] * 24, "funding_interval_min": [480] * 24}
+        {"symbol": ["AAA"] * 48, "ts_ms": [h * hour for h in range(48)],
+         "funding_rate": rates, "funding_interval_min": [480] * 48}
     )
     with pytest.raises(RuntimeError, match="SNAPSHOT"):
         _assert_funding_one_per_settlement(funding, root=tmp_path)
+    # ...but with the derived collapsing interval applied, it is corrected -> no raise.
+    intervals = derive_funding_interval_min(funding)
+    assert intervals["AAA"] == 480  # the true settlement interval, recovered from rate changes
+    _assert_funding_one_per_settlement(funding, root=tmp_path, interval_by_symbol=intervals)
+
+
+def test_assert_funding_does_not_flag_genuine_sub_8h_settlements(tmp_path) -> None:
+    """Genuine sub-8h alts (rate changes every settlement) with the venue's stale declared
+    8h interval must NOT be flagged — this was the 2026-06-15 false-positive that blocked
+    the bybit continuous backtest. BERA settles every 2h; rate changes every stamp."""
+    hour = MS_PER_HOUR
+    bera = pl.DataFrame(
+        {"symbol": ["BERA"] * 24, "ts_ms": [h * 2 * hour for h in range(24)],
+         "funding_rate": [0.0001 * i for i in range(24)], "funding_interval_min": [480] * 24}
+    )
+    _assert_funding_one_per_settlement(bera, root=tmp_path)  # no raise (genuine 2h)
+    assert derive_funding_interval_min(bera)["BERA"] == 120
 
 
 def test_assert_funding_one_per_settlement_accepts_one_per_settlement(tmp_path) -> None:
     """One row per 8h settlement (declared 8h) is the canonical shape — must NOT raise. A real
-    4h-settling alt whose Binance row WRONGLY declares 8h must also pass (it is legitimate
+    4h-settling alt whose row WRONGLY declares 8h must also pass (it is legitimate
     one-per-settlement data; bucketing by the stored interval was the 4h-undercount bug)."""
     hour = MS_PER_HOUR
     ok_8h = pl.DataFrame(
         {"symbol": ["AAA"] * 12, "ts_ms": [h * hour for h in range(0, 96, 8)],
-         "funding_rate": [0.001] * 12, "funding_interval_min": [480] * 12}
+         "funding_rate": [0.001 * i for i in range(12)], "funding_interval_min": [480] * 12}
     )
     _assert_funding_one_per_settlement(ok_8h, root=tmp_path)  # no raise
     real_4h_wrong_declared = pl.DataFrame(
         {"symbol": ["BBB"] * 24, "ts_ms": [h * hour for h in range(0, 96, 4)],
-         "funding_rate": [0.001] * 24, "funding_interval_min": [480] * 24}  # declares 8h, settles 4h
+         "funding_rate": [0.001 * i for i in range(24)], "funding_interval_min": [480] * 24}  # settles 4h
     )
     _assert_funding_one_per_settlement(real_4h_wrong_declared, root=tmp_path)  # no raise
 
 
-def test_funding_research_run_rejects_snapshot_root(tmp_path) -> None:
-    """End-to-end: a root whose funding is an hourly snapshot scrape must fail the research run
-    (with use_funding) rather than silently over-charge."""
+def test_funding_research_run_self_corrects_snapshot_root(tmp_path) -> None:
+    """End-to-end: a root whose funding is a realistic hourly snapshot scrape must NOT crash
+    the research run — the engine derives the true settlement interval and collapses the
+    snapshots to one charge per settlement (no over-charge), rather than rejecting."""
     root, start, n_bars = _build_root(tmp_path, n_symbols=26, n_bars=720, funding_8h=False)
     cfg = ContinuousEventConfig(
         start_date=_iso(start + 4 * MS_PER_DAY), end_date=_iso(start + 20 * MS_PER_DAY),
         hold_hours=6, entry_delay_hours=1, max_active=10, use_funding=True,
     )
-    with pytest.raises(RuntimeError, match="SNAPSHOT"):
-        run_continuous_event_research(root, config=cfg)
+    result = run_continuous_event_research(root, config=cfg)  # completes, self-corrected
+    assert result is not None
 
 
 # test-gaps-4: live continuous rmom day-floor join is day-D <- rmom[D] (no off-by-one)

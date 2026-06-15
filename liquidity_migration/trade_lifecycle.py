@@ -417,6 +417,139 @@ def _rank_exit_hit(
     return rank_fraction < threshold
 
 
+def _snap_interval_min(minutes: float) -> int:
+    """Round a derived interval to the nearest whole 60-minute step (min 60)."""
+    return max(60, int(round(minutes / 60.0)) * 60)
+
+
+# Real venue funding-interval ratios (settlement vs sample) are small clean integers:
+# 2h/1h, 4h/1h, 8h/1h, 8h/4h, 1d/1h, etc. Requiring a clean ratio avoids collapsing a
+# genuine sub-8h symbol whose rate merely sat constant for an odd run during a calm
+# regime (which would under-charge funding).
+_CLEAN_OVERSAMPLE_RATIOS = frozenset({2, 3, 4, 6, 8, 12, 24})
+
+
+def _collapse_interval_min(stamp_gap: int, change_gap: int | None, n_changes: int) -> int | None:
+    """The coarser settlement interval to collapse to when SNAPSHOT over-sampling is
+    detected, else None (the stamp cadence already is the settlement cadence).
+
+    Over-sampling = the funding rate stays constant across several finer-spaced stamps,
+    so it changes only on a strictly coarser, clean multiple of the stamp cadence
+    (``change_gap >= 2*stamp_gap``, exact multiple, clean ratio, enough changes to be
+    reliable). Shared by :func:`derive_funding_interval_min` and the continuous guard so
+    they never disagree on which symbols need collapsing."""
+    if change_gap is None or stamp_gap <= 0 or n_changes < 3:
+        return None
+    cg = int(change_gap)
+    if cg >= 2 * stamp_gap and cg % stamp_gap == 0 and (cg // stamp_gap) in _CLEAN_OVERSAMPLE_RATIOS:
+        return _snap_interval_min(cg)
+    return None
+
+
+def funding_cadence_stats(funding: pl.DataFrame | None) -> pl.DataFrame:
+    """Per-symbol funding cadence, derived from the realized settlement history.
+
+    Returns a frame with columns ``symbol``, ``stamp_gap`` (modal minutes between
+    consecutive distinct funding stamps), ``change_gap`` (modal minutes between
+    stamps where the funding RATE actually changes, or null when a symbol's rate is
+    too static to time), and ``n_changes``. The rate-change cadence is the genuine
+    settlement interval: it equals ``stamp_gap`` for clean one-row-per-settlement
+    data, and exceeds it only when a root was over-sampled with sub-interval
+    SNAPSHOT rows (the rate is constant across the snapshots, so it changes on a
+    strictly coarser, clean multiple of the stamp cadence). This is the
+    data-intrinsic, PIT-safe basis for both the interval map and the snapshot
+    guard — it never trusts the stored ``funding_interval_min`` (a stale 8h venue
+    default) nor a live exchangeInfo (not a PIT source).
+    """
+    empty = pl.DataFrame(
+        {
+            "symbol": pl.Series([], dtype=pl.String),
+            "stamp_gap": pl.Series([], dtype=pl.Int64),
+            "change_gap": pl.Series([], dtype=pl.Int64),
+            "n_changes": pl.Series([], dtype=pl.Int64),
+        }
+    )
+    if funding is None or funding.is_empty():
+        return empty
+    rate_col = "funding_rate" if "funding_rate" in funding.columns else "funding_rate_8h_equiv"
+    if not {"symbol", "ts_ms", rate_col}.issubset(funding.columns):
+        return empty
+    rows = (
+        funding.select(["symbol", "ts_ms", rate_col])
+        .drop_nulls(["symbol", "ts_ms"])
+        .unique(["symbol", "ts_ms"])
+        .sort(["symbol", "ts_ms"])
+        .with_columns(
+            ((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")) // 60_000).alias("_gap"),
+            (pl.col(rate_col) != pl.col(rate_col).shift(1).over("symbol")).alias("_changed"),
+        )
+        .filter(pl.col("_gap") > 0)
+    )
+    if rows.is_empty():
+        return empty
+
+    def _modal(frame: pl.DataFrame, alias: str) -> pl.DataFrame:
+        # modal _gap per symbol; ties broken toward the SMALLER gap (conservative:
+        # never over-coarsens the settlement interval).
+        return (
+            frame.group_by(["symbol", "_gap"])
+            .agg(pl.len().alias("_n"))
+            .sort(["symbol", "_n", "_gap"], descending=[False, True, False])
+            .group_by("symbol", maintain_order=True)
+            .first()
+            .select("symbol", pl.col("_gap").cast(pl.Int64).alias(alias))
+        )
+
+    stamp = _modal(rows, "stamp_gap")
+    # change_gap = modal gap between consecutive rate-CHANGE EVENTS (the genuine
+    # settlement cadence). It is computed on the subsequence of changed stamps, NOT
+    # the gap to each changed row's immediate predecessor (that is just the stamp
+    # cadence and would hide snapshot over-sampling). n_changes counts those gaps.
+    change_events = (
+        rows.filter(pl.col("_changed"))
+        .select("symbol", "ts_ms")
+        .sort(["symbol", "ts_ms"])
+        .with_columns(((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")) // 60_000).alias("_gap"))
+        .filter(pl.col("_gap") > 0)
+    )
+    if change_events.is_empty():
+        change = pl.DataFrame(
+            {"symbol": pl.Series([], dtype=pl.String), "change_gap": pl.Series([], dtype=pl.Int64)}
+        )
+        n_changes = pl.DataFrame(
+            {"symbol": pl.Series([], dtype=pl.String), "n_changes": pl.Series([], dtype=pl.Int64)}
+        )
+    else:
+        change = _modal(change_events, "change_gap")
+        n_changes = change_events.group_by("symbol").agg(pl.len().alias("n_changes"))
+    return (
+        stamp.join(change, on="symbol", how="left")
+        .join(n_changes, on="symbol", how="left")
+        .with_columns(pl.col("n_changes").fill_null(0).cast(pl.Int64))
+    )
+
+
+def derive_funding_interval_min(funding: pl.DataFrame | None) -> dict[str, int]:
+    """Map each symbol to its TRUE funding settlement interval (minutes).
+
+    Defaults to the modal stamp gap (the settlement cadence for clean data, a
+    no-op for the exact-stamp dedup). Overrides UPWARD to the rate-change cadence
+    only on clear, well-sampled over-sampling (rate constant across >=2 sub-interval
+    samples on a clean multiple of the stamp cadence), so genuine sub-8h alts are
+    charged every settlement while real SNAPSHOT rows collapse to one per
+    settlement in ``_funding_lookup``. See :func:`funding_cadence_stats`.
+    """
+    stats = funding_cadence_stats(funding)
+    if stats.is_empty():
+        return {}
+    out: dict[str, int] = {}
+    for r in stats.iter_rows(named=True):
+        stamp_gap = int(r["stamp_gap"])
+        collapse = _collapse_interval_min(stamp_gap, r["change_gap"], int(r["n_changes"]))
+        out[str(r["symbol"])] = collapse if collapse is not None else _snap_interval_min(stamp_gap)
+    return out
+
+
 def _funding_lookup(
     funding: pl.DataFrame | None,
     *,

@@ -516,6 +516,14 @@ Strict and currently unmet:
   is a hard alarm.
 - **Funding/data freshness:** Binance June ancillary top-up remains blocked from
   the dev box.
+- **Funding settlement interval (RESOLVED 2026-06-16):** funding cost is now charged
+  per TRUE settlement, derived data-intrinsically from the rate-change cadence
+  (`trade_lifecycle.derive_funding_interval_min`), not the stale stored
+  `funding_interval_min` (an 8h default). This fixed a guard false-positive that
+  blocked the **bybit continuous backtest** on genuine sub-8h-settling alts; bybit +
+  binance continuous now run fully-costed (`funding=modeled` on bybit). The dataset
+  resolver and the hard-coded `feature_panel_<date>` dependency were fixed at the same
+  time. Receipt: `docs/preregistration/2026-06-16-bybit-continuous-funding-fixes.md`.
 
 ## Helpers
 

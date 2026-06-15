@@ -54,7 +54,10 @@ from .trade_lifecycle import (
     _funding_lookup,
     _indexed_price_bars_by_symbol,
     _simulate_indexed_trade,
+    _collapse_interval_min,
     annualized_sharpe,
+    derive_funding_interval_min,
+    funding_cadence_stats,
 )
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
@@ -629,63 +632,57 @@ def _entry_vol(close_arr: "np.ndarray", entry_bar: int, window: int = 168, min_n
     return float(np.std(rets)) if rets.size >= min_n else 0.0
 
 
-def _assert_funding_one_per_settlement(funding: pl.DataFrame, *, root: Path) -> None:
-    """Fail loudly if the funding dataset looks like an hourly SNAPSHOT scrape rather than
-    one-row-per-settlement funding history.
+def _assert_funding_one_per_settlement(
+    funding: pl.DataFrame,
+    *,
+    root: Path,
+    interval_by_symbol: dict[str, int] | None = None,
+) -> None:
+    """Refuse to silently OVER-charge funding from sub-interval SNAPSHOT rows.
 
-    The engine dedups funding by exact stamp (``_funding_lookup`` with no authoritative interval),
-    which is correct ONLY if the parquet holds exactly one row per (symbol, settlement) — true for
-    the canonical full-PIT roots, whose funding comes from the venues' funding-history endpoints
-    (one row per settlement). If a root ever ingested sub-interval SNAPSHOT rows (e.g. an hourly
-    ticker/instruments scrape), exact-stamp dedup would treat every hourly snapshot as a distinct
-    settlement and OVER-charge funding ~Nx — which for a SHORT book FLATTERS returns (more credit).
-    We cannot trust the stored ``funding_interval_min`` to *bucket* (Binance hardcodes it to 8h, so
-    a real 4h alt would be under-counted — the 2026-06-03 regression), but we CAN use it as the
-    expected settlement cadence to detect over-sampling: if a symbol's observed median stamp spacing
-    is materially FINER than its declared interval, the rows are snapshots, not settlements. The
-    dedup itself stays exact-stamp; this only refuses to silently mis-charge a malformed root.
-    See cost-funding-5."""
-    if (
-        funding.is_empty()
-        or "funding_interval_min" not in funding.columns
-        or "symbol" not in funding.columns
-        or "ts_ms" not in funding.columns
-    ):
+    The engine charges funding per distinct settlement (``_funding_lookup``). That is
+    correct when the parquet holds one row per (symbol, settlement) — true for the
+    venues' funding-history endpoints. A root that ingested sub-interval SNAPSHOT
+    rows (e.g. an hourly ticker scrape of an 8h-settling symbol) would, under naive
+    exact-stamp dedup, treat each snapshot as a settlement and OVER-charge ~Nx,
+    flattering a short book (cost-funding-5).
+
+    Detection is DATA-INTRINSIC and does NOT trust the stored ``funding_interval_min``
+    (a stale 8h venue default that false-positived genuine 1h/2h-settling alts — the
+    2026-06-15 regression). A symbol is over-sampled only when its funding RATE stays
+    constant across several finer-spaced stamps, i.e. the rate changes on a clean,
+    strictly coarser multiple of the stamp cadence (``change_gap >= 2*stamp_gap``).
+    Genuine sub-8h settlements (rate changes every stamp) are not flagged. See
+    :func:`liquidity_migration.trade_lifecycle.funding_cadence_stats`.
+
+    Over-sampling is no longer fatal by itself: ``_funding_lookup`` collapses it to
+    one charge per true settlement when given ``interval_by_symbol`` (from
+    :func:`derive_funding_interval_min`). This guard raises ONLY if an over-sampled
+    symbol is not covered by a collapsing interval — i.e. it would actually be
+    mis-charged."""
+    stats = funding_cadence_stats(funding)
+    if stats.is_empty():
         return
-    # Per symbol: declared interval (modal stored value) vs observed median spacing of distinct stamps.
-    spacing = (
-        funding.select("symbol", "ts_ms", "funding_interval_min")
-        .drop_nulls()
-        .filter(pl.col("funding_interval_min") > 0)
-        .unique(["symbol", "ts_ms"])
-        .sort(["symbol", "ts_ms"])
-        .with_columns((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")).alias("_gap_ms"))
-        .drop_nulls("_gap_ms")
-        .filter(pl.col("_gap_ms") > 0)
-        .group_by("symbol")
-        .agg(
-            pl.col("_gap_ms").median().alias("_median_gap_ms"),
-            pl.col("funding_interval_min").median().alias("_declared_min"),
-            pl.len().alias("_n_gaps"),
-        )
-        # Need enough stamps for the median to be meaningful, and only flag when the observed cadence
-        # is < half the declared interval (clear over-sampling, not last-stamp jitter).
-        .filter(pl.col("_n_gaps") >= 4)
-        .filter(pl.col("_median_gap_ms") * 2 < pl.col("_declared_min") * 60_000)
+    intervals = interval_by_symbol or {}
+    uncorrected: list[tuple[str, int, int]] = []
+    for r in stats.iter_rows(named=True):
+        stamp_gap = int(r["stamp_gap"])
+        collapse = _collapse_interval_min(stamp_gap, r["change_gap"], int(r["n_changes"]))
+        # Over-sampled symbols are fine IFF the applied interval collapses them to one
+        # charge per true settlement; flag only those left uncorrected (would over-charge).
+        if collapse is not None and intervals.get(str(r["symbol"]), 0) < collapse:
+            uncorrected.append((str(r["symbol"]), stamp_gap, collapse))
+    if not uncorrected:
+        return
+    uncorrected.sort()
+    examples = ", ".join(f"{s} (stamps {sg}min vs settlements {cg}min)" for s, sg, cg in uncorrected[:3])
+    raise RuntimeError(
+        f"funding dataset under {root} has sub-interval SNAPSHOT rows NOT corrected by an authoritative "
+        f"interval: {len(uncorrected)} symbol(s) sample finer than their true settlement cadence "
+        f"(e.g. {examples}). Exact-stamp dedup would OVER-charge funding (~Nx) and flatter a short book. "
+        f"Pass interval_by_symbol=derive_funding_interval_min(funding) to _funding_lookup, or rebuild "
+        f"funding from the funding-history endpoint."
     )
-    if not spacing.is_empty():
-        bad = spacing.sort("symbol").head(3)
-        examples = ", ".join(
-            f"{s} (median gap {int(g) // 60_000}min vs declared {int(d)}min)"
-            for s, g, d, _ in bad.iter_rows()
-        )
-        raise RuntimeError(
-            f"funding dataset under {root} looks like an hourly SNAPSHOT scrape, not one-row-per-"
-            f"settlement funding history: {int(spacing.height)} symbol(s) sample finer than their "
-            f"declared settlement interval (e.g. {examples}). Exact-stamp dedup would OVER-charge "
-            f"funding (~Nx) and flatter a short book. Rebuild funding from the funding-history "
-            f"endpoint (download-data), not a ticker/instruments scrape."
-        )
 
 
 def _build_lifecycle_config(config: ContinuousEventConfig) -> TradeLifecycleConfig:
@@ -1255,8 +1252,12 @@ def run_continuous_event_research(
     if config.use_funding:
         fname = _autodetect_dataset_names(root)["funding_dataset"]
         funding = _read_window(root, fname, start_ms=start_ms - 10 * MS_PER_DAY, end_ms=end_ms + pad_fwd)
-        _assert_funding_one_per_settlement(funding, root=root)
-        funding_lookup = _funding_lookup(funding)
+        # Derive each symbol's TRUE settlement interval from the realized rate-change
+        # cadence (not the stale stored funding_interval_min) so genuine sub-8h alts
+        # are charged every settlement and any real SNAPSHOT over-sampling collapses.
+        funding_intervals = derive_funding_interval_min(funding)
+        _assert_funding_one_per_settlement(funding, root=root, interval_by_symbol=funding_intervals)
+        funding_lookup = _funding_lookup(funding, interval_by_symbol=funding_intervals)
 
     market_daily = None
     if config.market_min_ret_1d > -1.0 and not klines.is_empty():
