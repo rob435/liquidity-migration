@@ -147,11 +147,15 @@ def densify_trade_klines_1m(
         return klines
     symbols = klines["symbol"].unique().sort().to_list()
     if len(symbols) != 1:
+        # audit2b: a scalar initial_price is the prior close of ONE symbol; it must
+        # not seed every symbol in a multi-symbol frame (BTC's close leaking onto ETH).
+        # Drop it on the recursion — single-symbol callers (the production path) never
+        # enter this branch, so their seed flows through unchanged.
         frames = [
             densify_trade_klines_1m(
                 klines.filter(pl.col("symbol") == symbol),
                 archive_date=archive_date,
-                initial_price=initial_price,
+                initial_price=None,
             )
             for symbol in symbols
         ]
@@ -199,11 +203,15 @@ def densify_trade_klines_1h(
         return klines
     symbols = klines["symbol"].unique().sort().to_list()
     if len(symbols) != 1:
+        # audit2b: a scalar initial_price is the prior close of ONE symbol; it must
+        # not seed every symbol in a multi-symbol frame (BTC's close leaking onto ETH).
+        # Drop it on the recursion — single-symbol callers (the production path) never
+        # enter this branch, so their seed flows through unchanged.
         frames = [
             densify_trade_klines_1h(
                 klines.filter(pl.col("symbol") == symbol),
                 archive_date=archive_date,
-                initial_price=initial_price,
+                initial_price=None,
             )
             for symbol in symbols
         ]

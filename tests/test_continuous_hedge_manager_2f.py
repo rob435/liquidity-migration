@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from liquidity_migration.continuous_hedge_manager import (
     FROZEN_HEDGE_RULE,
     HEDGE_SYMBOL,
@@ -118,3 +120,60 @@ def test_hedge_trade_row_symbol_parameter() -> None:
     assert row["sleeve"] == "continuous_addon"
     # force-exit triggers all disabled (externally managed) — the ws_risk safety contract
     assert row["stop_price"] == 0.0 and row["take_profit_price"] == 0.0 and row["planned_exit_ts_ms"] == 0
+
+
+# ==========================================================================
+# Relocated from test_audit_fix_b14.py (hedge-1 — 2026-06-14 audit bucket b14).
+# Reuses the module-level _two_factor_series helper (identical to the batch's
+# _hedge_unit_series).
+# ==========================================================================
+
+
+def test_2f_falls_back_when_trailing_window_eth_thin_but_full_history_deep() -> None:
+    """hedge-1: the EXACT shape the original full-series count missed — ETH present
+    for the OLD half of the history (full joint >= beta_min_obs) but None for the
+    recent beta-window half (window joint < beta_min_obs). The trailing-window beta
+    is (0,0); the fallback MUST fire (single-leg BTC) instead of leaving the book
+    silently unhedged. The original full-series gate did NOT fire here."""
+    n = 200
+    unit, btc, eth_full = _two_factor_series(n)
+    # ETH known for the first 100 rows, None for the last 100 (the beta window).
+    eth = list(eth_full[:100]) + [None] * 100
+
+    # Full-series joint count is large (>= beta_min_obs); the windowed count is 0.
+    full_joint = sum(1 for b, e in zip(btc, eth) if b is not None and e is not None)
+    assert full_joint >= FROZEN_HEDGE_RULE.beta_min_obs  # the trap condition
+
+    cfg = ContinuousHedgeConfig()
+    d = compute_hedge_decision_2f(
+        cfg, unit_returns=unit, btc_returns=btc, eth_returns=eth,
+        live_gross_short_frac=0.5, btc_price=50_000.0, eth_price=3_000.0,
+        current_btc_qty=0.0, current_eth_qty=0.0, equity_usdt=10_000.0,
+    )
+    # Bug behaviour: no fallback, ratio_btc == ratio_eth == 0 (book unhedged).
+    # Fixed behaviour: fall back to single-leg BTC with a non-zero hedge.
+    assert d.fell_back_to_btc, "2f hedge silently went to zero (no fallback)"
+    assert d.ratio_btc > 0.0
+    assert d.ratio_eth == 0.0
+    # n_obs_joint must report the WINDOWED count the beta actually used (0 here),
+    # not the misleading full-series count.
+    assert d.n_obs_joint == 0
+
+
+def test_2f_full_window_still_matches_live_twin() -> None:
+    """hedge-1 guardrail: when the trailing window IS ETH-complete the windowed
+    gate must NOT spuriously fall back — the decision still matches the live twin."""
+    unit, btc, eth = _two_factor_series(120)
+    cfg = ContinuousHedgeConfig(max_hedge_equity_frac=10.0)
+    d = compute_hedge_decision_2f(
+        cfg, unit_returns=unit, btc_returns=btc, eth_returns=eth,
+        live_gross_short_frac=0.5, btc_price=50_000.0, eth_price=3_000.0,
+        current_btc_qty=0.0, current_eth_qty=0.0, equity_usdt=10_000.0,
+    )
+    r1, r2 = compute_continuous_hedge_ratios_2f(
+        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), FROZEN_HEDGE_RULE, 1.0,
+    )
+    assert not d.fell_back_to_btc
+    assert d.ratio_btc == pytest.approx(r1, abs=1e-15)
+    assert d.ratio_eth == pytest.approx(r2, abs=1e-15)
+    assert d.n_obs_joint >= FROZEN_HEDGE_RULE.beta_min_obs

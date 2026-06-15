@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
 from liquidity_migration.config import UniverseConfig
 from liquidity_migration.universe import build_current_universe_table, format_universe_report
@@ -81,14 +82,73 @@ def test_universe_report_contains_symbol_csv() -> None:
     assert "21-80" in report
 
 
-def _instrument(symbol: str, launch_time_ms: int, *, status: str = "Trading") -> dict:
+def test_current_universe_table_excludes_non_perp_and_non_usdt_contracts() -> None:
+    """universe-pit-2: the 'perpetuals-only, USDT-settled by construction' invariant
+    (docs/data_roots.md; backtesting_errors_we_never_repeat.md rule 12, instrument
+    lifecycle) must hold at the universe.py boundary. The positive test only ever fed
+    LinearPerpetual/USDT rows, so a refactor could silently let a dated-delivery future,
+    an inverse/USDC contract, or a row with a missing contractType through. Inject one of
+    each alongside two clean perps and assert ONLY the clean perps survive."""
+    snapshot_ts_ms = 1_800_000_000_000
+    old = snapshot_ts_ms - 100 * MS_PER_DAY
+    instruments = pl.DataFrame(
+        [
+            _instrument("AAAUSDT", old),  # clean LinearPerpetual / USDT -> kept
+            _instrument("BBBUSDT", old),  # clean LinearPerpetual / USDT -> kept
+            # dated-delivery future: contract_type is the operative exclusion.
+            _instrument("FUT0101USDT", old, contract_type="LinearFutures"),
+            # inverse perp settled in the coin (not USDT) -> excluded by settle_coin AND contract_type.
+            _instrument("INVUSD", old, contract_type="InversePerpetual", settle_coin="USD"),
+            # USDC-margined contract -> excluded by the USDT settle filter.
+            _instrument("USDCPERP", old, settle_coin="USDC"),
+            # missing/None contractType -> the is_in filter drops a null, so it is excluded.
+            _instrument("NOCTUSDT", old, contract_type=None),
+        ]
+    )
+    tickers = pl.DataFrame(
+        [
+            _ticker("AAAUSDT", 50_000_000.0),
+            _ticker("BBBUSDT", 40_000_000.0),
+            _ticker("FUT0101USDT", 90_000_000.0),  # high turnover would rank it FIRST if not excluded
+            _ticker("INVUSD", 80_000_000.0),
+            _ticker("USDCPERP", 70_000_000.0),
+            _ticker("NOCTUSDT", 60_000_000.0),
+        ]
+    )
+
+    table = build_current_universe_table(
+        instruments,
+        tickers,
+        universe_config=UniverseConfig(
+            min_turnover_24h=5_000_000.0,
+            min_age_days=30,
+            rank_start=1,
+            rank_end=10,
+            max_symbols=10,
+        ),
+        snapshot_ts_ms=snapshot_ts_ms,
+    )
+
+    assert table["symbol"].to_list() == ["AAAUSDT", "BBBUSDT"]
+    assert "LinearFutures" not in table["contract_type"].to_list()
+    assert set(table["settle_coin"].to_list()) == {"USDT"}
+
+
+def _instrument(
+    symbol: str,
+    launch_time_ms: int,
+    *,
+    status: str = "Trading",
+    contract_type: str | None = "LinearPerpetual",
+    settle_coin: str = "USDT",
+) -> dict:
     return {
         "ts_ms": 1,
         "symbol": symbol,
         "category": "linear",
-        "contract_type": "LinearPerpetual",
+        "contract_type": contract_type,
         "status": status,
-        "settle_coin": "USDT",
+        "settle_coin": settle_coin,
         "launch_time_ms": launch_time_ms,
         "tick_size": 0.01,
         "qty_step": 0.001,
@@ -108,3 +168,181 @@ def _ticker(symbol: str, turnover_24h: float) -> dict:
         "volume_24h": turnover_24h,
         "funding_rate": 0.0,
     }
+
+
+# --------------------------------------------------------------------------- #
+# universe-pit-2 — non-perp / non-USDT / missing-contractType rows excluded     #
+# (relocated from tests/test_audit_fix_b00.py; reuses _instrument/_ticker)      #
+# --------------------------------------------------------------------------- #
+def test_universepit2_excludes_dated_inverse_usdc_and_missing_contract_type() -> None:
+    snapshot = 1_800_000_000_000
+    old = snapshot - 100 * MS_PER_DAY
+    instruments = pl.DataFrame([
+        _instrument("AAAUSDT", old),
+        _instrument("BBBUSDT", old),
+        _instrument("FUT0101USDT", old, contract_type="LinearFutures"),  # dated delivery
+        _instrument("INVUSD", old, contract_type="InversePerpetual", settle_coin="USD"),
+        _instrument("USDCPERP", old, settle_coin="USDC"),
+        _instrument("NOCTUSDT", old, contract_type=None),  # missing contractType
+    ])
+    tickers = pl.DataFrame([
+        _ticker("AAAUSDT", 50_000_000.0),
+        _ticker("BBBUSDT", 40_000_000.0),
+        _ticker("FUT0101USDT", 90_000_000.0),  # would rank first if not excluded
+        _ticker("INVUSD", 80_000_000.0),
+        _ticker("USDCPERP", 70_000_000.0),
+        _ticker("NOCTUSDT", 60_000_000.0),
+    ])
+    table = build_current_universe_table(
+        instruments, tickers,
+        universe_config=UniverseConfig(
+            min_turnover_24h=5_000_000.0, min_age_days=30, rank_start=1, rank_end=10, max_symbols=10,
+        ),
+        snapshot_ts_ms=snapshot,
+    )
+    assert table["symbol"].to_list() == ["AAAUSDT", "BBBUSDT"]
+    assert "LinearFutures" not in table["contract_type"].to_list()
+    assert set(table["settle_coin"].to_list()) == {"USDT"}
+
+
+# --------------------------------------------------------------------------- #
+# audit bucket b10 (relocated from test_audit_fix_b10.py)                       #
+# universe-pit-1 / -3 / -5 — these carry their own `_univ_*` helpers because    #
+# they need extra columns (delivery_time_ms, null launch) the local            #
+# `_instrument`/`_ticker` fixtures above don't take.                            #
+# --------------------------------------------------------------------------- #
+def _univ_instrument(symbol, launch_ms, *, contract_type="LinearPerpetual", settle_coin="USDT", **extra):
+    row = {
+        "ts_ms": 1, "symbol": symbol, "category": "linear", "contract_type": contract_type,
+        "status": "Trading", "settle_coin": settle_coin, "launch_time_ms": launch_ms,
+        "tick_size": 0.01, "qty_step": 0.001, "min_notional_value": 5.0, "is_prelisting": False,
+    }
+    row.update(extra)
+    return row
+
+
+def _univ_ticker(symbol, turnover):
+    return {
+        "ts_ms": 1, "symbol": symbol, "last_price": 1.0, "open_interest": 1_000.0,
+        "open_interest_value": 1_000.0, "turnover_24h": turnover, "volume_24h": turnover,
+        "funding_rate": 0.0,
+    }
+
+
+def test_universepit1_missing_contract_type_column_raises() -> None:
+    """contract_type is now a HARD required column. A frame missing it must raise
+    RuntimeError instead of silently no-op'ing the only perpetuals-only barrier.
+    Before the fix the perp filter was `if "contract_type" in columns` and a frame
+    lacking the column passed dated-delivery futures straight through."""
+    snapshot = 1_800_000_000_000
+    old = snapshot - 100 * MS_PER_DAY
+    instruments = pl.DataFrame([_univ_instrument("AAAUSDT", old)]).drop("contract_type")
+    tickers = pl.DataFrame([_univ_ticker("AAAUSDT", 50_000_000.0)])
+    with pytest.raises(RuntimeError, match="contract_type"):
+        build_current_universe_table(
+            instruments, tickers,
+            universe_config=UniverseConfig(min_turnover_24h=5_000_000.0, min_age_days=30),
+            snapshot_ts_ms=snapshot,
+        )
+
+
+def test_universepit1_dated_delivery_excluded_by_delivery_time() -> None:
+    """Defense-in-depth: a row that slips the contract_type allow-list but carries a
+    non-null/non-zero delivery_time_ms (a dated delivery contract) is excluded."""
+    snapshot = 1_800_000_000_000
+    old = snapshot - 100 * MS_PER_DAY
+    instruments = pl.DataFrame([
+        _univ_instrument("AAAUSDT", old, delivery_time_ms=0),  # perp -> kept
+        # contract_type passes the allow-list (label says perpetual) but it has a
+        # real delivery time -> dated contract, must be excluded by the belt check.
+        _univ_instrument("FUT1231USDT", old, contract_type="LinearPerpetual",
+                         delivery_time_ms=snapshot + 30 * MS_PER_DAY),
+    ])
+    tickers = pl.DataFrame([
+        _univ_ticker("AAAUSDT", 50_000_000.0),
+        _univ_ticker("FUT1231USDT", 90_000_000.0),  # would rank first if not excluded
+    ])
+    table = build_current_universe_table(
+        instruments, tickers,
+        universe_config=UniverseConfig(
+            min_turnover_24h=5_000_000.0, min_age_days=30, rank_start=1, rank_end=10, max_symbols=10,
+        ),
+        snapshot_ts_ms=snapshot,
+    )
+    assert table["symbol"].to_list() == ["AAAUSDT"]
+
+
+def test_universepit3_join_drop_is_logged(caplog) -> None:
+    """A symbol present in instruments but missing from the tickers snapshot is
+    silently dropped by the inner join. The drop count must be surfaced (info log)
+    so a partial/throttled get_tickers fetch is observable per cycle."""
+    snapshot = 1_800_000_000_000
+    old = snapshot - 100 * MS_PER_DAY
+    instruments = pl.DataFrame([
+        _univ_instrument("AAAUSDT", old),
+        _univ_instrument("BBBUSDT", old),  # no ticker row -> dropped by the join
+    ])
+    tickers = pl.DataFrame([_univ_ticker("AAAUSDT", 50_000_000.0)])
+    with caplog.at_level("INFO", logger="liquidity_migration.universe"):
+        table = build_current_universe_table(
+            instruments, tickers,
+            universe_config=UniverseConfig(
+                min_turnover_24h=5_000_000.0, min_age_days=30, rank_start=1, rank_end=10, max_symbols=10,
+            ),
+            snapshot_ts_ms=snapshot,
+        )
+    assert table["symbol"].to_list() == ["AAAUSDT"]
+    assert any("dropped" in rec.getMessage() and "ticker" in rec.getMessage() for rec in caplog.records)
+
+
+def test_universepit5_null_launch_time_surfaced_in_unlimited_mode(caplog) -> None:
+    """In unlimited-universe mode (no age gate) a symbol with null launch_time_ms
+    has a null listing_age_days and passes through silently. The count of such
+    unknown-age symbols must be surfaced so the operator sees how many entered the
+    candidate pool."""
+    snapshot = 1_800_000_000_000
+    old = snapshot - 100 * MS_PER_DAY
+    instruments = pl.DataFrame([
+        _univ_instrument("AAAUSDT", old),
+        _univ_instrument("NULLAGEUSDT", None),  # null launch_time_ms -> unknown age
+    ])
+    tickers = pl.DataFrame([
+        _univ_ticker("AAAUSDT", 50_000_000.0),
+        _univ_ticker("NULLAGEUSDT", 40_000_000.0),
+    ])
+    with caplog.at_level("INFO", logger="liquidity_migration.universe"):
+        table = build_current_universe_table(
+            instruments, tickers,
+            # unlimited mode: no age gate active.
+            universe_config=UniverseConfig(
+                min_turnover_24h=5_000_000.0, min_age_days=0, max_age_days=0,
+                rank_start=1, rank_end=0, max_symbols=0,
+            ),
+            snapshot_ts_ms=snapshot,
+        )
+    # Null-age symbol passes through in unlimited mode (the residual exposure).
+    assert "NULLAGEUSDT" in table["symbol"].to_list()
+    assert any("null launch_time_ms" in rec.getMessage() for rec in caplog.records)
+
+
+def test_universepit5_null_launch_time_dropped_when_age_gated() -> None:
+    """With an active age floor, a null-launch (unknown-age) symbol is conservatively
+    dropped (the is_not_null guard), as before — the fix only adds observability."""
+    snapshot = 1_800_000_000_000
+    old = snapshot - 100 * MS_PER_DAY
+    instruments = pl.DataFrame([
+        _univ_instrument("AAAUSDT", old),
+        _univ_instrument("NULLAGEUSDT", None),
+    ])
+    tickers = pl.DataFrame([
+        _univ_ticker("AAAUSDT", 50_000_000.0),
+        _univ_ticker("NULLAGEUSDT", 40_000_000.0),
+    ])
+    table = build_current_universe_table(
+        instruments, tickers,
+        universe_config=UniverseConfig(
+            min_turnover_24h=5_000_000.0, min_age_days=30, rank_start=1, rank_end=10, max_symbols=10,
+        ),
+        snapshot_ts_ms=snapshot,
+    )
+    assert table["symbol"].to_list() == ["AAAUSDT"]

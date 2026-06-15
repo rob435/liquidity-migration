@@ -116,13 +116,33 @@ def _experiment(name: str) -> list[tuple[str, dict]]:
             ("sigwt/c2", {"sizing_mode": "signal", "vol_weight_clamp": 2.0}),
             ("sigwt/c3", {"sizing_mode": "signal", "vol_weight_clamp": 3.0}),
         ]
-    if name == "turnsurge":  # entry alpha — require a real flow surge (turnover >= k x trailing median)
-        return [("base", {})] + [(f"k{k}/w{w}", {"turnover_surge_min": k, "turnover_surge_lookback_h": w})
-                                 for w in (72, 168) for k in (1.5, 2.0, 3.0)]
-    if name == "rotate":  # rebalance alpha — replace the weakest hold with a stronger fresh candidate
-        return [("base", {})] + [(f"rot/m{m}", {"rotate_min_composite_edge": m})
-                                 for m in (0.02, 0.05, 0.10, 0.20)]
     raise SystemExit(f"unknown experiment: {name}")
+
+
+def _max_swept_max_hold_hours(experiment_arg: str) -> int:
+    """Largest ``max_hold_hours`` any cell in the requested experiment(s) will run.
+
+    The forward klines pad must cover the LONGEST hold actually swept, not just
+    BASE.max_hold_hours — otherwise the longest-hold cells in the `maxhold` sweep
+    (up to 168h) read against a window padded for only 48h, so their tail trades
+    are clipped to a shorter effective hold and exit early on a `data_end` mark,
+    biasing the very hold-horizon comparison the experiment exists to make
+    (alpha-scripts-4). Special-branch experiments never override max_hold_hours,
+    so they fall through to BASE.max_hold_hours. Unknown experiments raise inside
+    _experiment, which is the existing behavior; we swallow that here and let the
+    main dispatch surface it.
+    """
+    best = int(BASE.max_hold_hours)
+    for exp in experiment_arg.split(","):
+        try:
+            cells = _experiment(exp.strip())
+        except SystemExit:
+            continue  # special-branch / unknown — handled by the main dispatch
+        for _label, ov in cells:
+            mh = ov.get("max_hold_hours")
+            if mh is not None:
+                best = max(best, int(mh))
+    return best
 
 
 def _attach_surge_ratio(entries: pl.DataFrame, klines: pl.DataFrame, lookback_h: int) -> pl.DataFrame:
@@ -227,7 +247,11 @@ def main() -> int:
     entries = _fresh_entries(panel, BASE)
     kname = _autodetect_dataset_names(root)["klines_dataset"]
     start_ms, end_ms = _date_str_to_ms(BASE.start_date), _date_str_to_ms(BASE.end_date)
-    pad = (BASE.max_hold_hours + BASE.entry_delay_hours + 4) * MS_PER_HOUR
+    # Pad the forward klines window for the LONGEST max_hold actually swept in
+    # this run (not just BASE.max_hold_hours) so the maxhold sweep's long-hold
+    # cells aren't tail-truncated against a too-short window (alpha-scripts-4).
+    max_hold = _max_swept_max_hold_hours(args.experiment)
+    pad = (max_hold + BASE.entry_delay_hours + 4) * MS_PER_HOUR
     print(f"[{args.label}] read klines ...", flush=True)
     klines = _read_window(root, kname, start_ms=start_ms, end_ms=end_ms + pad,
                           columns=["ts_ms", "symbol", "open", "high", "low", "close", "turnover_quote"])
@@ -262,7 +286,11 @@ def main() -> int:
             years = max((int(ts[-1]) - int(ts[0])) / (365.25 * 24 * 3_600_000), 1e-9)
             block, nb, mars = 21, int(np.ceil(len(r) / 21)), []
             for _ in range(2000):
-                samp = np.concatenate([r[s:s + block] for s in rng.integers(0, max(1, len(r) - block), nb)])[:len(r)]
+                # audit2: upper bound is len(r)-block+1 (integers() is half-open, so
+                # max start = len(r)-block) — the old len(r)-block dropped the final
+                # block position and never resampled the last observation (off-by-one).
+                # Mirrors r1_robustness._resample_block_indices max_start.
+                samp = np.concatenate([r[s:s + block] for s in rng.integers(0, max(1, len(r) - block + 1), nb)])[:len(r)]
                 eq = 1.0 + np.cumsum(samp)
                 maxdd = float(-(eq - np.maximum.accumulate(eq)).min())
                 if maxdd > 1e-9:
@@ -375,6 +403,14 @@ def main() -> int:
             "giveback>=10%": e2.filter(pl.col("gb") >= 0.10),
             "near_high<2%(top)": e2.filter(pl.col("gb") < 0.02),
         }
+        # Each gate is evaluated full-sample with only a pooled MAR; carry an
+        # era1/era2 MAR split (split on entry_ts_ms vs BASE.split_date, as
+        # `regime`/`funding` do) so a giveback-gate verdict shows split stability
+        # and isn't an in-sample multiple-testing read (#19, alpha-scripts-6).
+        split = _date_str_to_ms(BASE.split_date)
+
+        def _emar(tr: pl.DataFrame) -> float:
+            return _daily_pnl_metrics(_portfolio_mtm_equity(tr, klines))["mar"] if not tr.is_empty() else 0.0
         rows = []
         for name, ge in gates.items():
             ge2 = ge.select("symbol", "ts_ms", "composite", "turnover_quote", "spell_end_ts")
@@ -383,10 +419,13 @@ def main() -> int:
             he = _portfolio_mtm_equity_hourly(trades, klines)
             hdd = abs(float(he["drawdown"].min())) if not he.is_empty() else 0.0
             bps = (dm["total_return"] / max(trades.height, 1)) * 1e4
+            e1 = _emar(trades.filter(pl.col("entry_ts_ms") < split))
+            e2m = _emar(trades.filter(pl.col("entry_ts_ms") >= split))
             rows.append({"gate": name, "mar": dm["mar"], "max_drawdown": abs(dm["max_drawdown"]), "hourly_dd": hdd,
-                         "total_return": dm["total_return"], "ret_bps_per_trade": bps, "n": int(trades.height)})
+                         "total_return": dm["total_return"], "ret_bps_per_trade": bps,
+                         "era1_mar": e1, "era2_mar": e2m, "n": int(trades.height)})
             print(f"  {name:20} MAR={dm['mar']:6.1f}  DD={abs(dm['max_drawdown'])*100:4.1f}%  hDD={hdd*100:4.1f}%  "
-                  f"ret={dm['total_return']*100:5.0f}%  bps/trade={bps:5.1f}  n={trades.height}", flush=True)
+                  f"ret={dm['total_return']*100:5.0f}%  bps/trade={bps:5.1f}  era1={e1:5.1f} era2={e2m:5.1f}  n={trades.height}", flush=True)
         if args.out:
             Path(args.out).write_text(json.dumps({"label": args.label, "experiment": "fadeconfirm", "rows": rows}, indent=2, default=str))
         print(f"[{args.label}/fadeconfirm] DONE", flush=True)
@@ -449,7 +488,9 @@ def main() -> int:
             block, nb = 21, int(np.ceil(len(r) / 21))
             mars = []
             for _ in range(3000):
-                samp = np.concatenate([r[s:s + block] for s in rng.integers(0, max(1, len(r) - block), nb)])[:len(r)]
+                # audit2: see note above — len(r)-block+1 so the final observation
+                # is reachable as a block start (off-by-one fix).
+                samp = np.concatenate([r[s:s + block] for s in rng.integers(0, max(1, len(r) - block + 1), nb)])[:len(r)]
                 eq = 1.0 + np.cumsum(samp)
                 maxdd = float(-(eq - np.maximum.accumulate(eq)).min())
                 if maxdd > 1e-9:
@@ -542,15 +583,27 @@ def main() -> int:
             "top_tercile(>=q66)": e2.filter(pl.col("frate") >= q66),
             "bottom_tercile(<=q33)": e2.filter(pl.col("frate") <= q33),
         }
+        # The gate thresholds (q10/q33/q66) are read off the FULL sample, so a
+        # best-gate read with only a pooled MAR is the multiple-testing trap
+        # (#19). Carry an era1/era2 MAR split (split on entry_ts_ms vs
+        # BASE.split_date, as `regime` does) so any gate verdict shows whether
+        # the edge is stable out-of-sample before it is cited (alpha-scripts-6).
+        split = _date_str_to_ms(BASE.split_date)
+
+        def _emar(tr: pl.DataFrame) -> float:
+            return _daily_pnl_metrics(_portfolio_mtm_equity(tr, klines))["mar"] if not tr.is_empty() else 0.0
         rows = []
         for name, ge in gates.items():
             ge2 = ge.select("symbol", "ts_ms", "composite", "turnover_quote", "spell_end_ts")
             trades, _ = _run_trades(ge2, symbol_bars, funding_lookup, cfg33, market_daily)
             dm = _daily_pnl_metrics(_portfolio_mtm_equity(trades, klines))
+            e1 = _emar(trades.filter(pl.col("entry_ts_ms") < split))
+            e2m = _emar(trades.filter(pl.col("entry_ts_ms") >= split))
             rows.append({"gate": name, "mar": dm["mar"], "max_drawdown": abs(dm["max_drawdown"]),
-                         "total_return": dm["total_return"], "n": int(trades.height)})
+                         "total_return": dm["total_return"], "era1_mar": e1, "era2_mar": e2m,
+                         "n": int(trades.height)})
             print(f"  {name:24} MAR={dm['mar']:6.1f}  DD={abs(dm['max_drawdown'])*100:4.1f}%  "
-                  f"ret={dm['total_return']*100:5.0f}%  n={trades.height}", flush=True)
+                  f"ret={dm['total_return']*100:5.0f}%  era1={e1:5.1f} era2={e2m:5.1f}  n={trades.height}", flush=True)
         if args.out:
             Path(args.out).write_text(json.dumps({"label": args.label, "experiment": "funding", "rows": rows}, indent=2, default=str))
         print(f"[{args.label}/funding] DONE", flush=True)
@@ -616,7 +669,10 @@ def main() -> int:
         nb = int(np.ceil(len(r) / block))
         mars = []
         for _ in range(n_boot):
-            starts = rng.integers(0, max(1, len(r) - block), nb)
+            # audit2: len(r)-block+1 upper bound (half-open) so max start = len(r)-block
+            # and the final observation is reachable — fixes the off-by-one that dropped
+            # the last data point from every resample. Mirrors r1_robustness max_start.
+            starts = rng.integers(0, max(1, len(r) - block + 1), nb)
             samp = np.concatenate([r[s:s + block] for s in starts])[:len(r)]
             eq = 1.0 + np.cumsum(samp)
             maxdd = float(-(eq - np.maximum.accumulate(eq)).min())
@@ -800,6 +856,22 @@ def main() -> int:
     surge_entries = _attach_surge_ratio(entries, klines, SURGE_LOOKBACK_H) if need_surge else None
 
     cfg_fields = {f.name for f in fields(ContinuousEventConfig)}
+    # Harness-only override keys the main loop's entry-resolution actually consumes
+    # (they are intentionally NOT ContinuousEventConfig fields). Any override key
+    # that is neither a config field nor one of these is a dead parameter: the
+    # cfg_fields filter drops it AND no entry-resolution branch reads it, so the
+    # cell would silently run base-equivalent and manufacture a fake null result
+    # (alpha-scripts-3). Fail fast rather than emit a misleading flat finding.
+    ENTRY_RESOLVED_KEYS = {"rmom_quantile", "liq_turnover_min", "turnover_surge_min"}
+    for label, ov in plan:
+        dead = [k for k in ov if k not in cfg_fields and k not in ENTRY_RESOLVED_KEYS]
+        if dead:
+            raise SystemExit(
+                f"dead override key(s) {dead} in cell '{label}': not a ContinuousEventConfig "
+                f"field and not consumed by any entry-resolution branch — this cell would run "
+                f"base-equivalent and fabricate a null result. Wire the parameter through (config "
+                f"field + engine support, or a new entry-resolution branch) or remove the experiment."
+            )
     base_mar = None
     rows = []
     for label, ov in plan:

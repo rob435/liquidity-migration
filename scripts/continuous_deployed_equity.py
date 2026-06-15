@@ -85,13 +85,17 @@ def stats(df: pl.DataFrame) -> dict:
     dd = eq / np.maximum.accumulate(eq) - 1.0
     total = float(eq[-1] - 1.0)
     years = ncal / ANN
+    max_dd = float(dd.min())
+    # audit2: a no-drawdown curve gives abs(max_dd)==0 -> ZeroDivisionError;
+    # mirror reconciliation._calendar_metrics and report mar=None instead.
+    mar = round((total / years) / abs(max_dd), 2) if abs(max_dd) > 1e-12 else None
     return {
         "window": f"{dates[0]} -> {dates[-1]}",
         "years": round(years, 2),
         "total_return_pct": round(total * 100, 2),
         "annualized_pct": round(((1 + total) ** (1 / years) - 1) * 100, 2),
-        "max_drawdown_pct": round(float(dd.min()) * 100, 2),
-        "mar": round((total / years) / abs(float(dd.min())), 2),
+        "max_drawdown_pct": round(max_dd * 100, 2),
+        "mar": mar,
         "sharpe_daily_ann": round(float(series.mean() / series.std() * np.sqrt(ANN)), 2),
         "worst_day_pct": round(float(series.min() * 100), 2),
     }

@@ -103,7 +103,15 @@ echo "[gate 6/7] smoke FC sweep — v11a baseline 0.15 on new Bybit root"
 echo
 echo "[gate 7/7] tests + lint"
 "$PYTHON_BIN" -m pytest -q
-.venv/bin/ruff check liquidity_migration tests || ruff check liquidity_migration tests
+# audit2b: pick ruff binary up-front so a real lint failure fails the gate
+# (the old `.venv/bin/ruff ... || ruff ...` swallowed any non-zero exit,
+#  masking genuine lint errors as a PATH-ruff fallback).
+if [ -x .venv/bin/ruff ]; then
+  RUFF_BIN=".venv/bin/ruff"
+else
+  RUFF_BIN="ruff"
+fi
+"$RUFF_BIN" check liquidity_migration tests
 
 echo
 echo "=============================================================="

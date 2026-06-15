@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
 
 from liquidity_migration import bybit
+from liquidity_migration.bybit import BybitKlineStreamPool
 
 
 def test_pybit_rate_limit_log_filter_drops_10006_messages(caplog) -> None:
@@ -926,3 +928,781 @@ def test_private_call_transport_retries_and_final_message_carries_cause(monkeypa
         client.cancel_order(symbol="BTCUSDT", order_link_id="lm-x")
     assert client._client.calls == client.retries  # transport: retried to exhaustion
     assert "connection reset by venue" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# audit2
+# B2 bybit._is_rate_limit must classify on retCode/retMsg, not the whole payload.
+# ---------------------------------------------------------------------------
+
+def test_is_rate_limit_ignores_orderid_substring() -> None:
+    # orderId contains "10006" but retCode is a definite reject -> NOT a rate limit.
+    assert bybit._is_rate_limit({"retCode": 110001, "result": {"orderId": "a10006b"}}) is False
+
+
+def test_is_rate_limit_true_on_retcode_10006() -> None:
+    assert bybit._is_rate_limit({"retCode": 10006, "retMsg": "Too many visits"}) is True
+
+
+def test_is_rate_limit_non_throttle_retmsg_not_matched_via_payload() -> None:
+    # A risk/leverage reject whose retMsg legitimately contains "rate limit" must not
+    # be misclassified when the code is a definite reject... but the retMsg text itself
+    # is the venue's throttle signal, so a retMsg-level match is still honoured:
+    assert bybit._is_rate_limit({"retCode": 110043, "retMsg": "set leverage not modified"}) is False
+
+
+def test_is_rate_limit_string_fallback() -> None:
+    assert bybit._is_rate_limit("rate limit exceeded") is True
+    assert bybit._is_rate_limit("position closed") is False
+
+
+# ---------------------------------------------------------------------------
+# B3 WS trade client carries the demo-only submit guard (defense in depth).
+# ---------------------------------------------------------------------------
+
+class _FakeWsTrading:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.calls = []
+
+    def place_order(self, callback, **params):
+        self.calls.append(("place", params))
+
+    def cancel_order(self, callback, **params):
+        self.calls.append(("cancel", params))
+
+
+def test_ws_trade_client_blocks_real_money_submit_without_confirm(monkeypatch) -> None:
+    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
+    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=False)
+    with pytest.raises(RuntimeError, match="REAL_MONEY"):
+        client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
+    with pytest.raises(RuntimeError, match="REAL_MONEY"):
+        client.cancel_order(object(), symbol="BTCUSDT", order_link_id="x")
+    assert client._client.calls == []  # nothing reached the venue
+
+
+def test_ws_trade_client_allows_real_money_with_confirm(monkeypatch) -> None:
+    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
+    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=False, confirm_real_money=True)
+    client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
+    assert client._client.calls == [("place", {
+        "category": "linear", "symbol": "BTCUSDT", "side": "Buy",
+        "orderType": "Market", "qty": "0.001", "orderLinkId": "x",
+    })]
+
+
+def test_ws_trade_client_demo_path_unaffected(monkeypatch) -> None:
+    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
+    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=True)
+    client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
+    assert len(client._client.calls) == 1
+
+
+# ==========================================================================
+# Relocated from the audit bucket b01 (exec-router, ratelimit-rest,
+# realmoney-safety, ws-pool findings).
+# ==========================================================================
+
+
+# --------------------------------------------------------------------------
+# exec-router-2 / exec-router-5 : BybitPrivateClient.place_order idempotency
+# --------------------------------------------------------------------------
+
+
+def _make_private_client(monkeypatch, fake_http_cls) -> bybit.BybitPrivateClient:
+    monkeypatch.setattr(bybit, "HTTP", fake_http_cls)
+    return bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
+
+
+def test_place_order_duplicate_link_returns_existing_open_order(monkeypatch) -> None:
+    """exec-router-2: a 110089 duplicate-orderLinkId reject must NOT raise; the
+    order is already at Bybit under this idempotency key, so place_order probes
+    by orderLinkId and returns the existing order. Pre-fix this raised
+    BybitDataError -> the caller recorded an error and wrote no ledger row while
+    the position was live (an orphan)."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            return {"retCode": 110089, "retMsg": "orderLinkID exists", "result": {}}
+
+        def get_open_orders(self, **_params):
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {"orderId": "live-1", "orderLinkId": "agc-1", "orderStatus": "New"}
+                    ],
+                    "nextPageCursor": "",
+                },
+            }
+
+    client = _make_private_client(monkeypatch, FakeHTTP)
+    result = client.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-1",
+    )
+    assert result["orderId"] == "live-1"
+    assert result["orderLinkId"] == "agc-1"
+
+
+def test_place_order_duplicate_link_raises_when_order_not_findable(monkeypatch) -> None:
+    """exec-router-2: if Bybit reports a duplicate but the order cannot be found
+    on either open-orders or history, surface the original reject rather than
+    silently swallowing it (returning a phantom success would be worse)."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            return {"retCode": 110089, "retMsg": "orderLinkID exists", "result": {}}
+
+        def get_open_orders(self, **_params):
+            return {"retCode": 0, "result": {"list": [], "nextPageCursor": ""}}
+
+        def get_order_history(self, **_params):
+            return {"retCode": 0, "result": {"list": []}}
+
+    client = _make_private_client(monkeypatch, FakeHTTP)
+    with pytest.raises(bybit.BybitDataError):
+        client.place_order(
+            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-x",
+        )
+
+
+def test_place_order_non_duplicate_reject_still_raises(monkeypatch) -> None:
+    """exec-router-2: only 110089 is treated as idempotent success; any other
+    non-zero retCode must still raise so genuine rejects are not masked."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            return {"retCode": 110007, "retMsg": "insufficient balance", "result": {}}
+
+    client = _make_private_client(monkeypatch, FakeHTTP)
+    with pytest.raises(bybit.BybitDataError, match="110007"):
+        client.place_order(
+            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-y",
+        )
+
+
+def test_place_order_duplicate_link_uses_history_only_for_active_status(monkeypatch) -> None:
+    """exec-router-2: a Rejected/Cancelled history row does NOT count as present
+    (the submit did not take), so the dup-link path must fall through to raise
+    rather than returning a dead order."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            return {"retCode": 110089, "retMsg": "orderLinkID exists", "result": {}}
+
+        def get_open_orders(self, **_params):
+            return {"retCode": 0, "result": {"list": [], "nextPageCursor": ""}}
+
+        def get_order_history(self, **_params):
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {"orderId": "dead", "orderLinkId": "agc-z", "orderStatus": "Rejected"}
+                    ]
+                },
+            }
+
+    client = _make_private_client(monkeypatch, FakeHTTP)
+    with pytest.raises(bybit.BybitDataError):
+        client.place_order(
+            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-z",
+        )
+
+
+def test_is_duplicate_order_link_matches_code_and_message() -> None:
+    """exec-router-2: classify by retCode 110089 AND by message text so a
+    re-worded retMsg still resolves as a duplicate."""
+    assert bybit._is_duplicate_order_link("Bybit place_order failed: {'retCode': 110089}")
+    assert bybit._is_duplicate_order_link("orderLinkID exists, duplicate")
+    assert not bybit._is_duplicate_order_link("retCode 110007 insufficient balance")
+
+
+def test_safe_int_degrades_on_malformed_timestamp() -> None:
+    """exec-router-5: the probe's row selection (and any createdTime parse) must
+    not raise on a non-numeric venue timestamp. _safe_int returns 0 instead of
+    propagating a ValueError that would turn a recoverable fallback into a hard
+    place_order crash."""
+    assert bybit._safe_int("1700000000000") == 1700000000000
+    assert bybit._safe_int("not-a-number") == 0
+    assert bybit._safe_int(None) == 0
+    assert bybit._safe_int({"createdTime": "x"}) == 0
+
+
+# --------------------------------------------------------------------------
+# ratelimit-rest-2 : shared BybitMarketData counters are lock-guarded
+# --------------------------------------------------------------------------
+
+
+def test_market_data_counters_no_lost_update_under_threads(monkeypatch) -> None:
+    """ratelimit-rest-2: the bootstrap pool shares ONE BybitMarketData across 16
+    threads. Concurrent _get / _record_call must not lose counter increments.
+    Pre-fix the unlocked read-modify-write dropped increments; the lock makes
+    logical_calls/http_calls/total_call_ms exact."""
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.testnet = testnet
+
+        def get_tickers(self, **_kwargs):
+            return {"retCode": 0, "result": {"list": []}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    market = bybit.BybitMarketData()
+
+    workers = 16
+    per_worker = 50
+    barrier = threading.Barrier(workers)
+
+    def hammer() -> None:
+        barrier.wait()  # release all threads together to maximise contention
+        for _ in range(per_worker):
+            market.get_tickers()
+
+    threads = [threading.Thread(target=hammer) for _ in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    stats = market.stats()
+    assert stats["logical_calls"] == workers * per_worker
+    assert stats["http_calls"] == workers * per_worker
+
+
+# --------------------------------------------------------------------------
+# ratelimit-rest-3 : get_instruments_info bounds its cursor walk
+# --------------------------------------------------------------------------
+
+
+def test_get_instruments_info_bounds_non_advancing_cursor(monkeypatch) -> None:
+    """ratelimit-rest-3: a stable, non-empty nextPageCursor must NOT loop
+    forever. The walk breaks on a non-advancing cursor. Pre-fix the unbounded
+    `while True` hung whatever thread called it."""
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.testnet = testnet
+            self.calls = 0
+
+        def get_instruments_info(self, **_params):
+            self.calls += 1
+            # Always returns the SAME non-empty cursor -> would loop forever.
+            return {
+                "retCode": 0,
+                "result": {"list": [{"symbol": f"S{self.calls}"}], "nextPageCursor": "STUCK"},
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    market = bybit.BybitMarketData()
+    rows = market.get_instruments_info()
+    # A stable cursor is detected as non-advancing on the SECOND fetch (the new
+    # cursor equals the previous), so the walk stops at 2 calls rather than
+    # looping forever. Pre-fix this `while True` never terminated.
+    assert market._client.calls == 2
+    assert len(rows) == 2
+
+
+def test_get_instruments_info_caps_at_max_pages(monkeypatch) -> None:
+    """ratelimit-rest-3: even with an always-advancing cursor the walk is capped
+    at max_pages so a pathological venue response cannot spin unbounded."""
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.testnet = testnet
+            self.calls = 0
+
+        def get_instruments_info(self, **_params):
+            self.calls += 1
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [{"symbol": f"S{self.calls}"}],
+                    "nextPageCursor": f"cursor-{self.calls}",  # always advances
+                },
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    market = bybit.BybitMarketData()
+    rows = market.get_instruments_info(max_pages=3)
+    assert market._client.calls == 3
+    assert len(rows) == 3
+
+
+# --------------------------------------------------------------------------
+# ratelimit-rest-5 : throttle counted once + no busy-spin at window edge
+# --------------------------------------------------------------------------
+
+
+def test_rate_limiter_counts_throttle_once_per_blocked_acquire(monkeypatch) -> None:
+    """ratelimit-rest-5: a single blocked acquire records exactly ONE
+    throttle_event and accumulates the real slept time once. Pre-fix the
+    per-loop counting inflated throttle_events/throttled_seconds when the loop
+    re-evaluated still-full. We drive a deterministic clock + sleep so the
+    re-loop is forced, proving the count stays at one."""
+    clock = {"t": 1000.0}
+    slept: list[float] = []
+
+    def fake_monotonic() -> float:
+        return clock["t"]
+
+    def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        # Advance the clock by LESS than requested on the first wake so the loop
+        # re-evaluates while still inside the window (the inflation trigger),
+        # then fully on the second.
+        if len(slept) == 1:
+            clock["t"] += seconds / 2.0
+        else:
+            clock["t"] += seconds
+
+    monkeypatch.setattr(bybit.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(bybit.time, "sleep", fake_sleep)
+
+    limiter = bybit.BybitRestRateLimiter(max_requests=1, per_seconds=1.0)
+    limiter.acquire()  # fills the single slot at t=1000
+    limiter.acquire()  # blocks; first wake is early, re-loops, second wake claims
+
+    stats = limiter.stats()
+    # The block is ONE logical throttle even though the loop slept twice.
+    assert stats["throttle_events"] == 1, stats
+    assert stats["throttled_seconds"] > 0.0
+    # No busy-spin: every wait the loop computed was a real sleep, not a spin.
+    assert all(s > 0.0 for s in slept), slept
+
+
+def test_rate_limiter_no_busy_spin_at_window_boundary(monkeypatch) -> None:
+    """ratelimit-rest-5: an oldest slot exactly AT the window cutoff is popped
+    (<= cutoff), so the limiter never enters the wait<=0 continue-loop that
+    busy-spun until the clock advanced. We hold the clock fixed at the boundary
+    and require the acquire to complete (a spin would hang)."""
+    clock = {"t": 500.0}
+
+    def fake_monotonic() -> float:
+        return clock["t"]
+
+    def fake_sleep(seconds: float) -> None:  # pragma: no cover - must not be reached
+        raise AssertionError(f"unexpected sleep({seconds}); boundary slot should free immediately")
+
+    monkeypatch.setattr(bybit.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(bybit.time, "sleep", fake_sleep)
+
+    limiter = bybit.BybitRestRateLimiter(max_requests=1, per_seconds=1.0)
+    limiter.acquire()  # slot at t=500
+    # Advance the clock to EXACTLY one window later: the slot is at the cutoff.
+    clock["t"] = 501.0
+    # With the strict `<` pop this would compute wait==0 and continue-spin
+    # forever (fake_sleep raises if ever called). With `<=` the slot frees and
+    # the acquire returns immediately without sleeping.
+    limiter.acquire()
+    assert limiter.stats()["throttle_events"] == 0
+
+
+# --------------------------------------------------------------------------
+# realmoney-safety-1 : the signing client refuses real-money submits by default
+# --------------------------------------------------------------------------
+
+
+def test_private_client_refuses_real_money_submit_by_default(monkeypatch) -> None:
+    """realmoney-safety-1: a demo=False (real-money) client must refuse to
+    place/cancel/set-leverage unless confirm_real_money=True was threaded in at
+    construction. Pre-fix there was no per-submit account assertion at the
+    signing layer; the demo-only invariant lived only at config validation."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):  # pragma: no cover - must not be reached
+            raise AssertionError("real-money submit should have been blocked")
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
+    with pytest.raises(RuntimeError, match="REAL_MONEY"):
+        client.place_order(
+            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="rm-1",
+        )
+    with pytest.raises(RuntimeError, match="REAL_MONEY"):
+        client.cancel_order(symbol="BTCUSDT", order_link_id="rm-1")
+
+
+def test_private_client_real_money_reads_are_never_gated(monkeypatch) -> None:
+    """realmoney-safety-1: the guard only blocks STATE-CHANGING submissions;
+    read-only calls (get_*) on a real-money client must still work so reconcile
+    / balance checks are unaffected."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_wallet_balance(self, **_params):
+            return {"retCode": 0, "result": {"list": [{"coin": "USDT"}]}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
+    balance = client.get_wallet_balance()
+    assert balance["list"][0]["coin"] == "USDT"
+
+
+def test_private_client_real_money_submit_allowed_with_explicit_optin(monkeypatch) -> None:
+    """realmoney-safety-1: an explicit confirm_real_money=True opt-in lets a
+    real-money client submit — the gate is a deliberate switch, not a hard wall,
+    so a future validated real-money path can thread the opt-in through."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            return {"retCode": 0, "result": {"orderId": "rm-ok"}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="k", api_secret="s", demo=False, confirm_real_money=True,
+    )
+    result = client.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="rm-2",
+    )
+    assert result["orderId"] == "rm-ok"
+
+
+def test_private_client_demo_submit_unaffected(monkeypatch) -> None:
+    """realmoney-safety-1: the guard is a no-op for demo clients (the only mode
+    that runs today)."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            return {"retCode": 0, "result": {"orderId": "demo-ok"}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
+    result = client.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="demo-1",
+    )
+    assert result["orderId"] == "demo-ok"
+
+
+# --------------------------------------------------------------------------
+# realmoney-safety-3 : malformed REAL_MONEY toggle fails loud
+# --------------------------------------------------------------------------
+
+
+def test_resolve_credentials_rejects_ambiguous_real_money(monkeypatch) -> None:
+    """realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.
+    'enabled') must raise at resolution rather than silently coercing to demo.
+    Pre-fix the operator who typed REAL_MONEY=enabled got demo with no warning."""
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
+    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
+    monkeypatch.delenv("DEMO", raising=False)
+    monkeypatch.setenv("REAL_MONEY", "enabled")
+    with pytest.raises(RuntimeError, match="not a recognised boolean"):
+        bybit.resolve_private_credentials()
+
+
+def test_resolve_credentials_accepts_recognised_falsey_values(monkeypatch) -> None:
+    """realmoney-safety-3: explicit falsey values (false/0/off/empty) stay demo
+    without raising — the fail-safe whitelist remains permissive."""
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
+    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
+    monkeypatch.delenv("DEMO", raising=False)
+    for falsey in ("false", "0", "off", "no", ""):
+        monkeypatch.setenv("REAL_MONEY", falsey)
+        assert bybit.resolve_private_credentials() == ("demo-k", "demo-s", True)
+
+
+def test_resolve_credentials_logs_resolved_account(monkeypatch, caplog) -> None:
+    """realmoney-safety-3: resolution emits a single INFO line naming the
+    resolved account so 'which account did this process use' is auditable from
+    the log. Pre-fix there was no resolved-account telemetry anywhere."""
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
+    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
+    monkeypatch.delenv("DEMO", raising=False)
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    with caplog.at_level("INFO", logger="liquidity_migration.bybit.account"):
+        bybit.resolve_private_credentials()
+    assert any("resolved account: demo" in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# ws-pool-3 : ping-timer patch cancels priors; _close_ws_client cleans either
+# --------------------------------------------------------------------------
+
+
+def test_ping_timer_patch_cancels_prior_timer_on_reconnect(monkeypatch) -> None:
+    """ws-pool-3: a reconnect re-invokes _send_initial_ping. The patched version
+    must cancel the prior timer before installing a new one, so reconnects do
+    not accumulate orphan daemon Timer threads. Pre-fix each reconnect overwrote
+    _agc_ping_timer without cancelling it."""
+
+    class FakeManager:
+        ping_interval = 1000
+
+        def _send_custom_ping(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules, "pybit._websocket_stream",
+        SimpleNamespace(_V5WebSocketManager=FakeManager),
+    )
+    bybit._patch_pybit_daemon_ping_timer()
+    manager = FakeManager()
+
+    manager._send_initial_ping()
+    first = manager._agc_ping_timer
+    assert first.daemon is True
+    # Mirror onto the stock attribute too, so pybit's own exit() can cancel it.
+    assert manager.custom_ping_timer is first
+
+    manager._send_initial_ping()  # simulate a reconnect
+    second = manager._agc_ping_timer
+    assert second is not first
+    # The prior timer was cancelled (not orphaned): a cancelled Timer's thread
+    # winds down promptly, so a short join completes. Pre-fix the prior timer was
+    # overwritten WITHOUT cancel and would have run its full ping_interval.
+    first.join(timeout=2.0)
+    assert not first.is_alive()
+    second.cancel()
+    second.join(timeout=2.0)
+
+
+def test_close_ws_client_cancels_stock_custom_ping_timer() -> None:
+    """ws-pool-3: _close_ws_client must cancel the ping timer even when only the
+    STOCK pybit attribute (custom_ping_timer) is set — so a pybit bump that
+    stops calling our patched _send_initial_ping cannot silently turn the cancel
+    into a no-op and reintroduce a shutdown-blocking timer thread."""
+    cancelled = {"v": False}
+
+    class FakeTimer:
+        def cancel(self) -> None:
+            cancelled["v"] = True
+
+    class FakeClient:
+        def __init__(self) -> None:
+            # Only the stock attribute is present (no _agc_ping_timer).
+            self.custom_ping_timer = FakeTimer()
+
+        def exit(self) -> None:
+            pass
+
+    client = FakeClient()
+    bybit._close_ws_client(client, timeout_seconds=1.0)
+    assert cancelled["v"] is True
+
+
+# --------------------------------------------------------------------------
+# ws-pool-4 : a callback swap re-routes bars on already-subscribed connections
+# --------------------------------------------------------------------------
+
+
+class _SwapFakeWebSocket:
+    def __init__(self) -> None:
+        self.callback = None
+
+    def kline_stream(self, *, interval, symbol, callback) -> None:
+        del interval, symbol
+        self.callback = callback
+
+    def unsubscribe(self, *, topic: str) -> None:
+        del topic
+
+    def close(self) -> None:
+        pass
+
+    def inject_bar(self, symbol: str) -> None:
+        assert self.callback is not None
+        self.callback(
+            {
+                "topic": f"kline.60.{symbol}",
+                "data": [{"start": 0, "confirm": True, "close": "1.0"}],
+            }
+        )
+
+
+class _SwapFactory:
+    def __init__(self) -> None:
+        self.built: list[_SwapFakeWebSocket] = []
+
+    def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _SwapFakeWebSocket:
+        del testnet, demo, channel_type
+        ws = _SwapFakeWebSocket()
+        self.built.append(ws)
+        return ws
+
+
+def test_callback_swap_reroutes_existing_connection() -> None:
+    """ws-pool-4: after subscribe() replaces the callback, an ALREADY-subscribed
+    connection must fire the NEW sink (the closure dereferences self._on_bar
+    live, not at build time). Pre-fix the closure captured the old on_bar, so
+    bars on the existing connection kept hitting the OLD sink — contradicting the
+    documented 'replaces for every connection' guarantee."""
+    factory = _SwapFactory()
+    pool = BybitKlineStreamPool(
+        interval_minutes=60,
+        topics_per_connection=10,
+        connection_spacing_seconds=0.0,
+        websocket_factory=factory,
+    )
+    old_bars: list[str] = []
+    new_bars: list[str] = []
+    try:
+        pool.subscribe(["BTCUSDT"], lambda s, b, c: old_bars.append(s))
+        ws = factory.built[0]
+        ws.inject_bar("BTCUSDT")
+        assert old_bars == ["BTCUSDT"]
+
+        # Swap the callback (same symbol set -> no new connection built).
+        pool.subscribe(["BTCUSDT"], lambda s, b, c: new_bars.append(s))
+        assert len(factory.built) == 1  # no new connection
+        ws.inject_bar("BTCUSDT")  # fire on the SAME existing connection
+        # The new sink got the bar; the old sink did not see a second one.
+        assert new_bars == ["BTCUSDT"]
+        assert old_bars == ["BTCUSDT"]
+    finally:
+        pool.close()
+
+
+# ---------------------------------------------------------------------------
+# _paged_time_range mid-pagination empty-page guard (relocated from audit
+# bucket iD). An empty mid-range page must NOT silently truncate a
+# ``_paged_time_range`` fetch: the Bybit funding-rate / open-interest paths walk
+# ``endTime`` backwards; if the provider returns an empty list *after* a full
+# page (a transient hiccup that returns ``[]`` instead of raising), the old code
+# ``break``-ed and returned only the rows fetched before the hole. Downstream,
+# ``_download_symbol_dataset`` would see ``frame.height > 0`` and write the
+# FULL-requested-range completeness marker, producing a permanent silent gap in
+# funding / open_interest that ``_marked_complete`` never re-fetches. The fix
+# raises ``BybitDataError`` on a mid-range empty page so the symbol-range is
+# retried rather than marked complete, while a *first-page* empty (genuine
+# "no data in range") still returns cleanly.
+# ---------------------------------------------------------------------------
+
+
+def _make_market_data(monkeypatch, responses_by_end_time):
+    """Build a BybitMarketData whose FakeHTTP serves canned funding/OI pages.
+
+    ``responses_by_end_time`` maps the per-request ``endTime`` (the backwards
+    pagination cursor) to the ``result.list`` payload to return for that call.
+    """
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.testnet = testnet
+            self.calls: list[dict] = []
+
+        def _serve(self, **params):
+            self.calls.append(params)
+            end_time = int(params["endTime"])
+            return {"retCode": 0, "result": {"list": responses_by_end_time[end_time]}}
+
+        # Both funding-history and open-interest route through _paged_time_range.
+        def get_funding_rate_history(self, **params):
+            return self._serve(**params)
+
+        def get_open_interest(self, **params):
+            return self._serve(**params)
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    # retries=1 keeps the test fast and deterministic; the guard fires before
+    # any retry/backoff because BybitDataError(non-rate-limit) raises immediately.
+    return bybit.BybitMarketData(testnet=True, retries=1, retry_sleep_seconds=0.0)
+
+
+def _funding_row(ts: int) -> dict[str, str]:
+    return {"fundingRateTimestamp": str(ts), "fundingRate": "0.0001"}
+
+
+def test_mid_range_empty_page_raises_instead_of_truncating(monkeypatch) -> None:
+    """A full page followed by an empty page mid-range must raise, not truncate.
+
+    limit=2, range [0, 10]. First request (endTime=10) returns a FULL page
+    (ts 9, 8) so pagination continues with endTime = 8 - 1 = 7. The second
+    request (endTime=7) returns [] -- a transient hole. Old behaviour: break and
+    return only [8, 9]. New behaviour: raise BybitDataError so the fetch fails
+    and the downloader retries rather than writing a full-range marker.
+    """
+    responses = {
+        10: [_funding_row(9), _funding_row(8)],  # full page -> keep paginating
+        7: [],  # transient empty mid-range -> must NOT silently truncate
+    }
+    client = _make_market_data(monkeypatch, responses)
+
+    with pytest.raises(bybit.BybitDataError) as excinfo:
+        client.get_funding_history("BTCUSDT", start=0, end=10, limit=2)
+
+    assert "mid-range" in str(excinfo.value)
+    # Both pages were actually requested before the guard fired.
+    assert len(client._client.calls) == 2
+    assert int(client._client.calls[1]["endTime"]) == 7
+
+
+def test_first_page_empty_returns_cleanly_no_data_in_range(monkeypatch) -> None:
+    """A genuinely empty range (first page empty) returns [] without raising."""
+    responses = {10: []}
+    client = _make_market_data(monkeypatch, responses)
+
+    rows = client.get_funding_history("BTCUSDT", start=0, end=10, limit=2)
+
+    assert rows == []
+    # Only one request was made; no spurious retry/extra pagination.
+    assert len(client._client.calls) == 1
+
+
+def test_full_then_short_page_completes_normally(monkeypatch) -> None:
+    """The happy multi-page path is unchanged: a full page then a short
+    (< limit) page terminates cleanly and returns the union, ascending by ts."""
+    responses = {
+        10: [_funding_row(9), _funding_row(8)],  # full page (len == limit)
+        7: [_funding_row(5)],  # short page (len < limit) -> natural end of data
+    }
+    client = _make_market_data(monkeypatch, responses)
+
+    rows = client.get_funding_history("BTCUSDT", start=0, end=10, limit=2)
+
+    assert [int(r["fundingRateTimestamp"]) for r in rows] == [5, 8, 9]
+    assert len(client._client.calls) == 2
+
+
+def test_open_interest_mid_range_empty_also_guarded(monkeypatch) -> None:
+    """open_interest shares _paged_time_range, so the same guard must apply.
+
+    Its timestamp key is "timestamp"; reproduce the full-then-empty hole.
+    """
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.testnet = testnet
+            self.calls: list[dict] = []
+
+        def get_open_interest(self, **params):
+            self.calls.append(params)
+            end_time = int(params["endTime"])
+            pages = {
+                10: [
+                    {"timestamp": "9", "openInterest": "1"},
+                    {"timestamp": "8", "openInterest": "2"},
+                ],
+                7: [],  # transient mid-range empty
+            }
+            return {"retCode": 0, "result": {"list": pages[end_time]}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitMarketData(testnet=True, retries=1, retry_sleep_seconds=0.0)
+
+    with pytest.raises(bybit.BybitDataError):
+        client.get_open_interest("BTCUSDT", "5min", start=0, end=10, limit=2)

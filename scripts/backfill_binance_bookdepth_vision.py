@@ -8,6 +8,11 @@ realism (P2) + deletion-risk insurance (Binance has deleted Vision datasets befo
 No signal claim; no pre-registration required until a signal test is proposed.
 
 Resume-safe per-symbol parquets under <root>/binance_usdm_bookdepth_1h/ + manifest.
+A 404 day = no-bookDepth day (normal pre-listing/delisted tail); a TRANSIENT day
+(exhausted retries on a 5xx/DNS/connection error) is tracked separately so an outage
+is never frozen as a permanent no-data gap — the manifest "complete" flag is False
+when any day failed transiently, and the resume guard re-attempts incomplete symbols
+(audit backfill-writers-2; mirrors scripts/backfill_binance_metrics_vision.py).
 
     POLARS_MAX_THREADS=4 .venv/bin/python scripts/backfill_binance_bookdepth_vision.py \
         [--root ~/SHARED_DATA/binance_full_pit] [--start 2023-01-01] [--workers 10] \
@@ -33,6 +38,14 @@ sys.path.insert(0, str(REPO))
 import polars as pl  # noqa: E402
 
 VISION = "https://data.binance.vision/data/futures/um/daily/bookDepth/{s}/{s}-bookDepth-{d}.zip"
+
+# Sentinel for a TRANSIENT day failure (exhausted retries on a 5xx / DNS / connection
+# error), as distinct from a genuine 404 ("no bookDepth this day", a normal pre-listing/
+# delisted tail). A transient day must NOT be frozen into a permanent empty marker the
+# resume guard treats as complete — that turns an outage into silent zero coverage,
+# violating data_roots.md's "absence == not-downloaded, never no-data" invariant
+# (audit backfill-writers-2; mirrors scripts/backfill_binance_metrics_vision.py).
+_TRANSIENT_DAY = object()
 
 
 def _kline_spans(root: Path) -> dict[str, tuple[str, str]]:
@@ -77,12 +90,23 @@ def _fetch(url: str, timeout: int = 30) -> bytes | None:
             if attempt < 3:
                 time.sleep(2 * (attempt + 1))
                 continue
-            return None
-    return None
+            # audit2: exhausted retries on a transient (DNS/connection) error is NOT a
+            # 404 — signal "unknown" with __RETRY__ so the caller can re-attempt rather
+            # than freeze a permanent no-data gap (backfill-writers-2).
+            return b"__RETRY__"
+    return b"__RETRY__"
 
 
-def _day_rows(symbol: str, day: str) -> list[dict] | None:
+def _day_rows(symbol: str, day: str) -> list[dict] | None | object:
+    """Rows for one symbol-day. Returns ``None`` for a genuine 404 / empty / bad zip
+    (a real no-data day) and the ``_TRANSIENT_DAY`` sentinel when the fetch failed
+    transiently (exhausted retries) — the caller must treat these differently so a
+    transient outage is never frozen as a permanent no-data marker (audit backfill-writers-2)."""
     blob = _fetch(VISION.format(s=symbol, d=day))
+    if blob == b"__RETRY__":
+        blob = _fetch(VISION.format(s=symbol, d=day), timeout=60)
+        if blob == b"__RETRY__":
+            return _TRANSIENT_DAY
     if not blob:
         return None
     agg: dict[tuple[str, str], list] = {}
@@ -120,15 +144,22 @@ def _day_rows(symbol: str, day: str) -> list[dict] | None:
 
 def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -> dict:
     rows: list[dict] = []
-    miss = 0
+    miss = 0          # genuine 404 / no-data days
+    transient = 0     # transient fetch failures (NOT no-data)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(_day_rows, symbol, d): d for d in days}
         for fut in as_completed(futs):
             r = fut.result()
-            if r is None:
+            if r is _TRANSIENT_DAY:
+                transient += 1
+            elif r is None:
                 miss += 1
             else:
                 rows.extend(r)
+    # audit2: a symbol is COMPLETE only when every non-data day was a genuine 404; any
+    # transient failure means its coverage is unknown and it must be re-runnable. The
+    # resume guard in main() skips a symbol only when complete (backfill-writers-2).
+    complete = transient == 0
     if rows:
         schema = {"symbol": pl.String, "hour": pl.String, "percentage": pl.String,
                   "depth_mean": pl.Float64, "notional_mean": pl.Float64,
@@ -138,9 +169,17 @@ def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -
             .dt.replace_time_zone("UTC").dt.epoch("ms").alias("ts_ms")
         ).drop_nulls("ts_ms").sort(["ts_ms", "percentage"])
         df.write_parquet(out_dir / f"{symbol}.parquet")
-        return {"symbol": symbol, "rows": df.height, "days_404": miss}
-    (out_dir / f"{symbol}.parquet").touch()
-    return {"symbol": symbol, "rows": 0, "days_404": miss}
+        return {"symbol": symbol, "rows": df.height, "days_404": miss,
+                "transient_fail": transient, "complete": complete}
+    if not complete:
+        # audit2: no rows AND a transient failure: do NOT write the empty .touch()
+        # marker. Freezing it would turn a transient outage into permanent zero
+        # coverage the resume guard skips forever — exactly the silent-gap bug.
+        return {"symbol": symbol, "rows": 0, "days_404": miss,
+                "transient_fail": transient, "complete": False}
+    (out_dir / f"{symbol}.parquet").touch()  # empty marker: genuinely no data on the archive
+    return {"symbol": symbol, "rows": 0, "days_404": miss,
+            "transient_fail": 0, "complete": True}
 
 
 def main() -> int:
@@ -167,7 +206,15 @@ def main() -> int:
         spans = {s: spans[s] for s in wanted if s in spans}
     todo = []
     for s, (a, b) in sorted(spans.items()):
-        if (out_dir / f"{s}.parquet").exists():
+        # audit2: resume only past COMPLETE symbols. A symbol with a parquet is complete
+        # unless the manifest explicitly marks it incomplete (a prior run hit a transient
+        # outage and left rows-but-a-gap or no marker at all). Older manifests predating
+        # the "complete" field have no such flag and are treated as complete (back-compat).
+        # This is what stops a transient outage from being frozen into permanent zero
+        # coverage (backfill-writers-2; mirrors backfill_binance_metrics_vision.py).
+        prior = manifest.get(s)
+        prior_incomplete = isinstance(prior, dict) and prior.get("complete") is False
+        if (out_dir / f"{s}.parquet").exists() and not prior_incomplete:
             continue
         first = max(a, args.start)
         if first > b:

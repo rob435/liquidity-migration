@@ -52,19 +52,17 @@ from liquidity_migration.continuous_forward_replay import (  # noqa: E402
     build_full_ledger,
     frozen_config_hash,
 )
-from scripts.w4_continuous_path_shape_measure import (  # noqa: E402
-    _bars,
-    _dates,
-    _symbol_hash_bucket,
-    _value_at_or_before,
-)
-from scripts.w4_continuous_stop_exit_realism import (  # noqa: E402
+from scripts._w5_shared import (  # noqa: E402
     COMPONENTS,
+    _bars,
     _btc_inputs,
     _component_config,
+    _dates,
     _load_component,
     _monthly_returns,
     _pit_partition_gate,
+    _symbol_hash_bucket,
+    _value_at_or_before,
     _write_csv,
 )
 
@@ -96,8 +94,7 @@ def _sha256_file(path: Path) -> str:
 def _code_hash() -> str:
     paths = [
         REPO / "scripts" / "w5_continuous_stage0_candidate_tape.py",
-        REPO / "scripts" / "w4_continuous_stop_exit_realism.py",
-        REPO / "scripts" / "w4_continuous_path_shape_measure.py",
+        REPO / "scripts" / "_w5_shared.py",
         REPO / "scripts" / "rebuild_winner_base_component_ledgers.py",
         REPO / "liquidity_migration" / "continuous_events.py",
         REPO / "liquidity_migration" / "continuous_forward_replay.py",
@@ -251,6 +248,32 @@ def _w4_overlap(root: Path, component: str, end_ms: int, w5_trades: pl.DataFrame
         }
     )
     return out
+
+
+def _w4_overlap_gate(comp_vals: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fail-closed W4-overlap falsifier verdict (w4-w5-stages-1).
+
+    The binding decision-rule item #5 ('W5 component trades equal the W4 control trades on the
+    overlap, 0 mismatches') must NOT pass vacuously. The original ``all(exact for c if available)``
+    returned True when the separate W4 control tag was absent (every component available=False ->
+    empty comprehension -> all([]) == True), silently disarming the strongest external faithfulness
+    gate on a fresh clone. Here the W4 control artifact must be present for EVERY component AND each
+    present one must match exactly. Returns the availability counts so a near-vacuous state is
+    visible in the verdict.
+
+    Each item of ``comp_vals`` is a component dict carrying a ``w4_overlap`` sub-dict with at least
+    ``available`` (bool) and, when available, ``exact`` (bool)."""
+    n_available = sum(1 for c in comp_vals if c["w4_overlap"].get("available"))
+    artifacts_present = bool(comp_vals) and n_available == len(comp_vals)
+    overlap_exact = artifacts_present and all(
+        bool(c["w4_overlap"].get("exact")) for c in comp_vals if c["w4_overlap"].get("available")
+    )
+    return {
+        "w4_artifacts_present": artifacts_present,
+        "w4_overlap_exact": overlap_exact,
+        "available_count": n_available,
+        "component_count": len(comp_vals),
+    }
 
 
 def _component_month_counts(tape_rows: list[dict[str, Any]], trades: pl.DataFrame) -> dict[str, Any]:
@@ -441,15 +464,20 @@ def run_stage(args: argparse.Namespace) -> dict[str, Any]:
         _write_csv(out / f"baseline_reconstruction_{venue}.csv", recon_rows)
 
         # ---- per-venue verdict gates ----
-        comp_vals = venue_block["components"].values()
+        comp_vals = list(venue_block["components"].values())
+        # w4-w5-stages-1: the W4 overlap falsifier is built fail-closed in _w4_overlap_gate so
+        # an absent W4 control tag (e.g. a fresh clone) cannot report a vacuous PASS. The
+        # availability count is surfaced so a near-vacuous state is visible in the verdict.
+        w4_gate = _w4_overlap_gate(comp_vals)
+        venue_block["w4_overlap_available_count"] = w4_gate["available_count"]
+        venue_block["w4_overlap_component_count"] = w4_gate["component_count"]
         venue_block["gates"] = {
             "root_present": True,
             "pit_pass": bool(pit["full_pit_universe_pass"]),
             "selected_reconcile_exact": all(c["selected_reconcile"]["exact"] for c in comp_vals),
             "month_reconcile": all(c["month_reconcile"]["reconciled"] for c in comp_vals),
-            "w4_overlap_exact": all(
-                bool(c["w4_overlap"].get("exact")) for c in comp_vals if c["w4_overlap"].get("available")
-            ),
+            "w4_artifacts_present": w4_gate["w4_artifacts_present"],
+            "w4_overlap_exact": w4_gate["w4_overlap_exact"],
             "ensemble_built": ensemble_block["built"],
             "rejected_available": venue_block.get("rejected_count", 0) > 0,
         }
@@ -500,17 +528,21 @@ def _write_markdown(payload: dict[str, Any], path: Path) -> None:
         "",
         "## Per-venue gates",
         "",
-        "| Venue | PIT | Selected==Ledger | Month reconcile | W4 overlap | Ensemble | Rejected avail |",
-        "|---|---|---|---|---|---|---|",
+        "| Venue | PIT | Selected==Ledger | Month reconcile | W4 present | W4 overlap | Ensemble | Rejected avail |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for venue, block in payload["venues"].items():
         g = block.get("gates")
         if not g:
-            lines.append(f"| `{venue}` | ERROR: {block.get('error', 'n/a')} |||||| ")
+            lines.append(f"| `{venue}` | ERROR: {block.get('error', 'n/a')} ||||||| ")
             continue
+        w4_present = (
+            f"{g['w4_artifacts_present']} "
+            f"({block.get('w4_overlap_available_count', 0)}/{block.get('w4_overlap_component_count', 0)})"
+        )
         lines.append(
             f"| `{venue}` | {g['pit_pass']} | {g['selected_reconcile_exact']} | {g['month_reconcile']} | "
-            f"{g['w4_overlap_exact']} | {g['ensemble_built']} | {g['rejected_available']} |"
+            f"{w4_present} | {g['w4_overlap_exact']} | {g['ensemble_built']} | {g['rejected_available']} |"
         )
     lines.extend(["", "## Candidate tape by component", "",
                   "| Venue | Component | Candidates | Selected | Rejected | Sel==Ledger | W4 overlap exact |",

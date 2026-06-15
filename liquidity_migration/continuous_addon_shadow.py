@@ -8,7 +8,7 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY, coerce_int
+from ._common import MS_PER_DAY, coerce_int, finite_float
 from .storage import read_dataset
 
 
@@ -111,11 +111,10 @@ def _int(row: dict[str, Any], *keys: str) -> int:
 
 
 def _float(value: Any) -> float:
-    try:
-        out = float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return out if math.isfinite(out) else 0.0
+    # Delegates to the finite-guarded _common.finite_float (code-quality-5): drops the
+    # divergent `float(value or 0.0)` idiom for the one NaN/inf coercion policy shared with
+    # reconciliation._float / ws_state_cache._float. Research-only file.
+    return finite_float(value, default=0.0) or 0.0
 
 
 def _optional_float(row: dict[str, Any], *keys: str) -> float | None:
@@ -132,6 +131,32 @@ def _optional_float(row: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
+def _cost_corrected_return(row: dict[str, Any]) -> float | None:
+    # audit2c: live `net_return` is gross-of-cost (gtr*notional_weight; fees in separate
+    # entry_fee_usdt/exit_fee_usdt, funding uncosted -- see continuous_demo DEPLOY NOTE
+    # ~L1398), so the cooldown skipped-return aggregation overstated saved/forfeited PnL
+    # by round-trip fees (+funding) and could be wrong-signed for marginal trades. Mirror
+    # the breaker `net_of_fees` adjustment: subtract realised round-trip fees as a fraction
+    # of trade equity. Backtest rows are already NET (net=gross+cost+funding) and carry no
+    # entry_fee_usdt/exit_fee_usdt, so no fee is subtracted -- no double-subtraction. A
+    # true `funding_return` field, if ever stored live, is folded in with the engine's
+    # additive sign (net = gross + funding_return).
+    gross = _optional_float(row, "net_return", "return_pct", "return", "gross_return", "gtr")
+    if gross is None:
+        return None
+    net = gross
+    entry_fee = row.get("entry_fee_usdt")
+    exit_fee = row.get("exit_fee_usdt")
+    if entry_fee is not None or exit_fee is not None:
+        equity = _optional_float(row, "equity_usdt")
+        if equity is not None and equity > 0.0:
+            net -= (_float(entry_fee) + _float(exit_fee)) / equity
+    funding = _optional_float(row, "funding_return")
+    if funding is not None:
+        net += funding
+    return net
+
+
 def _entry_ts(row: dict[str, Any]) -> int:
     return _int(row, "entry_ts_ms", "entry_exec_time_ms", "signal_ts_ms", "entry_signal_ts_ms")
 
@@ -140,12 +165,32 @@ def _signal_ts(row: dict[str, Any]) -> int:
     return _int(row, "signal_ts_ms", "entry_signal_ts_ms", "entry_ts_ms")
 
 
+def _reconciliation_signal_ts(row: dict[str, Any]) -> int:
+    """Signal timestamp used to key trade<->order reconciliation.
+
+    Deliberately does NOT fall back to entry_ts_ms (unlike _signal_ts). Orders
+    key off their signal_ts_ms, while entry occurs (1 + entry_confirm_delay) bars
+    later; if a trade row that dropped signal_ts_ms fell back to entry_ts_ms, its
+    key would land on a different timestamp than its order's, producing a spurious
+    'unmatched entry order attempt' (shadows-4). Using a single signal-only basis
+    keeps trade and order keys consistent on healthy data (which always carries
+    signal_ts_ms) and excludes a malformed signal-less trade from the signal key
+    set rather than mis-keying it; trade_id reconciliation below is the backstop
+    that still matches the order in that degenerate case.
+    """
+    return _int(row, "signal_ts_ms", "entry_signal_ts_ms")
+
+
+def _trade_id(row: dict[str, Any]) -> str:
+    return _str(row, "trade_id")
+
+
 def _exit_ts(row: dict[str, Any]) -> int:
     return _int(row, "exit_ts_ms", "exit_exec_time_ms")
 
 
 def _entry_key(row: dict[str, Any]) -> tuple[str, int]:
-    return (_str(row, "symbol"), _signal_ts(row))
+    return (_str(row, "symbol"), _reconciliation_signal_ts(row))
 
 
 def _trade_day(ts_ms: int) -> int:
@@ -156,8 +201,19 @@ def _rows(frame: pl.DataFrame, *, source: str | None = None) -> list[dict[str, A
     if frame.is_empty():
         return []
     rows = frame.to_dicts()
-    if source is None or "blend_source" not in frame.columns:
+    if source is None:
         return rows
+    if "blend_source" not in frame.columns:
+        # audit2: a primary/addon split was explicitly requested but the frame has no
+        # blend_source discriminator. The old guard returned the FULL row set for BOTH
+        # requests, silently counting every historical trade as BOTH the primary and the
+        # add-on leg (addon/primary ratio pinned to 1.0) and feeding the historical
+        # anatomy/concentration/key-diff drift gates garbage with no warning. The
+        # historical comparison REQUIRES the discriminator -> fail loud instead.
+        raise ValueError(
+            "blended trade frame is missing the required 'blend_source' column; "
+            f"cannot split by source={source!r} (historical drift gate would compare against garbage)"
+        )
     return [row for row in rows if _str(row, "blend_source").lower() == source]
 
 
@@ -180,7 +236,7 @@ def _is_reduce_only(row: dict[str, Any]) -> bool:
 
 
 def _entry_order_key(row: dict[str, Any]) -> tuple[str, int]:
-    return (_str(row, "symbol"), _signal_ts(row))
+    return (_str(row, "symbol"), _reconciliation_signal_ts(row))
 
 
 def _entry_order_attempt_ts(row: dict[str, Any]) -> int:
@@ -234,6 +290,11 @@ def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
         status = _str(row, "status").lower() or "unknown"
         counts[status] = counts.get(status, 0) + 1
     return counts
+
+
+def _filter_by_strategy_id(rows: list[dict[str, Any]], strategy_id: str) -> list[dict[str, Any]]:
+    """Keep only rows whose strategy_id matches (used for the same-root split)."""
+    return [row for row in rows if _str(row, "strategy_id") == strategy_id]
 
 
 def _strategy_id_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -346,6 +407,17 @@ def _trade_key_set(rows: list[dict[str, Any]]) -> set[tuple[str, int]]:
     }
 
 
+def _trade_id_set(rows: list[dict[str, Any]]) -> set[str]:
+    """Non-empty trade_ids of recorded trades, for trade_id-based reconciliation.
+
+    The order's trade_id is the authoritative link to its trade, independent of
+    timestamps. Matching on it as well as the signal key means a trade that
+    dropped signal_ts_ms (so its signal key is excluded) still reconciles its
+    order instead of producing a spurious unmatched-attempt flag (shadows-4).
+    """
+    return {tid for row in _clean_trade_rows(rows) if (tid := _trade_id(row))}
+
+
 def _entry_order_trade_reconciliation_summary(
     *,
     order_rows: list[dict[str, Any]],
@@ -353,10 +425,14 @@ def _entry_order_trade_reconciliation_summary(
     now_ms: int = 0,
 ) -> dict[str, Any]:
     trade_keys = _trade_key_set(trade_rows)
+    trade_ids = _trade_id_set(trade_rows)
     unmatched = [
         row
         for row in _clean_entry_order_rows(order_rows)
-        if _entry_order_key(row)[0] and _entry_order_key(row)[1] > 0 and _entry_order_key(row) not in trade_keys
+        if _entry_order_key(row)[0]
+        and _entry_order_key(row)[1] > 0
+        and _entry_order_key(row) not in trade_keys
+        and not (_trade_id(row) and _trade_id(row) in trade_ids)
     ]
     unmatched_live = [row for row in unmatched if _is_live_entry_order_status(row)]
     return {
@@ -388,10 +464,19 @@ def _unmatched_entry_order_attempt_rows(
     now_ms: int = 0,
 ) -> list[dict[str, Any]]:
     trade_keys = _trade_key_set(trade_rows)
+    # audit2: mirror the shadows-4 trade_id backstop the SUMMARY path uses
+    # (_entry_order_trade_reconciliation_summary). Without it, a trade that dropped
+    # signal_ts_ms but kept its authoritative trade_id (the crash-recovery/schema-drift
+    # case) is excluded from the summary's unmatched count (0) yet still emitted here as
+    # a phantom orphaned add-on order in the *_unmatched_entry_order_attempts.csv the
+    # operator audits — same audit, contradictory artifacts.
+    trade_ids = _trade_id_set(trade_rows)
     out: list[dict[str, Any]] = []
     for row in _clean_entry_order_rows(order_rows):
         key = _entry_order_key(row)
         if not key[0] or key[1] <= 0 or key in trade_keys:
+            continue
+        if _trade_id(row) and _trade_id(row) in trade_ids:
             continue
         out.append(
             {
@@ -610,7 +695,9 @@ def _trade_gap_events(source: str, rows: list[dict[str, Any]]) -> list[dict[str,
                 "order_link_id": "",
                 "signal_ts_ms": _signal_ts(row),
                 "status": _str(row, "status").lower() or "unknown",
-                "return_value": _optional_float(row, "net_return", "return_pct", "return", "gross_return", "gtr"),
+                # audit2c: cost-correct gross-of-fee live net_return before the cooldown
+                # skipped-return aggregation (mirrors the breaker net_of_fees adjustment).
+                "return_value": _cost_corrected_return(row),
             }
         )
     return events
@@ -2152,6 +2239,33 @@ def _markdown(payload: dict[str, Any]) -> str:
 def run_continuous_addon_shadow_audit(config: ContinuousAddonShadowAuditConfig) -> dict[str, Any]:
     primary_root = Path(config.primary_data_root).expanduser()
     addon_root = Path(config.addon_data_root).expanduser()
+    # Guard against silently auditing the SAME source as both sides. The primary
+    # and addon sides are read with no source filter, so if both (root, dataset)
+    # pairs resolve to the same path the identical trades load as BOTH primary and
+    # addon: addon_to_primary_ratio->1.0 and every combined metric (combined
+    # trades/symbol-day, active combined weight) double-counts the true exposure,
+    # silently producing a materially wrong audit with no warning. Require either
+    # distinct sources, or — for a deliberate single-root, strategy-split audit —
+    # distinct expected_*_strategy_id values that are then applied to each side.
+    # (shadows-3)
+    same_trades_source = (primary_root.resolve(), config.primary_trades_dataset) == (
+        addon_root.resolve(),
+        config.addon_trades_dataset,
+    )
+    distinct_strategy_split = bool(
+        config.expected_primary_strategy_id
+        and config.expected_addon_strategy_id
+        and config.expected_primary_strategy_id != config.expected_addon_strategy_id
+    )
+    if same_trades_source and not distinct_strategy_split:
+        raise ValueError(
+            "Add-on shadow audit primary and add-on resolve to the same trades source "
+            f"({primary_root.resolve()} / {config.primary_trades_dataset}); this double-counts "
+            "every combined metric. Point --primary-data-root and --addon-data-root at distinct "
+            "roots (or distinct trades datasets), or supply distinct "
+            "--expected-primary-strategy-id and --expected-addon-strategy-id to split one root by strategy."
+        )
+
     primary = read_dataset(primary_root, config.primary_trades_dataset)
     addon = read_dataset(addon_root, config.addon_trades_dataset)
     primary_orders = read_dataset(primary_root, config.primary_orders_dataset)
@@ -2162,6 +2276,13 @@ def run_continuous_addon_shadow_audit(config: ContinuousAddonShadowAuditConfig) 
     addon_rows = _clean_trade_rows(_rows(addon))
     primary_order_rows = _rows(primary_orders)
     addon_order_rows = _rows(addon_orders)
+    if same_trades_source and distinct_strategy_split:
+        # Single-root strategy-split mode: keep only each side's strategy so the
+        # two sides are genuinely disjoint rather than the same rows twice.
+        primary_rows = _filter_by_strategy_id(primary_rows, config.expected_primary_strategy_id)
+        addon_rows = _filter_by_strategy_id(addon_rows, config.expected_addon_strategy_id)
+        primary_order_rows = _filter_by_strategy_id(primary_order_rows, config.expected_primary_strategy_id)
+        addon_order_rows = _filter_by_strategy_id(addon_order_rows, config.expected_addon_strategy_id)
     primary_summary = _trade_summary(primary_rows)
     addon_summary = _trade_summary(addon_rows)
     shadow_overlap = _overlap_summary(primary_rows, addon_rows)

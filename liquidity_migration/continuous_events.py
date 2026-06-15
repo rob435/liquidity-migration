@@ -45,14 +45,16 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift
 from .config import DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .signal_harness import _autodetect_dataset_names, _date_str_to_ms, _read_window
+from .storage import read_dataset_columns
 from .trade_lifecycle import (
     _empty_trades,
     _funding_lookup,
     _indexed_price_bars_by_symbol,
     _simulate_indexed_trade,
+    annualized_sharpe,
 )
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
@@ -63,7 +65,10 @@ class ContinuousEventConfig:
     """Continuous-fade engine config. See module docstring + the pre-registration."""
 
     start_date: str = "2023-04-01"
-    end_date: str = "2026-05-28"
+    end_date: str = ""                    # "" = data-driven: clamp to the root's last available day
+    #                                       (end-exclusive, so the final full day is included). A
+    #                                       fixed past date silently truncated recent data as the
+    #                                       calendar advanced (cli-config-5).
     # --- selection (ported from p1d._deciled_panel) ---
     side: str = "short"
     decile: int = 9                       # short the top composite decile
@@ -103,13 +108,7 @@ class ContinuousEventConfig:
     entry_decel_lookback_h: int = 0       # 0=off; require close[t]/close[t-lookback]-1 <= entry_decel_max_ret
     entry_decel_max_ret: float = 0.0      # fade-started confirmation: recent move must be <= this
     market_min_ret_1d: float = -1.0       # skip entry if equal-weight market 1d return < this (-1 = off)
-    btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend" | "uptrend_capped" | "soft3"
-    # E2 regime family (receipt 2026-06-12-e2-regime-response-family.md). uptrend_capped (V1):
-    # on iff 0 < trend <= cap. soft3 (V2): trend > cap -> off; 0 < trend <= cap -> full size;
-    # trend <= 0 -> btc_soft3_size_frac x notional, top-composite-quintile candidates only
-    # (quintile within the fresh-entry pool at the same signal ts, ties kept).
-    btc_trend_euphoria_cap: float = 0.20  # threshold on the engine's prior-30d return-SUM trend
-    btc_soft3_size_frac: float = 0.25
+    btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend"
     entry_event_trigger: str = "none"      # hourly catalyst gate; "none" preserves continuous spell entries
     failed_fade_hours: int = 0            # 0=off; cut a fade that hasn't worked after N hours
     failed_fade_loss_pct: float = 0.0
@@ -172,14 +171,110 @@ def _feature_tag(feature_set: tuple[str, ...]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
 
 
-def _panel_cache_path(root: Path, config: ContinuousEventConfig) -> Path:
-    window_tag = hashlib.sha256(
-        f"{config.start_date}_{config.end_date}".encode("utf-8")
-    ).hexdigest()[:8]
+def _root_max_kline_ms(root: Path) -> int | None:
+    """Max kline ``ts_ms`` available under ``root`` (None if no kline data)."""
+    kname = _autodetect_dataset_names(root)["klines_dataset"]
+    k = read_dataset_columns(root, kname, columns=["ts_ms"])
+    if k.is_empty() or "ts_ms" not in k.columns:
+        return None
+    return int(k["ts_ms"].max())
+
+
+def _listing_ts_by_symbol(root: Path) -> dict[str, int]:
+    """Per-symbol AUTHORITATIVE PIT listing timestamp: the first-ever kline ``ts_ms`` under the
+    root, read over the FULL dataset independent of any run window.
+
+    The age gate must measure listing age from a symbol's true first bar, not the first bar that
+    happens to land inside the padded read window (which is clamped to ``start_ms - pad_back`` and
+    makes any older symbol look exactly ``pad_back`` old at the window start). This mirrors the live
+    demo's ``universe.listing_age_days`` (Bybit launchTime) using the root's own data, so the
+    backtest age floor admits the same symbols near the window edge as the live sleeve does
+    (pit-engine-2)."""
+    kname = _autodetect_dataset_names(root)["klines_dataset"]
+    k = read_dataset_columns(root, kname, columns=["symbol", "ts_ms"])
+    if k.is_empty() or "symbol" not in k.columns or "ts_ms" not in k.columns:
+        return {}
+    first = k.group_by("symbol").agg(pl.col("ts_ms").min().alias("first_ts"))
+    return {str(s): int(t) for s, t in first.iter_rows()}
+
+
+def _resolve_end_ms(root: Path, config: ContinuousEventConfig) -> int:
+    """End-exclusive window boundary in ms.
+
+    An explicit ``end_date`` is honored verbatim (frozen/forward runs pin it). An empty
+    ``end_date`` is the DATA-DRIVEN default: clamp to the day AFTER the root's last available
+    kline (end-exclusive, so the final full day is included), so a default research run never
+    silently omits the freshest data as the calendar advances (cli-config-5)."""
+    if config.end_date:
+        return _date_str_to_ms(config.end_date)
+    max_ts = _root_max_kline_ms(root)
+    if max_ts is None:
+        # No kline data to clamp against; fall back to start so the empty-root path returns empty.
+        return _date_str_to_ms(config.start_date)
+    return (max_ts // MS_PER_DAY) * MS_PER_DAY + MS_PER_DAY
+
+
+def _window_tag(config: ContinuousEventConfig, end_ms: int) -> str:
+    # When end_date is data-driven (""), bake the RESOLVED end into the cache key so two runs
+    # at different data ends never collide on the same cached panel.
+    end_part = config.end_date or f"auto{end_ms}"
+    return hashlib.sha256(f"{config.start_date}_{end_part}".encode("utf-8")).hexdigest()[:8]
+
+
+def _exclude_tag(exclude_symbols: Any) -> str:
+    """Stable 8-char hash of the exclusion set, order-independent."""
+    syms = sorted(str(s) for s in (exclude_symbols or []))
+    return hashlib.sha256("|".join(syms).encode("utf-8")).hexdigest()[:8]
+
+
+def _panel_cache_path(root: Path, config: ContinuousEventConfig, *, end_ms: int) -> Path:
+    window_tag = _window_tag(config, end_ms)
+    # audit2: fold the exclusion set into the cache key. The panel is built with
+    # `config.exclude_symbols` filtered out (build_continuous_panel below), but the
+    # old key omitted it — two runs differing ONLY in exclude_symbols collided on the
+    # same cached parquet and the second silently reused the first's (wrong-exclusion)
+    # panel. The empty-exclusion case (the live/default path) keeps its prior filename
+    # byte-for-byte, so no existing cache is invalidated; only non-empty exclusions get
+    # a distinct, correct key.
+    excl_part = "" if not config.exclude_symbols else f"_excl{_exclude_tag(config.exclude_symbols)}"
     return root / (
         f"_continuous_engine_panel_v2_rmom{int(round(config.rmom_quantile * 100))}"
-        f"_feat{_feature_tag(config.feature_set)}_{window_tag}.parquet"
+        f"_feat{_feature_tag(config.feature_set)}{excl_part}_{window_tag}.parquet"
     )
+
+
+# Max days the rmom table may lag the klines window's last day before the backtest panel build
+# refuses to run. residual_momentum[D] sums residual_return[D-9..D-3] (precompute shift(3)), so a
+# freshly rebuilt rmom legitimately trails the newest kline day by a couple of days; beyond that the
+# table is STALE and the left-join+null-filter would SILENTLY drop the newest dates from the panel
+# (the documented 2026-06-03 truncation). Matches the live watchdog's --max-rmom-stale-days default.
+RMOM_COVERAGE_TOLERANCE_DAYS = 2
+
+
+def _assert_rmom_covers_window(
+    rmom: pl.DataFrame, klines: pl.DataFrame, *, start_ms: int, root: Path
+) -> None:
+    """Fail loudly when residual_momentum lags the klines window instead of silently truncating.
+
+    The decile build left-joins rmom on (symbol, day_ts) and filters to non-null rmom, so a
+    present-but-stale residual_momentum.parquet drops EVERY symbol on the newest days with no error
+    — understating recent exposure/return in decision evidence (equity curves, research panels).
+    The live daemon is guarded by max_rmom_day_ts / rmom_stale_days telemetry; this mirrors that
+    guard on the backtest path (pit-data-5)."""
+    in_window = klines.filter(pl.col("ts_ms") >= start_ms)
+    if in_window.is_empty() or rmom.is_empty() or "day_ts" not in rmom.columns:
+        return
+    klines_max_day = (int(in_window["ts_ms"].max()) // MS_PER_DAY) * MS_PER_DAY
+    rmom_max_day = (int(rmom["day_ts"].max()) // MS_PER_DAY) * MS_PER_DAY
+    lag_days = (klines_max_day - rmom_max_day) // MS_PER_DAY
+    if lag_days > RMOM_COVERAGE_TOLERANCE_DAYS:
+        raise RuntimeError(
+            f"residual_momentum.parquet is STALE: newest rmom day "
+            f"{_iso_day(rmom_max_day)} lags the klines window's last day {_iso_day(klines_max_day)} "
+            f"by {lag_days}d (> {RMOM_COVERAGE_TOLERANCE_DAYS}d). The decile join would silently "
+            f"drop the newest dates from the panel. Rebuild it: "
+            f"POLARS_MAX_THREADS=8 python scripts/precompute_residual_momentum.py --root {root}"
+        )
 
 
 def build_continuous_panel(
@@ -193,11 +288,11 @@ def build_continuous_panel(
     which the engine does not use -- it computes the realised fill itself).
     """
     root = Path(str(data_root)).expanduser()
-    cache_path = _panel_cache_path(root, config)
+    start_ms, end_ms = _date_str_to_ms(config.start_date), _resolve_end_ms(root, config)
+    cache_path = _panel_cache_path(root, config, end_ms=end_ms)
     rmom_path = root / "residual_momentum.parquet"
     if cache and cache_path.exists() and not _panel_cache_stale(cache_path, rmom_path):
         return pl.read_parquet(cache_path)
-    start_ms, end_ms = _date_str_to_ms(config.start_date), _date_str_to_ms(config.end_date)
     kname = _autodetect_dataset_names(root)["klines_dataset"]
     k = _read_window(
         root, kname, start_ms=start_ms - 40 * MS_PER_DAY, end_ms=end_ms,
@@ -213,6 +308,7 @@ def build_continuous_panel(
             f"POLARS_MAX_THREADS=8 python scripts/precompute_residual_momentum.py --root {root}"
         )
     rmom = pl.read_parquet(rmom_path).rename({"ts_ms": "day_ts"})
+    _assert_rmom_covers_window(rmom, k, start_ms=start_ms, root=root)
     panel = compute_continuous_decile_panel(
         k,
         rmom,
@@ -284,12 +380,17 @@ def cross_sectional_decile(
     )
     k = k.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day_ts"))
     k = k.join(rmom, on=["symbol", "day_ts"], how="left").filter(pl.col("residual_momentum").is_not_null())
+    # Rank-fraction denominator (len-1) must be clamped to >=1: a ts_ms group that collapses to a
+    # single surviving symbol would otherwise divide by 0 -> NaN, and `filter(_rr <= q)` silently
+    # drops the lone candidate (NaN <= x is False) instead of ranking it at 0.0. Matches the
+    # singleton guard `_continuous_rank_lookup` already uses (max(height-1, 1)). See pit-signals-5.
+    _rank_denom = pl.max_horizontal(pl.len().over("ts_ms") - 1, pl.lit(1))
     k = k.with_columns(
-        ((pl.col("residual_momentum").rank().over("ts_ms") - 1) / (pl.len().over("ts_ms") - 1)).alias("_rr")
+        ((pl.col("residual_momentum").rank().over("ts_ms") - 1) / _rank_denom).alias("_rr")
     ).filter(pl.col("_rr") <= rmom_quantile)
     present = [f for f in feature_set if f in k.columns]
     k = k.with_columns(
-        [((pl.col(f).rank().over("ts_ms") - 1) / (pl.len().over("ts_ms") - 1)).alias(f"_n_{f}") for f in present]
+        [((pl.col(f).rank().over("ts_ms") - 1) / _rank_denom).alias(f"_n_{f}") for f in present]
     )
     k = k.with_columns(pl.mean_horizontal([pl.col(f"_n_{f}") for f in present]).alias("composite"))
     k = k.with_columns(
@@ -462,11 +563,22 @@ def _round_trip_bps(
 
 
 def _market_daily_returns(klines: pl.DataFrame) -> dict[int, float]:
-    """Equal-weight cross-sectional mean daily return per day-floored ts (the alt-market regime gate)."""
+    """Equal-weight cross-sectional mean daily return per day-floored ts (the alt-market regime gate).
+
+    The value for day D is D's FULL-day close-to-close return (known only at D's
+    final bar). The entry gate consumes it with a one-day causal lag (reads day
+    D-1 for an entry on day D), so an intraday entry never reads its own day's
+    not-yet-realised return.
+    """
+    # audit2c: gap-aware 1-day return. A plain shift(1).over("symbol") pairs a symbol's
+    # Nth PRESENT day, so across a delist/relist or archive gap it mislabels a multi-day
+    # close-to-close move as that day's 1-day return, biasing the equal-weight market
+    # regime gate. calendar_shift nulls the return on a post-gap day (it is excluded from
+    # the cross-sectional mean) and is byte-identical for a contiguous daily series.
     dc = (
         klines.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day"))
         .group_by(["symbol", "day"]).agg(pl.col("close").last().alias("c")).sort(["symbol", "day"])
-        .with_columns((pl.col("c") / pl.col("c").shift(1).over("symbol") - 1.0).alias("r"))
+        .with_columns((pl.col("c") / calendar_shift(pl.col("c"), 1, time_col="day") - 1.0).alias("r"))
         .group_by("day").agg(pl.col("r").mean().alias("mkt")).drop_nulls()
     )
     return {int(r[0]): float(r[1]) for r in dc.iter_rows()}
@@ -517,6 +629,139 @@ def _entry_vol(close_arr: "np.ndarray", entry_bar: int, window: int = 168, min_n
     return float(np.std(rets)) if rets.size >= min_n else 0.0
 
 
+def _assert_funding_one_per_settlement(funding: pl.DataFrame, *, root: Path) -> None:
+    """Fail loudly if the funding dataset looks like an hourly SNAPSHOT scrape rather than
+    one-row-per-settlement funding history.
+
+    The engine dedups funding by exact stamp (``_funding_lookup`` with no authoritative interval),
+    which is correct ONLY if the parquet holds exactly one row per (symbol, settlement) — true for
+    the canonical full-PIT roots, whose funding comes from the venues' funding-history endpoints
+    (one row per settlement). If a root ever ingested sub-interval SNAPSHOT rows (e.g. an hourly
+    ticker/instruments scrape), exact-stamp dedup would treat every hourly snapshot as a distinct
+    settlement and OVER-charge funding ~Nx — which for a SHORT book FLATTERS returns (more credit).
+    We cannot trust the stored ``funding_interval_min`` to *bucket* (Binance hardcodes it to 8h, so
+    a real 4h alt would be under-counted — the 2026-06-03 regression), but we CAN use it as the
+    expected settlement cadence to detect over-sampling: if a symbol's observed median stamp spacing
+    is materially FINER than its declared interval, the rows are snapshots, not settlements. The
+    dedup itself stays exact-stamp; this only refuses to silently mis-charge a malformed root.
+    See cost-funding-5."""
+    if (
+        funding.is_empty()
+        or "funding_interval_min" not in funding.columns
+        or "symbol" not in funding.columns
+        or "ts_ms" not in funding.columns
+    ):
+        return
+    # Per symbol: declared interval (modal stored value) vs observed median spacing of distinct stamps.
+    spacing = (
+        funding.select("symbol", "ts_ms", "funding_interval_min")
+        .drop_nulls()
+        .filter(pl.col("funding_interval_min") > 0)
+        .unique(["symbol", "ts_ms"])
+        .sort(["symbol", "ts_ms"])
+        .with_columns((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")).alias("_gap_ms"))
+        .drop_nulls("_gap_ms")
+        .filter(pl.col("_gap_ms") > 0)
+        .group_by("symbol")
+        .agg(
+            pl.col("_gap_ms").median().alias("_median_gap_ms"),
+            pl.col("funding_interval_min").median().alias("_declared_min"),
+            pl.len().alias("_n_gaps"),
+        )
+        # Need enough stamps for the median to be meaningful, and only flag when the observed cadence
+        # is < half the declared interval (clear over-sampling, not last-stamp jitter).
+        .filter(pl.col("_n_gaps") >= 4)
+        .filter(pl.col("_median_gap_ms") * 2 < pl.col("_declared_min") * 60_000)
+    )
+    if not spacing.is_empty():
+        bad = spacing.sort("symbol").head(3)
+        examples = ", ".join(
+            f"{s} (median gap {int(g) // 60_000}min vs declared {int(d)}min)"
+            for s, g, d, _ in bad.iter_rows()
+        )
+        raise RuntimeError(
+            f"funding dataset under {root} looks like an hourly SNAPSHOT scrape, not one-row-per-"
+            f"settlement funding history: {int(spacing.height)} symbol(s) sample finer than their "
+            f"declared settlement interval (e.g. {examples}). Exact-stamp dedup would OVER-charge "
+            f"funding (~Nx) and flatter a short book. Rebuild funding from the funding-history "
+            f"endpoint (download-data), not a ticker/instruments scrape."
+        )
+
+
+def _build_lifecycle_config(config: ContinuousEventConfig) -> TradeLifecycleConfig:
+    """Translate the continuous-event config into the daily engine's exit-ladder config.
+
+    The exit ladder is inherited from the daily engine and is off unless the config sets it.
+    Pure; lifted verbatim out of `_run_trades` so the setup reads in one place."""
+    return TradeLifecycleConfig(
+        start_date=config.start_date, end_date=config.end_date,
+        hold_days=max(1, round(config.hold_hours / 24)), take_profit_pct=max(config.take_profit_pct, 0.0),
+        failed_fade_exit_hours=config.failed_fade_hours,
+        failed_fade_loss_pct=config.failed_fade_loss_pct,
+        failed_fade_min_mfe_pct=config.failed_fade_min_mfe_pct,
+        failed_fade_close_location_min=0.0 if config.failed_fade_hours > 0 else 1.0,
+        breakeven_arm_pct=config.breakeven_arm_pct,
+        mfe_giveback_trigger_pct=config.mfe_giveback_trigger_pct,
+        mfe_giveback_retain_pct=config.mfe_giveback_retain_pct,
+        side_mode="long_low_short_high",
+        rank_exit_enabled=config.rank_exit_threshold > 0.0,
+        rank_exit_threshold=config.rank_exit_threshold,
+        hash_exit_prob=config.hash_exit_prob,
+    )
+
+
+def _compute_size_and_stop(
+    config: ContinuousEventConfig,
+    close_arr: Any,
+    entry_bar: int,
+    *,
+    base_nw: float,
+    inverse_vol: bool,
+    clamp: float,
+    regime_size_mult: float,
+    stop_pct: float | None,
+) -> tuple[float, float | None]:
+    """Per-trade notional weight (flat or inverse-vol, then x regime size mult) and the effective
+    stop (k * trailing hourly vol clamped to [0.05, 0.50] when stop_vol_mult>0, else the fixed
+    stop). Pure; arithmetic expressions preserved verbatim so float ordering is identical to the
+    prior inline form."""
+    nw = base_nw
+    if inverse_vol:
+        rv = _entry_vol(close_arr, int(entry_bar))
+        mult = min(max(config.target_vol_per_name / rv, 1.0 / clamp), clamp) if rv > 0 else 1.0
+        nw = base_nw * mult
+    nw *= regime_size_mult
+    trade_stop = stop_pct
+    if config.stop_vol_mult > 0.0:
+        sv = _entry_vol(close_arr, int(entry_bar))
+        trade_stop = min(max(config.stop_vol_mult * sv, 0.05), 0.50) if sv > 0 else stop_pct
+    return nw, trade_stop
+
+
+def _plan_exit(
+    *,
+    state_mode: bool,
+    spell_end: int,
+    entry_bar_end: int,
+    delay_ms: int,
+    max_hold_ms: int,
+    hold_ms: int,
+) -> int:
+    """Planned exit ts. State exit: cover when the name has left D9. spell_end is the last in-decile
+    hour (bar START), so spell_end + delay_ms (= +2h at entry_delay=1) is the close of the FIRST bar
+    the name is out of D9 — the same close at which "left-decile" becomes known. This close-on-
+    detection fill is INTENTIONAL and causal (deciding at a bar's close and filling at that close is
+    the convention every early-exit path in _simulate_indexed_trade uses for stop/TP/rank). It is
+    mildly asymmetric with the +1h entry gap, but the live book exits FASTER (tick-driven
+    left_decile / protective covers), so the backtest exit is not optimistic relative to live
+    (pit-engine-4). Clamped to >= entry+1h so a same-bar spell still holds at least one bar, and
+    capped at max_hold. Fixed-timer mode just holds hold_ms."""
+    if state_mode:
+        planned_exit = min(int(spell_end) + delay_ms, entry_bar_end + max_hold_ms)
+        return max(planned_exit, entry_bar_end + MS_PER_HOUR)
+    return entry_bar_end + hold_ms
+
+
 def _run_trades(
     entries: pl.DataFrame,
     symbol_bars: dict[str, Any],
@@ -527,6 +772,7 @@ def _run_trades(
     rank_lookup: dict[tuple[str, int], float] | None = None,
     candidate_sink: list[dict[str, Any]] | None = None,
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
+    listing_ts_by_symbol: dict[str, int] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
     (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
@@ -542,21 +788,7 @@ def _run_trades(
     if entries.is_empty():
         return _empty_trades(), {}
     # Exit ladder inherited from the daily engine (off unless the config sets them).
-    lifecycle = TradeLifecycleConfig(
-        start_date=config.start_date, end_date=config.end_date,
-        hold_days=max(1, round(config.hold_hours / 24)), take_profit_pct=max(config.take_profit_pct, 0.0),
-        failed_fade_exit_hours=config.failed_fade_hours,
-        failed_fade_loss_pct=config.failed_fade_loss_pct,
-        failed_fade_min_mfe_pct=config.failed_fade_min_mfe_pct,
-        failed_fade_close_location_min=0.0 if config.failed_fade_hours > 0 else 1.0,
-        breakeven_arm_pct=config.breakeven_arm_pct,
-        mfe_giveback_trigger_pct=config.mfe_giveback_trigger_pct,
-        mfe_giveback_retain_pct=config.mfe_giveback_retain_pct,
-        side_mode="long_low_short_high",
-        rank_exit_enabled=config.rank_exit_threshold > 0.0,
-        rank_exit_threshold=config.rank_exit_threshold,
-        hash_exit_prob=config.hash_exit_prob,
-    )
+    lifecycle = _build_lifecycle_config(config)
     base_nw = config.notional_weight
     inverse_vol = config.sizing_mode == "inverse_vol"
     clamp = max(config.vol_weight_clamp, 1.0)
@@ -581,28 +813,17 @@ def _run_trades(
     last_entry: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
     btc_gate = config.btc_trend_gate
-    if btc_gate not in ("off", "uptrend", "downtrend", "uptrend_capped", "soft3"):
+    if btc_gate not in ("off", "uptrend", "downtrend"):
         raise ValueError(
-            "btc_trend_gate must be 'off', 'uptrend', 'downtrend', 'uptrend_capped', or 'soft3'; "
-            f"got {btc_gate!r}"
+            f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}"
         )
     skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
-    skipped_crowding = skipped_soft3_quintile = 0
+    skipped_crowding = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
     turns = entries["turnover_quote"].to_list()
     spell_ends = entries["spell_end_ts"].to_list() if "spell_end_ts" in entries.columns else tss
-    # soft3: per-signal-ts top-quintile composite threshold over the fresh-candidate pool
-    # (>= keeps ties; a singleton pool keeps its only candidate).
-    soft3_q80: dict[int, float] = {}
-    if btc_gate == "soft3":
-        by_ts: dict[int, list[float]] = {}
-        for ts_i, comp_i in zip(tss, comps):
-            if comp_i is not None and np.isfinite(float(comp_i)):
-                by_ts.setdefault(int(ts_i), []).append(float(comp_i))
-        for ts_i, vals in by_ts.items():
-            soft3_q80[ts_i] = float(np.quantile(np.asarray(vals), 0.8))
     def _emit(
         reason: str,
         *,
@@ -673,10 +894,20 @@ def _run_trades(
             continue
         close_arr = bars["close"]
         # --- inherited selection gates (squeeze-defense) ---
-        if age_min_ms > 0 and (entry_bar_end - int(bars["bar_end_ts_ms"][0])) < age_min_ms:
-            _emit("age", entry_bar_end=entry_bar_end, active_count=len(active))
-            skipped_gate += 1
-            continue
+        if age_min_ms > 0:
+            # Age against the symbol's AUTHORITATIVE PIT listing (first-ever bar under the root),
+            # NOT the first bar of the padded read window. The window's first bar is clamped to
+            # start_ms - pad_back, so a symbol genuinely listed long before the run would otherwise
+            # appear exactly pad_back old at the window start and be wrongly age-gated near every
+            # backtest edge — diverging from the live demo, which ages off universe.listing_age_days
+            # (Bybit launchTime). Falls back to the loaded first bar only when no listing is known.
+            listing_ts = (listing_ts_by_symbol or {}).get(sym)
+            if listing_ts is None:
+                listing_ts = int(bars["bar_end_ts_ms"][0])
+            if (entry_bar_end - int(listing_ts)) < age_min_ms:
+                _emit("age", entry_bar_end=entry_bar_end, active_count=len(active))
+                skipped_gate += 1
+                continue
         regime_size_mult = 1.0
         if btc_gate != "off":
             trend = (btc_trend_daily or {}).get((int(sig_ts) // MS_PER_DAY) * MS_PER_DAY)
@@ -693,28 +924,6 @@ def _run_trades(
                 _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
-            if btc_gate == "uptrend_capped" and not (0.0 < trend <= config.btc_trend_euphoria_cap):
-                _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
-                skipped_btc_trend += 1
-                continue
-            if btc_gate == "soft3":
-                if trend > config.btc_trend_euphoria_cap:
-                    _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
-                    skipped_btc_trend += 1
-                    continue
-                if trend <= 0.0:
-                    thr = soft3_q80.get(int(sig_ts))
-                    comp_v = float(comp) if comp is not None else float("-inf")
-                    if thr is None or comp_v < thr:
-                        _emit(
-                            "soft3_quintile",
-                            entry_bar_end=entry_bar_end,
-                            active_count=len(active),
-                            regime_trend=cand_trend,
-                        )
-                        skipped_soft3_quintile += 1
-                        continue
-                    regime_size_mult = config.btc_soft3_size_frac
         if decel_h > 0 and entry_bar - decel_h >= 0:
             base_px = float(close_arr[entry_bar - decel_h])
             recent_ret = (float(close_arr[entry_bar]) / base_px - 1.0) if base_px > 0 else 0.0
@@ -723,34 +932,33 @@ def _run_trades(
                 skipped_gate += 1
                 continue
         if config.market_min_ret_1d > -1.0 and market_daily is not None:
-            mkt = market_daily.get((entry_bar_end // MS_PER_DAY) * MS_PER_DAY)
+            # Causal: read the PRIOR completed day's market return, NOT the entry
+            # day's own full-day close-to-close return (which only realises at the
+            # entry day's final bar and is future data at an intraday entry).
+            # Mirrors the current-day exclusion in _btc_trend_returns.
+            entry_day = (entry_bar_end // MS_PER_DAY) * MS_PER_DAY
+            mkt = market_daily.get(entry_day - MS_PER_DAY)
             if mkt is not None and mkt < config.market_min_ret_1d:   # short into a weak tape = squeeze risk
                 _emit("market", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
-        # --- sizing ---
-        nw = base_nw
-        if inverse_vol:
-            rv = _entry_vol(close_arr, int(entry_bar))
-            mult = min(max(config.target_vol_per_name / rv, 1.0 / clamp), clamp) if rv > 0 else 1.0
-            nw = base_nw * mult
-        nw *= regime_size_mult
+        # --- sizing + stop + exit planning (verbatim logic, extracted to helpers) ---
+        nw, trade_stop = _compute_size_and_stop(
+            config, close_arr, int(entry_bar),
+            base_nw=base_nw, inverse_vol=inverse_vol, clamp=clamp,
+            regime_size_mult=regime_size_mult, stop_pct=stop_pct,
+        )
         # W5 Stage 5 sizing hook (default None -> byte-identical): a per-entry, causal,
         # gross-neutral notional multiplier keyed by (symbol, signal_ts). Applied AFTER all
         # selection gates, so entries/breadth/exits are unchanged; resize/impact cost is
-        # recomputed at the new size by _round_trip_bps below.
+        # recomputed at the new size by _round_trip_bps below. trade_stop is independent of nw,
+        # so applying the multiplier after _compute_size_and_stop is numerically identical.
         if size_mult_lookup is not None:
             nw *= float(size_mult_lookup.get((sym, int(sig_ts)), 1.0))
-        # vol-scaled stop (default off): k * trailing hourly vol, clamped; else the fixed stop_pct.
-        trade_stop = stop_pct
-        if config.stop_vol_mult > 0.0:
-            sv = _entry_vol(close_arr, int(entry_bar))
-            trade_stop = min(max(config.stop_vol_mult * sv, 0.05), 0.50) if sv > 0 else stop_pct
-        if state_mode:
-            planned_exit = min(int(spell_end) + delay_ms, entry_bar_end + max_hold_ms)
-            planned_exit = max(planned_exit, entry_bar_end + MS_PER_HOUR)
-        else:
-            planned_exit = entry_bar_end + hold_ms
+        planned_exit = _plan_exit(
+            state_mode=state_mode, spell_end=int(spell_end), entry_bar_end=entry_bar_end,
+            delay_ms=delay_ms, max_hold_ms=max_hold_ms, hold_ms=hold_ms,
+        )
         trade = _simulate_indexed_trade(
             symbol=sym, side=config.side, score=float(comp) if comp is not None else 0.0,
             rank=int(config.decile), basket_id=_iso_day(entry_bar_end), signal_ts_ms=int(sig_ts),
@@ -787,7 +995,6 @@ def _run_trades(
         "skipped_breaker": skipped_breaker,
         "skipped_btc_trend": skipped_btc_trend,
         "skipped_crowding": skipped_crowding,
-        "skipped_soft3_quintile": skipped_soft3_quintile,
     }
     if not rows:
         return _empty_trades(), skips
@@ -820,19 +1027,14 @@ def _additive_equity(trades: pl.DataFrame) -> pl.DataFrame:
 
 
 def _additive_summary(trades: pl.DataFrame, config: ContinuousEventConfig) -> dict[str, Any]:
-    import statistics as st
-
     equity = _additive_equity(trades)
+    # Headline DD/MAR/Sharpe/return metrics come from the shared `_daily_pnl_metrics` helper
+    # (single source of truth — see code-quality-6: a divergent second copy would silently
+    # report a different number for the same sleeve). Only the additive-specific split is local.
+    base = _daily_pnl_metrics(equity)
     if equity.is_empty():
-        return {"n_trades": 0, "total_return": 0.0, "annualized_return": 0.0, "max_drawdown": 0.0,
-                "mar": None, "sharpe_like": 0.0, "worst_day_return": 0.0}
+        return {"n_trades": 0, **base}
     pnl = equity["basket_return"].to_list()
-    total = float(equity["equity"][-1] - 1.0)
-    maxdd = float(equity["drawdown"].min())          # <= 0, in return units
-    ts = equity["ts_ms"]
-    years = max((int(ts[-1]) - int(ts[0])) / (365.25 * MS_PER_DAY), 1e-9)
-    ann = total / years
-    sharpe = (st.mean(pnl) / st.pstdev(pnl) * (365 ** 0.5)) if len(pnl) > 2 and st.pstdev(pnl) > 0 else 0.0
     split_ms = _date_str_to_ms(config.split_date)
     funding_modes = set(str(m) for m in trades["funding_mode"].to_list()) if "funding_mode" in trades.columns else set()
     fmode = "missing" if (not funding_modes or funding_modes == {"missing"}) else (
@@ -841,12 +1043,7 @@ def _additive_summary(trades: pl.DataFrame, config: ContinuousEventConfig) -> di
     comp = float((pl.Series([p + 1.0 for p in pnl]).cum_prod()[-1]) - 1.0) if pnl else 0.0
     return {
         "n_trades": int(trades.height),
-        "total_return": total,
-        "annualized_return": ann,
-        "max_drawdown": maxdd,
-        "mar": (ann / abs(maxdd)) if abs(maxdd) > 1e-9 else None,
-        "sharpe_like": sharpe,
-        "worst_day_return": float(min(pnl)) if pnl else 0.0,
+        **base,
         "win_rate": float((trades["net_return"] > 0.0).mean()),
         "gross_return": float(trades["gross_return"].sum()),
         "cost_return": float(trades["cost_return"].sum()),
@@ -860,8 +1057,6 @@ def _additive_summary(trades: pl.DataFrame, config: ContinuousEventConfig) -> di
 
 def _daily_pnl_metrics(equity: pl.DataFrame) -> dict[str, Any]:
     """MAR/Sharpe/DD from any daily PnL series (cols: ts_ms, equity, drawdown, basket_return)."""
-    import statistics as st
-
     if equity.is_empty():
         return {"total_return": 0.0, "annualized_return": 0.0, "max_drawdown": 0.0, "mar": None,
                 "sharpe_like": 0.0, "worst_day_return": 0.0}
@@ -871,7 +1066,8 @@ def _daily_pnl_metrics(equity: pl.DataFrame) -> dict[str, Any]:
     ts = equity["ts_ms"]
     years = max((int(ts[-1]) - int(ts[0])) / (365.25 * MS_PER_DAY), 1e-9)
     ann = total / years
-    sharpe = (st.mean(pnl) / st.pstdev(pnl) * (365 ** 0.5)) if len(pnl) > 2 and st.pstdev(pnl) > 0 else 0.0
+    # metrics-3: one shared Sharpe convention (ddof=1, sqrt(365.25)) across all reports.
+    sharpe = annualized_sharpe(pnl)
     return {"total_return": total, "annualized_return": ann, "max_drawdown": maxdd,
             "mar": (ann / abs(maxdd)) if abs(maxdd) > 1e-9 else None,
             "sharpe_like": sharpe, "worst_day_return": float(min(pnl)) if pnl else 0.0}
@@ -1030,9 +1226,17 @@ def run_continuous_event_research(
         entries = _apply_entry_order(entries, entry_order)
 
     kname = _autodetect_dataset_names(root)["klines_dataset"]
-    start_ms, end_ms = _date_str_to_ms(config.start_date), _date_str_to_ms(config.end_date)
+    start_ms, end_ms = _date_str_to_ms(config.start_date), _resolve_end_ms(root, config)
     pad_fwd = (config.hold_hours + config.entry_delay_hours + 4) * MS_PER_HOUR
-    pad_back_days = max(31 if config.btc_trend_gate != "off" else 0, max(config.age_days_min, 0))
+    # audit2c: also reserve >=2 warmup days when the equal-weight market gate is on, so the
+    # gate's one-day-lagged daily market return is available from the window's first day
+    # instead of failing OPEN (allowing entries) for the first ~2 days. The btc-trend gate
+    # already reserves 31d, so this only bites a btc_trend_gate=off + market_min_ret config.
+    pad_back_days = max(
+        31 if config.btc_trend_gate != "off" else 0,
+        max(config.age_days_min, 0),
+        2 if config.market_min_ret_1d > -1.0 else 0,
+    )
     pad_back = pad_back_days * MS_PER_DAY
     klines = _read_window(
         root, kname, start_ms=start_ms - pad_back, end_ms=end_ms + pad_fwd,
@@ -1046,6 +1250,7 @@ def run_continuous_event_research(
     if config.use_funding:
         fname = _autodetect_dataset_names(root)["funding_dataset"]
         funding = _read_window(root, fname, start_ms=start_ms - 10 * MS_PER_DAY, end_ms=end_ms + pad_fwd)
+        _assert_funding_one_per_settlement(funding, root=root)
         funding_lookup = _funding_lookup(funding)
 
     market_daily = None
@@ -1060,11 +1265,16 @@ def run_continuous_event_research(
     if config.rank_exit_threshold > 0.0 and not panel.is_empty():
         rank_lookup = _continuous_rank_lookup(panel, delay_ms=(1 + config.entry_delay_hours) * MS_PER_HOUR)
 
+    # Authoritative per-symbol PIT listing (first-ever bar under the root), read independently of the
+    # run window so the age gate does not infer listing from the clamped window start (pit-engine-2).
+    listing_ts_by_symbol = _listing_ts_by_symbol(root) if config.age_days_min > 0 else None
+
     candidate_sink: list[dict[str, Any]] | None = [] if candidate_tape_path is not None else None
     if not entries.is_empty() and symbol_bars:
         trades, skips = _run_trades(
             entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup,
             candidate_sink=candidate_sink, size_mult_lookup=size_mult_lookup,
+            listing_ts_by_symbol=listing_ts_by_symbol,
         )
     else:
         trades, skips = _empty_trades(), {}

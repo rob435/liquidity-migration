@@ -38,7 +38,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_roll, calendar_shift, date_ms, pct
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_roll, calendar_shift, date_ms, is_weekend_ms, pct
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .momentum_signals import daily_bars, add_returns_and_age
 from .run_diagnostics import diagnose, is_tainted, render
@@ -349,7 +349,11 @@ class LongNativeConfig:
     cost_multiplier: float = 3.0
 
     # --- gates ---
-    require_pit_membership: bool = True
+    # pit-data-1: the former `require_pit_membership` flag was inert (read by no
+    # logic — only ever set). Per-(trading-day, symbol) tradability is already
+    # enforced implicitly by full-PIT klines + the PIT-causal universe gate, so
+    # the flag was a methodology trap (a phantom gate a future edit could trust).
+    # Removed; `require_full_pit_universe` is the live universe-completeness gate.
     require_full_pit_universe: bool = True
 
     # --- reporting ---
@@ -717,7 +721,8 @@ def run_long_native_research(
         "summary": summary, "lifecycle": lifecycle_stats, "splits": splits, "promotion": promotion,
         "event_counts": event_counts,
         "run_label": _run_label(full_pit_universe_pass=full_pit_universe_pass, funding_mode=funding_mode,
-                                 archive_manifest_empty=archive_manifest.is_empty()),
+                                 archive_manifest_empty=archive_manifest.is_empty(),
+                                 funding_modeled_fraction=float(summary.get("funding_modeled_fraction", 1.0))),
         "warnings": [w.as_dict() for w in warnings],
         "tainted": is_tainted(warnings),
         "equity_chart": chart_metadata,
@@ -863,7 +868,18 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
             ).over("symbol").alias("own_atr_quantile_90d"),
     ])
 
-    # universe rank by today's volume (descending)
+    # universe rank by today's volume (descending).
+    # CONTRACT (long-sleeve-2): the rank DENOMINATOR is whatever symbol set is
+    # present in the klines passed to build_long_features. In the BACKTEST that is
+    # the full per-venue PIT root (hundreds of names); in LIVE it is only the
+    # universe superset the demo cycle fetched (rank_end=universe_superset_size).
+    # The FC gate `today_volume_rank <= fc_top_volume_rank_max` therefore compares
+    # against different denominators live vs backtest, so a name ranked just inside
+    # the cutoff on the superset can fall outside it on the full universe (and
+    # vice-versa). Boundary flips are rare (the superset is turnover-ordered) but
+    # NOT guaranteed identical — keep the live superset wide enough that the
+    # top-`fc_top_volume_rank_max` set is provably stable, and surface a telemetry
+    # line whenever a fired FC candidate's rank is within a margin of the cutoff.
     daily = daily.with_columns(
         pl.col("turnover_quote").rank(method="ordinal", descending=True).over("ts_ms").alias("today_volume_rank")
     )
@@ -1082,10 +1098,30 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
 
     # positioning metrics (binance.vision): top-trader vs retail L/S ratio, taker flow, OI.
     # Build a cross-sectional factor score per config.metrics_factor, then rank in-universe.
-    if metrics is not None and not metrics.is_empty() and "global_lsr" in metrics.columns:
-        m = metrics.sort(["symbol", "ts_ms"]).with_columns(
-                (pl.col("oi") / calendar_shift(pl.col("oi"), 7) - 1.0).alias("oi_chg7_m")
-        ).select(["ts_ms", "symbol", "toptrader_lsr", "global_lsr", "taker_lsr", "oi_chg7_m"])
+    # audit2c ([13]): snap the metrics frame to the SAME day-end grid funding/OI use BEFORE
+    # calendar_shift and the join. The raw metrics ts_ms is intraday (5m/hourly), so the old
+    # un-snapped form left oi_chg7_m silently null (calendar_shift finds no exact 7-day
+    # partner) AND missed the daily (ts_ms, symbol) join entirely. Also require ALL columns
+    # the block reads (not just global_lsr): a partial metrics frame now falls back to null
+    # metrics via the else branch instead of raising a ColumnNotFoundError downstream.
+    _metrics_cols = {"global_lsr", "toptrader_lsr", "taker_lsr", "oi"}
+    if metrics is not None and not metrics.is_empty() and _metrics_cols.issubset(set(metrics.columns)):
+        m = (
+            metrics.select(["ts_ms", "symbol", "toptrader_lsr", "global_lsr", "taker_lsr", "oi"])
+            .with_columns(((pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)) + MS_PER_DAY).alias("ts_ms_day_end"))
+            .sort(["symbol", "ts_ms"])
+            .group_by(["symbol", "ts_ms_day_end"], maintain_order=True)
+            .agg([
+                pl.col("toptrader_lsr").last(),
+                pl.col("global_lsr").last(),
+                pl.col("taker_lsr").last(),
+                pl.col("oi").last(),
+            ])
+            .rename({"ts_ms_day_end": "ts_ms"})
+            .sort(["symbol", "ts_ms"])
+            .with_columns((pl.col("oi") / calendar_shift(pl.col("oi"), 7) - 1.0).alias("oi_chg7_m"))
+            .select(["ts_ms", "symbol", "toptrader_lsr", "global_lsr", "taker_lsr", "oi_chg7_m"])
+        )
         daily = daily.join(m, on=["ts_ms", "symbol"], how="left")
         factor = config.metrics_factor
         if factor == "global_lsr_low":
@@ -1905,7 +1941,7 @@ def _run_long_pipeline(
                     config, _safe_float(row_prev.get("btc_rv_30")))
                 if config.enable_dd_throttle and dd_cur <= config.dd_throttle_trigger:
                     position_weight = position_weight * config.dd_throttle_scale
-                if config.weekend_size_mult != 1.0 and ((int(trig_ts) // MS_PER_DAY) + 3) % 7 >= 5:
+                if config.weekend_size_mult != 1.0 and is_weekend_ms(int(trig_ts)):
                     position_weight = position_weight * config.weekend_size_mult
                 if config.max_per_symbol_weight > 0.0:
                     effective_gross = notional_weight * position_weight
@@ -2101,6 +2137,14 @@ def _run_long_pipeline(
                         continue
                     entry_ts_ms = deadline_ts
                     entry_idx = deadline_idx
+            # audit2c: the sniper retrace OVERRODE entry_ts_ms (fired or deadline) AFTER the
+            # window-boundary check above. Every other entry path refuses an entry past the
+            # research window end, but the FIRED sniper branch did not re-check it, so a
+            # retrace firing past config.end_date entered the book. Re-enforce here (a no-op
+            # for the already-checked non-sniper / deadline paths).
+            if window_end_ts_ms is not None and entry_ts_ms > window_end_ts_ms:
+                stats["skipped_no_entry_bar"] += 1
+                continue
             entry_price = float(bars["close"][entry_idx])
             if not math.isfinite(entry_price) or entry_price <= 0.0:
                 stats["skipped_no_entry_bar"] += 1
@@ -2138,7 +2182,7 @@ def _run_long_pipeline(
                 position_weight = position_weight * config.dd_throttle_scale
 
             # TA1 weekend lead (operator-directed): tilt Sat/Sun entries.
-            if config.weekend_size_mult != 1.0 and ((int(entry_ts_ms) // MS_PER_DAY) + 3) % 7 >= 5:
+            if config.weekend_size_mult != 1.0 and is_weekend_ms(int(entry_ts_ms)):
                 position_weight = position_weight * config.weekend_size_mult
 
             # B.3: per-symbol weight cap on final gross exposure. This must bind
@@ -2307,6 +2351,16 @@ def _split_rows(
 
 SHARPE_PROMOTION_THRESHOLD = 0.7  # Daily-aligned honest Sharpe; whole-period gate.
 
+# cost-funding-3: a 'partial' funding book passes the funding_mode!='missing'
+# check even when a large slice of notional was charged ZERO funding (symbols
+# absent from the funding dataset read funding_mode=='missing' per trade). The
+# notional-weighted funding_modeled_fraction (emitted by
+# summarize_trade_backtest) distinguishes a coverage-edge partial (one newly
+# listed alt) from a book where much of the notional is funding-free. Require at
+# least this fraction of traded notional to be fully funding-modeled to promote;
+# below it, down-label rather than silently undercharge funding.
+FUNDING_MODELED_FRACTION_THRESHOLD = 0.95
+
 
 def _cal_roll(
     expr: pl.Expr,
@@ -2338,7 +2392,13 @@ def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass
     """
     whole_sharpe = float(summary.get("sharpe_like", 0.0))
     max_dd = float(summary.get("max_drawdown", 0.0))
-    funding_ok = funding_mode != "missing"
+    # cost-funding-3: gate on the notional-weighted modeled fraction, not just the
+    # 3-state collapse. Absent (older callers/empty-book summaries) defaults to 1.0
+    # so this never invents a NEW failure when the signal is unavailable; the
+    # all-missing book is still caught by funding_mode=='missing'.
+    funding_modeled_fraction = float(summary.get("funding_modeled_fraction", 1.0))
+    funding_coverage_ok = funding_modeled_fraction >= FUNDING_MODELED_FRACTION_THRESHOLD
+    funding_ok = funding_mode != "missing" and funding_coverage_ok
     splits_with_baskets = [r for r in splits if r["basket_count"] > 0]
     all_pos = bool(splits_with_baskets) and all(r["total_return"] > 0 for r in splits_with_baskets)
     avg_split_sharpe = (
@@ -2354,8 +2414,12 @@ def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass
         reasons.append("max_drawdown_too_deep")
     if whole_sharpe < SHARPE_PROMOTION_THRESHOLD:
         reasons.append("whole_period_sharpe_below_threshold")
-    if not funding_ok:
+    if funding_mode == "missing":
         reasons.append("funding_missing")
+    elif not funding_coverage_ok:
+        # Distinguish a coverage-edge partial (passes) from a book where too much
+        # notional was charged zero funding (fails) — cost-funding-3.
+        reasons.append("funding_coverage_below_threshold")
     if splits_with_baskets and not all_pos:
         reasons.append("not_all_splits_positive")
 
@@ -2371,6 +2435,8 @@ def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass
         "whole_period_sharpe": whole_sharpe,
         "max_drawdown": max_dd,
         "funding_mode": funding_mode,
+        "funding_modeled_fraction": funding_modeled_fraction,
+        "funding_coverage_threshold": FUNDING_MODELED_FRACTION_THRESHOLD,
         "sharpe_threshold": SHARPE_PROMOTION_THRESHOLD,
         "splits_with_baskets": len(splits_with_baskets),
         "all_splits_positive": all_pos,
@@ -2394,7 +2460,13 @@ def _monthly_returns(baskets: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _run_label(*, full_pit_universe_pass: bool, funding_mode: str, archive_manifest_empty: bool) -> str:
+def _run_label(
+    *,
+    full_pit_universe_pass: bool,
+    funding_mode: str,
+    archive_manifest_empty: bool,
+    funding_modeled_fraction: float = 1.0,
+) -> str:
     if archive_manifest_empty:
         return "pit_required_missing_manifest"
     if not full_pit_universe_pass:
@@ -2402,6 +2474,12 @@ def _run_label(*, full_pit_universe_pass: bool, funding_mode: str, archive_manif
     if funding_mode == "missing":
         return "full_pit_universe_funding_missing"
     if funding_mode == "partial":
+        # cost-funding-3: split the single 'partial' label so a coverage-edge book
+        # (one funding-free alt) is distinguished from one where too much notional
+        # was charged zero funding. Defaults to 1.0 so callers that don't pass the
+        # fraction keep the prior coverage-OK label.
+        if funding_modeled_fraction < FUNDING_MODELED_FRACTION_THRESHOLD:
+            return "full_pit_universe_funding_coverage_low"
         return "full_pit_universe_funding_partial"
     return "full_pit_universe"
 

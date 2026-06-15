@@ -86,6 +86,13 @@ class KlineStreamManager:
     bootstrap_completion_threshold: float = 0.95
     bootstrap_timeout_seconds: float = 1200.0
     bootstrap_max_attempts_per_symbol: int = 2
+    # Per-IP REST budget the bootstrap (and cycle REST fallback) must stay under.
+    # get_klines paginates: a >1000-bar lookback issues 2+ HTTP calls per symbol,
+    # so the limiter has to be wired into the market client (one acquire per HTTP
+    # call), NOT acquired once per symbol — otherwise the effective rate is ~2x the
+    # budget and triggers the 429 storm this exists to prevent (audit ratelimit-rest-1).
+    bootstrap_rest_max_requests: int = 12
+    bootstrap_rest_per_seconds: float = 1.0
     flush_interval_seconds: float = 30.0
     retain_days: int = 90
     interval_minutes: int = 60
@@ -117,6 +124,9 @@ class KlineStreamManager:
     # (legacy timer path / tests).
     _cycle_wake_event: threading.Event | None = field(init=False, repr=False, default=None)
     _max_confirmed_ts_ms: int = field(init=False, repr=False, default=0)
+    # Shared REST limiter wired onto the market client so EACH paginated _get
+    # acquires once (see ratelimit-rest-1). Created in __post_init__.
+    _bootstrap_limiter: BybitRestRateLimiter = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.cache_root = Path(self.cache_root).expanduser()
@@ -138,6 +148,19 @@ class KlineStreamManager:
         self._universe = set()
         self._bootstrap_result = _BootstrapResult()
         self._lock = threading.RLock()
+        # Wire a shared REST rate-limiter onto the market client so every paginated
+        # get_klines HTTP call (not just one-per-symbol) is throttled under the
+        # per-IP budget. The bootstrap market client is built with no limiter
+        # (acquire() would otherwise be a no-op), so the manager owns it. Respect a
+        # limiter the caller already attached, and tolerate a market stub that has
+        # no rate_limiter attribute (test fakes) — the limiter still exists for the
+        # manual-acquire-free contract, it just isn't wired onto a stub client.
+        self._bootstrap_limiter = BybitRestRateLimiter(
+            max_requests=self.bootstrap_rest_max_requests,
+            per_seconds=self.bootstrap_rest_per_seconds,
+        )
+        if getattr(self.market_data, "rate_limiter", "absent") is None:
+            self.market_data.rate_limiter = self._bootstrap_limiter
         if self.pool is None:
             self.pool = BybitKlineStreamPool(
                 interval_minutes=self.interval_minutes,
@@ -257,6 +280,10 @@ class KlineStreamManager:
         """Synchronously re-fetch the universe + diff against the pool.
 
         Exposed for tests and operator-triggered manual refresh."""
+        # audit2b: snapshot the error counter so the empty-set guard below does
+        # not double-count an error _fetch_universe already counted (the default
+        # fetcher increments on its own REST exception path).
+        errors_before_fetch = self._universe_refresh_errors
         new_universe = set(self._fetch_universe())
         # An empty fetch is almost always a transient REST failure (the
         # default fetcher returns [] on exception, the long fetcher
@@ -273,7 +300,12 @@ class KlineStreamManager:
                 "universe refresh returned empty set; keeping existing %d subscriptions",
                 size,
             )
-            self._universe_refresh_errors += 1
+            # audit2b: only count the error here if _fetch_universe did NOT
+            # already count it (default-fetcher REST exception). A custom
+            # fetcher returning [] or a default fetch that simply filters to
+            # empty is still counted exactly once.
+            if self._universe_refresh_errors == errors_before_fetch:
+                self._universe_refresh_errors += 1
             self._last_universe_refresh_ms = _utc_now_ms()
             return {"added": 0, "removed": 0, "size": size}
         with self._lock:
@@ -286,9 +318,17 @@ class KlineStreamManager:
                 self.pool.update_subscriptions(new_universe)
             except Exception as exc:  # noqa: BLE001
                 _logger.exception("pool.update_subscriptions failed: %s", exc)
-        # Bootstrap any newly-added symbols (one REST call each).
+        # Bootstrap any newly-added symbols. Thread the manager's refresh-stop
+        # Event in as the shutdown signal so a SIGTERM mid-refresh-bootstrap (which
+        # sets _refresh_stop in stop()) cancels the in-flight REST worker pool
+        # promptly instead of leaving an orphaned 16-worker pool hammering the
+        # venue for up to bootstrap_timeout_seconds after the daemon believes it
+        # stopped (audit ws-pool-1). This is the one bootstrap path that previously
+        # bypassed the shutdown_event hardening on the start() path.
         if additions:
-            self._bootstrap_universe(additions, label="universe-refresh")
+            self._bootstrap_universe(
+                additions, label="universe-refresh", shutdown_event=self._refresh_stop,
+            )
         self._universe_refreshes += 1
         self._last_universe_refresh_ms = _utc_now_ms()
         return {
@@ -419,10 +459,10 @@ class KlineStreamManager:
             )
             return
         deadline = start + self.bootstrap_timeout_seconds
-        # A separate rate-limiter for bootstrap so it doesn't fight the cycle's
-        # demo rate-limiter at startup; conservative defaults so the bootstrap
-        # uses ~half the per-IP budget.
-        shared_limiter = BybitRestRateLimiter(max_requests=12, per_seconds=1.0)
+        # The shared REST limiter is wired onto the market client (__post_init__),
+        # so each paginated get_klines HTTP call acquires once — bootstrap stays
+        # under the per-IP budget even when a symbol's lookback spans multiple
+        # pages. Conservative defaults use ~half the per-IP budget.
         # Completion threshold is measured against the set ACTUALLY being
         # bootstrapped (``targets``), not the full universe (ws-dataplane-6).
         # On the universe-refresh path ``symbols`` is just the new listings,
@@ -457,7 +497,6 @@ class KlineStreamManager:
                     symbol,
                     start_ms=start_ms,
                     end_ms=end_ms,
-                    shared_limiter=shared_limiter,
                 ): symbol
                 for symbol in targets
             }
@@ -527,13 +566,16 @@ class KlineStreamManager:
         *,
         start_ms: int,
         end_ms: int,
-        shared_limiter: BybitRestRateLimiter,
     ) -> int:
-        """Fetch + insert one symbol's history. Returns bars inserted."""
+        """Fetch + insert one symbol's history. Returns bars inserted.
+
+        Rate-limiting is NOT done here: the shared limiter is wired onto
+        ``self.market_data`` (__post_init__), so each paginated get_klines HTTP
+        call acquires once. A manual acquire-per-symbol under-counted the multi-page
+        fetches and let bootstrap run at ~2x the per-IP budget (ratelimit-rest-1)."""
         last_exc: Exception | None = None
         for attempt in range(max(self.bootstrap_max_attempts_per_symbol, 1)):
             try:
-                shared_limiter.acquire()
                 rows = self.market_data.get_klines(
                     symbol, str(self.interval_minutes), start_ms, end_ms,
                 )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import gzip
 import io
+import logging
 import os
 import ssl
 import subprocess
@@ -21,6 +22,8 @@ import polars as pl
 from ._common import MS_PER_HOUR
 from .ingestion import aggregate_trade_klines_1h, trades_to_frame
 
+
+_logger = logging.getLogger("liquidity_migration.archive")
 
 DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_RETRIES = 5
@@ -41,6 +44,18 @@ class ArchiveFileNotFoundError(LookupError):
     """
 
 
+class ArchiveDownloadIncompleteError(RuntimeError):
+    """A downloaded archive failed an integrity check (truncated body / corrupt
+    container) before it could be promoted to the canonical name.
+
+    archive-integrity-1/-3: ``urlopen(...).read()`` returns whatever arrived on a
+    clean mid-stream socket close WITHOUT raising, so a partial body that happens to
+    end on a valid CSV record boundary would silently become a thin kline day in the
+    full-PIT root (indistinguishable from a low-liquidity day, and the resume guard
+    treats the partition as already-covered). This is a TRANSIENT failure — the caller
+    retries it — distinct from the permanent ArchiveFileNotFoundError (404)."""
+
+
 def _positive_int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -56,11 +71,36 @@ def download_archive_bytes(url: str, *, timeout_seconds: int = DEFAULT_TIMEOUT_S
     context = ssl.create_default_context(cafile=certifi.where())
     try:
         with urlopen(url, timeout=timeout_seconds, context=context) as response:  # noqa: S310 - user-provided research archive URL
-            return response.read()
+            body = response.read()
+            # archive-integrity-1: urlopen(...).read() returns the bytes received on a clean
+            # mid-stream socket close WITHOUT raising, so a truncated body would be promoted
+            # into the canonical full-PIT root as a silently-thin day. When the server
+            # advertised a Content-Length, assert the received count matches it and fail loud
+            # (transient -> the caller retries) rather than accept a short read.
+            expected = _content_length(response)
+            if expected is not None and len(body) != expected:
+                raise ArchiveDownloadIncompleteError(
+                    f"truncated download: got {len(body)} bytes, Content-Length={expected} url={url}"
+                )
+            return body
     except HTTPError as exc:
         if exc.code == 404:
             raise ArchiveFileNotFoundError(url) from exc
         raise
+
+
+def _content_length(response: object) -> int | None:
+    """Parse the response's Content-Length header to an int, or None when absent/unparseable.
+    Used to detect a truncated archive body before it is promoted (archive-integrity-1)."""
+    getheader = getattr(response, "getheader", None)
+    raw = getheader("Content-Length") if callable(getheader) else None
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) -> pl.DataFrame:
@@ -114,8 +154,15 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
     if os.environ.get(ARCHIVE_VECTORIZE_1H_ENV, "").strip().lower() in {"1", "true", "yes"}:
         try:
             return _read_public_trade_archive_klines_1h_vectorized(file_path, symbol=symbol)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - the scalar path below is the correct fallback
+            # code-quality-8: log the swallowed fast-path fault before falling back. The
+            # fallback preserves correctness, but a PERSISTENT vectorized failure (schema
+            # drift, a polars regression, a real parse error) on a builder feeding the
+            # full-PIT roots must be observable, not a silent permanent slow-path.
+            _logger.warning(
+                "archive: vectorized 1h-kline fast path failed for %s, falling back to scalar: %r",
+                file_path, exc,
+            )
     try:
         with _public_trade_text_handle(file_path) as handle:
             reader = csv.DictReader(handle)
@@ -171,7 +218,14 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
             if not bars:
                 return pl.DataFrame()
             return pl.DataFrame(list(bars.values())).sort(["symbol", "ts_ms"])
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - aggregate_trade_klines_1h is the correct fallback
+        # code-quality-8: log the swallowed scalar fast-path fault before falling back to
+        # the read_public_trade_archive + aggregate_trade_klines_1h slow path. Correctness
+        # is preserved, but a persistent fault here must surface rather than run silently.
+        _logger.warning(
+            "archive: scalar 1h-kline fast path failed for %s, falling back to aggregate: %r",
+            file_path, exc,
+        )
         trades = read_public_trade_archive(file_path, symbol=symbol)
         return aggregate_trade_klines_1h(trades)
 
@@ -233,6 +287,40 @@ def _read_public_trade_archive_klines_1h_vectorized(file_path: Path, *, symbol: 
     )
 
 
+def _archive_cache_is_complete(path: Path, *, expected_suffix: str | None = None) -> bool:
+    """archive-integrity-3: cheaply confirm a cached/just-written archive is COMPLETE before
+    it is re-served (or promoted), so the size-only guard cannot make corruption sticky. For a
+    compressed container (.gz/.zip) a clean truncation reliably fails to decompress, so we fully
+    drain it and reject on any error; for a plain .csv we can only confirm non-empty (a truncation
+    on a record boundary is undetectable without a manifest — the download-time Content-Length
+    check in download_archive_bytes is the defense there). Never raises: any failure -> False.
+
+    ``expected_suffix`` overrides ``path.suffix`` for the format decision — required when
+    validating the fresh-download TEMP file, whose ``*.tmp`` name would otherwise skip the
+    gzip/zip drain and be treated as a plain CSV, silently disabling archive-integrity-4."""
+    suffix = expected_suffix if expected_suffix is not None else path.suffix
+    try:
+        if not (path.exists() and path.stat().st_size > 0):
+            return False
+        if suffix == ".gz":
+            with gzip.open(path, "rb") as handle:
+                while handle.read(1024 * 1024):  # drain to the end -> raises on truncation
+                    pass
+            return True
+        if suffix == ".zip":
+            with zipfile.ZipFile(path) as archive:
+                names = [name for name in archive.namelist() if not name.endswith("/")]
+                if len(names) != 1:
+                    return False
+                with archive.open(names[0]) as raw:
+                    while raw.read(1024 * 1024):
+                        pass
+            return True
+        return True  # plain CSV: non-empty is all we can cheaply assert
+    except Exception:  # noqa: BLE001 - a validation failure means "treat as incomplete"
+        return False
+
+
 def download_public_trade_archive(
     url: str,
     destination: str | Path,
@@ -242,7 +330,14 @@ def download_public_trade_archive(
 ) -> Path:
     output = Path(destination)
     if output.exists() and output.stat().st_size > 0:
-        return output
+        # archive-integrity-3: validate the cache hit instead of trusting size alone — a
+        # previously-written partial/corrupt archive must NOT be re-served forever. On a
+        # failed check, unlink and fall through to re-download (the recovery path the
+        # idempotent re-download was always meant to be).
+        if _archive_cache_is_complete(output):
+            return output
+        _logger.warning("archive: cached archive failed integrity check, re-downloading: %s", output)
+        output.unlink(missing_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     retries = retries if retries is not None else _positive_int_env(ARCHIVE_RETRIES_ENV, DEFAULT_RETRIES)
     timeout_seconds = (
@@ -262,8 +357,22 @@ def download_public_trade_archive(
             temp_output = Path(temp_file.name)
         try:
             _download_archive_to_path(url, temp_output, timeout_seconds=timeout_seconds)
-            if output.exists() and output.stat().st_size > 0:
+            if output.exists() and output.stat().st_size > 0 and _archive_cache_is_complete(output):
                 return output
+            # archive-integrity-4: validate the FRESH download before promoting it to the
+            # canonical name. The check above only re-validates a pre-existing cache hit; the
+            # just-downloaded temp body was never gated, so a truncated/corrupt .gz that arrives
+            # without a Content-Length header (the curl backend, or a server omitting it, slips
+            # past the download_archive_bytes guard) would be replace()'d into the full-PIT root
+            # as a silently-thin day. Reject it the same way a corrupt cache is rejected: raise
+            # the TRANSIENT ArchiveDownloadIncompleteError so the loop re-fetches instead of
+            # writing a thin partition. The finally clause unlinks the corrupt temp file.
+            # Validate with the DESTINATION's suffix (.gz/.zip), not the temp's ".tmp"
+            # — else the gzip/zip drain is skipped and a truncated body is accepted.
+            if not _archive_cache_is_complete(temp_output, expected_suffix=output.suffix):
+                raise ArchiveDownloadIncompleteError(
+                    f"fresh download failed integrity check (truncated/corrupt body): {url}"
+                )
             temp_output.replace(output)
             return output
         except ArchiveFileNotFoundError:

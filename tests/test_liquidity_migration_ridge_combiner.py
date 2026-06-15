@@ -98,6 +98,27 @@ def test_nonpositive_lambda_rejected():
         RidgeCombinerConfig(features=FEATURES, lambda_grid=(0.0, 1.0))
 
 
+def test_embargo_must_cover_forward_horizon():
+    """The embargo must be >= forward_horizon + 1 so the newest training target
+    is fully resolved before the first test decision. fwd_ret_3d with the default
+    embargo=2 leaks the test fold into training and must be a hard config error."""
+    with pytest.raises(ValueError, match="embargo"):
+        RidgeCombinerConfig(
+            features=FEATURES,
+            target_col="fwd_ret_3d",
+            walk_forward=WalkForwardConfig(embargo_days=2),
+        )
+    # embargo >= horizon + 1 is accepted (no raise).
+    RidgeCombinerConfig(
+        features=FEATURES,
+        target_col="fwd_ret_3d",
+        walk_forward=WalkForwardConfig(embargo_days=4),
+    )
+    # The house-default fwd_ret_1d with embargo=2 stays valid.
+    RidgeCombinerConfig(features=FEATURES, target_col="fwd_ret_1d",
+                        walk_forward=WalkForwardConfig(embargo_days=2))
+
+
 # --- end-to-end behaviour ---------------------------------------------------
 def test_walk_forward_recovers_known_signal():
     scores, coefs = walk_forward_scores(_panel(), _cfg())
@@ -230,3 +251,47 @@ def test_coefficient_sign_consistency():
     cons = coefficient_sign_consistency(coefs)
     assert cons["a"] == pytest.approx(1.0)  # always positive
     assert cons["b"] == pytest.approx(2 / 3)  # 2 of 3 negative
+
+
+# ---------------------------------------------------------------------------
+# audit2
+# [12] ridge embargo leak guard must not be bypassable by the target name.
+# ---------------------------------------------------------------------------
+
+def test_ridge_embargo_enforced_for_explicit_horizon() -> None:
+    with pytest.raises(ValueError, match="embargo"):
+        RidgeCombinerConfig(
+            features=("a", "b"),
+            target_col="y_5d",
+            forward_horizon=5,
+            walk_forward=WalkForwardConfig(embargo_days=2),
+        )
+    # embargo >= horizon+1 is accepted.
+    RidgeCombinerConfig(
+        features=("a", "b"),
+        target_col="y_5d",
+        forward_horizon=5,
+        walk_forward=WalkForwardConfig(embargo_days=6),
+    )
+
+
+def test_ridge_forwardish_name_without_horizon_is_rejected() -> None:
+    with pytest.raises(ValueError, match="forward"):
+        RidgeCombinerConfig(
+            features=("a", "b"),
+            target_col="forward_return_5d",
+            walk_forward=WalkForwardConfig(embargo_days=2),
+        )
+
+
+def test_ridge_non_forward_target_is_unconstrained() -> None:
+    # A target with no forward-return shape needs no embargo coupling.
+    RidgeCombinerConfig(
+        features=("a", "b"),
+        target_col="alpha_label",
+        walk_forward=WalkForwardConfig(embargo_days=0),
+    )
+
+
+def test_ridge_default_fwd_ret_target_still_works() -> None:
+    RidgeCombinerConfig(features=("a", "b"), target_col="fwd_ret_1d")  # default embargo ok

@@ -297,3 +297,48 @@ def test_build_ledger_position_pnl_snapshot_falls_back_to_ticker_when_no_positio
     )
     assert rows[0]["mark_price"] == pytest.approx(110.0)
 
+
+# --- relocated from test_audit_fix_b04.py (audit bucket b04) -----------------
+# reports-charts-1: a wallet-read outage is surfaced, not masked. (The formatters
+# format_telegram_status_message / _telegram_notification_reason are defined in
+# event_demo_reports and re-exported via event_demo, imported above.)
+
+
+def _status_payload(*, wallet_error: str, equity: float) -> dict:
+    return {
+        "cycle": {
+            "ts_ms": 1_700_000_000_000,
+            "mode": "submit",
+            "equity_usdt": equity,
+            "wallet_error": wallet_error,
+            "entries_executed": 0,
+            "entry_candidates": 0,
+            "exits_executed": 0,
+            "exit_candidates": 0,
+            "position_report_error": "",
+        },
+        "bybit_position_summary": {},
+        "ledger_position_summary": {},
+    }
+
+
+def test_wallet_error_tags_fallback_equity_and_is_surfaced() -> None:
+    payload = _status_payload(wallet_error="wallet equity unavailable: timeout", equity=10_000.0)
+    text = format_telegram_status_message(payload)
+    # The fallback equity must NOT print as a clean read.
+    assert "FALLBACK" in text
+    assert "wallet_error=wallet equity unavailable: timeout" in text
+
+
+def test_wallet_error_triggers_a_notification() -> None:
+    payload = _status_payload(wallet_error="wallet equity unavailable: 403", equity=10_000.0)
+    assert _telegram_notification_reason(payload) == "wallet_error"
+
+
+def test_clean_wallet_read_is_not_tagged_or_notified() -> None:
+    payload = _status_payload(wallet_error="", equity=12_345.0)
+    text = format_telegram_status_message(payload)
+    assert "FALLBACK" not in text
+    assert "wallet_error" not in text
+    assert _telegram_notification_reason(payload) == ""
+

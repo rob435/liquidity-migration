@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
+
+DEPLOY_SH = Path(__file__).resolve().parents[1] / "scripts" / "deploy_vps_live.sh"
 
 
 def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
@@ -34,9 +39,19 @@ def test_continuous_rebalance_cycle_audit_parser_defaults() -> None:
     args = parser.parse_args(["continuous-rebalance-cycle-audit"])
 
     assert args.command == "continuous-rebalance-cycle-audit"
-    assert args.data_root == "data/bybit-continuous-paper-event"
+    # The audit's own root lives on a unique dest so it no longer shadows the
+    # global --data-root (argparse subparser-default collision); the global stays
+    # at its own default (None) unless the operator passes it.
+    assert args.audit_data_root == "data/bybit-continuous-paper-event"
+    assert args.data_root is None
     assert args.cycles_dataset == "continuous_fade_paper_cycles"
     assert args.orders_dataset == "continuous_fade_paper_orders"
+
+    # A global --data-root before the subcommand is preserved (was silently
+    # clobbered by the subparser default before the dest rename).
+    args2 = parser.parse_args(["--data-root", "data/custom", "continuous-rebalance-cycle-audit"])
+    assert args2.data_root == "data/custom"
+    assert args2.audit_data_root == "data/bybit-continuous-paper-event"
 
 
 def test_continuous_forward_readiness_parser_defaults() -> None:
@@ -147,11 +162,13 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
     assert "Environment=CONFIRM_DEMO_ORDERS=1" in hedge_text
 
 
-def test_continuous_rmom_refresh_is_toggle_aware_for_paper_only_evidence() -> None:
-    """The paper shadow FOLLOWS the demo root's klines + rmom gate (shared WS data
-    plane), so the refresh keeps the FOLLOWED demo root fresh whenever EITHER
-    continuous sleeve is on (paper-only evidence included) and never rebuilds the
-    paper root's gate from its dormant store."""
+def test_continuous_rmom_refresh_rebuilds_each_active_sleeve_root() -> None:
+    """audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
+    its OWN kline pool (KLINES_FOLLOW_ROOT dropped from the paper unit), so it reads
+    its rmom gate from its OWN root. The refresh must therefore rebuild EACH on
+    sleeve's own root — refreshing only the demo root left the paper book reading a
+    gate nothing builds, so it emitted zero entries forever and the paper<->demo cost
+    reconcile had nothing to pair."""
     repo = Path(__file__).resolve().parents[1]
     service = (
         repo / "deploy" / "systemd" / "liquidity-migration-continuous-rmom-refresh.service"
@@ -159,16 +176,24 @@ def test_continuous_rmom_refresh_is_toggle_aware_for_paper_only_evidence() -> No
     script = (repo / "scripts" / "run_continuous_rmom_refresh.sh").read_text(encoding="utf-8")
 
     assert "run_continuous_rmom_refresh.sh" in service
-    # continuous_rmom_refresh_on == demo-on OR paper-on (deploy/lib_sleeves.sh)
-    assert "continuous_rmom_refresh_on" in script
+    # Sleeve-aware: each root is rebuilt only when ITS sleeve is on.
+    assert 'sleeve_on "${CONTINUOUS_SLEEVE' in script
+    assert 'sleeve_on "${CONTINUOUS_PAPER_SLEEVE' in script
     assert "--root data/bybit-continuous-demo-event" in script
-    assert "--root data/bybit-continuous-paper-event" not in script
+    assert "--root data/bybit-continuous-paper-event" in script  # the fix
 
 
-def test_continuous_paper_unit_follows_demo_kline_plane() -> None:
-    """One shared WS kline plane per box: the paper unit follows the demo root's
-    snapshot read-only, the run script forwards the env as --klines-follow-root,
-    and both continuous units pin their compute threadpools (2-core box)."""
+def _active_lines(unit_text: str) -> list[str]:
+    """Non-comment, non-blank directive lines of a systemd unit."""
+    return [ln.strip() for ln in unit_text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def test_continuous_paper_unit_streams_its_own_kline_plane() -> None:
+    """audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
+    KLINES_FOLLOW_ROOT was dropped so the shadow stays live even when the demo (leader)
+    sleeve is off. Guard against a regression that re-adds an ACTIVE follow directive
+    (the old string survives only in an explanatory comment), and against the optional
+    drop-in mechanism being deleted. Both continuous units still pin their threadpools."""
     repo = Path(__file__).resolve().parents[1]
     paper = (
         repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service"
@@ -180,9 +205,11 @@ def test_continuous_paper_unit_follows_demo_kline_plane() -> None:
         repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh"
     ).read_text(encoding="utf-8")
 
-    assert "Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event" in paper
+    # No ACTIVE follow directive on the paper unit (comment-only mention is fine).
+    assert not any(ln.startswith("Environment=KLINES_FOLLOW_ROOT=") for ln in _active_lines(paper))
     # the LEADER must never follow anyone
-    assert "KLINES_FOLLOW_ROOT" not in demo
+    assert not any(ln.startswith("Environment=KLINES_FOLLOW_ROOT=") for ln in _active_lines(demo))
+    # the run script keeps the (now dormant) passthrough so a drop-in can re-enable it.
     assert "--klines-follow-root" in run_script
     for unit in (paper, demo):
         assert "Environment=POLARS_MAX_THREADS=1" in unit
@@ -238,7 +265,10 @@ def test_combined_book_report_includes_continuous_roots_and_sleeve_toggles() -> 
 
     assert "EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env" in service
     assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" in service
-    assert "--short-data-root data/bybit-demo-event" in service
+    # deploy-ci-4: the daily-SHORT sleeve was ERASED 2026-06-11, so the report
+    # unit no longer wires its --short-data-root (the erased root). Guard against
+    # the dead-sleeve arg drifting back in.
+    assert "--short-data-root" not in service
     assert "--long-data-root data/bybit-long-demo-event" in service
     assert "--continuous-data-root data/bybit-continuous-demo-event" in service
     assert "--continuous-paper-data-root data/bybit-continuous-paper-event" in service
@@ -452,8 +482,15 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "liquidity-migration-bybit-continuous-demo.service" in text
     assert "liquidity-migration-bybit-continuous-paper.service" in text
     assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
-    assert 'apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
-    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
+    # deploy-env-timers-1: the hedge timer is gated on a computed _hedge_timer_state
+    # (not raw CONTINUOUS_SLEEVE) so retiring continuous does NOT orphan an open,
+    # stopless hedge leg — when continuous is off it keeps the timer enabled (and
+    # pages CRITICAL) while the hedge addon ledger holds open rows, disabling only
+    # once flat. apply and verify must use the SAME computed state.
+    assert 'apply_timer_enable "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert "data/bybit-continuous-hedge-event" in text  # the open-hedge ledger check
+    assert "_hedge_timer_state=on" in text              # fail-safe keeps it enabled while open
     assert "continuous_rmom_refresh_on" in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
@@ -1037,6 +1074,25 @@ def test_vps_deploy_paths_filter_covers_every_unit_invoked_script() -> None:
     assert '"deploy/hedge_warmstart/*.csv"' in workflow
 
 
+def test_vps_deploy_workflow_has_full_suite_ci_gate() -> None:
+    """deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
+    server-side ruff + full-pytest CI job, and the deploy job must depend on it — so an
+    uninstalled local pre-push hook, a --no-verify, or a GitHub web edit can no longer
+    auto-deploy untested code."""
+    repo = Path(__file__).resolve().parents[1]
+    wf = (repo / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
+
+    # A dedicated CI job running the FULL gate (ruff over all three trees + pytest -q).
+    assert "ruff check liquidity_migration tests scripts" in wf
+    assert "pytest -q" in wf
+    # The deploy job gates on it.
+    assert "needs: ci" in wf
+    # CI runs on PRs too (the deploy steps stay push/dispatch-guarded).
+    assert "pull_request:" in wf
+    # The deploy job must not touch the box on a PR.
+    assert "github.event_name != 'pull_request'" in wf
+
+
 def _unit_environment(unit_path: Path) -> dict[str, str]:
     env: dict[str, str] = {}
     for line in unit_path.read_text(encoding="utf-8").splitlines():
@@ -1115,3 +1171,629 @@ def test_wrapper_unit_env_builds_argv_that_parses(unit_name: str, wrapper_name: 
             f"{unit_name} -> {wrapper_name}: wrapper argv does not parse against the CLI "
             f"(exit {exc.code}): {tokens[2:]}"
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# audit2b: sh_nsymbols — N_SYMBOLS empty-list miscount in
+# scripts/build_full_pit_bybit.sh.
+#
+# The build script derives a count of symbols from a comma-separated string for
+# a build-log line. The original logic ``echo "$SYMBOLS" | tr ',' '\n' | wc -l``
+# miscounts an EMPTY list as 1, because ``echo ""`` emits a single newline that
+# ``wc -l`` then counts. The fix guards the empty case to produce 0 while leaving
+# every non-empty (happy-path) count byte-identical.
+# ---------------------------------------------------------------------------
+
+_NSYMBOLS_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "build_full_pit_bybit.sh"
+)
+
+# The buggy formulation, preserved verbatim to prove the regression existed.
+OLD_SNIPPET = 'N_SYMBOLS=$(echo "$SYMBOLS" | tr \',\' \'\\n\' | wc -l)'
+
+
+def _count_with_new_logic(symbols: str) -> int:
+    """Run the script's current N_SYMBOLS logic in isolation via bash."""
+    script = (
+        f"SYMBOLS={symbols!r}\n"
+        "if [ -z \"$SYMBOLS\" ]; then\n"
+        "  N_SYMBOLS=0\n"
+        "else\n"
+        "  N_SYMBOLS=$(echo \"$SYMBOLS\" | tr ',' '\\n' | wc -l)\n"
+        "fi\n"
+        'echo "$N_SYMBOLS"\n'
+    )
+    out = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(out.stdout.strip())
+
+
+def _count_with_old_logic(symbols: str) -> int:
+    """Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion."""
+    script = f"SYMBOLS={symbols!r}\n" + OLD_SNIPPET + "\n" + 'echo "$N_SYMBOLS"\n'
+    out = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(out.stdout.strip())
+
+
+def test_empty_list_counts_zero_not_one() -> None:
+    # OLD code is wrong: blank line counted as one symbol.
+    assert _count_with_old_logic("") == 1
+    # NEW code: empty list -> 0.
+    assert _count_with_new_logic("") == 0
+
+
+def test_happy_path_counts_unchanged() -> None:
+    # Non-empty inputs are byte-identical between old and new logic.
+    for symbols in ("BTCUSDT", "BTCUSDT,ETHUSDT", "BTCUSDT,ETHUSDT,SOLUSDT"):
+        old = _count_with_old_logic(symbols)
+        new = _count_with_new_logic(symbols)
+        assert old == new, f"happy path changed for {symbols!r}: {old} != {new}"
+    assert _count_with_new_logic("BTCUSDT") == 1
+    assert _count_with_new_logic("BTCUSDT,ETHUSDT") == 2
+    assert _count_with_new_logic("BTCUSDT,ETHUSDT,SOLUSDT") == 3
+
+
+def test_script_carries_the_guard() -> None:
+    text = _NSYMBOLS_SCRIPT.read_text()
+    # The empty-list guard is present and the bare buggy one-liner is gone.
+    assert 'if [ -z "$SYMBOLS" ]; then' in text
+    assert "N_SYMBOLS=0" in text
+    assert not re.search(
+        r"^N_SYMBOLS=\$\(echo \"\$SYMBOLS\" \| tr",
+        text,
+        flags=re.MULTILINE,
+    ), "the unguarded buggy N_SYMBOLS one-liner is still present"
+
+
+# ---------------------------------------------------------------------------
+# audit2b: sh_ruff — gate-7 ruff fallback in scripts/verify_full_pit_rebuild.sh.
+#
+# The verification script runs ``set -euo pipefail`` and, in gate 7, linted with::
+#
+#     .venv/bin/ruff check liquidity_migration tests || ruff check liquidity_migration tests
+#
+# The ``||`` was intended only as a fallback for a *missing* ``.venv/bin/ruff``
+# (exit 127), but it fires on ANY non-zero exit — including a genuine lint
+# failure (ruff exits 1 when it finds errors). So if the canonical venv ruff found
+# a real lint error, the gate silently re-checked against a different PATH ruff;
+# when that one passed (version/config drift), the gate reported PASS and the
+# script printed "All gates PASSED" despite a real lint failure.
+#
+# The fix selects the ruff binary up-front (prefer ``.venv/bin/ruff`` if
+# executable, else PATH ``ruff``) and runs it exactly once, so its exit code —
+# including a lint failure — propagates and fails the gate. When the venv binary
+# is absent the fallback to PATH ruff is preserved, and the happy path (venv ruff
+# present and clean) is byte-identical.
+# ---------------------------------------------------------------------------
+
+_RUFF_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "verify_full_pit_rebuild.sh"
+)
+
+# Stub ruff binaries: a passing stub (exit 0) and a failing stub (exit 1,
+# mimicking ruff finding a lint error).
+_PASS_STUB = '#!/usr/bin/env bash\nexit 0\n'
+_FAIL_STUB = '#!/usr/bin/env bash\necho "F401 unused import"\nexit 1\n'
+
+
+def _make_stub(path: Path, body: str) -> None:
+    path.write_text(body)
+    path.chmod(0o755)
+
+
+def _run_old_gate(tmp_path: Path, venv_body: str, path_body: str | None) -> int:
+    """Model the OLD gate-7 lint line: ``$VENV check || ruff check``.
+
+    Returns the exit code under ``set -euo pipefail`` (what the script as a whole
+    would have done at that line). ``path_body=None`` means no PATH ruff exists.
+    """
+    venv = tmp_path / "venv_ruff"
+    _make_stub(venv, venv_body)
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    if path_body is not None:
+        _make_stub(bindir / "ruff", path_body)
+    script = (
+        "set -euo pipefail\n"
+        f'"{venv}" check liquidity_migration tests'
+        " || ruff check liquidity_migration tests\n"
+    )
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{bindir}:/usr/bin:/bin"},
+    ).returncode
+
+
+def _run_new_gate(tmp_path: Path, venv_body: str | None, path_body: str | None) -> int:
+    """Model the NEW gate-7 lint logic: pick the binary, then run it once.
+
+    ``venv_body=None`` means ``.venv/bin/ruff`` is absent (fallback to PATH).
+    """
+    venv = tmp_path / "venv_ruff"
+    if venv_body is not None:
+        _make_stub(venv, venv_body)
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    if path_body is not None:
+        _make_stub(bindir / "ruff", path_body)
+    script = (
+        "set -euo pipefail\n"
+        f'if [ -x "{venv}" ]; then\n'
+        f'  RUFF_BIN="{venv}"\n'
+        "else\n"
+        '  RUFF_BIN="ruff"\n'
+        "fi\n"
+        '"$RUFF_BIN" check liquidity_migration tests\n'
+    )
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{bindir}:/usr/bin:/bin"},
+    ).returncode
+
+
+def test_old_logic_masks_a_real_lint_failure(tmp_path: Path) -> None:
+    # Canonical venv ruff finds a lint error (exit 1); PATH ruff passes.
+    # OLD: the `||` swallows the failure -> gate exits 0 (masked).
+    assert _run_old_gate(tmp_path, _FAIL_STUB, _PASS_STUB) == 0
+
+
+def test_new_logic_fails_the_gate_on_a_real_lint_failure(tmp_path: Path) -> None:
+    # Same inputs as above. NEW: venv ruff is chosen and its exit 1 propagates.
+    assert _run_new_gate(tmp_path, _FAIL_STUB, _PASS_STUB) != 0
+
+
+def test_new_logic_happy_path_unchanged(tmp_path: Path) -> None:
+    # Venv ruff present and clean -> gate passes, identical to old behavior.
+    assert _run_old_gate(tmp_path, _PASS_STUB, _PASS_STUB) == 0
+    assert _run_new_gate(tmp_path, _PASS_STUB, _PASS_STUB) == 0
+
+
+def test_new_logic_falls_back_when_venv_ruff_absent(tmp_path: Path) -> None:
+    # The original fallback intent is preserved: missing venv ruff -> PATH ruff.
+    assert _run_new_gate(tmp_path, None, _PASS_STUB) == 0
+    # And a PATH-ruff lint failure still fails the gate.
+    assert _run_new_gate(tmp_path, None, _FAIL_STUB) != 0
+
+
+def test_script_carries_the_fix() -> None:
+    text = _RUFF_SCRIPT.read_text()
+    # The single-binary selection is present.
+    assert 'if [ -x .venv/bin/ruff ]; then' in text
+    assert 'RUFF_BIN=".venv/bin/ruff"' in text
+    assert '"$RUFF_BIN" check liquidity_migration tests' in text
+    # The masking `||` fallback one-liner is gone.
+    assert ".venv/bin/ruff check liquidity_migration tests || ruff check" not in text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# deploy script — structural guards (from audit b13; deploy-ci-3, deploy-ci-6,
+#                 deploy-env-timers-1, deploy-env-timers-3)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_deploy_verifies_liquidation_collector_active() -> None:
+    # deploy-ci-3: the always-on collector must be verified active+enabled in the
+    # post-settle block (not just enabled+restarted), so a crash on new code fails loud.
+    txt = DEPLOY_SH.read_text()
+    assert "systemctl is-active --quiet liquidity-migration-liquidation-collector.service" in txt
+    assert "systemctl is-enabled --quiet liquidity-migration-liquidation-collector.service" in txt
+
+
+def test_deploy_refuses_real_money_env() -> None:
+    # deploy-ci-6: the deploy must fail-closed if the sourced env sets REAL_MONEY truthy.
+    txt = DEPLOY_SH.read_text()
+    assert "REAL_MONEY" in txt
+    assert "Refusing deploy: REAL_MONEY" in txt
+
+
+def test_deploy_keeps_hedge_timer_when_continuous_off_but_leg_open() -> None:
+    # deploy-env-timers-1: the gating must NOT be a bare apply_timer_enable on
+    # CONTINUOUS_SLEEVE; it must consult the hedge ledger and keep the timer enabled
+    # while an open hedge leg exists.
+    txt = DEPLOY_SH.read_text()
+    assert "_hedge_timer_state" in txt
+    assert "bybit-continuous-hedge-event" in txt
+    # The verify side must mirror the apply side, not raw CONTINUOUS_SLEEVE.
+    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in txt
+    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in txt
+
+
+def test_deploy_warns_on_paper_following_frozen_demo_root() -> None:
+    # deploy-env-timers-3: demo-off + paper-on must warn that the paper shadow follows
+    # a frozen demo kline store.
+    txt = DEPLOY_SH.read_text()
+    assert "KLINES_FOLLOW_ROOT" in txt
+    assert 'sleeve_on "$CONTINUOUS_PAPER_SLEEVE"' in txt
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# deploy script — behavioral test of the REAL_MONEY refuse guard (from audit b13;
+#                 deploy-ci-6)
+# Replicates the exact case-statement from deploy_vps_live.sh so the truthy-detection
+# logic is exercised, not just present. Kept in sync via the structural test above.
+# ──────────────────────────────────────────────────────────────────────────────
+_REAL_MONEY_GUARD = r"""
+real_money_refused() {
+  case "${REAL_MONEY:-}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+  esac
+  return 1
+}
+if real_money_refused; then echo REFUSED; else echo OK; fi
+"""
+
+
+def _run_bash(body: str, env_line: str = "") -> str:
+    script = textwrap.dedent(f"""
+        set -euo pipefail
+        {env_line}
+        {body}
+    """)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+@pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "YES", "on", "ON"])
+def test_real_money_truthy_values_are_refused(val: str) -> None:
+    assert _run_bash(_REAL_MONEY_GUARD, f'export REAL_MONEY="{val}"') == "REFUSED"
+
+
+@pytest.mark.parametrize("env_line", ['export REAL_MONEY=""', "unset REAL_MONEY || true", 'export REAL_MONEY=false', 'export REAL_MONEY=0'])
+def test_real_money_demo_values_are_allowed(env_line: str) -> None:
+    assert _run_bash(_REAL_MONEY_GUARD, env_line) == "OK"
+
+
+# Verify the structural test's source-of-truth: the deploy script's actual case arms
+# must contain every truthy token the behavioral guard tests (so they can't drift).
+def test_deploy_real_money_case_covers_truthy_tokens() -> None:
+    txt = DEPLOY_SH.read_text()
+    for token in ("1|true|TRUE", "yes|YES", "on|ON"):
+        assert token in txt, f"deploy REAL_MONEY case missing arm {token!r}"
+
+
+# --- audit bucket b15: kill-switch fake-systemctl semantics (kill-switch-3) ---
+_FAKE_SYSTEMCTL = r"""#!/usr/bin/env bash
+echo "$@" >> "$LOG"
+cmd="$1"; shift
+now=0; for a in "$@"; do [ "$a" = "--now" ] && now=1; done
+args=(); for a in "$@"; do [ "$a" = "--quiet" ] || [ "$a" = "--now" ] || args+=("$a"); done
+case "$cmd" in
+  enable)  for u in "${args[@]}"; do touch "$STATE/$u.enabled"; [ "$now" = 1 ] && touch "$STATE/$u.active"; done ;;
+  disable) for u in "${args[@]}"; do rm -f "$STATE/$u.enabled" "$STATE/$u.active"; done ;;
+  restart|start) for u in "${args[@]}"; do touch "$STATE/$u.active"; done ;;
+  is-active)  for u in "${args[@]}"; do [ -f "$STATE/$u.active"  ] || exit 1; done ;;
+  is-enabled) for u in "${args[@]}"; do [ -f "$STATE/$u.enabled" ] || exit 1; done ;;
+esac
+exit 0
+"""
+
+
+def test_fake_systemctl_enable_without_now_does_not_start_unit(tmp_path: Path) -> None:
+    # kill-switch-3: the test fake must mirror real `systemctl enable` (no --now):
+    # it writes the wants-symlink (.enabled) but does NOT start the unit (.active).
+    # A fake that set .active on bare `enable` would let an on-path verify pass with
+    # no start step, hiding a deploy that dropped the `systemctl restart` lines.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "systemctl").write_text(_FAKE_SYSTEMCTL)
+    (fake_bin / "systemctl").chmod(0o755)
+    state = tmp_path / "state"
+    state.mkdir()
+    log = tmp_path / "log"
+    log.write_text("")
+    env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "STATE": str(state), "LOG": str(log)}
+    unit = "demo.service"
+    subprocess.run(["bash", "-c", f"systemctl enable {unit}"], env=env, check=True)
+    assert (state / f"{unit}.enabled").exists()
+    assert not (state / f"{unit}.active").exists(), "bare enable must NOT start the unit"
+    # enable --now and start DO mark active.
+    subprocess.run(["bash", "-c", f"systemctl start {unit}"], env=env, check=True)
+    assert (state / f"{unit}.active").exists()
+
+
+# ==========================================================================
+# Relocated from tests/test_audit_int_iI.py (audit bucket iI): cross-file
+# integration-completion regression tests for the deploy-gate fixes whose
+# owned-file side (scripts/deploy_vps_live.sh) landed in another bucket. Both
+# scripts here are SSH/systemctl deploy plumbing that cannot run in CI, so —
+# matching the existing deploy-script regression style above — these tests
+# assert the static content of the fail-closed guards.
+#
+# Findings covered:
+#   deploy-ci-6  verify_vps_live.sh and vps_console_recover_and_deploy.sh now
+#                carry the same fail-closed `case "${REAL_MONEY:-}" in 1|true|...)
+#                exit 1` guard as deploy_vps_live.sh.
+#   deploy-ci-3  The console-recovery verify block now asserts the always-on
+#                liquidation collector is active+enabled before 'deploy-verify-ok'.
+# ==========================================================================
+
+REPO = Path(__file__).resolve().parents[1]
+VERIFY = REPO / "scripts" / "verify_vps_live.sh"
+RECOVERY = REPO / "scripts" / "vps_console_recover_and_deploy.sh"
+
+COLLECTOR = "liquidity-migration-liquidation-collector.service"
+# The truthy-REAL_MONEY case arm shared verbatim with deploy_vps_live.sh.
+REAL_MONEY_CASE_ARM = "1|true|TRUE|True|yes|YES|Yes|on|ON|On)"
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# deploy-ci-6 : fail-closed REAL_MONEY guard in BOTH owned scripts
+# --------------------------------------------------------------------------
+
+
+def _assert_real_money_guard(text: str, *, refusal_token: str) -> None:
+    """A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero."""
+    assert 'case "${REAL_MONEY:-}" in' in text, "missing REAL_MONEY case guard"
+    assert REAL_MONEY_CASE_ARM in text, "REAL_MONEY guard does not match the truthy arm set"
+    # The guard must be fail-closed: the truthy arm exits 1, and it references
+    # the env file in the refusal so an operator knows what to fix.
+    guard = text.split('case "${REAL_MONEY:-}" in', 1)[1].split("esac", 1)[0]
+    assert REAL_MONEY_CASE_ARM in guard
+    assert "exit 1" in guard, "REAL_MONEY guard must exit 1 on a truthy value"
+    assert "REAL_MONEY" in guard
+    assert refusal_token in guard
+    assert "/etc/liquidity-migration/bybit-demo.env" in guard
+
+
+def test_verify_script_fails_closed_on_real_money() -> None:
+    text = _read(VERIFY)
+    _assert_real_money_guard(text, refusal_token="Verification failed")
+    # The guard must come AFTER the env is sourced, else ${REAL_MONEY} is unset.
+    source_idx = text.index(". /etc/liquidity-migration/bybit-demo.env")
+    guard_idx = text.index('case "${REAL_MONEY:-}" in')
+    assert source_idx < guard_idx, "REAL_MONEY guard must be after sourcing the env"
+
+
+def test_recovery_script_fails_closed_on_real_money() -> None:
+    text = _read(RECOVERY)
+    _assert_real_money_guard(text, refusal_token="Refusing deploy")
+    source_idx = text.index(". /etc/liquidity-migration/bybit-demo.env")
+    guard_idx = text.index('case "${REAL_MONEY:-}" in')
+    assert source_idx < guard_idx, "REAL_MONEY guard must be after sourcing the env"
+
+
+def test_real_money_guard_does_not_accept_demo_or_unset() -> None:
+    """The fail-closed arm must only match truthy spellings — demo / false /
+    unset must NOT trip it (that would block every legitimate demo deploy)."""
+    truthy = {"1", "true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON", "On"}
+    benign = {"", "0", "false", "FALSE", "False", "no", "NO", "demo", "DEMO"}
+    arm = REAL_MONEY_CASE_ARM.rstrip(")")
+    patterns = arm.split("|")
+    for value in truthy:
+        assert value in patterns, f"truthy {value!r} must trip the guard"
+    for value in benign:
+        assert value not in patterns, f"benign {value!r} must NOT trip the guard"
+
+
+# --------------------------------------------------------------------------
+# deploy-ci-3 : recovery verify block asserts the liquidation collector is up
+# --------------------------------------------------------------------------
+
+
+def test_recovery_enables_and_restarts_the_collector() -> None:
+    """Sanity precondition for the finding: the recovery path DOES bring the
+    always-on collector up, so the verify block owes it an is-active check."""
+    text = _read(RECOVERY)
+    assert f"systemctl enable {COLLECTOR}" in text
+    assert f"systemctl restart {COLLECTOR}" in text
+
+
+def test_recovery_verify_block_checks_collector_active_and_enabled() -> None:
+    text = _read(RECOVERY)
+    assert f"systemctl is-active --quiet {COLLECTOR}" in text, (
+        "recovery verify must assert the liquidation collector is active "
+        "(catches a crash-loop reaching 'failed')"
+    )
+    assert f"systemctl is-enabled --quiet {COLLECTOR}" in text, (
+        "recovery verify must assert the liquidation collector is enabled"
+    )
+
+
+def test_recovery_collector_verify_is_in_the_post_settle_block_before_verify_ok() -> None:
+    """The collector check must sit in the POST-settle verify block (after the
+    sleep) and BEFORE 'deploy-verify-ok' is emitted — otherwise a broken
+    collector still reaches the success message + Telegram."""
+    text = _read(RECOVERY)
+    # Post-settle block begins at the settle sleep guard.
+    settle_idx = text.index('if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then')
+    # Anchor on the actual success echo, NOT any mention of the string (the
+    # deploy-ci-3 comment block also references 'deploy-verify-ok').
+    verify_ok_idx = text.index('echo "deploy-verify-ok')
+    is_active_idx = text.index(f"systemctl is-active --quiet {COLLECTOR}")
+    is_enabled_idx = text.index(f"systemctl is-enabled --quiet {COLLECTOR}")
+    assert settle_idx < is_active_idx < verify_ok_idx
+    assert settle_idx < is_enabled_idx < verify_ok_idx
+
+
+def test_recovery_collector_verify_matches_risk_service_pattern() -> None:
+    """Parity check: the collector is verified the SAME way as the risk service
+    (both is-active and is-enabled, --quiet), so the gate fails loud."""
+    text = _read(RECOVERY)
+    risk = "liquidity-migration-bybit-risk.service"
+    for unit in (risk, COLLECTOR):
+        assert re.search(
+            rf"^\s*systemctl is-active --quiet {re.escape(unit)}\s*$", text, re.MULTILINE
+        ), f"missing is-active --quiet for {unit}"
+        assert re.search(
+            rf"^\s*systemctl is-enabled --quiet {re.escape(unit)}\s*$", text, re.MULTILINE
+        ), f"missing is-enabled --quiet for {unit}"
+
+
+# --- relocated from tests/test_audit_int_iJ.py (audit integration bucket iJ) ---
+# deploy-ci-4: the combined-book report systemd unit once wired
+# ``--short-data-root data/bybit-demo-event`` for the daily-SHORT sleeve that was
+# ERASED 2026-06-11. These guard that the dead-sleeve concept stays out of the
+# live report unit while every surviving sleeve root stays wired.
+_REPORT_UNIT = (
+    Path(__file__).resolve().parents[1]
+    / "deploy"
+    / "systemd"
+    / "liquidity-migration-combined-book-report.service"
+)
+
+
+def _report_unit_text() -> str:
+    return _REPORT_UNIT.read_text(encoding="utf-8")
+
+
+def test_report_unit_no_longer_wires_erased_short_data_root() -> None:
+    """deploy-ci-4: the erased daily-SHORT sleeve's root must not appear in the
+    live combined-book report ExecStart. Both the flag and the erased root path
+    are gone, so a reader/operator can't mistake a dead short book for a reported
+    one."""
+    text = _report_unit_text()
+    assert "--short-data-root" not in text, (
+        "report unit still wires --short-data-root for the erased daily-SHORT sleeve"
+    )
+    assert "bybit-demo-event" not in text, (
+        "report unit still references the erased daily-SHORT data root"
+    )
+
+
+def test_report_unit_still_wires_every_surviving_sleeve_root() -> None:
+    """Dropping the short arg must not disturb the surviving sleeves: long demo,
+    continuous demo, continuous paper, and the continuous hedge ledger all stay
+    wired so the daily aggregate keeps covering the live books."""
+    text = _report_unit_text()
+    assert "combined-book-telegram-report" in text
+    for arg in (
+        "--long-data-root data/bybit-long-demo-event",
+        "--continuous-data-root data/bybit-continuous-demo-event",
+        "--continuous-paper-data-root data/bybit-continuous-paper-event",
+        "--continuous-hedge-data-root data/bybit-continuous-hedge-event",
+        "--include-live-positions",
+    ):
+        assert arg in text, f"report unit dropped a surviving-sleeve arg: {arg}"
+
+
+def test_report_unit_execstart_still_well_formed() -> None:
+    """The multi-line ExecStart continuation must stay intact after the edit:
+    every line but the last in the ExecStart block ends with a backslash, and
+    the unit still declares a single ExecStart."""
+    lines = _report_unit_text().splitlines()
+    exec_indices = [i for i, ln in enumerate(lines) if ln.startswith("ExecStart=")]
+    assert len(exec_indices) == 1, "expected exactly one ExecStart in the report unit"
+
+    start = exec_indices[0]
+    # Walk the continued command; every continued line ends with a trailing '\'.
+    i = start
+    saw_continuation = False
+    while lines[i].rstrip().endswith("\\"):
+        saw_continuation = True
+        i += 1
+        assert i < len(lines), "ExecStart continuation runs off the end of the unit"
+    assert saw_continuation, "ExecStart should span multiple continued lines"
+    # The final command line of the block must not dangle a continuation.
+    assert not lines[i].rstrip().endswith("\\")
+
+
+# --- relocated from tests/test_audit_int_iM.py (audit bucket iM) ---------------
+# deploy-env-timers-3: the continuous-PAPER systemd unit hard-coded
+# ``Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event`` so the paper
+# shadow followed the demo (leader) sleeve's flushed kline snapshot read-only to
+# halve WS decode CPU. That follow is only safe while the demo sleeve is ON. The
+# documented-valid ``CONTINUOUS_SLEEVE=off`` + ``CONTINUOUS_PAPER_SLEEVE=on`` combo
+# stops the demo daemon and freezes its kline store, leaving the shadow following a
+# stale snapshot for up to ~2 days while it appears healthy. The robust completion
+# drops the follow override from the PAPER unit so the shadow always streams its own
+# kline pool. These tests pin that the override is gone, that no reference to the
+# demo root survives in the paper unit's environment, and that the rest of the
+# (load-bearing) paper config is undisturbed.
+_PAPER_UNIT = (
+    Path(__file__).resolve().parents[1]
+    / "deploy"
+    / "systemd"
+    / "liquidity-migration-bybit-continuous-paper.service"
+)
+
+
+def _paper_unit_text() -> str:
+    return _PAPER_UNIT.read_text(encoding="utf-8")
+
+
+def _paper_environment_assignments() -> dict[str, str]:
+    """Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments)."""
+    env: dict[str, str] = {}
+    for raw in _paper_unit_text().splitlines():
+        line = raw.strip()
+        if line.startswith("#") or not line.startswith("Environment="):
+            continue
+        assignment = line[len("Environment=") :]
+        key, _, value = assignment.partition("=")
+        env[key] = value
+    return env
+
+
+def test_paper_unit_no_longer_follows_demo_kline_root() -> None:
+    """deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT
+    override, so it always runs its own kline pool and never follows a frozen demo
+    snapshot when CONTINUOUS_SLEEVE=off + CONTINUOUS_PAPER_SLEEVE=on."""
+    env = _paper_environment_assignments()
+    assert "KLINES_FOLLOW_ROOT" not in env, (
+        "PAPER unit still sets KLINES_FOLLOW_ROOT — it would follow the demo "
+        "kline store and freeze when the demo sleeve is toggled off"
+    )
+
+
+def test_paper_unit_environment_never_points_at_demo_root() -> None:
+    """No active Environment= assignment in the PAPER unit may reference the demo
+    data root: the shadow's market-data plane must be self-contained."""
+    env = _paper_environment_assignments()
+    offenders = {
+        key: value
+        for key, value in env.items()
+        if "bybit-continuous-demo-event" in value
+    }
+    assert not offenders, (
+        f"PAPER unit Environment assignments still point at the demo root: {offenders}"
+    )
+
+
+def test_paper_unit_keeps_its_own_paper_data_root() -> None:
+    """The paper sleeve must still write/read its own dataset root so reconcile can
+    pair it against the demo ledger — only the follow override was removed."""
+    env = _paper_environment_assignments()
+    assert env.get("DATA_ROOT") == "data/bybit-continuous-paper-event", (
+        "PAPER unit lost or changed its own DATA_ROOT"
+    )
+
+
+def test_paper_unit_load_bearing_paper_knobs_intact() -> None:
+    """Dropping the follow line must not disturb the knobs that make this a true
+    no-submit shadow of the demo book (PAPER_MODE/dry-run routing + the mirrored
+    strategy knobs)."""
+    env = _paper_environment_assignments()
+    for key, expected in (
+        ("SUBMIT_ORDERS", "0"),
+        ("RECORD_DRY_RUN", "1"),
+        ("PAPER_MODE", "1"),
+        ("STRATEGY_PROFILE", "continuous_ensemble_v1"),
+    ):
+        assert env.get(key) == expected, (
+            f"PAPER unit knob {key} changed: expected {expected!r}, got {env.get(key)!r}"
+        )
+
+
+def test_paper_unit_documents_the_dropped_follow_override() -> None:
+    """The removal is documented in-unit (audit id + rationale) so an operator
+    re-adding the follow knob understands the demo-off hazard."""
+    text = _paper_unit_text()
+    assert "deploy-env-timers-3" in text, (
+        "the dropped KLINES_FOLLOW_ROOT override should be documented with its audit id"
+    )

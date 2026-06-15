@@ -47,13 +47,20 @@ VENUES = {"bybit": "bybit_full_pit", "binance": "binance_full_pit"}
 
 
 def _load_monthly(cell_dir: Path) -> list[tuple[str, float]]:
+    # Dedup on the month key (last-wins) BEFORE returning. A raw list would let a
+    # duplicated month row (a groupby/merge glitch, an appended re-run) be counted
+    # twice downstream: main() iterates base_months = [m for m,_ in base_monthly],
+    # so a repeated month survives into `months` and is compounded twice in
+    # _compound/_thirds/_concentration/_leave_one_out and the bootstrap, silently
+    # biasing the headline delta and the fragility p5 (decision-rule-3). The engine
+    # emits one row per month so this never fires in practice, but there is no error
+    # if it does — collapse to a unique-month dict, then sort.
     p = cell_dir / "volume_event_best_monthly.csv"
-    rows: list[tuple[str, float]] = []
+    by_month: dict[str, float] = {}
     with open(p) as f:
         for d in csv.DictReader(f):
-            rows.append((d["month"], float(d["strategy_return"])))
-    rows.sort(key=lambda r: r[0])
-    return rows
+            by_month[d["month"]] = float(d["strategy_return"])
+    return sorted(by_month.items())
 
 
 def _load_json_metrics(cell_dir: Path) -> dict:
@@ -146,6 +153,14 @@ def _mar(returns: list[float]) -> float:
 
 def _thirds(months: list[str], cell_r: list[float], base_r: list[float]) -> list[dict]:
     n = len(months)
+    # Fewer than 3 months cannot be split into thirds: k = n//3 = 0 makes the first
+    # two bounds (0,0) — empty slices that compound to 0.0 and whose label indexes
+    # months[-1] (months[b-1] with b=0), producing duplicate/garbled labels and a
+    # misleading "all cell-thirds>0: NO" for a uniformly-positive 1-2 month series
+    # (decision-rule-5). Real sweeps run ~36 months so this is diagnostic-only, but
+    # return [] so the caller skips the sub-period split instead of printing garbage.
+    if n < 3:
+        return []
     k = n // 3
     bounds = [(0, k), (k, 2 * k), (2 * k, n)]
     out = []
@@ -255,6 +270,33 @@ def _block_bootstrap(cell_r: list[float], base_r: list[float], *, n_boot: int, b
     }
 
 
+def _window_mismatch_warning(cell: str, months: list[str],
+                             cell_months: list[str], base_months: list[str]) -> str | None:
+    """Surface the headline-vs-fragility windowing inconsistency (decision-rule-4).
+
+    The headline MAR Δ (cell_mar - base_mar) is computed from each side's OWN full
+    reported window, but the fragility diagnostics (thirds/concentration/LOO/bootstrap)
+    run over the cell∩control month INTERSECTION. When cell and control share the
+    same window (the normal case) the intersection equals both full sets and the two
+    windows coincide — no mismatch. But an aborted-late or differently-bounded cell
+    would have the headline describe one window and the robustness check a different
+    one, masking that the edge concentrates in the non-overlapping tail. Returns a
+    warning string when the intersection drops months from either side, else None.
+    The headline number itself is left untouched (it matches the STATE/doc engine MAR).
+    """
+    n_inter = len(months)
+    dropped_cell = len(cell_months) - n_inter
+    dropped_base = len(base_months) - n_inter
+    if dropped_cell <= 0 and dropped_base <= 0:
+        return None
+    return (
+        f"  ⚠️  {cell}: window mismatch — headline MAR Δ uses each side's full window, "
+        f"but fragility diagnostics use the {n_inter}-month intersection "
+        f"(dropped {dropped_cell} cell / {dropped_base} control months). "
+        f"Treat the headline vs the p5/thirds as different windows."
+    )
+
+
 def _engine_mar(total_return: float, max_drawdown: float, years: float) -> float:
     """MAR = annualized return / |daily max DD|, matching the STATE/doc numbers
     (uses the engine's reported daily max_drawdown + the true window span, not
@@ -355,6 +397,13 @@ def main() -> int:
             cr = [cell_map[m] for m in months]
             br = [dict(base_monthly)[m] for m in months]
             cell_mar = _engine_mar(cj["total_return"], cj["max_drawdown"], _window_years(cj))
+            # decision-rule-4: warn loudly if the cell∩control intersection drops
+            # months from either side, so a windowing mismatch between the headline
+            # MAR Δ (full window) and the fragility diagnostics (intersection) is
+            # surfaced rather than silently combined.
+            _wmw = _window_mismatch_warning(cell, months, [m for m, _ in cm], base_months)
+            if _wmw is not None:
+                print(_wmw)
 
             collected.setdefault(cell, {})[venue] = {
                 "mar_d": cell_mar - base_mar, "ret": cj["total_return"],
@@ -367,13 +416,19 @@ def main() -> int:
             loo = _leave_one_out(cr, br, months)
             boot = _block_bootstrap(cr, br, n_boot=args.n_boot, block=args.block, seed=args.seed)
 
-            all_pos = all(t["cell"] > 0 for t in thirds)
             print(f"\n  ── {cell}  (trades {base_json['trades']}→{cj['trades']}, "
                   f"daily-DD {base_json['max_drawdown']:.1%}→{cj['max_drawdown']:.1%}, "
                   f"MAR {base_mar:.2f}→{cell_mar:.2f}, ret {base_json['total_return']:.2f}x→{cj['total_return']:.2f}x)")
-            print("     thirds (base→cell):  " + "   ".join(
-                f"{t['label']}: {t['base']:+.0%}→{t['cell']:+.0%}" for t in thirds)
-                + f"   [all cell-thirds>0: {'YES' if all_pos else 'NO'}]")
+            if thirds:
+                # all_pos is meaningful only when the series was actually split into
+                # thirds; for n<3 (_thirds returns []) skip the positive-third check
+                # rather than printing a degenerate "NO" (decision-rule-5).
+                all_pos = all(t["cell"] > 0 for t in thirds)
+                print("     thirds (base→cell):  " + "   ".join(
+                    f"{t['label']}: {t['base']:+.0%}→{t['cell']:+.0%}" for t in thirds)
+                    + f"   [all cell-thirds>0: {'YES' if all_pos else 'NO'}]")
+            else:
+                print(f"     thirds (base→cell):  insufficient months for sub-period split (n={len(months)})")
             tm = ", ".join(f"{m}({d:+.2f})" for m, d in conc["top_months"])
             print(f"     concentration:  top-{conc['top_k']} months = "
                   f"{conc['top_share_of_pos']:.0%} of positive-side monthly Δ   [{tm}]")

@@ -6,14 +6,20 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from liquidity_migration import cross_sleeve as _cross_sleeve
 from liquidity_migration import ws_risk
 from liquidity_migration.config import ResearchConfig
+from liquidity_migration.cross_sleeve import (
+    claim_symbol_reservation,
+    read_account_state,
+)
 from liquidity_migration.storage import read_dataset, write_dataset
 from liquidity_migration.ws_risk import (
     _LOG_RETENTION,
     EventWebSocketRiskConfig,
     EventWebSocketRiskEngine,
     WebSocketRiskState,
+    _now_ms,
     _read_telegram_dedupe_keys,
 )
 
@@ -3206,10 +3212,16 @@ def test_failed_background_send_unrecords_dedupe_key(tmp_path: Path, monkeypatch
     ok, status = engine.maybe_notify({"cycle": {}})
     assert (ok, status) == (True, "enqueued")
     assert attempted.wait(2.0), "background telegram sender did not run"
-    engine.close()  # drains the queue → the un-record has completed by here
-    assert "k-fail" not in engine.state.telegram_keys_sent
-    assert "k-fail" not in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
-    # the alert re-fires on the next material event
+    # audit2c: the sender thread no longer un-records the key off-thread (that mutated
+    # consumer-only state and raced the dedupe file). It hands the failed key back via a
+    # queue; the NEXT maybe_notify drains it (un-record on the consumer thread) THEN
+    # re-fires. Wait for the hand-back, then assert the alert re-fires — the (True,
+    # "enqueued") return proves the dedupe key was un-recorded (else it would be a dup).
+    import time as _time
+    for _ in range(200):
+        if not engine._telegram_failed_keys.empty():
+            break
+        _time.sleep(0.01)
     assert engine.maybe_notify({"cycle": {}}) == (True, "enqueued")
     engine.close()
 
@@ -3978,3 +3990,631 @@ def test_adoption_treats_eth_hedge_leg_as_externally_managed(tmp_path: Path) -> 
     assert float(row["take_profit_price"]) == 0.0
     assert int(row["planned_exit_ts_ms"]) == 0
     assert row["submit_mode"] == "adopted_recovered"
+
+
+def test_drain_failed_telegram_keys_unrecords_on_consumer_thread(tmp_path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
+    )
+    try:
+        engine.state.telegram_keys_sent.add("k-x")
+        ws_risk._write_telegram_dedupe_keys(engine.report_dir, engine.state.telegram_keys_sent)
+        # Sender thread hands a failed key back; consumer drains + un-records it.
+        engine._telegram_failed_keys.put("k-x")
+        engine._drain_failed_telegram_keys()
+        assert "k-x" not in engine.state.telegram_keys_sent
+        assert "k-x" not in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
+    finally:
+        engine.close()
+
+
+def test_drain_failed_telegram_keys_noop_when_queue_empty(tmp_path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
+    )
+    try:
+        engine.state.telegram_keys_sent.add("keep")
+        ws_risk._write_telegram_dedupe_keys(engine.report_dir, engine.state.telegram_keys_sent)
+        engine._drain_failed_telegram_keys()  # nothing queued -> no change
+        assert "keep" in engine.state.telegram_keys_sent
+        assert "keep" in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
+    finally:
+        engine.close()
+
+
+# ===========================================================================
+# Relocated from tests/test_audit_fix_b03.py (audit bucket b03 regressions).
+# Each test FAILS on the original bug and PASSES on the fix. These use a
+# distinct set of minimal doubles (`_FakePrivateClient` etc.) carried over
+# from the b03 suite — they track wallet calls and default to empty positions,
+# which the originals' `FakePrivateClient` does not.
+# ===========================================================================
+class _FakePrivateClient:
+    def __init__(self, *, positions: list[dict[str, object]] | None = None) -> None:
+        self.positions = positions if positions is not None else []
+        self.orders: list[dict[str, object]] = []
+        self.wallet_calls = 0
+
+    def get_positions(self, *, settle_coin: str | None = None):
+        return self.positions
+
+    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None):
+        return []
+
+    def place_order(self, **params):
+        self.orders.append(params)
+        return {"orderId": "rest-order-1"}
+
+    def set_trading_stop(self, **params):
+        return {}
+
+    def get_wallet_balance(self, *, account_type=None, coin=None):
+        self.wallet_calls += 1
+        return {"list": [{"coin": [{"coin": "USDT", "equity": "10000", "walletBalance": "10000"}]}]}
+
+    def get_trade_history(self, *, symbol=None, order_link_id=None, limit=50):
+        return [{"orderLinkId": order_link_id, "execQty": "1", "execPrice": "113",
+                 "execValue": "113", "execFee": "0.01"}]
+
+    def get_order_history(self, *, symbol=None, order_link_id=None, limit=50):
+        return []
+
+
+class _FakePrivateStream:
+    def subscribe_positions(self, callback):
+        pass
+
+    def subscribe_orders(self, callback):
+        pass
+
+    def subscribe_executions(self, callback, *, fast: bool = False):
+        pass
+
+    def close(self):
+        pass
+
+
+class _FakePublicStream:
+    def __init__(self) -> None:
+        self.symbols: list[str] = []
+
+    def subscribe_tickers(self, symbols, callback):
+        self.symbols.extend(symbols if isinstance(symbols, list) else [symbols])
+
+    def close(self):
+        pass
+
+
+def _long_position(symbol: str = "AAAUSDT") -> dict[str, object]:
+    # A LONG (Buy) position: close_side must be Sell (test-gaps-7).
+    return {
+        "symbol": symbol,
+        "side": "Buy",
+        "size": "1",
+        "avgPrice": "100",
+        "markPrice": "100",
+        "positionValue": "100",
+        "unrealisedPnl": "0",
+        "stopLoss": "88",
+        "takeProfit": "120",
+    }
+
+
+# test-gaps-7 — untracked LONG close-side sign
+def test_untracked_long_position_is_closed_with_a_sell(tmp_path: Path) -> None:
+    """test-gaps-7: the Buy->Sell long-close branch of close_side was never asserted.
+    An inverted sign would close a LONG with a Buy (increasing exposure). Pin it."""
+    private_client = _FakePrivateClient(positions=[_long_position()])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
+        ),
+        private_client=private_client,
+        private_stream=_FakePrivateStream(),
+        public_stream=_FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    assert len(private_client.orders) == 1
+    assert private_client.orders[0]["reduceOnly"] is True
+    # The load-bearing assertion the suite was missing: a LONG closes with a SELL.
+    assert private_client.orders[0]["side"] == "Sell"
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert stored_orders.select("side").item() == "Sell"
+    assert stored_orders.select("exit_reason").item() == "untracked_position"
+
+
+# ws-risk-1 / ws-risk-2 — failed rebuild must retry, not latch None
+class _DeadPrivate:
+    def is_connected(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+    def subscribe_positions(self, cb) -> None:  # noqa: ANN001
+        pass
+
+    def subscribe_orders(self, cb) -> None:  # noqa: ANN001
+        pass
+
+    def subscribe_executions(self, cb, **k) -> None:  # noqa: ANN001
+        pass
+
+
+class _LivePrivate(_DeadPrivate):
+    def is_connected(self) -> bool:
+        return True
+
+
+def test_failed_private_rebuild_retries_instead_of_latching_none(tmp_path: Path, monkeypatch) -> None:
+    """ws-risk-1: a rebuild that raises after the old socket is closed leaves
+    private_stream=None. The old guard (`stream is None -> return`) then made every
+    later on_idle pass a no-op forever (start_streams runs only once). The fix arms a
+    pending-rebuild latch so a SUBSEQUENT pass retries and recovers."""
+    attempts = {"n": 0}
+
+    def _flaky_build(_config):  # noqa: ANN001, ANN202
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("transient build failure")
+        return _LivePrivate()
+
+    monkeypatch.setattr("liquidity_migration.ws_risk._build_private_stream", _flaky_build)
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(),
+        # timeout=0 runs the build inline so the failure is deterministic.
+        risk_config=EventWebSocketRiskConfig(
+            private_ws_reconnect_seconds=30.0, stream_start_timeout_seconds=0.0
+        ),
+    )
+    engine.private_stream = _DeadPrivate()  # type: ignore[assignment]
+
+    # First reconnect pass: socket down past the bound -> build raises -> None + pending latch.
+    engine._maybe_reconnect_private_stream(time.monotonic())  # arms _private_disconnected_since
+    engine._private_disconnected_since = time.monotonic() - 999  # past the bound
+    engine._maybe_reconnect_private_stream(time.monotonic())
+    assert engine.private_stream is None
+    assert engine._private_rebuild_pending is True, "a failed rebuild must OWE a retry"
+
+    # A LATER pass must retry the build even though private_stream is None.
+    engine._last_private_reconnect_monotonic = time.monotonic() - 999  # clear the cooldown
+    engine._private_disconnected_since = time.monotonic() - 999
+    engine._maybe_reconnect_private_stream(time.monotonic())
+    assert isinstance(engine.private_stream, _LivePrivate), "the next pass must rebuild, not stay blind"
+    assert engine._private_rebuild_pending is False
+    assert attempts["n"] == 2
+
+
+def test_failed_public_rebuild_retries_instead_of_latching_none(tmp_path: Path, monkeypatch) -> None:
+    """ws-risk-2: same structure as ws-risk-1 for the public ticker stream. A failed
+    rebuild after the socket is closed leaves public_stream=None AND clears
+    subscribed_symbols; without the pending latch every later pass is a no-op and the
+    intrabar price feed silently degrades to the 30s REST mark forever."""
+    attempts = {"n": 0}
+
+    class _RebuiltPublic(_FakePublicStream):
+        pass
+
+    def _flaky_public(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("transient public build failure")
+        return _RebuiltPublic()
+
+    monkeypatch.setattr("liquidity_migration.ws_risk.BybitPublicTickerStream", _flaky_public)
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(),
+        risk_config=EventWebSocketRiskConfig(
+            private_ws_reconnect_seconds=30.0, stream_start_timeout_seconds=0.0
+        ),
+    )
+    engine.public_stream = _FakePublicStream()  # type: ignore[assignment]
+    engine.state.subscribed_symbols = {"AAAUSDT"}
+
+    now = time.monotonic()
+    # Force a long silence so the public watchdog fires.
+    engine._last_ticker_event_monotonic = now - 10_000
+    engine._public_stream_built_monotonic = now - 10_000
+    engine._maybe_reconnect_public_stream(now)
+    assert engine.public_stream is None
+    assert engine._public_rebuild_pending is True, "a failed public rebuild must OWE a retry"
+    # The symbols to re-subscribe are preserved ACROSS the failed attempt.
+    assert "AAAUSDT" in engine._public_resubscribe
+
+    # A later pass retries and recovers, re-subscribing the saved symbol set.
+    engine._last_public_reconnect_monotonic = now - 10_000
+    engine._maybe_reconnect_public_stream(now)
+    assert isinstance(engine.public_stream, _RebuiltPublic)
+    assert engine._public_rebuild_pending is False
+    assert "AAAUSDT" in engine.public_stream.symbols
+    assert attempts["n"] == 2
+
+
+# ws-risk-4 — cap-qty predicate must include the addon root
+def test_cap_qty_predicate_includes_addon_only_sibling(tmp_path: Path) -> None:
+    """ws-risk-4: an engine with ONLY continuous_addon configured still has a netted
+    sibling (short is always present), so the stop-cap must engage. The old predicate
+    (long_root or continuous_root) omitted the addon root -> cap_qty_to_trade=False,
+    letting a stop flatten the sibling leg. The fix keys off the owned-ledger count."""
+    addon_root = tmp_path / "addon"
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(continuous_addon_data_root=str(addon_root)),
+        private_client=_FakePrivateClient(),
+        private_stream=_FakePrivateStream(),
+        public_stream=_FakePublicStream(),
+    )
+    # short + continuous_addon == 2 owned ledgers -> cap engages.
+    assert len(engine._sleeve_routes(trades=True)) == 2
+    assert (len(engine._sleeve_routes(trades=True)) > 1) is True
+    # The old buggy predicate would have been False for this config.
+    old_predicate = engine.long_root is not None or engine.continuous_root is not None
+    assert old_predicate is False, "the addon-only config exposes the omitted-root bug"
+
+    # A short-only engine has a single owned ledger -> cap must NOT engage.
+    short_only = EventWebSocketRiskEngine(
+        tmp_path / "short_only",
+        config=ResearchConfig(data_root=tmp_path / "short_only"),
+        risk_config=EventWebSocketRiskConfig(),
+        private_client=_FakePrivateClient(),
+        private_stream=_FakePrivateStream(),
+        public_stream=_FakePublicStream(),
+    )
+    assert len(short_only._sleeve_routes(trades=True)) == 1
+    assert (len(short_only._sleeve_routes(trades=True)) > 1) is False
+
+
+# ws-risk-5 — stale-WS watchdog must see a dead PRIVATE stream while tickers flow
+def test_stale_watchdog_fires_on_private_silence_while_tickers_flow(tmp_path: Path) -> None:
+    """ws-risk-5: the all-events clock is bumped by ticker traffic too, so a dead
+    private stream stayed invisible to the stale-WS watchdog while public tickers kept
+    it warm. The fix tracks a private-only event clock; with positions held, private
+    silence must force a REST reconcile even when ticker events are fresh."""
+    private_client = _FakePrivateClient(positions=[])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            stale_ws_seconds=30.0,
+            rest_fallback=True,
+        ),
+        private_client=private_client,
+        private_stream=_FakePrivateStream(),
+        public_stream=_FakePublicStream(),
+    )
+    # Hold a position so the watchdog expects private-stream traffic.
+    engine.state.positions_by_symbol = {"AAAUSDT": _long_position()}
+
+    now = time.monotonic()
+    reconciles: list[float] = []
+    engine.rest_reconcile = lambda *a, **k: reconciles.append(now)  # type: ignore[assignment]
+
+    # Public ticker traffic keeps the all-events clock FRESH...
+    engine.state.last_ws_event_monotonic = now
+    # ...but the PRIVATE stream has been silent past the bound.
+    engine.state.last_private_ws_event_monotonic = now - 999
+    engine.state.last_stale_reconcile_monotonic = now - 999
+
+    engine.reconcile_stale_websocket(now)
+    assert reconciles, "private-stream silence must force a REST reconcile even with fresh tickers"
+    assert any("private-stream" in e for e in engine.state.errors)
+
+
+# ws-risk-6 — partial reduce-only fills book realized PnL on the closed chunk
+def _open_continuous_trade(root: Path) -> None:
+    write_dataset(
+        pl.DataFrame(
+            [{
+                "trade_id": "t2", "symbol": "BBBUSDT", "side": "short", "status": "open",
+                "qty": "3", "entry_price": 50.0, "equity_usdt": 10_000.0,
+                "notional_usdt": 150.0, "stop_price": 56.0, "take_profit_price": 40.0,
+                "planned_exit_ts_ms": 9_999_999_999_999,
+            }]
+        ),
+        root,
+        "event_demo_trades",
+        partition_by=(),
+    )
+
+
+def test_partial_reduce_books_realized_loss_on_the_closed_chunk(tmp_path: Path) -> None:
+    """ws-risk-6: the partial (not-fully-filled) branch booked NO realized PnL for the
+    closed chunk — the loss was hidden until the residual fully closed, so the
+    adverse-exit breaker read it as net 0. The fix accumulates the closed delta's
+    realized return on the still-open row, and folds every leg into the final
+    close's net_return."""
+    _open_continuous_trade(tmp_path)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True, confirm_demo_orders=True, repair_stops=False,
+            order_submit_mode="rest", rest_fallback=True, exit_untracked_positions=False,
+            rest_reconcile_seconds=0.0, heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0, adopt_untracked_positions=False,
+        ),
+        private_client=_FakePrivateClient(),
+        private_stream=_FakePrivateStream(),
+        public_stream=_FakePublicStream(),
+    )
+    engine.bootstrap()
+
+    # Partial reduce: close 1 of 3 at 55 (a SHORT loss: entry 50 -> 55 = -10% gross).
+    link1 = "lm-ux-c-BBBUSDT-reduce"
+    engine._record_orders([{
+        "order_link_id": link1, "trade_id": "t2", "symbol": "BBBUSDT", "side": "Buy",
+        "reduce_only": True, "status": "submitted", "qty": "1", "target_qty": "1",
+        "filled_qty": "", "exit_reason": "rebalance_reduce",
+    }])
+    engine.state.submitted_link_to_trade_id[link1] = "t2"
+    engine.record_tracked_exit_stream_fill(
+        order_link_id=link1, filled_qty=1.0, exit_price=55.0, source="execution",
+    )
+
+    row = read_dataset(tmp_path, "event_demo_trades").filter(pl.col("trade_id") == "t2").to_dicts()[0]
+    assert row["status"] == "open"
+    assert float(row["qty"]) == pytest.approx(2.0)
+    # The closed chunk's realized return is now BOOKED on the open row (was absent).
+    # gross = (50-55)/50 = -0.10; delta notional = 1*50 = 50; weight = 50/10000 = 0.005.
+    assert float(row["partial_exit_gross_return"]) == pytest.approx(-0.10)
+    assert float(row["partial_exit_realized_return"]) == pytest.approx(-0.10 * 0.005)
+    assert float(row["rebalance_realized_return"]) == pytest.approx(-0.0005)
+
+    # Close the residual 2 at 56 (another loss). The final net_return must fold BOTH
+    # legs — not just the last delta — so the multi-leg close no longer understates.
+    link2 = "lm-ux-c-BBBUSDT-final"
+    engine._record_orders([{
+        "order_link_id": link2, "trade_id": "t2", "symbol": "BBBUSDT", "side": "Buy",
+        "reduce_only": True, "status": "submitted", "qty": "2", "target_qty": "2",
+        "filled_qty": "", "exit_reason": "max_hold",
+    }])
+    engine.state.submitted_link_to_trade_id[link2] = "t2"
+    engine.record_tracked_exit_stream_fill(
+        order_link_id=link2, filled_qty=2.0, exit_price=56.0, source="execution",
+    )
+
+    closed = read_dataset(tmp_path, "event_demo_trades").filter(pl.col("trade_id") == "t2").to_dicts()[0]
+    assert closed["status"] == "closed"
+    # Final delta: gross = (50-56)/50 = -0.12; delta notional = 2*50 = 100; weight = 0.01.
+    # net_return = prior(-0.0005) + (-0.12 * 0.01) = -0.0005 - 0.0012 = -0.0017.
+    assert float(closed["net_return"]) == pytest.approx(-0.0017)
+    # The original bug would have booked only the final leg (-0.0012), hiding -0.0005.
+    assert float(closed["net_return"]) < -0.0012
+
+
+# ws-risk-7 — prune is skipped on a degraded ledger read
+def test_prune_closed_order_state_skipped_on_ledger_read_error(tmp_path: Path) -> None:
+    """ws-risk-7: live_trade_ids derives from open_trades, which is incomplete when a
+    sibling ledger read raised this pass. Pruning then evicts a still-open sibling
+    order's link, and a later fill for it finds no order and is dropped. The fix bails
+    out of pruning whenever ledger_read_error is set."""
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(telemetry_log_retention=2),
+        private_client=_FakePrivateClient(),
+        private_stream=_FakePrivateStream(),
+        public_stream=_FakePublicStream(),
+    )
+    # The OLDEST order (idx 0, beyond the retention grace window) belongs to a still-open
+    # sibling trade that is INVISIBLE this pass because the sibling ledger read raised, so
+    # open_trades is empty and the order looks trade-closed. WITHOUT the guard it would be
+    # evicted; a later fill for its link would then find no order and be dropped.
+    link = "lm-ux-c-CCC-open-sibling"
+    orders = [{"order_link_id": link, "trade_id": "open-sibling", "symbol": "CCCUSDT",
+               "status": "submitted", "exit_reason": "rebalance_reduce"}]
+    orders += [
+        {"order_link_id": f"recent-{i}", "trade_id": f"tx{i}", "symbol": "ZZZUSDT",
+         "status": "filled", "exit_reason": "rebalance_reduce"}
+        for i in range(5)
+    ]
+    engine._record_orders(orders)
+    engine.state.submitted_link_to_trade_id[link] = "open-sibling"
+
+    # With a ledger_read_error set, the prune MUST be a no-op (fail closed) — even though
+    # the oldest order is well beyond the grace window.
+    engine.state.ledger_read_error = "continuous:combined: RuntimeError: torn read"
+    engine._prune_closed_order_state()
+    assert link in engine.state.orders_by_link, "must NOT evict an old sibling order on a degraded read"
+    assert engine.state.submitted_link_to_trade_id.get(link) == "open-sibling"
+    assert engine.state.orders_evicted == 0
+
+    # Clearing the error re-enables the bounded prune (so it is a guard, not a disable):
+    # the oldest order IS now evictable, proving the guard — not a coincidental retention
+    # window — is what protected it above.
+    engine.state.ledger_read_error = ""
+    engine._prune_closed_order_state()
+    assert engine.state.orders_evicted > 0
+    assert link not in engine.state.orders_by_link, "the unguarded prune evicts the old order"
+
+
+# ws-risk-8 — cold-start adoption never fires a per-orphan wallet REST
+def test_cold_start_adoption_uses_cached_equity_no_wallet_call(tmp_path: Path) -> None:
+    """ws-risk-8: _build_adopted_trade stamped equity via
+    `_last_equity_usdt or _account_equity_usdt()`. On cold start the cache is 0.0, so a
+    blocking get_wallet_balance fired per adopted orphan on the latency-critical
+    consumer thread. The fix seeds the cache ONCE before adoption and reads cache-only."""
+    def _short(symbol: str) -> dict[str, object]:
+        return {"symbol": symbol, "side": "Sell", "size": "1", "avgPrice": "100",
+                "markPrice": "100", "positionValue": "100", "unrealisedPnl": "0",
+                "stopLoss": "112", "takeProfit": "80"}
+
+    private_client = _FakePrivateClient(positions=[_short("DDDUSDT"), _short("EEEUSDT")])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False, repair_stops=False, order_submit_mode="rest",
+            rest_reconcile_seconds=0.0, heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            adopt_untracked_positions=True, exit_untracked_positions=False,
+        ),
+        private_client=private_client,
+        private_stream=_FakePrivateStream(),
+        public_stream=_FakePublicStream(),
+    )
+    engine.bootstrap()
+
+    # The adopted rows carry a non-zero equity snapshot from the seeded cache.
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert not stored.is_empty()
+    assert all(e and float(e) > 0.0 for e in stored.select("equity_usdt").to_series().to_list())
+
+    # The adoption builder reads cache-only -> never a wallet call. _build_adopted_trade
+    # would have called get_wallet_balance once PER orphan (2 here) under the bug.
+    before = private_client.wallet_calls
+    built = engine._build_adopted_trade({"symbol": "FFFUSDT", "side": "Sell", "size": "1", "avgPrice": "100"},
+                                        now_ms=ws_risk._now_ms())
+    assert built is not None and float(built["equity_usdt"]) > 0.0
+    assert private_client.wallet_calls == before, "adoption builder must not fire a wallet REST"
+
+
+# --- relocated from tests/test_audit_int_iB.py (audit-integration bucket iB) ---
+# cross-sleeve-2: ws_risk._refresh_cross_sleeve_account_state must pass the
+# open->closed trade_id delta to cross_sleeve.write_account_state so a closed
+# trade's symbol reservation is GC'd promptly instead of lingering until the TTL.
+
+
+def _open_trades_frame(trade_ids: list[str]) -> pl.DataFrame:
+    """A minimal open_trades snapshot carrying just the trade_id column the
+    close-GC diff reads. compute_im_used tolerates extra/missing columns and the
+    engine's private_client is None (equity 0.0), so this is enough to drive a
+    real _refresh_cross_sleeve_account_state pass end to end."""
+    return pl.DataFrame({"trade_id": pl.Series(trade_ids, dtype=pl.String)})
+
+
+def _cross_sleeve_engine(root: Path) -> EventWebSocketRiskEngine:
+    # No sibling roots / no private client: the refresh writes ONLY the control
+    # row (IM/equity=0, reservations GC'd) into `root`, exactly as in production.
+    return EventWebSocketRiskEngine(
+        root, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig()
+    )
+
+
+def _reserved_symbols(root: Path, *, now_ms: int) -> set[str]:
+    return {r["symbol"] for r in read_account_state(root).active_reservations(now_ms=now_ms)}
+
+
+def _seed_control_row(root: Path, *, now_ms: int) -> None:
+    """Create the cross-sleeve control row so claim_symbol_reservation PERSISTS.
+    Without an existing row, claim is safe-by-default fail-open ("ws_risk not
+    deployed yet") and records nothing; in production ws_risk seeds the row on
+    bootstrap before any sleeve claims a symbol."""
+    _cross_sleeve.write_account_state(
+        root, equity_usdt=0.0, account_im_used_pct=0.0, im_used_pct_by_sleeve={}, now_ms=now_ms,
+    )
+
+
+def test_refresh_gcs_reservation_of_trade_that_closed_since_last_pass(tmp_path: Path) -> None:
+    """The end-to-end wiring: a sibling sleeve reserves two symbols; ws_risk sees
+    both trades open, then one closes. The next refresh frees ONLY the closed
+    trade's reservation — without waiting out the TTL — and keeps the live one.
+
+    Reservations are anchored to the real clock (_now_ms) because the engine's
+    write uses _now_ms() for TTL filtering; that keeps both reservations well
+    within their 180s TTL, so the close-GC is the ONLY thing that can drop one."""
+    engine = _cross_sleeve_engine(tmp_path)
+    now = _now_ms()
+    _seed_control_row(tmp_path, now_ms=now)  # ws_risk seeds the row before sleeves claim
+    assert claim_symbol_reservation(
+        tmp_path, symbol="CLOSEDUSDT", sleeve="continuous", trade_id="t-closed", now_ms=now
+    ) is True
+    assert claim_symbol_reservation(
+        tmp_path, symbol="LIVEUSDT", sleeve="continuous", trade_id="t-live", now_ms=now
+    ) is True
+
+    # Pass 1: both trades open -> baseline recorded, nothing closed yet, both kept.
+    engine.state.open_trades = _open_trades_frame(["t-closed", "t-live"])
+    engine._refresh_cross_sleeve_account_state()
+    assert engine._cross_sleeve_open_trade_ids == {"t-closed", "t-live"}
+    assert _reserved_symbols(tmp_path, now_ms=now) == {"CLOSEDUSDT", "LIVEUSDT"}
+
+    # Pass 2: t-closed dropped out of open_trades (the trade closed). Both
+    # reservations are well inside the 180s TTL, so only the close-GC can free
+    # CLOSEDUSDT — LIVEUSDT must remain.
+    engine.state.open_trades = _open_trades_frame(["t-live"])
+    engine._refresh_cross_sleeve_account_state()
+    assert engine._cross_sleeve_open_trade_ids == {"t-live"}
+    assert _reserved_symbols(tmp_path, now_ms=now) == {"LIVEUSDT"}
+
+
+def test_first_pass_closes_nothing_with_no_prior_baseline(tmp_path: Path) -> None:
+    """On the very first refresh the prior-open baseline is empty, so the diff
+    yields no closed ids — a fresh deploy must not GC reservations a sleeve just
+    claimed for trades it has not yet observed as open."""
+    engine = _cross_sleeve_engine(tmp_path)
+    now = _now_ms()
+    _seed_control_row(tmp_path, now_ms=now)  # ws_risk seeds the row before sleeves claim
+    assert claim_symbol_reservation(
+        tmp_path, symbol="AAAUSDT", sleeve="continuous", trade_id="t-a", now_ms=now
+    ) is True
+    assert engine._cross_sleeve_open_trade_ids == set()
+
+    engine.state.open_trades = _open_trades_frame(["t-a"])
+    engine._refresh_cross_sleeve_account_state()
+    # Baseline now seeded; the just-claimed reservation is untouched.
+    assert engine._cross_sleeve_open_trade_ids == {"t-a"}
+    assert _reserved_symbols(tmp_path, now_ms=now) == {"AAAUSDT"}
+
+
+def test_refresh_passes_closed_trade_ids_argument(tmp_path: Path, monkeypatch) -> None:
+    """Lock the wiring itself: write_account_state must RECEIVE the open->closed
+    delta as closed_trade_ids, independent of the owned-side GC semantics."""
+    captured: list[set[str]] = []
+
+    def _spy(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured.append(set(kwargs.get("closed_trade_ids", ())))
+
+    monkeypatch.setattr(_cross_sleeve, "write_account_state", _spy)
+    engine = _cross_sleeve_engine(tmp_path)
+
+    engine.state.open_trades = _open_trades_frame(["t1", "t2"])
+    engine._refresh_cross_sleeve_account_state()
+    assert captured[-1] == set()  # nothing closed on the baseline pass
+
+    engine.state.open_trades = _open_trades_frame(["t2"])
+    engine._refresh_cross_sleeve_account_state()
+    assert captured[-1] == {"t1"}  # t1 transitioned open->closed
+
+
+def test_baseline_not_advanced_when_write_raises(tmp_path: Path, monkeypatch) -> None:
+    """If write_account_state raises before completing, the prior-open baseline
+    must NOT advance, so the same close-GC retries next pass (the GC is
+    idempotent). The refresh itself stays self-swallowing — a control-row fault
+    must never break the reconcile loop."""
+    engine = _cross_sleeve_engine(tmp_path)
+    engine.state.open_trades = _open_trades_frame(["t1", "t2"])
+    engine._refresh_cross_sleeve_account_state()
+    assert engine._cross_sleeve_open_trade_ids == {"t1", "t2"}
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("simulated control-row write failure")
+
+    monkeypatch.setattr(_cross_sleeve, "write_account_state", _boom)
+    engine.state.open_trades = _open_trades_frame(["t2"])  # t1 closed
+    # Self-swallowing: no exception propagates out of the refresh.
+    engine._refresh_cross_sleeve_account_state()
+    # Baseline unchanged -> t1 is re-diffed as closed on the next (successful) pass.
+    assert engine._cross_sleeve_open_trade_ids == {"t1", "t2"}

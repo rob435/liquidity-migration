@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import polars as pl
 
+from liquidity_migration import archive_manifest as am
 from liquidity_migration import archive_manifest as manifest_module
 from liquidity_migration.archive_manifest import (
     ArchiveHourlyKlineApiDownloadConfig,
@@ -35,7 +36,7 @@ from liquidity_migration.archive_manifest import (
     run_archive_klines_download,
     synthesize_v5_listing_manifest_rows,
 )
-from liquidity_migration.storage import dataset_path, write_dataset
+from liquidity_migration.storage import dataset_path, read_dataset, write_dataset
 
 
 # --- parse_directory_hrefs / parse_symbol_directories ---------------------
@@ -810,3 +811,125 @@ def test_synthesize_v5_listing_fills_archive_lag_tail_for_existing_symbol() -> N
     assert dates == ["2026-05-26"]
     assert rows[0]["url"] == V5_LISTING_URL_SENTINEL
     assert rows[0]["source"] == V5_LISTING_SOURCE
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b11.py (audit bucket b11).
+# ---------------------------------------------------------------------------
+
+
+# pit-data-7: scrape download paths SKIP v5-listing sentinel rows
+def test_is_v5_listing_row_matches_sentinel_url_or_source() -> None:
+    assert am._is_v5_listing_row({"url": am.V5_LISTING_URL_SENTINEL, "source": "x"})
+    assert am._is_v5_listing_row({"url": "x", "source": am.V5_LISTING_SOURCE})
+    assert not am._is_v5_listing_row(
+        {"url": "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2024-01-01.csv.gz", "source": "scrape"}
+    )
+
+
+def test_scrape_download_skips_v5_listing_without_fetch(tmp_path, monkeypatch) -> None:
+    # If the sentinel row were NOT skipped, download_public_trade_archive would be
+    # called on the bogus URL and burn the retry budget; assert it is never called.
+    def _boom(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("download_public_trade_archive must not be called for a v5-listing row")
+
+    monkeypatch.setattr(am, "download_public_trade_archive", _boom)
+    row = {"symbol": "NEWUSDT", "date": "2024-01-01", "url": am.V5_LISTING_URL_SENTINEL,
+           "source": am.V5_LISTING_SOURCE}
+    for fn in (am._download_one_archive_kline, am._download_one_archive_hourly_kline):
+        result = fn(tmp_path, row, missing_only=False, min_existing_bars=1,
+                    discard_archives_after_success=False)
+        assert result["status"] == "skipped_v5_listing"
+        assert result["status"] != "failed"  # the original bug recorded 'failed'
+
+
+def test_archive_klines_report_surfaces_skipped_count() -> None:
+    payload = {
+        "name": "fix", "dataset": "klines_1h", "interval": "1h", "rows": 3, "workers": 1,
+        "downloaded": 1, "cached": 0, "empty": 0, "skipped_v5_listing": 2, "failures": 0,
+        "archives_deleted": 0, "created_at": "c",
+    }
+    report = am.format_archive_klines_report(payload)
+    assert "| Skipped (v5 listing) | 2 |" in report
+
+
+# pit-data-4: a narrow rebuild UNIONs with the persisted manifest (no PIT erasure)
+def _manifest(rows: list[tuple[str, str, str]]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": [s for s, _, _ in rows],
+            "date": [d for _, d, _ in rows],
+            "url": [u for _, _, u in rows],
+            "source": ["scrape"] * len(rows),
+        }
+    )
+
+
+def test_union_with_persisted_manifest_retains_other_symbols_on_shared_date(tmp_path) -> None:
+    # Persisted manifest covers BTC and ETH on 2024-01-01.
+    persisted = _manifest([
+        ("BTCUSDT", "2024-01-01", "btc.csv.gz"),
+        ("ETHUSDT", "2024-01-01", "eth.csv.gz"),
+    ])
+    write_dataset(persisted, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+
+    # A narrow rebuild only covers BTC on the same date.
+    narrow = _manifest([("BTCUSDT", "2024-01-01", "btc.csv.gz")])
+    merged = am._union_with_persisted_manifest(tmp_path, narrow)
+
+    syms_on_date = set(
+        merged.filter(pl.col("date") == "2024-01-01")["symbol"].to_list()
+    )
+    # ETH's PIT membership on 2024-01-01 must survive the narrow rebuild.
+    assert syms_on_date == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_union_with_persisted_manifest_dedupes_and_falls_back(tmp_path) -> None:
+    # No prior manifest -> returns the new frame unchanged.
+    narrow = _manifest([("BTCUSDT", "2024-01-01", "btc.csv.gz")])
+    assert am._union_with_persisted_manifest(tmp_path, narrow).height == 1
+
+    # With a prior manifest sharing the same (symbol,date,url), the union dedupes.
+    write_dataset(narrow, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+    again = _manifest([
+        ("BTCUSDT", "2024-01-01", "btc.csv.gz"),  # duplicate key
+        ("SOLUSDT", "2024-01-02", "sol.csv.gz"),  # new
+    ])
+    merged = am._union_with_persisted_manifest(tmp_path, again)
+    keys = sorted(zip(merged["symbol"].to_list(), merged["date"].to_list(), merged["url"].to_list()))
+    assert keys == [
+        ("BTCUSDT", "2024-01-01", "btc.csv.gz"),
+        ("SOLUSDT", "2024-01-02", "sol.csv.gz"),
+    ]
+
+
+def test_run_archive_manifest_persist_is_non_destructive(tmp_path, monkeypatch) -> None:
+    """End-to-end: a narrow rebuild persisted via run_archive_manifest must not
+    drop another symbol's date partition (pit-data-4)."""
+    # Seed a persisted manifest covering BTC + ETH on a shared date.
+    seed = _manifest([
+        ("BTCUSDT", "2024-01-01", "btc.csv.gz"),
+        ("ETHUSDT", "2024-01-01", "eth.csv.gz"),
+    ])
+    write_dataset(seed, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+
+    # A narrow rebuild that resolves only BTC. Patch the builder so we drive the
+    # persist path deterministically without network.
+    narrow = _manifest([("BTCUSDT", "2024-01-01", "btc.csv.gz")])
+
+    def _fake_build(*args, **kwargs):
+        return narrow
+
+    monkeypatch.setattr(am, "build_archive_trade_manifest", _fake_build)
+
+    cfg = am.ArchiveManifestConfig(
+        name="narrow", symbols=("BTCUSDT",), allow_degraded=True,
+    )
+    am.run_archive_manifest(tmp_path, config=cfg, report_dir=tmp_path / "reports")
+
+    persisted = read_dataset(tmp_path, "archive_trade_manifest")
+    syms_on_date = set(
+        persisted.filter(pl.col("date") == "2024-01-01")["symbol"].to_list()
+    )
+    assert "ETHUSDT" in syms_on_date, "narrow rebuild must NOT erase ETH's PIT membership"
+    assert "BTCUSDT" in syms_on_date

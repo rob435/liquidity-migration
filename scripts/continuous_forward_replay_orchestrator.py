@@ -64,8 +64,11 @@ NAME_TO_CELL = {
 CELL_OVERRIDES = {cell: ov for (_root, cell), ov in rb.CELLS.items()}
 
 
-def btc_inputs(venue: str, days: list[int]) -> tuple[dict[int, float], dict[int, float]]:
-    """BTC daily returns (consecutive-day, klines-based) + real funding day-sums.
+def btc_inputs(
+    venue: str, days: list[int], symbol: str = "BTCUSDT"
+) -> tuple[dict[int, float], dict[int, float]]:
+    """Hedge-instrument daily returns (consecutive-day, klines-based) + real funding
+    day-sums for ``symbol`` (default BTCUSDT; pass ETHUSDT for the 2f second leg).
 
     Same construction as the banked driver's ``btc_inputs`` but sourced from
     klines_1h directly (the driver's cached research feature panel does not
@@ -73,7 +76,7 @@ def btc_inputs(venue: str, days: list[int]) -> tuple[dict[int, float], dict[int,
     root = ROOTS[venue]
     closes = (
         pl.scan_parquet(str(root / "klines_1h" / "**" / "*.parquet"))
-        .filter(pl.col("symbol") == "BTCUSDT")
+        .filter(pl.col("symbol") == symbol)
         .select("ts_ms", "close")
         .collect()
         .with_columns(((pl.col("ts_ms") // 86_400_000) * 86_400_000).alias("day"))
@@ -90,7 +93,7 @@ def btc_inputs(venue: str, days: list[int]) -> tuple[dict[int, float], dict[int,
     fdir = root / ("funding" if venue == "bybit" else "binance_usdm_funding")
     for day in days:
         date = dt.datetime.fromtimestamp(day / 1000, tz=dt.timezone.utc).date().isoformat()
-        part = fdir / f"date={date}" / "symbol=BTCUSDT"
+        part = fdir / f"date={date}" / f"symbol={symbol}"
         if part.exists():
             fund[day] = float(
                 pl.read_parquet(part, columns=["funding_rate"])["funding_rate"].sum()
@@ -131,18 +134,57 @@ def venue_update(venue: str, state_dir: Path, forward_start_ms: int) -> dict:
         for name, cell in NAME_TO_CELL.items()
     }
     all_days = sorted({d for p in pieces.values() for d in p.days})
-    rets, fund = btc_inputs(venue, all_days)
-    ledger = build_full_ledger(pieces, rets, fund)
+    # forward-replay-1: BTC+ETH 2f hedge — track the SAME object the live demo book
+    # runs (operator decision 2026-06-14). The ETH second leg goes through
+    # build_full_ledger's hedge_returns_2 / hedge_funding_2; FROZEN_FORWARD_CONFIG now
+    # carries instrument2=ETHUSDT (its config-hash voids any prior btc_only ledger).
+    rets, fund = btc_inputs(venue, all_days, "BTCUSDT")
+    rets2, fund2 = btc_inputs(venue, all_days, "ETHUSDT")
+    ledger = build_full_ledger(pieces, rets, fund, rets2, fund2)
     res = update_forward_ledger(state_dir, venue, ledger)
     summary = forward_readiness_summary(state_dir, venue, forward_start_ms=forward_start_ms)
     return {
         "venue": venue,
+        "status": "ok",
         "data_end": end_date,
         "appended_days": res.appended_days,
         "verified_overlap_days": res.verified_overlap_days,
         "total_ledger_days": res.total_days,
+        "drift_detected": False,
         "readiness": summary,
     }
+
+
+def _run_venue(venue: str, state_dir: Path, forward_start_ms: int) -> dict:
+    """Per-venue wrapper that turns a drift / build failure into a reported status
+    rather than aborting the whole run.
+
+    ``update_forward_ledger`` raises a hard ``RuntimeError`` on overlap drift (correct as a
+    same-code regression alarm). Without isolation, a drift on the first venue aborts the loop
+    before the second venue ever runs, and — because nothing alerts on a non-advancing clock — the
+    forward window can quietly stop accruing while the W4 audit keeps printing a stale ``forward_days``
+    (forward-replay-5). Isolating each venue lets the healthy venue still append and surfaces the
+    failure (drift vs other error) explicitly; ``main`` then exits non-zero so a manual/scheduled run
+    cannot silently no-op. Self-healing a *legitimate* history revision (vs a code regression) still
+    requires the state-dir re-base in continuous_forward_replay.update_forward_ledger and is out of
+    scope here."""
+    try:
+        return venue_update(venue, state_dir, forward_start_ms)
+    except Exception as exc:  # noqa: BLE001 - one venue's failure must not abort the other
+        msg = str(exc)
+        drift = "forward-ledger drift" in msg or "missing from the rebuilt ledger" in msg
+        print(
+            f"[{venue}] FORWARD-CLOCK STALL ({'drift' if drift else 'error'}): {msg}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {
+            "venue": venue,
+            "status": "drift" if drift else "error",
+            "appended_days": 0,
+            "drift_detected": drift,
+            "error": msg,
+        }
 
 
 def main() -> int:
@@ -155,10 +197,35 @@ def main() -> int:
     state_dir = Path(args.state_dir).expanduser()
     fwd_ms = int(dt.datetime.fromisoformat(args.forward_start)
                  .replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
-    out = {"config_object": FROZEN_FORWARD_CONFIG["object"], "venues": {}}
+    out: dict = {"config_object": FROZEN_FORWARD_CONFIG["object"], "venues": {}}
     for venue in [v.strip() for v in args.venues.split(",") if v.strip()]:
-        out["venues"][venue] = venue_update(venue, state_dir, fwd_ms)
+        out["venues"][venue] = _run_venue(venue, state_dir, fwd_ms)
+    # Observability: a venue that failed OR appended zero days on a run is a stalled clock.
+    # Flag it loudly and exit non-zero so the stall is not silent (forward-replay-5).
+    failed = [v for v, r in out["venues"].items() if r.get("status") != "ok"]
+    stalled = [
+        v for v, r in out["venues"].items()
+        if r.get("status") == "ok" and int(r.get("appended_days") or 0) == 0
+    ]
+    out["failed_venues"] = failed
+    out["stalled_venues"] = stalled
     print(json.dumps(out, indent=2))
+    if failed:
+        print(
+            f"FORWARD-CLOCK STALLED for {failed}; the forward window is NOT advancing. "
+            "If a data root was legitimately revised, archive/re-base the state dir per "
+            "the continuous_forward_replay contract; otherwise this is a same-code regression.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    if stalled:
+        print(
+            f"WARNING: venues {stalled} appended 0 forward days this run (clock did not advance). "
+            "Expected only if the data root has not refreshed since the prior run.",
+            file=sys.stderr,
+            flush=True,
+        )
     return 0
 
 

@@ -13,7 +13,9 @@ Covers:
 """
 from __future__ import annotations
 
+import logging
 import math
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,14 +23,21 @@ from typing import Any
 import polars as pl
 import pytest
 
+import liquidity_migration.long_native_event_demo as lnd
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.config import ResearchConfig
 from liquidity_migration.long_native_event_demo import (
+    FC_VOLUME_RANK_TELEMETRY_MARGIN,
     LONG_DEMO_STRATEGY_PROFILES,
     LONG_DEMO_TRADES_DATASET,
     LONG_ENTRY_LINK_PREFIX,
     LONG_EXIT_LINK_PREFIX,
     LongNativeDemoCycleConfig,
     MULTI_STRAT_V1_STRATEGY_ID,
+    _execute_long_entries,
+    _fc_rank_is_near_boundary,
+    _log_fc_rank_boundary,
+    _execute_long_exits,
     _filter_pending_long_entries,
     _long_demo_event_config,
     _long_demo_strategy_id,
@@ -44,6 +53,7 @@ from liquidity_migration.long_native_event_demo import (
     format_long_demo_cycle_summary,
     format_long_telegram_status_message,
     projected_long_initial_margin_pct_equity,
+    run_long_native_demo_cycle,
     target_long_order_notional_pct_equity,
     _long_telegram_reason,
 )
@@ -110,19 +120,24 @@ def test_projected_margin_guard_rejects_unsafe_levered_full_book() -> None:
     strategy = _v11a_long_native_config()
     unsafe = LongNativeDemoCycleConfig(notional_multiplier=10.0)
     projection = projected_long_initial_margin_pct_equity(unsafe, strategy)
-    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(1.25)
+    # audit2c: worst case now also folds the 1.5x weekend tilt (and the <=1.0
+    # vol-parity weight), so the projection is 1.25 * 1.5 = 1.875, not 1.25.
+    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(1.875)
     with pytest.raises(ValueError, match="projected full-book initial margin"):
         _validate_long_demo_config(unsafe, strategy)
 
 
 def test_projected_margin_guard_allows_explicit_safe_levered_demo() -> None:
     strategy = _v11a_long_native_config()
+    # audit2c: the 4x config used to project exactly 0.50 and pass; once the 1.5x
+    # weekend tilt is modeled it projects 0.75 and is correctly rejected. A 2x
+    # config (0.10*2*1.25*1.5 = 0.375) is the new headroom-respecting "safe" case.
     safe = LongNativeDemoCycleConfig(
-        notional_multiplier=4.0,
+        notional_multiplier=2.0,
         max_projected_initial_margin_pct_equity=0.50,
     )
     projection = projected_long_initial_margin_pct_equity(safe, strategy)
-    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.50)
+    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.375)
     _validate_long_demo_config(safe, strategy)
 
 
@@ -798,3 +813,453 @@ def test_median_universe_selection_noop_without_median_column() -> None:
     feat = pl.DataFrame([{"ts_ms": 1, "symbol": "x", "turnover_quote": 1.0, "in_universe": True}])
     out, fallback = _apply_median_universe_selection(feat, universe_size=3, snapshot_ts_ms=1)
     assert fallback == 0 and out.equals(feat)
+
+
+# --------------------------------------------------------------------------- #
+# audit2c — projected-IM guard models the LIVE worst-case per-position notional #
+# --------------------------------------------------------------------------- #
+def test_guard_now_rejects_promoted_4x_config_that_used_to_pass() -> None:
+    """The promoted strategy (gross_exposure=1.0, max_concurrent_positions=10,
+    entry_leverage=10) with notional_multiplier=4.0 used to project EXACTLY 0.50
+    full-book IM and pass the 50% ceiling. With the 1.5x weekend tilt modeled it
+    projects 0.75 and must be rejected."""
+    strategy = _v11a_long_native_config()
+    assert strategy.gross_exposure == pytest.approx(1.0)
+    assert strategy.max_concurrent_positions == 10
+    assert strategy.weekend_size_mult == pytest.approx(1.5)
+
+    demo = LongNativeDemoCycleConfig(
+        notional_multiplier=4.0,
+        entry_leverage=10.0,
+        max_projected_initial_margin_pct_equity=0.50,
+    )
+    projection = projected_long_initial_margin_pct_equity(demo, strategy)
+
+    # base per-position = 1.0/10 = 0.10; * mult 4 = 0.40; * vol-scale 1.25 = 0.50
+    # (the OLD worst-case order notional). The fix adds * 1.5 weekend tilt = 0.75.
+    assert projection["worst_case_order_notional_pct_equity"] == pytest.approx(0.75)
+    # full book = 0.75 * 10 positions / 10x leverage = 0.75 (was 0.50).
+    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.75)
+
+    # The guard now correctly REJECTS what it previously approved at exactly 0.50.
+    with pytest.raises(ValueError, match="projected full-book initial margin"):
+        _validate_long_demo_config(demo, strategy)
+
+
+def test_guard_models_weekend_and_unit_position_weight_factors() -> None:
+    """Worst-case order notional = per_order * vol_scale * weekend_mult * 1.0.
+
+    Pins each factor so a regression that drops the weekend tilt (the old bug) or
+    the unit position-weight assumption fails here."""
+    strategy = _v11a_long_native_config()
+    demo = LongNativeDemoCycleConfig(notional_multiplier=4.0, entry_leverage=10.0)
+    projection = projected_long_initial_margin_pct_equity(demo, strategy)
+
+    per_order = projection["per_order_notional_pct_equity"]
+    vol_scale = projection["worst_case_vol_target_scale"]
+    worst_case = projection["worst_case_order_notional_pct_equity"]
+    assert per_order == pytest.approx(0.40)
+    assert vol_scale == pytest.approx(1.25)
+    # weekend_size_mult=1.5, max vol-parity weight=1.0 -> factor 1.5 over the old model.
+    assert worst_case == pytest.approx(per_order * vol_scale * 1.5)
+
+
+def test_weekend_mult_one_low_multiplier_still_passes() -> None:
+    """A config with weekend_size_mult=1.0 and a low multiplier is below the
+    ceiling and must still be accepted (the guard only tightens where the live
+    book is actually levered up by the weekend tilt)."""
+    strategy = replace(_v11a_long_native_config(), weekend_size_mult=1.0)
+    demo = LongNativeDemoCycleConfig(
+        notional_multiplier=2.0,
+        entry_leverage=10.0,
+        max_projected_initial_margin_pct_equity=0.50,
+    )
+    projection = projected_long_initial_margin_pct_equity(demo, strategy)
+
+    # weekend_mult=1.0 -> no extra factor: 0.10 * 2 * 1.25 = 0.25 worst-case order;
+    # full book = 0.25 * 10 / 10 = 0.25, well under 0.50.
+    assert projection["worst_case_order_notional_pct_equity"] == pytest.approx(0.25)
+    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.25)
+    _validate_long_demo_config(demo, strategy)  # must not raise
+
+
+def test_weekend_mult_below_one_does_not_relax_guard() -> None:
+    """A weekend tilt < 1.0 would size DOWN, but a guard must never use it to
+    relax the worst case below the no-tilt baseline — the max(1.0, ...) floor
+    keeps the projection conservative."""
+    strategy = replace(_v11a_long_native_config(), weekend_size_mult=0.5)
+    demo = LongNativeDemoCycleConfig(notional_multiplier=4.0, entry_leverage=10.0)
+    projection = projected_long_initial_margin_pct_equity(demo, strategy)
+    # floor at 1.0 -> worst case stays 0.40 * 1.25 = 0.50, not 0.25.
+    assert projection["worst_case_order_notional_pct_equity"] == pytest.approx(0.50)
+
+
+# --------------------------------------------------------------------------- #
+# audit2b — long-demo cycle telemetry truthfulness (entries_parallel_workers)   #
+# --------------------------------------------------------------------------- #
+class _ThreadRecordingClient:
+    """Private client that records the thread each place_order ran on."""
+
+    def __init__(self) -> None:
+        self.place_threads: list[int] = []
+        self.set_leverage_calls: list[dict] = []
+
+    def set_leverage(self, **kw: Any) -> dict:
+        self.set_leverage_calls.append(kw)
+        return {}
+
+    def place_order(self, **params: Any) -> dict:
+        self.place_threads.append(threading.get_ident())
+        return {"orderId": f"oid-{len(self.place_threads)}"}
+
+
+def _candidate(symbol: str, signal_ts_ms: int = 1_700_000_000_000) -> dict[str, Any]:
+    return {
+        "trade_id": f"long-{symbol}-{signal_ts_ms}",
+        "symbol": symbol,
+        "side": "long",
+        "pattern": "fomo_chase",
+        "signal_ts_ms": signal_ts_ms,
+        "signal_close": 100.0,
+        "live_price": 99.0,
+        "retrace_threshold": 99.0,
+        "sniper_deadline_ms": signal_ts_ms + 6 * lnd.MS_PER_HOUR,
+        "entry_reason": "sniper_retrace",
+        "entry_ready_ts_ms": signal_ts_ms,
+        "stop_loss_pct": 0.1,
+        "take_profit_pct": 0.2,
+        "max_hold_days": 3,
+        "planned_exit_ts_ms": signal_ts_ms + 3 * lnd.MS_PER_DAY,
+        "atr_14d_pct": 0.05,
+        "realized_vol": 0.5,
+        "position_weight": 1.0,
+        "candidate_score": 0.2,
+        "today_volume_rank": 1.0,
+        "entry_policy": "v11a_sniper_retrace_fallthru",
+        "entry_quality_tier": "sniper_retrace",
+        "entry_rule": "sniper retrace",
+    }
+
+
+def _stub_cycle_dependencies(monkeypatch: pytest.MonkeyPatch, *, candidates: list[dict]) -> None:
+    """Patch the heavy collaborators so the cycle reaches the entries-telemetry
+    block deterministically and offline. Leaves the real `requested_entry_workers`
+    computation + cycle-row assembly (the code under test) untouched."""
+    universe = pl.DataFrame(
+        {"symbol": [c["symbol"] for c in candidates] or ["AAAUSDT"]}
+    )
+
+    monkeypatch.setattr(lnd, "_demo_instruments", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(
+        lnd, "_resolve_ticker_snapshot", lambda *a, **k: ([], "rest")
+    )
+    monkeypatch.setattr(lnd, "_normalize_tickers", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(lnd, "_build_long_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(
+        lnd,
+        "_resolve_private_snapshot",
+        lambda *a, **k: (
+            {
+                "equity_usdt": 10_000.0,
+                "wallet_error": "",
+                "raw_open_orders": [],
+                "open_order_error": "",
+                "raw_positions": [],
+                "position_error": "",
+            },
+            "rest",
+        ),
+    )
+    monkeypatch.setattr(
+        lnd, "_download_recent_1h_klines",
+        lambda *a, **k: (
+            pl.DataFrame(),
+            {"cache_rows": 0, "fetched_rows": 0, "store_rows": 0, "store_symbols": 0},
+        ),
+    )
+    monkeypatch.setattr(lnd, "build_long_features", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(
+        lnd, "_apply_median_universe_selection", lambda features, **k: (features, 0)
+    )
+    monkeypatch.setattr(
+        lnd, "_price_lookup_from_tickers_and_klines",
+        lambda *a, **k: {c["symbol"]: c["live_price"] for c in candidates},
+    )
+    monkeypatch.setattr(lnd, "_contract_lookup", lambda *a, **k: {})
+    monkeypatch.setattr(
+        lnd, "_select_long_entry_candidates",
+        lambda **k: (list(candidates), {"no_signal": 0}),
+    )
+    # Entries are a no-op for the telemetry test: we only care about the worker
+    # count the cycle REPORTS, not the executed rows.
+    monkeypatch.setattr(
+        lnd, "_execute_long_entries", lambda *a, **k: ([], [], 0)
+    )
+
+
+def _run_cycle(tmp_path: Path, demo: LongNativeDemoCycleConfig) -> dict[str, Any]:
+    return run_long_native_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=demo,
+        private_client=_ThreadRecordingClient(),
+        now_ms=1_700_000_300_000,
+    )
+
+
+def test_submit_cycle_reports_truthful_worker_count_of_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """submit_orders=True, max_concurrent_entries=4, 2 candidates: the OLD code
+    set entries_parallel_workers = min(4, 2) = 2 and reported it, despite
+    sequential execution. The fix reports the ACTUAL worker count, 1."""
+    cands = [_candidate("AAAUSDT"), _candidate("BBBUSDT", signal_ts_ms=1_700_000_001_000)]
+    _stub_cycle_dependencies(monkeypatch, candidates=cands)
+    demo = LongNativeDemoCycleConfig(
+        submit_orders=True,
+        confirm_demo_orders=True,
+        max_concurrent_entries=4,
+        max_new_entries_per_cycle=5,
+        ws_klines_enabled=False,
+    )
+    payload = _run_cycle(tmp_path, demo)
+    # 2 candidates reached the entries block (proves the >1 branch could fire).
+    assert payload["cycle"]["entry_candidates"] == 2
+    # Truthful: sequential execution => 1 worker. OLD code reported 2 here.
+    assert payload["cycle"]["entries_parallel_workers"] == 1
+
+
+def test_dry_run_cycle_worker_count_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The normal dry-run path never entered the parallel branch and reported 1
+    both before and after the fix — the fix must not perturb it."""
+    cands = [_candidate("AAAUSDT"), _candidate("BBBUSDT", signal_ts_ms=1_700_000_001_000)]
+    _stub_cycle_dependencies(monkeypatch, candidates=cands)
+    demo = LongNativeDemoCycleConfig(
+        submit_orders=False,
+        record_dry_run=True,
+        max_concurrent_entries=4,
+        max_new_entries_per_cycle=5,
+        ws_klines_enabled=False,
+    )
+    payload = _run_cycle(tmp_path, demo)
+    assert payload["cycle"]["entry_candidates"] == 2
+    assert payload["cycle"]["entries_parallel_workers"] == 1
+
+
+def test_submit_cycle_single_candidate_worker_count_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single candidate never trips the >1 branch (len(candidates) > 1 is
+    False), so both old and new report 1 — the other happy path."""
+    cands = [_candidate("AAAUSDT")]
+    _stub_cycle_dependencies(monkeypatch, candidates=cands)
+    demo = LongNativeDemoCycleConfig(
+        submit_orders=True,
+        confirm_demo_orders=True,
+        max_concurrent_entries=4,
+        max_new_entries_per_cycle=5,
+        ws_klines_enabled=False,
+    )
+    payload = _run_cycle(tmp_path, demo)
+    assert payload["cycle"]["entry_candidates"] == 1
+    assert payload["cycle"]["entries_parallel_workers"] == 1
+
+
+def test_execute_long_entries_runs_on_single_thread_despite_max_workers() -> None:
+    """The fact that makes any reported worker count >1 a lie: even handed
+    max_workers=4 and a private_client_factory, _execute_long_entries submits
+    every entry on the SAME (calling) thread — there is no parallelism."""
+    client = _ThreadRecordingClient()
+    contracts = {
+        "AAAUSDT": {"tick_size": 0.01, "qty_step": 0.001, "min_order_qty": 0.0,
+                    "min_notional_value": 0.0, "max_order_qty": 1e9},
+        "BBBUSDT": {"tick_size": 0.01, "qty_step": 0.001, "min_order_qty": 0.0,
+                    "min_notional_value": 0.0, "max_order_qty": 1e9},
+        "CCCUSDT": {"tick_size": 0.01, "qty_step": 0.001, "min_order_qty": 0.0,
+                    "min_notional_value": 0.0, "max_order_qty": 1e9},
+    }
+    cands = [
+        _candidate("AAAUSDT"),
+        _candidate("BBBUSDT", signal_ts_ms=1_700_000_001_000),
+        _candidate("CCCUSDT", signal_ts_ms=1_700_000_002_000),
+    ]
+    demo = LongNativeDemoCycleConfig(
+        submit_orders=True, confirm_demo_orders=True, entry_leverage=10.0
+    )
+
+    def _factory() -> _ThreadRecordingClient:  # would-be parallel worker client
+        return _ThreadRecordingClient()
+
+    _rows, _orders, _skipped = _execute_long_entries(
+        cands,
+        trading_client=client,
+        demo=demo,
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.1,
+        price_by_symbol={"AAAUSDT": 99.0, "BBBUSDT": 99.0, "CCCUSDT": 99.0},
+        contract_by_symbol=contracts,
+        now_ms=1_700_000_300_000,
+        strategy_id="s",
+        record_preflight=None,
+        private_client_factory=_factory,
+        execution_event_router=None,
+        max_workers=4,  # explicitly request parallelism...
+    )
+    # ...yet all three place_order calls ran sequentially on this one thread via
+    # the single injected trading_client (the factory was never used). Three
+    # placements is itself proof the burst was not short-circuited.
+    assert len(client.place_threads) == 3
+    assert set(client.place_threads) == {threading.get_ident()}
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b11.py (audit bucket b11).
+# ---------------------------------------------------------------------------
+
+
+# long-sleeve-1: live path applies the deployed weekend 1.5x size tilt
+def _fc_signal_features(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:
+    """Minimal feature row that passes detect_pattern_fomo_chase (mirrors the
+    long_native_event_demo test fixture)."""
+    return pl.DataFrame([
+        {
+            "ts_ms": signal_ts_ms,
+            "symbol": symbol,
+            "close": signal_close,
+            "in_universe": True,
+            "regime_on": True,
+            "eth_regime_on": True,
+            "today_volume_rank": 5,
+            "log_return": math.log(1.0 + 0.20),
+            "close_location": 0.85,
+            "atr_14d_pct": 0.05,
+            "sigma_daily_30d": 0.05,
+            "pump_3d_log": 0.10,
+            "pump_7d_log": 0.20,
+            "close_loc_3d": 0.7,
+            "close_loc_7d": 0.7,
+            "intra_max_Nh_pump_log": 0.0,
+            "realized_vol": 0.6,
+            "coin_30d_return": 0.5,
+            "coin_60d_return": 0.5,
+            "coin_fc_sma": None,
+            "btc_high_proximity": 0.5,
+            "btc_sma_dist": 0.05,
+            "vol_vs_30d_median": 2.0,
+            "own_pump_quantile_90d": 0.10,
+            "own_atr_quantile_90d": 0.10,
+            "atr_20d": 5.0,
+        }
+    ])
+
+
+# 2023-04-01 12:00Z is a Saturday; 2023-04-05 12:00Z is a Wednesday.
+_SAT_NOW_MS = 1_680_350_400_000
+_WED_NOW_MS = 1_680_696_000_000
+
+
+def _one_candidate_weight(now_ms: int) -> float:
+    strategy = _v11a_long_native_config()
+    assert strategy.weekend_size_mult == 1.5, "v11a profile must carry the 1.5x weekend tilt"
+    signal_ts = now_ms - 2 * MS_PER_HOUR  # fresh, same UTC day, retrace fired
+    features = _fc_signal_features(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
+    candidates, _ = _select_long_entry_candidates(
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now_ms,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.5},  # below the 1% retrace threshold
+        max_new_entries=5,
+    )
+    assert len(candidates) == 1, "expected exactly one FC retrace candidate"
+    return float(candidates[0]["position_weight"])
+
+
+def test_live_weekend_size_tilt_matches_backtest() -> None:
+    weekday_weight = _one_candidate_weight(_WED_NOW_MS)
+    weekend_weight = _one_candidate_weight(_SAT_NOW_MS)
+    assert weekday_weight > 0.0
+    # The live Sat entry must be sized 1.5x the live weekday entry, exactly as the
+    # backtest sizes Sat/Sun entries (long_native.py weekend_size_mult). Before the
+    # fix the live path ignored weekend_size_mult, so both were equal.
+    assert weekend_weight == pytest.approx(weekday_weight * 1.5)
+
+
+# long-sleeve-3: live per-trade net_return is NET of venue fees
+def test_live_long_exit_net_return_subtracts_fees() -> None:
+    from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
+
+    now = 2_000_000_000_000
+    # Trade carries an entry fee; equity 10k, notional 1k (weight 0.1), +10% move.
+    all_trades = pl.DataFrame([
+        {
+            "trade_id": "t1", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
+            "status": "open", "qty": "0.001", "entry_price": 100.0,
+            "notional_usdt": 1_000.0, "equity_usdt": 10_000.0,
+            "entry_fee_usdt": 0.6,  # taker fee on entry
+            "planned_exit_ts_ms": now - MS_PER_HOUR,
+        },
+    ])
+    plan = {"trade_id": "t1", "symbol": "BTCUSDT", "qty": "0.001", "exit_reason": "time_stop"}
+    demo = LongNativeDemoCycleConfig(submit_orders=False)  # dry-run -> exit_fee 0
+
+    rows, _ = _execute_long_exits(
+        [plan], all_trades, trading_client=None, demo=demo, now_ms=now,
+        price_by_symbol={"BTCUSDT": 110.0},  # +10%
+    )
+    assert len(rows) == 1 and rows[0]["status"] == "closed"
+    gross = 0.10 * (1_000.0 / 10_000.0)  # gross_trade_return * notional_weight
+    fee_return = (0.6 + 0.0) / 10_000.0
+    # net_return must be NET of fees; the original bug recorded the gross value.
+    assert float(rows[0]["net_return"]) == pytest.approx(gross - fee_return)
+    assert float(rows[0]["net_return"]) < gross
+
+
+# ratelimit-rest-4: stale "short never gets starved" claim removed
+def test_rate_limit_docstring_no_longer_overstates_cross_sleeve_protection() -> None:
+    from liquidity_migration.long_native_event_demo import (
+        _long_demo_private_rest_rate_limit_per_second,
+    )
+
+    doc = _long_demo_private_rest_rate_limit_per_second.__doc__ or ""
+    assert "ratelimit-rest-4" in doc
+    assert "per-IP" in doc  # explicitly states it is NOT a per-IP coordinator
+    assert "never gets starved" not in doc  # the stale erased-short claim is gone
+
+
+# --------------------------------------------------------------------------- #
+# long-sleeve-2: live FC rank-boundary telemetry (observability ONLY)
+# (relocated from tests/test_audit_int_iG.py)
+# --------------------------------------------------------------------------- #
+
+def test_fc_rank_near_boundary_predicate() -> None:
+    cutoff = 10
+    margin = FC_VOLUME_RANK_TELEMETRY_MARGIN
+    # Exactly at the cutoff -> in band.
+    assert _fc_rank_is_near_boundary(cutoff, cutoff) is True
+    # Within margin of the cutoff -> in band.
+    assert _fc_rank_is_near_boundary(cutoff - margin, cutoff) is True
+    assert _fc_rank_is_near_boundary(cutoff - 1, cutoff) is True
+    # Comfortably inside the top set -> NOT flagged.
+    assert _fc_rank_is_near_boundary(cutoff - margin - 1, cutoff) is False
+    assert _fc_rank_is_near_boundary(1, cutoff) is False
+    # Above the cutoff -> would not have fired the FC gate; not flagged.
+    assert _fc_rank_is_near_boundary(cutoff + 1, cutoff) is False
+    # Missing rank -> not flagged.
+    assert _fc_rank_is_near_boundary(None, cutoff) is False
+
+
+def test_log_fc_rank_boundary_emits_for_near_boundary_candidate(caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="liquidity_migration.long_native_event_demo"):
+        _log_fc_rank_boundary(symbol="WIFUSDT", today_volume_rank=9, fc_top_volume_rank_max=10)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("rank-boundary" in m and "WIFUSDT" in m for m in msgs)
+
+
+def test_log_fc_rank_boundary_silent_for_comfortable_rank(caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="liquidity_migration.long_native_event_demo"):
+        _log_fc_rank_boundary(symbol="ETHUSDT", today_volume_rank=2, fc_top_volume_rank_max=10)
+    assert caplog.records == []

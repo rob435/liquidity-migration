@@ -19,9 +19,9 @@ to be strictly PIT, the NEWEST summed residual_return must complete ≤ D 00:00 
 ≤ D-3. Hence shift(3): residual_momentum[D] = sum residual_return[D-9..D-3], whose newest term
 residual_return[D-3] completes (D-1) 01:00 UTC < D 00:00 UTC. (The old shift(1) summed
 residual_return[D-1], which completes D+1 01:00 UTC — up to ~25h of future data: that was the bug.)
-The backtest event-research join is separately day-aligned in volume_events._attach_residual_momentum
-(panel trading day = date(ts_ms-1ms)); the live/continuous join (continuous_events: floor to
-start-of-day D) was already aligned.
+The live/continuous join (continuous_events: floor to start-of-day D) is aligned to the same
+trading day (date(ts_ms-1ms)). (The former backtest event-research join helper was erased
+with the daily SHORT engine on 2026-06-11; only the continuous join remains.)
 
 ⚠️ DEPLOY NOTE: shift(3) re-bases EVERY residual_momentum value (a 2-day-staler, causal momentum),
 so the rmom-gate MAR verdict AND the live continuous rmom_quantile (0.33) were calibrated on the OLD

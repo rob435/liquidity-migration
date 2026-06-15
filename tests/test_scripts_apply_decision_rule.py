@@ -7,9 +7,11 @@ passes every gate, to confirm both branches work.
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -424,6 +426,42 @@ def test_investigation_one_venue_positive_other_beyond_tolerance_is_descriptive(
     )
 
 
+def test_investigation_one_venue_positive_other_unmeasurable_is_descriptive(tmp_path):
+    """1/2 positive but the OTHER venue's MAR Δ is NaN (zero-drawdown, unmeasurable)
+    → descriptive, NOT investigation_positive. A NaN MAR Δ must not pass the
+    majority gate via `nan < -tol` being False (the falsifier path already
+    excludes NaN; the positive path must too)."""
+    import math
+
+    rows = [
+        {"cell_id": "00_baseline", "venue": "bybit",   "sharpe_like": 2.0,
+         "max_drawdown": -0.42, "trades": 400, "total_return": 5.0, "window_days": 365.25},
+        {"cell_id": "00_baseline", "venue": "binance", "sharpe_like": 1.0,
+         "max_drawdown": -0.50, "trades": 300, "total_return": 0.5, "window_days": 365.25},
+        # ZeroDD bybit: max_drawdown 0.0 -> MAR is NaN (unmeasurable) -> Δ is NaN.
+        {"cell_id": "ZeroDD", "venue": "bybit",   "sharpe_like": 2.4,
+         "max_drawdown": 0.0, "trades": 380, "total_return": 6.0, "window_days": 365.25},
+        # ZeroDD binance: MAR = 0.8/0.4 = 2.0 vs control 1.0 -> Δ = +1.0 (positive).
+        {"cell_id": "ZeroDD", "venue": "binance", "sharpe_like": 1.2,
+         "max_drawdown": -0.40, "trades": 290, "total_return": 0.8, "window_days": 365.25},
+    ]
+    csv_path = _write_csv_with_window(tmp_path, rows)
+    raw, _excluded = MOD._read_csv(csv_path)
+    indexed = MOD._index_by_cell(raw)
+    v = MOD.evaluate_cell_investigation(
+        cell_id="ZeroDD",
+        cell_rows=indexed["ZeroDD"],
+        control_rows=indexed["00_baseline"],
+        window_days=365.25,
+    )
+    assert math.isnan(v.bybit_mar_d), f"expected NaN bybit MAR Δ, got {v.bybit_mar_d}"
+    assert v.binance_mar_d > 0
+    assert v.verdict == "descriptive", (
+        f"expected descriptive (NaN other venue is unmeasurable), got {v.verdict} "
+        f"reasons={v.reasons}"
+    )
+
+
 def test_investigation_mar_falsify_at_minus_one(tmp_path):
     """MAR Δ ≤ -1.0 on either venue → falsifier."""
     rows = [
@@ -645,3 +683,208 @@ def test_non_full_pit_cell_is_hard_excluded_from_positive(tmp_path, capsys):
     assert "non_full_pit" in out
     assert "investigation_positive=0" in out  # the tainted cell was excluded
     assert "HARD-EXCLUDED" in out
+
+
+# ─────────────────── audit2 — decision-rule + block-bootstrap robustness ───────────────────
+# audit2 covers two independent defects:
+#
+# (1) ``scripts/apply_decision_rule.py``: the investigation tier must not crash on
+#     a malformed ``window_days=0`` row. Such a row carries no measurable window,
+#     so MAR is UNMEASURABLE (nan) and the cell is non-qualifying (``descriptive``),
+#     NOT an exception. Valid (``window_days>0``) rows are unchanged.
+#
+# (2) ``scripts/alpha_sweep.py``: the moving-block bootstrap drew block starts from
+#     ``[0, len(r) - block)``, so the maximum start was ``len(r) - block - 1`` and the
+#     FINAL observation (index ``len(r) - 1``) was never reachable in any resample
+#     (off-by-one). The corrected range ``[0, len(r) - block + 1)`` makes the max
+#     start ``len(r) - block`` so a block ``[n-block, n-1]`` includes the last point,
+#     mirroring ``r1_robustness._resample_block_indices`` (max_start = n - block + 1).
+
+# audit2 reuses the target's already-loaded apply_decision_rule module + repo root.
+adr = MOD
+REPO = REPO_ROOT
+
+
+# --------------------------------------------------------------------------- #
+# (1) apply_decision_rule: window_days<=0 must not crash the investigation tier
+# --------------------------------------------------------------------------- #
+
+
+def test_compute_mar_window_days_zero_is_unmeasurable_not_crash():
+    """A window_days=0 row yields nan (unmeasurable), never an exception."""
+    # OLD code: compute_annualized_return raises ValueError("window_days must be > 0")
+    # which propagated out of compute_mar and crashed the whole verdict.
+    out = adr.compute_mar(total_return=0.5, max_drawdown=-0.20, window_days=0.0)
+    assert math.isnan(out)
+    # negative window is equally degenerate
+    assert math.isnan(adr.compute_mar(0.5, -0.20, -3.0))
+
+
+def test_evaluate_cell_investigation_window_days_zero_no_crash_non_qualifying():
+    """Feed a window_days=0 cell row: no exception, and a sane non-qualifying
+    (descriptive) verdict — not investigation_positive, not a crash."""
+    Cell = adr.CellMetrics
+    # control with a real window; the candidate cell is the malformed window_days=0 one.
+    control = {
+        "bybit": Cell("00_baseline", "bybit", 1.0, -0.20, 100, 0.5, window_days=365.0),
+        "binance": Cell("00_baseline", "binance", 1.0, -0.20, 100, 0.5, window_days=365.0),
+    }
+    cell = {
+        "bybit": Cell("01_bad", "bybit", 1.5, -0.18, 100, 0.6, window_days=0.0),
+        "binance": Cell("01_bad", "binance", 1.5, -0.18, 100, 0.6, window_days=0.0),
+    }
+    # Must not raise.
+    v = adr.evaluate_cell_investigation(
+        "01_bad", cell, control, window_days=365.0,
+    )
+    # nan MAR on both venues → neither positive nor falsified → descriptive.
+    assert v.verdict == "descriptive"
+    assert math.isnan(v.bybit_mar)
+    assert math.isnan(v.binance_mar)
+    # it specifically did NOT pass as a positive on tainted/unmeasurable numbers
+    assert v.verdict != "investigation_positive"
+
+
+def test_evaluate_cell_investigation_valid_window_unchanged():
+    """A normal (window_days>0) cell still evaluates exactly as before: a clear
+    MAR improvement on both venues with healthy trades is investigation_positive."""
+    Cell = adr.CellMetrics
+    control = {
+        "bybit": Cell("00_baseline", "bybit", 1.0, -0.40, 100, 0.5, window_days=365.0),
+        "binance": Cell("00_baseline", "binance", 1.0, -0.40, 100, 0.5, window_days=365.0),
+    }
+    # Higher return AND shallower drawdown → higher MAR on both venues.
+    cell = {
+        "bybit": Cell("01_good", "bybit", 1.5, -0.20, 100, 1.0, window_days=365.0),
+        "binance": Cell("01_good", "binance", 1.5, -0.20, 100, 1.0, window_days=365.0),
+    }
+    v = adr.evaluate_cell_investigation("01_good", cell, control, window_days=365.0)
+    assert v.verdict == "investigation_positive"
+    assert v.bybit_mar_d > 0
+    assert v.binance_mar_d > 0
+    # Sanity: MAR is finite and matches the direct compute_mar (no behavior drift).
+    expected_by = adr.compute_mar(1.0, -0.20, 365.0)
+    assert math.isclose(v.bybit_mar, expected_by, rel_tol=1e-12)
+
+
+# --------------------------------------------------------------------------- #
+# (2) alpha_sweep block-bootstrap: final observation must be reachable
+# --------------------------------------------------------------------------- #
+
+# The three sweep sites all use the idiom
+#   rng.integers(0, max(1, len(r) - block + 1), nb)
+# i.e. the start is drawn from the half-open interval [0, n - block + 1), so the
+# maximum start index is n - block and a block [n-block, n-1] reaches the last
+# observation. The pre-fix idiom used (n - block), dropping the final point.
+
+
+def _max_start_corrected(n: int, block: int) -> int:
+    """The corrected exclusive upper bound used by the sweep bootstrap."""
+    return max(1, n - block + 1)
+
+
+def _max_start_old(n: int, block: int) -> int:
+    """The pre-fix (buggy) exclusive upper bound — kept to prove the regression."""
+    return max(1, n - block)
+
+
+def test_corrected_range_reaches_final_observation():
+    """With the corrected upper bound, the max block start == n - block, so the
+    block [n-block, n-1] includes the final index n-1. The old range did NOT."""
+    n, block = 30, 21
+    rng = np.random.default_rng(0)
+    starts = rng.integers(0, _max_start_corrected(n, block), 100_000)
+    max_start = int(starts.max())
+    # exclusive upper bound is n-block+1 → reachable max start is exactly n-block
+    assert max_start == n - block  # == 9
+    # the final observation index (n-1) is covered by a block starting at n-block
+    last_covered = max_start + block - 1
+    assert last_covered == n - 1
+
+    # Regression guard: the OLD range could never reach n-1.
+    old_starts = rng.integers(0, _max_start_old(n, block), 100_000)
+    old_max_start = int(old_starts.max())
+    assert old_max_start == n - block - 1  # == 8, one short
+    assert old_max_start + block - 1 == n - 2  # last point (n-1) unreachable
+
+
+def test_alpha_sweep_source_uses_corrected_upper_bound():
+    """All block-bootstrap call sites in alpha_sweep.py use the +1 (corrected)
+    upper bound; none retain the pre-fix `len(r) - block)` form."""
+    src = (REPO / "scripts" / "alpha_sweep.py").read_text()
+    # every integers() bootstrap draw is now the corrected form
+    assert "len(r) - block + 1" in src
+    n_corrected = src.count("rng.integers(0, max(1, len(r) - block + 1), nb)")
+    assert n_corrected == 3, f"expected 3 corrected sites, found {n_corrected}"
+    # no buggy site survives (the corrected substring contains '- block', so we
+    # must check the exact buggy call form, not a loose '- block)' fragment)
+    assert "rng.integers(0, max(1, len(r) - block), nb)" not in src
+
+
+def test_final_observation_appears_over_many_draws():
+    """End-to-end: over many seeded resamples, the FINAL observation value is
+    actually included at least once (it never could be under the off-by-one)."""
+    n, block = 30, 21
+    r = np.arange(n, dtype=float)  # distinct values; r[-1] == 29.0 is the sentinel
+    rng = np.random.default_rng(0)
+    seen_last = False
+    for _ in range(2000):
+        starts = rng.integers(0, _max_start_corrected(n, block), int(np.ceil(n / block)))
+        samp = np.concatenate([r[s:s + block] for s in starts])[:n]
+        if (samp == r[-1]).any():
+            seen_last = True
+            break
+    assert seen_last, "corrected bootstrap must be able to include the final observation"
+
+    # And prove the OLD bound could not have produced it.
+    rng_old = np.random.default_rng(0)
+    starts_old = rng_old.integers(0, _max_start_old(n, block), 1)
+    assert int(starts_old.max()) <= n - block - 1
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b03.py (decision-rule-2). Routes through
+# the module-loaded MOD (CellMetrics/evaluate_cell) like the rest of this suite.
+# ---------------------------------------------------------------------------
+def test_legacy_rule_rejects_zero_trade_binance_cell() -> None:
+    """decision-rule-2: with `--rule legacy`, min_trades_binance defaults to 0, so the
+    soft floor (`0 < 0`) never fires and a 0-trade Binance cell was rubber-stamped a
+    candidate on the Bybit numbers alone. The fix blocks any venue with 0 executed
+    trades regardless of preset (STATE.md non-negotiable #3: both venues matter)."""
+    def _m(*, sharpe: float, dd: float, ret: float, trades: int) -> "MOD.CellMetrics":
+        return MOD.CellMetrics(
+            cell_id="c", venue="x", sharpe_like=sharpe, max_drawdown=dd,
+            total_return=ret, trades=trades,
+        )
+
+    # Control with real drawdown/return on both venues.
+    control = {
+        "bybit": _m(sharpe=1.0, dd=-0.30, ret=1.0, trades=400),
+        "binance": _m(sharpe=1.0, dd=-0.30, ret=1.0, trades=400),
+    }
+    # Cell: bybit clears the legacy bar (Δsharpe +0.6, DD unchanged, positive return,
+    # 350 trades); binance is PRESENT but executed ZERO trades.
+    cell = {
+        "bybit": _m(sharpe=1.6, dd=-0.30, ret=1.5, trades=350),
+        "binance": _m(sharpe=1.6, dd=-0.30, ret=1.5, trades=0),
+    }
+    verdict = MOD.evaluate_cell(
+        "cell-degenerate", cell, control,
+        sharpe_delta_min=0.5, dd_delta_pp_max=-5.0,  # legacy preset values
+        min_trades_bybit=30, min_trades_binance=0,   # the buggy legacy floor
+    )
+    assert verdict.verdict != "candidate", "a 0-trade Binance venue must never be a candidate"
+    assert any("0 trades" in r for r in verdict.reasons)
+
+    # Sanity: the same cell with real trades on BOTH venues still passes the legacy bar
+    # (the guard targets only the degenerate 0-trade case, not legitimate cells).
+    good = {
+        "bybit": _m(sharpe=1.6, dd=-0.30, ret=1.5, trades=350),
+        "binance": _m(sharpe=1.6, dd=-0.30, ret=1.5, trades=350),
+    }
+    ok = MOD.evaluate_cell(
+        "cell-good", good, control,
+        sharpe_delta_min=0.5, dd_delta_pp_max=-5.0,
+        min_trades_bybit=30, min_trades_binance=0,
+    )
+    assert ok.verdict == "candidate"

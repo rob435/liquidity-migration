@@ -224,6 +224,13 @@ class WebSocketRiskState:
     executions_by_link: dict[str, dict[str, float]] = field(default_factory=dict)
     subscribed_symbols: set[str] = field(default_factory=set)
     last_ws_event_monotonic: float = field(default_factory=time.monotonic)
+    # ws-risk-5: a clock bumped ONLY by private-stream events (position / order /
+    # execution) -- the ones that drive the prompt stop/close path. last_ws_event_
+    # monotonic above is bumped by EVERY event including public 'ticker' traffic, so
+    # it can't tell a dead private stream from a quiet one while tickers flow. The
+    # stale-WS watchdog keys off THIS clock so private-stream silence forces a REST
+    # reconcile even when the public ticker stream is healthy.
+    last_private_ws_event_monotonic: float = field(default_factory=time.monotonic)
     last_stale_reconcile_monotonic: float = 0.0
     last_report_monotonic: float = 0.0
     last_reconcile_monotonic: float = 0.0
@@ -343,6 +350,16 @@ class EventWebSocketRiskEngine:
         # sees only rows added since the previous report (the message BODY and
         # persisted report keep the cumulative slices).
         self._reason_high_water: dict[str, int] = {}
+        # cross-sleeve-2: trade_ids that were OPEN at the previous control-row
+        # refresh, so the next pass can diff prior-vs-current open_trades and pass
+        # the open->closed set as closed_trade_ids to write_account_state. That
+        # frees a closed trade's symbol reservation immediately (faster symbol
+        # turnover for a sibling sleeve once long/addon are live) instead of
+        # waiting out the 180s TTL. The owned-side GC matches on reservation
+        # trade_id; a trade reserved under a candidate trade_id that never matches
+        # here just falls back to the existing TTL/release path, so wiring this can
+        # only free reservations sooner, never strand a live one.
+        self._cross_sleeve_open_trade_ids: set[str] = set()
         # Captured by run(): the one thread allowed to mutate self.state.
         self._consumer_thread_ident: int | None = None
         # Telegram notifications are sent on a background daemon thread so the
@@ -355,6 +372,11 @@ class EventWebSocketRiskEngine:
         # sender never reads structures the consumer concurrently mutates (WS-R-001).
         self._telegram_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
         self._telegram_thread: threading.Thread | None = None
+        # audit2c: the sender thread MUST NOT mutate self.state.telegram_keys_sent or
+        # write the dedupe file (consumer-thread-only invariant + a file-write race
+        # against maybe_notify). On a failed send it hands the key back here; the
+        # consumer un-records it (drain in maybe_notify) so the alert can re-fire.
+        self._telegram_failed_keys: queue.Queue[str] = queue.Queue()
         # Background reconcile-prefetcher (opt-in via reconcile_prefetch_enabled).
         # Holds the latest positions + open-orders REST snapshot so rest_reconcile
         # reads it non-blocking. Written by the prefetcher via atomic reference
@@ -366,6 +388,11 @@ class EventWebSocketRiskEngine:
         self._private_disconnected_since: float | None = None
         self._last_private_reconnect_monotonic = 0.0
         self._private_ws_reconnects = 0
+        # ws-risk-1: a rebuild that fails mid-flight (after the old stream was
+        # closed) leaves private_stream=None; this flag tells the next on_idle
+        # pass that a replacement is still OWED so the None never latches the
+        # daemon into REST-only mode permanently (start_streams runs only once).
+        self._private_rebuild_pending = False
         # Public ticker stream health (see _maybe_reconnect_public_stream, round 4):
         # the public socket feeds price_by_symbol for the intrabar stop checks and
         # had NO reconnect treatment — pybit's permanent give-up froze ticker
@@ -375,6 +402,12 @@ class EventWebSocketRiskEngine:
         self._public_stream_built_monotonic = time.monotonic()
         self._last_public_reconnect_monotonic = 0.0
         self._public_ws_reconnects = 0
+        # ws-risk-2: as for the private stream, a rebuild that fails after the old
+        # socket was closed leaves public_stream=None AND subscribed_symbols cleared,
+        # which would latch the daemon into REST-only ticker prices forever. This
+        # flag + the saved symbol set let the next on_idle pass retry the build.
+        self._public_rebuild_pending = False
+        self._public_resubscribe: set[str] = set()
 
     def _maybe_reconnect_private_stream(self, now: float) -> None:
         """Rebuild the private WS stream when its SOCKET is genuinely down (not merely
@@ -388,31 +421,44 @@ class EventWebSocketRiskEngine:
         failure is recorded and swallowed so the reconcile loop is never broken."""
         stream = self.private_stream
         bound = self.risk.private_ws_reconnect_seconds
-        if stream is None or bound <= 0.0:
+        if bound <= 0.0:
             return
-        probe = getattr(stream, "is_connected", None)
-        connected = probe() if callable(probe) else None
-        if connected is not False:
-            if connected is True:
-                self._private_disconnected_since = None
-            return  # True (healthy) or None (unknown / older pybit) -> stay conservative
+        # ws-risk-1: when a prior rebuild failed AFTER closing the old socket,
+        # private_stream is None but a replacement is still OWED. Do NOT take the
+        # stream-is-None early return in that case -- fall through to retry the
+        # build so a single transient failure can't permanently disable the
+        # positions/orders/executions feed (start_streams runs only once).
+        if stream is None and not self._private_rebuild_pending:
+            return
+        if stream is not None:
+            probe = getattr(stream, "is_connected", None)
+            connected = probe() if callable(probe) else None
+            if connected is not False:
+                if connected is True:
+                    self._private_disconnected_since = None
+                return  # True (healthy) or None (unknown / older pybit) -> stay conservative
         if self._private_disconnected_since is None:
             self._private_disconnected_since = now
         down_for = now - self._private_disconnected_since
         if down_for <= bound or now - self._last_private_reconnect_monotonic <= bound:
             return
         self._last_private_reconnect_monotonic = now
-        self._private_disconnected_since = None
         self._private_ws_reconnects += 1
         _logger.warning(
             "private WS socket down %.0fs > bound %.0fs; rebuilding the risk private stream",
             down_for, bound,
         )
-        try:
-            stream.close()
-        except Exception:  # noqa: BLE001 - close errors must not break reconcile
-            pass
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001 - close errors must not break reconcile
+                pass
+        # Build the replacement into a LOCAL and publish self.private_stream only
+        # once it is in hand; on any failure leave _private_rebuild_pending set
+        # and _private_disconnected_since armed so the next on_idle pass (after the
+        # bound elapses again) retries instead of latching None forever.
         self.private_stream = None
+        self._private_rebuild_pending = True
         new_stream, error = _call_with_timeout(
             "private websocket stream reconnect",
             lambda: _build_private_stream(self.config),
@@ -428,7 +474,20 @@ class EventWebSocketRiskEngine:
             timeout_seconds=self.risk.stream_start_timeout_seconds,
         )
         if sub_error:
+            # The socket built but the subscription did not land -> the stream is
+            # live but feeds nothing; tear it back down and keep retrying so we
+            # don't sit on a subscribe-less stream that looks healthy.
             self.state.errors.append(sub_error)
+            try:
+                new_stream.close()
+            except Exception:  # noqa: BLE001 - close errors must not break reconcile
+                pass
+            self.private_stream = None
+            self._private_disconnected_since = now
+            return
+        # Replacement is fully live and subscribed: clear the owed-rebuild latch.
+        self._private_rebuild_pending = False
+        self._private_disconnected_since = None
 
     def _maybe_reconnect_public_stream(self, now: float) -> None:
         """Rebuild the public TICKER stream when it has gone silent while symbols
@@ -439,8 +498,16 @@ class EventWebSocketRiskEngine:
         against thrash, clear subscribed_symbols so re-subscription is real.
         REST reconcile + venue-side stops cover the gap; best-effort throughout."""
         bound = self.risk.private_ws_reconnect_seconds
-        if self.public_stream is None or bound <= 0.0 or not self.state.subscribed_symbols:
+        if bound <= 0.0:
             return
+        # ws-risk-2: when a prior rebuild failed AFTER closing the old socket,
+        # public_stream is None and subscribed_symbols was already cleared, so both
+        # of the usual guards would make every later pass a no-op. The pending flag
+        # tells us a replacement is still OWED so we fall through and retry instead
+        # of latching the daemon onto REST-only (30s) ticker prices forever.
+        if not self._public_rebuild_pending:
+            if self.public_stream is None or not self.state.subscribed_symbols:
+                return
         last_alive = max(self._last_ticker_event_monotonic, self._public_stream_built_monotonic)
         silence_bound = max(bound, 60.0)
         if now - last_alive <= silence_bound or now - self._last_public_reconnect_monotonic <= bound:
@@ -449,17 +516,23 @@ class EventWebSocketRiskEngine:
         self._public_ws_reconnects += 1
         _logger.warning(
             "public ticker WS silent %.0fs > bound %.0fs with %d subscribed symbols; rebuilding",
-            now - last_alive, silence_bound, len(self.state.subscribed_symbols),
+            now - last_alive, silence_bound, len(self.state.subscribed_symbols) or len(self._public_resubscribe),
         )
-        try:
-            close = getattr(self.public_stream, "close", None)
-            if callable(close):
-                close()
-        except Exception:  # noqa: BLE001 - close errors must not break reconcile
-            pass
-        self.public_stream = None
-        resubscribe = set(self.state.subscribed_symbols)
+        if self.public_stream is not None:
+            try:
+                close = getattr(self.public_stream, "close", None)
+                if callable(close):
+                    close()
+            except Exception:  # noqa: BLE001 - close errors must not break reconcile
+                pass
+        # Remember the symbols to re-subscribe ACROSS a failed attempt so a retry
+        # still re-subscribes the right set (subscribed_symbols is cleared so a
+        # rebuilt socket actually re-subscribes rather than thinking it already has).
+        self._public_resubscribe |= set(self.state.subscribed_symbols)
+        resubscribe = set(self._public_resubscribe)
         self.state.subscribed_symbols = set()
+        self.public_stream = None
+        self._public_rebuild_pending = True
         stream, error = _call_with_timeout(
             "public ticker websocket stream reconnect",
             lambda: BybitPublicTickerStream(
@@ -474,6 +547,8 @@ class EventWebSocketRiskEngine:
             return
         self.public_stream = stream
         self._public_stream_built_monotonic = now
+        self._public_rebuild_pending = False
+        self._public_resubscribe = set()
         self.subscribe_tickers(resubscribe | set(self.state.positions_by_symbol))
 
     # ------------------------------------------------------------------
@@ -691,6 +766,15 @@ class EventWebSocketRiskEngine:
             _logger.warning("ws_risk: cross-sleeve equity read failed: %s", exc)
             return 0.0
 
+    def _adoption_equity_usdt(self) -> float:
+        """Equity to stamp on an adopted orphan WITHOUT a synchronous wallet REST call
+        (ws-risk-8). adopt_untracked_positions runs on the latency-critical consumer
+        thread (the sole authority for stop-trigger events); a blocking
+        get_wallet_balance per orphan would stall stop processing. bootstrap() and
+        rest_reconcile() seed _last_equity_usdt before adopting, so the cache is the
+        right source; we never fall back to a live fetch on this hot path."""
+        return self._last_equity_usdt
+
     def _refresh_cross_sleeve_account_state(self) -> None:
         try:
             equity = self._account_equity_usdt()
@@ -699,6 +783,16 @@ class EventWebSocketRiskEngine:
             account_pct, im_by_sleeve = _cross_sleeve.compute_im_used(
                 self.state.open_trades, equity_usdt=equity, sleeve_leverage=self._sleeve_entry_leverage()
             )
+            # cross-sleeve-2: GC the symbol reservation of any trade that transitioned
+            # open->closed since the previous pass. open_trades is the set of currently
+            # OPEN/submitted rows (per-pass snapshot); a trade_id present last pass but
+            # absent now has closed (or was flattened/adopted away), so its reservation
+            # can be freed NOW instead of lingering to the 180s TTL — faster symbol
+            # turnover for a sibling sleeve once long/addon are live. The owned-side
+            # write_account_state matches closed_trade_ids against reservation trade_id;
+            # an unmatched id is a harmless no-op (TTL/release still cover it).
+            current_open_trade_ids = set(_column_values(self.state.open_trades, "trade_id"))
+            closed_trade_ids = self._cross_sleeve_open_trade_ids - current_open_trade_ids
             # Margin budget is OFF (operator decision 2026-06-03): an EQUAL 1/n split would
             # STARVE the over-subscribed sleeves — long alone wants ~200% IM (10x lev x 10x
             # notional, 20%/position), short ~50%, continuous ~25%; the three combined want
@@ -713,8 +807,13 @@ class EventWebSocketRiskEngine:
                 account_im_used_pct=account_pct,
                 im_used_pct_by_sleeve=im_by_sleeve,
                 now_ms=_now_ms(),
+                closed_trade_ids=closed_trade_ids,
                 account_key=self.account_key,
             )
+            # Only advance the prior-open baseline AFTER a clean write so a write that
+            # raised before completing re-tries the same close-GC next pass (the GC is
+            # idempotent — re-dropping an already-freed reservation is a no-op).
+            self._cross_sleeve_open_trade_ids = current_open_trade_ids
         except Exception as exc:  # noqa: BLE001 - owner write must never break reconcile
             _logger.error("ws_risk: cross-sleeve state refresh failed (non-fatal): %s", exc)
 
@@ -830,6 +929,15 @@ class EventWebSocketRiskEngine:
         self.reconcile_positions(write=True, require_evidence=True)
         self.evaluate_symbols(set(self.state.positions_by_symbol))
         self.repair_exchange_stops()
+        # ws-risk-8: seed the equity cache with ONE wallet read BEFORE adoption so
+        # _build_adopted_trade reads the cache instead of firing a blocking
+        # get_wallet_balance per adopted orphan on the consumer thread. Cold start
+        # is the only window where _last_equity_usdt is still 0.0; in steady state
+        # the prior reconcile already populated it. Self-swallowing (returns 0.0 on
+        # failure, leaving adopted rows with the documented zero-equity fallback).
+        seed_equity = self._account_equity_usdt()
+        if seed_equity > 0.0:
+            self._last_equity_usdt = seed_equity
         self.adopt_untracked_positions()
         self.exit_untracked_positions()
         self.start_streams()
@@ -880,6 +988,14 @@ class EventWebSocketRiskEngine:
             else:
                 self.public_stream = stream
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
+        # audit2c: anchor the public-WS health "built" timestamp to the ACTUAL stream
+        # construction + first subscription here, not to __init__. The watchdog
+        # (_maybe_reconnect_public_stream) is a no-op until symbols are subscribed, so
+        # an __init__-time anchor only matters once the stream is live — and if the
+        # build/subscribe lagged __init__ it could trip a spurious reconnect of a
+        # healthy just-subscribed stream. Set it now (>= the __init__ value, so strictly
+        # safer); rebuilds refresh it at _maybe_reconnect_public_stream.
+        self._public_stream_built_monotonic = time.monotonic()
         if self.risk.order_submit_mode in {"ws", "ws_then_rest"} and self.trade_client is None:
             # WS-first exits: actually ATTEMPT the WS trade client (with jittered
             # retry) rather than pre-emptively giving up in ws_then_rest mode —
@@ -940,7 +1056,14 @@ class EventWebSocketRiskEngine:
 
     def handle_event(self, event_type: str, message: dict[str, Any]) -> None:
         self._assert_consumer_thread()
-        self.state.last_ws_event_monotonic = time.monotonic()
+        now_mono = time.monotonic()
+        self.state.last_ws_event_monotonic = now_mono
+        # ws-risk-5: bump the private-only clock for the events that come off the
+        # PRIVATE socket (position / order / execution / ws order ack). Public
+        # 'ticker' traffic deliberately does NOT touch it, so the stale-WS watchdog
+        # can detect a dead private stream even while ticker prices keep flowing.
+        if event_type in ("position", "order", "execution", "ws_order_ack"):
+            self.state.last_private_ws_event_monotonic = now_mono
         if event_type == "position":
             self.on_position_message(message)
         elif event_type == "ticker":
@@ -1155,6 +1278,23 @@ class EventWebSocketRiskEngine:
         now_ms = _now_ms()
         exit_price = exit_price if exit_price > 0.0 else _float(order.get("avg_price")) or _float(trade.get("exit_price"))
         exit_reason = str(order.get("exit_reason") or trade.get("exit_reason") or f"{source}_confirmed")
+        entry_price = _float(trade.get("entry_price"))
+        # ws-risk-6: book the realized PnL of THIS fill's closed chunk so a
+        # multi-leg close (a rebalance_reduce or a partially-filling stop) no
+        # longer hides its crystallized gain/loss until the residual closes.
+        # The closed delta's gross return is weighted by the delta's OWN entry
+        # notional (delta_qty * entry_price) / equity — the same gross-of-cost
+        # convention as the full-close net_return below. Accumulated into
+        # rebalance_realized_return (the field continuous_demo's cycle path
+        # already uses for exactly this) so the final close can fold in every
+        # earlier leg. Prior realized legs are carried across the upsert.
+        delta_gross_return = (
+            _trade_return(entry_price, exit_price, side=str(trade.get("side") or "short"))
+            if entry_price > 0.0 and exit_price > 0.0
+            else 0.0
+        )
+        delta_weight = _ratio_or_zero(abs(delta_qty * entry_price), trade.get("equity_usdt"))
+        prior_realized = _float(trade.get("rebalance_realized_return"))
         if fully_filled:
             # A closed trade must carry gross_trade_return and net_return — the
             # ws-stream close is the STEADY-STATE close path under
@@ -1162,13 +1302,12 @@ class EventWebSocketRiskEngine:
             # pending-fill reconciler skips the row, so a missing PnL stamp here
             # was never backfilled (round 4). Same formula as the cycle exit /
             # pending-fill close / orphan backfill.
-            entry_price = _float(trade.get("entry_price"))
-            gross_trade_return = (
-                _trade_return(entry_price, exit_price, side=str(trade.get("side") or "short"))
-                if entry_price > 0.0 and exit_price > 0.0
-                else 0.0
-            )
-            notional_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
+            gross_trade_return = delta_gross_return
+            # net_return = the final delta's contribution PLUS every earlier
+            # partial-reduce leg's realized return (ws-risk-6). On a plain
+            # single-leg close prior_realized is 0.0 and this reduces to the
+            # historical gross*weight, so a non-partial close is unchanged.
+            final_realized = prior_realized + gross_trade_return * delta_weight
             trade.update(
                 {
                     "status": "closed",
@@ -1178,7 +1317,8 @@ class EventWebSocketRiskEngine:
                     "exit_fee_usdt": fee_usdt or _float(order.get("fee_usdt")),
                     "exit_exec_time_ms": now_ms,
                     "gross_trade_return": gross_trade_return,
-                    "net_return": gross_trade_return * notional_weight,
+                    "net_return": final_realized,
+                    "rebalance_realized_return": final_realized,
                     "exit_reason": exit_reason,
                     "exit_order_link_id": order_link_id,
                     "exit_order_id": order.get("order_id", ""),
@@ -1192,16 +1332,29 @@ class EventWebSocketRiskEngine:
             self.state.positions_by_symbol.pop(str(trade.get("symbol", "")), None)
             report_reason = f"ws_{source}_fill"
         else:
+            # ws-risk-6: persist the closed chunk's realized return on the
+            # still-open row so it is never lost. NOTE (needs_integration):
+            # _recent_adverse_exit_count in continuous_demo only sums status=='closed'
+            # rows, so a loss-crystallizing partial reduce still does not increment
+            # the entry-pause breaker until the residual fully closes — booking
+            # rebalance_realized_return here makes that loss VISIBLE and feeds the
+            # eventual closed row's net_return, but wiring the breaker to read open
+            # partial rows must be done in continuous_demo (a file this engine does
+            # not own).
+            realized_so_far = prior_realized + delta_gross_return * delta_weight
             trade.update(
                 {
                     "status": "open",
                     "qty": _quantity_text(remaining_qty),
-                    "notional_usdt": abs(_float(trade.get("entry_price")) * remaining_qty),
+                    "notional_usdt": abs(entry_price * remaining_qty),
+                    "rebalance_realized_return": realized_so_far,
                     "partial_exit_order_link_id": order_link_id,
                     "partial_exit_order_id": order.get("order_id", ""),
                     "partial_exit_price": exit_price,
                     "partial_exit_reason": exit_reason,
                     "partial_exit_qty": _quantity_text(filled_qty),
+                    "partial_exit_gross_return": delta_gross_return,
+                    "partial_exit_realized_return": delta_gross_return * delta_weight,
                     "partial_exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
                     "partial_exit_ts_ms": now_ms,
                     "updated_at_ms": now_ms,
@@ -1326,7 +1479,11 @@ class EventWebSocketRiskEngine:
             now_ms=_now_ms(),
             # reconcile-core-2: shared netted account -> cap each sleeve's stop to its
             # own leg so it can't flatten a sibling sleeve's position on the same symbol.
-            cap_qty_to_trade=self.long_root is not None or self.continuous_root is not None,
+            # ws-risk-4: key off the actual owned-ledger count (short is always present,
+            # so >1 means a sibling sleeve is netted in) rather than naming long/continuous
+            # explicitly -- the prior predicate omitted continuous_addon, so an addon-only
+            # sibling config silently lost cross-sleeve isolation.
+            cap_qty_to_trade=len(self._sleeve_routes(trades=True)) > 1,
         )
         for exit_plan in exits:
             symbol = str(exit_plan.get("symbol", ""))
@@ -1935,7 +2092,9 @@ class EventWebSocketRiskEngine:
                 # hedge's book-state resolver) never see an un-stamped row — a
                 # zero-equity row flips the WHOLE book to unknown and blocks the
                 # hedge (snipe-fill twin, audit 2026-06-12 round 3 / solo sweep).
-                "equity_usdt": self._last_equity_usdt or self._account_equity_usdt(),
+                # ws-risk-8: cache-only (bootstrap/rest_reconcile seed it first) so
+                # adoption on the consumer thread never blocks on a wallet REST.
+                "equity_usdt": self._adoption_equity_usdt(),
                 "ts_ms": now_ms,
                 "entry_ts_ms": opened_ms,
                 "opened_at_ms": opened_ms,
@@ -1978,7 +2137,8 @@ class EventWebSocketRiskEngine:
             "entry_exec_time_ms": opened_ms,
             "notional_usdt": abs(entry_price * _float(qty)),
             # See the recovered path: never write an equity-less open row.
-            "equity_usdt": self._last_equity_usdt or self._account_equity_usdt(),
+            # ws-risk-8: cache-only (seeded before adoption) — no wallet REST here.
+            "equity_usdt": self._adoption_equity_usdt(),
             "ts_ms": now_ms,
             "entry_ts_ms": opened_ms,
             "opened_at_ms": opened_ms,
@@ -2455,12 +2615,22 @@ class EventWebSocketRiskEngine:
         has_active_work = bool(self.state.subscribed_symbols or self.state.positions_by_symbol) or not self.state.open_trades.is_empty()
         if not has_active_work:
             return
-        ws_age = now - self.state.last_ws_event_monotonic
-        if ws_age < self.risk.stale_ws_seconds:
-            return
         if now - self.state.last_stale_reconcile_monotonic < self.risk.stale_ws_seconds:
             return
-        self.state.errors.append(f"websocket stale for {ws_age:.1f}s; forced REST reconcile")
+        ws_age = now - self.state.last_ws_event_monotonic
+        # ws-risk-5: when we hold positions / open trades, the PRIVATE stream should
+        # be delivering position/execution updates. Measure that stream's own silence
+        # off last_private_ws_event_monotonic so a dead private socket forces a REST
+        # reconcile even while the public ticker stream keeps last_ws_event fresh
+        # (the old all-events clock could be kept warm by ticker traffic alone,
+        # blinding the watchdog to the most safety-relevant stream's death).
+        expects_private = bool(self.state.positions_by_symbol) or not self.state.open_trades.is_empty()
+        private_age = (now - self.state.last_private_ws_event_monotonic) if expects_private else 0.0
+        stale_age = max(ws_age, private_age)
+        if stale_age < self.risk.stale_ws_seconds:
+            return
+        reason = "private-stream" if private_age >= ws_age and expects_private else "websocket"
+        self.state.errors.append(f"{reason} stale for {stale_age:.1f}s; forced REST reconcile")
         self.rest_reconcile()
         self.state.last_stale_reconcile_monotonic = now
 
@@ -2564,6 +2734,16 @@ class EventWebSocketRiskEngine:
         oldest beyond a ``retention``-order grace window (so a just-closed
         trade's late reconciliation still resolves). ``orders`` is
         append-ordered, so the tail is the most recent."""
+        # ws-risk-7: live_trade_ids is derived from open_trades, which is KNOWN to
+        # be incomplete on a pass where a sibling sleeve's ledger read raised
+        # (_read_combined drops that sleeve and sets ledger_read_error). Pruning
+        # then would judge a still-open sibling order's trade "closed" and evict
+        # its order-link state, so a later fill for that link finds no order and is
+        # silently dropped. Fail closed: never prune while the open-trade set is
+        # degraded (the adopt/flatten reconcilers are already gated the same way).
+        # The order maps re-bound on the next clean reconcile/bootstrap.
+        if self.state.ledger_read_error:
+            return
         retention = getattr(self.risk, "telemetry_log_retention", _LOG_RETENTION)
         orders = self.state.orders
         if len(orders) <= retention:
@@ -2761,14 +2941,11 @@ class EventWebSocketRiskEngine:
                 # the next NEW material event notifies normally.
                 _logger.warning("telegram not configured (TELEGRAM_* env missing); keeping dedupe key: %s", key)
                 continue
-            _logger.warning("telegram send failed; un-recording dedupe key so the alert can re-fire: %s", key)
-            try:
-                keys = set(_read_telegram_dedupe_keys(self.report_dir))
-                keys.discard(key)
-                _write_telegram_dedupe_keys(self.report_dir, keys)
-                self.state.telegram_keys_sent.discard(key)
-            except Exception as exc:  # noqa: BLE001 - dedupe repair is best-effort telemetry
-                _logger.warning("telegram dedupe un-record failed: %s", exc)
+            # audit2c: hand the failed key back to the CONSUMER thread to un-record
+            # (discard from the set + rewrite the dedupe file) rather than mutating
+            # consumer-only state and racing the dedupe file from this sender thread.
+            _logger.warning("telegram send failed; handing dedupe key to the consumer to un-record so it can re-fire: %s", key)
+            self._telegram_failed_keys.put(key)
 
     def _enqueue_telegram(self, key: str, text: str) -> None:
         if self._telegram_thread is None or not self._telegram_thread.is_alive():
@@ -2802,9 +2979,31 @@ class EventWebSocketRiskEngine:
             view[key] = rows[-fresh:] if fresh > 0 else []
         return view
 
+    def _drain_failed_telegram_keys(self) -> None:
+        """Consumer-thread un-record of keys whose background send failed. The sender
+        thread hands failed keys back via a thread-safe queue (it must not mutate
+        consumer-only state or race the dedupe file); we discard them from the set and
+        rewrite the dedupe file HERE, on the consumer thread, so the alert can re-fire."""
+        drained = False
+        while True:
+            try:
+                key = self._telegram_failed_keys.get_nowait()
+            except queue.Empty:
+                break
+            self.state.telegram_keys_sent.discard(key)
+            drained = True
+        if drained:
+            try:
+                _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
+            except Exception as exc:  # noqa: BLE001 - dedupe repair is best-effort telemetry
+                _logger.warning("telegram dedupe un-record (consumer) failed: %s", exc)
+
     def maybe_notify(self, payload: dict[str, Any]) -> tuple[bool, str]:
         if not self.risk.telegram:
             return False, "disabled"
+        # audit2c: un-record any keys whose background send failed (handed back by the
+        # sender thread) before the dedupe check below, so a failed alert can re-fire.
+        self._drain_failed_telegram_keys()
         reason = _telegram_notification_reason(self._reason_payload_view(payload))
         if not reason:
             return False, "quiet_no_material_event"

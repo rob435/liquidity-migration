@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -136,6 +137,13 @@ def compute_mar(total_return: float, max_drawdown: float, window_days: float) ->
     the drawdown / trade-count / return-sign falsifiers still fire. The baseline control has real
     drawdown in practice, so this is descriptive, not a hole.)"""
     if abs(max_drawdown) <= 1e-9:
+        return float("nan")
+    # audit2: a malformed window_days<=0 row makes annualization UNDEFINED (the
+    # cell carries no measurable window); treat it as UNMEASURABLE (nan), the same
+    # non-qualifying path as zero-DD, instead of letting compute_annualized_return
+    # raise and crash the whole investigation verdict. Valid rows (window_days>0)
+    # are unaffected — the math below is byte-identical to before.
+    if window_days <= 0:
         return float("nan")
     ann = compute_annualized_return(total_return, window_days)
     return ann / abs(max_drawdown)
@@ -331,6 +339,17 @@ def evaluate_cell(
         cand_reasons.append(f"bybit trades {bybit_trades} < {min_trades_bybit}")
     if binance_trades < min_trades_binance:
         cand_reasons.append(f"binance trades {binance_trades} < {min_trades_binance}")
+    # decision-rule-2: a venue that EXECUTED ZERO trades has no statistical content,
+    # so it can never satisfy "both venues matter" (STATE.md non-negotiable #3). Block
+    # it regardless of the preset's min_trades floor — the archived `legacy` preset
+    # defaults min_trades_binance=0, so `0 < 0` is False and a 0-trade Binance cell
+    # would otherwise be rubber-stamped a candidate on the Bybit numbers alone. This
+    # is independent of the soft floor above (which `legacy` sets to 0) and a present
+    # row, not a missing one (a missing venue is already a falsifier above).
+    if by is not None and bybit_trades <= 0:
+        cand_reasons.append("bybit executed 0 trades (degenerate single-venue cell)")
+    if bn is not None and binance_trades <= 0:
+        cand_reasons.append("binance executed 0 trades (degenerate single-venue cell)")
 
     is_candidate = not cand_reasons and not is_falsifier
 
@@ -476,7 +495,12 @@ def evaluate_cell_investigation(
         # Check the other venue's tolerance
         other_d = bybit_mar_d if not by_positive else binance_mar_d
         other_venue = "bybit" if not by_positive else "binance"
-        if other_d < -mar_delta_tolerance:
+        # A NaN MAR Δ on the other venue is UNMEASURABLE, not "within tolerance":
+        # nan < -tol is False, so without this guard a 1/2-positive cell whose
+        # other venue is unmeasurable (zero-DD divide artifact) would silently pass
+        # the majority gate as investigation_positive. Treat it as not-positive
+        # (descriptive), matching how the falsifier path already excludes NaN.
+        if math.isnan(other_d) or other_d < -mar_delta_tolerance:
             pos_reasons.append(
                 f"only 1 venue positive, {other_venue} MAR Δ {other_d:+.2f} < -{mar_delta_tolerance}"
             )

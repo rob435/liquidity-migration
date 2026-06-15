@@ -3,6 +3,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
+from liquidity_migration import continuous_rebalance
 from liquidity_migration.continuous_rebalance import (
     MS_PER_DAY,
     ContinuousRebalanceComponents,
@@ -351,3 +352,23 @@ def test_plan_skips_component_tagged_row_without_weight() -> None:
     )
     assert len(plans) == 1
     assert plans[0].target_notional_usdt == pytest.approx(10_000.0 * 0.02)
+
+
+# ---------------------------------------------------------------------------
+# Relocated from tests/test_audit_fix_b03.py (code-quality-5).
+# ---------------------------------------------------------------------------
+def test_finite_float_delegates_and_keeps_drop_in_contract() -> None:
+    """code-quality-5: continuous_rebalance._finite_float must route through the single
+    canonical _common.finite_float (so a future NaN/inf policy tightening lands in ONE
+    place) while preserving its float (never None), positional-default contract."""
+    assert continuous_rebalance.finite_float is not None  # the import is wired
+    # NaN / inf / non-numeric all collapse to the default (the finite guard).
+    assert continuous_rebalance._finite_float(float("nan")) == 0.0
+    assert continuous_rebalance._finite_float(float("inf")) == 0.0
+    assert continuous_rebalance._finite_float("not-a-number") == 0.0
+    assert continuous_rebalance._finite_float(None) == 0.0
+    # Custom positional default is honored and the return is always a float, never None.
+    out = continuous_rebalance._finite_float(None, -1.5)
+    assert out == -1.5 and isinstance(out, float)
+    # Valid finite values pass through unchanged.
+    assert continuous_rebalance._finite_float("3.5") == pytest.approx(3.5)

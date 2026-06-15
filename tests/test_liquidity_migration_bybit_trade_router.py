@@ -20,6 +20,7 @@ import time
 
 import pytest
 
+from liquidity_migration import bybit
 from liquidity_migration.bybit import BybitTradeRouter, _RouterWsFailed
 
 
@@ -439,3 +440,143 @@ def test_stats_independent_per_router_instance() -> None:
     r1.place_order(symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="lm-A")
     assert r1.stats()["ws_attempts"] == 1
     assert r2.stats()["ws_attempts"] == 0
+
+
+# --------------------------------------------------------------------------
+# exec-router-2 / exec-router-4 / exec-router-5 : router probe edge cases
+# (relocated from the audit bucket b01)
+# --------------------------------------------------------------------------
+
+
+class _RecordingRest:
+    """REST stand-in: records place_order calls and serves a probe response."""
+
+    def __init__(self, *, open_orders=None, history=None) -> None:
+        self._open_orders = open_orders or []
+        self._history = history or []
+        self.place_order_calls: list[dict] = []
+
+    def place_order(self, **params):
+        self.place_order_calls.append(params)
+        return {"orderId": "rest-resubmit", "orderLinkId": params.get("orderLinkId")}
+
+    def get_open_orders(self, **_params):
+        return list(self._open_orders)
+
+    def get_order_history(self, **_params):
+        return list(self._history)
+
+
+class _TimingOutWs:
+    """WS stand-in whose place_order never acks (forces a router timeout)."""
+
+    def place_order(self, _callback, **_params):
+        return None  # ack never delivered -> router times out
+
+
+def test_router_ws_timeout_probe_recovers_without_resubmit(monkeypatch) -> None:
+    """exec-router-2: on a WS timeout the router probes by orderLinkId and, when
+    the order is present at Bybit, returns it WITHOUT a REST resubmit (no
+    double-submit). Pre-fix a timeout fell straight through to REST."""
+    rest = _RecordingRest(
+        open_orders=[{"orderId": "ws-took", "orderLinkId": "lnk-1", "orderStatus": "New"}]
+    )
+    router = bybit.BybitTradeRouter(
+        rest_client=rest,
+        ws_client=_TimingOutWs(),
+        order_submit_mode="ws_then_rest",
+        rest_fallback=True,
+        ws_timeout_seconds=0.05,
+    )
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="lnk-1",
+    )
+    assert result["orderId"] == "ws-took"
+    assert rest.place_order_calls == []  # no resubmit
+    stats = router.stats()
+    assert stats["ws_timeout_probe_attempts"] == 1
+    assert stats["ws_timeout_probe_recovered"] == 1
+
+
+def test_router_ws_timeout_falls_back_to_rest_when_probe_empty(monkeypatch) -> None:
+    """exec-router-2: when the probe finds nothing, the order genuinely did not
+    take, so the default ws_then_rest mode resubmits via REST."""
+    rest = _RecordingRest(open_orders=[], history=[])
+    router = bybit.BybitTradeRouter(
+        rest_client=rest,
+        ws_client=_TimingOutWs(),
+        order_submit_mode="ws_then_rest",
+        rest_fallback=True,
+        ws_timeout_seconds=0.05,
+    )
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="lnk-2",
+    )
+    assert result["orderId"] == "rest-resubmit"
+    assert len(rest.place_order_calls) == 1
+
+
+def test_router_strict_ws_probes_before_raising(monkeypatch) -> None:
+    """exec-router-4: strict-WS (rest_fallback=False) must still probe on a
+    lost-ack timeout and recover the order before raising — otherwise it gives
+    LESS orphan protection than the default mode. Pre-fix the
+    `if not self._rest_fallback: raise` short-circuited before the probe."""
+    rest = _RecordingRest(
+        open_orders=[{"orderId": "ws-took", "orderLinkId": "lnk-3", "orderStatus": "New"}]
+    )
+    router = bybit.BybitTradeRouter(
+        rest_client=rest,
+        ws_client=_TimingOutWs(),
+        order_submit_mode="ws",
+        rest_fallback=False,
+        ws_timeout_seconds=0.05,
+    )
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="lnk-3",
+    )
+    assert result["orderId"] == "ws-took"
+    assert rest.place_order_calls == []  # strict-WS never resubmits
+
+
+def test_router_strict_ws_raises_when_probe_empty(monkeypatch) -> None:
+    """exec-router-4: strict-WS still raises (never resubmits) when the probe
+    finds no order — the recovery is the only behaviour change, not a fallback."""
+    rest = _RecordingRest(open_orders=[], history=[])
+    router = bybit.BybitTradeRouter(
+        rest_client=rest,
+        ws_client=_TimingOutWs(),
+        order_submit_mode="ws",
+        rest_fallback=False,
+        ws_timeout_seconds=0.05,
+    )
+    with pytest.raises(bybit._RouterWsFailed):
+        router.place_order(
+            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="lnk-4",
+        )
+    assert rest.place_order_calls == []
+
+
+def test_router_probe_survives_malformed_created_time(monkeypatch) -> None:
+    """exec-router-5: a non-numeric createdTime in a probe row must not raise out
+    of _probe_existing_order. Pre-fix the bare int() in max(key=...) raised a
+    ValueError that escaped place_order, converting a recoverable fallback into a
+    hard crash."""
+    rest = _RecordingRest(
+        open_orders=[
+            {"orderId": "a", "orderLinkId": "lnk-5", "orderStatus": "New", "createdTime": "garbage"},
+            {"orderId": "b", "orderLinkId": "lnk-5", "orderStatus": "New", "createdTime": "1700000000001"},
+        ]
+    )
+    router = bybit.BybitTradeRouter(
+        rest_client=rest,
+        ws_client=_TimingOutWs(),
+        order_submit_mode="ws_then_rest",
+        rest_fallback=True,
+        ws_timeout_seconds=0.05,
+    )
+    # Must not raise; returns one of the matching rows.
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="lnk-5",
+    )
+    assert result["orderLinkId"] == "lnk-5"
+    assert rest.place_order_calls == []

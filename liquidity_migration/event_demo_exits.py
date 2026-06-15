@@ -846,7 +846,7 @@ def _execute_risk_exits(
                 }
             )
             orders.append(order_row)
-        if fully_filled:
+        if fully_filled and exit_price > 0.0:
             # Mirror the cycle-exit and pending-exit-reconcile paths: a closed
             # trade must carry both gross_trade_return and net_return so the
             # orphan reconciler does not have to backfill them post-hoc.
@@ -873,6 +873,23 @@ def _execute_risk_exits(
                 }
             )
             rows.append(trade)
+        elif fully_filled:
+            # event-demo-core-2: mirror the cycle path's BUG-5 guard. exit_price
+            # <= 0.0 means no resolvable price (e.g. a max_hold exit on a
+            # fully-delisted / no-ticker symbol in the dry-run path, where the
+            # planned price falls back to 0.0). Booking a "closed" trade now would
+            # record a fabricated exit_price=0 / 0% gross_trade_return into the
+            # ledger — a fictional flat round-trip. Keep the trade OPEN and retry
+            # next cycle when a price reappears; on the submit path the venue
+            # settles it and the orphan reconciler books the real get_closed_pnl
+            # price. Never fall back to entry_price (still a fictional flat
+            # return).
+            _logger.warning(
+                "risk exit for %s (%s) skipped: no resolvable exit price "
+                "(delisted / no ticker / no fill price); keeping trade open for retry",
+                symbol,
+                str(exit_plan.get("exit_reason") or ""),
+            )
         elif risk.submit_orders and filled_qty > 0.0:
             rows.append(
                 _partial_exit_trade_update(
@@ -1751,6 +1768,53 @@ def _orphan_close_pnl_from_records(
     # closures and rows that omit closedSize degrade to the leg's own price. (M8)
     candidates.sort(key=lambda item: item[0])  # ascending by createdTime
     legs = [record for _, record in candidates]
+    # event-demo-core-3: on the SHARED netted demo account get_closed_pnl is
+    # account-wide (symbol+time-window only, no per-sleeve key), so a SIBLING
+    # sleeve's same-side close on this symbol since entry_ts_ms is also returned
+    # here. Aggregating ALL such legs would fold the sibling's close into THIS
+    # trade's exit price / fee / return. Cap the aggregation at this trade's own
+    # ledgered qty: take legs earliest-first until cumulative closedSize covers
+    # the trade qty (within tolerance), then stop — a sibling's surplus close
+    # legs beyond our qty can no longer reprice this leg. A leg whose orderId
+    # matches this trade's recorded exit_order_id is always kept (it is provably
+    # ours). When the trade has no usable qty or no leg carries a usable
+    # closedSize, fall back to the legacy all-legs behavior (no regression for
+    # single-leg / size-less closures).
+    trade_qty = _float(trade.get("qty"))
+    trade_exit_order_id = str(trade.get("exit_order_id") or "")
+    has_usable_size = any(_float(r.get("closedSize")) > 0.0 for r in legs)
+    if trade_qty > 0.0 and has_usable_size and len(legs) > 1:
+        qty_tolerance = max(trade_qty * 1e-8, 1e-12)
+        # audit2c ([4]): selecting OUR close legs out of an account-wide closed-PnL feed
+        # (a SIBLING sleeve may have closed the same side near our entry) is genuinely
+        # ambiguous without per-sleeve keys — earliest-first mis-priced this trade off a
+        # sibling's EARLIER close, latest-first off a sibling's LATER one. Disambiguate
+        # by the strongest available signals, in order:
+        #   1. provably-ours legs: those whose orderId matches the recorded exit_order_id
+        #      (when we have one) — never a sibling's; use them alone.
+        #   2. a single leg whose size matches our ledgered qty: almost certainly our
+        #      whole close (prefer the LATEST such — an orphan is found when OUR position
+        #      closed, i.e. the most recent same-size close).
+        #   3. otherwise cover qty LATEST-first (our close completes most recently).
+        ours = [leg for leg in legs if trade_exit_order_id and str(leg.get("orderId") or "") == trade_exit_order_id]
+        if ours:
+            legs = ours
+        else:
+            exact = [leg for leg in legs if abs(max(_float(leg.get("closedSize")), 0.0) - trade_qty) <= qty_tolerance]
+            if exact:
+                legs = [exact[-1]]  # latest exact-size match
+            else:
+                capped_legs: list[dict[str, Any]] = []
+                cumulative_size = 0.0
+                for leg in reversed(legs):  # latest-first (legs are ascending by createdTime)
+                    if cumulative_size + qty_tolerance >= trade_qty:
+                        break
+                    capped_legs.append(leg)
+                    cumulative_size += max(_float(leg.get("closedSize")), 0.0)
+                if capped_legs:
+                    # Restore ascending order so legs[-1] is the latest (close-completion) leg.
+                    capped_legs.sort(key=lambda r: int(_float(r.get("createdTime") or r.get("updatedTime") or 0)))
+                    legs = capped_legs
     priced = [
         (_float(r.get("closedSize")), _float(r.get("avgExitPrice")))
         for r in legs
@@ -1877,8 +1941,22 @@ def plan_risk_exits(
         # 'prefer venue size'.
         trade_qty = _float(trade.get("qty"))
         position_size = _float(position.get("size"))
-        if cap_qty_to_trade and trade_qty > 0.0 and position_size > 0.0:
-            qty = _quantity_text(min(trade_qty, position_size))
+        if cap_qty_to_trade:
+            # ws-risk-3: in cap mode (a sibling-sleeve ledger is configured) the
+            # exit qty is NEVER the raw netted position.size — that would let this
+            # sleeve's stop flatten a sibling's leg, the non-self-healing
+            # cross-sleeve OVER-close documented above. The ceiling is this
+            # sleeve's own ledgered qty.
+            #   trade_qty>0, position_size>0 -> min(trade_qty, position_size)
+            #   trade_qty>0, position_size<=0 -> trade_qty (no venue size yet)
+            #   trade_qty<=0 -> SKIP: a zero/empty ledger qty (schema drift,
+            #     adopted/hedge row, partially-cleared row) must not fall back to
+            #     the netted size and liquidate another sleeve. Under-closing is
+            #     fail-safe; residual exposure is recovered by the separate
+            #     untracked-position flatten path.
+            if trade_qty <= 0.0:
+                continue
+            qty = _quantity_text(min(trade_qty, position_size) if position_size > 0.0 else trade_qty)
         else:
             qty = str(_first_non_empty(position.get("size"), trade.get("qty")))
         if not symbol or not qty:

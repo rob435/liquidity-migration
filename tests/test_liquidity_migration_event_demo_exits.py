@@ -24,6 +24,7 @@ from liquidity_migration.event_demo import (
     _terminalize_stale_pending_entry_orders,
     run_event_risk_cycle,
 )
+from liquidity_migration.event_demo_exits import _orphan_close_pnl_from_records
 from liquidity_migration.storage import read_dataset, write_dataset
 
 from _event_demo_fixtures import *  # noqa: F401,F403  (shared fakes/helpers)
@@ -1498,10 +1499,14 @@ def test_orphan_close_pnl_backfill_pulls_exit_price_and_return() -> None:
 
 def test_orphan_close_pnl_backfill_aggregates_multi_leg_close() -> None:
     """M8: a position closed via several reduce-only legs must sum execFee and
-    qty-weight the exit price across legs, not price the close off one leg."""
+    qty-weight the exit price across legs, not price the close off one leg.
+
+    qty matches the legs' total closedSize (3+1=4) so this trade's OWN multi-leg
+    close is aggregated in full; the event-demo-core-3 sibling-fold cap only
+    truncates legs BEYOND the trade's ledgered qty."""
     trade = _open_trade_row(
         side="short", entry_price=100.0, entry_ts_ms=1_700_000_000_000,
-        notional_usdt=1_000.0, equity_usdt=10_000.0,
+        notional_usdt=1_000.0, equity_usdt=10_000.0, qty="4",
     )
     client = _ClosedPnlClient(
         records=[
@@ -2178,7 +2183,10 @@ def test_batched_orphan_close_matches_legacy_per_symbol_path() -> None:
         {"symbol": "BBBUSDT", "side": "Sell", "avgExitPrice": "190.0", "closedSize": "2",
          "execFee": "0.2", "orderId": "x-b", "createdTime": "1700000060000"},  # wrong side for a short
     ]
-    trade_a = _open_trade_row(trade_id="t-a", symbol="AAAUSDT", side="short", entry_price=100.0)
+    # qty=2 matches the two legs' total closedSize (1+1) so this trade's own
+    # multi-leg close aggregates in full (the event-demo-core-3 sibling-fold cap
+    # only excludes legs beyond the ledgered qty).
+    trade_a = _open_trade_row(trade_id="t-a", symbol="AAAUSDT", side="short", entry_price=100.0, qty="2")
     # Legacy per-symbol matcher (records pre-filtered to the symbol, as the venue would).
     from liquidity_migration.event_demo_exits import _orphan_close_pnl_from_records
     legacy = _orphan_close_pnl_from_records(
@@ -2338,8 +2346,11 @@ def test_account_closed_pnl_does_not_merge_distinct_orderidless_legs() -> None:
     )
 
     now = 1_700_000_000_000
+    # qty=2 matches the two legs' total closedSize (1+1) so both legs of THIS
+    # trade's own close are aggregated (the event-demo-core-3 sibling-fold cap
+    # only excludes legs beyond the ledgered qty).
     trade = _open_trade_row(trade_id="t-a", symbol="AAAUSDT", side="short",
-                            entry_price=100.0, entry_ts_ms=now - 3_600_000)
+                            entry_price=100.0, entry_ts_ms=now - 3_600_000, qty="2")
     records = [
         {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0", "closedSize": "1",
          "execFee": "0.1", "createdTime": str(now - 60_000)},  # no orderId
@@ -2475,3 +2486,49 @@ def test_pending_entry_fill_not_double_added_onto_adopted_row() -> None:
     assert trades == []
     assert order_updates[0]["status"] == "filled"
     assert order_updates[0]["filled_qty"] == "1"
+
+
+# audit2c [4]/[5]: orphan-close leg selection must not mis-attribute a sibling
+# sleeve's earlier same-side close on the shared netted demo account.
+def _trade(**kw):
+    base = {
+        "symbol": "AAAUSDT", "side": "short", "entry_price": 10.0, "entry_ts_ms": 1000,
+        "qty": "100", "exit_order_id": "", "notional_usdt": 1000.0, "equity_usdt": 10000.0,
+    }
+    base.update(kw)
+    return base
+
+
+def _leg(price, size, fee, oid, t):
+    return {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": str(price),
+            "closedSize": str(size), "execFee": str(fee), "orderId": oid, "createdTime": str(t)}
+
+
+def test_orphan_close_prefers_our_recent_close_over_earlier_sibling() -> None:
+    # exit_order_id unknown; a SIBLING's same-side close is EARLIER than ours.
+    # Old earliest-first picked the sibling (12.0); the fix prefers our most-recent close.
+    records = [_leg(12.0, 100, 0.5, "sibling", 2000), _leg(9.0, 100, 0.3, "ours", 3000)]
+    bf = _orphan_close_pnl_from_records(_trade(), now_ms=5000, records=records)
+    assert bf["exit_price"] == pytest.approx(9.0)       # ours, NOT the sibling's 12.0
+    assert bf["exit_order_id"] == "ours"
+    assert bf["exit_fee_usdt"] == pytest.approx(0.3)    # only our leg's fee
+    assert bf["gross_trade_return"] == pytest.approx(0.10)  # short (10-9)/10
+
+
+def test_orphan_close_known_exit_order_id_wins_even_when_sibling_is_later() -> None:
+    records = [_leg(9.0, 100, 0.3, "ours", 2000), _leg(12.0, 100, 0.5, "sibling", 3000)]
+    bf = _orphan_close_pnl_from_records(_trade(exit_order_id="ours"), now_ms=5000, records=records)
+    assert bf["exit_price"] == pytest.approx(9.0)
+    assert bf["exit_order_id"] == "ours"
+
+
+def test_orphan_close_own_multileg_still_aggregates_in_full() -> None:
+    # Our own 2-leg close (sums to qty) must still aggregate fully (no regression).
+    records = [_leg(96.0, 3, 0.3, "leg-1", 1_700_000_040_000),
+               _leg(94.0, 1, 0.1, "leg-2", 1_700_000_050_000)]
+    bf = _orphan_close_pnl_from_records(_trade(qty="4", entry_price=100.0),
+                                        now_ms=1_700_000_100_000, records=records)
+    assert bf["exit_price"] == pytest.approx(95.5)      # (3*96 + 1*94) / 4
+    assert bf["exit_fee_usdt"] == pytest.approx(0.4)    # both legs summed
+    assert bf["exit_order_id"] == "leg-2"               # latest leg completes the close
+    assert bf["closed_at_ms"] == 1_700_000_050_000

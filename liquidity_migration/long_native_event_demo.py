@@ -39,7 +39,7 @@ from typing import Any, Callable
 
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, PENDING_ORDER_STATUSES
+from ._common import MS_PER_DAY, MS_PER_HOUR, PENDING_ORDER_STATUSES, is_weekend_ms
 from .bybit import BybitMarketData, BybitPrivateClient, BybitRestRateLimiter
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_tickers
@@ -122,6 +122,18 @@ PENDING_ORDER_GUARD_MS = 15 * 60 * 1000
 # Signals older than this aren't acted on. Without this bound a missed-cycle
 # event would later trigger a stale fill long after the retrace window closed.
 SIGNAL_FRESHNESS_MS = 24 * MS_PER_HOUR
+
+# long-sleeve-2: the FC gate `today_volume_rank <= fc_top_volume_rank_max` ranks
+# turnover over WHATEVER symbols build_long_features saw — the full per-venue PIT
+# universe in the backtest, but only the ~universe_superset_size live superset in
+# the demo cycle (see the CONTRACT note in long_native.build_long_features). A
+# name ranked just inside the cutoff on the superset can fall outside it over the
+# full universe, so the live book can fire an FC candidate the backtest would not.
+# This is observability ONLY: when a fired candidate's live rank lands within this
+# margin of the cutoff (the rank-boundary band where the denominator difference can
+# flip membership), emit a telemetry line so the divergence is auditable. It does
+# NOT change which candidates fire or how they are sized.
+FC_VOLUME_RANK_TELEMETRY_MARGIN = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,7 +295,6 @@ def _v11a_long_native_config() -> LongNativeConfig:
         # Receipt: docs/preregistration/trade-atlas-2026-06-11.md.
         weekend_size_mult=1.5,
         cost_multiplier=3.0,
-        require_pit_membership=False,
         require_full_pit_universe=False,
     )
 
@@ -403,7 +414,18 @@ def projected_long_initial_margin_pct_equity(
         if strategy_config.enable_vol_target
         else 1.0
     )
-    worst_case_order_notional_pct = per_order_notional_pct * worst_case_vol_scale
+    # audit2c: the LIVE per-position notional also multiplies by weekend_size_mult
+    # (1.5 on weekend entries) and the vol-parity position_weight (max 1.0 given the
+    # vol floor). Model both so the guard captures the true worst-case book IM
+    # instead of under-counting and approving a config that breaches the ceiling.
+    worst_case_weekend_mult = max(1.0, float(strategy_config.weekend_size_mult))
+    worst_case_position_weight = 1.0  # audit2c: vol-parity weight is bounded by 1.0 (vol floor)
+    worst_case_order_notional_pct = (
+        per_order_notional_pct
+        * worst_case_vol_scale
+        * worst_case_weekend_mult
+        * worst_case_position_weight
+    )
     full_book_positions = max(int(strategy_config.max_concurrent_positions), 0)
     cycle_entries = min(max(int(demo_config.max_new_entries_per_cycle), 0), full_book_positions)
     leverage = max(float(demo_config.entry_leverage), 1e-12)
@@ -654,13 +676,24 @@ def run_long_native_demo_cycle(
             candidates, live_pos_skips = _filter_by_symbol_set(candidates, live_position_symbols)
             candidates, live_open_skips = _filter_by_symbol_set(candidates, live_entry_order_symbols)
 
-        # Parallel entry submission (mirrors short side). Each worker owns
-        # its own private REST client; they share a rate limiter so the
-        # process stays within Bybit's per-account REST budget. The long
-        # sleeve's rate-limit budget is capped lower than the short's so
-        # the short never gets starved.
+        # Parallel entry submission. Each worker owns its own private REST
+        # client; within this long-entry burst they share ONE limiter so the
+        # burst stays within budget. NOTE (ratelimit-rest-4): this limiter is
+        # per-purpose, NOT a process-wide per-IP budget — the continuous cycle
+        # fetch (event_demo_data) and the kline bootstrap (kline_stream_manager)
+        # each construct their own independent limiters with separate windows,
+        # so they do not compose into a single per-IP allowance. The long
+        # private budget is sized conservatively (see
+        # _long_demo_private_rest_rate_limit_per_second) to leave headroom under
+        # Bybit's per-account/per-IP caps; cross-purpose coordination would need
+        # a single hoisted limiter injected into all REST clients.
         private_factory: Callable[[], Any] | None
-        entries_parallel_workers = 1
+        # audit2b: `requested_entry_workers` is the configured parallelism the caller
+        # PASSES to _execute_long_entries as max_workers; it is NOT what executes.
+        # _execute_long_entries discards max_workers/private_client_factory and runs the
+        # entry burst sequentially (one place_order at a time), so the truthful worker
+        # count for telemetry is always 1 (see `entries_parallel_workers` below).
+        requested_entry_workers = 1
         if demo.submit_orders and demo.max_concurrent_entries > 1 and len(candidates) > 1:
             shared_limiter = BybitRestRateLimiter(
                 max_requests=_long_demo_private_rest_rate_limit_per_second(),
@@ -673,7 +706,7 @@ def run_long_native_demo_cycle(
                 return client
 
             private_factory = _build_worker_client
-            entries_parallel_workers = min(demo.max_concurrent_entries, len(candidates))
+            requested_entry_workers = min(demo.max_concurrent_entries, len(candidates))
         else:
             private_factory = None
 
@@ -690,7 +723,7 @@ def run_long_native_demo_cycle(
             record_preflight=preflight_callback,
             private_client_factory=private_factory,
             execution_event_router=execution_event_router,
-            max_workers=entries_parallel_workers,
+            max_workers=requested_entry_workers,
             cross_sleeve_account_root=str(cross_sleeve_root),
             live_position_symbols=live_position_symbols,
         )
@@ -771,7 +804,13 @@ def run_long_native_demo_cycle(
             "latest_feature_ts_ms": _max_int(features, "ts_ms") if not features.is_empty() else 0,
             "entry_candidates": len(candidates),
             "entries_executed": len(executed_entries),
-            "entries_parallel_workers": entries_parallel_workers,
+            # audit2b: report the ACTUAL worker count. _execute_long_entries runs the
+            # entry burst SEQUENTIALLY (max_workers/private_client_factory are reserved
+            # for future parallelism, not used), so the real concurrency is always 1 —
+            # the prior `requested_entry_workers` value (≤ max_concurrent_entries) was
+            # the configured request, never what executed. Telemetry-only; no change to
+            # sizing/selection/order submission.
+            "entries_parallel_workers": 1,
             "exit_candidates": len(exit_plans),
             "exits_executed": len(executed_exits),
             "open_long_positions_after": _count_open_long_positions(all_trades),
@@ -947,10 +986,16 @@ def _build_long_universe(
 
 
 def _long_demo_private_rest_rate_limit_per_second() -> int:
-    """Per the deployment plan: long sleeve uses a lower REST budget than the
-    short so the short never gets starved. The short's _demo_private_rest_rate_limit_per_second
-    returns ~15; this returns ~5. Both share the same per-account Bybit cap
-    but the budgets stay disjoint at the application layer."""
+    """Conservative per-purpose REST budget for the long private-entry burst.
+
+    ratelimit-rest-4: this returns ~1/3 of the base private budget
+    (``_demo_private_rest_rate_limit_per_second`` ~= 15 -> ~5 here). It is a
+    per-purpose limiter, NOT a per-IP coordinator: the continuous cycle fetch and
+    the kline bootstrap run their own independent limiters, so the budgets do not
+    compose into one per-IP allowance. The downsizing keeps the long burst well
+    under the per-account/per-IP caps with headroom for the other purposes; it is
+    no longer about starving any other sleeve (the daily SHORT sleeve was erased
+    2026-06-11, so the old cross-sleeve-starvation rationale is moot)."""
     base = max(int(_demo_private_rest_rate_limit_per_second() / 3), 3)
     return base
 
@@ -1086,8 +1131,26 @@ def _select_long_entry_candidates(
                 max_position_weight=strategy.max_position_weight,
                 notional_weight=notional_weight,
             )
+            # long-sleeve-1: apply the deployed weekend size tilt in the LIVE path
+            # identically to the backtest (long_native.py:2141), keyed on the actual
+            # entry time (now_ms == entry_ts_ms here), via the SHARED is_weekend_ms
+            # helper so live and backtest can't drift. Without this the live demo
+            # sized Sat/Sun entries 1x while the promotion backtest sized them 1.5x,
+            # so the forward-demo arbiter measured a different profile than validated.
+            if strategy.weekend_size_mult != 1.0 and is_weekend_ms(now_ms):
+                position_weight = position_weight * strategy.weekend_size_mult
             candidate_score = _float(row.get("log_return"))
             volume_rank = _float(row.get("today_volume_rank")) or 1e9
+            # long-sleeve-2: observability-only rank-boundary telemetry. The
+            # candidate has already passed the FC gate (today_volume_rank <=
+            # fc_top_volume_rank_max) on the LIVE superset denominator; flag it when
+            # its rank is close enough to the cutoff that the full-universe backtest
+            # could have ranked it outside the top set. No selection/sizing change.
+            _log_fc_rank_boundary(
+                symbol=symbol,
+                today_volume_rank=volume_rank,
+                fc_top_volume_rank_max=strategy.fc_top_volume_rank_max,
+            )
             candidate = {
                 "trade_id": _long_trade_id(symbol=symbol, signal_ts_ms=int(ts)),
                 "symbol": symbol,
@@ -1136,6 +1199,46 @@ def _select_long_entry_candidates(
         )
     )
     return deduped[:max_new_entries], skips
+
+
+def _fc_rank_is_near_boundary(
+    today_volume_rank: float, fc_top_volume_rank_max: int, *, margin: int = FC_VOLUME_RANK_TELEMETRY_MARGIN
+) -> bool:
+    """long-sleeve-2: True when a fired FC candidate's live volume rank sits in the
+    rank-boundary band [cutoff-margin, cutoff] where the live-vs-backtest rank
+    denominator difference (~superset live, full universe in backtest) can flip
+    whether the name is in the top-`fc_top_volume_rank_max` set. Pure predicate so
+    the live path stays observability-only and the boundary logic is unit-testable.
+    A candidate that fired already satisfies rank <= cutoff; we only care about the
+    upper band, not ranks comfortably inside it."""
+    if today_volume_rank is None:
+        return False
+    rank = float(today_volume_rank)
+    cutoff = float(fc_top_volume_rank_max)
+    if rank > cutoff:
+        return False  # would not have fired the FC gate; nothing to flag
+    return rank >= cutoff - float(margin)
+
+
+def _log_fc_rank_boundary(
+    *, symbol: str, today_volume_rank: float, fc_top_volume_rank_max: int
+) -> None:
+    """long-sleeve-2: emit a cycle-telemetry line when a fired FC candidate's live
+    volume rank is within FC_VOLUME_RANK_TELEMETRY_MARGIN of the cutoff, so
+    live-vs-backtest rank-boundary divergence is auditable. Observability ONLY —
+    the caller has already decided to fire; this never gates or resizes."""
+    if not _fc_rank_is_near_boundary(today_volume_rank, fc_top_volume_rank_max):
+        return
+    _logger.info(
+        "long FC rank-boundary: %s today_volume_rank=%.0f within margin %d of "
+        "fc_top_volume_rank_max=%d (live rank is over the universe superset, NOT the "
+        "full backtest universe — this candidate could rank outside the backtest top "
+        "set; observability-only, long-sleeve-2)",
+        symbol,
+        float(today_volume_rank),
+        FC_VOLUME_RANK_TELEMETRY_MARGIN,
+        int(fc_top_volume_rank_max),
+    )
 
 
 def _vol_parity_weight(
@@ -1412,6 +1515,18 @@ def _execute_long_exits(
                 notional_weight = _ratio_or_zero(
                     trade.get("notional_usdt"), trade.get("equity_usdt")
                 )
+                # long-sleeve-3: net_return must be NET of venue fees to match the
+                # backtest's _finalize_trade (gross + cost + funding) and the
+                # authoritative live ledger roll-up (_ledger_summary nets entry+exit
+                # fees). Previously this column was gross-of-cost yet named net_return,
+                # a parity-implying label that would mislead any reconcile/diagnostic
+                # comparing it against the backtest net_return. Funding is not modeled
+                # per-trade on the live path, so (like the authoritative roll-up) only
+                # fees are subtracted here. Fees are an equity-fraction cost.
+                fee_return = _ratio_or_zero(
+                    _float(trade.get("entry_fee_usdt")) + _float(exit_fee_usdt),
+                    trade.get("equity_usdt"),
+                )
                 trade_update.update({
                     "status": "closed",
                     "exit_ts_ms": now_ms,
@@ -1419,7 +1534,7 @@ def _execute_long_exits(
                     "exit_fee_usdt": exit_fee_usdt,
                     "exit_exec_time_ms": exit_exec_time_ms,
                     "gross_trade_return": gross_trade_return,
-                    "net_return": gross_trade_return * notional_weight,
+                    "net_return": gross_trade_return * notional_weight - fee_return,
                     "exit_reason": str(plan.get("exit_reason", "time_stop")),
                     "exit_order_link_id": exit_link,
                     "exit_order_id": order_result.get("orderId", ""),

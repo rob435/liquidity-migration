@@ -85,22 +85,27 @@ asymmetry is the original trap. Two guards now exist:
 ## Membership modes
 
 (The `--pit-membership` / `--allow-partial-pit` CLI flags were erased with the
-`volume-events` subcommand in e03e9ab; the knobs survive as run-config fields.)
+`volume-events` subcommand in e03e9ab; the surviving knob is a run-config field.)
+
+The surviving gate is `require_full_pit_universe` (default `True`): the run aborts
+unless every archive-manifest `(trading-day, symbol)` within each symbol's traded
+lifespan is covered by klines — the no-survivorship / no-look-ahead
+universe-completeness check enforced in `volume_events_pit.py`.
 
 | mode | config | meaning | use for |
 | --- | --- | --- | --- |
-| strict (default) | `require_pit_membership=True` | archive PIT membership on the trading day | all evidence / promotion |
-| current-universe | `require_pit_membership=False` | drop the per-trade PIT gate; trade whatever the manifest's current listing covers | a same-day diagnostic / reconcile before the archive publishes |
+| strict (default) | `require_full_pit_universe=True` | abort unless the full PIT universe is covered | all evidence / promotion |
+| biased diagnostic | `require_full_pit_universe=False` | skip the completeness abort; run on whatever klines exist | a clearly-labelled same-day diagnostic — **never** promotion evidence |
 
-`require_pit_membership=False` runs are labelled `biased_benchmark` /
-`current_universe_biased` — **never** promotion evidence (it is exactly the
-survivorship surface the methodology doc forbids for real decisions). It exists
-only so a same-day reconcile can include a signal whose trading-day archive has
-not published yet.
+`require_full_pit_universe=False` runs are labelled `biased_benchmark` /
+`current_universe_biased` — never promotion evidence (it is exactly the
+survivorship surface the methodology doc forbids for real decisions).
 
-Note: `require_full_pit_universe` is a *different* knob — it relaxes only the
-universe-*completeness* abort (every manifest symbol must have klines), not the
-per-trade membership gate. Per-trade membership stays strict either way.
+Note (pit-data-1, 2026-06-14): the former per-trade `require_pit_membership`
+flag was REMOVED — it was inert (read by no enforcement path) and advertised a
+per-trade membership gate that never ran. PIT membership is enforced at the
+universe level by the gate above; do not re-introduce a flag implying per-trade
+gating without an actual enforcement path.
 
 ## The one-command workflow
 

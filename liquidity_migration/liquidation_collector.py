@@ -9,6 +9,25 @@ scoping note): both venues sample/throttle their public liquidation broadcasts, 
 this is a FLOOR on liquidation activity — still the best obtainable signal.
 
     .venv/bin/python -m liquidity_migration.liquidation_collector --root data/liquidations
+
+Row schema (one JSON object per line; this is a RAW tape — fields are stored as the
+venue reports them, NOT normalized — so the eventual P12 calibration consumer must
+read this note):
+
+  * recv_ms : int  — local receive wall-clock ms (used for UTC-day file rotation).
+  * venue   : str  — "bybit" | "binance".
+  * symbol  : str  — venue-native perp symbol (e.g. "BTCUSDT").
+  * side    : str  — RAW, per-venue casing AND semantics:
+      - bybit:   d["S"] is title-case "Buy"/"Sell" = the side of the LIQUIDATED order.
+      - binance: o["S"] is upper-case "BUY"/"SELL" = the side of the liquidation
+                 (forceOrder); "SELL" means a LONG was liquidated, "BUY" a short.
+    A consumer normalizing on, e.g., side == "Buy" would silently miss every binance
+    row — lower-case and reconcile the per-venue meaning before deriving any feature.
+  * qty     : float — base-asset size; only qty > 0 rows are kept.
+  * price   : float — bybit "p"; binance "ap" (avg fill) else "p" fallback. Only
+                price > 0 rows are kept, so notional (qty * price) is never polluted
+                by a zero-price row (audit 2026-06-12 round 4).
+  * ts_ms   : int  — venue event time (bybit "T"; binance "T" else "E" else recv_ms).
 """
 
 from __future__ import annotations
@@ -78,7 +97,10 @@ def parse_bybit_event(msg: dict[str, Any], recv_ms: int) -> list[dict[str, Any]]
             })
         except (TypeError, ValueError):
             continue
-    return [r for r in rows if r["symbol"] and r["qty"] > 0.0]
+    # Drop zero/negative price the same way zero qty is dropped: a price=0 row (a
+    # missing/garbage 'p') would pollute any notional aggregation in the consumer
+    # (audit 2026-06-12 round 4).
+    return [r for r in rows if r["symbol"] and r["qty"] > 0.0 and r["price"] > 0.0]
 
 
 def parse_binance_event(msg: dict[str, Any], recv_ms: int) -> list[dict[str, Any]]:
@@ -96,12 +118,17 @@ def parse_binance_event(msg: dict[str, Any], recv_ms: int) -> list[dict[str, Any
                 "symbol": str(o.get("s", "")),
                 "side": str(o.get("S", "")),
                 "qty": float(o.get("q", 0.0)),
-                "price": float(o.get("ap") or o.get("p") or 0.0),
+                # ap (avg fill) else p fallback. A string "0"/"0.00" ap is TRUTHY,
+                # so `o.get("ap") or o.get("p")` would keep the zero ap and never
+                # fall back; parse numerically and fall back only when ap is not > 0.
+                "price": (float(o.get("ap") or 0.0) or float(o.get("p") or 0.0)),
                 "ts_ms": int(o.get("T", e.get("E", recv_ms))),
             })
         except (TypeError, ValueError):
             continue
-    return [r for r in rows if r["symbol"] and r["qty"] > 0.0]
+    # Drop zero/negative price (see parse_bybit_event): protects the consumer's
+    # notional aggregations from a missing/garbage avg-price field.
+    return [r for r in rows if r["symbol"] and r["qty"] > 0.0 and r["price"] > 0.0]
 
 
 class JsonlDayWriter:
@@ -127,26 +154,43 @@ class JsonlDayWriter:
         if not rows:
             return
         with self._lock:
-            by_path: dict[Path, list[str]] = {}
-            venue_counts: dict[str, int] = {}
+            # Group by (venue, path) so the per-venue counter can be advanced by the
+            # rows that ACTUALLY landed, not by a pre-computed total — on a partial
+            # disk-full failure that distinction is what keeps written_by_venue (the
+            # silent-leg heartbeat) honest, the same way self.dropped must.
+            by_path: dict[tuple[str, Path], list[str]] = {}
             for r in rows:
                 day = datetime.fromtimestamp(r["recv_ms"] / 1000, tz=timezone.utc).date().isoformat()
-                p = self.root / r["venue"] / f"{day}.jsonl"
-                by_path.setdefault(p, []).append(json.dumps(r, separators=(",", ":")))
                 venue = str(r["venue"])
-                venue_counts[venue] = venue_counts.get(venue, 0) + 1
-            for p, lines in by_path.items():
+                p = self.root / venue / f"{day}.jsonl"
+                by_path.setdefault((venue, p), []).append(json.dumps(r, separators=(",", ":")))
+            for (venue, p), lines in by_path.items():
+                # Write one line at a time (NOT a single "\n".join batch): a disk-full
+                # OSError mid-batch then tears at most the in-flight line — every line
+                # that already returned from fh.write is a complete "...\n" record — and
+                # the dropped counter reflects ONLY the lines that did not land, instead
+                # of over-counting earlier lines that were already flushed. This keeps
+                # the append-only JSONL day file parseable by a strict
+                # `for line in f: json.loads(line)` consumer (the unbuilt P12
+                # liquidation-proxy tape reader) even when the box fills mid-flush
+                # (audit 2026-06-12 round 4).
+                written_here = 0
                 try:
                     p.parent.mkdir(parents=True, exist_ok=True)
                     with p.open("a", encoding="utf-8") as fh:
-                        fh.write("\n".join(lines) + "\n")
+                        for line in lines:
+                            fh.write(line + "\n")
+                            written_here += 1
                 except OSError as exc:
-                    self.dropped += len(lines)
-                    _logger.warning("liquidation writer OSError (%s): dropped %d row(s) for %s", exc, len(lines), p)
-                    continue
-                self.written += len(lines)
-            for venue, count in venue_counts.items():
-                self.written_by_venue[venue] = self.written_by_venue.get(venue, 0) + count
+                    dropped_here = len(lines) - written_here
+                    self.dropped += dropped_here
+                    _logger.warning(
+                        "liquidation writer OSError (%s): wrote %d, dropped %d row(s) for %s",
+                        exc, written_here, dropped_here, p,
+                    )
+                self.written += written_here
+                if written_here:
+                    self.written_by_venue[venue] = self.written_by_venue.get(venue, 0) + written_here
 
 
 def bybit_linear_symbols() -> list[str]:
@@ -194,18 +238,50 @@ def _run_bybit(writer: JsonlDayWriter, stop: threading.Event) -> None:
 
             def on_open(ws: Any) -> None:
                 opened["monotonic"] = time.monotonic()
+                # websocket-client swallows an on_open exception (logs it, does
+                # NOT reconnect), so a mid-burst send() failure would silently
+                # leave the symbol-universe tail unsubscribed for the life of the
+                # connection. Close on any failure to force a full re-subscribe.
                 for i in range(0, len(symbols), BYBIT_TOPICS_PER_SUBSCRIBE):
                     chunk = symbols[i:i + BYBIT_TOPICS_PER_SUBSCRIBE]
-                    ws.send(json.dumps({"op": "subscribe",
-                                        "args": [f"allLiquidation.{s}" for s in chunk]}))
+                    try:
+                        ws.send(json.dumps({"op": "subscribe",
+                                            "args": [f"allLiquidation.{s}" for s in chunk]}))
+                    except Exception as exc:  # noqa: BLE001 - any send failure must trigger reconnect
+                        _logger.warning(
+                            "bybit collector: subscribe send failed at chunk %d/%d (%s); "
+                            "closing to force resubscribe",
+                            i // BYBIT_TOPICS_PER_SUBSCRIBE + 1,
+                            (len(symbols) + BYBIT_TOPICS_PER_SUBSCRIBE - 1) // BYBIT_TOPICS_PER_SUBSCRIBE,
+                            exc,
+                        )
+                        ws.close()
+                        return
 
             def on_message(ws: Any, message: str) -> None:
-                if _close_if_expired(ws):
-                    return
                 try:
-                    writer.write(parse_bybit_event(json.loads(message), now_ms()))
+                    payload = json.loads(message)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    # Still honour the age cap even on an unparseable frame so a quiet
+                    # connection past its cap is recycled.
+                    _close_if_expired(ws)
+                    return
+                # Surface a failed subscribe ack (e.g. Bybit subscribe-rate-limit
+                # during the burst) instead of dropping it silently — parse_bybit_event
+                # returns [] for ack frames, so without this it would never be seen.
+                if isinstance(payload, dict) and payload.get("op") == "subscribe" and payload.get("success") is False:
+                    _logger.warning("bybit collector: subscribe REJECTED: %s", payload.get("ret_msg") or payload)
+                    return
+                # Write THIS frame's rows BEFORE the age-cap close: _close_if_expired
+                # closes the ws but the payload is already in hand, so checking expiry
+                # first discarded the rows of the frame that happened to trip the
+                # ~24h rollover — avoidable loss of unbuyable data (audit 2026-06-12
+                # round 4). Write-then-check loses nothing; the rollover is rare.
+                try:
+                    writer.write(parse_bybit_event(payload, now_ms()))
                 except (json.JSONDecodeError, TypeError, ValueError):
                     pass
+                _close_if_expired(ws)
 
             def on_pong(ws: Any, _message: Any) -> None:
                 # Heartbeat path: pongs arrive every ping_interval, so the age

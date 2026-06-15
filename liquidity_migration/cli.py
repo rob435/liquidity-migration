@@ -4,24 +4,34 @@ import argparse
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
 from .archive_manifest import ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig
 from .archive_manifest import ArchiveKlineDownloadConfig, ArchiveManifestConfig, run_archive_manifest
+from .archive_manifest import _safe_name as _archive_safe_name  # audit2b: report path must match on-disk slug
 from .archive_manifest import run_archive_hourly_klines_api_download, run_archive_hourly_klines_download
 from .archive_manifest import run_archive_klines_download
 from .config import (
     DEFAULT_EXCLUDED_SYMBOLS,
+    ResearchConfig,
     UniverseConfig,
     ensure_data_root_exists,
     load_config,
 )
 from .storage import ensure_data_root
 from .data_layer import DEFAULT_DATA_LAYER_DATASETS, DataLayerAuditConfig, run_data_layer_audit
-from .downloaders import download_binance_usdm_proxy_data, download_market_data, parse_date_ms
+from .downloaders import (
+    BINANCE_PROXY_DATASET_MAP,
+    REST_DATASETS,
+    download_binance_usdm_proxy_data,
+    download_market_data,
+    parse_date_ms,
+)
 from .event_demo import (
     EventRiskCycleConfig,
+    _validate_risk_config,
     build_event_risk_private_client,
     run_event_risk_cycle,
 )
@@ -35,6 +45,7 @@ from .reconciliation import (
     run_long_paper_demo_reconciliation,
 )
 from .continuous_addon_shadow import ContinuousAddonShadowAuditConfig, run_continuous_addon_shadow_audit
+from .universe import _safe_name as _universe_safe_name  # audit2b: report path must match on-disk slug
 from .universe import run_discover_universe
 from .continuous_events import ContinuousEventConfig, run_continuous_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
@@ -324,12 +335,8 @@ def _run_signal_harness(args, data_root: Path) -> int:
     raise RuntimeError(f"unknown signal-harness action: {action!r}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    config = load_config(args.config, data_root=args.data_root)
-    data_root = _resolve_data_root(args.command, config.data_root)
 
-    if args.command == "download-data":
+def _cmd_download_data(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         if args.fixture:
             outputs = generate_fixture_data(data_root)
         else:
@@ -338,10 +345,14 @@ def main(argv: list[str] | None = None) -> int:
             outputs = download_market_data(
                 data_root,
                 config=config,
-                symbols=[item.strip().upper() for item in args.symbols.split(",") if item.strip()],
+                symbols=_parse_symbols(args.symbols),
                 start_ms=parse_date_ms(args.start),
                 end_ms=parse_date_ms(args.end),
-                datasets={item.strip() for item in args.datasets.split(",") if item.strip()},
+                datasets=_validate_datasets(
+                    {item.strip() for item in args.datasets.split(",") if item.strip()},
+                    _KNOWN_BYBIT_DATASETS,
+                    venue="Bybit",
+                ),
                 archive_url_template=args.archive_url_template,
                 workers=args.workers,
                 open_interest_interval=args.open_interest_interval,
@@ -373,13 +384,18 @@ def main(argv: list[str] | None = None) -> int:
             print(line, file=sys.stderr)
         return 0
 
-    if args.command == "download-binance-proxy":
+
+def _cmd_download_binance_proxy(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         outputs = download_binance_usdm_proxy_data(
             data_root,
-            symbols=[item.strip().upper() for item in args.symbols.split(",") if item.strip()],
+            symbols=_parse_symbols(args.symbols),
             start_ms=parse_date_ms(args.start),
             end_ms=parse_date_ms(args.end),
-            datasets={item.strip() for item in args.datasets.split(",") if item.strip()},
+            datasets=_validate_datasets(
+                {item.strip() for item in args.datasets.split(",") if item.strip()},
+                _KNOWN_BINANCE_PROXY_DATASETS,
+                venue="Binance proxy",
+            ),
             workers=args.workers,
             interval=args.interval,
             period=args.period,
@@ -389,7 +405,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{dataset}: {path}")
         return 0
 
-    if args.command == "data-layer-audit":
+
+def _cmd_data_layer_audit(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_data_layer_audit(
             data_root,
             config=DataLayerAuditConfig(
@@ -409,14 +426,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "discover-universe":
+
+def _cmd_discover_universe(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         universe_config = _universe_config_from_args(config.universe, args)
         payload = run_discover_universe(data_root, config=config, universe_config=universe_config, name=args.name)
-        print(f"universe rows={payload['rows']} path={data_root / 'reports' / ('universe_' + args.name + '.md')}")
+        # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+        print(
+            f"universe rows={payload['rows']} "
+            f"path={data_root / 'reports' / ('universe_' + _universe_safe_name(args.name) + '.md')}"
+        )
         print(payload["symbol_csv"])
         return 0
 
-    if args.command == "archive-manifest":
+
+def _cmd_archive_manifest(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         manifest_config = ArchiveManifestConfig(
             base_url=args.base_url or DEFAULT_BYBIT_PUBLIC_TRADING_URL,
             quote_suffix=args.quote_suffix,
@@ -433,14 +456,16 @@ def main(argv: list[str] | None = None) -> int:
             "archive manifest "
             f"rows={payload['rows']} "
             f"symbols={payload['symbols']} "
-            f"path={data_root / 'reports' / ('archive_manifest_' + args.name + '.md')}"
+            # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+            f"path={data_root / 'reports' / ('archive_manifest_' + _archive_safe_name(args.name) + '.md')}"
         )
         survivorship_warning = payload.get("survivorship_warning")
         if survivorship_warning:
             print(f"WARNING: {survivorship_warning}")
         return 0
 
-    if args.command == "archive-download-klines":
+
+def _cmd_archive_download_klines(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         kline_config = ArchiveKlineDownloadConfig(
             start=args.start,
             end=args.end,
@@ -460,11 +485,13 @@ def main(argv: list[str] | None = None) -> int:
             f"cached={payload['cached']} "
             f"archives_deleted={payload.get('archives_deleted', 0)} "
             f"failed={payload['failures']} "
-            f"path={data_root / 'reports' / ('archive_klines_' + args.name + '.md')}"
+            # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+            f"path={data_root / 'reports' / ('archive_klines_' + _archive_safe_name(args.name) + '.md')}"
         )
         return 1 if payload["failures"] else 0
 
-    if args.command == "archive-download-klines-1h":
+
+def _cmd_archive_download_klines_1h(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         kline_config_1h = ArchiveHourlyKlineDownloadConfig(
             start=args.start,
             end=args.end,
@@ -484,11 +511,13 @@ def main(argv: list[str] | None = None) -> int:
             f"cached={payload['cached']} "
             f"archives_deleted={payload.get('archives_deleted', 0)} "
             f"failed={payload['failures']} "
-            f"path={data_root / 'reports' / ('archive_klines_1h_' + args.name + '.md')}"
+            # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+            f"path={data_root / 'reports' / ('archive_klines_1h_' + _archive_safe_name(args.name) + '.md')}"
         )
         return 1 if payload["failures"] else 0
 
-    if args.command == "archive-download-klines-1h-api":
+
+def _cmd_archive_download_klines_1h_api(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         kline_config_1h_api = ArchiveHourlyKlineApiDownloadConfig(
             api_url=args.api_url,
             category=args.category,
@@ -514,11 +543,13 @@ def main(argv: list[str] | None = None) -> int:
             f"cached={payload['cached']} "
             f"empty={payload['empty']} "
             f"failed={payload['failures']} "
-            f"path={data_root / 'reports' / ('archive_klines_1h_api_' + args.name + '.md')}"
+            # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+            f"path={data_root / 'reports' / ('archive_klines_1h_api_' + _archive_safe_name(args.name) + '.md')}"
         )
         return 1 if payload["failures"] else 0
 
-    if args.command == "event-risk-cycle":
+
+def _cmd_event_risk_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         risk_config = EventRiskCycleConfig(
             submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders,
@@ -540,6 +571,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("interval-seconds must be non-negative")
             if args.max_cycles < 0:
                 raise ValueError("max-cycles must be non-negative")
+            # Fail fast on order-safety / config errors BEFORE the loop (CCR-3):
+            # the per-cycle broad except below must only swallow transient
+            # (network/REST) failures, never a fatal misconfig such as
+            # --submit-orders without --confirm-demo-orders or REAL_MONEY=true,
+            # which would otherwise spin forever logging the same error.
+            _validate_risk_config(risk_config)
             private_client = build_event_risk_private_client(config, risk_config)
             cycles = 0
             while True:
@@ -566,7 +603,8 @@ def main(argv: list[str] | None = None) -> int:
         _print_event_risk_summary(payload)
         return 0
 
-    if args.command == "event-risk-ws":
+
+def _cmd_event_risk_ws(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         ws_risk_config = EventWebSocketRiskConfig(
             submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders,
@@ -607,7 +645,8 @@ def main(argv: list[str] | None = None) -> int:
         _print_event_risk_summary(payload)
         return 0
 
-    if args.command == "combined-book-telegram-report":
+
+def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         from liquidity_migration.long_native_event_demo import format_combined_book_summary
         from liquidity_migration.event_demo import _build_private_client, _safe_raw_positions, _utc_now_ms
         from liquidity_migration.event_demo import build_position_pnl_snapshot, summarize_position_pnl
@@ -664,11 +703,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.print_only:
             print(message)
             return 0
-        sent = send_telegram_message(message, enabled=True)
+        try:
+            sent = send_telegram_message(message, enabled=True)
+        except OSError as exc:
+            # audit2: send_telegram_message PROPAGATES transport errors by contract
+            # (HTTPError/URLError/TimeoutError all subclass OSError). The combined-book
+            # report is a oneshot notify on a timer; a transient telegram outage should
+            # exit non-zero cleanly, not crash the service with an uncaught traceback.
+            print(f"combined-book telegram report failed to send: {type(exc).__name__}: {exc}")
+            return 1
         print(f"combined-book telegram report sent={sent} chars={len(message)}")
         return 0 if sent else 1
 
-    if args.command == "long-native-event-demo-cycle":
+
+def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         from liquidity_migration.long_native_event_demo import (
             LongNativeDemoCycleConfig,
             format_long_demo_cycle_summary,
@@ -730,7 +778,8 @@ def main(argv: list[str] | None = None) -> int:
         print(format_long_demo_cycle_summary(payload))
         return 0
 
-    if args.command == "continuous-event-demo-cycle":
+
+def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, run_continuous_demo_cycle
         feature_set = tuple(part.strip() for part in str(args.feature_set).split(",") if part.strip())
         cont_demo_config = ContinuousDemoCycleConfig(
@@ -792,7 +841,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "continuous-events":
+
+def _cmd_continuous_events(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         cont_config = ContinuousEventConfig(
             start_date=args.start, end_date=args.end, side=args.side, decile=args.decile,
             rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
@@ -853,10 +903,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "signal-harness":
+
+def _cmd_signal_harness(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         return _run_signal_harness(args, data_root)
 
-    if args.command == "reconcile-long-paper-demo":
+
+def _cmd_reconcile_long_paper_demo(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_long_paper_demo_reconciliation(
             args.paper_data_root,
             args.demo_data_root,
@@ -877,7 +929,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "reconcile-continuous-paper-demo":
+
+def _cmd_reconcile_continuous_paper_demo(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_paper_demo_reconciliation(
             args.paper_data_root,
             args.demo_data_root,
@@ -898,9 +951,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "continuous-rebalance-cycle-audit":
+
+def _cmd_continuous_rebalance_cycle_audit(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_rebalance_cycle_audit(
-            args.data_root,
+            args.audit_data_root,
             cycles_dataset=args.cycles_dataset,
             orders_dataset=args.orders_dataset,
             output_dir=args.output_dir,
@@ -919,7 +973,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if result["ok"] else 1
 
-    if args.command == "continuous-forward-readiness":
+
+def _cmd_continuous_forward_readiness(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_forward_readiness(
             args.paper_data_root,
             args.demo_data_root,
@@ -944,7 +999,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if payload["ok"] else 1
 
-    if args.command == "continuous-vs-daily-forward":
+
+def _cmd_continuous_vs_daily_forward(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_vs_daily_forward_comparison(
             args.daily_data_root,
             args.continuous_data_root,
@@ -974,7 +1030,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if payload["ok"] else 1
 
-    if args.command == "continuous-addon-shadow-audit":
+
+def _cmd_continuous_addon_shadow_audit(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_continuous_addon_shadow_audit(
             ContinuousAddonShadowAuditConfig(
                 primary_data_root=args.primary_data_root,
@@ -1184,7 +1241,41 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"continuous add-on shadow audit gate failure: {failure}", file=sys.stderr)
         return 1 if args.fail_on_threshold_breach and not gate["passed"] else 0
 
-    raise AssertionError(f"unhandled command: {args.command}")
+
+_COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Path], int]] = {
+    "download-data": _cmd_download_data,
+    "download-binance-proxy": _cmd_download_binance_proxy,
+    "data-layer-audit": _cmd_data_layer_audit,
+    "discover-universe": _cmd_discover_universe,
+    "archive-manifest": _cmd_archive_manifest,
+    "archive-download-klines": _cmd_archive_download_klines,
+    "archive-download-klines-1h": _cmd_archive_download_klines_1h,
+    "archive-download-klines-1h-api": _cmd_archive_download_klines_1h_api,
+    "event-risk-cycle": _cmd_event_risk_cycle,
+    "event-risk-ws": _cmd_event_risk_ws,
+    "combined-book-telegram-report": _cmd_combined_book_telegram_report,
+    "long-native-event-demo-cycle": _cmd_long_native_event_demo_cycle,
+    "continuous-event-demo-cycle": _cmd_continuous_event_demo_cycle,
+    "continuous-events": _cmd_continuous_events,
+    "signal-harness": _cmd_signal_harness,
+    "reconcile-long-paper-demo": _cmd_reconcile_long_paper_demo,
+    "reconcile-continuous-paper-demo": _cmd_reconcile_continuous_paper_demo,
+    "continuous-rebalance-cycle-audit": _cmd_continuous_rebalance_cycle_audit,
+    "continuous-forward-readiness": _cmd_continuous_forward_readiness,
+    "continuous-vs-daily-forward": _cmd_continuous_vs_daily_forward,
+    "continuous-addon-shadow-audit": _cmd_continuous_addon_shadow_audit,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    config = load_config(args.config, data_root=args.data_root)
+    data_root = _resolve_data_root(args.command, config.data_root)
+    handler = _COMMAND_HANDLERS.get(args.command)
+    if handler is None:
+        raise AssertionError(f"unhandled command: {args.command}")
+    return handler(args, config, data_root)
+
 
 
 def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -1193,9 +1284,60 @@ def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _parse_symbols(value: str | None) -> list[str]:
+    """Parse a comma-separated --symbols string into upper-cased symbols.
+
+    Single source of truth for the download paths so a missing .strip()/.upper()
+    can't drift between branches (code-quality-9).
+    """
+    if not value:
+        return []
+    return [item.strip().upper() for item in value.split(",") if item.strip()]
+
+
+# Known dataset tokens accepted by each download path. The downloaders dispatch
+# purely via `if "<name>" in datasets`, so an unknown/typo'd name is otherwise a
+# silent no-op (exit 0, zero output) that leaves a coverage/PIT gap. We assert
+# requested-vs-known here so a typo fails loud, mirroring the survivorship gate
+# the repo uses for missing symbols.
+_KNOWN_BYBIT_DATASETS = frozenset(REST_DATASETS | {"archive_klines_1m"})
+# Binance proxy accepts either the short alias (map keys, e.g. "funding") or the
+# already-resolved canonical name (map values, e.g. "binance_usdm_funding"); both
+# match a dispatch branch after _resolve_binance_dataset_name.
+_KNOWN_BINANCE_PROXY_DATASETS = frozenset(
+    set(BINANCE_PROXY_DATASET_MAP) | set(BINANCE_PROXY_DATASET_MAP.values())
+)
+
+
+def _validate_datasets(requested: set[str], known: frozenset[str], *, venue: str) -> set[str]:
+    """Fail loud if any requested dataset name is not a known/served dataset.
+
+    The downloaders silently skip unknown dataset tokens, so without this guard a
+    typo (e.g. ``klines_1hr`` or ``funidng``) downloads nothing for that dataset
+    and returns exit 0 — a silent data-coverage hole. Raises with the offending
+    tokens listed and the known names for the venue.
+    """
+    unknown = sorted(requested - known)
+    if unknown:
+        raise RuntimeError(
+            f"Unknown {venue} dataset(s): {', '.join(unknown)}. "
+            f"Known datasets: {', '.join(sorted(known))}."
+        )
+    return requested
+
+
 
 
 def _universe_config_from_args(base: UniverseConfig, args: argparse.Namespace) -> UniverseConfig:
+    # --include-excluded (include_majors) and --exclude-defaults (exclude_majors)
+    # are contradictory: one clears the excluded-symbol list, the other applies
+    # it. The precedence below would silently let include win and drop the
+    # exclude flag with no warning, producing a PIT-relevant universe membership
+    # the operator did not intend. Fail loud on the contradiction instead.
+    if args.include_majors and args.exclude_majors:
+        raise RuntimeError(
+            "--include-excluded and --exclude-defaults are mutually exclusive; pass at most one."
+        )
     if args.exclude_symbols is not None:
         exclude_symbols = _csv_str(args.exclude_symbols, ())
     elif args.include_majors:

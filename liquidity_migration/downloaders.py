@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import gc
+import math  # audit2b: guard non-finite taker volumes before the imbalance ratio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 import polars as pl
 
 from .archive import ArchiveFileNotFoundError, download_public_trade_archive, read_public_trade_archive
+from .archive_manifest import previous_kline_close  # audit2c: seed densify carry-forward like the canonical PIT builder
 from .binance import BinanceDataError, BinanceUSDMData, _recent_history_start
 from .bybit import BybitMarketData
 from .config import ResearchConfig
-from .ingestion import aggregate_trade_klines_1m, normalize_funding_history
+from .ingestion import aggregate_trade_klines_1m, densify_trade_klines_1m, normalize_funding_history
 from .storage import dataset_path, write_dataset
 
 
@@ -143,6 +145,14 @@ def download_market_data(
                     continue
                 trades = read_public_trade_archive(archive_path, symbol=symbol)
                 klines_1m = aggregate_trade_klines_1m(trades)
+                # audit2c: densify the sparse 1m bars onto the full 1440-row grid with a
+                # carry-forward seed, matching archive_manifest._download_one_archive_kline —
+                # the raw aggregate output left gap-y bars diverging from the canonical builder.
+                klines_1m = densify_trade_klines_1m(
+                    klines_1m,
+                    archive_date=date,
+                    initial_price=previous_kline_close(data_root, symbol=symbol, archive_date=date, dataset="klines_1m"),
+                )
                 outputs["klines_1m"] = write_dataset(klines_1m, data_root, "klines_1m", append=False)
                 del trades, klines_1m
                 gc.collect()
@@ -804,7 +814,10 @@ def _normalize_binance_taker_flow(symbol: str, rows: list[dict], *, period: str)
         # missing) emits nulls for the derived fields rather than a spurious 0.
         buy_volume = _float_or_none(row.get("buyVol"))
         sell_volume = _float_or_none(row.get("sellVol"))
-        if buy_volume is None or sell_volume is None:
+        # audit2b: a NaN/inf or negative volume is malformed (volumes are non-negative & finite); it
+        # slips past the None check and would yield a fabricated 0.0 imbalance (total <= 0 branch) or a
+        # NaN ratio. Treat it as missing data and emit null derived fields, same as an absent field.
+        if not _is_valid_volume(buy_volume) or not _is_valid_volume(sell_volume):
             output.append(
                 {
                     "ts_ms": int(row["timestamp"]),
@@ -842,23 +855,51 @@ def _normalize_funding(symbol: str, rows: list[dict]) -> list[dict]:
             "ts_ms": int(row["fundingRateTimestamp"]),
             "symbol": symbol,
             "funding_rate": float(row["fundingRate"]),
-            "funding_interval_min": int(row.get("fundingIntervalHour") or 8) * 60,
+            "funding_interval_min": _funding_interval_min(row.get("fundingIntervalHour")),
         }
         for row in rows
     ]
+
+
+def _funding_interval_min(funding_interval_hour: Any) -> int:
+    # The `or 8` idiom only catches None/empty; a literal "0" (string) is truthy so
+    # int("0")==0 would yield a 0-minute interval and make funding_rate_8h_equiv =
+    # funding_rate * (480/0) = inf downstream (ingestion.normalize_funding_history).
+    # A non-positive interval is not a real Bybit funding cadence (real values are
+    # 1/2/4/8h), so treat it as missing and fall back to the 8h default.
+    try:
+        hours = int(funding_interval_hour) if funding_interval_hour not in (None, "") else 8
+    except (TypeError, ValueError):
+        hours = 8
+    if hours <= 0:
+        hours = 8
+    return hours * 60
 
 
 def _normalize_open_interest(symbol: str, rows: list[dict], *, interval_time: str = "1h") -> list[dict]:
-    return [
-        {
-            "ts_ms": int(row["timestamp"]),
-            "symbol": symbol,
-            "open_interest": float(row.get("openInterest", 0.0)),
-            "open_interest_value": float(row.get("openInterestValue", row.get("openInterest", 0.0))),
-            "open_interest_interval": interval_time,
-        }
-        for row in rows
-    ]
+    # _float_or_none: an ABSENT field is genuinely-missing data (dropped downstream),
+    # NOT a fabricated 0.0 that survives the is_finite() filter in
+    # long_native.build_long_features and corrupts oi_chg_*d with a spurious
+    # 0->next-value -100% jump (and an inf on the following real value). Mirrors the
+    # Binance sibling _normalize_binance_open_interest (data-download-7). The
+    # open_interest fallback for open_interest_value only applies when openInterest
+    # is genuinely present, so a missing field stays null rather than coalescing.
+    output = []
+    for row in rows:
+        open_interest = _float_or_none(row.get("openInterest"))
+        open_interest_value = _float_or_none(row.get("openInterestValue"))
+        if open_interest_value is None:
+            open_interest_value = open_interest
+        output.append(
+            {
+                "ts_ms": int(row["timestamp"]),
+                "symbol": symbol,
+                "open_interest": open_interest,
+                "open_interest_value": open_interest_value,
+                "open_interest_interval": interval_time,
+            }
+        )
+    return output
 
 
 def _normalize_tickers(rows: list[dict]) -> pl.DataFrame:
@@ -948,6 +989,11 @@ def _partition_exists(data_root: str | Path, *, dataset: str, symbol: str, date:
 
 def _float_or_none(value) -> float | None:
     return float(value) if value not in (None, "") else None
+
+
+def _is_valid_volume(value: float | None) -> bool:
+    # audit2b: a taker volume is usable only if it is present, finite, and non-negative.
+    return value is not None and math.isfinite(value) and value >= 0.0
 
 
 def _resolve_binance_dataset_name(dataset: str) -> str:

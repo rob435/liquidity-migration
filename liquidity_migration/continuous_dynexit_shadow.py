@@ -98,14 +98,56 @@ def compute_shadow_anchor(
     c_sig = at(signal_ts_ms)
     c_24 = at(signal_ts_ms - 24 * MS_H)
     c_1 = at(signal_ts_ms - MS_H)
-    cands = []
-    if c_sig and c_24:
-        cands.append(c_sig / c_24 - 1.0)
-    if c_sig and c_1:
-        cands.append(c_sig / c_1 - 1.0)
-    if not cands:
+    # The dynamic exit being shadowed is defined as anchor = clip(max(runup24h,
+    # ret1)). Require BOTH reference closes (and the signal close): arming on ret1
+    # ALONE when the 24h bar is missing would shadow a DIFFERENT anchor and bias
+    # the forward statistic. Matches the documented "doesn't arm when the cache
+    # lacks the needed bars" contract (counted, not imputed).
+    if not (c_sig and c_24 and c_1):
         return None
-    return min(max(max(cands), ANCHOR_LO), ANCHOR_HI)
+    runup24h = c_sig / c_24 - 1.0
+    ret1 = c_sig / c_1 - 1.0
+    return min(max(max(runup24h, ret1), ANCHOR_LO), ANCHOR_HI)
+
+
+def _arm_entry(
+    entry: dict[str, Any],
+    *,
+    armed: dict[str, dict[str, Any]],
+    exited: set[str],
+    klines: pl.DataFrame | None,
+    now_ms: int,
+    out: list[dict[str, Any]],
+    stats: dict[str, int],
+) -> None:
+    """Arm one entry row (fresh exec_entry OR a recovered open ledger trade).
+
+    Idempotent: a trade already in ``armed``/``exited`` or lacking the causal
+    inputs is skipped. On a successful arm the row is appended to ``out`` (to be
+    flushed to the JSONL) and registered in ``armed`` so duplicate sources in the
+    same cycle can't double-arm.
+    """
+    tid = str(entry.get("trade_id", ""))
+    if not tid or tid in armed or tid in exited:
+        return
+    symbol = str(entry.get("symbol", ""))
+    entry_price = float(entry.get("entry_price") or 0.0)
+    signal_ts = int(entry.get("signal_ts_ms") or 0)
+    if not symbol or entry_price <= 0.0 or signal_ts <= 0:
+        return
+    anchor = compute_shadow_anchor(klines, symbol=symbol, signal_ts_ms=signal_ts)
+    if anchor is None:
+        stats["no_anchor"] += 1
+        return
+    row = {
+        "event": "arm", "trade_id": tid, "symbol": symbol, "ts_ms": now_ms,
+        "entry_ts_ms": int(entry.get("entry_ts_ms") or now_ms), "entry_price": entry_price,
+        "signal_ts_ms": signal_ts, "anchor": round(anchor, 6), "f": F_TARGET,
+        "target_price": entry_price * (1.0 - F_TARGET * anchor),
+    }
+    armed[tid] = row
+    out.append(row)
+    stats["armed"] += 1
 
 
 def update_dynexit_shadow(
@@ -128,27 +170,23 @@ def update_dynexit_shadow(
     stats = {"armed": 0, "dyn_tp_exits": 0, "real_exits": 0, "no_anchor": 0}
 
     for entry in fresh_entries:
-        tid = str(entry.get("trade_id", ""))
-        if not tid or tid in armed or tid in exited:
-            continue
-        symbol = str(entry.get("symbol", ""))
-        entry_price = float(entry.get("entry_price") or 0.0)
-        signal_ts = int(entry.get("signal_ts_ms") or 0)
-        if not symbol or entry_price <= 0.0 or signal_ts <= 0:
-            continue
-        anchor = compute_shadow_anchor(klines, symbol=symbol, signal_ts_ms=signal_ts)
-        if anchor is None:
-            stats["no_anchor"] += 1
-            continue
-        row = {
-            "event": "arm", "trade_id": tid, "symbol": symbol, "ts_ms": now_ms,
-            "entry_ts_ms": int(entry.get("entry_ts_ms") or now_ms), "entry_price": entry_price,
-            "signal_ts_ms": signal_ts, "anchor": round(anchor, 6), "f": F_TARGET,
-            "target_price": entry_price * (1.0 - F_TARGET * anchor),
-        }
-        armed[tid] = row
-        out.append(row)
-        stats["armed"] += 1
+        _arm_entry(entry, armed=armed, exited=exited, klines=klines, now_ms=now_ms, out=out, stats=stats)
+
+    # shadows-2: arming off the fresh-entries stream ALONE loses any arm whose
+    # JSONL line was torn by a mid-write crash — that trade is no longer "fresh"
+    # next cycle (it is already open in the ledger, not a new exec_entry), and
+    # _read_state silently drops the truncated line, so it would never re-arm and
+    # its shadow observation is lost forever (biased toward high-write/high-vol
+    # cycles). Make arm recovery independent of the fresh stream: scan the open
+    # ledger trades for this sleeve and arm any not yet armed/exited from the row
+    # itself (entry_price/signal_ts_ms are present). Idempotent and self-healing
+    # for historical gaps; the kline cache simply may not reach far enough back for
+    # an old trade (counted as no_anchor, not imputed), exactly the live contract.
+    if not all_trades.is_empty() and "status" in all_trades.columns:
+        open_trades = all_trades.filter(pl.col("status") == "open")
+        if not open_trades.is_empty():
+            for trade in open_trades.to_dicts():
+                _arm_entry(trade, armed=armed, exited=exited, klines=klines, now_ms=now_ms, out=out, stats=stats)
 
     closed_real: dict[str, dict[str, Any]] = {}
     if not all_trades.is_empty() and "status" in all_trades.columns:
@@ -162,13 +200,24 @@ def update_dynexit_shadow(
         symbol = str(arm.get("symbol", ""))
         target = float(arm.get("target_price") or 0.0)
         entry_ts = int(arm.get("entry_ts_ms") or 0)
+        # audit2: enforce the frozen pre-registration rule
+        # (continuous-dynexit-forward-shadow-2026-06-10) — the shadow exits on a
+        # target-low touch OR at the real trade's exit, WHICHEVER FIRST. A closed
+        # real trade therefore CAPS the dyn_tp scan at its exit time: a target
+        # touched only AFTER the position was really closed (e.g. a +25% disaster
+        # stop forced the real exit, then price later reaches the dyn target) is not
+        # a fill the dyn variant could have taken — counting it is look-ahead that
+        # inflates the dyn-exit forward statistic. A missing/unknown real exit_ts
+        # falls back to now_ms (no worse than the prior behaviour).
+        real_exit_ts = int((closed_real.get(tid) or {}).get("exit_ts_ms") or 0)
+        scan_upper = now_ms if real_exit_ts <= 0 else min(now_ms, real_exit_ts)
         hit_ts: int | None = None
         if klines is not None and not klines.is_empty() and target > 0.0:
             sub = (
                 klines.filter(
                     (pl.col("symbol") == symbol)
                     & (pl.col("ts_ms") >= entry_ts)
-                    & (pl.col("ts_ms") <= now_ms)
+                    & (pl.col("ts_ms") <= scan_upper)
                     & (pl.col("low") <= target)
                 )
                 .sort("ts_ms")

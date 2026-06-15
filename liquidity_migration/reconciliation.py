@@ -30,6 +30,19 @@ _logger = logging.getLogger(__name__)
 DEFAULT_ENTRY_TOLERANCE_MS = 600_000
 MS_PER_DAY = 86_400_000
 
+# Canonical value is continuous_demo.SNIPER_TRADE_SUFFIX ("-snipe"); mirrored here
+# to avoid importing the heavy live-trading module (bybit client, etc.) into the
+# reconcile path. A filled demo snipe books a "{base}-snipe" SHORT row, but the
+# paper (dry-run) runner never books a snipe fill (there is no venue to fill
+# against), so a snipe row has no paper twin BY DESIGN — counting it as demo_only
+# pollutes the slippage/divergence diagnostic (sniper-2). Snipe rows are excluded
+# from pairing and reported under a separate snipe_demo_only count.
+SNIPER_TRADE_SUFFIX = "-snipe"
+
+
+def _is_snipe_trade(row: dict[str, Any]) -> bool:
+    return str(row.get("trade_id") or "").endswith(SNIPER_TRADE_SUFFIX)
+
 
 def _normalized_side(value: Any) -> str:
     text = str(value or "").lower()
@@ -160,8 +173,15 @@ def reconcile_paper_demo(
     Within each pass, the globally smallest gap is paired first so trades
     close in time cannot steal each other's better match.
     """
-    paper = _clean_trades(paper_trades)
-    demo = _clean_trades(demo_trades)
+    paper_all = _clean_trades(paper_trades)
+    demo_all = _clean_trades(demo_trades)
+    # Snipe rows are demo-only by design (sniper-2): pull them OUT of the pairing
+    # population so they cannot inflate demo_only, and report them separately so an
+    # operator (or the decision rule) does not read by-design behavior as ledger drift.
+    paper = [t for t in paper_all if not _is_snipe_trade(t)]
+    demo = [t for t in demo_all if not _is_snipe_trade(t)]
+    snipe_paper_only = sum(1 for t in paper_all if _is_snipe_trade(t))
+    snipe_demo_only = sum(1 for t in demo_all if _is_snipe_trade(t))
     tolerance = max(int(entry_tolerance_ms), 0)
     signal_tolerance = max(int(signal_tolerance_ms), 0)
 
@@ -381,6 +401,10 @@ def reconcile_paper_demo(
         "paired": len(pairs),
         "paper_only": len(paper) - len(pairs),
         "demo_only": len(demo) - len(pairs),
+        # By-design snipe rows excluded from the pairing population (sniper-2);
+        # surfaced separately so they are not mistaken for reconciliation drift.
+        "snipe_demo_only": snipe_demo_only,
+        "snipe_paper_only": snipe_paper_only,
         "closed_pairs": len(exit_bps_list),
         "entry_tolerance_ms": tolerance,
         "entry_slippage_bps_mean": mean(entry_bps) if entry_bps else 0.0,
@@ -409,6 +433,8 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
         f"- paired: {summary['paired']}",
         f"- paper-only (demo did not take): {summary['paper_only']}",
         f"- demo-only (paper did not take): {summary['demo_only']}",
+        f"- snipe demo-only (no paper twin by design, excluded from pairing): "
+        f"{summary.get('snipe_demo_only', 0)}",
         "",
         "## Entry slippage — demo fill vs idealized paper fill (bps, +adverse)",
         "",
@@ -531,31 +557,60 @@ def run_continuous_paper_demo_reconciliation(
     return payload
 
 
-def _rebalance_prior_state_from_cycles(cycles: pl.DataFrame, *, current_day_ts: int) -> ContinuousRebalanceScaleState:
-    if cycles.is_empty():
-        return ContinuousRebalanceScaleState(prior_raw_returns=())
-    current_day = (int(current_day_ts) // MS_PER_DAY) * MS_PER_DAY
+def _latest_rebalance_row_by_day(
+    rows: list[dict[str, Any]],
+) -> dict[int, tuple[tuple[int, int], float, dict[str, Any]]]:
+    """Reduce rebalance rows to the LATEST row per (floored) rebalance day.
+
+    Materialized ONCE per audit (reconciliation-4): the latest row per day, keyed by
+    ``(ts_ms, original_index)`` so the most-recent same-day cycle wins deterministically.
+    """
     latest_by_day: dict[int, tuple[tuple[int, int], float, dict[str, Any]]] = {}
-    for idx, row in enumerate(cycles.to_dicts()):
+    for idx, row in enumerate(rows):
         day = _int(row.get("rebalance_day_ts"))
-        raw = _float(row.get("rebalance_raw_return"))
-        if day <= 0 or day >= current_day:
+        if day <= 0:
             continue
         day = (day // MS_PER_DAY) * MS_PER_DAY
         key = (_int(row.get("ts_ms")), idx)
         prev = latest_by_day.get(day)
         if prev is None or key > prev[0]:
-            latest_by_day[day] = (key, raw, row)
-    if not latest_by_day:
+            latest_by_day[day] = (key, _float(row.get("rebalance_raw_return")), row)
+    return latest_by_day
+
+
+def _prior_state_before_day(
+    latest_by_day: dict[int, tuple[tuple[int, int], float, dict[str, Any]]],
+    sorted_days: list[int],
+    *,
+    current_day_ts: int,
+) -> ContinuousRebalanceScaleState:
+    """Prior-state for sizing the cycle at ``current_day_ts`` from a PRECOMPUTED
+    per-day reduction — equivalent to the old per-call full-frame rescan but O(prior
+    days) instead of O(rows) (reconciliation-4). ``prior_raw_returns`` excludes the
+    day being sized; equity/peak come from the most-recent prior day's latest row.
+    """
+    current_day = (int(current_day_ts) // MS_PER_DAY) * MS_PER_DAY
+    prior_days = [d for d in sorted_days if d < current_day]
+    if not prior_days:
         return ContinuousRebalanceScaleState(prior_raw_returns=())
-    days = sorted(latest_by_day)
-    latest = latest_by_day[days[-1]][2]
+    latest = latest_by_day[prior_days[-1]][2]
     equity = _float(latest.get("rebalance_scaled_equity")) or 1.0
     peak = _float(latest.get("rebalance_scaled_peak")) or max(equity, 1.0)
     return ContinuousRebalanceScaleState(
-        prior_raw_returns=tuple(latest_by_day[day][1] for day in days),
+        prior_raw_returns=tuple(latest_by_day[day][1] for day in prior_days),
         prior_scaled_equity=equity if equity > 0.0 else 1.0,
         prior_scaled_peak=max(peak, equity, 1.0),
+    )
+
+
+def _rebalance_prior_state_from_cycles(cycles: pl.DataFrame, *, current_day_ts: int) -> ContinuousRebalanceScaleState:
+    if cycles.is_empty():
+        return ContinuousRebalanceScaleState(prior_raw_returns=())
+    latest_by_day = _latest_rebalance_row_by_day(cycles.to_dicts())
+    if not latest_by_day:
+        return ContinuousRebalanceScaleState(prior_raw_returns=())
+    return _prior_state_before_day(
+        latest_by_day, sorted(latest_by_day), current_day_ts=current_day_ts
     )
 
 
@@ -598,13 +653,21 @@ def audit_continuous_rebalance_cycles(
         }
 
     rebalance = cycles.filter(pl.col("rebalance_day_ts").is_not_null()).sort("ts_ms")
+    # Materialize the rebalance rows ONCE and reuse the list everywhere below
+    # (reconciliation-4): every downstream pass previously re-ran rebalance.to_dicts(),
+    # and the scale loop re-scanned the whole frame per row => O(n^2) over operating
+    # days. The per-day reduction is computed once and the prior-state for each row is
+    # derived from it in O(prior days).
+    rebalance_rows = rebalance.to_dicts()
+    latest_by_day = _latest_rebalance_row_by_day(rebalance_rows)
+    sorted_days = sorted(latest_by_day)
     scale_mismatches = 0
-    for row in rebalance.to_dicts():
+    for row in rebalance_rows:
         day = _int(row.get("rebalance_day_ts"))
         if day <= 0:
             continue
         expected = compute_continuous_rebalance_scale(
-            _rebalance_prior_state_from_cycles(rebalance, current_day_ts=day),
+            _prior_state_before_day(latest_by_day, sorted_days, current_day_ts=day),
             rule,
         )
         observed = _float(row.get("rebalance_target_scale"))
@@ -620,15 +683,18 @@ def audit_continuous_rebalance_cycles(
                 }
             )
 
-    same_day_violations = 0
-    for day in sorted({(_int(r.get("rebalance_day_ts")) // MS_PER_DAY) * MS_PER_DAY for r in rebalance.to_dicts()}):
-        if day <= 0:
+    # Group rebalance rows by floored day in a single pass instead of re-filtering
+    # the frame per distinct day.
+    rows_by_floored_day: dict[int, list[dict[str, Any]]] = {}
+    for r in rebalance_rows:
+        floored = (_int(r.get("rebalance_day_ts")) // MS_PER_DAY) * MS_PER_DAY
+        if floored <= 0:
             continue
-        rows = [
-            r for r in rebalance.to_dicts()
-            if (_int(r.get("rebalance_day_ts")) // MS_PER_DAY) * MS_PER_DAY == day
-        ]
-        rows.sort(key=lambda r: _int(r.get("ts_ms")))
+        rows_by_floored_day.setdefault(floored, []).append(r)
+
+    same_day_violations = 0
+    for day in sorted(rows_by_floored_day):
+        rows = sorted(rows_by_floored_day[day], key=lambda r: _int(r.get("ts_ms")))
         active_resize_rows = [r for r in rows if _int(r.get("rebalance_resize_orders")) > 0]
         if len(active_resize_rows) > 1:
             same_day_violations += 1
@@ -646,7 +712,7 @@ def audit_continuous_rebalance_cycles(
                     }
                 )
 
-    cycle_resize_orders = sum(_int(r.get("rebalance_resize_orders")) for r in rebalance.to_dicts())
+    cycle_resize_orders = sum(_int(r.get("rebalance_resize_orders")) for r in rebalance_rows)
     order_resize_orders = 0
     if not orders.is_empty() and "resize_reason" in orders.columns:
         order_resize_orders = orders.filter(pl.col("resize_reason").is_not_null()).height
@@ -663,7 +729,7 @@ def audit_continuous_rebalance_cycles(
     summary = {
         "cycles": cycles.height,
         "rebalance_cycles": rebalance.height,
-        "days": len({(_int(r.get("rebalance_day_ts")) // MS_PER_DAY) * MS_PER_DAY for r in rebalance.to_dicts()}),
+        "days": len(rows_by_floored_day),
         "scale_mismatches": scale_mismatches,
         "same_day_resize_violations": same_day_violations,
         "cycle_resize_orders": cycle_resize_orders,
@@ -928,13 +994,39 @@ def _latest_trade_rows(trades: pl.DataFrame) -> list[dict[str, Any]]:
     return [item[1] for item in latest.values()] if latest else rows
 
 
-def _fee_adjusted_return(row: dict[str, Any]) -> float | None:
+def _fee_adjusted_return(row: dict[str, Any], *, net_of_cost: bool = False) -> float | None:
+    """Per-trade fractional return on the trade's equity, cost-consistent.
+
+    The ``net_return`` field is OVERLOADED by source and must be disambiguated by
+    the caller (code-quality-4 / cost-funding-2):
+
+    * LIVE ledger (``net_of_cost=False``, default): ``net_return`` is GROSS-of-cost
+      (``gross_trade_return * notional_weight``; see continuous_demo.py DEPLOY NOTE
+      ~L1193), so this function subtracts the realised round-trip fees here. Funding
+      is NOT tracked per-trade on the live close path, so it is folded in IFF a
+      per-trade funding term is present in the row; otherwise the return is
+      funding-BLIND (a known conservative residual on a receive-funding short book).
+    * BACKTEST ledger (``net_of_cost=True``): ``net_return`` is already NET-of-cost
+      (gross + cost_return + funding_return), so fees/funding must NOT be re-applied
+      — doing so would double-count and understate returns.
+
+    Passing a backtest (net-of-cost) frame without ``net_of_cost=True`` is the bug
+    this guard prevents; the flag makes the source convention explicit at the call.
+    """
     has_return = False
     ret = 0.0
     for key in ("net_return", "gross_trade_return"):
         value = row.get(key)
         if value not in (None, ""):
             ret = _float(value)
+            # audit2c: gross_trade_return is the RAW per-trade return; weight it by
+            # notional/equity so it lands on the same notional-weighted basis as
+            # net_return (= gtr * notional_weight) before fees are subtracted below.
+            if key == "gross_trade_return":
+                notional = _float(row.get("notional_usdt"))
+                equity = _float(row.get("equity_usdt"))
+                if notional > 0.0 and equity > 0.0:
+                    ret *= notional / equity
             has_return = True
             break
     if not has_return:
@@ -948,20 +1040,42 @@ def _fee_adjusted_return(row: dict[str, Any]) -> float | None:
         equity = _float(row.get("equity_usdt"))
         if notional > 0.0 and equity > 0.0:
             ret *= notional / equity
+    if net_of_cost:
+        # Already net of fees+funding by construction (backtest convention) —
+        # re-subtracting fees here would double-count (code-quality-4).
+        return ret
     equity = _float(row.get("equity_usdt"))
     if equity > 0.0:
         fees = _float(row.get("entry_fee_usdt")) + _float(row.get("exit_fee_usdt"))
         ret -= fees / equity
+        # Fold in realised funding when the ledger carries it (cost-funding-2).
+        # The live close path does NOT write a per-trade funding term today, so this
+        # is usually a no-op and the return stays funding-blind; once the close path
+        # records funding (USDT or fractional) this folds it in without a code change.
+        funding_usdt = row.get("funding_usdt")
+        if funding_usdt not in (None, ""):
+            # +funding_usdt = credit received (improves a short book's return).
+            ret += _float(funding_usdt) / equity
+        else:
+            funding_return = row.get("funding_return")
+            if funding_return not in (None, ""):
+                ret += _float(funding_return)
     return ret
 
 
-def _trade_ledger_daily_returns(trades: pl.DataFrame) -> dict[int, float]:
+def _trade_ledger_daily_returns(trades: pl.DataFrame, *, net_of_cost: bool = False) -> dict[int, float]:
+    """Sum per-trade returns into a calendar-day series.
+
+    ``net_of_cost`` is forwarded to :func:`_fee_adjusted_return` and MUST match the
+    ledger's cost convention (False = live gross-of-fees, True = backtest net-of-cost);
+    the callers below pass live ``read_dataset`` ledgers, hence the False default.
+    """
     daily: dict[int, float] = {}
     for row in _latest_trade_rows(trades):
         ts = _row_timestamp(row, ("exit_ts_ms", "closed_at_ms"))
         if ts <= 0:
             continue
-        ret = _fee_adjusted_return(row)
+        ret = _fee_adjusted_return(row, net_of_cost=net_of_cost)
         if ret is None:
             continue
         day = (ts // MS_PER_DAY) * MS_PER_DAY
@@ -1020,6 +1134,17 @@ def _calendar_metrics(returns_by_day: dict[int, float], *, start_day: int, end_d
             "equity": [],
         }
     days = list(range(start_day, end_day + MS_PER_DAY, MS_PER_DAY))
+    # COMPOUND, peak-relative drawdown (metrics-2 / reconciliation-2): the daily
+    # series here is a FRACTIONAL return whose true equity COMPOUNDS — the continuous
+    # engine persists rebalance_scaled_equity = prior * (1 + scaled_return) and
+    # drawdown = equity/peak - 1 (continuous_rebalance.apply_rebalance_rule /
+    # continuous_demo). Summing returns additively (equity += ret) and reporting an
+    # ABSOLUTE drawdown (equity - peak) diverges materially from that engine curve and
+    # the forward-readiness summary it sits beside, so the standalone continuous MAR /
+    # total-return shown to the operator disagreed with the engine for the SAME book.
+    # NOTE: this legitimately shifts the reported comparator numbers (additive ->
+    # compounded); MAR is STATE.md's named primary forward arbiter, so a fresh read /
+    # pre-registration is owed before any decision binds on the new value.
     equity = 1.0
     peak = 1.0
     max_drawdown = 0.0
@@ -1027,9 +1152,9 @@ def _calendar_metrics(returns_by_day: dict[int, float], *, start_day: int, end_d
     worst = 0.0
     for day in days:
         ret = float(returns_by_day.get(day, 0.0))
-        equity += ret
+        equity *= 1.0 + ret
         peak = max(peak, equity)
-        dd = equity - peak
+        dd = (equity - peak) / peak if peak > 0.0 else 0.0
         max_drawdown = min(max_drawdown, dd)
         worst = min(worst, ret)
         curve.append({"ts_ms": day, "basket_return": ret, "equity": equity, "drawdown": dd})
@@ -1046,6 +1171,24 @@ def _calendar_metrics(returns_by_day: dict[int, float], *, start_day: int, end_d
         "worst_day_return": worst,
         "equity": curve,
     }
+
+
+def _continuous_beats_daily_mar(continuous: dict[str, Any], daily: dict[str, Any]) -> bool:
+    """Does the continuous leg beat the daily leg on MAR?
+
+    audit2: _calendar_metrics returns mar=None EXACTLY for a zero-drawdown curve
+    (abs(max_dd) <= 1e-12) — the best-possible drawdown outcome (effectively infinite
+    MAR), reachable whenever the continuous book never dips below its running peak. The
+    old inline gate folded that None into `continuous_mar > daily_mar` -> False and
+    raised a spurious "continuous MAR <= daily MAR" issue on the BEST drawdown case.
+    Treat a zero-drawdown continuous book as beating any finite daily MAR whenever its
+    return is at least the daily leg's; otherwise the strict finite comparison stands.
+    """
+    continuous_mar = continuous["mar"]
+    daily_mar = daily["mar"]
+    if continuous_mar is None and abs(continuous["max_drawdown"]) <= 1e-12:
+        return bool(continuous["total_return"] >= daily["total_return"])
+    return bool(continuous_mar is not None and daily_mar is not None and continuous_mar > daily_mar)
 
 
 def _format_mar(value: float | None) -> str:
@@ -1182,9 +1325,7 @@ def run_continuous_vs_daily_forward_comparison(
     continuous_beats_return = bool(continuous["total_return"] > daily["total_return"])
     daily_mar = daily["mar"]
     continuous_mar = continuous["mar"]
-    continuous_beats_mar = bool(
-        continuous_mar is not None and daily_mar is not None and continuous_mar > daily_mar
-    )
+    continuous_beats_mar = _continuous_beats_daily_mar(continuous, daily)
     performance_window_ready = common_days >= int(min_common_days) and bool(daily_returns) and bool(continuous_returns)
     if performance_window_ready and not continuous_beats_return:
         issues.append(

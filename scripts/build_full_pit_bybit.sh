@@ -93,7 +93,12 @@ if bad:
 print(",".join(syms))
 PY
 )
-N_SYMBOLS=$(echo "$SYMBOLS" | tr ',' '\n' | wc -l)
+# audit2b: empty symbol list must count as 0, not 1 (a blank line is not a symbol)
+if [ -z "$SYMBOLS" ]; then
+  N_SYMBOLS=0
+else
+  N_SYMBOLS=$(echo "$SYMBOLS" | tr ',' '\n' | wc -l)
+fi
 
 echo
 echo "[4/4] Bybit — funding + open_interest + mark/index/premium for $N_SYMBOLS symbols"

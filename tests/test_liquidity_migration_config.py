@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,6 +10,7 @@ from liquidity_migration.config import (
     CostConfig,
     DEFAULT_EXCLUDED_SYMBOLS,
     DEFAULT_RESEARCH_DATA_ROOT,
+    ExchangeConfig,
     _merge_dataclass,
     ensure_data_root_exists,
     load_config,
@@ -56,19 +59,26 @@ def test_merge_dataclass_rejects_unknown_keys() -> None:
         _merge_dataclass(CostConfig, {"maker_fee_bps": 1.0, "not_a_real_field": 99})
 
 
-def test_cost_config_default_base_cost_unchanged_and_e3_e4_knobs() -> None:
-    # Default (60% maker blend, symmetric legs) must equal the legacy 2*blended
-    # so existing/running cells are byte-identical.
-    blended = 0.60 * (2.0 + 1.0) + 0.40 * (5.5 + 2.0)  # 4.8
-    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(2.0 * blended)  # 9.6
-    assert CostConfig(exit_cost_multiplier=1.0).base_entry_exit_cost_bps == pytest.approx(9.6)
-    # E3: model the live 100%-taker market execution exactly (no maker blend).
-    assert CostConfig(maker_fill_probability=0.0).base_entry_exit_cost_bps == pytest.approx(
-        2.0 * (5.5 + 2.0)  # 15.0 bps round-trip
+def test_cost_config_default_models_live_100pct_taker() -> None:
+    # The dataclass default must model the deployed 100%-taker market execution
+    # (maker_fill_probability=0.0), NOT a 0.60 maker blend. A maker-blend default
+    # under-costs by ~36% (9.6 vs 15.0 bps) and silently flatters returns on any
+    # consumer that does not pass the YAML — the canonical cost-too-low error.
+    # (cli-config-2 / cost-funding-1)
+    assert CostConfig().maker_fill_probability == pytest.approx(0.0)
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(
+        2.0 * (5.5 + 2.0)  # 15.0 bps round-trip, 100% taker
     )
-    # E4: a costlier cover (exit) leg — only the exit leg scales.
+    assert CostConfig(exit_cost_multiplier=1.0).base_entry_exit_cost_bps == pytest.approx(15.0)
+    # A maker blend must still be expressible when explicitly opted into (E3).
+    assert CostConfig(maker_fill_probability=0.60).base_entry_exit_cost_bps == pytest.approx(
+        2.0 * (0.60 * (2.0 + 1.0) + 0.40 * (5.5 + 2.0))  # 9.6 bps
+    )
+    # E4: a costlier cover (exit) leg — only the exit leg scales. Symmetric base
+    # is now the 100%-taker blend (taker_fee+taker_slippage = 7.5 bps/leg).
+    taker_leg = 5.5 + 2.0
     assert CostConfig(exit_cost_multiplier=2.0).base_entry_exit_cost_bps == pytest.approx(
-        blended * 3.0  # entry(1) + exit(2) legs
+        taker_leg * 3.0  # entry(1) + exit(2) legs
     )
 
 
@@ -76,3 +86,122 @@ def test_ensure_data_root_exists(tmp_path: Path) -> None:
     assert ensure_data_root_exists(tmp_path) == tmp_path
     with pytest.raises(FileNotFoundError, match="does not exist"):
         ensure_data_root_exists(tmp_path / "missing")
+
+
+# audit2b defect 1: load_config silently dropped unconsumed top-level YAML
+# blocks (e.g. the committed `trade_flow` block). It must surface them via a
+# warning rather than ignoring them silently.
+def test_unconsumed_top_level_block_is_warned(tmp_path: Path, caplog) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+trade_flow:
+  exclude_block_trades: true
+  exclude_rpi_trades: true
+universe:
+  rank_start: 1
+""",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.config"):
+        config = load_config(config_path)
+
+    # The unconsumed block is surfaced...
+    assert any("trade_flow" in rec.getMessage() for rec in caplog.records)
+    assert any("unconsumed" in rec.getMessage() for rec in caplog.records)
+    # ...but loading still succeeds and the consumed keys are honoured.
+    assert config.universe.rank_start == 1
+
+
+# audit2b defect 1 (negative): a config whose only blocks ARE consumed must NOT
+# emit the unconsumed-keys warning (normal-input-unchanged guard).
+def test_fully_consumed_config_emits_no_warning(tmp_path: Path, caplog) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+exchange:
+  name: bybit
+universe:
+  rank_start: 1
+cost_model:
+  maker_fee_bps: 2.0
+""",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.config"):
+        load_config(config_path)
+
+    assert not any("unconsumed" in rec.getMessage() for rec in caplog.records)
+
+
+# audit2b defect 2: _merge_dataclass now applies the same numeric coercion that
+# UniverseConfig already gets. A quoted-numeric YAML value used to flow into the
+# frozen dataclass as a str and only crash later in str-arithmetic.
+def test_cost_config_quoted_numeric_is_coerced(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+cost_model:
+  maker_fee_bps: "2.0"
+  taker_fee_bps: "5.5"
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert isinstance(config.costs.maker_fee_bps, float)
+    assert config.costs.maker_fee_bps == pytest.approx(2.0)
+    assert config.costs.taker_fee_bps == pytest.approx(5.5)
+    # On OLD code this raised TypeError (str + float) in str-arithmetic.
+    assert config.costs.base_entry_exit_cost_bps == pytest.approx(2.0 * (5.5 + 2.0))
+
+
+def test_merge_dataclass_coerces_quoted_float_directly() -> None:
+    merged = _merge_dataclass(CostConfig, {"maker_fee_bps": "2.0"})
+    assert isinstance(merged.maker_fee_bps, float)
+    assert merged.maker_fee_bps == pytest.approx(2.0)
+
+
+# audit2b defect 2 (happy-path guard): native float/str/bool YAML values must be
+# numerically/byte unchanged by the coercion.
+def test_merge_dataclass_native_values_unchanged() -> None:
+    cost = _merge_dataclass(
+        CostConfig, {"maker_fee_bps": 2.0, "taker_fee_bps": 5.5}
+    )
+    assert cost == CostConfig(maker_fee_bps=2.0, taker_fee_bps=5.5)
+    assert cost.base_entry_exit_cost_bps == pytest.approx(15.0)
+
+    exch = _merge_dataclass(
+        ExchangeConfig, {"name": "bybit", "settle_coin": "USDT", "testnet": False}
+    )
+    # String fields stay strings; bool stays bool (no float() applied to them).
+    assert exch.name == "bybit"
+    assert exch.settle_coin == "USDT"
+    assert exch.testnet is False
+
+
+def test_default_config_load_unchanged() -> None:
+    # The zero-arg default load must be wholly unaffected by both fixes.
+    default = load_config()
+    assert default.costs.base_entry_exit_cost_bps == pytest.approx(15.0)
+    assert default.exchange.name == "bybit"
+
+
+# --------------------------------------------------------------------------- #
+# Relocated from tests/test_audit_fix_b12.py (audit bucket b12 regressions):
+# cli-config-2 / cost-funding-1: CostConfig default must model 100% taker.
+# --------------------------------------------------------------------------- #
+def test_cost_config_default_is_full_taker_not_maker_blend() -> None:
+    # The default must NOT be the 0.60 maker blend (9.6 bps) that under-costs by
+    # ~36% and silently flatters returns. It must be the deployed 100%-taker cost.
+    assert CostConfig().maker_fill_probability == pytest.approx(0.0)
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(15.0)
+    # A maker blend must still be expressible when explicitly opted into.
+    assert CostConfig(maker_fill_probability=0.60).base_entry_exit_cost_bps == pytest.approx(9.6)
+    # The default must never be cheaper than the explicit full-taker cost.
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(
+        replace(CostConfig(), maker_fill_probability=0.0).base_entry_exit_cost_bps
+    )

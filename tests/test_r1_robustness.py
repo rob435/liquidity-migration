@@ -10,6 +10,7 @@ Audit 2026-05-29 found two gate-integrity holes:
 """
 from __future__ import annotations
 
+import csv
 import importlib.util
 import math
 import random
@@ -127,3 +128,70 @@ def test_annualize_and_engine_mar_stay_real_below_minus_100pct() -> None:
 
     # exactly -100% (growth == 0) must also stay real, not raise.
     assert MOD._annualize(-1.0, 12) == -1.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# decision-rule-3 — _load_monthly dedups duplicate month rows  (from audit b13)
+# ──────────────────────────────────────────────────────────────────────────────
+def _write_monthly(cell_dir: Path, rows: list[tuple[str, float]]) -> None:
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    with open(cell_dir / "volume_event_best_monthly.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["month", "strategy_return"])
+        for m, r in rows:
+            w.writerow([m, r])
+
+
+def test_load_monthly_dedups_duplicate_months(tmp_path: Path) -> None:
+    # A duplicate '2023-02' row must NOT survive to be compounded twice (decision-rule-3).
+    _write_monthly(tmp_path, [("2023-01", 0.1), ("2023-02", 0.3), ("2023-02", 0.3)])
+    out = MOD._load_monthly(tmp_path)
+    months = [m for m, _ in out]
+    assert months == ["2023-01", "2023-02"], months  # de-duplicated + sorted
+    assert len(out) == len(set(months))
+
+
+def test_load_monthly_last_wins_on_duplicate(tmp_path: Path) -> None:
+    # On a duplicated month the last value wins (matches the documented dict-keyed dedup).
+    _write_monthly(tmp_path, [("2023-02", 0.1), ("2023-02", 0.9)])
+    out = dict(MOD._load_monthly(tmp_path))
+    assert out["2023-02"] == 0.9
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# decision-rule-4 — window-mismatch warning  (from audit b13)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_window_mismatch_warning_none_when_windows_coincide() -> None:
+    # Normal case: cell and control share the same window -> intersection == both -> no warn.
+    months = ["2023-01", "2023-02", "2023-03"]
+    assert MOD._window_mismatch_warning("c1", months, months, months) is None
+
+
+def test_window_mismatch_warning_fires_when_intersection_drops_months() -> None:
+    # An aborted-late cell: control has 3 months, cell only 2; intersection drops the tail.
+    base = ["2023-01", "2023-02", "2023-03"]
+    cell = ["2023-01", "2023-02"]
+    inter = ["2023-01", "2023-02"]
+    msg = MOD._window_mismatch_warning("c1", inter, cell, base)
+    assert msg is not None
+    assert "window mismatch" in msg
+    assert "dropped 0 cell / 1 control months" in msg
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# decision-rule-5 — _thirds for n<3  (from audit b13)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_thirds_returns_empty_for_fewer_than_three_months() -> None:
+    # Pre-fix: n=1/2 produced (0,0) bounds -> empty 0.0 thirds + months[-1] labels +
+    # a misleading "all cell-thirds>0: NO" for a uniformly-positive series.
+    assert MOD._thirds(["2023-01"], [0.1], [0.05]) == []
+    assert MOD._thirds(["2023-01", "2023-02"], [0.1, 0.2], [0.05, 0.1]) == []
+
+
+def test_thirds_splits_three_or_more_months() -> None:
+    months = ["2023-01", "2023-02", "2023-03"]
+    out = MOD._thirds(months, [0.1, 0.2, 0.3], [0.05, 0.1, 0.15])
+    assert len(out) == 3
+    # No duplicate/garbled labels: each third's label spans its own bound.
+    assert out[0]["label"] == "2023-01..2023-01"
+    assert out[2]["label"] == "2023-03..2023-03"

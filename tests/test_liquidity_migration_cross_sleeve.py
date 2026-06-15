@@ -8,11 +8,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from liquidity_migration.cross_sleeve import (
     CrossSleeveAccountState,
+    VALID_SLEEVES,
     claim_symbol_reservation,
+    claim_symbols_reservation,
     clamp_max_new_entries,
+    encode_control_row,
     equal_split_budget,
+    partition_claimable,
     read_account_state,
     release_symbol_reservation,
     seed_margin_budget,
@@ -305,3 +311,145 @@ def test_release_symbol_reservation_frees_symbol_for_sibling(tmp_path: Path) -> 
     # a wrong-trade_id release must NOT drop short's live claim
     assert release_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="short", trade_id="WRONG", now_ms=now) is False
     assert claim_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="long", trade_id="t3", now_ms=now) is False
+
+
+# ======================================================================================
+# Relocated from tests/test_audit_fix_b08.py (audit bucket b08).
+# ======================================================================================
+
+
+# --------------------------------------------------------------------------------------
+# cross-sleeve-1: continuous_addon is budgeted and clamped consistently
+# --------------------------------------------------------------------------------------
+def test_continuous_addon_is_a_valid_budgeted_sleeve() -> None:
+    assert "continuous_addon" in VALID_SLEEVES
+
+
+def test_equal_split_includes_continuous_addon_in_denominator() -> None:
+    # PRE-FIX: 'continuous_addon' was dropped, so this returned {'long':0.5,'continuous':0.5}
+    # (denominator 2) and the three sleeves over-committed the one shared account.
+    split = equal_split_budget(["long", "continuous", "continuous_addon"])
+    assert split == {"long": 1 / 3, "continuous": 1 / 3, "continuous_addon": 1 / 3}
+    assert sum(split.values()) == pytest.approx(1.0)
+    # addon alone -> 100%, not dropped to {} (which the pre-fix code did, leaving long at 100%)
+    assert equal_split_budget(["continuous_addon"]) == {"continuous_addon": 1.0}
+
+
+def test_clamp_fires_for_an_at_ceiling_continuous_addon() -> None:
+    # PRE-FIX: budget_for('continuous_addon') was None (never budgeted) so clamp returned
+    # (5, False) -> the addon ran UNCAPPED even at 99% IM.
+    state = CrossSleeveAccountState(
+        margin_budget_pct_by_sleeve={"long": 1 / 3, "continuous": 1 / 3, "continuous_addon": 1 / 3},
+        im_used_pct_by_sleeve={"continuous_addon": 0.40},  # over its 1/3 ceiling
+    )
+    assert clamp_max_new_entries(5, sleeve="continuous_addon", state=state) == (0, True)
+    # a still-under sibling is unchanged
+    assert clamp_max_new_entries(5, sleeve="long", state=state) == (5, False)
+
+
+# --------------------------------------------------------------------------------------
+# cross-sleeve-5: empty-dict budget {} round-trips symmetrically (write {} -> read None)
+# --------------------------------------------------------------------------------------
+def test_empty_dict_budget_round_trips_symmetrically(tmp_path: Path) -> None:
+    # equal_split_budget([]) -> {} ; persisting it must NOT read back differently from how it
+    # was written. PRE-FIX: encode wrote '{}' but _loads_budget decoded '{}' -> None, so
+    # write({}) != read(). Now {} canonicalizes to None on BOTH sides (== no clamp).
+    seed_margin_budget(tmp_path, equal_split_budget([]), now_ms=1_000)
+    assert read_account_state(tmp_path).margin_budget_pct_by_sleeve is None
+
+
+def test_encode_control_row_normalizes_empty_budget_to_blank() -> None:
+    # The on-disk encoding of an empty-dict budget must equal the encoding of a None budget,
+    # so the round-trip cannot silently distinguish "no sleeves budgeted" from "no budget".
+    none_row = encode_control_row(CrossSleeveAccountState(margin_budget_pct_by_sleeve=None))
+    empty_row = encode_control_row(CrossSleeveAccountState(margin_budget_pct_by_sleeve={}))
+    assert none_row["margin_budget_pct_by_sleeve"] == ""
+    assert empty_row["margin_budget_pct_by_sleeve"] == ""
+    # a NON-empty budget still encodes to a JSON string (unchanged behavior)
+    real_row = encode_control_row(CrossSleeveAccountState(margin_budget_pct_by_sleeve={"long": 0.5}))
+    assert real_row["margin_budget_pct_by_sleeve"] == '{"long": 0.5}'
+
+
+# --------------------------------------------------------------------------------------
+# cross-sleeve-6: batch claim takes the control-row lock ONCE, preserving the per-candidate
+# contract. Equivalence with N sequential single-claims + a single lock acquisition.
+# --------------------------------------------------------------------------------------
+def _count_lock_acquisitions(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Wrap cross_sleeve.exclusive_file_lock to count how many times the control-row lock is
+    actually acquired. partition_claimable must take it ONCE per call regardless of N."""
+    from liquidity_migration import cross_sleeve as cs_module
+
+    counter = {"n": 0}
+    real_lock = cs_module.exclusive_file_lock
+
+    def counting_lock(*args, **kwargs):  # noqa: ANN002, ANN003
+        counter["n"] += 1
+        return real_lock(*args, **kwargs)
+
+    monkeypatch.setattr(cs_module, "exclusive_file_lock", counting_lock)
+    return counter
+
+
+def test_partition_claimable_takes_lock_once_for_many_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_margin_budget(tmp_path, {"continuous": 0.5}, now_ms=1_000)  # create the dataset (1 lock)
+    counter = _count_lock_acquisitions(monkeypatch)
+    candidates = [{"symbol": f"S{i}USDT", "trade_id": f"t{i}"} for i in range(6)]
+
+    granted, skipped = partition_claimable(
+        tmp_path, candidates, sleeve="continuous", now_ms=1_700_000_000_000
+    )
+
+    assert {c["symbol"] for c in granted} == {c["symbol"] for c in candidates}
+    assert skipped == 0
+    # PRE-FIX: one lock cycle PER candidate (6). The batch claim takes it exactly once.
+    assert counter["n"] == 1
+    # the reservations were persisted by the single write
+    reserved = {r["symbol"] for r in read_account_state(tmp_path).reservations}
+    assert reserved == {c["symbol"] for c in candidates}
+
+
+def test_batch_claim_rejects_foreign_and_live_but_grants_own_reclaim(tmp_path: Path) -> None:
+    seed_margin_budget(tmp_path, {"long": 0.5}, now_ms=1_000)
+    now = 1_700_000_000_000
+    # a sibling already holds BBBUSDT
+    assert claim_symbol_reservation(tmp_path, symbol="BBBUSDT", sleeve="short", trade_id="s1", now_ms=now) is True
+    # continuous also already holds CCCUSDT (its own -> later re-claim must grant)
+    assert claim_symbol_reservation(tmp_path, symbol="CCCUSDT", sleeve="continuous", trade_id="c0", now_ms=now) is True
+
+    candidates = [
+        {"symbol": "AAAUSDT", "trade_id": "c1"},   # free -> grant
+        {"symbol": "BBBUSDT", "trade_id": "c2"},   # foreign reservation -> deny
+        {"symbol": "CCCUSDT", "trade_id": "c3"},   # own re-claim -> grant
+        {"symbol": "DDDUSDT", "trade_id": "c4"},   # live venue position -> deny
+    ]
+    granted, skipped, denied = claim_symbols_reservation(
+        tmp_path, candidates, sleeve="continuous", now_ms=now,
+        live_position_symbols={"DDDUSDT"},
+    )
+    assert {c["symbol"] for c in granted} == {"AAAUSDT", "CCCUSDT"}
+    assert {c["symbol"] for c in denied} == {"BBBUSDT", "DDDUSDT"}
+    assert skipped == 2
+    # the sibling's BBBUSDT reservation survived (batch only ever appends its own grants)
+    syms = {(r["symbol"], r["sleeve"]) for r in read_account_state(tmp_path).reservations}
+    assert ("BBBUSDT", "short") in syms
+    assert ("AAAUSDT", "continuous") in syms
+
+
+def test_batch_claim_with_no_candidates_never_takes_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_margin_budget(tmp_path, {"long": 0.5}, now_ms=1_000)
+    counter = _count_lock_acquisitions(monkeypatch)
+    granted, skipped, denied = claim_symbols_reservation(tmp_path, [], sleeve="long", now_ms=1)
+    assert (granted, skipped, denied) == ([], 0, [])
+    assert counter["n"] == 0  # empty batch short-circuits before touching the lock
+
+
+def test_batch_claim_fails_open_when_no_control_dataset(tmp_path: Path) -> None:
+    # No ws_risk writer yet -> the whole batch is GRANTED (legacy venue-snapshot exclusion only).
+    candidates = [{"symbol": "XUSDT", "trade_id": "t1"}, {"symbol": "YUSDT", "trade_id": "t2"}]
+    granted, skipped, denied = claim_symbols_reservation(tmp_path, candidates, sleeve="long", now_ms=1)
+    assert {c["symbol"] for c in granted} == {"XUSDT", "YUSDT"}
+    assert skipped == 0 and denied == []

@@ -16,6 +16,7 @@ from Phase 5 are meaningless. These tests pin:
 """
 from __future__ import annotations
 
+import inspect
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,9 +28,14 @@ from liquidity_migration.signal_harness import (
     FEATURE_REGISTRY,
     FeatureContext,
     ICReport,
+    _aggregate_daily_funding,
     _aggregate_daily_klines,
+    _aggregate_daily_open_interest,
+    _aggregate_daily_premium,
     _attach_daily_returns,
     _attach_forward_returns,
+    _make_turnover_delta,
+    _make_xs_rank_ret_Nd,
     build_combined_signal_portfolio,
     build_feature_panel,
     compute_univariate_ic,
@@ -47,6 +53,18 @@ MS_PER_DAY = 86_400_000
 
 def _date_ms(date_str: str) -> int:
     return int(datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _daily_returns_frame(symbol: str, day_indices: list[int], closes: list[float]) -> pl.DataFrame:
+    # Provenance: relocated from tests/test_audit_fix_b09.py (audit bucket b09).
+    base = _date_ms("2025-01-01")
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * len(day_indices),
+            "ts_ms": [base + d * MS_PER_DAY for d in day_indices],
+            "close": closes,
+        }
+    )
 
 
 def _make_hourly_klines(
@@ -717,3 +735,386 @@ def test_attach_daily_returns_is_calendar_exact_across_gaps() -> None:
     assert rets[0] is None  # no D-1 partner for the first day
     assert abs(rets[1] - 0.10) < 1e-12  # 110/100 - 1
     assert rets[2] is None  # day 3 has no day-2 partner -> null, not 121/110-1
+
+
+# ============================================================================
+# audit2c: decile under-deploy + daily-aggregation day-key snap
+# ============================================================================
+#
+# Two corrected behaviours are pinned here:
+#
+#   (1) Decile under-deploy — ``build_combined_signal_portfolio`` must exclude
+#       names with null / non-positive ``realized_vol`` from the rank pool BEFORE
+#       selecting the per-day decile, so every selected (short/long) name is
+#       sizable and carries a non-null weight. The old code ranked un-sizable
+#       names into the decile and they silently deployed weight=null.
+#
+#   (2) Daily-aggregation day key — ``_aggregate_daily_{funding,open_interest,
+#       premium}`` must snap the per-day key to the 00:00-UTC day floor
+#       ((ts_ms // MS_PER_DAY) * MS_PER_DAY) rather than the first intraday ts,
+#       so the daily row joins the kline 00:00 grid even on a gap-edge day whose
+#       first observation is not at midnight.
+
+
+# ---------------------------------------------------------------------------
+# (1) Decile breadth: no selected name with a null weight
+# ---------------------------------------------------------------------------
+
+
+def _panel_with_unsizable_extremes() -> pl.DataFrame:
+    """Panel where the most-extreme names by signal have unusable realized_vol.
+
+    Per day, 12 symbols. ``feature_a`` is monotone in symbol id, so the
+    lowest-id symbols are the most-negative-signal (short candidates) and the
+    highest-id the most-positive (long candidates). The single most-extreme
+    name on EACH tail has a non-sizable realized_vol (null on the short tail,
+    0.0 on the long tail) — under the old code those two names would be picked
+    into the decile and deploy weight=null.
+    """
+    rows: list[dict] = []
+    n_days = 3
+    n_symbols = 12
+    for d in range(n_days):
+        ts = _date_ms("2025-03-01") + d * MS_PER_DAY
+        for s in range(n_symbols):
+            if s == 0:
+                vol = None  # most-negative signal, null vol -> not sizable
+            elif s == n_symbols - 1:
+                vol = 0.0  # most-positive signal, zero vol -> not sizable
+            else:
+                vol = 0.5
+            rows.append(
+                {
+                    "symbol": f"S{s:02d}",
+                    "ts_ms": ts,
+                    "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+                    "feature_a": float(s),
+                    "realized_vol_7d": vol,
+                    "fwd_ret_3d": 0.0,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def test_decile_excludes_unsizable_names_from_pool() -> None:
+    """No selected (short/long) name carries a null weight (fix #1).
+
+    Old behaviour: S00 (null vol) and S11 (0.0 vol) rank into the decile and
+    get weight=null, silently zeroing one slot per side.
+    """
+    panel = _panel_with_unsizable_extremes()
+    out = build_combined_signal_portfolio(
+        panel,
+        surviving_features=["feature_a"],
+        weighting="equal",
+        top_decile=0.20,  # ceil(0.20 * 10 sizable) = 2 per side
+        vol_target_per_name=0.01,
+        forward_horizon=3,
+    )
+
+    selected = out.filter(pl.col("position_side") != "flat")
+    # Every selected name must have a finite, non-null weight.
+    assert selected["weight"].null_count() == 0
+    assert selected["weight"].is_finite().all()
+
+    # The un-sizable extremes must NOT be selected — they were masked out of the
+    # rank pool, so they fall through to "flat" with weight 0.
+    unsizable = out.filter(pl.col("symbol").is_in(["S00", "S11"]))
+    assert (unsizable["position_side"] == "flat").all()
+    assert (unsizable["weight"] == 0.0).all()
+
+    # Breadth guarantee holds over the 10 sizable names: ceil(0.20 * 10) = 2
+    # shorts and 2 longs each day, all sizable.
+    by_side = out.group_by(["ts_ms", "position_side"]).agg(pl.len().alias("n"))
+    assert by_side.filter(pl.col("position_side") == "short")["n"].max() == 2
+    assert by_side.filter(pl.col("position_side") == "long")["n"].max() == 2
+    shorts = out.filter(pl.col("position_side") == "short")
+    longs = out.filter(pl.col("position_side") == "long")
+    assert (shorts["weight"] < 0.0).all()
+    assert (longs["weight"] > 0.0).all()
+
+
+def test_decile_all_sizable_unchanged() -> None:
+    """When every name is sizable the selection is unchanged (no regression)."""
+    rows: list[dict] = []
+    n_symbols = 10
+    ts = _date_ms("2025-03-01")
+    for s in range(n_symbols):
+        rows.append(
+            {
+                "symbol": f"S{s:02d}",
+                "ts_ms": ts,
+                "date": "2025-03-01",
+                "feature_a": float(s),
+                "realized_vol_7d": 0.5,
+                "fwd_ret_3d": 0.0,
+            }
+        )
+    out = build_combined_signal_portfolio(
+        pl.DataFrame(rows),
+        surviving_features=["feature_a"],
+        weighting="equal",
+        top_decile=0.20,
+        vol_target_per_name=0.01,
+        forward_horizon=3,
+    )
+    by_side = out.group_by("position_side").agg(pl.len().alias("n"))
+    assert by_side.filter(pl.col("position_side") == "short")["n"][0] == 2
+    assert by_side.filter(pl.col("position_side") == "long")["n"][0] == 2
+    assert out["weight"].null_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# (2) Daily-aggregation day key snapped to the 00:00 day floor
+# ---------------------------------------------------------------------------
+
+
+def _gap_edge_intraday(value_col: str, *, extra: dict[str, list] | None = None) -> pl.DataFrame:
+    """Intraday rows for one symbol/day whose first ts is OFF the 00:00 grid.
+
+    The day's 00:00 bar is missing (a gap edge); the first observation is at
+    01:00 UTC. ``min(ts_ms)`` is therefore the day floor + 1h, not the floor.
+    """
+    day_floor = _date_ms("2025-03-02")
+    hours = [1, 2, 23]  # 00:00 bar absent
+    data: dict[str, list] = {
+        "symbol": ["S00"] * len(hours),
+        "ts_ms": [day_floor + h * 3_600_000 for h in hours],
+        value_col: [1.0, 2.0, 3.0],
+    }
+    if extra:
+        data.update(extra)
+    return pl.DataFrame(data)
+
+
+def test_funding_day_key_snapped_to_day_floor() -> None:
+    funding = _gap_edge_intraday("funding_rate")
+    out = _aggregate_daily_funding(funding)
+    day_floor = _date_ms("2025-03-02")
+    assert out["ts_ms"].to_list() == [day_floor]
+    # sanity: the un-snapped first ts would have been day_floor + 1h
+    assert out["ts_ms"][0] != day_floor + 3_600_000
+    # aggregation content unaffected by the key snap
+    assert out["funding_rate_1d_sum"][0] == 6.0
+    assert out["funding_rate_last"][0] == 3.0
+
+
+def test_open_interest_day_key_snapped_to_day_floor() -> None:
+    oi = _gap_edge_intraday("open_interest")
+    out = _aggregate_daily_open_interest(oi)
+    day_floor = _date_ms("2025-03-02")
+    assert out["ts_ms"].to_list() == [day_floor]
+    assert out["open_interest"][0] == 3.0  # last of the day
+
+
+def test_premium_day_key_snapped_to_day_floor() -> None:
+    premium = _gap_edge_intraday("close")
+    out = _aggregate_daily_premium(premium)
+    day_floor = _date_ms("2025-03-02")
+    assert out["ts_ms"].to_list() == [day_floor]
+    assert out["premium_close"][0] == 3.0  # last hourly close
+
+
+def test_snapped_key_joins_kline_grid() -> None:
+    """The snapped daily key joins a kline-grid row keyed at 00:00 (fix #2).
+
+    The kline daily grid keys each day at the 00:00 floor. The un-snapped OI
+    key (first intraday ts = floor + 1h) would miss this join; the snapped key
+    lands exactly on the grid and the join keeps the day.
+    """
+    day_floor = _date_ms("2025-03-02")
+    oi_daily = _aggregate_daily_open_interest(_gap_edge_intraday("open_interest"))
+    kline_grid = pl.DataFrame({"symbol": ["S00"], "ts_ms": [day_floor], "adv_30d": [10.0]})
+    joined = oi_daily.join(kline_grid, on=["symbol", "ts_ms"], how="inner")
+    assert joined.height == 1
+    assert joined["ts_ms"][0] == day_floor
+
+
+# ============================================================================
+# Relocated from tests/test_audit_fix_b09.py (audit bucket b09).
+# pit-signals-3 / research-methodology-2 / test-gaps-3 — gap-blind N-day builders
+# ============================================================================
+
+
+def test_xs_rank_ret_Nd_is_calendar_exact_across_a_gap() -> None:
+    """A symbol present on days {0,1,2,5,6} then ranked: the day-5/6 rows must NOT
+    treat shift(3) as a clean 3-calendar-day return. With the positional bug the
+    day-5 row's "ret_3d" used day-2's close (a 3-CALENDAR-day-misaligned span);
+    calendar_shift nulls it because there is no row exactly 3 days back.
+
+    Two contiguous control symbols keep the cross-section non-degenerate so the
+    rank denominator and ordering are well defined.
+    """
+    builder = _make_xs_rank_ret_Nd(3)
+    # GAPPED symbol: missing days 3 and 4.
+    gapped = _daily_returns_frame("GAP", [0, 1, 2, 5, 6], [10.0, 11.0, 12.0, 20.0, 21.0])
+    # Contiguous controls present every day 0..6.
+    ctrl_days = [0, 1, 2, 3, 4, 5, 6]
+    ctrl_a = _daily_returns_frame("AAA", ctrl_days, [100.0 + d for d in ctrl_days])
+    ctrl_b = _daily_returns_frame("BBB", ctrl_days, [200.0 - d for d in ctrl_days])
+    daily_returns = pl.concat([gapped, ctrl_a, ctrl_b]).sort(["symbol", "ts_ms"])
+    ctx = FeatureContext(
+        daily_klines=pl.DataFrame(),
+        daily_returns=daily_returns,
+        funding_daily=pl.DataFrame(),
+        open_interest_daily=pl.DataFrame(),
+        premium_daily=pl.DataFrame(),
+    )
+    out = builder(ctx)
+    base = _date_ms("2025-01-01")
+    gap_rows = {
+        (row["ts_ms"] - base) // MS_PER_DAY: row["xs_rank_ret_3d"]
+        for row in out.filter(pl.col("symbol") == "GAP").to_dicts()
+    }
+    # Day 5 and day 6 have no row EXACTLY 3 calendar days back (days 2 and 3 resp.;
+    # day 3 is missing entirely, day 2 is 3 days before day 5 but reached via a gap),
+    # so calendar_shift yields null ret_Nd -> null rank. The positional bug would have
+    # produced a finite (misaligned) rank for at least one of them.
+    assert gap_rows[5] is None
+    assert gap_rows[6] is None
+    # A contiguous row (day 3, exactly 3 days after day 0) is finite for the controls.
+    ctrl_day3 = [
+        row["xs_rank_ret_3d"]
+        for row in out.filter((pl.col("symbol") == "AAA")).to_dicts()
+        if (row["ts_ms"] - base) // MS_PER_DAY == 3
+    ]
+    assert ctrl_day3 and ctrl_day3[0] is not None
+
+
+def test_xs_rank_ret_Nd_matches_positional_shift_on_contiguous_data() -> None:
+    """Numerical-equivalence gate: on a CONTIGUOUS series calendar_shift(n) is
+    byte-identical to the old close/close.shift(n)-1, so the fix moves no number
+    on the happy path."""
+    builder = _make_xs_rank_ret_Nd(3)
+    days = list(range(8))
+    a = _daily_returns_frame("AAA", days, [100.0 * (1.0 + 0.01 * d) for d in days])
+    b = _daily_returns_frame("BBB", days, [50.0 * (1.0 + 0.02 * d) for d in days])
+    daily_returns = pl.concat([a, b]).sort(["symbol", "ts_ms"])
+    ctx = FeatureContext(
+        daily_klines=pl.DataFrame(),
+        daily_returns=daily_returns,
+        funding_daily=pl.DataFrame(),
+        open_interest_daily=pl.DataFrame(),
+        premium_daily=pl.DataFrame(),
+    )
+    out = builder(ctx).sort(["symbol", "ts_ms"])
+    # Reference: old positional definition + the same cross-sectional rank fraction.
+    ref = daily_returns.with_columns(
+        (pl.col("close") / pl.col("close").shift(3).over("symbol") - 1.0).alias("ret_Nd")
+    ).with_columns(
+        pl.col("ret_Nd").rank(method="average", descending=False).over("ts_ms").alias("_r")
+    ).with_columns(
+        (pl.col("_r") / pl.col("ret_Nd").count().over("ts_ms")).alias("ref_rank")
+    ).sort(["symbol", "ts_ms"])
+    got = out["xs_rank_ret_3d"].to_list()
+    exp = ref["ref_rank"].to_list()
+    assert len(got) == len(exp)
+    for g, e in zip(got, exp):
+        assert (g is None) == (e is None)
+        if g is not None:
+            assert g == pytest.approx(e)
+
+
+def test_turnover_delta_window_shrinks_across_a_gap_not_stretches() -> None:
+    """turnover_delta_7d's prior-mean is now calendar-bounded: a gapped symbol's
+    prior window covers <=7 CALENDAR days, never positionally back-filled rows from
+    >7 days ago. We assert the post-gap row's prior mean uses only in-window days."""
+    builder = _make_turnover_delta(7)
+    base = _date_ms("2025-01-01")
+    # Present days 0,1,2 (turnover 100) then a long gap, relist day 30 (turnover 100).
+    present = [0, 1, 2, 30]
+    daily_klines = pl.DataFrame(
+        {
+            "symbol": ["GAP"] * len(present),
+            "ts_ms": [base + d * MS_PER_DAY for d in present],
+            "turnover_quote": [100.0, 100.0, 100.0, 100.0],
+        }
+    ).sort(["symbol", "ts_ms"])
+    ctx = FeatureContext(
+        daily_klines=daily_klines,
+        daily_returns=pl.DataFrame(),
+        funding_daily=pl.DataFrame(),
+        open_interest_daily=pl.DataFrame(),
+        premium_daily=pl.DataFrame(),
+    )
+    out = builder(ctx)
+    by_day = {
+        (row["ts_ms"] - base) // MS_PER_DAY: row["turnover_delta_7d"]
+        for row in out.to_dicts()
+    }
+    # Day 30's prior-7-CALENDAR-day window (days 23..29) is empty, so prior_mean is
+    # null and turnover_delta_7d is null. The positional bug compared against days
+    # {0,1,2} (28+ days stale) and produced a finite (0.0) delta.
+    assert by_day[30] is None
+
+
+def test_calendar_helpers_are_imported_in_signal_harness() -> None:
+    """The module must actually route through the gap-aware primitives; importing
+    them is the structural part of the fix (test-gaps-3)."""
+    import liquidity_migration.signal_harness as sh
+
+    src = inspect.getsource(sh)
+    assert "calendar_shift" in src
+    assert "calendar_roll" in src
+    # No bare positional shift on the daily panel should survive in the N-day builders.
+    assert ".shift(n).over(\"symbol\")" not in src
+    assert ".shift(7).over(\"symbol\")" not in src
+
+
+# ============================================================================
+# research-methodology-4 — tied bottom signals must not shrink the short book
+# ============================================================================
+
+
+def _tie_panel() -> pl.DataFrame:
+    """10 symbols/day for 2 days; the 4 lowest feature values are TIED so an
+    average-rank fractional cut would zero out the short side."""
+    rows: list[dict] = []
+    n_symbols = 10
+    # 4 tied lowest (value 0.0), then 6 distinct higher values.
+    values = [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    for d in range(2):
+        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
+        for s in range(n_symbols):
+            rows.append(
+                {
+                    "symbol": f"S{s:02d}",
+                    "ts_ms": ts,
+                    "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+                    "feature_a": values[s],
+                    "realized_vol_7d": 0.5,
+                    "fwd_ret_3d": 0.0,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def test_tied_bottom_signals_still_deploy_exact_decile_short_count() -> None:
+    """top_decile=0.40 over 10 names => exactly 4 shorts and 4 longs per day, even
+    though the 4 lowest feature values tie. With the original rank(method="average")
+    + frac<=top_decile cut, the tied bottom group's average rank (2.5/10=0.25) was
+    NOT <= 0.40 for all four and could collapse the short count below 4."""
+    out = build_combined_signal_portfolio(
+        _tie_panel(),
+        surviving_features=["feature_a"],
+        weighting="equal",
+        top_decile=0.40,
+        vol_target_per_name=0.01,
+        forward_horizon=3,
+    )
+    per_day = out.group_by(["ts_ms", "position_side"]).agg(pl.len().alias("n"))
+    shorts = per_day.filter(pl.col("position_side") == "short")["n"].to_list()
+    longs = per_day.filter(pl.col("position_side") == "long")["n"].to_list()
+    assert shorts and all(n == 4 for n in shorts)
+    assert longs and all(n == 4 for n in longs)
+    # The short book is non-empty every day (the under-deployment bug produced 0).
+    assert (out.filter(pl.col("position_side") == "short")["weight"] < 0.0).all()
+
+
+def test_decile_selection_uses_ordinal_rank_not_average() -> None:
+    import liquidity_migration.signal_harness as sh
+
+    src = inspect.getsource(sh.build_combined_signal_portfolio)
+    assert 'rank(method="ordinal")' in src
+    # The selection must not fall back to the fractional <= top_decile cut.
+    assert "signal_rank_frac\") <= top_decile" not in src

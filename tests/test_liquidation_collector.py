@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 from liquidity_migration.liquidation_collector import (
     MAX_CONNECTION_AGE_SECONDS,
@@ -99,3 +100,121 @@ def test_connection_expired_age_check() -> None:
     assert not connection_expired(0.0, now_monotonic=4.9, max_age_seconds=5.0)
     # default clock: a just-opened connection is not expired
     assert not connection_expired(time.monotonic())
+
+
+# --------------------------------------------------------------------------- #
+# audit bucket b05 (liquidation-collector-4/5/6 writer + parser fixes;
+# folded from test_audit_fix_b05.py)
+# --------------------------------------------------------------------------- #
+def _liq():
+    import liquidity_migration.liquidation_collector as lc
+    return lc
+
+
+def test_writer_per_line_partial_failure_counts_only_unlanded(tmp_path, monkeypatch) -> None:
+    """liquidation-collector-4: a disk-full OSError partway through a batch must leave
+    every already-written line intact (no torn line) and count ONLY the rows that did
+    not land — not the whole batch."""
+    lc = _liq()
+    w = lc.JsonlDayWriter(tmp_path)
+
+    rows = [
+        {"recv_ms": 1_765_000_000_000, "venue": "bybit", "symbol": f"S{i}",
+         "side": "Buy", "qty": 1.0, "price": 2.0, "ts_ms": 1}
+        for i in range(5)
+    ]
+
+    real_open = Path.open
+
+    class _FailAfter:
+        """A file wrapper that raises OSError on the 3rd write (disk full mid-batch)."""
+
+        def __init__(self, fh):
+            self._fh = fh
+            self._n = 0
+
+        def write(self, data):
+            self._n += 1
+            if self._n == 3:
+                raise OSError("No space left on device")
+            return self._fh.write(data)
+
+        def __enter__(self):
+            self._fh.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self._fh.__exit__(*a)
+
+    def fake_open(self, *args, **kwargs):
+        return _FailAfter(real_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", fake_open)
+    w.write(rows)
+    monkeypatch.undo()
+
+    # 2 lines landed before the 3rd write raised; 3 did not.
+    assert w.written == 2
+    assert w.dropped == 3
+    assert w.written_by_venue.get("bybit") == 2
+    # Every persisted line is a complete JSON record (no torn trailing line).
+    f = next((tmp_path / "bybit").glob("*.jsonl"))
+    lines = [ln for ln in f.read_text(encoding="utf-8").splitlines() if ln]
+    assert len(lines) == 2
+    for ln in lines:
+        json.loads(ln)  # must not raise
+
+
+def test_bybit_on_message_writes_before_age_cap_close() -> None:
+    """liquidation-collector-5: the bybit on_message must parse-and-write the in-hand
+    frame BEFORE the 24h connection-age close, so the rollover frame's rows are not
+    discarded. Assert the ordering within the on_message body in the source."""
+    import inspect
+    lc = _liq()
+    src = inspect.getsource(lc._run_bybit)
+    # Isolate the on_message body (from its def to the next nested def, on_pong).
+    om_start = src.index("def on_message(")
+    om_end = src.index("def on_pong(", om_start)
+    on_message = src[om_start:om_end]
+    # The write must precede the expiry check WITHIN on_message.
+    write_idx = on_message.index("writer.write(parse_bybit_event")
+    close_idx = on_message.index("_close_if_expired(ws)", write_idx)
+    assert close_idx > write_idx, "on_message must write the frame before the age-cap close"
+    # The OLD bug — a guard-return at the very top before any parse/write — must be gone:
+    # on_message must not return early on expiry before having written the frame.
+    first_line = on_message.split("\n", 1)[1].lstrip()
+    assert not first_line.startswith("if _close_if_expired(ws):"), \
+        "on_message must not short-circuit on expiry before writing the frame"
+
+
+def test_parse_drops_zero_and_negative_price_rows() -> None:
+    """liquidation-collector-6: a row with price<=0 (missing/garbage price) is dropped
+    the same way zero-qty rows are, so notional aggregations are never polluted."""
+    lc = _liq()
+    recv = 1_765_000_000_000
+
+    # Bybit: zero price dropped, positive price kept.
+    assert lc.parse_bybit_event(
+        {"topic": "allLiquidation.X", "data": {"s": "X", "S": "Buy", "v": "1", "p": "0"}}, recv) == []
+    kept = lc.parse_bybit_event(
+        {"topic": "allLiquidation.X", "data": {"s": "X", "S": "Buy", "v": "1", "p": "2.5"}}, recv)
+    assert len(kept) == 1 and kept[0]["price"] == 2.5
+
+    # Binance: ap=p=0 (the verified pollution case) dropped; ap fallback kept.
+    assert lc.parse_binance_event(
+        {"e": "forceOrder", "o": {"s": "Y", "S": "SELL", "q": "1", "ap": "0", "p": "0"}}, recv) == []
+    kept_b = lc.parse_binance_event(
+        {"e": "forceOrder", "o": {"s": "Y", "S": "SELL", "q": "1", "ap": "0", "p": "3"}}, recv)
+    assert len(kept_b) == 1 and kept_b[0]["price"] == 3.0
+
+
+def test_module_documents_per_venue_side_price_schema() -> None:
+    """liquidation-collector-6: the module docstring documents the per-venue side
+    casing/semantics and the zero-price drop so the eventual P12 consumer cannot
+    silently mis-normalize."""
+    lc = _liq()
+    doc = lc.__doc__ or ""
+    assert "Row schema" in doc
+    assert "Buy" in doc and "BUY" in doc  # the casing divergence is documented
+    assert "LIQUIDATED order" in doc or "liquidated" in doc.lower()
+    assert "price > 0" in doc

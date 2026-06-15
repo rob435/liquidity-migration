@@ -25,8 +25,9 @@ from typing import Any, cast
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR
+from ._common import MS_PER_DAY, MS_PER_HOUR, finite_float
 from .config import DEFAULT_EXCLUDED_SYMBOLS
+from .order_link_id import assert_routable_component_tags
 from .continuous_events import (
     FEATURES,
     compute_continuous_decile_panel,
@@ -374,7 +375,7 @@ class LivePanelCache:
         self._feature_set = tuple(feature_set)
         self._exclude = tuple(exclude_symbols)
         self._cur_ts: int | None = None
-        self._sig: tuple[int, int, float, float] | None = None
+        self._sig: tuple[int, int, int, int] | None = None
         self._carry: dict[str, dict[str, Any]] = {}
         self.refreshes = 0
         self.live_updates = 0
@@ -384,22 +385,45 @@ class LivePanelCache:
 
     def _confirmed_signature(
         self, klines_recent: pl.DataFrame, cur_ts: int, config: ContinuousDemoCycleConfig,
-    ) -> tuple[int, int, float, float]:
-        """A cheap content fingerprint of the confirmed bars feeding the carry: (row count, max ts,
-        close-sum, turnover-sum). It catches NOT JUST the hour rolling over but also a confirmed bar
-        being BACKFILLED or RE-DELIVERED with corrected values mid-hour (Bybit re-pushes a just-closed
-        bar after late trades; `KlineStore.add_bar` overwrites it in place) — without that, the carry
-        would silently go stale within the hour. O(N) scan (no rolling), far cheaper than `_refresh`."""
+    ) -> tuple[int, int, int, int]:
+        """A cheap, collision-resistant content fingerprint of the confirmed bars feeding the carry.
+
+        It catches NOT JUST the hour rolling over but also a confirmed bar being BACKFILLED or
+        RE-DELIVERED with corrected values mid-hour (Bybit re-pushes a just-closed bar after late
+        trades; ``KlineStore.add_bar`` overwrites it in place) — without that, the carry would silently
+        go stale within the hour.
+
+        pit-engine-3: the previous fingerprint was ``(row_count, max_ts, close_sum, turnover_sum)``. A
+        value-preserving multi-symbol backfill that conserved BOTH float sums (e.g. one symbol's close
+        corrected +X while another's is -X, same count/max_ts) left the fingerprint unchanged → the
+        refresh was skipped and the live decile reranked off a stale per-symbol carry, with no exception
+        so the cycle's full-recompute fallback never fired. We now fold an order-independent hash of
+        each row's ``(symbol, ts_ms, close, turnover_quote)`` tuple into the signature (a wrapping SUM
+        and a wrapping SUM-OF-SQUARES of polars' per-row 64-bit hashes — two different-degree
+        reductions), so a per-symbol value change moves the fingerprint even when the cross-sectional
+        float sums are preserved. Order-independent because the bar set has no inherent order. Still an
+        O(N) scan (no rolling), far cheaper than ``_refresh``."""
         exclude = self._exclude or config.exclude_symbols
         lf = klines_recent.lazy().select("ts_ms", "symbol", "close", "turnover_quote").filter(
             pl.col("ts_ms") < cur_ts)
         if exclude:
             lf = lf.filter(~pl.col("symbol").is_in(list(exclude)))
-        agg = lf.select(
-            pl.len().alias("h"), pl.col("ts_ms").max().alias("mx"),
-            pl.col("close").sum().alias("cs"), pl.col("turnover_quote").sum().alias("ts_sum"),
-        ).collect().row(0)
-        return (int(agg[0]), int(agg[1] or 0), float(agg[2] or 0.0), float(agg[3] or 0.0))
+        confirmed = lf.collect()
+        if confirmed.is_empty():
+            return (0, 0, 0, 0)
+        row_hashes = confirmed.select("symbol", "ts_ms", "close", "turnover_quote").hash_rows()
+        row_count = confirmed.height
+        max_ts = int(confirmed.get_column("ts_ms").max() or 0)
+        mod = 1 << 64
+        # Two order-independent reductions of the per-row 64-bit hashes: a linear SUM and a
+        # quadratic SUM-OF-SQUARES. Both move when any row's (symbol, ts_ms, close, turnover_quote)
+        # changes; using two different-degree polynomials means a backfill whose per-row hash deltas
+        # happened to cancel in the linear sum (mod 2^64) is overwhelmingly unlikely to ALSO cancel in
+        # the quadratic sum, so the pair is collision-resistant where a plain float-sum was not.
+        hashes = row_hashes.to_list()
+        hash_sum = sum(hashes) % mod
+        hash_sq_sum = sum((h * h) % mod for h in hashes) % mod
+        return (row_count, max_ts, hash_sum, hash_sq_sum)
 
     def state(
         self,
@@ -572,6 +596,7 @@ def plan_continuous_sniper_orders(
     *,
     config: ContinuousDemoCycleConfig,
     price_by_symbol: dict[str, float],
+    contract_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Pure planner for the sniper resting-limit leg (S1 Amendment 6).
 
@@ -581,9 +606,17 @@ def plan_continuous_sniper_orders(
     notional. reduce_only=False (it ADDS short). Returns [] when disabled or when
     an entry has no usable price/notional. The caller submits + cancels-on-exit;
     this function does no I/O so it is unit-testable.
+
+    The plan carries the venue contract filters (``min_order_qty`` /
+    ``min_notional_value`` / ``max_order_qty``) so ``_execute_sniper_placements``
+    can size the snipe through the SAME ``order_quantity_for_notional`` helper the
+    base entry uses (sniper-1): a quarter-size snipe on a low-priced name otherwise
+    floored below Bybit's min and the venue silently rejected it, while a snipe
+    above maxOrderQty went uncapped.
     """
     if not config.sniper_enabled or config.sniper_size_frac <= 0.0 or config.sniper_wick_pct <= 0.0:
         return []
+    contracts = contract_by_symbol or {}
     plans: list[dict[str, Any]] = []
     for entry in entries:
         symbol = str(entry.get("symbol", ""))
@@ -592,7 +625,28 @@ def plan_continuous_sniper_orders(
         base_qty = _float(entry.get("qty"))
         if not symbol or entry_price <= 0.0 or base_qty <= 0.0:
             continue
+        # sniper-8: the snipe link encodes signal_ts so recover_snipe_trade_id_from_link can
+        # reconstruct the base trade_id (built from the SAME signal_ts) after a VPS rebuild. A
+        # 0/missing signal_ts makes the snipe unrecoverable — the placement used to default the
+        # link's ts to now_ms (a DIFFERENT value than the base id's), so recovery returned None
+        # and ws_risk booked the lossy component-less id, the same mis-pairing/duplicate-row
+        # class sniper-4 guards. The planner is now the single source of signal_ts: skip the
+        # snipe entirely rather than place an unrecoverable one. (Base entries always carry a
+        # valid signal_ts, so this never fires on the live path — it removes the latent
+        # 0-vs-now_ms inconsistency between planner and placement at the root.)
+        signal_ts_ms = int(entry.get("signal_ts_ms") or 0)
+        if signal_ts_ms <= 0:
+            continue
         limit_price = entry_price * (1.0 + config.sniper_wick_pct)
+        contract = contracts.get(symbol, {})
+        # Limit orders cap on maxOrderQty (not maxMktOrderQty); fall back to the
+        # entry row's max_market_order_qty / contract step when the contract map
+        # is absent (dry-run / tests).
+        max_order_qty = (
+            _float(contract.get("max_order_qty"))
+            or _float(contract.get("max_market_order_qty"))
+            or _float(entry.get("max_market_order_qty"))
+        )
         plans.append({
             "symbol": symbol,
             "side": "Sell",
@@ -602,9 +656,12 @@ def plan_continuous_sniper_orders(
             "qty": base_qty * config.sniper_size_frac,
             "notional_usdt": base_notional * config.sniper_size_frac,
             "base_trade_id": str(entry.get("trade_id", "")),
-            "signal_ts_ms": int(entry.get("signal_ts_ms") or 0),
-            "tick_size": _float(entry.get("tick_size")),
-            "qty_step": _float(entry.get("qty_step")),
+            "signal_ts_ms": signal_ts_ms,
+            "tick_size": _float(entry.get("tick_size")) or _float(contract.get("tick_size")),
+            "qty_step": _float(entry.get("qty_step")) or _float(contract.get("qty_step")),
+            "min_order_qty": _float(contract.get("min_order_qty")),
+            "min_notional_value": _float(contract.get("min_notional_value")),
+            "max_order_qty": max_order_qty,
             "reason": "sniper_wick_add",
         })
     return plans
@@ -639,6 +696,22 @@ def _sniper_trade_id(base_trade_id: str) -> str:
     return f"{base_trade_id}{SNIPER_TRADE_SUFFIX}"
 
 
+def _sniper_fill_ts_ms(history_row: dict[str, Any], now_ms: int) -> int:
+    """Best available FILL timestamp for a resolved snipe order-history row (sniper-6).
+
+    For ``Filled`` the order's ``updatedTime`` is the fill time, but for
+    ``PartiallyFilledCanceled`` ``updatedTime`` is the later CANCEL time — using it
+    understates the snipe's age and fires its max_hold force-exit late. Prefer the
+    execution-time field (``execTime``) which is the genuine fill time when Bybit
+    includes it, then fall back to ``updatedTime`` then ``now_ms``. Only positive
+    epoch-ms values are accepted (a 0/blank field never masks a real later one)."""
+    for key in ("execTime", "updatedTime"):
+        ts = int(_float(history_row.get(key)))
+        if ts > 0:
+            return ts
+    return int(now_ms)
+
+
 def _execute_sniper_placements(
     exec_entries: list[dict[str, Any]],
     *,
@@ -648,6 +721,7 @@ def _execute_sniper_placements(
     strategy_id: str,
     price_by_symbol: dict[str, float],
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
+    contract_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Place the sniper resting limits for this cycle's fresh entries (S1 Amendment 6).
 
@@ -657,23 +731,53 @@ def _execute_sniper_placements(
     row when `reconcile_continuous_snipes` observes its fill. Dry-run records planned
     rows without submitting.
     """
-    from .event_demo import _stop_price_for_entry
+    from .event_demo import _stop_price_for_entry, order_quantity_for_notional
 
-    plans = plan_continuous_sniper_orders(exec_entries, config=demo, price_by_symbol=price_by_symbol)
+    plans = plan_continuous_sniper_orders(
+        exec_entries, config=demo, price_by_symbol=price_by_symbol,
+        contract_by_symbol=contract_by_symbol,
+    )
     order_rows: list[dict[str, Any]] = []
     for plan in plans:
         symbol = plan["symbol"]
-        qty = _sniper_round_qty(_float(plan.get("qty")), _float(plan.get("qty_step")))
-        if qty <= 0.0:
-            continue
         tick = _float(plan.get("tick_size"))
         limit_price = _float(plan.get("limit_price"))
         if tick > 0.0:
             limit_price = float(Decimal(str(round(limit_price / tick))) * Decimal(str(tick)))
+        # sniper-1: size through the same contract-filter-aware helper the base entry
+        # uses, so the snipe respects min_order_qty / min_notional_value and is capped at
+        # max_order_qty. We preserve the RESEARCH form (a quarter of the base QTY) by
+        # sizing the helper from that target qty's notional AT THE RESTING PRICE, so the
+        # filter pass reproduces the quarter-size target (modulo step) rather than
+        # re-deriving qty from a notional taken at the base entry price. A sub-min snipe
+        # is skipped (not submitted into a guaranteed venue rejection); an oversized one
+        # is capped at max_order_qty (the old _sniper_round_qty did neither).
+        qty_step = _float(plan.get("qty_step"))
+        priced = limit_price if limit_price > 0.0 else _float(plan.get("limit_price"))
+        target_qty = _float(plan.get("qty"))
+        sized = order_quantity_for_notional(
+            notional_usdt=target_qty * priced,
+            price=priced,
+            qty_step=qty_step,
+            min_order_qty=_float(plan.get("min_order_qty")),
+            min_notional_value=_float(plan.get("min_notional_value")),
+            max_order_qty=_float(plan.get("max_order_qty")),
+        )
+        if sized is None:
+            continue
+        qty = _float(sized[0])
+        if qty <= 0.0:
+            continue
         stop_price = _stop_price_for_entry(
             entry_price=limit_price, side="short", stop_loss_pct=demo.stop_loss_pct, tick_size=tick
         )
-        signal_ts = int(plan.get("signal_ts_ms") or now_ms)
+        # sniper-8: plan_continuous_sniper_orders only emits plans with a positive
+        # signal_ts (it skips the unrecoverable 0 case), so the link's encoded ts always
+        # matches the base trade_id's. A defensive skip (not a now_ms default that would
+        # desync the link from the base id) guards a hand-built plan.
+        signal_ts = int(plan.get("signal_ts_ms") or 0)
+        if signal_ts <= 0:
+            continue
         trade_id = _sniper_trade_id(str(plan.get("base_trade_id", "")))
         # Trade-id-hashed link: two components' snipes on the SAME symbol share signal_ts
         # (both candidates come from the same confirmed bar) — a shared link cross-wires
@@ -686,12 +790,18 @@ def _execute_sniper_placements(
         if demo.submit_orders:
             assert trading_client is not None
             if record_preflight is not None:
+                # sniper-5: carry base_trade_id + reason on the preflight intent so a
+                # crash-orphaned snipe (place_order fired, placement row never flushed) is
+                # fully resolvable by reconcile_continuous_snipes from this row alone:
+                # _sniper_order_state surfaces a surviving preflight intent, and reconcile
+                # uses base_trade_id to decide whether to cancel it with the dead base.
                 record_preflight({
-                    "order_link_id": link, "ts_ms": now_ms, "trade_id": trade_id,
+                    "order_link_id": link, "ts_ms": now_ms, "updated_at_ms": now_ms, "trade_id": trade_id,
                     "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "qty": qty_text,
                     "reduce_only": False, "submit_mode": "preflight", "status": "submitted",
                     "trade_side": "short", "sleeve": continuous_sleeve_name(demo),
                     "signal_ts_ms": signal_ts, "stop_price": stop_price, "reason": SNIPER_REASON,
+                    "base_trade_id": str(plan.get("base_trade_id", "")),
                 })
             try:
                 result = trading_client.place_order(**_order_params(
@@ -704,7 +814,14 @@ def _execute_sniper_placements(
             except Exception as exc:  # noqa: BLE001 — a failed snipe must never block the base entry
                 submit_mode, status, error = "error", "failed", f"sniper place_order failed: {exc}"[:500]
         order_rows.append({
-            "order_link_id": link, "ts_ms": now_ms, "trade_id": trade_id,
+            # sniper-3: stamp updated_at_ms so the orders ledger dedups this link by TRUE
+            # recency. The dataset dedups by order_link_id keep='last' and sorts by
+            # updated_at_ms; without it (all-null) the sort is a no-op and the survivor is
+            # whichever row lands last in concat/glob order, correct today only by the
+            # implicit ts_ms-bucket-is-monotonic invariant. Stamping it (matching the
+            # reconcile updates below) makes the resting/terminal state machine robust to any
+            # future change that lets an update carry a non-monotonic ts_ms.
+            "order_link_id": link, "ts_ms": now_ms, "updated_at_ms": now_ms, "trade_id": trade_id,
             "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "order_type": "Limit",
             "qty": qty_text, "reduce_only": False, "order_id": order_id, "submit_mode": submit_mode,
             "avg_price": 0.0, "notional_usdt": qty * limit_price, "status": status,
@@ -718,22 +835,53 @@ def _execute_sniper_placements(
 
 
 def _sniper_order_state(all_orders: pl.DataFrame) -> list[dict[str, Any]]:
-    """Latest-state view of sniper orders: one dict per link still RESTING."""
+    """Latest-state view of sniper orders: one dict per link still needing resolution.
+
+    A link is RESTING (returned) if its freshest row is a live placement
+    (``submit_mode in {submitted, dry_run}``, ``status='resting'``) and no terminal
+    row exists.
+
+    sniper-5: a preflight INTENT row (``submit_mode='preflight'``) is written and
+    flushed BEFORE ``place_order`` fires; the live placement row is only flushed at
+    end of cycle. A crash in that window leaves a PostOnly Sell resting on the venue
+    whose ONLY ledger trace is the preflight row — which the old view excluded, so
+    ``reconcile_continuous_snipes`` never cancelled it when the base thesis died
+    (a permanent unmanaged-order orphan; ``adopt_untracked_positions`` only adopts
+    POSITIONS, never resting ORDERS). We now surface a SURVIVING preflight row (one
+    with no superseding submitted/dry_run placement row and no terminal row for the
+    link) re-tagged ``submit_mode='submitted'`` so reconcile routes it through the
+    venue ``get_open_orders`` check: still resting + base gone -> cancelled; gone +
+    cumExecQty>0 -> booked; gone + no fill -> terminalized. In the NORMAL case the
+    end-of-cycle placement row supersedes the preflight row, so this only fires on
+    the crash orphan."""
     if all_orders.is_empty() or "reason" not in all_orders.columns:
         return []
     snipes = all_orders.filter(pl.col("reason") == SNIPER_REASON)
     if snipes.is_empty():
         return []
     resting: dict[str, dict[str, Any]] = {}
+    preflight: dict[str, dict[str, Any]] = {}
     terminal: set[str] = set()
     for row in snipes.sort("ts_ms").to_dicts():
         link = str(row.get("order_link_id", ""))
         status = str(row.get("status", ""))
+        submit_mode = str(row.get("submit_mode"))
         if status in ("filled", "cancelled", "closed", "failed"):
             terminal.add(link)
-        elif status == "resting" and str(row.get("submit_mode")) in ("submitted", "dry_run"):
+        elif status == "resting" and submit_mode in ("submitted", "dry_run"):
             resting[link] = row
-    return [row for link, row in resting.items() if link not in terminal]
+            preflight.pop(link, None)  # a real placement supersedes the intent row
+        elif submit_mode == "preflight" and link not in resting:
+            preflight[link] = row
+    out = [row for link, row in resting.items() if link not in terminal]
+    # Orphaned preflight intents (crash between place_order and the placement-row
+    # flush): route them through the venue check as if submitted.
+    out.extend(
+        {**row, "submit_mode": "submitted"}
+        for link, row in preflight.items()
+        if link not in terminal and link not in resting
+    )
+    return out
 
 
 def reconcile_continuous_snipes(
@@ -743,6 +891,7 @@ def reconcile_continuous_snipes(
     trading_client: Any | None,
     demo: ContinuousDemoCycleConfig,
     now_ms: int,
+    account_equity_usdt: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Per-cycle sniper lifecycle sweep. Returns (fill_trade_rows, order_update_rows, snipe_exit_plans).
 
@@ -778,6 +927,15 @@ def reconcile_continuous_snipes(
             eq = _float(t.get("equity_usdt"))
             if eq > 0.0:
                 equity_by_trade_id[str(t.get("trade_id", ""))] = eq
+    # sniper-7: when the base row carries no positive equity_usdt (adopted/recovered
+    # base whose equity stamp was lost, or a base pruned before the snipe books),
+    # equity_by_trade_id.get(base_id) is missing -> a 0.0 stamp zeroes the snipe's
+    # notional-weight and therefore its booked net_return despite real gross PnL.
+    # Fall back to the live account-equity snapshot (then any other base row's
+    # equity) so a snipe never books with zero equity and zero weight.
+    fallback_equity = account_equity_usdt if account_equity_usdt > 0.0 else 0.0
+    if fallback_equity <= 0.0 and equity_by_trade_id:
+        fallback_equity = max(equity_by_trade_id.values())
 
     fill_rows: list[dict[str, Any]] = []
     update_rows: list[dict[str, Any]] = []
@@ -789,7 +947,8 @@ def reconcile_continuous_snipes(
         base_open = base_id in open_base_ids
         if str(row.get("submit_mode")) != "submitted" or trading_client is None:
             if not base_open:  # dry-run bookkeeping: retire the planned snipe with its base
-                update_rows.append({**row, "ts_ms": now_ms, "status": "cancelled", "submit_mode": "dry_run"})
+                update_rows.append({**row, "ts_ms": now_ms, "updated_at_ms": now_ms,
+                                    "status": "cancelled", "submit_mode": "dry_run"})
             continue
         try:
             open_orders = trading_client.get_open_orders(symbol=symbol)
@@ -813,9 +972,10 @@ def reconcile_continuous_snipes(
                     # resolution books any cumExecQty>0 from positive terminal
                     # evidence (PartiallyFilledCanceled) and converges to
                     # "cancelled" when exec qty is zero.
-                    update_rows.append({**row, "ts_ms": now_ms, "cancel_requested_ms": now_ms})
+                    update_rows.append({**row, "ts_ms": now_ms, "updated_at_ms": now_ms,
+                                        "cancel_requested_ms": now_ms})
                 except Exception as exc:  # noqa: BLE001
-                    update_rows.append({**row, "ts_ms": now_ms, "status": "resting",
+                    update_rows.append({**row, "ts_ms": now_ms, "updated_at_ms": now_ms, "status": "resting",
                                         "error": f"sniper cancel failed: {exc}"[:300]})
             continue
         # no longer resting on the venue: resolve filled-vs-cancelled from history
@@ -832,7 +992,7 @@ def reconcile_continuous_snipes(
                 continue
             exec_qty = _float(h.get("cumExecQty"))
             avg_price = _float(h.get("avgPrice"))
-            exec_ts = int(_float(h.get("updatedTime")) or now_ms)
+            exec_ts = _sniper_fill_ts_ms(h, now_ms)
             history_status = str(h.get("orderStatus", ""))
             break
         if (
@@ -848,19 +1008,21 @@ def reconcile_continuous_snipes(
                 "updated_at_ms": now_ms, "signal_ts_ms": int(_float(row.get("signal_ts_ms")) or exec_ts),
                 "entry_price": avg_price, "qty": _decimal_text(Decimal(str(exec_qty))),
                 "notional_usdt": abs(avg_price * exec_qty),
-                "equity_usdt": equity_by_trade_id.get(base_id, 0.0),
+                "equity_usdt": equity_by_trade_id.get(base_id) or fallback_equity,
                 "entry_leverage": demo.entry_leverage, "tick_size": _float(row.get("tick_size")),
                 "qty_step": _float(row.get("qty_step")), "stop_price": _float(row.get("stop_price")),
                 "stop_loss_pct": demo.stop_loss_pct, "entry_order_link_id": link,
                 "entry_order_id": str(row.get("order_id", "")), "submit_mode": "submitted",
                 "base_trade_id": base_id, "reason": SNIPER_REASON,
             })
-            update_rows.append({**row, "ts_ms": now_ms, "status": "filled", "avg_price": avg_price})
+            update_rows.append({**row, "ts_ms": now_ms, "updated_at_ms": now_ms,
+                                 "status": "filled", "avg_price": avg_price})
         elif history_status in _SNIPER_TERMINAL_ORDER_STATUSES:
             # Positive terminal evidence from history. An already-booked fill (trade_id
             # known) marks "filled", everything else "cancelled" — both terminal.
             terminal = "filled" if exec_qty > 0.0 else "cancelled"
-            update_rows.append({**row, "ts_ms": now_ms, "status": terminal, "avg_price": avg_price})
+            update_rows.append({**row, "ts_ms": now_ms, "updated_at_ms": now_ms,
+                                 "status": terminal, "avg_price": avg_price})
         # else: empty/lagging history or a non-terminal orderStatus — the open-orders
         # snapshot may have been empty/partial (the empty-fetch-as-deletion class,
         # audit 2026-06-11: terminalizing here ghosted a still-resting PostOnly order
@@ -1170,15 +1332,58 @@ def _recent_entry_cooldown_symbols(
     return out
 
 
+def _recent_partial_adverse_exit_count(
+    all_trades: pl.DataFrame, *, now_ms: int, cutoff: int, strategy_id: str,
+) -> int:
+    """ws-risk-6: count loss-crystallizing PARTIAL reduces that have not yet fully closed.
+
+    record_tracked_exit_stream_fill books a partial (rebalance_reduce) reduce-only fill on the
+    STILL-OPEN row, stamping ``partial_exit_realized_return`` (the realized return of the closed
+    delta, weighted by its notional) and ``partial_exit_ts_ms`` while keeping status=="open" — the
+    full ``net_return`` is only written when the residual eventually closes. The closed-row breaker
+    branch therefore reads a loss-crystallizing partial reduce as net 0 until the residual closes,
+    suppressing the correlated-squeeze entry-pause during exactly the squeeze it exists to detect
+    (the Round 4 FULL-close fix did not cover the partial path). Count each open row whose
+    ``partial_exit_realized_return`` is negative and whose ``partial_exit_ts_ms`` is within the
+    window as one additional adverse event. status=="open" here vs status=="closed" in the closed
+    branch are mutually exclusive, so a trade is never double-counted once it fully closes."""
+    if "partial_exit_realized_return" not in all_trades.columns:
+        return 0
+    open_df = all_trades.filter(
+        (pl.col("status") == "open")
+        & (pl.col("strategy_id") == strategy_id)
+        & (pl.col("partial_exit_realized_return").is_not_null())
+        & (pl.col("partial_exit_realized_return") < 0.0)
+    )
+    if open_df.is_empty():
+        return 0
+    # Key the window on partial_exit_ts_ms (when the reduce booked the loss); fall back to
+    # updated_at_ms only if the partial timestamp is absent (older rows), never to a closed-row field.
+    if "partial_exit_ts_ms" in open_df.columns:
+        ts_expr = pl.col("partial_exit_ts_ms")
+        if "updated_at_ms" in open_df.columns:
+            ts_expr = pl.coalesce([pl.col("partial_exit_ts_ms"), pl.col("updated_at_ms")])
+    elif "updated_at_ms" in open_df.columns:
+        ts_expr = pl.col("updated_at_ms")
+    else:
+        # No timestamp to window on — count the negative partials conservatively (breaker errs toward
+        # pausing during a squeeze) rather than silently dropping them.
+        return int(open_df.height)
+    return int(open_df.filter(ts_expr.fill_null(now_ms) >= cutoff).height)
+
+
 def _recent_adverse_exit_count(
     all_trades: pl.DataFrame, *, now_ms: int, window_minutes: int, strategy_id: str,
 ) -> int:
     """Count the sleeve's recent ADVERSE covers (the correlated-squeeze footprint): closed trades whose
-    exit_reason is a loss-cut (stop_approach / failed_fade) OR whose net_return is negative, within the
-    last `window_minutes`. Drives the entry-pause circuit breaker. Stateless (ledger-derived)."""
+    exit_reason is a loss-cut (stop_approach / failed_fade) OR whose net_return is negative, PLUS open
+    trades whose in-flight partial reduce crystallized a loss (ws-risk-6), within the last
+    `window_minutes`. Drives the entry-pause circuit breaker. Stateless (ledger-derived)."""
     if window_minutes <= 0 or all_trades.is_empty() or "exit_ts_ms" not in all_trades.columns:
         return 0
     cutoff = now_ms - window_minutes * 60_000
+    partial_count = _recent_partial_adverse_exit_count(
+        all_trades, now_ms=now_ms, cutoff=cutoff, strategy_id=strategy_id)
     df = all_trades.filter(
         (pl.col("status") == "closed")
         & (pl.col("strategy_id") == strategy_id)
@@ -1186,7 +1391,7 @@ def _recent_adverse_exit_count(
         & (pl.col("exit_ts_ms") >= cutoff)
     )
     if df.is_empty():
-        return 0
+        return partial_count
     adverse = pl.lit(False)
     if "exit_reason" in df.columns:
         adverse = adverse | pl.col("exit_reason").is_in(["stop_approach", "failed_fade"])
@@ -1211,7 +1416,7 @@ def _recent_adverse_exit_count(
             ).fill_null(0.0)
             net_of_fees = net_of_fees - fee_frac
         adverse = adverse | (net_of_fees < 0.0)
-    return int(df.filter(adverse).height)
+    return int(df.filter(adverse).height) + partial_count
 
 
 def entry_circuit_breaker_tripped(
@@ -1242,7 +1447,7 @@ def _continuous_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, re
 
 
 def _continuous_suborder_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, trade_id: str) -> str:
-    """Order link with a ``-x{3×base36}`` trade-id hash — for the continuous order families that can
+    """Order link with a ``-x{4×base36}`` trade-id hash — for the continuous order families that can
     place TWO same-symbol orders in the same second: the sniper base-exit + snipe exit in one sweep,
     multi-component same-symbol trades exiting/resizing together, and two components' snipes. Bybit
     accepts a REUSED link once the first order is terminal, and the WS execution router buffers rows
@@ -1250,9 +1455,16 @@ def _continuous_suborder_link_id(prefix: str, *, symbol: str, signal_ts_ms: int,
     as the second's, closing the second trade with the first order's price/fee (audit 2026-06-12).
     Deterministic per trade_id, so a crash-retry of the same logical order reuses the same link
     (idempotent). decode_entry_order_link_id strips the suffix (entry-prefix resize/sniper links
-    still decode); exit links are prefix-matched only (is_exit_link) and never decoded."""
+    still decode); exit links are prefix-matched only (is_exit_link) and never decoded.
+
+    exec-router-6: the uniqueness suffix was widened from ``crc32%46656`` (3 base36 chars, 46656
+    buckets) to ``crc32%1679616`` (4 base36 chars, 1.68M buckets) so two DISTINCT same-symbol
+    same-second trade_ids collide on the link with ~36x lower probability. ``x``+4 stays len-5 — one
+    char short of the 6-char ts36 tail, so the decoder can still unambiguously strip it. The decoder
+    (order_link_id.decode_entry_order_link_id) accepts BOTH the old len-4 and the new len-5 shape, so
+    orderLinkIds written before the widening still decode on a VPS rebuild (backward compatible)."""
     link = _continuous_order_link_id(prefix, symbol=symbol, signal_ts_ms=signal_ts_ms)
-    suffix = "-x" + _base36(zlib.crc32(str(trade_id).encode("utf-8")) % 46656).rjust(3, "0")
+    suffix = "-x" + _base36(zlib.crc32(str(trade_id).encode("utf-8")) % 1_679_616).rjust(4, "0")
     return f"{link[: 36 - len(suffix)]}{suffix}"
 
 
@@ -1302,26 +1514,51 @@ def recover_snipe_trade_id_from_link(
     2026-06-12 round 3). A snipe link carries no base component and no re-entry
     seq, so adoption previously reconstructed ``{base}-snipe`` while the live twin
     row is ``{base}[-{seq}][-{component}]-snipe`` — breaking paper<->demo pairing
-    after a rebuild. But the link's ``-x{3xbase36}`` suffix IS
-    ``crc32(trade_id) % 46656``: enumerate every known component (and the
+    after a rebuild. But the link's ``-x{base36}`` suffix IS
+    ``crc32(trade_id) % modulus``: enumerate every known component (and the
     component-less base) x seq 0..max_seq and return the UNIQUE candidate whose
     crc matches the suffix; None when there is no (or an ambiguous) match —
-    callers fall back to the lossy form."""
-    match = re.search(r"-x([0-9a-z]{3})$", str(link))
+    callers fall back to the lossy form.
+
+    exec-router-6: the suffix was widened from ``crc32%46656`` (3 base36 chars) to
+    ``crc32%1679616`` (4 base36 chars). The regex accepts BOTH widths so a legacy
+    3-char link written before the widening still recovers; the candidate suffix is
+    recomputed at the width carried by THIS link (modulus = 36**width) so old and new
+    links each round-trip against the id that produced them, never cross-matching widths."""
+    match = re.search(r"-x([0-9a-z]{3,4})$", str(link))
     if not match:
         return None
     want = match.group(1)
+    width = len(want)
+    modulus = 36 ** width
     comps = components if components is not None else _known_ensemble_component_tags()
     found: set[str] = set()
     for seq in range(max_seq + 1):
         base = _continuous_trade_id(strategy_id, symbol, int(signal_ts_ms), seq)
         for comp in (*comps, ""):
             candidate = f"{base}-{comp}-snipe" if comp else f"{base}-snipe"
-            suffix = _base36(zlib.crc32(candidate.encode("utf-8")) % 46656).rjust(3, "0")
+            suffix = _base36(zlib.crc32(candidate.encode("utf-8")) % modulus).rjust(width, "0")
             if suffix == want:
                 found.add(candidate)
     if len(found) == 1:
         return next(iter(found))
+    # sniper-4: an ambiguous (>=2 candidates collide on the crc suffix) or empty
+    # match silently returns None and ws_risk then books the lossy component-less
+    # {base}-snipe id — a DIFFERENT trade_id than the live {base}-{component}-snipe
+    # row, re-introducing the paper<->demo mis-pairing this function exists to
+    # prevent (audit 2026-06-12 round 3). The empty case is the routine "this link
+    # is for a different sleeve/symbol" non-event, but a 2+ collision is the silent
+    # landmine: surface it to the operator log so a post-rebuild mis-pairing is
+    # diagnosable instead of invisible. (The collision space was widened from 46656
+    # to 1.68M buckets in exec-router-6 — a 4-char suffix; legacy 3-char links still
+    # recover at their original width.)
+    if len(found) >= 2:
+        _logger.warning(
+            "snipe trade_id recovery AMBIGUOUS for link=%s symbol=%s signal_ts_ms=%s: "
+            "%d candidates collide on the crc suffix (width=%d, %s) — falling back to the "
+            "lossy component-less id, paper<->demo pairing may break",
+            link, symbol, signal_ts_ms, len(found), width, sorted(found),
+        )
     return None
 
 
@@ -1474,6 +1711,17 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
     )
 
 
+# exec-router-3: enforce the decode-routing invariant at import (config-load) instead of
+# leaving it as a documented-but-unenforced comment. A continuous ensemble component tag
+# beginning with "a" builds an ``lm-en-ca…`` link that decode_entry_order_link_id mis-classifies
+# as the ADDON sleeve (the "ca" prefix is tested before the generic "c"), silently mis-routing the
+# fill to the addon ledger with a garbled component_tag on a VPS rebuild. _known_ensemble_component_tags
+# enumerates every tag any profile can emit; assert_routable_component_tags raises here so an
+# "a"-prefixed tag fails loudly at module load rather than corrupting attribution later. Placed AFTER
+# apply_continuous_demo_profile (which _known_ensemble_component_tags drives per profile) is defined.
+assert_routable_component_tags(_known_ensemble_component_tags())
+
+
 def continuous_rebalance_rule(config: ContinuousDemoCycleConfig) -> ContinuousRebalanceRule:
     return ContinuousRebalanceRule(
         realized_vol_window_days=int(config.daily_rebalance_realized_vol_window_days),
@@ -1576,13 +1824,13 @@ def _open_continuous_trades(all_trades: pl.DataFrame, strategy_id: str) -> pl.Da
 
 
 def _finite_or_none(value: Any) -> float | None:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    if out != out or out in (float("inf"), float("-inf")):
-        return None
-    return out
+    """NaN/inf-guarded float coercion, None on missing/invalid (default=None variant).
+
+    code-quality-5: routes through the canonical ``_common.finite_float`` (same consolidation
+    reconciliation._float / ws_state_cache._float already adopted) so a future tightening of the
+    NaN/inf policy lives in ONE place. ``finite_float(value, default=None)`` is behavior-preserving:
+    None/unparseable -> None (old: float(None) raised TypeError -> None), NaN/+-inf -> None."""
+    return finite_float(value, default=None)
 
 
 def _continuous_rebalance_scale_state_from_cycles(
@@ -2537,6 +2785,13 @@ def _continuous_telegram_reason(
 ) -> str:
     """Material-event filter for the continuous per-cycle telegram — quiet cycles send nothing.
     Mirrors long_native_event_demo._long_telegram_reason."""
+    # reports-charts-1: a wallet-read failure makes resolve_snapshot_equity hand back the
+    # fixed $10,000 fallback (never None), so every cycle would otherwise silently report a
+    # constant balance as if the wallet were read — masking a private-REST outage (auth expiry,
+    # rate-limit ban, network) on the operator's only at-a-glance health view. Page the operator
+    # on a pure wallet outage even when no order activity fired this cycle.
+    if payload.get("wallet_error"):
+        return "continuous_wallet_error"
     # Submit failures live on ORDER rows, surfaced via payload counts: a failed
     # live entry/exit appends NO trade row, so the trade-row checks below never
     # fired for real venue rejects (audit 2026-06-12 round 3). The trade-row
@@ -2588,6 +2843,13 @@ def format_continuous_telegram_status_message(
     # read misstates the account on an operator-facing message (audit r3).
     equity = payload.get("equity_usdt")
     equity_text = f"${_f(equity):,.2f}" if equity is not None else "NA"
+    # reports-charts-1: on a wallet-read failure resolve_snapshot_equity returns the fixed
+    # $10,000 fallback (not None / not 0), so the equity print looks like a real successful
+    # read. Tag it as a fallback and surface the underlying error so the operator sees the
+    # outage instead of a falsely-steady balance (sizing also runs off this same fallback).
+    wallet_error = payload.get("wallet_error")
+    if wallet_error and equity is not None:
+        equity_text = f"{equity_text} (FALLBACK - wallet read failed)"
     lines = [
         "[Continuous sleeve] Bybit demo",
         f"reason={reason}",
@@ -2622,6 +2884,11 @@ def format_continuous_telegram_status_message(
         lines.append(
             f"submit errors: entries={error_counts[0]} exits={error_counts[1]} resizes={error_counts[2]}"
         )
+    # reports-charts-1: surface the wallet-read error verbatim so the operator can tell a
+    # private-REST outage from a genuinely steady balance (the equity line above is the
+    # masked $10,000 fallback when this is set).
+    if wallet_error:
+        lines.append(f"wallet_error={str(wallet_error)[:200]}")
     resizes = int(payload.get("rebalance_resizes") or 0)
     if resizes:
         lines.append(f"rebalance resizes: {resizes}")
@@ -2921,7 +3188,8 @@ def run_continuous_demo_cycle(
         sniper_orders: list[dict[str, Any]] = []
         if demo.sniper_enabled:
             snipe_fills, snipe_updates, snipe_exit_plans = reconcile_continuous_snipes(
-                all_trades, all_orders, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms)
+                all_trades, all_orders, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms,
+                account_equity_usdt=equity_usdt)
             if snipe_fills:
                 all_trades = _upsert_rows(all_trades, snipe_fills, key="trade_id")
                 if demo.submit_orders or demo.record_dry_run:
@@ -3040,9 +3308,16 @@ def run_continuous_demo_cycle(
                     for cand in cands_c:
                         if len(candidates) >= _eff_max:
                             break
+                        # cross-sleeve-3: stamp the COMPONENT-suffixed trade_id onto the
+                        # candidate so the cross-sleeve reservation (claim/release/closed
+                        # GC keys on cand['trade_id']) matches the executed trade row's id
+                        # (_execute_continuous_entries appends -{component}). The base id
+                        # left the reservation orphaned from the persisted row — a latent
+                        # leak the moment a closed_trade_ids GC matches real (suffixed) ids.
                         candidates.append({**cand, "component": comp_name,
                                            "component_weight": comp_weight,
-                                           "take_profit_pct": comp_tp})
+                                           "take_profit_pct": comp_tp,
+                                           "trade_id": f"{cand['trade_id']}-{comp_name}"})
             else:
                 picks = select_continuous_entries(
                     entry_state, held_symbols=held_symbols, cooldown_symbols=cooldown, open_count=open_count,
@@ -3111,7 +3386,7 @@ def run_continuous_demo_cycle(
             sniper_orders = _execute_sniper_placements(
                 exec_entries, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms,
                 strategy_id=strategy_id, price_by_symbol=price_by_symbol,
-                record_preflight=preflight_cb)
+                record_preflight=preflight_cb, contract_by_symbol=contract_by_symbol)
             if sniper_orders and (demo.submit_orders or demo.record_dry_run):
                 # Flush placement rows IMMEDIATELY (round 4): a crash between a
                 # successful snipe place_order and the end-of-cycle flush left a
@@ -3148,6 +3423,14 @@ def run_continuous_demo_cycle(
         post_trade_ledger = all_trades
         if exec_entries:
             post_trade_ledger = _upsert_rows(post_trade_ledger, exec_entries, key="trade_id")
+        # sizing-rebalance-3: snapshot the ledger BEFORE today's resizes are applied.
+        # The rebalance raw-return marks weight each position's prev->cur move by the qty
+        # held OVER that interval — which is the PRE-resize qty. Marking on the post-resize
+        # ledger weighted a rebalance-INCREASE day's move by qty_new (the added
+        # (qty_new-qty_old), opened at ~today's price, earned no prev->cur move), biasing the
+        # persisted rebalance_raw_return that feeds tomorrow's vol-target scale, momentum
+        # hurdle, and drawdown-gate equity. Mark on this snapshot so the weight is qty_old.
+        pre_resize_ledger = post_trade_ledger
         if demo.daily_rebalance_enabled and not rebalance_resize_checked:
             resize_plans = plan_continuous_rebalance_resizes(
                 _open_continuous_trades(post_trade_ledger, strategy_id).to_dicts(),
@@ -3182,7 +3465,7 @@ def run_continuous_demo_cycle(
         rebalance_fields: dict[str, Any] = {}
         if demo.daily_rebalance_enabled:
             rebalance_fields = _continuous_rebalance_cycle_fields(
-                post_trade_ledger,
+                pre_resize_ledger,
                 all_cycles,
                 price_by_symbol=price_by_symbol,
                 current_day_ts=cur_day_ts,
@@ -3233,6 +3516,12 @@ def run_continuous_demo_cycle(
             # never page a successful live entry (round 4 — telegram plane).
             "entries": len([r for r in exec_entries if r.get("status") == "open"]),
             "exits": len(exec_exits), "candidates": len(candidates), "equity_usdt": equity_usdt,
+            # reports-charts-1: a wallet-read failure makes resolve_snapshot_equity return the
+            # fixed $10,000 fallback (never None), so equity_usdt alone cannot tell the operator
+            # the read failed. Carry the wallet_error string into the cycle row + telegram payload
+            # so the notify reason filter pages on a pure wallet outage and the message tags the
+            # equity as a fallback. "" on a healthy read (snapshot.get returns "" from event_demo).
+            "wallet_error": snapshot.get("wallet_error") or "",
             # Sniper lifecycle visibility: a snipe FILL is a NEW live short on the account
             # and an error is a stuck/ghost resting order — both must reach the cycle row,
             # the journald summary and the telegram reason filter (audit 2026-06-12).

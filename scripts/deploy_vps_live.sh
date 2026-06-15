@@ -141,6 +141,22 @@ if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
   exit 1
 fi
 
+# DEFENSE-IN-DEPTH on the highest-stakes toggle (deploy-ci-6): the order-submitting
+# units (continuous-demo, long-demo, risk) run on the account this env file defines,
+# and demo-only operation otherwise depends solely on the per-process runtime guard
+# validate_order_submit_allowed(). Make the DEPLOY itself fail-closed: if a mis-edited
+# bybit-demo.env ever set REAL_MONEY truthy, refuse the deploy rather than restart live
+# order-submitting daemons against a real-money account. The strategy is NOT validated
+# for real money; promotion is operator-gated, never a deploy side effect.
+case "${REAL_MONEY:-}" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    echo "Refusing deploy: REAL_MONEY='${REAL_MONEY}' in /etc/liquidity-migration/bybit-demo.env." \
+         "This box deploys order-submitting demo units; real money is not validated and must not be" \
+         "enabled by a deploy. Fix the env file to demo (unset/false REAL_MONEY) and redeploy." >&2
+    exit 1
+    ;;
+esac
+
 # Sync every .service / .timer in deploy/systemd/ so any unit added
 # to the repo (e.g. demo-health, combined-book-report, future units)
 # auto-deploys instead of needing a one-off manual cp. The long
@@ -199,6 +215,21 @@ apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # --now schedules them immediately; subsequent deploys are idempotent.
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
+# deploy-env-timers-3: the paper unit hard-codes KLINES_FOLLOW_ROOT to the DEMO root,
+# so with CONTINUOUS_SLEEVE=off + CONTINUOUS_PAPER_SLEEVE=on the demo daemon stops, its
+# kline store stops advancing, and the paper shadow follows a FROZEN snapshot while the
+# rmom gate is rebuilt only from that frozen demo root. Documented-valid but degrades for
+# up to ~2 days while appearing healthy. Warn loudly at deploy time so the operator drops
+# the KLINES_FOLLOW_ROOT override (run the paper shadow on its own pool) rather than
+# discovering it only via the slower kline-staleness / rmom-staleness watchdogs.
+if ! sleeve_on "$CONTINUOUS_SLEEVE" && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
+  echo "WARN: CONTINUOUS_SLEEVE=off but CONTINUOUS_PAPER_SLEEVE=on — the paper shadow's" \
+       "KLINES_FOLLOW_ROOT still points at the now-FROZEN demo kline store" \
+       "(data/bybit-continuous-demo-event), so paper evidence runs on stale market data" \
+       "for up to ~2 days while looking healthy. Drop the KLINES_FOLLOW_ROOT line from" \
+       "deploy/systemd/liquidity-migration-bybit-continuous-paper.service so the shadow" \
+       "streams its own klines, then redeploy." >&2
+fi
 # Daily refresh of the continuous-fade rmom gate + the gate seed run when either the
 # continuous demo sleeve or its no-order paper evidence collector is on.
 if continuous_rmom_refresh_on; then
@@ -236,7 +267,54 @@ else
   echo "kill-switch: continuous demo+paper sleeves off -> skipping rmom timer + gate seed." >&2
   apply_timer_enable off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 fi
-apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
+# Hedge timer gating (deploy-env-timers-1): the daily BTC/ETH hedge long is booked
+# with stop_price=take_profit_price=planned_exit_ts_ms=0, so the always-on risk service
+# TRACKS but is contractually FORBIDDEN from force-exiting it — the daily hedge timer is
+# its ONLY lifecycle manager. Unconditionally disabling the timer when CONTINUOUS_SLEEVE
+# goes off (the documented retirement action) would ORPHAN any open hedge leg: never
+# resized/closed (manager dead), never stopped (stopless by contract), never monitored
+# (the watchdog only tracks the hedge units while continuous is on). So when continuous
+# is OFF we first check the hedge addon ledger: if it holds an open hedge row, keep the
+# timer ENABLED so the daily run can trim it to flat (its reduce-only legs proceed even
+# when warmstart is stale), and page loudly; only disable once the leg is flat.
+# _hedge_timer_state is the intended hedge-timer state; the verify block below reuses
+# it so apply and verify never disagree (a kept-open timer must not fail verify_timer off).
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  _hedge_timer_state=on
+else
+  _hedge_open="$(HEDGE_ROOT="data/bybit-continuous-hedge-event" "$PYTHON" - <<'PY' 2>/dev/null || echo unknown
+import os
+from liquidity_migration.storage import read_dataset
+try:
+    t = read_dataset(os.environ["HEDGE_ROOT"], "continuous_fade_demo_trades")
+    if t.is_empty() or "status" not in t.columns:
+        print(0)
+    else:
+        print(int(t.filter(t["status"] == "open").height))
+except Exception:
+    print("unknown")
+PY
+)"
+  if [ "${_hedge_open}" = "unknown" ]; then
+    # Could not read the ledger — fail safe: do NOT auto-disable a timer that might be
+    # the only manager of an open live position. Keep it enabled and page the operator.
+    echo "CRITICAL: CONTINUOUS_SLEEVE=off but the hedge addon ledger" \
+         "(data/bybit-continuous-hedge-event) could not be read — KEEPING the hedge timer" \
+         "enabled (fail-safe) so a possibly-open, stopless hedge long is not orphaned." \
+         "Inspect the addon ledger and flatten the hedge manually before retiring continuous." >&2
+    _hedge_timer_state=on
+  elif [ "${_hedge_open:-0}" -gt 0 ]; then
+    echo "CRITICAL: CONTINUOUS_SLEEVE=off but the hedge addon ledger holds ${_hedge_open}" \
+         "OPEN hedge row(s). The hedge long is stopless (risk service tracks but never exits it)" \
+         "and the daily hedge timer is its ONLY manager — KEEPING the timer enabled so the daily" \
+         "run can trim it to flat. It will auto-disable on the next deploy once the leg is flat." >&2
+    _hedge_timer_state=on
+  else
+    echo "hedge leg flat (no open rows) -> disabling the hedge timer with continuous off." >&2
+    _hedge_timer_state=off
+  fi
+fi
+apply_timer_enable "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS
 
 # --- restart: only the ON sleeves (off sleeves were disable --now'd above); risk always. ---
 # Long/continuous share the liquidity_migration package with the short side, so any Python
@@ -253,6 +331,15 @@ fi
 # Risk always runs; each sleeve is verified per its toggle (on => active+enabled, off => NOT active).
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
+# The liquidation collector is always-on (enabled+restarted above). Verify it the
+# SAME way as the risk service so a deployed code change that crashes the collector
+# on startup FAILS the deploy loud — otherwise a broken collector still reaches
+# 'deploy-verify-ok' and the success Telegram, and the data loss (unbuyable forward
+# liquidation history) is only caught out-of-band by the ~3-minute watchdog
+# (deploy-ci-3). is-active catches a crash-loop reaching 'failed'; is-enabled catches
+# "we never enabled it".
+systemctl is-active --quiet liquidity-migration-liquidation-collector.service
+systemctl is-enabled --quiet liquidity-migration-liquidation-collector.service
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
@@ -261,7 +348,11 @@ if continuous_rmom_refresh_on; then
 else
   verify_timer off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 fi
-verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
+# Verify the hedge timer against the SAME state the apply block chose (which keeps it
+# enabled when continuous is off but an open hedge leg still needs winding down —
+# deploy-env-timers-1), not raw CONTINUOUS_SLEEVE, so a deliberately-kept-open timer
+# does not fail verify.
+verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
 # so deploys can't silently leave the watchdog or daily report off. (The

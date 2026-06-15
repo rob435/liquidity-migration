@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -18,7 +17,8 @@ from .config import ResearchConfig
 from .downloaders import _normalize_instruments, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
-from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, PENDING_ORDER_STATUSES
+from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, finite_float
+from ._common import PENDING_ORDER_STATUSES  # noqa: F401  re-exported: tests + the pending-order guard constant below consume it via event_demo
 # orderLinkId encode/decode live in order_link_id.py (cohesive home); re-exported here so
 # existing `from .event_demo import _order_link_id` callers (3 sleeves, ws_risk, tests) are unaffected.
 from .order_link_id import _base36, _order_link_id, _risk_order_link_id, _split_order_link_id, decode_entry_order_link_id, is_exit_link  # noqa: F401
@@ -405,21 +405,32 @@ def run_event_risk_cycle(
             "ledger_position_summary": ledger_position_summary,
             "report_dir": str(report_dir),
         }
-        telegram_sent, telegram_error = _maybe_notify(payload, enabled=risk.telegram)
-        cycle_row["telegram_sent"] = telegram_sent
-        cycle_row["telegram_error"] = telegram_error
-        payload["cycle"] = cycle_row
         # Partition by date: event_demo_cycles is append-only telemetry, never
         # read back inside a cycle. With partition_by=() the whole dataset was
         # read + rewritten every cycle, so the per-cycle write cost grew without
         # bound. Date partitioning caps each write to the current day's rows.
+        # The cycle row is persisted with its telegram_sent=False/telegram_error=""
+        # defaults; the notify runs OUTSIDE this lock (below) so a slow Telegram
+        # RTT can never hold event_demo_ledger.lock against a co-located writer
+        # (lock-held-I/O class, mirroring continuous_demo/long_native — audit
+        # 2026-06-14, telegram-alert-2). The richer report JSON below carries the
+        # post-notify telegram outcome; the cycles dataset keeps its schema.
         write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=("date",))
-        report_path = report_dir / f"event_risk_cycle_{cycle_id}.json"
-        report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-        (report_dir / "latest_event_risk_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-        (report_dir / "latest_event_risk_cycle.md").write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
-        _prune_cycle_reports(report_dir, prefix="event_risk_cycle_", keep_days=7, now_ms=cycle_now_ms)
-        return payload
+
+    # Telegram send is intentionally OUTSIDE the ledger lock: send_telegram_message
+    # blocks on a urlopen up to its 10s timeout (plus a 429 retry sleep), and the
+    # event_demo_ledger.lock is shared with other event_demo writers — holding it
+    # through the round-trip would stall any co-located ledger writer.
+    telegram_sent, telegram_error = _maybe_notify(payload, enabled=risk.telegram)
+    cycle_row["telegram_sent"] = telegram_sent
+    cycle_row["telegram_error"] = telegram_error
+    payload["cycle"] = cycle_row
+    report_path = report_dir / f"event_risk_cycle_{cycle_id}.json"
+    report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    (report_dir / "latest_event_risk_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    (report_dir / "latest_event_risk_cycle.md").write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
+    _prune_cycle_reports(report_dir, prefix="event_risk_cycle_", keep_days=7, now_ms=cycle_now_ms)
+    return payload
 
 
 def build_event_risk_private_client(config: ResearchConfig, risk: EventRiskCycleConfig) -> BybitPrivateClient | None:
@@ -467,9 +478,13 @@ def build_position_pnl_snapshot(positions: list[dict[str, Any]]) -> list[dict[st
             continue
         side = _normalized_position_side(position.get("side"))
         avg_price = _first_float(position, ("avgPrice", "entryPrice", "sessionAvgPrice"))
-        mark_price = _first_float(position, ("markPrice", "liqPrice"))
+        # audit2c: never mark at liqPrice (a wildly-off PnL); prefer markPrice
+        # then lastPrice then avgPrice, and leave the mark/unrealized fields null
+        # when no genuine mark is available rather than substituting liqPrice.
+        mark_price = _first_float(position, ("markPrice", "lastPrice", "avgPrice"))
+        have_mark = mark_price > 0.0
         position_value = _first_float(position, ("positionValue", "positionBalance"))
-        if position_value <= 0.0 and mark_price > 0.0:
+        if position_value <= 0.0 and have_mark:
             position_value = size * mark_price
         unrealized_pnl = _first_float(position, ("unrealisedPnl", "unrealizedPnl"))
         pnl_pct = unrealized_pnl / position_value if position_value > 0.0 else 0.0
@@ -479,14 +494,15 @@ def build_position_pnl_snapshot(positions: list[dict[str, Any]]) -> list[dict[st
                 "side": side,
                 "qty": size,
                 "avg_price": avg_price,
-                "mark_price": mark_price,
+                "mark_price": mark_price if have_mark else None,
                 "position_value_usdt": position_value,
-                "unrealized_pnl_usdt": unrealized_pnl,
-                "pnl_pct": pnl_pct,
+                "unrealized_pnl_usdt": unrealized_pnl if have_mark else None,
+                "pnl_pct": pnl_pct if have_mark else None,
                 "leverage": _first_float(position, ("leverage",)),
             }
         )
-    return sorted(rows, key=lambda row: abs(float(row["unrealized_pnl_usdt"])), reverse=True)
+    # audit2c: null uPnL (no genuine mark) sorts last via 0.0, never a TypeError.
+    return sorted(rows, key=lambda row: abs(_float(row["unrealized_pnl_usdt"])), reverse=True)
 
 
 def build_ledger_position_pnl_snapshot(
@@ -731,32 +747,6 @@ def _split_qty_for_max_order_size(
 
 
 
-
-
-
-
-def _pending_order_refs(orders: pl.DataFrame, *, reduce_only: bool, now_ms: int) -> tuple[set[str], set[str]]:
-    trade_ids: set[str] = set()
-    symbols: set[str] = set()
-    if orders.is_empty():
-        return trade_ids, symbols
-    for row in orders.to_dicts():
-        if _bool(row.get("reduce_only")) != reduce_only:
-            continue
-        if str(row.get("status", "")) not in PENDING_ORDER_STATUSES:
-            continue
-        ts_ms = int(row.get("ts_ms") or 0)
-        if ts_ms > 0 and now_ms - ts_ms > PENDING_ORDER_GUARD_MS:
-            continue
-        if reduce_only and not str(row.get("exit_reason", "")):
-            continue
-        trade_id = str(row.get("trade_id", ""))
-        symbol = str(row.get("symbol", ""))
-        if trade_id:
-            trade_ids.add(trade_id)
-        if symbol:
-            symbols.add(symbol)
-    return trade_ids, symbols
 
 
 
@@ -1383,11 +1373,9 @@ def _max_int(frame: pl.DataFrame, column: str) -> int:
 
 
 def _float(value: Any) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
+    # Delegates to the finite-guarded _common.finite_float (quality-dup / code-quality-5):
+    # one NaN/inf coercion policy shared with reconciliation._float and ws_state_cache._float.
+    return finite_float(value, default=0.0) or 0.0
 
 
 def _ratio_or_zero(numerator: Any, denominator: Any) -> float:

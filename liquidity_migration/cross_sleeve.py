@@ -55,7 +55,14 @@ SHARED_ACCOUNT_ROOT_DIRNAME = "bybit-demo-event"
 # reconcile pass; short enough that a crashed claimant never wedges a symbol.
 RESERVATION_TTL_MS = 180_000
 
-VALID_SLEEVES = ("short", "long", "continuous")
+# The sleeves that may hold a budget share / be IM-clamped. MUST stay in sync with the
+# names ws_risk._active_sleeves() can emit and with the sleeve tag the live books write to
+# the ledger (continuous_demo tags its add-on trades sleeve="continuous_addon"). Omitting a
+# routed sleeve here is silently unsafe: equal_split_budget drops it from the denominator
+# (the surviving sleeves' shares inflate and over-commit the shared account) while
+# compute_im_used still counts its IM and clamp_max_new_entries never throttles it
+# (budget_for is None). CS cross-sleeve-1.
+VALID_SLEEVES = ("short", "long", "continuous", "continuous_addon")
 
 
 class _Preserve:
@@ -155,7 +162,12 @@ def _loads_list(value: Any) -> list[dict[str, Any]]:
 
 
 def _loads_budget(value: Any) -> dict[str, float] | None:
-    """Budget split decodes to None (= no clamp) when absent/empty, else a dict."""
+    """Budget split decodes to None (= no clamp) when absent/empty, else a dict.
+
+    CS cross-sleeve-5: an empty dict ``{}`` is the canonical "no sleeves budgeted" case
+    (``equal_split_budget([])``), which means exactly "no clamp" — i.e. None. ``encode_control_row``
+    normalizes ``{}`` to the empty string on write so the round-trip is symmetric (write {} -> read
+    None), and a stale ``'{}'`` persisted by an older writer still decodes to None here."""
     if value is None or value == "":
         return None
     d = _loads_dict(value)
@@ -181,9 +193,13 @@ def encode_control_row(state: CrossSleeveAccountState) -> dict[str, Any]:
         "equity_usdt": float(state.equity_usdt),
         "account_im_used_pct": float(state.account_im_used_pct),
         "im_used_pct_by_sleeve": json.dumps(state.im_used_pct_by_sleeve, sort_keys=True),
+        # CS cross-sleeve-5: a None OR empty-dict budget both mean "no clamp", so both write
+        # the empty string. This keeps the write/read round-trip symmetric — without it an
+        # explicit {} persisted as '{}' would read back as None (write({}) != read()), a silent
+        # normalization that surprises an equality-based audit. {} canonicalizes to None.
         "margin_budget_pct_by_sleeve": (
             json.dumps(state.margin_budget_pct_by_sleeve, sort_keys=True)
-            if state.margin_budget_pct_by_sleeve is not None
+            if state.margin_budget_pct_by_sleeve
             else ""
         ),
         "reservations": json.dumps(state.reservations),
@@ -295,7 +311,16 @@ def seed_margin_budget(
 ) -> None:
     """Operator seed of the pre-registered IM split — UNDER-LOCK RMW that sets ONLY the
     budget split and preserves ws_risk's IM + the sleeves' reservations. Pass None to
-    clear the clamp (back to legacy no-op)."""
+    clear the clamp (back to legacy no-op).
+
+    CS cross-sleeve-4: this is the INTENDED operator seam for turning the budget clamp on.
+    There is deliberately no CLI/daemon caller yet — wiring one is gated on a pre-registered,
+    sleeve-WEIGHTED allocation decision (AGENTS.md parameter pre-registration; an equal 1/n
+    split would starve the over-subscribed sleeves, see ws_risk._refresh_cross_sleeve_account_state).
+    Unlike the per-cycle writers (write_account_state / claim / release) this is NOT wrapped in
+    swallow-and-log: a one-shot operator action MUST fail loud so the operator sees a failed seed,
+    whereas a per-reconcile write must never break the loop. The divergent error contract is
+    therefore correct by design, not an oversight."""
     root = ensure_data_root(account_root)
     with exclusive_file_lock(dataset_lock_path(root, CROSS_SLEEVE_DATASET), stale_seconds=21_600, poll_seconds=0.01):
         prior = _read_state_locked(root)
@@ -397,25 +422,93 @@ def partition_claimable(
     candidate's symbol (dict with 'symbol' + 'trade_id') through the shared registry and
     return (granted_candidates, skipped_count). A candidate whose symbol is taken by a
     sibling (active foreign reservation OR live venue position) is dropped. Fail-open:
-    claim_symbol_reservation returns True on any error / no-writer, so this never blocks a
-    legitimate entry. Call ONLY on a real submit (dry-run/paper must not reserve)."""
-    granted: list[dict[str, Any]] = []
-    skipped = 0
-    for cand in candidates:
-        ok = claim_symbol_reservation(
-            account_root,
-            symbol=str(cand.get("symbol", "")),
-            sleeve=sleeve,
-            trade_id=str(cand.get("trade_id", "")),
-            now_ms=now_ms,
-            live_position_symbols=live_position_symbols,
-            ttl_ms=ttl_ms,
-        )
-        if ok:
-            granted.append(cand)
-        else:
-            skipped += 1
+    on any error / no-writer the whole batch is GRANTED, so this never blocks a legitimate
+    entry. Call ONLY on a real submit (dry-run/paper must not reserve).
+
+    CS cross-sleeve-6: resolves ALL candidates against one state snapshot under a SINGLE
+    lock+read+write cycle (was N lock/read/fsync/rename cycles, one per candidate) so the
+    submit hot path does not accrue per-candidate fsync churn when many symbols (or the
+    4-component ensemble re-claiming a symbol across components) fire in one cycle."""
+    granted, skipped, _ = claim_symbols_reservation(
+        account_root,
+        candidates,
+        sleeve=sleeve,
+        now_ms=now_ms,
+        live_position_symbols=live_position_symbols,
+        ttl_ms=ttl_ms,
+    )
     return granted, skipped
+
+
+def claim_symbols_reservation(
+    account_root: str | Path,
+    candidates: list[dict[str, Any]],
+    *,
+    sleeve: str,
+    now_ms: int,
+    live_position_symbols: set[str] | None = None,
+    ttl_ms: int = RESERVATION_TTL_MS,
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+    """long-sleeve-6 BATCH claim: take the control-row dataset lock ONCE, read the state
+    ONCE, resolve every candidate against that single in-memory snapshot (granting/rejecting
+    against reservations as they accumulate so an own-sleeve re-claim within the batch is
+    idempotent and a sibling/live-position conflict still rejects), append all granted
+    reservations, and write ONCE. Returns (granted_candidates, skipped_count, denied).
+
+    Same per-candidate contract as claim_symbol_reservation: a candidate whose symbol is in
+    a live venue position OR reserved by a DIFFERENT sleeve is rejected; the sleeve's own
+    symbol is a re-claim (grant). Safe-by-default: no control dataset yet -> GRANT all (legacy
+    venue-snapshot exclusion remains); ANY error -> GRANT all (fail-open) + a warning, so a bug
+    here can never silently halt the live book. An empty candidate list never takes the lock."""
+    if not candidates:
+        return [], 0, []
+    live = live_position_symbols or set()
+    granted: list[dict[str, Any]] = []
+    denied: list[dict[str, Any]] = []
+    try:
+        root = ensure_data_root(account_root)
+        with exclusive_file_lock(dataset_lock_path(root, CROSS_SLEEVE_DATASET), stale_seconds=21_600, poll_seconds=0.01):
+            path = root / CROSS_SLEEVE_DATASET
+            if not (path.exists() and sorted(path.glob("**/*.parquet"))):
+                return list(candidates), 0, []  # no writer yet -> legacy exclusion only
+            state = _read_state_locked(root)
+            # Evolve ONE reservation set across the batch (active only) so intra-batch
+            # re-claims and conflicts resolve exactly as N sequential single-claims would.
+            kept = list(state.active_reservations(now_ms=now_ms))
+            for cand in candidates:
+                symbol = str(cand.get("symbol", ""))
+                trade_id = str(cand.get("trade_id", ""))
+                taken = symbol in live or any(
+                    str(r.get("symbol")) == symbol and str(r.get("sleeve")) != sleeve
+                    for r in kept
+                )
+                if taken:
+                    denied.append(cand)
+                    continue
+                # own re-claim: drop this sleeve's prior row for the symbol, then re-append
+                kept = [
+                    r for r in kept
+                    if not (str(r.get("symbol")) == symbol and str(r.get("sleeve")) == sleeve)
+                ]
+                kept.append({
+                    "symbol": symbol, "sleeve": sleeve, "trade_id": trade_id,
+                    "reserved_at_ms": int(now_ms), "ttl_ms": int(ttl_ms),
+                })
+                granted.append(cand)
+            if granted:
+                _write_state_locked(root, CrossSleeveAccountState(
+                    account_key=state.account_key,
+                    equity_usdt=state.equity_usdt,
+                    account_im_used_pct=state.account_im_used_pct,
+                    im_used_pct_by_sleeve=state.im_used_pct_by_sleeve,
+                    margin_budget_pct_by_sleeve=state.margin_budget_pct_by_sleeve,
+                    reservations=kept,
+                    updated_at_ms=max(state.updated_at_ms + 1, int(now_ms)),  # CS-1: monotonic last-writer-wins
+                ))
+            return granted, len(denied), denied
+    except Exception as exc:  # noqa: BLE001 - reservation must never halt the live book
+        _logger.warning("cross_sleeve batch claim failed for %s (%d cands), failing open: %s", sleeve, len(candidates), exc)
+        return list(candidates), 0, []
 
 
 def claim_symbol_reservation(
@@ -430,7 +523,8 @@ def claim_symbol_reservation(
 ) -> bool:
     """long-sleeve-6: atomically claim `symbol` for `sleeve` under the control-row
     dataset lock. Returns True if granted (caller may submit), False if TAKEN (active
-    foreign reservation OR a live venue position).
+    foreign reservation OR a live venue position). Thin single-candidate wrapper over
+    claim_symbols_reservation for the long sleeve's sequential path.
 
     Atomicity: takes the dataset lock ONCE and does the whole read-modify-write inside
     it, so two processes waking in the same ~60s window are SERIALIZED — the loser sees
@@ -438,39 +532,15 @@ def claim_symbol_reservation(
     venue snapshot cannot. Safe-by-default: no control dataset yet (ws_risk not deployed)
     -> GRANT (legacy venue-snapshot exclusion remains); any error -> GRANT (fail-open) +
     a warning, so a bug here can never silently halt the live book."""
-    live = live_position_symbols or set()
-    try:
-        root = ensure_data_root(account_root)
-        with exclusive_file_lock(dataset_lock_path(root, CROSS_SLEEVE_DATASET), stale_seconds=21_600, poll_seconds=0.01):
-            path = root / CROSS_SLEEVE_DATASET
-            if not (path.exists() and sorted(path.glob("**/*.parquet"))):
-                return True  # no writer yet -> legacy exclusion only
-            state = _read_state_locked(root)
-            if symbol in live:
-                return False
-            if state.symbol_reserved_by_other(symbol, sleeve=sleeve, now_ms=now_ms):
-                return False
-            kept = [
-                r for r in state.active_reservations(now_ms=now_ms)
-                if not (str(r.get("symbol")) == symbol and str(r.get("sleeve")) == sleeve)
-            ]
-            kept.append({
-                "symbol": symbol, "sleeve": sleeve, "trade_id": trade_id,
-                "reserved_at_ms": int(now_ms), "ttl_ms": int(ttl_ms),
-            })
-            _write_state_locked(root, CrossSleeveAccountState(
-                account_key=state.account_key,
-                equity_usdt=state.equity_usdt,
-                account_im_used_pct=state.account_im_used_pct,
-                im_used_pct_by_sleeve=state.im_used_pct_by_sleeve,
-                margin_budget_pct_by_sleeve=state.margin_budget_pct_by_sleeve,
-                reservations=kept,
-                updated_at_ms=max(state.updated_at_ms + 1, int(now_ms)),  # CS-1: monotonic last-writer-wins
-            ))
-            return True
-    except Exception as exc:  # noqa: BLE001 - reservation must never halt the live book
-        _logger.warning("cross_sleeve claim failed for %s/%s, failing open: %s", sleeve, symbol, exc)
-        return True
+    granted, _, _ = claim_symbols_reservation(
+        account_root,
+        [{"symbol": symbol, "trade_id": trade_id}],
+        sleeve=sleeve,
+        now_ms=now_ms,
+        live_position_symbols=live_position_symbols,
+        ttl_ms=ttl_ms,
+    )
+    return bool(granted)
 
 
 def release_symbol_reservation(

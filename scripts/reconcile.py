@@ -209,29 +209,40 @@ def refresh_rmom(step: Step, root: str, today: dt.date) -> None:
     step.run(_script("precompute_residual_momentum.py", "--root", root, "--start", start, "--end", end))
 
 
-def reconcile_long(step: Step, *, paper: str, demo: str) -> str:
+def reconcile_long(step: Step, *, paper: str, demo: str) -> tuple[str, bool]:
     step.banner("Reconcile LONG: paper <-> demo")
-    _, out = step.run_capture(_cli("reconcile-long-paper-demo", "--paper-data-root", paper, "--demo-data-root", demo))
-    return _first_summary_line(out, "long paper-demo reconciliation")
+    rc, out = step.run_capture(_cli("reconcile-long-paper-demo", "--paper-data-root", paper, "--demo-data-root", demo))
+    return _summarize_leg(out, "long paper-demo reconciliation", rc)
 
 
-def reconcile_continuous(step: Step, *, paper: str, demo: str) -> tuple[str, str]:
+def reconcile_continuous(step: Step, *, paper: str, demo: str) -> tuple[str, bool]:
     step.banner("Reconcile CONTINUOUS: paper-readiness + signal-consistency")
-    _, out = step.run_capture(
+    rc_pd, out = step.run_capture(
         _cli("continuous-forward-readiness", "--paper-data-root", paper, "--demo-data-root", demo, "--paper-only")
     )
-    pd_summary = _first_summary_line(out, "continuous forward readiness")
+    pd_summary, pd_ok = _summarize_leg(out, "continuous forward readiness", rc_pd)
     # Signal-consistency: are the no-order paper entries genuine engine D9 picks?
-    _, sig = step.run_capture(_script("continuous_demo_signal_check.py", "--root", paper))
-    sig_summary = _first_summary_line(sig, "SUMMARY:")
-    return pd_summary, sig_summary
+    rc_sig, sig = step.run_capture(_script("continuous_demo_signal_check.py", "--root", paper))
+    sig_summary, sig_ok = _summarize_leg(sig, "SUMMARY:", rc_sig)
+    return f"{pd_summary}  ||  signal: {sig_summary}", (pd_ok and sig_ok)
 
 
-def _first_summary_line(out: str, needle: str) -> str:
-    for ln in out.splitlines():
-        if needle in ln:
-            return ln.strip()
-    return "(no output)"
+def _summarize_leg(out: str, needle: str, rc: int) -> tuple[str, bool]:
+    """One-line summary for a reconcile leg + whether it passed.
+
+    A leg passes only when it exited 0 AND printed its summary line. A nonzero
+    exit (a readiness gate failing, or a crash before the summary — e.g. the
+    continuous signal-check raising SystemExit on a missing WS kline store) is
+    rendered as an explicit FAILED marker rather than the benign '(no output)',
+    so a crashed leg is never indistinguishable from a clean run-with-no-pairs
+    in the unified headline (reconciliation-3, reconciliation-5).
+    """
+    line = next((ln.strip() for ln in out.splitlines() if needle in ln), None)
+    if rc != 0:
+        return f"⚠️ FAILED (rc={rc}): {line or '(no summary line)'}", False
+    if line is None:
+        return "⚠️ FAILED (rc=0 but no summary line printed)", False
+    return line, True
 
 
 # ----------------------------------------------------------------------------- main
@@ -276,24 +287,34 @@ def main() -> int:
 
     # 3. Per-sleeve reconcile. (The continuous signal-check uses the pulled
     # live-root rmom panel, so a continuous-only run needs no research provisioning.)
+    # Track each sleeve's pass/fail so the wrapper exit code is a machine-checkable
+    # tripwire — a failed readiness gate or a crashed leg must NOT exit 0
+    # (reconciliation-3).
     summary: dict[str, str] = {}
+    ok: dict[str, bool] = {}
     if "long" in sleeves:
         lp = SLEEVES["long"]["paper"][1]  # type: ignore[index]
         ld = SLEEVES["long"]["demo"][1]  # type: ignore[index]
-        summary["long"] = reconcile_long(step, paper=lp, demo=ld)
+        summary["long"], ok["long"] = reconcile_long(step, paper=lp, demo=ld)
     if "continuous" in sleeves:
         cp = SLEEVES["continuous"]["paper"][1]  # type: ignore[index]
         cd = SLEEVES["continuous"]["demo"][1]  # type: ignore[index]
-        pd_sum, sig_sum = reconcile_continuous(step, paper=cp, demo=cd)
-        summary["continuous"] = f"{pd_sum}  ||  signal: {sig_sum}"
+        summary["continuous"], ok["continuous"] = reconcile_continuous(step, paper=cp, demo=cd)
 
-    # 4. Unified headline.
-    if not args.dry_run:
-        print(f"\n{'=' * 72}\nRECONCILIATION SUMMARY — SELECTED SLEEVES\n{'=' * 72}")
-        for s in sleeves:
-            print(f"\n## {SLEEVES[s]['label']}")
-            print(f"  {summary.get(s, '(skipped)')}")
-        print(f"\nReports under: {REPO / 'data' / 'reconcile'}")
+    # 4. Unified headline. Dry-run never actually ran a leg, so it has no pass/fail
+    # signal — it always succeeds (it only echoes commands).
+    if args.dry_run:
+        print("\n✅ done.")
+        return 0
+    print(f"\n{'=' * 72}\nRECONCILIATION SUMMARY — SELECTED SLEEVES\n{'=' * 72}")
+    for s in sleeves:
+        print(f"\n## {SLEEVES[s]['label']}")
+        print(f"  {summary.get(s, '(skipped)')}")
+    print(f"\nReports under: {REPO / 'data' / 'reconcile'}")
+    failed = [s for s in sleeves if not ok.get(s, False)]
+    if failed:
+        print(f"\n❌ RECONCILE FAILED — sleeve(s) with a failed/crashed leg: {', '.join(failed)}")
+        return 1
     print("\n✅ done.")
     return 0
 

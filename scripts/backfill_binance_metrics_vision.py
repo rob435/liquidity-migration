@@ -12,8 +12,13 @@ Mechanics (resume-safe):
   2. per symbol, daily zips data/futures/um/daily/metrics/{S}/{S}-metrics-{d}.zip
      (404 = no-metrics day, normal for pre-listing/delisted tails);
   3. one parquet per symbol under <root>/binance_usdm_metrics_5m/ — symbols with
-     an existing parquet are SKIPPED, so re-runs resume;
-  4. _manifest.json records per-symbol row counts + 404 days for the audit.
+     a COMPLETE existing parquet are SKIPPED, so re-runs resume; an incomplete
+     symbol (a prior transient outage) is re-fetched and READ-MERGED onto its
+     existing rows (no clobber) so this shared canonical root is never silently
+     truncated (audit backfill-writers-1/2). Each parquet carries a self-describing
+     `coverage` column ('full' here vs 'event_anchored' from the event-anchored arm);
+  4. _manifest.json records per-symbol row counts, 404 days, transient_fail count,
+     complete flag, and coverage for the audit.
 
     POLARS_MAX_THREADS=4 .venv/bin/python scripts/backfill_binance_metrics_vision.py \
         [--root ~/SHARED_DATA/binance_full_pit] [--start 2023-01-01] [--workers 12] \
@@ -39,6 +44,15 @@ sys.path.insert(0, str(REPO))
 import polars as pl  # noqa: E402
 
 VISION = "https://data.binance.vision/data/futures/um/daily/metrics/{s}/{s}-metrics-{d}.zip"
+
+# Sentinel for a TRANSIENT day failure (exhausted retries on a 5xx / DNS / connection
+# error), as distinct from a genuine 404 ("no metrics this day", a normal pre-listing/
+# delisted tail). A transient day must NOT be frozen into a permanent empty marker the
+# resume guard treats as complete — that turns an outage into silent zero coverage,
+# violating data_roots.md's "absence == not-downloaded, never no-data" invariant
+# (audit backfill-writers-2).
+_TRANSIENT_DAY = object()
+
 NUM_COLS = [
     "sum_open_interest",
     "sum_open_interest_value",
@@ -96,12 +110,16 @@ def _fetch(url: str, timeout: int = 30) -> bytes | None:
     return b"__RETRY__"
 
 
-def _day_rows(symbol: str, day: str) -> list[dict] | None:
+def _day_rows(symbol: str, day: str) -> list[dict] | None | object:
+    """Rows for one symbol-day. Returns ``None`` for a genuine 404 / empty / bad zip
+    (a real no-data day) and the ``_TRANSIENT_DAY`` sentinel when the fetch failed
+    transiently (exhausted retries) — the caller must treat these differently so a
+    transient outage is never frozen as a permanent no-data marker."""
     blob = _fetch(VISION.format(s=symbol, d=day))
     if blob == b"__RETRY__":
         blob = _fetch(VISION.format(s=symbol, d=day), timeout=60)
         if blob == b"__RETRY__":
-            return None
+            return _TRANSIENT_DAY
     if not blob:
         return None
     rows: list[dict] = []
@@ -122,27 +140,90 @@ def _day_rows(symbol: str, day: str) -> list[dict] | None:
     return rows
 
 
+def _stamp_coverage(df: pl.DataFrame, coverage: str) -> pl.DataFrame:
+    """Stamp a self-describing ``coverage`` column ('full' | 'event_anchored') onto a
+    per-symbol frame so the parquet records its own coverage scope on disk, rather than
+    relying on a side manifest that can drift from the file (audit backfill-writers-1)."""
+    return df.with_columns(pl.lit(coverage, dtype=pl.String).alias("coverage"))
+
+
+def _merge_with_existing(df: pl.DataFrame, path: Path) -> pl.DataFrame:
+    """Concat ``df`` with the rows already on disk at ``path`` (if any), de-duplicating on
+    (symbol, ts_ms) and keeping the LAST occurrence so freshly-fetched/corrected rows
+    supersede stale ones. An absent file or an empty ``.touch()`` marker (a genuine
+    no-data symbol from a prior pass) contributes no rows. Any pre-existing ``coverage``
+    column is dropped before concat so the caller can re-stamp it uniformly; column order
+    is otherwise preserved so the on-disk schema is stable (audit backfill-writers-1)."""
+    if not path.exists() or path.stat().st_size == 0:
+        return df
+    try:
+        prior = pl.read_parquet(path)
+    except Exception:
+        # Unreadable / non-parquet marker — treat as no prior rows rather than crashing
+        # the whole symbol; the fresh rows are still written.
+        return df
+    if prior.height == 0:
+        return df
+    if "coverage" in prior.columns:
+        prior = prior.drop("coverage")
+    prior = prior.select([c for c in df.columns if c in prior.columns])
+    return (
+        pl.concat([prior, df], how="vertical_relaxed")
+        .unique(["symbol", "ts_ms"], keep="last")
+        .sort("ts_ms")
+    )
+
+
 def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -> dict:
     rows: list[dict] = []
-    miss = 0
+    miss = 0          # genuine 404 / no-data days
+    transient = 0     # transient fetch failures (NOT no-data)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(_day_rows, symbol, d): d for d in days}
         for fut in as_completed(futs):
             r = fut.result()
-            if r is None:
+            if r is _TRANSIENT_DAY:
+                transient += 1
+            elif r is None:
                 miss += 1
             else:
                 rows.extend(r)
+    # A symbol is COMPLETE only when every non-data day was a genuine 404; any
+    # transient failure means its coverage is unknown and it must be re-runnable
+    # (audit backfill-writers-2). The resume guard in main() skips a symbol only
+    # when complete, so an incomplete symbol is retried on the next run.
+    complete = transient == 0
     if rows:
         schema = {"create_time": pl.String, "symbol": pl.String, **{c: pl.Float64 for c in NUM_COLS}}
         df = pl.DataFrame(rows, schema=schema).with_columns(
             pl.col("create_time").str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False)
             .dt.replace_time_zone("UTC").dt.epoch("ms").alias("ts_ms")
         ).drop("create_time").drop_nulls("ts_ms").unique(["symbol", "ts_ms"]).sort("ts_ms")
+        # READ-MERGE the existing per-symbol parquet rather than clobbering it
+        # (audit backfill-writers-1). This dir is a CANONICAL PIT root shared with the
+        # event-anchored wrapper, which passes only [t0-26h, t0] window days. A bare
+        # write_parquet of just the days THIS call was passed would truncate a
+        # previously-full-history symbol into a present-but-sparse file that a reader
+        # mistakes for "no data" rather than "overwritten". Concat + unique(symbol,ts_ms)
+        # keeps prior coverage and is idempotent on overlapping days (last write wins
+        # via keep="last", so a re-fetch of a corrected day supersedes the stale one).
+        df = _merge_with_existing(df, out_dir / f"{symbol}.parquet")
+        # Stamp self-describing coverage on disk so the parquet itself records that this
+        # is FULL-history (vs the event-anchored wrapper's event_anchored), closing the
+        # "manifest says X, parquet holds Y" ambiguity at the writer (backfill-writers-1).
+        df = _stamp_coverage(df, "full")
         df.write_parquet(out_dir / f"{symbol}.parquet")
-        return {"symbol": symbol, "rows": df.height, "days_404": miss}
-    (out_dir / f"{symbol}.parquet").touch()  # empty marker: nothing available
-    return {"symbol": symbol, "rows": 0, "days_404": miss}
+        return {"symbol": symbol, "rows": df.height, "days_404": miss,
+                "transient_fail": transient, "complete": complete, "coverage": "full"}
+    if not complete:
+        # No rows AND a transient failure: do NOT write the empty .touch() marker.
+        # Freezing it would turn a transient outage into permanent zero coverage,
+        # which the resume guard would skip forever — exactly the silent-gap bug.
+        return {"symbol": symbol, "rows": 0, "days_404": miss,
+                "transient_fail": transient, "complete": False, "coverage": "full"}
+    (out_dir / f"{symbol}.parquet").touch()  # empty marker: genuinely no data on the archive
+    return {"symbol": symbol, "rows": 0, "days_404": miss,
+            "transient_fail": 0, "complete": True, "coverage": "full"}
 
 
 def main() -> int:
@@ -165,7 +246,15 @@ def main() -> int:
         spans = {s: spans[s] for s in wanted if s in spans}
     todo = []
     for s, (a, b) in sorted(spans.items()):
-        if (out_dir / f"{s}.parquet").exists():
+        # Resume only past COMPLETE symbols. A symbol with a parquet is complete
+        # unless the manifest explicitly marks it incomplete (a prior run hit a
+        # transient outage and left rows-but-a-gap or no marker at all). Older
+        # manifests predating the "complete" field have no such flag and are
+        # treated as complete (back-compat). This is what stops a transient outage
+        # from being frozen into permanent zero coverage (audit backfill-writers-2).
+        prior = manifest.get(s)
+        prior_incomplete = isinstance(prior, dict) and prior.get("complete") is False
+        if (out_dir / f"{s}.parquet").exists() and not prior_incomplete:
             continue
         first = max(a, args.start)
         if first > b:

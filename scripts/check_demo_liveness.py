@@ -43,7 +43,8 @@ from pathlib import Path
 
 import polars as pl
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration.storage import read_dataset  # noqa: E402
 from liquidity_migration.telegram import send_telegram_message  # noqa: E402
@@ -51,6 +52,22 @@ from liquidity_migration.telegram import send_telegram_message  # noqa: E402
 # Severity order for message framing only.
 CRITICAL = "CRITICAL"
 WARNING = "WARNING"
+
+
+def _default_root(rel: str) -> str:
+    """Anchor a default data root at the repo dir (NOT the CWD).
+
+    The demo-liveness unit sets WorkingDirectory=/opt/liquidity-migration and passes
+    only SOME roots absolute, so a manual/cron invocation from another CWD would let
+    the relative argparse defaults resolve against the wrong directory — and the
+    risk/liquidation/depth gathers early-return [] when their root .exists() is False,
+    silently no-op'ing the ws_risk heartbeat liveness (the single check that the
+    stop-repair / orphan-adoption / reconcile authority is alive). Anchoring every
+    default at the repo dir makes CWD irrelevant; the documented '' skip sentinel is
+    unaffected (it never reaches here). Kept as str so build_arg_parser's '' skip
+    handling and the str->Path conversion in main() are unchanged (audit 2026-06-12
+    round 4)."""
+    return str(_REPO_ROOT / rel)
 
 
 def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
@@ -63,6 +80,20 @@ def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
     invocation. In production the EnvironmentFile always sets the toggle, so the
     default only matters off-VPS."""
     return os.environ.get(env_var, default).strip().lower() in {"on", "1", "true", "yes"}
+
+
+def _continuous_rmom_refresh_on() -> bool:
+    """Mirror deploy/lib_sleeves.sh ``continuous_rmom_refresh_on``: the daily rmom
+    refresh (and the continuous forward-report) run when EITHER the continuous demo
+    or the continuous paper sleeve is on, because both follow residual_momentum.parquet.
+    The watchdog must monitor those units under the SAME predicate the deploy uses to
+    enable them — otherwise, when both continuous sleeves are off (the documented
+    LONG-only kill-switch), the deploy disables the timers (systemctl disable --now ->
+    'inactive') while the watchdog still expects them 'active' and pages CRITICAL on an
+    intentionally-disabled timer every run (audit 2026-06-12 round 4)."""
+    return _sleeve_on("CONTINUOUS_SLEEVE", default="off") or _sleeve_on(
+        "CONTINUOUS_PAPER_SLEEVE", default="off"
+    )
 
 
 @dataclass(frozen=True)
@@ -98,9 +129,11 @@ def evaluate_cycle_liveness(
     return None
 
 
-def evaluate_unit_states(unit_states: dict[str, str]) -> list[Alert]:
+def evaluate_unit_states(
+    unit_states: dict[str, str], *, prior_not_active_timers: set[str] | None = None
+) -> list[Alert]:
     """SERVICES alert only on the TERMINAL systemd ``failed`` state; TIMERS alert
-    on anything not ``active``.
+    on anything not ``active``, with a one-interval debounce.
 
     A deploy (or any ``Restart=always`` recovery) walks a service through
     activating -> active -> deactivating -> inactive -> activating, so alerting
@@ -112,18 +145,30 @@ def evaluate_unit_states(unit_states: dict[str, str]) -> list[Alert]:
     or disabled timer reports ``inactive`` and its scheduled job (hedge, daily
     reports) simply never fires again, silently and forever (audit 2026-06-12
     round 3). A healthy monitored timer is ``active`` (waiting), so not-active IS
-    the alarm; deploys restart timers in well under one watchdog interval."""
+    the alarm. But a deploy briefly walks a timer through activating/inactive, and
+    a watchdog run landing in that window would page a self-resolving false CRITICAL
+    (audit 2026-06-12 round 4). So a timer's FIRST not-active observation is a
+    debounced WARNING; it escalates to CRITICAL only when it is STILL not-active on
+    the next run (``prior_not_active_timers`` — the set of units that were not-active
+    last run, threaded from the persisted watchdog state). A genuinely-dead daily/
+    hourly timer is delayed at most one ~3-min interval before it pages CRITICAL,
+    while a deploy-window blip never escalates past WARNING and self-resolves."""
+    prior = prior_not_active_timers or set()
     alerts: list[Alert] = []
     for unit, state in sorted(unit_states.items()):
         if unit.endswith(".timer"):
             if state != "active":
+                # Escalate only if the timer was ALSO not-active on the previous run;
+                # a single transient observation (a deploy restart) stays a WARNING.
+                persistent = unit in prior
                 alerts.append(
                     Alert(
                         key=f"unit:{unit}",
-                        severity=CRITICAL,
+                        severity=CRITICAL if persistent else WARNING,
                         message=(
                             f"systemd timer {unit} is {state.upper()} (not active) — its scheduled "
                             f"job will never fire. Re-enable it: systemctl enable --now {unit}"
+                            + ("" if persistent else " (debouncing one interval; escalates to CRITICAL if still down next run)")
                         ),
                     )
                 )
@@ -185,6 +230,38 @@ def evaluate_stop_protection(
     return alerts
 
 
+def evaluate_orphan_hedge(*, hedge_timer_enabled: bool, open_hedge_trades: list[dict]) -> Alert | None:
+    """The daily hedge timer is the SOLE lifecycle manager of the hedge's open
+    BTC/ETH long: build_hedge_tracking_row books it stopless (stop_price=0,
+    planned_exit_ts_ms=0) precisely so the always-on risk service tracks but never
+    force-exits it. Disabling that timer — the documented CONTINUOUS_SLEEVE=off
+    retirement — therefore strands any open hedge leg as a permanently-open,
+    unmonitored, stopless position (the risk service won't exit it and the watchdog
+    never reads this root). Page CRITICAL so the operator flattens it manually (or
+    re-enables the hedge until flat). No alert while the timer is enabled (the daily
+    run manages it) or when there is no open leg to orphan."""
+    if hedge_timer_enabled:
+        return None
+    syms = sorted({
+        str(t.get("symbol") or "?")
+        for t in open_hedge_trades
+        if str(t.get("status") or "").lower() == "open"
+    })
+    if not syms:
+        return None
+    return Alert(
+        key="orphan_hedge",
+        severity=CRITICAL,
+        message=(
+            f"ORPHANED HEDGE: {len(syms)} open hedge leg(s) {syms} but the continuous "
+            "hedge timer is DISABLED (CONTINUOUS_SLEEVE=off). The hedge is booked "
+            "stopless, so the risk service never exits it, and its only manager (the "
+            "daily hedge timer) is off — the position is permanently open and "
+            "unmanaged. Flatten it manually, or re-enable the hedge until flat."
+        ),
+    )
+
+
 def evaluate_ws_staleness(
     *, store_max_ts_ms: int | None, now_ms: int, max_lag_hours: float, label: str
 ) -> Alert | None:
@@ -235,26 +312,76 @@ def evaluate_rmom_staleness(
     return None
 
 
+# State-key namespace for a PENDING resolved-note retry. Keeping it distinct from
+# the bare alert-cooldown key is the fix for the flapping-CRITICAL false-negative
+# (audit 2026-06-12 round 4): a failed resolved-note send used to re-stamp the bare
+# alert key with its OLD alert-era timestamp, which select_alerts_to_send then read
+# as a fresh cooldown and suppressed a genuine re-fire for the remaining cooldown
+# window — exactly when a flapping UNPROTECTED / DAEMON-DOWN page is needed most.
+_RESOLVED_PREFIX = "resolved:"
+# State-key namespace recording which TIMERS were not-active last run, for the
+# one-interval timer-CRITICAL debounce (audit 2026-06-12 round 4). Like the resolved
+# namespace, these entries are bookkeeping only and must never arm the alert cooldown
+# or be mistaken for a stale active alert to resolve.
+_PENDING_TIMER_PREFIX = "pending_timer:"
+# State-key namespace recording the rank of the last-sent severity per alert key, so a
+# WARNING -> CRITICAL escalation (e.g. the debounced timer alert escalating on its
+# second consecutive not-active run) is ALWAYS sent even inside the cooldown window —
+# a severity bump must never be silently swallowed by the cooldown (audit round 4).
+_SEV_PREFIX = "sev:"
+_RESERVED_PREFIXES = (_RESOLVED_PREFIX, _PENDING_TIMER_PREFIX, _SEV_PREFIX)
+_SEVERITY_RANK = {WARNING: 1, CRITICAL: 2}
+
+
 def select_alerts_to_send(
     *, active: list[Alert], state: dict[str, int], now_ms: int, cooldown_minutes: float
 ) -> tuple[list[Alert], list[str], dict[str, int]]:
     """Cooldown + resolve logic. Returns (alerts_to_send, resolved_keys, new_state).
 
     New condition -> send now. Persisting condition -> re-send only after the
-    cooldown. A key present in state but no longer active -> resolved."""
+    cooldown, UNLESS its severity escalated above the last-sent severity (then send
+    immediately — a WARNING that became CRITICAL must page now). A key present in
+    state but no longer active -> resolved. A pending resolved-note retry (a
+    ``resolved:<key>`` entry whose <key> is not active again) is re-surfaced for
+    another delivery attempt; reserved bookkeeping entries (``resolved:``/
+    ``pending_timer:``/``sev:``) never arm the alert-side cooldown, so a dropped
+    resolved note can no longer suppress a genuine re-alert."""
     cooldown_ms = cooldown_minutes * 60_000.0
     active_by_key = {a.key: a for a in active}
+    # The alert-cooldown namespace excludes the reserved bookkeeping entries (pending
+    # resolved-note retries, the timer-debounce markers, last-sent severity) so they
+    # neither suppress a re-fire nor get mistaken for a stale active alert to resolve.
+    cooldown_state = {
+        k: v for k, v in state.items() if not k.startswith(_RESERVED_PREFIXES)
+    }
     to_send: list[Alert] = []
     new_state = dict(state)
     for key, alert in active_by_key.items():
-        last = state.get(key)
-        if last is None or (now_ms - last) >= cooldown_ms:
+        last = cooldown_state.get(key)
+        rank = _SEVERITY_RANK.get(alert.severity, 0)
+        last_rank = state.get(f"{_SEV_PREFIX}{key}", 0)
+        escalated = rank > last_rank
+        if last is None or (now_ms - last) >= cooldown_ms or escalated:
             to_send.append(alert)
             new_state[key] = now_ms
-    resolved = [k for k in state if k not in active_by_key]
-    for k in resolved:
-        new_state.pop(k, None)
-    return to_send, resolved, new_state
+            new_state[f"{_SEV_PREFIX}{key}"] = rank
+    # Newly-cleared conditions (active last run, gone now): drop the cooldown key (and
+    # its severity marker) and mark it for a resolved note. Already-pending resolved
+    # retries are re-surfaced too, unless the condition re-fired (then it's active).
+    resolved_keys: set[str] = set()
+    for key in cooldown_state:
+        if key not in active_by_key:
+            resolved_keys.add(key)
+            new_state.pop(key, None)
+            new_state.pop(f"{_SEV_PREFIX}{key}", None)
+    for key in state:
+        if key.startswith(_RESOLVED_PREFIX):
+            bare = key[len(_RESOLVED_PREFIX):]
+            if bare in active_by_key:
+                new_state.pop(key, None)  # condition came back; it's an active alert now
+            else:
+                resolved_keys.add(bare)
+    return to_send, sorted(resolved_keys), new_state
 
 
 def _f(value: object) -> float:
@@ -320,21 +447,38 @@ def _default_units_for_toggles() -> list[str]:
         # Always-on forward-evidence collector (enabled by every deploy): a failed
         # collector is unbuyable history silently lost — page on it (audit 2026-06-12).
         "liquidity-migration-liquidation-collector.service",
-        # The daily reports are the operator's heartbeat; BOTH oneshot services exit 1
-        # on a failed send (combined-book since round 2, forward-report since round 3),
-        # so monitoring them pages instead of "the report just never arrived". Their
-        # TIMERS are monitored too: a stopped timer is "inactive", never "failed",
-        # and a dead timer means the report silently never runs again (round 3).
+        # The combined-book report is the operator's heartbeat and is enabled by EVERY
+        # deploy unconditionally; its oneshot service exits 1 on a failed send (round 2)
+        # and its TIMER (stopped == "inactive", never "failed") means the report silently
+        # never runs again, so both are monitored unconditionally.
         "liquidity-migration-combined-book-report.service",
         "liquidity-migration-combined-book-report.timer",
-        "liquidity-migration-continuous-forward-report.service",
-        "liquidity-migration-continuous-forward-report.timer",
     ]
     if _sleeve_on("LONG_SLEEVE"):
         units.extend(
             [
                 "liquidity-migration-bybit-long-demo.service",
                 "liquidity-migration-bybit-long-paper.service",
+            ]
+        )
+    if _continuous_rmom_refresh_on():
+        units.extend(
+            [
+                # The continuous forward-report and the daily rmom refresh are both
+                # enabled by the deploy under continuous_rmom_refresh_on (CONTINUOUS_SLEEVE
+                # OR CONTINUOUS_PAPER_SLEEVE — deploy_vps_live.sh:204-205) and disabled
+                # (systemctl disable --now -> "inactive") when both are off. Monitor them
+                # under the SAME predicate so the watchdog never pages CRITICAL on a timer
+                # the deploy intentionally disabled (audit 2026-06-12 round 4). The
+                # forward-report oneshot exits 1 on a failed send (round 3), so its SERVICE
+                # is monitored too. The rmom refresh feeds the live entry gate for both the
+                # demo and paper roots (paper follows the demo root's residual_momentum.parquet);
+                # unmonitored, a failing refresh was silent until the rmom-staleness CRITICAL
+                # at ~2 days (round 3).
+                "liquidity-migration-continuous-forward-report.service",
+                "liquidity-migration-continuous-forward-report.timer",
+                "liquidity-migration-continuous-rmom-refresh.service",
+                "liquidity-migration-continuous-rmom-refresh.timer",
             ]
         )
     if _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
@@ -345,14 +489,10 @@ def _default_units_for_toggles() -> list[str]:
                 # The SERVICE too, not just the timer: a failed oneshot leaves the
                 # timer active/waiting, so a crashed (order-submitting, SUBMIT_HEDGE=1)
                 # hedge run would otherwise never page — is-active on a failed oneshot
-                # reports "failed", which evaluate_unit_states alerts on.
+                # reports "failed", which evaluate_unit_states alerts on. The hedge timer
+                # rides $CONTINUOUS_SLEEVE alone (deploy_vps_live.sh:239), not the
+                # rmom-refresh predicate, so it stays in this DEMO-only branch.
                 "liquidity-migration-continuous-hedge.service",
-                # The daily rmom refresh feeds the live entry gate; unmonitored, a
-                # failing refresh was silent until the rmom-staleness CRITICAL at
-                # ~2 days — the order-submitting sleeve traded against an aging
-                # gate the whole time (audit 2026-06-12 round 3).
-                "liquidity-migration-continuous-rmom-refresh.service",
-                "liquidity-migration-continuous-rmom-refresh.timer",
             ]
         )
     if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
@@ -433,39 +573,67 @@ def gather_risk_alerts(*, risk_root: Path, now_ms: int, args: argparse.Namespace
     return [live] if live else []
 
 
-def gather_liquidation_capture_alerts(
-    *, liquidations_root: Path, now_ms: int, max_age_hours: float
-) -> list[Alert]:
-    """Freshness of the forward liquidation capture. The collector unit can never
-    reach systemd "failed" (Restart=always with RestartSec=15 spaces starts beyond
-    the default start-limit window), so a crash-looping or hung-but-connected
-    collector loses unbuyable history silently forever (audit 2026-06-12 round 3).
-    Bybit liquidations on a 400+ symbol universe arrive near-continuously; a stale
-    newest-file mtime means capture stopped. Venues that have never written (the
-    region-blocked Binance leg) contribute no files and never alarm."""
-    if not liquidations_root.exists():
-        return []
+def _venue_newest_mtime_ms(venue_dir: Path) -> int:
+    """Newest *.jsonl mtime (ms) under a single venue subdir, 0 if none/unreadable."""
     try:
-        newest_mtime_ms = max(
-            (int(p.stat().st_mtime * 1000) for p in liquidations_root.glob("*/*.jsonl")),
+        return max(
+            (int(p.stat().st_mtime * 1000) for p in venue_dir.glob("*.jsonl")),
             default=0,
         )
     except OSError:
-        newest_mtime_ms = 0
-    if newest_mtime_ms <= 0:
+        return 0
+
+
+def gather_liquidation_capture_alerts(
+    *, liquidations_root: Path, now_ms: int, max_age_hours: float
+) -> list[Alert]:
+    """Freshness of the forward liquidation capture, checked PER VENUE.
+
+    The collector unit can never reach systemd "failed" (Restart=always with
+    RestartSec=15 spaces starts beyond the default start-limit window), so a
+    crash-looping or hung-but-connected collector loses unbuyable history silently
+    forever (audit 2026-06-12 round 3).
+
+    A whole-root newest-mtime check is NOT enough: with two venues (bybit + binance)
+    a healthy bybit leg keeps the root mtime fresh and MASKS a binance leg that
+    connected but then went silent — exactly the 2026-06-10 incident the per-venue
+    write counter was added for (audit 2026-06-12 round 4). So freshness is evaluated
+    independently for EACH venue subdir that has ever written: a venue that produced
+    data before and is now stale pages a per-venue WARNING (key
+    ``liquidation_capture_stale:<venue>``) even while another venue streams. A venue
+    that has NEVER written (no subdir / no files — the region-blocked binance leg
+    pending a permitted-region host, STATE.md) contributes nothing and is NOT alarmed,
+    preserving the documented "region-quiet != broken" distinction. If EVERY venue
+    that has written goes stale, each pages its own per-venue WARNING, so the
+    all-venues-stopped case is still covered; a fresh box that has never written
+    anything emits nothing (the unit check covers a dead service)."""
+    if not liquidations_root.exists():
+        return []
+    try:
+        venue_dirs = sorted(d for d in liquidations_root.iterdir() if d.is_dir())
+    except OSError:
+        venue_dirs = []
+    venue_mtimes = {d.name: _venue_newest_mtime_ms(d) for d in venue_dirs}
+    written_mtimes = {v: m for v, m in venue_mtimes.items() if m > 0}
+    if not written_mtimes:
         return []  # nothing ever captured here (fresh box) — the unit check covers a dead service
-    age_h = (now_ms - newest_mtime_ms) / 3_600_000.0
-    if age_h > max_age_hours:
-        return [Alert(
-            key="liquidation_capture_stale",
-            severity=WARNING,
-            message=(
-                f"liquidation capture STALE — newest JSONL {age_h:.1f}h old (> {max_age_hours:.0f}h). "
-                f"The collector unit is alive-but-not-writing (it cannot reach systemd 'failed'); "
-                f"check its journal. Every silent hour is forward history lost."
-            ),
-        )]
-    return []
+    alerts: list[Alert] = []
+    # Per-venue: a venue that HAS written before but has now gone stale is a silent
+    # leg, even if a sibling venue keeps the root fresh.
+    for venue, mtime_ms in sorted(written_mtimes.items()):
+        age_h = (now_ms - mtime_ms) / 3_600_000.0
+        if age_h > max_age_hours:
+            alerts.append(Alert(
+                key=f"liquidation_capture_stale:{venue}",
+                severity=WARNING,
+                message=(
+                    f"liquidation capture STALE for venue '{venue}' — newest JSONL {age_h:.1f}h old "
+                    f"(> {max_age_hours:.0f}h) while the leg has written before. The collector is "
+                    f"alive-but-not-writing for this venue (it cannot reach systemd 'failed'); check "
+                    f"its journal. Every silent hour is forward history lost."
+                ),
+            ))
+    return alerts
 
 
 def gather_depth_capture_alerts(
@@ -639,6 +807,27 @@ def gather_long_alerts(
     return alerts
 
 
+def gather_hedge_orphan_alerts(
+    *, hedge_root: Path, hedge_timer_enabled: bool, trades_dataset: str = "continuous_fade_demo_trades"
+) -> list[Alert]:
+    """Detect an orphaned hedge leg — an open row in the hedge addon ledger while
+    the hedge timer is disabled. This is the ONLY check that reads the hedge addon
+    root; without it, retiring the continuous sleeve silently strands an open,
+    stopless, unmanaged hedge long (deploy-env-timers-1)."""
+    if hedge_root is None or not hedge_root.exists():
+        return []
+    try:
+        tdf = read_dataset(hedge_root, trades_dataset)
+        open_ct = (
+            tdf.filter(pl.col("status") == "open").to_dicts()
+            if (not tdf.is_empty() and "status" in tdf.columns) else []
+        )
+    except Exception:  # noqa: BLE001 — watchdog never crashes
+        open_ct = []
+    alert = evaluate_orphan_hedge(hedge_timer_enabled=hedge_timer_enabled, open_hedge_trades=open_ct)
+    return [alert] if alert else []
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Exposed for the unit↔argparse parity test: the demo-liveness unit once
     passed an arg this script had dropped (--data-root, 2026-06-11 purge) and
@@ -655,19 +844,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Roots stay str (NOT type=Path): argparse type=Path turns the documented '' skip
     # sentinel into Path('.') — truthy and existing — so the skip never skipped and the
     # gather ran against the repo CWD, paging a FALSE CRITICAL with an empty label.
-    p.add_argument("--continuous-root", default="data/bybit-continuous-demo-event",
+    # Defaults are anchored at the repo dir via _default_root (NOT relative to the CWD)
+    # so a manual/cron invocation from another directory cannot silently disable the
+    # risk/liquidation/depth safety gathers (audit 2026-06-12 round 4).
+    p.add_argument("--continuous-root", default=_default_root("data/bybit-continuous-demo-event"),
                    help="continuous-fade sleeve root for its per-sleeve cycle-age + rmom-freshness + stop checks ('' to skip)")
-    p.add_argument("--continuous-paper-root", default="data/bybit-continuous-paper-event",
+    p.add_argument("--continuous-paper-root", default=_default_root("data/bybit-continuous-paper-event"),
                    help="continuous-fade paper root for no-order evidence cycle-age + rmom-freshness checks ('' to skip)")
-    p.add_argument("--long-root", default="data/bybit-long-demo-event",
+    p.add_argument("--long-root", default=_default_root("data/bybit-long-demo-event"),
                    help="long-native sleeve root for its per-sleeve cycle-age + WS-staleness + stop checks ('' to skip)")
-    p.add_argument("--risk-root", default="data/bybit-demo-event",
+    p.add_argument("--risk-root", default=_default_root("data/bybit-demo-event"),
                    help="ws_risk engine root for its heartbeat cycle-age check — the risk service has no sleeve toggle ('' to skip)")
-    p.add_argument("--liquidations-root", default="data/liquidations",
+    p.add_argument("--hedge-root", default=_default_root("data/bybit-continuous-hedge-event"),
+                   help="continuous hedge addon root; paged CRITICAL when it holds an open hedge leg while the "
+                        "hedge timer is disabled (orphaned stopless position) ('' to skip)")
+    p.add_argument("--liquidations-root", default=_default_root("data/liquidations"),
                    help="forward liquidation-capture root for the newest-JSONL freshness check ('' to skip)")
     p.add_argument("--max-liquidation-age-hours", type=float, default=3.0,
                    help="warn if the newest captured liquidation JSONL is older than this")
-    p.add_argument("--depth-root", default="data/depth",
+    p.add_argument("--depth-root", default=_default_root("data/depth"),
                    help="forward depth-capture root for the newest-JSONL freshness check; "
                         "only checked when the depth collector unit is enabled ('' to skip)")
     p.add_argument("--max-depth-age-hours", type=float, default=3.0,
@@ -693,16 +888,32 @@ def main() -> int:
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
     risk_root = Path(args.risk_root) if str(args.risk_root).strip() else None
     liquidations_root = Path(args.liquidations_root) if str(args.liquidations_root).strip() else None
-    _state_root = continuous_root or long_root or Path("data")
+    # audit2b: anchor the state-file fallback at the repo dir (NOT CWD), matching the
+    # _default_root root anchoring — when BOTH sleeve roots are explicitly skipped the
+    # cooldown/dedup state must still land in one stable location, else a manual/cron run
+    # from another CWD reads an empty state and re-pages every persisting condition.
+    _state_root = continuous_root or long_root or (_REPO_ROOT / "data")
     state_file = args.state_file or (_state_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
+
+    # Load state up front: the timer-not-active debounce needs the PRIOR run's
+    # not-active timer set (pending_timer:* namespace) to distinguish a transient
+    # deploy-window blip from a persistently dead timer (audit 2026-06-12 round 4).
+    state = _load_state(state_file)
+    prior_not_active_timers = {
+        k[len(_PENDING_TIMER_PREFIX):] for k in state if k.startswith(_PENDING_TIMER_PREFIX)
+    }
 
     # Per-sleeve kill-switch: skip an intentionally-off sleeve's DAEMON checks so a
     # deliberately-retired daemon doesn't false-page as "down" — but stop/mismatch
     # checks on residual open rows always run ("off" does not flatten). Unset-defaults
     # mirror deploy/lib_sleeves.sh: LONG off (round-3 fail-safe change), CONTINUOUS off.
     # (The daily-short sleeve was erased 2026-06-11.)
-    alerts = evaluate_unit_states(_unit_states(units))
+    unit_states = _unit_states(units)
+    not_active_timers = {
+        u for u, s in unit_states.items() if u.endswith(".timer") and s != "active"
+    }
+    alerts = evaluate_unit_states(unit_states, prior_not_active_timers=prior_not_active_timers)
     if risk_root is not None:
         alerts.extend(gather_risk_alerts(risk_root=risk_root, now_ms=now_ms, args=args))
     if liquidations_root is not None:
@@ -721,6 +932,14 @@ def main() -> int:
             continuous_root=continuous_root, now_ms=now_ms, args=args,
             cycle_checks=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
         ))
+    hedge_root = Path(args.hedge_root) if str(args.hedge_root).strip() else None
+    if hedge_root is not None:
+        # The hedge timer rides the CONTINUOUS_SLEEVE toggle; if it is off while an
+        # open hedge leg remains, that leg is orphaned (stopless, unmanaged).
+        alerts.extend(gather_hedge_orphan_alerts(
+            hedge_root=hedge_root,
+            hedge_timer_enabled=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
+        ))
     if continuous_paper_root is not None and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         alerts.extend(
             gather_continuous_alerts(
@@ -737,10 +956,15 @@ def main() -> int:
             long_root=long_root, now_ms=now_ms, args=args,
             cycle_checks=_sleeve_on("LONG_SLEEVE"),
         ))
-    state = _load_state(state_file)
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min
     )
+    # Persist the current not-active timer set for the next run's debounce decision:
+    # a timer must be observed not-active on two consecutive runs to escalate to
+    # CRITICAL, so a deploy-window blip self-resolves as a one-run WARNING (round 4).
+    new_state = {k: v for k, v in new_state.items() if not k.startswith(_PENDING_TIMER_PREFIX)}
+    for unit in not_active_timers:
+        new_state[f"{_PENDING_TIMER_PREFIX}{unit}"] = now_ms
 
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     for alert in to_send:
@@ -760,25 +984,43 @@ def main() -> int:
                 # 2026-06-12). Surface it and DON'T advance this alert's cooldown:
                 # the next run retries.
                 print("(telegram send returned False — TELEGRAM_* env missing or API non-2xx; will retry next run)")
+                # Revert BOTH the cooldown stamp and the last-sent-severity marker to
+                # their pre-send values so an undelivered alert advances neither — the
+                # next run re-evaluates and retries (incl. a still-pending escalation).
                 if alert.key in state:
                     new_state[alert.key] = state[alert.key]
                 else:
                     new_state.pop(alert.key, None)
+                sev_key = f"{_SEV_PREFIX}{alert.key}"
+                if sev_key in state:
+                    new_state[sev_key] = state[sev_key]
+                else:
+                    new_state.pop(sev_key, None)
     for key in resolved:
         line = f"✅ liquidity-migration {ts}: resolved — {key}"
         print(line)
+        retry_key = f"{_RESOLVED_PREFIX}{key}"
         if args.telegram:
             delivered = False
             try:
                 delivered = send_telegram_message(line)
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
-            if not delivered and key in state:
-                # Keep the key in state so the next run re-detects the resolution
-                # and retries the note — a dropped "resolved" left the operator
-                # believing the condition was still active (audit 2026-06-12 r3).
-                new_state[key] = state[key]
+            if not delivered:
+                # Track the pending resolved-note retry under a SEPARATE namespace
+                # (resolved:<key>) so the next run re-detects the resolution and retries
+                # the note — a dropped "resolved" left the operator believing the
+                # condition was still active (audit 2026-06-12 r3). The distinct
+                # namespace is the round-4 fix: re-stamping the bare alert key here used
+                # to re-arm its alert-side cooldown, suppressing a genuine re-fire of a
+                # flapping safety condition for the remaining window. The stored value is
+                # a marker only; select_alerts_to_send ignores resolved:* for cooldown.
+                new_state[retry_key] = now_ms
                 print("(telegram send returned False — resolved note will retry next run)")
+                continue
+        # Delivered (or stdout-only mode, which always "delivers"): clear any pending
+        # retry marker so the resolved note isn't re-sent forever.
+        new_state.pop(retry_key, None)
     # State saved AFTER the sends so an undelivered alert's cooldown stays unset.
     _save_state(state_file, new_state)
 

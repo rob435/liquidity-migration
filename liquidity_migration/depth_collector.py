@@ -22,11 +22,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import shutil
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 _logger = logging.getLogger(__name__)
 
@@ -35,6 +37,19 @@ BYBIT_INSTRUMENTS = "https://api.bybit.com/v5/market/instruments-info?category=l
 BANDS_PCT = (0.2, 1.0, 2.0, 3.0, 4.0, 5.0)
 REQUEST_PACING_SECONDS = 0.25  # ~4 req/s, far inside bybit's public REST limits
 HTTP_TIMEOUT = 10.0
+# A single hourly cycle must not bleed into the next hour: an exchange-latency spike
+# would otherwise stretch one serial cycle past 60 min, collapsing the next-cycle gap
+# to the 60s floor or skipping an hour, silently degrading the documented HOURLY
+# cadence (depth-collector-2). Abort the remaining symbols once the budget is spent.
+CYCLE_BUDGET_SECONDS = 2400.0  # 40 min — leaves headroom inside the hour
+# Retention: gzip day files older than this and prune compressed files past the
+# window so two always-on append-only collectors cannot silently fill a small VPS
+# disk (depth-collector-3).
+RETENTION_GZIP_AFTER_DAYS = 7
+RETENTION_PRUNE_AFTER_DAYS = 60
+# Free-disk floor: refuse to start a cycle below this so an ENOSPC cannot tear down
+# the collector mid-write and (worse) starve the co-located live trading services.
+MIN_FREE_DISK_BYTES = 512 * 1024 * 1024  # 512 MiB
 
 
 def band_notionals(
@@ -135,7 +150,34 @@ def snapshot_symbol(symbol: str) -> dict[str, Any] | None:
     return {"recv_ms": int(time.time() * 1000), "venue": "bybit", "symbol": symbol, **bands}
 
 
-def collect_cycle(root: Path, symbols: list[str]) -> dict[str, int]:
+def iter_jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield parsed rows from a depth JSONL file, TOLERATING a truncated trailing
+    line (depth-collector-4). A SIGKILL/OOM/power-loss mid-write can leave the final
+    buffered line without its newline; a naive line-by-line loader would raise. A
+    parse error on the LAST line is skipped (the bounded crash-boundary damage);
+    a parse error on any EARLIER line is a genuine corruption and re-raised.
+    """
+    if not path.exists():
+        return
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    last = len(lines) - 1
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            yield json.loads(stripped)
+        except json.JSONDecodeError:
+            if idx == last:
+                _logger.warning("skipping truncated trailing line in %s", path)
+                continue
+            raise
+
+
+def collect_cycle(
+    root: Path, symbols: list[str], *, cycle_budget_seconds: float = CYCLE_BUDGET_SECONDS
+) -> dict[str, int]:
     # CONSUMER CONTRACT: the filename day is stamped at CYCLE START, so a cycle
     # that straddles UTC midnight (only under extreme HTTP latency; cycles are
     # top-of-hour aligned) appends its tail rows to the PREVIOUS day's file.
@@ -143,9 +185,21 @@ def collect_cycle(root: Path, symbols: list[str]) -> dict[str, int]:
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     out_path = root / "bybit" / f"{day}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    ok = err = 0
+    started = time.monotonic()
+    deadline = started + max(float(cycle_budget_seconds), 0.0) if cycle_budget_seconds > 0 else None
+    ok = err = skipped = 0
     with open(out_path, "a", encoding="utf-8") as f:
-        for sym in symbols:
+        for i, sym in enumerate(symbols):
+            if deadline is not None and time.monotonic() >= deadline:
+                # Cadence guard (depth-collector-2): abort the rest so the cycle
+                # cannot bleed past the hour. The captured slice is still written;
+                # the gap is observable in the duration/skipped telemetry below.
+                skipped = len(symbols) - i
+                _logger.warning(
+                    "depth cycle hit %.0fs budget after %d/%d symbols; skipping %d remaining",
+                    cycle_budget_seconds, i, len(symbols), skipped,
+                )
+                break
             try:
                 row = snapshot_symbol(sym)
                 if row is not None:
@@ -155,8 +209,79 @@ def collect_cycle(root: Path, symbols: list[str]) -> dict[str, int]:
                 err += 1
                 _logger.warning("depth snapshot failed for %s: %s", sym, exc)
             time.sleep(REQUEST_PACING_SECONDS)
-    _logger.info("depth cycle done: %d ok, %d errors -> %s", ok, err, out_path)
-    return {"ok": ok, "errors": err}
+        # Per-cycle flush+fsync (depth-collector-4): hourly data, so flushing once at
+        # cycle end is cheap and shrinks the partial-line window to the fsync boundary.
+        f.flush()
+        os.fsync(f.fileno())
+    duration = time.monotonic() - started
+    _logger.info(
+        "depth cycle done: %d ok, %d errors, %d skipped in %.1fs -> %s",
+        ok, err, skipped, duration, out_path,
+    )
+    return {"ok": ok, "errors": err, "skipped": skipped, "duration_s": int(duration)}
+
+
+def _file_day(path: Path) -> datetime | None:
+    """Parse the UTC day from a ``<YYYY-MM-DD>.jsonl[.gz]`` filename, or None."""
+    stem = path.name
+    for suffix in (".jsonl.gz", ".jsonl"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    try:
+        return datetime.strptime(stem, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def enforce_retention(
+    root: Path,
+    *,
+    gzip_after_days: int = RETENTION_GZIP_AFTER_DAYS,
+    prune_after_days: int = RETENTION_PRUNE_AFTER_DAYS,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """gzip day files older than ``gzip_after_days`` and delete (gz or raw) files
+    older than ``prune_after_days`` (depth-collector-3). The CURRENT/most-recent day
+    is never gzipped (it is still being appended to). Bounds disk growth of an
+    always-on append-only collector on a small VPS.
+    """
+    bybit_dir = root / "bybit"
+    if not bybit_dir.is_dir():
+        return {"gzipped": 0, "pruned": 0}
+    now = now or datetime.now(timezone.utc)
+    gzip_cutoff = now - timedelta(days=gzip_after_days)
+    prune_cutoff = now - timedelta(days=prune_after_days)
+    gzipped = pruned = 0
+    for path in sorted(bybit_dir.iterdir()):
+        if not path.is_file():
+            continue
+        file_day = _file_day(path)
+        if file_day is None:
+            continue
+        if file_day < prune_cutoff:
+            path.unlink()
+            pruned += 1
+            continue
+        if path.name.endswith(".jsonl") and file_day < gzip_cutoff:
+            import gzip
+
+            gz_path = path.with_suffix(path.suffix + ".gz")
+            with open(path, "rb") as src, gzip.open(gz_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            path.unlink()
+            gzipped += 1
+    if gzipped or pruned:
+        _logger.info("depth retention: gzipped %d, pruned %d under %s", gzipped, pruned, bybit_dir)
+    return {"gzipped": gzipped, "pruned": pruned}
+
+
+def free_disk_bytes(path: Path) -> int:
+    """Bytes free on the filesystem backing ``path`` (the first existing ancestor)."""
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return shutil.disk_usage(probe).free
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -184,7 +309,26 @@ def main() -> None:
             time.sleep(60.0)
             continue
         _logger.info("depth collector: %d symbols", len(symbols))
+        # Free-disk guard (depth-collector-3): two always-on append-only collectors
+        # share a small VPS; refuse a cycle below the floor so an ENOSPC mid-write
+        # cannot tear down this writer or starve the co-located live trading services.
+        free = free_disk_bytes(root)
+        if free < MIN_FREE_DISK_BYTES:
+            _logger.error(
+                "depth collector: free disk %d B below floor %d B under %s; skipping cycle",
+                free, MIN_FREE_DISK_BYTES, root,
+            )
+            if args.once:
+                return
+            time.sleep(max(60.0, 3600.0 - (time.time() % 3600.0)))
+            continue
         collect_cycle(root, symbols)
+        # Retention pass (depth-collector-3): gzip aged day files and prune past the
+        # window so disk growth of this append-only collector stays bounded.
+        try:
+            enforce_retention(root)
+        except OSError as exc:  # retention must never kill the capture loop
+            _logger.warning("depth retention pass failed: %s", exc)
         if args.once:
             return
         # align the next cycle to the next top-of-hour

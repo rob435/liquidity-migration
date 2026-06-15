@@ -139,3 +139,64 @@ def test_plan_risk_exits_caps_qty_to_trade_on_shared_account() -> None:
     assert capped[0]["exit_reason"] == "stop_loss"
     assert capped[0]["qty"] == "1"
 
+
+# --- audit bucket b10 ws-risk-3 (relocated from test_audit_fix_b10.py) -------
+# A qty<=0 ledger row must never reduce-only-flatten the netted size in cap mode.
+def test_wsrisk3_zero_qty_row_does_not_emit_netted_exit() -> None:
+    """A cap-mode (sibling-sleeve configured) open trade whose ledger qty parses to
+    0 must NOT fall back to the raw netted position.size when a stop fires — that
+    reduce-only would flatten the sibling's leg too (the non-self-healing
+    cross-sleeve over-close). Before the fix the else branch preferred the netted
+    size and emitted qty='10'; after, it skips entirely."""
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "0",  # schema drift / adopted-hedge / partially-cleared row
+                "stop_price": 112.0,
+            }
+        ]
+    )
+    position_by_symbol = {
+        "AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "10", "markPrice": "113"},
+    }
+    price_by_symbol = {"AAAUSDT": 113.0}
+    capped = plan_risk_exits(
+        open_trades,
+        position_by_symbol=position_by_symbol,
+        price_by_symbol=price_by_symbol,
+        now_ms=1_700_000_060_000,
+        cap_qty_to_trade=True,
+    )
+    assert capped == [], "a qty<=0 ledger row must not flatten the full netted position in cap mode"
+
+
+def test_wsrisk3_positive_qty_still_caps_to_trade() -> None:
+    """Control: a normal qty>0 cap-mode trade still caps at min(trade_qty,
+    position_size) (unchanged behaviour)."""
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "stop_price": 112.0,
+            }
+        ]
+    )
+    position_by_symbol = {"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "10", "markPrice": "113"}}
+    capped = plan_risk_exits(
+        open_trades,
+        position_by_symbol=position_by_symbol,
+        price_by_symbol={"AAAUSDT": 113.0},
+        now_ms=1_700_000_060_000,
+        cap_qty_to_trade=True,
+    )
+    assert len(capped) == 1
+    assert capped[0]["qty"] == "1"
+

@@ -190,9 +190,15 @@ def _warmstart_last_date(path: Path) -> date | None:
             if not raw:
                 continue
             try:
-                last = date.fromisoformat(raw)
+                parsed = date.fromisoformat(raw)
             except ValueError:
                 continue
+            # audit2c: track the MAX date, not the last row in file order. A
+            # warmstart CSV appended out of order (or non-monotonic) would otherwise
+            # mislabel staleness off a stale final row. Identical for the normal
+            # date-ordered file.
+            if last is None or parsed > last:
+                last = parsed
     return last
 
 
@@ -247,6 +253,43 @@ def _instrument_filters(symbol: str, cache_root: Path) -> dict[str, float]:
     return out
 
 
+def _read_actual_fill(
+    client, *, symbol: str, order_link_id: str, requested_qty: float,
+) -> tuple[float, float, str]:
+    """Read the realized (filled_qty, avg_price) for a just-submitted market order.
+
+    Mirrors the demo engine's pending-fill reconciler: poll the venue's execution
+    history for this orderLinkId and sum the actual fills (``_execution_summary``
+    over ``get_trade_history``). ``place_order`` returns only the create ack
+    (orderId), NOT the fill — booking ``filled_qty=requested_qty`` at the planner's
+    implied price recorded a fictional fill whenever the market slipped, partially
+    filled, or (for a reduce-only Sell) was venue-capped by cross-sleeve netting
+    against a same-symbol fade short on the shared one-way account (audit
+    2026-06-14, hedge-2/hedge-3).
+
+    Returns ``(filled_qty, avg_price, source)``. On a read failure or an empty
+    venue view, falls back CONSERVATIVELY to ``(requested_qty, 0.0, "read_failed")``:
+    the order was accepted (we hold an orderId), so we must keep tracking the
+    position we asked for rather than silently drop it — but ``source`` flags that
+    the fill is unverified so the operator can see it.
+    """
+    from liquidity_migration.event_demo import _float as _ed_float
+    from liquidity_migration.event_demo import _wait_for_execution_summary
+
+    try:
+        summary = _wait_for_execution_summary(
+            client, symbol=symbol, order_link_id=order_link_id,
+            poll_seconds=3.0, poll_interval_seconds=0.2, target_qty=requested_qty,
+        )
+    except Exception:  # noqa: BLE001 — a transport fault must not drop the position
+        return requested_qty, 0.0, "read_failed"
+    filled = _ed_float(summary.get("qty"))
+    avg_price = _ed_float(summary.get("avg_price"))
+    if filled <= 0.0:
+        return requested_qty, 0.0, "read_failed"
+    return filled, avg_price, "venue"
+
+
 def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root: Path, now_ms: int) -> dict:
     """Submit one leg's resize as a Market order and append the ledger rows.
 
@@ -259,6 +302,12 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root
     or, for non-reduce-only legs, a floored notional below minNotionalValue — is
     returned as a ``skipped`` leg instead of a guaranteed venue reject (reduce-only
     legs are exempt from minNotional per Bybit semantics).
+
+    After submit the ACTUAL fill (qty + average price) is read back from the venue
+    and booked, not the planner's implied price/requested qty (audit 2026-06-14,
+    hedge-2/hedge-3): a slipped/partial/venue-capped fill must size the ledger off
+    what really happened so the next day's resize is computed against the true
+    hedge, not a fictional one.
     """
     from liquidity_migration.bybit import BybitPrivateClient, resolve_private_credentials
     from liquidity_migration.event_demo import _decimal_text, _order_params
@@ -281,7 +330,7 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root
         and qty * price < filters["min_notional_value"]
     ):
         return {**skip_base, "skipped": "below_min_notional"}
-    client = BybitPrivateClient(category="linear", demo=True, api_key=api_key, api_secret=api_secret)
+    client = BybitPrivateClient(category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret)
     link = hedge_order_link_id(now_ms, symbol=plan.symbol)
     qty_text = _decimal_text(qty_dec)
     result = client.place_order(**_order_params(
@@ -289,35 +338,48 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root
         order_link_id=link, reduce_only=plan.reduce_only,
     ))
     order_id = str(result.get("orderId", ""))
+    # Read the realized fill instead of assuming requested_qty filled at the
+    # implied price. filled_qty drives the trade-row qty / reduce booking; the
+    # avg fill price drives entry/exit price. A short fill (slippage-rejected,
+    # partial, or venue-capped by cross-sleeve netting) is booked as what truly
+    # filled, so the ledger never overstates the hedge.
+    filled_qty, fill_price, fill_source = _read_actual_fill(
+        client, symbol=plan.symbol, order_link_id=link, requested_qty=qty,
+    )
+    # Implied price is the fallback when the venue did not report an avg price.
+    book_price = fill_price if fill_price > 0.0 else price
+    # status "filled" only when the venue confirmed the full requested qty;
+    # otherwise "partial" so ws_risk's pending-fill reconciler can later delta-add
+    # any remainder (it adds venue_cumulative − filled_qty onto the trade row — a
+    # terminal "filled" row with the full qty made it re-add the whole fill, every
+    # armed BUY double-booked, audit 2026-06-11; booking the ACTUAL filled_qty here
+    # keeps that delta honest for a partial too).
+    fully_filled = filled_qty + 1e-12 >= qty
     order_row = {
         "order_link_id": link, "ts_ms": now_ms, "trade_id": f"hedge-{link}",
         "strategy_id": cfg.strategy_id, "symbol": plan.symbol, "side": plan.side,
         "order_type": "Market", "qty": qty, "reduce_only": plan.reduce_only,
-        # status "filled" + filled_qty/target_qty: this runner books the market
-        # fill itself (trade row below / reduce booking below), so the order row
-        # must say so. ws_risk's pending-fill reconciler delta-adds
-        # (venue cumulative − filled_qty) onto the trade row; an order row left
-        # "submitted" with no filled_qty read previous=0 and re-added the FULL
-        # fill — every armed BUY double-booked (audit 2026-06-11).
-        "order_id": order_id, "submit_mode": "submitted", "status": "filled",
-        "filled_qty": qty, "target_qty": qty,
+        "order_id": order_id, "submit_mode": "submitted",
+        "status": "filled" if fully_filled else "partial",
+        "filled_qty": filled_qty, "target_qty": qty,
         "trade_side": "long", "sleeve": "continuous_addon",
-        "notional_usdt": abs(qty * price), "reason": plan.reason,
+        "notional_usdt": abs(filled_qty * book_price), "reason": plan.reason,
         "updated_at_ms": now_ms,
     }
     write_dataset(pl.DataFrame([order_row]), data_root, cfg.orders_dataset, append=True)
-    if plan.side == "Buy" and not plan.reduce_only:
+    if plan.side == "Buy" and not plan.reduce_only and filled_qty > 0.0:
         trade_row = build_hedge_trade_row(
-            cfg, qty=qty, entry_price=max(price, 0.0), now_ms=now_ms,
+            cfg, qty=filled_qty, entry_price=max(book_price, 0.0), now_ms=now_ms,
             order_link_id=link, order_id=order_id, symbol=plan.symbol,
         )
         write_dataset(pl.DataFrame([trade_row]), data_root, cfg.trades_dataset, append=True)
-    elif plan.side == "Sell" and plan.reduce_only:
+    elif plan.side == "Sell" and plan.reduce_only and filled_qty > 0.0:
         _apply_hedge_reduce_to_trades(
-            data_root, cfg, symbol=plan.symbol, sold_qty=qty,
-            exit_price=max(price, 0.0), now_ms=now_ms,
+            data_root, cfg, symbol=plan.symbol, sold_qty=filled_qty,
+            exit_price=max(book_price, 0.0), now_ms=now_ms,
         )
-    return {"symbol": plan.symbol, "side": plan.side, "qty": qty,
+    return {"symbol": plan.symbol, "side": plan.side, "qty": filled_qty,
+            "requested_qty": qty, "fill_source": fill_source,
             "reduce_only": plan.reduce_only, "order_id": order_id, "link": link}
 
 
@@ -384,7 +446,7 @@ def _live_wallet_equity_usdt() -> float:
     api_key, api_secret, demo_flag = resolve_private_credentials()
     if not api_key or not api_secret or not demo_flag:
         raise RuntimeError("hedge equity read requires DEMO Bybit credentials in env")
-    client = BybitPrivateClient(category="linear", demo=True, api_key=api_key, api_secret=api_secret)
+    client = BybitPrivateClient(category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret)
     return wallet_equity_usdt(client.get_wallet_balance())
 
 
@@ -497,6 +559,13 @@ def main() -> int:
             "n_obs_joint": decision.n_obs_joint, "fell_back_to_btc": decision.fell_back_to_btc,
             "plan_btc": _plan_json(decision.plan_btc), "plan_eth": _plan_json(decision.plan_eth),
         })
+        # audit2c: report the EFFECTIVE hedge mode. The use_2f gate is a coarse
+        # full-series ETH pre-filter; the engine measures joint obs over the trailing
+        # beta window and falls back to a single-leg BTC hedge when that window is
+        # ETH-thin. Reflect that fallback here so hedge_mode is not misleadingly "2f"
+        # when the book was actually hedged BTC-only (fell_back_to_btc carries the detail).
+        if decision.fell_back_to_btc:
+            out["hedge_mode"] = "btc"
         plans = [p for p in (decision.plan_btc, decision.plan_eth) if p is not None]
     else:
         current_hedge_qty = _current_hedge_qty(data_root, cfg.trades_dataset)
@@ -547,17 +616,23 @@ def main() -> int:
         # Mode flipped 2f -> single-leg while an ETH hedge leg is still open: the
         # single-leg path would never reduce/close it (round 3). Block + page.
         out["status"] = "submit_blocked_unmanaged_eth_leg"
-    elif args.submit and warmstart_stale and any(not p.reduce_only for p in plans):
-        # A stale beta window blocks only risk-INCREASING legs; trimming/closing a
-        # hedge is risk-reducing and proceeds (all-reduce-only plans fall through).
-        out["status"] = "submit_blocked_stale_warmstart"
-        out["blocked_legs"] = [_plan_json(p) for p in plans if not p.reduce_only]
-        out["would_run_legs"] = [_plan_json(p) for p in plans if p.reduce_only]
     elif args.submit and plans:
+        # A stale beta window blocks only risk-INCREASING legs; trimming/closing a
+        # hedge is risk-reducing and ALWAYS proceeds — even when a sibling leg in
+        # the SAME run wants to add (audit 2026-06-14: the old terminal block
+        # rejected the whole run, so a risk-reducing reduce-only trim was held
+        # hostage by an add leg, leaving an over-hedged leg un-trimmed longer than
+        # necessary). Partition: submit the reduce-only set, block only the adds.
+        if warmstart_stale:
+            blocked_add_legs = [p for p in plans if not p.reduce_only]
+            submittable = [p for p in plans if p.reduce_only]
+        else:
+            blocked_add_legs = []
+            submittable = list(plans)
         submitted = []
         skipped = []
         errors = []
-        for plan in plans:
+        for plan in submittable:
             try:
                 result = _submit_plan(plan, cfg, data_root, primary_root, now_ms)
             except Exception as exc:  # noqa: BLE001 — one leg failing must not kill the other's report
@@ -567,8 +642,19 @@ def main() -> int:
         out["submitted"] = submitted
         out["skipped"] = skipped
         out["submit_errors"] = errors
+        if blocked_add_legs:
+            out["blocked_legs"] = [_plan_json(p) for p in blocked_add_legs]
         if errors:
             out["status"] = "submit_partial" if submitted else "submit_failed"
+        elif blocked_add_legs:
+            # Add legs were blocked by the stale beta window. The status must page
+            # (the book sits un-added) regardless of whether the reduce-only legs
+            # submitted — a partial-block variant when a trim went through, the
+            # all-blocked variant otherwise.
+            out["status"] = (
+                "submit_partial_blocked_stale_warmstart" if submitted
+                else "submit_blocked_stale_warmstart"
+            )
         elif submitted:
             out["status"] = "submitted"
         else:
@@ -615,6 +701,7 @@ def main() -> int:
         "submit_blocked_eth_price_unavailable",
         "submit_blocked_unmanaged_eth_leg",
         "submit_blocked_stale_warmstart",
+        "submit_partial_blocked_stale_warmstart",
         "submit_failed",
         "submit_partial",
     }

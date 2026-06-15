@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from liquidity_migration._common import MS_PER_DAY
+from liquidity_migration._common import MS_PER_DAY, calendar_roll
 from liquidity_migration.signal_harness import (
     _aggregate_daily_klines,
     _attach_daily_returns,
@@ -99,11 +99,19 @@ def compute_btc_beta(
             (pl.col("_btc_ret") * pl.col("_btc_ret")).alias("_yy"),
         )
     )
+    # CALENDAR-aware rolling moments (pit-signals-4 / BAC class): the gapped rows
+    # (null ret_1d on a delist->relist or data hole) are dropped by the filter above,
+    # so a row-based rolling_mean(window_size=window) would count SURVIVING rows and
+    # silently stretch the "window-day" beta across >window CALENDAR days for a gapped
+    # symbol — a staler-than-intended estimate. calendar_roll uses rolling_mean_by over
+    # the 00:00-UTC daily ts_ms grid, so a gapped window correctly shrinks (and nulls
+    # under min_samples). shifted=False => trailing window-day mean INCLUDING the current
+    # day, matching the prior rolling_mean. Numerically identical on a contiguous series.
     df = df.with_columns(
-        pl.col("ret_1d").rolling_mean(window_size=window, min_samples=min_periods).over("symbol").alias("_ex"),
-        pl.col("_btc_ret").rolling_mean(window_size=window, min_samples=min_periods).over("symbol").alias("_ey"),
-        pl.col("_xy").rolling_mean(window_size=window, min_samples=min_periods).over("symbol").alias("_exy"),
-        pl.col("_yy").rolling_mean(window_size=window, min_samples=min_periods).over("symbol").alias("_eyy"),
+        calendar_roll(pl.col("ret_1d"), "mean", window, shifted=False, min_samples=min_periods).over("symbol").alias("_ex"),
+        calendar_roll(pl.col("_btc_ret"), "mean", window, shifted=False, min_samples=min_periods).over("symbol").alias("_ey"),
+        calendar_roll(pl.col("_xy"), "mean", window, shifted=False, min_samples=min_periods).over("symbol").alias("_exy"),
+        calendar_roll(pl.col("_yy"), "mean", window, shifted=False, min_samples=min_periods).over("symbol").alias("_eyy"),
     )
     var_y = pl.col("_eyy") - pl.col("_ey") * pl.col("_ey")
     cov_xy = pl.col("_exy") - pl.col("_ex") * pl.col("_ey")

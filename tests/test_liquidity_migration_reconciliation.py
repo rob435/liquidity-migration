@@ -6,6 +6,11 @@ import polars as pl
 import pytest
 
 from liquidity_migration.reconciliation import (
+    MS_PER_DAY,
+    SNIPER_TRADE_SUFFIX,
+    _continuous_beats_daily_mar,
+    _fee_adjusted_return,
+    _trade_ledger_daily_returns,
     _write_pairs_csv,
     format_reconciliation_report,
     reconcile_paper_demo,
@@ -265,4 +270,234 @@ def test_write_pairs_csv_emits_machine_readable_companion(tmp_path: Path) -> Non
     assert df["demo_exit_price"][0] == pytest.approx(91.0)
     # No paired trades -> no companion file.
     assert _write_pairs_csv(report_path, []) is None
+
+
+def test_absent_net_return_uses_notional_weighted_gross() -> None:
+    """audit2c: gross_trade_return is weighted by notional/equity before fees.
+
+    notional/equity = 5000/1000 = 5x. The gross return is scaled by that factor,
+    THEN the equity-fractional fee is subtracted — both terms now share the
+    notional-weighted, equity-fractional basis.
+    """
+    row = {
+        "gross_trade_return": 0.02,
+        "notional_usdt": 5000.0,
+        "equity_usdt": 1000.0,
+        "entry_fee_usdt": 0.5,
+        "exit_fee_usdt": 0.5,
+    }
+    out = _fee_adjusted_return(row, net_of_cost=False)
+
+    weight = 5000.0 / 1000.0
+    expected = 0.02 * weight - (0.5 + 0.5) / 1000.0
+    assert out == pytest.approx(expected)  # 0.1 - 0.001 = 0.099
+
+    # The old (unweighted) value subtracted fees from the RAW gross return.
+    old_unweighted = 0.02 - (0.5 + 0.5) / 1000.0  # 0.019
+    assert out != pytest.approx(old_unweighted)
+    # Delta vs the old basis: +0.08 (the gross part scaled by 5x).
+    assert out - old_unweighted == pytest.approx(0.02 * (weight - 1.0))
+
+
+def test_present_net_return_unchanged() -> None:
+    """audit2c guard: a trade WITH net_return (already notional-weighted) keeps the
+    exact same fee-adjusted return — only the gross_trade_return branch is touched."""
+    row = {
+        "net_return": 0.010,  # = gross_trade_return * notional_weight already
+        "notional_usdt": 5000.0,
+        "equity_usdt": 1000.0,
+        "entry_fee_usdt": 0.6,
+        "exit_fee_usdt": 0.6,
+    }
+    out = _fee_adjusted_return(row, net_of_cost=False)
+    assert out == pytest.approx(0.010 - (0.6 + 0.6) / 1000.0)
+
+
+def test_gross_without_notional_falls_back_to_raw() -> None:
+    """audit2c: with no usable notional/equity the weighting is a safe no-op, so the
+    raw gross return is used (no spurious zeroing) before fees are applied."""
+    row = {
+        "gross_trade_return": 0.02,
+        "equity_usdt": 1000.0,  # notional_usdt absent -> weight skipped
+        "entry_fee_usdt": 0.5,
+        "exit_fee_usdt": 0.5,
+    }
+    out = _fee_adjusted_return(row, net_of_cost=False)
+    assert out == pytest.approx(0.02 - (0.5 + 0.5) / 1000.0)
+
+
+# ---------------------------------------------------------------------------
+# audit2
+# [8] reconciliation: a zero-drawdown continuous book (mar=None) is the BEST
+# drawdown case, not a MAR failure.
+# ---------------------------------------------------------------------------
+
+def test_zero_drawdown_continuous_beats_finite_daily_mar() -> None:
+    continuous = {"mar": None, "max_drawdown": 0.0, "total_return": 0.20}
+    daily = {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15}
+    assert _continuous_beats_daily_mar(continuous, daily) is True  # was False (false alarm)
+
+
+def test_zero_drawdown_continuous_with_lower_return_does_not_beat() -> None:
+    continuous = {"mar": None, "max_drawdown": 0.0, "total_return": 0.05}
+    daily = {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15}
+    assert _continuous_beats_daily_mar(continuous, daily) is False
+
+
+def test_finite_mar_comparison_unchanged() -> None:
+    assert _continuous_beats_daily_mar(
+        {"mar": 5.0, "max_drawdown": -0.04, "total_return": 0.2},
+        {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15},
+    ) is True
+    assert _continuous_beats_daily_mar(
+        {"mar": 2.0, "max_drawdown": -0.08, "total_return": 0.1},
+        {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15},
+    ) is False
+
+
+# --------------------------------------------------------------------------
+# code-quality-4 + cost-funding-2: _fee_adjusted_return source-convention guard
+# (relocated from tests/test_audit_fix_b06.py)
+# --------------------------------------------------------------------------
+
+
+def test_fee_adjusted_return_live_subtracts_fees_only_once() -> None:
+    """code-quality-4: a LIVE (gross-of-cost) row has fees subtracted exactly once."""
+    row = {
+        "net_return": 0.010,  # gross-of-cost: gtr * notional_weight
+        "equity_usdt": 1000.0,
+        "entry_fee_usdt": 0.6,
+        "exit_fee_usdt": 0.6,
+    }
+    out = _fee_adjusted_return(row, net_of_cost=False)
+    assert out == pytest.approx(0.010 - (0.6 + 0.6) / 1000.0)
+
+
+def test_fee_adjusted_return_backtest_does_not_double_subtract_fees() -> None:
+    """code-quality-4: a BACKTEST (net-of-cost) row must NOT have fees re-subtracted.
+
+    Original bug: _fee_adjusted_return ALWAYS subtracted fees, so a net-of-cost
+    frame had its fees double-counted, understating the return. With net_of_cost=True
+    the stored net return passes through unchanged.
+    """
+    net_of_cost_return = 0.008  # gross + cost_return + funding_return already applied
+    row = {
+        "net_return": net_of_cost_return,
+        "equity_usdt": 1000.0,
+        "entry_fee_usdt": 0.6,
+        "exit_fee_usdt": 0.6,
+    }
+    out = _fee_adjusted_return(row, net_of_cost=True)
+    assert out == pytest.approx(net_of_cost_return)
+    # And demonstrably different from the (wrong) double-subtracted value.
+    assert out != pytest.approx(net_of_cost_return - (0.6 + 0.6) / 1000.0)
+
+
+def test_fee_adjusted_return_folds_in_funding_when_present_usdt() -> None:
+    """cost-funding-2: when the live ledger carries a per-trade funding term it is
+    folded into the return. A received funding credit (+usdt) improves the return."""
+    base = {
+        "net_return": 0.010,
+        "equity_usdt": 1000.0,
+        "entry_fee_usdt": 0.5,
+        "exit_fee_usdt": 0.5,
+    }
+    without = _fee_adjusted_return(dict(base), net_of_cost=False)
+    with_funding = _fee_adjusted_return({**base, "funding_usdt": 2.0}, net_of_cost=False)
+    assert with_funding == pytest.approx(without + 2.0 / 1000.0)
+
+
+def test_fee_adjusted_return_folds_in_funding_when_present_fractional() -> None:
+    """cost-funding-2: a fractional funding_return term is folded in directly."""
+    base = {
+        "net_return": 0.010,
+        "equity_usdt": 1000.0,
+        "entry_fee_usdt": 0.5,
+        "exit_fee_usdt": 0.5,
+    }
+    without = _fee_adjusted_return(dict(base), net_of_cost=False)
+    with_funding = _fee_adjusted_return({**base, "funding_return": 0.0015}, net_of_cost=False)
+    assert with_funding == pytest.approx(without + 0.0015)
+
+
+def test_trade_ledger_daily_returns_forwards_net_of_cost_flag() -> None:
+    """code-quality-4: the daily aggregator forwards net_of_cost so a backtest frame
+    is not silently fee-double-subtracted on its way into the daily series."""
+    frame = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "net_return": 0.008,
+                "equity_usdt": 1000.0,
+                "entry_fee_usdt": 0.6,
+                "exit_fee_usdt": 0.6,
+                "exit_ts_ms": 5 * MS_PER_DAY + 1,
+            }
+        ]
+    )
+    live = _trade_ledger_daily_returns(frame, net_of_cost=False)
+    backtest = _trade_ledger_daily_returns(frame, net_of_cost=True)
+    day = 5 * MS_PER_DAY
+    assert backtest[day] == pytest.approx(0.008)
+    assert live[day] == pytest.approx(0.008 - (0.6 + 0.6) / 1000.0)
+    assert backtest[day] != pytest.approx(live[day])
+
+
+# --------------------------------------------------------------------------
+# sniper-2: snipe rows excluded from paper/demo pairing, reported separately
+# (relocated from tests/test_audit_fix_b06.py)
+# --------------------------------------------------------------------------
+
+
+def _recon_trade(trade_id: str, *, symbol: str, entry_ts_ms: int) -> dict:
+    return {
+        "trade_id": trade_id,
+        "symbol": symbol,
+        "side": "short",
+        "signal_ts_ms": entry_ts_ms - 1000,
+        "entry_ts_ms": entry_ts_ms,
+        "entry_price": 100.0,
+        "qty": 1.0,
+        "status": "closed",
+        "exit_price": 99.0,
+        "exit_ts_ms": entry_ts_ms + 3600_000,
+        "exit_reason": "tp",
+    }
+
+
+def test_snipe_rows_excluded_from_demo_only_count() -> None:
+    """sniper-2: a filled demo snipe has no paper twin BY DESIGN. It must NOT inflate
+    demo_only (the slippage/divergence diagnostic) and must be reported separately."""
+    paper = pl.DataFrame([_recon_trade("BTC-1", symbol="BTCUSDT", entry_ts_ms=1_000_000)])
+    demo = pl.DataFrame(
+        [
+            _recon_trade("BTC-1", symbol="BTCUSDT", entry_ts_ms=1_000_000),
+            _recon_trade("ETH-1" + SNIPER_TRADE_SUFFIX, symbol="ETHUSDT", entry_ts_ms=2_000_000),
+        ]
+    )
+    result = reconcile_paper_demo(paper, demo)
+    summary = result["summary"]
+    # The shared BTC trade pairs; the snipe is pulled out, so demo_only stays 0.
+    assert summary["paired"] == 1
+    assert summary["demo_only"] == 0
+    assert summary["snipe_demo_only"] == 1
+    # The snipe must not be counted in the pairing population.
+    assert summary["demo_trades"] == 1
+
+
+def test_snipe_exclusion_does_not_drop_real_demo_only() -> None:
+    """sniper-2 guard: a genuine (non-snipe) demo-only row is still counted."""
+    paper = pl.DataFrame([_recon_trade("BTC-1", symbol="BTCUSDT", entry_ts_ms=1_000_000)])
+    demo = pl.DataFrame(
+        [
+            _recon_trade("BTC-1", symbol="BTCUSDT", entry_ts_ms=1_000_000),
+            _recon_trade("ETH-1", symbol="ETHUSDT", entry_ts_ms=2_000_000),  # real demo-only
+            _recon_trade("XRP-1" + SNIPER_TRADE_SUFFIX, symbol="XRPUSDT", entry_ts_ms=3_000_000),
+        ]
+    )
+    result = reconcile_paper_demo(paper, demo)
+    summary = result["summary"]
+    assert summary["paired"] == 1
+    assert summary["demo_only"] == 1  # ETH-1 only
+    assert summary["snipe_demo_only"] == 1  # XRP snipe reported apart
 

@@ -15,6 +15,7 @@ close. Tests verify the four lifecycle pillars:
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from pathlib import Path
@@ -808,4 +809,337 @@ def test_universe_refresh_threshold_log_counts_only_new_targets(tmp_path: Path, 
         for msg in threshold_logs:
             assert "/3" not in msg, msg
     finally:
+        manager.stop()
+
+
+# --- audit2b unit kline_mgr_count: universe_refresh_errors double-count ---
+#
+# Defect: ``universe_refresh_errors`` was double-counted on the default-fetcher
+# empty path. When ``force_refresh_universe`` calls ``_fetch_universe`` and the
+# default fetcher's ``get_instruments_info`` raises, ``_fetch_universe`` already
+# increments ``_universe_refresh_errors`` (line ~413) and returns ``[]``; the
+# empty-set guard in ``force_refresh_universe`` then increments it a SECOND time
+# for the same underlying error.
+#
+# These tests pin:
+#   * the default-fetcher REST-exception path counts the error exactly ONCE
+#     (fails on the old code, which counted 2), and
+#   * the normal / other empty paths are unchanged (custom-fetcher empty and a
+#     default fetch that simply filters to empty each count exactly once; a
+#     successful refresh counts zero).
+
+
+class _Market:
+    """Default-fetcher stand-in: get_instruments_info drives the path."""
+
+    def __init__(self, instruments_factory, kline_factory) -> None:
+        self._instruments_factory = instruments_factory
+        self._kline_factory = kline_factory
+        self.instrument_calls = 0
+        self.kline_calls: list[str] = []
+        # __post_init__ wires a limiter only when this attribute is None.
+        self.rate_limiter = None
+
+    def get_instruments_info(self) -> list[dict]:
+        self.instrument_calls += 1
+        return list(self._instruments_factory(self.instrument_calls))
+
+    def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list:
+        self.kline_calls.append(symbol)
+        return list(self._kline_factory(symbol, interval, start, end))
+
+
+class _Pool:
+    def __init__(self) -> None:
+        self.updates: list[set[str]] = []
+        self.subscribed: list[list[str]] = []
+        self.closed = False
+
+    def subscribe(self, symbols, callback) -> None:
+        self.subscribed.append(list(symbols))
+
+    def update_subscriptions(self, new_symbols: set[str]) -> dict:
+        self.updates.append(set(new_symbols))
+        return {"added": 0, "removed": 0, "connections": 1}
+
+    def close(self) -> None:
+        self.closed = True
+
+    def start_watchdog(self) -> None:
+        pass
+
+    def stats(self) -> dict:
+        return {"connections": 1}
+
+
+def _build(tmp_path: Path, instruments_factory) -> tuple[KlineStreamManager, _Pool, _Market]:
+    pool = _Pool()
+
+    def _klines(symbol, interval, start, end):
+        # A single page of bars is plenty for bootstrap to mark covered.
+        from liquidity_migration._common import MS_PER_HOUR
+
+        return [
+            {
+                "ts_ms": start + i * MS_PER_HOUR,
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume_base": 10.0,
+                "turnover_quote": 15.0,
+            }
+            for i in range(120)
+        ]
+
+    market = _Market(instruments_factory, _klines)
+    manager = KlineStreamManager(
+        market_data=market,
+        cache_root=tmp_path,
+        lookback_days=5,
+        bootstrap_workers=2,
+        universe_refresh_interval_seconds=0.0,  # no refresh thread
+        bootstrap_completion_threshold=1.0,
+        bootstrap_timeout_seconds=10.0,
+        flush_interval_seconds=0.0,
+        retain_days=30,
+        topics_per_connection=10,
+        pool=pool,
+    )
+    return manager, pool, market
+
+
+def test_default_fetcher_rest_exception_counts_error_once(tmp_path: Path) -> None:
+    """First fetch succeeds (start), second raises (refresh blip).
+
+    On the old code the exception was counted in _fetch_universe AND again in
+    the empty-set guard => 2. The fix counts it exactly once."""
+
+    def _instruments(call_n: int):
+        if call_n >= 2:
+            raise RuntimeError("simulated REST 5xx")
+        return _instruments_payload(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+
+    manager, pool, _market = _build(tmp_path, _instruments)
+    manager.start()
+    try:
+        assert manager.stats()["universe_refresh_errors"] == 0
+        result = manager.force_refresh_universe()
+        # Universe is preserved (transient-failure guard).
+        assert result == {"added": 0, "removed": 0, "size": 3}
+        assert set(manager.universe_symbols()) == {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+        # The single underlying error is counted exactly once, not twice.
+        assert manager.stats()["universe_refresh_errors"] == 1
+        # Existing subscriptions untouched on the empty path.
+        assert pool.updates == []
+    finally:
+        manager.stop()
+
+
+def test_default_fetcher_filtered_to_empty_counts_error_once(tmp_path: Path) -> None:
+    """Default fetch returns rows but they filter to empty (no exception).
+
+    _fetch_universe does NOT count here, so the empty-set guard must still
+    count exactly once. This path is unchanged by the fix."""
+
+    def _instruments(call_n: int):
+        if call_n >= 2:
+            return _instruments_payload([])  # valid call, no symbols
+        return _instruments_payload(["BTCUSDT", "ETHUSDT"])
+
+    manager, _pool, _market = _build(tmp_path, _instruments)
+    manager.start()
+    try:
+        assert manager.stats()["universe_refresh_errors"] == 0
+        result = manager.force_refresh_universe()
+        assert result == {"added": 0, "removed": 0, "size": 2}
+        assert manager.stats()["universe_refresh_errors"] == 1
+    finally:
+        manager.stop()
+
+
+def test_successful_refresh_counts_no_error(tmp_path: Path) -> None:
+    """Normal happy path: a non-empty refresh records zero errors and the
+    diff/return shape is unchanged by the fix."""
+
+    def _instruments(call_n: int):
+        return _instruments_payload(["BTCUSDT", "ETHUSDT"])
+
+    manager, _pool, _market = _build(tmp_path, _instruments)
+    manager.start()
+    try:
+        result = manager.force_refresh_universe()
+        assert result == {"added": 0, "removed": 0, "size": 2}
+        assert manager.stats()["universe_refresh_errors"] == 0
+    finally:
+        manager.stop()
+
+
+# ==========================================================================
+# Relocated from test_audit_fix_b14.py (ratelimit-rest-1, ws-pool-1 —
+# 2026-06-14 audit bucket b14).
+# ==========================================================================
+
+
+class _PaginatingMarketData:
+    """Mimics BybitMarketData: get_klines paginates and EACH page acquires the
+    wired rate_limiter once (as the real _get does). rate_limiter starts None
+    exactly like the daemons build it, so the manager must wire its own."""
+
+    def __init__(self, *, instruments, pages_per_symbol: int) -> None:
+        self._instruments = instruments
+        self._pages = pages_per_symbol
+        self.rate_limiter = None
+        self.kline_calls: list[str] = []
+
+    def get_instruments_info(self) -> list[dict]:
+        return list(self._instruments)
+
+    def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list:
+        self.kline_calls.append(symbol)
+        bars = []
+        for page in range(self._pages):
+            if self.rate_limiter is not None:
+                self.rate_limiter.acquire()  # one acquire per HTTP page, like _get
+            bars.append({
+                "ts_ms": start + page * MS_PER_HOUR, "open": 1.0, "high": 1.0,
+                "low": 1.0, "close": 1.0, "volume_base": 1.0, "turnover_quote": 1.0,
+            })
+        return bars
+
+
+class _CountingLimiter:
+    def __init__(self) -> None:
+        self.acquires = 0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            self.acquires += 1
+
+
+def test_bootstrap_symbol_no_longer_takes_a_manual_limiter() -> None:
+    """ratelimit-rest-1: the manual once-per-symbol acquire is gone — the
+    _bootstrap_symbol signature must no longer accept ``shared_limiter`` (the
+    limiter now lives on the market client, acquiring once per paginated call)."""
+    params = inspect.signature(KlineStreamManager._bootstrap_symbol).parameters
+    assert "shared_limiter" not in params
+
+
+def test_bootstrap_wires_limiter_and_acquires_once_per_page(tmp_path) -> None:
+    """ratelimit-rest-1: bootstrap must rate-limit each PAGINATED get_klines call,
+    not once per symbol. With a market client whose get_klines makes 3 pages, a
+    2-symbol bootstrap must acquire 6 times (the original once-per-symbol code
+    acquired only 2)."""
+    symbols = ["AAAUSDT", "BBBUSDT"]
+    market = _PaginatingMarketData(
+        instruments=_instruments_payload(symbols), pages_per_symbol=3,
+    )
+
+    class _NoopPool:
+        def subscribe(self, *a, **k): pass
+        def update_subscriptions(self, *a, **k): return {}
+        def close(self): pass
+        def start_watchdog(self): pass
+        def stop_watchdog(self): pass
+        def stats(self): return {}
+
+    manager = KlineStreamManager(
+        market_data=market, cache_root=tmp_path,
+        lookback_days=2, bootstrap_workers=2,
+        universe_refresh_interval_seconds=0.0,
+        bootstrap_completion_threshold=1.0,
+        bootstrap_timeout_seconds=30.0,
+        flush_interval_seconds=0.0, retain_days=30,
+        topics_per_connection=10, pool=_NoopPool(),
+    )
+    # The manager must have wired ITS limiter onto the (None-limiter) client.
+    assert market.rate_limiter is not None
+    # Swap in a counting limiter on the client to count per-page acquires.
+    counter = _CountingLimiter()
+    market.rate_limiter = counter
+    manager.start()
+    try:
+        # 2 symbols * 3 pages each = 6 acquires (NOT 2, the once-per-symbol bug).
+        assert counter.acquires == 6
+        assert sorted(market.kline_calls) == ["AAAUSDT", "BBBUSDT"]
+    finally:
+        manager.stop()
+
+
+def test_refresh_bootstrap_honors_shutdown_promptly(tmp_path) -> None:
+    """ws-pool-1: a universe-refresh bootstrap must honor the manager's refresh-
+    stop signal. With a slow REST fetch and only a couple of workers, setting
+    _refresh_stop mid-flight (what stop() does on SIGTERM) must cancel the pool and
+    return promptly instead of running to the 1200s bootstrap deadline. The
+    original code passed NO shutdown_event on this path, so it ignored the signal."""
+    refresh_targets = [f"SYM{i:02d}USDT" for i in range(20)]
+
+    def _instruments(call_n):
+        # Refresh (call >=2) adds the new listings to bootstrap.
+        base = ["BTCUSDT"]
+        return _instruments_payload(base + (refresh_targets if call_n >= 2 else []))
+
+    started = threading.Event()
+
+    def _slow_klines(symbol, interval, start, end):
+        started.set()
+        time.sleep(0.5)  # slow REST page
+        return [{
+            "ts_ms": start, "open": 1.0, "high": 1.0, "low": 1.0,
+            "close": 1.0, "volume_base": 1.0, "turnover_quote": 1.0,
+        }]
+
+    class _FakeMarket:
+        def __init__(self):
+            self.rate_limiter = None
+            self._n = 0
+
+        def get_instruments_info(self):
+            self._n += 1
+            return _instruments(self._n)
+
+        def get_klines(self, symbol, interval, start, end):
+            return _slow_klines(symbol, interval, start, end)
+
+    class _NoopPool:
+        def subscribe(self, *a, **k): pass
+        def update_subscriptions(self, *a, **k): return {}
+        def close(self): pass
+        def start_watchdog(self): pass
+        def stop_watchdog(self): pass
+        def stats(self): return {}
+
+    market = _FakeMarket()
+    manager = KlineStreamManager(
+        market_data=market, cache_root=tmp_path,
+        lookback_days=2, bootstrap_workers=2,
+        universe_refresh_interval_seconds=0.0,  # no auto refresh thread
+        bootstrap_completion_threshold=1.0,
+        bootstrap_timeout_seconds=1200.0,  # the deadline the orphan would run to
+        flush_interval_seconds=0.0, retain_days=30,
+        topics_per_connection=10, pool=_NoopPool(),
+    )
+    manager.start()  # bootstraps BTCUSDT only
+    try:
+        # Fire the refresh in a background thread; it will start a slow bootstrap
+        # of the 20 new listings. Set the manager's refresh-stop shortly after the
+        # first REST call begins — this is what stop() does on SIGTERM.
+        result: dict = {}
+
+        def _run_refresh():
+            result["out"] = manager.force_refresh_universe()
+
+        th = threading.Thread(target=_run_refresh)
+        t0 = time.monotonic()
+        th.start()
+        assert started.wait(timeout=5.0), "refresh bootstrap never issued a REST call"
+        manager._refresh_stop.set()  # SIGTERM-equivalent mid-bootstrap
+        th.join(timeout=10.0)
+        elapsed = time.monotonic() - t0
+        assert not th.is_alive(), "refresh bootstrap ignored shutdown — still running"
+        # Must return WELL under the 1200s deadline (proves the signal was honored).
+        assert elapsed < 30.0, f"refresh bootstrap blocked {elapsed:.1f}s past shutdown"
+    finally:
+        manager._refresh_stop.clear()
         manager.stop()

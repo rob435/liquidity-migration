@@ -13,6 +13,8 @@ can be a shared dependency of all three sleeves + ws_risk without a circular imp
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 # The orderLinkId prefix vocabulary — ONE registry so a new sleeve/exit prefix is added in a single
 # place. Entry links are decoded by ``decode_entry_order_link_id``; exit/risk-side links are matched
 # by ``is_exit_link`` (event_demo._is_own_exit_order enumerated these inline; quality-dup-12).
@@ -29,6 +31,28 @@ EXIT_LINK_PREFIXES = ("lm-ex-", "lm-rx-", "lm-wx-", "lm-ux-")
 def is_exit_link(order_link_id: str) -> bool:
     """True if ``order_link_id`` is a bot-generated EXIT / risk-side order (any sleeve)."""
     return bool(order_link_id) and order_link_id.startswith(EXIT_LINK_PREFIXES)
+
+
+def assert_routable_component_tags(component_tags: Iterable[str]) -> None:
+    """Enforce the decode-routing invariant on continuous ensemble component tags.
+
+    Continuous entry links are built as ``lm-en-c{tag}-…`` and the addon/hedge family
+    as ``lm-en-ca-…``; ``decode_entry_order_link_id`` therefore tests
+    ``tag.startswith("ca")`` (addon) BEFORE ``tag.startswith("c")`` (continuous).
+    A continuous component tag that begins with ``"a"`` produces ``"c"+"a…"`` = ``"ca…"``
+    which the decoder mis-classifies as the addon sleeve, silently mis-routing the fill
+    to the addon ledger with a garbled component_tag and breaking paper<->demo pairing
+    on a VPS rebuild (exec-router-3). The constraint was documented (above) but never
+    enforced; call this at config-load with every known ensemble component tag so an
+    ``"a"``-prefixed tag fails loudly at startup instead of corrupting attribution later.
+    """
+    bad = sorted({t for t in component_tags if isinstance(t, str) and t.startswith("a")})
+    if bad:
+        raise ValueError(
+            "continuous ensemble component tag(s) must not begin with 'a' — "
+            f"'c'+'a…' collides with the 'ca' addon orderLinkId prefix and mis-routes "
+            f"the fill on rebuild (see order_link_id.decode_entry_order_link_id): {bad}"
+        )
 
 
 def _base36(value: int) -> str:
@@ -88,13 +112,17 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int, str] 
     if not order_link_id or not order_link_id.startswith("lm-en"):
         return None
     parts = order_link_id.split("-")
-    # `-x{3×base36}` sub-order uniquifier (continuous resize/sniper/exit links carry a short
+    # `-x{base36}` sub-order uniquifier (continuous resize/sniper/exit links carry a short
     # trade-id hash so two same-symbol orders in the same second never share a link — Bybit
     # accepts a reused link once the first order is terminal, which cross-wired WS fill
     # attribution; audit 2026-06-12). It is ORDER-level identity, not entry identity: strip it
-    # before decoding. A real ts36 tail is 6-7 chars and a re-entry seq is a plain int, so the
-    # exact "x"+3-char shape cannot collide with either.
-    if len(parts) >= 5 and len(parts[-1]) == 4 and parts[-1][0] == "x":
+    # before decoding. The suffix width was WIDENED from "x"+3 base36 (len-4, 46656 buckets) to
+    # "x"+4 base36 (len-5, 1.68M buckets) to make the distinct-trade_id crc collision negligible
+    # (exec-router-6); accept BOTH the legacy len-4 AND the new len-5 shape so orderLinkIds
+    # written before the widening still decode on a VPS rebuild. A real ts36 tail is 6 chars for
+    # current epoch-seconds (and a re-entry seq is a plain int with no "x" prefix), so neither
+    # the old nor the new "x"+N shape can collide with a legitimate final part.
+    if len(parts) >= 5 and len(parts[-1]) in (4, 5) and parts[-1][0] == "x":
         try:
             int(parts[-1][1:], 36)
         except ValueError:
