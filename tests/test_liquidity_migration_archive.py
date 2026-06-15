@@ -710,18 +710,24 @@ def test_archive_download_can_build_1m_klines_from_public_trades(tmp_path, monke
         archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
     )
 
-    klines = read_dataset(tmp_path, "klines_1m")
+    klines = read_dataset(tmp_path, "klines_1m").sort("ts_ms")
     assert outputs["klines_1m"] == tmp_path / "klines_1m"
-    assert klines.select(["open", "high", "low", "close", "volume_base", "turnover_quote"]).to_dicts() == [
-        {
-            "open": 100.0,
-            "high": 102.0,
-            "low": 99.0,
-            "close": 99.0,
-            "volume_base": 3.5,
-            "turnover_quote": 351.5,
-        }
-    ]
+    # audit2c: the CLI archive_klines_1m path now DENSIFIES to a full per-minute grid
+    # (carry-forward close, zero volume on untraded minutes), matching the canonical PIT
+    # builder (archive_manifest._download_one_archive_kline) instead of writing sparse bars.
+    rows = klines.select(["open", "high", "low", "close", "volume_base", "turnover_quote"]).to_dicts()
+    assert klines.height == 1440  # full UTC day grid
+    # the single traded minute (00:00) keeps the real aggregated OHLCV
+    assert rows[0] == {
+        "open": 100.0, "high": 102.0, "low": 99.0, "close": 99.0,
+        "volume_base": 3.5, "turnover_quote": 351.5,
+    }
+    # untraded minutes carry the prior close forward at zero volume
+    assert rows[1] == {
+        "open": 99.0, "high": 99.0, "low": 99.0, "close": 99.0,
+        "volume_base": 0.0, "turnover_quote": 0.0,
+    }
+    assert rows[-1]["close"] == 99.0 and rows[-1]["volume_base"] == 0.0
 
 
 def test_archive_manifest_downloader_resumes_and_writes_klines(tmp_path, monkeypatch) -> None:

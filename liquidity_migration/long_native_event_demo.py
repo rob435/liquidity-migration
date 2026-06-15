@@ -414,7 +414,18 @@ def projected_long_initial_margin_pct_equity(
         if strategy_config.enable_vol_target
         else 1.0
     )
-    worst_case_order_notional_pct = per_order_notional_pct * worst_case_vol_scale
+    # audit2c: the LIVE per-position notional also multiplies by weekend_size_mult
+    # (1.5 on weekend entries) and the vol-parity position_weight (max 1.0 given the
+    # vol floor). Model both so the guard captures the true worst-case book IM
+    # instead of under-counting and approving a config that breaches the ceiling.
+    worst_case_weekend_mult = max(1.0, float(strategy_config.weekend_size_mult))
+    worst_case_position_weight = 1.0  # audit2c: vol-parity weight is bounded by 1.0 (vol floor)
+    worst_case_order_notional_pct = (
+        per_order_notional_pct
+        * worst_case_vol_scale
+        * worst_case_weekend_mult
+        * worst_case_position_weight
+    )
     full_book_positions = max(int(strategy_config.max_concurrent_positions), 0)
     cycle_entries = min(max(int(demo_config.max_new_entries_per_cycle), 0), full_book_positions)
     leverage = max(float(demo_config.entry_leverage), 1e-12)
@@ -677,7 +688,12 @@ def run_long_native_demo_cycle(
         # Bybit's per-account/per-IP caps; cross-purpose coordination would need
         # a single hoisted limiter injected into all REST clients.
         private_factory: Callable[[], Any] | None
-        entries_parallel_workers = 1
+        # audit2b: `requested_entry_workers` is the configured parallelism the caller
+        # PASSES to _execute_long_entries as max_workers; it is NOT what executes.
+        # _execute_long_entries discards max_workers/private_client_factory and runs the
+        # entry burst sequentially (one place_order at a time), so the truthful worker
+        # count for telemetry is always 1 (see `entries_parallel_workers` below).
+        requested_entry_workers = 1
         if demo.submit_orders and demo.max_concurrent_entries > 1 and len(candidates) > 1:
             shared_limiter = BybitRestRateLimiter(
                 max_requests=_long_demo_private_rest_rate_limit_per_second(),
@@ -690,7 +706,7 @@ def run_long_native_demo_cycle(
                 return client
 
             private_factory = _build_worker_client
-            entries_parallel_workers = min(demo.max_concurrent_entries, len(candidates))
+            requested_entry_workers = min(demo.max_concurrent_entries, len(candidates))
         else:
             private_factory = None
 
@@ -707,7 +723,7 @@ def run_long_native_demo_cycle(
             record_preflight=preflight_callback,
             private_client_factory=private_factory,
             execution_event_router=execution_event_router,
-            max_workers=entries_parallel_workers,
+            max_workers=requested_entry_workers,
             cross_sleeve_account_root=str(cross_sleeve_root),
             live_position_symbols=live_position_symbols,
         )
@@ -788,7 +804,13 @@ def run_long_native_demo_cycle(
             "latest_feature_ts_ms": _max_int(features, "ts_ms") if not features.is_empty() else 0,
             "entry_candidates": len(candidates),
             "entries_executed": len(executed_entries),
-            "entries_parallel_workers": entries_parallel_workers,
+            # audit2b: report the ACTUAL worker count. _execute_long_entries runs the
+            # entry burst SEQUENTIALLY (max_workers/private_client_factory are reserved
+            # for future parallelism, not used), so the real concurrency is always 1 —
+            # the prior `requested_entry_workers` value (≤ max_concurrent_entries) was
+            # the configured request, never what executed. Telemetry-only; no change to
+            # sizing/selection/order submission.
+            "entries_parallel_workers": 1,
             "exit_candidates": len(exit_plans),
             "exits_executed": len(executed_exits),
             "open_long_positions_after": _count_open_long_positions(all_trades),

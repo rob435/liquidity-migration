@@ -109,9 +109,20 @@ def test_verify_download_falls_back_to_content_length_when_no_checksum() -> None
     raw = b"only-half-here"
     with pytest.raises(ValueError, match="Content-Length mismatch"):
         bv._verify_download(raw, expected_sha256=None, content_length=len(raw) + 100)
-    # Matching length (or no header at all) passes.
+    # Matching length passes.
     bv._verify_download(raw, expected_sha256=None, content_length=len(raw))
-    bv._verify_download(raw, expected_sha256=None, content_length=None)
+    # audit2c: with NEITHER checksum NOR Content-Length, the both-absent path is no
+    # longer a no-op — a non-zip body is now rejected as unverifiable corruption.
+    with pytest.raises(ValueError, match="unverifiable body rejected"):
+        bv._verify_download(raw, expected_sha256=None, content_length=None)
+    # A genuine valid zip with no checksum/length still passes.
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("AAAUSDT-1h-2024-01.csv", "1,2,3\n")
+    bv._verify_download(buf.getvalue(), expected_sha256=None, content_length=None)
 
 
 def test_fetch_expected_sha256_parses_leading_hex(monkeypatch) -> None:

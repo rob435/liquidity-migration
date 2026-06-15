@@ -16,7 +16,8 @@ Design contract — non-negotiable:
      i.e. the trade is opened 1h after EOD (matching the production
      --entry-delay-hours 1 fill model) and held for exactly N trading days.
 
-  3. Cross-sectional ranks are dense, fractional, computed ONLY among same-day
+  3. Cross-sectional ranks are average-tie fractional ranks (polars
+     method="average", normalised to [0, 1]), computed ONLY among same-day
      observations, and signed so that LARGER value == HIGHER rank.
 
   4. Forward returns are computed once at panel-build time. IC and portfolio
@@ -187,7 +188,11 @@ def _aggregate_daily_funding(funding: pl.DataFrame) -> pl.DataFrame:
         .group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                pl.col("ts_ms").min().alias("day_start_ms"),
+                # audit2c: snap the day key to the 00:00-UTC day floor rather than
+                # the first intraday ts. The kline daily grid is on the day floor;
+                # using min(ts) risks an off-grid key on a gap-edge day (missing
+                # 00:00 bar) and a join miss / dropped day against that grid.
+                ((pl.col("ts_ms").min() // MS_PER_DAY) * MS_PER_DAY).alias("day_start_ms"),
                 pl.col(rate_col).sum().alias("funding_rate_1d_sum"),
                 pl.col(rate_col).last().alias("funding_rate_last"),
             ]
@@ -203,7 +208,9 @@ def _aggregate_daily_open_interest(open_interest: pl.DataFrame) -> pl.DataFrame:
         return open_interest
     has_value = "open_interest_value" in open_interest.columns
     aggs: list[pl.Expr] = [
-        pl.col("ts_ms").min().alias("day_start_ms"),
+        # audit2c: snap the day key to the 00:00-UTC day floor (see
+        # _aggregate_daily_funding) so the OI daily row joins the kline grid.
+        ((pl.col("ts_ms").min() // MS_PER_DAY) * MS_PER_DAY).alias("day_start_ms"),
         pl.col("open_interest").last().alias("open_interest"),
     ]
     if has_value:
@@ -234,7 +241,10 @@ def _aggregate_daily_premium(premium_index_1h: pl.DataFrame) -> pl.DataFrame:
         .group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                pl.col("ts_ms").min().alias("day_start_ms"),
+                # audit2c: snap the day key to the 00:00-UTC day floor (see
+                # _aggregate_daily_funding) so the premium daily row joins the
+                # kline grid on a gap-edge day.
+                ((pl.col("ts_ms").min() // MS_PER_DAY) * MS_PER_DAY).alias("day_start_ms"),
                 pl.col("close").last().alias("premium_close"),
             ]
         )
@@ -275,8 +285,10 @@ def _attach_daily_returns(daily_klines: pl.DataFrame) -> pl.DataFrame:
 
 
 def _xs_rank(df: pl.DataFrame, value_col: str, *, out_col: str) -> pl.DataFrame:
-    """Cross-sectional dense rank fraction in [0, 1] per ts_ms.
+    """Cross-sectional average-tie rank fraction in [0, 1] per ts_ms.
 
+    Uses polars rank(method="average") normalised by the same-day count, NOT a
+    dense rank (audit2: the module docstring previously mislabelled this 'dense').
     Larger value -> higher rank. Nulls stay null; their presence does not
     bias the ranks of the rest (rank is computed over non-null values).
     """
@@ -1106,21 +1118,34 @@ def build_combined_signal_portfolio(
     # under-deploys vs the stated decile). Ordinal breaks ties arbitrarily but
     # DETERMINISTICALLY, so the per-day count is exactly the configured decile
     # regardless of ties — which is what the selection logic below relies on.
+    # audit2c: rank pool must contain only SIZABLE names. A selected name with
+    # null/non-positive realized_vol gets size_factor=null below, so its signed
+    # weight is null and that side silently deploys 0 gross for the slot,
+    # breaking the documented decile breadth. Mask un-sizable names out of the
+    # pool BEFORE computing _signal_rank/_xs_n/_decile_k so the k selected names
+    # are all sizable. The vol guard mirrors the raw_size guard below (vol > 0.0;
+    # a null vol fails the predicate and is masked to null).
+    if realized_vol_col not in df.columns:
+        raise KeyError(
+            f"realized_vol_col={realized_vol_col!r} not in panel; ensure the feature was included in build_feature_panel"
+        )
     df = df.with_columns(
-        pl.col("combined_signal")
+        pl.when(pl.col(realized_vol_col) > 0.0)
+        .then(pl.col("combined_signal"))
+        .otherwise(None)
+        .alias("_rankable_signal")
+    )
+    df = df.with_columns(
+        pl.col("_rankable_signal")
         .rank(method="ordinal")
         .over("ts_ms")
         .alias("_signal_rank"),
-        pl.col("combined_signal").count().over("ts_ms").alias("_xs_n"),
+        pl.col("_rankable_signal").count().over("ts_ms").alias("_xs_n"),
     ).with_columns(
         (pl.col("_signal_rank") / pl.col("_xs_n")).alias("signal_rank_frac")
     )
 
     # Sizing — 1/realized-vol per name, clipped.
-    if realized_vol_col not in df.columns:
-        raise KeyError(
-            f"realized_vol_col={realized_vol_col!r} not in panel; ensure the feature was included in build_feature_panel"
-        )
     raw_size = pl.when(pl.col(realized_vol_col) > 0.0).then(
         pl.lit(vol_target_per_name) / pl.col(realized_vol_col)
     ).otherwise(None)

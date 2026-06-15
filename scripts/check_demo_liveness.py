@@ -888,7 +888,11 @@ def main() -> int:
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
     risk_root = Path(args.risk_root) if str(args.risk_root).strip() else None
     liquidations_root = Path(args.liquidations_root) if str(args.liquidations_root).strip() else None
-    _state_root = continuous_root or long_root or Path("data")
+    # audit2b: anchor the state-file fallback at the repo dir (NOT CWD), matching the
+    # _default_root root anchoring — when BOTH sleeve roots are explicitly skipped the
+    # cooldown/dedup state must still land in one stable location, else a manual/cron run
+    # from another CWD reads an empty state and re-pages every persisting condition.
+    _state_root = continuous_root or long_root or (_REPO_ROOT / "data")
     state_file = args.state_file or (_state_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
 

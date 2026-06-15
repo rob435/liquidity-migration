@@ -598,7 +598,11 @@ def _strategy_equity_series(equity: pl.DataFrame) -> list[dict[str, Any]]:
     if equity.is_empty() or not _has_columns(equity, "date", "equity"):
         return []
     rows = []
-    for row in equity.sort("ts_ms").select(["date", "equity"]).to_dicts():
+    # audit2b: guard ts_ms before sorting on it — a date+equity frame without a
+    # ts_ms column passed the guard above then crashed at .sort("ts_ms"); fall
+    # back to the date ordering the chart already renders by.
+    sort_key = "ts_ms" if _has_columns(equity, "ts_ms") else "date"
+    for row in equity.sort(sort_key).select(["date", "equity"]).to_dicts():
         value = _float_or_nan(row.get("equity"))
         day = _parse_day(row.get("date"))
         if day is not None and math.isfinite(value):

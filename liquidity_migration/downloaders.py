@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import math  # audit2b: guard non-finite taker volumes before the imbalance ratio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,10 +11,11 @@ from urllib.parse import urlparse
 import polars as pl
 
 from .archive import ArchiveFileNotFoundError, download_public_trade_archive, read_public_trade_archive
+from .archive_manifest import previous_kline_close  # audit2c: seed densify carry-forward like the canonical PIT builder
 from .binance import BinanceDataError, BinanceUSDMData, _recent_history_start
 from .bybit import BybitMarketData
 from .config import ResearchConfig
-from .ingestion import aggregate_trade_klines_1m, normalize_funding_history
+from .ingestion import aggregate_trade_klines_1m, densify_trade_klines_1m, normalize_funding_history
 from .storage import dataset_path, write_dataset
 
 
@@ -143,6 +145,14 @@ def download_market_data(
                     continue
                 trades = read_public_trade_archive(archive_path, symbol=symbol)
                 klines_1m = aggregate_trade_klines_1m(trades)
+                # audit2c: densify the sparse 1m bars onto the full 1440-row grid with a
+                # carry-forward seed, matching archive_manifest._download_one_archive_kline —
+                # the raw aggregate output left gap-y bars diverging from the canonical builder.
+                klines_1m = densify_trade_klines_1m(
+                    klines_1m,
+                    archive_date=date,
+                    initial_price=previous_kline_close(data_root, symbol=symbol, archive_date=date, dataset="klines_1m"),
+                )
                 outputs["klines_1m"] = write_dataset(klines_1m, data_root, "klines_1m", append=False)
                 del trades, klines_1m
                 gc.collect()
@@ -804,7 +814,10 @@ def _normalize_binance_taker_flow(symbol: str, rows: list[dict], *, period: str)
         # missing) emits nulls for the derived fields rather than a spurious 0.
         buy_volume = _float_or_none(row.get("buyVol"))
         sell_volume = _float_or_none(row.get("sellVol"))
-        if buy_volume is None or sell_volume is None:
+        # audit2b: a NaN/inf or negative volume is malformed (volumes are non-negative & finite); it
+        # slips past the None check and would yield a fabricated 0.0 imbalance (total <= 0 branch) or a
+        # NaN ratio. Treat it as missing data and emit null derived fields, same as an absent field.
+        if not _is_valid_volume(buy_volume) or not _is_valid_volume(sell_volume):
             output.append(
                 {
                     "ts_ms": int(row["timestamp"]),
@@ -976,6 +989,11 @@ def _partition_exists(data_root: str | Path, *, dataset: str, symbol: str, date:
 
 def _float_or_none(value) -> float | None:
     return float(value) if value not in (None, "") else None
+
+
+def _is_valid_volume(value: float | None) -> bool:
+    # audit2b: a taker volume is usable only if it is present, finite, and non-negative.
+    return value is not None and math.isfinite(value) and value >= 0.0
 
 
 def _resolve_binance_dataset_name(dataset: str) -> str:

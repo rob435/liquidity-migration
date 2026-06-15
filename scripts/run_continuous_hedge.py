@@ -190,9 +190,15 @@ def _warmstart_last_date(path: Path) -> date | None:
             if not raw:
                 continue
             try:
-                last = date.fromisoformat(raw)
+                parsed = date.fromisoformat(raw)
             except ValueError:
                 continue
+            # audit2c: track the MAX date, not the last row in file order. A
+            # warmstart CSV appended out of order (or non-monotonic) would otherwise
+            # mislabel staleness off a stale final row. Identical for the normal
+            # date-ordered file.
+            if last is None or parsed > last:
+                last = parsed
     return last
 
 
@@ -553,6 +559,13 @@ def main() -> int:
             "n_obs_joint": decision.n_obs_joint, "fell_back_to_btc": decision.fell_back_to_btc,
             "plan_btc": _plan_json(decision.plan_btc), "plan_eth": _plan_json(decision.plan_eth),
         })
+        # audit2c: report the EFFECTIVE hedge mode. The use_2f gate is a coarse
+        # full-series ETH pre-filter; the engine measures joint obs over the trailing
+        # beta window and falls back to a single-leg BTC hedge when that window is
+        # ETH-thin. Reflect that fallback here so hedge_mode is not misleadingly "2f"
+        # when the book was actually hedged BTC-only (fell_back_to_btc carries the detail).
+        if decision.fell_back_to_btc:
+            out["hedge_mode"] = "btc"
         plans = [p for p in (decision.plan_btc, decision.plan_eth) if p is not None]
     else:
         current_hedge_qty = _current_hedge_qty(data_root, cfg.trades_dataset)

@@ -398,6 +398,12 @@ def _pooled(rows: list[dict[str, Any]]) -> pl.DataFrame:
     # the cross-venue gate: every venue must have a finite MAR (`is_not_null().all()`)
     # AND every venue must clear the bar. For the min_mar tiebreak, fill nulls with
     # -inf so a venue with no MAR can never win. `n_venues_with_mar` exposes coverage.
+    # audit2: a SINGLE-venue run (e.g. --venues bybit) yields n_venues==1 groups
+    # where `.all()` reduces each *_both gate to a one-venue test -> a false
+    # cross-venue pass on one venue's numbers. Require BOTH venues present
+    # (n_venues == len(VENUES)) before any *_both can be True; use a true row
+    # count (pl.len()) rather than mar.len(), and the VENUES constant (not 2).
+    both_venues = pl.len() == len(VENUES)
     return (
         frame.group_by(["portfolio", "risk_rule"])
         .agg(
@@ -407,14 +413,18 @@ def _pooled(rows: list[dict[str, Any]]) -> pl.DataFrame:
             pl.col("mar").fill_null(float("-inf")).min().alias("min_mar"),
             pl.col("mar").mean().alias("mean_mar"),
             pl.col("mar").is_not_null().sum().alias("n_venues_with_mar"),
-            pl.col("mar").len().alias("n_venues"),
+            pl.len().alias("n_venues"),
             pl.col("max_drawdown").min().alias("worst_dd"),
             pl.col("worst_day_return").min().alias("worst_day"),
             pl.col("delta_return_vs_turn3p3").mean().alias("mean_delta_return_vs_turn3p3"),
             pl.col("delta_mar_vs_turn3p3").mean().alias("mean_delta_mar_vs_turn3p3"),
-            (pl.col("return") >= 1.20).all().alias("target_return_both"),
-            (pl.col("mar").is_not_null().all() & (pl.col("mar") >= 6.0).all()).alias("target_mar_both"),
-            (pl.col("max_drawdown") >= -0.12).all().alias("target_dd_ok_both"),
+            (both_venues & (pl.col("return") >= 1.20).all()).alias("target_return_both"),
+            (
+                both_venues
+                & pl.col("mar").is_not_null().all()
+                & (pl.col("mar") >= 6.0).all()
+            ).alias("target_mar_both"),
+            (both_venues & (pl.col("max_drawdown") >= -0.12).all()).alias("target_dd_ok_both"),
         )
         .sort(
             [

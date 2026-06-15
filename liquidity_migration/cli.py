@@ -10,6 +10,7 @@ from pathlib import Path
 from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
 from .archive_manifest import ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig
 from .archive_manifest import ArchiveKlineDownloadConfig, ArchiveManifestConfig, run_archive_manifest
+from .archive_manifest import _safe_name as _archive_safe_name  # audit2b: report path must match on-disk slug
 from .archive_manifest import run_archive_hourly_klines_api_download, run_archive_hourly_klines_download
 from .archive_manifest import run_archive_klines_download
 from .config import (
@@ -44,6 +45,7 @@ from .reconciliation import (
     run_long_paper_demo_reconciliation,
 )
 from .continuous_addon_shadow import ContinuousAddonShadowAuditConfig, run_continuous_addon_shadow_audit
+from .universe import _safe_name as _universe_safe_name  # audit2b: report path must match on-disk slug
 from .universe import run_discover_universe
 from .continuous_events import ContinuousEventConfig, run_continuous_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
@@ -428,7 +430,11 @@ def _cmd_data_layer_audit(args: argparse.Namespace, config: ResearchConfig, data
 def _cmd_discover_universe(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         universe_config = _universe_config_from_args(config.universe, args)
         payload = run_discover_universe(data_root, config=config, universe_config=universe_config, name=args.name)
-        print(f"universe rows={payload['rows']} path={data_root / 'reports' / ('universe_' + args.name + '.md')}")
+        # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+        print(
+            f"universe rows={payload['rows']} "
+            f"path={data_root / 'reports' / ('universe_' + _universe_safe_name(args.name) + '.md')}"
+        )
         print(payload["symbol_csv"])
         return 0
 
@@ -450,7 +456,8 @@ def _cmd_archive_manifest(args: argparse.Namespace, config: ResearchConfig, data
             "archive manifest "
             f"rows={payload['rows']} "
             f"symbols={payload['symbols']} "
-            f"path={data_root / 'reports' / ('archive_manifest_' + args.name + '.md')}"
+            # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+            f"path={data_root / 'reports' / ('archive_manifest_' + _archive_safe_name(args.name) + '.md')}"
         )
         survivorship_warning = payload.get("survivorship_warning")
         if survivorship_warning:
@@ -478,7 +485,8 @@ def _cmd_archive_download_klines(args: argparse.Namespace, config: ResearchConfi
             f"cached={payload['cached']} "
             f"archives_deleted={payload.get('archives_deleted', 0)} "
             f"failed={payload['failures']} "
-            f"path={data_root / 'reports' / ('archive_klines_' + args.name + '.md')}"
+            # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+            f"path={data_root / 'reports' / ('archive_klines_' + _archive_safe_name(args.name) + '.md')}"
         )
         return 1 if payload["failures"] else 0
 
@@ -503,7 +511,8 @@ def _cmd_archive_download_klines_1h(args: argparse.Namespace, config: ResearchCo
             f"cached={payload['cached']} "
             f"archives_deleted={payload.get('archives_deleted', 0)} "
             f"failed={payload['failures']} "
-            f"path={data_root / 'reports' / ('archive_klines_1h_' + args.name + '.md')}"
+            # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+            f"path={data_root / 'reports' / ('archive_klines_1h_' + _archive_safe_name(args.name) + '.md')}"
         )
         return 1 if payload["failures"] else 0
 
@@ -534,7 +543,8 @@ def _cmd_archive_download_klines_1h_api(args: argparse.Namespace, config: Resear
             f"cached={payload['cached']} "
             f"empty={payload['empty']} "
             f"failed={payload['failures']} "
-            f"path={data_root / 'reports' / ('archive_klines_1h_api_' + args.name + '.md')}"
+            # audit2b: print the on-disk slug (_safe_name), not the raw --name.
+            f"path={data_root / 'reports' / ('archive_klines_1h_api_' + _archive_safe_name(args.name) + '.md')}"
         )
         return 1 if payload["failures"] else 0
 
@@ -693,7 +703,15 @@ def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: Researc
         if args.print_only:
             print(message)
             return 0
-        sent = send_telegram_message(message, enabled=True)
+        try:
+            sent = send_telegram_message(message, enabled=True)
+        except OSError as exc:
+            # audit2: send_telegram_message PROPAGATES transport errors by contract
+            # (HTTPError/URLError/TimeoutError all subclass OSError). The combined-book
+            # report is a oneshot notify on a timer; a transient telegram outage should
+            # exit non-zero cleanly, not crash the service with an uncaught traceback.
+            print(f"combined-book telegram report failed to send: {type(exc).__name__}: {exc}")
+            return 1
         print(f"combined-book telegram report sent={sent} chars={len(message)}")
         return 0 if sent else 1
 

@@ -1019,6 +1019,14 @@ def _fee_adjusted_return(row: dict[str, Any], *, net_of_cost: bool = False) -> f
         value = row.get(key)
         if value not in (None, ""):
             ret = _float(value)
+            # audit2c: gross_trade_return is the RAW per-trade return; weight it by
+            # notional/equity so it lands on the same notional-weighted basis as
+            # net_return (= gtr * notional_weight) before fees are subtracted below.
+            if key == "gross_trade_return":
+                notional = _float(row.get("notional_usdt"))
+                equity = _float(row.get("equity_usdt"))
+                if notional > 0.0 and equity > 0.0:
+                    ret *= notional / equity
             has_return = True
             break
     if not has_return:
@@ -1165,6 +1173,24 @@ def _calendar_metrics(returns_by_day: dict[int, float], *, start_day: int, end_d
     }
 
 
+def _continuous_beats_daily_mar(continuous: dict[str, Any], daily: dict[str, Any]) -> bool:
+    """Does the continuous leg beat the daily leg on MAR?
+
+    audit2: _calendar_metrics returns mar=None EXACTLY for a zero-drawdown curve
+    (abs(max_dd) <= 1e-12) — the best-possible drawdown outcome (effectively infinite
+    MAR), reachable whenever the continuous book never dips below its running peak. The
+    old inline gate folded that None into `continuous_mar > daily_mar` -> False and
+    raised a spurious "continuous MAR <= daily MAR" issue on the BEST drawdown case.
+    Treat a zero-drawdown continuous book as beating any finite daily MAR whenever its
+    return is at least the daily leg's; otherwise the strict finite comparison stands.
+    """
+    continuous_mar = continuous["mar"]
+    daily_mar = daily["mar"]
+    if continuous_mar is None and abs(continuous["max_drawdown"]) <= 1e-12:
+        return bool(continuous["total_return"] >= daily["total_return"])
+    return bool(continuous_mar is not None and daily_mar is not None and continuous_mar > daily_mar)
+
+
 def _format_mar(value: float | None) -> str:
     return "NA" if value is None else f"{value:.6f}"
 
@@ -1299,9 +1325,7 @@ def run_continuous_vs_daily_forward_comparison(
     continuous_beats_return = bool(continuous["total_return"] > daily["total_return"])
     daily_mar = daily["mar"]
     continuous_mar = continuous["mar"]
-    continuous_beats_mar = bool(
-        continuous_mar is not None and daily_mar is not None and continuous_mar > daily_mar
-    )
+    continuous_beats_mar = _continuous_beats_daily_mar(continuous, daily)
     performance_window_ready = common_days >= int(min_common_days) and bool(daily_returns) and bool(continuous_returns)
     if performance_window_ready and not continuous_beats_return:
         issues.append(

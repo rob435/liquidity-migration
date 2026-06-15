@@ -1785,18 +1785,36 @@ def _orphan_close_pnl_from_records(
     has_usable_size = any(_float(r.get("closedSize")) > 0.0 for r in legs)
     if trade_qty > 0.0 and has_usable_size and len(legs) > 1:
         qty_tolerance = max(trade_qty * 1e-8, 1e-12)
-        capped_legs: list[dict[str, Any]] = []
-        cumulative_size = 0.0
-        for leg in legs:
-            leg_is_ours = bool(trade_exit_order_id) and str(leg.get("orderId") or "") == trade_exit_order_id
-            if cumulative_size + qty_tolerance >= trade_qty and not leg_is_ours:
-                # Trade qty already covered by earlier legs; this and later legs
-                # are a sibling's surplus close — exclude them.
-                break
-            capped_legs.append(leg)
-            cumulative_size += max(_float(leg.get("closedSize")), 0.0)
-        if capped_legs:
-            legs = capped_legs
+        # audit2c ([4]): selecting OUR close legs out of an account-wide closed-PnL feed
+        # (a SIBLING sleeve may have closed the same side near our entry) is genuinely
+        # ambiguous without per-sleeve keys — earliest-first mis-priced this trade off a
+        # sibling's EARLIER close, latest-first off a sibling's LATER one. Disambiguate
+        # by the strongest available signals, in order:
+        #   1. provably-ours legs: those whose orderId matches the recorded exit_order_id
+        #      (when we have one) — never a sibling's; use them alone.
+        #   2. a single leg whose size matches our ledgered qty: almost certainly our
+        #      whole close (prefer the LATEST such — an orphan is found when OUR position
+        #      closed, i.e. the most recent same-size close).
+        #   3. otherwise cover qty LATEST-first (our close completes most recently).
+        ours = [leg for leg in legs if trade_exit_order_id and str(leg.get("orderId") or "") == trade_exit_order_id]
+        if ours:
+            legs = ours
+        else:
+            exact = [leg for leg in legs if abs(max(_float(leg.get("closedSize")), 0.0) - trade_qty) <= qty_tolerance]
+            if exact:
+                legs = [exact[-1]]  # latest exact-size match
+            else:
+                capped_legs: list[dict[str, Any]] = []
+                cumulative_size = 0.0
+                for leg in reversed(legs):  # latest-first (legs are ascending by createdTime)
+                    if cumulative_size + qty_tolerance >= trade_qty:
+                        break
+                    capped_legs.append(leg)
+                    cumulative_size += max(_float(leg.get("closedSize")), 0.0)
+                if capped_legs:
+                    # Restore ascending order so legs[-1] is the latest (close-completion) leg.
+                    capped_legs.sort(key=lambda r: int(_float(r.get("createdTime") or r.get("updatedTime") or 0)))
+                    legs = capped_legs
     priced = [
         (_float(r.get("closedSize")), _float(r.get("avgExitPrice")))
         for r in legs

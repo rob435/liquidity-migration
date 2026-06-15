@@ -40,6 +40,9 @@ from liquidity_migration.storage import write_dataset  # noqa: E402
 
 VISION = "https://data.binance.vision/data/futures/um/monthly/fundingRate/{s}/{s}-fundingRate-{m}.zip"
 FAPI = "https://fapi.binance.com/fapi/v1/fundingRate?symbol={s}&startTime={st}&limit=1000"
+# audit2: days into a month within which the just-closed month's monthly archive
+# may still 404 transiently (Vision publishes a day or two into the next month).
+_PUBLISH_LAG_DAYS = 3
 
 
 def _kline_spans(root: Path) -> dict[str, tuple[str, str]]:
@@ -81,13 +84,39 @@ def _fetch(url: str, timeout: int = 30) -> bytes | None:
         raise
 
 
-def _month_rows(symbol: str, month: str, cache: Path) -> list[dict]:
+def _cache_cutoff_month(now: datetime) -> str:
+    """Oldest month whose empty-404 archive must NOT be permanently cached.
+
+    The Vision monthly fundingRate archive for a month is published a day or two
+    INTO the following month, so on/just-after the 1st the just-closed month's
+    archive can still 404 transiently. We therefore refuse to cache empty markers
+    for both the current month and the immediately-prior month during that
+    ~publish-lag window (first 3 days). Older months that 404 are genuinely
+    perp-funding-free and are safe to cache permanently. (audit2)
+    """
+    cur = now.strftime("%Y-%m")
+    if now.day > _PUBLISH_LAG_DAYS:
+        return cur
+    # within the publish-lag window: also protect the immediately-prior month
+    y, m = now.year, now.month - 1
+    if m == 0:
+        y, m = y - 1, 12
+    return f"{y:04d}-{m:02d}"
+
+
+def _month_rows(symbol: str, month: str, cache: Path, cache_cutoff: str) -> list[dict]:
     cpath = cache / f"{symbol}-{month}.zip"
     if cpath.exists():
         blob = cpath.read_bytes() or None
     else:
         blob = _fetch(VISION.format(s=symbol, m=month))
-        cpath.write_bytes(blob or b"")  # empty file = cached 404
+        # audit2: only persist an empty-404 marker for months STRICTLY older than
+        # the cache cutoff. The current (and just-closed-but-not-yet-published)
+        # month's archive does not exist yet; caching its 404 as a permanent empty
+        # marker would never re-promote once the archive publishes, so the month
+        # stays a hole on every re-run. Leave it uncached — fapi top-up fills it.
+        if blob is not None or month < cache_cutoff:
+            cpath.write_bytes(blob or b"")  # empty file = cached 404 (older months only)
     if not blob:
         return []
     rows = []
@@ -111,23 +140,43 @@ def _month_rows(symbol: str, month: str, cache: Path) -> list[dict]:
 
 
 def _fapi_topup(symbol: str, since_ms: int) -> list[dict]:
-    blob = _fetch(FAPI.format(s=symbol, st=since_ms + 1))
-    if not blob:
-        return []
-    rows = []
-    for r in json.loads(blob):
-        try:
-            rows.append({
-                "ts_ms": int(r["fundingTime"]),
-                "symbol": symbol,
-                "funding_rate": float(r["fundingRate"]),
-                "mark_price": float("nan"),
-                "funding_interval_min": 480,  # REST omits the interval; P&L path ignores it
-                "source": "binance_usdm_funding_fapi",
-            })
-        except (KeyError, ValueError):
-            continue
-    return rows
+    # audit2: paginate the fapi fetch. A single GET with limit=1000 returns only
+    # the FIRST 1000 settlements since the last archive row; a symbol needing
+    # >1000 settlements silently loses the tail. Mirror binance._paged_forward:
+    # advance startTime to (last fundingTime + 1) and keep fetching until a SHORT
+    # page (<1000 rows) signals end-of-data, accumulating every page.
+    limit = 1000
+    rows_by_ts: dict[int, dict] = {}
+    cursor = since_ms + 1
+    while True:
+        blob = _fetch(FAPI.format(s=symbol, st=cursor))
+        if not blob:
+            break
+        batch = json.loads(blob)
+        if not batch:
+            break
+        for r in batch:
+            try:
+                ts = int(r["fundingTime"])
+                rows_by_ts[ts] = {
+                    "ts_ms": ts,
+                    "symbol": symbol,
+                    "funding_rate": float(r["fundingRate"]),
+                    "mark_price": float("nan"),
+                    "funding_interval_min": 480,  # REST omits the interval; P&L path ignores it
+                    "source": "binance_usdm_funding_fapi",
+                }
+            except (KeyError, ValueError):
+                continue
+        if len(batch) < limit:
+            break
+        latest = max(int(r["fundingTime"]) for r in batch)
+        next_cursor = latest + 1
+        if next_cursor <= cursor:  # no forward progress -> stop (avoid infinite loop)
+            break
+        cursor = next_cursor
+    # dedup/sort on fundingTime
+    return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
 
 
 def main() -> int:
@@ -146,10 +195,16 @@ def main() -> int:
     jobs = [(s, m) for s, (a, b) in spans.items() for m in _months(a, b)]
     print(f"symbol-months to fetch: {len(jobs)}", flush=True)
 
+    # audit2: the current month's Vision archive is never permanently 404-cached
+    # (it does not exist yet); only months strictly older than the cutoff get an
+    # empty marker. The cutoff also protects the just-closed month near the 1st.
+    now = datetime.now(timezone.utc)
+    this_month = now.strftime("%Y-%m")
+    cache_cutoff = _cache_cutoff_month(now)
     all_rows: list[dict] = []
     missing_months = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(_month_rows, s, m, cache): (s, m) for s, m in jobs}
+        futs = {ex.submit(_month_rows, s, m, cache, cache_cutoff): (s, m) for s, m in jobs}
         done = 0
         for fut in as_completed(futs):
             rows = fut.result()
@@ -161,7 +216,6 @@ def main() -> int:
                 print(f"  {done}/{len(jobs)} months  rows={len(all_rows):,}", flush=True)
 
     # current-month top-up from REST for symbols whose kline span reaches this month
-    this_month = datetime.now(timezone.utc).strftime("%Y-%m")
     last_by_symbol: dict[str, int] = {}
     for r in all_rows:
         if r["ts_ms"] > last_by_symbol.get(r["symbol"], 0):

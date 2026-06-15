@@ -1098,10 +1098,30 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
 
     # positioning metrics (binance.vision): top-trader vs retail L/S ratio, taker flow, OI.
     # Build a cross-sectional factor score per config.metrics_factor, then rank in-universe.
-    if metrics is not None and not metrics.is_empty() and "global_lsr" in metrics.columns:
-        m = metrics.sort(["symbol", "ts_ms"]).with_columns(
-                (pl.col("oi") / calendar_shift(pl.col("oi"), 7) - 1.0).alias("oi_chg7_m")
-        ).select(["ts_ms", "symbol", "toptrader_lsr", "global_lsr", "taker_lsr", "oi_chg7_m"])
+    # audit2c ([13]): snap the metrics frame to the SAME day-end grid funding/OI use BEFORE
+    # calendar_shift and the join. The raw metrics ts_ms is intraday (5m/hourly), so the old
+    # un-snapped form left oi_chg7_m silently null (calendar_shift finds no exact 7-day
+    # partner) AND missed the daily (ts_ms, symbol) join entirely. Also require ALL columns
+    # the block reads (not just global_lsr): a partial metrics frame now falls back to null
+    # metrics via the else branch instead of raising a ColumnNotFoundError downstream.
+    _metrics_cols = {"global_lsr", "toptrader_lsr", "taker_lsr", "oi"}
+    if metrics is not None and not metrics.is_empty() and _metrics_cols.issubset(set(metrics.columns)):
+        m = (
+            metrics.select(["ts_ms", "symbol", "toptrader_lsr", "global_lsr", "taker_lsr", "oi"])
+            .with_columns(((pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)) + MS_PER_DAY).alias("ts_ms_day_end"))
+            .sort(["symbol", "ts_ms"])
+            .group_by(["symbol", "ts_ms_day_end"], maintain_order=True)
+            .agg([
+                pl.col("toptrader_lsr").last(),
+                pl.col("global_lsr").last(),
+                pl.col("taker_lsr").last(),
+                pl.col("oi").last(),
+            ])
+            .rename({"ts_ms_day_end": "ts_ms"})
+            .sort(["symbol", "ts_ms"])
+            .with_columns((pl.col("oi") / calendar_shift(pl.col("oi"), 7) - 1.0).alias("oi_chg7_m"))
+            .select(["ts_ms", "symbol", "toptrader_lsr", "global_lsr", "taker_lsr", "oi_chg7_m"])
+        )
         daily = daily.join(m, on=["ts_ms", "symbol"], how="left")
         factor = config.metrics_factor
         if factor == "global_lsr_low":
@@ -2117,6 +2137,14 @@ def _run_long_pipeline(
                         continue
                     entry_ts_ms = deadline_ts
                     entry_idx = deadline_idx
+            # audit2c: the sniper retrace OVERRODE entry_ts_ms (fired or deadline) AFTER the
+            # window-boundary check above. Every other entry path refuses an entry past the
+            # research window end, but the FIRED sniper branch did not re-check it, so a
+            # retrace firing past config.end_date entered the book. Re-enforce here (a no-op
+            # for the already-checked non-sniper / deadline paths).
+            if window_end_ts_ms is not None and entry_ts_ms > window_end_ts_ms:
+                stats["skipped_no_entry_bar"] += 1
+                continue
             entry_price = float(bars["close"][entry_idx])
             if not math.isfinite(entry_price) or entry_price <= 0.0:
                 stats["skipped_no_entry_bar"] += 1

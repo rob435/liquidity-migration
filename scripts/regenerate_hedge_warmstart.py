@@ -69,7 +69,10 @@ def daily_returns(closes: dict[int, float]) -> dict[int, float]:
     days = sorted(closes)
     out: dict[int, float] = {}
     for prev, cur in zip(days, days[1:]):
-        if closes[prev] > 0:
+        # audit2: only emit a calendar-consecutive return; a missing UTC day
+        # would otherwise mislabel a multi-day move as one day (mirrors the
+        # gap-guarded twin in continuous_forward_replay_orchestrator.btc_inputs).
+        if cur - prev == MS_DAY and closes[prev] > 0:
             out[cur] = closes[cur] / closes[prev] - 1.0
     return out
 

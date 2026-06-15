@@ -39,6 +39,15 @@ def _today() -> dt.date:
     return dt.datetime.now(dt.timezone.utc).date()
 
 
+def _shift_years(date: dt.date, years: int) -> dt.date:
+    # audit2: date.replace(year=...) raises ValueError for Feb 29 when the
+    # target year is not a leap year; clamp Feb 29 -> Feb 28 in that case.
+    try:
+        return date.replace(year=date.year - years)
+    except ValueError:
+        return date.replace(year=date.year - years, day=28)
+
+
 def _run_long(
     root: str,
     costs: Any,
@@ -96,7 +105,7 @@ def _continuous_payload_from_summary(summary: dict[str, Any], *, report_dir: Pat
 def _run_continuous(
     root: str,
     costs: Any,
-    start: str,
+    start: str | None,  # audit2c: None preserves the frozen continuous start
     end: str,
     out: Path,
     pit_tol: float,
@@ -277,7 +286,14 @@ def main() -> int:
         default=4.0,
         help="Extra pure-leverage continuous chart to render alongside 1x. Use 1 to suppress the extra chart.",
     )
-    p.add_argument("--years", type=int, default=3, help="Window length in years (ignored if --start given).")
+    # audit2c: default --years to a sentinel so an unset window can preserve the
+    # frozen continuous start instead of forcing a rolling 3y override.
+    p.add_argument(
+        "--years",
+        type=int,
+        default=None,
+        help="Window length in years (default 3; ignored if --start given).",
+    )
     p.add_argument("--start", default=None, help="Window start YYYY-MM-DD (overrides --years).")
     p.add_argument("--end", default=None, help="Window end YYYY-MM-DD (exclusive; default tomorrow UTC).")
     p.add_argument("--root", default=DEFAULT_ROOT, help="Per-venue full-PIT data root.")
@@ -292,7 +308,12 @@ def main() -> int:
 
     today = _today()
     end = args.end or (today + dt.timedelta(days=1)).isoformat()
-    start = args.start or (today.replace(year=today.year - args.years)).isoformat()
+    # audit2c: only treat the window as explicit when the user passed --start or
+    # --years; otherwise the continuous path must inherit the frozen deployed
+    # start (None) rather than a rolling 3y override.
+    explicit_window = args.start is not None or args.years is not None
+    years = 3 if args.years is None else args.years
+    start = args.start or _shift_years(today, years).isoformat()
     root = str(Path(args.root).expanduser())
     out_root = Path(args.out).expanduser() if args.out else Path(root) / "reports" / "equity_curves"
     costs = load_config(args.config).costs
@@ -316,10 +337,12 @@ def main() -> int:
                     long_notional=args.long_notional_multiplier,
                 )
             else:
+                # audit2c: pass the rolling/explicit start only when the user asked
+                # for a window; otherwise None preserves the frozen continuous start.
                 payload = _run_continuous(
                     root,
                     costs,
-                    start,
+                    start if explicit_window else None,
                     end,
                     out,
                     0.0,

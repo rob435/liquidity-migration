@@ -478,9 +478,13 @@ def build_position_pnl_snapshot(positions: list[dict[str, Any]]) -> list[dict[st
             continue
         side = _normalized_position_side(position.get("side"))
         avg_price = _first_float(position, ("avgPrice", "entryPrice", "sessionAvgPrice"))
-        mark_price = _first_float(position, ("markPrice", "liqPrice"))
+        # audit2c: never mark at liqPrice (a wildly-off PnL); prefer markPrice
+        # then lastPrice then avgPrice, and leave the mark/unrealized fields null
+        # when no genuine mark is available rather than substituting liqPrice.
+        mark_price = _first_float(position, ("markPrice", "lastPrice", "avgPrice"))
+        have_mark = mark_price > 0.0
         position_value = _first_float(position, ("positionValue", "positionBalance"))
-        if position_value <= 0.0 and mark_price > 0.0:
+        if position_value <= 0.0 and have_mark:
             position_value = size * mark_price
         unrealized_pnl = _first_float(position, ("unrealisedPnl", "unrealizedPnl"))
         pnl_pct = unrealized_pnl / position_value if position_value > 0.0 else 0.0
@@ -490,14 +494,15 @@ def build_position_pnl_snapshot(positions: list[dict[str, Any]]) -> list[dict[st
                 "side": side,
                 "qty": size,
                 "avg_price": avg_price,
-                "mark_price": mark_price,
+                "mark_price": mark_price if have_mark else None,
                 "position_value_usdt": position_value,
-                "unrealized_pnl_usdt": unrealized_pnl,
-                "pnl_pct": pnl_pct,
+                "unrealized_pnl_usdt": unrealized_pnl if have_mark else None,
+                "pnl_pct": pnl_pct if have_mark else None,
                 "leverage": _first_float(position, ("leverage",)),
             }
         )
-    return sorted(rows, key=lambda row: abs(float(row["unrealized_pnl_usdt"])), reverse=True)
+    # audit2c: null uPnL (no genuine mark) sorts last via 0.0, never a TypeError.
+    return sorted(rows, key=lambda row: abs(_float(row["unrealized_pnl_usdt"])), reverse=True)
 
 
 def build_ledger_position_pnl_snapshot(

@@ -286,7 +286,11 @@ def main() -> int:
             years = max((int(ts[-1]) - int(ts[0])) / (365.25 * 24 * 3_600_000), 1e-9)
             block, nb, mars = 21, int(np.ceil(len(r) / 21)), []
             for _ in range(2000):
-                samp = np.concatenate([r[s:s + block] for s in rng.integers(0, max(1, len(r) - block), nb)])[:len(r)]
+                # audit2: upper bound is len(r)-block+1 (integers() is half-open, so
+                # max start = len(r)-block) — the old len(r)-block dropped the final
+                # block position and never resampled the last observation (off-by-one).
+                # Mirrors r1_robustness._resample_block_indices max_start.
+                samp = np.concatenate([r[s:s + block] for s in rng.integers(0, max(1, len(r) - block + 1), nb)])[:len(r)]
                 eq = 1.0 + np.cumsum(samp)
                 maxdd = float(-(eq - np.maximum.accumulate(eq)).min())
                 if maxdd > 1e-9:
@@ -484,7 +488,9 @@ def main() -> int:
             block, nb = 21, int(np.ceil(len(r) / 21))
             mars = []
             for _ in range(3000):
-                samp = np.concatenate([r[s:s + block] for s in rng.integers(0, max(1, len(r) - block), nb)])[:len(r)]
+                # audit2: see note above — len(r)-block+1 so the final observation
+                # is reachable as a block start (off-by-one fix).
+                samp = np.concatenate([r[s:s + block] for s in rng.integers(0, max(1, len(r) - block + 1), nb)])[:len(r)]
                 eq = 1.0 + np.cumsum(samp)
                 maxdd = float(-(eq - np.maximum.accumulate(eq)).min())
                 if maxdd > 1e-9:
@@ -663,7 +669,10 @@ def main() -> int:
         nb = int(np.ceil(len(r) / block))
         mars = []
         for _ in range(n_boot):
-            starts = rng.integers(0, max(1, len(r) - block), nb)
+            # audit2: len(r)-block+1 upper bound (half-open) so max start = len(r)-block
+            # and the final observation is reachable — fixes the off-by-one that dropped
+            # the last data point from every resample. Mirrors r1_robustness max_start.
+            starts = rng.integers(0, max(1, len(r) - block + 1), nb)
             samp = np.concatenate([r[s:s + block] for s in starts])[:len(r)]
             eq = 1.0 + np.cumsum(samp)
             maxdd = float(-(eq - np.maximum.accumulate(eq)).min())

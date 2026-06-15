@@ -157,11 +157,13 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
     assert "Environment=CONFIRM_DEMO_ORDERS=1" in hedge_text
 
 
-def test_continuous_rmom_refresh_is_toggle_aware_for_paper_only_evidence() -> None:
-    """The paper shadow FOLLOWS the demo root's klines + rmom gate (shared WS data
-    plane), so the refresh keeps the FOLLOWED demo root fresh whenever EITHER
-    continuous sleeve is on (paper-only evidence included) and never rebuilds the
-    paper root's gate from its dormant store."""
+def test_continuous_rmom_refresh_rebuilds_each_active_sleeve_root() -> None:
+    """audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
+    its OWN kline pool (KLINES_FOLLOW_ROOT dropped from the paper unit), so it reads
+    its rmom gate from its OWN root. The refresh must therefore rebuild EACH on
+    sleeve's own root — refreshing only the demo root left the paper book reading a
+    gate nothing builds, so it emitted zero entries forever and the paper<->demo cost
+    reconcile had nothing to pair."""
     repo = Path(__file__).resolve().parents[1]
     service = (
         repo / "deploy" / "systemd" / "liquidity-migration-continuous-rmom-refresh.service"
@@ -169,16 +171,24 @@ def test_continuous_rmom_refresh_is_toggle_aware_for_paper_only_evidence() -> No
     script = (repo / "scripts" / "run_continuous_rmom_refresh.sh").read_text(encoding="utf-8")
 
     assert "run_continuous_rmom_refresh.sh" in service
-    # continuous_rmom_refresh_on == demo-on OR paper-on (deploy/lib_sleeves.sh)
-    assert "continuous_rmom_refresh_on" in script
+    # Sleeve-aware: each root is rebuilt only when ITS sleeve is on.
+    assert 'sleeve_on "${CONTINUOUS_SLEEVE' in script
+    assert 'sleeve_on "${CONTINUOUS_PAPER_SLEEVE' in script
     assert "--root data/bybit-continuous-demo-event" in script
-    assert "--root data/bybit-continuous-paper-event" not in script
+    assert "--root data/bybit-continuous-paper-event" in script  # the fix
 
 
-def test_continuous_paper_unit_follows_demo_kline_plane() -> None:
-    """One shared WS kline plane per box: the paper unit follows the demo root's
-    snapshot read-only, the run script forwards the env as --klines-follow-root,
-    and both continuous units pin their compute threadpools (2-core box)."""
+def _active_lines(unit_text: str) -> list[str]:
+    """Non-comment, non-blank directive lines of a systemd unit."""
+    return [ln.strip() for ln in unit_text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def test_continuous_paper_unit_streams_its_own_kline_plane() -> None:
+    """audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
+    KLINES_FOLLOW_ROOT was dropped so the shadow stays live even when the demo (leader)
+    sleeve is off. Guard against a regression that re-adds an ACTIVE follow directive
+    (the old string survives only in an explanatory comment), and against the optional
+    drop-in mechanism being deleted. Both continuous units still pin their threadpools."""
     repo = Path(__file__).resolve().parents[1]
     paper = (
         repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service"
@@ -190,9 +200,11 @@ def test_continuous_paper_unit_follows_demo_kline_plane() -> None:
         repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh"
     ).read_text(encoding="utf-8")
 
-    assert "Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event" in paper
+    # No ACTIVE follow directive on the paper unit (comment-only mention is fine).
+    assert not any(ln.startswith("Environment=KLINES_FOLLOW_ROOT=") for ln in _active_lines(paper))
     # the LEADER must never follow anyone
-    assert "KLINES_FOLLOW_ROOT" not in demo
+    assert not any(ln.startswith("Environment=KLINES_FOLLOW_ROOT=") for ln in _active_lines(demo))
+    # the run script keeps the (now dormant) passthrough so a drop-in can re-enable it.
     assert "--klines-follow-root" in run_script
     for unit in (paper, demo):
         assert "Environment=POLARS_MAX_THREADS=1" in unit

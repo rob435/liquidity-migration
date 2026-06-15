@@ -217,8 +217,11 @@ def _verify_download(raw: bytes, expected_sha256: str | None, content_length: in
     silently into the PIT root and degrade the cross-venue OOS comparison, which
     the M5 download-completeness gate (it only counts hard download FAILURES) does
     NOT catch. Verify against the published SHA256 when available; otherwise fall
-    back to the advertised Content-Length. Raises on mismatch so the caller treats
-    it as a retryable failure (and ultimately a counted failed job)."""
+    back to the advertised Content-Length; and with neither signal present, require
+    the raw body to at least be a non-empty, structurally-valid zip (audit2c — the
+    both-absent path was previously a no-op that let any garbage body through).
+    Raises on mismatch so the caller treats it as a retryable failure (and
+    ultimately a counted failed job)."""
     if expected_sha256 is not None:
         actual = hashlib.sha256(raw).hexdigest()
         if actual != expected_sha256:
@@ -231,16 +234,34 @@ def _verify_download(raw: bytes, expected_sha256: str | None, content_length: in
         raise ValueError(
             f"Content-Length mismatch: header {content_length} != body {len(raw)} bytes"
         )
+    # audit2c: with neither a .CHECKSUM nor a Content-Length, the only remaining
+    # signal is the body itself — an empty or non-zip body is corrupt and must NOT
+    # pass the gate (the previous no-op let a truncated/garbage body into the PIT
+    # root). A genuine valid zip with no sidecar still passes.
+    if content_length is None and expected_sha256 is None:
+        if not raw or not zipfile.is_zipfile(io.BytesIO(raw)):
+            raise ValueError(
+                f"unverifiable body rejected: no CHECKSUM, no Content-Length, and "
+                f"raw is not a valid zip ({len(raw)} bytes)"
+            )
 
 
-def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict]:
+def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict] | None:
     """Download, integrity-verify, and parse one monthly 1h kline file.
 
     Verifies the body against the published ``.CHECKSUM`` SHA256 (or, when that
     sidecar is missing, the advertised Content-Length) BEFORE parsing, so a
     corrupt-but-parseable archive is treated as a retryable failure rather than
     silently entering the survivorship-complete PIT root (M5 only catches hard
-    download failures, not silent corruption). Returns [] on hard failure."""
+    download failures, not silent corruption).
+
+    Returns the parsed rows on a successful fetch — possibly an EMPTY list for a
+    valid month that genuinely holds no parseable bars (header-only/empty CSV).
+    Returns ``None`` only on a hard download/integrity failure. audit2b: the
+    caller must distinguish these — an empty-but-valid month is NOT a download
+    failure and must not be counted against the survivorship-completeness gate
+    (previously both returned [] and a valid-empty month was miscounted as a
+    failed job, spuriously inflating max_failure_ratio)."""
     url = f"{VISION_FILES}/{MONTHLY_KLINES_PREFIX}{symbol}/1h/{symbol}-1h-{ym}.zip"
     for attempt in range(retries):
         try:
@@ -250,12 +271,12 @@ def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict]:
             content_length = int(header_len) if header_len is not None else None
             expected_sha256 = _fetch_expected_sha256(url)
             _verify_download(raw, expected_sha256, content_length)
-            return parse_month_csv(symbol, raw)
+            return parse_month_csv(symbol, raw)  # audit2b: list (maybe empty) == success
         except Exception:  # noqa: BLE001 - network/integrity; retry then give up
             if attempt == retries - 1:
-                return []
+                return None  # audit2b: None signals a hard failure, distinct from []
             time.sleep(0.5 * (attempt + 1))
-    return []
+    return None  # audit2b: hard failure sentinel
 
 
 # --------------------------------------------------------------------------
@@ -416,10 +437,14 @@ def build_binance_oos(
         futs = {ex.submit(fetch_month_klines, s, m): (s, m) for s, m in jobs}
         for fut in as_completed(futs):
             rows = fut.result()
-            if rows:
-                all_rows.extend(rows)
-            else:
+            # audit2b: only None is a hard download failure; an empty list is a
+            # valid month with no parseable bars and must NOT be counted against
+            # the survivorship-completeness gate (previously both were [] and an
+            # empty-but-valid month spuriously inflated max_failure_ratio).
+            if rows is None:
                 failed_jobs.append(futs[fut])
+            elif rows:
+                all_rows.extend(rows)
             done += 1
             if done % 500 == 0:
                 print(f"[binance_vision]  {done}/{len(jobs)} files, {len(all_rows):,} rows, "

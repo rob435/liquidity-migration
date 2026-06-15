@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
+
+_logger = logging.getLogger(__name__)
+
+# audit2b: top-level YAML keys load_config actually consumes. Anything else in a
+# config file (e.g. the committed `trade_flow` block) is currently unwired; warn
+# so it is surfaced rather than silently dropped, matching this module's
+# fail-loud-on-unknown-keys philosophy without breaking the happy path.
+_CONSUMED_TOP_LEVEL_KEYS = frozenset({"exchange", "universe", "cost_model", "data_root"})
 
 try:
     import yaml
@@ -130,15 +139,38 @@ class ResearchConfig:
     data_root: Path = DEFAULT_RESEARCH_DATA_ROOT
 
 
+# audit2b: type-aware coercion so the generic dataclass merge matches the
+# numeric coercion UniverseConfig already does (float()/int()). Without it a
+# quoted-numeric YAML value (e.g. maker_fee_bps: "2.0") flows straight into the
+# frozen dataclass and only blows up later in str-arithmetic
+# (base_entry_exit_cost_bps). Keyed on the *string* annotation because this
+# module uses `from __future__ import annotations`, so fields(cls)[i].type is
+# the annotation text, not the type object. Unknown annotations pass through
+# unchanged, so the happy path (YAML already gives float/bool) is a no-op.
+_COERCERS: dict[str, Any] = {"float": float, "int": int, "bool": bool, "str": str}
+
+
+def _coerce_field(annotation: Any, value: Any) -> Any:
+    coercer = _COERCERS.get(annotation) if isinstance(annotation, str) else None
+    return coercer(value) if coercer is not None else value
+
+
 def _merge_dataclass(cls: type, payload: dict[str, Any] | None):
     payload = dict(payload or {})
-    allowed = {item.name for item in fields(cls)}
+    annotations = {item.name: item.type for item in fields(cls)}
+    allowed = set(annotations)
     unknown = sorted(set(payload) - allowed)
     if unknown:
         raise TypeError(
             f"Unknown {cls.__name__} keys in config: {unknown}. Allowed: {sorted(allowed)}"
         )
-    return cls(**{key: payload[key] for key in allowed if key in payload})
+    return cls(
+        **{
+            key: _coerce_field(annotations[key], payload[key])
+            for key in allowed
+            if key in payload
+        }
+    )
 
 
 def ensure_data_root_exists(data_root: str | Path) -> Path:
@@ -185,6 +217,18 @@ def load_config(path: str | Path | None = None, *, data_root: str | Path | None 
         loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         if loaded:
             raw = dict(loaded)
+
+    # audit2b: surface (don't silently drop) any top-level block load_config
+    # does not consume — e.g. the committed `trade_flow` block, which is not
+    # wired into ResearchConfig. Warn rather than raise so the happy path
+    # (loading the default YAML) still returns an identical ResearchConfig.
+    unconsumed = sorted(set(raw) - _CONSUMED_TOP_LEVEL_KEYS)
+    if unconsumed:
+        _logger.warning(
+            "load_config ignoring unconsumed top-level config keys: %s (consumed: %s)",
+            unconsumed,
+            sorted(_CONSUMED_TOP_LEVEL_KEYS),
+        )
 
     root = Path(data_root or raw.get("data_root") or DEFAULT_RESEARCH_DATA_ROOT).expanduser()
     return ResearchConfig(

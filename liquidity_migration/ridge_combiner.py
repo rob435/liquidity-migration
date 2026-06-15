@@ -58,6 +58,12 @@ class RidgeCombinerConfig:
     inner_cv_folds: int = 3
     min_train_rows: int = 200
     standardize: bool = True
+    # audit2: explicit forward horizon (days) of `target_col`. When set it drives the
+    # embargo>=horizon+1 leak guard unconditionally; when None the horizon is parsed
+    # from a `fwd_ret_Nd` name. A forward-returnish name that cannot be parsed AND has
+    # no explicit horizon is a hard error (see __post_init__) — the guard can no longer
+    # be silently bypassed by naming the target anything other than fwd_ret_Nd.
+    forward_horizon: int | None = None
 
     def __post_init__(self) -> None:
         if not self.features:
@@ -72,15 +78,35 @@ class RidgeCombinerConfig:
         # WalkForwardConfig docstring invariant in code instead of by convention,
         # so wiring a multi-day target (e.g. fwd_ret_3d) without bumping embargo
         # is a hard error rather than silent in-fold target leakage (fake alpha).
-        horizon_match = re.search(r"fwd_ret_(\d+)d", self.target_col)
-        if horizon_match is not None:
-            horizon = int(horizon_match.group(1))
+        # audit2: resolve the forward horizon from the explicit field first, then fall
+        # back to parsing a `fwd_ret_Nd` name. Previously the entire leak guard was
+        # gated on the regex matching, so a multi-day target named anything else
+        # (e.g. 'y_5d', 'forward_return_5d', a residualised name) silently skipped the
+        # embargo check — textbook in-fold target leakage with no error.
+        horizon: int | None = self.forward_horizon
+        if horizon is None:
+            horizon_match = re.search(r"fwd_ret_(\d+)d", self.target_col)
+            if horizon_match is not None:
+                horizon = int(horizon_match.group(1))
+        if horizon is not None:
+            if horizon < 0:
+                raise ValueError(f"forward_horizon ({horizon}) must be >= 0")
             if self.walk_forward.embargo_days < horizon + 1:
                 raise ValueError(
                     f"embargo_days ({self.walk_forward.embargo_days}) must be >= "
                     f"forward horizon + 1 ({horizon + 1}) for target_col "
                     f"{self.target_col!r}, else the test fold leaks into training"
                 )
+        elif re.search(r"(?:fwd|forward)", self.target_col, re.IGNORECASE) or re.search(
+            r"\d+\s*d\b", self.target_col
+        ):
+            # A forward-returnish name we cannot parse to a horizon, with no explicit
+            # forward_horizon -> refuse rather than silently skip the leak guard.
+            raise ValueError(
+                f"target_col {self.target_col!r} looks like a forward return but its "
+                "horizon cannot be parsed; set RidgeCombinerConfig.forward_horizon "
+                "explicitly so the embargo>=horizon+1 leak guard can be enforced"
+            )
 
 
 @dataclass(frozen=True)

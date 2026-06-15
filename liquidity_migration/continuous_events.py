@@ -45,7 +45,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift
 from .config import DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .signal_harness import _autodetect_dataset_names, _date_str_to_ms, _read_window
 from .storage import read_dataset_columns
@@ -220,11 +220,25 @@ def _window_tag(config: ContinuousEventConfig, end_ms: int) -> str:
     return hashlib.sha256(f"{config.start_date}_{end_part}".encode("utf-8")).hexdigest()[:8]
 
 
+def _exclude_tag(exclude_symbols: Any) -> str:
+    """Stable 8-char hash of the exclusion set, order-independent."""
+    syms = sorted(str(s) for s in (exclude_symbols or []))
+    return hashlib.sha256("|".join(syms).encode("utf-8")).hexdigest()[:8]
+
+
 def _panel_cache_path(root: Path, config: ContinuousEventConfig, *, end_ms: int) -> Path:
     window_tag = _window_tag(config, end_ms)
+    # audit2: fold the exclusion set into the cache key. The panel is built with
+    # `config.exclude_symbols` filtered out (build_continuous_panel below), but the
+    # old key omitted it — two runs differing ONLY in exclude_symbols collided on the
+    # same cached parquet and the second silently reused the first's (wrong-exclusion)
+    # panel. The empty-exclusion case (the live/default path) keeps its prior filename
+    # byte-for-byte, so no existing cache is invalidated; only non-empty exclusions get
+    # a distinct, correct key.
+    excl_part = "" if not config.exclude_symbols else f"_excl{_exclude_tag(config.exclude_symbols)}"
     return root / (
         f"_continuous_engine_panel_v2_rmom{int(round(config.rmom_quantile * 100))}"
-        f"_feat{_feature_tag(config.feature_set)}_{window_tag}.parquet"
+        f"_feat{_feature_tag(config.feature_set)}{excl_part}_{window_tag}.parquet"
     )
 
 
@@ -555,10 +569,15 @@ def _market_daily_returns(klines: pl.DataFrame) -> dict[int, float]:
     D-1 for an entry on day D), so an intraday entry never reads its own day's
     not-yet-realised return.
     """
+    # audit2c: gap-aware 1-day return. A plain shift(1).over("symbol") pairs a symbol's
+    # Nth PRESENT day, so across a delist/relist or archive gap it mislabels a multi-day
+    # close-to-close move as that day's 1-day return, biasing the equal-weight market
+    # regime gate. calendar_shift nulls the return on a post-gap day (it is excluded from
+    # the cross-sectional mean) and is byte-identical for a contiguous daily series.
     dc = (
         klines.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day"))
         .group_by(["symbol", "day"]).agg(pl.col("close").last().alias("c")).sort(["symbol", "day"])
-        .with_columns((pl.col("c") / pl.col("c").shift(1).over("symbol") - 1.0).alias("r"))
+        .with_columns((pl.col("c") / calendar_shift(pl.col("c"), 1, time_col="day") - 1.0).alias("r"))
         .group_by("day").agg(pl.col("r").mean().alias("mkt")).drop_nulls()
     )
     return {int(r[0]): float(r[1]) for r in dc.iter_rows()}
@@ -1198,7 +1217,15 @@ def run_continuous_event_research(
     kname = _autodetect_dataset_names(root)["klines_dataset"]
     start_ms, end_ms = _date_str_to_ms(config.start_date), _resolve_end_ms(root, config)
     pad_fwd = (config.hold_hours + config.entry_delay_hours + 4) * MS_PER_HOUR
-    pad_back_days = max(31 if config.btc_trend_gate != "off" else 0, max(config.age_days_min, 0))
+    # audit2c: also reserve >=2 warmup days when the equal-weight market gate is on, so the
+    # gate's one-day-lagged daily market return is available from the window's first day
+    # instead of failing OPEN (allowing entries) for the first ~2 days. The btc-trend gate
+    # already reserves 31d, so this only bites a btc_trend_gate=off + market_min_ret config.
+    pad_back_days = max(
+        31 if config.btc_trend_gate != "off" else 0,
+        max(config.age_days_min, 0),
+        2 if config.market_min_ret_1d > -1.0 else 0,
+    )
     pad_back = pad_back_days * MS_PER_DAY
     klines = _read_window(
         root, kname, start_ms=start_ms - pad_back, end_ms=end_ms + pad_fwd,

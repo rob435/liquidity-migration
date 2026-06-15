@@ -3206,10 +3206,16 @@ def test_failed_background_send_unrecords_dedupe_key(tmp_path: Path, monkeypatch
     ok, status = engine.maybe_notify({"cycle": {}})
     assert (ok, status) == (True, "enqueued")
     assert attempted.wait(2.0), "background telegram sender did not run"
-    engine.close()  # drains the queue → the un-record has completed by here
-    assert "k-fail" not in engine.state.telegram_keys_sent
-    assert "k-fail" not in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
-    # the alert re-fires on the next material event
+    # audit2c: the sender thread no longer un-records the key off-thread (that mutated
+    # consumer-only state and raced the dedupe file). It hands the failed key back via a
+    # queue; the NEXT maybe_notify drains it (un-record on the consumer thread) THEN
+    # re-fires. Wait for the hand-back, then assert the alert re-fires — the (True,
+    # "enqueued") return proves the dedupe key was un-recorded (else it would be a dup).
+    import time as _time
+    for _ in range(200):
+        if not engine._telegram_failed_keys.empty():
+            break
+        _time.sleep(0.01)
     assert engine.maybe_notify({"cycle": {}}) == (True, "enqueued")
     engine.close()
 

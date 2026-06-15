@@ -131,6 +131,32 @@ def _optional_float(row: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
+def _cost_corrected_return(row: dict[str, Any]) -> float | None:
+    # audit2c: live `net_return` is gross-of-cost (gtr*notional_weight; fees in separate
+    # entry_fee_usdt/exit_fee_usdt, funding uncosted -- see continuous_demo DEPLOY NOTE
+    # ~L1398), so the cooldown skipped-return aggregation overstated saved/forfeited PnL
+    # by round-trip fees (+funding) and could be wrong-signed for marginal trades. Mirror
+    # the breaker `net_of_fees` adjustment: subtract realised round-trip fees as a fraction
+    # of trade equity. Backtest rows are already NET (net=gross+cost+funding) and carry no
+    # entry_fee_usdt/exit_fee_usdt, so no fee is subtracted -- no double-subtraction. A
+    # true `funding_return` field, if ever stored live, is folded in with the engine's
+    # additive sign (net = gross + funding_return).
+    gross = _optional_float(row, "net_return", "return_pct", "return", "gross_return", "gtr")
+    if gross is None:
+        return None
+    net = gross
+    entry_fee = row.get("entry_fee_usdt")
+    exit_fee = row.get("exit_fee_usdt")
+    if entry_fee is not None or exit_fee is not None:
+        equity = _optional_float(row, "equity_usdt")
+        if equity is not None and equity > 0.0:
+            net -= (_float(entry_fee) + _float(exit_fee)) / equity
+    funding = _optional_float(row, "funding_return")
+    if funding is not None:
+        net += funding
+    return net
+
+
 def _entry_ts(row: dict[str, Any]) -> int:
     return _int(row, "entry_ts_ms", "entry_exec_time_ms", "signal_ts_ms", "entry_signal_ts_ms")
 
@@ -175,8 +201,19 @@ def _rows(frame: pl.DataFrame, *, source: str | None = None) -> list[dict[str, A
     if frame.is_empty():
         return []
     rows = frame.to_dicts()
-    if source is None or "blend_source" not in frame.columns:
+    if source is None:
         return rows
+    if "blend_source" not in frame.columns:
+        # audit2: a primary/addon split was explicitly requested but the frame has no
+        # blend_source discriminator. The old guard returned the FULL row set for BOTH
+        # requests, silently counting every historical trade as BOTH the primary and the
+        # add-on leg (addon/primary ratio pinned to 1.0) and feeding the historical
+        # anatomy/concentration/key-diff drift gates garbage with no warning. The
+        # historical comparison REQUIRES the discriminator -> fail loud instead.
+        raise ValueError(
+            "blended trade frame is missing the required 'blend_source' column; "
+            f"cannot split by source={source!r} (historical drift gate would compare against garbage)"
+        )
     return [row for row in rows if _str(row, "blend_source").lower() == source]
 
 
@@ -427,10 +464,19 @@ def _unmatched_entry_order_attempt_rows(
     now_ms: int = 0,
 ) -> list[dict[str, Any]]:
     trade_keys = _trade_key_set(trade_rows)
+    # audit2: mirror the shadows-4 trade_id backstop the SUMMARY path uses
+    # (_entry_order_trade_reconciliation_summary). Without it, a trade that dropped
+    # signal_ts_ms but kept its authoritative trade_id (the crash-recovery/schema-drift
+    # case) is excluded from the summary's unmatched count (0) yet still emitted here as
+    # a phantom orphaned add-on order in the *_unmatched_entry_order_attempts.csv the
+    # operator audits — same audit, contradictory artifacts.
+    trade_ids = _trade_id_set(trade_rows)
     out: list[dict[str, Any]] = []
     for row in _clean_entry_order_rows(order_rows):
         key = _entry_order_key(row)
         if not key[0] or key[1] <= 0 or key in trade_keys:
+            continue
+        if _trade_id(row) and _trade_id(row) in trade_ids:
             continue
         out.append(
             {
@@ -649,7 +695,9 @@ def _trade_gap_events(source: str, rows: list[dict[str, Any]]) -> list[dict[str,
                 "order_link_id": "",
                 "signal_ts_ms": _signal_ts(row),
                 "status": _str(row, "status").lower() or "unknown",
-                "return_value": _optional_float(row, "net_return", "return_pct", "return", "gross_return", "gtr"),
+                # audit2c: cost-correct gross-of-fee live net_return before the cooldown
+                # skipped-return aggregation (mirrors the breaker net_of_fees adjustment).
+                "return_value": _cost_corrected_return(row),
             }
         )
     return events

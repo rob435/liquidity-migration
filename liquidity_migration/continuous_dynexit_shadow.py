@@ -200,13 +200,24 @@ def update_dynexit_shadow(
         symbol = str(arm.get("symbol", ""))
         target = float(arm.get("target_price") or 0.0)
         entry_ts = int(arm.get("entry_ts_ms") or 0)
+        # audit2: enforce the frozen pre-registration rule
+        # (continuous-dynexit-forward-shadow-2026-06-10) — the shadow exits on a
+        # target-low touch OR at the real trade's exit, WHICHEVER FIRST. A closed
+        # real trade therefore CAPS the dyn_tp scan at its exit time: a target
+        # touched only AFTER the position was really closed (e.g. a +25% disaster
+        # stop forced the real exit, then price later reaches the dyn target) is not
+        # a fill the dyn variant could have taken — counting it is look-ahead that
+        # inflates the dyn-exit forward statistic. A missing/unknown real exit_ts
+        # falls back to now_ms (no worse than the prior behaviour).
+        real_exit_ts = int((closed_real.get(tid) or {}).get("exit_ts_ms") or 0)
+        scan_upper = now_ms if real_exit_ts <= 0 else min(now_ms, real_exit_ts)
         hit_ts: int | None = None
         if klines is not None and not klines.is_empty() and target > 0.0:
             sub = (
                 klines.filter(
                     (pl.col("symbol") == symbol)
                     & (pl.col("ts_ms") >= entry_ts)
-                    & (pl.col("ts_ms") <= now_ms)
+                    & (pl.col("ts_ms") <= scan_upper)
                     & (pl.col("low") <= target)
                 )
                 .sort("ts_ms")

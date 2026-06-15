@@ -966,7 +966,19 @@ def _safe_int(value: Any) -> int:
 
 
 def _is_rate_limit(value: Any) -> bool:
-    text = str(value).lower()
+    # audit2: classify precisely. Given a STRUCTURED Bybit payload, key off
+    # retCode == 10006 and only the retMsg text — never a str() of the whole payload,
+    # which false-positives when an orderId/orderLinkId happens to contain "10006",
+    # or when a non-throttle retMsg legitimately contains "rate limit" (e.g. a
+    # risk/leverage-limit reject). Those would otherwise burn the retry budget +
+    # backoff on a deterministic reject and inflate the rate_limit telemetry used to
+    # size the REST budget. A bare string/exception falls back to a tight text match.
+    if isinstance(value, dict):
+        if _safe_int(value.get("retCode")) == 10006:
+            return True
+        text = str(value.get("retMsg") or "").lower()
+    else:
+        text = str(value).lower()
     return "10006" in text or "rate limit" in text or "too many visits" in text
 
 
@@ -1411,6 +1423,14 @@ class BybitWebSocketTradeClient:
     api_key: str | None = None
     api_secret: str | None = None
     recv_window: int = 1000
+    # audit2: mirror BybitPrivateClient's defense-in-depth real-money guard on the WS
+    # signing path. The config-time validate_order_submit_allowed gate protects the
+    # normal wiring, but the REST client deliberately RE-asserts the demo-only invariant
+    # at the layer that signs the order; the WS submit path had no such guard, so a
+    # future/refactored wiring that built this client with demo=False would place a
+    # real-money WS order with nothing between it and the venue. Defaults off, matching
+    # the repo rule that REAL_MONEY is never enabled without explicit instruction.
+    confirm_real_money: bool = False
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -1426,12 +1446,25 @@ class BybitWebSocketTradeClient:
             recv_window=self.recv_window,
         )
 
+    def _assert_submit_allowed(self, action: str) -> None:
+        """Refuse a state-changing WS submission on a real-money account unless the
+        caller explicitly opted in at construction — the WS twin of
+        BybitPrivateClient._assert_submit_allowed, asserted at the signing layer."""
+        if not self.demo and not self.confirm_real_money:
+            raise RuntimeError(
+                f"Refusing to {action} on a REAL_MONEY account: this websocket trade "
+                "client was built without confirm_real_money=True. The strategy is not "
+                "validated for real money; keep it on demo."
+            )
+
     def place_order(self, callback: Any, **params: Any) -> None:
         if "orderLinkId" not in params:
             raise ValueError("orderLinkId is required for idempotent Bybit websocket order submission")
+        self._assert_submit_allowed("place an order")
         self._client.place_order(callback, category=self.category, **params)
 
     def cancel_order(self, callback: Any, *, symbol: str, order_link_id: str) -> None:
+        self._assert_submit_allowed("cancel an order")
         self._client.cancel_order(callback, category=self.category, symbol=symbol, orderLinkId=order_link_id)
 
     def close(self) -> None:
@@ -1446,6 +1479,7 @@ def build_ws_trade_client(
     api_key: str | None,
     api_secret: str | None,
     recv_window: int = 1000,
+    confirm_real_money: bool = False,
     attempts: int = 4,
     base_backoff_seconds: float = 0.5,
     max_backoff_seconds: float = 8.0,
@@ -1491,6 +1525,7 @@ def build_ws_trade_client(
                 api_key=api_key,
                 api_secret=api_secret,
                 recv_window=recv_window,
+                confirm_real_money=confirm_real_money,
             )
         except Exception as exc:  # noqa: BLE001 - retry transient connect failures; caller REST-falls-back
             last_exc = exc

@@ -65,8 +65,10 @@ def _link_subdir(target: Path, source: Path) -> str:
     developer mode AND with mklink failing).
     """
     if target.exists() or target.is_symlink():
-        # Idempotency: assume existing link is correct (we resolve and
-        # verify the operator-visible state below before declaring done).
+        # audit2b: comment corrected to match assume-correct behavior — nothing
+        # downstream resolves/verifies an existing link target.
+        # Idempotency: assume any pre-existing target (link or dir) is correct
+        # and leave it in place; the link target is NOT re-resolved or verified.
         return "exists"
     target.parent.mkdir(parents=True, exist_ok=True)
     # First try a real symlink (POSIX always works; Windows works under

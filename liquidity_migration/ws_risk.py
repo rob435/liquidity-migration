@@ -372,6 +372,11 @@ class EventWebSocketRiskEngine:
         # sender never reads structures the consumer concurrently mutates (WS-R-001).
         self._telegram_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
         self._telegram_thread: threading.Thread | None = None
+        # audit2c: the sender thread MUST NOT mutate self.state.telegram_keys_sent or
+        # write the dedupe file (consumer-thread-only invariant + a file-write race
+        # against maybe_notify). On a failed send it hands the key back here; the
+        # consumer un-records it (drain in maybe_notify) so the alert can re-fire.
+        self._telegram_failed_keys: queue.Queue[str] = queue.Queue()
         # Background reconcile-prefetcher (opt-in via reconcile_prefetch_enabled).
         # Holds the latest positions + open-orders REST snapshot so rest_reconcile
         # reads it non-blocking. Written by the prefetcher via atomic reference
@@ -983,6 +988,14 @@ class EventWebSocketRiskEngine:
             else:
                 self.public_stream = stream
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
+        # audit2c: anchor the public-WS health "built" timestamp to the ACTUAL stream
+        # construction + first subscription here, not to __init__. The watchdog
+        # (_maybe_reconnect_public_stream) is a no-op until symbols are subscribed, so
+        # an __init__-time anchor only matters once the stream is live — and if the
+        # build/subscribe lagged __init__ it could trip a spurious reconnect of a
+        # healthy just-subscribed stream. Set it now (>= the __init__ value, so strictly
+        # safer); rebuilds refresh it at _maybe_reconnect_public_stream.
+        self._public_stream_built_monotonic = time.monotonic()
         if self.risk.order_submit_mode in {"ws", "ws_then_rest"} and self.trade_client is None:
             # WS-first exits: actually ATTEMPT the WS trade client (with jittered
             # retry) rather than pre-emptively giving up in ws_then_rest mode —
@@ -2928,14 +2941,11 @@ class EventWebSocketRiskEngine:
                 # the next NEW material event notifies normally.
                 _logger.warning("telegram not configured (TELEGRAM_* env missing); keeping dedupe key: %s", key)
                 continue
-            _logger.warning("telegram send failed; un-recording dedupe key so the alert can re-fire: %s", key)
-            try:
-                keys = set(_read_telegram_dedupe_keys(self.report_dir))
-                keys.discard(key)
-                _write_telegram_dedupe_keys(self.report_dir, keys)
-                self.state.telegram_keys_sent.discard(key)
-            except Exception as exc:  # noqa: BLE001 - dedupe repair is best-effort telemetry
-                _logger.warning("telegram dedupe un-record failed: %s", exc)
+            # audit2c: hand the failed key back to the CONSUMER thread to un-record
+            # (discard from the set + rewrite the dedupe file) rather than mutating
+            # consumer-only state and racing the dedupe file from this sender thread.
+            _logger.warning("telegram send failed; handing dedupe key to the consumer to un-record so it can re-fire: %s", key)
+            self._telegram_failed_keys.put(key)
 
     def _enqueue_telegram(self, key: str, text: str) -> None:
         if self._telegram_thread is None or not self._telegram_thread.is_alive():
@@ -2969,9 +2979,31 @@ class EventWebSocketRiskEngine:
             view[key] = rows[-fresh:] if fresh > 0 else []
         return view
 
+    def _drain_failed_telegram_keys(self) -> None:
+        """Consumer-thread un-record of keys whose background send failed. The sender
+        thread hands failed keys back via a thread-safe queue (it must not mutate
+        consumer-only state or race the dedupe file); we discard them from the set and
+        rewrite the dedupe file HERE, on the consumer thread, so the alert can re-fire."""
+        drained = False
+        while True:
+            try:
+                key = self._telegram_failed_keys.get_nowait()
+            except queue.Empty:
+                break
+            self.state.telegram_keys_sent.discard(key)
+            drained = True
+        if drained:
+            try:
+                _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
+            except Exception as exc:  # noqa: BLE001 - dedupe repair is best-effort telemetry
+                _logger.warning("telegram dedupe un-record (consumer) failed: %s", exc)
+
     def maybe_notify(self, payload: dict[str, Any]) -> tuple[bool, str]:
         if not self.risk.telegram:
             return False, "disabled"
+        # audit2c: un-record any keys whose background send failed (handed back by the
+        # sender thread) before the dedupe check below, so a failed alert can re-fire.
+        self._drain_failed_telegram_keys()
         reason = _telegram_notification_reason(self._reason_payload_view(payload))
         if not reason:
             return False, "quiet_no_material_event"

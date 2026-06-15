@@ -110,19 +110,24 @@ def test_projected_margin_guard_rejects_unsafe_levered_full_book() -> None:
     strategy = _v11a_long_native_config()
     unsafe = LongNativeDemoCycleConfig(notional_multiplier=10.0)
     projection = projected_long_initial_margin_pct_equity(unsafe, strategy)
-    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(1.25)
+    # audit2c: worst case now also folds the 1.5x weekend tilt (and the <=1.0
+    # vol-parity weight), so the projection is 1.25 * 1.5 = 1.875, not 1.25.
+    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(1.875)
     with pytest.raises(ValueError, match="projected full-book initial margin"):
         _validate_long_demo_config(unsafe, strategy)
 
 
 def test_projected_margin_guard_allows_explicit_safe_levered_demo() -> None:
     strategy = _v11a_long_native_config()
+    # audit2c: the 4x config used to project exactly 0.50 and pass; once the 1.5x
+    # weekend tilt is modeled it projects 0.75 and is correctly rejected. A 2x
+    # config (0.10*2*1.25*1.5 = 0.375) is the new headroom-respecting "safe" case.
     safe = LongNativeDemoCycleConfig(
-        notional_multiplier=4.0,
+        notional_multiplier=2.0,
         max_projected_initial_margin_pct_equity=0.50,
     )
     projection = projected_long_initial_margin_pct_equity(safe, strategy)
-    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.50)
+    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.375)
     _validate_long_demo_config(safe, strategy)
 
 

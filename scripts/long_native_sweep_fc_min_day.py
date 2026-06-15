@@ -27,7 +27,12 @@ _ENTRY_ONLY_OVERRIDES = {"fc_min_day_return", "fc_use_sigma_threshold"}
 
 
 def _fmt_pct_tag(value: float) -> str:
-    return f"{int(round(value * 100)):03d}"
+    # audit2: tag from the EXACT value at 4-decimal precision, not int-percent.
+    # The old f"{int(round(value*100)):03d}" had 1pp resolution AND banker's
+    # rounding, so distinct --values (0.10/0.104/0.105) collided on one tag ->
+    # one run_dir -> --skip-existing mislabeled/clobbered the 2nd cell.
+    # filesystem-safe: '.'->'p', '-'->'m'.
+    return f"{value:.4f}".replace(".", "p").replace("-", "m")
 
 
 def main() -> int:
@@ -49,6 +54,17 @@ def main() -> int:
     values = [float(v.strip()) for v in args.values.split(",") if v.strip()]
     if not values:
         print("ERROR: no sweep values parsed", file=sys.stderr)
+        return 2
+
+    # audit2: fail fast if two requested values would share a run_dir tag.
+    tags = [_fmt_pct_tag(v) for v in values]
+    if len(set(tags)) != len(tags):
+        seen: dict[str, float] = {}
+        for v, t in zip(values, tags):
+            if t in seen:
+                print(f"ERROR: --values {seen[t]} and {v} collide on tag '{t}'", file=sys.stderr)
+            else:
+                seen[t] = v
         return 2
 
     research = load_config(args.config)

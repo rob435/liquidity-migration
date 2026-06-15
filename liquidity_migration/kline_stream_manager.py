@@ -280,6 +280,10 @@ class KlineStreamManager:
         """Synchronously re-fetch the universe + diff against the pool.
 
         Exposed for tests and operator-triggered manual refresh."""
+        # audit2b: snapshot the error counter so the empty-set guard below does
+        # not double-count an error _fetch_universe already counted (the default
+        # fetcher increments on its own REST exception path).
+        errors_before_fetch = self._universe_refresh_errors
         new_universe = set(self._fetch_universe())
         # An empty fetch is almost always a transient REST failure (the
         # default fetcher returns [] on exception, the long fetcher
@@ -296,7 +300,12 @@ class KlineStreamManager:
                 "universe refresh returned empty set; keeping existing %d subscriptions",
                 size,
             )
-            self._universe_refresh_errors += 1
+            # audit2b: only count the error here if _fetch_universe did NOT
+            # already count it (default-fetcher REST exception). A custom
+            # fetcher returning [] or a default fetch that simply filters to
+            # empty is still counted exactly once.
+            if self._universe_refresh_errors == errors_before_fetch:
+                self._universe_refresh_errors += 1
             self._last_universe_refresh_ms = _utc_now_ms()
             return {"added": 0, "removed": 0, "size": size}
         with self._lock:

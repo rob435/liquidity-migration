@@ -138,6 +138,13 @@ def compute_mar(total_return: float, max_drawdown: float, window_days: float) ->
     drawdown in practice, so this is descriptive, not a hole.)"""
     if abs(max_drawdown) <= 1e-9:
         return float("nan")
+    # audit2: a malformed window_days<=0 row makes annualization UNDEFINED (the
+    # cell carries no measurable window); treat it as UNMEASURABLE (nan), the same
+    # non-qualifying path as zero-DD, instead of letting compute_annualized_return
+    # raise and crash the whole investigation verdict. Valid rows (window_days>0)
+    # are unaffected — the math below is byte-identical to before.
+    if window_days <= 0:
+        return float("nan")
     ann = compute_annualized_return(total_return, window_days)
     return ann / abs(max_drawdown)
 

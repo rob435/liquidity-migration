@@ -336,10 +336,15 @@ def forward_readiness_summary(
     # Compounding/vol/dd over observed rows alone would drop the zero-return
     # calendar days, collapsing the span out of the return numerator while the
     # year denominator stayed calendar — an inconsistent MAR and an inflated
-    # Sharpe (forward-replay-2/6, metrics-3/6). Build the same gap-filled calendar
-    # series the deployed-equity reference uses (scripts/continuous_deployed_equity
-    # .stats()) so total, dd, years AND Sharpe all share the calendar basis and the
-    # two engines agree whenever gaps exist.
+    # Sharpe (forward-replay-2/6, metrics-3/6). Build a gap-filled calendar series
+    # (same CONSTRUCTION as the deployed-equity reference,
+    # scripts/continuous_deployed_equity.stats()) so total, dd and Sharpe share the
+    # calendar basis. NOTE (audit2): the `years` denominator below deliberately uses
+    # the RAW span (no +1), matching the _daily_pnl_metrics / _calendar_metrics
+    # annualizer convention — NOT deployed_equity.stats()'s inclusive span+1 — so
+    # forward_mar/annualized here differ from deployed_equity by one calendar day on
+    # short windows. That divergence is intentional; do NOT "reconcile" it by adding
+    # +1, which would shift a Tier-3-facing reported number (operator-gated).
     ts = df["ts_ms"].to_numpy()
     first_ms, last_ms = int(ts[0]), int(ts[-1])
     span_days = int((last_ms - first_ms) // MS_PER_DAY) + 1  # calendar span (inclusive)
