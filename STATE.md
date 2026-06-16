@@ -85,8 +85,11 @@ Details are in git history; the current behavior below is what matters.
   a cross-venue null; the shadow is the only possible revival path.
 - **Shared kline data plane:** paper shadow follows the demo root's flushed
   kline snapshot read-only (`KLINES_FOLLOW_ROOT`).
-- **LONG:** `div` + volup125 + weekend 1.5x tilt, toggled off, awaiting operator
-  leverage/capital decision.
+- **LONG:** `div` + volup125 + weekend 1.5x tilt. **RE-ENABLED 2026-06-16 by operator**
+  (`LONG_SLEEVE=on`): demo + paper services live, submitting at the v11a sizing
+  (ENTRY_LEVERAGE=10, margin-capped at 50% projected IM), sharing the netted demo
+  account with the continuous sleeve. Demo/paper only, `REAL_MONEY` false. Decision #4
+  (leverage/capital) is thereby resolved as "run at the current v11a demo sizing".
 - **VPS:** Hetzner demo host. A push to the deployment branch can auto-deploy;
   do not push without operator confirmation and the pre-push gate.
 
@@ -109,7 +112,10 @@ Details are in git history; the current behavior below is what matters.
    cycle).
 3. Finish Binance FAPI ancillary June top-ups from the VPS or another permitted
    host; the dev box is region/network blocked.
-4. Decide LONG leverage/capital. The sleeve is off until then.
+4. ~~Decide LONG leverage/capital. The sleeve is off until then.~~ RESOLVED 2026-06-16
+   (operator): LONG re-enabled at the current v11a demo sizing (ENTRY_LEVERAGE=10,
+   50% projected-IM cap), demo/paper only. Revisit sizing if margin contention with the
+   active continuous sleeve shows up in demo.
 5. PE2 long provisional-entry OOS re-judgment is armed only after both full-PIT
    roots extend at least 60 days past 2026-05-28 and have enough trades.
 6. ~~Forward replay orchestrator~~ DONE 2026-06-13:

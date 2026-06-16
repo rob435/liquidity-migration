@@ -130,12 +130,12 @@ def test_continuous_paper_split_keeps_demo_orders_off_runs_paper(tmp_path: Path)
     assert "enable liquidity-migration-bybit-continuous-demo.service" not in calls
 
 
-def test_loaded_toggles_continuous_on_long_off(tmp_path: Path) -> None:
-    # Loaded toggles (2026-06-09 operator re-shape; daily-short ERASED 2026-06-11):
-    # the VPS runs ONLY the continuous system; LONG stays off until re-enabled.
+def test_loaded_toggles_long_continuous_and_paper_on(tmp_path: Path) -> None:
+    # Loaded toggles: LONG re-enabled 2026-06-16 by operator (demo diversifier, shares the
+    # netted demo account with continuous); continuous demo + paper stay on.
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
-        test "$LONG_SLEEVE" = off && test "$CONTINUOUS_SLEEVE" = on             && test "$CONTINUOUS_PAPER_SLEEVE" = on
+        test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = on             && test "$CONTINUOUS_PAPER_SLEEVE" = on
         echo "TOGGLES_OK"
     """)
     assert rc == 0, err
@@ -171,14 +171,15 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     assert "FALLBACK_OK" in proc.stdout
 
 
-def test_committed_sleeves_env_continuous_only() -> None:
-    # The committed file is the source of truth. 2026-06-09 operator instruction: the VPS
-    # runs ONLY the continuous system. 2026-06-11: the daily-short sleeve was ERASED —
-    # no SHORT toggles remain. Each line must be systemd-EnvironmentFile-safe
-    # (plain KEY=value, no inline comment).
+def test_committed_sleeves_env_long_and_continuous_on() -> None:
+    # The committed file is the source of truth. 2026-06-16 operator instruction: LONG
+    # re-enabled (demo diversifier on the shared demo account) alongside the continuous
+    # demo + paper sleeves. 2026-06-11: the daily-short sleeve was ERASED — no SHORT
+    # toggles remain. Each line must be systemd-EnvironmentFile-safe (plain KEY=value,
+    # no inline comment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
-        "LONG_SLEEVE": "off",
+        "LONG_SLEEVE": "on",
         "CONTINUOUS_SLEEVE": "on",
         "CONTINUOUS_PAPER_SLEEVE": "on",
     }
