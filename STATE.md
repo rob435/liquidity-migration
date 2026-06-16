@@ -1,6 +1,6 @@
 # Research Program State
 
-**Last updated:** 2026-06-14
+**Last updated:** 2026-06-16
 
 Read this first for live state and binding decision rules. Research conclusions
 live in [docs/research_summary.md](docs/research_summary.md).
@@ -41,6 +41,24 @@ Details are in git history; the current behavior below is what matters.
   (`winner_base`: p3 .30 / p4p3 .20 / p4p5 .40 / tp14 .10,
   w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25,
   BTC-uptrend gate). Demo fills are execution evidence only.
+  - **GATE TEMPORARILY OFF (plumbing test, 2026-06-16, operator):** `BTC_TREND_GATE`
+    flipped `uptrend`→`off` on BOTH demo + paper units (commit 5d3fa42, deployed via
+    main) so the flat (BTC-30d-down) book takes entries and exercises the
+    fill→hedge→ledger→reconcile path. **This window's demo/paper fills are NOT
+    promoted-object forward evidence** (different entry rule); the BTC-vol
+    regime-hedge forward clock stays clean (no-order replay reproduces the `uptrend`
+    book). **REVERT both units to `uptrend` once plumbing is confirmed.** The gate is
+    now a single-source `--btc-trend-gate`/`BTC_TREND_GATE` knob (commit 51c756d) — the
+    `continuous_ensemble_v1`/`continuous_rebalance_v1` profiles no longer silently
+    override it; runner defaults to `uptrend` as a fail-safe.
+  - **Why the gate stays the strategy (exploratory bybit A/B, 2026-06-16, `exploratory`):**
+    full deployed 2f+regime book, full-PIT, costed, 2023-04→2026-06 — gate `uptrend`
+    MAR 5.12 / ret 88% / maxDD −5.4% vs gate `off` MAR 1.29 / ret 57% / maxDD −14.0%
+    (off ran `funding=partial`, costs understated). The 30d gate is RISK CONTROL (the
+    downtrend fades it admits lose money + ~triple the drawdown), not alpha — `off` is
+    for the plumbing test only. Driver `scripts/gate_ab_plumbing_2026-06-16.py`;
+    artifacts `~/SHARED_DATA/gate_ab_plumbing_2026-06-16/` (binance arm not completed,
+    run stopped early by operator).
 - **2f BTC+ETH hedge:** wired and armed. Warmstart CSVs were regenerated on
   2026-06-13; after a long flat spell, the first risk-increasing leg may still
   block on calendar-age staleness and page unless the operator requests
