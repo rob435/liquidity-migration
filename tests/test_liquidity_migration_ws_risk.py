@@ -4322,6 +4322,67 @@ def test_stale_watchdog_fires_on_private_silence_while_tickers_flow(tmp_path: Pa
     assert any("private-stream" in e for e in engine.state.errors)
 
 
+# ws-risk-6 — a CONFIRMED-LIVE but quiet private socket must NOT read as stale
+def _stale_watchdog_engine(tmp_path: Path, private_stream) -> "EventWebSocketRiskEngine":  # noqa: ANN001
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            stale_ws_seconds=30.0,
+            rest_fallback=True,
+        ),
+        private_client=_FakePrivateClient(positions=[]),
+        private_stream=private_stream,
+        public_stream=_FakePublicStream(),
+    )
+    engine.state.positions_by_symbol = {"AAAUSDT": _long_position()}
+    return engine
+
+
+def test_stale_watchdog_ignores_quiet_but_live_private_socket(tmp_path: Path) -> None:
+    """ws-risk-6: Bybit only pushes private events on state changes, so a healthy
+    socket on a quiet book goes silent for hours. The watchdog must trust the socket's
+    is_connected()=True over its data-silence and NOT raise a false 'private-stream
+    stale; forced REST reconcile' (which surfaced as position_report_error on every
+    heartbeat of the idle 3-short demo book). Regression for the operator false page."""
+    engine = _stale_watchdog_engine(tmp_path, _LivePrivate())
+
+    now = time.monotonic()
+    reconciles: list[float] = []
+    engine.rest_reconcile = lambda *a, **k: reconciles.append(now)  # type: ignore[assignment]
+    # Public tickers fresh; private silent far past the bound (the quiet-book case).
+    engine.state.last_ws_event_monotonic = now
+    engine.state.last_private_ws_event_monotonic = now - 9999
+    engine.state.last_stale_reconcile_monotonic = now - 9999
+
+    engine.reconcile_stale_websocket(now)
+    assert not reconciles, "a confirmed-live private socket must not be forced to reconcile on silence alone"
+    assert not any("private-stream" in e for e in engine.state.errors)
+
+
+def test_stale_watchdog_still_fires_on_dead_private_socket(tmp_path: Path) -> None:
+    """ws-risk-6 guard: the liveness gate must NOT blind the watchdog to a genuinely
+    DOWN private socket. is_connected()=False -> silence is meaningful -> still force a
+    REST reconcile so protection is preserved while _maybe_reconnect rebuilds."""
+    engine = _stale_watchdog_engine(tmp_path, _DeadPrivate())
+
+    now = time.monotonic()
+    reconciles: list[float] = []
+    engine.rest_reconcile = lambda *a, **k: reconciles.append(now)  # type: ignore[assignment]
+    engine.state.last_ws_event_monotonic = now
+    engine.state.last_private_ws_event_monotonic = now - 9999
+    engine.state.last_stale_reconcile_monotonic = now - 9999
+
+    engine.reconcile_stale_websocket(now)
+    assert reconciles, "a down private socket's silence must still force a REST reconcile"
+    assert any("private-stream" in e for e in engine.state.errors)
+
+
 # ws-risk-6 — partial reduce-only fills book realized PnL on the closed chunk
 def _open_continuous_trade(root: Path) -> None:
     write_dataset(

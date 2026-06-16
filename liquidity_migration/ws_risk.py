@@ -409,6 +409,23 @@ class EventWebSocketRiskEngine:
         self._public_rebuild_pending = False
         self._public_resubscribe: set[str] = set()
 
+    def _private_stream_connected(self) -> bool | None:
+        """Probe the private WS socket's TRUE liveness via pybit's ``is_connected()``
+        (reads ``ws.sock.connected``). Returns True (socket up), False (socket down),
+        or None when liveness is unknowable -- no stream, or an older pybit without
+        the probe -- in which case callers must stay conservative and fall back to
+        data-silence heuristics. Best-effort: a probe that raises reads as unknown."""
+        stream = self.private_stream
+        if stream is None:
+            return None
+        probe = getattr(stream, "is_connected", None)
+        if not callable(probe):
+            return None
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 - a flaky liveness probe must not break reconcile
+            return None
+
     def _maybe_reconnect_private_stream(self, now: float) -> None:
         """Rebuild the private WS stream when its SOCKET is genuinely down (not merely
         a quiet account). The private stream feeds the position/order/execution events
@@ -431,8 +448,7 @@ class EventWebSocketRiskEngine:
         if stream is None and not self._private_rebuild_pending:
             return
         if stream is not None:
-            probe = getattr(stream, "is_connected", None)
-            connected = probe() if callable(probe) else None
+            connected = self._private_stream_connected()
             if connected is not False:
                 if connected is True:
                     self._private_disconnected_since = None
@@ -2625,6 +2641,19 @@ class EventWebSocketRiskEngine:
         # (the old all-events clock could be kept warm by ticker traffic alone,
         # blinding the watchdog to the most safety-relevant stream's death).
         expects_private = bool(self.state.positions_by_symbol) or not self.state.open_trades.is_empty()
+        # ws-risk-6: a private socket that is CONFIRMED live (is_connected() is True)
+        # but merely quiet is NOT stale. Bybit only pushes private events on state
+        # changes (fills, order/balance moves), so a healthy socket on an idle book
+        # legitimately goes silent for hours. Counting that silence as staleness fired
+        # a perpetual false "private-stream stale; forced REST reconcile" that surfaced
+        # as position_report_error on EVERY heartbeat of a quiet-but-healthy account.
+        # Socket liveness is the authority -- the same is_connected() signal
+        # _maybe_reconnect_private_stream rebuilds off; fall back to data-silence only
+        # when liveness is unknown (None, older pybit) or the socket is down (False),
+        # where silence is genuinely meaningful. Mirrors the LONG daemon's
+        # _check_ws_health fix (commit 4e224ed).
+        if expects_private and self._private_stream_connected() is True:
+            expects_private = False
         private_age = (now - self.state.last_private_ws_event_monotonic) if expects_private else 0.0
         stale_age = max(ws_age, private_age)
         if stale_age < self.risk.stale_ws_seconds:
