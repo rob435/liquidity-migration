@@ -41,7 +41,10 @@ MAX_HOLD_HOURS="${MAX_HOLD_HOURS:-48}"
 STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v1}"
 FEATURE_SET="${FEATURE_SET:-rv_168h,vov,dist_low,xsret7,xsret3}"
 ENTRY_EVENT_TRIGGER="${ENTRY_EVENT_TRIGGER:-none}"
-BTC_TREND_GATE="${BTC_TREND_GATE:-off}"
+# Default to the DEPLOYED gate (uptrend) so a dropped env line cannot silently
+# disable the 30d-BTC trend gate. The systemd units pin BTC_TREND_GATE explicitly;
+# set it to "off" there (demo + paper together) for a plumbing test.
+BTC_TREND_GATE="${BTC_TREND_GATE:-uptrend}"
 STOP_LOSS_PCT="${STOP_LOSS_PCT:-0.25}"  # wide server-side disaster stop; the state exit is profit-only
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-2}"
 PER_POSITION_NOTIONAL_PCT_EQUITY="${PER_POSITION_NOTIONAL_PCT_EQUITY:-2}"

@@ -867,7 +867,10 @@ def test_continuous_rebalance_rule_matches_default_candidate_knobs() -> None:
 
 def test_continuous_rebalance_profile_resolves_to_pinned_candidate_contract() -> None:
     cfg = apply_continuous_demo_profile(
-        ContinuousDemoCycleConfig(strategy_profile="continuous_rebalance_v1", paper_mode=True, record_dry_run=True)
+        ContinuousDemoCycleConfig(
+            strategy_profile="continuous_rebalance_v1", btc_trend_gate="uptrend",
+            paper_mode=True, record_dry_run=True,
+        )
     )
 
     assert cfg.rmom_quantile == pytest.approx(0.25)
@@ -876,7 +879,7 @@ def test_continuous_rebalance_profile_resolves_to_pinned_candidate_contract() ->
     assert cfg.max_hold_hours == 24
     assert cfg.entry_confirm_delay_hours == 1
     assert cfg.entry_event_trigger == "turn4_pop4"
-    assert cfg.btc_trend_gate == "uptrend"
+    assert cfg.btc_trend_gate == "uptrend"  # pass-through from the CLI/env knob, not pinned by the profile
     assert cfg.daily_rebalance_enabled is True
     assert continuous_rebalance_rule(cfg).target_daily_vol == pytest.approx(0.025)
 

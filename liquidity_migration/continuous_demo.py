@@ -1676,7 +1676,12 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
             max_hold_hours=24,
             entry_confirm_delay_hours=1,
             entry_event_trigger="none",
-            btc_trend_gate="uptrend",
+            # btc_trend_gate is NOT pinned here: it is the single-source-of-truth
+            # CLI/env knob (`--btc-trend-gate` / `BTC_TREND_GATE`), so the deploy
+            # layer controls it (units pin `uptrend`; runner defaults `uptrend`).
+            # Pinning it here previously silently overrode the env, making
+            # `BTC_TREND_GATE=off` a no-op. Pass-through keeps the deployed value
+            # (uptrend) while letting demo/paper flip to `off` via config alone.
             daily_rebalance_enabled=True,
             daily_rebalance_realized_vol_window_days=90,
             daily_rebalance_target_daily_vol=0.045,
@@ -1703,7 +1708,8 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         max_hold_hours=24,
         entry_confirm_delay_hours=1,
         entry_event_trigger="turn4_pop4",
-        btc_trend_gate="uptrend",
+        # btc_trend_gate pass-through (see continuous_ensemble_v1 above): the gate
+        # is the CLI/env knob, not pinned by the profile.
         daily_rebalance_enabled=True,
         daily_rebalance_realized_vol_window_days=90,
         daily_rebalance_target_daily_vol=0.025,

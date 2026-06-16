@@ -15,7 +15,11 @@ from liquidity_migration.continuous_demo import (
 
 
 def test_ensemble_profile_resolves_winner_base() -> None:
-    cfg = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v1"))
+    # The deployed gate (uptrend) arrives via the --btc-trend-gate / BTC_TREND_GATE
+    # knob, not the profile; pass it in to mirror the live CLI/env wiring.
+    cfg = apply_continuous_demo_profile(
+        ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v1", btc_trend_gate="uptrend")
+    )
     comps = {c[0]: c for c in cfg.ensemble_components}
     assert set(comps) == {"p3", "p4p3", "p4p5", "tp14"}
     assert comps["p3"] == ("p3", "turn3_pop3", 240, 0.10, 0.30)
@@ -31,6 +35,18 @@ def test_ensemble_profile_resolves_winner_base() -> None:
     assert cfg.daily_rebalance_max_scale == 4.0
     assert cfg.daily_rebalance_target_daily_vol == 0.045
     assert cfg.daily_rebalance_strategy_momentum_window_days == 0  # the merged test's winning arm
+
+
+def test_profile_does_not_override_btc_trend_gate() -> None:
+    # Single source of truth: the profile must PASS THROUGH the gate from the
+    # CLI/env knob, never pin it. Pinning it (the pre-2026-06-16 bug) silently
+    # made BTC_TREND_GATE=off a no-op for the deployed ensemble.
+    for profile in ("continuous_ensemble_v1", "continuous_rebalance_v1"):
+        for gate in ("uptrend", "off", "downtrend"):
+            cfg = apply_continuous_demo_profile(
+                ContinuousDemoCycleConfig(strategy_profile=profile, btc_trend_gate=gate)
+            )
+            assert cfg.btc_trend_gate == gate, (profile, gate)
 
 
 def test_old_profile_still_resolves_unchanged() -> None:
