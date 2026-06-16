@@ -463,6 +463,73 @@ without genuinely new data, a new lifecycle, or a fresh forward-only bar.
   regime-hedge remains the one robust bybit edge.** If a binance sleeve also runs, dispersion/stack
   is a real per-venue binance hedge (forward-watch option, not a both-venue candidate). Receipt
   `docs/preregistration/2026-06-15-w5-continuous-stage10b-dispersion-clean.md`.
+- **W6 orderflow squeeze (OI-buildup) — A1 sizing + A4 hedge-regime BOTH NULL (2026-06-15).**
+  The exploratory screen found a real within-symbol IC (`oi_chg_24h` bybit +0.0665 p=0.002),
+  but neither harvestable mode converts it. **A1 (mean-1 gross-neutral SIZING up of high-squeeze
+  fades):** return rises monotonically with tilt (0.77→0.80) but drawdown grows faster → bybit
+  ΔMAR −0.40/−0.26 at k0.5, gross-neutral confirmed (no leverage artifact); the W5 diffuse-edge
+  root cause on the orderflow axis. **A4 (aggregate book-squeeze × the live BTC-vol hedge
+  intensity):** λ0.5 +0.057 vs the BTC-vol baseline is WITHIN the 8-seed shuffle-control noise
+  (−0.34…+0.10, 2/8 beat it), not λ-robust (λ0.25 −0.087), cost-fragile (1.5× → −0.07) — extends
+  Stage 8d/8e/8g (BTC-vol is the unique hedge regime). binance squeeze data-gated (OI ~6wk).
+  **Lesson reinforced: a real orderflow IC does NOT robustly harvest as sizing OR as a hedge
+  regime; the multi-seed shuffle control (not single-seed) is what kills the A4 favorable cut.**
+  Receipts `2026-06-15-w6-squeeze-proxy-sizing.md`, `2026-06-15-w6-squeeze-hedge-intensity.md`.
+  **A5 (per-day gross scaler by squeeze-breadth) skipped by cheap diagnostic** — squeeze-breadth
+  → daily return is real-but-weak (breadth Spearman +0.094 p=0.038), the same edge A1 proved
+  doesn't survive DD; a gross-up faces the same mechanism on a weaker signal (low prior).
+  **Data-gating:** B1 (intrabar entry-price timing) is blocked locally — `tick_ohlc_1m`/all
+  sub-hourly klines are 0 partitions; only `taker_flow_5m` exists. Next lead = squeeze-conditioned
+  crowding ADMISSION (the one diffuse-edge-friendly entry-set direction: ADD high-squeeze fades
+  the crowding gate rejects — screen rejected-entry outcomes first, then an engine hook).
+- **W6 crowding-ADMISSION screen — POSITIVE bybit prior, the program's first non-NULL lead
+  (2026-06-15).** Hypothetical causal fade model VALIDATED against the ledger (return corr
+  0.996/0.999, entry-price MAPE 0.0). The 1166 crowding-rejected bybit fades (rejected by
+  `entry_crowding_max_fresh=2`, the 3rd+ fresh candidate per signal-hour, with concurrency
+  slots FREE) are **profitable: mean +37bp/fade net of 15bp cost** (high-squeeze tercile +109bp,
+  low-squeeze +78bp). So the crowding gate is REJECTING PROFITABLE FADES — the diffuse-edge
+  logic predicts admitting them ADDS book profit (this ADDS deployment, unlike the failed
+  select/size/time levers). Squeeze CONDITIONING is weak (within-symbol IC +0.022, p=0.25, NS;
+  control degenerate) → the value is blanket admission, squeeze a weak tilt. binance squeeze
+  data-gated (OI ~6wk). **Next = the engine config sweep on `entry_crowding_max_fresh` tested
+  on MAR (leverage-invariant → a MAR rise = genuine breadth quality, not leverage), with a
+  constant-leverage control, cost stress, thirds, bybit-robust bar.** Receipt
+  `2026-06-15-w6-crowding-admission.md`; screen `scripts/w6_crowding_admission_screen.py`.
+- **W6 crowding-ADMISSION engine sweep — NULL (2026-06-15), closing Track A.** Despite the
+  positive screen, admitting the rejected fades (entry_crowding_max_fresh 2→4→999) LOWERS MAR
+  (ΔMAR −0.14/−0.075): return rises (0.77→0.80) and trades +8% but maxDD grows faster, and at
+  MATCHED gross admission is far worse than uniformly leveraging the existing book (constant-
+  leverage control +0.168 vs admission −0.075) — the admitted fades are tail-correlated
+  (concurrent-squeeze days). **The crowding cap (max_fresh=2) is near-optimal.** SHARPENED ROOT
+  CAUSE (W5+W6): the book's edge is diffuse but its TAIL is correlated-concurrent, so every lever
+  that adds/sizes book exposure (sizing A1, gross A5, admission) concentrates the tail → MAR
+  falls; only the BTC-vol HEDGE harvests (tail protection, no added exposure). **W6 Track-A
+  convergence: the orderflow squeeze signal is a real IC that harvests in no mode; in-sample
+  search on local data is complete. Paths forward = forward-watch the live BTC-vol hedge + data
+  accrual (binance OI tape E4, sub-hourly price/tick for B1, depth for B2/B4) + operator steer.
+  Do not manufacture low-prior in-sample experiments (Stage-4 false-positive risk).** Receipt
+  `2026-06-15-w6-crowding-admission.md`.
+- **W6 Track B (cost/execution alpha) — data accrued (bybit 5m, 3yr, 610 symbols) + B1/exhaustion
+  entry-timing NULL (2026-06-16).** Operator authorized a bulk sub-hourly download; bybit
+  `klines_5m` now full-coverage in `bybit_full_pit/klines_5m`. **B1 entry-PRICE timing** (chase-limit
+  sell-higher) is a clean NULL once measured correctly: the first screen's "t=-10 catastrophic" was a
+  FILL-CONVENTION BUG (caught by the convergence audit) — it benchmarked against close at signal+1h,
+  but the engine fills at signal+**2h**. Corrected on local 5m with the real +2h baseline
+  (`w6_entry_timing_corrected.py`): chase-limit is −7 to −11 bp/trade but INSIGNIFICANT (|t|<0.9) at
+  all offsets — no edge, the +2h fill already captures the pump. **Exhaustion-conditioned
+  entry** falsified the opposite way: intra-window continuation `cont_ret` IC **+0.094 p=0.002**
+  (HIGHER continuation → BETTER fade; high-cont win 72% vs 59% low-cont) — re-confirms Stage-7b
+  "bigger pumps fade better" (path-shape family, real-but-unharvestable), and shows the runaway
+  losers (−19% mae) are NOT identifiable from intra-window price action at the fill. **Conclusion:
+  the fixed +1h delayed fill is near-optimal execution; the entry-price-improvement and
+  exhaustion-selection angles are closed.** Funding-carry also NULL (funding_return ~1e-5/trade;
+  edge is pure price-fade). Scripts `w6_entry_timing_screen.py`, `w6_exhaustion_entry_screen.py`.
+- **W6 funding-data finding (system-wide, 2026-06-15).** The audit guard
+  `_assert_funding_one_per_settlement` false-positives on ~89 bybit symbols that genuinely
+  settle sub-8h (verified vs the authoritative endpoint), blocking all bybit engine backtests;
+  data + charge are correct, `funding_interval_min` is mislabeled 480. Corrected research-scoped
+  guard installed; proper fix operator-gated. Doc
+  `docs/audit/2026-06-15-funding-interval-mislabel-guard-falsepositive.md`.
 - **W4 replacement Stage 1 stop/exit realism (2026-06-13):** exact registered
   capped 25% disaster stop plus failed-fade/breakeven overlay rejected on the
   amended full-PIT common window (`2023-04-01 <= signal_ts < 2026-05-01`).

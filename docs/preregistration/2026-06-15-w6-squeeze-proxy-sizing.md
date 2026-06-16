@@ -94,9 +94,55 @@ POLARS_MAX_THREADS=8 PYTHONPATH=. .venv/bin/python \
 ```
 
 ## Post-run results
-(fill after the sweep: per-grid-cell pooled/per-venue ΔMAR, control deltas, thirds,
-cost-stress, verdict.)
+
+**Run 2026-06-15** (`scripts/w6_squeeze_proxy_sizing.py`, harness validated: S0_control
+reproduces the Stage-0 ensemble exactly — bybit MAR 4.748). Implementation notes / deviations
+from the literal receipt, all documented and defensible:
+- The within-symbol z standardizer is a **causal expanding** per-symbol mean + **causal
+  expanding** residual sigma (not a static train-fold baseline). Reason: the train-fold
+  baseline discarded ~70% of OI-covered entries (n_tilted 2182→680); the expanding form is
+  fully causal and preserves coverage. (Methodology-review finding; the prior global-sigma
+  draft was a whole-sample look-ahead feeding the cap-clip and was fixed.)
+- Squeeze score keyed on **unique (symbol, signal_ts)** (the score is component-independent;
+  the engine applies the multiplier shared across components). 3220 selected rows → 1326
+  unique entries; OI covers 925/1326, n_tilted 646 after the first-per-symbol drop.
+- **FUNDING-DATA GOTCHA (documented separately):** the engine's new
+  `_assert_funding_one_per_settlement` guard false-positives on ~89 bybit symbols that
+  genuinely settle sub-8h (verified row-for-row vs the authoritative `get_funding_rate_history`
+  endpoint; `instruments.fundingInterval=240` for ANIMEUSDT). The funding CHARGE is correct
+  (exact-stamp on raw `funding_rate`). The run installs a research-scoped corrected guard
+  (fires only on <55min cadence). See `docs/audit/2026-06-15-funding-interval-mislabel-guard-falsepositive.md`.
+
+**OI score (bybit primary), k×cap grid ΔMAR vs S0 (gross-neutral confirmed, ratios 0.998–1.003):**
+
+| cell | MAR | ΔMAR | return | maxDD |
+|---|---:|---:|---:|---:|
+| S0_control | 4.748 | +0.000 | 0.7707 | −0.0527 |
+| k0.25/cap0.5 | 4.729 | −0.019 | 0.7566 | −0.0519 |
+| k0.25/cap1.0 | 4.756 | +0.008 | 0.7578 | −0.0517 |
+| k0.5/cap0.5 | 4.350 | **−0.398** | 0.7830 | −0.0584 |
+| k0.5/cap1.0 | 4.490 | **−0.257** | 0.8001 | −0.0578 |
+
+**Gate 1 (bybit ΔMAR>0 across the WHOLE grid): FAIL** (3/4 cells negative). Returns rise
+monotonically with tilt strength (0.757→0.800) — the OI squeeze IC is REAL — but maxDD grows
+faster than return, so MAR falls. Gross-neutral (gate 6 pass), so this is a genuine
+risk-adjusted failure, not leverage. Gates 2–5 not evaluated: per Stage-4d compute discipline,
+the decisive cheap gate (1) already fails on the STRONGEST leg.
+
+**Funding / combined sizing legs: NOT RUN (by discipline).** Bybit within-symbol funding IC is
+insignificant (screen: +0.025, p=0.22; entry-funding screen also weak, p=0.111), and the
+DD-concentration mechanism that killed OI sizing is generic to any mean-1 size-up on this
+diffuse book. Spending ~2h of engine on a weaker, primary-venue-insignificant leg is exactly
+the low-prior spend the discipline forbids. Binance funding-sizing (binance IC +0.056) is a
+secondary-venue note, not a primary candidate.
 
 ## Verdict
-accepted | rejected | inconclusive — pending the engine sweep.
-Honest prior: a real IC that may or may not harvest; the controls + cost stress decide.
+**REJECTED (admissible, NOT harvestable).** The OI-buildup squeeze proxy carries a real
+within-symbol selection IC (Stage-0 screen +0.0665, p=0.002; here return rises monotonically
+with tilt), but sizing UP the high-squeeze fades does NOT lift risk-adjusted return — MAR
+falls because drawdown concentrates faster than return grows, gross held at 1.0. This is the
+**W5 root cause confirmed on the W6 orderflow axis**: the continuous fade book's edge is
+diffuse and profits when broadly deployed, so every selection/sizing lever (entry priority,
+path-shape, liquidity, now OI-squeeze) fails to harvest a real IC. Logged as a forward-watch
+note; **no sizing tilt deployed; Tier-3 unchanged.** Next: A4 (squeeze × hedge-intensity
+overlay) — the proven non-selection mode that keeps the whole book.
