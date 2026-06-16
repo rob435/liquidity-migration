@@ -33,7 +33,10 @@ Environment=MAX_HOLD_HOURS=24
 Environment=STRATEGY_PROFILE=continuous_ensemble_v1
 Environment=FEATURE_SET=max_ret168
 Environment=ENTRY_EVENT_TRIGGER=none
-Environment=BTC_TREND_GATE=uptrend
+# PLUMBING TEST (operator 2026-06-16): gate flipped uptrend->off (mirrors the demo
+# unit) so the paper shadow tracks the demo book during the test. REVERT to
+# "uptrend" with the demo unit once plumbing is confirmed.
+Environment=BTC_TREND_GATE=off
 Environment=DAILY_REBALANCE_ENABLED=1
 Environment=STOP_LOSS_PCT=0.25
 Environment=ENTRY_LEVERAGE=2

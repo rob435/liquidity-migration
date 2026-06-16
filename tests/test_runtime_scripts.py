@@ -148,7 +148,11 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
         assert "Environment=STRATEGY_PROFILE=continuous_ensemble_v1" in text
         assert "Environment=FEATURE_SET=max_ret168" in text
         assert "Environment=ENTRY_EVENT_TRIGGER=none" in text
-        assert "Environment=BTC_TREND_GATE=uptrend" in text
+        # PLUMBING TEST (operator 2026-06-16): demo + paper gate flipped to "off" so
+        # the flat (BTC-30d-down) book takes entries and exercises the fill/ledger/
+        # reconcile path. Both units stay matched. Revert this assertion to "uptrend"
+        # when the gate is restored after the plumbing test.
+        assert "Environment=BTC_TREND_GATE=off" in text
         assert "Environment=DAILY_REBALANCE_ENABLED=1" in text
     demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service").read_text(encoding="utf-8")
     paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service").read_text(encoding="utf-8")

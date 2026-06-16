@@ -32,7 +32,12 @@ Environment=FEATURE_SET=max_ret168
 Environment=ENTRY_EVENT_TRIGGER=none
 # Sniper ARMED by operator instruction 2026-06-10 (PostOnly +8% quarter-size adds).
 Environment=CONTINUOUS_SNIPER=1
-Environment=BTC_TREND_GATE=uptrend
+# PLUMBING TEST (operator 2026-06-16): gate flipped uptrend->off so the book takes
+# entries while BTC's 30d trend is negative, to exercise the demo/paper fill ->
+# hedge -> ledger -> reconcile path end to end. Demo/paper is execution-evidence
+# ONLY; this window is NOT promoted-object forward evidence. REVERT to "uptrend"
+# once plumbing is confirmed. (Demo + paper flipped together so reconcile matches.)
+Environment=BTC_TREND_GATE=off
 Environment=DAILY_REBALANCE_ENABLED=1
 # Wide server-side disaster stop (Bybit-managed; fires even if the daemon is down). The state exit
 # ("left the decile") is a PROFIT exit a squeezing short never triggers, so this is the only hard
