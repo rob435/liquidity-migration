@@ -128,7 +128,26 @@ Details are in git history; the current behavior below is what matters.
 
 ## Current Research Direction
 
-**W6 — bybit-first program (active, 2026-06-15).** The successor wave to W5. W5
+**W7 — Clean-Base Program (ACTIVE, the next-month direction, opened 2026-06-16 by
+operator).** Plan: `docs/research_plans/w7_clean_base_program/PLAN.md`. A deliberate
+reset + re-attack succeeding W5/W6. We stripped the deployed book to a clean
+single-rule baseline (`scripts/clean_base_2026-06-16.py`,
+`~/SHARED_DATA/clean_base_2026-06-16/`) — removing the over-fit dressing (4-strat
+ensemble + weights, catalyst-threshold zoo, per-component age/TP, the BTC-30d
+up/down entry gate, the daily vol-target/drawdown stack, inverse-vol sizing, and
+the hedge as an in-book component) and keeping only the core fade thesis, the
+W5-validated load-bearing risk controls (crowding cap, liquidity floor, single age
+floor, 24h hold), and the methodology gates. Organizing thesis (from W5/W6
+convergence): **the edge is diffuse and the loss tail is correlated-concurrent**, so
+every IC (BTC-vol/trend regime, OI-squeeze, path-shape, liquidity, dispersion) must
+be re-converted on the **risk/tail/hedge axis**, not entry-selection or sizing — the
+crude 30d gate is the exemplar of the wrong conversion. Tracks A–G re-open the
+promising-but-closed leads with materially different mechanisms + fresh
+pre-registration (NOT re-mining); strict Tier-3 gate UNCHANGED; forward demo (both
+books now live) is the tiebreaker. W5/W6 below are retained as the evidence base
+W7 builds on.
+
+**W6 — bybit-first program (W7 predecessor, 2026-06-15).** The successor wave to W5. W5
 exhausted the price/return lever space; W6 opens the orderflow/squeeze axis,
 execution/cost alpha, and hedge deepening — bybit-primary (robust on bybit, not
 completely losing on binance). Plan: `docs/research_plans/w6_bybit_program/PLAN.md`
