@@ -492,6 +492,30 @@ without genuinely new data, a new lifecycle, or a fresh forward-only bar.
   the forward-watch queue below.
 - Old daily SHORT evidence is historical only. It may teach methodology lessons;
   it cannot justify a current sleeve.
+- **Dynamic cross-sleeve TILT (LONG↔CONTINUOUS) NULL — both venues 2026-06-16**
+  (receipt `docs/preregistration/2026-06-16-dynamic-tilt-allocator.md`; artifacts
+  `~/SHARED_DATA/dynamic_tilt_2026-06-16/`). Tested the one way a sleeve blend could
+  be alpha — *dynamically timing* the capital tilt to whichever sleeve's regime is
+  about to win — pre-registered, both-venue, cost-stressed, with block-shuffle +
+  mean-fix + lagged-signal + walk-forward controls. The two sleeves are **nearly
+  uncorrelated** (ρ 0.034 bybit / 0.066 binance), so the hindsight best FIXED weight
+  already harvests the diversification (47% long → MAR 4.645 bybit; 18% long → 4.944
+  binance) and is a very hard bar. **Every dynamic candidate FAILS the bar on both
+  venues** — regime-timing (BTC trend/vol primary `dMAR −0.74 / −1.21`, inside the
+  shuffle null at p76/p69), inverse-vol (−0.23 / −1.18), and relative momentum
+  (−0.90 / −2.17). The lone positive cell, rel_mom @63d on bybit (+0.57, p94), is
+  **venue-specific noise**: −3.00 at the 3rd percentile of the shuffle null on
+  binance, and a lone-spike lookback neighborhood (42d −2.48, 90d −0.40) — the
+  Stage-4/Stage-10 venue-split trap. **No genuine predictive timing skill exists; the
+  apparent yearly rotation is ~one macro episode (2024 long-year, venue-identical) and
+  is not timeable without overfitting** — exactly the trap the methodology gate
+  forbids. Consistent with W5's regime-conditioning NULLs. **Constructive residual
+  (not a dynamic alpha):** because the sleeves are uncorrelated, a *fixed* ~30%-long /
+  70%-continuous blend modestly beats continuous-only on both venues (MAR 4.45 vs
+  4.02 bybit; 4.72 vs 4.36 binance, sign-stable across thirds) — i.e. the open
+  LONG-capital decision (#4) is the lever, NOT a regime allocator. Risk-parity is not
+  robust (bybit +0.39, binance −0.60). Do not re-mine dynamic sleeve-allocation on
+  this window without genuinely new data or a new lifecycle.
 
 ## Revisit Queue
 

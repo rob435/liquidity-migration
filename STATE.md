@@ -132,6 +132,17 @@ watch, never real money). Directive: **keep iterating, do not stop** — take as
 long as needed, never give up. This reopens the Stage 8 regime-hedge (+0.078 both
 venues, ~+0.05 form-stable) as a live candidate to firm into a robust form.
 
+**Dynamic cross-sleeve TILT (LONG↔CONTINUOUS) — NULL, both venues 2026-06-16.**
+Pre-registered test of dynamically timing the capital split between the two sleeves
+(receipt `docs/preregistration/2026-06-16-dynamic-tilt-allocator.md`). The sleeves are
+nearly uncorrelated (ρ≈0.03/0.07) so the best FIXED weight already harvests the
+diversification; **regime-timing, relative-momentum, and inverse-vol all fail to beat
+it on both venues and show no skill above a block-shuffle null** — the apparent yearly
+rotation (2024 long-year) is ~one episode, not timeable (the lone win, rel_mom@63d
+bybit, is venue noise: p3 on binance). Closed as REJECTED; do not re-mine on this
+window. Only robust residual = a *fixed* ~30% long tilt diversifies (open LONG-capital
+decision #4), not a dynamic allocator. Tooling: `scripts/dynamic_tilt_allocator.py`.
+
 Active programs:
 
 - **Wave 4 owner-erased 2026-06-13.** By explicit owner override, the local
