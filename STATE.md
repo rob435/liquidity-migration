@@ -106,9 +106,76 @@ completely losing on binance). Plan: `docs/research_plans/w6_bybit_program/PLAN.
 screen (`scripts/w6_squeeze_proxy_screen.py`) found a real within-symbol IC over the
 composite — `oi_chg_24h` bybit **+0.0665, p=0.002** (all thirds +, symbol-hash control
 degenerate); `funding_level` binance +0.056 / bybit +0.025 same sign. Admissibility,
-NOT a harvest. **P0 next = the pre-registered squeeze-proxy sizing sweep**
-(`docs/preregistration/2026-06-15-w6-squeeze-proxy-sizing.md`) + the squeeze ×
-hedge-intensity overlay (A4). Full ranked roadmap + guardrails in the plan.
+NOT a harvest. **A1 (squeeze SIZING) and A4 (squeeze × hedge-intensity) both ran 2026-06-15
+→ NULL** (receipts `2026-06-15-w6-squeeze-proxy-sizing.md`, `2026-06-15-w6-squeeze-hedge-intensity.md`):
+- **A1 NULL** — sizing UP high-OI-squeeze fades lifts return (0.77→0.80 monotone in tilt)
+  but worsens drawdown more → MAR falls (k0.5 −0.40/−0.26), gross-neutral confirmed. The
+  W5 diffuse-edge root cause, now confirmed on the orderflow axis. Size-up lever closed.
+- **A4 NULL** — composing an aggregate book-squeeze hedge-intensity on top of the live
+  BTC-vol regime adds nothing: the λ=0.5 +0.057 is WITHIN the 8-seed shuffle-control noise
+  (−0.34…+0.10; 2/8 beat it), not λ-robust (λ0.25 −0.087), and cost-fragile (1.5× → −0.07).
+  Extends Stage 8d/8e/8g: BTC-vol is the unique hedge regime, now vs the orderflow axis.
+  binance squeeze is data-gated (OI ~6wk, E4).
+- **DATA FINDING (system-wide):** the audit's new `_assert_funding_one_per_settlement`
+  guard FALSE-POSITIVES on ~89 bybit symbols that genuinely settle sub-8h (verified vs the
+  authoritative `get_funding_rate_history` endpoint across 8 symbols; `instruments.fundingInterval=240`),
+  blocking ALL bybit engine backtests. Data + funding charge are correct; only
+  `funding_interval_min` is mislabeled 480. Research scripts install a corrected guard
+  (fires only <55min). Proper fix is OPERATOR-gated — see
+  `docs/audit/2026-06-15-funding-interval-mislabel-guard-falsepositive.md`.
+- **A5 (per-day gross scaler by squeeze-breadth) SKIPPED by diagnostic 2026-06-15.** Cheap
+  screen (Stage-2/4d discipline): squeeze-breadth → daily book return is real-but-weak
+  (breadth Spearman +0.094 p=0.038; mean-squeeze +0.057 NS; best-return days 0.53 vs worst
+  0.37 active high-squeeze fades). Same order/pattern as A1's return-edge, which A1 proved
+  does NOT survive DD amplification — a gross-up faces the identical mechanism on a weaker
+  signal. Skipped (low prior); forward-watch note, not an engine spend.
+- **DATA-GATING reality (local box):** B1 (intrabar entry-PRICE timing — the highest-prior
+  cost-alpha item) is data-gated: `tick_ohlc_1m` and all sub-hourly klines (5m/1m/15m) have
+  **0 partitions locally**; only `taker_flow_5m` exists (flow, not price). Binance OI is
+  ~6wk (A1/A4 binance squeeze leg vacuous). Depth is forward-only/immature.
+- **Crowding-ADMISSION: screen POSITIVE but engine sweep NULL (2026-06-15).** The screen found
+  the crowding gate rejects PROFITABLE fades (1166 bybit, +37bp/fade net, fade model
+  ledger-validated corr 0.996) → admitting them looked diffuse-edge-friendly. But the engine
+  sweep (`entry_crowding_max_fresh` 2→4→999) LOWERS MAR (ΔMAR −0.14/−0.075): admission raises
+  return (0.77→0.80) and trades (+8%) but maxDD grows faster, and at MATCHED gross it is far
+  worse than uniformly leveraging the existing book (LEV control +0.168 vs admission −0.075).
+  The admitted fades are tail-correlated (pile onto concurrent-squeeze days); **the crowding cap
+  is near-optimal.** Receipt `2026-06-15-w6-crowding-admission.md`. (LEV +0.168 = a
+  hedge-ratio/leverage artifact — book larger vs fixed hedge — NOT a lead; it trades away
+  squeeze tail-protection/Tier-3.)
+**W6 TRACK-A CONVERGENCE (2026-06-15):** the orderflow OI-squeeze signal is a real IC (screen
++0.0665) that harvests in NO mode — sizing (A1), hedge-regime (A4), gross-scaler (A5),
+crowding-admission — all NULL. SHARPENED ROOT CAUSE: the book's edge is diffuse but its TAIL is
+correlated-concurrent, so EVERY lever that adds/sizes book exposure concentrates the tail → MAR
+falls; only the BTC-vol HEDGE (tail protection without added exposure) harvests. This mirrors
+W5's convergence. The cost-alpha axis (Track B) is DATA-GATED locally (no sub-hourly price;
+binance OI ~6wk; depth forward-only). **Per the W5 lesson (consolidate, don't manufacture
+low-prior in-sample experiments — Stage-4 false-positive risk): in-sample W6 search on local
+data is complete. The credible paths are (a) forward-watch the live BTC-vol regime-hedge, (b)
+DATA ACCRUAL to unlock the genuinely-untested axes — binance OI forward tape (E4) for both-venue
+orderflow, sub-hourly price/tick for B1 entry-timing cost alpha, depth maturation for B2/B4
+maker/capacity — and (c) the operator-gated funding-guard fix + a new research direction.**
+Standing deliverable remains the live BTC-vol regime-hedge; nothing new promotes.
+- **W6 Track B + audit-verified convergence (2026-06-16).** Operator authorized data accrual +
+  "keep digging". DONE: bulk bybit `klines_5m` (610-symbol universe, 2023-04→2026-05, full coverage)
+  is now local (intrabar research enabled for the future). Track B (cost/execution) explored on it:
+  **B1 entry-PRICE timing NULL** (chase-limit insignificant once the +2h fill-convention bug was
+  fixed — the first "t=-10" was a baseline artifact caught by the convergence audit; corrected
+  `w6_entry_timing_corrected.py`). **Exhaustion-conditioned entry NULL** (`cont_ret` IC +0.094 — bigger
+  intra-window pumps fade BETTER, path-shape family, unharvestable; runaway losers not identifiable at
+  the fill). **Funding-carry NULL** (de-notionalized ~−36bp/trade; no carry; pure price-fade).
+  **Maker/passive EXIT** = a forward-execution cost item (≤8bp/trade ceiling = exit-leg taker+spread;
+  realizable only with real maker fills) → folds into the R4/depth forward debt, NOT a backtestable
+  in-sample edge. An **adversarial-audit Workflow** (9 agents) independently CONFIRMED A1/A4/admission
+  are clean NULLs (gross-neutrality, causal sigma, multi-seed controls all correct; correlated-tail
+  mechanism verified), caught the B1 bug (now fixed), and surfaced no harvestable in-sample lead.
+  **W6 in-sample search on LOCAL data is COMPLETE (audit-verified).** Genuine paths forward (all need
+  operator/data, not more local in-sample mining): (1) forward-execution calibration — maker-exit +
+  R4 realized-fill/depth (validate with real demo fills); (2) operator/host-gated data — binance OI
+  forward tape (E4, both-venue orderflow), depth maturation (B2/B4), a permitted-region host for
+  binance intrabar; (3) forward-watch the live BTC-vol regime-hedge; (4) a new research direction.
+  All W6 scripts/docs are research-only (no `liquidity_migration/**` change), ruff-clean, uncommitted
+  (operator-gated).
 
 The full window is open for pre-registered research again, but the methodology
 bar did not change: both venues, full PIT, causal features, cost/funding, and

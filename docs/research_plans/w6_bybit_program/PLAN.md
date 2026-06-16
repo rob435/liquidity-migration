@@ -14,6 +14,36 @@ both-venue check where its data allows, and a second-sleeve option where it is t
 robust venue (dispersion). Everything is research-stage forward-watch; the **Tier-3
 real-money gate is UNCHANGED** and unmet — no item here changes that.
 
+## W6 STATUS — Track A converged, Track B data-gated (2026-06-15)
+
+The squeeze-proxy spine (Track A) was executed and is CLOSED for harvestable modes; all NULL:
+- **A1 squeeze SIZING** — NULL (return rises with tilt, DD rises faster → MAR falls; gross-neutral).
+- **A4 squeeze × hedge-intensity** — NULL (λ0.5 +0.057 within 8-seed shuffle noise; not λ-robust;
+  cost-fragile; BTC-vol stays the unique hedge regime).
+- **A5 gross-scaler** — SKIPPED by cheap diagnostic (squeeze-breadth→return weak +0.094, faces A1's DD).
+- **Crowding-ADMISSION** — screen POSITIVE (rejected fades profitable +37bp/fade, ledger-validated)
+  but the engine sweep is NULL (admitting them LOWERS MAR −0.075/−0.14; at matched gross worse than
+  uniform leverage → the admitted fades are tail-correlated; the crowding cap is near-optimal).
+
+**SHARPENED ROOT CAUSE (W5+W6):** the book's edge is diffuse but its TAIL is correlated-concurrent,
+so EVERY lever that adds/sizes book exposure concentrates the tail → MAR falls; only the BTC-vol
+HEDGE (tail protection without added exposure) harvests. The orderflow OI-squeeze signal is a real
+IC (+0.0665) that harvests in NO mode.
+
+**Track B (cost/execution alpha) is DATA-GATED locally:** `tick_ohlc_1m` + all sub-hourly klines = 0
+partitions (B1 entry-price timing blocked); binance OI ~6wk (both-venue orderflow + A1/A4 binance leg
+vacuous); depth forward-only (B2/B4). The creative long-side fade-of-dumps angle is operator-FORBIDDEN
+(bounce products killed; "do not revive").
+
+**In-sample W6 search on local data is COMPLETE.** Per the W5 lesson (consolidate; don't manufacture
+low-prior in-sample experiments — Stage-4 false-positive risk), the credible next steps are: (1) DATA
+ACCRUAL — binance OI forward tape (E4), sub-hourly price/tick (B1), depth maturation (B2/B4); (2) the
+operator-gated funding-guard fix (`docs/audit/2026-06-15-funding-interval-mislabel-guard-falsepositive.md`);
+(3) forward-watch the live BTC-vol regime-hedge; (4) a new research direction. Receipts:
+`2026-06-15-w6-squeeze-proxy-sizing.md`, `…-squeeze-hedge-intensity.md`, `…-crowding-admission.md`.
+Scripts: `scripts/w6_squeeze_proxy_sizing.py`, `…_squeeze_hedge_intensity.py`,
+`…_crowding_admission_screen.py`, `…_crowding_admission_sweep.py` (all uncommitted, operator-gated).
+
 ## The one lesson that shapes every track
 
 W5 (~18 mechanisms) converged to a single root cause: **the continuous fade book's
