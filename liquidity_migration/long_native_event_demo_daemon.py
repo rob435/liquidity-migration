@@ -732,17 +732,39 @@ class LongNativeDemoDaemon:
         threshold = self._ws_stale_warning_seconds
         if threshold <= 0.0:
             return
+        # Socket-level liveness (TRUE connection via pybit is_connected(), independent of
+        # data flow): the private stream only pushes on position/order changes, so a quiet
+        # account is SILENT BUT HEALTHY. Computed once and used to gate BOTH the
+        # data-silence warning and the force-reconnect below. None = unprobeable (older
+        # pybit) -> stay conservative.
+        priv_connected = (
+            self._ws_stream.is_connected()
+            if (self._ws_stream is not None and hasattr(self._ws_stream, "is_connected"))
+            else None
+        )
         if self._private_state_cache.is_seeded():
             # WS-only clock so the REST-reconcile re-seed can't mask a dead stream
             # (audit 2026-06-02 #2); inf = no WS push yet = no-signal, not silence.
             priv_silence = self._private_state_cache.seconds_since_last_ws_event()
             if priv_silence != float("inf") and priv_silence > threshold:
                 self._ws_private_stale_ticks += 1
-                if not self._ws_private_stale_warned:
+                # Only ALARM when the socket is not confirmed alive. is_connected() True =>
+                # the silence is just a quiet account (no position/order pushes, e.g. an
+                # idle / toggled-off LONG sleeve), NOT a dead WS — warning there is a false
+                # "investigate" page. False/None (down or unprobeable) keeps the heads-up;
+                # the is_connected()-driven force-reconnect below handles a real dead socket.
+                if priv_connected is True:
+                    if self._ws_private_stale_warned:
+                        _logger.info(
+                            "long private WS quiet but socket healthy (silence=%.1fs)",
+                            priv_silence,
+                        )
+                        self._ws_private_stale_warned = False
+                elif not self._ws_private_stale_warned:
                     _logger.warning(
-                        "long private WS silent for %.0fs (threshold %.0fs); "
-                        "REST reconcile keeps state fresh but pybit auto-reconnect "
-                        "may have failed — investigate",
+                        "long private WS silent for %.0fs (threshold %.0fs) and socket not "
+                        "confirmed alive; REST reconcile keeps state fresh but pybit "
+                        "auto-reconnect may have failed — investigate",
                         priv_silence, threshold,
                     )
                     self._ws_private_stale_warned = True
@@ -754,11 +776,7 @@ class LongNativeDemoDaemon:
         # genuinely DOWN socket past the bound (pybit auto-reconnect first) + a cooldown
         # (auth-limit safety). REST reconcile covers the gap; never blocks a cycle.
         if self._ws_stream is not None and not self._shutdown.is_set():
-            connected = (
-                self._ws_stream.is_connected()
-                if hasattr(self._ws_stream, "is_connected")
-                else None
-            )
+            connected = priv_connected
             if connected is False:
                 mono = time.monotonic()
                 if self._ws_private_disconnected_since is None:

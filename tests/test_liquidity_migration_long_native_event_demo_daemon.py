@@ -137,3 +137,49 @@ def test_long_daemon_force_reconnects_private_stream_when_socket_down(tmp_path: 
     assert daemon._ws_private_reconnects == 1
     assert opened, "fresh long private stream opened after force-reconnect"
     assert isinstance(daemon._ws_stream, _LivePrivate)
+
+
+def test_long_daemon_private_ws_silence_no_false_alarm_when_socket_healthy(tmp_path: Path) -> None:
+    """A quiet-but-healthy private WS (is_connected() True) must NOT raise the
+    'investigate' warning: the private stream only pushes on position/order changes,
+    so an idle / toggled-off sleeve is silent yet fine. Only silence with a non-alive
+    socket warns. Regression for the false-positive page on the idle LONG sleeve."""
+
+    class _Cache:
+        def is_seeded(self) -> bool:
+            return True
+
+        def seconds_since_last_ws_event(self) -> float:
+            return 999.0
+
+    class _Stream:
+        def __init__(self, connected) -> None:  # noqa: ANN001
+            self._connected = connected
+
+        def is_connected(self):  # noqa: ANN201
+            return self._connected
+
+        def close(self) -> None:
+            pass
+
+    def _daemon(connected):  # noqa: ANN001, ANN202
+        d = LongNativeDemoDaemon(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=LongNativeDemoCycleConfig(submit_orders=False, ws_klines_enabled=False),
+            interval_seconds=0.0,
+            ws_stream_factory=lambda _config: _Stream(True),
+            cycle_runner=_stub_long_cycle_runner([]),
+        )
+        d._ws_stale_warning_seconds = 10.0
+        d._private_state_cache = _Cache()  # type: ignore[assignment]
+        d._ws_stream = _Stream(connected)  # type: ignore[assignment]
+        return d
+
+    healthy = _daemon(True)
+    healthy._check_ws_health()
+    assert healthy._ws_private_stale_warned is False, "quiet but healthy socket must not warn"
+
+    down = _daemon(False)
+    down._check_ws_health()
+    assert down._ws_private_stale_warned is True, "silence + non-alive socket must still warn"
