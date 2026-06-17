@@ -7,10 +7,9 @@ and running in the demo and forward")
 orchestrator run on the archived state dir + the first live hedge cycle that
 stamps a non-1.0 `hedge_intensity`).
 
-Finding: the W5 Stage 8c deliverable
-(`docs/research_plans/w5_continuous_signal_alpha/PROGRAM_REPORT.md`) — the ONLY
-robust, both-venue, trade-keeping improvement the W5 program found — is promoted
-from research to live demo + forward-watch.
+Finding: the consolidated historical research record (`docs/research_summary.md`)
+identified BTC-vol hedge modulation as the only robust, both-venue, trade-keeping
+continuous-book improvement worth live demo + forward-watch.
 
 ## What's changing
 The frozen continuous hedge gains a **causal, mean-1 BTC-volatility regime
@@ -32,8 +31,7 @@ returns strictly before day `d`, so the day-`d` hedge sized as
   `btcvol_intensity_series(days, btc_rets, …)` (backtest/forward) and
   `latest_btcvol_intensity(btc_returns, …)` (live), plus `FROZEN_BTCVOL_REGIME`
   (`{kind: btcvol, lam: 0.5, vol_window: 30, pct_window: 250}`, `VOL_MIN_OBS=10`,
-  `PCT_WARMUP=50`). Ported verbatim from the validated
-  `scripts/w5_continuous_stage8_regime_hedge.py`.
+  `PCT_WARMUP=50`).
 - `liquidity_migration/continuous_forward_replay.py`
   - `FROZEN_FORWARD_CONFIG['hedge']` gains `"regime": FROZEN_BTCVOL_REGIME` — a
     new HASHED key (the single behavioural knob). `frozen_hedge_regime()` exposes
@@ -59,10 +57,10 @@ deployed-equity report) read the regime from `frozen_hedge_regime()` /
 (errors-we-never-repeat #16).
 
 ## Hypothesis
-W5 found the fade book's edge is diffuse and profits when broadly deployed; every
+Historical screening found the fade book's edge is diffuse and profits when broadly deployed; every
 selection/sizing/exit lever failed to robustly harvest. The only robust both-venue
 improvement is an overlay that keeps the whole book and hedges the squeeze tail —
-the BTC-vol regime-hedge. Characterized honestly (Stage 8f) it is a **modest,
+the BTC-vol regime-hedge. Characterized honestly, it is a **modest,
 sub-period-variable tail-insurance overlay**, not a smooth alpha: pooled ΔMAR
 +0.05–0.08 at 1× hedge cost, both venues positive, λ-robust {0.25,0.5,0.75}, beats
 the random-regime (hash) control by +0.6–0.8, keeps all trades, gross-neutral. Lone

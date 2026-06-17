@@ -627,7 +627,7 @@ def apply_rebalance_rule(
         hedge_cost_return = 0.0
         r1 = 0.0
         r2 = 0.0
-        # W5 Stage 8 regime-hedge hook (default None -> byte-identical): a causal,
+        # Regime-hedge hook (default None -> byte-identical): a causal,
         # per-day hedge-intensity multiplier on the hedge leg(s) only — the book
         # gross/funding/cost scale is untouched, so entries/breadth are unchanged and
         # only the hedge notional (and its cost) is reallocated across regimes.
@@ -645,7 +645,7 @@ def apply_rebalance_rule(
             # data-gap day. Only the realized PnL/funding CONTRIBUTION is gated on
             # the day's value being present. On fully-populated series (all days
             # known) this is numerically identical to the prior per-leg gating, so
-            # the parity tests are unchanged. ``hedge_scale`` carries the W5 Stage 8
+            # the parity tests are unchanged. ``hedge_scale`` carries the regime
             # intensity multiplier and reduces to ``scale`` when intensity is None.
             r1, r2 = _capped_hedge_legs(b1, b2, hedge_scale, float(hedge_rule.hedge_cap), True, True)
             hedge_ratio = r1 + r2

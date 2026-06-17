@@ -74,7 +74,7 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
         # drift alarm). build_full_ledger wires the second (ETH) leg from the
         # orchestrator's hedge_returns_2 / hedge_funding_2 inputs.
         #
-        # 'regime' (W5 Stage 8c deliverable, operator-approved 2026-06-15; receipt
+        # 'regime' (operator-approved 2026-06-15; receipt
         # docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md): the BTC-vol
         # regime-hedge overlay. A causal, mean-1 daily intensity (continuous_regime.
         # btcvol_intensity_series) multiplies BOTH 2f hedge legs — hedge more in
@@ -223,7 +223,7 @@ def build_full_ledger(
     config hash and the stamped ``hedge_mode`` reflect the 2f object. Mixing a 2f
     ledger into a ``btc_only`` state dir is caught by the config-hash pin.
 
-    ``hedge_intensity`` (W5 Stage 8, default None -> byte-identical) is a causal
+    ``hedge_intensity`` (default None -> byte-identical) is a causal
     per-day multiplier on the hedge leg only; the frozen control passes None.
     """
     combined = combine_continuous_components(pieces, FROZEN_FORWARD_CONFIG["weights"])

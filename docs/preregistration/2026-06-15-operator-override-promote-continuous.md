@@ -12,7 +12,7 @@ decision, not new alpha.
 
 The CONTINUOUS-fade book — the deployed `continuous_ensemble_v1` (winner_base
 4-component ensemble + BTC+ETH 2f hedge) **including the BTC-vol regime-hedge
-overlay** (W5 Stage 8c, λ=0.5; `continuous_regime.FROZEN_BTCVOL_REGIME`) — is added
+overlay** (λ=0.5; `continuous_regime.FROZEN_BTCVOL_REGIME`) — is added
 back to `promoted.PROFILES` as `"continuous"`, alongside `"long"`.
 
 Source of truth for the promoted object is unchanged:
@@ -27,12 +27,13 @@ time of promotion:
 
 - **Demo/paper ONLY. `REAL_MONEY` stays false. NOT validated for real money.**
 - **Tier-2 demo-candidate bar NOT met** — the regime-hedge is pooled MAR delta
-  **+0.078 < the +0.1 Tier-2 threshold** (W5 Stage 8/8c).
+  **+0.078 < the +0.1 Tier-2 threshold** in the historical validation record.
 - **Tier-3 real-money gate UNMET and UNCHANGED** — needs ≥30 days forward demo,
   both-venue forward MAR>0, drawdown <50%, daily reconciliation, bootstrap pooled
   MAR-delta left tail ≥0, residual Sharpe ≥+0.3, stress + capacity. The overlay
   went live on demo/forward only on 2026-06-15 (forward evidence ≈ 0 days).
-- The regime-hedge is the W5 program's one robust both-venue edge, but it is a
+- The regime-hedge is the one robust both-venue edge retained from the historical
+  continuous program, but it is a
   **modest, sub-period-variable tail-insurance overlay** (~+0.05–0.08 pooled MAR,
   return-additive, beats the random-regime control) — framed as **squeeze
   protection**, not a smooth uniform +MAR edge. Binance has thin 1.5×-cost headroom.
@@ -80,6 +81,6 @@ Window clipped to data ends on this dev box.
 **Methodology debt opened by this promotion:** the continuous book cannot currently
 be produced as a *fully-costed* backtest on this dev box (bybit funding contaminated,
 binance funding missing). The promotion is therefore a deployment-registry decision
-resting on prior in-sample W5 evidence + the live forward clock, not on a fresh
+resting on prior in-sample regime evidence + the live forward clock, not on a fresh
 fully-costed both-venue backtest. Rebuild funding on both roots before citing any new
 continuous backtest as costed evidence.

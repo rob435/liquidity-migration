@@ -1,10 +1,10 @@
 """Causal BTC-volatility regime intensity for the continuous-book hedge.
 
-The W5 program (`docs/research_plans/w5_continuous_signal_alpha/PROGRAM_REPORT.md`)
-found exactly one robust, both-venue, trade-keeping improvement to the continuous
-fade book: modulate the hedge leg by a causal BTC-volatility regime — hedge MORE
-in turbulence, LESS in calm — via a mean-1 daily ``intensity`` multiplier. This
-module is the single source of truth for that signal; both the live demo hedge
+Historical research, now consolidated in `docs/research_summary.md`, found one
+robust, both-venue, trade-keeping improvement to the continuous fade book: modulate
+the hedge leg by a causal BTC-volatility regime — hedge MORE in turbulence, LESS in
+calm — via a mean-1 daily ``intensity`` multiplier. This module is the single source
+of truth for that signal; both the live demo hedge
 manager (`continuous_hedge_manager`) and the no-order forward signal clock
 (`continuous_forward_replay` / the orchestrator) compute the intensity here so the
 demo and the forward ledger track the identical hedge object.
@@ -17,9 +17,8 @@ deque of PRIOR days' vols (today's vol is appended only after it is scored). So 
 day-``d`` hedge sized as ``beta(through d-1) * scale * intensity[d]`` never reads
 day-``d`` data.
 
-Ported verbatim (numbers/order preserved) from
-`scripts/w5_continuous_stage8_regime_hedge.py` (`_btc_vol_series` /
-`_btcvol_intensity`), where the deliverable was validated.
+The deployed numbers/order are intentionally frozen; change them only through a new
+receipt and a fresh forward clock.
 """
 
 from __future__ import annotations
@@ -38,9 +37,9 @@ PCT_WARMUP = 50
 # The frozen, deployed regime. Embedded into FROZEN_FORWARD_CONFIG['hedge'] so it
 # is part of frozen_config_hash() (changing it voids the forward ledger by design),
 # and read by the live hedge manager so demo + forward use identical parameters.
-# lam=0.5 is the W5 Stage 8c deliverable (robust across {0.25,0.5,0.75}); the
-# intensity is symmetric about 1.0 (mean-1: a reallocation of hedge weight across
-# regimes, not a larger average hedge), bounded to [1-lam, 1+lam].
+# lam=0.5 is the validated deployed setting (robust across {0.25,0.5,0.75});
+# the intensity is symmetric about 1.0 (mean-1: a reallocation of hedge weight
+# across regimes, not a larger average hedge), bounded to [1-lam, 1+lam].
 FROZEN_BTCVOL_REGIME: dict[str, Any] = {
     "kind": "btcvol",
     "lam": 0.5,

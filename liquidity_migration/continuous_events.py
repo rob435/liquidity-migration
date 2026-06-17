@@ -119,7 +119,7 @@ class ContinuousEventConfig:
     breakeven_arm_pct: float = 0.0        # 0=off; once MFE>=this, exit if it returns to entry
     mfe_giveback_trigger_pct: float = 0.0
     mfe_giveback_retain_pct: float = 0.0
-    hash_exit_prob: float = 0.0           # W5 Stage 3 negative control: per-bar hash exit prob; 0=off
+    hash_exit_prob: float = 0.0           # Negative-control per-bar hash exit prob; 0=off
     # Portfolio circuit breaker (correlated-squeeze defense): PAUSE new entries when >= N net-negative
     # exits (the live sleeve's "adverse cover" footprint of a market-wide alt melt-up) have completed
     # within the trailing entry_pause_window_hours. Causal: counts only exits that closed strictly
@@ -494,13 +494,12 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
 
 
 def _symbol_priority_hash(symbol: str) -> int:
-    """Deterministic, market-content-free symbol hash (matches the W5 candidate-tape
-    ``symbol_hash_bucket`` ordering) — the negative-control entry priority."""
+    """Deterministic, market-content-free symbol hash for negative-control entry priority."""
     return int(hashlib.sha256(symbol.encode("utf-8")).hexdigest()[:8], 16) % 1000
 
 
 def _apply_entry_order(entries: pl.DataFrame, entry_order: str) -> pl.DataFrame:
-    """W5 Stage-1 hook: re-order candidates WITHIN each ``signal_ts`` by an entry-priority score,
+    """Re-order candidates WITHIN each ``signal_ts`` by an entry-priority score,
     leaving every gate / capacity / cooldown / sizing untouched. Reordering is causal (only same-ts
     candidates ever swap; a later ts can never jump ahead of an earlier one). ``fcfs`` (default)
     reproduces the frozen control's ``(ts_ms, symbol)`` order exactly.
@@ -775,7 +774,7 @@ def _run_trades(
     (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
     daily engine's `_simulate_indexed_trade` (identical fills/funding/exit semantics).
 
-    `candidate_sink` (default None) is the W5 Stage-0 audit hook: when a list is supplied, every
+    `candidate_sink` (default None) is the candidate-tape audit hook: when a list is supplied, every
     candidate fed into this loop appends one decision row (selected OR the exact rejection reason,
     in engine order) so the FULL eligible candidate set — not just executed trades — is recoverable
     from the same code that makes the live decision. When it is None the loop is byte-identical to
@@ -945,7 +944,7 @@ def _run_trades(
             base_nw=base_nw, inverse_vol=inverse_vol, clamp=clamp,
             regime_size_mult=regime_size_mult, stop_pct=stop_pct,
         )
-        # W5 Stage 5 sizing hook (default None -> byte-identical): a per-entry, causal,
+        # Per-entry sizing hook (default None -> byte-identical): a causal,
         # gross-neutral notional multiplier keyed by (symbol, signal_ts). Applied AFTER all
         # selection gates, so entries/breadth/exits are unchanged; resize/impact cost is
         # recomputed at the new size by _round_trip_bps below. trade_stop is independent of nw,
@@ -1210,10 +1209,10 @@ def run_continuous_event_research(
     """Run the execution-grade continuous-fade backtest and (optionally) write artifacts.
 
     When `candidate_tape_path` is set, the full eligible candidate set (selected + rejected,
-    with the exact engine reason) is written to that parquet for W5 Stage-0 reconstruction. The
+    with the exact engine reason) is written to that parquet for candidate-tape reconstruction. The
     extra emission is purely additive: with `candidate_tape_path=None` the run is unchanged.
 
-    `entry_order` (W5 Stage 1) re-orders candidates WITHIN each signal timestamp by an
+    `entry_order` re-orders candidates WITHIN each signal timestamp by an
     entry-priority score before the unchanged selection loop; `"fcfs"` (default) reproduces the
     frozen control exactly. See `_apply_entry_order`.
     """

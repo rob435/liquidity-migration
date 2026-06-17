@@ -1,4 +1,4 @@
-"""BTC-vol regime-hedge overlay (W5 Stage 8c).
+"""BTC-vol regime-hedge overlay.
 
 Covers the shared intensity signal (continuous_regime) and its parity across the
 three consumers that must apply the IDENTICAL hedge object: the forward ledger,

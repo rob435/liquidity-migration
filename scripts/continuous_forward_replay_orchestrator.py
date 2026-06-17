@@ -142,7 +142,7 @@ def venue_update(venue: str, state_dir: Path, forward_start_ms: int) -> dict:
     # carries instrument2=ETHUSDT (its config-hash voids any prior btc_only ledger).
     rets, fund = btc_inputs(venue, all_days, "BTCUSDT")
     rets2, fund2 = btc_inputs(venue, all_days, "ETHUSDT")
-    # W5 Stage 8c BTC-vol regime-hedge overlay (operator-approved 2026-06-15;
+    # BTC-vol regime-hedge overlay (operator-approved 2026-06-15; receipt:
     # docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md): a causal,
     # mean-1 daily intensity from the BTC return series scales BOTH 2f hedge legs
     # (hedge more in turbulence). The same params are part of frozen_config_hash and
@@ -180,8 +180,8 @@ def _run_venue(venue: str, state_dir: Path, forward_start_ms: int) -> dict:
     ``update_forward_ledger`` raises a hard ``RuntimeError`` on overlap drift (correct as a
     same-code regression alarm). Without isolation, a drift on the first venue aborts the loop
     before the second venue ever runs, and — because nothing alerts on a non-advancing clock — the
-    forward window can quietly stop accruing while the W4 audit keeps printing a stale ``forward_days``
-    (forward-replay-5). Isolating each venue lets the healthy venue still append and surfaces the
+    forward window can quietly stop accruing while the audit keeps printing a stale ``forward_days``
+    value. Isolating each venue lets the healthy venue still append and surfaces the
     failure (drift vs other error) explicitly; ``main`` then exits non-zero so a manual/scheduled run
     cannot silently no-op. Self-healing a *legitimate* history revision (vs a code regression) still
     requires the state-dir re-base in continuous_forward_replay.update_forward_ledger and is out of

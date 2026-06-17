@@ -984,7 +984,7 @@ def test_age_gate_uses_listing_not_window_start() -> None:
     assert trades_fallback.height == 0
 
 
-# w4-w5-stages-4: candidate_sink / candidate_tape and _apply_entry_order invariants
+# candidate_sink / candidate_tape and _apply_entry_order invariants
 def test_apply_entry_order_fcfs_is_identity() -> None:
     """fcfs must be a no-op reorder (reproduces the frozen control's (ts, symbol) order)."""
     entries = pl.DataFrame(
@@ -1011,7 +1011,7 @@ def test_apply_entry_order_is_causal_within_ts() -> None:
 
 
 def test_candidate_tape_selected_rows_match_executed_trades(tmp_path) -> None:
-    """The W5 Stage-0 audit contract: the tape's selected rows must equal the executed trades
+    """The candidate-tape audit contract: selected rows must equal executed trades
     (same-code reconstruction). Pre-existing finding had NO positive test for this."""
     root, start, n_bars = _build_root(tmp_path, n_symbols=26, n_bars=720)
     cfg = ContinuousEventConfig(

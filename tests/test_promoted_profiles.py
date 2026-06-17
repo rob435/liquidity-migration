@@ -41,7 +41,7 @@ def test_continuous_profile_is_deployed_book_with_regime_hedge() -> None:
     assert cfg["object"] == "continuous_winner_uptrend_ensemble_btc_hedged"
     assert cfg["hedge"]["instrument"] == "BTCUSDT"
     assert cfg["hedge"]["instrument2"] == "ETHUSDT"
-    # the BTC-vol regime-hedge overlay (W5 Stage 8c) is embedded
+    # the BTC-vol regime-hedge overlay is embedded
     assert cfg["hedge"]["regime"]["lam"] == 0.5
     # promoted by operator override -> it IS in PROFILES now
     assert promoted.PROFILES["continuous"] is promoted.continuous_profile

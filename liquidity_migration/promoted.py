@@ -244,7 +244,7 @@ def long_profile(*, start: str | None = None, end: str | None = None):
 
 def continuous_profile(*, start: str | None = None, end: str | None = None):
     """The deployed CONTINUOUS-fade book, INCLUDING the BTC-vol regime-hedge overlay
-    (W5 Stage 8c, lambda=0.5).
+    (lambda=0.5).
 
     Source of truth: ``continuous_forward_replay.FROZEN_FORWARD_CONFIG`` — the exact
     object the live demo book and the forward clock execute (winner_base 4-component
