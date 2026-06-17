@@ -933,10 +933,18 @@ def _apply_median_universe_selection(
     backtest's median-rank universe; a non-zero count is surfaced as cycle telemetry."""
     if features.is_empty() or "turnover_median_90d" not in features.columns:
         return features, 0
-    latest_ts = features["ts_ms"].max()
+    # Re-select on the latest CLOSED bar, not the unconditional max: a daily feature
+    # row is stamped at the day END, so a still-forming UTC day (>=20 hourly bars by
+    # ~20:00 UTC) yields a FUTURE-stamped bar > snapshot_ts_ms. Entries fire from the
+    # latest closed bar (the entry path gates ts <= now_ms), so mutating membership /
+    # emitting telemetry on the future bar describes the wrong bar (audit-iter1 long-3).
+    closed = features.filter(pl.col("ts_ms") <= snapshot_ts_ms)
+    if closed.is_empty():
+        return features, 0
+    latest_ts = closed["ts_ms"].max()
     if latest_ts is None:
         return features, 0
-    today = features.filter(pl.col("ts_ms") == latest_ts)
+    today = closed.filter(pl.col("ts_ms") == latest_ts)
     if today.is_empty():
         return features, 0
     finite = today.filter(pl.col("turnover_median_90d").is_finite()).sort(

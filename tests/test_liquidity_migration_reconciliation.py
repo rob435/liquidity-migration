@@ -501,3 +501,17 @@ def test_snipe_exclusion_does_not_drop_real_demo_only() -> None:
     assert summary["demo_only"] == 1  # ETH-1 only
     assert summary["snipe_demo_only"] == 1  # XRP snipe reported apart
 
+
+
+def test_fee_adjusted_return_skips_undirected_row_instead_of_assuming_short() -> None:
+    """audit-iter1 archive-recon-2: the price-fallback branch (no net_return /
+    gross_trade_return) must NOT default a missing side to 'short' — that sign-flips a
+    long trade. A row with no return AND no side is undirected and must be skipped."""
+    # No return fields -> price fallback; no side -> undirected -> None (skip).
+    assert _fee_adjusted_return({"entry_price": 100.0, "exit_price": 110.0}) is None
+    # An explicit long with a +10% move stays POSITIVE (not flipped to -10%).
+    r_long = _fee_adjusted_return({"entry_price": 100.0, "exit_price": 110.0, "side": "long"})
+    assert r_long is not None and r_long > 0.0
+    # A short with price falling 10% is positive (sanity: the short branch is intact).
+    r_short = _fee_adjusted_return({"entry_price": 100.0, "exit_price": 90.0, "side": "short"})
+    assert r_short is not None and r_short > 0.0

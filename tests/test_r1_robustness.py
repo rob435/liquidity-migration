@@ -195,3 +195,30 @@ def test_thirds_splits_three_or_more_months() -> None:
     # No duplicate/garbled labels: each third's label spans its own bound.
     assert out[0]["label"] == "2023-01..2023-01"
     assert out[2]["label"] == "2023-03..2023-03"
+
+
+def test_engine_mar_degenerate_window_returns_nan_not_overflow() -> None:
+    """audit-iter1 scripts-1: a zero-span (start==end) window floors _window_years to
+    ~1e-9, making the annualization exponent ~1e9 so growth**exp raises OverflowError
+    and crashed the whole multi-venue run. _engine_mar must return nan instead."""
+    assert math.isnan(MOD._engine_mar(0.5, -0.2, 1e-9))  # would have raised OverflowError
+    assert math.isfinite(MOD._engine_mar(0.5, -0.2, 2.0))  # normal window unaffected
+
+
+def test_load_monthly_returns_none_on_malformed_csv(tmp_path: Path) -> None:
+    """audit-iter1 scripts-2: a truncated/malformed monthly CSV must signal unreadable
+    (None) so the caller skips just that cell, mirroring _load_json_metrics, instead of
+    crashing the whole run."""
+    d = tmp_path / "cell"
+    d.mkdir()
+    # missing the strategy_return column -> KeyError inside the parse loop
+    (d / "volume_event_best_monthly.csv").write_text("month,other\n1970-01,0.1\n")
+    assert MOD._load_monthly(d) is None
+    # a non-numeric strategy_return -> ValueError
+    (d / "volume_event_best_monthly.csv").write_text("month,strategy_return\n1970-01,abc\n")
+    assert MOD._load_monthly(d) is None
+    # a well-formed file still parses (dedup-on-month, sorted)
+    (d / "volume_event_best_monthly.csv").write_text(
+        "month,strategy_return\n1970-02,-0.05\n1970-01,0.1\n"
+    )
+    assert MOD._load_monthly(d) == [("1970-01", 0.1), ("1970-02", -0.05)]

@@ -238,6 +238,13 @@ def _dataset_row(
     pair_coverage = covered_pairs / reference_pair_count if reference_pair_count else 0.0
     expected_bars = reference_pair_count * 24 if dataset in HOURLY_DATASETS else 0
     bar_coverage = min(row_count / expected_bars, 1.0) if expected_bars else None
+    # When the row count was ESTIMATED (partitions assumed full at 24 bars/day), the
+    # 24-factor cancels and bar_coverage degenerates to the partition-presence ratio —
+    # it no longer measures intra-day bar completeness and would read as measured
+    # evidence. Suppress it so an estimated value is never mistaken for a real
+    # per-day-bar measurement (audit-iter1 data-io-2).
+    if bar_coverage is not None and snapshot.row_count_estimated:
+        bar_coverage = None
     span_ok = _span_covers(min_date, max_date, start_date=start_date, end_exclusive=end_exclusive)
     if row_count == 0:
         status = "MISSING"

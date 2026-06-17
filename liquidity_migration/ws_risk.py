@@ -1116,6 +1116,11 @@ class EventWebSocketRiskEngine:
         self.evaluate_symbols(changed_symbols)
 
     def on_ticker_message(self, message: dict[str, Any]) -> None:
+        # WS-R-002: every state mutator runs on the consumer thread. on_ticker_message
+        # mutates price_by_symbol (the intrabar-stop price map) and was the lone on_*
+        # handler missing this guard; restore it so a future miswiring of the public
+        # ticker callback fails fast instead of silently racing (audit-iter1 ws-1).
+        self._assert_consumer_thread()
         self._last_ticker_event_monotonic = time.monotonic()
         changed_symbols: set[str] = set()
         for row in _message_rows(message):
@@ -1980,7 +1985,12 @@ class EventWebSocketRiskEngine:
         side = _normalized_position_side(position.get("side"))
         if not symbol or _float(qty) <= 0.0 or entry_price <= 0.0 or side not in {"long", "short"}:
             return None
-        opened_ms = _int(position.get("createdTime") or position.get("created_time")) or now_ms
+        # Route through _float first (like the sibling recovery path at ~line 2217): a
+        # float-formatted venue ms string ("1.7e12", "...0") makes int(str) raise and
+        # silently date the adopted trade to now_ms, skewing planned_exit by up to
+        # adopt_hold_days. int(_float(...)) parses it; identical for integer strings
+        # (audit-iter1 ws-2).
+        opened_ms = int(_float(position.get("createdTime") or position.get("created_time"))) or now_ms
         stop_loss_pct = max(self.risk.adopt_stop_loss_pct, 0.0)
         take_profit_pct = max(self.risk.adopt_take_profit_pct, 0.0)
         tick_size = _float(position.get("tickSize") or position.get("tick_size"))

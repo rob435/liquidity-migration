@@ -1034,7 +1034,13 @@ def _fee_adjusted_return(row: dict[str, Any], *, net_of_cost: bool = False) -> f
         exit_price = _float(row.get("exit_price"))
         if entry <= 0.0 or exit_price <= 0.0:
             return None
-        side = _normalized_side(row.get("side") or row.get("trade_side") or "short")
+        # Do NOT default a missing side to "short": that sign-flips a long trade's
+        # return. A row with no return field AND no side is undirected — skip it
+        # rather than guess (audit-iter1 archive-recon-2). Callers already skip None.
+        raw_side = row.get("side") or row.get("trade_side")
+        if not raw_side:
+            return None
+        side = _normalized_side(raw_side)
         ret = (entry - exit_price) / entry if side == "short" else (exit_price - entry) / entry
         notional = _float(row.get("notional_usdt"))
         equity = _float(row.get("equity_usdt"))

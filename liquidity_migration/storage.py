@@ -681,11 +681,22 @@ def read_dataset(data_root: str | Path, dataset: str) -> pl.DataFrame:
     return read_dataset_columns(data_root, dataset)
 
 
+def _partition_date_ge(file: Path, since: str) -> bool:
+    """True if a `date=YYYY-MM-DD`-partitioned file is on/after ``since`` (or has no
+    date partition, so it is never pruned). Lets a reader skip old partitions by
+    path alone — no parquet opened for pruned dates."""
+    for part in file.parts:
+        if part.startswith("date="):
+            return part[len("date="):] >= since
+    return True
+
+
 def read_dataset_columns(
     data_root: str | Path,
     dataset: str,
     *,
     columns: list[str] | None = None,
+    since_date: str | None = None,
 ) -> pl.DataFrame:
     """Eagerly read a dataset, optionally projecting only ``columns``.
 
@@ -695,6 +706,10 @@ def read_dataset_columns(
     saving for wide datasets (e.g. klines_1h) on hot read paths. Any requested
     column absent from a partition is tolerated; the projection is intersected
     with the on-disk schema before collecting.
+
+    ``since_date`` (YYYY-MM-DD) prunes `date=`-partitioned files to that date
+    forward BEFORE any parquet is opened — a forward-window backtest then never
+    pays to read the multi-year tail. Non-date-partitioned files are never pruned.
 
     A canonical request (e.g. ``funding``) transparently resolves to the
     venue-specific variant actually present on the root (e.g.
@@ -713,7 +728,19 @@ def read_dataset_columns(
     # snapshot of the dataset. The collect() below MUST stay inside the lock so
     # the actual file reads complete before a writer can rename underneath us.
     with exclusive_file_lock(dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01):
-        files = sorted(path.glob("**/*.parquet"))
+        # When since_date is set and the dataset is top-level `date=`-partitioned,
+        # prune at the DIRECTORY level before globbing: a full `**/*.parquet` walk of
+        # a (date,symbol)-partitioned root is ~500k files / tens of seconds, almost
+        # all of it discarded. Globbing only the kept date dirs avoids that walk.
+        if since_date:
+            top_date_dirs = [d for d in path.glob("date=*") if d.is_dir()]
+            if top_date_dirs:
+                kept = [d for d in top_date_dirs if d.name[len("date="):] >= since_date]
+                files = sorted(f for d in kept for f in d.glob("**/*.parquet"))
+            else:
+                files = [f for f in sorted(path.glob("**/*.parquet")) if _partition_date_ge(f, since_date)]
+        else:
+            files = sorted(path.glob("**/*.parquet"))
         return _collect_ledger_files(files, dataset=dataset, columns=columns)
 
 

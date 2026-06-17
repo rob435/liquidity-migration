@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 
 from .config import TradeLifecycleConfig
-from ._common import MS_PER_DAY, MS_PER_HOUR, _iso_date, _iso_month, date_boundary_ms
+from ._common import MS_PER_HOUR, _iso_date, _iso_month, date_boundary_ms
 
 
 def summarize_baskets(trades: pl.DataFrame, *, config: TradeLifecycleConfig) -> pl.DataFrame:
@@ -108,25 +108,18 @@ def _daily_sharpe(equity: pl.DataFrame) -> float:
     """
     if equity.is_empty() or "equity" not in equity.columns:
         return 0.0
-    eq_df = equity.sort("ts_ms")
-    ts = eq_df["ts_ms"].to_numpy().astype(np.int64)
-    eq = eq_df["equity"].to_numpy().astype(float)
-    if eq.size < 2:
+    # audit-iter1 (event-demo-1): forward-fill on TRUE calendar days via the shared
+    # _daily_equity_values helper (snaps each row to dt.date(), reindexes onto a
+    # pl.date_range). The previous hand-rolled grid stepped MS_PER_DAY off the FIRST
+    # exit's intra-day wall-clock time and compared it against per-date exit
+    # timestamps (each `exit_ts_ms.max()`, an arbitrary intra-day time), so on
+    # non-midnight exits it mis-bucketed days — injecting spurious 0%-return days and
+    # distorting sharpe_like (which feeds scripts/apply_decision_rule's three-tier
+    # gate). Tests only used midnight-aligned exits, so the bug was invisible.
+    values = np.asarray(_daily_equity_values(equity), dtype=float)
+    if values.size < 2:
         return 0.0
-    first_ts, last_ts = int(ts[0]), int(ts[-1])
-    span_days = max(1, int(round((last_ts - first_ts) / MS_PER_DAY)) + 1)
-    if span_days < 2:
-        return 0.0
-    # Forward-fill onto the calendar-day grid: for each day in [first, last],
-    # equity equals the equity of the most recent exit at or before that day.
-    grid_eq = np.empty(span_days, dtype=float)
-    j = 0
-    for i in range(span_days):
-        day_ts = first_ts + i * MS_PER_DAY
-        while j + 1 < ts.size and ts[j + 1] <= day_ts:
-            j += 1
-        grid_eq[i] = eq[j]
-    daily_ret = np.diff(grid_eq) / grid_eq[:-1]
+    daily_ret = np.diff(values) / values[:-1]
     # metrics-3: one shared Sharpe convention (ddof=1, sqrt(365.25)) across all reports.
     return annualized_sharpe(daily_ret)
 

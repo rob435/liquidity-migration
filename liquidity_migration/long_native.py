@@ -71,6 +71,14 @@ class LongNativeConfig:
     # --- window ---
     start_date: str = ""
     end_date: str = ""
+    # Optional DATA-READ floor (YYYY-MM-DD): when set, klines/manifest/funding are
+    # read only from this date forward, and the full-PIT universe gate is scoped to
+    # it. Used for a forward-window backtest that doesn't re-read/re-feature the full
+    # multi-year sample. MUST sit far enough before start_date to warm every
+    # lookback (universe_volume_window_days=90, min_listing_history_days=60, the
+    # 30d rollers) or signal-window features differ from a full read. Empty ("") =
+    # read the whole root (default; byte-identical to the pre-change behaviour).
+    read_start_date: str = ""
 
     # --- universe ---
     universe_size: int = 30
@@ -396,12 +404,31 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
     raw_klines = read_dataset_columns(
         root, "klines_1h",
         columns=["ts_ms", "symbol", "date", "open", "high", "low", "close", "turnover_quote", "volume_base"],
+        since_date=(cfg.read_start_date or None),  # prune old date= partitions at the read, not after
     )
     if raw_klines.is_empty():
         raise RuntimeError("klines_1h is empty; run download-data first")
     funding = read_dataset(root, "funding")
     archive_manifest = read_dataset(root, "archive_trade_manifest")
     open_interest = read_dataset(root, "open_interest") if (cfg.enable_oi_momentum or cfg.fc_require_oi_rising) else None
+
+    # Forward-window backtest: floor the read at read_start_date so we don't
+    # re-read/re-feature the full multi-year sample, and so the full-PIT gate is
+    # scoped to the window (an ancient kline-coverage gap then can't fail a recent
+    # forward run). read_start_date MUST pre-date start_date by more than the
+    # longest lookback (caller's responsibility) or signal-window features shift.
+    if cfg.read_start_date:
+        rs = cfg.read_start_date
+        rs_ms = int(dt.datetime.fromisoformat(rs).replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
+        # raw_klines is already pruned at the read (since_date); floor the rest here.
+        if not archive_manifest.is_empty() and "date" in archive_manifest.columns:
+            archive_manifest = archive_manifest.filter(pl.col("date") >= rs)
+        if not funding.is_empty() and "ts_ms" in funding.columns:
+            funding = funding.filter(pl.col("ts_ms") >= rs_ms)
+        if open_interest is not None and not open_interest.is_empty() and "ts_ms" in open_interest.columns:
+            open_interest = open_interest.filter(pl.col("ts_ms") >= rs_ms)
+        if raw_klines.is_empty():
+            raise RuntimeError(f"klines_1h empty after read_start_date={rs} floor; widen the window")
     metrics_df = None
     if cfg.enable_metrics_signal or cfg.fc_lsr_filter:
         mfiles: list[Path] = []
@@ -1677,7 +1704,14 @@ def _provisional_trigger_panel(
             pl.col("turnover_quote").rolling_sum(24, min_samples=24).over("symbol").alias("turn24"),
         )
         .with_columns(
-            ((pl.col("close") - pl.col("lo24")) / (pl.col("hi24") - pl.col("lo24"))).alias("cl24"),
+            # Flat-range guard matching the daily close_location features (lines ~791,
+            # ~842): a halted/illiquid 24h window (hi24==lo24) would give 0/0=NaN.
+            # otherwise(0.5) keeps it consistent with the rest of the module
+            # (audit-iter1 long-2). Byte-identical for non-degenerate windows.
+            pl.when((pl.col("hi24") - pl.col("lo24")) > 1e-12)
+            .then((pl.col("close") - pl.col("lo24")) / (pl.col("hi24") - pl.col("lo24")))
+            .otherwise(0.5)
+            .alias("cl24"),
             pl.col("turn24").rank(method="ordinal", descending=True).over("ts_ms").alias("rank24"),
             (((pl.col("bar_end_ts_ms") - 1) // MS_PER_DAY + 1) * MS_PER_DAY).alias("day_end_ts_ms"),
         )

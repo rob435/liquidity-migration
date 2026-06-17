@@ -199,6 +199,12 @@ def _execute_exits(
         sub_order_rows: list[dict[str, Any]] = []
         total_filled_qty = 0.0
         total_fill_value = 0.0
+        # Qty that actually carried a price, so the volume-weighted exit_price is
+        # averaged over PRICED legs only. A leg that filled (qty>0) but resolved to a
+        # zero avg_price (degraded venue summary + a 0 planned_exit fallback) used to
+        # inflate the denominator without contributing to the numerator, dragging
+        # exit_price toward zero on a split close (audit-iter1 event-demo-3).
+        priced_filled_qty = 0.0
         # See entry path: venue-reported fees and exec time are required for
         # reconciliation to close the demo↔Bybit PnL triangle and to measure
         # true fill-time skew.
@@ -296,6 +302,7 @@ def _execute_exits(
             total_filled_qty += sub_filled_qty
             if sub_filled_qty > 0.0 and sub_avg_price > 0.0:
                 total_fill_value += sub_avg_price * sub_filled_qty
+                priced_filled_qty += sub_filled_qty
             total_fee += sub_fee
             if sub_exec_time_ms > max_exec_time_ms:
                 max_exec_time_ms = sub_exec_time_ms
@@ -327,9 +334,12 @@ def _execute_exits(
             )
 
         target_qty = _float(qty)
+        # Average over the PRICED qty (not total_filled_qty) so an unpriced leg can't
+        # drag exit_price toward zero (audit-iter1 event-demo-3). total_filled_qty
+        # stays the denominator for the fully_filled check below.
         exit_price = (
-            (total_fill_value / total_filled_qty)
-            if total_filled_qty > 0.0 and total_fill_value > 0.0
+            (total_fill_value / priced_filled_qty)
+            if priced_filled_qty > 0.0 and total_fill_value > 0.0
             else _float(exit_plan.get("planned_exit_price"))
         )
         qty_tolerance = max(target_qty * 1e-8, 1e-12)
@@ -1056,6 +1066,7 @@ def _submit_reduce_only_exit(
         order_rows: list[dict[str, Any]] = []
         total_filled_qty = 0.0
         total_fill_value = 0.0
+        priced_filled_qty = 0.0  # qty that carried a price (audit-iter1 event-demo-3)
         total_fee = 0.0
         max_exec_time_ms = 0
         first_order_id = ""
@@ -1144,6 +1155,7 @@ def _submit_reduce_only_exit(
             total_filled_qty += sub_filled_qty
             if sub_filled_qty > 0.0 and sub_avg_price > 0.0:
                 total_fill_value += sub_avg_price * sub_filled_qty
+                priced_filled_qty += sub_filled_qty
             if not first_order_id:
                 first_order_id = sub_order_result.get("orderId", "")
             sub_row = _risk_order_row(
@@ -1171,9 +1183,11 @@ def _submit_reduce_only_exit(
             order_rows.append(sub_row)
 
         target_qty = _float(qty)
+        # Average over PRICED qty so an unpriced leg can't bias avg_price low
+        # (audit-iter1 event-demo-3).
         avg_price = (
-            (total_fill_value / total_filled_qty)
-            if total_filled_qty > 0.0 and total_fill_value > 0.0
+            (total_fill_value / priced_filled_qty)
+            if priced_filled_qty > 0.0 and total_fill_value > 0.0
             else 0.0
         )
         agg_summary: dict[str, Any] = {

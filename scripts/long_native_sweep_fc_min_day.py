@@ -43,6 +43,11 @@ def main() -> int:
     ap.add_argument("--config", default="configs/volume_alpha.default.yaml")
     ap.add_argument("--start", default=None, help="Signal-window start YYYY-MM-DD (default: full history on the root)")
     ap.add_argument("--end", default=None, help="Signal-window end YYYY-MM-DD (default: full history on the root)")
+    ap.add_argument("--read-warmup-days", type=int, default=None,
+                    help="With --start, floor the DATA READ at start-minus-this-many-days so the "
+                         "backtest only reads/features the forward window + warmup (not the full "
+                         "multi-year sample), and scopes the full-PIT gate to that window. Must "
+                         "exceed the longest lookback (universe_volume_window_days=90). Omit for a full read.")
     ap.add_argument("--report-subdir", default="long_native_fc_sweep",
                     help="Subdirectory under <data-root>/reports/")
     ap.add_argument("--skip-existing", action="store_true",
@@ -77,6 +82,14 @@ def main() -> int:
         base_cfg = replace(base_cfg, start_date=args.start or base_cfg.start_date,
                            end_date=args.end or base_cfg.end_date)
         print(f"[window] {base_cfg.start_date or '*'} .. {base_cfg.end_date or '*'}", flush=True)
+    if args.read_warmup_days is not None:
+        if not base_cfg.start_date:
+            print("ERROR: --read-warmup-days requires --start", file=sys.stderr)
+            return 2
+        from datetime import date, timedelta
+        read_start = (date.fromisoformat(base_cfg.start_date) - timedelta(days=args.read_warmup_days)).isoformat()
+        base_cfg = replace(base_cfg, read_start_date=read_start)
+        print(f"[read floor] {read_start} (signal start {base_cfg.start_date} - {args.read_warmup_days}d warmup)", flush=True)
     sweep_summary: list[dict] = []
     shared_inputs: dict | None = None  # LON-6: built once, reused across entry-only cells
 

@@ -3442,7 +3442,19 @@ def run_continuous_demo_cycle(
         # persisted rebalance_raw_return that feeds tomorrow's vol-target scale, momentum
         # hurdle, and drawdown-gate equity. Mark on this snapshot so the weight is qty_old.
         pre_resize_ledger = post_trade_ledger
-        if demo.daily_rebalance_enabled and not rebalance_resize_checked:
+        # audit-iter1 (continuous-1): never size live rebalance resizes off a fallback
+        # equity. On a wallet-read failure `equity_usdt` is the fixed fallback and
+        # `errors` is True; entries are already suppressed in submit mode (see the
+        # entry guard), but the resize path was not. Resizing live notional off phantom
+        # equity (the deployed book scales up to 4x) would compute wrong-magnitude /
+        # wrong-signed Market orders. Skip and defer to the next cycle once the wallet
+        # read recovers; `rebalance_resize_checked` stays False so today still resizes
+        # later. Dry-run/paper (submit_orders False) is unaffected.
+        if (
+            demo.daily_rebalance_enabled
+            and not rebalance_resize_checked
+            and not (errors and demo.submit_orders)
+        ):
             resize_plans = plan_continuous_rebalance_resizes(
                 _open_continuous_trades(post_trade_ledger, strategy_id).to_dicts(),
                 price_by_symbol=price_by_symbol,

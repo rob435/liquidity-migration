@@ -88,9 +88,9 @@ Each sleeve has a paper (dry-run) shadow on its own root (long:
 `data/bybit-long-paper-event`, continuous: `data/bybit-continuous-paper-event`)
 — same profile/universe/cadence, no orders, idealized fills at signal price.
 Comparing the paper and demo ledgers measures demo-vs-paper execution slippage.
-Run `bash scripts/reconcile.sh` (skill: `pit-reconcile`) for the demo↔paper
-reconcile — it is the only reconcile entrypoint; do not hand-assemble the
-`reconcile-*` calls. (The daily-short sleeve and its roots were erased
+Run `bash scripts/reconcile.sh` (skill: `pit-reconcile`) — the single reconcile
+entrypoint (full demo↔backtest↔paper by default; `--quick` for the fast
+demo↔paper-only check). Do not hand-assemble the `reconcile-*` calls. (The daily-short sleeve and its roots were erased
 2026-06-11; legacy `data/bybit-demo-event` / `data/bybit-paper-event` dirs on a
 live host are inert history.)
 

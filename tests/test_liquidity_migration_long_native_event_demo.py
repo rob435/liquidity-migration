@@ -1263,3 +1263,31 @@ def test_log_fc_rank_boundary_silent_for_comfortable_rank(caplog) -> None:
     with caplog.at_level(logging.INFO, logger="liquidity_migration.long_native_event_demo"):
         _log_fc_rank_boundary(symbol="ETHUSDT", today_volume_rank=2, fc_top_volume_rank_max=10)
     assert caplog.records == []
+
+
+def test_median_universe_selection_targets_latest_closed_bar_not_future_bar() -> None:
+    """audit-iter1 long-3: a daily feature row is stamped at the day END, so a still-
+    forming UTC day yields a FUTURE-stamped bar (> snapshot_ts_ms). Entries fire from
+    the latest CLOSED bar, so the re-selection (and its telemetry) must target that
+    bar, not the future partial one. The old code keyed on the unconditional max ts."""
+    from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
+
+    now = 1_700_000_000_000
+    closed = now - 3_600_000   # latest closed bar (<= now)
+    future = now + 3_600_000   # next-midnight partial bar (> now)
+    rows = []
+    for sym, med in [("s30", 30.0), ("s20", 20.0), ("s10", 10.0)]:
+        # CLOSED bar: top-2-by-median = {s30, s20}; pre-set in_universe all False.
+        rows.append({"ts_ms": closed, "symbol": sym, "turnover_median_90d": med,
+                     "turnover_quote": 1.0, "in_universe": False})
+        # FUTURE bar: DIFFERENT (inverted) ranking + pre-set True; must stay untouched.
+        rows.append({"ts_ms": future, "symbol": sym, "turnover_median_90d": 100.0 - med,
+                     "turnover_quote": 1.0, "in_universe": True})
+    feat = pl.DataFrame(rows)
+    out, fallback = _apply_median_universe_selection(feat, universe_size=2, snapshot_ts_ms=now)
+    assert fallback == 0
+    closed_rows = out.filter(pl.col("ts_ms") == closed).sort("symbol")
+    closed_sel = dict(zip(closed_rows["symbol"].to_list(), closed_rows["in_universe"].to_list()))
+    assert closed_sel == {"s30": True, "s20": True, "s10": False}  # re-selected on CLOSED bar
+    fut = out.filter(pl.col("ts_ms") == future)
+    assert all(fut["in_universe"].to_list())  # future bar untouched

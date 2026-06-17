@@ -145,7 +145,15 @@ def compute_mar(total_return: float, max_drawdown: float, window_days: float) ->
     # are unaffected — the math below is byte-identical to before.
     if window_days <= 0:
         return float("nan")
-    ann = compute_annualized_return(total_return, window_days)
+    # A tiny-but-positive window_days (corrupted CSV cell / fat-fingered --window-days)
+    # makes the exponent 365.25/window_days explode, so growth**exp raises
+    # OverflowError for any positive return. Treat as UNMEASURABLE (nan) — the same
+    # non-qualifying path as zero-DD / window_days<=0 — instead of crashing the
+    # investigation verdict (audit-iter1 scripts-3; parity with r1_robustness._engine_mar).
+    try:
+        ann = compute_annualized_return(total_return, window_days)
+    except OverflowError:
+        return float("nan")
     return ann / abs(max_drawdown)
 
 

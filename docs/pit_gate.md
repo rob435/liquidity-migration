@@ -12,10 +12,13 @@ membership gate — the thing that decides whether a backtest signal is allowed 
 trade, and the thing that broke the backtest↔paper reconciliation on 2026-05-30.
 
 TL;DR: the gate is correct now (the off-by-one is fixed), and the plumbing is
-self-checking. For a routine reconcile just run:
+self-checking. There is ONE command for the whole reconciliation — it refreshes
+PIT data, pulls the live ledgers, runs each sleeve's backtest over the forward
+window, and reconciles the model against demo + paper, all in a single run:
 
 ```bash
-bash scripts/reconcile.sh
+bash scripts/reconcile.sh              # full demo<->backtest<->paper, both sleeves
+bash scripts/reconcile.sh --quick      # fast paper<->demo execution check only
 ```
 
 ## What the gate is
@@ -109,9 +112,18 @@ gating without an actual enforcement path.
 
 ## The one-command workflow
 
-`scripts/reconcile.sh` (driver: `scripts/reconcile.py`) reconciles the promoted
-LONG sleeve by default (`--sleeves long`). Continuous is opt-in diagnostics only
-via `--sleeves continuous`. In order:
+`scripts/reconcile.sh` is the single front door. By **default** it runs the full
+demo ↔ backtest ↔ paper three-way for BOTH sleeves (see the next section). The
+`--quick` flag routes to the FAST two-way (paper ↔ demo execution only, driver
+`scripts/reconcile.py`, no PIT download / no backtest) — use it for a quick
+"is the live executor matching the model?" pass once the root is already current:
+
+```bash
+bash scripts/reconcile.sh --quick              # LONG paper<->demo (default sleeve)
+bash scripts/reconcile.sh --quick --sleeves long,continuous
+```
+
+The `--quick` path, in order:
 
 1. **pull** — rsync every selected sleeve's demo + paper ledgers from the VPS
    (long `long_native_{demo,paper}_*`; when explicitly selected, continuous
@@ -125,14 +137,57 @@ via `--sleeves continuous`. In order:
    the sleeve, 2026-06-11.)
 4. **summary** — one unified headline across selected sleeves.
 
-Flags: `--sleeves long,continuous`, `--dry-run`, `--no-pull`, `--no-rmom`,
-`--bybit-root PATH`, `--config PATH`, `--vps HOST`. The matching skills are
-`.claude/skills/pit-reconcile` / `.codex/skills/pit-reconcile`.
+`--quick` flags: `--sleeves long,continuous`, `--dry-run`, `--no-pull`,
+`--no-rmom`, `--bybit-root PATH`, `--config PATH`, `--vps HOST`. The matching
+skills are `.claude/skills/pit-reconcile` / `.codex/skills/pit-reconcile`.
 
-The old manifest-refresh / kline-fill / coverage / backtest provisioning steps
-were removed with the erased SHORT sleeve's backtest leg. Refreshing the
-manifest is the manual command above
+Refreshing the manifest on its own is the manual command above
 (`python -m liquidity_migration --data-root <root> archive-manifest`).
+
+## The three-way (demo ↔ backtest ↔ paper) workflow — rebuilt 2026-06-17
+
+This is the **default** of `scripts/reconcile.sh` (the whole reconciliation in
+one run). The backtest leg that the daily-SHORT erasure removed was rebuilt
+generically as `scripts/reconcile_three_way.py`, covering BOTH surviving sleeves:
+
+```bash
+bash scripts/reconcile.sh                    # long + continuous, full pipeline (default)
+bash scripts/reconcile.sh --no-data-refresh  # skip the PIT download
+bash scripts/reconcile.sh --sleeves long     # one sleeve
+# (scripts/reconcile_three_way.sh is a back-compat alias for the same thing.)
+```
+
+It (0) refreshes PIT data on the research root over a **gap-only** tail window
+(archive-manifest `--allow-degraded` + 1h klines + filter; the manifest stage
+unions with the persisted manifest so a narrow rebuild augments, never wipes,
+coverage), (1) pulls the live ledgers, then per sleeve:
+
+The refresh **short-circuits** any dataset already current and runs each sub-stage
+under a wall-clock timeout, so a current root does ~no work and nothing can hang
+(the original tool stalled for hours re-checking already-present partitions over a
+blind wide window). **Funding is OFF by default** (`--with-funding` to enable): it
+changes only the backtest's PnL/cost, not which entries the model picks, so it is
+irrelevant to the entry agreement and a full-universe funding backfill is slow.
+
+- **LONG** (discrete-event): runs the v11a backtest over the forward window on
+  the fresh root and reconciles the **backtest entries vs demo and vs paper** by
+  `(symbol, side, signal-day)`, plus the demo↔paper execution leg. `model_only`
+  is expected when the live sleeve was off/just re-enabled; the tripwire is a
+  live entry with **no** matching backtest signal (`demo_not_in_model` /
+  `paper_not_in_model` > 0 → possible look-ahead in live, stale-PIT in the
+  backtest, or threshold drift). The backtest `run_label` is surfaced verbatim.
+- **CONTINUOUS** (rebalance book): demo↔paper execution leg + the engine-decile
+  **signal-consistency of both the demo and paper live entries** — the faithful
+  "model" leg, since a `continuous-events` CLI run cannot reproduce
+  `FROZEN_FORWARD_CONFIG`'s ensemble+hedge, but the shared decile pipeline can
+  confirm each live entry was a genuine D9 pick.
+
+Why the asymmetry: LONG entries pair 1:1 to the trade ledger by signal-day;
+CONTINUOUS is a portfolio book whose faithful model leg is decile-membership of
+the live entries, not a trade-ledger pairing. The backtest leg is
+agreement/execution evidence — never alpha proof and never a promotion gate
+(`docs/backtesting_errors_we_never_repeat.md`). Matching skill:
+`.claude/skills/pit-reconcile`.
 
 ## When a reconcile shows `paper-only` / `pit_membership_fail`
 

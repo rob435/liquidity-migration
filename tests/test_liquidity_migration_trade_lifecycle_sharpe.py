@@ -15,10 +15,13 @@ from liquidity_migration._common import MS_PER_DAY
 from liquidity_migration.config import TradeLifecycleConfig
 from liquidity_migration.trade_lifecycle import (
     _daily_sharpe,
+    annualized_sharpe,
     build_equity_curve,
     summarize_baskets,
     summarize_trade_backtest,
 )
+
+MS_PER_HOUR = MS_PER_DAY // 24
 
 
 def _trade(*, basket_id: str, exit_day: int, net_return: float) -> dict:
@@ -166,6 +169,35 @@ def test_daily_sharpe_single_diff_returns_zero(ddof_safe_size: int) -> None:
         }
     )
     assert _daily_sharpe(eq) == 0.0
+
+
+def test_daily_sharpe_buckets_by_calendar_day_not_intraday_exit_time() -> None:
+    """Regression (audit-iter1 event-demo-1): production exits carry intra-day
+    wall-clock timestamps (exit_ts_ms.max() per date), NOT midnight. The Sharpe must
+    forward-fill on TRUE calendar days. The old hand-rolled grid stepped MS_PER_DAY
+    off the first exit's clock time and mis-bucketed days, injecting spurious 0%-return
+    days. With non-midnight exits on three consecutive calendar days the correct daily
+    return series is [+50%, -20%]; the old grid produced [0%, +50%].
+    """
+    eq = pl.DataFrame(
+        {
+            # 1970-01-01 01:00, 1970-01-02 23:00, 1970-01-03 06:00 (non-midnight)
+            "ts_ms": [
+                1 * MS_PER_HOUR,
+                MS_PER_DAY + 23 * MS_PER_HOUR,
+                2 * MS_PER_DAY + 6 * MS_PER_HOUR,
+            ],
+            "equity": [1.0, 1.5, 1.2],
+            "drawdown": [0.0, 0.0, 0.0],
+            "basket_return": [0.0, 0.5, -0.2],
+            "date": ["1970-01-01", "1970-01-02", "1970-01-03"],
+        }
+    )
+    expected = annualized_sharpe([0.5, -0.2])  # true calendar-day forward-fill
+    buggy = annualized_sharpe([0.0, 0.5])      # what the old intraday grid produced
+    got = _daily_sharpe(eq)
+    assert math.isclose(got, expected, rel_tol=1e-9)
+    assert not math.isclose(got, buggy, rel_tol=1e-9)
 
 
 def test_sparse_strategy_daily_sharpe_is_finite_and_unbiased_by_firing_rate() -> None:

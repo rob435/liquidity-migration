@@ -1965,6 +1965,14 @@ class BybitKlineStreamPool:
             raise RuntimeError("internal error: on_bar callback not set")
 
         def _callback(message: dict[str, Any]) -> None:
+            # Concurrency note (audit-iter1 data-io-3): these counters and
+            # last_message_monotonic are written lock-free here from this connection's
+            # SINGLE pybit WS thread, and read (possibly one tick stale) under
+            # self._lock by stats()/check_stale_connections(). Single-writer means no
+            # lost update; the staleness math tolerates a sub-tick visibility lag. Do
+            # NOT wrap these writes in self._lock — that acquires the pool RLock on the
+            # hot per-bar path. If a free-threaded build ever needs stronger ordering,
+            # use a per-connection lock or atomics, not the shared pool lock.
             state.message_count += 1
             state.last_message_monotonic = time.monotonic()
             on_bar = self._on_bar

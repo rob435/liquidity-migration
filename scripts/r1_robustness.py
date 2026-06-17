@@ -46,7 +46,7 @@ SHARED = Path.home() / "SHARED_DATA"
 VENUES = {"bybit": "bybit_full_pit", "binance": "binance_full_pit"}
 
 
-def _load_monthly(cell_dir: Path) -> list[tuple[str, float]]:
+def _load_monthly(cell_dir: Path) -> list[tuple[str, float]] | None:
     # Dedup on the month key (last-wins) BEFORE returning. A raw list would let a
     # duplicated month row (a groupby/merge glitch, an appended re-run) be counted
     # twice downstream: main() iterates base_months = [m for m,_ in base_monthly],
@@ -57,9 +57,19 @@ def _load_monthly(cell_dir: Path) -> list[tuple[str, float]]:
     # if it does — collapse to a unique-month dict, then sort.
     p = cell_dir / "volume_event_best_monthly.csv"
     by_month: dict[str, float] = {}
-    with open(p) as f:
-        for d in csv.DictReader(f):
-            by_month[d["month"]] = float(d["strategy_return"])
+    try:
+        with open(p) as f:
+            for d in csv.DictReader(f):
+                by_month[d["month"]] = float(d["strategy_return"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # A truncated/partially-written monthly CSV (OOM-killed cell), an empty/
+        # non-numeric strategy_return (ValueError), a missing column (KeyError), or a
+        # truncated trailing row giving float(None) (TypeError) must NOT crash the
+        # whole multi-venue run. Signal unreadable (None) so the caller skips just
+        # this cell, mirroring _load_json_metrics's load_error contract
+        # (audit-iter1 scripts-2).
+        print(f"    (monthly CSV unreadable: {p.name}: {type(exc).__name__}: {exc})")
+        return None
     return sorted(by_month.items())
 
 
@@ -305,7 +315,14 @@ def _engine_mar(total_return: float, max_drawdown: float, years: float) -> float
     growth = 1.0 + total_return
     # growth<=0 (>=100% cumulative loss) -> a fractional power is COMPLEX and crashes
     # the isfinite() guard; floor the annualized return to -1.0 (audit pass2 #3).
-    ann = (growth ** (1.0 / years) - 1.0) if growth > 0.0 else -1.0
+    # A degenerate/near-zero-span window (start==end -> years floored to 1e-9) makes
+    # the exponent ~1e9 and `growth ** that` raise OverflowError for any growth>1;
+    # return nan ("unmeasurable") so the isfinite() gates exclude the cell instead of
+    # crashing the whole multi-venue run (audit-iter1 scripts-1).
+    try:
+        ann = (growth ** (1.0 / years) - 1.0) if growth > 0.0 else -1.0
+    except OverflowError:
+        return float("nan")
     # nan (not inf) for a ~zero-DD cell: MAR is a divide-by-~0 artifact there, and
     # inf would let a degenerate (e.g. too-few-trades, no down day) cell spuriously
     # clear the pooled-MAR demo-eligibility gate. _tier2_verdict treats a non-finite
@@ -368,6 +385,10 @@ def main() -> int:
                   f"({base_json['load_error']}) — cannot evaluate this venue.")
             continue
         base_monthly = _load_monthly(control_dir)
+        if base_monthly is None:
+            print(f"SKIP {venue}: control ({args.control}) monthly CSV unreadable "
+                  f"— cannot evaluate this venue.")
+            continue
         base_months = [m for m, _ in base_monthly]
         control_full_pit[venue] = base_json["full_pit_pass"]
         if not base_json["full_pit_pass"]:
@@ -391,6 +412,9 @@ def main() -> int:
                 print(f"  {cell}: report unreadable ({cj['load_error']}) — skipped (OOM-killed cell?)")
                 continue
             cm = _load_monthly(cdir)
+            if cm is None:
+                print(f"  {cell}: monthly ledger unreadable — skipped (truncated/partial cell?)")
+                continue
             # align months to the control's month set (intersection, sorted)
             cell_map = dict(cm)
             months = [m for m in base_months if m in cell_map]

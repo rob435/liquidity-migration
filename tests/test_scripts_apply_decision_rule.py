@@ -888,3 +888,11 @@ def test_legacy_rule_rejects_zero_trade_binance_cell() -> None:
         min_trades_bybit=30, min_trades_binance=0,
     )
     assert ok.verdict == "candidate"
+
+
+def test_compute_mar_tiny_window_returns_nan_not_overflow() -> None:
+    """audit-iter1 scripts-3: a tiny-but-positive window_days (corrupted CSV / fat-
+    fingered --window-days) makes the annualization exponent explode; compute_mar must
+    return nan (UNMEASURABLE), not raise OverflowError and crash the verdict run."""
+    assert math.isnan(MOD.compute_mar(0.5, -0.2, 0.001))  # would have raised
+    assert math.isfinite(MOD.compute_mar(0.5, -0.2, 365.0))  # normal window unaffected
