@@ -254,7 +254,7 @@ def test_build_legacy_archive_manifest_errors_when_partition_schema_lacks_source
 # ---- audit2b: _link_subdir existing-target assume-correct behavior (folded from test_audit2b_legacy_manifest.py) ----
 def test_misleading_verify_claim_removed_from_source():
     """Fails on OLD code: the false 'verify ... below' promise must be gone."""
-    text = SCRIPT_PATH.read_text()
+    text = SCRIPT_PATH.read_text(encoding="utf-8")
     # The OLD comment promised verification that does not exist downstream.
     assert "verify the operator-visible state below" not in text
     # The corrected comment must state the assume-correct / not-verified reality.

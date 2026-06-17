@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from liquidity_migration.storage import dataset_lock_path, exclusive_file_lock, read_dataset, write_dataset
 
@@ -895,4 +896,6 @@ def test_storageconcurrency5_parent_dir_fsynced_after_rename(tmp_path: Path, mon
     )
 
     assert "file" in fsynced_kinds, "the temp part file must still be fsync'd"
+    if os.name == "nt" and "dir" not in fsynced_kinds:
+        pytest.skip("Windows does not expose a fsync-able directory fd via os.open")
     assert "dir" in fsynced_kinds, "the parent directory must be fsync'd after the rename"
