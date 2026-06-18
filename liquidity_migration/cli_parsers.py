@@ -543,7 +543,7 @@ def _add_combined_book_report_parser(subparsers) -> None:
 def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     """CLI for the v11a long sleeve forward-testing cycle. Mirrors event-demo-cycle.
 
-    Profile is `MultiStratV1` (v11a uni50 sniper retrace 1%/6h fall-through).
+    Profile is `LongV11aDivWeekendVol` (v11a uni50 sniper retrace 1%/6h fall-through).
     Per-position notional defaults to 1x research sizing; levered demo sizing
     must be passed explicitly and must satisfy the projected initial-margin cap.
     Runs on the same Bybit demo account with order-link prefix lm-en-l-* so the
@@ -555,7 +555,7 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     )
     long_demo = subparsers.add_parser(
         "long-native-event-demo-cycle",
-        help="Run one forward-testing cycle for the v11a long sleeve (MultiStratV1).",
+        help="Run one forward-testing cycle for the v11a long sleeve (LongV11aDivWeekendVol).",
     )
     demo_defaults = LongNativeDemoCycleConfig()
     long_demo.add_argument("--universe-size", type=int, default=demo_defaults.universe_size,
@@ -605,7 +605,7 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         "--strategy-profile",
         choices=LONG_DEMO_STRATEGY_PROFILE_CHOICES,
         default=demo_defaults.strategy_profile,
-        help="Long-side demo entry profile. MultiStratV1 = v11a uni50 sniper retrace 1%%/6h fall-through.",
+        help="Long-side demo entry profile. LongV11aDivWeekendVol = v11a uni50 sniper retrace 1%%/6h fall-through.",
     )
     long_demo.add_argument(
         "--daemon", action="store_true",
@@ -722,6 +722,22 @@ def _add_continuous_rebalance_cycle_audit_parser(subparsers) -> None:
         default="continuous_fade_paper_orders",
         help="Orders dataset carrying resize order rows.",
     )
+    audit.add_argument(
+        "--start-ts-ms",
+        type=int,
+        default=None,
+        help="Only audit rows whose decision/cycle timestamp is at or after this UTC ms boundary.",
+    )
+    audit.add_argument(
+        "--strategy-profile",
+        default=None,
+        help="Optional cycle strategy_profile filter, e.g. continuous_ensemble_v2.",
+    )
+    audit.add_argument(
+        "--strategy-id",
+        default=None,
+        help="Optional cycle/order strategy_id filter, e.g. continuous_fade_v2_paper.",
+    )
     audit.add_argument("--output-dir", default=None, help="Where to write the audit report.")
 
 
@@ -761,6 +777,27 @@ def _add_continuous_forward_readiness_parser(subparsers) -> None:
         "--paper-only",
         action="store_true",
         help="Audit only the continuous paper evidence collector; skip demo telemetry and paper-demo reconcile.",
+    )
+    readiness.add_argument(
+        "--start-ts-ms",
+        type=int,
+        default=None,
+        help="Only audit rows whose decision/cycle timestamp is at or after this UTC ms boundary.",
+    )
+    readiness.add_argument(
+        "--strategy-profile",
+        default=None,
+        help="Optional cycle strategy_profile filter, e.g. continuous_ensemble_v2.",
+    )
+    readiness.add_argument(
+        "--paper-strategy-id",
+        default=None,
+        help="Optional paper trade/order/cycle strategy_id filter, e.g. continuous_fade_v2_paper.",
+    )
+    readiness.add_argument(
+        "--demo-strategy-id",
+        default=None,
+        help="Optional demo trade/order/cycle strategy_id filter, e.g. continuous_fade_v2.",
     )
     readiness.add_argument("--output-dir", default=None, help="Where to write the readiness report bundle.")
 

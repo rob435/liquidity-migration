@@ -67,7 +67,7 @@ def test_registry_does_not_export_research_candidate_manifests() -> None:
 
 def test_continuous_profile_is_deployed_book_with_regime_hedge() -> None:
     cfg = promoted.continuous_profile()
-    # the exact deployed object (winner_base ensemble + BTC+ETH 2f hedge)
+    # the exact deployed object (continuous_ensemble_v2 ensemble + BTC+ETH 2f hedge)
     assert cfg["object"] == "continuous_winner_uptrend_ensemble_btc_hedged"
     assert cfg["hedge"]["instrument"] == "BTCUSDT"
     assert cfg["hedge"]["instrument2"] == "ETHUSDT"

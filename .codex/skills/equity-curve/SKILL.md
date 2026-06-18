@@ -38,7 +38,7 @@ inferred from `--root`.
   `run_long_native_research`. Use `--long-notional-multiplier N` only to draw a
   pure-leverage curve on the same signal.
 - `continuous`: the research/demo-stage continuous ensemble reconstruction:
-  winner_base components plus the banked BTC+ETH 2f hedge, via
+  continuous_ensemble_v2 components plus the banked BTC+ETH 2f hedge, via
   `scripts/continuous_deployed_equity_refresh.py`. It is in `promoted.PROFILES`
   by an explicit operator override (2026-06-15), NOT a demo-arbiter gate pass: it
   is demo/paper ONLY (REAL_MONEY stays false, Tier-3 real-money gate unmet), not a
@@ -108,7 +108,7 @@ Always read the printed `run_label` and chart subtitle.
   `full_pit_universe`; `pit_membership_filtered_current_universe` is not citable
   unless the runner proves delisted names were traded and explains the conservative
   label.
-- CONTINUOUS is labelled `continuous_research_stage_not_promoted` by the equity
+- CONTINUOUS is labelled `continuous_demo_paper_research_stage` by the equity
   runner. That means comparison/diagnostic curve, not promotion evidence. The
   continuous research window is spent; forward demo/paper is the decision surface.
 - Any result with missing PIT, current-universe bias, missing cost artifacts, or

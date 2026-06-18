@@ -6,8 +6,8 @@ every data-root refresh and commit the CSVs (they sit in the deploy paths
 filter, so the commit auto-deploys them to the live units).
 
 Construction (matches the engine the betas were banked on):
-- components = the four frozen winner_base cells (the parity-verified rebuilt
-  ledgers; `scripts/rebuild_winner_base_component_ledgers.py`) combined on the
+- components = the three current frozen continuous_ensemble_v2 cells (the parity-verified rebuilt
+  ledgers; `scripts/rebuild_continuous_component_ledgers.py`) combined on the
   frozen receipt weights;
 - unit_ret[day] = gross + funding + scale-1 entry costs per LEDGER day (the
   scale-independent day return `apply_rebalance_rule` scales);
@@ -41,14 +41,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import polars as pl  # noqa: E402
 
-import continuous_ensemble_rebalance_scout as scout  # noqa: E402
-
-from liquidity_migration.continuous_rebalance import scaled_entry_cost  # noqa: E402
+from liquidity_migration.continuous_component_sources import (  # noqa: E402
+    CONTINUOUS_COMPONENT_SOURCES,
+    load_continuous_component_source,
+)
+from liquidity_migration.continuous_rebalance import (  # noqa: E402
+    combine_continuous_components,
+    scaled_entry_cost,
+)
 
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
 ROOTS = {"bybit": SHARED / "bybit_full_pit", "binance": SHARED / "binance_full_pit"}
 OUT_DIR = Path(__file__).resolve().parent.parent / "deploy" / "hedge_warmstart"
-# age210tp14 dropped 2026-06-18 (receipt docs/preregistration/2026-06-18-drop-tp14-continuous-ensemble.md); renorm = old/0.90.
+# Current three-component object frozen 2026-06-18; renorm = old/0.90.
 WINNER = {"turn3p3": 0.3333333333333333, "turn4p3": 0.2222222222222222, "turn4p5": 0.4444444444444444}
 MS_DAY = 86_400_000
 
@@ -79,8 +84,11 @@ def daily_returns(closes: dict[int, float]) -> dict[int, float]:
 
 
 def unit_series(venue: str) -> dict[int, float]:
-    comps = {src: scout._load_source(scout.SOURCES[src], venue)[0] for src in WINNER}
-    combined = scout._combine_components(comps, WINNER)
+    comps = {
+        src: load_continuous_component_source(CONTINUOUS_COMPONENT_SOURCES[src], venue)[0]
+        for src in WINNER
+    }
+    combined = combine_continuous_components(comps, WINNER)
     out: dict[int, float] = {}
     for day in combined.days:
         ret = combined.gross_by_day.get(day, 0.0) + combined.funding_by_day.get(day, 0.0)

@@ -261,6 +261,32 @@ def test_plan_rebalance_resizes_scales_target_by_component_weight() -> None:
     assert plans[0].delta_notional_usdt == pytest.approx(100.0)
 
 
+def test_plan_rebalance_resizes_preserves_inverse_vol_multiplier() -> None:
+    plans = plan_continuous_rebalance_resizes(
+        [
+            {
+                "trade_id": "t-p4p5",
+                "symbol": "ABCUSDT",
+                "qty": "0.4",
+                "component_weight": 0.40,
+                "vol_weight_multiplier": 0.50,
+            },
+        ],
+        price_by_symbol={"ABCUSDT": 100.0},
+        equity_usdt=10_000.0,
+        base_notional_pct_equity=2.0,
+        target_scale=2.0,
+    )
+
+    assert len(plans) == 1
+    assert plans[0].side == "Sell"
+    assert plans[0].reduce_only is False
+    # target = 200 base * 2 scale * 0.40 component * 0.50 inverse-vol = 80
+    assert plans[0].target_notional_usdt == pytest.approx(80.0)
+    assert plans[0].current_notional_usdt == pytest.approx(40.0)
+    assert plans[0].delta_notional_usdt == pytest.approx(40.0)
+
+
 def test_plan_rebalance_resizes_never_touches_snipe_rows() -> None:
     # Regression (audit 2026-06-12 round 3): sniper fills are deliberately
     # quarter-size and lifecycle-managed by the sniper — the daily rebalance
@@ -329,7 +355,7 @@ def test_plan_skips_component_tagged_row_without_weight() -> None:
         equity_usdt=10_000.0,
         base_notional_pct_equity=2.0,
         target_scale=1.0,
-        component_tags_requiring_weight=("p3", "tp14"),
+        component_tags_requiring_weight=("p3", "p4p5"),
     )
 
     # Component-suffixed row with NO weight -> skipped entirely.

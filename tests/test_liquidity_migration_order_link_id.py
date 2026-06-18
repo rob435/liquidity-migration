@@ -19,8 +19,8 @@ from liquidity_migration.order_link_id import (
 # exec-router-3 — component tags must not start with 'a'
 # ──────────────────────────────────────────────────────────────────────────────
 def test_assert_routable_component_tags_passes_deployed_tags() -> None:
-    # The deployed continuous tags are p3/p4p3/p4p5/tp14 — none start with 'a'.
-    assert_routable_component_tags(["", "p3", "p4p3", "p4p5", "tp14", "s"])  # no raise
+    # The deployed continuous tags are p3/p4p3/p4p5 — none start with 'a'.
+    assert_routable_component_tags(["", "p3", "p4p3", "p4p5", "s"])  # no raise
 
 
 def test_assert_routable_component_tags_raises_for_a_prefixed_tag() -> None:

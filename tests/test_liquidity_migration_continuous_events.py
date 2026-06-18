@@ -144,6 +144,34 @@ def test_fresh_entries_illiquid_hours_in_spell_do_not_create_new_spells() -> Non
     assert got == [("A", 0)]  # ONE spell; hour 3 is a continuation, not a new fresh entry
 
 
+def test_fresh_entries_state_exit_uses_hysteresis_hold_band_without_creating_d8_entries() -> None:
+    """Live exits enter on fresh D9, then hold through D8 when exit_decile_buffer=1.
+
+    The state spell_end must extend through the D8 wobble band so the backtest covers only
+    once the name drops below D8; D8 itself must not create a new entry.
+    """
+    h = MS_PER_HOUR
+    panel = pl.DataFrame(
+        {
+            "symbol": ["A", "A", "A", "A", "B"],
+            "ts_ms": [0, h, 2 * h, 3 * h, h],
+            "decile": [9, 8, 8, 7, 8],
+            "composite": [0.9, 0.8, 0.8, 0.4, 0.8],
+            "turnover_quote": [1e6, 1e6, 1e6, 1e6, 1e6],
+        }
+    )
+    cfg = ContinuousEventConfig(
+        decile=9,
+        exit_mode="state",
+        exit_decile_buffer=1,
+        liq_turnover_min=500_000.0,
+    )
+    fresh = _fresh_entries(panel, cfg)
+    assert fresh.select("symbol", "ts_ms", "spell_end_ts").to_dicts() == [
+        {"symbol": "A", "ts_ms": 0, "spell_end_ts": 2 * h}
+    ]
+
+
 def test_fresh_entries_entry_event_trigger_can_fire_inside_existing_decile_spell() -> None:
     """Event-trigger mode is not the old always-on decile spell gate.
 
@@ -400,7 +428,42 @@ def test_state_exit_holds_only_while_in_decile() -> None:
     assert trades.height == 1
     # entry bar ends at sig_ts + (1+1)h = 2h; state exit = spell_end(2h) + 2h = 4h -> hold ~2h, NOT 12h
     assert trades["hold_hours"][0] <= 4.0
-    assert trades["exit_reason"][0] == "max_hold"  # planned (state) exit, no stop
+    assert trades["exit_reason"][0] == "left_decile"  # planned state exit, no stop
+
+
+def test_run_trades_stop_approach_cuts_before_server_stop_and_labels_reason() -> None:
+    rows = []
+    for i in range(8):
+        high = 100.0
+        close = 100.0
+        if i == 3:
+            high = 120.0
+            close = 120.0
+        rows.append(
+            {
+                "ts_ms": i * MS_PER_HOUR,
+                "symbol": "A",
+                "open": 100.0,
+                "high": high,
+                "low": 100.0,
+                "close": close,
+            }
+        )
+    bars = _indexed_price_bars_by_symbol(pl.DataFrame(rows))
+    entries = pl.DataFrame({"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]})
+    cfg = ContinuousEventConfig(
+        max_active=5,
+        hold_hours=6,
+        entry_delay_hours=0,
+        stop_loss_pct=0.25,
+        stop_approach_frac=0.8,
+        use_funding=False,
+        flat_round_trip_bps=0.0,
+    )
+    trades, _ = _run_trades(entries, bars, None, cfg)
+    assert trades.height == 1
+    assert trades["exit_reason"][0] == "stop_approach"
+    assert trades["exit_price"][0] == pytest.approx(120.0)
 
 
 def test_run_trades_cooldown_blocks_reentry() -> None:

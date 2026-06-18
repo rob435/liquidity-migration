@@ -49,9 +49,9 @@ python -m liquidity_migration <subcommand> --help
 
 ## Canonical commands
 
-Research sweeps: continuous sweeps use an in-memory config-override driver
-(see `scripts/alpha_sweep.py`); long sweeps call `run_long_native_research`
-directly per cell (see `scripts/long_improve_sweep.py`). The erased
+Research sweeps: use a small dated dispatcher for the specific pre-registered
+cells and call the relevant package runner directly per cell. Do not revive
+deleted generic sweep helpers. The erased
 `volume_events_cell.sh` single-cell path has NO replacement — the daily-short
 engine it drove is gone.
 
@@ -86,8 +86,8 @@ subcommand list — do not maintain a copy here.
   explicitly biased diagnostics, and that run must be labelled biased.
 - Demo order submission requires `SUBMIT_ORDERS=1` + `CONFIRM_DEMO_ORDERS=1`
   and a known `STRATEGY_PROFILE`; the DEPLOYED profile is pinned by the
-  deploy/verify scripts, not refused at runtime — check STATE.md > What's
-  Running before changing it. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle
+  deploy/verify scripts, not refused at runtime — check STATE.md > What Is
+  Running / Wired before changing it. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle
   (`bybit.resolve_private_credentials`), which defaults to demo; keep it on demo
   without explicit owner instruction.
 - Continuous and LONG have separate lifecycles; do not transfer assumptions

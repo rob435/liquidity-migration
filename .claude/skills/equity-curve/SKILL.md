@@ -1,42 +1,122 @@
 ---
 name: equity-curve
-description: "Produce equity curves for the promoted LONG v11a sleeve from its EXACT deployed profile, and the official strategy-vs-BTC PNG. Use when asked for any sleeve's equity curve, to backtest the promoted/deployed profile, to get the equity chart PNG, or to compare sleeves/venues. The zero-friction path for both sleeves is scripts/equity_curves.sh (profiles from liquidity_migration/promoted.py); the long-only deep-dive is scripts/long_native_sweep_fc_min_day.py. Covers per-venue full-PIT roots, outputs, and run-label interpretation. (Continuous was de-promoted 2026-06-05 and is no longer part of the equity tool.)"
+description: "Produce official equity curves for the promoted LONG v11a sleeve and the research-stage CONTINUOUS demo book. Use scripts/equity_curves.sh for long, continuous, or long-vs-continuous comparisons; LONG comes from liquidity_migration/promoted.py, CONTINUOUS delegates to scripts/continuous_deployed_equity_refresh.py and is a promoted-in-code profile by operator override (2026-06-15), demo/paper only - not a real-money or gate-pass claim. Covers per-venue full-PIT roots, outputs, and run-label interpretation."
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
+> ERASURE NOTE (2026-06-11, operator order): the daily SHORT sleeve was erased
+> from the system. Ignore old short/volume-events commands. The surviving curve
+> surfaces are LONG v11a and the CONTINUOUS fade demo book.
 
-# Equity curves — promoted profiles, one command
+# Equity Curves - One Runner
 
-**For the promoted-in-code LONG sleeve equity curve, use the zero-friction tool:**
+Use the official wrapper:
 
 ```bash
-bash scripts/equity_curves.sh                 # LONG only, last 3 years
-bash scripts/equity_curves.sh --years 2       # shorter window (lighter on the 16 GB box)
+bash scripts/equity_curves.sh                              # LONG only, last 3 years
+bash scripts/equity_curves.sh --sleeves long               # explicit LONG
+bash scripts/equity_curves.sh --sleeves continuous         # continuous demo book
+bash scripts/equity_curves.sh --sleeves long,continuous    # side-by-side run
+bash scripts/equity_curves.sh --years 2                    # shorter window
+bash scripts/equity_curves.sh --start 2023-06-01 --end 2026-06-12
+bash scripts/equity_curves.sh --sleeves continuous --chart-leverage 2.5
 ```
 
-It runs the LONG sleeve's EXACT promoted-in-code profile — sourced from the single source
-of truth `liquidity_migration/promoted.py` (`long_profile`; `PROFILES == {"long"}`
-since the 2026-06-11 short-sleeve erasure, pinned by `tests/test_promoted_profiles.py`)
-— emits the equity PNG, and prints the `run_label` for the run (a biased/partial-PIT
-result is flagged, never hidden). No flag archaeology, no "what's deployed?" guessing.
-Use `--long-notional-multiplier N` to draw the long curve at a higher (e.g. 5x)
-sizing — pure leverage on the same signal.
+Venue roots:
 
-The rest of this skill is the **long-only deep-dive** — use it when you need more than the
-one-command run.
+```bash
+bash scripts/equity_curves.sh --root ~/SHARED_DATA/bybit_full_pit --venue bybit
+bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
+```
 
----
+`--venue` is only needed for the continuous sleeve when the venue cannot be
+inferred from `--root`.
 
-# Long-only sleeve equity curve + official PNG (deep-dive)
+## Sleeve Contract
 
-The one command for the long-only (long_native v11a) equity curve + the official
-strategy-vs-BTC PNG is `scripts/long_native_sweep_fc_min_day.py`. Use it instead of
-hand-assembling a `long_native` run — there is **no CLI subcommand** (only the
-forward demo `long-native-event-demo-cycle` is wired into `python -m liquidity_migration`).
+- `long`: the promoted-in-code LONG v11a sleeve. The profile is sourced from
+  `liquidity_migration/promoted.py` (`PROFILES == {"long", "continuous"}`) and run through
+  `run_long_native_research`. Use `--long-notional-multiplier N` only to draw a
+  pure-leverage curve on the same signal.
+- `continuous`: the research/demo-stage continuous ensemble reconstruction:
+  continuous_ensemble_v2 components plus the banked BTC+ETH 2f hedge, via
+  `scripts/continuous_deployed_equity_refresh.py`. It is in `promoted.PROFILES`
+  by an explicit operator override (2026-06-15), NOT a demo-arbiter gate pass: it
+  is demo/paper ONLY (REAL_MONEY stays false, Tier-3 real-money gate unmet), not a
+  real-money claim, and not promotion evidence. The forward demo/paper record is
+  the arbiter. Receipt:
+  `docs/preregistration/2026-06-15-operator-override-promote-continuous.md`.
+
+Continuous-specific options:
+
+```bash
+bash scripts/equity_curves.sh --sleeves continuous --continuous-render-only
+bash scripts/equity_curves.sh --sleeves continuous --continuous-chart-leverage 3
+bash scripts/equity_curves.sh --sleeves continuous \
+  --continuous-frozen-fallback ~/SHARED_DATA/continuous_deployed_equity_refresh_2026-06-12
+```
+
+`--continuous-render-only` requires an existing
+`<out>/continuous/<venue>/continuous_equity.csv`; it re-renders charts and stats
+without rerunning components. The frozen fallback root supplies the component
+configs when the original one-off receipt directories are absent.
+
+`--continuous-chart-leverage N` (alias `--chart-leverage N`) writes an extra
+pure-leverage continuous chart next to the 1x chart. Default is `4`; pass `1`
+to suppress the extra leveraged PNG. This is chart/report leverage only:
+margin and liquidation are not modeled.
+
+## Outputs
+
+Default output root:
+
+```text
+<ROOT>/reports/equity_curves/
+```
+
+Key files:
+
+- LONG: `long/**/long_native_equity_btc.png`,
+  `long/**/long_native_equity.csv`, trades/baskets/monthly/report JSON+MD.
+- CONTINUOUS: `continuous/<venue>/continuous_equity_btc.png` and
+  `continuous/<venue>/continuous_equity.csv`.
+- CONTINUOUS also writes `continuous_equity_btc_<N>x.png`,
+  `continuous_equity_<N>x.csv`, and `continuous_monthly_<N>x.csv` for the
+  requested chart leverage. The 1x outputs are
+  `continuous_equity_btc.png`, `continuous_equity.csv`, and
+  `continuous_monthly.csv`.
+
+The monthly table on continuous charts shows real entry-month trade counts from
+the component trade ledgers, deduped by `(entry_ts_ms, symbol, side)`, not equity
+row counts. The runner summary prefers the unlevered continuous PNG when both 1x
+and a leveraged chart exist.
+
+## Data Roots
+
+| Venue | Root | Notes |
+|---|---|---|
+| Bybit | `~/SHARED_DATA/bybit_full_pit` | funding dataset named `funding` |
+| Binance | `~/SHARED_DATA/binance_full_pit` | funding dataset named `binance_usdm_funding`; storage fallback resolves it |
+
+Use per-venue full-PIT roots for research curves. Do not point research runs at
+live demo or paper ledger roots.
+
+## Integrity Read
+
+Always read the printed `run_label` and chart subtitle.
+
+- LONG labels come from `long_native._run_label`. Clean best case is
+  `full_pit_universe`; `pit_membership_filtered_current_universe` is not citable
+  unless the runner proves delisted names were traded and explains the conservative
+  label.
+- CONTINUOUS is labelled `continuous_demo_paper_research_stage` by the equity
+  runner. That means comparison/diagnostic curve, not promotion evidence. The
+  continuous research window is spent; forward demo/paper is the decision surface.
+- Any result with missing PIT, current-universe bias, missing cost artifacts, or
+  unexplained synchronization is exploratory/invalid under `backtest-integrity`.
+
+## Long Deep Dive
+
+For a long-only parameter deep dive, use:
 
 ```bash
 .venv/bin/python scripts/long_native_sweep_fc_min_day.py \
@@ -45,97 +125,12 @@ forward demo `long-native-event-demo-cycle` is wired into `python -m liquidity_m
   --report-subdir long_native_v11a_rerun
 ```
 
-The v11a sleeve (`liquidity_migration/long_native.py`, `run_long_native_research`)
-is crypto-native and long-only — separate from the volume-events short sleeve.
+Use this only when you need the v11a sweep machinery. For normal equity curves
+and long-vs-continuous comparisons, use `scripts/equity_curves.sh`.
 
-- `--values` takes the `fc_min_day_return` value(s) to sweep; pass the canonical
-  v11a default (defined in `_v11a_long_native_config()`) for the production curve.
-  One value = one run; the script overrides only that param.
-- `--config` (default `configs/volume_alpha.default.yaml`) supplies only the
-  **cost model**; the strategy config is always v11a.
-- Runtime ≈ 100–200 s per venue. Re-run instead of trusting a stale cached
-  report whenever the user emphasizes fresh / current / "no bugs" data.
+## Pairs With
 
-## Data roots — per venue (critical)
-
-| Venue | Root | Why |
-|---|---|---|
-| Bybit | `~/SHARED_DATA/bybit_full_pit` | funding dataset named `funding`, 764 symbols → funding modeled |
-| Binance | `~/SHARED_DATA/binance_full_pit` | `binance_usdm_funding` rebuilt 2026-06-09: 697 symbols / ~2.23M rows with true settlement intervals → funding modeled |
-
-**Funding now auto-resolves — no symlink/rename needed.** As of the run-diagnostics
-refactor, `read_dataset(root,"funding")` transparently falls back to the
-venue-specific dataset present on the root (`binance_usdm_funding`) when a canonical
-`funding/` dir is absent (`storage.resolve_dataset_name`). So `binance_full_pit` is
-funding-readable directly; you do **not** need `binance_full_pit_strategy` (it does
-not exist on this box) or a hand symlink. The old ~51-symbol partial-coverage caveat
-is GONE since the 2026-06-09 rebuild (receipt
-`docs/preregistration/binance-funding-rebuild-2026-06-09.md`; pre-rebuild dataset
-kept as `binance_usdm_funding.pre_rebuild_2026-06-09.bak`) — all future Binance
-numbers use the full-coverage basis. A `FUNDING_PARTIAL` warning on a new run now
-indicates a real gap worth investigating, not the known-old coverage hole.
-
-Every run now prints a named **warnings block** (and the report JSON carries
-`warnings[]` + a machine `tainted` bool) — read that instead of decoding `run_label`
-by hand. `tainted: true` (e.g. `PIT_SURVIVORSHIP`) means survivorship/look-ahead
-biased → not citable; data-gap warnings (`FUNDING_PARTIAL`, `WINDOW_CLIPPED_*`) are
-non-blocking and tell you exactly what to backfill.
-
-## Outputs — `<ROOT>/reports/<subdir>/fc_min_day_015/`
-
-- **`long_native_equity_btc.png`** — the official equity curve: strategy equity
-  vs BTC buy-and-hold, $1-normalized, with a monthly-returns table. **Display it
-  with the Read tool** (it renders the image). This is "the official equity curve
-  maker" output. Note: BTC's multiple dominates the y-axis, so the strategy line
-  can look flat — read the legend multiples, not the visual height.
-- `long_native_equity.csv` — per-basket equity / drawdown / basket_return / date.
-- `long_native_trades.csv`, `long_native_baskets.csv`, `long_native_monthly.csv`.
-- `long_native_research_report.json` / `.md` — run_label, summary, splits,
-  event_counts, config.
-
-## Canonical v11a profile (for context when reporting)
-
-- Universe / regime parameters (universe size, turnover lookback, BTC regime
-  gate) come from `_v11a_long_native_config()` in `liquidity_migration/long_native_event_demo.py`
-  — read them there rather than trusting a copy here. Membership is PIT-recomputed
-  daily, so the count of distinct symbols traded exceeds the universe size as it
-  rotates over the years.
-- In practice fires `fomo_chase` events; the docstring's capitulation_rebound /
-  funding_squeeze / volume_resurrection patterns fire 0 under v11a.
-- `require_full_pit_universe=False` → **the run does NOT raise on a PIT failure.
-  You MUST read the run_label every time** (see below).
-
-## Run label = the integrity verdict (check every run)
-
-From `long_native._run_label`, best → worst:
-
-- `full_pit_universe` — clean: full-PIT universe + funding modeled.
-- `full_pit_universe_funding_partial` / `full_pit_universe_funding_missing` —
-  universe clean (no survivorship), funding caveat (costs understated where
-  funding is absent).
-- `pit_membership_filtered_current_universe` — **full-PIT FAILED → current-universe
-  survivorship-biased → throwaway**, never cite as evidence. Caused by a
-  kline/manifest coverage gap (e.g. Bybit's early-2021 1h-kline gap: the manifest
-  claims symbol-dates the 1h klines don't cover).
-- `pit_required_missing_manifest` — archive manifest empty.
-
-A PIT failure means a kline/manifest coverage gap; the run_label and report name
-it. To refresh membership and re-check coverage, follow the **`pit-reconcile`**
-skill. Fix Bybit kline gaps with `archive-download-klines-1h`; fix
-Binance funding gaps by backfilling funding.
-
-## Cross-venue read
-
-Run both venues and compare total return / Sharpe-like / profit factor / max-DD.
-Directional agreement across Bybit + Binance is the robustness signal; divergence
-flags a regime/microstructure artefact or a data-coverage difference (e.g. one
-venue funding-partial, the other funding-modeled; different history start).
-
-## Pairs with
-
-- `backtest-integrity` — apply before trusting any run; the label rules above
-  ARE that standard for this sleeve.
-- `research-report` — interpret the JSON/MD report and assign a run label.
-- `pit-reconcile` — refresh PIT membership / diagnose manifest-vs-kline coverage
-  gaps (the official fix for a PIT-failed run_label).
-- `run-strategy` — the rest of the CLI (data builders, audits, forward runners).
+- `backtest-integrity`: apply before trusting or citing a curve.
+- `research-report`: interpret generated JSON/MD reports.
+- `pit-reconcile`: diagnose PIT manifest or demo/paper ledger issues.
+- `run-strategy`: construct other CLI/data-root commands correctly.

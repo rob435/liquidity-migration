@@ -64,7 +64,7 @@ from .event_demo import (
     plan_stop_repairs,
     summarize_position_pnl,
 )
-from .long_native_event_demo import MULTI_STRAT_V1_STRATEGY_ID
+from .long_native_event_demo import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
 from . import cross_sleeve as _cross_sleeve
 from .event_demo import wallet_equity_usdt
@@ -2236,7 +2236,7 @@ class EventWebSocketRiskEngine:
         trade_id for a recovered adoption. Falls back to canonical defaults
         when adopt_*_strategy_id was left empty in EventWebSocketRiskConfig."""
         if sleeve == "long":
-            return self.risk.adopt_long_strategy_id or MULTI_STRAT_V1_STRATEGY_ID
+            return self.risk.adopt_long_strategy_id or LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
         if sleeve == "continuous":
             from .continuous_demo import CONTINUOUS_STRATEGY_ID  # lazy: avoid heavy import at module load
             return self.risk.adopt_continuous_strategy_id or CONTINUOUS_STRATEGY_ID

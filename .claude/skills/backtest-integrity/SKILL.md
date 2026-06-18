@@ -101,11 +101,10 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   signals, the decision timestamp is the causal trailing-window bar close; any
   zero-delay entry must be justified by that causal construction and remains
   research-gated.
-- Run sweeps via a dispatcher script, not hand-assembled engine flags.
-  The old volume-events dispatcher was erased with the short-sleeve cleanup;
-  current patterns are `scripts/alpha_sweep.py`
-  (continuous, in-memory config overrides) and `scripts/long_improve_sweep.py`
-  (long, direct `run_long_native_research` cells). The Tier-2 verdict comes from
+- Run sweeps via a dated dispatcher script, not hand-assembled engine flags.
+  The old volume-events dispatcher and generic alpha sweep scripts were erased
+  with the research scrub. For new serious work, write a small pre-registered
+  dispatcher that calls the relevant package runner directly per cell. The Tier-2 verdict comes from
   `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
   `scripts/apply_decision_rule.py`. Every engine requires full PIT by default;
   partial-PIT runs (config `require_full_pit_universe=False` — the old

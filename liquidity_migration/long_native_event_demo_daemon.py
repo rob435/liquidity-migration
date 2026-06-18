@@ -59,7 +59,7 @@ class LongNativeDemoDaemon:
 
     # Sleeve identity used in operator-facing telegram text. Subclasses override.
     _sleeve_label = "long"
-    _daemon_label = "long-native MultiStratV1"
+    _daemon_label = "long-native LongV11aDivWeekendVol"
 
     def __init__(
         self,

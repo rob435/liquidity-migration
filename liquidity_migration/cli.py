@@ -960,6 +960,10 @@ def _cmd_continuous_rebalance_cycle_audit(args: argparse.Namespace, config: Rese
             cycles_dataset=args.cycles_dataset,
             orders_dataset=args.orders_dataset,
             output_dir=args.output_dir,
+            start_ts_ms=args.start_ts_ms,
+            strategy_profile=args.strategy_profile,
+            cycle_strategy_id=args.strategy_id,
+            order_strategy_id=args.strategy_id,
         )
         result = payload["result"]
         summary = result["summary"]
@@ -971,6 +975,9 @@ def _cmd_continuous_rebalance_cycle_audit(args: argparse.Namespace, config: Rese
             f"scale_mismatches={summary['scale_mismatches']} "
             f"same_day_resize_violations={summary['same_day_resize_violations']} "
             f"resize_order_count_mismatch={summary['resize_order_count_mismatch']} "
+            f"start_ts_ms={summary.get('start_ts_ms') or '-'} "
+            f"strategy_profile={summary.get('strategy_profile') or '-'} "
+            f"strategy_id={summary.get('cycle_strategy_id') or '-'} "
             f"path={payload['report_path']}"
         )
         return 0 if result["ok"] else 1
@@ -985,6 +992,10 @@ def _cmd_continuous_forward_readiness(args: argparse.Namespace, config: Research
             require_no_unmatched=not args.allow_unmatched,
             require_demo=not args.paper_only,
             output_dir=args.output_dir,
+            start_ts_ms=args.start_ts_ms,
+            strategy_profile=args.strategy_profile,
+            paper_strategy_id=args.paper_strategy_id,
+            demo_strategy_id=args.demo_strategy_id,
         )
         summary = payload["summary"]
         print(
@@ -997,6 +1008,10 @@ def _cmd_continuous_forward_readiness(args: argparse.Namespace, config: Research
             f"paper_only={summary['paper_only']} "
             f"demo_only={summary['demo_only']} "
             f"sample_warning={summary['sample_warning']} "
+            f"start_ts_ms={summary.get('start_ts_ms') or '-'} "
+            f"strategy_profile={summary.get('strategy_profile') or '-'} "
+            f"paper_strategy_id={summary.get('paper_strategy_id') or '-'} "
+            f"demo_strategy_id={summary.get('demo_strategy_id') or '-'} "
             f"path={payload['report_path']}"
         )
         return 0 if payload["ok"] else 1

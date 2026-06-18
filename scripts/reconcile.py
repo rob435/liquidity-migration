@@ -97,6 +97,15 @@ SLEEVES: dict[str, dict[str, object]] = {
 }
 ALL_SLEEVES = tuple(SLEEVES.keys())
 
+# Exact v2-forward boundary. The 2026-06-18 deploy reset the continuous control to
+# continuous_ensemble_v2; old v1 rows remain in pulled ledgers only so the executor can
+# wind them down. Reconcile must not let those rows poison the v2 baseline.
+CONTINUOUS_V2_START = dt.datetime(2026, 6, 18, 19, 54, tzinfo=dt.timezone.utc)
+CONTINUOUS_V2_START_MS = int(CONTINUOUS_V2_START.timestamp() * 1000)
+CONTINUOUS_V2_PROFILE = "continuous_ensemble_v2"
+CONTINUOUS_V2_DEMO_STRATEGY_ID = "continuous_fade_v2"
+CONTINUOUS_V2_PAPER_STRATEGY_ID = "continuous_fade_v2_paper"
+
 
 # ----------------------------------------------------------------------------- helpers
 class Step:
@@ -215,14 +224,40 @@ def reconcile_long(step: Step, *, paper: str, demo: str) -> tuple[str, bool]:
     return _summarize_leg(out, "long paper-demo reconciliation", rc)
 
 
-def reconcile_continuous(step: Step, *, paper: str, demo: str) -> tuple[str, bool]:
+def reconcile_continuous(
+    step: Step,
+    *,
+    paper: str,
+    demo: str,
+    start_ts_ms: int = CONTINUOUS_V2_START_MS,
+    strategy_profile: str = CONTINUOUS_V2_PROFILE,
+    paper_strategy_id: str = CONTINUOUS_V2_PAPER_STRATEGY_ID,
+    demo_strategy_id: str = CONTINUOUS_V2_DEMO_STRATEGY_ID,
+) -> tuple[str, bool]:
     step.banner("Reconcile CONTINUOUS: paper-readiness + signal-consistency")
     rc_pd, out = step.run_capture(
-        _cli("continuous-forward-readiness", "--paper-data-root", paper, "--demo-data-root", demo, "--paper-only")
+        _cli(
+            "continuous-forward-readiness",
+            "--paper-data-root", paper,
+            "--demo-data-root", demo,
+            "--paper-only",
+            "--start-ts-ms", str(start_ts_ms),
+            "--strategy-profile", strategy_profile,
+            "--paper-strategy-id", paper_strategy_id,
+            "--demo-strategy-id", demo_strategy_id,
+        )
     )
     pd_summary, pd_ok = _summarize_leg(out, "continuous forward readiness", rc_pd)
     # Signal-consistency: are the no-order paper entries genuine engine D9 picks?
-    rc_sig, sig = step.run_capture(_script("continuous_demo_signal_check.py", "--root", paper))
+    rc_sig, sig = step.run_capture(
+        _script(
+            "continuous_demo_signal_check.py",
+            "--root", paper,
+            "--trades-dataset", "continuous_fade_paper_trades",
+            "--start-ts-ms", str(start_ts_ms),
+            "--strategy-id", paper_strategy_id,
+        )
+    )
     sig_summary, sig_ok = _summarize_leg(sig, "SUMMARY:", rc_sig)
     return f"{pd_summary}  ||  signal: {sig_summary}", (pd_ok and sig_ok)
 

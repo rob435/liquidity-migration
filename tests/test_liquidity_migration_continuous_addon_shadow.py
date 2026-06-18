@@ -31,7 +31,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 {
                     "trade_id": "p-a",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_v1_paper",
+                    "strategy_id": "continuous_fade_v2_paper",
                     "side": "short",
                     "status": "open",
                     "signal_ts_ms": 10_000,
@@ -42,7 +42,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 {
                     "trade_id": "p-b",
                     "symbol": "BBBUSDT",
-                    "strategy_id": "continuous_fade_v1_paper",
+                    "strategy_id": "continuous_fade_v2_paper",
                     "side": "short",
                     "status": "closed",
                     "signal_ts_ms": 30_000,
@@ -65,7 +65,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "order_link_id": "lm-en-c-AAA-1",
                     "trade_id": "p-a",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_v1_paper",
+                    "strategy_id": "continuous_fade_v2_paper",
                     "reduce_only": False,
                     "status": "planned",
                     "signal_ts_ms": 10_000,
@@ -74,7 +74,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "order_link_id": "lm-en-c-AAA-1",
                     "trade_id": "p-a",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_v1_paper",
+                    "strategy_id": "continuous_fade_v2_paper",
                     "reduce_only": False,
                     "status": "planned",
                     "signal_ts_ms": 10_000,
@@ -91,7 +91,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 {
                     "trade_id": "a-a",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "side": "short",
                     "status": "open",
                     "signal_ts_ms": 10_000,
@@ -102,7 +102,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 {
                     "trade_id": "a-b",
                     "symbol": "BBBUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "side": "short",
                     "status": "closed",
                     "signal_ts_ms": 30_000,
@@ -115,7 +115,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 {
                     "trade_id": "a-c-extra",
                     "symbol": "CCCUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "side": "short",
                     "status": "closed",
                     "signal_ts_ms": 70_000,
@@ -138,7 +138,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "order_link_id": "lm-en-ca-AAA-1",
                     "trade_id": "a-a",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "reduce_only": False,
                     "status": "planned",
                     "signal_ts_ms": 10_000,
@@ -147,7 +147,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "order_link_id": "lm-en-ca-AAA-1",
                     "trade_id": "a-a",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "reduce_only": False,
                     "status": "submitted_unconfirmed",
                     "signal_ts_ms": 10_000,
@@ -156,7 +156,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "order_link_id": "lm-en-ca-AAA-2",
                     "trade_id": "a-a-retry",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "reduce_only": False,
                     "status": "planned",
                     "signal_ts_ms": 10_000,
@@ -165,7 +165,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "order_link_id": "lm-en-ca-BBB-1",
                     "trade_id": "a-b",
                     "symbol": "BBBUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "reduce_only": False,
                     "status": "filled",
                     "signal_ts_ms": 30_000,
@@ -174,7 +174,7 @@ def _write_shadow_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "order_link_id": "lm-ux-ca-AAA-exit",
                     "trade_id": "a-a",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "reduce_only": True,
                     "status": "filled",
                     "signal_ts_ms": 10_000,
@@ -253,8 +253,8 @@ def test_continuous_addon_shadow_audit_reports_overlap_and_history_diff(tmp_path
             primary_data_root=str(primary_root),
             addon_data_root=str(addon_root),
             historical_blended_trades_csv=str(historical_csv),
-            expected_primary_strategy_id="continuous_fade_v1_paper",
-            expected_addon_strategy_id="continuous_fade_addon_v1_paper",
+            expected_primary_strategy_id="continuous_fade_v2_paper",
+            expected_addon_strategy_id="continuous_fade_addon_v2_paper",
             expected_primary_entry_order_prefix="lm-en-c",
             expected_addon_entry_order_prefix="lm-en-ca",
             output_dir=str(out_dir),
@@ -338,15 +338,15 @@ def test_continuous_addon_shadow_audit_reports_overlap_and_history_diff(tmp_path
     assert summary["historical"]["concentration"]["top1_weight_share"] == pytest.approx(0.999)
     assert summary["historical_concentration_drift"]["top1_weight_share"] == pytest.approx(0.499)
     assert summary["primary_strategy"] == {
-        "expected_strategy_id": "continuous_fade_v1_paper",
-        "strategy_counts": {"continuous_fade_v1_paper": 2},
+        "expected_strategy_id": "continuous_fade_v2_paper",
+        "strategy_counts": {"continuous_fade_v2_paper": 2},
         "expected_strategy_rows": 2,
         "unexpected_strategy_rows": 0,
         "missing_strategy_rows": 0,
     }
     assert summary["addon_strategy"] == {
-        "expected_strategy_id": "continuous_fade_addon_v1_paper",
-        "strategy_counts": {"continuous_fade_addon_v1_paper": 3},
+        "expected_strategy_id": "continuous_fade_addon_v2_paper",
+        "strategy_counts": {"continuous_fade_addon_v2_paper": 3},
         "expected_strategy_rows": 3,
         "unexpected_strategy_rows": 0,
         "missing_strategy_rows": 0,
@@ -633,8 +633,8 @@ def test_continuous_addon_shadow_audit_reports_overlap_and_history_diff(tmp_path
     report_text = Path(payload["report_path"]).read_text(encoding="utf-8")
     assert "continuous_addon_shadow_audit_addon_symbol_concentration.csv" in report_text
     assert "continuous_addon_shadow_audit_historical_addon_symbol_concentration.csv" in report_text
-    assert "Primary trade strategy ids: `continuous_fade_v1_paper=2`" in report_text
-    assert "Add-on trade strategy ids: `continuous_fade_addon_v1_paper=3`" in report_text
+    assert "Primary trade strategy ids: `continuous_fade_v2_paper=2`" in report_text
+    assert "Add-on trade strategy ids: `continuous_fade_addon_v2_paper=3`" in report_text
     assert "Primary unexpected strategy rows: `0`" in report_text
     assert "Add-on unexpected strategy rows: `0`" in report_text
     assert "Primary entry order prefixes: `lm-en-c=1`" in report_text
@@ -889,7 +889,7 @@ def test_continuous_addon_shadow_audit_unmatched_entry_order_attempt_gate(tmp_pa
                     "order_link_id": "lm-en-ca-ORPHAN-1",
                     "trade_id": "a-orphan",
                     "symbol": "ORPHANUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "reduce_only": False,
                     "status": "filled",
                     "signal_ts_ms": 130_000,
@@ -1173,7 +1173,7 @@ def test_continuous_addon_shadow_audit_cooldown_simulation(tmp_path: Path) -> No
                 {
                     "trade_id": "a-a-second",
                     "symbol": "AAAUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "side": "short",
                     "status": "open",
                     "signal_ts_ms": 54_000,
@@ -1195,7 +1195,7 @@ def test_continuous_addon_shadow_audit_cooldown_simulation(tmp_path: Path) -> No
                     "order_link_id": "lm-en-ca-BBB-2",
                     "trade_id": "a-b-second",
                     "symbol": "BBBUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "reduce_only": False,
                     "status": "planned",
                     "signal_ts_ms": 33_000,
@@ -1347,7 +1347,7 @@ def test_continuous_addon_shadow_audit_strategy_identity_gate(tmp_path: Path) ->
                 {
                     "trade_id": "a-wrong-strategy",
                     "symbol": "WRONGUSDT",
-                    "strategy_id": "continuous_fade_v1_paper",
+                    "strategy_id": "continuous_fade_v2_paper",
                     "side": "short",
                     "status": "closed",
                     "signal_ts_ms": 110_000,
@@ -1368,8 +1368,8 @@ def test_continuous_addon_shadow_audit_strategy_identity_gate(tmp_path: Path) ->
             primary_data_root=str(primary_root),
             addon_data_root=str(addon_root),
             output_dir=str(tmp_path / "audit"),
-            expected_primary_strategy_id="continuous_fade_v1_paper",
-            expected_addon_strategy_id="continuous_fade_addon_v1_paper",
+            expected_primary_strategy_id="continuous_fade_v2_paper",
+            expected_addon_strategy_id="continuous_fade_addon_v2_paper",
             max_primary_unexpected_strategy_rows=0,
             max_addon_unexpected_strategy_rows=0,
         )
@@ -1378,8 +1378,8 @@ def test_continuous_addon_shadow_audit_strategy_identity_gate(tmp_path: Path) ->
     summary = payload["summary"]
     assert summary["primary_strategy"]["unexpected_strategy_rows"] == 0
     assert summary["addon_strategy"]["strategy_counts"] == {
-        "continuous_fade_addon_v1_paper": 3,
-        "continuous_fade_v1_paper": 1,
+        "continuous_fade_addon_v2_paper": 3,
+        "continuous_fade_v2_paper": 1,
     }
     assert summary["addon_strategy"]["unexpected_strategy_rows"] == 1
     gate = summary["gate"]
@@ -1398,7 +1398,7 @@ def test_continuous_addon_shadow_audit_order_prefix_identity_gate(tmp_path: Path
                     "order_link_id": "lm-en-c-WRONG-1",
                     "trade_id": "a-wrong-prefix",
                     "symbol": "WRONGUSDT",
-                    "strategy_id": "continuous_fade_addon_v1_paper",
+                    "strategy_id": "continuous_fade_addon_v2_paper",
                     "reduce_only": False,
                     "status": "planned",
                     "signal_ts_ms": 120_000,
@@ -1574,9 +1574,9 @@ def test_continuous_addon_shadow_audit_cli_parser() -> None:
             "--addon-orders-dataset",
             "addon_orders",
             "--expected-primary-strategy-id",
-            "continuous_fade_v1_paper",
+            "continuous_fade_v2_paper",
             "--expected-addon-strategy-id",
-            "continuous_fade_addon_v1_paper",
+            "continuous_fade_addon_v2_paper",
             "--expected-primary-entry-order-prefix",
             "lm-en-c",
             "--expected-addon-entry-order-prefix",
@@ -1707,8 +1707,8 @@ def test_continuous_addon_shadow_audit_cli_parser() -> None:
     assert args.addon_data_root == "addon"
     assert args.primary_orders_dataset == "primary_orders"
     assert args.addon_orders_dataset == "addon_orders"
-    assert args.expected_primary_strategy_id == "continuous_fade_v1_paper"
-    assert args.expected_addon_strategy_id == "continuous_fade_addon_v1_paper"
+    assert args.expected_primary_strategy_id == "continuous_fade_v2_paper"
+    assert args.expected_addon_strategy_id == "continuous_fade_addon_v2_paper"
     assert args.expected_primary_entry_order_prefix == "lm-en-c"
     assert args.expected_addon_entry_order_prefix == "lm-en-ca"
     assert args.min_addon_trades == 10

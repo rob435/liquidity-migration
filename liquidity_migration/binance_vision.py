@@ -1,16 +1,13 @@
-"""Point-in-time Binance USD-M OOS data acquisition from the public
-``data.binance.vision`` archive.
+"""Point-in-time Binance USD-M data-root maintenance from public archives.
 
-Why this exists: a cross-exchange OOS check (Binance USD-M as out-of-sample for
-the Bybit liquidity-migration short) must reconstruct PIT membership from a
-source that includes delisted, renamed and migrated instruments. Reading a live
-``fapi.binance.com/exchangeInfo`` only returns *currently listed* symbols and is
+The current long/continuous research surface needs per-venue full-PIT roots that
+include delisted, renamed, and migrated instruments. Reading live
+``fapi.binance.com/exchangeInfo`` only returns currently listed symbols and is
 survivorship-biased — forbidden by ``docs/backtesting_errors_we_never_repeat.md``.
 
-The ``data.binance.vision`` monthly archive enumerates every symbol that ever
-had bars. This module discovers that universe, downloads 1h klines, and writes a
-Bybit-shaped data root (``klines_1h`` + ``archive_trade_manifest``) so the
-existing ``volume-events`` engine can run against it unmodified.
+The ``data.binance.vision`` monthly archive enumerates every symbol that ever had
+bars. This module discovers that universe, downloads 1h klines, and writes the
+Binance full-PIT root's ``klines_1h`` + ``archive_trade_manifest`` datasets.
 
 CLI:
     python -m liquidity_migration.binance_vision build-binance-oos \\

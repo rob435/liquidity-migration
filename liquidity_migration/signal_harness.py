@@ -1087,8 +1087,8 @@ def build_combined_signal_portfolio(
     # column sum propagates null -> the name is silently dropped from BOTH pools,
     # biasing the decile pool toward names with complete data). Instead a missing Z
     # contributes NEUTRALLY (0) to the sum, and a name is excluded only when it has
-    # ZERO present features. (audit-iter2 harness-cli-1; see the magnitude-normalization
-    # note in docs/strategy_improvements.md.)
+    # ZERO present features. See docs/research_summary.md for the current
+    # operator-gated queue around signal-combination behavior changes.
     z_cols: list[str] = []
     df = panel
     for feature in surviving_features:

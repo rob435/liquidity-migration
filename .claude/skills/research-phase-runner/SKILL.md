@@ -19,9 +19,9 @@ what's done, what's pending, and the current binding decision rules.
 
 ## The program you are working (post-erasure, 2026-06-11)
 
-Two research lines survive: the **CONTINUOUS fade book** (the live demo book,
-research-stage, NOT promoted) and the **long-native v11a sleeve** (promoted-in-code,
-toggled off). The daily SHORT selection program was ERASED 2026-06-11 by operator
+Two research lines survive: the **CONTINUOUS fade book** (the live demo/paper book,
+research-stage, promoted-in-code only by operator override) and the
+**long-native v11a sleeve** (demo/paper enabled in current deploy state). The daily SHORT selection program was ERASED 2026-06-11 by operator
 order — do not propose short work or re-mine its window. As of 2026-06-12 the
 window is open again only for pre-registered, tightly scoped research; closed
 families in `docs/research_summary.md` stay closed. The active queue and decision
@@ -57,11 +57,10 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    off-menu cells without a dated amendment (a new pre-registration receipt) first.
 
 3. **Dispatch.** (`volume_events_cell.sh` was erased with the short engine —
-   single-cell runs now go through a dispatcher too.) Sweeps: write a dispatcher
-   following the current patterns — continuous sweeps use an in-memory
-   config-override driver (see `scripts/alpha_sweep.py`); long sweeps call
-   `run_long_native_research` directly per cell (see
-   `scripts/long_improve_sweep.py`). Preserve the old sweep discipline:
+   single-cell runs now go through a dispatcher too.) For a serious sweep, write
+   a small dated dispatcher for the specific pre-registered cells and call the
+   relevant package runner directly. Do not revive deleted generic sweep scripts.
+   Preserve the old sweep discipline:
    predeclare worker/thread counts for memory-heavy cells because
    over-parallelizing OOMs the box. Always run **both venues**.
 

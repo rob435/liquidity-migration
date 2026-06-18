@@ -1,15 +1,20 @@
-"""Long-side execution module — live counterpart to long_native.run_long_native_research.
+"""Long-side execution module - live counterpart to long_native.run_long_native_research.
 
-Mirrors event_demo.py for the v11a long sleeve (uni10 FC sniper retrace 1%/6h
-fall-through). (`event_demo.py` survives as shared execution infrastructure —
+Mirrors event_demo.py for the v11a long sleeve (uni50 FC sniper retrace 1%/6h
+fall-through). (`event_demo.py` survives as shared execution infrastructure -
 the daily SHORT sleeve itself was ERASED 2026-06-11.) This module
 runs alongside the continuous book on the same Bybit demo account with order-link prefix
 `lm-en-l-*` for entries and `lm-ux-l-*` for exits so the existing ws_risk
 service can route fill events per sleeve.
 
+Human-readable source of truth for the full promoted/demo lifecycle, including
+where long differs from continuous, is ``docs/promoted_trading_logic.md``. Keep
+this module focused on live long execution mechanics and keep lifecycle prose in
+that doc.
+
 Operating model
 ---------------
-- 60s cycle reads the most-recent fully-closed UTC daily bar for each top-10
+- 60s cycle reads the most-recent fully-closed UTC daily bar for each top-50
   universe symbol; runs `detect_pattern_fomo_chase` from long_native against it.
 - Each FC candidate carries a signal_close and a 6h sniper-retrace window. The
   cycle enters at the current market price as soon as current_price reaches
@@ -98,9 +103,9 @@ from .universe import build_current_universe_table
 
 _logger = logging.getLogger("liquidity_migration.long_native_event_demo")
 
-# The single promoted live profile. Per owner: profile name is `MultiStratV1`.
-MULTI_STRAT_V1_STRATEGY_ID = "long_native_v11a_uni10_sniper_retrace1pct_6h_fallthru"
-LONG_DEMO_STRATEGY_PROFILES = ("MultiStratV1",)
+# The single promoted live profile. Per owner: profile name is `LongV11aDivWeekendVol`.
+LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID = "long_native_v11a_div_weekend_vol"
+LONG_DEMO_STRATEGY_PROFILES = ("LongV11aDivWeekendVol",)
 LONG_DEMO_STRATEGY_PROFILE_CHOICES = LONG_DEMO_STRATEGY_PROFILES
 
 # Dataset names for the long-side ledger. Distinct from short's
@@ -169,7 +174,7 @@ class LongNativeDemoCycleConfig:
     account_type: str = "UNIFIED"
     settle_coin: str = "USDT"
     data_name: str = "long-native-event-demo"
-    strategy_profile: str = "MultiStratV1"
+    strategy_profile: str = "LongV11aDivWeekendVol"
     # long-sleeve-5/-6: path to the shared cross-sleeve control root (= the short/account
     # root, owned by ws_risk). None => auto-resolve from this sleeve's data_root via the
     # sibling convention (cross_sleeve.shared_account_root). Read-only here; the whole
@@ -286,7 +291,7 @@ def _v11a_long_native_config() -> LongNativeConfig:
         vol_target_max_scale=1.25,
         vol_target_min_scale=0.30,
         # TA1 atlas gate (2026-06-11, OPERATOR-DIRECTED wiring — owner override of the
-        # TA1 receipt's forward-only path; demo/paper only, sleeve currently OFF).
+        # TA1 receipt's forward-only path; demo/paper only).
         # weekend bonus -> 1.5x Sat/Sun size: the sweep WINNER for the LONG book
         # (long_regularity TA41: dMAR +0.25 bybit / +0.28 binance, Sharpe up on both).
         # The 30d cooldown was sweep-rejected here (hurts both venues: dMAR -0.28/-0.22;
@@ -305,14 +310,14 @@ def _long_demo_event_config(profile: str) -> LongNativeConfig:
             f"Unknown long-native demo profile: {profile}. "
             f"Choices: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}"
         )
-    if profile == "MultiStratV1":
+    if profile == "LongV11aDivWeekendVol":
         return _v11a_long_native_config()
     raise ValueError(f"Unhandled long-native demo profile: {profile}")
 
 
 def _long_demo_strategy_id(profile: str) -> str:
-    if profile == "MultiStratV1":
-        return MULTI_STRAT_V1_STRATEGY_ID
+    if profile == "LongV11aDivWeekendVol":
+        return LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
     raise ValueError(f"Unknown long-native demo profile: {profile}")
 
 
@@ -2098,7 +2103,7 @@ def format_long_telegram_status_message(payload: dict[str, Any], *, reason: str)
     cycle = payload["cycle"]
     ledger_summary = payload.get("ledger_position_summary", {})
     lines = [
-        "[Long sleeve / MultiStratV1] Bybit demo",
+        "[Long sleeve / LongV11aDivWeekendVol] Bybit demo",
         f"time={_iso_dt(cycle['ts_ms'])}",
         f"reason={reason}",
         f"mode={cycle['mode']} equity=${_float(cycle['equity_usdt']):,.2f}",

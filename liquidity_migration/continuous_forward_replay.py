@@ -50,8 +50,7 @@ MS_PER_DAY = 86_400_000
 # (frozen-weights policy). Changing ANY value here voids the accrued forward ledger.
 FROZEN_FORWARD_CONFIG: dict[str, Any] = {
     "object": "continuous_winner_uptrend_ensemble_btc_hedged",
-    # age210tp14 leg dropped 2026-06-18 (operator; receipt
-    # docs/preregistration/2026-06-18-drop-tp14-continuous-ensemble.md). Renormalized = old/0.90.
+    # Current three-component object frozen 2026-06-18. Renormalized = old/0.90.
     # NOTE: this changes frozen_config_hash -> the prior continuous forward ledger is VOIDED;
     # archive the old state dir + regenerate the hedge warmstart + start a fresh clock on deploy.
     "weights": {"turn3p3": 0.3333333333333333, "turn4p3": 0.2222222222222222, "turn4p5": 0.4444444444444444},

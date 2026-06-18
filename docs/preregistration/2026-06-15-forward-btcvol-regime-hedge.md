@@ -3,9 +3,8 @@
 **Date:** 2026-06-15
 **Author:** rob435 (operator-approved 2026-06-15 — "no opt-in, get it implemented
 and running in the demo and forward")
-**Stage:** run-pending (code complete; the confirming run is the first fresh-clock
-orchestrator run on the archived state dir + the first live hedge cycle that
-stamps a non-1.0 `hedge_intensity`).
+**Stage:** accepted as wired for demo/forward-watch. Forward performance remains
+operator-gated and research-stage; no real-money gate is cleared.
 
 Finding: the consolidated historical research record (`docs/research_summary.md`)
 identified BTC-vol hedge modulation as the only robust, both-venue, trade-keeping
@@ -46,8 +45,8 @@ returns strictly before day `d`, so the day-`d` hedge sized as
   (and single-leg `compute_hedge_decision`) multiply `target_scale` by
   `latest_btcvol_intensity(btc_returns)` read from the same hash-pinned
   `frozen_hedge_regime()`; intensity is stamped into the decision diagnostics.
-- `scripts/continuous_deployed_equity.py` / `continuous_deployed_equity_refresh.py`
-  — the reported deployed equity applies the same intensity
+- `scripts/continuous_deployed_equity_refresh.py` — the reported deployed equity
+  applies the same intensity
   (`deployed_hedge_intensity`) so the curve cannot silently diverge from the live
   + forward hedge object.
 
@@ -91,7 +90,7 @@ Object/clock change, not a sweep:
   `tests/test_continuous_regime.py`).
 
 ## Roots that will be touched
-- [ ] bybit_full_pit — read-only; the orchestrator recomputes the four frozen
+- [ ] bybit_full_pit — read-only; the orchestrator recomputes the three current frozen
   component cells to the data end. No candidate selection, no parameter sweep.
 - [ ] binance_full_pit — same, read-only.
 - [x] forward demo/paper (always, by being live) — the fresh regime-hedge forward
@@ -134,21 +133,18 @@ The live demo hedge (`liquidity-migration-continuous-hedge.timer`) picks up the
 overlay automatically once the new code deploys — no separate live step.
 
 ## Post-run results
-(fill in after the confirming run; include the fresh state-dir path, both venues'
-`readiness` blocks showing `hedge_regime`, and the first live `hedge_intensity`.)
+
+Current status after the scrub: the overlay is wired into the frozen forward config,
+live hedge decision path, and deployed-equity refresh, and STATE.md marks it live
+forward-watch since 2026-06-15. This receipt is not a performance result; the forward
+watch remains the evidence source.
 
 - `frozen_config_hash` (regime):
   `0668eb88c0d657478517c02d4994c0e48ddd5da7449897cdd92ecd153913d158`
-- code landed at commit: _pending merge SHA_
-- bybit fresh clock: `forward_days` / `ledger_days` / `hedge_regime` = _pending_
-- binance fresh clock: `forward_days` / `ledger_days` / `hedge_regime` = _pending_
-- Old 2f state dir archived to: _path pending_
-- First live non-1.0 `hedge_intensity` observed: _pending_
 
 ## Verdict
-accepted | rejected | inconclusive — pending the confirming run.
 
-Expected verdict on a clean run: **accepted as wired** (the demo book and forward
-ledger track one regime-hedge object; the config-hash void of the old clock is the
-intended reset). Forward-watch then judges the overlay as squeeze protection over a
-real squeeze sample. No promotion or Tier claim is made or cleared here.
+**Accepted as wired** (the demo book and forward ledger track one regime-hedge
+object; the config-hash void of the old clock is the intended reset). Forward-watch
+then judges the overlay as squeeze protection over a real squeeze sample. No
+promotion or Tier claim is made or cleared here.

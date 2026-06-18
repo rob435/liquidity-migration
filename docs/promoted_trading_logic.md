@@ -62,6 +62,12 @@ Data roots:
 - Demo orders/ledger: `data/bybit-continuous-demo-event`.
 - Paper shadow: `data/bybit-continuous-paper-event`.
 
+V2-forward reconcile/control baseline:
+`docs/preregistration/2026-06-18-continuous-v2-forward-baseline.md`. The
+baseline starts at `2026-06-18T19:54:00+00:00` (`1781812440000`) and is the only
+control arm for future continuous A/B tests unless a later receipt explicitly
+replaces it.
+
 ### Continuous Signal And Entry
 
 The live short signal is the top composite fade decile (`decile=9`) after the
@@ -423,7 +429,7 @@ Status: promoted-in-code for demo/paper only. No real-money claim.
 Registry object: `promoted.long_profile()` returns
 `_v11a_long_native_config()`.
 
-Live daemon profile: `STRATEGY_PROFILE=MultiStratV1`.
+Live daemon profile: `STRATEGY_PROFILE=LongV11aDivWeekendVol`.
 
 Data roots:
 

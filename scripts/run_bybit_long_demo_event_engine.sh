@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Long-sleeve (MultiStratV1, v11a uni10 sniper retrace 1%/6h fall-through)
+# Long-sleeve (LongV11aDivWeekendVol, v11a uni50 sniper retrace 1%/6h fall-through)
 # forward-testing engine. Runs on the same Bybit demo account as the other sleeves
 # sleeve but with order-link prefix lm-en-l-* so the extended ws_risk routes
 # fills back to the long ledger.
 #
 # Hard gates:
-# - SUBMIT_ORDERS=1 requires STRATEGY_PROFILE=MultiStratV1 + CONFIRM_DEMO_ORDERS=1
+# - SUBMIT_ORDERS=1 requires STRATEGY_PROFILE=LongV11aDivWeekendVol + CONFIRM_DEMO_ORDERS=1
 # - TELEGRAM_ENABLED=1 requires BOT_TOKEN + CHAT_ID + Bybit API key/secret
 set -euo pipefail
 
@@ -20,7 +20,7 @@ fi
 
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-long-demo-event}"
-STRATEGY_PROFILE="${STRATEGY_PROFILE:-MultiStratV1}"
+STRATEGY_PROFILE="${STRATEGY_PROFILE:-LongV11aDivWeekendVol}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
 if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "INTERVAL_SECONDS must be a non-negative integer number of seconds." >&2
@@ -78,7 +78,7 @@ if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
     # Configurable space-separated allowlist (was a hard-coded single profile).
     # Default keeps the safe long-sleeve value; extend ALLOWED_SUBMIT_PROFILES
     # to enable others without editing this script. Safe-by-default.
-    ALLOWED_SUBMIT_PROFILES="${ALLOWED_SUBMIT_PROFILES:-MultiStratV1}"
+    ALLOWED_SUBMIT_PROFILES="${ALLOWED_SUBMIT_PROFILES:-LongV11aDivWeekendVol}"
     if [[ " $ALLOWED_SUBMIT_PROFILES " != *" $STRATEGY_PROFILE "* ]]; then
         echo "STRATEGY_PROFILE=$STRATEGY_PROFILE not in ALLOWED_SUBMIT_PROFILES='$ALLOWED_SUBMIT_PROFILES'; refusing to submit." >&2
         exit 2

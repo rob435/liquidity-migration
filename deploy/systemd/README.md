@@ -21,15 +21,15 @@ The deployable VPS units are:
   liquidity-migration-depth-collector.service`); the deploy installs the unit and
   restarts it only if already enabled.
 - Timers include the demo-liveness watchdog, combined-book report, continuous rmom
-  refresh, the daily continuous BTC+ETH hedge (submit-armed; see below), and the
-  continuous forward report. (The demo-health timer was erased with the short sleeve.)
+  refresh, and the daily continuous BTC+ETH hedge (submit-armed; see below).
+  (The demo-health timer was erased with the short sleeve.)
 
 Which sleeve units actually run is governed by `deploy/sleeves.env` plus the
 optional host override `/etc/liquidity-migration/sleeves.env` (the host file
 wins); together they are the source of truth for which sleeves are enabled.
-As of 2026-06-09 the live set is the continuous pair only
-(`CONTINUOUS_SLEEVE=on`, `CONTINUOUS_PAPER_SLEEVE=on`); long is
-off but redeployable.
+As of 2026-06-18 the live set is long demo/paper, continuous demo, and
+continuous paper (`LONG_SLEEVE=on`, `CONTINUOUS_SLEEVE=on`,
+`CONTINUOUS_PAPER_SLEEVE=on`). All are demo/paper only.
 
 Install or refresh it on the VPS from a trusted local checkout:
 
@@ -148,8 +148,10 @@ cp deploy/systemd/liquidity-migration-*.service /etc/systemd/system/
 cp deploy/systemd/liquidity-migration-*.timer /etc/systemd/system/
 systemctl daemon-reload
 # Enable only the units whose toggle is on in deploy/sleeves.env, plus the always-on
-# risk service and support timers. As of 2026-06-09:
+# risk service and support timers. As of 2026-06-18:
 systemctl enable --now liquidity-migration-bybit-risk.service
+systemctl enable --now liquidity-migration-bybit-long-demo.service
+systemctl enable --now liquidity-migration-bybit-long-paper.service
 systemctl enable --now liquidity-migration-bybit-continuous-demo.service
 systemctl enable --now liquidity-migration-bybit-continuous-paper.service
 systemctl enable --now liquidity-migration-liquidation-collector.service
@@ -157,7 +159,6 @@ systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
 systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
 systemctl enable --now liquidity-migration-continuous-hedge.timer
-systemctl enable --now liquidity-migration-continuous-forward-report.timer
 ```
 
 Required secrets live outside git in:
@@ -185,9 +186,13 @@ blocked subscription is reported while REST reconciliation and exchange-native
 stops keep covering open risk.
 
 Single-submitter safety (post the 2026-06-11 short-sleeve erasure): the
-order-submitting units are the continuous demo sleeve
-(`liquidity-migration-bybit-continuous-demo.service`, `SUBMIT_ORDERS=1` +
-venue-side disaster stop) and the daily BTC+ETH hedge timer
+order-submitting units are the long demo sleeve
+(`liquidity-migration-bybit-long-demo.service`, `SUBMIT_ORDERS=1`), the
+continuous demo sleeve
+(`liquidity-migration-bybit-continuous-demo.service`, `SUBMIT_ORDERS=1`,
+`continuous_ensemble_v2`, inverse-vol component sizing with
+`TARGET_VOL_PER_NAME=0.01`/`VOL_WEIGHT_CLAMP=2`, max4 daily vol-target
+rebalance, no venue-side stop; demo/paper only) and the daily BTC+ETH hedge timer
 (`liquidity-migration-continuous-hedge.timer`) — the hedge unit ships
 **`SUBMIT_HEDGE=1` + `CONFIRM_DEMO_ORDERS=1` (operator-armed 2026-06-10)**, so
 it SUBMITS demo orders; runtime guards + staleness gates still apply. The

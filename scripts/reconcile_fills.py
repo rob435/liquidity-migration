@@ -232,12 +232,21 @@ def _long_price_map(df: pl.DataFrame, sig_col: str, start_ms: int, end_ms: int) 
     return out
 
 
-def continuous_live_prices(root: str, dataset: str, start_ms: int, end_ms: int) -> tuple[dict, dict]:
+def continuous_live_prices(
+    root: str,
+    dataset: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    strategy_id: str | None = None,
+) -> tuple[dict, dict]:
     """Notional-weighted (symbol, signal-bar) -> entry_price for the continuous book.
     Thin I/O wrapper over ``aggregate_continuous_prices``."""
     df = _read_live(root, dataset)
     if df is None:
         return {}, {}
+    if strategy_id and "strategy_id" in df.columns:
+        df = df.filter(pl.col("strategy_id").cast(pl.Utf8) == strategy_id)
     return aggregate_continuous_prices(df, start_ms, end_ms)
 
 
@@ -555,7 +564,10 @@ def _match_line(res: dict, *, label: str) -> str:
 
 
 def fills_continuous(*, demo_root: str, paper_root: str, start: dt.date, end: dt.date,
-                     out_dir: Path, research_root: str | None = None) -> tuple[str, bool]:
+                     out_dir: Path, research_root: str | None = None,
+                     start_ms_override: int | None = None,
+                     demo_strategy_id: str | None = None,
+                     paper_strategy_id: str | None = None) -> tuple[str, bool]:
     """Continuous three-way fills + backtest-match. The PRIMARY check recomputes the engine
     candidate set on the LIVE signal plane (the demo root's klines+rmom — current data, so it
     verifies every live entry NOW) and gates on it. When ``research_root`` is given it ALSO
@@ -566,16 +578,34 @@ def fills_continuous(*, demo_root: str, paper_root: str, start: dt.date, end: dt
     not those, so they go stale (~05-26/05-30 here), truncating the factor panel and — via rmom's
     shift(3) — its coverage to ~06-02. Pass `--with-funding` to top them up. rmom itself is
     causal (~2-3d lag, shift(3)). Both gate on a HARD off-decile unmatched (the drift alarm)."""
-    start_ms, end_ms = _ms(start), _ms(end)
-    demo, demo_bar = continuous_live_prices(demo_root, "continuous_fade_demo_trades", start_ms, end_ms)
-    paper, paper_bar = continuous_live_prices(paper_root, "continuous_fade_paper_trades", start_ms, end_ms)
+    start_ms, end_ms = (int(start_ms_override) if start_ms_override is not None else _ms(start)), _ms(end)
+    demo, demo_bar = continuous_live_prices(
+        demo_root,
+        "continuous_fade_demo_trades",
+        start_ms,
+        end_ms,
+        strategy_id=demo_strategy_id,
+    )
+    paper, paper_bar = continuous_live_prices(
+        paper_root,
+        "continuous_fade_paper_trades",
+        start_ms,
+        end_ms,
+        strategy_id=paper_strategy_id,
+    )
     keys_entry_bar = {**paper_bar, **demo_bar}  # prefer demo's real entry bar; fall back to paper's
 
     live = _match_plane(demo, paper, keys_entry_bar, demo_root, demo_root, start_ms, end_ms)
     write_csv(live["rows"], out_dir / "continuous_three_way_fills.csv",
               key_names=["symbol", "signal_bar_ms"], extra_cols=["model_components"])
     summary, ok = summarize(live["rows"], label="CONTINUOUS")
-    full = f"{summary}\n  {_match_line(live, label='live signal-plane')}"
+    full = (
+        f"{summary}\n"
+        f"    window_start_ts_ms={start_ms} "
+        f"window_start_utc={dt.datetime.fromtimestamp(start_ms / 1000, dt.timezone.utc).isoformat()} "
+        f"demo_strategy_id={demo_strategy_id or '-'} paper_strategy_id={paper_strategy_id or '-'}\n"
+        f"  {_match_line(live, label='live signal-plane')}"
+    )
     gate_ok = ok and len(live["hard"]) == 0
 
     if research_root:
@@ -592,7 +622,7 @@ def fills_continuous(*, demo_root: str, paper_root: str, start: dt.date, end: dt
 
 
 # ----------------------------------------------------------------------------- standalone CLI
-DEMO_START = {"long": "2026-06-04", "continuous": "2026-06-09"}
+DEMO_START = {"long": "2026-06-04", "continuous": "2026-06-18"}
 ROOTS = {
     "long": ("data/bybit-long-demo-event", "data/bybit-long-paper-event"),
     "continuous": ("data/bybit-continuous-demo-event", "data/bybit-continuous-paper-event"),
@@ -605,6 +635,8 @@ def main() -> int:
     p.add_argument("--demo-root", default=None)
     p.add_argument("--paper-root", default=None)
     p.add_argument("--start", default=None, help="forward-window start YYYY-MM-DD (default: demo start)")
+    p.add_argument("--start-ts-ms", type=int, default=None,
+                   help="Exact forward-window start UTC ms; overrides --start.")
     p.add_argument("--end", default=None, help="forward-window end YYYY-MM-DD exclusive (default: tomorrow UTC)")
     p.add_argument("--long-trades-csv", default=None,
                    help="LONG only: path to long_native_trades.csv from the v11a backtest leg.")
@@ -612,6 +644,8 @@ def main() -> int:
                    help="CONTINUOUS only: recompute the backtest candidates on this independent "
                         "PIT root (klines+rmom) instead of the live demo plane. Needs the root's "
                         "rmom refreshed past the window (else recent entries land in pending_rmom).")
+    p.add_argument("--demo-strategy-id", default=None, help="CONTINUOUS only: filter demo trades by strategy_id.")
+    p.add_argument("--paper-strategy-id", default=None, help="CONTINUOUS only: filter paper trades by strategy_id.")
     p.add_argument("--out-dir", default=str(REPO / "data" / "reconcile"))
     args = p.parse_args()
 
@@ -631,7 +665,10 @@ def main() -> int:
     else:
         summary, ok = fills_continuous(demo_root=demo_root, paper_root=paper_root,
                                        start=start, end=end, out_dir=out_dir,
-                                       research_root=args.research_root)
+                                       research_root=args.research_root,
+                                       start_ms_override=args.start_ts_ms,
+                                       demo_strategy_id=args.demo_strategy_id,
+                                       paper_strategy_id=args.paper_strategy_id)
 
     print("\n" + summary, flush=True)
     print("\n(execution-agreement evidence; NOT alpha proof / NOT a promotion gate.)", flush=True)

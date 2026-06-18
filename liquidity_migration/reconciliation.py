@@ -9,7 +9,7 @@ does not. Unpaired trades on either side are fill-rate divergence.
 
 from __future__ import annotations
 
-import json
+import datetime as dt
 import logging
 from pathlib import Path
 from statistics import mean, median
@@ -39,6 +39,18 @@ MS_PER_DAY = 86_400_000
 # from pairing and reported under a separate snipe_demo_only count.
 SNIPER_TRADE_SUFFIX = "-snipe"
 
+# --- v2-forward reconcile constants. The command-line reconcile front door passes
+# these explicitly so the baseline gate is v2-forward only, while the library
+# functions default to unfiltered behavior for tests and ad-hoc diagnostics. ---
+CONTINUOUS_V2_FORWARD_START = "2026-06-18T19:54:00Z"
+CONTINUOUS_V2_FORWARD_START_MS = int(
+    dt.datetime(2026, 6, 18, 19, 54, tzinfo=dt.timezone.utc).timestamp() * 1000
+)
+CONTINUOUS_V2_DEMO_STRATEGY_ID = "continuous_fade_v2"
+CONTINUOUS_V2_PAPER_STRATEGY_ID = "continuous_fade_v2_paper"
+CONTINUOUS_V2_STRATEGY_IDS = (CONTINUOUS_V2_DEMO_STRATEGY_ID, CONTINUOUS_V2_PAPER_STRATEGY_ID)
+CONTINUOUS_V2_PROFILE = "continuous_ensemble_v2"
+
 
 def _is_snipe_trade(row: dict[str, Any]) -> bool:
     return str(row.get("trade_id") or "").endswith(SNIPER_TRADE_SUFFIX)
@@ -64,6 +76,38 @@ def _int(value: Any) -> int:
     # Thin alias kept so the existing call sites stay untouched; the implementation
     # is the shared _common.coerce_int (quality-dup-9).
     return coerce_int(value)
+
+
+def _utc_ms(value: int | None) -> str:
+    if value is None:
+        return ""
+    return dt.datetime.fromtimestamp(int(value) / 1000, dt.timezone.utc).isoformat()
+
+
+def _id_label(allowed: str | tuple[str, ...] | None) -> str:
+    """Render a strategy-id filter (str / tuple / None) for a report banner."""
+    if allowed is None:
+        return ""
+    return ",".join(str(v) for v in allowed) if isinstance(allowed, tuple) else str(allowed)
+
+
+def _filter_min_ts(df: pl.DataFrame, start_ts_ms: int | None, columns: tuple[str, ...]) -> pl.DataFrame:
+    if start_ts_ms is None or df.is_empty():
+        return df
+    exprs = [pl.col(col).cast(pl.Int64, strict=False) for col in columns if col in df.columns]
+    if not exprs:
+        return df
+    return df.filter(pl.coalesce(exprs).fill_null(0) >= int(start_ts_ms))
+
+
+def _filter_value(df: pl.DataFrame, column: str, allowed: str | tuple[str, ...] | None) -> pl.DataFrame:
+    if allowed is None or df.is_empty() or column not in df.columns:
+        return df
+    values = (allowed,) if isinstance(allowed, str) else allowed
+    values = tuple(str(v) for v in values if str(v))
+    if not values:
+        return df
+    return df.filter(pl.col(column).cast(pl.Utf8).is_in(values))
 
 
 def _clean_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
@@ -531,6 +575,9 @@ def run_continuous_paper_demo_reconciliation(
     entry_tolerance_ms: int = DEFAULT_ENTRY_TOLERANCE_MS,
     output_dir: str | Path | None = None,
     min_pairs_warning: int = 20,
+    start_ts_ms: int | None = None,
+    paper_strategy_id: str | tuple[str, ...] | None = None,
+    demo_strategy_id: str | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Continuous-fade sleeve (3rd sleeve) paper/demo execution-slippage
     reconciler. Same pairing as the short/long reconcilers but reads the
@@ -550,6 +597,9 @@ def run_continuous_paper_demo_reconciliation(
         report_filename="continuous_paper_demo_reconciliation.md",
         entry_tolerance_ms=entry_tolerance_ms,
         output_dir=output_dir,
+        start_ts_ms=start_ts_ms,
+        paper_strategy_id=paper_strategy_id,
+        demo_strategy_id=demo_strategy_id,
     )
     summary = payload["result"]["summary"]
     summary["min_pairs_warning_threshold"] = int(min_pairs_warning)
@@ -620,10 +670,30 @@ def audit_continuous_rebalance_cycles(
     *,
     rule: ContinuousRebalanceRule | None = None,
     scale_tolerance: float = 1e-9,
+    start_ts_ms: int | None = None,
+    strategy_profile: str | None = None,
+    cycle_strategy_id: str | tuple[str, ...] | None = None,
+    order_strategy_id: str | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Audit daily-rebalance cycle telemetry for causal scale and resize discipline."""
     rule = rule or ContinuousRebalanceRule()
     issues: list[dict[str, Any]] = []
+    raw_cycles = cycles.height
+    raw_orders = orders.height
+    cycles = _filter_min_ts(cycles, start_ts_ms, ("ts_ms",))
+    cycles = _filter_value(cycles, "strategy_profile", strategy_profile)
+    cycles = _filter_value(cycles, "strategy_id", cycle_strategy_id)
+    orders = _filter_min_ts(orders, start_ts_ms, ("signal_ts_ms", "ts_ms", "updated_at_ms", "exec_time_ms"))
+    orders = _filter_value(orders, "strategy_id", order_strategy_id)
+    filters = {
+        "start_ts_ms": start_ts_ms,
+        "start_utc": _utc_ms(start_ts_ms),
+        "strategy_profile": strategy_profile or "",
+        "cycle_strategy_id": cycle_strategy_id or "",
+        "order_strategy_id": order_strategy_id or "",
+        "cycles_before_filter": raw_cycles,
+        "orders_before_filter": raw_orders,
+    }
     if cycles.is_empty():
         return {
             "ok": False,
@@ -634,6 +704,7 @@ def audit_continuous_rebalance_cycles(
                 "scale_mismatches": 0,
                 "same_day_resize_violations": 0,
                 "resize_order_count_mismatch": False,
+                **filters,
             },
             "issues": [{"kind": "empty_cycles", "message": "no cycle rows"}],
         }
@@ -648,6 +719,7 @@ def audit_continuous_rebalance_cycles(
                 "scale_mismatches": 0,
                 "same_day_resize_violations": 0,
                 "resize_order_count_mismatch": False,
+                **filters,
             },
             "issues": [{"kind": "missing_rebalance_columns", "message": "rebalance_day_ts column missing"}],
         }
@@ -735,6 +807,7 @@ def audit_continuous_rebalance_cycles(
         "cycle_resize_orders": cycle_resize_orders,
         "order_resize_orders": order_resize_orders,
         "resize_order_count_mismatch": mismatch,
+        **filters,
     }
     return {"ok": not issues, "summary": summary, "issues": issues}
 
@@ -752,6 +825,13 @@ def format_continuous_rebalance_audit_report(payload: dict[str, Any]) -> str:
         f"same_day_resize_violations: `{summary['same_day_resize_violations']}`",
         f"cycle_resize_orders: `{summary.get('cycle_resize_orders', 0)}`",
         f"order_resize_orders: `{summary.get('order_resize_orders', 0)}`",
+        f"start_ts_ms: `{summary.get('start_ts_ms') or ''}`",
+        f"start_utc: `{summary.get('start_utc') or ''}`",
+        f"strategy_profile: `{summary.get('strategy_profile') or ''}`",
+        f"cycle_strategy_id: `{summary.get('cycle_strategy_id') or ''}`",
+        f"order_strategy_id: `{summary.get('order_strategy_id') or ''}`",
+        f"cycles_before_filter: `{summary.get('cycles_before_filter', summary['cycles'])}`",
+        f"orders_before_filter: `{summary.get('orders_before_filter', 0)}`",
         "",
         "This is a ledger-consistency audit, not promotion or OOS evidence.",
     ]
@@ -769,11 +849,19 @@ def run_continuous_rebalance_cycle_audit(
     cycles_dataset: str = "continuous_fade_paper_cycles",
     orders_dataset: str = "continuous_fade_paper_orders",
     output_dir: str | Path | None = None,
+    start_ts_ms: int | None = None,
+    strategy_profile: str | None = None,
+    cycle_strategy_id: str | tuple[str, ...] | None = None,
+    order_strategy_id: str | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     root = Path(data_root).expanduser()
     payload = audit_continuous_rebalance_cycles(
         read_dataset(root, cycles_dataset),
         read_dataset(root, orders_dataset),
+        start_ts_ms=start_ts_ms,
+        strategy_profile=strategy_profile,
+        cycle_strategy_id=cycle_strategy_id,
+        order_strategy_id=order_strategy_id,
     )
     report = format_continuous_rebalance_audit_report(payload)
     report_dir = Path(output_dir).expanduser() if output_dir else root / "reports" / "continuous_rebalance_cycle_audit"
@@ -812,6 +900,11 @@ def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
         f"- paper-only trades: `{summary['paper_only']}`",
         f"- demo-only trades: `{summary['demo_only']}`",
         f"- no unmatched required: `{summary['require_no_unmatched']}`",
+        f"- start_ts_ms: `{summary.get('start_ts_ms') or ''}`",
+        f"- start_utc: `{summary.get('start_utc') or ''}`",
+        f"- strategy_profile: `{summary.get('strategy_profile') or ''}`",
+        f"- paper_strategy_id: `{summary.get('paper_strategy_id') or ''}`",
+        f"- demo_strategy_id: `{summary.get('demo_strategy_id') or ''}`",
         "",
         "## Paper Rebalance",
         "",
@@ -871,6 +964,10 @@ def run_continuous_forward_readiness(
     require_no_unmatched: bool = True,
     require_demo: bool = True,
     output_dir: str | Path | None = None,
+    start_ts_ms: int | None = None,
+    strategy_profile: str | None = None,
+    paper_strategy_id: str | None = None,
+    demo_strategy_id: str | None = None,
 ) -> dict[str, Any]:
     """Run the continuous candidate's forward-ledger readiness checks.
 
@@ -878,6 +975,10 @@ def run_continuous_forward_readiness(
     roots with the paper↔demo trade reconciliation. It deliberately does not
     label alpha or promotion; it only says whether the forward ledgers are clean
     enough to be used as the next arbiter.
+
+    The command-line reconcile front door passes the frozen v2-forward filters
+    explicitly. The library default stays unfiltered so ad-hoc diagnostics and
+    tests can still inspect full ledger history.
     """
     paper_root_p = Path(paper_root).expanduser()
     demo_root_p = Path(demo_root).expanduser()
@@ -893,6 +994,10 @@ def run_continuous_forward_readiness(
         cycles_dataset="continuous_fade_paper_cycles",
         orders_dataset="continuous_fade_paper_orders",
         output_dir=out_root / "paper_rebalance",
+        start_ts_ms=start_ts_ms,
+        strategy_profile=strategy_profile,
+        cycle_strategy_id=paper_strategy_id,
+        order_strategy_id=paper_strategy_id,
     )
     demo_rebalance = None
     paper_demo = None
@@ -909,6 +1014,10 @@ def run_continuous_forward_readiness(
             cycles_dataset="continuous_fade_demo_cycles",
             orders_dataset="continuous_fade_demo_orders",
             output_dir=out_root / "demo_rebalance",
+            start_ts_ms=start_ts_ms,
+            strategy_profile=strategy_profile,
+            cycle_strategy_id=demo_strategy_id,
+            order_strategy_id=demo_strategy_id,
         )
         paper_demo = run_continuous_paper_demo_reconciliation(
             paper_root_p,
@@ -916,6 +1025,9 @@ def run_continuous_forward_readiness(
             entry_tolerance_ms=entry_tolerance_ms,
             min_pairs_warning=min_pairs_warning,
             output_dir=out_root / "paper_demo",
+            start_ts_ms=start_ts_ms,
+            paper_strategy_id=paper_strategy_id,
+            demo_strategy_id=demo_strategy_id,
         )
         rec_summary = paper_demo["result"]["summary"]
 
@@ -951,6 +1063,11 @@ def run_continuous_forward_readiness(
         "sample_warning": bool(rec_summary.get("sample_warning")),
         "min_pairs_warning_threshold": int(rec_summary.get("min_pairs_warning_threshold", min_pairs_warning)),
         "require_no_unmatched": bool(require_no_unmatched),
+        "start_ts_ms": start_ts_ms,
+        "start_utc": _utc_ms(start_ts_ms),
+        "strategy_profile": strategy_profile or "",
+        "paper_strategy_id": paper_strategy_id or "",
+        "demo_strategy_id": demo_strategy_id or "",
     }
     payload = {
         "ok": not issues,
@@ -1179,225 +1296,6 @@ def _calendar_metrics(returns_by_day: dict[int, float], *, start_day: int, end_d
     }
 
 
-def _continuous_beats_daily_mar(continuous: dict[str, Any], daily: dict[str, Any]) -> bool:
-    """Does the continuous leg beat the daily leg on MAR?
-
-    audit2: _calendar_metrics returns mar=None EXACTLY for a zero-drawdown curve
-    (abs(max_dd) <= 1e-12) — the best-possible drawdown outcome (effectively infinite
-    MAR), reachable whenever the continuous book never dips below its running peak. The
-    old inline gate folded that None into `continuous_mar > daily_mar` -> False and
-    raised a spurious "continuous MAR <= daily MAR" issue on the BEST drawdown case.
-    Treat a zero-drawdown continuous book as beating any finite daily MAR whenever its
-    return is at least the daily leg's; otherwise the strict finite comparison stands.
-    """
-    continuous_mar = continuous["mar"]
-    daily_mar = daily["mar"]
-    if continuous_mar is None and abs(continuous["max_drawdown"]) <= 1e-12:
-        return bool(continuous["total_return"] >= daily["total_return"])
-    return bool(continuous_mar is not None and daily_mar is not None and continuous_mar > daily_mar)
-
-
-def _format_mar(value: float | None) -> str:
-    return "NA" if value is None else f"{value:.6f}"
-
-
-def _latest_day(returns_by_day: dict[int, float]) -> int:
-    return max(returns_by_day) if returns_by_day else 0
-
-
-def _maturity_day(start_day: int, min_common_days: int) -> int:
-    if start_day <= 0 or min_common_days <= 0:
-        return 0
-    return start_day + (min_common_days - 1) * MS_PER_DAY
-
-
-def format_continuous_vs_daily_forward_report(payload: dict[str, Any]) -> str:
-    summary = payload["summary"]
-    daily = payload["daily"]
-    continuous = payload["continuous"]
-    lines = [
-        "# Continuous vs Daily Forward Comparator",
-        "",
-        f"ok: `{payload['ok']}`",
-        f"mode: `{summary.get('mode', 'comparison')}`",
-        "",
-        "This compares realized forward ledger performance over the same calendar window.",
-        "The daily leg is OPTIONAL (2026-06-11 operator decision): in `continuous_only`",
-        "mode the binding read is the continuous ledger over its OWN window (below).",
-        "",
-        "## Continuous (own full window — the standalone read)",
-        "",
-        f"- days: `{summary.get('continuous_full_days', 0)}`",
-        f"- total_return: `{summary.get('continuous_full_total_return', 0.0):.6f}`",
-        f"- mar: `{_format_mar(summary.get('continuous_full_mar'))}`",
-        f"- max_drawdown: `{summary.get('continuous_full_max_drawdown', 0.0):.6f}`",
-        "",
-        "## Summary",
-        "",
-        f"- common_start_day_ts: `{summary['common_start_day_ts']}`",
-        f"- common_end_day_ts: `{summary['common_end_day_ts']}`",
-        f"- common_days: `{summary['common_days']}`",
-        f"- min_common_days: `{summary['min_common_days']}`",
-        f"- common_days_remaining: `{summary['common_days_remaining']}`",
-        f"- maturity_day_ts: `{summary['maturity_day_ts']}`",
-        f"- daily_observed_days: `{summary['daily_observed_days']}`",
-        f"- continuous_observed_days: `{summary['continuous_observed_days']}`",
-        f"- latest_daily_day_ts: `{summary['latest_daily_day_ts']}`",
-        f"- latest_continuous_day_ts: `{summary['latest_continuous_day_ts']}`",
-        f"- continuous beats return: `{summary['continuous_beats_return']}`",
-        f"- continuous beats MAR: `{summary['continuous_beats_mar']}`",
-        "",
-        "## Daily Short",
-        "",
-        f"- source: `{summary['daily_source']}`",
-        f"- total_return: `{daily['total_return']:.6f}`",
-        f"- annualized_return: `{daily['annualized_return']:.6f}`",
-        f"- max_drawdown: `{daily['max_drawdown']:.6f}`",
-        f"- mar: `{_format_mar(daily['mar'])}`",
-        f"- worst_day_return: `{daily['worst_day_return']:.6f}`",
-        "",
-        "## Continuous",
-        "",
-        f"- source: `{summary['continuous_source']}`",
-        f"- total_return: `{continuous['total_return']:.6f}`",
-        f"- annualized_return: `{continuous['annualized_return']:.6f}`",
-        f"- max_drawdown: `{continuous['max_drawdown']:.6f}`",
-        f"- mar: `{_format_mar(continuous['mar'])}`",
-        f"- worst_day_return: `{continuous['worst_day_return']:.6f}`",
-    ]
-    if not payload["ok"]:
-        lines.extend(["", "## Blocking Issues", ""])
-        for issue in payload["issues"]:
-            lines.append(f"- {issue}")
-    if payload.get("notes"):
-        lines.extend(["", "## Notes (non-blocking)", ""])
-        for note in payload["notes"]:
-            lines.append(f"- {note}")
-    return "\n".join(lines) + "\n"
-
-
-def run_continuous_vs_daily_forward_comparison(
-    daily_root: str | Path,
-    continuous_root: str | Path,
-    *,
-    daily_trades_dataset: str = "event_demo_trades",
-    daily_cycles_dataset: str = "event_demo_cycles",
-    continuous_cycles_dataset: str = "continuous_fade_paper_cycles",
-    continuous_trades_dataset: str = "continuous_fade_paper_trades",
-    min_common_days: int = 30,
-    output_dir: str | Path | None = None,
-) -> dict[str, Any]:
-    daily_root_p = Path(daily_root).expanduser()
-    continuous_root_p = Path(continuous_root).expanduser()
-    daily_returns, daily_source = _daily_forward_returns(
-        read_dataset(daily_root_p, daily_trades_dataset),
-        read_dataset(daily_root_p, daily_cycles_dataset),
-    )
-    cycles = read_dataset(continuous_root_p, continuous_cycles_dataset)
-    continuous_returns = _continuous_cycle_daily_returns(cycles)
-    continuous_source = continuous_cycles_dataset
-    if not continuous_returns:
-        continuous_returns = _trade_ledger_daily_returns(read_dataset(continuous_root_p, continuous_trades_dataset))
-        continuous_source = continuous_trades_dataset
-
-    # 2026-06-11 operator decision: the continuous forward report must NOT depend on the
-    # short sleeve. The daily leg is OPTIONAL — daily-side gaps are informational notes,
-    # never blocking issues; the comparison block only binds once both legs matured.
-    issues: list[str] = []
-    notes: list[str] = []
-    if not daily_returns:
-        notes.append(
-            f"daily return series is empty from {daily_root_p}/{daily_cycles_dataset}+{daily_trades_dataset} "
-            "(short sleeve ERASED 2026-06-11 — continuous-only mode)"
-        )
-    if not continuous_returns:
-        issues.append(f"continuous return series is empty from {continuous_root_p}/{continuous_source}")
-
-    start = max(min(daily_returns) if daily_returns else 0, min(continuous_returns) if continuous_returns else 0)
-    end = min(max(daily_returns) if daily_returns else 0, max(continuous_returns) if continuous_returns else 0)
-    common_days = ((end - start) // MS_PER_DAY + 1) if start > 0 and end >= start else 0
-    if common_days < int(min_common_days):
-        notes.append(f"common forward window {common_days}d below min_common_days {int(min_common_days)}")
-
-    daily = _calendar_metrics(daily_returns, start_day=start, end_day=end)
-    continuous = _calendar_metrics(continuous_returns, start_day=start, end_day=end)
-    # standalone continuous view over its OWN window — the primary read when the
-    # daily leg is off/immature
-    continuous_full = _calendar_metrics(
-        continuous_returns,
-        start_day=min(continuous_returns) if continuous_returns else 0,
-        end_day=max(continuous_returns) if continuous_returns else 0,
-    )
-    continuous_beats_return = bool(continuous["total_return"] > daily["total_return"])
-    daily_mar = daily["mar"]
-    continuous_mar = continuous["mar"]
-    continuous_beats_mar = _continuous_beats_daily_mar(continuous, daily)
-    performance_window_ready = common_days >= int(min_common_days) and bool(daily_returns) and bool(continuous_returns)
-    if performance_window_ready and not continuous_beats_return:
-        issues.append(
-            f"continuous return {continuous['total_return']:.6f} <= daily return {daily['total_return']:.6f}"
-        )
-    if performance_window_ready and not continuous_beats_mar:
-        issues.append(f"continuous MAR {_format_mar(continuous_mar)} <= daily MAR {_format_mar(daily_mar)}")
-
-    summary = {
-        "mode": "comparison" if performance_window_ready else "continuous_only",
-        "continuous_full_days": len(continuous_returns),
-        "continuous_full_total_return": continuous_full["total_return"],
-        "continuous_full_mar": continuous_full["mar"],
-        "continuous_full_max_drawdown": continuous_full["max_drawdown"],
-        "common_start_day_ts": start,
-        "common_end_day_ts": end,
-        "common_days": common_days,
-        "min_common_days": int(min_common_days),
-        "common_days_remaining": max(int(min_common_days) - common_days, 0),
-        "maturity_day_ts": _maturity_day(start, int(min_common_days)),
-        "daily_observed_days": len(daily_returns),
-        "continuous_observed_days": len(continuous_returns),
-        "latest_daily_day_ts": _latest_day(daily_returns),
-        "latest_continuous_day_ts": _latest_day(continuous_returns),
-        "daily_source": daily_source,
-        "continuous_source": continuous_source,
-        "continuous_beats_return": continuous_beats_return,
-        "continuous_beats_mar": continuous_beats_mar,
-    }
-    payload = {
-        "ok": not issues,
-        "inputs": {
-            "daily_root": str(daily_root_p),
-            "continuous_root": str(continuous_root_p),
-            "daily_trades_dataset": daily_trades_dataset,
-            "daily_cycles_dataset": daily_cycles_dataset,
-            "continuous_cycles_dataset": continuous_cycles_dataset,
-            "continuous_trades_dataset": continuous_trades_dataset,
-            "min_common_days": int(min_common_days),
-        },
-        "summary": summary,
-        "daily": {k: v for k, v in daily.items() if k != "equity"},
-        "continuous": {k: v for k, v in continuous.items() if k != "equity"},
-        "continuous_full": {k: v for k, v in continuous_full.items() if k != "equity"},
-        "issues": issues,
-        "notes": notes,
-    }
-    report = format_continuous_vs_daily_forward_report(payload)
-    report_dir = Path(output_dir).expanduser() if output_dir else continuous_root_p / "reports" / "continuous_vs_daily_forward"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / "continuous_vs_daily_forward.md"
-    report_path.write_text(report, encoding="utf-8")
-    json_path = report_dir / "continuous_vs_daily_forward.json"
-    daily_equity_csv = report_dir / "daily_forward_equity.csv"
-    continuous_equity_csv = report_dir / "continuous_forward_equity.csv"
-    pl.DataFrame(daily["equity"]).write_csv(daily_equity_csv)
-    pl.DataFrame(continuous["equity"]).write_csv(continuous_equity_csv)
-    payload["report"] = report
-    payload["report_path"] = str(report_path)
-    payload["json_path"] = str(json_path)
-    payload["daily_equity_csv"] = str(daily_equity_csv)
-    payload["continuous_equity_csv"] = str(continuous_equity_csv)
-    json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    return payload
-
-
 def _run_reconciliation(
     *,
     paper_root: str | Path,
@@ -1408,15 +1306,35 @@ def _run_reconciliation(
     report_filename: str,
     entry_tolerance_ms: int,
     output_dir: str | Path | None,
+    start_ts_ms: int | None = None,
+    paper_strategy_id: str | tuple[str, ...] | None = None,
+    demo_strategy_id: str | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     paper_root_p = Path(paper_root).expanduser()
     demo_root_p = Path(demo_root).expanduser()
+    paper = read_dataset(paper_root_p, paper_dataset)
+    demo = read_dataset(demo_root_p, demo_dataset)
+    paper = _filter_min_ts(paper, start_ts_ms, ("signal_ts_ms", "entry_ts_ms", "ts_ms"))
+    demo = _filter_min_ts(demo, start_ts_ms, ("signal_ts_ms", "entry_ts_ms", "ts_ms"))
+    paper = _filter_value(paper, "strategy_id", paper_strategy_id)
+    demo = _filter_value(demo, "strategy_id", demo_strategy_id)
     result = reconcile_paper_demo(
-        read_dataset(paper_root_p, paper_dataset),
-        read_dataset(demo_root_p, demo_dataset),
+        paper,
+        demo,
         entry_tolerance_ms=entry_tolerance_ms,
     )
     report = format_reconciliation_report(result)
+    if start_ts_ms is not None or paper_strategy_id is not None or demo_strategy_id is not None:
+        # Make the standalone reconcile report self-describing: print the active
+        # forward-window boundary + strategy filters (v2-forward by default) so a
+        # reader can see pre-freeze rows were excluded.
+        report += (
+            "\n## Forward-Window Filter\n\n"
+            f"- start_ts_ms: `{start_ts_ms if start_ts_ms is not None else ''}`\n"
+            f"- start_utc: `{_utc_ms(start_ts_ms)}`\n"
+            f"- paper_strategy_id: `{_id_label(paper_strategy_id)}`\n"
+            f"- demo_strategy_id: `{_id_label(demo_strategy_id)}`\n"
+        )
     report_dir = (
         Path(output_dir).expanduser() if output_dir else demo_root_p / "reports" / report_subdir
     )
@@ -1425,5 +1343,3 @@ def _run_reconciliation(
     report_path.write_text(report, encoding="utf-8")
     pairs_csv_path = _write_pairs_csv(report_path, result["pairs"])
     return {"result": result, "report": report, "report_path": str(report_path), "pairs_csv_path": pairs_csv_path}
-
-

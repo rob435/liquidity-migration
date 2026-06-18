@@ -25,11 +25,12 @@ and systemd env overrides, see `docs/promoted_trading_logic.md`.
 
 **Continuous fade book**
 
-- Old deployed system restored as the research anchor on 2026-06-17.
 - Demo/paper object: `continuous_ensemble_v2`.
-- The 2026-06-18 operator override dropped the stale `tp14` leg. Current
-  ensemble weights are p3 `0.3333333333`, p4p3 `0.2222222222`, and p4p5
-  `0.4444444444`.
+- The 2026-06-18 operator override froze the current three-component object:
+  p3 `0.3333333333`, p4p3 `0.2222222222`, and p4p5 `0.4444444444`.
+- The v2-forward control baseline starts at `2026-06-18T19:54:00+00:00`
+  (`1781812440000`) and is the only control arm for future continuous A/B tests.
+  Receipt: `docs/preregistration/2026-06-18-continuous-v2-forward-baseline.md`.
 - Settings: inverse-vol component sizing (`target_vol_per_name=0.01`, clamp
   2.0), w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25, BTC-uptrend
   gate, TP/24h exits only, no daemon `left_decile`, `stop_approach`,
@@ -40,7 +41,7 @@ and systemd env overrides, see `docs/promoted_trading_logic.md`.
   registered 2026-06-18 replay showed both daemon stops and the 25% server stop
   destroy the fade edge; a future mainnet path needs a different risk control.
 - Demo fills are execution evidence, not alpha proof. The forward clock resets
-  after config-hash changes such as the `tp14` removal.
+  after material config-hash changes.
 
 **Continuous risk overlays**
 
@@ -120,8 +121,8 @@ proposal/audit ledgers:
 - `docs/preregistration/2026-06-18-continuous-v2-invvol-max4-replay.md` -
   registered replay promoting inverse-vol entry sizing plus max4 daily
   vol-target rebalance into official v2 demo/paper wiring.
-- `docs/preregistration/2026-06-18-drop-tp14-continuous-ensemble.md` - accepted
-  operator override to the 3-component continuous ensemble, demo/paper only.
+- `docs/preregistration/2026-06-18-continuous-v2-forward-baseline.md` -
+  v2-forward reconcile/control baseline for future continuous A/B tests.
 - `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md` - BTC-vol
   hedge forward-watch clock.
 - `docs/preregistration/2026-06-15-operator-override-promote-continuous.md` -

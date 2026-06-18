@@ -1,13 +1,14 @@
-"""Reproduce the four frozen winner_base component ledgers locally.
+"""Reproduce the current frozen continuous_ensemble_v2 component ledgers locally.
 
-The OI/taker-flow scouts and the taker-flow backfill anchor on the frozen
-winner_base component ledgers (``continuous_ensemble_rebalance_scout.SOURCES``),
-which were produced on the original research box (2026-06-07 artifact dirs)
-and are absent on other machines. The configs are receipt-frozen and the
-engine is deterministic given (panel, klines, funding, config), so the
-ledgers are reproducible — this driver re-runs the four component cells via
+The continuous refresh, hedge warm-start, and forward replay anchor on the
+frozen continuous_ensemble_v2 component ledgers
+(``liquidity_migration.continuous_component_sources``), which were produced on
+the original research box (2026-06-07 artifact dirs) and may be absent on other
+machines. The configs are receipt-frozen and the engine is deterministic given
+(panel, klines, funding, config), so the ledgers are reproducible — this driver
+re-runs the three current component cells via
 ``run_continuous_event_research`` and writes artifacts to the exact paths
-SOURCES expects under the local SHARED_DATA.
+the component source registry expects under the local SHARED_DATA.
 
 Parity anchor: the p3 (turn3_pop3 merged) cell's documented trade counts are
 857 bybit / 722 binance (docs/research_summary.md, merged-signal section);
@@ -17,7 +18,7 @@ Data layer reproduction only — no signal claim, no new cells, no sweeps.
 
 Run (sequential, ~1-2GB peak per cell):
     POLARS_MAX_THREADS=8 PYTHONPATH=. .venv/bin/python \
-        scripts/rebuild_winner_base_component_ledgers.py [--venues bybit,binance]
+        scripts/rebuild_continuous_component_ledgers.py [--venues bybit,binance]
 """
 
 from __future__ import annotations
@@ -53,8 +54,8 @@ COMMON = dict(
     use_funding=True,
 )
 
-# (artifact_root, cell_dir) -> per-component overrides; mirrors
-# continuous_ensemble_rebalance_scout.SOURCES for the 4 live ensemble components.
+# (artifact_root, cell_dir) -> per-component overrides; mirrors the current
+# continuous component source registry.
 CELLS: dict[tuple[str, str], dict] = {
     ("continuous_merged_signal_raw_2026-06-07", "merged_signal"): dict(
         entry_event_trigger="turn3_pop3", age_days_min=240, take_profit_pct=0.10

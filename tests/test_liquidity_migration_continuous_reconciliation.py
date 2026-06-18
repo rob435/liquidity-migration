@@ -1,7 +1,6 @@
 """Tests for the continuous-fade sleeve reconcile-paper-demo analyzer."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import polars as pl
@@ -20,7 +19,6 @@ from liquidity_migration.reconciliation import (
     run_continuous_forward_readiness,
     run_continuous_paper_demo_reconciliation,
     run_continuous_rebalance_cycle_audit,
-    run_continuous_vs_daily_forward_comparison,
 )
 from liquidity_migration.storage import read_dataset, write_dataset
 
@@ -37,8 +35,10 @@ def _trade_row(
     qty: float = 1.0,
     status: str = "open",
     exit_price: float = 0.0,
+    signal_ts_ms: int | None = None,
+    strategy_id: str | None = None,
 ) -> dict:
-    return {
+    row = {
         "trade_id": trade_id,
         "symbol": symbol,
         "side": side,
@@ -48,6 +48,11 @@ def _trade_row(
         "status": status,
         "exit_price": exit_price,
     }
+    if signal_ts_ms is not None:
+        row["signal_ts_ms"] = signal_ts_ms
+    if strategy_id is not None:
+        row["strategy_id"] = strategy_id
+    return row
 
 
 def _clean_rebalance_cycles(day0: int) -> pl.DataFrame:
@@ -77,45 +82,6 @@ def _clean_rebalance_cycles(day0: int) -> pl.DataFrame:
                 "rebalance_resize_skipped_same_day": True,
                 "rebalance_resize_orders": 0,
             },
-        ],
-        infer_schema_length=None,
-    )
-
-
-def _continuous_perf_cycles(day0: int, returns: list[float]) -> pl.DataFrame:
-    rows = []
-    equity = 1.0
-    peak = 1.0
-    for idx, ret in enumerate(returns):
-        day = day0 + idx * MS_PER_DAY
-        equity += ret
-        peak = max(peak, equity)
-        rows.append(
-            {
-                "cycle_id": f"c{idx}",
-                "ts_ms": day + 1,
-                "rebalance_day_ts": day,
-                "rebalance_raw_return": ret,
-                "rebalance_target_scale": 1.0,
-                "rebalance_scaled_return": ret,
-                "rebalance_scaled_equity": equity,
-                "rebalance_scaled_peak": peak,
-            }
-        )
-    return pl.DataFrame(rows, infer_schema_length=None)
-
-
-def _daily_cycle_rows(day0: int, count: int) -> pl.DataFrame:
-    return pl.DataFrame(
-        [
-            {
-                "cycle_id": f"d{idx}",
-                "ts_ms": day0 + idx * MS_PER_DAY + 1,
-                "mode": "dry_run",
-                "entries_executed": 0,
-                "exits_executed": 0,
-            }
-            for idx in range(count)
         ],
         infer_schema_length=None,
     )
@@ -288,131 +254,106 @@ def test_continuous_forward_readiness_flags_unmatched_trades(tmp_path: Path) -> 
     assert any("unmatched trades" in issue for issue in payload["issues"])
 
 
-def test_continuous_vs_daily_forward_accepts_same_window_outperformance(tmp_path: Path) -> None:
-    daily_root = tmp_path / "daily"
-    cont_root = tmp_path / "continuous"
-    daily_root.mkdir()
-    cont_root.mkdir()
+def test_continuous_forward_readiness_v2_filter_ignores_pre_v2_poison(tmp_path: Path) -> None:
+    paper_root = tmp_path / "paper"
+    demo_root = tmp_path / "demo"
+    paper_root.mkdir()
+    demo_root.mkdir()
     day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+    v2_start = day0 + MS_PER_DAY
 
-    daily = pl.DataFrame(
-        [
-            _trade_row(trade_id="D-1", symbol="AAAUSDT", entry_ts_ms=day0, entry_price=1.0, status="closed")
-            | {"exit_ts_ms": day0 + 1, "net_return": 0.01},
-            _trade_row(
-                trade_id="D-2", symbol="BBBUSDT", entry_ts_ms=day0 + MS_PER_DAY, entry_price=1.0, status="closed"
-            )
-            | {"exit_ts_ms": day0 + MS_PER_DAY + 1, "net_return": -0.02},
-            _trade_row(
-                trade_id="D-3", symbol="CCCUSDT", entry_ts_ms=day0 + 2 * MS_PER_DAY, entry_price=1.0, status="closed"
-            )
-            | {"exit_ts_ms": day0 + 2 * MS_PER_DAY + 1, "net_return": 0.01},
-        ],
-        infer_schema_length=None,
+    old_paper = _trade_row(
+        trade_id="old-paper",
+        symbol="OLDUSDT",
+        entry_ts_ms=day0 + 1,
+        signal_ts_ms=day0,
+        entry_price=1.0,
+        strategy_id="retired_continuous_paper",
     )
-    write_dataset(daily, daily_root, "event_demo_trades", partition_by=())
-    write_dataset(_continuous_perf_cycles(day0, [0.02, -0.01, 0.04]), cont_root, "continuous_fade_paper_cycles", partition_by=())
+    v2_paper = _trade_row(
+        trade_id="v2-match",
+        symbol="ENAUSDT",
+        entry_ts_ms=v2_start + 1,
+        signal_ts_ms=v2_start,
+        entry_price=1.0,
+        strategy_id="continuous_fade_v2_paper",
+    )
+    v2_demo = _trade_row(
+        trade_id="v2-match",
+        symbol="ENAUSDT",
+        entry_ts_ms=v2_start + 2,
+        signal_ts_ms=v2_start,
+        entry_price=1.01,
+        strategy_id="continuous_fade_v2",
+    )
+    write_dataset(pl.DataFrame([old_paper, v2_paper], infer_schema_length=None), paper_root, "continuous_fade_paper_trades", partition_by=())
+    write_dataset(pl.DataFrame([v2_demo], infer_schema_length=None), demo_root, "continuous_fade_demo_trades", partition_by=())
 
-    payload = run_continuous_vs_daily_forward_comparison(
-        daily_root,
-        cont_root,
-        min_common_days=3,
-        output_dir=tmp_path / "out",
+    old_bad = [
+        {
+            "cycle_id": "old-a",
+            "ts_ms": day0 + 1,
+            "strategy_profile": "retired_continuous_profile",
+            "strategy_id": "retired_continuous_paper",
+            "rebalance_day_ts": day0,
+            "rebalance_raw_return": 0.0,
+            "rebalance_target_scale": 1.0,
+            "rebalance_scaled_equity": 1.0,
+            "rebalance_scaled_peak": 1.0,
+            "rebalance_resize_skipped_same_day": False,
+            "rebalance_resize_orders": 1,
+        },
+        {
+            "cycle_id": "old-b",
+            "ts_ms": day0 + 2,
+            "strategy_profile": "retired_continuous_profile",
+            "strategy_id": "retired_continuous_paper",
+            "rebalance_day_ts": day0,
+            "rebalance_raw_return": 0.0,
+            "rebalance_target_scale": 1.0,
+            "rebalance_scaled_equity": 1.0,
+            "rebalance_scaled_peak": 1.0,
+            "rebalance_resize_skipped_same_day": False,
+            "rebalance_resize_orders": 1,
+        },
+    ]
+    clean_v2_paper = {
+        "cycle_id": "v2-paper",
+        "ts_ms": v2_start + 1,
+        "strategy_profile": "continuous_ensemble_v2",
+        "strategy_id": "continuous_fade_v2_paper",
+        "rebalance_day_ts": v2_start,
+        "rebalance_raw_return": 0.0,
+        "rebalance_target_scale": 1.0,
+        "rebalance_scaled_equity": 1.0,
+        "rebalance_scaled_peak": 1.0,
+        "rebalance_resize_skipped_same_day": False,
+        "rebalance_resize_orders": 0,
+    }
+    clean_v2_demo = clean_v2_paper | {"cycle_id": "v2-demo", "strategy_id": "continuous_fade_v2"}
+    write_dataset(pl.DataFrame([*old_bad, clean_v2_paper], infer_schema_length=None), paper_root, "continuous_fade_paper_cycles", partition_by=())
+    write_dataset(pl.DataFrame([*old_bad, clean_v2_demo], infer_schema_length=None), demo_root, "continuous_fade_demo_cycles", partition_by=())
+
+    payload = run_continuous_forward_readiness(
+        paper_root,
+        demo_root,
+        entry_tolerance_ms=10_000,
+        min_pairs_warning=1,
+        output_dir=tmp_path / "readiness",
+        start_ts_ms=v2_start,
+        strategy_profile="continuous_ensemble_v2",
+        paper_strategy_id="continuous_fade_v2_paper",
+        demo_strategy_id="continuous_fade_v2",
     )
 
     assert payload["ok"] is True
-    assert payload["summary"]["mode"] == "comparison"
-    assert payload["summary"]["continuous_beats_return"] is True
-    assert payload["summary"]["continuous_beats_mar"] is True
-    assert payload["summary"]["daily_observed_days"] == 3
-    assert payload["summary"]["continuous_observed_days"] == 3
-    assert payload["summary"]["common_days_remaining"] == 0
-    assert payload["summary"]["maturity_day_ts"] == day0 + 2 * MS_PER_DAY
-    assert payload["inputs"]["daily_trades_dataset"] == "event_demo_trades"
-    assert payload["inputs"]["daily_cycles_dataset"] == "event_demo_cycles"
-    assert payload["inputs"]["continuous_cycles_dataset"] == "continuous_fade_paper_cycles"
-    assert payload["continuous"]["total_return"] > payload["daily"]["total_return"]
-    assert Path(payload["daily_equity_csv"]).exists()
-    assert Path(payload["continuous_equity_csv"]).exists()
-    receipt = json.loads(Path(payload["json_path"]).read_text(encoding="utf-8"))
-    assert receipt["ok"] is True
-    assert receipt["inputs"]["continuous_root"] == str(cont_root)
-    assert receipt["summary"]["common_days"] == 3
-    assert receipt["summary"]["maturity_day_ts"] == day0 + 2 * MS_PER_DAY
-    assert receipt["daily_equity_csv"] == payload["daily_equity_csv"]
-
-
-def test_continuous_vs_daily_forward_rejects_underperformance(tmp_path: Path) -> None:
-    daily_root = tmp_path / "daily"
-    cont_root = tmp_path / "continuous"
-    daily_root.mkdir()
-    cont_root.mkdir()
-    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
-
-    daily = pl.DataFrame(
-        [
-            _trade_row(trade_id="D-1", symbol="AAAUSDT", entry_ts_ms=day0, entry_price=1.0, status="closed")
-            | {"exit_ts_ms": day0 + 1, "net_return": 0.03},
-            _trade_row(
-                trade_id="D-2", symbol="BBBUSDT", entry_ts_ms=day0 + MS_PER_DAY, entry_price=1.0, status="closed"
-            )
-            | {"exit_ts_ms": day0 + MS_PER_DAY + 1, "net_return": -0.01},
-            _trade_row(
-                trade_id="D-3", symbol="CCCUSDT", entry_ts_ms=day0 + 2 * MS_PER_DAY, entry_price=1.0, status="closed"
-            )
-            | {"exit_ts_ms": day0 + 2 * MS_PER_DAY + 1, "net_return": 0.03},
-        ],
-        infer_schema_length=None,
-    )
-    write_dataset(daily, daily_root, "event_demo_trades", partition_by=())
-    write_dataset(_continuous_perf_cycles(day0, [0.01, -0.02, 0.01]), cont_root, "continuous_fade_paper_cycles", partition_by=())
-
-    payload = run_continuous_vs_daily_forward_comparison(
-        daily_root,
-        cont_root,
-        min_common_days=3,
-        output_dir=tmp_path / "out",
-    )
-
-    assert payload["ok"] is False
-    assert payload["summary"]["continuous_beats_return"] is False
-    assert any("continuous return" in issue for issue in payload["issues"])
-
-
-def test_continuous_vs_daily_forward_uses_daily_cycles_as_zero_return_days(tmp_path: Path) -> None:
-    daily_root = tmp_path / "daily"
-    cont_root = tmp_path / "continuous"
-    daily_root.mkdir()
-    cont_root.mkdir()
-    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
-
-    write_dataset(_daily_cycle_rows(day0, 1), daily_root, "event_demo_cycles", partition_by=("date",))
-    write_dataset(_continuous_perf_cycles(day0, [0.0]), cont_root, "continuous_fade_paper_cycles", partition_by=())
-
-    payload = run_continuous_vs_daily_forward_comparison(
-        daily_root,
-        cont_root,
-        min_common_days=30,
-        output_dir=tmp_path / "out",
-    )
-
-    # 2026-06-11 operator semantics: an immature common window is a NOTE, not a
-    # blocking issue — the continuous read stands alone.
-    assert payload["ok"] is True
-    assert payload["summary"]["mode"] == "continuous_only"
-    assert payload["summary"]["common_days"] == 1
-    assert payload["summary"]["common_days_remaining"] == 29
-    assert payload["summary"]["maturity_day_ts"] == day0 + 29 * MS_PER_DAY
-    assert payload["summary"]["daily_source"] == "event_demo_cycles"
-    assert payload["summary"]["daily_observed_days"] == 1
-    assert payload["summary"]["continuous_observed_days"] == 1
-    assert payload["summary"]["latest_daily_day_ts"] == day0
-    assert payload["summary"]["latest_continuous_day_ts"] == day0
-    assert payload["summary"]["continuous_full_days"] == 1
-    assert payload["daily"]["total_return"] == 0.0
-    assert any("below min_common_days" in note for note in payload["notes"])
-    assert not any("daily return series is empty" in issue for issue in payload["issues"])
-    assert not any("continuous return" in issue for issue in payload["issues"])
+    assert payload["summary"]["paired"] == 1
+    assert payload["summary"]["paper_only"] == 0
+    assert payload["summary"]["start_ts_ms"] == v2_start
+    assert payload["paper_rebalance"]["result"]["summary"]["cycles_before_filter"] == 3
+    assert payload["paper_rebalance"]["result"]["summary"]["cycles"] == 1
+    assert "continuous_ensemble_v2" in payload["report"]
+    assert str(v2_start) in payload["report"]
 
 
 def test_continuous_paper_mode_resolves_distinct_dataset_names() -> None:
@@ -544,6 +485,148 @@ def test_continuous_rebalance_cycle_audit_flags_repeated_same_day_resize() -> No
 
     assert payload["ok"] is False
     assert payload["summary"]["same_day_resize_violations"] >= 1
+    assert any(issue["kind"] == "same_day_multiple_resize" for issue in payload["issues"])
+
+
+def test_continuous_rebalance_cycle_audit_v2_filter_ignores_pre_v2_bad_rows() -> None:
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+    v2_start = day0 + MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "cycle_id": "old-a",
+                "ts_ms": day0 + 1,
+                "strategy_profile": "retired_continuous_profile",
+                "strategy_id": "retired_continuous_paper",
+                "rebalance_day_ts": day0,
+                "rebalance_raw_return": 0.0,
+                "rebalance_target_scale": 1.0,
+                "rebalance_scaled_equity": 1.0,
+                "rebalance_scaled_peak": 1.0,
+                "rebalance_resize_skipped_same_day": False,
+                "rebalance_resize_orders": 1,
+            },
+            {
+                "cycle_id": "old-b",
+                "ts_ms": day0 + 2,
+                "strategy_profile": "retired_continuous_profile",
+                "strategy_id": "retired_continuous_paper",
+                "rebalance_day_ts": day0,
+                "rebalance_raw_return": 0.0,
+                "rebalance_target_scale": 1.0,
+                "rebalance_scaled_equity": 1.0,
+                "rebalance_scaled_peak": 1.0,
+                "rebalance_resize_skipped_same_day": False,
+                "rebalance_resize_orders": 1,
+            },
+            {
+                "cycle_id": "v2-clean",
+                "ts_ms": v2_start + 1,
+                "strategy_profile": "continuous_ensemble_v2",
+                "strategy_id": "continuous_fade_v2_paper",
+                "rebalance_day_ts": v2_start,
+                "rebalance_raw_return": 0.0,
+                "rebalance_target_scale": 1.0,
+                "rebalance_scaled_equity": 1.0,
+                "rebalance_scaled_peak": 1.0,
+                "rebalance_resize_skipped_same_day": False,
+                "rebalance_resize_orders": 0,
+            },
+        ],
+        infer_schema_length=None,
+    )
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "old-resize",
+                "ts_ms": day0 + 3,
+                "signal_ts_ms": day0,
+                "strategy_id": "retired_continuous_paper",
+                "resize_reason": "rebalance_increase",
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    payload = audit_continuous_rebalance_cycles(
+        cycles,
+        orders,
+        start_ts_ms=v2_start,
+        strategy_profile="continuous_ensemble_v2",
+        cycle_strategy_id="continuous_fade_v2_paper",
+        order_strategy_id="continuous_fade_v2_paper",
+    )
+
+    assert payload["ok"] is True
+    assert payload["summary"]["cycles_before_filter"] == 3
+    assert payload["summary"]["orders_before_filter"] == 1
+    assert payload["summary"]["cycles"] == 1
+    assert payload["summary"]["order_resize_orders"] == 0
+
+
+def test_continuous_rebalance_cycle_audit_v2_filter_still_fails_post_v2_bad_rows() -> None:
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+    v2_start = day0 + MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "cycle_id": "v2-a",
+                "ts_ms": v2_start + 1,
+                "strategy_profile": "continuous_ensemble_v2",
+                "strategy_id": "continuous_fade_v2_paper",
+                "rebalance_day_ts": v2_start,
+                "rebalance_raw_return": 0.0,
+                "rebalance_target_scale": 1.0,
+                "rebalance_scaled_equity": 1.0,
+                "rebalance_scaled_peak": 1.0,
+                "rebalance_resize_skipped_same_day": False,
+                "rebalance_resize_orders": 1,
+            },
+            {
+                "cycle_id": "v2-b",
+                "ts_ms": v2_start + 2,
+                "strategy_profile": "continuous_ensemble_v2",
+                "strategy_id": "continuous_fade_v2_paper",
+                "rebalance_day_ts": v2_start,
+                "rebalance_raw_return": 0.0,
+                "rebalance_target_scale": 1.0,
+                "rebalance_scaled_equity": 1.0,
+                "rebalance_scaled_peak": 1.0,
+                "rebalance_resize_skipped_same_day": False,
+                "rebalance_resize_orders": 1,
+            },
+        ],
+        infer_schema_length=None,
+    )
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "v2-a",
+                "ts_ms": v2_start + 1,
+                "strategy_id": "continuous_fade_v2_paper",
+                "resize_reason": "rebalance_increase",
+            },
+            {
+                "order_link_id": "v2-b",
+                "ts_ms": v2_start + 2,
+                "strategy_id": "continuous_fade_v2_paper",
+                "resize_reason": "rebalance_increase",
+            },
+        ],
+        infer_schema_length=None,
+    )
+
+    payload = audit_continuous_rebalance_cycles(
+        cycles,
+        orders,
+        start_ts_ms=v2_start,
+        strategy_profile="continuous_ensemble_v2",
+        cycle_strategy_id="continuous_fade_v2_paper",
+        order_strategy_id="continuous_fade_v2_paper",
+    )
+
+    assert payload["ok"] is False
+    assert payload["summary"]["cycles"] == 2
     assert any(issue["kind"] == "same_day_multiple_resize" for issue in payload["issues"])
 
 

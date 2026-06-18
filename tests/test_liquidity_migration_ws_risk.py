@@ -2624,7 +2624,7 @@ def test_ws_risk_recovers_continuous_addon_hedge_as_tracking_row(tmp_path: Path)
     assert stored.height == 1
     trade = stored.to_dicts()[0]
     assert trade["trade_id"] == f"hedge-{entry_link}"
-    assert trade["strategy_id"] == "continuous_btc_hedge_v1"
+    assert trade["strategy_id"] == "continuous_btc_hedge_v2"
     assert trade["symbol"] == HEDGE_SYMBOL
     assert trade["side"] == "long"
     assert trade["sleeve"] == "continuous_addon"
@@ -2674,7 +2674,7 @@ def test_recover_entry_link_metadata_prefers_latest_reentry(tmp_path: Path) -> N
 
 
 def test_adoption_rebuilds_component_tagged_trade_id(tmp_path: Path) -> None:
-    """REGRESSION (audit 2026-06-12): the deployed continuous_ensemble_v1 emits ONLY
+    """REGRESSION (audit 2026-06-12): the ensemble profiles emit ONLY
     component-tagged links (lm-en-cp3-…) and the live trade_id carries the component
     ({base}-p3). The rebuild reconstruction dropped it, so every post-rebuild adoption
     produced an id that matched no paper-twin row — reconciliation pairing broke."""
@@ -2710,7 +2710,7 @@ def test_adoption_rebuilds_component_tagged_trade_id(tmp_path: Path) -> None:
     # without it the daily rebalance defaults the missing weight to 1.0 and
     # resizes a fractional p3 entry to FULL base notional (the round-3 CRITICAL
     # re-entering through the adoption door). p3 weight renormalized to 1/3 after
-    # the 2026-06-18 tp14 drop.
+    # the 2026-06-18 component-set freeze.
     assert row["component"] == "p3"
     assert float(row["component_weight"]) == pytest.approx(0.3333333333333333)
 
@@ -3490,7 +3490,7 @@ def test_ws_risk_routed_write_isolates_continuous_from_short_ledger(tmp_path: Pa
     )
     engine._write_order_rows_routed([
         {"order_link_id": "lm-ux-c-AAA-x", "ts_ms": 1, "symbol": "AAAUSDT", "side": "Buy",
-         "status": "filled", "sleeve": "continuous", "trade_id": "continuous_fade_v1-AAAUSDT-1"},
+         "status": "filled", "sleeve": "continuous", "trade_id": "continuous_fade_v2-AAAUSDT-1"},
         {"order_link_id": "lm-ux-SHORT-y", "ts_ms": 2, "symbol": "ZZZUSDT", "side": "Buy",
          "status": "filled", "sleeve": "short", "trade_id": "short-ZZZUSDT-1"},
     ])

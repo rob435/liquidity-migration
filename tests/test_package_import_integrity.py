@@ -1,11 +1,10 @@
 """Guards against circular-import regressions in the post-refactor module split.
 
-The `event_demo` and `volume_events` monoliths were each split into a hub plus
-sibling modules. The hub eagerly imports its siblings (re-export + the hub's own
-cycle code calls them) and each sibling imports shared helpers back from the hub
-— a hub<->sibling cycle. Importing a sibling FIRST in a fresh process used to
-deadlock on the partially-initialized hub; `liquidity_migration/__init__.py`
-preloads the hubs to break it. These tests pin that contract.
+The `event_demo` helpers and surviving standalone `volume_events_charts` /
+`volume_events_pit` helpers are still imported by live long/continuous paths.
+Importing a sibling FIRST in a fresh process used to deadlock on partially
+initialized shared modules; `liquidity_migration/__init__.py` preloads the
+needed hubs/helpers to break it. These tests pin that contract.
 
 The imports MUST run in a subprocess: once a hub is loaded in the pytest process
 the cycle is masked, so an in-process `import` would pass even if the bug
@@ -22,7 +21,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Every sibling module produced by the event_demo + volume_events + cli splits.
+# Every sibling module produced by the event_demo + surviving chart/PIT + cli splits.
 _SPLIT_SIBLINGS = [
     "event_demo_data",
     "event_demo_reports",

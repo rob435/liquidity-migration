@@ -165,8 +165,8 @@ def test_forward_metrics_use_gap_filled_calendar_basis(tmp_path) -> None:
     update_forward_ledger(tmp_path, "bybit", full)
     s = forward_readiness_summary(tmp_path, "bybit", forward_start_ms=T0)
 
-    # Recompute the expected calendar-basis stats the way the deployed reference
-    # (scripts/continuous_deployed_equity.stats) does: scatter observed returns
+    # Recompute the expected calendar-basis stats the way the deployed refresh
+    # reference (scripts/continuous_deployed_equity_refresh.stats) does: scatter observed returns
     # onto a zero-filled calendar grid.
     ledger = pl.read_csv(tmp_path / "bybit" / "forward_ledger.csv").sort("ts_ms")
     ts = ledger["ts_ms"].to_numpy()

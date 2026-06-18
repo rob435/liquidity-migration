@@ -1,14 +1,11 @@
 """Forward-replay ORCHESTRATOR for the frozen continuous object (STATE open item).
 
-Design receipt: docs/preregistration/continuous-forward-clock-spec-2026-06-09.md
-— "the missing piece is the runner/orchestrator, not another decision rule."
-
 Per venue, this runs the spec's exact sequence:
-  1. re-run the four FROZEN component configs (identical to
-     scripts/rebuild_winner_base_component_ledgers.py — imported, not copied)
+  1. re-run the three current frozen component configs (identical to
+     scripts/rebuild_continuous_component_ledgers.py)
      over full history to the root's current data end;
   2. build_full_ledger(pieces, btc_returns, btc_funding) — the banked
-     BTC-hedged winner object, path-dependent from inception;
+     BTC-hedged continuous object, path-dependent from inception;
   3. update_forward_ledger(state_dir, venue, ledger) — verifies every stored
      day to 1e-9 then appends only new days (drift = hard error by design;
      a data-root revision that legitimately rewrites history requires
@@ -36,11 +33,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import continuous_ensemble_rebalance_scout as scout  # noqa: E402
-import rebuild_winner_base_component_ledgers as rb  # noqa: E402
+import rebuild_continuous_component_ledgers as rb  # noqa: E402
 
 import polars as pl  # noqa: E402
 
+from liquidity_migration.continuous_component_sources import (  # noqa: E402
+    ContinuousComponentSource,
+    load_continuous_component_source,
+)
 from liquidity_migration.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
     run_continuous_event_research,
@@ -114,7 +114,7 @@ def ensure_cells(venue: str, work: Path, end_date: str) -> None:
     for cell, overrides in CELL_OVERRIDES.items():
         out_dir = work / venue / cell
         report = out_dir / "continuous_report.json"
-        # Skip only when the report AND the CSV artifacts scout._load_source needs are all
+        # Skip only when the report AND the CSV artifacts load_continuous_component_source needs are all
         # present and current — a run interrupted after the report but before the CSVs (or
         # an older run that wrote no CSVs on a flat component) must re-run (audit-iter4/5).
         needed_csvs = (
@@ -139,7 +139,7 @@ def venue_update(venue: str, state_dir: Path, forward_start_ms: int) -> dict:
     end_date = data_end_day(ROOTS[venue])
     ensure_cells(venue, work, end_date)
     pieces = {
-        name: scout._load_source(scout.SourceSpec(work, cell), venue)[0]
+        name: load_continuous_component_source(ContinuousComponentSource(work, cell), venue)[0]
         for name, cell in NAME_TO_CELL.items()
     }
     all_days = sorted({d for p in pieces.values() for d in p.days})

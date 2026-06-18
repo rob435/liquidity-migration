@@ -17,6 +17,7 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import reconcile_fills as rf  # noqa: E402
+from liquidity_migration.storage import write_dataset  # noqa: E402
 
 
 def _ms(y: int, m: int, d: int, h: int = 0) -> int:
@@ -125,6 +126,39 @@ def test_aggregate_continuous_no_notional_column_equal_weights():
     })
     price, _ = rf.aggregate_continuous_prices(df, 0, 9_999_999_999_999)
     assert abs(price[("AAA", bar)] - 2.0) < 1e-12
+
+
+def test_continuous_live_prices_filters_v2_strategy_id(tmp_path: Path):
+    root = tmp_path / "root"
+    dataset = "continuous_fade_paper_trades"
+    start = _ms(2026, 6, 18, 19)
+    v1_bar = _ms(2026, 6, 18, 18)
+    v2_bar = _ms(2026, 6, 18, 20)
+    write_dataset(
+        pl.DataFrame(
+            {
+                "symbol": ["OLD", "NEW"],
+                "strategy_id": ["retired_continuous_paper", "continuous_fade_v2_paper"],
+                "signal_ts_ms": [v1_bar, v2_bar],
+                "entry_ts_ms": [v1_bar, v2_bar],
+                "entry_price": [1.0, 2.0],
+                "notional_usdt": [10.0, 10.0],
+            }
+        ),
+        root,
+        dataset,
+        partition_by=(),
+    )
+
+    prices, _bars = rf.continuous_live_prices(
+        str(root),
+        dataset,
+        start,
+        _ms(2026, 6, 19),
+        strategy_id="continuous_fade_v2_paper",
+    )
+
+    assert prices == {("NEW", v2_bar): 2.0}
 
 
 # ----------------------------------------------------------------------------- long price map

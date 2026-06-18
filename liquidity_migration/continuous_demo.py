@@ -37,10 +37,20 @@ from .continuous_events import (
 )
 
 CONTINUOUS_STRATEGY_ID = "continuous_fade_v2"
-# Temporary ledger-safety adapter: local demo/paper ledgers still contain open
-# pre-freeze rows under this id. The v2 executor manages them until flat; it must
-# not create new entries under these ids.
-CONTINUOUS_PREFREEZE_STRATEGY_IDS = ("continuous_fade_v1",)
+# --- v2 freeze boundary: the SINGLE source of truth for v2-forward reconcile ---
+# The 3-component `continuous_ensemble_v2` object froze on 2026-06-18 after the
+# component-set and risk-lifecycle reset. The active continuous ledgers were
+# hard-reset to this boundary; the daemon owns only the v2 strategy ids below.
+CONTINUOUS_V2_FORWARD_START = "2026-06-18T19:54:00Z"
+CONTINUOUS_V2_FORWARD_START_MS = 1_781_812_440_000
+CONTINUOUS_V2_PROFILE = "continuous_ensemble_v2"
+# Every v2 strategy id that may author a NEW continuous row (demo + paper).
+CONTINUOUS_V2_DEMO_STRATEGY_ID = CONTINUOUS_STRATEGY_ID            # continuous_fade_v2
+CONTINUOUS_V2_PAPER_STRATEGY_ID = CONTINUOUS_STRATEGY_ID + "_paper"  # continuous_fade_v2_paper
+CONTINUOUS_V2_STRATEGY_IDS = (
+    CONTINUOUS_V2_DEMO_STRATEGY_ID,
+    CONTINUOUS_V2_PAPER_STRATEGY_ID,
+)
 CONTINUOUS_ADDON_STRATEGY_ID = "continuous_fade_addon_v2"
 CONTINUOUS_ENTRY_LINK_PREFIX = "en-c"   # lm-en-c-{base}-{ts36}  (5-part; distinct sleeve for ws_risk routing)
 CONTINUOUS_EXIT_LINK_PREFIX = "ux-c"    # lm-ux-c-{base}-{ts36}
@@ -199,7 +209,7 @@ class ContinuousDemoCycleConfig:
     # continuous_dynexit_shadow.jsonl. Zero order impact; forward evidence is the
     # only path that can ever promote it (receipt continuous-dynexit-forward-shadow).
     dynexit_shadow_enabled: bool = True
-    # --- winner_base 3-component ensemble (the validated research object) ---
+    # --- continuous_ensemble_v2 3-component ensemble (the validated research object) ---
     # (name, entry_event_trigger|"none", age_days_min, take_profit_pct, weight).
     # Non-empty => the cycle selects entries PER COMPONENT (each with its own event
     # trigger, age floor and venue-side TP) and sizes each entry by weight x the base
@@ -1657,7 +1667,7 @@ def continuous_strategy_id(config: ContinuousDemoCycleConfig) -> str:
 
 def continuous_managed_strategy_ids(config: ContinuousDemoCycleConfig) -> tuple[str, ...]:
     suffix = "_paper" if config.paper_mode else ""
-    return (CONTINUOUS_STRATEGY_ID + suffix, *(sid + suffix for sid in CONTINUOUS_PREFREEZE_STRATEGY_IDS))
+    return (CONTINUOUS_STRATEGY_ID + suffix,)
 
 
 def continuous_sleeve_name(config: ContinuousDemoCycleConfig) -> str:
@@ -1672,11 +1682,10 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
     vol-target rebalance, and TP/24h exits with no daemon or server stop. It is
     not real-money-safe.
 
-    ``promoted.continuous_profile()`` exposes the frozen portfolio object
-    (winner_base entry lineage + 2f hedge + BTC-vol regime-hedge) for tooling.
-    The deployed daemon lifecycle is ``continuous_ensemble_v2`` through this
-    resolver plus systemd/env overrides. Demo/paper ONLY (``REAL_MONEY`` false;
-    Tier-3 real-money gate unmet and unchanged).
+    ``promoted.continuous_profile()`` exposes the frozen portfolio object for
+    tooling. The deployed daemon lifecycle is ``continuous_ensemble_v2`` through
+    this resolver plus systemd/env overrides. Demo/paper ONLY (``REAL_MONEY``
+    false; Tier-3 real-money gate unmet and unchanged).
     """
     if config.strategy_profile != "continuous_ensemble_v2":
         return config
@@ -3338,7 +3347,7 @@ def run_continuous_demo_cycle(
             and btc_trend_gate_allows_entry
         ):
             if demo.ensemble_components:
-                # winner_base ensemble: select PER COMPONENT (own trigger + age floor),
+                # continuous_ensemble_v2 ensemble: select PER COMPONENT (own trigger + age floor),
                 # in declared order, capped at _eff_max total new entries this cycle.
                 # The same symbol may enter under multiple components (the research
                 # combine sums weighted exposures); trade ids/links carry the

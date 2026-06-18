@@ -62,10 +62,10 @@ RECONCILE_OUT = REPO / "data" / "reconcile"
 # Forward-demo start per sleeve (the window over which the backtest can have a
 # live counterpart). Recorded in STATE.md / deploy/sleeves.env:
 #   LONG forward demo started 2026-06-04 (re-enabled 2026-06-16 after a toggle-off);
-#   CONTINUOUS demo book live since the 2026-06-09 VPS rebuild.
+#   CONTINUOUS v2 baseline starts at the 2026-06-18 v2 deploy boundary.
 DEMO_START: dict[str, str] = {
     "long": "2026-06-04",
-    "continuous": "2026-06-09",
+    "continuous": "2026-06-18",
 }
 
 # The v11a production fc_min_day_return gate (the deployed value); one value = the
@@ -461,13 +461,35 @@ def reconcile_long_three_way(step: rc.Step, *, trades_csv: Path, run_label: str,
 
 
 # ----------------------------------------------------------------------------- step 3: CONTINUOUS model leg
-def continuous_signal_leg(step: rc.Step, *, demo_root: str, paper_root: str) -> tuple[str, bool]:
+def continuous_signal_leg(
+    step: rc.Step,
+    *,
+    demo_root: str,
+    paper_root: str,
+    start_ts_ms: int = rc.CONTINUOUS_V2_START_MS,
+) -> tuple[str, bool]:
     """Engine-decile signal-consistency of the live continuous entries — the
     faithful 'model' leg for the rebalance book. Run against BOTH demo and paper."""
     step.banner("CONTINUOUS model leg: engine-decile signal-consistency (demo + paper)")
-    rc_d, out_d = step.run_capture(rc._script("continuous_demo_signal_check.py", "--root", demo_root))
+    rc_d, out_d = step.run_capture(
+        rc._script(
+            "continuous_demo_signal_check.py",
+            "--root", demo_root,
+            "--trades-dataset", "continuous_fade_demo_trades",
+            "--start-ts-ms", str(start_ts_ms),
+            "--strategy-id", rc.CONTINUOUS_V2_DEMO_STRATEGY_ID,
+        )
+    )
     demo_sum, demo_ok = rc._summarize_leg(out_d, "SUMMARY:", rc_d)
-    rc_p, out_p = step.run_capture(rc._script("continuous_demo_signal_check.py", "--root", paper_root))
+    rc_p, out_p = step.run_capture(
+        rc._script(
+            "continuous_demo_signal_check.py",
+            "--root", paper_root,
+            "--trades-dataset", "continuous_fade_paper_trades",
+            "--start-ts-ms", str(start_ts_ms),
+            "--strategy-id", rc.CONTINUOUS_V2_PAPER_STRATEGY_ID,
+        )
+    )
     paper_sum, paper_ok = rc._summarize_leg(out_p, "SUMMARY:", rc_p)
     summary = f"demo: {demo_sum}  ||  paper: {paper_sum}"
     return summary, (demo_ok and paper_ok)
@@ -580,24 +602,35 @@ def main() -> int:
     if "continuous" in sleeves:
         cp = rc.SLEEVES["continuous"]["paper"][1]   # type: ignore[index]
         cd = rc.SLEEVES["continuous"]["demo"][1]    # type: ignore[index]
-        exec_summary, exec_ok = rc.reconcile_continuous(step, paper=cp, demo=cd)
+        cont_start = _date(args.backtest_start) if args.backtest_start else _date(DEMO_START["continuous"])
+        cont_start_ms = _ms(cont_start) if args.backtest_start else rc.CONTINUOUS_V2_START_MS
+        exec_summary, exec_ok = rc.reconcile_continuous(
+            step,
+            paper=cp,
+            demo=cd,
+            start_ts_ms=cont_start_ms,
+            strategy_profile=rc.CONTINUOUS_V2_PROFILE,
+            paper_strategy_id=rc.CONTINUOUS_V2_PAPER_STRATEGY_ID,
+            demo_strategy_id=rc.CONTINUOUS_V2_DEMO_STRATEGY_ID,
+        )
         # The backtest-match always recomputes on the LIVE signal plane (primary gate) AND
         # on the independent-PIT research root (secondary; back-fills as the rmom horizon ages).
         cont_kroot = root  # inside `if "continuous" in sleeves` -> the research root
         if args.dry_run:
-            continuous_signal_leg(step, demo_root=cd, paper_root=cp)
+            continuous_signal_leg(step, demo_root=cd, paper_root=cp, start_ts_ms=cont_start_ms)
             step.banner("CONTINUOUS backtest-match: engine recompute <-> demo <-> paper (entries + fills)")
             print("$ (recompute the per-component engine candidates on the live signal-plane (primary, "
                   "gates now) + independent-PIT research root (secondary, back-fills as rmom ages); "
                   "cross-check entries + entry-price; write continuous_three_way_fills.csv)")
             summary["continuous"], ok["continuous"] = "(dry-run)", True
         else:
-            model_summary, model_ok = continuous_signal_leg(step, demo_root=cd, paper_root=cp)
+            model_summary, model_ok = continuous_signal_leg(step, demo_root=cd, paper_root=cp, start_ts_ms=cont_start_ms)
             step.banner("CONTINUOUS backtest-match: engine recompute <-> demo <-> paper (entries + fills)")
-            cont_start = _date(args.backtest_start) if args.backtest_start else _date(DEMO_START["continuous"])
             fills_summary, fills_ok = rf.fills_continuous(
                 demo_root=cd, paper_root=cp, start=cont_start, end=win_end, out_dir=RECONCILE_OUT,
-                research_root=cont_kroot)
+                research_root=cont_kroot, start_ms_override=cont_start_ms,
+                demo_strategy_id=rc.CONTINUOUS_V2_DEMO_STRATEGY_ID,
+                paper_strategy_id=rc.CONTINUOUS_V2_PAPER_STRATEGY_ID)
             print("\n" + fills_summary, flush=True)
             summary["continuous"] = (f"model(decile): {model_summary}\n  exec(paper↔demo): {exec_summary}"
                                      f"\n  {fills_summary}")

@@ -10,12 +10,12 @@ decision, not new alpha.
 
 ## What this is
 
-The CONTINUOUS-fade book — the operator-approved winner_base ensemble + BTC+ETH
+The CONTINUOUS-fade book — the operator-approved continuous_ensemble_v2 ensemble + BTC+ETH
 2f hedge **including the BTC-vol regime-hedge overlay**
 (λ=0.5; `continuous_regime.FROZEN_BTCVOL_REGIME`) — is added
 back to `promoted.PROFILES` as `"continuous"`, alongside `"long"`.
 
-Current supersession: on 2026-06-18 the operator dropped the stale `tp14` leg and
+Current supersession: on 2026-06-18 the operator froze the current three-component object and
 reset the continuous forward clock. Source of truth for the current promoted-in-code
 object is still `continuous_forward_replay.FROZEN_FORWARD_CONFIG`, now the
 3-component p3/p4p3/p4p5 object. `promoted.continuous_profile()` returns a deep

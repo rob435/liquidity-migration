@@ -50,8 +50,8 @@ These roots are **not committed** (data, not code).
 
 When the per-venue roots span their full available histories there is no
 clean internal OOS window left in either venue. **Pristine OOS henceforth is
-the forward demo + paper ledgers, ticking from the latest forward-clock restart
-(2026-06-09, full VPS rebuild — see STATE.md for the current clock).**
+the forward demo + paper ledgers, ticking from each sleeve's latest
+forward-clock restart (see STATE.md for the current clock).**
 
 When a candidate parameter set is promoted, the forward ledgers accumulate
 clean OOS PnL that no backtest sweep can touch. Cite forward returns as the

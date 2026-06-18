@@ -23,7 +23,7 @@ from liquidity_migration.ws_risk import (
 
 def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch) -> None:
     """The equal-split denominator = sleeves that are BOTH owned (root configured) AND
-    enabled (kill-switch toggle, unset ⇒ on). Toggling a sleeve off shrinks the active set,
+    enabled (kill-switch toggle, unset ⇒ fail-safe off). Toggling a sleeve off shrinks the active set,
     so the equal-split budget grows for the survivors (3 → 1/3, 2 → 1/2, 1 → 1/1)."""
     from liquidity_migration.cross_sleeve import equal_split_budget
 

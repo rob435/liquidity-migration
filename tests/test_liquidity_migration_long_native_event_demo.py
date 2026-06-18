@@ -1,7 +1,7 @@
-"""Tests for the long-sleeve forward-testing module (v11a MultiStratV1).
+"""Tests for the long-sleeve forward-testing module (v11a LongV11aDivWeekendVol).
 
 Covers:
-- Profile loader returns the v11a uni10 sniper config
+- Profile loader returns the v11a uni50 sniper config
 - Order-link prefix is `lm-en-l-*` so ws_risk routes fills to the long ledger
 - Per-position notional sizing scales by notional_multiplier × base
 - Sniper retrace candidate selection enters when live price reaches threshold
@@ -33,7 +33,7 @@ from liquidity_migration.long_native_event_demo import (
     LONG_ENTRY_LINK_PREFIX,
     LONG_EXIT_LINK_PREFIX,
     LongNativeDemoCycleConfig,
-    MULTI_STRAT_V1_STRATEGY_ID,
+    LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
     _execute_long_entries,
     _fc_rank_is_near_boundary,
     _log_fc_rank_boundary,
@@ -157,11 +157,11 @@ def test_vol_target_scale_volup125() -> None:
 
 
 def test_strategy_profile_resolution() -> None:
-    assert LONG_DEMO_STRATEGY_PROFILES == ("MultiStratV1",)
-    assert _long_demo_strategy_id("MultiStratV1") == MULTI_STRAT_V1_STRATEGY_ID
+    assert LONG_DEMO_STRATEGY_PROFILES == ("LongV11aDivWeekendVol",)
+    assert _long_demo_strategy_id("LongV11aDivWeekendVol") == LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
     with pytest.raises(ValueError):
         _long_demo_strategy_id("nonexistent")
-    cfg = _long_demo_event_config("MultiStratV1")
+    cfg = _long_demo_event_config("LongV11aDivWeekendVol")
     assert cfg.enable_fomo_chase
     with pytest.raises(ValueError):
         _long_demo_event_config("nope")
@@ -544,7 +544,7 @@ def test_format_long_telegram_message_contains_essentials() -> None:
         "ledger_position_summary": {"unrealized_pnl_usdt": 0.0, "pnl_pct": 0.0},
     }
     text = format_long_telegram_status_message(payload, reason="long_entry_executed")
-    assert "MultiStratV1" in text
+    assert "LongV11aDivWeekendVol" in text
     assert "BTCUSDT" in text
     assert "sniper_retrace" in text
     assert "10×" in text or "10x" in text or "x10" in text or "x" in text  # multiplier marker present
@@ -666,7 +666,7 @@ def test_combined_book_summary_fails_open_on_missing_roots(tmp_path: Path) -> No
 def test_long_demo_cycle_summary_includes_key_fields() -> None:
     payload = {
         "cycle": {
-            "cycle_id": "abc", "mode": "submit", "strategy_profile": "MultiStratV1",
+            "cycle_id": "abc", "mode": "submit", "strategy_profile": "LongV11aDivWeekendVol",
             "symbols": 10, "feature_rows": 100,
             "entries_executed": 1, "entry_candidates": 1,
             "exits_executed": 0, "exit_candidates": 0,
@@ -676,7 +676,7 @@ def test_long_demo_cycle_summary_includes_key_fields() -> None:
     }
     text = format_long_demo_cycle_summary(payload)
     assert "long-native event demo cycle" in text
-    assert "MultiStratV1" in text
+    assert "LongV11aDivWeekendVol" in text
     assert "entries=1/1" in text
 
 

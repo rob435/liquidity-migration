@@ -134,7 +134,7 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int, str] 
     # Long:       lm-en-l-{base}-{ts36}              → 5 parts (parts[2]=="l"), sleeve="long"
     # Continuous: lm-en-c{tag}-{base}-{ts36}[-{seq}] → 5/6 parts; tag is "" (plain), an ensemble
     #             component ("p3"/"p4p3"/"p4p5" → "cp3"…), or the sniper "s" → "cs".
-    #             The deployed continuous_ensemble_v1 emits ONLY component-tagged links — a
+    #             The deployed ensemble profiles emit ONLY component-tagged links — a
     #             decoder that knew bare "c" alone sent every live entry to the adopted-*
     #             fallback as sleeve="short" on rebuild (audit 2026-06-11).
     # Addon:      lm-en-ca-{base}-{ts36}[-{seq}]     → sleeve="continuous_addon" (hedge). Checked

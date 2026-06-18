@@ -1,9 +1,9 @@
 # Known Limitations
 
 A single, honest place that catalogs what this system **cannot** currently claim
-or do. Maintained by the continuous audit loop
-(`docs/audit/CONTINUOUS_AUDIT_LOG.md`). If a limitation is removed by a fix, move
-it to the "Resolved" section with the date and commit.
+or do. Historical audit logs were removed from the hot path; git history is the
+archive. If a limitation is removed by a fix, move it to the "Resolved" section
+with the date and commit.
 
 This complements — does not replace — the methodology gate
 (`docs/backtesting_errors_we_never_repeat.md`) and the live state (`STATE.md`).
@@ -59,11 +59,27 @@ tests (`tests/test_property_invariants.py`, iter-8).
   backtest's PnL/cost only, not which entries the model picks; a full-universe
   funding backfill is slow (retry-on-empty across ~800 symbols). Use
   `--with-funding` for costed PnL.
-- **CONTINUOUS has no 1:1 trade-ledger backtest leg.** A costed `continuous-events`
-  run cannot reproduce `FROZEN_FORWARD_CONFIG`'s ensemble+hedge, so the faithful
-  model leg is engine-decile membership of the live entries, not a trade pairing.
-- **The three-way's runtime is dominated by the PIT data download** (network).
-  Use `--no-data-refresh` to re-run the reconcile quickly once the root is current.
+- **CONTINUOUS backtest-match is directional, not a 1:1 trade pairing.** The live engine
+  is path-dependent (MAX_ACTIVE / max-new-per-cycle / cooldown / held-state cap entries),
+  so a backtest cannot reproduce the exact entry SET. The reconcile instead recomputes the
+  UNCAPPED per-component entry candidates (`scripts/reconcile_fills.py`, reusing the engine's
+  shared decile + trigger functions) and checks directionally: every live entry must be a
+  candidate; a candidate not taken live is expected capacity. A costed re-sim of
+  `FROZEN_FORWARD_CONFIG`'s ensemble+hedge is NOT attempted (that portfolio-return object is
+  `continuous_forward_replay`, a different granularity).
+- **The independent-PIT continuous backtest-match lags the live window — data freshness,
+  not a horizon.** rmom itself is causal (a ~2-3 day completion lag, `rolling_sum(7).shift(3)`).
+  The independent-PIT plane's coverage is gated by the research root's factor-panel inputs:
+  `build_feature_panel` reads `open_interest` + `premium`, and the **default** three-way refresh
+  updates only the manifest + klines, not those derivative metrics — so they go stale on the
+  research root (here OI ~05-26, premium ~05-30), truncating the factor panel and (via rmom's
+  `shift(3)`) its coverage to ~06-02. So even a freshly-recomputed research-root rmom ends
+  ~06-02, and recent continuous entries are reported `pending_rmom` (never failures) until those
+  inputs are topped up (`--with-funding`). The LIVE signal plane (current rmom) verifies entries
+  immediately and gates the run; the independent-PIT plane back-fills as the research inputs advance.
+- **The three-way's runtime is dominated by the PIT data download + rmom recompute.** Use
+  `--no-data-refresh` (skip download) and/or `--no-rmom` (skip the recompute) to re-run the
+  reconcile quickly once the root is current.
 
 ## Hedge / risk plumbing
 
@@ -72,11 +88,11 @@ tests (`tests/test_property_invariants.py`, iter-8).
   even on a live socket (STATE.md open decision #2 — whether to make it
   ledger-aware is undecided).
 
-## Known data/code warts (from the continuous audit — tracked, not yet fixed)
+## Known data/code warts
 
 These are confirmed, adversarially-verified findings that are latent or
-design-decisions, tracked in `docs/audit/CONTINUOUS_AUDIT_LOG.md`. Behavior-changing
-ones are proposals in `docs/strategy_improvements.md`.
+design-decisions. Behavior-changing ones that affect current strategy decisions are
+summarized in `docs/research_summary.md`.
 
 - **Binance proxy funding hardcodes an 8h interval** (`downloaders._normalize_binance_funding`):
   wrong for 4h-cadence alts. Currently harmless — every live reader either ignores the
@@ -88,9 +104,10 @@ ones are proposals in `docs/strategy_improvements.md`.
 - **Windowed ledger read can drop a >6-month-open trade** (`storage._recent_ledger_month_dirs`):
   a post-migration trade lives in its `entry_ts_ms` month bucket, not the legacy=0
   tail, so a position open longer than `months_back` (=6 in ws_risk) is invisible to the
-  steady-state reconcile. Mitigated by the full read on every restart (`bootstrap`) +
-  server-side stops; the longest sleeve hold is ~21 days, so the >6mo precondition is
-  not reachable in normal operation (audit-iter1 archive-recon-1).
+  steady-state reconcile. Mitigated by the full read on every restart (`bootstrap`);
+  the longest sleeve hold is ~21 days, so the >6mo precondition is not reachable in
+  normal operation (audit-iter1 archive-recon-1). Do not assume every sleeve has a
+  server-side stop: continuous v2 intentionally runs no-stop in demo/paper.
 - **Orphan-close exit price drops priced-but-size-less legs** (`event_demo_exits._orphan_close_pnl_from_records`):
   the volume-weighted price uses only legs with `closedSize>0`, while fees sum over all
   legs — a minor price/fee leg-set inconsistency on a degenerate Bybit closed-PnL row.
@@ -122,7 +139,7 @@ ones are proposals in `docs/strategy_improvements.md`.
 Confirmed defects in the `ws_risk` multi-leg WS close path. All affect recorded
 PnL/fee on the netted demo/paper ledger (no real money); `safe=False` because the
 fix touches the latency-critical close path + trade-row schema and needs a targeted
-split-close unit test. Tracked in `docs/audit/CONTINUOUS_AUDIT_LOG.md` iter-3.
+split-close unit test.
 
 - **Split (multi-sub-order) WS exit books only the FINAL sub-order's fee** into
   `exit_fee_usdt` (under-counts fees on a split close). Fix: accumulate fees across
@@ -141,12 +158,8 @@ split-close unit test. Tracked in `docs/audit/CONTINUOUS_AUDIT_LOG.md` iter-3.
 ### From audit iteration 5 (2026-06-18) — deploy/ops + test-debt
 
 Deploy/systemd items (safe=False — they touch the live VPS units / deploy flow, so they
-need operator review before landing on the host). Tracked in the audit ledger iter-5.
+need operator review before landing on the host).
 
-- **`deploy/systemd/liquidity-migration-continuous-forward-report.service` compares
-  against the ERASED daily-SHORT paper root** (`data/bybit-paper-event`). The
-  continuous-vs-daily forward comparator points at a dead root → the comparison is
-  meaningless. Needs the live unit updated (operator) to the surviving root or removal.
 - **`deploy_vps_live.sh` rmom-seed verification checks the DEMO root only** — a false
   "rmom gate EMPTY" WARN in the `CONTINUOUS_SLEEVE=off` + paper-on combo (post-7d39d61
   per-root refresh). Cosmetic (a WARN), but misleading.
@@ -157,8 +170,6 @@ need operator review before landing on the host). Tracked in the audit ledger it
 
 Test-debt — tests that assert on SOURCE STRINGS rather than behavior (they pass even if
 the code regresses); low priority, listed so they aren't mistaken for real coverage:
-- `tests/test_scripts_alpha_sweep.py` era-split MAR guard (checks the source contains
-  `era1_mar`/`era2_mar`, not that the split is correct).
 - `tests/test_liquidity_migration_continuous_demo.py` exit-planner wiring lock (checks a
   source substring, not which decile snapshot the planner receives).
 - `tests/test_liquidity_migration_trade_lifecycle.py` cost-funding-4 test (checks a

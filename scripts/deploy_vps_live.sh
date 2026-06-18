@@ -394,6 +394,15 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 # Fail the deploy loud if the risk unit isn't wired to both sibling sleeve roots.
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
+# Long sleeve assertions: the profile name is intentionally explicit so the old
+# ambiguous label cannot re-enter the live env by accident.
+if sleeve_on "$LONG_SLEEVE"; then
+  systemctl cat liquidity-migration-bybit-long-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
+  systemctl cat liquidity-migration-bybit-long-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol'
+  systemctl cat liquidity-migration-bybit-long-paper.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=0'
+  systemctl cat liquidity-migration-bybit-long-paper.service --no-pager | grep -E 'Environment=PAPER_MODE=1'
+  systemctl cat liquidity-migration-bybit-long-paper.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol'
+fi
 # Order-submitting continuous sleeve assertions: submit-orders config + v2 no-stop lifecycle.
 # Only when the sleeve is toggled ON; a retired sleeve's file content must not be an
 # unconditional deploy gate.

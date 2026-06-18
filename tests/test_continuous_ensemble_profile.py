@@ -14,14 +14,14 @@ from liquidity_migration.continuous_demo import (
 )
 
 
-def test_ensemble_profile_resolves_winner_base() -> None:
+def test_ensemble_profile_resolves_continuous_ensemble_v2() -> None:
     # The deployed gate (uptrend) arrives via the --btc-trend-gate / BTC_TREND_GATE
     # knob, not the profile; pass it in to mirror the live CLI/env wiring.
     cfg = apply_continuous_demo_profile(
         ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2", btc_trend_gate="uptrend")
     )
     comps = {c[0]: c for c in cfg.ensemble_components}
-    # age210tp14 dropped 2026-06-18 (receipt 2026-06-18-drop-tp14-continuous-ensemble.md);
+    # Current three-component object frozen 2026-06-18;
     # remaining three weights renormalized = old/0.90.
     assert set(comps) == {"p3", "p4p3", "p4p5"}
     assert comps["p3"] == ("p3", "turn3_pop3", 240, 0.10, 0.3333333333333333)
@@ -143,7 +143,7 @@ def test_inverse_vol_entry_sizing_multiplies_component_weight() -> None:
 def test_two_components_same_symbol_distinct_ids() -> None:
     # Generic executor test: two distinct component tags + different TPs on one symbol get
     # distinct ids and the right per-candidate TP price. Synthetic tags (decoupled from the
-    # deployed component set, which no longer includes a 0.14-TP leg after dropping tp14).
+    # deployed component set, which no longer includes a 0.14-TP leg.
     rows, _ = _run([
         _cand(component="cmpA", weight=0.30, tp=0.10),
         _cand(component="cmpB", weight=0.10, tp=0.14),

@@ -74,16 +74,36 @@ def load_rmom(root: str) -> pl.DataFrame:
     return pl.read_parquet(f"{root}/residual_momentum.parquet").rename({"ts_ms": "day_ts"})
 
 
-def load_entries(root: str) -> pl.DataFrame:
-    fs = glob.glob(f"{root}/continuous_fade_demo_trades/**/*.parquet", recursive=True)
+def _filter_entries(df: pl.DataFrame, *, start_ts_ms: int | None, strategy_id: str | None) -> pl.DataFrame:
+    if df.is_empty():
+        return df
+    if start_ts_ms is not None:
+        ts_cols = [pl.col(c).cast(pl.Int64, strict=False) for c in ("signal_ts_ms", "entry_ts_ms", "ts_ms") if c in df.columns]
+        if ts_cols:
+            df = df.filter(pl.coalesce(ts_cols).fill_null(0) >= int(start_ts_ms))
+    if strategy_id and "strategy_id" in df.columns:
+        df = df.filter(pl.col("strategy_id").cast(pl.Utf8) == strategy_id)
+    return df
+
+
+def load_entries(root: str, *, trades_dataset: str, start_ts_ms: int | None = None,
+                 strategy_id: str | None = None) -> pl.DataFrame:
+    fs = glob.glob(f"{root}/{trades_dataset}/**/*.parquet", recursive=True)
     if not fs:
         return pl.DataFrame({"symbol": [], "signal_ts_ms": [], "entry_ts_ms": []})
-    return pl.concat([pl.read_parquet(f) for f in fs], how="diagonal_relaxed")
+    df = pl.concat([pl.read_parquet(f) for f in fs], how="diagonal_relaxed")
+    return _filter_entries(df, start_ts_ms=start_ts_ms, strategy_id=strategy_id)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Continuous demo signal-consistency check.")
     ap.add_argument("--root", default=DEFAULT_ROOT, help="Continuous demo data root.")
+    ap.add_argument("--trades-dataset", default="continuous_fade_demo_trades",
+                    help="Trades dataset to check under --root.")
+    ap.add_argument("--start-ts-ms", type=int, default=None,
+                    help="Only check entries whose signal/entry timestamp is at or after this UTC ms boundary.")
+    ap.add_argument("--strategy-id", default=None,
+                    help="Optional strategy_id filter for entries.")
     ap.add_argument("--rmom-quantile", type=float, default=RMOM_QUANTILE)
     ap.add_argument("--feature-set", default=",".join(FEATURE_SET),
                     help="Comma list of engine features (must match the deployed profile).")
@@ -92,9 +112,17 @@ def main() -> int:
     rmom_quantile = float(args.rmom_quantile)
     feature_set = tuple(f.strip() for f in args.feature_set.split(",") if f.strip())
 
-    entries_probe = load_entries(root)
+    entries_probe = load_entries(
+        root,
+        trades_dataset=args.trades_dataset,
+        start_ts_ms=args.start_ts_ms,
+        strategy_id=args.strategy_id,
+    )
     if entries_probe.height == 0:
-        print(f"continuous signal-check: no demo entries under {root} yet — nothing to verify.")
+        print(
+            f"continuous signal-check: no entries under {root}/{args.trades_dataset} "
+            f"for start_ts_ms={args.start_ts_ms or '-'} strategy_id={args.strategy_id or '-'} yet — nothing to verify."
+        )
         print("SUMMARY: 0/0 confirmed D9 at signal bar; 0 off-decile; 0 no-panel-row.")
         return 0
 
@@ -108,7 +136,12 @@ def main() -> int:
     )
     print(f"decile panel: {panel.height} rows, deciles={sorted(panel['decile'].unique().to_list())}")
 
-    entries = load_entries(root)
+    entries = load_entries(
+        root,
+        trades_dataset=args.trades_dataset,
+        start_ts_ms=args.start_ts_ms,
+        strategy_id=args.strategy_id,
+    )
     print(f"\n=== {entries.height} live continuous demo entries vs engine D{DECILE} membership ===")
     # Bar-align signal_ts to the hourly grid the panel uses.
     hit = miss = nopanel = 0

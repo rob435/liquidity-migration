@@ -3,7 +3,7 @@
 
 LONG runs from the exact promoted-in-code profile in `liquidity_migration.promoted`.
 CONTINUOUS is reconstructed from the deployed continuous entry book
-(`continuous_ensemble_v2`, frozen winner_base components, plus 2f hedge +
+(`continuous_ensemble_v2`, frozen continuous_ensemble_v2 components, plus 2f hedge +
 BTC-vol regime-hedge) via the continuous refresh runner.
 As of the 2026-06-15 operator-override promotion the continuous book is
 promoted-in-code (`promoted.continuous_profile`), but demo/paper ONLY —

@@ -46,12 +46,30 @@ def test_continuous_rebalance_cycle_audit_parser_defaults() -> None:
     assert args.data_root is None
     assert args.cycles_dataset == "continuous_fade_paper_cycles"
     assert args.orders_dataset == "continuous_fade_paper_orders"
+    assert args.start_ts_ms is None
+    assert args.strategy_profile is None
+    assert args.strategy_id is None
 
     # A global --data-root before the subcommand is preserved (was silently
     # clobbered by the subparser default before the dest rename).
     args2 = parser.parse_args(["--data-root", "data/custom", "continuous-rebalance-cycle-audit"])
     assert args2.data_root == "data/custom"
     assert args2.audit_data_root == "data/bybit-continuous-paper-event"
+
+    args3 = parser.parse_args(
+        [
+            "continuous-rebalance-cycle-audit",
+            "--start-ts-ms",
+            "1781812440000",
+            "--strategy-profile",
+            "continuous_ensemble_v2",
+            "--strategy-id",
+            "continuous_fade_v2_paper",
+        ]
+    )
+    assert args3.start_ts_ms == 1_781_812_440_000
+    assert args3.strategy_profile == "continuous_ensemble_v2"
+    assert args3.strategy_id == "continuous_fade_v2_paper"
 
 
 def test_continuous_forward_readiness_parser_defaults() -> None:
@@ -67,6 +85,28 @@ def test_continuous_forward_readiness_parser_defaults() -> None:
     assert args.min_pairs_warning == 20
     assert args.allow_unmatched is False
     assert args.paper_only is False
+    assert args.start_ts_ms is None
+    assert args.strategy_profile is None
+    assert args.paper_strategy_id is None
+    assert args.demo_strategy_id is None
+
+    args2 = parser.parse_args(
+        [
+            "continuous-forward-readiness",
+            "--start-ts-ms",
+            "1781812440000",
+            "--strategy-profile",
+            "continuous_ensemble_v2",
+            "--paper-strategy-id",
+            "continuous_fade_v2_paper",
+            "--demo-strategy-id",
+            "continuous_fade_v2",
+        ]
+    )
+    assert args2.start_ts_ms == 1_781_812_440_000
+    assert args2.strategy_profile == "continuous_ensemble_v2"
+    assert args2.paper_strategy_id == "continuous_fade_v2_paper"
+    assert args2.demo_strategy_id == "continuous_fade_v2"
 
 
 def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
@@ -129,13 +169,17 @@ def test_reconcile_continuous_uses_forward_readiness_gate() -> None:
 
     assert '"continuous-forward-readiness"' in text
     assert '"--paper-only"' in text
+    assert "CONTINUOUS_V2_START_MS" in text
+    assert '"--strategy-profile", strategy_profile' in text
+    assert '"--paper-strategy-id", paper_strategy_id' in text
     assert '"--root", paper' in text
+    assert '"--trades-dataset", "continuous_fade_paper_trades"' in text
     assert '"reconcile-continuous-paper-demo"' not in text
 
 
 def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controlled() -> None:
     repo = Path(__file__).resolve().parents[1]
-    # 2026-06-10: both units run the validated winner_base ensemble
+    # 2026-06-10: both units run the validated continuous_ensemble_v2 ensemble
     # (the profile owns triggers/age/TP per component; unit-level trigger is none).
     for unit_name in (
         "liquidity-migration-bybit-continuous-demo.service",
@@ -167,6 +211,18 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
     assert "Environment=HEDGE_MODE=2f" in hedge_text
     assert "Environment=SUBMIT_HEDGE=1" in hedge_text
     assert "Environment=CONFIRM_DEMO_ORDERS=1" in hedge_text
+
+
+def test_long_units_pin_descriptive_v11a_profile() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-long-demo.service").read_text(encoding="utf-8")
+    paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-long-paper.service").read_text(encoding="utf-8")
+
+    assert "Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol" in demo_text
+    assert "Environment=SUBMIT_ORDERS=1" in demo_text
+    assert "Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol" in paper_text
+    assert "Environment=SUBMIT_ORDERS=0" in paper_text
+    assert "Environment=PAPER_MODE=1" in paper_text
 
 
 def test_continuous_rmom_refresh_rebuilds_each_active_sleeve_root() -> None:

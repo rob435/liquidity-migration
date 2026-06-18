@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration Bybit long-sleeve (MultiStratV1) paper (dry-run) runner
+Description=liquidity-migration Bybit long-sleeve (LongV11aDivWeekendVol) paper (dry-run) runner
 Wants=network-online.target
 After=network-online.target
 
@@ -20,7 +20,7 @@ Environment=RECORD_DRY_RUN=1
 # the demo dataset names and reconciliation finds paired=0.
 Environment=PAPER_MODE=1
 Environment=TELEGRAM_ENABLED=0
-Environment=STRATEGY_PROFILE=MultiStratV1
+Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol
 Environment=INTERVAL_SECONDS=60
 Environment=USE_DAEMON=0
 Environment=PYTHONDONTWRITEBYTECODE=1

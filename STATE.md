@@ -33,8 +33,11 @@ promoted-in-code without clearing the real-money gate. The gate remains:
   inverse-vol component sizing (`target_vol_per_name=0.01`, clamp 2.0),
   w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25, BTC-uptrend gate,
   TP/24h exits only, no daemon/server stop. Demo/paper only; not real-money-safe.
-- The old `tp14` component was dropped by 2026-06-18 operator override; the fresh
-  3-component object reset the continuous forward clock.
+- The 2026-06-18 operator override froze the current three-component object and
+  reset the continuous forward clock.
+- The v2-forward reconcile/control baseline starts at
+  `2026-06-18T19:54:00+00:00` (`1781812440000`) and is recorded in
+  `docs/preregistration/2026-06-18-continuous-v2-forward-baseline.md`.
 - The temporary 2026-06-16 `BTC_TREND_GATE=off` plumbing window is closed in the
   live-v2 wiring; demo + paper are back to `uptrend`.
 - **2f BTC+ETH hedge:** wired and armed. Warmstart CSVs were regenerated on 2026-06-13.
@@ -85,9 +88,9 @@ pre-registration and explicit operator direction.
 
 - `docs/preregistration/2026-06-18-continuous-live-v2-exit-redesign.md`
 - `docs/preregistration/2026-06-18-continuous-v2-invvol-max4-replay.md`
+- `docs/preregistration/2026-06-18-continuous-v2-forward-baseline.md`
 - `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md`
 - `docs/preregistration/2026-06-15-operator-override-promote-continuous.md`
-- `docs/preregistration/2026-06-18-drop-tp14-continuous-ensemble.md`
 - `docs/preregistration/continuous-capacity-impact-2026-06-09.md`
 - `docs/preregistration/continuous-dynexit-forward-shadow-2026-06-10.md`
 - `docs/preregistration/sniper-staged-entries-2026-06-09.md`

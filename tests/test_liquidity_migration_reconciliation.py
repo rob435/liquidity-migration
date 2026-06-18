@@ -8,7 +8,6 @@ import pytest
 from liquidity_migration.reconciliation import (
     MS_PER_DAY,
     SNIPER_TRADE_SUFFIX,
-    _continuous_beats_daily_mar,
     _fee_adjusted_return,
     _trade_ledger_daily_returns,
     _write_pairs_csv,
@@ -324,35 +323,6 @@ def test_gross_without_notional_falls_back_to_raw() -> None:
     }
     out = _fee_adjusted_return(row, net_of_cost=False)
     assert out == pytest.approx(0.02 - (0.5 + 0.5) / 1000.0)
-
-
-# ---------------------------------------------------------------------------
-# audit2
-# [8] reconciliation: a zero-drawdown continuous book (mar=None) is the BEST
-# drawdown case, not a MAR failure.
-# ---------------------------------------------------------------------------
-
-def test_zero_drawdown_continuous_beats_finite_daily_mar() -> None:
-    continuous = {"mar": None, "max_drawdown": 0.0, "total_return": 0.20}
-    daily = {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15}
-    assert _continuous_beats_daily_mar(continuous, daily) is True  # was False (false alarm)
-
-
-def test_zero_drawdown_continuous_with_lower_return_does_not_beat() -> None:
-    continuous = {"mar": None, "max_drawdown": 0.0, "total_return": 0.05}
-    daily = {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15}
-    assert _continuous_beats_daily_mar(continuous, daily) is False
-
-
-def test_finite_mar_comparison_unchanged() -> None:
-    assert _continuous_beats_daily_mar(
-        {"mar": 5.0, "max_drawdown": -0.04, "total_return": 0.2},
-        {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15},
-    ) is True
-    assert _continuous_beats_daily_mar(
-        {"mar": 2.0, "max_drawdown": -0.08, "total_return": 0.1},
-        {"mar": 3.0, "max_drawdown": -0.10, "total_return": 0.15},
-    ) is False
 
 
 # --------------------------------------------------------------------------

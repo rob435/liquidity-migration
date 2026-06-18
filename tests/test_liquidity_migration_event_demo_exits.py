@@ -2396,7 +2396,7 @@ def test_pending_entry_recovery_carries_identity_fields() -> None:
                 "stop_price": 112.0,
                 "take_profit_price": 80.0,
                 "sleeve": "continuous",
-                "strategy_id": "continuous_fade_v1",
+                "strategy_id": "continuous_fade_v2",
                 "component": "p3",
                 "component_weight": 0.30,
                 "filled_qty": "",
@@ -2416,7 +2416,7 @@ def test_pending_entry_recovery_carries_identity_fields() -> None:
     assert len(trades) == 1
     recovered = trades[0]
     assert recovered["sleeve"] == "continuous"
-    assert recovered["strategy_id"] == "continuous_fade_v1"
+    assert recovered["strategy_id"] == "continuous_fade_v2"
     assert recovered["component"] == "p3"
     assert float(recovered["component_weight"]) == 0.30
 

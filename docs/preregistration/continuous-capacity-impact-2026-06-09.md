@@ -1,6 +1,10 @@
 # R4/R5 receipt: impact-calibration status + capacity statement (continuous winner+hedge)
 
 **Date:** 2026-06-09. **Program:** live-readiness R4 (impact calibration) + R5 (capacity).
+**Current use after 2026-06-18 scrub:** historical capacity and fill-calibration
+debt only. The continuous object reset after the 2026-06-18 component-set freeze, so this receipt
+must not be cited as current forward-clock evidence or as a real-money deployment
+approval.
 
 ## R4 — impact calibration vs observed fills: BLOCKED ON OPERATOR (documented)
 
@@ -25,7 +29,7 @@ per venue; hourly turnover proxied by daily/24 (measured conservative: entry hou
 `notional_weight` x component weight x scale x E, over all 3,055 (bybit) / 2,617
 (binance) ensemble entries 2023-04..2026-05; turnover joined PIT per entry date.
 
-| venue | p95 participation per $1 | capacity (p95 ≤ 5%) | with ~1.4x hour factor | Tier-3 deployable (cap/10) |
+| venue | p95 participation per $1 | capacity (p95 ≤ 5%) | with ~1.4x hour factor | cap/10 capacity haircut |
 |---|---|---|---|---|
 | bybit | 1.18e-07 | ~$0.43M | ~$0.6M | **~$43–60k** |
 | binance | 2.94e-08 | ~$1.70M | ~$2.4M | **~$170–240k** |
@@ -35,16 +39,15 @@ not executable as modeled. Cross-check: consistent with the earlier liquid-fade
 estimate (~$1–3M cap) under a stricter all-trades bar.
 
 **Honest conclusion: the continuous winner+hedge is a SMALL-BOOK strategy at current
-breadth — combined two-venue Tier-3-safe deployment ≈ $200–300k.** Capacity binds on
-the small-name tail (bybit especially). Documented lever (NOT run; would need
-pre-registered validation as a strategy change): turnover-aware sizing caps
-(participation-capped weights) would raise capacity at some MAR cost.
+breadth.** The old cap/10 illustration is a capacity haircut, not a deployment
+approval and not a Tier-3 pass. Capacity binds on the small-name tail (bybit
+especially). Documented lever (NOT run; would need pre-registered validation as a
+strategy change): turnover-aware sizing caps (participation-capped weights) would
+raise capacity at some MAR cost.
 
 ## R3 collector — seeded and verified on real data (same day)
 
-`~/SHARED_DATA/continuous_forward_state_2026-06-09/` seeded from the real component
-ledgers: rebuilt full-history hedged ledgers match Stage-B EXACTLY (bybit +93.18%/MAR
-5.52, binance +73.66%/5.64), 633/569 days stored, re-run verifies all days and appends
-0 (idempotency on real data). Forward clock correctly reads 0 days — it starts ticking
-when the roots are refreshed past 2026-05-26/27 and the component-extension run is
-scheduled.
+Historical note: `~/SHARED_DATA/continuous_forward_state_2026-06-09/` was seeded
+from the then-current component ledgers and verified idempotent on real data. That
+clock is no longer current after later config-hash resets. STATE.md is the current
+clock source.

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Deployed continuous-ensemble equity on the June-extended PIT roots.
 
-Re-runs the EXACT frozen winner_base component configs (loaded from the
+Re-runs the EXACT frozen continuous_ensemble_v2 component configs (loaded from the
 2026-06-07 source receipts; only `end_date` is overridden) against the
 refreshed per-venue full-PIT roots, then reproduces the deployed book —
-winner_base 3-component ensemble @ w90/tv0.045/max4/ddh-0.04 + banked 2f
+continuous_ensemble_v2 3-component ensemble @ w90/tv0.045/max4/ddh-0.04 + banked 2f
 BTC+ETH hedge — and the official strategy-vs-BTC chart.
 
 IN-SAMPLE RESEARCH refresh (data-boundary extension, zero parameter changes;
@@ -476,7 +476,7 @@ def render_curves(
             monthly=monthly,
             png_name=f"continuous_equity_btc{tag}.png",
             title=(
-                f"CONTINUOUS deployed — winner_base ensemble + 2f hedge (max4)"
+                f"CONTINUOUS deployed — continuous_ensemble_v2 ensemble + 2f hedge (max4)"
                 f"{'' if mult == 1.0 else f', {mult:g}x levered'} [{venue}] — refreshed to {end_date}"
             ),
             subtitle=sub,
