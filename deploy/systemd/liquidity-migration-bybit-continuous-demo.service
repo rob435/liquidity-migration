@@ -26,25 +26,34 @@ Environment=WORKERS=2
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
 Environment=MAX_HOLD_HOURS=24
-# 2026-06-10: the validated winner_base 4-component ensemble is the live book.
-Environment=STRATEGY_PROFILE=continuous_ensemble_v1
+# 2026-06-18: repaired live-v2 demo/paper lifecycle. Same 3-component entry book
+# with inverse-vol component sizing, max4 daily vol-target rebalance; daemon
+# exits are TP/24h only and no server stop is attached. Not real-money-safe.
+Environment=STRATEGY_PROFILE=continuous_ensemble_v2
 Environment=FEATURE_SET=max_ret168
 Environment=ENTRY_EVENT_TRIGGER=none
 # Sniper ARMED by operator instruction 2026-06-10 (PostOnly +8% quarter-size adds).
 Environment=CONTINUOUS_SNIPER=1
-# PLUMBING TEST (operator 2026-06-16): gate flipped uptrend->off so the book takes
-# entries while BTC's 30d trend is negative, to exercise the demo/paper fill ->
-# hedge -> ledger -> reconcile path end to end. Demo/paper is execution-evidence
-# ONLY; this window is NOT promoted-object forward evidence. REVERT to "uptrend"
-# once plumbing is confirmed. (Demo + paper flipped together so reconcile matches.)
-Environment=BTC_TREND_GATE=off
+Environment=BTC_TREND_GATE=uptrend
 Environment=DAILY_REBALANCE_ENABLED=1
-# Wide server-side disaster stop (Bybit-managed; fires even if the daemon is down). The state exit
-# ("left the decile") is a PROFIT exit a squeezing short never triggers, so this is the only hard
-# catastrophe cap. 0.25 = operator I-phase cap. Set 0 ONLY for an explicit unstopped diagnostic.
-Environment=STOP_LOSS_PCT=0.25
+Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045
+Environment=DAILY_REBALANCE_MAX_SCALE=4
+Environment=DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04
+Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0
+Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN=0
+Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW=0
+Environment=STOP_LOSS_PCT=0
+Environment=LEFT_DECILE_EXIT_ENABLED=0
+Environment=STOP_APPROACH_FRAC=0
+Environment=FAILED_FADE_HOURS=0
+Environment=FAILED_FADE_LOSS_PCT=0
+Environment=FAILED_FADE_MIN_MFE_PCT=0
+Environment=BREAKEVEN_ARM_PCT=0
 Environment=ENTRY_LEVERAGE=2
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
+Environment=SIZING_MODE=inverse_vol
+Environment=TARGET_VOL_PER_NAME=0.01
+Environment=VOL_WEIGHT_CLAMP=2
 Environment=LIQ_TURNOVER_MIN=500000
 # Two daemons x full-width default threadpools on a 2-core box just buys context
 # switching; pin to 1 — the daemon's own WORKERS parallelism is the intended knob.

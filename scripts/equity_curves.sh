@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One command -> official equity curves.
-# LONG is the only promoted-in-code sleeve. CONTINUOUS is included here as the
-# research/demo-stage continuous ensemble reconstruction, not as a promoted profile.
+# LONG and CONTINUOUS are promoted-in-code for demo/paper tooling. CONTINUOUS is
+# operator-override demo/paper only, not a real-money or gate-pass claim.
 #
 #   bash scripts/equity_curves.sh                 # the promoted LONG sleeve, last 3 years
 #   bash scripts/equity_curves.sh --sleeves continuous

@@ -3,9 +3,9 @@
 > **2026-06-11:** the daily SHORT sleeve was ERASED from the system by operator
 > order — the short engine, its CLI reconcile commands, and the short ledgers'
 > live writers no longer exist. The PIT gate itself survives (it is generic);
-> everything below that mentions the short sleeve is HISTORICAL. The current
-> reconcile default is the LONG sleeve (`--sleeves long`), with continuous as
-> opt-in diagnostics.
+> everything below that mentions the short sleeve is HISTORICAL. The full
+> reconcile default is BOTH surviving sleeves; the `--quick` execution-only path
+> defaults to LONG unless `--sleeves long,continuous` is supplied.
 
 This is the operator + maintainer reference for the point-in-time (PIT) universe
 membership gate — the thing that decides whether a backtest signal is allowed to
@@ -119,7 +119,7 @@ demo ↔ backtest ↔ paper three-way for BOTH sleeves (see the next section). T
 "is the live executor matching the model?" pass once the root is already current:
 
 ```bash
-bash scripts/reconcile.sh --quick              # LONG paper<->demo (default sleeve)
+bash scripts/reconcile.sh --quick              # LONG paper<->demo (quick default)
 bash scripts/reconcile.sh --quick --sleeves long,continuous
 ```
 
@@ -176,17 +176,53 @@ irrelevant to the entry agreement and a full-universe funding backfill is slow.
   live entry with **no** matching backtest signal (`demo_not_in_model` /
   `paper_not_in_model` > 0 → possible look-ahead in live, stale-PIT in the
   backtest, or threshold drift). The backtest `run_label` is surfaced verbatim.
-- **CONTINUOUS** (rebalance book): demo↔paper execution leg + the engine-decile
-  **signal-consistency of both the demo and paper live entries** — the faithful
-  "model" leg, since a `continuous-events` CLI run cannot reproduce
-  `FROZEN_FORWARD_CONFIG`'s ensemble+hedge, but the shared decile pipeline can
-  confirm each live entry was a genuine D9 pick.
+- **CONTINUOUS** (rebalance book): demo↔paper execution leg + a **backtest-match**
+  that re-derives the deployed `continuous_ensemble_v2` ENTRY candidate set per
+  component (`scripts/reconcile_fills.py`, default-ON rmom recompute as step 1b
+  below). It reuses the engine's own `compute_continuous_decile_panel` +
+  `_entry_event_expr` to reproduce the per-bar predicate `decile==9 & turnover≥liq
+  & component-trigger` (the uncapped form of `select_continuous_entries`), then
+  asks: is every live entry a genuine engine candidate? A live entry that is **not**
+  a candidate is the tripwire — classified `hard` (off-decile → look-ahead/drift)
+  vs soft (`near_decile ≥D8` boundary flip, or `no_panel_row` snapshot gap). Only
+  `hard` fails. (This supersedes the older decile-membership-only check, which
+  remains as a complementary signal-consistency leg.)
 
-Why the asymmetry: LONG entries pair 1:1 to the trade ledger by signal-day;
-CONTINUOUS is a portfolio book whose faithful model leg is decile-membership of
-the live entries, not a trade-ledger pairing. The backtest leg is
-agreement/execution evidence — never alpha proof and never a promotion gate
-(`docs/backtesting_errors_we_never_repeat.md`). Matching skill:
+### Fill-level cross-check + the two recompute planes (2026-06-18)
+
+`scripts/reconcile_fills.py` runs automatically inside the three-way and adds the
+**entry-price** corner: for the entries the books share it joins `entry_price`
+across backtest/model, demo, and paper and reports the pairwise delta in bps
+(per-entry CSV at `data/reconcile/{long,continuous}_three_way_fills.csv`). LONG
+uses the backtest `entry_price`; CONTINUOUS prices the model at the PIT kline close
+and notional-weights paper's per-component legs into one symbol fill to match
+demo's netted position.
+
+- **Step 1b — rmom recompute (default ON for continuous):** `precompute_residual_momentum.py`
+  refreshes the research-root `residual_momentum.parquet` so the independent-PIT
+  plane runs on a fresh panel. Skip with `--no-rmom`; `--with-rmom` is a deprecated
+  no-op.
+- **Two planes:** the continuous backtest-match recomputes on the **live signal
+  plane** (the demo root's current klines+rmom — verifies every entry NOW, this is
+  the gate) and, on the **independent-PIT research plane** (freshly-downloaded
+  `klines_1h` + recomputed rmom). The PIT plane is informational and **lags the live
+  window** — but that is a DATA-FRESHNESS gap, not a horizon: rmom itself is causal
+  (a ~2-3d completion lag, `rolling_sum(7).shift(3)`). `build_feature_panel` also reads
+  `open_interest`/`premium`, and the **default** three-way refresh updates only the
+  manifest + klines (not those derivative metrics), so on the research root they go stale
+  (here OI ~05-26, premium ~05-30), truncating the factor panel — and via rmom's `shift(3)`
+  its coverage — to ~06-02. Pass `--with-funding` (which refreshes funding + OI + mark +
+  index + premium) to advance the plane. Until then recent continuous entries are reported
+  `pending_rmom`, never failures.
+
+Why the asymmetry: LONG entries pair 1:1 to the backtest trade ledger by
+`(symbol, side, signal-day)`. CONTINUOUS is a path-dependent ensemble book — the
+live engine caps entries (MAX_ACTIVE / max-new-per-cycle / cooldown / held-state),
+so a backtest can't reproduce the exact entry SET; the recompute therefore yields
+the UNCAPPED per-component candidate set and the check is directional (every live
+entry must be a candidate; a candidate not taken live is expected capacity). The
+backtest leg is agreement/execution evidence — never alpha proof and never a
+promotion gate (`docs/backtesting_errors_we_never_repeat.md`). Matching skill:
 `.claude/skills/pit-reconcile`.
 
 ## When a reconcile shows `paper-only` / `pit_membership_fail`

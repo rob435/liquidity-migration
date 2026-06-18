@@ -2,13 +2,14 @@
 """One command for official equity curves.
 
 LONG runs from the exact promoted-in-code profile in `liquidity_migration.promoted`.
-CONTINUOUS is reconstructed from the deployed continuous ensemble
-(`continuous_ensemble_v1` winner_base + 2f hedge + BTC-vol regime-hedge) via the
-continuous refresh runner. As of the 2026-06-15 operator-override promotion the
-deployed continuous book is also promoted-in-code (`promoted.continuous_profile`),
-but demo/paper ONLY — REAL_MONEY stays false and the Tier-3 real-money gate is unmet
-and unchanged, so this tool's continuous output is still demo/forward evidence, not a
-real-money promotion claim.
+CONTINUOUS is reconstructed from the deployed continuous entry book
+(`continuous_ensemble_v2`, frozen winner_base components, plus 2f hedge +
+BTC-vol regime-hedge) via the continuous refresh runner.
+As of the 2026-06-15 operator-override promotion the continuous book is
+promoted-in-code (`promoted.continuous_profile`), but demo/paper ONLY —
+REAL_MONEY stays false and the Tier-3 real-money gate is unmet and unchanged, so
+this tool's continuous output is still demo/forward evidence, not a real-money
+promotion claim.
 
     bash scripts/equity_curves.sh                      # promoted LONG sleeve, last 3 years, bybit_full_pit
     bash scripts/equity_curves.sh --sleeves continuous # research-stage continuous book
@@ -100,7 +101,7 @@ def _continuous_payload_from_summary(summary: dict[str, Any], *, report_dir: Pat
     if isinstance(one_x.get("sharpe_daily_ann"), (int, float)):
         normalized["sharpe_like"] = float(one_x["sharpe_daily_ann"])
     return {
-        "run_label": "continuous_research_stage_not_promoted",
+        "run_label": "continuous_demo_paper_research_stage",
         "summary": normalized,
         "continuous_summary": summary,
         "report_dir": str(report_dir),

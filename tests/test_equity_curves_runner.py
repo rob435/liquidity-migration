@@ -44,7 +44,7 @@ def test_continuous_payload_normalizes_percent_stats(tmp_path: Path) -> None:
         report_dir=tmp_path,
     )
 
-    assert payload["run_label"] == "continuous_research_stage_not_promoted"
+    assert payload["run_label"] == "continuous_demo_paper_research_stage"
     assert payload["summary"] == {
         "total_return": 0.125,
         "max_drawdown": -0.04,
@@ -117,5 +117,5 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
         "data_root": root,
         "chart_leverage": 2.5,
     }
-    assert payload["run_label"] == "continuous_research_stage_not_promoted"
+    assert payload["run_label"] == "continuous_demo_paper_research_stage"
     assert payload["summary"]["total_return"] == 0.1

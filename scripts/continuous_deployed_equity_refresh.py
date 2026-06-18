@@ -5,8 +5,7 @@ Re-runs the EXACT frozen winner_base component configs (loaded from the
 2026-06-07 source receipts; only `end_date` is overridden) against the
 refreshed per-venue full-PIT roots, then reproduces the deployed book —
 winner_base 3-component ensemble @ w90/tv0.045/max4/ddh-0.04 + banked 2f
-BTC+ETH hedge — and the official strategy-vs-BTC chart, exactly as
-`continuous_deployed_equity.py` does for the frozen window.
+BTC+ETH hedge — and the official strategy-vs-BTC chart.
 
 IN-SAMPLE RESEARCH refresh (data-boundary extension, zero parameter changes;
 the window is spent; forward demo is the arbiter) — not a promotion claim.
@@ -24,19 +23,28 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import continuous_deployed_equity as deployed  # noqa: E402
-import continuous_ensemble_rebalance_scout as scout  # noqa: E402
-
+from liquidity_migration.continuous_component_sources import (  # noqa: E402
+    CONTINUOUS_COMPONENT_SOURCES,
+    ContinuousComponentSource,
+    load_continuous_component_source,
+)
+from liquidity_migration.continuous_forward_replay import (  # noqa: E402
+    FROZEN_FORWARD_CONFIG,
+    frozen_hedge_regime,
+    frozen_rebalance_rule,
+)
 from liquidity_migration.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
     run_continuous_event_research,
@@ -44,12 +52,58 @@ from liquidity_migration.continuous_events import (  # noqa: E402
 from liquidity_migration.continuous_rebalance import (  # noqa: E402
     ContinuousHedgeRule,
     apply_rebalance_rule,
+    combine_continuous_components,
 )
+from liquidity_migration.continuous_regime import btcvol_intensity_series  # noqa: E402
 from liquidity_migration.storage import resolve_dataset_name  # noqa: E402
 from liquidity_migration.volume_events_charts import _write_equity_benchmark_chart  # noqa: E402
 
-SHARED = Path("C:/Users/user/SHARED_DATA")
+SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA"))).expanduser()
 PANEL_COLUMNS = ["symbol", "ts_ms", "date", "close", "turnover_quote"]
+WINNER_WEIGHTS = dict(FROZEN_FORWARD_CONFIG["weights"])
+ANN = 365.25
+FUNDING_ROOT = {
+    "bybit": SHARED / "bybit_full_pit" / "funding",
+    "binance": SHARED / "binance_full_pit" / "binance_usdm_funding",
+}
+
+
+def winner_rule():
+    return frozen_rebalance_rule()
+
+
+def deployed_hedge_intensity(days: list[int], btc_ret: dict[int, float]) -> dict[int, float] | None:
+    regime = frozen_hedge_regime()
+    if not regime:
+        return None
+    return btcvol_intensity_series(days, btc_ret, regime["lam"], regime["vol_window"], regime["pct_window"])
+
+
+def stats(df: pl.DataFrame) -> dict[str, Any]:
+    dates = [dt.datetime.fromtimestamp(t / 1000, tz=dt.timezone.utc).date() for t in df["ts_ms"].to_list()]
+    rets = df["basket_return"].to_numpy()
+    ncal = (dates[-1] - dates[0]).days + 1
+    series = np.zeros(ncal)
+    for d, r in zip(dates, rets):
+        series[(d - dates[0]).days] = r
+    eq = np.cumprod(1.0 + series)
+    dd = eq / np.maximum.accumulate(eq) - 1.0
+    total = float(eq[-1] - 1.0)
+    years = ncal / ANN
+    max_dd = float(dd.min())
+    mar = round((total / years) / abs(max_dd), 2) if abs(max_dd) > 1e-12 else None
+    std = float(series.std(ddof=1)) if series.size > 1 else 0.0
+    sharpe = round(float(series.mean()) / std * np.sqrt(ANN), 2) if std > 1e-12 else None
+    return {
+        "window": f"{dates[0]} -> {dates[-1]}",
+        "years": round(years, 2),
+        "total_return_pct": round(total * 100, 2),
+        "annualized_pct": round(((1 + total) ** (1 / years) - 1) * 100, 2),
+        "max_drawdown_pct": round(max_dd * 100, 2),
+        "mar": mar,
+        "sharpe_daily_ann": sharpe,
+        "worst_day_pct": round(float(series.min() * 100), 2),
+    }
 
 
 def config_from_report(path: Path) -> ContinuousEventConfig:
@@ -71,7 +125,7 @@ def frozen_config(
     start_date: str | None = None,
     fallback_root: Path | None = None,
 ) -> ContinuousEventConfig:
-    spec = scout.SOURCES[component]
+    spec = CONTINUOUS_COMPONENT_SOURCES[component]
     report_path = spec.root / venue / spec.cell / "continuous_report.json"
     if not report_path.exists() and fallback_root is not None:
         # The 2026-06-07 one-off receipt dirs were consolidated away (STATE.md: git history
@@ -222,7 +276,7 @@ def pad_flat_tail(df: pl.DataFrame, *, through_date: dt.date) -> pl.DataFrame:
 
 def funding_root(venue: str, data_root: Path | None = None) -> Path:
     if data_root is None:
-        return deployed.FUNDING_ROOT[venue]
+        return FUNDING_ROOT[venue]
     return data_root / resolve_dataset_name(data_root, "funding")
 
 
@@ -274,8 +328,8 @@ def component_report_matches_window(payload: dict[str, Any], *, start_date: str 
 
 def monthly_trade_counts(*, output_root: Path, venue: str) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
-    for component in deployed.WINNER_WEIGHTS:
-        spec = scout.SOURCES[component]
+    for component in WINNER_WEIGHTS:
+        spec = CONTINUOUS_COMPONENT_SOURCES[component]
         trades_path = output_root / "components" / venue / spec.cell / "continuous_trades.csv"
         if not trades_path.exists():
             continue
@@ -345,8 +399,8 @@ def run_components(
 ) -> dict[str, Any]:
     data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
-    for component in deployed.WINNER_WEIGHTS:
-        spec = scout.SOURCES[component]
+    for component in WINNER_WEIGHTS:
+        spec = CONTINUOUS_COMPONENT_SOURCES[component]
         cell_dir = output_root / "components" / venue / spec.cell
         report_path = cell_dir / "continuous_report.json"
         if report_path.exists():
@@ -401,8 +455,6 @@ def render_curves(
         tag = "" if mult == 1.0 else f"_{mult:g}x"
         mdf = df
         if mult != 1.0:
-            import numpy as np
-
             rets = mdf["basket_return"].fill_null(0.0).to_numpy() * mult
             eq = np.cumprod(1.0 + rets)
             mdf = mdf.with_columns(pl.Series("basket_return", rets), pl.Series("equity", eq))
@@ -430,7 +482,7 @@ def render_curves(
             subtitle=sub,
             strategy_name=name,
         )
-        venue_summary[f"{mult:g}x"] = deployed.stats(mdf)
+        venue_summary[f"{mult:g}x"] = stats(mdf)
         print(f"[{venue}] {mult:g}x {json.dumps(venue_summary[f'{mult:g}x'])}", flush=True)
         print(f"[{venue}] png: {out_dir / f'continuous_equity_btc{tag}.png'} ({'ok' if meta else 'CHART FAILED'})", flush=True)
 
@@ -465,19 +517,19 @@ def run_venue(
             data_root=data_root,
         )
         pieces = {}
-        for component in deployed.WINNER_WEIGHTS:
-            spec = scout.SOURCES[component]
-            refreshed = scout.SourceSpec(output_root / "components", spec.cell)
-            comp, _n, _cfg = scout._load_source(refreshed, venue)
+        for component in WINNER_WEIGHTS:
+            spec = CONTINUOUS_COMPONENT_SOURCES[component]
+            refreshed = ContinuousComponentSource(output_root / "components", spec.cell)
+            comp, _n, _cfg = load_continuous_component_source(refreshed, venue)
             pieces[component] = comp
-        combined = scout._combine_components(pieces, deployed.WINNER_WEIGHTS)
+        combined = combine_continuous_components(pieces, WINNER_WEIGHTS)
         panel = load_extended_panel(venue, end_date=end_date, root=data_root)
         btc_ret, btc_fund = instrument_inputs(venue, combined.days, "BTCUSDT", panel, data_root=data_root)
         eth_ret, eth_fund = instrument_inputs(venue, combined.days, "ETHUSDT", panel, data_root=data_root)
         df = apply_rebalance_rule(
-            combined, deployed.winner_rule(), ContinuousHedgeRule(90, 60, 2.0, 5.0),
+            combined, winner_rule(), ContinuousHedgeRule(90, 60, 2.0, 5.0),
             btc_ret, btc_fund, eth_ret, eth_fund,
-            hedge_intensity=deployed.deployed_hedge_intensity(combined.days, btc_ret),
+            hedge_intensity=deployed_hedge_intensity(combined.days, btc_ret),
         )
         panel_last = dt.date.fromisoformat(str(panel["date"].max()))
         df = pad_flat_tail(df, through_date=panel_last)

@@ -467,7 +467,7 @@ def _add_event_risk_ws_parser(subparsers) -> None:
         help=(
             "When set, ws_risk ALSO reads/writes the continuous-fade sleeve ledger at this data root "
             "and routes WS fills per the `sleeve` column. Used when the continuous sleeve is enabled "
-            "(currently OFF / de-promoted); keeps its short-direction positions tracked, not flattened."
+            "(demo/paper only); keeps its short-direction positions tracked, not flattened."
         ),
     )
     event_ws_risk.add_argument("--continuous-trades-dataset", default=ws_risk_defaults.continuous_trades_dataset,
@@ -605,7 +605,7 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         "--strategy-profile",
         choices=LONG_DEMO_STRATEGY_PROFILE_CHOICES,
         default=demo_defaults.strategy_profile,
-        help="Long-side demo entry profile. MultiStratV1 = v11a uni10 sniper retrace 1%%/6h fall-through.",
+        help="Long-side demo entry profile. MultiStratV1 = v11a uni50 sniper retrace 1%%/6h fall-through.",
     )
     long_demo.add_argument(
         "--daemon", action="store_true",
@@ -648,7 +648,7 @@ def _add_reconcile_long_paper_demo_parser(subparsers) -> None:
     )
     reconcile.add_argument(
         "--paper-data-root",
-        default="data/bybit-paper-event",
+        default="data/bybit-long-paper-event",
         help="Paper data root holding the long_native_paper_trades ledger.",
     )
     reconcile.add_argument(
@@ -763,35 +763,6 @@ def _add_continuous_forward_readiness_parser(subparsers) -> None:
         help="Audit only the continuous paper evidence collector; skip demo telemetry and paper-demo reconcile.",
     )
     readiness.add_argument("--output-dir", default=None, help="Where to write the readiness report bundle.")
-
-
-def _add_continuous_vs_daily_forward_parser(subparsers) -> None:
-    compare = subparsers.add_parser(
-        "continuous-vs-daily-forward",
-        help="Compare realized forward daily-short and continuous ledgers on same-window return and MAR.",
-    )
-    compare.add_argument(
-        "--daily-data-root",
-        default="data/bybit-paper-event",
-        help="Legacy daily-short root (sleeve ERASED 2026-06-11; optional — absent/insufficient "
-             "data degrades to a continuous-only report).",
-    )
-    compare.add_argument(
-        "--continuous-data-root",
-        default="data/bybit-continuous-paper-event",
-        help="Continuous paper/demo root holding continuous rebalance cycles or trades.",
-    )
-    compare.add_argument("--daily-trades-dataset", default="event_demo_trades")
-    compare.add_argument("--daily-cycles-dataset", default="event_demo_cycles")
-    compare.add_argument("--continuous-cycles-dataset", default="continuous_fade_paper_cycles")
-    compare.add_argument("--continuous-trades-dataset", default="continuous_fade_paper_trades")
-    compare.add_argument(
-        "--min-common-days",
-        type=int,
-        default=30,
-        help="Fail unless the overlapping forward comparison window has at least this many days.",
-    )
-    compare.add_argument("--output-dir", default=None, help="Where to write the comparison report and equity CSVs.")
 
 
 def _add_continuous_addon_shadow_audit_parser(subparsers) -> None:
@@ -1465,9 +1436,28 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
         action="store_true",
         help="Allow cover-then-reopen inside the same symbol/signal window using a re-entry sequence.",
     )
+    p.add_argument(
+        "--left-decile-exit-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=d.left_decile_exit_enabled,
+        help="Enable/disable state exits when a held name leaves the fade decile band.",
+    )
     p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct)
+    p.add_argument(
+        "--stop-approach-frac",
+        type=float,
+        default=d.stop_approach_frac,
+        help="Daemon cover threshold as a fraction of stop-loss-pct; 0 disables.",
+    )
+    p.add_argument("--failed-fade-hours", type=int, default=d.failed_fade_hours)
+    p.add_argument("--failed-fade-loss-pct", type=float, default=d.failed_fade_loss_pct)
+    p.add_argument("--failed-fade-min-mfe-pct", type=float, default=d.failed_fade_min_mfe_pct)
+    p.add_argument("--breakeven-arm-pct", type=float, default=d.breakeven_arm_pct)
     p.add_argument("--entry-leverage", type=float, default=d.entry_leverage)
     p.add_argument("--per-position-notional-pct-equity", type=float, default=d.per_position_notional_pct_equity)
+    p.add_argument("--sizing-mode", default=d.sizing_mode, choices=["flat", "inverse_vol"])
+    p.add_argument("--target-vol-per-name", type=float, default=d.target_vol_per_name)
+    p.add_argument("--vol-weight-clamp", type=float, default=d.vol_weight_clamp)
     p.add_argument("--fallback-equity-usdt", type=float, default=d.fallback_equity_usdt)
     p.add_argument("--entry-order-type", default=d.entry_order_type)
     p.add_argument("--exit-order-type", default=d.exit_order_type)
@@ -1507,36 +1497,6 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     )
     p.add_argument("--data-name", default=d.data_name)
     p.add_argument("--strategy-profile", choices=CONTINUOUS_DEMO_PROFILES, default=d.strategy_profile)
-    p.add_argument(
-        "--addon-primary-pnl-gate",
-        action="store_true",
-        help="Research-stage add-on mode: skip candidates whose same-symbol active primary fade is underwater.",
-    )
-    p.add_argument(
-        "--addon-primary-min-unrealized-return",
-        type=float,
-        default=d.addon_primary_min_unrealized_return,
-        help="Minimum active same-symbol primary unrealized return required for an add-on candidate.",
-    )
-    p.add_argument(
-        "--addon-primary-data-root",
-        default=d.addon_primary_data_root,
-        help="Primary continuous ledger root to consult for --addon-primary-pnl-gate. Defaults to this data root.",
-    )
-    p.add_argument(
-        "--addon-primary-strategy-id",
-        default=d.addon_primary_strategy_id,
-        help="Primary strategy_id to consult for --addon-primary-pnl-gate.",
-    )
-    p.add_argument(
-        "--addon-same-symbol-entry-cooldown-minutes",
-        type=int,
-        default=d.addon_same_symbol_entry_cooldown_minutes,
-        help=(
-            "Default-off add-on churn guard: skip same-symbol add-on entries if this sleeve entered "
-            "that symbol within the last N minutes."
-        ),
-    )
     p.add_argument("--daemon", action="store_true", help="Run the long-lived sub-hourly daemon loop.")
     p.add_argument("--interval-seconds", type=float, default=60.0, help="Heartbeat cadence (sub-hourly reaction).")
     p.add_argument("--no-event-driven-cycle", action="store_true")

@@ -4,7 +4,7 @@ A research codebase for crypto-perp trading systems. Two systems remain:
 
 - **Continuous fade book** - the live demo system, research-stage only.
 - **Long-native v11a sleeve** - promoted-in-code for demo/paper only, currently
-  toggled off on the live box.
+  toggled on in `deploy/sleeves.env`.
 
 The original daily SHORT strategy was erased from the system on 2026-06-11 by
 operator order. Git history is the archive.
@@ -12,13 +12,15 @@ operator order. Git history is the archive.
 ## Status
 
 Nothing is approved for real money. Forward demo/paper, both venues, and the
-three-tier gate in [STATE.md](STATE.md) are the arbiter.
+real-money gate in [STATE.md](STATE.md) are the arbiter.
 
 Read first:
 
 - [STATE.md](STATE.md) - live state, open operator decisions, decision rules.
 - [docs/research_summary.md](docs/research_summary.md) - current research
   decisions, failure ledger, and revisit queue.
+- [docs/promoted_trading_logic.md](docs/promoted_trading_logic.md) - full
+  demo/paper lifecycle for the promoted-in-code continuous and long sleeves.
 
 ## Repository Map
 

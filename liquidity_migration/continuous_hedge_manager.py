@@ -71,7 +71,7 @@ class ContinuousHedgeConfig:
     warmstart_csv: str = "deploy/hedge_warmstart/bybit_warmstart.csv"
     trades_dataset: str = "continuous_fade_demo_trades"
     orders_dataset: str = "continuous_fade_demo_orders"
-    strategy_id: str = "continuous_btc_hedge_v1"
+    strategy_id: str = "continuous_btc_hedge_v2"
     # "2f" = the banked BTC+ETH two-factor hedge (Stage-B s0-s8 PASS, 2026-06-10);
     # "btc" = the prior single-leg WP3 form (fallback; also used when the warm-start
     # has no eth_ret column or too few joint observations).
@@ -438,7 +438,6 @@ def hedge_order_link_id(now_ms: int, symbol: str = HEDGE_SYMBOL) -> str:
     from .event_demo import _order_link_id
 
     return _order_link_id(HEDGE_LINK_PREFIX, symbol=symbol, signal_ts_ms=int(now_ms))
-
 
 
 

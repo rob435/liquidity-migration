@@ -18,8 +18,9 @@ the deployed continuous-fade ensemble and renormalize the remaining three trigge
 
 Edited everywhere the weights are a source of truth: `continuous_demo.py` (the LIVE demo
 daemon's `ensemble_components`), `continuous_forward_replay.FROZEN_FORWARD_CONFIG["weights"]`,
-and `WINNER_WEIGHTS` in `continuous_deployed_equity.py` + `regenerate_hedge_warmstart.py`, plus
-the pinned tests. **Demo/paper only; `REAL_MONEY` stays false.**
+and `WINNER_WEIGHTS` in `continuous_deployed_equity_refresh.py` +
+`regenerate_hedge_warmstart.py`, plus the pinned tests. **Demo/paper only;
+`REAL_MONEY` stays false.**
 
 ## Hypothesis
 
@@ -60,15 +61,18 @@ Code change only (no sweep). Equivalence/▸behaviour checks:
 ```bash
 .venv/bin/python -m ruff check liquidity_migration tests scripts
 .venv/bin/python -m pytest -q tests/test_continuous_ensemble_profile.py \
-  tests/test_continuous_forward_replay.py tests/test_scripts_continuous_deployed_equity.py
+  tests/test_continuous_forward_replay.py tests/test_continuous_deployed_equity_refresh.py
 ```
 On deploy (operator-gated, separate): archive the old continuous forward state dir, regenerate
 the hedge warmstart, restart the forward clock.
 
 ## Post-run results
 
-(filled after the change lands + tests pass; commit SHA)
+Implemented in the current worktree: the continuous demo profile,
+`FROZEN_FORWARD_CONFIG`, deployed-equity refresh, hedge warmstart, and component
+source registry now use the 3-component p3/p4p3/p4p5 object. The old research scout
+surface was removed. No commit SHA exists yet in this unstaged worktree.
 
 ## Verdict
 
-(filled — operator override accepted; forward ledger reset acknowledged)
+Operator override accepted; forward ledger reset acknowledged. Demo/paper only.

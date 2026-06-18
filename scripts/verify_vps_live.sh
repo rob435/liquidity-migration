@@ -35,7 +35,7 @@ fi
 
 "$PYTHON" - <<'PY'
 # The daily-short sleeve was ERASED 2026-06-11 (operator order). Pin the surviving
-# deployed configs — the LONG promoted profile and the continuous sleeve's guards —
+# deployed configs — the LONG promoted profile and the continuous sleeve's demo/paper guards —
 # mirroring the strategy-settings gate in scripts/deploy_vps_live.sh.
 from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 
@@ -45,12 +45,30 @@ assert long_cfg.max_concurrent_positions == 10
 assert long_cfg.cooldown_days == 7
 assert long_cfg.weekend_size_mult == 1.5
 
-from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
-cont = ContinuousDemoCycleConfig()
-assert cont.rmom_quantile == 0.33, cont.rmom_quantile
+from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, apply_continuous_demo_profile
+cont = apply_continuous_demo_profile(
+    ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2", btc_trend_gate="uptrend")
+)
+assert cont.rmom_quantile == 0.25, cont.rmom_quantile
+assert {c[0] for c in cont.ensemble_components} == {"p3", "p4p3", "p4p5"}
 assert cont.entry_pause_after_adverse_exits == 8, cont.entry_pause_after_adverse_exits
 assert cont.entry_pause_window_minutes == 1440, cont.entry_pause_window_minutes
-assert cont.stop_loss_pct == 0.25, cont.stop_loss_pct
+assert cont.stop_loss_pct == 0.0, cont.stop_loss_pct
+assert cont.left_decile_exit_enabled is False, cont.left_decile_exit_enabled
+assert cont.stop_approach_frac == 0.0, cont.stop_approach_frac
+assert cont.failed_fade_hours == 0, cont.failed_fade_hours
+assert cont.breakeven_arm_pct == 0.0, cont.breakeven_arm_pct
+assert cont.sizing_mode == "inverse_vol", cont.sizing_mode
+assert cont.target_vol_per_name == 0.01, cont.target_vol_per_name
+assert cont.vol_weight_clamp == 2.0, cont.vol_weight_clamp
+assert cont.daily_rebalance_enabled is True, cont.daily_rebalance_enabled
+assert cont.daily_rebalance_realized_vol_window_days == 90, cont.daily_rebalance_realized_vol_window_days
+assert cont.daily_rebalance_target_daily_vol == 0.045, cont.daily_rebalance_target_daily_vol
+assert cont.daily_rebalance_max_scale == 4.0, cont.daily_rebalance_max_scale
+assert cont.daily_rebalance_drawdown_half_threshold == -0.04, cont.daily_rebalance_drawdown_half_threshold
+assert cont.daily_rebalance_strategy_momentum_window_days == 0, cont.daily_rebalance_strategy_momentum_window_days
+assert cont.daily_rebalance_strategy_momentum_min_return == 0.0, cont.daily_rebalance_strategy_momentum_min_return
+assert cont.daily_rebalance_strategy_momentum_scale_when_below == 0.0, cont.daily_rebalance_strategy_momentum_scale_when_below
 print("strategy-settings-ok")
 PY
 
@@ -100,9 +118,9 @@ systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 # The continuous rmom-refresh timer is required if either continuous demo or
 # paper evidence collection is enabled.
 if continuous_rmom_refresh_on; then
-  verify_timer on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
+  verify_timer on $CONTINUOUS_SLEEVE_TIMERS
 else
-  verify_timer off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
+  verify_timer off $CONTINUOUS_SLEEVE_TIMERS
 fi
 verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Timer parity — read-only verify must catch a deploy that forgot to enable
@@ -134,16 +152,31 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 # if the risk unit isn't wired to the long + continuous sleeves.
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
-# Order-submitting continuous sleeve config + its disaster stop — only when toggled ON
+# Order-submitting continuous sleeve config — only when toggled ON
 # (a retired sleeve's file content must not be an unconditional verify gate).
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
-  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=continuous_ensemble_v2'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SIZING_MODE=inverse_vol'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=TARGET_VOL_PER_NAME=0.01'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=VOL_WEIGHT_CLAMP=2'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=DAILY_REBALANCE_ENABLED=1'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=DAILY_REBALANCE_MAX_SCALE=4'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_APPROACH_FRAC=0'
 fi
 # MONEY-SAFETY parity with deploy_vps_live.sh (audit 2026-06-12 round 3): the
 # continuous PAPER shadow must NEVER submit orders — UNCONDITIONAL regardless of
 # toggle. A mis-edited paper unit previously passed this script.
 systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=0'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=continuous_ensemble_v2'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=SIZING_MODE=inverse_vol'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=TARGET_VOL_PER_NAME=0.01'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=VOL_WEIGHT_CLAMP=2'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=DAILY_REBALANCE_ENABLED=1'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=DAILY_REBALANCE_MAX_SCALE=4'
 systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=PAPER_MODE=1'
 systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=DATA_ROOT=data/bybit-continuous-paper-event'
 

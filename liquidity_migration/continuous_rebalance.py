@@ -160,9 +160,8 @@ def combine_continuous_components(
 ) -> ContinuousRebalanceComponents:
     """Weighted combine of decomposed component ledgers (canonical implementation).
 
-    Moved from the ensemble scout (`scripts/continuous_ensemble_rebalance_scout.py`),
-    which now delegates here. Impact bps scale by ``weight ** impact_exponent``
-    (participation shrinks with the slice of notional).
+    Impact bps scale by ``weight ** impact_exponent`` (participation shrinks
+    with the slice of notional).
     """
     raw_by_day: dict[int, float] = defaultdict(float)
     gross_by_day: dict[int, float] = defaultdict(float)
@@ -265,13 +264,15 @@ def plan_continuous_rebalance_resizes(
     The continuous demo ledger stores one row per open short. The promoted
     research rule scales the per-name base notional, so each open row targets:
 
-    ``equity * base_notional_pct_equity / 100 * target_scale * component_weight``
+    ``equity * base_notional_pct_equity / 100 * target_scale
+    * component_weight * vol_weight_multiplier``
 
     where ``component_weight`` is the row's own entry-sizing weight (ensemble
     components enter at 0.10-0.40 of base; legacy single-component rows default
-    to 1.0). Rows whose trade_id ends with one of ``exclude_trade_id_suffixes``
-    (sniper fills — deliberately quarter-size, lifecycle-managed by the sniper)
-    are never resized.
+    to 1.0) and ``vol_weight_multiplier`` preserves inverse-vol entry sizing
+    from the ledger row (legacy/flat rows default to 1.0). Rows whose trade_id
+    ends with one of ``exclude_trade_id_suffixes`` (sniper fills — deliberately
+    quarter-size, lifecycle-managed by the sniper) are never resized.
 
     Positive delta means increase the short with a non-reduce-only Sell. Negative
     delta means reduce the short with a reduce-only Buy. This planner deliberately
@@ -305,7 +306,10 @@ def plan_continuous_rebalance_resizes(
             if any(tag and trade_id.endswith(f"-{tag}") for tag in component_tags_requiring_weight):
                 continue
             weight = 1.0
-        target = base * scale * weight
+        vol_mult = _finite_float(trade.get("vol_weight_multiplier"))
+        if vol_mult <= 0.0:
+            vol_mult = 1.0
+        target = base * scale * weight * vol_mult
         current = qty * price
         delta = target - current
         if abs(delta) < floor:

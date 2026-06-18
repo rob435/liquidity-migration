@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""One-command demo-forward reconciliation for the promoted LONG sleeve.
+"""Fast demo-forward execution reconciliation for selected sleeves.
 
 Pulls the live ledgers and reconciles each selected sleeve:
 
     LONG   (v11a)        : paper <-> demo
 
-CONTINUOUS (fade) is the LIVE demo book since 2026-06-09 but is research-stage,
-NOT promoted. It is not reconciled by default; pass `--sleeves continuous` for
-diagnostics (paper <-> demo readiness + signal-consistency vs the engine).
+CONTINUOUS (fade) is research-stage demo/paper only. This quick path defaults to
+LONG; pass `--sleeves long,continuous` when the execution-only check should cover
+both surviving sleeves.
 
 Pipeline:
     1. pull        — rsync the live demo+paper ledgers for every selected sleeve  [--no-pull]
@@ -22,8 +22,8 @@ and are gone; refresh the PIT manifest manually when needed:
 
 Safe by default: read-only against the VPS, demo only, never real money.
 
-    bash scripts/reconcile.sh                       # promoted sleeve (long), fully auto
-    bash scripts/reconcile.sh --sleeves continuous  # continuous diagnostics only
+    bash scripts/reconcile.sh --quick                         # LONG only
+    bash scripts/reconcile.sh --quick --sleeves long,continuous
     bash scripts/reconcile.sh --dry-run             # print every command, run nothing
     bash scripts/reconcile.sh --help                # all options
 
@@ -248,12 +248,12 @@ def _summarize_leg(out: str, needle: str, rc: int) -> tuple[str, bool]:
 # ----------------------------------------------------------------------------- main
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="One-command self-provisioning reconciliation for promoted sleeves.",
+        description="Fast paper<->demo execution reconciliation for selected sleeves.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--sleeves", default="long",
-                   help="Comma list of sleeves to reconcile (long); add 'continuous' "
-                        "explicitly for diagnostics (live demo book, research-stage, NOT promoted).")
+                   help="Comma list of sleeves to reconcile; quick mode defaults to long. "
+                        "Add continuous for the demo/paper research-stage book.")
     p.add_argument("--bybit-root", default=DEFAULT_BYBIT_ROOT, help="Research root for the backtest + provisioning.")
     p.add_argument("--config", default=DEFAULT_CONFIG, help="Strategy config (the promoted profile).")
     p.add_argument("--vps", default=VPS_HOST, help="VPS ssh target for the ledger pull.")

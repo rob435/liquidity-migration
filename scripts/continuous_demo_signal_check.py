@@ -28,9 +28,9 @@ import polars as pl  # noqa: E402
 from liquidity_migration.continuous_events import compute_continuous_decile_panel  # noqa: E402
 
 DEFAULT_ROOT = "data/bybit-continuous-demo-event"
-# Must MATCH the deployed continuous_ensemble_v1 engine, else this "consistency"
+# Must MATCH the deployed continuous_ensemble_v2 entry engine, else this "consistency"
 # check replays a DIFFERENT D9 universe than the live book and reports spurious
-# hits/misses (audit-iter3 scripts-research). Deployed values:
+# hits/misses (audit-iter3 scripts-research). Deployed entry values:
 # rmom_quantile=0.25, feature_set=("max_ret168",) (continuous_demo.py ensemble profile).
 RMOM_QUANTILE = 0.25
 FEATURE_SET = ("max_ret168",)

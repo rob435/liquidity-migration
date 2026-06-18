@@ -1,6 +1,6 @@
 ---
 name: pit-reconcile
-description: "Reconcile the live demo/paper ledgers for the LONG (v11a) and CONTINUOUS (fade) sleeves, and fix/diagnose PIT membership (archive_trade_manifest) problems. ONE command: `bash scripts/reconcile.sh` runs the full demo<->backtest<->paper three-way for both sleeves (downloads fresh PIT data, runs each sleeve's backtest over the live forward window, reconciles the model against demo+paper); add `--quick` for the fast two-way (paper<->demo execution only). Use whenever asked to reconcile the ledgers, run a demo-backtest-paper reconciliation, when a reconcile shows paper-only / demo-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest is stale. (Continuous is the LIVE demo book since 2026-06-09 — research-stage, NOT promoted. The backtest leg is agreement/execution evidence, never alpha proof or a promotion gate.)"
+description: "Reconcile the live demo/paper ledgers for the LONG (v11a) and CONTINUOUS (fade) sleeves, and fix/diagnose PIT membership (archive_trade_manifest) problems. ONE command: `bash scripts/reconcile.sh` runs the full demo<->backtest<->paper three-way for both sleeves (downloads fresh PIT data, runs each sleeve's backtest over the live forward window, reconciles the model against demo+paper); add `--quick` for the fast two-way (paper<->demo execution only). Use whenever asked to reconcile the ledgers, run a demo-backtest-paper reconciliation, when a reconcile shows paper-only / demo-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest is stale. Continuous is demo/paper research-stage and promoted-in-code only by operator override; the backtest leg is agreement/execution evidence, never alpha proof or a promotion gate."
 ---
 
 > **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
@@ -64,6 +64,10 @@ In one shot it:
    Pass `--with-funding` when you actually want costed PnL. Skip the whole refresh
    with `--no-data-refresh`.
 2. **pulls** the live demo+paper ledgers from the VPS (read-only).
+   - **1b. rmom recompute (continuous, default ON):** `precompute_residual_momentum.py`
+     refreshes the research-root `residual_momentum.parquet` so the independent-PIT
+     plane (step 5) runs on a fresh panel. Skip with `--no-rmom`; `--with-rmom` is a
+     deprecated no-op.
 3. **LONG (discrete-event):** runs the v11a backtest over the forward window
    (default start = the 2026-06-04 demo start) on the fresh root — **windowed**:
    it reads/features only `[window_start − 150d warmup, window_end]`, not the full
@@ -71,17 +75,84 @@ In one shot it:
    pruning at the read), so the full-PIT gate is scoped to the window and the read
    skips the multi-year tail. Then it reconciles the **backtest entries vs demo and
    vs paper** by `(symbol, side, signal-day)`, plus the demo↔paper execution leg.
-4. **CONTINUOUS (rebalance book):** demo↔paper execution leg + the engine-decile
-   **signal-consistency of BOTH the demo and paper live entries** — the faithful
-   "model" leg for a portfolio book (a costed `continuous-events` run cannot
-   reproduce `FROZEN_FORWARD_CONFIG`'s ensemble+hedge, but the shared decile
-   pipeline confirms each live entry was a genuine D9 pick).
-5. prints one **three-way summary** and a non-zero exit if any LIVE entry lacks a
-   model justification (the look-ahead / drift tripwire).
+4. **CONTINUOUS (rebalance book):** demo↔paper execution leg + an engine-decile
+   **signal-consistency** leg over BOTH the demo and paper live entries (the shared
+   decile pipeline confirms each live entry was a genuine D9 pick — a costed
+   `continuous-events` run cannot reproduce `FROZEN_FORWARD_CONFIG`'s ensemble+hedge).
+   This is now the *complementary* check; the **stronger per-component backtest-match
+   is step 5**, which reproduces the actual entry candidates, not just decile membership.
+5. **fill-level entry-price cross-check + backtest-match** (`scripts/reconcile_fills.py`,
+   runs automatically): joins the actual **entry prices** across all three corners and
+   reports the pairwise delta in bps, AND verifies each live entry is reproduced by an
+   independent recompute of the engine selection.
+   - **LONG** uses the backtest `entry_price`, keyed `(symbol, side, signal-day)`.
+   - **CONTINUOUS** reproduces the deployed `continuous_ensemble_v2` ENTRY candidate set
+     by re-running the engine's OWN shared functions — `compute_continuous_decile_panel`
+     then the per-component `decile==9 & turnover≥liq & _entry_event_expr(trigger)` filter
+     (the current components are p3/p4p3/p4p5) — so `in_model` means
+     "the engine, recomputed on the signal-plane klines+rmom, generates this exact entry."
+     The PIT kline close at the entry bar is the model fill price; paper's per-component
+     legs notional-weight into one symbol fill to match demo's netted position.
+   Per-entry tables: `data/reconcile/{long,continuous}_three_way_fills.csv`
+   (`in_model/in_demo/in_paper`, `px_*`, `bps_*`, continuous adds `model_components`).
+6. prints one **three-way summary** and a non-zero exit if a LIVE entry lacks a model
+   justification — for continuous, only a genuine **off-decile (≤D7)** unmatched entry is
+   HARD (look-ahead/drift); a `near_decile (≥D8)` flip (one decile below, or top-decile but
+   failing the marginal turnover gate at the closed bar vs the live synthetic-price bar), a
+   missing-panel-row snapshot gap, and entries after rmom coverage (`pending_rmom`) are
+   reported but do NOT fail the gate.
 
-**Why the two sleeves differ:** LONG entries pair 1:1 to the trade ledger by
-`(symbol, signal-day)`; CONTINUOUS is a daily rebalance book whose faithful model
-leg is decile-membership of the live entries, not a trade-ledger pairing.
+**Seamless by default — one command does it all.** `bash scripts/reconcile.sh` runs the
+full continuous chain with no flags: PIT kline/manifest **download** → **rmom recompute**
+on the research root (step 1b, default ON) → **engine recompute → entry+fill cross-check**.
+The backtest-match runs on TWO planes:
+- **live signal-plane (primary, gates now):** recompute on the demo root's current
+  klines+rmom — verifies every live entry immediately. This is what passes/fails the run.
+- **independent-PIT (secondary, informational):** recompute on the research root's
+  freshly-downloaded `klines_1h` + freshly-recomputed rmom. This is the fully-independent
+  data check, but its rmom coverage currently ends ~2 weeks back: `build_feature_panel` reads
+  `open_interest`/`premium`, and the DEFAULT refresh updates only manifest+klines, not those
+  derivative metrics — so they go stale on the research root (OI ~05-26, premium ~05-30) and
+  truncate the factor panel (→ rmom ~06-02). Pass `--with-funding` to top them up. So recent
+  entries sit in `pending_rmom` and back-fill once those inputs advance. This is a
+  DATA-FRESHNESS gap — rmom itself is causal (~2-3d lag, `shift(3)`), not a forward horizon.
+`--no-rmom` skips the recompute (uses the on-disk panel); `--no-data-refresh` skips both the
+download and the recompute. The independent-PIT line still prints (just with older
+`rmom_through`). Both planes fail the gate only on a HARD off-decile unmatched entry.
+
+Run the fills leg alone (no backtest/VPS) against a local snapshot:
+`python scripts/reconcile_fills.py --sleeve continuous` (defaults to the live demo plane;
+add `--research-root <path>` for the independent PIT recompute) or `--sleeve long
+--long-trades-csv <path>`. The listing-age floor (210/240d) is delegated to the live engine
+whenever the kline history is shorter than the floor (a short WS store can't support it).
+
+**Why the two sleeves differ:** LONG entries pair 1:1 to the backtest trade ledger by
+`(symbol, side, signal-day)`. CONTINUOUS is a path-dependent ensemble book — the live
+engine caps entries (MAX_ACTIVE / max-new-per-cycle / cooldown / held-state), so a
+backtest can't reproduce the exact entry SET; instead the recompute generates the UNCAPPED
+per-component candidate set and the check is directional: every live entry must be a
+candidate (else tripwire), while a candidate not taken live is expected capacity. Keys are
+`(symbol, signal-bar)` (component-agnostic, robust to sniper/re-entry sharing a signal_ts);
+`model_components` records which components generated it.
+
+**Reading the fills line:** `Δ demo↔paper` is the live execution gap (real Bybit
+fill vs the idealized model fill — the PostOnly-sniper/cap drag); `Δ paper↔model`
+near 0 means the live paper book faithfully replays the PIT model price, a large
+value flags data-revision / look-ahead; `Δ demo↔model` is the total real-vs-clean
+slippage. bps are SIGNED (`+` = filled higher); the book is short, so `+` is
+favourable.
+
+**Reading the continuous `backtest-match` line:** `confirmed` = live entries the engine
+recompute reproduces. `off_decile(HARD)` is the real alarm — a live entry the recompute
+puts at ≤D7 (look-ahead / drift / a reproduction bug); it fails the gate. The soft buckets
+are expected noise and do NOT fail: `near_decile (≥D8)` (one decile below at the closed-bar
+recompute — the live engine ranks with a synthetic live-price current bar so marginal names
+flip — OR top-decile but failing the marginal turnover gate at the closed bar),
+`no_panel_row` (the WS snapshot lacked that bar), `pending_rmom` (entry after the rmom
+panel's coverage end — on the independent-PIT plane the research root's rmom coverage is
+currently ~2 weeks stale because its factor-panel inputs lag, so recent entries can't be
+confirmed there yet; the live plane is current). A handful of soft unmatched is normal; a
+rising `off_decile` is the thing to chase.
 
 **Reading the LONG three-way line:** `model_only` (backtest signalled, live didn't
 act) is EXPECTED when the live sleeve was off / just re-enabled (LONG re-enabled
@@ -107,8 +178,8 @@ stall was a blind wide window re-checking already-present partitions for the who
 universe, plus a needless full-universe funding crawl — both removed.)
 
 Extra flags: `--with-funding` (also refresh funding for costed PnL — slow, off by
-default), `--with-rmom` (also recompute research-root rmom — slow, off by default;
-the continuous leg uses the live-root panel so the three-way doesn't need it),
+default), `--no-rmom` (skip the research-root rmom recompute — it is ON by default
+now for the continuous independent-PIT plane; `--with-rmom` is a deprecated no-op),
 `--backtest-start YYYY-MM-DD` (override the forward-window start),
 `--data-refresh-timeout SECONDS` (per-stage stall guard), `--no-data-refresh`,
 `--no-pull`, `--bybit-root PATH`, `--vps HOST`.
@@ -120,9 +191,8 @@ the continuous leg uses the live-root panel so the three-way doesn't need it),
   add `--sleeves long,continuous` to include continuous diagnostics.
 - The SHORT legs were ERASED 2026-06-11 with the sleeve.
 
-> **CONTINUOUS** (fade) is the LIVE demo book (operator re-shape 2026-06-09:
-> the VPS runs ONLY the continuous system). It remains research-stage — NOT
-> promoted (rmom latency knife-edge stands; never present it as promoted). Its
+> **CONTINUOUS** (fade) is the live demo/paper book. It remains research-stage
+> and is promoted-in-code only by operator override, not by a real-money gate. Its
 > three-way "model" leg is engine-decile signal-consistency of the live entries,
 > not a trade-ledger pairing.
 

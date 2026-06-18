@@ -1,13 +1,13 @@
-"""winner_base ensemble live-wiring tests (2026-06-10).
+"""v2 continuous ensemble live-wiring tests.
 
-Covers: profile resolution (frozen receipt weights, research rule, NO momentum
-hurdle), weighted sizing + component-tagged ids + venue-side TP in the entry
-executor, and legacy-path invariance (no component keys => old behavior).
+Covers: profile resolution, weighted sizing + component-tagged ids + venue-side
+TP in the entry executor, and component-less candidate behavior.
 """
 
 from __future__ import annotations
 
 from liquidity_migration.continuous_demo import (
+    CONTINUOUS_DEMO_PROFILES,
     ContinuousDemoCycleConfig,
     _execute_continuous_entries,
     apply_continuous_demo_profile,
@@ -18,7 +18,7 @@ def test_ensemble_profile_resolves_winner_base() -> None:
     # The deployed gate (uptrend) arrives via the --btc-trend-gate / BTC_TREND_GATE
     # knob, not the profile; pass it in to mirror the live CLI/env wiring.
     cfg = apply_continuous_demo_profile(
-        ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v1", btc_trend_gate="uptrend")
+        ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2", btc_trend_gate="uptrend")
     )
     comps = {c[0]: c for c in cfg.ensemble_components}
     # age210tp14 dropped 2026-06-18 (receipt 2026-06-18-drop-tp14-continuous-ensemble.md);
@@ -38,22 +38,46 @@ def test_ensemble_profile_resolves_winner_base() -> None:
     assert cfg.daily_rebalance_strategy_momentum_window_days == 0  # the merged test's winning arm
 
 
+def test_ensemble_v2_disables_damaging_daemon_exits() -> None:
+    cfg = apply_continuous_demo_profile(
+        ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2", btc_trend_gate="uptrend")
+    )
+    comps = {c[0]: c for c in cfg.ensemble_components}
+    assert set(comps) == {"p3", "p4p3", "p4p5"}
+    assert cfg.max_hold_hours == 24
+    assert cfg.left_decile_exit_enabled is False
+    assert cfg.reentry_cooldown_minutes == 0
+    assert cfg.stop_approach_frac == 0.0
+    assert cfg.failed_fade_hours == 0
+    assert cfg.failed_fade_loss_pct == 0.0
+    assert cfg.failed_fade_min_mfe_pct == 0.0
+    assert cfg.breakeven_arm_pct == 0.0
+    assert cfg.stop_loss_pct == 0.0
+    assert cfg.sizing_mode == "inverse_vol"
+    assert cfg.target_vol_per_name == 0.01
+    assert cfg.vol_weight_clamp == 2.0
+    assert cfg.daily_rebalance_enabled
+    assert cfg.daily_rebalance_realized_vol_window_days == 90
+    assert cfg.daily_rebalance_target_daily_vol == 0.045
+    assert cfg.daily_rebalance_max_scale == 4.0
+    assert cfg.daily_rebalance_strategy_momentum_window_days == 0
+    assert cfg.daily_rebalance_strategy_momentum_min_return == 0.0
+    assert cfg.daily_rebalance_strategy_momentum_scale_when_below == 0.0
+
+
 def test_profile_does_not_override_btc_trend_gate() -> None:
     # Single source of truth: the profile must PASS THROUGH the gate from the
     # CLI/env knob, never pin it. Pinning it (the pre-2026-06-16 bug) silently
     # made BTC_TREND_GATE=off a no-op for the deployed ensemble.
-    for profile in ("continuous_ensemble_v1", "continuous_rebalance_v1"):
-        for gate in ("uptrend", "off", "downtrend"):
-            cfg = apply_continuous_demo_profile(
-                ContinuousDemoCycleConfig(strategy_profile=profile, btc_trend_gate=gate)
-            )
-            assert cfg.btc_trend_gate == gate, (profile, gate)
+    for gate in ("uptrend", "off", "downtrend"):
+        cfg = apply_continuous_demo_profile(
+            ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2", btc_trend_gate=gate)
+        )
+        assert cfg.btc_trend_gate == gate
 
 
-def test_old_profile_still_resolves_unchanged() -> None:
-    cfg = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile="continuous_rebalance_v1"))
-    assert cfg.entry_event_trigger == "turn4_pop4"
-    assert cfg.ensemble_components == ()
+def test_only_frozen_v2_profile_is_selectable() -> None:
+    assert CONTINUOUS_DEMO_PROFILES == ("continuous_ensemble_v2",)
 
 
 def _cand(symbol="AAAUSDT", component=None, weight=None, tp=None):
@@ -84,6 +108,36 @@ def test_component_entry_weighted_sizing_tp_and_ids() -> None:
     assert abs(r["take_profit_price"] - 90.0) < 1e-9
     assert r["trade_id"].endswith("-p4p5")
     assert "p4p5" in r["entry_order_link_id"]
+
+
+def test_inverse_vol_entry_sizing_multiplies_component_weight() -> None:
+    demo = ContinuousDemoCycleConfig(
+        submit_orders=False,
+        sizing_mode="inverse_vol",
+        target_vol_per_name=0.01,
+        vol_weight_clamp=2.0,
+    )
+    rows, orders = _execute_continuous_entries(
+        [_cand(component="p4p5", weight=0.40, tp=0.10) | {"rv_168h": 0.02}],
+        trading_client=None,
+        demo=demo,
+        equity_usdt=10_000.0,
+        order_notional_frac=0.02,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={"AAAUSDT": {"tick_size": 0.01, "qty_step": 0.1}},
+        now_ms=1_700_000_100_000,
+        strategy_id="s",
+        record_preflight=None,
+        execution_event_router=None,
+    )
+    assert len(rows) == 1
+    assert len(orders) == 1
+    # 10_000 * 0.02 * 0.40 * (0.01 / 0.02) = 40 USDT at price 100 -> 0.4 qty
+    assert abs(float(rows[0]["qty"]) - 0.4) < 1e-9
+    assert rows[0]["sizing_mode"] == "inverse_vol"
+    assert abs(float(rows[0]["entry_vol"]) - 0.02) < 1e-12
+    assert abs(float(rows[0]["vol_weight_multiplier"]) - 0.5) < 1e-12
+    assert abs(float(orders[0]["vol_weight_multiplier"]) - 0.5) < 1e-12
 
 
 def test_two_components_same_symbol_distinct_ids() -> None:

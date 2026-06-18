@@ -59,8 +59,8 @@ def _continuous_links_in_message(message: Mapping[str, Any]) -> bool:
     """True if any execution row in the message belongs to the continuous family.
     Used by Tier 4 to nudge a state refresh only on OUR fills, not the short/long sleeves'.
 
-    Entry links are DECODED, not prefix-matched: the deployed continuous_ensemble_v1 emits
-    only component-tagged links (lm-en-cp3-…, sniper lm-en-cs-…) which a literal
+    Entry links are DECODED, not prefix-matched: the deployed ensemble profiles emit
+    component-tagged links (lm-en-cp3-…, sniper lm-en-cs-…) which a literal
     "lm-en-c-" prefix never matched — entry/snipe fills (exactly the between-cycle sniper
     window Tier 4 exists for) fell through to the 60s heartbeat (audit 2026-06-12). Exits
     keep the prefix match ("lm-ux-c" covers the plain book and the ca addon family)."""

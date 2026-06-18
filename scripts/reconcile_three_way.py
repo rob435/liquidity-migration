@@ -52,8 +52,12 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent))
 
 import reconcile as rc  # noqa: E402  reuse Step/SLEEVES/pull_sleeve/refresh_rmom/reconcile_long/continuous
+import reconcile_fills as rf  # noqa: E402  fill-level entry-price cross-check (the 3rd corner's prices)
 
 REPO = rc.REPO
+
+# Where the fill-level per-entry CSVs land (next to the agreement keys).
+RECONCILE_OUT = REPO / "data" / "reconcile"
 
 # Forward-demo start per sleeve (the window over which the backtest can have a
 # live counterpart). Recorded in STATE.md / deploy/sleeves.env:
@@ -486,10 +490,14 @@ def main() -> int:
     p.add_argument("--with-funding", action="store_true",
                    help="Also refresh funding (slow, full-universe). OFF by default: funding "
                         "affects backtest PnL only, not the entry agreement. Use for costed PnL.")
+    p.add_argument("--no-rmom", action="store_true",
+                   help="Skip the research-root residual_momentum recompute. By DEFAULT the continuous "
+                        "backtest-match runs on the research root (independent PIT klines_1h + freshly "
+                        "recomputed rmom); --no-rmom (or --no-data-refresh) falls back to the live signal "
+                        "plane — current data, but not an independent recompute.")
     p.add_argument("--with-rmom", action="store_true",
-                   help="Also recompute residual_momentum on the RESEARCH root (slow, full-kline). "
-                        "OFF by default: the continuous model leg reads the LIVE root's rmom panel "
-                        "(pulled from the VPS), not this one, so the three-way never needs it.")
+                   help="Deprecated no-op — the research-root rmom recompute is ON by default now "
+                        "(use --no-rmom to skip). Accepted so old invocations don't error.")
     p.add_argument("--backtest-start", default=None,
                    help="Override the backtest/forward-window start (YYYY-MM-DD). "
                         "Default: per-sleeve demo start.")
@@ -525,12 +533,17 @@ def main() -> int:
         for s in sleeves:
             rc.pull_sleeve(step, args.vps, s)
 
-    # 1b. continuous research-root rmom recompute — OFF by default. The continuous
-    #     model leg (continuous_demo_signal_check) reads the LIVE root's rmom panel
-    #     (pulled from the VPS in step 1), NOT this research-root one, so the
-    #     three-way never consumes it. Opt in with --with-rmom to refresh the
-    #     research panel for a separate continuous backtest.
-    if "continuous" in sleeves and args.with_rmom:
+    # 1b. Research-root residual_momentum recompute — DEFAULT ON for continuous so the
+    #     INDEPENDENT-PIT backtest-match runs on a fresh research rmom panel. Skipped under
+    #     --no-rmom (use the on-disk panel) or --no-data-refresh (don't pair a heavy rmom
+    #     recompute with a "skip the slow stuff" request). The independent-PIT check itself
+    #     ALWAYS runs for continuous (it's cheap and informational); it just confirms fewer
+    #     entries when the research panel's coverage lags. That lag is the derivative-metric
+    #     inputs build_feature_panel reads (open_interest/premium): the default refresh updates
+    #     only manifest+klines, so they go stale and truncate rmom (here to ~06-02; --with-funding
+    #     tops them up). rmom itself is causal (~2-3d, shift(3)); those entries sit in pending_rmom.
+    do_rmom_recompute = ("continuous" in sleeves) and not args.no_rmom and not args.no_data_refresh
+    if do_rmom_recompute:
         rc.refresh_rmom(step, root, today)
 
     summary: dict[str, str] = {}
@@ -547,27 +560,48 @@ def main() -> int:
             run_long_backtest(step, root, bt_start, win_end)
             step.banner("LONG three-way: backtest <-> demo <-> paper (entry agreement)")
             print("$ (pair backtest/demo/paper entries by symbol+side+signal-day)")
+            step.banner("LONG fills: backtest <-> demo <-> paper (entry-price cross-check)")
+            print("$ (join entry_price across the 3 books; write long_three_way_fills.csv)")
             summary["long"], ok["long"] = "(dry-run)", True
         else:
             trades_csv, label = run_long_backtest(step, root, bt_start, win_end)
             tw_summary, tw_ok = reconcile_long_three_way(
                 step, trades_csv=trades_csv, run_label=label,
                 demo_root=ld, paper_root=lp, start=bt_start, end=win_end)
-            summary["long"] = f"{tw_summary}\n  exec(paper↔demo): {exec_summary}"
-            ok["long"] = tw_ok and exec_ok
+            step.banner("LONG fills: backtest <-> demo <-> paper (entry-price cross-check)")
+            fills_summary, fills_ok = rf.fills_long(
+                trades_csv=trades_csv, demo_root=ld, paper_root=lp,
+                start=bt_start, end=win_end, out_dir=RECONCILE_OUT)
+            print("\n" + fills_summary, flush=True)
+            summary["long"] = f"{tw_summary}\n  exec(paper↔demo): {exec_summary}\n  {fills_summary}"
+            ok["long"] = tw_ok and exec_ok and fills_ok
 
     # 3. CONTINUOUS: demo<->paper execution + engine-decile model leg (demo + paper).
     if "continuous" in sleeves:
         cp = rc.SLEEVES["continuous"]["paper"][1]   # type: ignore[index]
         cd = rc.SLEEVES["continuous"]["demo"][1]    # type: ignore[index]
         exec_summary, exec_ok = rc.reconcile_continuous(step, paper=cp, demo=cd)
+        # The backtest-match always recomputes on the LIVE signal plane (primary gate) AND
+        # on the independent-PIT research root (secondary; back-fills as the rmom horizon ages).
+        cont_kroot = root  # inside `if "continuous" in sleeves` -> the research root
         if args.dry_run:
             continuous_signal_leg(step, demo_root=cd, paper_root=cp)
+            step.banner("CONTINUOUS backtest-match: engine recompute <-> demo <-> paper (entries + fills)")
+            print("$ (recompute the per-component engine candidates on the live signal-plane (primary, "
+                  "gates now) + independent-PIT research root (secondary, back-fills as rmom ages); "
+                  "cross-check entries + entry-price; write continuous_three_way_fills.csv)")
             summary["continuous"], ok["continuous"] = "(dry-run)", True
         else:
             model_summary, model_ok = continuous_signal_leg(step, demo_root=cd, paper_root=cp)
-            summary["continuous"] = f"model(decile): {model_summary}\n  exec(paper↔demo): {exec_summary}"
-            ok["continuous"] = model_ok and exec_ok
+            step.banner("CONTINUOUS backtest-match: engine recompute <-> demo <-> paper (entries + fills)")
+            cont_start = _date(args.backtest_start) if args.backtest_start else _date(DEMO_START["continuous"])
+            fills_summary, fills_ok = rf.fills_continuous(
+                demo_root=cd, paper_root=cp, start=cont_start, end=win_end, out_dir=RECONCILE_OUT,
+                research_root=cont_kroot)
+            print("\n" + fills_summary, flush=True)
+            summary["continuous"] = (f"model(decile): {model_summary}\n  exec(paper↔demo): {exec_summary}"
+                                     f"\n  {fills_summary}")
+            ok["continuous"] = model_ok and exec_ok and fills_ok
 
     # 4. Unified headline.
     if args.dry_run:

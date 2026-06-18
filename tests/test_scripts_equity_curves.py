@@ -1,8 +1,8 @@
-"""Tests for scripts/equity_curves.py (+ scripts/continuous_deployed_equity.py).
+"""Tests for scripts/equity_curves.py (+ scripts/continuous_deployed_equity_refresh.py).
 
 Covers two crash-on-edge fixes and the continuous frozen-start routing (audit2):
 (1) start-date year shift no longer raises on Feb 29 (clamps to Feb 28);
-(2) continuous_deployed_equity.stats() returns mar=None on a no-drawdown curve
+(2) continuous_deployed_equity_refresh.stats() returns mar=None on a no-drawdown curve
     instead of dividing by zero;
 (3) the continuous sleeve inherits the frozen deployed start (start_date=None)
     unless --start/--years explicitly asks for a window.
@@ -32,7 +32,7 @@ def _load(name: str):
 
 
 equity_curves = _load("equity_curves")
-deployed = _load("continuous_deployed_equity")
+continuous_refresh = _load("continuous_deployed_equity_refresh")
 
 
 def _eq_df(returns: list[float]) -> pl.DataFrame:
@@ -81,7 +81,7 @@ def test_main_start_computation_does_not_raise_on_feb29(monkeypatch):
 
 def test_stats_no_drawdown_returns_none_mar():
     # Monotonically increasing equity -> zero drawdown -> old code divided by 0.
-    out = deployed.stats(_eq_df([0.01] * 10))
+    out = continuous_refresh.stats(_eq_df([0.01] * 10))
     assert out["mar"] is None
     assert out["max_drawdown_pct"] == 0.0
 
@@ -92,7 +92,7 @@ def test_stats_with_drawdown_mar_unchanged():
 
     rets = [0.05, 0.05, -0.20, 0.03, 0.04, -0.02, 0.06]
     df = _eq_df(rets)
-    out = deployed.stats(df)
+    out = continuous_refresh.stats(df)
 
     dates = [
         dt.datetime.fromtimestamp(t / 1000, tz=dt.timezone.utc).date()
@@ -106,7 +106,7 @@ def test_stats_with_drawdown_mar_unchanged():
     eq = np.cumprod(1.0 + series)
     dd = eq / np.maximum.accumulate(eq) - 1.0
     total = float(eq[-1] - 1.0)
-    years = ncal / deployed.ANN
+    years = ncal / continuous_refresh.ANN
     expected_mar = round((total / years) / abs(float(dd.min())), 2)
 
     assert out["mar"] == expected_mar

@@ -1,6 +1,6 @@
 ---
 name: pit-reconcile
-description: "Reconcile the live demo/paper ledgers for the LONG (v11a) and CONTINUOUS (fade) sleeves, and fix/diagnose PIT membership (archive_trade_manifest) problems. ONE command: `bash scripts/reconcile.sh` runs the full demo<->backtest<->paper three-way for both sleeves by default (downloads fresh PIT data, runs each sleeve's backtest over the live forward window, reconciles the model against demo+paper); add `--quick` for the fast two-way (paper<->demo execution only). Use whenever asked to reconcile the ledgers, run a demo-backtest-paper reconciliation, when a reconcile shows paper-only / demo-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest is stale. (Continuous is the LIVE demo book since 2026-06-09 — research-stage, NOT promoted. The backtest leg is agreement/execution evidence, never alpha proof or a promotion gate.)"
+description: "Reconcile the live demo/paper ledgers for the LONG (v11a) and CONTINUOUS (fade) sleeves, and fix/diagnose PIT membership (archive_trade_manifest) problems. ONE command: `bash scripts/reconcile.sh` runs the full demo<->backtest<->paper three-way for both sleeves by default (downloads fresh PIT data, runs each sleeve's backtest over the live forward window, reconciles the model against demo+paper); add `--quick` for the fast two-way (paper<->demo execution only). Use whenever asked to reconcile the ledgers, run a demo-backtest-paper reconciliation, when a reconcile shows paper-only / demo-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest is stale. Continuous is demo/paper research-stage and promoted-in-code only by operator override; the backtest leg is agreement/execution evidence, never alpha proof or a promotion gate."
 ---
 
 > **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
@@ -53,13 +53,27 @@ by default. In one shot it:
    picks); pass `--with-funding` for costed PnL. Skip the whole refresh with
    `--no-data-refresh`.
 2. **pulls** the live demo+paper ledgers from the VPS (read-only).
+   - **1b. rmom recompute (continuous, default ON):** refreshes the research-root
+     `residual_momentum.parquet` so the independent-PIT plane (step 5) runs on a fresh
+     panel. Skip with `--no-rmom`.
 3. **LONG (discrete-event):** runs the v11a backtest over the forward window on
    the fresh root, then reconciles the backtest entries vs demo and vs paper by
    `(symbol, side, signal-day)`, plus the demo↔paper execution leg.
-4. **CONTINUOUS (rebalance book):** demo↔paper execution leg + the engine-decile
-   signal-consistency of the live entries (its faithful 'model' leg).
-5. prints one **three-way summary** and a non-zero exit if any LIVE entry lacks a
-   model justification (the look-ahead / drift tripwire).
+4. **CONTINUOUS (rebalance book):** demo↔paper execution leg + an engine-decile
+   signal-consistency leg, AND a **backtest-match** that re-derives the deployed
+   `continuous_ensemble_v2` per-component entry candidates (`scripts/reconcile_fills.py`;
+   default-ON rmom recompute, step 1b) and flags any live entry that isn't a genuine
+   candidate (hard = off-decile ≤D7 → drift; soft = near_decile ≥D8 / snapshot gap / pending_rmom).
+5. **fill-level entry-price cross-check** (`scripts/reconcile_fills.py`, both sleeves):
+   joins `entry_price` across backtest/model, demo, paper and reports the bps deltas
+   (`data/reconcile/{long,continuous}_three_way_fills.csv`). The continuous backtest-match
+   runs on TWO planes — the live signal plane (current, gates) and the independent-PIT
+   research plane (informational; its rmom coverage is gated by the derivative-metric inputs
+   `build_feature_panel` reads — OI/premium — which the default refresh skips, so they go
+   stale and recent entries land in `pending_rmom` until `--with-funding` tops them up; rmom
+   itself is causal ~2-3d, not a horizon).
+6. prints one **three-way summary** and a non-zero exit if a LIVE entry lacks a model
+   justification (continuous: only a HARD off-decile unmatched entry fails).
 
 (The old manifest-refresh / kline-fill / coverage steps from the two-way path are
 now folded into the three-way's bounded PIT refresh. Manifest refresh can still be
@@ -72,11 +86,14 @@ run manually: `python -m liquidity_migration --data-root <root> archive-manifest
   add `--sleeves long,continuous` to include continuous diagnostics.
 - The SHORT legs were ERASED 2026-06-11 with the sleeve.
 
-> **CONTINUOUS** (fade) is the LIVE demo book (operator re-shape 2026-06-09:
-> the VPS runs ONLY the continuous system). It remains research-stage — NOT
-> promoted (rmom latency knife-edge stands; never present it as promoted). Its
-> three-way 'model' leg is engine-decile signal-consistency of the live entries
-> (`scripts/continuous_demo_signal_check.py`), not a trade-ledger pairing.
+> **CONTINUOUS** (fade) is the live demo/paper book. It remains research-stage
+> and is promoted-in-code only by operator override, not by a real-money gate. Its
+> three-way 'model' leg recomputes the per-component entry candidates
+> (`scripts/reconcile_fills.py`, reusing the engine's shared decile + trigger
+> functions) and cross-checks fills; the directional check is "every live entry
+> must be a candidate" (a candidate not taken live is expected capacity). A costed
+> re-sim of `FROZEN_FORWARD_CONFIG`'s ensemble+hedge is NOT attempted. The older
+> `continuous_demo_signal_check.py` decile check still runs as a complementary leg.
 
 ## When to use
 
@@ -104,7 +121,8 @@ Default (full three-way):
 - `--sleeves long,continuous` — pick a subset (default: both).
 - `--no-data-refresh` — skip the PIT download (use the root as-is; backtest may be stale).
 - `--with-funding` — also refresh funding (slow; affects backtest PnL only, off by default).
-- `--with-rmom` — also recompute research-root rmom (slow, off by default).
+- `--no-rmom` — skip the research-root rmom recompute (ON by default for the continuous
+  independent-PIT plane); `--with-rmom` is a deprecated no-op.
 - `--backtest-start YYYY-MM-DD` — override the forward-window start.
 - `--data-refresh-timeout SECONDS` — per-stage stall guard.
 - `--dry-run` — print every command, run nothing.

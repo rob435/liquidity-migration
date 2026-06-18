@@ -35,20 +35,57 @@ def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Pat
     assert _resolve_data_root("reconcile-long-paper-demo", noop) == noop and not noop.exists()
 
 
-def test_cli_continuous_demo_addon_entry_cooldown_parser(tmp_path: Path) -> None:
+def test_cli_continuous_demo_rejects_retired_strategy_profile(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "--data-root",
+                str(tmp_path),
+                "continuous-event-demo-cycle",
+                "--strategy-profile",
+                "retired_continuous_profile",
+            ]
+        )
+
+
+def test_cli_continuous_demo_exit_redesign_parser(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
             "--data-root",
             str(tmp_path),
             "continuous-event-demo-cycle",
             "--strategy-profile",
-            "continuous_addon_v1",
-            "--addon-same-symbol-entry-cooldown-minutes",
-            "15",
+            "continuous_ensemble_v2",
+            "--no-left-decile-exit-enabled",
+            "--stop-approach-frac",
+            "0",
+            "--failed-fade-hours",
+            "0",
+            "--failed-fade-loss-pct",
+            "0",
+            "--failed-fade-min-mfe-pct",
+            "0",
+            "--breakeven-arm-pct",
+            "0",
+            "--sizing-mode",
+            "inverse_vol",
+            "--target-vol-per-name",
+            "0.01",
+            "--vol-weight-clamp",
+            "2",
         ]
     )
 
-    assert args.addon_same_symbol_entry_cooldown_minutes == 15
+    assert args.strategy_profile == "continuous_ensemble_v2"
+    assert args.left_decile_exit_enabled is False
+    assert args.stop_approach_frac == 0
+    assert args.failed_fade_hours == 0
+    assert args.failed_fade_loss_pct == 0
+    assert args.failed_fade_min_mfe_pct == 0
+    assert args.breakeven_arm_pct == 0
+    assert args.sizing_mode == "inverse_vol"
+    assert args.target_vol_per_name == 0.01
+    assert args.vol_weight_clamp == 2
 
 
 def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:

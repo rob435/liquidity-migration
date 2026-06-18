@@ -23,15 +23,15 @@ The live/continuous join (continuous_events: floor to start-of-day D) is aligned
 trading day (date(ts_ms-1ms)). (The former backtest event-research join helper was erased
 with the daily SHORT engine on 2026-06-11; only the continuous join remains.)
 
-⚠️ DEPLOY NOTE: shift(3) re-bases EVERY residual_momentum value (a 2-day-staler, causal momentum),
-so the rmom-gate MAR verdict AND the live continuous rmom_quantile (0.33) were calibrated on the OLD
-leaky signal and MUST be re-validated / re-calibrated before this is deployed.
+Deployment note: the live continuous profile now uses the post-look-ahead shift(3)
+rmom table with `rmom_quantile=0.25`. Treat any further rmom latency or target
+change as a fresh research change requiring pre-registration.
 
-The engine (volume_events.run_volume_event_research) left-joins this on (symbol, daily-grid ts_ms)
-to add a `residual_momentum` column, gated by --liquidity-migration-residual-momentum-max
-(keep LOW residual-momentum = short the idiosyncratically-weak candidates).
+The continuous engine left-joins this on (symbol, daily-grid ts_ms) to add a
+`residual_momentum` column and keeps LOW residual-momentum names (short the
+idiosyncratically-weak candidates).
 
-When enabled, the continuous demo sleeve (currently OFF / de-promoted) joins this table on the CURRENT trading day's ts, so for the live
+When enabled, the continuous demo/paper sleeve joins this table on the CURRENT trading day's ts, so for the live
 refresh `--end` MUST advance to today — otherwise the daily systemd refresh keeps writing a table that
 ends in the past, the live join finds no row for today, the `is_not_null` filter empties the whole
 cross-section, and the sleeve silently emits zero signal. `--end` therefore defaults to TOMORROW (UTC)

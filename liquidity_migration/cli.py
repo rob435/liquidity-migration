@@ -41,7 +41,6 @@ from .reconciliation import (
     run_continuous_forward_readiness,
     run_continuous_paper_demo_reconciliation,
     run_continuous_rebalance_cycle_audit,
-    run_continuous_vs_daily_forward_comparison,
     run_long_paper_demo_reconciliation,
 )
 from .continuous_addon_shadow import ContinuousAddonShadowAuditConfig, run_continuous_addon_shadow_audit
@@ -58,7 +57,6 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
     _add_continuous_addon_shadow_audit_parser,
     _add_continuous_forward_readiness_parser,
     _add_continuous_rebalance_cycle_audit_parser,
-    _add_continuous_vs_daily_forward_parser,
     _add_continuous_event_demo_cycle_parser,
     _add_continuous_events_parser,
     _add_data_layer_audit_parser,
@@ -184,7 +182,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconcile_continuous_paper_demo_parser(subparsers)
     _add_continuous_rebalance_cycle_audit_parser(subparsers)
     _add_continuous_forward_readiness_parser(subparsers)
-    _add_continuous_vs_daily_forward_parser(subparsers)
     _add_continuous_addon_shadow_audit_parser(subparsers)
 
     return parser
@@ -791,8 +788,18 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
             entry_event_trigger=args.entry_event_trigger,
             btc_trend_gate=args.btc_trend_gate,
             allow_same_signal_reentry=args.allow_same_signal_reentry,
-            stop_loss_pct=args.stop_loss_pct, entry_leverage=args.entry_leverage,
+            left_decile_exit_enabled=args.left_decile_exit_enabled,
+            stop_loss_pct=args.stop_loss_pct,
+            stop_approach_frac=args.stop_approach_frac,
+            failed_fade_hours=args.failed_fade_hours,
+            failed_fade_loss_pct=args.failed_fade_loss_pct,
+            failed_fade_min_mfe_pct=args.failed_fade_min_mfe_pct,
+            breakeven_arm_pct=args.breakeven_arm_pct,
+            entry_leverage=args.entry_leverage,
             per_position_notional_pct_equity=args.per_position_notional_pct_equity,
+            sizing_mode=args.sizing_mode,
+            target_vol_per_name=args.target_vol_per_name,
+            vol_weight_clamp=args.vol_weight_clamp,
             fallback_equity_usdt=args.fallback_equity_usdt, entry_order_type=args.entry_order_type,
             exit_order_type=args.exit_order_type, submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders, telegram=args.telegram,
@@ -807,11 +814,6 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
             daily_rebalance_strategy_momentum_min_return=args.daily_rebalance_strategy_momentum_min_return,
             daily_rebalance_strategy_momentum_scale_when_below=args.daily_rebalance_strategy_momentum_scale_when_below,
             strategy_profile=args.strategy_profile,
-            addon_primary_pnl_gate=args.addon_primary_pnl_gate,
-            addon_primary_min_unrealized_return=args.addon_primary_min_unrealized_return,
-            addon_primary_data_root=args.addon_primary_data_root,
-            addon_primary_strategy_id=args.addon_primary_strategy_id,
-            addon_same_symbol_entry_cooldown_minutes=args.addon_same_symbol_entry_cooldown_minutes,
             sniper_enabled=args.sniper_enabled,
             sniper_wick_pct=args.sniper_wick_pct,
             sniper_size_frac=args.sniper_size_frac,
@@ -996,37 +998,6 @@ def _cmd_continuous_forward_readiness(args: argparse.Namespace, config: Research
             f"demo_only={summary['demo_only']} "
             f"sample_warning={summary['sample_warning']} "
             f"path={payload['report_path']}"
-        )
-        return 0 if payload["ok"] else 1
-
-
-def _cmd_continuous_vs_daily_forward(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
-        payload = run_continuous_vs_daily_forward_comparison(
-            args.daily_data_root,
-            args.continuous_data_root,
-            daily_trades_dataset=args.daily_trades_dataset,
-            daily_cycles_dataset=args.daily_cycles_dataset,
-            continuous_cycles_dataset=args.continuous_cycles_dataset,
-            continuous_trades_dataset=args.continuous_trades_dataset,
-            min_common_days=args.min_common_days,
-            output_dir=args.output_dir,
-        )
-        summary = payload["summary"]
-        daily = payload["daily"]
-        continuous = payload["continuous"]
-        print(
-            "continuous vs daily forward "
-            f"ok={payload['ok']} "
-            f"common_days={summary['common_days']} "
-            f"common_days_remaining={summary['common_days_remaining']} "
-            f"daily_observed_days={summary['daily_observed_days']} "
-            f"continuous_observed_days={summary['continuous_observed_days']} "
-            f"continuous_return={continuous['total_return']:.6f} "
-            f"daily_return={daily['total_return']:.6f} "
-            f"continuous_mar={continuous['mar'] if continuous['mar'] is not None else 'NA'} "
-            f"daily_mar={daily['mar'] if daily['mar'] is not None else 'NA'} "
-            f"path={payload['report_path']} "
-            f"json={payload['json_path']}"
         )
         return 0 if payload["ok"] else 1
 
@@ -1262,7 +1233,6 @@ _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Pat
     "reconcile-continuous-paper-demo": _cmd_reconcile_continuous_paper_demo,
     "continuous-rebalance-cycle-audit": _cmd_continuous_rebalance_cycle_audit,
     "continuous-forward-readiness": _cmd_continuous_forward_readiness,
-    "continuous-vs-daily-forward": _cmd_continuous_vs_daily_forward,
     "continuous-addon-shadow-audit": _cmd_continuous_addon_shadow_audit,
 }
 

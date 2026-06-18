@@ -214,7 +214,7 @@ def test_missing_btc_price_is_surfaced_not_silent(monkeypatch, tmp_path, capsys)
 
 def _open_hedge_row(trade_id: str, qty: float, entry_ts_ms: int) -> dict:
     return {
-        "trade_id": trade_id, "strategy_id": "continuous_hedge_v1", "symbol": "BTCUSDT",
+        "trade_id": trade_id, "strategy_id": "continuous_hedge_v2", "symbol": "BTCUSDT",
         "side": "long", "sleeve": "continuous_addon", "status": "open",
         "ts_ms": entry_ts_ms, "entry_ts_ms": entry_ts_ms, "opened_at_ms": entry_ts_ms,
         "updated_at_ms": entry_ts_ms, "entry_price": 100_000.0, "qty": qty,
@@ -279,7 +279,7 @@ def test_hedge_buy_order_row_is_terminal_for_ws_risk_reconciler() -> None:
     now = 1_700_000_000_000
     order_row = {
         "order_link_id": "lm-en-ca-BTC-t72ncw", "ts_ms": now,
-        "trade_id": "hedge-lm-en-ca-BTC-t72ncw", "strategy_id": "continuous_hedge_v1",
+        "trade_id": "hedge-lm-en-ca-BTC-t72ncw", "strategy_id": "continuous_hedge_v2",
         "symbol": "BTCUSDT", "side": "Buy", "order_type": "Market", "qty": 0.5,
         "reduce_only": False, "order_id": "oid-1", "submit_mode": "submitted",
         "status": "filled", "filled_qty": 0.5, "target_qty": 0.5,

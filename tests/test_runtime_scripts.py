@@ -69,22 +69,6 @@ def test_continuous_forward_readiness_parser_defaults() -> None:
     assert args.paper_only is False
 
 
-def test_continuous_vs_daily_forward_parser_defaults() -> None:
-    from liquidity_migration.cli import build_parser
-
-    parser = build_parser()
-    args = parser.parse_args(["continuous-vs-daily-forward"])
-
-    assert args.command == "continuous-vs-daily-forward"
-    assert args.daily_data_root == "data/bybit-paper-event"
-    assert args.continuous_data_root == "data/bybit-continuous-paper-event"
-    assert args.daily_trades_dataset == "event_demo_trades"
-    assert args.daily_cycles_dataset == "event_demo_cycles"
-    assert args.continuous_cycles_dataset == "continuous_fade_paper_cycles"
-    assert args.continuous_trades_dataset == "continuous_fade_paper_trades"
-    assert args.min_common_days == 30
-
-
 def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
     from liquidity_migration.cli import build_parser
 
@@ -93,11 +77,11 @@ def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
         [
             "continuous-event-demo-cycle",
             "--strategy-profile",
-            "continuous_rebalance_v1",
+            "continuous_ensemble_v2",
             "--feature-set",
             "max_ret168",
             "--entry-event-trigger",
-            "turn4_pop4",
+            "none",
             "--btc-trend-gate",
             "uptrend",
             "--daily-rebalance-enabled",
@@ -105,9 +89,9 @@ def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
     )
 
     assert args.command == "continuous-event-demo-cycle"
-    assert args.strategy_profile == "continuous_rebalance_v1"
+    assert args.strategy_profile == "continuous_ensemble_v2"
     assert args.feature_set == "max_ret168"
-    assert args.entry_event_trigger == "turn4_pop4"
+    assert args.entry_event_trigger == "none"
     assert args.btc_trend_gate == "uptrend"
     assert args.daily_rebalance_enabled is True
 
@@ -116,10 +100,23 @@ def test_continuous_runner_wires_rebalance_profile_env() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh").read_text(encoding="utf-8")
 
-    # 2026-06-10: the live default is the validated winner_base 4-component ensemble.
-    assert 'STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v1}"' in text
+    # 2026-06-18: the live default is the repaired v2 lifecycle.
+    assert 'STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v2}"' in text
     assert "--strategy-profile \"$STRATEGY_PROFILE\"" in text
-    assert 'DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-0}"' in text
+    assert 'LEFT_DECILE_EXIT_ENABLED="${LEFT_DECILE_EXIT_ENABLED:-0}"' in text
+    assert 'STOP_APPROACH_FRAC="${STOP_APPROACH_FRAC:-0}"' in text
+    assert "--stop-approach-frac \"$STOP_APPROACH_FRAC\"" in text
+    assert "--failed-fade-hours \"$FAILED_FADE_HOURS\"" in text
+    assert "--breakeven-arm-pct \"$BREAKEVEN_ARM_PCT\"" in text
+    assert 'SIZING_MODE="${SIZING_MODE:-inverse_vol}"' in text
+    assert 'TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"' in text
+    assert 'VOL_WEIGHT_CLAMP="${VOL_WEIGHT_CLAMP:-2}"' in text
+    assert "--sizing-mode \"$SIZING_MODE\"" in text
+    assert "--target-vol-per-name \"$TARGET_VOL_PER_NAME\"" in text
+    assert "--vol-weight-clamp \"$VOL_WEIGHT_CLAMP\"" in text
+    assert 'DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-1}"' in text
+    assert 'DAILY_REBALANCE_TARGET_DAILY_VOL="${DAILY_REBALANCE_TARGET_DAILY_VOL:-0.045}"' in text
+    assert 'DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS="${DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS:-0}"' in text
     assert "--daily-rebalance-enabled" in text
     assert "--daily-rebalance-strategy-momentum-min-return" in text
     # sniper arm switch present (default off; CONTINUOUS_SNIPER=1 arms it)
@@ -138,22 +135,28 @@ def test_reconcile_continuous_uses_forward_readiness_gate() -> None:
 
 def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controlled() -> None:
     repo = Path(__file__).resolve().parents[1]
-    # 2026-06-10: both units run the validated winner_base 4-component ensemble
+    # 2026-06-10: both units run the validated winner_base ensemble
     # (the profile owns triggers/age/TP per component; unit-level trigger is none).
     for unit_name in (
         "liquidity-migration-bybit-continuous-demo.service",
         "liquidity-migration-bybit-continuous-paper.service",
     ):
         text = (repo / "deploy" / "systemd" / unit_name).read_text(encoding="utf-8")
-        assert "Environment=STRATEGY_PROFILE=continuous_ensemble_v1" in text
+        assert "Environment=STRATEGY_PROFILE=continuous_ensemble_v2" in text
         assert "Environment=FEATURE_SET=max_ret168" in text
         assert "Environment=ENTRY_EVENT_TRIGGER=none" in text
-        # PLUMBING TEST (operator 2026-06-16): demo + paper gate flipped to "off" so
-        # the flat (BTC-30d-down) book takes entries and exercises the fill/ledger/
-        # reconcile path. Both units stay matched. Revert this assertion to "uptrend"
-        # when the gate is restored after the plumbing test.
-        assert "Environment=BTC_TREND_GATE=off" in text
+        assert "Environment=BTC_TREND_GATE=uptrend" in text
+        assert "Environment=LEFT_DECILE_EXIT_ENABLED=0" in text
+        assert "Environment=STOP_APPROACH_FRAC=0" in text
+        assert "Environment=FAILED_FADE_HOURS=0" in text
+        assert "Environment=BREAKEVEN_ARM_PCT=0" in text
         assert "Environment=DAILY_REBALANCE_ENABLED=1" in text
+        assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
+        assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
+        assert "Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0" in text
+        assert "Environment=SIZING_MODE=inverse_vol" in text
+        assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
+        assert "Environment=VOL_WEIGHT_CLAMP=2" in text
     demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service").read_text(encoding="utf-8")
     paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service").read_text(encoding="utf-8")
     # sniper armed on the DEMO unit only (paper is a no-order shadow)
@@ -229,35 +232,25 @@ def test_liveness_watchdog_checks_continuous_paper_evidence_root() -> None:
     script = (repo / "scripts" / "check_demo_liveness.py").read_text(encoding="utf-8")
 
     assert "--continuous-paper-root /opt/liquidity-migration/data/bybit-continuous-paper-event" in service
+    assert not any("--continuous-stop-check" in line for line in _active_lines(service))
     assert "liquidity-migration-bybit-continuous-paper.service" in script
     assert "_sleeve_on(\"CONTINUOUS_PAPER_SLEEVE\")" in script
+    assert "continuous_stop_check" in script
 
 
-def test_continuous_forward_report_timer_wired_to_paper_evidence_gate() -> None:
+def test_continuous_rmom_timer_wired_to_paper_evidence_gate() -> None:
     repo = Path(__file__).resolve().parents[1]
-    service = (
-        repo / "deploy" / "systemd" / "liquidity-migration-continuous-forward-report.service"
-    ).read_text(encoding="utf-8")
-    timer = (
-        repo / "deploy" / "systemd" / "liquidity-migration-continuous-forward-report.timer"
-    ).read_text(encoding="utf-8")
     deploy = (repo / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
     verify = (repo / "scripts" / "verify_vps_live.sh").read_text(encoding="utf-8")
     recovery = (repo / "scripts" / "vps_console_recover_and_deploy.sh").read_text(encoding="utf-8")
-
-    assert "scripts/continuous_forward_report.py" in service
-    assert "--daily-data-root data/bybit-paper-event" in service
-    assert "--daily-cycles-dataset event_demo_cycles" in service
-    assert "--continuous-data-root data/bybit-continuous-paper-event" in service
-    assert "--stale-coverage-gap-days 2" in service
-    assert "--telegram" in service
-    assert "OnCalendar=*-*-* 08:10:00" in timer
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
+
     for text in (deploy, verify, recovery):
         assert "continuous_rmom_refresh_on" in text
         assert "apply_timer_enable" in text or "verify_timer" in text
-        assert "CONTINUOUS_FORWARD_REPORT_TIMERS" in text
-    assert 'CONTINUOUS_FORWARD_REPORT_TIMERS="liquidity-migration-continuous-forward-report.timer"' in lib
+        assert "CONTINUOUS_FORWARD_REPORT_TIMERS" not in text
+    assert "CONTINUOUS_FORWARD_REPORT_TIMERS" not in lib
+    assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
     assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
 
 
@@ -468,7 +461,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "verify_timer()" in lib
     assert "continuous_rmom_refresh_on()" in lib
     sleeves = (repo / "deploy" / "sleeves.env").read_text(encoding="utf-8")
-    # 2026-06-09 operator instruction: continuous-only box (demo orders ON, demo-account only).
+    # Continuous demo orders are ON; long is controlled by its own sleeve toggle.
     assert "CONTINUOUS_SLEEVE=on" in sleeves
     assert "CONTINUOUS_PAPER_SLEEVE=on" in sleeves
     # Timers ship with the unit files but `systemctl enable` is required to
@@ -499,7 +492,15 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
     assert "Environment=SUBMIT_ORDERS=1" in text
-    assert "Environment=STOP_LOSS_PCT=0.25" in text
+    assert "Environment=SIZING_MODE=inverse_vol" in text
+    assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
+    assert "Environment=VOL_WEIGHT_CLAMP=2" in text
+    assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
+    assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
+    assert 'cont.sizing_mode == "inverse_vol"' in text
+    assert "cont.target_vol_per_name == 0.01" in text
+    assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
+    assert "Environment=STOP_LOSS_PCT=0" in text
     # The deploy must SEED the rmom gate (start the oneshot service), not just enable the
     # daily timer — else a fresh deploy starts the continuous daemon into an empty gate and
     # blacks out until 00:20 UTC (the 2026-06-02 incident). Seed must run BEFORE the
@@ -614,12 +615,21 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     # stays wired to read the continuous ledger even when the sleeve is off (asserted
     # below, unconditional) — else its open positions would silently flatten.
     assert "continuous_rmom_refresh_on" in text
-    assert "verify_timer on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS" in text
+    assert "verify_timer on $CONTINUOUS_SLEEVE_TIMERS" in text
+    assert "CONTINUOUS_FORWARD_REPORT_TIMERS" not in text
     assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
     assert "Environment=SUBMIT_ORDERS=1" in text
-    assert "Environment=STOP_LOSS_PCT=0.25" in text
+    assert "Environment=SIZING_MODE=inverse_vol" in text
+    assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
+    assert "Environment=VOL_WEIGHT_CLAMP=2" in text
+    assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
+    assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
+    assert 'cont.sizing_mode == "inverse_vol"' in text
+    assert "cont.target_vol_per_name == 0.01" in text
+    assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
+    assert "Environment=STOP_LOSS_PCT=0" in text
     assert "verify-ok commit=" in text
     assert "--property=Environment" not in text
 
@@ -881,7 +891,15 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
     assert "Environment=SUBMIT_ORDERS=1" in text
-    assert "Environment=STOP_LOSS_PCT=0.25" in text
+    assert "Environment=SIZING_MODE=inverse_vol" in text
+    assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
+    assert "Environment=VOL_WEIGHT_CLAMP=2" in text
+    assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
+    assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
+    assert 'cont.sizing_mode == "inverse_vol"' in text
+    assert "cont.target_vol_per_name == 0.01" in text
+    assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
+    assert "Environment=STOP_LOSS_PCT=0" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
 
@@ -931,7 +949,7 @@ def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Pat
 
 
 def test_reset_demo_paper_ledgers_covers_continuous_sleeve(tmp_path: Path) -> None:
-    """The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset —
+    """The continuous-fade sleeve is still covered by the reset —
     omitting it would leave stale continuous trades that contaminate the clean pre/post
     forward-demo split on a strategy overhaul (audit 2026-06-02 #10)."""
     import shutil
@@ -1787,7 +1805,11 @@ def test_paper_unit_load_bearing_paper_knobs_intact() -> None:
         ("SUBMIT_ORDERS", "0"),
         ("RECORD_DRY_RUN", "1"),
         ("PAPER_MODE", "1"),
-        ("STRATEGY_PROFILE", "continuous_ensemble_v1"),
+        ("STRATEGY_PROFILE", "continuous_ensemble_v2"),
+        ("LEFT_DECILE_EXIT_ENABLED", "0"),
+        ("STOP_APPROACH_FRAC", "0"),
+        ("FAILED_FADE_HOURS", "0"),
+        ("BREAKEVEN_ARM_PCT", "0"),
     ):
         assert env.get(key) == expected, (
             f"PAPER unit knob {key} changed: expected {expected!r}, got {env.get(key)!r}"

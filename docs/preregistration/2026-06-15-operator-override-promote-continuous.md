@@ -10,15 +10,16 @@ decision, not new alpha.
 
 ## What this is
 
-The CONTINUOUS-fade book — the deployed `continuous_ensemble_v1` (winner_base
-4-component ensemble + BTC+ETH 2f hedge) **including the BTC-vol regime-hedge
-overlay** (λ=0.5; `continuous_regime.FROZEN_BTCVOL_REGIME`) — is added
+The CONTINUOUS-fade book — the operator-approved winner_base ensemble + BTC+ETH
+2f hedge **including the BTC-vol regime-hedge overlay**
+(λ=0.5; `continuous_regime.FROZEN_BTCVOL_REGIME`) — is added
 back to `promoted.PROFILES` as `"continuous"`, alongside `"long"`.
 
-Source of truth for the promoted object is unchanged:
-`continuous_forward_replay.FROZEN_FORWARD_CONFIG` (the same frozen config the live
-demo book and the forward clock already execute). `promoted.continuous_profile()`
-returns a deep copy of it.
+Current supersession: on 2026-06-18 the operator dropped the stale `tp14` leg and
+reset the continuous forward clock. Source of truth for the current promoted-in-code
+object is still `continuous_forward_replay.FROZEN_FORWARD_CONFIG`, now the
+3-component p3/p4p3/p4p5 object. `promoted.continuous_profile()` returns a deep
+copy of it.
 
 ## Why this needs a loud caveat (the honest evidence state)
 
@@ -53,7 +54,7 @@ The Tier-3 criteria themselves are **not loosened** by this change (Non-Negotiab
 - `tests/test_equity_curves_runner.py` — `PROFILES` pin updated to include continuous.
 - `liquidity_migration/continuous_demo.py`, `scripts/equity_curves.py` — stale
   "continuous is outside PROFILES / not a promotion claim" comments corrected.
-- `STATE.md` — status + Non-Negotiable #2 annotated with the override.
+- `STATE.md` — status and real-money gate annotated with the override.
 
 No runtime/deploy behavior changes: nothing iterates `promoted.PROFILES` to deploy;
 the equity tool runs continuous via its own refresh runner. This is a registry/label
@@ -74,9 +75,10 @@ Window clipped to data ends on this dev box.
   → hourly-snapshot scrape; exact-stamp dedup would over-charge funding ~N× and
   flatter a short book). Correct refusal; fix = rebuild bybit funding via
   `download-data` from the funding-history endpoint.
-- **CONTINUOUS (binance_full_pit):** see run log / STATE update — reported with its
-  exact `run_label`; funding on this root is missing/non-overlapping for the window,
-  so any continuous number here is funding-uncosted and is demo/shape evidence only.
+- **CONTINUOUS (binance_full_pit):** funding on this root was missing/non-overlapping
+  for the window, so any continuous number from this snapshot was funding-uncosted
+  and demo/shape evidence only. Current continuous conclusions are consolidated in
+  `docs/research_summary.md`.
 
 **Methodology debt opened by this promotion:** the continuous book cannot currently
 be produced as a *fully-costed* backtest on this dev box (bybit funding contaminated,

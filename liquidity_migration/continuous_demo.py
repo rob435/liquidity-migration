@@ -1,4 +1,4 @@
-"""Live CONTINUOUS-fade demo sleeve — signal + selection (the 'no 1h' core).
+"""Live CONTINUOUS-fade demo sleeve: signal, selection, entries, exits.
 
 A SEPARATE demo-account sleeve (own ledger root `data/bybit-continuous-demo-event`, own
 `lm-en-c-`/`lm-ux-c-` orderLinkId prefix) that forward-tests the continuous liquidity-migration
@@ -6,15 +6,14 @@ fade the backtest engine (`continuous_events.py`) measured. The backtest is the 
 demo is the only thing that can settle the open questions the audit flagged (OOS persistence,
 borrow/short-availability, sub-hourly squeezes).
 
-**No 1h.** The rolling features (rv_168h, vov, dist_low, xsret7/3) are inherently built from trailing
-hourly closes, but the SIGNAL is recomputed continuously off the live ticker price as the in-progress
-("current") bar — so a name entering/leaving the top fade decile is acted on the moment the live price
-crosses, NOT on the hourly bar close. The decile pipeline is the SHARED, verified
-`continuous_events.compute_continuous_decile_panel`, so the live signal == the backtest signal.
+The current deployed ensemble enters from the confirmed-bar +1h path, not the
+old intra-hour "no 1h" entry. The decile pipeline is the SHARED, verified
+`continuous_events.compute_continuous_decile_panel`.
 
-Live state-exit rule (no spell bookkeeping needed): hold a short iff the name is currently in the top
-decile (D9). Enter when it is in D9 + liquid + not already held + capacity; exit when it leaves D9
-(or hits its resting stop / max-hold). EXPLORATORY/forward-demo only; never real money.
+The frozen `continuous_ensemble_v2` demo/paper profile uses inverse-vol
+component entry sizing, max4 daily vol-target rebalance, and TP/24h exits with
+no daemon or server stop. It is the only selectable continuous daemon profile.
+EXPLORATORY/forward-demo only; never real money.
 """
 from __future__ import annotations
 
@@ -37,17 +36,18 @@ from .continuous_events import (
     per_symbol_timeseries_features,
 )
 
-CONTINUOUS_STRATEGY_ID = "continuous_fade_v1"
-CONTINUOUS_ADDON_STRATEGY_ID = "continuous_fade_addon_v1"
+CONTINUOUS_STRATEGY_ID = "continuous_fade_v2"
+# Temporary ledger-safety adapter: local demo/paper ledgers still contain open
+# pre-freeze rows under this id. The v2 executor manages them until flat; it must
+# not create new entries under these ids.
+CONTINUOUS_PREFREEZE_STRATEGY_IDS = ("continuous_fade_v1",)
+CONTINUOUS_ADDON_STRATEGY_ID = "continuous_fade_addon_v2"
 CONTINUOUS_ENTRY_LINK_PREFIX = "en-c"   # lm-en-c-{base}-{ts36}  (5-part; distinct sleeve for ws_risk routing)
 CONTINUOUS_EXIT_LINK_PREFIX = "ux-c"    # lm-ux-c-{base}-{ts36}
 CONTINUOUS_ADDON_ENTRY_LINK_PREFIX = "en-ca"
 CONTINUOUS_ADDON_EXIT_LINK_PREFIX = "ux-ca"
 CONTINUOUS_DEMO_PROFILES = (
-    "continuous_v1",
-    "continuous_addon_v1",
-    "continuous_rebalance_v1",  # DEPRECATED 2026-06-10: single-component turn4_pop4 (kept resolvable for old ledgers)
-    "continuous_ensemble_v1",   # the validated winner_base 3-component ensemble (the live default)
+    "continuous_ensemble_v2",   # 2026-06-18 demo/paper lifecycle: inv-vol + max4 + TP/24h, no server stop
 )
 
 
@@ -76,8 +76,8 @@ class ContinuousDemoCycleConfig:
     # decile + this many hours' delay, NOT the live intra-hour decile cross. The engine validated the
     # +1h point (d1) and it ~DOUBLES MAR vs intra-hour entry (d0) cross-venue — shorting intra-hour enters
     # into the first-hour continuation/squeeze. 1 = the validated +1h entry (default). 0 = legacy intra-hour
-    # ("no-1h") entry off the live decile. EXITS stay tick-driven regardless (squeeze protection is good).
-    # docs/preregistration/alpha-sweep-2026-06-02.md. EXPLORATORY — forward demo is the arbiter.
+    # ("no-1h") entry off the live decile. Kept as an integer knob for A/B tests only;
+    # the frozen v2 profile pins it to 1.
     entry_confirm_delay_hours: int = 1
     entry_event_trigger: str = "none"      # opt-in confirmed-hour event gate: none | fresh_pop25 | popX_gbY | ...
     btc_trend_gate: str = "off"            # off | uptrend | downtrend; causal prior-30d BTC return gate.
@@ -86,6 +86,7 @@ class ContinuousDemoCycleConfig:
     # decile") once the name is CLEARLY out — its decile has dropped below `decile - exit_decile_buffer`.
     # buffer=0 reproduces the original exit-the-instant-it-leaves-D9 behaviour; buffer=1 (default)
     # holds through a one-decile wobble (D8) and covers at D7 or below.
+    left_decile_exit_enabled: bool = True
     exit_decile_buffer: int = 1
     # Re-entry cooldown: after covering a name, do not re-open it for this many minutes even if it
     # is still/again in D9 — stops a boundary name from being re-shorted seconds after an exit.
@@ -99,6 +100,9 @@ class ContinuousDemoCycleConfig:
     # once its live loss reaches this fraction of the way to the server-side disaster stop
     # (loss >= stop_approach_frac * stop_loss_pct). Reacts on a ticker tick instead of waiting for
     # Bybit's market stop to fill into the gap. 0 disables (rely solely on the 0.25 server stop).
+    # The repaired continuous_ensemble_v2 profile disables this: the 2026-06-18 full-PIT diagnostic
+    # showed stop_approach is the primary reason the live lifecycle diverged from the profitable
+    # fixed 24h/TP ledger.
     stop_approach_frac: float = 0.8
     # Portfolio circuit breaker (correlated-squeeze defense): PAUSE new entries when the sleeve has had
     # >= entry_pause_after_adverse_exits adverse covers (stop_approach / failed_fade / any net-negative
@@ -112,10 +116,9 @@ class ContinuousDemoCycleConfig:
     # choice. Set entry_pause_after_adverse_exits=0 to disable.
     entry_pause_after_adverse_exits: int = 8
     entry_pause_window_minutes: int = 1440
-    # DISASTER STOP (server-side, Bybit-managed via the entry order's stopLoss; fires even if the daemon
-    # is down). Wide on purpose: a tight stop whipsaws the normal fade wiggle, but a live unstopped alt
-    # short has unbounded squeeze risk and "leave-the-decile" is a PROFIT exit a squeezing name never
-    # triggers. 0.25 = the operator's I-phase cap; the state exit + max-hold stay the primary exits.
+    # Generic server-side stop knob. The frozen v2 profile overrides this to 0.0 after
+    # the 2026-06-18 full-PIT redesign showed both daemon stops and the 25% venue stop
+    # destroy the fade edge. v2 is demo/paper only, not real-money-safe.
     stop_loss_pct: float = 0.25
     # --- inherited-from-daily exits/gate (validated cross-venue beneficial in the engine ablation,
     # docs/continuous_sleeve_inheritance.md). Checked each cycle off live price + kline-reconstructed MFE. ---
@@ -125,7 +128,10 @@ class ContinuousDemoCycleConfig:
     breakeven_arm_pct: float = 0.10       # once MFE>=this, cover if price returns to entry (protect the winner)
     age_days_min: int = 30                # skip fresh-listing squeezers (mild floor; engine-neutral, cheap insurance)
     entry_leverage: float = 2.0
-    per_position_notional_pct_equity: float = 2.0   # 2% per name (matches the proxy 2% weight)
+    per_position_notional_pct_equity: float = 2.0   # base % before component, inverse-vol and rebalance scales
+    sizing_mode: str = "flat"                       # "flat" | "inverse_vol" (target_vol_per_name / rv_168h)
+    target_vol_per_name: float = 0.02               # inverse-vol per-name hourly-vol target
+    vol_weight_clamp: float = 3.0                   # inverse-vol multiplier clamp [1/clamp, clamp]
     notional_multiplier: float = 1.0                # read by the shared daemon scaffolding (logging only)
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
@@ -153,7 +159,7 @@ class ContinuousDemoCycleConfig:
     # since ws_risk writes the control row only to the authority root); set the short root
     # in deploy to make continuous consult it. Read-only, fail-open, NO-OP until seeded.
     cross_sleeve_account_root: str | None = None
-    strategy_profile: str = "continuous_v1"
+    strategy_profile: str = "continuous_ensemble_v2"
     paper_mode: bool = False
     # --- research-stage dual-sleeve adapter ---
     # OFF by default. When this runner is used as a paper/demo add-on sleeve,
@@ -328,6 +334,7 @@ def _empty_live_state() -> pl.DataFrame:
     return pl.DataFrame(
         {"symbol": pl.Series([], dtype=pl.String), "decile": pl.Series([], dtype=pl.Int64),
          "composite": pl.Series([], dtype=pl.Float64), "turnover_quote": pl.Series([], dtype=pl.Float64),
+         "rv_168h": pl.Series([], dtype=pl.Float64),
          "ret1": pl.Series([], dtype=pl.Float64), "max_ret168": pl.Series([], dtype=pl.Float64),
          "prior6_ret1_max": pl.Series([], dtype=pl.Float64),
          "giveback_from_prior6_high": pl.Series([], dtype=pl.Float64),
@@ -337,7 +344,14 @@ def _empty_live_state() -> pl.DataFrame:
 
 def _select_live_state_columns(panel: pl.DataFrame) -> pl.DataFrame:
     base = ["symbol", "decile", "composite", "turnover_quote"]
-    event_cols = ["ret1", "max_ret168", "prior6_ret1_max", "giveback_from_prior6_high", "turnover_spike_168h"]
+    event_cols = [
+        "rv_168h",
+        "ret1",
+        "max_ret168",
+        "prior6_ret1_max",
+        "giveback_from_prior6_high",
+        "turnover_spike_168h",
+    ]
     return panel.select(base + [c for c in event_cols if c in panel.columns])
 
 
@@ -555,7 +569,7 @@ class LivePanelCache:
             rmom_quantile=self._rmom_quantile,
             feature_set=self._feature_set,
         )
-        return panel.select("symbol", "decile", "composite", "turnover_quote")
+        return panel.select("symbol", "decile", "composite", "turnover_quote", "rv_168h")
 
 
 def select_continuous_entries(
@@ -725,11 +739,11 @@ def _execute_sniper_placements(
 ) -> list[dict[str, Any]]:
     """Place the sniper resting limits for this cycle's fresh entries (S1 Amendment 6).
 
-    One PostOnly Sell limit per fresh short at entry*(1+wick), quarter-size, with the
-    book's disaster stop attached venue-side (a fill between cycles is protected even
-    before its ledger row exists). Returns ORDER rows only — a snipe becomes a TRADE
-    row when `reconcile_continuous_snipes` observes its fill. Dry-run records planned
-    rows without submitting.
+    One PostOnly Sell limit per fresh short at entry*(1+wick), quarter-size. A
+    server stop is attached only when ``demo.stop_loss_pct > 0``; v2 leaves it
+    off. Returns ORDER rows only — a snipe becomes a TRADE row when
+    `reconcile_continuous_snipes` observes its fill. Dry-run records planned rows
+    without submitting.
     """
     from .event_demo import _stop_price_for_entry, order_quantity_for_notional
 
@@ -768,8 +782,9 @@ def _execute_sniper_placements(
         qty = _float(sized[0])
         if qty <= 0.0:
             continue
-        stop_price = _stop_price_for_entry(
-            entry_price=limit_price, side="short", stop_loss_pct=demo.stop_loss_pct, tick_size=tick
+        stop_price = (
+            _stop_price_for_entry(entry_price=limit_price, side="short", stop_loss_pct=demo.stop_loss_pct, tick_size=tick)
+            if demo.stop_loss_pct > 0.0 else 0.0
         )
         # sniper-8: plan_continuous_sniper_orders only emits plans with a positive
         # signal_ts (it skips the unrecoverable 0 case), so the link's encoded ts always
@@ -1204,7 +1219,7 @@ def plan_continuous_exits(
 ) -> list[dict[str, Any]]:
     """Plan covers for held shorts. Exit reasons (first match wins):
       - breakeven : reached >= breakeven_arm_pct favorable then gave it back to entry (protect winner)
-      - left_decile: the name dropped CLEARLY out of the top fade decile — HYSTERESIS: its decile fell
+      - left_decile: when enabled, the name dropped CLEARLY out of the top fade decile — HYSTERESIS: its decile fell
                      below ``decile - exit_decile_buffer`` (buffer=1 holds through a one-decile wobble so
                      a name flickering on the D9 boundary is not churned) (the state/profit exit)
       - stop_approach/failed_fade: squeeze-defence loss cuts (see `_protective_exit_reason`)
@@ -1219,12 +1234,11 @@ def plan_continuous_exits(
     (breakeven / stop_approach / failed_fade / max_hold) are PRICE-driven via ``_trade_excursion`` (live
     klines + ticker), so squeeze safety stays immediate and live regardless of the decile snapshot.
 
-    breakeven/failed_fade are the daily-system exits validated cross-venue in the engine ablation; the
-    MFE is reconstructed from the kline lows over [entry, now]; current PnL uses the live ticker price.
-    The 25% disaster stop is the server-side resting order, not re-planned here."""
+    The MFE is reconstructed from the kline lows over [entry, now]; current PnL uses the live ticker
+    price. v2 disables the daemon protective exits and server stop."""
     if not open_trades:
         return []
-    have_state = not decile_state.is_empty()
+    have_state = bool(config.left_decile_exit_enabled) and not decile_state.is_empty()
     # Hysteresis band: hold while the name's decile is still >= exit_decile_min; cover only once
     # clearly out. exit_decile_buffer=0 == cover the instant it leaves the top decile (legacy).
     exit_decile_min = config.decile - max(0, config.exit_decile_buffer)
@@ -1638,70 +1652,33 @@ def _continuous_entry_candidates_with_signal_metadata(
 
 
 def continuous_strategy_id(config: ContinuousDemoCycleConfig) -> str:
-    base = CONTINUOUS_ADDON_STRATEGY_ID if config.strategy_profile == "continuous_addon_v1" else CONTINUOUS_STRATEGY_ID
-    return base + ("_paper" if config.paper_mode else "")
+    return CONTINUOUS_STRATEGY_ID + ("_paper" if config.paper_mode else "")
+
+
+def continuous_managed_strategy_ids(config: ContinuousDemoCycleConfig) -> tuple[str, ...]:
+    suffix = "_paper" if config.paper_mode else ""
+    return (CONTINUOUS_STRATEGY_ID + suffix, *(sid + suffix for sid in CONTINUOUS_PREFREEZE_STRATEGY_IDS))
 
 
 def continuous_sleeve_name(config: ContinuousDemoCycleConfig) -> str:
-    return "continuous_addon" if config.strategy_profile == "continuous_addon_v1" else "continuous"
+    return "continuous"
 
 
 def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> ContinuousDemoCycleConfig:
     """Resolve named demo profiles into explicit knobs.
 
-    ``continuous_ensemble_v1`` is the live demo book (the validated winner_base
-    3-component ensemble, operator-wired 2026-06-10; both live units pin it via
-    STRATEGY_PROFILE). ``continuous_rebalance_v1`` is its DEPRECATED
-    single-component predecessor, kept resolvable for old ledgers.
+    ``continuous_ensemble_v2`` is the frozen 2026-06-18 demo/paper lifecycle:
+    three-component entry book, inverse-vol component sizing, max4 daily
+    vol-target rebalance, and TP/24h exits with no daemon or server stop. It is
+    not real-money-safe.
 
-    As of the 2026-06-15 operator-override promotion, the deployed ensemble
-    (``continuous_ensemble_v1`` == ``continuous_forward_replay.FROZEN_FORWARD_CONFIG``,
-    incl. the BTC-vol regime-hedge) IS promoted via ``promoted.continuous_profile()``
-    — but demo/paper ONLY (``REAL_MONEY`` false; Tier-3 real-money gate unmet and
-    unchanged). The deprecated ``continuous_rebalance_v1`` predecessor stays
-    research-stage and is not the promoted object.
+    ``promoted.continuous_profile()`` exposes the frozen portfolio object
+    (winner_base entry lineage + 2f hedge + BTC-vol regime-hedge) for tooling.
+    The deployed daemon lifecycle is ``continuous_ensemble_v2`` through this
+    resolver plus systemd/env overrides. Demo/paper ONLY (``REAL_MONEY`` false;
+    Tier-3 real-money gate unmet and unchanged).
     """
-    if config.strategy_profile == "continuous_ensemble_v1":
-        # The validated winner_base ensemble (frozen receipt weights; receipts:
-        # continuous-winner-robustness-2026-06-09 + continuous-walkforward-allocator
-        # [weights frozen, no re-estimation] + continuous-hedge-2f-engine-2026-06-10).
-        # Research rule w90/tv0.045/max4/ddh-0.04, NO strategy-momentum hurdle (the
-        # merged test's winning arm). Per-component age floors and TPs are enforced
-        # per entry; venue-side TP attached at order placement.
-        return replace(
-            config,
-            rmom_quantile=0.25,
-            feature_set=("max_ret168",),
-            liq_turnover_min=500_000.0,
-            max_hold_hours=24,
-            entry_confirm_delay_hours=1,
-            entry_event_trigger="none",
-            # btc_trend_gate is NOT pinned here: it is the single-source-of-truth
-            # CLI/env knob (`--btc-trend-gate` / `BTC_TREND_GATE`), so the deploy
-            # layer controls it (units pin `uptrend`; runner defaults `uptrend`).
-            # Pinning it here previously silently overrode the env, making
-            # `BTC_TREND_GATE=off` a no-op. Pass-through keeps the deployed value
-            # (uptrend) while letting demo/paper flip to `off` via config alone.
-            daily_rebalance_enabled=True,
-            daily_rebalance_realized_vol_window_days=90,
-            daily_rebalance_target_daily_vol=0.045,
-            daily_rebalance_max_scale=4.0,
-            daily_rebalance_drawdown_half_threshold=-0.04,
-            daily_rebalance_resize_cost_bps=10.0,
-            daily_rebalance_strategy_momentum_window_days=0,
-            daily_rebalance_strategy_momentum_min_return=0.0,
-            daily_rebalance_strategy_momentum_scale_when_below=0.0,
-            ensemble_components=(
-                # age210tp14 leg dropped 2026-06-18 (operator; receipt
-                # docs/preregistration/2026-06-18-drop-tp14-continuous-ensemble.md): worst leg
-                # in-sample (MAR ~0.97 bybit / negative binance), the only one with no turn/pop
-                # catalyst. Remaining three weights renormalized = old weight / 0.90.
-                ("p3", "turn3_pop3", 240, 0.10, 0.3333333333333333),
-                ("p4p3", "turn4_pop3", 240, 0.10, 0.2222222222222222),
-                ("p4p5", "turn4_pop5", 240, 0.10, 0.4444444444444444),
-            ),
-        )
-    if config.strategy_profile != "continuous_rebalance_v1":
+    if config.strategy_profile != "continuous_ensemble_v2":
         return config
     return replace(
         config,
@@ -1710,18 +1687,35 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         liq_turnover_min=500_000.0,
         max_hold_hours=24,
         entry_confirm_delay_hours=1,
-        entry_event_trigger="turn4_pop4",
-        # btc_trend_gate pass-through (see continuous_ensemble_v1 above): the gate
-        # is the CLI/env knob, not pinned by the profile.
+        entry_event_trigger="none",
+        # btc_trend_gate is NOT pinned here: it is the single-source-of-truth
+        # CLI/env knob (`--btc-trend-gate` / `BTC_TREND_GATE`), so the deploy
+        # layer controls it (units pin `uptrend`; runner defaults `uptrend`).
         daily_rebalance_enabled=True,
         daily_rebalance_realized_vol_window_days=90,
-        daily_rebalance_target_daily_vol=0.025,
+        daily_rebalance_target_daily_vol=0.045,
         daily_rebalance_max_scale=4.0,
         daily_rebalance_drawdown_half_threshold=-0.04,
         daily_rebalance_resize_cost_bps=10.0,
-        daily_rebalance_strategy_momentum_window_days=180,
-        daily_rebalance_strategy_momentum_min_return=0.02,
+        daily_rebalance_strategy_momentum_window_days=0,
+        daily_rebalance_strategy_momentum_min_return=0.0,
         daily_rebalance_strategy_momentum_scale_when_below=0.0,
+        sizing_mode="inverse_vol",
+        target_vol_per_name=0.01,
+        vol_weight_clamp=2.0,
+        left_decile_exit_enabled=False,
+        reentry_cooldown_minutes=0,
+        stop_loss_pct=0.0,
+        stop_approach_frac=0.0,
+        failed_fade_hours=0,
+        failed_fade_loss_pct=0.0,
+        failed_fade_min_mfe_pct=0.0,
+        breakeven_arm_pct=0.0,
+        ensemble_components=(
+            ("p3", "turn3_pop3", 240, 0.10, 0.3333333333333333),
+            ("p4p3", "turn4_pop3", 240, 0.10, 0.2222222222222222),
+            ("p4p5", "turn4_pop5", 240, 0.10, 0.4444444444444444),
+        ),
     )
 
 
@@ -1773,6 +1767,18 @@ def _continuous_entry_link_prefix(config: ContinuousDemoCycleConfig) -> str:
 
 def _continuous_exit_link_prefix(config: ContinuousDemoCycleConfig) -> str:
     return CONTINUOUS_ADDON_EXIT_LINK_PREFIX if continuous_sleeve_name(config) == "continuous_addon" else CONTINUOUS_EXIT_LINK_PREFIX
+
+
+def _continuous_vol_weight_multiplier(config: ContinuousDemoCycleConfig, entry_vol: Any) -> float:
+    if config.sizing_mode == "flat":
+        return 1.0
+    if config.sizing_mode != "inverse_vol":
+        raise ValueError(f"unknown continuous sizing_mode {config.sizing_mode!r}")
+    rv = _finite_or_none(entry_vol)
+    if rv is None or rv <= 0.0:
+        return 1.0
+    clamp = max(float(config.vol_weight_clamp), 1.0)
+    return min(max(float(config.target_vol_per_name) / rv, 1.0 / clamp), clamp)
 
 
 # ============================================================================
@@ -1829,11 +1835,12 @@ from . import cross_sleeve as _cross_sleeve  # noqa: E402
 _logger = logging.getLogger(__name__)
 
 
-def _open_continuous_trades(all_trades: pl.DataFrame, strategy_id: str) -> pl.DataFrame:
+def _open_continuous_trades(all_trades: pl.DataFrame, strategy_id: str | tuple[str, ...]) -> pl.DataFrame:
     if all_trades.is_empty():
         return all_trades
+    strategy_ids = (strategy_id,) if isinstance(strategy_id, str) else tuple(strategy_id)
     return all_trades.filter(
-        (pl.col("status") == "open") & (pl.col("strategy_id") == strategy_id)
+        (pl.col("status") == "open") & (pl.col("strategy_id").is_in(list(strategy_ids)))
     )
 
 
@@ -2597,7 +2604,15 @@ def _execute_continuous_entries(
         qty_step = _float(contract.get("qty_step")) or 0.001
         component = str(cand.get("component") or "")
         component_weight = _float(cand.get("component_weight")) or 1.0
-        capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_frac * component_weight
+        entry_vol = _float(cand.get("rv_168h"))
+        vol_weight_multiplier = _continuous_vol_weight_multiplier(demo, cand.get("rv_168h"))
+        capped_notional = (
+            equity_usdt
+            * demo.wallet_balance_fraction
+            * order_notional_frac
+            * component_weight
+            * vol_weight_multiplier
+        )
         max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
         # NOTE (EXEC-3): like the short/long ENTRY paths, a single entry whose qty exceeds Bybit's
         # per-order maxMktOrderQty is CAPPED here (order_quantity_for_notional floors to max_qty), NOT
@@ -2615,7 +2630,10 @@ def _execute_continuous_entries(
             continue
         qty, actual_notional = quantity
         stop_loss_pct = _float(cand.get("stop_loss_pct"))
-        stop_price = _stop_price_for_entry(entry_price=price, side="short", stop_loss_pct=stop_loss_pct, tick_size=tick_size)
+        stop_price = (
+            _stop_price_for_entry(entry_price=price, side="short", stop_loss_pct=stop_loss_pct, tick_size=tick_size)
+            if stop_loss_pct > 0.0 else 0.0
+        )
         take_profit_pct = _float(cand.get("take_profit_pct"))
         take_profit_price = 0.0
         if take_profit_pct > 0.0:
@@ -2705,6 +2723,9 @@ def _execute_continuous_entries(
                 "max_market_order_qty": max_qty, "stop_price": stop_price, "stop_loss_pct": stop_loss_pct,
                 "take_profit_price": take_profit_price, "take_profit_pct": take_profit_pct,
                 "component": component, "component_weight": component_weight,
+                "sizing_mode": demo.sizing_mode,
+                "entry_vol": entry_vol,
+                "vol_weight_multiplier": vol_weight_multiplier,
                 "entry_fee_usdt": entry_fee, "entry_exec_time_ms": entry_exec_time_ms,
                 "decile": int(cand.get("decile") or 0), "composite": _float(cand.get("composite")),
                 "entry_order_link_id": entry_link, "entry_order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
@@ -2722,6 +2743,9 @@ def _execute_continuous_entries(
             # row without the weight gets resized to FULL base by the daily
             # rebalance (round-3 CRITICAL re-entering via recovery; round 4).
             "component": component, "component_weight": component_weight,
+            "sizing_mode": demo.sizing_mode,
+            "entry_vol": entry_vol,
+            "vol_weight_multiplier": vol_weight_multiplier,
             "take_profit_pct": take_profit_pct, "take_profit_price": take_profit_price,
             # filled_qty/target_qty: ws_risk's pending-fill reconciler delta-adds
             # (venue cumulative − filled_qty); without filled_qty a "partial" entry's
@@ -2970,15 +2994,19 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
         raise ValueError(
             f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {config.btc_trend_gate!r}"
         )
+    if config.sizing_mode not in ("flat", "inverse_vol"):
+        raise ValueError(f"sizing_mode must be 'flat' or 'inverse_vol'; got {config.sizing_mode!r}")
+    if config.sizing_mode == "inverse_vol":
+        if config.target_vol_per_name <= 0.0:
+            raise ValueError("target_vol_per_name must be positive for inverse_vol sizing")
+        if config.vol_weight_clamp < 1.0:
+            raise ValueError("vol_weight_clamp must be >= 1.0 for inverse_vol sizing")
     if not config.feature_set:
         raise ValueError("feature_set must contain at least one causal feature")
-    if config.addon_primary_pnl_gate and config.submit_orders:
-        if config.strategy_profile != "continuous_addon_v1":
-            raise ValueError("addon_primary_pnl_gate submit requires strategy_profile='continuous_addon_v1'")
-        if not config.addon_primary_data_root:
-            raise ValueError("addon_primary_pnl_gate submit requires addon_primary_data_root")
-    if config.addon_same_symbol_entry_cooldown_minutes > 0 and config.strategy_profile != "continuous_addon_v1":
-        raise ValueError("addon_same_symbol_entry_cooldown_minutes requires strategy_profile='continuous_addon_v1'")
+    if config.addon_primary_pnl_gate:
+        raise ValueError("addon_primary_pnl_gate is retired; the continuous entry daemon is v2-only")
+    if config.addon_same_symbol_entry_cooldown_minutes > 0:
+        raise ValueError("addon_same_symbol_entry_cooldown_minutes is retired; the continuous entry daemon is v2-only")
     if config.entry_event_trigger != "none":
         if config.entry_confirm_delay_hours <= 0:
             raise ValueError("entry_event_trigger requires confirmed-bar entry timing")
@@ -3058,8 +3086,13 @@ def run_continuous_demo_cycle(
     panel_cache: "LivePanelCache | None" = None,
     reactivity_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One continuous-fade demo cycle: live decile (ticker-driven, no 1h gate) -> fresh-D9 shorts +
-    left-decile/max-hold covers -> submit (gated) -> separate ledgers. Mirrors the long sleeve.
+    """One continuous-fade demo cycle.
+
+    The deployed ensemble enters from the confirmed-bar +1h decile state, then
+    applies the frozen v2 exit lifecycle (TP/24h only) and gated entries into
+    separate demo/paper ledgers. Retired exit knobs remain code-level fields only
+    so historical rows can be read and closed safely; they are not selectable
+    through the live CLI.
 
     When ``panel_cache`` is supplied (and ``live_panel_cache_enabled``) the live decile is sourced
     from the Tier-2 within-hour cache (heavy features once per bar close, cheap re-rank per wake); a
@@ -3067,6 +3100,7 @@ def run_continuous_demo_cycle(
     demo = apply_continuous_demo_profile(demo_config or ContinuousDemoCycleConfig())
     _validate_continuous_demo_config(demo)
     strategy_id = continuous_strategy_id(demo)
+    managed_strategy_ids = continuous_managed_strategy_ids(demo)
     sleeve_name = continuous_sleeve_name(demo)
     trades_dataset, orders_dataset, cycles_dataset = continuous_dataset_names(demo)
     root = Path(data_root).expanduser()
@@ -3153,7 +3187,7 @@ def run_continuous_demo_cycle(
             if demo.daily_rebalance_enabled
             else False
         )
-        open_trades = _open_continuous_trades(all_trades, strategy_id)
+        open_trades = _open_continuous_trades(all_trades, managed_strategy_ids)
         held_symbols = set(open_trades["symbol"].to_list()) if not open_trades.is_empty() else set()
 
         cycle_trade_rows: list[dict[str, Any]] = []
@@ -3406,7 +3440,7 @@ def run_continuous_demo_cycle(
                         _cs_root, symbol=cand_symbol, sleeve=sleeve_name,
                         trade_id=str(cand.get("trade_id", "")), now_ms=cycle_now_ms)
         # Sniper placement (S1 Amendment 6): one resting PostOnly Sell limit per fresh
-        # short at entry*(1+wick), quarter-size, disaster stop attached venue-side.
+        # short at entry*(1+wick), quarter-size. v2 does not attach a server stop.
         if demo.sniper_enabled and exec_entries:
             sniper_orders = _execute_sniper_placements(
                 exec_entries, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms,
@@ -3475,7 +3509,7 @@ def run_continuous_demo_cycle(
         )
         if resize_ran:
             resize_plans = plan_continuous_rebalance_resizes(
-                _open_continuous_trades(post_trade_ledger, strategy_id).to_dicts(),
+                _open_continuous_trades(post_trade_ledger, managed_strategy_ids).to_dicts(),
                 price_by_symbol=price_by_symbol,
                 equity_usdt=equity_usdt * demo.wallet_balance_fraction,
                 base_notional_pct_equity=demo.per_position_notional_pct_equity,
@@ -3670,7 +3704,7 @@ def run_continuous_protective_exit_cycle(
         return {"exits": 0, "open_positions": 0, "skipped": "no-submit"}
     if demo.submit_orders and trading_client is None:
         return {"exits": 0, "open_positions": 0, "skipped": "no-client"}
-    strategy_id = continuous_strategy_id(demo)
+    managed_strategy_ids = continuous_managed_strategy_ids(demo)
     trades_dataset, orders_dataset, _cycles = continuous_dataset_names(demo)
     root = Path(data_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -3678,7 +3712,7 @@ def run_continuous_protective_exit_cycle(
 
     with exclusive_file_lock(root / ".locks" / "continuous_demo_cycle.lock", stale_seconds=900):
         all_trades = read_dataset(root, trades_dataset)
-        open_trades = _open_continuous_trades(all_trades, strategy_id)
+        open_trades = _open_continuous_trades(all_trades, managed_strategy_ids)
         if open_trades.is_empty():
             return {"exits": 0, "open_positions": 0}
         held = set(open_trades["symbol"].to_list())
@@ -3709,7 +3743,7 @@ def run_continuous_protective_exit_cycle(
         # fast loop's ~2s cadence the WS order event for the main cycle's (or our own prior) cover can
         # still be in flight, so `live_exit_syms` (from the WS snapshot) may miss it; this guard stops
         # a second reduce-only. Retry of a genuinely-failed cover is deferred to the slower main cycle
-        # (whose snapshot has a REST fallback) — the server-side disaster stop covers the interim.
+        # (whose snapshot has a REST fallback).
         in_flight = {str(t["symbol"]) for t in open_dicts if str(t.get("exit_order_link_id") or "")}
         exit_plans = plan_protective_exits(
             open_dicts, now_ms=now, config=demo, klines=klines, price_by_symbol=price_by_symbol)

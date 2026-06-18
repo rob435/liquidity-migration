@@ -1,4 +1,4 @@
-"""Tests for the continuous-fade demo sleeve (liquidity_migration.continuous_demo) — experimental, OFF / de-promoted.
+"""Tests for the continuous-fade demo/paper sleeve (liquidity_migration.continuous_demo).
 
 The headline test is EQUIVALENCE: the live state (confirmed history + live price as the current bar)
 must reproduce the verified backtest decile exactly — the live signal == the backtest signal. Plus
@@ -52,7 +52,6 @@ from liquidity_migration.continuous_demo import (
     _protective_exit_reason,
     _recent_exit_cooldown_symbols,
     _recent_entry_cooldown_symbols,
-    continuous_sleeve_name,
     continuous_strategy_id,
     entry_circuit_breaker_tripped,
     plan_continuous_exits,
@@ -403,7 +402,7 @@ def test_execute_entries_dry_run_builds_short_rows() -> None:
     rows, orders = _execute_continuous_entries(
         cand, trading_client=None, demo=cfg, equity_usdt=10_000.0, order_notional_frac=0.02,
         price_by_symbol={"WIFUSDT": 100.0}, contract_by_symbol=contracts, now_ms=1_700_000_000_000,
-        strategy_id="continuous_fade_v1", record_preflight=None, execution_event_router=None)
+        strategy_id="continuous_fade_v2", record_preflight=None, execution_event_router=None)
     assert len(rows) == 1 and len(orders) == 1
     r, o = rows[0], orders[0]
     assert r["side"] == "short" and o["side"] == "Sell"
@@ -414,38 +413,11 @@ def test_execute_entries_dry_run_builds_short_rows() -> None:
     assert r["sleeve"] == "continuous"                   # self-identifying for ws_risk routing
 
 
-def test_execute_entries_dry_run_builds_addon_identity_rows() -> None:
-    from liquidity_migration.continuous_demo import _execute_continuous_entries
-
-    cfg = ContinuousDemoCycleConfig(
-        submit_orders=False,
-        record_dry_run=True,
-        strategy_profile="continuous_addon_v1",
-        stop_loss_pct=0.25,
-        per_position_notional_pct_equity=2.0,
-    )
-    cand = [{"symbol": "WIFUSDT", "decile": 9, "composite": 0.95, "turnover_quote": 2e6,
-             "signal_ts_ms": 1_700_000_000_000, "stop_loss_pct": 0.25, "live_price": 100.0}]
-    contracts = {"WIFUSDT": {"tick_size": 0.0001, "qty_step": 0.001, "min_order_qty": 0.001}}
-
-    rows, orders = _execute_continuous_entries(
-        cand, trading_client=None, demo=cfg, equity_usdt=10_000.0, order_notional_frac=0.02,
-        price_by_symbol={"WIFUSDT": 100.0}, contract_by_symbol=contracts, now_ms=1_700_000_000_000,
-        strategy_id=continuous_strategy_id(cfg), record_preflight=None, execution_event_router=None)
-
-    assert continuous_sleeve_name(cfg) == "continuous_addon"
-    assert rows[0]["strategy_id"] == "continuous_fade_addon_v1"
-    assert rows[0]["sleeve"] == "continuous_addon"
-    assert orders[0]["sleeve"] == "continuous_addon"
-    assert rows[0]["entry_order_link_id"].startswith("lm-en-ca-")
-    assert decode_entry_order_link_id(rows[0]["entry_order_link_id"])[0] == "continuous_addon"
-
-
 def test_execute_exits_dry_run_closes_short() -> None:
     from liquidity_migration.continuous_demo import _execute_continuous_exits
 
     cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
-    trade = {"trade_id": "continuous_fade_v1-WIFUSDT-1700000000", "symbol": "WIFUSDT", "side": "short",
+    trade = {"trade_id": "continuous_fade_v2-WIFUSDT-1700000000", "symbol": "WIFUSDT", "side": "short",
              "sleeve": "continuous",
              "status": "open", "entry_price": 100.0, "qty": "2", "equity_usdt": 10_000.0, "notional_usdt": 200.0}
     all_trades = pl.DataFrame([trade])
@@ -470,7 +442,7 @@ def test_execute_exits_dry_run_without_live_price_falls_back_to_entry() -> None:
     from liquidity_migration.continuous_demo import _execute_continuous_exits
 
     cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
-    trade = {"trade_id": "continuous_fade_v1-WIFUSDT-1700000000", "symbol": "WIFUSDT", "side": "short",
+    trade = {"trade_id": "continuous_fade_v2-WIFUSDT-1700000000", "symbol": "WIFUSDT", "side": "short",
              "sleeve": "continuous",
              "status": "open", "entry_price": 100.0, "qty": "2", "equity_usdt": 10_000.0, "notional_usdt": 200.0}
     plan = [{**trade, "exit_reason": "left_decile"}]
@@ -852,23 +824,26 @@ def test_rebalance_scale_state_empty_defaults_safe() -> None:
     assert state.prior_scaled_peak == pytest.approx(1.0)
 
 
-def test_continuous_rebalance_rule_matches_default_candidate_knobs() -> None:
-    rule = continuous_rebalance_rule(ContinuousDemoCycleConfig(daily_rebalance_enabled=True, record_dry_run=True))
+def test_continuous_rebalance_rule_matches_v2_knobs() -> None:
+    cfg = apply_continuous_demo_profile(
+        ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2", daily_rebalance_enabled=True, record_dry_run=True)
+    )
+    rule = continuous_rebalance_rule(cfg)
 
     assert rule.realized_vol_window_days == 90
-    assert rule.target_daily_vol == pytest.approx(0.025)
+    assert rule.target_daily_vol == pytest.approx(0.045)
     assert rule.max_scale == pytest.approx(4.0)
     assert rule.drawdown_half_threshold == pytest.approx(-0.04)
     assert rule.resize_cost_bps == pytest.approx(10.0)
-    assert rule.strategy_momentum_window_days == 180
-    assert rule.strategy_momentum_min_return == pytest.approx(0.02)
+    assert rule.strategy_momentum_window_days == 0
+    assert rule.strategy_momentum_min_return == pytest.approx(0.0)
     assert rule.strategy_momentum_scale_when_below == pytest.approx(0.0)
 
 
 def test_continuous_rebalance_profile_resolves_to_pinned_candidate_contract() -> None:
     cfg = apply_continuous_demo_profile(
         ContinuousDemoCycleConfig(
-            strategy_profile="continuous_rebalance_v1", btc_trend_gate="uptrend",
+            strategy_profile="continuous_ensemble_v2", btc_trend_gate="uptrend",
             paper_mode=True, record_dry_run=True,
         )
     )
@@ -878,10 +853,10 @@ def test_continuous_rebalance_profile_resolves_to_pinned_candidate_contract() ->
     assert cfg.liq_turnover_min == pytest.approx(500_000.0)
     assert cfg.max_hold_hours == 24
     assert cfg.entry_confirm_delay_hours == 1
-    assert cfg.entry_event_trigger == "turn4_pop4"
+    assert cfg.entry_event_trigger == "none"
     assert cfg.btc_trend_gate == "uptrend"  # pass-through from the CLI/env knob, not pinned by the profile
     assert cfg.daily_rebalance_enabled is True
-    assert continuous_rebalance_rule(cfg).target_daily_vol == pytest.approx(0.025)
+    assert continuous_rebalance_rule(cfg).target_daily_vol == pytest.approx(0.045)
 
 
 def test_continuous_rebalance_mode_requires_persistence_or_submitted_demo() -> None:
@@ -1114,7 +1089,6 @@ def test_continuous_cycle_daily_rebalance_resizes_once_per_day(
     root = tmp_path / "continuous-rebalance-cycle"
     trades_ds, orders_ds, cycles_ds = continuous_dataset_names(cfg)
     now = 1_700_000_000_000
-    day = (now // MS_PER_DAY) * MS_PER_DAY
     strat = continuous_strategy_id(cfg)
     write_dataset(
         pl.DataFrame(
@@ -1123,12 +1097,12 @@ def test_continuous_cycle_daily_rebalance_resizes_once_per_day(
                     "trade_id": "t1",
                     "strategy_id": strat,
                     "symbol": "ABCUSDT",
-                    "side": "short",
-                    "sleeve": "continuous",
-                    "status": "open",
-                    "entry_ts_ms": day - MS_PER_DAY,
-                    "entry_price": 100.0,
-                    "qty": "1",
+                        "side": "short",
+                        "sleeve": "continuous",
+                        "status": "open",
+                        "entry_ts_ms": now - MS_PER_HOUR,
+                        "entry_price": 100.0,
+                        "qty": "1",
                     "notional_usdt": 100.0,
                     "equity_usdt": 10_000.0,
                     "qty_step": 0.1,
@@ -1213,14 +1187,12 @@ def test_dataset_names_separate_from_other_sleeves() -> None:
     assert "event_demo" not in demo[0] and "long_native" not in demo[0]
 
 
-def test_shipped_default_carries_a_disaster_stop() -> None:
-    """Safety guard: the SHIPPED live config must default to a non-zero protective stop, and every
-    entry it produces must carry a server-side stop ABOVE entry. Makes an unstopped continuous short
-    impossible to ship by accident (the state exit is a PROFIT exit, not a risk control)."""
+def test_live_v2_ships_without_server_stop_demo_paper_only() -> None:
+    """The registered 2026-06-18 redesign deliberately ships demo/paper v2 without a server stop."""
     from liquidity_migration.continuous_demo import _execute_continuous_entries
 
-    cfg = ContinuousDemoCycleConfig()  # the SHIPPED default
-    assert cfg.stop_loss_pct > 0.0, "live continuous sleeve must ship with a disaster stop"
+    cfg = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2"))
+    assert cfg.stop_loss_pct == 0.0
     cand = [{"symbol": "WIFUSDT", "decile": 9, "composite": 0.9, "turnover_quote": 2e6,
              "signal_ts_ms": 1_700_000_000_000, "stop_loss_pct": cfg.stop_loss_pct, "live_price": 100.0}]
     rows, orders = _execute_continuous_entries(
@@ -1228,9 +1200,9 @@ def test_shipped_default_carries_a_disaster_stop() -> None:
         order_notional_frac=cfg.per_position_notional_pct_equity / 100.0,
         price_by_symbol={"WIFUSDT": 100.0},
         contract_by_symbol={"WIFUSDT": {"tick_size": 0.0001, "qty_step": 0.001, "min_order_qty": 0.001}},
-        now_ms=1_700_000_000_000, strategy_id="continuous_fade_v1", record_preflight=None,
+        now_ms=1_700_000_000_000, strategy_id="continuous_fade_v2", record_preflight=None,
         execution_event_router=None)
-    assert rows[0]["stop_price"] > rows[0]["entry_price"] > 0.0   # short stop is above entry, non-zero
+    assert rows[0]["stop_price"] == 0.0
     assert rows[0]["stop_loss_pct"] == cfg.stop_loss_pct
 
 
@@ -1368,10 +1340,10 @@ def test_live_panel_cache_matches_full_recompute() -> None:
     assert checked >= 5
 
 
-def test_live_panel_cache_supports_rebalance_profile_max_ret168() -> None:
-    """continuous_rebalance_v1 ranks on max_ret168; the cheap live cache must carry it too."""
+def test_live_panel_cache_supports_v2_max_ret168() -> None:
+    """v2 ranks on max_ret168; the cheap live cache must carry it too."""
     klines, rmom, start, n_bars = _dispersed_synth()
-    cfg = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile="continuous_rebalance_v1"))
+    cfg = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2"))
     assert cfg.feature_set == ("max_ret168",)
     cache = LivePanelCache(
         rmom_quantile=cfg.rmom_quantile,
@@ -1488,38 +1460,53 @@ def test_hysteresis_buffer_zero_is_legacy_exit_on_leaving_top_decile() -> None:
     assert exits == {"D8": "left_decile"}
 
 
+def test_left_decile_exit_can_be_disabled_for_live_v2() -> None:
+    cfg = ContinuousDemoCycleConfig(
+        decile=9,
+        left_decile_exit_enabled=False,
+        breakeven_arm_pct=0.0,
+        stop_approach_frac=0.0,
+        max_hold_hours=0,
+        failed_fade_hours=0,
+    )
+    now = 2_000_000_000_000
+    state = _state([("OUT7", 7)])
+    trades = [{"symbol": "OUT7", "entry_ts_ms": now - MS_PER_HOUR, "entry_price": 100.0}]
+    assert plan_continuous_exits(trades, state, now_ms=now, config=cfg) == []
+
+
 def test_reentry_cooldown_blocks_recently_exited_symbol() -> None:
     now = 2_000_000_000_000
     trades = pl.DataFrame([
-        {"trade_id": "t1", "strategy_id": "continuous_fade_v1", "symbol": "FRESH", "status": "closed",
+        {"trade_id": "t1", "strategy_id": "continuous_fade_v2", "symbol": "FRESH", "status": "closed",
          "exit_ts_ms": now - 10 * 60_000},                       # exited 10 min ago -> in cooldown
-        {"trade_id": "t2", "strategy_id": "continuous_fade_v1", "symbol": "OLD", "status": "closed",
+        {"trade_id": "t2", "strategy_id": "continuous_fade_v2", "symbol": "OLD", "status": "closed",
          "exit_ts_ms": now - 120 * 60_000},                      # exited 2h ago -> clear
         {"trade_id": "t3", "strategy_id": "other", "symbol": "OTHER", "status": "closed",
          "exit_ts_ms": now - 1 * 60_000},                        # different strategy -> ignored
     ])
     cooled = _recent_exit_cooldown_symbols(trades, now_ms=now, cooldown_minutes=30,
-                                           strategy_id="continuous_fade_v1")
+                                           strategy_id="continuous_fade_v2")
     assert cooled == {"FRESH"}
     # cooldown disabled
     assert _recent_exit_cooldown_symbols(trades, now_ms=now, cooldown_minutes=0,
-                                         strategy_id="continuous_fade_v1") == set()
+                                         strategy_id="continuous_fade_v2") == set()
 
 
 def test_recent_entry_cooldown_blocks_recent_addon_entry_symbol() -> None:
     now = 2_000_000_000_000
     trades = pl.DataFrame([
-        {"trade_id": "t1", "strategy_id": "continuous_fade_addon_v1", "symbol": "FRESH", "entry_ts_ms": now - 10 * 60_000},
-        {"trade_id": "t2", "strategy_id": "continuous_fade_addon_v1", "symbol": "OLD", "entry_ts_ms": now - 120 * 60_000},
-        {"trade_id": "t3", "strategy_id": "continuous_fade_v1", "symbol": "PRIMARY", "entry_ts_ms": now - 1 * 60_000},
-        {"trade_id": "t4", "strategy_id": "continuous_fade_addon_v1", "symbol": "SIGNAL", "signal_ts_ms": now - 5 * 60_000},
+        {"trade_id": "t1", "strategy_id": "continuous_fade_addon_v2", "symbol": "FRESH", "entry_ts_ms": now - 10 * 60_000},
+        {"trade_id": "t2", "strategy_id": "continuous_fade_addon_v2", "symbol": "OLD", "entry_ts_ms": now - 120 * 60_000},
+        {"trade_id": "t3", "strategy_id": "continuous_fade_v2", "symbol": "PRIMARY", "entry_ts_ms": now - 1 * 60_000},
+        {"trade_id": "t4", "strategy_id": "continuous_fade_addon_v2", "symbol": "SIGNAL", "signal_ts_ms": now - 5 * 60_000},
     ])
 
     cooled = _recent_entry_cooldown_symbols(
         trades,
         now_ms=now,
         cooldown_minutes=30,
-        strategy_id="continuous_fade_addon_v1",
+        strategy_id="continuous_fade_addon_v2",
     )
 
     assert cooled == {"FRESH", "SIGNAL"}
@@ -1527,7 +1514,7 @@ def test_recent_entry_cooldown_blocks_recent_addon_entry_symbol() -> None:
         trades,
         now_ms=now,
         cooldown_minutes=0,
-        strategy_id="continuous_fade_addon_v1",
+        strategy_id="continuous_fade_addon_v2",
     ) == set()
 
 
@@ -1535,7 +1522,7 @@ def test_entry_circuit_breaker_trips_on_adverse_cluster_and_self_clears() -> Non
     """Correlated-squeeze defense: pause entries once >= N adverse covers land within the window;
     disabled by default; self-clears as the cluster ages out of the window (stateless)."""
     now = 2_000_000_000_000
-    strat = "continuous_fade_v1"
+    strat = "continuous_fade_v2"
 
     def _rows(n, age_min, reason="stop_approach", nr=-0.01):
         return [{"trade_id": f"t{reason}{i}", "strategy_id": strat, "symbol": f"S{i}", "status": "closed",
@@ -1564,7 +1551,7 @@ def test_shipped_default_enables_circuit_breaker_at_w24_n8() -> None:
     assert cfg.entry_pause_after_adverse_exits == 8
     assert cfg.entry_pause_window_minutes == 1440
     now = 2_000_000_000_000
-    strat = "continuous_fade_v1"
+    strat = "continuous_fade_v2"
     rows = [{"trade_id": f"t{i}", "strategy_id": strat, "symbol": f"S{i}", "status": "closed",
              "exit_ts_ms": now - 60 * 60_000, "exit_reason": "failed_fade", "net_return": -0.02}
             for i in range(8)]   # 8 adverse covers an hour ago, inside the 24h window
@@ -1633,17 +1620,16 @@ def test_plan_protective_exits_breakeven_from_live_dip_then_giveback() -> None:
 # Tier 1 — run_continuous_protective_exit_cycle (the daemon's fast path)
 # ============================================================================
 
-def test_protective_exit_cycle_covers_stop_approach_dry_run(tmp_path) -> None:
+def test_protective_exit_cycle_covers_max_hold_dry_run(tmp_path) -> None:
     """The fast exit-only cycle reads the open continuous trade, prices it off the WS ticker cache,
-    and covers a short that has run into a stop-approach loss — writing the closed row to the ledger,
+    and covers a short that has reached the frozen v2 24h max hold — writing the closed row to the ledger,
     with no universe build / decile recompute / network."""
     from liquidity_migration.config import ResearchConfig
     from liquidity_migration.continuous_demo import continuous_strategy_id
     from liquidity_migration.storage import read_dataset, write_dataset
     from liquidity_migration.ws_state_cache import TickerCache
 
-    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True,
-                                    stop_loss_pct=0.25, stop_approach_frac=0.8)
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
     root = tmp_path / "bybit-continuous-demo-event"
     trades_ds, _orders, _cycles = continuous_dataset_names(cfg)
     now = 1_700_000_000_000
@@ -1651,21 +1637,21 @@ def test_protective_exit_cycle_covers_stop_approach_dry_run(tmp_path) -> None:
     write_dataset(pl.DataFrame([{
         "trade_id": f"{strat}-WIFUSDT-1699", "strategy_id": strat, "symbol": "WIFUSDT", "side": "short",
         "status": "open", "entry_price": 100.0, "qty": "2", "notional_usdt": 200.0, "equity_usdt": 10_000.0,
-        "entry_ts_ms": now - 3 * MS_PER_HOUR, "updated_at_ms": now - 3 * MS_PER_HOUR,
+        "entry_ts_ms": now - 25 * MS_PER_HOUR, "updated_at_ms": now - 25 * MS_PER_HOUR,
     }], infer_schema_length=None), root, trades_ds, partition_by=())
 
     tc = TickerCache()
-    tc.seed([{"symbol": "WIFUSDT", "lastPrice": "130.0"}])   # short down 30% -> past 0.8*0.25 stop-approach
+    tc.seed([{"symbol": "WIFUSDT", "lastPrice": "101.0"}])
 
     payload = run_continuous_protective_exit_cycle(
         root, config=ResearchConfig(), demo_config=cfg, trading_client=None,
         kline_store=None, ticker_cache=tc, private_state_cache=None, now_ms=now)
     assert payload["exits"] == 1
-    assert "stop_approach" in payload["reasons"]
+    assert "max_hold" in payload["reasons"]
     after = read_dataset(root, trades_ds)
     closed = after.filter(pl.col("status") == "closed")
     assert closed.height == 1
-    assert closed["exit_reason"].to_list() == ["stop_approach"]
+    assert closed["exit_reason"].to_list() == ["max_hold"]
 
 
 def test_protective_exit_cycle_sends_telegram(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1678,8 +1664,7 @@ def test_protective_exit_cycle_sends_telegram(tmp_path, monkeypatch: pytest.Monk
     from liquidity_migration.storage import write_dataset
     from liquidity_migration.ws_state_cache import TickerCache
 
-    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True,
-                                    stop_loss_pct=0.25, stop_approach_frac=0.8, telegram=True)
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True, telegram=True)
     root = tmp_path / "bybit-continuous-demo-event"
     trades_ds, _orders, _cycles = continuous_dataset_names(cfg)
     now = 1_700_000_000_000
@@ -1687,11 +1672,11 @@ def test_protective_exit_cycle_sends_telegram(tmp_path, monkeypatch: pytest.Monk
     write_dataset(pl.DataFrame([{
         "trade_id": f"{strat}-WIFUSDT-1699", "strategy_id": strat, "symbol": "WIFUSDT", "side": "short",
         "status": "open", "entry_price": 100.0, "qty": "2", "notional_usdt": 200.0, "equity_usdt": 10_000.0,
-        "entry_ts_ms": now - 3 * MS_PER_HOUR, "updated_at_ms": now - 3 * MS_PER_HOUR,
+        "entry_ts_ms": now - 25 * MS_PER_HOUR, "updated_at_ms": now - 25 * MS_PER_HOUR,
     }], infer_schema_length=None), root, trades_ds, partition_by=())
 
     tc = TickerCache()
-    tc.seed([{"symbol": "WIFUSDT", "lastPrice": "130.0"}])
+    tc.seed([{"symbol": "WIFUSDT", "lastPrice": "101.0"}])
     sent: list[str] = []
     monkeypatch.setattr(
         "liquidity_migration.telegram.send_telegram_message",
@@ -1706,9 +1691,9 @@ def test_protective_exit_cycle_sends_telegram(tmp_path, monkeypatch: pytest.Monk
     assert len(sent) == 1
     assert "reason=continuous_exit_executed" in sent[0]
     assert "(fast protective-exit loop)" in sent[0]
-    assert "stop_approach" in sent[0]
+    assert "max_hold" in sent[0]
     # paper marks at the live ticker price, not entry (round-3 exit-price fix)
-    assert "@$130" in sent[0]
+    assert "@$101" in sent[0]
 
 
 def test_continuous_same_window_reentry_both_rows_survive(tmp_path) -> None:
@@ -2025,8 +2010,8 @@ def test_validate_continuous_demo_config_rejects_event_trigger_without_confirmed
         )
 
 
-def test_validate_continuous_demo_config_requires_addon_profile_for_submit_gate() -> None:
-    with pytest.raises(ValueError, match="continuous_addon_v1"):
+def test_validate_continuous_demo_config_retires_addon_primary_gate() -> None:
+    with pytest.raises(ValueError, match="retired"):
         _validate_continuous_demo_config(
             ContinuousDemoCycleConfig(
                 addon_primary_pnl_gate=True,
@@ -2036,35 +2021,11 @@ def test_validate_continuous_demo_config_requires_addon_profile_for_submit_gate(
         )
 
 
-def test_validate_continuous_demo_config_requires_primary_root_for_submit_gate() -> None:
-    with pytest.raises(ValueError, match="addon_primary_data_root"):
-        _validate_continuous_demo_config(
-            ContinuousDemoCycleConfig(
-                strategy_profile="continuous_addon_v1",
-                addon_primary_pnl_gate=True,
-                submit_orders=True,
-                confirm_demo_orders=True,
-            )
-        )
-
-
-def test_validate_continuous_demo_config_requires_addon_profile_for_addon_entry_cooldown() -> None:
-    with pytest.raises(ValueError, match="addon_same_symbol_entry_cooldown_minutes"):
+def test_validate_continuous_demo_config_retires_addon_entry_cooldown() -> None:
+    with pytest.raises(ValueError, match="retired"):
         _validate_continuous_demo_config(
             ContinuousDemoCycleConfig(addon_same_symbol_entry_cooldown_minutes=15)
         )
-
-
-def test_validate_continuous_demo_config_allows_addon_submit_identity_when_rooted(tmp_path) -> None:
-    _validate_continuous_demo_config(
-        ContinuousDemoCycleConfig(
-            strategy_profile="continuous_addon_v1",
-            addon_primary_pnl_gate=True,
-            addon_primary_data_root=str(tmp_path / "primary"),
-            submit_orders=True,
-            confirm_demo_orders=True,
-        )
-    )
 
 
 def test_validate_continuous_demo_config_allows_valid_demo_runs() -> None:
@@ -2077,14 +2038,26 @@ def test_validate_continuous_demo_config_allows_valid_demo_runs() -> None:
 
 
 def test_continuous_live_config_golden_values() -> None:
-    """Pin the operator-directed live values so a silent revert toward the engine
-    defaults is caught (audit 2026-06-02 #11). rmom_quantile=0.33: alpha-sweep
-    2026-06-02; breaker w24/n8 + 0.25 stop: cb1 / I-phase receipts."""
-    c = ContinuousDemoCycleConfig()
-    assert c.rmom_quantile == 0.33
+    """Pin the resolved live-v2 values so a silent revert to retired exits is caught."""
+    c = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2"))
+    assert c.rmom_quantile == 0.25
     assert c.entry_pause_after_adverse_exits == 8
     assert c.entry_pause_window_minutes == 1440
-    assert c.stop_loss_pct == 0.25
+    assert c.left_decile_exit_enabled is False
+    assert c.stop_loss_pct == 0.0
+    assert c.stop_approach_frac == 0.0
+    assert c.failed_fade_hours == 0
+    assert c.breakeven_arm_pct == 0.0
+    assert c.sizing_mode == "inverse_vol"
+    assert c.target_vol_per_name == 0.01
+    assert c.vol_weight_clamp == 2.0
+    assert c.daily_rebalance_enabled is True
+    assert c.daily_rebalance_realized_vol_window_days == 90
+    assert c.daily_rebalance_target_daily_vol == 0.045
+    assert c.daily_rebalance_max_scale == 4.0
+    assert c.daily_rebalance_strategy_momentum_window_days == 0
+    assert c.daily_rebalance_strategy_momentum_min_return == 0.0
+    assert c.daily_rebalance_strategy_momentum_scale_when_below == 0.0
 
 
 def test_format_continuous_demo_cycle_summary_handles_flat_payload() -> None:
@@ -2180,7 +2153,7 @@ def test_circuit_breaker_counts_fee_negative_covers_as_adverse() -> None:
     reading a cost-consistent metric without mutating the stored gross net_return."""
     cfg = ContinuousDemoCycleConfig(entry_pause_after_adverse_exits=2, entry_pause_window_minutes=1440)
     now = 1_700_000_000_000
-    strat = "continuous_fade_v1"
+    strat = "continuous_fade_v2"
     # Two covers, each gross-positive (+0.0001) but fee tax (4 USDT on 10k equity = 0.0004 of equity)
     # makes them net-NEGATIVE. Old breaker (gross only) sees 0 adverse; fixed breaker sees 2 -> trips.
     rows = [
@@ -2319,7 +2292,7 @@ def test_continuous_telegram_failure_is_isolated(monkeypatch: pytest.MonkeyPatch
 
 
 def test_component_and_sniper_links_decode_as_continuous() -> None:
-    """REGRESSION (audit 2026-06-11): the deployed continuous_ensemble_v1 appends the
+    """REGRESSION (audit 2026-06-11): the ensemble profiles append the
     component tag to the link prefix ('en-c'+'p3' -> lm-en-cp3-...) and the sniper
     appends 's' (lm-en-cs-...). The decoder only knew bare 'c' — every LIVE entry's
     link decoded to None, so on a VPS rebuild/orphan ws_risk's side-based fallback
@@ -2329,7 +2302,7 @@ def test_component_and_sniper_links_decode_as_continuous() -> None:
     expected_ts = (sig // 1000) * 1000
     # every component tag the deployed profile can emit (continuous_demo profile
     # components) + the sniper form, first-entry and re-entry
-    for component in ("p3", "p4p3", "p4p5", "tp14", "s"):
+    for component in ("p3", "p4p3", "p4p5", "s"):
         link = _continuous_order_link_id(f"en-c{component}", symbol="WLDUSDT", signal_ts_ms=sig)
         assert decode_entry_order_link_id(link) == ("continuous", expected_ts, 0, component), link
         relink = _continuous_order_link_id(f"en-c{component}", symbol="WLDUSDT", signal_ts_ms=sig, reentry_seq=2)
@@ -2354,7 +2327,7 @@ def test_tier4_link_matcher_catches_component_and_sniper_fills() -> None:
     def _msg(link: str) -> dict:
         return {"data": [{"orderLinkId": link}]}
 
-    for prefix in ("en-cp3", "en-cp4p3", "en-cp4p5", "en-ctp14", "en-cs", "en-c", "en-ca"):
+    for prefix in ("en-cp3", "en-cp4p3", "en-cp4p5", "en-cs", "en-c", "en-ca"):
         link = _continuous_order_link_id(prefix, symbol="WIFUSDT", signal_ts_ms=sig)
         assert _continuous_links_in_message(_msg(link)), link
     # exits (incl. hash-suffixed) and addon exits match by prefix
@@ -2470,7 +2443,7 @@ def test_cycle_counts_entries_notifies_and_sends_outside_lock(
         return pl.DataFrame(), {"store_rows": 0}
 
     entry_trade_row = {
-        "trade_id": "cf-ABCUSDT-1700000000000-p3", "strategy_id": "continuous_fade_v1",
+        "trade_id": "cf-ABCUSDT-1700000000000-p3", "strategy_id": "continuous_fade_v2",
         "symbol": "ABCUSDT", "side": "short", "sleeve": "continuous", "status": "open",
         "ts_ms": now, "entry_ts_ms": now, "opened_at_ms": now, "updated_at_ms": now,
         "signal_ts_ms": now - 3_600_000, "entry_price": 100.0, "qty": "1",
@@ -2479,7 +2452,7 @@ def test_cycle_counts_entries_notifies_and_sends_outside_lock(
     }
     entry_order_row = {
         "order_link_id": "lm-en-cp3-ABC-1", "ts_ms": now,
-        "trade_id": entry_trade_row["trade_id"], "strategy_id": "continuous_fade_v1",
+        "trade_id": entry_trade_row["trade_id"], "strategy_id": "continuous_fade_v2",
         "symbol": "ABCUSDT", "side": "Sell", "qty": "1", "reduce_only": False,
         "submit_mode": "dry_run", "status": "planned", "trade_side": "short",
         "sleeve": "continuous", "signal_ts_ms": now - 3_600_000,
@@ -2974,7 +2947,7 @@ def test_crosssleeve3_component_trade_id_matches_executed_row() -> None:
 # code-quality-5 (_finite_or_none delegates to _common.finite_float).
 # Each test FAILs on the original (pre-fix) code and PASSes on the fix.
 # ──────────────────────────────────────────────────────────────────────────────
-_STRATEGY = "continuous_fade_v1"
+_STRATEGY = "continuous_fade_v2"
 _SIG = 1_765_400_000_000
 
 
@@ -3082,7 +3055,7 @@ def test_execrouter3_module_load_enforced_deployed_tags_are_routable() -> None:
     site this bucket wired). The deployed tags must pass — if the guard fired the import above
     would have raised, so reaching here proves the enforced call site exists and is satisfied."""
     tags = _known_ensemble_component_tags()
-    assert tags  # non-empty (p3/p4p3/p4p5/tp14)
+    assert tags  # non-empty (p3/p4p3/p4p5)
     assert not any(t.startswith("a") for t in tags)
     assert_routable_component_tags(tags)  # explicit no-raise on the live vocabulary
 

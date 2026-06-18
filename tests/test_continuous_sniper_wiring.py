@@ -176,7 +176,7 @@ def test_recover_snipe_trade_id_from_link_round_trips_component_and_seq() -> Non
     )
 
     demo = _cfg()
-    strategy_id = "continuous_fade_ensemble_v1"
+    strategy_id = "continuous_fade_v2"
     sig = 1_765_400_000_000
     # tp14 dropped from the ensemble 2026-06-18 -> no longer a recoverable known tag.
     for component in ("p3", "p4p3", "p4p5", ""):

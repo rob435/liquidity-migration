@@ -55,7 +55,7 @@ from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
 )
 from liquidity_migration.storage import read_dataset, write_dataset  # noqa: E402
 
-PRIMARY_STRATEGY_ID = "continuous_fade_v1"
+PRIMARY_STRATEGY_ID = "continuous_fade_v2"
 MAX_WARMSTART_STALE_DAYS = 3
 
 

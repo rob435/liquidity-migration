@@ -81,11 +81,13 @@ class ContinuousEventConfig:
     # --- execution ---
     entry_delay_hours: int = 1            # bars AFTER the deciding bar's close (0 = proxy/look-ahead)
     exit_mode: str = "fixed"              # "fixed" = hold_hours timer; "state" = hold while in the fade decile
+    exit_decile_buffer: int = 0            # state-mode hysteresis: D9/buffer=1 holds while decile >= D8
     hold_hours: int = 12                  # fixed-mode hold horizon
     max_hold_hours: int = 48              # state-mode cap (force exit if the name never leaves the decile)
     rank_exit_threshold: float = 0.0      # 0=off; short exits when composite rank fraction falls below threshold
     cooldown_hours: int = 0               # 0 -> fixed: hold_hours; state: 0 (spell-fresh already dedupes)
     stop_loss_pct: float = 0.0            # 0 -> no stop (proxy parity)
+    stop_approach_frac: float = 0.0        # >0 cuts at frac * stop_loss_pct; live uses 0.8 of disaster stop
     take_profit_pct: float = 0.0          # 0 -> no take-profit; short TP exits on favorable downside
     stop_vol_mult: float = 0.0            # >0 -> vol-scaled stop = k * trailing hourly vol (overrides fixed
     #                                       stop_loss_pct per-trade), clamped to [5%,50%]. 0 -> fixed stop.
@@ -287,8 +289,8 @@ def build_continuous_panel(
 
     PIT-causal: all 5 features are trailing closed-bar windows on `ts_ms`'s close (known at
     ts_ms+1h); the rmom join is a day-floor lag1 (residual_momentum[D] uses residuals <= D-1).
-    Reproduces scripts/p1d_continuous_turnover._deciled_panel (minus the proxy's `fwd` column,
-    which the engine does not use -- it computes the realised fill itself).
+    This is the engine-owned decile panel builder; it computes realised fills
+    downstream rather than carrying a forward-return proxy column.
     """
     root = Path(str(data_root)).expanduser()
     start_ms, end_ms = _date_str_to_ms(config.start_date), _resolve_end_ms(root, config)
@@ -407,6 +409,7 @@ def cross_sectional_decile(
         "turnover_quote",
     ]
     event_cols = [
+        "rv_168h",
         "ret1",
         "max_ret168",
         "prior6_ret1_max",
@@ -472,7 +475,12 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
     "Fresh" is computed on the FULL target-decile membership timeline (a gap > 1h marks a new
     spell), and the liquid gate is applied AFTER -- matching the proxy. Filtering liquid FIRST
     would let illiquid hours inside one continuous spell open artificial gaps -> spurious fresh
-    entries (it inflated the count ~2x in the first cut)."""
+    entries (it inflated the count ~2x in the first cut).
+
+    Live state exits use hysteresis: enter on a fresh D9 catalyst, but keep the planned state
+    spell alive while the name remains within the configured hold band (D9/D8 for buffer=1).
+    The wider hold-band spell is used ONLY for state-exit timing; it does not create D8 entries.
+    """
     if panel.is_empty():
         return panel
     d = panel.filter(pl.col("decile") == config.decile).sort(["symbol", "ts_ms"])
@@ -486,6 +494,23 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
     d = d.with_columns(pl.col("fresh").cum_sum().over("symbol").alias("_spell"))
     d = d.with_columns(pl.col("ts_ms").max().over(["symbol", "_spell"]).alias("spell_end_ts"))
     d = d.filter(pl.col("fresh")).filter(pl.col("turnover_quote") >= config.liq_turnover_min)
+    if config.exit_mode == "state" and config.exit_decile_buffer > 0 and not d.is_empty():
+        hold_min_decile = config.decile - max(0, int(config.exit_decile_buffer))
+        hold = panel.filter(pl.col("decile") >= hold_min_decile).sort(["symbol", "ts_ms"])
+        hold = hold.with_columns(
+            ((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")) > MS_PER_HOUR)
+            .fill_null(True)
+            .alias("_hold_fresh")
+        )
+        hold = hold.with_columns(pl.col("_hold_fresh").cum_sum().over("symbol").alias("_hold_spell"))
+        hold = hold.with_columns(
+            pl.col("ts_ms").max().over(["symbol", "_hold_spell"]).alias("hold_band_spell_end_ts")
+        )
+        d = (
+            d.drop("spell_end_ts")
+            .join(hold.select("symbol", "ts_ms", "hold_band_spell_end_ts"), on=["symbol", "ts_ms"], how="left")
+            .rename({"hold_band_spell_end_ts": "spell_end_ts"})
+        )
     if config.entry_max_ret168_max < 10.0:
         if "max_ret168" not in d.columns:
             raise ValueError("entry_max_ret168_max requires max_ret168 in the continuous panel")
@@ -820,6 +845,16 @@ def _run_trades(
     comps = entries["composite"].to_list()
     turns = entries["turnover_quote"].to_list()
     spell_ends = entries["spell_end_ts"].to_list() if "spell_end_ts" in entries.columns else tss
+    stop_approach_on = (
+        stop_pct is not None
+        and config.stop_approach_frac > 0.0
+        and config.stop_loss_pct > 0.0
+        and config.stop_vol_mult <= 0.0
+    )
+    stop_approach_pct = (
+        min(float(config.stop_loss_pct), float(config.stop_loss_pct) * float(config.stop_approach_frac))
+        if stop_approach_on else None
+    )
     def _emit(
         reason: str,
         *,
@@ -942,7 +977,7 @@ def _run_trades(
         nw, trade_stop = _compute_size_and_stop(
             config, close_arr, int(entry_bar),
             base_nw=base_nw, inverse_vol=inverse_vol, clamp=clamp,
-            regime_size_mult=regime_size_mult, stop_pct=stop_pct,
+            regime_size_mult=regime_size_mult, stop_pct=stop_approach_pct if stop_approach_on else stop_pct,
         )
         # Per-entry sizing hook (default None -> byte-identical): a causal,
         # gross-neutral notional multiplier keyed by (symbol, signal_ts). Applied AFTER all
@@ -969,6 +1004,15 @@ def _run_trades(
             _emit("no_fill", entry_bar_end=entry_bar_end, active_count=len(active))
             skipped_no_bar += 1
             continue
+        if stop_approach_on and trade.get("exit_reason") == "stop_loss":
+            trade["exit_reason"] = "stop_approach"
+        if (
+            state_mode
+            and trade.get("exit_reason") == "max_hold"
+            and planned_exit < entry_bar_end + max_hold_ms
+            and int(trade.get("exit_ts_ms") or 0) == int(planned_exit)
+        ):
+            trade["exit_reason"] = "left_decile"
         rows.append(trade)
         _emit(
             "selected",

@@ -35,29 +35,39 @@ WORKERS="${WORKERS:-4}"
 MAX_ACTIVE="${MAX_ACTIVE:-25}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 MAX_HOLD_HOURS="${MAX_HOLD_HOURS:-48}"
-# 2026-06-10: the live default is the validated winner_base 4-component ensemble
-# (frozen receipt weights). The old single-component profiles remain selectable
-# via the env for rollback/diagnostics only.
-STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v1}"
+# 2026-06-18: the live default is the frozen v2 demo/paper lifecycle:
+# 3-component ensemble, inverse-vol component sizing, max4 daily vol-target
+# rebalance, and TP/24h exits with no daemon or server stop.
+# This is NOT real-money-safe; any mainnet candidate needs a different risk design.
+STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v2}"
 FEATURE_SET="${FEATURE_SET:-rv_168h,vov,dist_low,xsret7,xsret3}"
 ENTRY_EVENT_TRIGGER="${ENTRY_EVENT_TRIGGER:-none}"
 # Default to the DEPLOYED gate (uptrend) so a dropped env line cannot silently
 # disable the 30d-BTC trend gate. The systemd units pin BTC_TREND_GATE explicitly;
 # set it to "off" there (demo + paper together) for a plumbing test.
 BTC_TREND_GATE="${BTC_TREND_GATE:-uptrend}"
-STOP_LOSS_PCT="${STOP_LOSS_PCT:-0.25}"  # wide server-side disaster stop; the state exit is profit-only
+STOP_LOSS_PCT="${STOP_LOSS_PCT:-0}"
+LEFT_DECILE_EXIT_ENABLED="${LEFT_DECILE_EXIT_ENABLED:-0}"
+STOP_APPROACH_FRAC="${STOP_APPROACH_FRAC:-0}"
+FAILED_FADE_HOURS="${FAILED_FADE_HOURS:-0}"
+FAILED_FADE_LOSS_PCT="${FAILED_FADE_LOSS_PCT:-0}"
+FAILED_FADE_MIN_MFE_PCT="${FAILED_FADE_MIN_MFE_PCT:-0}"
+BREAKEVEN_ARM_PCT="${BREAKEVEN_ARM_PCT:-0}"
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-2}"
 PER_POSITION_NOTIONAL_PCT_EQUITY="${PER_POSITION_NOTIONAL_PCT_EQUITY:-2}"
+SIZING_MODE="${SIZING_MODE:-inverse_vol}"
+TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"
+VOL_WEIGHT_CLAMP="${VOL_WEIGHT_CLAMP:-2}"
 LIQ_TURNOVER_MIN="${LIQ_TURNOVER_MIN:-500000}"
 FALLBACK_EQUITY_USDT="${FALLBACK_EQUITY_USDT:-10000}"
-DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-0}"
+DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-1}"
 DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS="${DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS:-90}"
-DAILY_REBALANCE_TARGET_DAILY_VOL="${DAILY_REBALANCE_TARGET_DAILY_VOL:-0.025}"
+DAILY_REBALANCE_TARGET_DAILY_VOL="${DAILY_REBALANCE_TARGET_DAILY_VOL:-0.045}"
 DAILY_REBALANCE_MAX_SCALE="${DAILY_REBALANCE_MAX_SCALE:-4}"
 DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD="${DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD:--0.04}"
 DAILY_REBALANCE_RESIZE_COST_BPS="${DAILY_REBALANCE_RESIZE_COST_BPS:-10}"
-DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS="${DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS:-180}"
-DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN="${DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN:-0.02}"
+DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS="${DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS:-0}"
+DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN="${DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN:-0}"
 DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW="${DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW:-0}"
 
 order_args=()
@@ -102,9 +112,14 @@ if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
     order_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
 fi
 # S1 Amendment 6 sniper (Tier-2 demo candidate, wired 2026-06-10): resting PostOnly
-# Sell limit at entry*(1+8%) per fresh short, quarter-size, disaster stop attached.
+# Sell limit at entry*(1+8%) per fresh short, quarter-size. In v2 no server stop is attached.
 # Off by default; the operator arms it with CONTINUOUS_SNIPER=1.
 [[ "${CONTINUOUS_SNIPER:-0}" == "1" ]] && order_args+=(--sniper-enabled)
+if [[ "$LEFT_DECILE_EXIT_ENABLED" == "0" ]]; then
+    order_args+=(--no-left-decile-exit-enabled)
+else
+    order_args+=(--left-decile-exit-enabled)
+fi
 
 echo "continuous-demo engine: data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} profile=$STRATEGY_PROFILE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
 exec "$PYTHON_BIN" -m liquidity_migration \
@@ -121,8 +136,16 @@ exec "$PYTHON_BIN" -m liquidity_migration \
     --entry-event-trigger "$ENTRY_EVENT_TRIGGER" \
     --btc-trend-gate "$BTC_TREND_GATE" \
     --stop-loss-pct "$STOP_LOSS_PCT" \
+    --stop-approach-frac "$STOP_APPROACH_FRAC" \
+    --failed-fade-hours "$FAILED_FADE_HOURS" \
+    --failed-fade-loss-pct "$FAILED_FADE_LOSS_PCT" \
+    --failed-fade-min-mfe-pct "$FAILED_FADE_MIN_MFE_PCT" \
+    --breakeven-arm-pct "$BREAKEVEN_ARM_PCT" \
     --entry-leverage "$ENTRY_LEVERAGE" \
     --per-position-notional-pct-equity "$PER_POSITION_NOTIONAL_PCT_EQUITY" \
+    --sizing-mode "$SIZING_MODE" \
+    --target-vol-per-name "$TARGET_VOL_PER_NAME" \
+    --vol-weight-clamp "$VOL_WEIGHT_CLAMP" \
     --liq-turnover-min "$LIQ_TURNOVER_MIN" \
     --fallback-equity-usdt "$FALLBACK_EQUITY_USDT" \
     --daily-rebalance-realized-vol-window-days "$DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS" \

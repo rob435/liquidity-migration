@@ -29,18 +29,31 @@ Environment=WORKERS=2
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
 Environment=MAX_HOLD_HOURS=24
-# 2026-06-10: mirrors the demo book — the winner_base 4-component ensemble.
-Environment=STRATEGY_PROFILE=continuous_ensemble_v1
+# 2026-06-18: mirrors the repaired demo live-v2 demo/paper lifecycle:
+# inverse-vol component sizing, max4 daily vol-target rebalance, TP/24h only.
+Environment=STRATEGY_PROFILE=continuous_ensemble_v2
 Environment=FEATURE_SET=max_ret168
 Environment=ENTRY_EVENT_TRIGGER=none
-# PLUMBING TEST (operator 2026-06-16): gate flipped uptrend->off (mirrors the demo
-# unit) so the paper shadow tracks the demo book during the test. REVERT to
-# "uptrend" with the demo unit once plumbing is confirmed.
-Environment=BTC_TREND_GATE=off
+Environment=BTC_TREND_GATE=uptrend
 Environment=DAILY_REBALANCE_ENABLED=1
-Environment=STOP_LOSS_PCT=0.25
+Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045
+Environment=DAILY_REBALANCE_MAX_SCALE=4
+Environment=DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04
+Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0
+Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN=0
+Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW=0
+Environment=STOP_LOSS_PCT=0
+Environment=LEFT_DECILE_EXIT_ENABLED=0
+Environment=STOP_APPROACH_FRAC=0
+Environment=FAILED_FADE_HOURS=0
+Environment=FAILED_FADE_LOSS_PCT=0
+Environment=FAILED_FADE_MIN_MFE_PCT=0
+Environment=BREAKEVEN_ARM_PCT=0
 Environment=ENTRY_LEVERAGE=2
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
+Environment=SIZING_MODE=inverse_vol
+Environment=TARGET_VOL_PER_NAME=0.01
+Environment=VOL_WEIGHT_CLAMP=2
 Environment=LIQ_TURNOVER_MIN=500000
 # Market-data plane: this PAPER shadow runs its OWN kline pool.
 # 2026-06-14 (deploy-env-timers-3): we previously set

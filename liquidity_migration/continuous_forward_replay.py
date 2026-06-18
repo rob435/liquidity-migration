@@ -55,6 +55,15 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
     # NOTE: this changes frozen_config_hash -> the prior continuous forward ledger is VOIDED;
     # archive the old state dir + regenerate the hedge warmstart + start a fresh clock on deploy.
     "weights": {"turn3p3": 0.3333333333333333, "turn4p3": 0.2222222222222222, "turn4p5": 0.4444444444444444},
+    # Official v2 entry sizing, promoted 2026-06-18
+    # (docs/preregistration/2026-06-18-continuous-v2-invvol-max4-replay.md).
+    # The frozen component source ledgers were generated with this recipe; keep
+    # it explicit here so promoted.continuous_profile() is not ambiguous.
+    "entry_sizing": {
+        "mode": "inverse_vol",
+        "target_vol_per_name": 0.01,
+        "vol_weight_clamp": 2.0,
+    },
     "rebalance": {
         "realized_vol_window_days": 90,
         "target_daily_vol": 0.045,
@@ -374,8 +383,8 @@ def forward_readiness_summary(
     # calendar days, collapsing the span out of the return numerator while the
     # year denominator stayed calendar — an inconsistent MAR and an inflated
     # Sharpe (forward-replay-2/6, metrics-3/6). Build a gap-filled calendar series
-    # (same CONSTRUCTION as the deployed-equity reference,
-    # scripts/continuous_deployed_equity.stats()) so total, dd and Sharpe share the
+    # (same construction as the deployed-equity refresh reference,
+    # scripts/continuous_deployed_equity_refresh.stats()) so total, dd and Sharpe share the
     # calendar basis. NOTE (audit2): the `years` denominator below deliberately uses
     # the RAW span (no +1), matching the _daily_pnl_metrics / _calendar_metrics
     # annualizer convention — NOT deployed_equity.stats()'s inclusive span+1 — so

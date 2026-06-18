@@ -639,8 +639,8 @@ class EventWebSocketRiskEngine:
     # (~21d), so a live open trade is never outside the window; bootstrap() still does
     # the FULL read (months_back=0) so a cold start re-loads every open trade
     # regardless of age. A trade somehow stuck open past 6 months would fall out of the
-    # steady-state window (still protected by its server-side stop + recovered on the
-    # next restart's full bootstrap read) — implausible given the hold horizon.
+    # steady-state window and be recovered on the next restart's full bootstrap read —
+    # implausible given the hold horizon.
     _RECONCILE_MONTHS_BACK = 6
 
     def _read_combined(self, *, trades: bool, months_back: int = _RECONCILE_MONTHS_BACK) -> pl.DataFrame:
@@ -2054,7 +2054,7 @@ class EventWebSocketRiskEngine:
             # short/long link + a first continuous entry) reproduces the legacy form verbatim.
             trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}" + (f"-{reentry_seq}" if reentry_seq > 0 else "")
             # The live continuous trade_id carries the ensemble component ({base}-{component});
-            # the deployed continuous_ensemble_v1 emits ONLY component-tagged links, so a
+            # the deployed ensemble profiles emit ONLY component-tagged links, so a
             # component-less reconstruction matched NO paper-twin row — every post-rebuild
             # adoption broke reconciliation pairing (audit 2026-06-12). The sniper tag "s"
             # maps to the -snipe suffix; the BASE component is not in the link, but the
@@ -2258,8 +2258,8 @@ class EventWebSocketRiskEngine:
             # A configured sleeve's ledger read raised this pass -> its open
             # trades are missing from open_trades, so a live position of that
             # sleeve would look "untracked" and get flattened. Fail closed: never
-            # flatten a position we merely failed to see. The server-side stops
-            # still protect every position; only this janitor pauses.
+            # flatten a position we merely failed to see. This janitor pauses; it
+            # must not pretend venue stops exist for every sleeve/profile.
             _logger.warning(
                 "ws_risk: skipping exit_untracked_positions -- a ledger read failed this pass (%s); "
                 "refusing to flatten positions we may have failed to see", self.state.ledger_read_error,
