@@ -257,3 +257,12 @@ def test_collect_cycle_flushes_to_disk(tmp_path, monkeypatch) -> None:
     out = tmp_path / "bybit" / f"{day}.jsonl"
     rows = list(depth_collector.iter_jsonl_rows(out))
     assert len(rows) == 2
+
+
+def test_band_notionals_rejects_crossed_or_locked_book() -> None:
+    """audit-iter2 collectors-1: a crossed (best_bid > best_ask) or locked
+    (best_bid == best_ask) snapshot must return None, not a bogus mid + bands."""
+    assert band_notionals([(101.0, 5.0)], [(100.0, 5.0)]) is None  # crossed
+    assert band_notionals([(100.0, 5.0)], [(100.0, 5.0)]) is None  # locked
+    # a normal book still aggregates
+    assert band_notionals([(99.9, 5.0)], [(100.1, 5.0)]) is not None

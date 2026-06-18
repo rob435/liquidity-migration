@@ -66,6 +66,11 @@ def band_notionals(
     best_bid, best_ask = float(bids[0][0]), float(asks[0][0])
     if best_bid <= 0 or best_ask <= 0:
         return None
+    # Reject a crossed/locked book (best_bid >= best_ask): a transient crossed REST
+    # snapshot would otherwise yield a mid inside the spread inversion and bogus band
+    # notionals written to the append-only tape. NULL-not-garbage. (audit-iter2 collectors-1)
+    if best_bid >= best_ask:
+        return None
     mid = 0.5 * (best_bid + best_ask)
     out: dict[str, Any] = {"mid": mid}
     for side, levels, sign in (("bid", bids, -1.0), ("ask", asks, 1.0)):

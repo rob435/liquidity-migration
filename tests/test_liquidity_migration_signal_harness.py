@@ -1118,3 +1118,39 @@ def test_decile_selection_uses_ordinal_rank_not_average() -> None:
     assert 'rank(method="ordinal")' in src
     # The selection must not fall back to the fractional <= top_decile cut.
     assert "signal_rank_frac\") <= top_decile" not in src
+
+
+def test_build_combined_signal_portfolio_keeps_name_missing_one_of_several_features() -> None:
+    """audit-iter2 harness-cli-1: a plain column sum nulls the whole name when ANY one
+    feature is null, silently dropping it from BOTH pools and biasing the decile pool.
+    A name missing ONE feature must still get a (neutral-filled) combined signal; a
+    name missing ALL features is still excluded (null signal)."""
+    rows: list[dict] = []
+    n_days, n_symbols = 3, 12
+    for d in range(n_days):
+        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
+        for s in range(n_symbols):
+            rows.append({
+                "symbol": f"S{s:02d}",
+                "ts_ms": ts,
+                "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+                # S05: only feature_b null (one missing). S06: both null (no data).
+                "feature_a": (None if s == 6 else float(s)),
+                "feature_b": (None if s in (5, 6) else float(n_symbols - s)),
+                "realized_vol_7d": 0.5,
+                "fwd_ret_3d": 0.0,
+            })
+    panel = pl.DataFrame(rows, infer_schema_length=None)
+    out = build_combined_signal_portfolio(
+        panel,
+        surviving_features=["feature_a", "feature_b"],
+        weighting="equal",
+        top_decile=0.20,
+        vol_target_per_name=0.01,
+        forward_horizon=3,
+    )
+    day0 = out.filter(pl.col("ts_ms") == _date_ms("2025-01-01"))
+    sig = dict(zip(day0["symbol"].to_list(), day0["combined_signal"].to_list()))
+    assert sig["S00"] is not None
+    assert sig["S05"] is not None   # one feature missing -> still signalled (not dropped)
+    assert sig["S06"] is None       # all features missing -> excluded

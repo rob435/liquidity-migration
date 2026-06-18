@@ -33,7 +33,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, cast
+from typing import Callable, Iterable
 
 import polars as pl
 
@@ -1009,7 +1009,17 @@ def compute_univariate_ic(
         hi = (i + 1) * chunk if i < sub_periods - 1 else n_days
         sub_slice = ics[lo:hi]
         sub_ics.append(sum(sub_slice) / len(sub_slice) if sub_slice else float("nan"))
-    sign_consistent = all(math.copysign(1.0, v) == math.copysign(1.0, mean_ic) for v in sub_ics if not math.isnan(v)) and not math.isnan(mean_ic)
+    # Require every sub-period to be populated (reject under-powered splits where
+    # n_days < sub_periods leaves NaN slices that all() would skip, passing
+    # vacuously on ~one sub-period) and treat an exactly-0.0 sub-IC as failing
+    # (copysign(1.0, 0.0) is +1.0, which would otherwise mis-class a flat period as
+    # positive). (audit-iter2 harness-cli-2)
+    non_nan = [v for v in sub_ics if not math.isnan(v)]
+    sign_consistent = (
+        not math.isnan(mean_ic)
+        and len(non_nan) >= sub_periods
+        and all(v != 0.0 and math.copysign(1.0, v) == math.copysign(1.0, mean_ic) for v in non_nan)
+    )
 
     return ICReport(
         feature=feature,
@@ -1072,8 +1082,13 @@ def build_combined_signal_portfolio(
     if fwd_col not in panel.columns:
         raise KeyError(f"panel missing {fwd_col!r}")
 
-    # Cross-sectional Z-score per feature per day, dropping rows where the
-    # feature is null (so it doesn't poison the combined sum).
+    # Cross-sectional Z-score per feature per day. A missing feature's Z is null;
+    # we must NOT let one null Z null the whole name's combined signal (a plain
+    # column sum propagates null -> the name is silently dropped from BOTH pools,
+    # biasing the decile pool toward names with complete data). Instead a missing Z
+    # contributes NEUTRALLY (0) to the sum, and a name is excluded only when it has
+    # ZERO present features. (audit-iter2 harness-cli-1; see the magnitude-normalization
+    # note in docs/strategy_improvements.md.)
     z_cols: list[str] = []
     df = panel
     for feature in surviving_features:
@@ -1083,12 +1098,15 @@ def build_combined_signal_portfolio(
         df = _xs_zscore(df, feature, out_col=z_col)
         z_cols.append(z_col)
 
-    # Combined signal
+    # Number of present (non-null) feature Z's per row, used to exclude no-data names.
+    present_count = pl.sum_horizontal([pl.col(z).is_not_null().cast(pl.Int32) for z in z_cols])
+
+    # Combined signal: null-skipping horizontal sum (missing Z -> 0), nulled only
+    # when the name has no present feature at all.
     combined: pl.Expr
     if weighting == "equal":
-        # z_cols is non-empty (surviving_features validated above), so the
-        # builtin sum() always yields a polars Expr, never the int start value.
-        combined = cast(pl.Expr, sum(pl.col(z) for z in z_cols))
+        raw_combined = pl.sum_horizontal([pl.col(z).fill_null(0.0) for z in z_cols])
+        combined = pl.when(present_count > 0).then(raw_combined).otherwise(None)
     else:
         # ic_weighted: positive IC means high feature value -> high return,
         # so the SIGN of IC tells us which direction predicts. For a SHORT
@@ -1101,7 +1119,10 @@ def build_combined_signal_portfolio(
         if any(f not in ic_weights for f in surviving_features):  # type: ignore[operator]
             missing = [f for f in surviving_features if f not in ic_weights]  # type: ignore[operator]
             raise KeyError(f"ic_weights missing entries for {missing}")
-        combined = cast(pl.Expr, sum(ic_weights[f] * pl.col(z) for f, z in zip(surviving_features, z_cols)))  # type: ignore[index, misc]  # ic_weights non-None+membership checked above
+        raw_combined = pl.sum_horizontal(
+            [(ic_weights[f] * pl.col(z)).fill_null(0.0) for f, z in zip(surviving_features, z_cols)]  # type: ignore[index]  # ic_weights non-None+membership checked above
+        )
+        combined = pl.when(present_count > 0).then(raw_combined).otherwise(None)
 
     df = df.with_columns(combined.alias("combined_signal"))
 

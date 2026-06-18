@@ -227,10 +227,19 @@ def format_universe_report(payload: dict[str, Any]) -> str:
         "|---:|---|---:|---:|---:|---:|",
     ]
     for row in payload["universe"][:50]:
+        # Render a genuinely-missing field as 'n/a', not 0: `or 0` conflated None
+        # (no data) with a real 0.0, so a partial ticker fetch looked like hard data
+        # in the committed audit report. (audit-iter2 risk-factor-3)
+        turnover = row.get("turnover_24h")
+        age = row.get("listing_age_days")
+        oi = row.get("open_interest_value")
+        funding = row.get("funding_rate")
         lines.append(
-            f"| {row['liquidity_rank']} | {row['symbol']} | ${row.get('turnover_24h') or 0:,.0f} | "
-            f"{(row.get('listing_age_days') or 0):.0f} | ${row.get('open_interest_value') or 0:,.0f} | "
-            f"{(row.get('funding_rate') or 0):.4%} |"
+            f"| {row['liquidity_rank']} | {row['symbol']} | "
+            f"{('$' + format(turnover, ',.0f')) if turnover is not None else 'n/a'} | "
+            f"{format(age, '.0f') if age is not None else 'n/a'} | "
+            f"{('$' + format(oi, ',.0f')) if oi is not None else 'n/a'} | "
+            f"{format(funding, '.4%') if funding is not None else 'n/a'} |"
         )
     lines.extend([""])
     return "\n".join(lines)

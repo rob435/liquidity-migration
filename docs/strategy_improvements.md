@@ -144,6 +144,63 @@ not adopted now. `exploratory` label; gross-of-cost IC, no promotion claim.
 
 ---
 
+### 2026-06-18 — Full-PIT gate: per-symbol kline-vs-manifest lag check  [🟡 Proposed]
+
+**Sleeve:** cross-sleeve (research data gate) · **Type:** gate
+
+**Observation.** `volume_events_pit._required_pit_date_symbols` derives each symbol's
+required coverage window `[first_kline_date, last_kline_date]` from the klines
+themselves. If a still-active coin's recent klines were not downloaded (a partial /
+symbol-scoped kline fetch), its `last_kline_date` is artificially early, so the
+missing recent (date,symbol) pairs fall OUTSIDE the required window and the full-PIT
+gate returns pass=True despite incomplete recent coverage — `pit_coverage` only
+checks the dataset-wide max date, so one lagging coin is invisible. Confirmed +
+verified (audit-iter2 ingestion-pit-2, MED). Also a related LOW: the required set
+(no bar-count filter) vs covered set (`>=20` bars) asymmetry can FALSELY trip the
+gate on a genuine partial final day (fail-safe direction; currently unreachable on
+densified Bybit / inner-joined Binance roots) — audit-iter2 ingestion-pit-4.
+
+**Proposed change.** Add a per-symbol cross-check: when a symbol's klines end
+materially before its manifest entries AND those trailing manifest dates are recent
+(within a few days of `latest_signal_trading_day`), treat them as REQUIRED (gate
+trips) or flag — distinguishing an active-coin lag from a real post-delisting phantom
+by date recency. Separately, bound the required-set per-symbol dates on the same
+`>=min_hourly_bars` covered set to remove the partial-final-day asymmetry.
+
+**Expected effect & risk.** Hardens a methodology-critical no-look-ahead/
+no-survivorship gate. Per `AGENTS.md` this is a correctness-gate change → needs a
+pre-registration entry and must update `tests/test_liquidity_migration_volume_events_pit.py`
+(whose assertions encode the current post-delisting exclusion). Risk: a wrong recency
+heuristic could re-flag real delistings — needs a deliberate fail-vs-flag policy call.
+
+**Decision.** (operator)
+
+---
+
+### 2026-06-18 — Combined-signal magnitude normalization for partial-feature names  [🟡 Proposed]
+
+**Sleeve:** research (Phase-6 multi-feature portfolio) · **Type:** feature
+
+**Observation.** The combined-signal null-poisoning bug is FIXED (audit-iter2
+harness-cli-1): a name missing one feature now contributes that feature's Z as 0
+(`pl.sum_horizontal` over `fill_null(0.0)`), so it is no longer silently dropped.
+That is option (a): a partially-observed name has a systematically smaller |combined|
+magnitude than a fully-observed one (fewer non-zero Z's summed).
+
+**Proposed change (optional refinement).** Option (b): re-normalize each name's
+combined signal by its count of present features (divide by `present_count`) so
+partial- and full-feature names are magnitude-comparable in the cross-sectional rank.
+
+**Expected effect & risk.** Affects only multi-feature research portfolios (not the
+live single-feature sleeves). Whether (a) or (b) is preferable depends on whether a
+missing feature should dampen a name's conviction (a) or be treated as "no
+information, judge on what's present" (b). Research tooling → validate via the
+Phase-6 IC/decile diagnostics, not a live gate.
+
+**Decision.** (operator)
+
+---
+
 ## Template
 
 ```

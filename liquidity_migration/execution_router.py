@@ -48,6 +48,10 @@ class ExecutionEventRouter:
         if max_buffered_links <= 0:
             raise ValueError("max_buffered_links must be positive")
         self._rows: dict[str, list[dict[str, Any]]] = {}
+        # Per-link set of execIds already buffered, so a redelivered WS execution
+        # (Bybit's private stream is not exactly-once) is not double-counted into
+        # the fill qty/fee/avg-price by _execution_summary (audit-iter2 reports-exec-1).
+        self._seen_exec_ids: dict[str, set[str]] = {}
         # Insertion-order maintained by dict (3.7+). When we evict, we pop
         # from the front; recently-active links stay at the back.
         self._lock = threading.Lock()
@@ -68,10 +72,24 @@ class ExecutionEventRouter:
                 # actively-filling links from FIFO eviction.
                 if link in self._rows:
                     bucket = self._rows.pop(link)
+                    seen = self._seen_exec_ids.pop(link, set())
                 else:
-                    bucket = []
+                    bucket, seen = [], set()
+                # Dedup by execId: a redelivered execution (WS is not exactly-once;
+                # a resubscribe/frame replay can repeat an execId) would otherwise be
+                # summed twice by _execution_summary, corrupting the recorded fill
+                # qty/fee/avg-price. Rows without an execId keep append behaviour
+                # (matches ingestion's idless-trade fallback). (audit-iter2 reports-exec-1)
+                eid = str(row.get("execId") or row.get("exec_id") or "")
+                if eid and eid in seen:
+                    self._rows[link] = bucket
+                    self._seen_exec_ids[link] = seen
+                    continue
+                if eid:
+                    seen.add(eid)
                 bucket.append(dict(row))
                 self._rows[link] = bucket
+                self._seen_exec_ids[link] = seen
                 self._events_received += 1
             self._evict_excess_locked()
             self._cond.notify_all()
@@ -84,6 +102,7 @@ class ExecutionEventRouter:
             except StopIteration:
                 return
             self._rows.pop(victim, None)
+            self._seen_exec_ids.pop(victim, None)
 
     def has_fill(self, order_link_id: str) -> bool:
         with self._lock:
@@ -116,12 +135,14 @@ class ExecutionEventRouter:
         """Caller signals that this order_link_id is reconciled; drop the buffer."""
         with self._lock:
             self._rows.pop(order_link_id, None)
+            self._seen_exec_ids.pop(order_link_id, None)
 
     def clear_all(self) -> None:
         """Drop every buffered link. Use on WS reconnect: in-flight links
         will fall back to REST (which is the safe default)."""
         with self._lock:
             self._rows.clear()
+            self._seen_exec_ids.clear()
 
     def stats(self) -> dict[str, int]:
         with self._lock:

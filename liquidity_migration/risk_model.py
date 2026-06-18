@@ -231,10 +231,17 @@ def fit_factor_returns(
             continue
         x = np.column_stack([np.ones(sub.height), sub.select(present).to_numpy()])
         y = sub[target_col].to_numpy()
-        beta = np.linalg.lstsq(x, y, rcond=None)[0]
+        sol = np.linalg.lstsq(x, y, rcond=None)
+        beta, rank = sol[0], int(sol[2])
         resid = y - x @ beta
-        for i, fc in enumerate(present):
-            factor_records.append({"ts_ms": ts, "factor": fc, "factor_return": float(beta[i + 1])})
+        # On a rank-deficient daily cross-section (collinear/constant factor columns)
+        # lstsq silently returns an arbitrary min-norm solution, so the per-factor
+        # slopes are meaningless — suppress them rather than recording garbage that
+        # would perturb decompose / factor sign-consistency. Residuals stay correct
+        # (fitted values are unique even when beta is not). (audit-iter2 risk-factor-2)
+        if rank == x.shape[1]:
+            for i, fc in enumerate(present):
+                factor_records.append({"ts_ms": ts, "factor": fc, "factor_return": float(beta[i + 1])})
         for sym, rr in zip(sub["symbol"].to_list(), resid.tolist()):
             resid_records.append({"symbol": sym, "ts_ms": ts, "residual_return": float(rr)})
 

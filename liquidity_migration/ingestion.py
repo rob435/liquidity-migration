@@ -81,7 +81,11 @@ def aggregate_trade_klines_1m(trades: pl.DataFrame) -> pl.DataFrame:
     if trades.is_empty():
         return pl.DataFrame()
     filtered = trades.unique(subset=["symbol", "trade_id"], keep="last") if "trade_id" in trades.columns else trades
-    sort_cols = [col for col in ("symbol", "ts_ms", "trade_ts_ms", "trade_id") if col in filtered.columns or col == "trade_ts_ms"]
+    # "price" is a deterministic tie-break for id-less trades sharing an exact
+    # trade_ts_ms (split fills at one instant): without it open/close would depend
+    # on input row order. No-op when trade_id is present (already a total order).
+    # (audit-iter2 ingestion-pit-3)
+    sort_cols = [col for col in ("symbol", "ts_ms", "trade_ts_ms", "trade_id", "price") if col in filtered.columns or col == "trade_ts_ms"]
     bars = (
         filtered.with_columns(
             [
@@ -111,7 +115,11 @@ def aggregate_trade_klines_1h(trades: pl.DataFrame) -> pl.DataFrame:
     if trades.is_empty():
         return pl.DataFrame()
     filtered = trades.unique(subset=["symbol", "trade_id"], keep="last") if "trade_id" in trades.columns else trades
-    sort_cols = [col for col in ("symbol", "ts_ms", "trade_ts_ms", "trade_id") if col in filtered.columns or col == "trade_ts_ms"]
+    # "price" is a deterministic tie-break for id-less trades sharing an exact
+    # trade_ts_ms (split fills at one instant): without it open/close would depend
+    # on input row order. No-op when trade_id is present (already a total order).
+    # (audit-iter2 ingestion-pit-3)
+    sort_cols = [col for col in ("symbol", "ts_ms", "trade_ts_ms", "trade_id", "price") if col in filtered.columns or col == "trade_ts_ms"]
     bars = (
         filtered.with_columns(
             [
@@ -281,10 +289,18 @@ def normalize_funding_history(funding: pl.DataFrame, *, default_interval_min: in
         if "funding_interval_min" in funding.columns
         else pl.lit(default_interval_min)
     )
+    # Clamp a non-positive funding_interval_min to the default for BOTH the stored
+    # column and the divisor: fill_null does not catch a literal 0 (-> 480/0 = inf)
+    # or a negative interval (-> sign-flipped equiv). (audit-iter2 ingestion-pit-1)
+    interval_min = (
+        pl.when(interval.fill_null(default_interval_min) <= 0)
+        .then(pl.lit(default_interval_min))
+        .otherwise(interval.fill_null(default_interval_min))
+    )
     return funding.with_columns(
         [
-            interval.fill_null(default_interval_min).alias("funding_interval_min"),
-            (pl.col("funding_rate") * (480.0 / interval.fill_null(default_interval_min))).alias("funding_rate_8h_equiv"),
+            interval_min.alias("funding_interval_min"),
+            (pl.col("funding_rate") * (480.0 / interval_min)).alias("funding_rate_8h_equiv"),
         ]
     ).sort(["symbol", "ts_ms"])
 

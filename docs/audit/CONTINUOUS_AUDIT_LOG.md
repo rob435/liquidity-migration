@@ -41,6 +41,7 @@ Each iteration:
 | # | Date | Confirmed | Fixed | Deferred | Notes |
 |---|------|-----------|-------|----------|-------|
 | 1 | 2026-06-18 | 22 | 13 | 9 | repo-wide audit (8 clusters, adversarial verify); 1 HIGH fixed; reconcile collapsed to one command; harness-cli cluster pending re-run (rate-limited) |
+| 2 | 2026-06-18 | 14 | 11 | 3 | harness-cli (rerun) + 27 modules iter1 missed; 2 HIGH fixed (execId double-count, combined-signal null-poison); +7 regression tests |
 
 ---
 
@@ -111,3 +112,49 @@ Written up with fix plans:
 All changes committed **locally only — no `git push`** (push auto-deploys to the
 live VPS). `REAL_MONEY` untouched. No methodology/PIT gate loosened; the
 filtered-through marker and the universe-shrink proposal *tighten* correctness.
+
+---
+
+## Iteration 2 — 2026-06-18
+
+**Baseline:** `ruff` clean; `pytest -q` → 1975 passed (carried iter-1 fixes).
+
+**Audit:** the rate-limited `harness-cli` cluster (rerun) + the 27 package modules
+iteration 1 did not reach, across 7 clusters (harness-cli, risk-factor,
+hedge-regime, collectors, ingestion-pit, reports-exec, core-config) with
+adversarial per-finding verification. 26 raw → **14 confirmed** (2 high, 3 medium,
+9 low), 12 rejected.
+
+### Fixed this iteration (11; +7 regression tests; 1975 → 1982)
+
+| Finding | File | Sev | Fix |
+|---|---|---|---|
+| reports-exec-1 | `execution_router.py` | **high** | Dedup WS execution rows by `execId` (per-link seen-set, cleared with the bucket) so a redelivered fill isn't double-counted into qty/fee/avg-price |
+| harness-cli-1 | `signal_harness.py` | **high** | Combined signal: a missing feature Z contributes neutrally (`sum_horizontal`/`fill_null(0)`) instead of nulling the whole name out of both pools; all-null names still excluded |
+| ingestion-pit-1 | `ingestion.py` | med | `normalize_funding_history` clamps a 0/negative `funding_interval_min` (was `480/0 = inf` / sign-flip) |
+| core-config-1 | `config.py` | med | Strict bool coercer (`bool("false")` was `True`, silently flipping a quoted YAML bool) |
+| harness-cli-2 | `signal_harness.py` | low | Sub-period sign-consistency: reject under-powered splits (NaN slices) + treat 0.0 sub-IC as failing |
+| risk-factor-2 | `risk_model.py` | low | `fit_factor_returns` suppresses per-factor slopes on a rank-deficient day (lstsq min-norm garbage); residuals kept |
+| risk-factor-3 | `universe.py` | low | Report renders missing fields as `n/a`, not `0` (`or 0` masked None) |
+| collectors-1 | `depth_collector.py` | low | `band_notionals` rejects a crossed/locked book (was a bogus in-spread mid) |
+| ingestion-pit-3 | `ingestion.py` | low | OHLC aggregation adds a `price` tie-break so id-less same-instant fills give deterministic open/close |
+| reports-exec-2 | `volume_events_charts.py` | low | `_chart_final_values` no longer assumes sorted points (scan-all, max-day ≤ common_end) |
+| core-config-2 | `config.py` | low | `DEFAULT_RESEARCH_DATA_ROOT` expanded at definition (no stray `~`) |
+
+Regression tests added: execId dedup (+ clear reset), combined-signal partial-feature
+keep/all-null-exclude, funding interval clamp, strict bool coercion, data-root
+expansion, crossed-book rejection.
+
+### Deferred (3 — methodology-gate / pre-registration / defensive)
+
+- **strategy_improvements.md:** ingestion-pit-2 (full-PIT per-symbol kline-lag gate,
+  MED) + ingestion-pit-4 (required/covered bar-count asymmetry, LOW) — methodology
+  gate, needs pre-reg + fail-vs-flag policy; combined-signal magnitude-normalization
+  refinement (a-vs-b).
+- **limitations.md:** risk-factor-1 (`decompose_strategy_pnl` missing-factor→0.0
+  defensive gap; active trigger refuted as unreachable today).
+
+### Guardrail honored
+
+Local commit only — **no `git push`**. `REAL_MONEY` untouched. No methodology/PIT
+gate loosened (the deferred PIT-gate change would *tighten* it; left for pre-reg).

@@ -205,3 +205,21 @@ def test_cost_config_default_is_full_taker_not_maker_blend() -> None:
     assert CostConfig().base_entry_exit_cost_bps == pytest.approx(
         replace(CostConfig(), maker_fill_probability=0.0).base_entry_exit_cost_bps
     )
+
+
+def test_merge_dataclass_bool_coercion_is_strict() -> None:
+    """audit-iter2 core-config-1: builtin bool('false') is True. A quoted YAML bool
+    must parse to the right value, native bools pass through, and an ambiguous string
+    must raise rather than silently flip."""
+    assert _merge_dataclass(ExchangeConfig, {"testnet": "false"}).testnet is False
+    assert _merge_dataclass(ExchangeConfig, {"testnet": "no"}).testnet is False
+    assert _merge_dataclass(ExchangeConfig, {"testnet": "true"}).testnet is True
+    assert _merge_dataclass(ExchangeConfig, {"testnet": True}).testnet is True
+    with pytest.raises(ValueError):
+        _merge_dataclass(ExchangeConfig, {"testnet": "maybe"})
+
+
+def test_default_research_data_root_is_expanded() -> None:
+    """audit-iter2 core-config-2: the default must be expanduser()'d so a direct
+    ResearchConfig() exposes a resolvable path."""
+    assert "~" not in str(DEFAULT_RESEARCH_DATA_ROOT)

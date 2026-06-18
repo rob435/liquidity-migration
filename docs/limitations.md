@@ -85,6 +85,18 @@ ones are proposals in `docs/strategy_improvements.md`.
   correctness bug; a fix must preserve the *live* (not confirmed-bar) semantics of the
   telemetry (audit-iter1 continuous-2).
 
+### From audit iteration 2 (2026-06-18)
+
+- **`risk_model.decompose_strategy_pnl` coerces a missing factor return to 0.0**
+  (`fr_map[d].get(f) or 0.0`), which would understate factor-explained PnL and
+  overstate residual alpha. The active trigger is REFUTED — `fit_factor_returns`
+  emits all-or-nothing per day, so a surviving day always has every factor; the
+  only path is a mismatched caller passing loadings whose factor set isn't a subset
+  of the fitted factor returns, and the only such consumer (`decompose_strategy_pnl`)
+  is currently exercised only in tests. Defensive gap, not active corruption
+  (audit-iter2 risk-factor-1). Fix when touched: validate the factor-set subset at
+  entry and treat a genuinely-missing factor return as unresolved, not 0.0.
+
 ## Resolved
 
 _None yet._

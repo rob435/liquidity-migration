@@ -324,3 +324,23 @@ def test_hourly_multi_symbol_densify_does_not_leak_seed() -> None:
     assert _leading_prices(dense, "AAAUSDT", n=1) == [100.0]
     assert dense.filter(pl.col("symbol") == "AAAUSDT").height == 24
     assert dense.filter(pl.col("symbol") == "BBBUSDT").height == 24
+
+
+def test_funding_interval_zero_or_negative_is_clamped() -> None:
+    """audit-iter2 ingestion-pit-1: a 0 funding_interval_min must not yield inf and a
+    negative one must not sign-flip the 8h-equivalent; both clamp to the 8h default."""
+    import math
+
+    funding = normalize_funding_history(
+        pl.DataFrame(
+            [
+                {"ts_ms": 1, "symbol": "AAA", "funding_rate": 0.001, "funding_interval_min": 0},
+                {"ts_ms": 1, "symbol": "BBB", "funding_rate": 0.001, "funding_interval_min": -240},
+                {"ts_ms": 1, "symbol": "CCC", "funding_rate": 0.001, "funding_interval_min": 480},
+            ]
+        )
+    )
+    vals = {r["symbol"]: r["funding_rate_8h_equiv"] for r in funding.iter_rows(named=True)}
+    assert math.isfinite(vals["AAA"]) and vals["AAA"] == 0.001  # 0 -> clamped to 480 -> *1
+    assert math.isfinite(vals["BBB"]) and vals["BBB"] == 0.001  # negative -> clamped, no sign flip
+    assert vals["CCC"] == 0.001

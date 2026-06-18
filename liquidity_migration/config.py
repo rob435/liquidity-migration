@@ -38,7 +38,7 @@ DEFAULT_STABLECOIN_SYMBOLS = (
     "USDYUSDT",
 )
 DEFAULT_EXCLUDED_SYMBOLS = DEFAULT_STABLECOIN_SYMBOLS
-DEFAULT_RESEARCH_DATA_ROOT = Path("~/SHARED_DATA/bybit_full_pit")
+DEFAULT_RESEARCH_DATA_ROOT = Path("~/SHARED_DATA/bybit_full_pit").expanduser()
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +150,22 @@ class ResearchConfig:
 # module uses `from __future__ import annotations`, so fields(cls)[i].type is
 # the annotation text, not the type object. Unknown annotations pass through
 # unchanged, so the happy path (YAML already gives float/bool) is a no-op.
-_COERCERS: dict[str, Any] = {"float": float, "int": int, "bool": bool, "str": str}
+def _coerce_bool(value: Any) -> bool:
+    """Strict bool coercion. builtin bool('false') is True, silently flipping a
+    quoted YAML boolean to its opposite; this repo is fail-loud-on-bad-config, so
+    parse the string explicitly and raise on anything ambiguous (matches the
+    REAL_MONEY env convention in bybit.py). (audit-iter2 core-config-1)"""
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off", ""):
+        return False
+    raise ValueError(f"cannot parse boolean from {value!r}")
+
+
+_COERCERS: dict[str, Any] = {"float": float, "int": int, "bool": _coerce_bool, "str": str}
 
 
 def _coerce_field(annotation: Any, value: Any) -> Any:

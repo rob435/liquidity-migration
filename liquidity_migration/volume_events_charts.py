@@ -161,14 +161,15 @@ def _chart_final_values(series: list[dict[str, Any]]) -> dict[str, float]:
     multiples are read over the same window; for the strategy that endpoint is in
     its flat tail anyway, so its multiple is unchanged.
     """
+    # Do NOT assume points are date-sorted: OverlaySpec.points can be hand-supplied.
+    # Use the max parsed day per series for common_end, and pick the value at the
+    # largest day <= common_end (scan all, no early break). (audit-iter2 reports-exec-2)
     finals: dict[str, float] = {}
     last_dates: list[date] = []
     for item in series:
-        points = item["points"]
-        if points:
-            day = _parse_day(points[-1]["date"])
-            if day is not None:
-                last_dates.append(day)
+        days = [d for p in item["points"] if (d := _parse_day(p["date"])) is not None]
+        if days:
+            last_dates.append(max(days))
     common_end = min(last_dates) if last_dates else None
     for item in series:
         points = item["points"]
@@ -176,12 +177,12 @@ def _chart_final_values(series: list[dict[str, Any]]) -> dict[str, float]:
             continue
         value: float | None = None
         if common_end is not None:
+            best_day: date | None = None
             for point in points:
                 day = _parse_day(point["date"])
-                if day is not None and day <= common_end:
+                if day is not None and day <= common_end and (best_day is None or day > best_day):
+                    best_day = day
                     value = float(point["value"])
-                elif day is not None and day > common_end:
-                    break
         if value is None:
             value = float(points[-1]["value"])
         finals[str(item["name"])] = value

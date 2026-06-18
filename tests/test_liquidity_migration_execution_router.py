@@ -190,3 +190,30 @@ def test_router_max_buffered_links_validation() -> None:
         ExecutionEventRouter(max_buffered_links=0)
     with pytest.raises(ValueError):
         ExecutionEventRouter(max_buffered_links=-1)
+
+
+def test_router_dedups_redelivered_execid() -> None:
+    """audit-iter2 reports-exec-1: a redelivered execId (WS is not exactly-once) must
+    be counted once, not double-summed into the fill qty/fee. Distinct execIds still
+    accumulate; rows without an execId keep append behaviour."""
+    router = ExecutionEventRouter()
+    row = {"orderLinkId": "lm-en-DUP", "execId": "e1", "execQty": "0.5", "execPrice": "100"}
+    router.on_execution_event(_exec_event(dict(row)))
+    router.on_execution_event(_exec_event(dict(row)))  # same execId redelivered
+    assert len(router.snapshot_rows("lm-en-DUP")) == 1
+    router.on_execution_event(
+        _exec_event({"orderLinkId": "lm-en-DUP", "execId": "e2", "execQty": "0.5", "execPrice": "100"})
+    )
+    assert len(router.snapshot_rows("lm-en-DUP")) == 2  # distinct execId accumulates
+    router.on_execution_event(_exec_event({"orderLinkId": "lm-en-NOID", "execQty": "1"}))
+    router.on_execution_event(_exec_event({"orderLinkId": "lm-en-NOID", "execQty": "1"}))
+    assert len(router.snapshot_rows("lm-en-NOID")) == 2  # idless rows keep append behaviour
+
+
+def test_router_clear_resets_execid_dedup() -> None:
+    router = ExecutionEventRouter()
+    row = {"orderLinkId": "lm-en-CLR", "execId": "x1", "execQty": "1"}
+    router.on_execution_event(_exec_event(dict(row)))
+    router.clear("lm-en-CLR")
+    router.on_execution_event(_exec_event(dict(row)))  # link reused after clear -> not suppressed
+    assert len(router.snapshot_rows("lm-en-CLR")) == 1
