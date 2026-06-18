@@ -50,6 +50,7 @@ Each iteration:
 | 8 | 2026-06-18 | 0 | — | — | NEW METHOD: stdlib-random property/invariant tests over the core math (Sharpe scale-invariance, calendar-day bucketing, funding clamp, hedge-ratio bounds) — ~1,800 generated inputs, all invariants HELD (0 new bugs); +5 generative tests, 1998 total |
 | 9 | 2026-06-18 | 0 | — | — | NEW LENS: coverage-gap analysis (~79% pkg). Confirmed the uncovered ~21% is network/IO glue (collectors/daemons/API clients), NOT untested logic — their pure parsers/helpers are fully tested. Net validated; coverage posture documented in limitations.md. No redundant tests added |
 | 10 | 2026-06-18 | 0 | — | — | Extended property testing to the ACCOUNTING layer (equity-curve/drawdown/total-return identities that feed the decision rule): drawdown<=0, total_return==eq[-1]-1, finite Sharpe, all-positive→zero-DD — all held over generated trade sets; +2 generative tests, 2000 total |
+| 11 | 2026-06-18 | 0 | — | — | Extended property testing to RECONCILIATION pairing (self-reconcile pairs fully; paired<=min population, no double-pairing) — held over generated ledgers; +2 generative tests, 2002 total |
 
 ---
 
@@ -478,6 +479,32 @@ asserted the hard accounting identities:
 
 **All identities held — 0 new bugs.** The accounting layer is now generatively hardened
 alongside the core math (iter-8). Suite green at **2000** (+2).
+
+### Guardrail honored
+
+Local commit only — no `git push`. Test-only addition; no production code changed.
+
+---
+
+## Iteration 11 — 2026-06-18 (property-test the reconciliation pairing)
+
+No new repo commits since iter-10. Continued the property method on the reconciliation
+pairing (`reconcile_paper_demo`) — the live↔model agreement check at the heart of the
+"one command reconciliation". Generated random ledgers and asserted the non-trivial
+pairing invariants (the partition counts themselves are definitional subtraction, so the
+value is in the pairing logic):
+
+- **Self-reconciliation pairs FULLY**: `reconcile_paper_demo(X, X)` pairs every trade
+  (`paired == len(X)`, zero paper_only/demo_only) — exercises the trade_id→signal→entry
+  precedence and proves it's complete when both sides are identical.
+- **`paired <= min(paper_trades, demo_trades)`**: no trade can double-pair; all partition
+  counts non-negative.
+
+**All held — 0 new bugs.** Reconciliation pairing is now generatively hardened alongside
+the core math (iter-8) and the accounting layer (iter-10). Suite green at **2002** (+2).
+
+The high-value property-test targets (core math, accounting, reconciliation) are now
+covered; further iterations focus on auditing NEW operator commits rather than padding.
 
 ### Guardrail honored
 

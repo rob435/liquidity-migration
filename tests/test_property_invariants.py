@@ -22,6 +22,7 @@ from liquidity_migration.continuous_rebalance import (
 )
 from liquidity_migration.config import TradeLifecycleConfig
 from liquidity_migration.ingestion import normalize_funding_history
+from liquidity_migration.reconciliation import reconcile_paper_demo
 from liquidity_migration.trade_lifecycle import (
     _daily_sharpe,
     annualized_sharpe,
@@ -166,3 +167,56 @@ def test_hedge_ratio_bounded_by_cap_times_scale() -> None:
         assert 0.0 <= r <= cap * max(scale, 0.0) + 1e-12, (r, cap, scale)
         if scale <= 0.0:
             assert r == 0.0
+
+
+def _recon_row(rng: random.Random, trade_id: str, entry_ts_ms: int) -> dict:
+    """Minimal trade row reconcile_paper_demo accepts (mirrors test_..._reconciliation)."""
+    return {
+        "trade_id": trade_id,
+        "symbol": rng.choice(["AAAUSDT", "BBBUSDT", "CCCUSDT"]),
+        "side": "short",
+        "signal_ts_ms": entry_ts_ms - 1000,
+        "entry_ts_ms": entry_ts_ms,
+        "entry_price": 100.0,
+        "qty": 1.0,
+        "status": "closed",
+        "exit_price": 99.0,
+        "exit_ts_ms": entry_ts_ms + 3_600_000,
+        "exit_reason": "tp",
+    }
+
+
+def _distinct_rows(rng: random.Random, n: int, id_prefix: str) -> list[dict]:
+    rows, used = [], set()
+    for i in range(n):
+        ts = rng.randint(1_000_000, 50_000_000)
+        while ts in used:  # distinct entry/signal ts so tolerance pairing is unambiguous
+            ts = rng.randint(1_000_000, 50_000_000)
+        used.add(ts)
+        rows.append(_recon_row(rng, f"{id_prefix}{i}", ts))
+    return rows
+
+
+def test_reconcile_self_pairs_fully() -> None:
+    """Reconciling a ledger against ITSELF must pair every trade (exact trade_id match)
+    and leave nothing unpaired — a real exercise of the trade_id/signal/entry pairing."""
+    rng = random.Random(41)
+    for _ in range(80):
+        rows = _distinct_rows(rng, rng.randint(1, 30), "t")
+        df = pl.DataFrame(rows)
+        s = reconcile_paper_demo(df, df)["summary"]
+        assert s["paired"] == len(rows), s
+        assert s["paper_only"] == 0 and s["demo_only"] == 0, s
+
+
+def test_reconcile_paired_bounded_by_min_population() -> None:
+    """paired can never exceed the smaller population (no trade double-pairs); all
+    partition counts are non-negative."""
+    rng = random.Random(42)
+    for _ in range(80):
+        paper = _distinct_rows(rng, rng.randint(1, 25), "p")
+        demo = _distinct_rows(rng, rng.randint(1, 25), "d")
+        s = reconcile_paper_demo(pl.DataFrame(paper), pl.DataFrame(demo))["summary"]
+        assert s["paired"] >= 0
+        assert s["paired"] <= min(s["paper_trades"], s["demo_trades"]), s
+        assert s["paper_only"] >= 0 and s["demo_only"] >= 0, s
