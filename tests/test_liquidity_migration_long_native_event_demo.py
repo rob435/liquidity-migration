@@ -337,7 +337,10 @@ def test_stale_signal_beyond_24h_is_dropped() -> None:
         max_new_entries=5,
     )
     assert candidates == []
-    assert skips["no_signal"] == 1
+    # audit-iter3: a >24h signal is now attributed to the stale_signal counter (it was
+    # previously mis-counted as no_signal, leaving stale_signal stuck at 0).
+    assert skips["stale_signal"] == 1
+    assert skips["no_signal"] == 0
 
 
 def test_cooldown_blocks_re_entry() -> None:

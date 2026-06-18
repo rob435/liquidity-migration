@@ -25,6 +25,7 @@ import csv
 import io
 import json
 import sys
+import time
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -75,13 +76,26 @@ def _months(first: str, last: str) -> list[str]:
 
 def _fetch(url: str, timeout: int = 30) -> bytes | None:
     req = urllib.request.Request(url, headers={"User-Agent": "liqmig-funding-rebuild"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return None
-        raise
+    # Retry 5xx / 408 / 429 with backoff (fapi rate-limits the REST top-up): a single
+    # transient error must not abort the whole rebuild after all archive work
+    # (audit-iter3 backlog scripts). 404 is a genuine no-data month.
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            if (exc.code >= 500 or exc.code in (408, 429)) and attempt < 3:
+                time.sleep(5 * (attempt + 1))
+                continue
+            raise
+        except Exception:
+            if attempt < 3:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
+    return None
 
 
 def _cache_cutoff_month(now: datetime) -> str:
@@ -225,7 +239,14 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=4) as ex:  # be gentle with fapi rate limits
         futs = {ex.submit(_fapi_topup, s, last_by_symbol.get(s, 0)): s for s in topup_syms}
         for fut in as_completed(futs):
-            all_rows.extend(fut.result())
+            sym = futs[fut]
+            try:
+                all_rows.extend(fut.result())
+            except Exception as exc:  # noqa: BLE001 - one symbol's top-up must not abort the rebuild
+                # Log LOUDLY (not silent): this symbol's current-month rows are missing
+                # from the rebuilt dataset (audit-iter3 backlog scripts).
+                print(f"  WARN: fapi top-up failed for {sym}: {exc} — "
+                      f"current-month funding rows missing for this symbol", flush=True)
 
     df = pl.DataFrame(all_rows).unique(["symbol", "ts_ms"], keep="first").sort(["symbol", "ts_ms"])
     print(f"total rows: {df.height:,}  symbols: {df['symbol'].n_unique()}  "

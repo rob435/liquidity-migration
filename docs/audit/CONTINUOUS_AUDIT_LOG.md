@@ -43,6 +43,7 @@ Each iteration:
 | 1 | 2026-06-18 | 22 | 13 | 9 | repo-wide audit (8 clusters, adversarial verify); 1 HIGH fixed; reconcile collapsed to one command; harness-cli cluster pending re-run (rate-limited) |
 | 2 | 2026-06-18 | 14 | 11 | 3 | harness-cli (rerun) + 27 modules iter1 missed; 2 HIGH fixed (execId double-count, combined-signal null-poison); +7 regression tests |
 | 3 | 2026-06-18 | 39 | 8 | 31 | remaining scripts + DEEP pass on 5 giant modules; 3 HIGH fixed (incl. a fix-interaction with iter-1); 1 reverted (test-pinned audit2b conflict); large LOW backlog queued for iter-4 |
+| 4 | 2026-06-18 | (backlog) | 15 | 1 | cleared the iter-3 safe-LOW backlog (no new audit); +3 regression tests; only the orchestrator zero-trade engine fix deferred to iter-5 |
 
 ---
 
@@ -224,3 +225,49 @@ hard-fail.
 Local commit only — **no `git push`**. `REAL_MONEY` untouched. A test-pinned prior
 decision (audit2b) was NOT overridden — surfaced to the operator instead. The
 deferred look-ahead fix *tightens* PIT (left for pre-reg, not silently changed).
+
+---
+
+## Iteration 4 — 2026-06-18
+
+**Baseline:** `ruff` clean; `pytest -q` → 1984 passed.
+
+No new audit this iteration — this pass CLEARED the safe-LOW backlog that iteration
+3 deliberately queued (all already adversarially verified). 15 of 16 backlog items
+fixed; the suite stays green at **1987** (+3 regression tests).
+
+### Fixed (15)
+
+| Finding | File | Fix |
+|---|---|---|
+| stale_signal counter | `long_native_event_demo.py` | count stale drops explicitly; a cycle where every signal aged out reports `skipped_stale_signal` not `skipped_no_signal` |
+| metrics 429 | `backfill_binance_metrics_vision.py` | 429/408 treated as transient (retry → `__RETRY__`), not a run-aborting raise |
+| bookdepth 429 | `backfill_binance_bookdepth_vision.py` | same 429/408 transient handling |
+| funding 429 | `backfill_binance_funding_vision.py` | `_fetch` retry/backoff for 429/5xx + loud per-symbol top-up guard (no silent loss) |
+| metrics concat | `backfill_binance_metrics_vision.py` | `_merge_with_existing` aligns prior to df's full schema (no concat crash on older on-disk schema) |
+| taker --ohlc label | `bybit_taker_flow_backfill.py` | OHLC manifest status reflects OHLC production, not the flow result |
+| alpha regime returns | `alpha_sweep.py` | regime/regimevalidate market index uses gap-aware `calendar_shift` (BAC-1), not positional `shift(1)` |
+| alpha forward pad | `alpha_sweep.py` | forward klines pad uses the MAX swept `entry_delay_hours`, so long-delay cells aren't extra-truncated |
+| addon orders collision | `continuous_addon_shadow.py` | same-orders-source (not just trades) now fails loud / strategy-filters; double-count guard broadened |
+| addon idle cycles | `continuous_addon_shadow.py` | `worst_entry_acceptance_fraction` excludes zero-candidate cycles (default 1.0) so idle cycles don't fail the gate |
+| funding coverage | `continuous_deployed_equity{,_refresh}.py` | warn on missing funding partitions (silent zero-funding hedge) — both copies |
+| event_counts double-count | `long_native.py` | `fomo_chase` counted once (daily classification); provisional firings tracked via `stats` |
+| dry-run exit order price | `long_native_event_demo.py` | exit ORDER leg marks to the live/entry price in dry-run/paper (matched the trade leg) |
+| addon attempts ts_ms | `continuous_addon_shadow.py` | per-row CSV ts_ms uses the same fallback chain as bucketing (reconcilable with counts) |
+| ensemble trigger validation | `continuous_demo.py` | validate ensemble component triggers + confirm-delay up front (fail fast) |
+
+Regression tests added: stale-signal attribution (updated), ensemble-trigger validation
+(invalid trigger + delay=0), addon same-orders-source guard.
+
+### Deferred to iteration 5 (1)
+
+`continuous_forward_replay_orchestrator` zero-trade hard-fail: the root cause is the
+engine not writing CSVs on a legitimately-flat component (`continuous_events.py`
+output path). Better done deliberately (write empty CSVs unconditionally + harden the
+staleness skip to require the CSV artifacts) than as a quick backlog-clear.
+
+### Guardrail honored
+
+Local commit only — **no `git push`**. `REAL_MONEY` untouched. One test that pinned a
+*buggy* counter attribution (stale_signal→no_signal) was updated to the corrected
+behavior (it documented no deliberate intent, unlike the audit2b case in iter-3).

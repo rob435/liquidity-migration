@@ -82,10 +82,12 @@ def _fetch(url: str, timeout: int = 30) -> bytes | None:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
-            if exc.code >= 500 and attempt < 3:
+            # transient: 5xx plus 408/429 (rate-limit / timeout). Retry, then degrade to
+            # __RETRY__ rather than crashing the whole backfill (audit-iter3 backlog scripts).
+            if (exc.code >= 500 or exc.code in (408, 429)) and attempt < 3:
                 time.sleep(5 * (attempt + 1))
                 continue
-            raise
+            return b"__RETRY__"
         except Exception:
             if attempt < 3:
                 time.sleep(2 * (attempt + 1))

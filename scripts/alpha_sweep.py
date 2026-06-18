@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO))
 import numpy as np  # noqa: E402
 import polars as pl  # noqa: E402
 
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR  # noqa: E402
+from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift  # noqa: E402
 from liquidity_migration.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
     _additive_summary,
@@ -145,6 +145,24 @@ def _max_swept_max_hold_hours(experiment_arg: str) -> int:
     return best
 
 
+def _max_swept_entry_delay_hours(experiment_arg: str) -> int:
+    """Largest ``entry_delay_hours`` any cell in the requested experiment(s) will run.
+    The forward klines pad must cover the longest (delay + hold) actually swept, else
+    the `delay` sweep's long-delay cells get more tail-truncation than short-delay
+    cells (audit-iter3 backlog scripts). Mirrors _max_swept_max_hold_hours."""
+    best = int(BASE.entry_delay_hours)
+    for exp in experiment_arg.split(","):
+        try:
+            cells = _experiment(exp.strip())
+        except SystemExit:
+            continue  # special-branch / unknown — handled by the main dispatch
+        for _label, ov in cells:
+            ed = ov.get("entry_delay_hours")
+            if ed is not None:
+                best = max(best, int(ed))
+    return best
+
+
 def _attach_surge_ratio(entries: pl.DataFrame, klines: pl.DataFrame, lookback_h: int) -> pl.DataFrame:
     """surge_ratio per entry = signal-bar turnover / trailing-median turnover (causal: the median uses
     the lookback_h bars BEFORE the signal bar via shift(1)). Re-injects the liquidity-migration EVENT:
@@ -251,7 +269,7 @@ def main() -> int:
     # this run (not just BASE.max_hold_hours) so the maxhold sweep's long-hold
     # cells aren't tail-truncated against a too-short window (alpha-scripts-4).
     max_hold = _max_swept_max_hold_hours(args.experiment)
-    pad = (max_hold + BASE.entry_delay_hours + 4) * MS_PER_HOUR
+    pad = (max_hold + _max_swept_entry_delay_hours(args.experiment) + 4) * MS_PER_HOUR
     print(f"[{args.label}] read klines ...", flush=True)
     klines = _read_window(root, kname, start_ms=start_ms, end_ms=end_ms + pad,
                           columns=["ts_ms", "symbol", "open", "high", "low", "close", "turnover_quote"])
@@ -273,7 +291,7 @@ def main() -> int:
         ent = _fresh_entries(panel, cfg33)
         mbase = (klines.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day"))
                  .group_by(["symbol", "day"]).agg(pl.col("close").last().alias("c")).sort(["symbol", "day"])
-                 .with_columns((pl.col("c") / pl.col("c").shift(1).over("symbol") - 1.0).alias("r"))
+                 .with_columns((pl.col("c") / calendar_shift(pl.col("c"), 1, time_col="day") - 1.0).alias("r"))
                  .group_by("day").agg(pl.col("r").mean().alias("mret")).drop_nulls().sort("day"))
         rng = np.random.default_rng(0)
 
@@ -323,7 +341,7 @@ def main() -> int:
         # equal-weight market daily index -> trailing trend (7d) + vol (14d), CAUSAL (shifted by 1 day).
         md = (klines.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day"))
               .group_by(["symbol", "day"]).agg(pl.col("close").last().alias("c")).sort(["symbol", "day"])
-              .with_columns((pl.col("c") / pl.col("c").shift(1).over("symbol") - 1.0).alias("r"))
+              .with_columns((pl.col("c") / calendar_shift(pl.col("c"), 1, time_col="day") - 1.0).alias("r"))
               .group_by("day").agg(pl.col("r").mean().alias("mret")).drop_nulls().sort("day"))
         md = md.with_columns(pl.col("mret").rolling_sum(7).shift(1).alias("trend7"),
                              pl.col("mret").rolling_std(14).shift(1).alias("vol14"))

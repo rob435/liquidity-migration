@@ -520,7 +520,10 @@ def _entry_order_attempt_rows(*, source: str, rows: list[dict[str, Any]]) -> lis
             "order_link_id": _str(row, "order_link_id"),
             "trade_id": _str(row, "trade_id"),
             "status": _str(row, "status").lower() or "unknown",
-            "ts_ms": _int(row, "ts_ms", "created_ts_ms", "updated_at_ms"),
+            # Use the same fallback chain as bucketing (and the sibling unmatched-attempts
+            # CSV at ~line 489) so per-row ts_ms reconciles against the daily/symbol-day
+            # counts instead of emitting 0 for rows keyed by signal_ts (audit-iter3 backlog).
+            "ts_ms": _entry_order_attempt_ts(row),
             "submit_mode": _str(row, "submit_mode"),
             "error": _str(row, "error"),
         }
@@ -1373,9 +1376,16 @@ def _cycle_summary(cycles: pl.DataFrame, *, now_ms: int = 0) -> dict[str, Any]:
         "same_signal_reentry_skip_fraction": _ratio(same_signal_reentry_skips, candidate_pressure),
         "addon_primary_pnl_gate_skip_fraction": _ratio(addon_primary_pnl_gate_skips, candidate_pressure),
         "max_candidate_pressure": max((int(row["candidate_pressure"]) for row in rows), default=0),
+        # Exclude idle (zero-candidate-pressure) cycles: an idle cycle has acceptance
+        # 0.0 but rejected nothing, so counting it would spuriously fail the worst-cycle
+        # acceptance gate. default=1.0 = "no cycle had candidates to reject" (audit-iter3).
         "worst_entry_acceptance_fraction": min(
-            (float(row["entry_acceptance_fraction"]) for row in rows),
-            default=0.0,
+            (
+                float(row["entry_acceptance_fraction"])
+                for row in rows
+                if int(row["candidate_pressure"]) > 0
+            ),
+            default=1.0,
         ),
         "worst_same_signal_reentry_skip_fraction": max(
             (float(row["same_signal_reentry_skip_fraction"]) for row in rows),
@@ -2252,18 +2262,27 @@ def run_continuous_addon_shadow_audit(config: ContinuousAddonShadowAuditConfig) 
         addon_root.resolve(),
         config.addon_trades_dataset,
     )
+    # audit-iter3: the ORDERS datasets are also read for both sides (daily/symbol-day
+    # ticket-rate gates), so an orders-source collision double-counts those metrics
+    # just like trades. Guard it on the same condition.
+    same_orders_source = (primary_root.resolve(), config.primary_orders_dataset) == (
+        addon_root.resolve(),
+        config.addon_orders_dataset,
+    )
+    same_any_source = same_trades_source or same_orders_source
     distinct_strategy_split = bool(
         config.expected_primary_strategy_id
         and config.expected_addon_strategy_id
         and config.expected_primary_strategy_id != config.expected_addon_strategy_id
     )
-    if same_trades_source and not distinct_strategy_split:
+    if same_any_source and not distinct_strategy_split:
+        which = "trades" if same_trades_source else "orders"
         raise ValueError(
-            "Add-on shadow audit primary and add-on resolve to the same trades source "
-            f"({primary_root.resolve()} / {config.primary_trades_dataset}); this double-counts "
-            "every combined metric. Point --primary-data-root and --addon-data-root at distinct "
-            "roots (or distinct trades datasets), or supply distinct "
-            "--expected-primary-strategy-id and --expected-addon-strategy-id to split one root by strategy."
+            f"Add-on shadow audit primary and add-on resolve to the same {which} source "
+            f"({primary_root.resolve()}); this double-counts combined metrics. Point "
+            "--primary-data-root and --addon-data-root at distinct roots (or distinct "
+            "datasets), or supply distinct --expected-primary-strategy-id and "
+            "--expected-addon-strategy-id to split one root by strategy."
         )
 
     primary = read_dataset(primary_root, config.primary_trades_dataset)
@@ -2276,7 +2295,7 @@ def run_continuous_addon_shadow_audit(config: ContinuousAddonShadowAuditConfig) 
     addon_rows = _clean_trade_rows(_rows(addon))
     primary_order_rows = _rows(primary_orders)
     addon_order_rows = _rows(addon_orders)
-    if same_trades_source and distinct_strategy_split:
+    if same_any_source and distinct_strategy_split:
         # Single-root strategy-split mode: keep only each side's strategy so the
         # two sides are genuinely disjoint rather than the same rows twice.
         primary_rows = _filter_by_strategy_id(primary_rows, config.expected_primary_strategy_id)

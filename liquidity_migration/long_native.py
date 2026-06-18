@@ -1992,7 +1992,11 @@ def _run_long_pipeline(
                     if effective_gross > config.max_per_symbol_weight:
                         position_weight = config.max_per_symbol_weight / max(notional_weight, 1e-12)
                 stats["provisional_entries"] += 1
-                event_counts["fomo_chase"] += 1
+                # event_counts["fomo_chase"] is NOT bumped here: it is the daily-
+                # classification firing count, incremented once in the standard loop
+                # (~line 2046). A confirmed provisional symbol re-classifies there, so
+                # counting it here too double-counted it (audit-iter3 backlog). Provisional
+                # fills are tracked via stats["provisional_entries"]/["provisional_confirmed"].
                 open_positions[symbol] = {
                     "symbol": symbol,
                     "pattern": "fomo_chase",

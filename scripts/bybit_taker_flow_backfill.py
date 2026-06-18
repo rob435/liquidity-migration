@@ -199,12 +199,17 @@ def process_one(sym: str, date: str) -> tuple[str, str]:
         else:
             status = "ok"
         if EMIT_OHLC:
+            # In --ohlc mode the active manifest is the OHLC manifest, so status must
+            # reflect whether an OHLC partition was written — NOT the flow result. The
+            # old `elif status=="ok"` mislabeled OHLC-producing dates as "empty" when
+            # flow happened to be empty (audit-iter3 backlog scripts).
             ohlc = aggregate_tick_ohlc_1m(csv_bytes, symbol=sym)
             if not ohlc.is_empty():
                 ohlc_dir = OHLC_DATASET / f"date={date}" / f"symbol={sym}"
                 ohlc_dir.mkdir(parents=True, exist_ok=True)
                 ohlc.write_parquet(ohlc_dir / "part.parquet")
-            elif status == "ok":
+                status = "ok"
+            else:
                 status = "empty"
         Path(archive_path).unlink(missing_ok=True)
         return key, status

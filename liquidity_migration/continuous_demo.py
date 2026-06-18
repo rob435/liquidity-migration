@@ -2981,6 +2981,17 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
             raise ValueError("entry_event_trigger requires confirmed-bar entry timing")
         # Parse/validate now, before any order path or cycle work.
         _entry_event_expr(config.entry_event_trigger)
+    # audit-iter3: validate ensemble component triggers up front too (each component is
+    # run as entry_event_trigger=comp_trigger at cycle time). Fail fast on an unknown
+    # trigger string and require confirmed-bar timing so the event-feature columns exist.
+    for comp in config.ensemble_components:
+        comp_trigger = comp[1]
+        if comp_trigger != "none":
+            if config.entry_confirm_delay_hours <= 0:
+                raise ValueError(
+                    "ensemble component entry_event_trigger requires confirmed-bar entry timing"
+                )
+            _entry_event_expr(comp_trigger)
     from .bybit import validate_order_submit_allowed
 
     validate_order_submit_allowed(

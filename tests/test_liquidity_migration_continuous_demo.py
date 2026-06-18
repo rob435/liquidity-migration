@@ -3230,3 +3230,27 @@ def test_codequality5_finite_or_none_matches_finite_float_default_none() -> None
     assert _finite_or_none(float("nan")) is None
     assert _finite_or_none(None) is None
     assert _finite_or_none("3.25") == 3.25
+
+
+def test_validate_rejects_ensemble_component_invalid_trigger() -> None:
+    """audit-iter3: an unknown ensemble component trigger must fail fast in the
+    validator, not at cycle time."""
+    with pytest.raises(ValueError):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(
+                record_dry_run=True,
+                ensemble_components=(("c1", "not_a_real_trigger", 0, 0.1, 1.0),),
+            )
+        )
+
+
+def test_validate_rejects_ensemble_trigger_without_confirm_delay() -> None:
+    """audit-iter3: an ensemble component event-trigger requires confirmed-bar timing."""
+    with pytest.raises(ValueError, match="confirmed-bar"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(
+                record_dry_run=True,
+                entry_confirm_delay_hours=0,
+                ensemble_components=(("c1", "fresh_pop25", 0, 0.1, 1.0),),
+            )
+        )

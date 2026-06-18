@@ -98,10 +98,14 @@ def _fetch(url: str, timeout: int = 30) -> bytes | None:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
-            if exc.code >= 500 and attempt < 3:  # transient archive 5xx: back off and retry
+            # transient: archive 5xx, plus 408/429 (rate-limit / timeout). Back off and
+            # retry; on exhaustion signal __RETRY__ so the day degrades to a retryable
+            # transient marker instead of crashing the whole multi-symbol run
+            # (audit-iter3 backlog scripts).
+            if (exc.code >= 500 or exc.code in (408, 429)) and attempt < 3:
                 time.sleep(5 * (attempt + 1))
                 continue
-            raise
+            return b"__RETRY__"
         except Exception:
             if attempt < 3:
                 time.sleep(2 * (attempt + 1))
@@ -166,7 +170,13 @@ def _merge_with_existing(df: pl.DataFrame, path: Path) -> pl.DataFrame:
         return df
     if "coverage" in prior.columns:
         prior = prior.drop("coverage")
-    prior = prior.select([c for c in df.columns if c in prior.columns])
+    # Align prior to df's full schema: add any column df has but prior lacks (older
+    # on-disk schema) as typed nulls, then order to df.columns — else the concat
+    # crashes on a column-count mismatch (audit-iter3 backlog scripts).
+    for c in df.columns:
+        if c not in prior.columns:
+            prior = prior.with_columns(pl.lit(None).cast(df.schema[c]).alias(c))
+    prior = prior.select(df.columns)
     return (
         pl.concat([prior, df], how="vertical_relaxed")
         .unique(["symbol", "ts_ms"], keep="last")

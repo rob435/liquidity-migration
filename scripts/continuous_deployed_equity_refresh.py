@@ -246,11 +246,20 @@ def instrument_inputs(
     }
     fund: dict[int, float] = {}
     root = funding_root(venue, data_root)
+    missing = 0
     for day in days:
         date = dt.datetime.fromtimestamp(day / 1000, tz=dt.timezone.utc).date().isoformat()
         part = root / f"date={date}" / f"symbol={symbol}"
         if part.exists():
             fund[day] = float(pl.read_parquet(part, columns=["funding_rate"])["funding_rate"].sum())
+        else:
+            missing += 1
+    # Surface funding-coverage gaps: a missing partition silently defaults to zero
+    # funding for the hedge legs, which a wholly-missing/mis-resolved root would hide
+    # (audit-iter3 backlog scripts). Diagnostic only — no numeric change.
+    if missing:
+        print(f"[{venue}] {symbol} funding coverage: {len(days) - missing}/{len(days)} days; "
+              f"{missing} defaulted to zero", flush=True)
     return rets, fund
 
 

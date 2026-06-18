@@ -2088,3 +2088,36 @@ def test_addon_shadow_float_drops_divergent_or_idiom() -> None:
     # math is still imported in addon_shadow (used elsewhere); the helper no
     # longer re-implements the isfinite guard itself.
     assert cas._float(2.5) == 2.5
+
+
+def test_addon_audit_same_orders_source_raises(tmp_path: Path) -> None:
+    """audit-iter3: distinct trades datasets but a SHARED orders dataset (no strategy
+    split) must still fail loud — the orders double-count combined ticket-rate metrics."""
+    root = tmp_path / "shared"
+    root.mkdir()
+    trade = {
+        "symbol": "BTCUSDT", "signal_ts_ms": 1_000, "entry_ts_ms": 1_000 + 2 * 3_600_000,
+        "trade_id": "t1", "strategy_id": "primary",
+    }
+    order = {
+        "symbol": "BTCUSDT", "signal_ts_ms": 1_000, "trade_id": "t1", "status": "filled",
+        "order_link_id": "lm-en-ca-1", "strategy_id": "primary",
+    }
+    write_dataset(pl.DataFrame([trade]), root, "continuous_fade_paper_trades", partition_by=())
+    write_dataset(
+        pl.DataFrame([dict(trade, trade_id="t2")]), root,
+        "continuous_fade_demo_trades", partition_by=(),
+    )
+    write_dataset(pl.DataFrame([order]), root, "continuous_fade_paper_orders", partition_by=())
+    write_dataset(
+        pl.DataFrame([{"ts_ms": 1_000, "entry_candidates": 1, "entries": 1}]),
+        root, "continuous_fade_paper_cycles", partition_by=(),
+    )
+    config = cas.ContinuousAddonShadowAuditConfig(
+        primary_data_root=str(root),
+        addon_data_root=str(root),
+        addon_trades_dataset="continuous_fade_demo_trades",  # distinct -> no trades collision
+        output_dir=str(tmp_path / "out"),
+    )
+    with pytest.raises(ValueError, match="same orders source"):
+        cas.run_continuous_addon_shadow_audit(config)

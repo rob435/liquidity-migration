@@ -1086,12 +1086,25 @@ def _select_long_entry_candidates(
     # long-sleeve-1: a daily signal's ts_ms is the day-END stamp, so the current still-forming
     # bar has a FUTURE ts. Require int(ts) <= now_ms (closed bar) — firing FC on a not-yet-closed
     # bar is look-ahead vs the backtest's closed-bar signal (a no-look-ahead correctness gate).
-    eligible_ts = sorted(
+    # Count stale drops explicitly so a cycle where every closed-bar signal aged out
+    # reports skipped_stale_signal>0 rather than masquerading as skipped_no_signal
+    # (audit-iter3 backlog; observability only — no effect on selection/sizing/PIT).
+    closed_ts = [
         ts for ts in features["ts_ms"].unique().to_list()
-        if ts is not None and int(ts) <= now_ms and (now_ms - int(ts)) <= SIGNAL_FRESHNESS_MS
-    )
+        if ts is not None and int(ts) <= now_ms
+    ]
+    eligible_ts = []
+    for ts in closed_ts:
+        if (now_ms - int(ts)) > SIGNAL_FRESHNESS_MS:
+            skips["stale_signal"] += 1
+        else:
+            eligible_ts.append(ts)
+    eligible_ts.sort()
     if not eligible_ts:
-        skips["no_signal"] = 1
+        # "no_signal" only when there were no closed-bar signals at all; if signals
+        # existed but all aged out, stale_signal already records it.
+        if skips["stale_signal"] == 0:
+            skips["no_signal"] = 1
         return [], skips
 
     candidates: list[dict[str, Any]] = []
@@ -1557,6 +1570,16 @@ def _execute_long_exits(
                     "updated_at_ms": now_ms,
                 })
             rows.append(trade_update)
+        # Mark the exit ORDER leg to the same price the trade leg uses: in dry-run/paper
+        # the venue exit_price is 0 (no real fill), so the order row recorded avg_price/
+        # notional=0 while the trade row marked to the live price — mirror the entry-row
+        # convention (audit-iter3 backlog). Submit mode keeps the real venue exec price.
+        order_exit_price = exit_price if demo.submit_orders else (
+            exit_price
+            or _float((price_by_symbol or {}).get(symbol))
+            or _float(trade.get("entry_price"))
+        )
+        order_exit_qty = filled_qty if demo.submit_orders else _float(qty)
         order_rows.append({
             "order_link_id": exit_link,
             "ts_ms": now_ms,
@@ -1568,10 +1591,10 @@ def _execute_long_exits(
             "reduce_only": True,
             "order_id": order_result.get("orderId", ""),
             "submit_mode": submit_mode,
-            "avg_price": exit_price,
+            "avg_price": order_exit_price,
             "fee_usdt": exit_fee_usdt,
             "exec_time_ms": exit_exec_time_ms,
-            "notional_usdt": abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0,
+            "notional_usdt": abs(order_exit_price * order_exit_qty) if order_exit_price > 0.0 else 0.0,
             "status": status,
             "trade_side": "long",
             "exit_reason": str(plan.get("exit_reason", "time_stop")),
