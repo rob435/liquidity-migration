@@ -36,9 +36,12 @@ python -m liquidity_migration <subcommand> --help
   root, and never point demo ledgers at the research root.
 - **Paper-shadow ledgers** → `data/bybit-long-paper-event` +
   `data/bybit-continuous-paper-event` (`data/bybit-paper-event` is the erased
-  short sleeve's inert root). Reconciliation is fully scripted — run
-  `bash scripts/reconcile.sh` (skill: `pit-reconcile`) for the paper↔demo
-  reconcile; do not hand-assemble `reconcile-*` calls.
+  short sleeve's inert root). Reconciliation is fully scripted behind ONE
+  front door — `bash scripts/reconcile.sh` (skill: `pit-reconcile`) runs the full
+  demo↔backtest↔paper three-way for BOTH sleeves by default; add `--quick` for
+  the fast paper↔demo execution-only check. Do not hand-assemble `reconcile-*`
+  calls. (`scripts/reconcile_three_way.sh` is a back-compat alias for the default
+  full run.)
 - **Pristine OOS** → forward demo / paper ledgers only. There is no internal
   OOS surface; both per-venue roots span their full available history. Cite
   the forward ledger as the OOS evidence.

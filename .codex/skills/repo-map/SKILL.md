@@ -49,8 +49,11 @@ and `graphify-out/GRAPH_REPORT.md`.
 - `event_demo.py` / `event_demo_exits.py` / `ws_risk.py` — shared live-execution
   helpers + the websocket-first risk watchdog (REST fallback; always-on).
 - `trade_lifecycle.py` / `_common.py` / `momentum_signals.py` — the shared
-  simulate stack, date/frame utils, and the rmom builder (relocated from the
-  erased hub).
+  simulate stack, date/frame utils, and the `daily_bars` / `add_returns_and_age`
+  resampling helpers that `long_native.py` uses (the rest of `momentum_signals`
+  is legacy/dead). The residual-momentum (rmom) signal is built in `risk_model.py`
+  (`build_factor_panel` / `fit_factor_returns`, driven by
+  `scripts/precompute_residual_momentum.py`), not here.
 - `long_native.py` — the long-native v11a sleeve (the `equity-curve` skill drives it).
 - `kline_store.py` / `kline_stream_manager.py` / `ws_state_cache.py` — the
   WS-driven event runtime.

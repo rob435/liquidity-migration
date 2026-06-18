@@ -1,6 +1,6 @@
 ---
 name: equity-curve
-description: "Produce official equity curves for the promoted LONG v11a sleeve and the research-stage CONTINUOUS demo book. Use scripts/equity_curves.sh for long, continuous, or long-vs-continuous comparisons; LONG comes from liquidity_migration/promoted.py, CONTINUOUS delegates to scripts/continuous_deployed_equity_refresh.py and is not a promoted profile. Covers per-venue full-PIT roots, outputs, and run-label interpretation."
+description: "Produce official equity curves for the promoted LONG v11a sleeve and the research-stage CONTINUOUS demo book. Use scripts/equity_curves.sh for long, continuous, or long-vs-continuous comparisons; LONG comes from liquidity_migration/promoted.py, CONTINUOUS delegates to scripts/continuous_deployed_equity_refresh.py and is a promoted-in-code profile by operator override (2026-06-15), demo/paper only - not a real-money or gate-pass claim. Covers per-venue full-PIT roots, outputs, and run-label interpretation."
 ---
 
 > ERASURE NOTE (2026-06-11, operator order): the daily SHORT sleeve was erased
@@ -34,14 +34,17 @@ inferred from `--root`.
 ## Sleeve Contract
 
 - `long`: the promoted-in-code LONG v11a sleeve. The profile is sourced from
-  `liquidity_migration/promoted.py` (`PROFILES == {"long"}`) and run through
+  `liquidity_migration/promoted.py` (`PROFILES == {"long", "continuous"}`) and run through
   `run_long_native_research`. Use `--long-notional-multiplier N` only to draw a
   pure-leverage curve on the same signal.
 - `continuous`: the research/demo-stage continuous ensemble reconstruction:
   winner_base components plus the banked BTC+ETH 2f hedge, via
-  `scripts/continuous_deployed_equity_refresh.py`. It is deliberately not in
-  `promoted.PROFILES`, not a real-money claim, and not promotion evidence. The
-  forward demo/paper record is the arbiter.
+  `scripts/continuous_deployed_equity_refresh.py`. It is in `promoted.PROFILES`
+  by an explicit operator override (2026-06-15), NOT a demo-arbiter gate pass: it
+  is demo/paper ONLY (REAL_MONEY stays false, Tier-3 real-money gate unmet), not a
+  real-money claim, and not promotion evidence. The forward demo/paper record is
+  the arbiter. Receipt:
+  `docs/preregistration/2026-06-15-operator-override-promote-continuous.md`.
 
 Continuous-specific options:
 

@@ -51,6 +51,7 @@ Each iteration:
 | 9 | 2026-06-18 | 0 | — | — | NEW LENS: coverage-gap analysis (~79% pkg). Confirmed the uncovered ~21% is network/IO glue (collectors/daemons/API clients), NOT untested logic — their pure parsers/helpers are fully tested. Net validated; coverage posture documented in limitations.md. No redundant tests added |
 | 10 | 2026-06-18 | 0 | — | — | Extended property testing to the ACCOUNTING layer (equity-curve/drawdown/total-return identities that feed the decision rule): drawdown<=0, total_return==eq[-1]-1, finite Sharpe, all-positive→zero-DD — all held over generated trade sets; +2 generative tests, 2000 total |
 | 11 | 2026-06-18 | 0 | — | — | Extended property testing to RECONCILIATION pairing (self-reconcile pairs fully; paired<=min population, no double-pairing) — held over generated ledgers; +2 generative tests, 2002 total |
+| 12 | 2026-06-18 | (docs) | 6 | — | OPERATOR-REQUESTED Codex-skills sync: audited all 8 .codex/skills (fan-out), fixed 13 stale claims across 6 (reconcile.sh one-command model; continuous now promoted-in-code; rmom in risk_model not momentum_signals; STATE.md section renames; funding-roots) — closes the iter-1 Codex follow-up. research-report + vps-migrate already current |
 
 ---
 
@@ -509,3 +510,37 @@ covered; further iterations focus on auditing NEW operator commits rather than p
 ### Guardrail honored
 
 Local commit only — no `git push`. Test-only addition; no production code changed.
+
+---
+
+## Iteration 12 — 2026-06-18 (operator-requested: sync the Codex skills)
+
+The operator asked to sync `.codex/skills/` to the post-reconcile-consolidation repo
+state ("still calls reconcile.sh paper↔demo-only … update all the codex skills and stuff
+too"). Previously left alone per the .claude/.codex ownership split; now explicitly
+authorized. Fanned out one auditor per skill (8) to compare each `.codex/skills/*/SKILL.md`
+against the ACTUAL current repo and return precise old→new corrections; applied them under
+review after verifying every factual claim against the code.
+
+**13 edits across 6 skills** (research-report + vps-migrate were already current):
+- **pit-reconcile (5):** reconcile.sh is now the ONE front door — full demo↔backtest↔paper
+  three-way for both sleeves by default, `--quick` for the fast two-way; rewrote the
+  description, erasure note, body, sleeves section, and flags.
+- **run-strategy (1):** same reconcile reframing.
+- **equity-curve (3):** CONTINUOUS is now promoted-in-code (operator override 2026-06-15,
+  `PROFILES == {"long","continuous"}`, receipt cited) — demo/paper only, not a gate pass.
+- **backtest-integrity (1):** funding is no longer a general data gap (both full-PIT roots
+  carry funding); only the reconcile backtest leg keeps it off by default for speed.
+- **repo-map (1):** rmom is built in `risk_model.py` / `precompute_residual_momentum.py`,
+  NOT `momentum_signals.py` (which is legacy `daily_bars`/`add_returns_and_age` only).
+- **research-phase-runner (2):** STATE.md no longer has "Decision Rules"/"Helpers" sections
+  (trimmed 2026-06-17) — point to `docs/research_summary.md` + the MCP server instead.
+
+Each factual correction verified against the code before writing (promoted.PROFILES, the
+override receipt, the rmom builder location, the funding roots, STATE.md sections). All 8
+frontmatters intact; no stale `paper↔demo-only` / `{"long"}`-only claims remain in `.codex`.
+
+### Guardrail honored
+
+Docs only (`.codex/skills/` + this ledger); no code changed. Local commit only — no
+`git push`. This closes the iteration-1 "Codex-side sync" follow-up.

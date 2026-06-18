@@ -112,8 +112,13 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   partial-PIT runs (config `require_full_pit_universe=False` — the old
   `--allow-partial-pit` flag was erased with the volume-events CLI) are for
   explicitly biased diagnostics only, labelled biased.
-- Funding is a known gap on roots without a funding dataset — mark such runs
-  fee/slippage stressed but funding-missing.
+- The per-venue full-PIT roots now carry funding (Bybit v5 REST funding;
+  Binance `binance_usdm_funding`, full-coverage), so costed runs include
+  funding/carry per the cost-model gate above. Only a root that genuinely lacks
+  a funding dataset is funding-missing — label such runs fee/slippage stressed
+  but funding-missing. (Separately, the three-way reconcile's backtest leg keeps
+  funding OFF by default for speed — `--with-funding` to enable; that is a
+  reconcile choice, not a data gap.)
 - Legacy fixed-day rebalance-grid benchmarks and erased short-sleeve results are
   retired evidence. Do not cite them as evidence for the surviving continuous or
   LONG systems.

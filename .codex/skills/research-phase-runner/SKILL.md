@@ -29,8 +29,10 @@ rules live in STATE.md plus `docs/research_summary.md`.
 
 ## The decision framework — three-tier, demo-arbiter
 
-Ordered by how expensive a false positive is. **The exact thresholds are owned by
-STATE.md ("Decision Rules (three-tier demo-arbiter)") — read them there; do not copy the
+Ordered by how expensive a false positive is. **The current binding decision surface is
+`docs/research_summary.md` plus STATE.md ("Current Status" / "Current Research Direction");
+the three-tier framing is also referenced in `docs/limitations.md` and the
+`scripts/apply_decision_rule.py` docstring — read the thresholds there, do not copy the
 numbers here (that is how they drift).**
 
 1. **Investigation** — keep studying? Loose (MAR-Δ direction + trade minimums).
@@ -116,7 +118,7 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
 
 If available, the `liqmig-research` MCP server exposes report/state tooling
 (`current_state`, `parse_report`, `audit_run_artifacts`, `data_roots`, ...) —
-see STATE.md "Helpers" for the current list. Treat those tools as accelerators,
+the MCP server itself is the source of truth for the current list. Treat those tools as accelerators,
 not dependencies. Without MCP, read `STATE.md`, `docs/data_roots.md`, and report
 files directly. `apply_decision_rule` is the legacy-bar verdict (reference only);
 the Tier-2 verdict is `scripts/r1_robustness.py`.
