@@ -146,6 +146,25 @@ the code regresses); low priority, listed so they aren't mistaken for real cover
 - `tests/test_liquidity_migration_continuous_addon_shadow.py` `_float` regression inputs
   don't distinguish the buggy `float(value or 0.0)` idiom from the fix.
 
+### From audit iteration 6 (2026-06-18) — deferred (low / design / unused tooling)
+
+- **`ingestion.densify_trade_klines_{1m,1h}` silently drops a bar whose ts_ms is off
+  the single-day grid** (a mislabeled archive partition). Raise-vs-warn is a design
+  call (a hard raise risks failing on legitimate midnight-boundary spillover), so it's
+  deferred rather than auto-fixed (audit-iter6 ingestion).
+- **`ridge_combiner.select_lambda` optimizes a time-POOLED rank-IC, not the within-day
+  cross-sectional IC the ridge is deployed for** — a metric/objective mismatch. The
+  module is currently unused by any production path; flag for the operator whether to
+  wire it in (with the per-day objective) or retire it before investing further.
+- **`volume_events_pit` diagnostic field `manifest_date_symbols_missing_from_klines`
+  counts the RAW manifest set, not the gate's `required` set** (overcounts pre-listing/
+  post-delisting phantoms). It's a reported diagnostic only — no gate decision or
+  downstream consumer depends on it — and the module is the methodology-critical PIT
+  gate, so it's left untouched pending a deliberate change (audit-iter6).
+- **`momentum_signals._empty_daily_bars` schema doesn't match the conditional non-empty
+  `daily_bars` schema** (volume_base/turnover_quote always present in the empty frame,
+  conditional in the non-empty). Edge-case-only; needs the caller contract clarified.
+
 ## Resolved
 
 _None yet._

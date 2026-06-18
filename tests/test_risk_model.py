@@ -346,3 +346,36 @@ def test_btc_beta_gap_does_not_stretch_window_past_calendar_span() -> None:
     # itself) -> below min_periods -> null. A row-based window would have reached back
     # to the pre-gap block and produced a (stale) non-null beta.
     assert beta_200 is None, beta_200
+
+
+def test_decompose_strategy_pnl_zero_signal_ts_uses_entry_fallback() -> None:
+    """audit-iter6: signal_ts_ms==0 is the repo's 'unknown signal' sentinel — it must
+    take the entry-based fallback, not snap to a garbage negative day and drop the trade."""
+    loadings = pl.DataFrame([{"symbol": "A", "ts_ms": 0, "f1": 1.0}])
+    fr = pl.DataFrame([{"ts_ms": 0, "factor": "f1", "factor_return": 0.05}])
+    entry = _DAY + 3_600_000  # 01:00 of D+1 -> floor(entry)-1day == day 0
+    out = decompose_strategy_pnl(
+        pl.DataFrame([{"symbol": "A", "signal_ts_ms": 0, "entry_ts_ms": entry,
+                       "hold_days": 1, "realized_return": 0.08}]),
+        loadings, fr, factor_cols=["f1"],
+    )
+    assert out["n_unresolved"] == 0
+    assert out["per_trade"].row(0, named=True)["explained"] is not None
+
+
+def test_decompose_strategy_pnl_null_loading_in_present_row_is_unresolved() -> None:
+    """audit-iter6: a present loading ROW with a NULL required factor can't be fully
+    decomposed — mark unresolved rather than zeroing it (which would mis-book its share
+    as residual alpha and inflate the residual Sharpe)."""
+    loadings = pl.DataFrame(
+        [{"symbol": "A", "ts_ms": 0, "f1": None}],
+        schema={"symbol": pl.String, "ts_ms": pl.Int64, "f1": pl.Float64},
+    )
+    fr = pl.DataFrame([{"ts_ms": 0, "factor": "f1", "factor_return": 0.05}])
+    out = decompose_strategy_pnl(
+        pl.DataFrame([{"symbol": "A", "signal_ts_ms": _DAY, "entry_ts_ms": _DAY + 3_600_000,
+                       "hold_days": 1, "realized_return": 0.08}]),
+        loadings, fr, factor_cols=["f1"],
+    )
+    assert out["n_unresolved"] == 1
+    assert out["per_trade"].row(0, named=True)["explained"] is None

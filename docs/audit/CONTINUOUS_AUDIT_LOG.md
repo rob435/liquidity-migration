@@ -45,6 +45,7 @@ Each iteration:
 | 3 | 2026-06-18 | 39 | 8 | 31 | remaining scripts + DEEP pass on 5 giant modules; 3 HIGH fixed (incl. a fix-interaction with iter-1); 1 reverted (test-pinned audit2b conflict); large LOW backlog queued for iter-4 |
 | 4 | 2026-06-18 | (backlog) | 15 | 1 | cleared the iter-3 safe-LOW backlog (no new audit); +3 regression tests; only the orchestrator zero-trade engine fix deferred to iter-5 |
 | 5 | 2026-06-18 | 15 | 9 | 6 | FRESH ANGLES (deploy/ops, config-consistency, verify-changes, test-quality); 1 HIGH watchdog false-page fixed; landed the deferred [14]; +3 net-strengthening tests; deploy/test-debt deferred to operator |
+| 6 | 2026-06-18 | 14 | 10 | 4 | DEEP pass on alpha/PIT-critical medium modules; **0 HIGH (convergence)**; risk_model decompose hardening + hedge fallback + regime warmup + ledger dedup; +3 tests |
 
 ---
 
@@ -315,3 +316,52 @@ Local commit only — **no `git push`**. The deploy-1 watchdog fix changes pagin
 live host but only takes effect when the operator pushes/deploys; flagged for review.
 `REAL_MONEY` untouched; no methodology/PIT gate loosened (the read_start_date guard
 *tightens* it).
+
+---
+
+## Iteration 6 — 2026-06-18
+
+**Baseline:** `ruff` clean; `pytest -q` → 1990 passed.
+
+DEEP second pass on the alpha/PIT-critical MEDIUM modules that got only a single
+shared-cluster finder in iter-2 (risk_model, ridge_combiner, continuous_hedge_manager,
+continuous_forward_replay, momentum_signals, ingestion, volume_events_pit,
+continuous_regime). 25 raw → **14 confirmed (0 high, 3 medium, 11 low)**, 11 rejected.
+**Zero HIGH — the campaign has converged.** Suite green at **1993** (+3 tests).
+
+### Fixed this iteration (10)
+
+| Finding | File | Sev | Fix |
+|---|---|---|---|
+| decompose sentinel | `risk_model.py` | med | `signal_ts_ms==0` (the "unknown signal" sentinel) now takes the entry fallback instead of snapping to a garbage negative day and silently dropping the trade |
+| decompose null-loading | `risk_model.py` | med | a present loading row with a null required factor is marked UNRESOLVED, not zeroed (which mis-booked its share as residual alpha → inflated Tier-3 residual Sharpe) |
+| 2f hedge fallback | `continuous_hedge_manager.py` | med | fall back to the single-leg BTC hedge on ANY degenerate (0,0) 2f result, not only the thin-window case (degenerate-variance left the book silently unhedged) |
+| btc_beta variance guard | `risk_model.py` | low | `var_y > 1e-12` (not `abs`): a FP-negative variance yields a null beta, not a wrong-signed division |
+| permutation p-value | `risk_model.py` | low | +1 correction so a finite permutation sample can't report an over-confident p==0 |
+| FROZEN_HEDGE_RULE | `continuous_hedge_manager.py` | low | derived from `frozen_hedge_rule()` (single source of truth) instead of a hardcoded literal — drift now structurally impossible |
+| regime warmup | `continuous_regime.py` | low | warmup = `min(PCT_WARMUP, pct_window)` so a `pct_window<50` can't silently disable all modulation (byte-identical for the deployed 250) |
+| ledger dedup | `continuous_forward_replay.py` | low | raise on duplicate `ts_ms` in a stored forward ledger (corrupt/hand-edited ledger was silently mis-verified) |
+| seq/block/rpi parse | `ingestion.py` | low | `seq` no longer lost when it's a legitimate 0; block/RPI fallback triggers on present-but-None primary key |
+
+Regression tests added: decompose zero-signal-ts fallback, decompose null-loading
+unresolved, FROZEN_HEDGE_RULE == frozen_hedge_rule() drift guard.
+
+### Deferred (4 → limitations.md)
+
+ingestion densify off-grid drop (raise-vs-warn design); ridge_combiner select_lambda
+pooled-vs-per-day objective (unused tooling — wire-in-or-retire decision); the
+volume_events_pit diagnostic overcount (methodology-gate module, left untouched);
+momentum_signals empty-frame schema mismatch (caller-contract, edge-only).
+
+### Convergence note
+
+Six iterations now cover the entire package, all scripts, deploy/ops plumbing, config
+consistency, and the test suite. HIGH-finding yield by iteration: 1, 2, 3, 0, 1, 0.
+Remaining open items are operator-decision (strategy proposals, deploy units) — not
+auto-fixable. The loop shifts to a **slower cadence + lighter targeted passes** from here.
+
+### Guardrail honored
+
+Local commit only — **no `git push`**. `REAL_MONEY` untouched. The regime-warmup fix is
+byte-identical for the deployed `pct_window=250` (verified before changing the FROZEN
+object); no methodology/PIT gate loosened.

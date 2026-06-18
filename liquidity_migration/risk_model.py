@@ -116,7 +116,10 @@ def compute_btc_beta(
     var_y = pl.col("_eyy") - pl.col("_ey") * pl.col("_ey")
     cov_xy = pl.col("_exy") - pl.col("_ex") * pl.col("_ey")
     return df.with_columns(
-        pl.when(var_y.abs() > 1e-12).then(cov_xy / var_y).otherwise(None).alias("btc_beta")
+        # var_y > 1e-12 (NOT abs): a tiny FP-negative variance must yield a null beta, not
+        # a wrong-signed cov/var_y division (audit-iter6). Variance is non-negative in
+        # theory; FP rounding of E[y^2]-E[y]^2 can make it slightly negative.
+        pl.when(var_y > 1e-12).then(cov_xy / var_y).otherwise(None).alias("btc_beta")
     ).select("symbol", "ts_ms", "btc_beta")
 
 
@@ -316,7 +319,9 @@ def residual_variance_capture(
     real_res_std = _resid_std(False, rng)
     n_perm = max(0, int(n_permutations))
     null = np.array([_resid_std(True, rng) for _ in range(n_perm)]) if n_perm else np.array([])
-    p_value = float(np.mean(null <= real_res_std)) if null.size else None
+    # +1 permutation p-value correction (count the observed statistic itself): avoids an
+    # over-confident p==0 from a finite permutation sample (audit-iter6).
+    p_value = float((np.sum(null <= real_res_std) + 1) / (null.size + 1)) if null.size else None
     null_p05 = float(np.percentile(null, 5)) if null.size else None
     return {
         "raw_std": raw_std,
@@ -406,7 +411,10 @@ def decompose_strategy_pnl(
         # entry delay — a multi-day-delayed entry would mis-snap — so the signal_ts path (the standard
         # engine ledger column, taken whenever present) is authoritative; the fallback is legacy-only.
         sig = t.get("signal_ts_ms")
-        if sig is not None:
+        # audit-iter6: 0 is the repo's "unknown signal" sentinel (adopted/reconciled rows);
+        # `sig is not None` would treat it as a real ts and snap to a garbage negative day.
+        # Require a POSITIVE signal ts; else take the entry-based legacy fallback.
+        if sig is not None and int(sig) > 0:
             grid = ((int(sig) - 1) // MS_PER_DAY) * MS_PER_DAY
         else:
             grid = ((ets // MS_PER_DAY) - 1) * MS_PER_DAY
@@ -420,13 +428,18 @@ def decompose_strategy_pnl(
             n_unresolved += 1
             records.append({"symbol": sym, "entry_ts_ms": ets, "realized_return": realized, "explained": None, "residual": None})
             continue
+        # audit-iter6: a present loading ROW with any null required factor can't be fully
+        # decomposed — zeroing the null factor would mis-book its share as residual alpha
+        # and inflate the Tier-3 residual Sharpe. Mark unresolved (btc_beta is null in
+        # warm-up; funding/premium z are null on some venues), mirroring the guards above.
+        if any(exposure.get(f) is None for f in present):
+            n_unresolved += 1
+            records.append({"symbol": sym, "entry_ts_ms": ets, "realized_return": realized, "explained": None, "residual": None})
+            continue
         explained = 0.0
         for f in present:
-            ef = exposure.get(f)
-            if ef is None:
-                continue
             cum = sum(fr_map[d].get(f) or 0.0 for d in present_days)
-            explained += float(ef) * cum
+            explained += float(exposure[f]) * cum
         records.append({"symbol": sym, "entry_ts_ms": ets, "realized_return": realized, "explained": explained, "residual": realized - explained})
 
     per_trade = pl.DataFrame(records, schema=pt_schema)

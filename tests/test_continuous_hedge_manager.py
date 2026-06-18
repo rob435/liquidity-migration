@@ -153,3 +153,13 @@ def test_hedge_row_is_tracked_but_never_force_exited() -> None:
             now_ms=9_999_999_999_999,  # far future -> would trip a real max_hold
         )
         assert exits == [], f"hedge row force-exited at price {px}: {exits}"
+
+
+def test_frozen_hedge_rule_derives_from_forward_config() -> None:
+    """audit-iter6: the live hedge manager's FROZEN_HEDGE_RULE must equal the single
+    source of truth (FROZEN_FORWARD_CONFIG via frozen_hedge_rule), so it can't drift
+    from the forward ledger it mirrors."""
+    from liquidity_migration.continuous_forward_replay import frozen_hedge_rule
+    from liquidity_migration.continuous_hedge_manager import FROZEN_HEDGE_RULE
+
+    assert FROZEN_HEDGE_RULE == frozen_hedge_rule()

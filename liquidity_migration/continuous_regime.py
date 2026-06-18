@@ -86,7 +86,11 @@ def btcvol_intensity_series(
     intensity: dict[int, float] = {}
     for i, d in enumerate(days):
         v = vols[i]
-        if v is None or len(dq) < PCT_WARMUP:
+        # Warm-up is the LESSER of PCT_WARMUP and pct_window: dq is capped at maxlen
+        # pct_window, so a pct_window < PCT_WARMUP could never reach the threshold and
+        # would silently disable all modulation (audit-iter6). Byte-identical for the
+        # deployed pct_window=250 (min(50,250)=50).
+        if v is None or len(dq) < min(PCT_WARMUP, pct_window):
             intensity[d] = 1.0
         else:
             pct = sum(1 for x in dq if x <= v) / len(dq)

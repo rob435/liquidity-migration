@@ -274,6 +274,13 @@ def update_forward_ledger(
     rebased = 0
     if path.exists():
         stored = pl.read_csv(path)
+        # Fail loud on a duplicated/hand-edited ledger rather than silently mis-verifying:
+        # a duplicate ts_ms would be compared against a single fresh row and pass (audit-iter6).
+        if not stored.is_empty() and stored["ts_ms"].n_unique() != stored.height:
+            raise RuntimeError(
+                f"{venue}: stored forward ledger has duplicate ts_ms rows — corrupt/partial "
+                f"ledger, refusing to verify."
+            )
         new_by_day = {int(r["ts_ms"]): r for r in new.to_dicts()}
         drifted_days: list[tuple[int, str, Any, Any]] = []
         for row in stored.to_dicts():

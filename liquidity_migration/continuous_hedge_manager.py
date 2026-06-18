@@ -33,15 +33,18 @@ from .continuous_rebalance import (
     compute_continuous_hedge_ratio,
     compute_continuous_hedge_ratios_2f,
 )
-from .continuous_forward_replay import frozen_hedge_regime
+from .continuous_forward_replay import frozen_hedge_regime, frozen_hedge_rule
 from .continuous_regime import latest_btcvol_intensity
 
 HEDGE_SYMBOL = "BTCUSDT"
 HEDGE_SYMBOL_2 = "ETHUSDT"  # second leg of the banked 2f hedge (2026-06-10 Stage-B)
 HEDGE_LINK_PREFIX = "en-ca"  # ws_risk continuous-addon adoption namespace
 # Frozen hedge rule — the banked engine-leg parameters (Stage-B, 8/8 pass; the same
-# rule object parameterizes both the single-leg WP3 form and the 2f form).
-FROZEN_HEDGE_RULE = ContinuousHedgeRule(beta_window_days=90, beta_min_obs=60, hedge_cap=2.0, cost_bps=5.0)
+# rule object parameterizes both the single-leg WP3 form and the 2f form). Derived from
+# the single source of truth (FROZEN_FORWARD_CONFIG['hedge']) so the live manager can't
+# drift from the forward ledger it mirrors (audit-iter6); byte-identical to the prior
+# literal ContinuousHedgeRule(90, 60, 2.0, 5.0).
+FROZEN_HEDGE_RULE = frozen_hedge_rule()
 # The backtest book is 0.5-gross-short at scale 1; live H_equity_frac scales by the
 # live book's actual gross-short fraction relative to that reference.
 REFERENCE_GROSS_SHORT_FRAC = 0.5
@@ -307,7 +310,12 @@ def compute_hedge_decision_2f(
     )
     r_btc, r_eth = compute_continuous_hedge_ratios_2f(state, FROZEN_HEDGE_RULE, target_scale)
     fell_back = False
-    if r_btc == 0.0 and r_eth == 0.0 and n_joint < FROZEN_HEDGE_RULE.beta_min_obs:
+    # audit-iter6: fall back to the single-leg BTC hedge on ANY degenerate (0,0) 2f
+    # result, not only the thin-window case — the degenerate-variance / uncovered-zero-beta
+    # paths also yield (0,0) and would otherwise leave the book silently unhedged. Genuine
+    # no-hedge cases (target_scale==0, beta clipped to 0) also yield a 0.0 single-leg, so
+    # this never introduces a spurious hedge.
+    if r_btc == 0.0 and r_eth == 0.0:
         single = compute_continuous_hedge_ratio(
             ContinuousHedgeState(prior_raw_returns=tuple(unit_returns), prior_hedge_returns=tuple(btc_returns)),
             FROZEN_HEDGE_RULE,

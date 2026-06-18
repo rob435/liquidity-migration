@@ -46,9 +46,13 @@ def normalize_trade(raw: dict[str, Any], symbol: str | None = None, *, index: in
         # keeps the legacy id for any direct caller.
         suffix = f"-{index}" if index is not None else ""
         trade_id = f"{ts_ms}-{side}-{price}-{size_base}{suffix}"
-    seq = raw.get("seq") or raw.get("L")
-    is_block = _parse_bool(raw.get("isBlockTrade") if "isBlockTrade" in raw else raw.get("BT"))
-    is_rpi = _parse_bool(raw.get("isRPITrade") if "isRPITrade" in raw else raw.get("RPI"))
+    # audit-iter6: `seq or L` loses a legitimate sequence value of 0; and the block/RPI
+    # fallback must trigger when the primary key is present-but-None, not only absent.
+    seq = raw.get("seq")
+    if seq is None:
+        seq = raw.get("L")
+    is_block = _parse_bool(raw.get("isBlockTrade") if raw.get("isBlockTrade") is not None else raw.get("BT"))
+    is_rpi = _parse_bool(raw.get("isRPITrade") if raw.get("isRPITrade") is not None else raw.get("RPI"))
     trade_symbol = str(symbol or raw.get("symbol") or raw.get("s"))
     if side not in {"Buy", "Sell"}:
         raise ValueError(f"Unsupported taker side: {side!r}")
