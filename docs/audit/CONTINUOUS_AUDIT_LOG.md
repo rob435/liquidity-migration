@@ -46,6 +46,7 @@ Each iteration:
 | 4 | 2026-06-18 | (backlog) | 15 | 1 | cleared the iter-3 safe-LOW backlog (no new audit); +3 regression tests; only the orchestrator zero-trade engine fix deferred to iter-5 |
 | 5 | 2026-06-18 | 15 | 9 | 6 | FRESH ANGLES (deploy/ops, config-consistency, verify-changes, test-quality); 1 HIGH watchdog false-page fixed; landed the deferred [14]; +3 net-strengthening tests; deploy/test-debt deferred to operator |
 | 6 | 2026-06-18 | 14 | 10 | 4 | DEEP pass on alpha/PIT-critical medium modules; **0 HIGH (convergence)**; risk_model decompose hardening + hedge fallback + regime warmup + ledger dedup; +3 tests |
+| 7 | 2026-06-18 | 5 | 0 | 5 | LIGHT pass (post-convergence, ~1h cadence): gate verified green; read-only audit of the operator's research_residualization workstream — **0 verdict-invalidating bugs**, 5 LOW hygiene items reported for the operator (not fixed — their workstream) |
 
 ---
 
@@ -365,3 +366,39 @@ auto-fixable. The loop shifts to a **slower cadence + lighter targeted passes** 
 Local commit only — **no `git push`**. `REAL_MONEY` untouched. The regime-warmup fix is
 byte-identical for the deployed `pct_window=250` (verified before changing the FROZEN
 object); no methodology/PIT gate loosened.
+
+---
+
+## Iteration 7 — 2026-06-18 (light pass)
+
+First post-convergence pass on the slow (~1h) cadence. No new repo commits since
+iter-6; the gate was re-verified green (ruff clean, 1993 pass). The only un-audited
+surface was the operator's untracked `research_residualization_*` workstream (the
+EXPLORATORY harness behind the REJECTED/parked residualization-target decision), so
+this pass did a READ-ONLY correctness audit of it — focused on whether any bug could
+INVALIDATE that rejected verdict.
+
+**Result: 0 verdict-invalidating defects.** The rejected-residualization conclusion is
+methodologically sound (adversarially confirmed: the per-target IC ordering the verdict
+rests on is internally consistent on any single run; the doc's effective-window/n_days
+and the >0.994 rmom overlap cross-check rule out a stale/short panel). 5 LOW hygiene
+findings, REPORTED for the operator (NOT fixed — it is their untracked workstream):
+
+1. `research_residualization_target.py:254-256` — panel cache key omits start/end/factor
+   set; reusing `--out` across windows could silently serve a stale-window panel
+   (reproducibility foot-gun; the recorded run used the correct full panels).
+2. `:123,128-149` — the second klines read for `attach_targets` has no forward pad, so
+   the alt forward targets are nulled 1-4 days before `end` while the incumbent
+   `fwd_ret_1d` is not (tiny trailing-edge population asymmetry; the cross-check drops
+   those rows so it doesn't validate the edge it claims to).
+3. `:168-183` — `build_rmom` uses positional `rolling_sum+shift` on a gap-pruned residual
+   series (not calendar-aware) — minor vs the deployed precompute (still >0.994 corr).
+4. `:397` — factor-sign-agreement check passes vacuously when a factor is absent on a venue.
+5. `research_residualization_stage_b.py:94-98` — `mean_daily_rank_corr` can become NaN on
+   a zero-variance day (`drop_nulls` doesn't strip NaN).
+
+### Guardrail honored
+
+No code changed this iteration (the findings are in the operator's untracked workstream;
+reported, not fixed). Local doc commit only — no `git push`. The loop stays on the slow
+cadence; it will focus on NEW operator commits when they appear.

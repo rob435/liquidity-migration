@@ -140,6 +140,14 @@ costs (the rmom-latency receipt's revival condition), `fwd_intraday` is the *leg
 to harvest ~1 extra day of the freshness curve and should be re-tested **then, forward** —
 not adopted now. `exploratory` label; gross-of-cost IC, no promotion claim.
 
+**Independent audit (2026-06-18, audit-loop iter-7).** The research harness
+(`research_residualization_*`) was read-only audited for any defect that could flip this
+verdict: **none found** — the per-target IC ordering is internally consistent and the
+effective-window / >0.994 rmom-overlap cross-check rule out a stale panel. 5 LOW
+research-script hygiene items (cache-key window, trailing-edge target pad, gap-aware
+rmom, vacuous sign check, NaN rank-corr) are listed in `docs/audit/CONTINUOUS_AUDIT_LOG.md`
+iter-7 for the workstream owner; they do not affect the conclusion.
+
 **Decision.** (operator)
 
 ---
