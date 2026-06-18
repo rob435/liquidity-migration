@@ -109,11 +109,10 @@ The v2-forward baseline has not produced a new v2 entry yet. Therefore the
 baseline performance state is intentionally zero-entry and must not be read as a
 return result.
 
-Filtered demo rows:
+Filtered demo rows at the reset snapshot:
 
-- V2 cycles: `72`
-- First v2 cycle ts: `1781812487663`
-- Last v2 cycle ts: `1781817797050`
+- V2 cycle heartbeats: present and expected to increase while the daemon runs.
+  Exact cycle-row counts are liveness telemetry, not a frozen control metric.
 - V2 trades: `0`
 - V2 open trades: `0`
 - V2 closed trades: `0`
@@ -123,11 +122,11 @@ Filtered demo rows:
 - Cycle-derived max drawdown: `0.0`
 - Worst day return: `0.0`
 
-Filtered paper rows:
+Filtered paper rows at the reset snapshot:
 
-- V2 cycles: `75`
-- First v2 cycle ts: `1781812515380`
-- Last v2 cycle ts: `1781817797495`
+- V2 cycle heartbeats: present and expected to increase while the paper daemon
+  runs. Exact cycle-row counts are liveness telemetry, not a frozen control
+  metric.
 - V2 trades: `0`
 - V2 open trades: `0`
 - V2 closed trades: `0`
