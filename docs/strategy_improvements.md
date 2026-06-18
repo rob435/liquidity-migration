@@ -263,6 +263,61 @@ need operator review (and pre-reg where they touch live sizing). Tracked in
 
 ---
 
+### 2026-06-18 — Intraday (maker) residual-reversal book: rmom at its real frequency  [⚪ Rejected / parked]
+
+**Sleeve:** continuous (proposed new execution model) · **Type:** feature + execution
+
+**Idea (tested, rejected).** The daily rmom edge's "no operational margin" looked like an
+artifact of the daily-batch cadence, so: residualize **hourly** and run a passive/maker
+intraday reversal book. Investigated end to end — IC study
+(`scripts/research_intraday_residual.py`), pre-reg
+(`docs/preregistration/2026-06-18-intraday-residual-reversal-taker.md`), and an **official
+backtest** through the deployed execution core (`scripts/research_intraday_reversal_backtest.py`:
+`_round_trip_bps` cost parity-checked + funding-to-exit + sequential compounding). Both
+full-PIT venues, 2024–2026. Report: `docs/research/2026-06-18-intraday-residual-frequency.md`.
+
+**Result — does not work.** The intraday IC is real and strong (~−0.038, both venues; IC
+halves by ~8h staleness), confirming the daily book samples a decayed tail. **But the
+official, liquidity-gated backtest kills it:** restricted to tradeable (≥$2M/h) names the
+short-hold (4–12h) **gross Sharpe is ~0/negative on both venues** — the edge lived in
+**illiquid names you can't trade at size**. Taker is a wipeout at every hold (SR −1.5 to
+−10.5); even an idealized 4 bps maker is negative at intraday holds once funding (−1 to
+−5 bps/basket drag) and turnover are real — the earlier gross-frontier "maker viable" read
+is **withdrawn**. The only positive cell (bybit H24) fails the two-venue bar (binance H24
+~flat) and is a daily, not intraday, hold.
+
+**Disposition.** Do not build. Combined with the rejected target-change (above), the
+honest conclusion for the whole rmom line: the residual-reversal alpha is real but too
+thin/illiquid to extract net of cost at any frequency or target tested. Keep the existing
+daily book; reallocate research effort. Would only reopen on true maker-rebate tiers + a
+real posted-order fill study showing liquid-name short-hold gross is positive after
+adverse selection (a high bar the evidence argues against). `exploratory`; not promotion
+evidence.
+
+**Independent audit (2026-06-18, audit-loop iter-13).** Read-only audit of the 3 research
+scripts. **The "do not build" verdict is SAFE** — it rests on the official backtest
+(`research_intraday_reversal_backtest.py`), which genuinely uses the execution core
+(`_round_trip_bps` per-leg/ADV-aware cost + `_funding_lookup`/`_perp_funding_return` +
+`annualized_sharpe`, verified). Findings, none of which flip the reject (a reject under
+these issues is only MORE robust once corrected):
+- **(critical, scope = IC-STUDY SKETCH only)** `research_intraday_residual.py` costs its
+  "net spread" with a FLAT `--rt-cost-bps 12` (below the 16 bps impactless floor, charged
+  once not per-leg, no ADV impact, no funding) — its *net* numbers are below-cost and must
+  not be cited; cite only the official backtest's net. The pre-reg's "costed via the
+  execution core" wording describes the official backtest, not this sketch — clarify it.
+- **(medium)** the official backtest's trailing-24h rmom `rolling_sum(window_size=24)` and
+  the IC sketch's `ret_1h`/entry-exit `shift(1)` are POSITIONAL over present-hours-only
+  series (BAC-1: reach across hourly gaps); the author already labeled this "exploratory".
+  funding window is off-by-one-bar vs the bar-end convention.
+- **If this line is ever reopened:** wire the IC sketch to `_round_trip_bps` (≥16 bps/leg +
+  ADV impact) or relabel its column "gross spread"; make the 24h rmom + ret_1h windows
+  wall-clock (time-based rolling / densified grid); compute the SPLIT_DATE split-stability
+  the pre-reg's decision rule expects. Full list: `docs/audit/CONTINUOUS_AUDIT_LOG.md` iter-13.
+
+**Decision.** (operator)
+
+---
+
 ## Template
 
 ```

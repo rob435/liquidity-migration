@@ -52,6 +52,7 @@ Each iteration:
 | 10 | 2026-06-18 | 0 | — | — | Extended property testing to the ACCOUNTING layer (equity-curve/drawdown/total-return identities that feed the decision rule): drawdown<=0, total_return==eq[-1]-1, finite Sharpe, all-positive→zero-DD — all held over generated trade sets; +2 generative tests, 2000 total |
 | 11 | 2026-06-18 | 0 | — | — | Extended property testing to RECONCILIATION pairing (self-reconcile pairs fully; paired<=min population, no double-pairing) — held over generated ledgers; +2 generative tests, 2002 total |
 | 12 | 2026-06-18 | (docs) | 6 | — | OPERATOR-REQUESTED Codex-skills sync: audited all 8 .codex/skills (fan-out), fixed 13 stale claims across 6 (reconcile.sh one-command model; continuous now promoted-in-code; rmom in risk_model not momentum_signals; STATE.md section renames; funding-roots) — closes the iter-1 Codex follow-up. research-report + vps-migrate already current |
+| 13 | 2026-06-18 | 10 | (report) | — | HEARTBEAT caught NEW operator code (intraday residual-reversal workstream); read-only audit (3 scripts): 1 critical (IC-sketch flat-12bps below-cost) + 2 med + 7 low. **Reject verdict SAFE** — rests on the correctly-costed official backtest; sketch under-cost biases toward profit. Reported on the proposal entry; not fixed (operator's untracked research) |
 
 ---
 
@@ -544,3 +545,42 @@ frontmatters intact; no stale `paper↔demo-only` / `{"long"}`-only claims remai
 
 Docs only (`.codex/skills/` + this ledger); no code changed. Local commit only — no
 `git push`. This closes the iteration-1 "Codex-side sync" follow-up.
+
+---
+
+## Iteration 13 — 2026-06-18 (heartbeat caught new operator code)
+
+The slow heartbeat found NEW operator code since iter-12: an intraday residual-reversal
+research workstream (`scripts/research_intraday_residual.py`,
+`research_intraday_reversal_backtest.py`, `research_intraday_reversal_plot.py` + a
+pre-registration receipt). Gate re-verified green (2002). Ran a read-only correctness
+audit (3 finders + adversarial verify) focused on the leak-prone bug classes for an
+intraday reversal book — look-ahead/fill-timing, cost omission, funding sign, side-mapping
+— and whether any defect could flip the costed verdict. 12 raw → **10 confirmed**
+(1 critical, 2 medium, 7 low); 1 flagged invalidating IN ISOLATION.
+
+**Contextualized result: the workstream's "do not build" verdict is SAFE.** The final
+reject rests on the OFFICIAL backtest (`research_intraday_reversal_backtest.py`), which is
+correctly costed (verified: `_round_trip_bps` per-leg/ADV-aware + `_funding_lookup`/
+`_perp_funding_return` + `annualized_sharpe`). The critical finding's scope is the separate
+IC-STUDY SKETCH (`research_intraday_residual.py`), which costs a flat `--rt-cost-bps 12`
+(below the 16 bps impactless floor, single-leg, no ADV impact, no funding) — its NET numbers
+are below-cost, and the pre-reg's "costed via the execution core" wording describes the
+official backtest, not the sketch. Because under-costing biases TOWARD profit and the verdict
+is still reject, the conclusion is conservative-safe.
+
+Other findings (medium/low): the official backtest's 24h rmom `rolling_sum(window_size=24)`
+and the sketch's `ret_1h`/entry-exit `shift(1)` are POSITIONAL over present-hours-only series
+(BAC-1, gap-crossing — author already labeled "exploratory"); funding window off-by-one-bar;
+SPLIT_DATE split-stability recorded but not computed; plot buckets by signal not exit date;
+plot re-derives WEIGHT from constants.
+
+REPORTED on the proposal entry in `docs/strategy_improvements.md` (with the "if reopened"
+fix list) — **not fixed**: this is the operator's untracked, EXPLORATORY, already-REJECTED
+research; the critical fix is a documented fork (wire the real model vs relabel the sketch
+"gross"), an operator call. Offered to wire it on request.
+
+### Guardrail honored
+
+Docs only (`docs/strategy_improvements.md` + this ledger); the operator's untracked research
+scripts were NOT modified. Local commit only — no `git push`.
