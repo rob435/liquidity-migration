@@ -47,6 +47,7 @@ Each iteration:
 | 5 | 2026-06-18 | 15 | 9 | 6 | FRESH ANGLES (deploy/ops, config-consistency, verify-changes, test-quality); 1 HIGH watchdog false-page fixed; landed the deferred [14]; +3 net-strengthening tests; deploy/test-debt deferred to operator |
 | 6 | 2026-06-18 | 14 | 10 | 4 | DEEP pass on alpha/PIT-critical medium modules; **0 HIGH (convergence)**; risk_model decompose hardening + hedge fallback + regime warmup + ledger dedup; +3 tests |
 | 7 | 2026-06-18 | 5 | 0 | 5 | LIGHT pass (post-convergence, ~1h cadence): gate verified green; read-only audit of the operator's research_residualization workstream — **0 verdict-invalidating bugs**, 5 LOW hygiene items reported for the operator (not fixed — their workstream) |
+| 8 | 2026-06-18 | 0 | — | — | NEW METHOD: stdlib-random property/invariant tests over the core math (Sharpe scale-invariance, calendar-day bucketing, funding clamp, hedge-ratio bounds) — ~1,800 generated inputs, all invariants HELD (0 new bugs); +5 generative tests, 1998 total |
 
 ---
 
@@ -402,3 +403,32 @@ findings, REPORTED for the operator (NOT fixed — it is their untracked workstr
 No code changed this iteration (the findings are in the operator's untracked workstream;
 reported, not fixed). Local doc commit only — no `git push`. The loop stays on the slow
 cadence; it will focus on NEW operator commits when they appear.
+
+---
+
+## Iteration 8 — 2026-06-18 (new method: property-based testing)
+
+After 7 static read-audits converged (0 HIGH in the deep pass), this iteration changed
+the bug-finding METHOD rather than re-scanning cleared code: **stdlib-`random`
+generative invariant tests** over the highest-stakes pure math. ~1,800 random inputs
+asserting properties that must hold for ANY input:
+
+- `annualized_sharpe`: scale-invariant (×k>0) and sign-flips under return negation;
+  degenerate (<2 pts / zero-variance / empty) → 0.0.
+- `_daily_sharpe`: result invariant to the intra-day exit HOUR (only calendar day +
+  equity matter) — the property the iter-1 intraday-grid bug violated, now generatively
+  locked across random days/gaps/hours.
+- `normalize_funding_history`: `funding_rate_8h_equiv` always finite and equals
+  `rate * 480/clamped_interval` for random rates and intervals incl. 0 / negative
+  (the iter-6 clamp), over 500 symbols.
+- `compute_continuous_hedge_ratio`: always finite, in `[0, cap*max(scale,0)]`, and
+  exactly 0 for a non-positive target scale, over random series/caps/min-obs/scales.
+
+**Result: all invariants held — 0 new bugs** (consistent with convergence). The value
+is a permanently stronger net: these catch a future regression in the core math that
+example-based tests can't. No new dependency (hypothesis deliberately avoided — dev deps
+are minimal; pure `random.Random` like the existing suite). Suite green at **1998** (+5).
+
+### Guardrail honored
+
+Local commit only — no `git push`. Test-only addition; no production code changed.
