@@ -33,6 +33,26 @@ This complements — does not replace — the methodology gate
   incomplete; the continuous signal-consistency check is a consistency check on
   live data, not OOS/promotion evidence.
 
+## Test coverage posture
+
+Package coverage is **~79%** (line+branch, `pytest --cov`). The continuous-audit loop
+(iter-9, 2026-06-18) analysed the uncovered ~21% and confirmed it is concentrated in
+**network/IO glue that is not unit-testable**, NOT in untested business logic:
+
+- Lowest-covered modules are the live collectors / WS loops / API clients
+  (`liquidation_collector`, `depth_collector`, `binance`, `kline_follower`,
+  `kline_stream_manager`, the `*_daemon`s). Their uncovered lines are the WS run loops,
+  reconnect/backoff, symbol-universe fetch, and `main()` — exercised only against a live
+  venue, not in CI.
+- Their **pure logic IS unit-tested**: e.g. `liquidation_collector`'s parsers
+  (`parse_bybit_event`/`parse_binance_event`, incl. the zero-`ap` truthy-string fallback
+  and the zero/negative price+qty drop) and `connection_expired` are fully covered;
+  `depth_collector.band_notionals` (incl. the crossed-book guard) is covered.
+
+So the uncovered surface is an accepted integration-glue limitation, not a hidden-bug
+reservoir. The core financial/PIT math additionally carries property-based invariant
+tests (`tests/test_property_invariants.py`, iter-8).
+
 ## Reconciliation
 
 - **Funding is off by default in the three-way reconcile.** Funding affects the

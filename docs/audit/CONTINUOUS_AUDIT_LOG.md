@@ -48,6 +48,7 @@ Each iteration:
 | 6 | 2026-06-18 | 14 | 10 | 4 | DEEP pass on alpha/PIT-critical medium modules; **0 HIGH (convergence)**; risk_model decompose hardening + hedge fallback + regime warmup + ledger dedup; +3 tests |
 | 7 | 2026-06-18 | 5 | 0 | 5 | LIGHT pass (post-convergence, ~1h cadence): gate verified green; read-only audit of the operator's research_residualization workstream — **0 verdict-invalidating bugs**, 5 LOW hygiene items reported for the operator (not fixed — their workstream) |
 | 8 | 2026-06-18 | 0 | — | — | NEW METHOD: stdlib-random property/invariant tests over the core math (Sharpe scale-invariance, calendar-day bucketing, funding clamp, hedge-ratio bounds) — ~1,800 generated inputs, all invariants HELD (0 new bugs); +5 generative tests, 1998 total |
+| 9 | 2026-06-18 | 0 | — | — | NEW LENS: coverage-gap analysis (~79% pkg). Confirmed the uncovered ~21% is network/IO glue (collectors/daemons/API clients), NOT untested logic — their pure parsers/helpers are fully tested. Net validated; coverage posture documented in limitations.md. No redundant tests added |
 
 ---
 
@@ -432,3 +433,29 @@ are minimal; pure `random.Random` like the existing suite). Suite green at **199
 ### Guardrail honored
 
 Local commit only — no `git push`. Test-only addition; no production code changed.
+
+---
+
+## Iteration 9 — 2026-06-18 (new lens: coverage-gap analysis)
+
+mypy was unavailable in the venv (declared dev dep, partial install) and un-configured
+mypy on 46k lines is mostly annotation noise, so this iteration used the other unused
+lens: **test-coverage-gap analysis** (`pytest --cov`). Package coverage is **~79%**
+(line+branch). Drilled into the lowest-covered modules to find untested LOGIC (where
+bugs hide):
+
+- The lowest-covered substantive module, `liquidation_collector` (~44%), turned out to
+  have its pure parsers/expiry helpers ALREADY fully tested (incl. the zero-`ap`
+  truthy-string fallback and the zero/negative price+qty drop) — the uncovered lines are
+  the WS run loops / API fetch / `main()`, which only run against a live venue.
+- The pattern holds across the low-coverage set (`depth_collector`, `binance`,
+  `kline_follower`, the daemons): uncovered == network/IO glue; pure logic IS unit-tested.
+
+**Result: the test net is solid — the coverage gap is integration glue, not a
+hidden-bug reservoir.** No redundant tests added (they'd duplicate existing coverage).
+Documented the coverage posture in `docs/limitations.md` (the operator asked to document
+limitations). This is a positive convergence signal from a second orthogonal method.
+
+### Guardrail honored
+
+Local doc commit only — no `git push`. No code changed.
