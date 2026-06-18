@@ -67,10 +67,6 @@ CELLS: dict[tuple[str, str], dict] = {
         "independent_continuous_entry_filter_sweep_exploratory_2026-06-07",
         "age240_turn4pop5_crowd2",
     ): dict(entry_event_trigger="turn4_pop5", age_days_min=240, take_profit_pct=0.10),
-    (
-        "independent_continuous_tp_hold_sweep_exploratory_2026-06-07",
-        "age210_tp14_hold24_invvol10_crowd2",
-    ): dict(entry_event_trigger="none", age_days_min=210, take_profit_pct=0.14),
 }
 
 

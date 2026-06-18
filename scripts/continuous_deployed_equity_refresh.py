@@ -4,7 +4,7 @@
 Re-runs the EXACT frozen winner_base component configs (loaded from the
 2026-06-07 source receipts; only `end_date` is overridden) against the
 refreshed per-venue full-PIT roots, then reproduces the deployed book —
-winner_base 4-component ensemble @ w90/tv0.045/max4/ddh-0.04 + banked 2f
+winner_base 3-component ensemble @ w90/tv0.045/max4/ddh-0.04 + banked 2f
 BTC+ETH hedge — and the official strategy-vs-BTC chart, exactly as
 `continuous_deployed_equity.py` does for the frozen window.
 

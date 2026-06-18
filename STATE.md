@@ -17,8 +17,8 @@ artifacts, not in the hot path.
 
 ## What Is Running / Wired
 
-- **Continuous demo book:** `continuous_ensemble_v1`: p3 .30 / p4p3 .20 / p4p5 .40 /
-  tp14 .10, w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25, BTC-uptrend gate.
+- **Continuous demo book:** `continuous_ensemble_v1`: p3 .333 / p4p3 .222 / p4p5 .444,
+  w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25, BTC-uptrend gate.
 - **Temporary gate-off plumbing window:** on 2026-06-16 the operator flipped
   `BTC_TREND_GATE=off` on demo + paper to exercise fill -> hedge -> ledger -> reconcile.
   This is not promoted-object forward evidence. Revert both units to `uptrend` once the

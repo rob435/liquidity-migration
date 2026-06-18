@@ -247,7 +247,7 @@ def continuous_profile(*, start: str | None = None, end: str | None = None):
     (lambda=0.5).
 
     Source of truth: ``continuous_forward_replay.FROZEN_FORWARD_CONFIG`` — the exact
-    object the live demo book and the forward clock execute (winner_base 4-component
+    object the live demo book and the forward clock execute (winner_base 3-component
     ensemble + BTC+ETH 2f hedge, with ``hedge.regime`` = the causal, mean-1 BTC-vol
     regime intensity ``continuous_regime.FROZEN_BTCVOL_REGIME``). Returned as a deep
     copy so callers cannot mutate the frozen config.

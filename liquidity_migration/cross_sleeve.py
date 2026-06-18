@@ -428,7 +428,7 @@ def partition_claimable(
     CS cross-sleeve-6: resolves ALL candidates against one state snapshot under a SINGLE
     lock+read+write cycle (was N lock/read/fsync/rename cycles, one per candidate) so the
     submit hot path does not accrue per-candidate fsync churn when many symbols (or the
-    4-component ensemble re-claiming a symbol across components) fire in one cycle."""
+    3-component ensemble re-claiming a symbol across components) fire in one cycle."""
     granted, skipped, _ = claim_symbols_reservation(
         account_root,
         candidates,

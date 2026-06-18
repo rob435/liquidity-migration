@@ -61,7 +61,6 @@ NAME_TO_CELL = {
     "turn3p3": "merged_signal",
     "turn4p3": "age240_turn4pop3_crowd2",
     "turn4p5": "age240_turn4pop5_crowd2",
-    "age210tp14": "age210_tp14_hold24_invvol10_crowd2",
 }
 CELL_OVERRIDES = {cell: ov for (_root, cell), ov in rb.CELLS.items()}
 

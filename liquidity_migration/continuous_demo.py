@@ -47,7 +47,7 @@ CONTINUOUS_DEMO_PROFILES = (
     "continuous_v1",
     "continuous_addon_v1",
     "continuous_rebalance_v1",  # DEPRECATED 2026-06-10: single-component turn4_pop4 (kept resolvable for old ledgers)
-    "continuous_ensemble_v1",   # the validated winner_base 4-component ensemble (the live default)
+    "continuous_ensemble_v1",   # the validated winner_base 3-component ensemble (the live default)
 )
 
 
@@ -193,7 +193,7 @@ class ContinuousDemoCycleConfig:
     # continuous_dynexit_shadow.jsonl. Zero order impact; forward evidence is the
     # only path that can ever promote it (receipt continuous-dynexit-forward-shadow).
     dynexit_shadow_enabled: bool = True
-    # --- winner_base 4-component ensemble (the validated research object) ---
+    # --- winner_base 3-component ensemble (the validated research object) ---
     # (name, entry_event_trigger|"none", age_days_min, take_profit_pct, weight).
     # Non-empty => the cycle selects entries PER COMPONENT (each with its own event
     # trigger, age floor and venue-side TP) and sizes each entry by weight x the base
@@ -1650,7 +1650,7 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
     """Resolve named demo profiles into explicit knobs.
 
     ``continuous_ensemble_v1`` is the live demo book (the validated winner_base
-    4-component ensemble, operator-wired 2026-06-10; both live units pin it via
+    3-component ensemble, operator-wired 2026-06-10; both live units pin it via
     STRATEGY_PROFILE). ``continuous_rebalance_v1`` is its DEPRECATED
     single-component predecessor, kept resolvable for old ledgers.
 

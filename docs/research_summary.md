@@ -20,8 +20,8 @@ archive.
 **Continuous fade book**
 
 - Old deployed system restored as the research anchor on 2026-06-17.
-- Live demo object: `continuous_ensemble_v1`: p3 .30 / p4p3 .20 / p4p5 .40 / tp14
-  .10, w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25, BTC-uptrend gate.
+- Live demo object: `continuous_ensemble_v1`: p3 .333 / p4p3 .222 / p4p5 .444,
+  w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25, BTC-uptrend gate.
 - Demo fills are execution evidence, not alpha proof.
 - The temporary 2026-06-16 `BTC_TREND_GATE=off` plumbing window is not promoted-object
   forward evidence; revert to `uptrend` after plumbing confirmation.

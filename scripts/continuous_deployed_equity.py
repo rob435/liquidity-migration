@@ -1,6 +1,6 @@
 """Official-format equity curve for the DEPLOYED continuous strategy.
 
-Book = winner_base 4-component ensemble @ w90/tv0.045/max4/ddh-0.04 + the banked
+Book = winner_base 3-component ensemble @ w90/tv0.045/max4/ddh-0.04 + the banked
 BTC+ETH 2f hedge with real funding — the exact object wired live 2026-06-10
 (profile continuous_ensemble_v1 + HEDGE_MODE=2f), reproduced through the
 s0-parity-verified Stage-B pipeline. Renders via the shared official chart writer

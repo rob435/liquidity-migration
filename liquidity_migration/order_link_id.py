@@ -20,7 +20,7 @@ from collections.abc import Iterable
 # by ``is_exit_link`` (event_demo._is_own_exit_order enumerated these inline; quality-dup-12).
 #   entry:  lm-en-{base}-{ts36} (short, erased 2026-06-11 — decoded for legacy adoption only)
 #           lm-en-l-… (long) · lm-en-c{tag}-…[-seq] (continuous: plain "c", ensemble component
-#           tags "cp3"/"cp4p3"/"cp4p5"/"ctp14", sniper "cs") · lm-en-ca-… (continuous_addon/hedge)
+#           tags "cp3"/"cp4p3"/"cp4p5", sniper "cs") · lm-en-ca-… (continuous_addon/hedge)
 #           CONSTRAINT: a continuous component tag must never begin with "a" — "c"+"a…" would
 #           collide with the "ca" addon prefix and mis-route the fill.
 #   exit/risk: lm-ex- (planned exit) · lm-rx- (risk exit) · lm-wx- (watchdog) · lm-ux- (untracked unwind)
@@ -133,7 +133,7 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int, str] 
     # Short:      lm-en-{base}-{ts36}                → 4 parts, sleeve="short" (legacy adoption)
     # Long:       lm-en-l-{base}-{ts36}              → 5 parts (parts[2]=="l"), sleeve="long"
     # Continuous: lm-en-c{tag}-{base}-{ts36}[-{seq}] → 5/6 parts; tag is "" (plain), an ensemble
-    #             component ("p3"/"p4p3"/"p4p5"/"tp14" → "cp3"…), or the sniper "s" → "cs".
+    #             component ("p3"/"p4p3"/"p4p5" → "cp3"…), or the sniper "s" → "cs".
     #             The deployed continuous_ensemble_v1 emits ONLY component-tagged links — a
     #             decoder that knew bare "c" alone sent every live entry to the adopted-*
     #             fallback as sleeve="short" on rebuild (audit 2026-06-11).
