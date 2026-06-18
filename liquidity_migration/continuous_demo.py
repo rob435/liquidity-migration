@@ -3450,11 +3450,16 @@ def run_continuous_demo_cycle(
         # wrong-signed Market orders. Skip and defer to the next cycle once the wallet
         # read recovers; `rebalance_resize_checked` stays False so today still resizes
         # later. Dry-run/paper (submit_orders False) is unaffected.
-        if (
+        # audit-iter3 (deep-continuous_demo): `resize_ran` must also drive the
+        # persisted `rebalance_resize_checked` below — otherwise an error-deferred
+        # cycle still marks today "checked" and the resize is permanently skipped
+        # for the rest of the day even after the wallet read recovers.
+        resize_ran = (
             demo.daily_rebalance_enabled
             and not rebalance_resize_checked
             and not (errors and demo.submit_orders)
-        ):
+        )
+        if resize_ran:
             resize_plans = plan_continuous_rebalance_resizes(
                 _open_continuous_trades(post_trade_ledger, strategy_id).to_dicts(),
                 price_by_symbol=price_by_symbol,
@@ -3498,7 +3503,10 @@ def run_continuous_demo_cycle(
             )
             rebalance_fields.update(
                 {
-                    "rebalance_resize_checked": True,
+                    # Stay False on an error-deferred cycle (resize_ran False AND not
+                    # already checked) so the resize retries later the same day once the
+                    # wallet read recovers (audit-iter3 deep-continuous_demo).
+                    "rebalance_resize_checked": rebalance_resize_checked or resize_ran,
                     "rebalance_resize_orders": len(resize_orders),
                     "rebalance_resize_trade_rows": len(resize_rows),
                     "rebalance_resize_skipped_same_day": rebalance_resize_checked,

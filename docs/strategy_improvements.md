@@ -201,6 +201,60 @@ Phase-6 IC/decile diagnostics, not a live gate.
 
 ---
 
+### 2026-06-18 — Live vol-target sizing reads an incomplete current-day btc_rv_30 (look-ahead)  [🟡 Proposed — HIGH PRIORITY]
+
+**Sleeve:** long · **Type:** sizing (methodology / PIT)
+
+**Observation.** `long_native_event_demo._compute_long_order_sizing` selects the
+vol-target BTC realized-vol scalar via `features.sort("ts_ms")["btc_rv_30"]` →
+`drop_nulls()[-1]`, with NO `ts <= now_ms` gate. A daily feature row is stamped at
+day-END, so after ~20:00 UTC the still-forming current day is the latest row — the
+live sizing scalar then uses an INCOMPLETE-day BTC vol the backtest never sees.
+This is a look-ahead in a running sleeve's order sizing (audit-iter3 long, MED,
+verified). Mirrors the median-universe future-bar class fixed in iter-1.
+
+**Proposed change.** Thread `now_ms` into the sizing helper and gate the selection
+to closed bars: `features.filter(pl.col("ts_ms") <= now_ms).sort("ts_ms")["btc_rv_30"]`
+(fall back to scale 1.0 when empty), exactly like `_apply_median_universe_selection`.
+
+**Expected effect & risk.** Removes the look-ahead so live vol-target sizing equals
+the backtest on mid-day cycles. It IS a behavior change to deployed live/paper sizing
+(post-~20:00 UTC cycles), so per `AGENTS.md` it goes through the parameter-change
+discipline (pre-reg) rather than a silent edit; a `reconcile.sh` run should confirm
+live and backtest sizing then agree. Methodology-correctness fix → it *tightens* PIT.
+
+**Decision.** (operator)
+
+---
+
+### 2026-06-18 — Audit iter-3 deferred (behavior / strategy / exit logic)  [🟡 Proposed]
+
+Confirmed + verified, but each changes trade selection/sizing/exit behavior, so they
+need operator review (and pre-reg where they touch live sizing). Tracked in
+`docs/audit/CONTINUOUS_AUDIT_LOG.md` iter-3.
+
+- **`long_native` `fc_use_scaled_exit` never books the documented 50% partial** — the
+  full size rides to final exit, contradicting the flag's docstring (lines ~1879-1899).
+- **`long_native_event_demo` partial time-stop exit leaves qty unreduced** — next cycle
+  re-plans a full-qty exit (lines ~1338-1342/1493-1558).
+- **`long_native` volume-resurrection entries bypass `in_universe`** (min-listing-history
+  / 90d-turnover-finite) gates, and `avg_rank_pct_30d` normalizes by `universe_size`
+  not symbol count, saturating the below-median gate (lines ~1209-1228, 919-927).
+- **`continuous_demo` live BTC-trend gate recomputed from only ~45d klines can
+  fail-closed and silently block ALL entries** (lines ~1749-1764/3280-3284).
+- **`continuous_demo` partial market-fill covers don't count toward the
+  correlated-squeeze entry-pause breaker** (lines ~1335-1372/2187-2196).
+- **`long_native` live per-symbol weight cap** (re-confirm of iter-1 long-4) and
+  **provisional positional `shift(24)`** (re-confirm of iter-1 long-1) — see the
+  earlier entries; still open.
+- **`build_legacy_archive_manifest` link idempotency** trusts a dangling/wrong-source
+  link. NOTE: re-resolving CONFLICTS with the deliberate, test-pinned audit2b
+  "assume-correct" decision — left unchanged pending an operator ruling.
+
+**Decision.** (operator)
+
+---
+
 ## Template
 
 ```

@@ -230,6 +230,10 @@ def main() -> None:
 
     events = load_bybit_events()
     pairs = needed_symbol_dates(events, forward_hours=args.forward_hours)
+    if not pairs:
+        # audit-iter3: min()/max() over an empty pair set would crash; nothing to do.
+        print(f"events={events.height} unique_symbol_dates=0 — no symbol-dates to backfill.", flush=True)
+        return
     print(f"events={events.height} unique_symbol_dates={len(pairs)} "
           f"symbols={len({s for s, _ in pairs})} "
           f"date_range=[{min(d for _, d in pairs)} .. {max(d for _, d in pairs)}]", flush=True)

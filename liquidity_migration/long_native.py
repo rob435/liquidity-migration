@@ -655,8 +655,13 @@ def run_long_native_research(
     full_pit_universe_pass = inputs["full_pit_universe_pass"]
     pit_covered_date_symbols = inputs["pit_covered_date_symbols"]
 
+    # Gate on BOTH flags: provisional FC entries can only CONFIRM via the fomo-chase
+    # classifier, so with enable_fomo_chase off they would fire then fail to confirm,
+    # churning same-day. Don't build the panel for that invalid pairing (audit-iter3).
     provisional_triggers = (
-        _provisional_trigger_panel(klines, features, cfg) if cfg.fc_provisional_entry else None
+        _provisional_trigger_panel(klines, features, cfg)
+        if (cfg.fc_provisional_entry and cfg.enable_fomo_chase)
+        else None
     )
     trades, lifecycle_stats, event_counts = _run_long_pipeline(
         features=features,

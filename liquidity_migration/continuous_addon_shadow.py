@@ -2283,6 +2283,14 @@ def run_continuous_addon_shadow_audit(config: ContinuousAddonShadowAuditConfig) 
         addon_rows = _filter_by_strategy_id(addon_rows, config.expected_addon_strategy_id)
         primary_order_rows = _filter_by_strategy_id(primary_order_rows, config.expected_primary_strategy_id)
         addon_order_rows = _filter_by_strategy_id(addon_order_rows, config.expected_addon_strategy_id)
+        # addon_cycles is a pl.DataFrame (not list[dict]); filter it too so the
+        # cycle-based gates see ONLY the add-on strategy's cycles, not both strategies'
+        # telemetry mixed together (audit-iter3 deep-continuous_addon_shadow). Guard on
+        # the column: older/empty cycle datasets may not carry strategy_id.
+        if "strategy_id" in addon_cycles.columns:
+            addon_cycles = addon_cycles.filter(
+                pl.col("strategy_id") == config.expected_addon_strategy_id
+            )
     primary_summary = _trade_summary(primary_rows)
     addon_summary = _trade_summary(addon_rows)
     shadow_overlap = _overlap_summary(primary_rows, addon_rows)

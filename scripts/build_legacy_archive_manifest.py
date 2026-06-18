@@ -69,6 +69,10 @@ def _link_subdir(target: Path, source: Path) -> str:
         # downstream resolves/verifies an existing link target.
         # Idempotency: assume any pre-existing target (link or dir) is correct
         # and leave it in place; the link target is NOT re-resolved or verified.
+        # NOTE (audit-iter3): this assume-correct policy is a deliberate, test-pinned
+        # decision (see test_existing_stale_target_assumed_correct_not_verified); a
+        # dangling/wrong-source link is therefore trusted. Re-resolving is a proposal
+        # in docs/strategy_improvements.md, not changed here.
         return "exists"
     target.parent.mkdir(parents=True, exist_ok=True)
     # First try a real symlink (POSIX always works; Windows works under

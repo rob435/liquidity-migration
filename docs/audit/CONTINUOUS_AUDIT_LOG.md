@@ -42,6 +42,7 @@ Each iteration:
 |---|------|-----------|-------|----------|-------|
 | 1 | 2026-06-18 | 22 | 13 | 9 | repo-wide audit (8 clusters, adversarial verify); 1 HIGH fixed; reconcile collapsed to one command; harness-cli cluster pending re-run (rate-limited) |
 | 2 | 2026-06-18 | 14 | 11 | 3 | harness-cli (rerun) + 27 modules iter1 missed; 2 HIGH fixed (execId double-count, combined-signal null-poison); +7 regression tests |
+| 3 | 2026-06-18 | 39 | 8 | 31 | remaining scripts + DEEP pass on 5 giant modules; 3 HIGH fixed (incl. a fix-interaction with iter-1); 1 reverted (test-pinned audit2b conflict); large LOW backlog queued for iter-4 |
 
 ---
 
@@ -158,3 +159,68 @@ expansion, crossed-book rejection.
 
 Local commit only — **no `git push`**. `REAL_MONEY` untouched. No methodology/PIT
 gate loosened (the deferred PIT-gate change would *tighten* it; left for pre-reg).
+
+---
+
+## Iteration 3 — 2026-06-18
+
+**Baseline:** `ruff` clean; `pytest -q` → 1982 passed (carried iter-1/2 fixes).
+
+**Audit:** the 19 remaining `scripts/` (excluding the operator's concurrent
+`research_residualization_*` workstream) + a DEEP second pass on the five
+2,000–3,700-line modules a single finder under-covered (continuous_demo, ws_risk,
+long_native, continuous_addon_shadow, long_native_event_demo), across 9 clusters.
+50 raw → **39 confirmed** (3 high, 9 medium, 27 low), 11 rejected.
+
+This was a deliberately wide pass; given the volume, iteration 3 FIXED the 3 HIGH +
+the clearly-safe MEDIUM + a few low-risk crash guards, DEFERRED the behavior/PnL/
+methodology items to the docs, and QUEUED the safe LOW tail for iteration 4.
+
+### Fixed this iteration (8; +3 regression tests; suite stays green at 1985)
+
+| Finding | File | Sev | Fix |
+|---|---|---|---|
+| scripts-research | `continuous_demo_signal_check.py` | **high** | Replay the continuous engine with the DEPLOYED params (rmom_quantile 0.33→0.25, feature_set=`max_ret168`) + a `--feature-set` flag, so the reconcile's continuous model leg is a faithful live==engine check, not a different universe |
+| deep-continuous_demo | `continuous_demo.py` | **high** | Daily-rebalance no longer permanently skipped for the day after a first-cycle wallet error — `rebalance_resize_checked` now reflects whether the resize actually ran (fixes an interaction with the iter-1 wallet-error gate) |
+| deep-continuous_addon_shadow | `continuous_addon_shadow.py` | **high** | Single-root strategy-split mode now filters `addon_cycles` by `strategy_id`, so cycle-based gates see only the add-on strategy (trades/orders were already filtered) |
+| scripts-equity | `continuous_deployed_equity.py` | med | `stats()` Sharpe uses sample std (ddof=1) + zero-variance guard (was population std, div-by-~0 risk) |
+| scripts-equity | `continuous_deployed_equity_refresh.py` | med | Frozen-panel fast path clips the cached panel to `--end-date` (exclusive), no longer leaking rows past the boundary |
+| deep-long_native | `long_native.py` | med | Provisional FC panel gated on `enable_fomo_chase` too — an invalid pairing can no longer fire entries that never confirm |
+| scripts-research | `bybit_taker_flow_backfill.py` | low | Guard `min()/max()` over an empty symbol-date set (was a crash) |
+| (revert) | `build_legacy_archive_manifest.py` | — | Link re-resolution REVERTED: it conflicts with the deliberate, test-pinned audit2b "assume-correct" decision → deferred to operator |
+
+Regression tests added: deployed-equity Sharpe (flat→None, sample-std finite),
+provisional test fixture now sets a valid `enable_fomo_chase` pairing.
+
+### Deferred — behavior / methodology (→ `docs/strategy_improvements.md`)
+
+HIGH-PRIORITY: **live vol-target sizing reads an incomplete current-day `btc_rv_30`
+(look-ahead)** — causal fix changes live sizing, needs pre-reg. Plus: `fc_use_scaled_exit`
+partial never booked; partial time-stop qty not reduced; resurrection gates
+(in_universe bypass / avg_rank normalization); live BTC-trend gate fail-closed from
+~45d klines; squeeze-breaker partial-fill miss; the link-idempotency conflict; and
+re-confirms of iter-1 long-1/long-4.
+
+### Deferred — PnL/fee accounting + data warts (→ `docs/limitations.md`)
+
+WS multi-leg close: only final sub-order's fee booked; only final leg's gross return;
+`reconcile_flat` drops partial-reduce PnL; aged-out pending exit drops a late fill;
+validator omits `continuous_addon_data_root`; funding 480-hardcode on blank interval.
+
+### Backlog — safe LOW fixes queued for iteration 4
+
+Low-risk, mostly research/ops tooling; not fixed this round to keep the iteration
+reviewable: `backfill_binance_{metrics,bookdepth,funding}` 429-abort handling +
+metrics concat column-mismatch; `bybit_taker_flow --ohlc` empty-label; `alpha_sweep`
+non-gap-aware regime `shift(1)` + forward-pad delay; addon double-count guard (orders/
+cycles) + idle-cycle worst-acceptance + entry_order_attempts ts_ms=0; `continuous_demo`
+component-trigger validation; `long_native` event_counts fomo_chase double-count +
+stale_signal counter; `long_native_event_demo` dry-run exit-order avg_price=0;
+`continuous_deployed_equity` missing-funding silent-zero; orchestrator zero-trades
+hard-fail.
+
+### Guardrail honored
+
+Local commit only — **no `git push`**. `REAL_MONEY` untouched. A test-pinned prior
+decision (audit2b) was NOT overridden — surfaced to the operator instead. The
+deferred look-ahead fix *tightens* PIT (left for pre-reg, not silently changed).

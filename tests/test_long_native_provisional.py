@@ -30,7 +30,10 @@ def _features(symbol: str, day_end_ms: int, **over) -> dict:
 
 
 def _cfg(**over) -> LongNativeConfig:
-    base = {"fc_provisional_entry": True, "fc_use_sigma_threshold": True,
+    # enable_fomo_chase must be on for a valid provisional pairing: provisional FC
+    # entries confirm only via the fomo-chase classifier (audit-iter3).
+    base = {"fc_provisional_entry": True, "enable_fomo_chase": True,
+            "fc_use_sigma_threshold": True,
             "fc_min_day_return": 0.15, "fc_min_close_location": 0.7,
             "fc_top_volume_rank_max": 10}
     base.update(over)

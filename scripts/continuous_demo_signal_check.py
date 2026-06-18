@@ -28,7 +28,12 @@ import polars as pl  # noqa: E402
 from liquidity_migration.continuous_events import compute_continuous_decile_panel  # noqa: E402
 
 DEFAULT_ROOT = "data/bybit-continuous-demo-event"
-RMOM_QUANTILE = 0.33
+# Must MATCH the deployed continuous_ensemble_v1 engine, else this "consistency"
+# check replays a DIFFERENT D9 universe than the live book and reports spurious
+# hits/misses (audit-iter3 scripts-research). Deployed values:
+# rmom_quantile=0.25, feature_set=("max_ret168",) (continuous_demo.py ensemble profile).
+RMOM_QUANTILE = 0.25
+FEATURE_SET = ("max_ret168",)
 DECILE = 9
 LIQ_MIN = 500_000.0
 
@@ -80,9 +85,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Continuous demo signal-consistency check.")
     ap.add_argument("--root", default=DEFAULT_ROOT, help="Continuous demo data root.")
     ap.add_argument("--rmom-quantile", type=float, default=RMOM_QUANTILE)
+    ap.add_argument("--feature-set", default=",".join(FEATURE_SET),
+                    help="Comma list of engine features (must match the deployed profile).")
     args = ap.parse_args()
     root = args.root
     rmom_quantile = float(args.rmom_quantile)
+    feature_set = tuple(f.strip() for f in args.feature_set.split(",") if f.strip())
 
     entries_probe = load_entries(root)
     if entries_probe.height == 0:
@@ -95,7 +103,9 @@ def main() -> int:
     print(f"klines: {k.height} rows {_ts(k['ts_ms'].min())}->{_ts(k['ts_ms'].max())}; "
           f"rmom: {rmom.height} rows; symbols(klines)={k['symbol'].n_unique()}")
 
-    panel = compute_continuous_decile_panel(k, rmom, rmom_quantile=rmom_quantile, start_ms=0)
+    panel = compute_continuous_decile_panel(
+        k, rmom, rmom_quantile=rmom_quantile, feature_set=feature_set, start_ms=0
+    )
     print(f"decile panel: {panel.height} rows, deciles={sorted(panel['decile'].unique().to_list())}")
 
     entries = load_entries(root)

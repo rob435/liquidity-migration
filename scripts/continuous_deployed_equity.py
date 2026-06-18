@@ -104,6 +104,11 @@ def stats(df: pl.DataFrame) -> dict:
     # audit2: a no-drawdown curve gives abs(max_dd)==0 -> ZeroDivisionError;
     # mirror reconciliation._calendar_metrics and report mar=None instead.
     mar = round((total / years) / abs(max_dd), 2) if abs(max_dd) > 1e-12 else None
+    # audit-iter3: use the repo-canonical Sharpe convention (sample std, ddof=1) and
+    # guard zero variance / single-day series, mirroring trade_lifecycle.annualized_sharpe
+    # (np.std's ddof=0 understates vol and a flat series would divide by ~0).
+    std = float(series.std(ddof=1)) if series.size > 1 else 0.0
+    sharpe = round(float(series.mean()) / std * np.sqrt(ANN), 2) if std > 1e-12 else None
     return {
         "window": f"{dates[0]} -> {dates[-1]}",
         "years": round(years, 2),
@@ -111,7 +116,7 @@ def stats(df: pl.DataFrame) -> dict:
         "annualized_pct": round(((1 + total) ** (1 / years) - 1) * 100, 2),
         "max_drawdown_pct": round(max_dd * 100, 2),
         "mar": mar,
-        "sharpe_daily_ann": round(float(series.mean() / series.std() * np.sqrt(ANN)), 2),
+        "sharpe_daily_ann": sharpe,
         "worst_day_pct": round(float(series.min() * 100), 2),
     }
 

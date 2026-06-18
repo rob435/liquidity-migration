@@ -146,8 +146,12 @@ def load_extended_panel(venue: str, *, end_date: str, root: Path | None = None) 
     boundary = dt.date.fromisoformat(end_date)
     frozen = root / FROZEN_PANEL_NAME
     dups = 0
-    if frozen.exists():
-        fp = pl.read_parquet(frozen, columns=PANEL_COLUMNS)
+    fp = pl.read_parquet(frozen, columns=PANEL_COLUMNS) if frozen.exists() else None
+    if fp is not None:
+        # Clip the cached panel to the requested end_date (exclusive): a frozen panel
+        # built to a LATER date must not leak rows past --end-date (audit-iter3).
+        fp = fp.filter(pl.col("date") < boundary.isoformat())
+    if fp is not None and not fp.is_empty():
         n_before = fp.height
         fp = fp.sort("ts_ms").group_by(["symbol", "date"], maintain_order=True).last()
         dups = n_before - fp.height

@@ -97,6 +97,27 @@ ones are proposals in `docs/strategy_improvements.md`.
   (audit-iter2 risk-factor-1). Fix when touched: validate the factor-set subset at
   entry and treat a genuinely-missing factor return as unresolved, not 0.0.
 
+### From audit iteration 3 (2026-06-18) — WS-close PnL/fee accounting (demo/paper)
+
+Confirmed defects in the `ws_risk` multi-leg WS close path. All affect recorded
+PnL/fee on the netted demo/paper ledger (no real money); `safe=False` because the
+fix touches the latency-critical close path + trade-row schema and needs a targeted
+split-close unit test. Tracked in `docs/audit/CONTINUOUS_AUDIT_LOG.md` iter-3.
+
+- **Split (multi-sub-order) WS exit books only the FINAL sub-order's fee** into
+  `exit_fee_usdt` (under-counts fees on a split close). Fix: accumulate fees across
+  all sub-links before stamping (ws_risk ~1338/1700-1748).
+- **`gross_trade_return` on a multi-leg WS close records only the final leg's gross
+  return** (ws_risk ~1326/1340).
+- **`reconcile_flat_pending_exit_orders` drops prior partial-reduce realized PnL**
+  from `net_return` (ws_risk ~2520-2535).
+- **An aged-out pending exit order (> `pending_exit_guard_seconds`) is dropped from
+  tracking**, so a late WS fill for it is silently discarded (ws_risk ~2700-2709).
+- **Config flatten-safety validator omits `continuous_addon_data_root`** from its
+  warning set (ws_risk ~3192-3205).
+- **`backfill_binance_funding_vision` reintroduces the 8h (480-min) hardcode** on a
+  missing/blank `funding_interval_hours` — same family as data-io-1 (script ~133-134).
+
 ## Resolved
 
 _None yet._
