@@ -48,7 +48,8 @@ from liquidity_migration.continuous_rebalance import scaled_entry_cost  # noqa: 
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
 ROOTS = {"bybit": SHARED / "bybit_full_pit", "binance": SHARED / "binance_full_pit"}
 OUT_DIR = Path(__file__).resolve().parent.parent / "deploy" / "hedge_warmstart"
-WINNER = {"turn3p3": 0.30, "turn4p3": 0.20, "turn4p5": 0.40, "age210tp14": 0.10}
+# age210tp14 dropped 2026-06-18 (receipt docs/preregistration/2026-06-18-drop-tp14-continuous-ensemble.md); renorm = old/0.90.
+WINNER = {"turn3p3": 0.3333333333333333, "turn4p3": 0.2222222222222222, "turn4p5": 0.4444444444444444}
 MS_DAY = 86_400_000
 
 

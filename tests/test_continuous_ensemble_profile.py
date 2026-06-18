@@ -21,12 +21,13 @@ def test_ensemble_profile_resolves_winner_base() -> None:
         ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v1", btc_trend_gate="uptrend")
     )
     comps = {c[0]: c for c in cfg.ensemble_components}
-    assert set(comps) == {"p3", "p4p3", "p4p5", "tp14"}
-    assert comps["p3"] == ("p3", "turn3_pop3", 240, 0.10, 0.30)
-    assert comps["p4p3"] == ("p4p3", "turn4_pop3", 240, 0.10, 0.20)
-    assert comps["p4p5"] == ("p4p5", "turn4_pop5", 240, 0.10, 0.40)
-    assert comps["tp14"] == ("tp14", "none", 210, 0.14, 0.10)
-    assert abs(sum(c[4] for c in cfg.ensemble_components) - 1.0) < 1e-12  # frozen weights sum to 1
+    # age210tp14 dropped 2026-06-18 (receipt 2026-06-18-drop-tp14-continuous-ensemble.md);
+    # remaining three weights renormalized = old/0.90.
+    assert set(comps) == {"p3", "p4p3", "p4p5"}
+    assert comps["p3"] == ("p3", "turn3_pop3", 240, 0.10, 0.3333333333333333)
+    assert comps["p4p3"] == ("p4p3", "turn4_pop3", 240, 0.10, 0.2222222222222222)
+    assert comps["p4p5"] == ("p4p5", "turn4_pop5", 240, 0.10, 0.4444444444444444)
+    assert abs(sum(c[4] for c in cfg.ensemble_components) - 1.0) < 1e-12  # renormalized weights sum to 1
     assert cfg.rmom_quantile == 0.25
     assert cfg.btc_trend_gate == "uptrend"
     assert cfg.max_hold_hours == 24
@@ -86,17 +87,20 @@ def test_component_entry_weighted_sizing_tp_and_ids() -> None:
 
 
 def test_two_components_same_symbol_distinct_ids() -> None:
+    # Generic executor test: two distinct component tags + different TPs on one symbol get
+    # distinct ids and the right per-candidate TP price. Synthetic tags (decoupled from the
+    # deployed component set, which no longer includes a 0.14-TP leg after dropping tp14).
     rows, _ = _run([
-        _cand(component="p3", weight=0.30, tp=0.10),
-        _cand(component="tp14", weight=0.10, tp=0.14),
+        _cand(component="cmpA", weight=0.30, tp=0.10),
+        _cand(component="cmpB", weight=0.10, tp=0.14),
     ])
     assert len(rows) == 2
     ids = {r["trade_id"] for r in rows}
     links = {r["entry_order_link_id"] for r in rows}
     assert len(ids) == 2 and len(links) == 2
     tp_by_comp = {r["component"]: r["take_profit_price"] for r in rows}
-    assert abs(tp_by_comp["p3"] - 90.0) < 1e-9
-    assert abs(tp_by_comp["tp14"] - 86.0) < 1e-9
+    assert abs(tp_by_comp["cmpA"] - 90.0) < 1e-9
+    assert abs(tp_by_comp["cmpB"] - 86.0) < 1e-9
 
 
 def test_legacy_candidate_unchanged() -> None:

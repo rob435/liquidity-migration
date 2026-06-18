@@ -2708,10 +2708,11 @@ def test_adoption_rebuilds_component_tagged_trade_id(tmp_path: Path) -> None:
     assert row["sleeve"] == "continuous"
     # ROUND 4: the adopted row must also carry the ensemble sizing weight —
     # without it the daily rebalance defaults the missing weight to 1.0 and
-    # resizes a 0.30x p3 entry to FULL base notional (the round-3 CRITICAL
-    # re-entering through the adoption door).
+    # resizes a fractional p3 entry to FULL base notional (the round-3 CRITICAL
+    # re-entering through the adoption door). p3 weight renormalized to 1/3 after
+    # the 2026-06-18 tp14 drop.
     assert row["component"] == "p3"
-    assert float(row["component_weight"]) == pytest.approx(0.30)
+    assert float(row["component_weight"]) == pytest.approx(0.3333333333333333)
 
 
 def test_ws_risk_falls_back_to_adopted_when_order_history_has_no_bot_link(tmp_path: Path) -> None:

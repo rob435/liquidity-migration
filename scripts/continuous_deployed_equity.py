@@ -39,7 +39,8 @@ from liquidity_migration.volume_events_charts import _write_equity_benchmark_cha
 
 SHARED = Path("C:/Users/user/SHARED_DATA")
 OUT = SHARED / "continuous_deployed_equity_2026-06-10"
-WINNER_WEIGHTS = {"turn3p3": 0.30, "turn4p3": 0.20, "turn4p5": 0.40, "age210tp14": 0.10}
+# age210tp14 dropped 2026-06-18 (receipt docs/preregistration/2026-06-18-drop-tp14-continuous-ensemble.md); renorm = old/0.90.
+WINNER_WEIGHTS = {"turn3p3": 0.3333333333333333, "turn4p3": 0.2222222222222222, "turn4p5": 0.4444444444444444}
 ANN = 365.25
 FUNDING_ROOT = {
     "bybit": SHARED / "bybit_full_pit" / "funding",

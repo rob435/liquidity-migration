@@ -1692,10 +1692,13 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
             daily_rebalance_strategy_momentum_min_return=0.0,
             daily_rebalance_strategy_momentum_scale_when_below=0.0,
             ensemble_components=(
-                ("p3", "turn3_pop3", 240, 0.10, 0.30),
-                ("p4p3", "turn4_pop3", 240, 0.10, 0.20),
-                ("p4p5", "turn4_pop5", 240, 0.10, 0.40),
-                ("tp14", "none", 210, 0.14, 0.10),
+                # age210tp14 leg dropped 2026-06-18 (operator; receipt
+                # docs/preregistration/2026-06-18-drop-tp14-continuous-ensemble.md): worst leg
+                # in-sample (MAR ~0.97 bybit / negative binance), the only one with no turn/pop
+                # catalyst. Remaining three weights renormalized = old weight / 0.90.
+                ("p3", "turn3_pop3", 240, 0.10, 0.3333333333333333),
+                ("p4p3", "turn4_pop3", 240, 0.10, 0.2222222222222222),
+                ("p4p5", "turn4_pop5", 240, 0.10, 0.4444444444444444),
             ),
         )
     if config.strategy_profile != "continuous_rebalance_v1":
