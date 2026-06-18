@@ -20,10 +20,69 @@ from liquidity_migration.continuous_rebalance import (
     ContinuousHedgeState,
     compute_continuous_hedge_ratio,
 )
+from liquidity_migration.config import TradeLifecycleConfig
 from liquidity_migration.ingestion import normalize_funding_history
-from liquidity_migration.trade_lifecycle import _daily_sharpe, annualized_sharpe
+from liquidity_migration.trade_lifecycle import (
+    _daily_sharpe,
+    annualized_sharpe,
+    build_equity_curve,
+    summarize_baskets,
+    summarize_trade_backtest,
+)
 
 MS_PER_HOUR = MS_PER_DAY // 24
+
+
+def _gen_trade(rng: random.Random, basket_id: str, exit_day: int, net_return: float) -> dict:
+    """A minimal trade row summarize_baskets/build_equity_curve accept (mirrors the
+    fixture in test_..._trade_lifecycle_sharpe). Exit hour is randomized to exercise the
+    calendar-day bucketing."""
+    exit_ms = exit_day * MS_PER_DAY + rng.randint(0, 23) * MS_PER_HOUR
+    entry_ms = max(0, exit_ms - MS_PER_DAY)
+    return {
+        "trade_id": f"{basket_id}-t", "basket_id": basket_id,
+        "entry_signal_ts_ms": entry_ms, "entry_ts_ms": entry_ms, "exit_ts_ms": exit_ms,
+        "entry_date": "1970-01-01", "exit_date": "1970-01-02", "exit_month": "1970-01",
+        "symbol": "BTCUSDT", "side": "long", "score": 0.0, "rank": 1,
+        "entry_price": 100.0, "exit_price": 100.0 * (1.0 + net_return),
+        "exit_reason": "take_profit", "planned_exit_ts_ms": exit_ms,
+        "stop_price": 90.0, "take_profit_price": 130.0,
+        "notional_weight": 1.0, "position_weight": 1.0,
+        "gross_trade_return": net_return, "gross_return": net_return,
+        "cost_return": 0.0, "funding_return": 0.0, "funding_mode": "ok", "funding_event_count": 0,
+        "net_return": net_return, "mae": 0.0, "mfe": 0.0, "bars_held": 24, "hold_hours": 24.0,
+        "actual_entry_delay_hours": 0.0, "pattern": "fomo_chase",
+    }
+
+
+def _summary(rng: random.Random, rets: list[float]) -> tuple[dict, pl.DataFrame]:
+    days = sorted(rng.sample(range(1, 320), len(rets)))  # distinct exit calendar days
+    trades = pl.DataFrame([_gen_trade(rng, f"B{i}", days[i], rets[i]) for i in range(len(rets))])
+    cfg = TradeLifecycleConfig(rebalance_days=7, hold_days=7, score="test")
+    baskets = summarize_baskets(trades, config=cfg)
+    equity = build_equity_curve(baskets)
+    return summarize_trade_backtest(trades, baskets, equity, config=cfg), equity
+
+
+def test_equity_curve_accounting_identities() -> None:
+    """max_drawdown = min(eq/cummax - 1) must always be <= 0; total_return must equal
+    equity[-1]-1; sharpe_like must be finite. (These feed the three-tier decision rule.)"""
+    rng = random.Random(31)
+    for _ in range(120):
+        rets = [rng.uniform(-0.3, 0.3) for _ in range(rng.randint(2, 25))]
+        s, equity = _summary(rng, rets)
+        assert s["max_drawdown"] <= 1e-12, s["max_drawdown"]           # drawdown never positive
+        assert s["total_return"] > -1.0                                 # equity stays positive (rets > -1)
+        assert math.isclose(s["total_return"], float(equity["equity"][-1] - 1.0), rel_tol=1e-9, abs_tol=1e-12)
+        assert math.isfinite(s["sharpe_like"])
+
+
+def test_all_positive_returns_have_zero_drawdown() -> None:
+    """A strictly-increasing equity curve has exactly zero drawdown and positive return."""
+    rng = random.Random(32)
+    s, _ = _summary(rng, [rng.uniform(0.001, 0.05) for _ in range(12)])
+    assert math.isclose(s["max_drawdown"], 0.0, abs_tol=1e-12)
+    assert s["total_return"] > 0.0
 
 
 def test_annualized_sharpe_scale_invariant_and_sign_flip() -> None:

@@ -49,6 +49,7 @@ Each iteration:
 | 7 | 2026-06-18 | 5 | 0 | 5 | LIGHT pass (post-convergence, ~1h cadence): gate verified green; read-only audit of the operator's research_residualization workstream — **0 verdict-invalidating bugs**, 5 LOW hygiene items reported for the operator (not fixed — their workstream) |
 | 8 | 2026-06-18 | 0 | — | — | NEW METHOD: stdlib-random property/invariant tests over the core math (Sharpe scale-invariance, calendar-day bucketing, funding clamp, hedge-ratio bounds) — ~1,800 generated inputs, all invariants HELD (0 new bugs); +5 generative tests, 1998 total |
 | 9 | 2026-06-18 | 0 | — | — | NEW LENS: coverage-gap analysis (~79% pkg). Confirmed the uncovered ~21% is network/IO glue (collectors/daemons/API clients), NOT untested logic — their pure parsers/helpers are fully tested. Net validated; coverage posture documented in limitations.md. No redundant tests added |
+| 10 | 2026-06-18 | 0 | — | — | Extended property testing to the ACCOUNTING layer (equity-curve/drawdown/total-return identities that feed the decision rule): drawdown<=0, total_return==eq[-1]-1, finite Sharpe, all-positive→zero-DD — all held over generated trade sets; +2 generative tests, 2000 total |
 
 ---
 
@@ -459,3 +460,25 @@ limitations). This is a positive convergence signal from a second orthogonal met
 ### Guardrail honored
 
 Local doc commit only — no `git push`. No code changed.
+
+---
+
+## Iteration 10 — 2026-06-18 (extend property testing to the accounting layer)
+
+No new repo commits since iter-9. Continued the property-based method (iter-8) on a
+fresh, high-value target: the **trade-accounting layer** (`summarize_trade_backtest` /
+`build_equity_curve`), whose outputs (`total_return`, `max_drawdown`, `sharpe_like`)
+feed the three-tier demo-candidate decision rule. Generated random trade sets and
+asserted the hard accounting identities:
+
+- `max_drawdown = min(equity/cummax − 1)` is ALWAYS ≤ 0 (a drawdown can never be positive).
+- `total_return == equity[-1] − 1` (definitional consistency).
+- `sharpe_like` is always finite.
+- a strictly-increasing equity curve has EXACTLY zero drawdown and positive return.
+
+**All identities held — 0 new bugs.** The accounting layer is now generatively hardened
+alongside the core math (iter-8). Suite green at **2000** (+2).
+
+### Guardrail honored
+
+Local commit only — no `git push`. Test-only addition; no production code changed.
