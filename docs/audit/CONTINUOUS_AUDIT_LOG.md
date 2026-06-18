@@ -44,6 +44,7 @@ Each iteration:
 | 2 | 2026-06-18 | 14 | 11 | 3 | harness-cli (rerun) + 27 modules iter1 missed; 2 HIGH fixed (execId double-count, combined-signal null-poison); +7 regression tests |
 | 3 | 2026-06-18 | 39 | 8 | 31 | remaining scripts + DEEP pass on 5 giant modules; 3 HIGH fixed (incl. a fix-interaction with iter-1); 1 reverted (test-pinned audit2b conflict); large LOW backlog queued for iter-4 |
 | 4 | 2026-06-18 | (backlog) | 15 | 1 | cleared the iter-3 safe-LOW backlog (no new audit); +3 regression tests; only the orchestrator zero-trade engine fix deferred to iter-5 |
+| 5 | 2026-06-18 | 15 | 9 | 6 | FRESH ANGLES (deploy/ops, config-consistency, verify-changes, test-quality); 1 HIGH watchdog false-page fixed; landed the deferred [14]; +3 net-strengthening tests; deploy/test-debt deferred to operator |
 
 ---
 
@@ -271,3 +272,46 @@ staleness skip to require the CSV artifacts) than as a quick backlog-clear.
 Local commit only — **no `git push`**. `REAL_MONEY` untouched. One test that pinned a
 *buggy* counter attribution (stale_signal→no_signal) was updated to the corrected
 behavior (it documented no deliberate intent, unlike the audit2b case in iter-3).
+
+---
+
+## Iteration 5 — 2026-06-18
+
+**Baseline:** `ruff` clean; `pytest -q` → 1987 passed.
+
+FRESH-ANGLE audit — the per-module sweeps (iters 1-3) had converged, so this pass
+attacked angles they can't see: **deploy/ops plumbing, deployed-config vs
+promoted-profile vs docs consistency, an adversarial verification of the cumulative
+iter-1..4 diff, and test-suite quality** (hunting tests that can't catch their own
+bug). 24 raw → **15 confirmed** (1 high, 4 medium, 10 low), 9 rejected. Also landed
+the iteration-4 deferred orchestrator item. Suite green at **1990** (+3 tests).
+
+### Fixed this iteration (9)
+
+| Finding | File | Sev | Fix |
+|---|---|---|---|
+| deploy-1 | `check_demo_liveness.py` | **high** | Orphan-hedge watchdog reads the real systemd timer state (`_unit_enabled`), not the `CONTINUOUS_SLEEVE` toggle — stops a false CRITICAL "ORPHANED HEDGE" page every cycle during the intended wind-down |
+| verify-changes | `long_native.py` | med | `read_start_date` doc corrected + a GUARD that raises when an active xsec gate's lookback (btc_trend_200 / btc_vol_pos, 200/365d) exceeds the read warmup — closes the silent-divergence trap in the windowed-read I added in iter-1 |
+| deferred [14] | `continuous_events.py` + `continuous_forward_replay_orchestrator.py` | med | Engine always writes the ledger CSVs (even empty, for a flat component); orchestrator skip-check requires the CSV artifacts — a zero-trade component no longer hard-fails the venue |
+| test-quality | `test_scripts_apply_decision_rule.py`→`test_r1_robustness.py` | med | Added a BEHAVIORAL block-bootstrap test driving the PRODUCTION resampler (the old test only checked a test-local copy of the formula) |
+| config-consistency | `test_scripts_continuous_deployed_equity.py` | med | Pin the equity tool's hardcoded weights/rule/hedge to FROZEN_FORWARD_CONFIG (drift guard — the iter-3 signal-check failure class) |
+| test-quality | `test_liquidity_migration_signal_harness.py` | low | Exercise the ic_weighted combination math (only its error path was tested) |
+| deploy-doc | `scripts/git-hooks/pre-push` | low | Comment corrected — vps-deploy.yml DOES run a server-side ruff+pytest gate now |
+| config-doc | `scripts/alpha_sweep.py` | low | BASE comment corrected — it's the legacy cb1 base, NOT the deployed continuous_ensemble_v1 sleeve |
+| verify-changes | (`reconciliation._fee_adjusted_return`) | — | Verified the iter-1 fix is correct + callers skip None (no change needed) |
+
+### Deferred (6 — deploy/systemd review + test-debt)
+
+- **limitations.md (deploy, operator review):** forward-report systemd unit compares
+  against the ERASED daily-SHORT paper root; deploy rmom-seed checks DEMO root only
+  (false WARN); kept-enabled hedge wind-down is unmonitored (false-negative flip-side
+  of the deploy-1 fix).
+- **limitations.md (test-debt):** 4 source-string-match / weak-input tests that pass
+  even if the code regresses.
+
+### Guardrail honored
+
+Local commit only — **no `git push`**. The deploy-1 watchdog fix changes paging on the
+live host but only takes effect when the operator pushes/deploys; flagged for review.
+`REAL_MONEY` untouched; no methodology/PIT gate loosened (the read_start_date guard
+*tightens* it).

@@ -115,7 +115,15 @@ def ensure_cells(venue: str, work: Path, end_date: str) -> None:
     for cell, overrides in CELL_OVERRIDES.items():
         out_dir = work / venue / cell
         report = out_dir / "continuous_report.json"
-        if report.exists():
+        # Skip only when the report AND the CSV artifacts scout._load_source needs are all
+        # present and current — a run interrupted after the report but before the CSVs (or
+        # an older run that wrote no CSVs on a flat component) must re-run (audit-iter4/5).
+        needed_csvs = (
+            out_dir / "continuous_trades.csv",
+            out_dir / "continuous_mtm_equity.csv",
+            out_dir / "continuous_equity.csv",
+        )
+        if report.exists() and all(p.exists() for p in needed_csvs):
             cfg_end = json.loads(report.read_text()).get("config", {}).get("end_date")
             if cfg_end == end_date:
                 print(f"[{venue}] {cell}: current to {end_date}, skip", flush=True)

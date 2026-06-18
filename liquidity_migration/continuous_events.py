@@ -1337,10 +1337,13 @@ def run_continuous_event_research(
     if report_dir is not None:
         out_dir = Path(str(report_dir)).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
+        # Always write the ledger CSVs — even empty ones (a legitimately flat component):
+        # the forward-replay orchestrator/scout loads these by path, so a missing CSV on a
+        # zero-trade component used to hard-fail the whole venue (audit-iter4/5 deferred).
+        trades.write_csv(out_dir / "continuous_trades.csv")
+        equity.write_csv(out_dir / "continuous_equity.csv")
+        mtm_equity.write_csv(out_dir / "continuous_mtm_equity.csv")
         if not trades.is_empty():
-            trades.write_csv(out_dir / "continuous_trades.csv")
-            equity.write_csv(out_dir / "continuous_equity.csv")
-            mtm_equity.write_csv(out_dir / "continuous_mtm_equity.csv")
             # Charts render an extended copy so a book that goes flat near the end (e.g. the
             # BTC-trend gate blocking all entries) draws as a flat line through the data
             # boundary; the persisted CSVs above keep the validated ledger-day shape.

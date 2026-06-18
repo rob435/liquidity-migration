@@ -222,3 +222,15 @@ def test_load_monthly_returns_none_on_malformed_csv(tmp_path: Path) -> None:
         "month,strategy_return\n1970-02,-0.05\n1970-01,0.1\n"
     )
     assert MOD._load_monthly(d) == [("1970-01", 0.1), ("1970-02", -0.05)]
+
+
+def test_resample_block_indices_can_reach_final_observation() -> None:
+    """audit-iter5: the moving-block upper bound must be n-block+1 so a block can cover
+    the FINAL observation (n-1). A buggy max(n-block,1) bound would never reach it. This
+    drives the PRODUCTION resampler, not a test-local copy of the formula."""
+    n, block = 30, 21
+    rng = random.Random(0)
+    seen_final = any(
+        (n - 1) in MOD._resample_block_indices(n, block, rng) for _ in range(200)
+    )
+    assert seen_final, "final observation n-1 unreachable — block upper bound regressed"

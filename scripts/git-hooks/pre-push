@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Mandatory pre-push gates (CLAUDE.md): ruff + the full pytest suite.
-# There is NO GitHub-side full-suite CI — the only workflow is vps-deploy.yml,
-# which deploys straight to the live VPS on push to main. This hook is the
-# only gate between a bad commit and a live deploy.
+# vps-deploy.yml DOES run a server-side ruff+pytest `ci` job that gates the deploy
+# (audit 2026-06-12 round 4), but it runs only after push; this hook is the LOCAL
+# gate that catches a bad commit BEFORE it pushes and triggers a live deploy.
 # Bypass with `git push --no-verify` if you truly need to (don't).
 #
 # CANONICAL SOURCE (round 4): this file is the tracked copy; .git/hooks/ is

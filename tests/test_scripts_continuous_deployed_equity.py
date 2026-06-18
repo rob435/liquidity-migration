@@ -37,3 +37,19 @@ def test_stats_sharpe_uses_sample_std() -> None:
     df = pl.DataFrame({"ts_ms": [i * _DAY for i in range(5)], "basket_return": rets})
     s = MOD.stats(df)["sharpe_daily_ann"]
     assert s is not None and isinstance(s, float)
+
+
+def test_deployed_equity_literals_match_frozen_config() -> None:
+    """audit-iter5: the equity tool's hardcoded weights/rule/hedge are separate copies
+    of the deployed object — pin them to the canonical FROZEN_FORWARD_CONFIG so a future
+    retune can't silently leave the 'deployed continuous' curve drawing stale params."""
+    from liquidity_migration.continuous_forward_replay import (
+        FROZEN_FORWARD_CONFIG,
+        frozen_hedge_rule,
+        frozen_rebalance_rule,
+    )
+    from liquidity_migration.continuous_rebalance import ContinuousHedgeRule
+
+    assert MOD.WINNER_WEIGHTS == FROZEN_FORWARD_CONFIG["weights"]
+    assert MOD.winner_rule() == frozen_rebalance_rule()
+    assert ContinuousHedgeRule(90, 60, 2.0, 5.0) == frozen_hedge_rule()

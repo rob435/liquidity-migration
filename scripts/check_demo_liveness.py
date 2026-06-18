@@ -934,11 +934,14 @@ def main() -> int:
         ))
     hedge_root = Path(args.hedge_root) if str(args.hedge_root).strip() else None
     if hedge_root is not None:
-        # The hedge timer rides the CONTINUOUS_SLEEVE toggle; if it is off while an
-        # open hedge leg remains, that leg is orphaned (stopless, unmanaged).
+        # Key off the ACTUAL systemd timer state, not the CONTINUOUS_SLEEVE toggle:
+        # deploy_vps_live.sh deliberately KEEPS the hedge timer enabled while a leg is
+        # open even when CONTINUOUS_SLEEVE=off (to trim it flat), so reading the toggle
+        # paged a false CRITICAL "ORPHANED HEDGE" every cycle during the intended
+        # wind-down. _unit_enabled mirrors the deploy's decision (audit-iter5 deploy-1).
         alerts.extend(gather_hedge_orphan_alerts(
             hedge_root=hedge_root,
-            hedge_timer_enabled=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
+            hedge_timer_enabled=_unit_enabled("liquidity-migration-continuous-hedge.timer"),
         ))
     if continuous_paper_root is not None and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         alerts.extend(

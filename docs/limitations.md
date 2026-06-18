@@ -118,6 +118,34 @@ split-close unit test. Tracked in `docs/audit/CONTINUOUS_AUDIT_LOG.md` iter-3.
 - **`backfill_binance_funding_vision` reintroduces the 8h (480-min) hardcode** on a
   missing/blank `funding_interval_hours` — same family as data-io-1 (script ~133-134).
 
+### From audit iteration 5 (2026-06-18) — deploy/ops + test-debt
+
+Deploy/systemd items (safe=False — they touch the live VPS units / deploy flow, so they
+need operator review before landing on the host). Tracked in the audit ledger iter-5.
+
+- **`deploy/systemd/liquidity-migration-continuous-forward-report.service` compares
+  against the ERASED daily-SHORT paper root** (`data/bybit-paper-event`). The
+  continuous-vs-daily forward comparator points at a dead root → the comparison is
+  meaningless. Needs the live unit updated (operator) to the surviving root or removal.
+- **`deploy_vps_live.sh` rmom-seed verification checks the DEMO root only** — a false
+  "rmom gate EMPTY" WARN in the `CONTINUOUS_SLEEVE=off` + paper-on combo (post-7d39d61
+  per-root refresh). Cosmetic (a WARN), but misleading.
+- **A kept-enabled hedge timer/oneshot is UNMONITORED when `CONTINUOUS_SLEEVE=off`**
+  (`check_demo_liveness` line ~484): a failed hedge wind-down run never pages. This is
+  the false-NEGATIVE flip-side of the orphan-hedge false-POSITIVE fixed this iteration
+  (the watchdog now reads the real timer state). Needs a monitoring-design decision.
+
+Test-debt — tests that assert on SOURCE STRINGS rather than behavior (they pass even if
+the code regresses); low priority, listed so they aren't mistaken for real coverage:
+- `tests/test_scripts_alpha_sweep.py` era-split MAR guard (checks the source contains
+  `era1_mar`/`era2_mar`, not that the split is correct).
+- `tests/test_liquidity_migration_continuous_demo.py` exit-planner wiring lock (checks a
+  source substring, not which decile snapshot the planner receives).
+- `tests/test_liquidity_migration_trade_lifecycle.py` cost-funding-4 test (checks a
+  comment string exists).
+- `tests/test_liquidity_migration_continuous_addon_shadow.py` `_float` regression inputs
+  don't distinguish the buggy `float(value or 0.0)` idiom from the fix.
+
 ## Resolved
 
 _None yet._

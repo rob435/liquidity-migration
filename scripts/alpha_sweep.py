@@ -43,7 +43,10 @@ from liquidity_migration.signal_harness import (  # noqa: E402
 from liquidity_migration.trade_lifecycle import _funding_lookup  # noqa: E402
 from liquidity_migration.trade_lifecycle import _indexed_price_bars_by_symbol  # noqa: E402
 
-# Live-sleeve-matching base (same as cb1).
+# Legacy cb1 research base (short-fade, rmom_quantile=0.5). NOTE: this is the
+# historical sweep base, NOT the currently deployed continuous sleeve — the live book
+# is continuous_ensemble_v1 (rmom_quantile=0.25, feature_set=max_ret168, ensemble
+# weights/hedge; see promoted.py). Don't read alpha_sweep cells as live-sleeve evidence.
 BASE = ContinuousEventConfig(
     start_date="2023-04-01", end_date="2026-05-28",
     side="short", decile=9, rmom_quantile=0.5, liq_turnover_min=500_000.0,

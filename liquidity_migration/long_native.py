@@ -74,10 +74,13 @@ class LongNativeConfig:
     # Optional DATA-READ floor (YYYY-MM-DD): when set, klines/manifest/funding are
     # read only from this date forward, and the full-PIT universe gate is scoped to
     # it. Used for a forward-window backtest that doesn't re-read/re-feature the full
-    # multi-year sample. MUST sit far enough before start_date to warm every
-    # lookback (universe_volume_window_days=90, min_listing_history_days=60, the
-    # 30d rollers) or signal-window features differ from a full read. Empty ("") =
-    # read the whole root (default; byte-identical to the pre-change behaviour).
+    # multi-year sample. MUST sit far enough before start_date to warm every ACTIVE
+    # lookback or signal-window features differ from a full read. The longest windows:
+    # universe_volume_window_days (90), the 30d rollers, listing-history, AND — when the
+    # xsec gates are on — btc_trend_200 (200d BTC SMA) and btc_vol_pos (365d BTC-RV
+    # position). The 200d/365d ones are enforced by the guard in build_long_research_inputs
+    # (raises if the warmup is too short for an active xsec gate). Empty ("") = read the
+    # whole root (default; byte-identical to the pre-change behaviour).
     read_start_date: str = ""
 
     # --- universe ---
@@ -419,6 +422,24 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
     # longest lookback (caller's responsibility) or signal-window features shift.
     if cfg.read_start_date:
         rs = cfg.read_start_date
+        # Guard the silent-divergence trap (audit-iter5 verify-changes): the xsec gates
+        # consume btc_trend_200 (200d SMA) / btc_vol_pos (365d RV-position). If the read
+        # floor doesn't pre-date start_date by that many days those features are computed
+        # over a TRUNCATED history and diverge from a full read — fail loud instead.
+        if cfg.start_date and cfg.enable_xsec_momentum:
+            required_warmup = 0
+            if cfg.xsec_require_btc_200:
+                required_warmup = max(required_warmup, 200)
+            if cfg.xsec_min_btc_vol_pos > 0.0:
+                required_warmup = max(required_warmup, 365)
+            if required_warmup:
+                warmup_days = (dt.date.fromisoformat(cfg.start_date) - dt.date.fromisoformat(rs)).days
+                if warmup_days < required_warmup:
+                    raise RuntimeError(
+                        f"read_start_date warmup {warmup_days}d < {required_warmup}d required by the "
+                        f"active xsec gate (btc_trend_200/btc_vol_pos): a shorter warmup silently "
+                        f"diverges from a full read. Widen read_start_date or disable the gate."
+                    )
         rs_ms = int(dt.datetime.fromisoformat(rs).replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
         # raw_klines is already pruned at the read (since_date); floor the rest here.
         if not archive_manifest.is_empty() and "date" in archive_manifest.columns:

@@ -1154,3 +1154,24 @@ def test_build_combined_signal_portfolio_keeps_name_missing_one_of_several_featu
     assert sig["S00"] is not None
     assert sig["S05"] is not None   # one feature missing -> still signalled (not dropped)
     assert sig["S06"] is None       # all features missing -> excluded
+
+
+def test_build_combined_signal_portfolio_ic_weighted_combines_math() -> None:
+    """audit-iter5: exercise the ic_weighted COMBINATION math (only its missing-weights
+    error path was tested). With feature_b weighted 0, the result must reduce to ranking
+    on feature_a alone (lowest feature_a -> short)."""
+    panel = _portfolio_panel().with_columns((pl.col("feature_a") * -1.0).alias("feature_b"))
+    out = build_combined_signal_portfolio(
+        panel,
+        surviving_features=["feature_a", "feature_b"],
+        weighting="ic_weighted",
+        ic_weights={"feature_a": 1.0, "feature_b": 0.0},
+        top_decile=0.20,
+        vol_target_per_name=0.01,
+        forward_horizon=3,
+    )
+    day0 = out.filter(pl.col("ts_ms") == out["ts_ms"].min())
+    shorts = set(day0.filter(pl.col("position_side") == "short")["symbol"].to_list())
+    longs = set(day0.filter(pl.col("position_side") == "long")["symbol"].to_list())
+    assert "S00" in shorts   # lowest feature_a -> most-negative combined -> short
+    assert "S19" in longs    # highest feature_a -> long
