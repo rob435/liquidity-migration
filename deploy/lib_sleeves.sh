@@ -16,7 +16,6 @@ CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.servic
 # Timer the continuous sleeve owns (the daily rmom-gate refresh). It runs when either
 # continuous demo or continuous paper is on, because both need residual_momentum.parquet.
 CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"
-CONTINUOUS_FORWARD_REPORT_TIMERS="liquidity-migration-continuous-forward-report.timer"
 # The BTC-beta hedge is an order-submitting continuous-demo addon, not paper evidence.
 CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"
 

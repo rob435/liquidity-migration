@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """Fast liveness + safety watchdog for the live demo book.
 
-Answers "is the system ALIVE and are open positions PROTECTED?" and runs every
-few minutes so the operator can manually close positions when something breaks.
+Answers "is the system ALIVE, and are stop-required open positions PROTECTED?"
+and runs every few minutes so the operator can manually close positions when something breaks.
 (The hourly short-sleeve entry-health companion was erased with that sleeve,
 2026-06-11.) It Telegrams on:
 
   * DAEMON DOWN / HUNG -- no cycle has been written within --max-cycle-age-min
     (catches a crash-loop under ``Restart=always``, a hang, or a stop), and/or a
     monitored systemd unit is not ``active``.
-  * UNPROTECTED POSITION -- an open ledger position whose Bybit position carries
-    no / a wrong server-side ``stopLoss`` (the risk daemon should re-arm it; a
-    persistent miss means CLOSE MANUALLY). This is the authoritative check that
-    the resting exchange-side stop is actually in place.
+  * UNPROTECTED POSITION -- for stop-required sleeves, an open ledger position
+    whose Bybit position carries no / a wrong server-side ``stopLoss`` (the risk
+    daemon should re-arm it; a persistent miss means CLOSE MANUALLY). This is
+    the authoritative check that the resting exchange-side stop is actually in
+    place. Continuous v2 is intentionally no-stop demo/paper, so its stop check
+    is opt-in via ``--continuous-stop-check``.
   * LEDGER<->VENUE MISMATCH -- a position open on one side but not the other.
   * WS FEED STALL -- the WS kline store's newest bar is far behind wall clock
     (REST still covers correctness, so this is a warning).
@@ -84,8 +86,8 @@ def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
 
 def _continuous_rmom_refresh_on() -> bool:
     """Mirror deploy/lib_sleeves.sh ``continuous_rmom_refresh_on``: the daily rmom
-    refresh (and the continuous forward-report) run when EITHER the continuous demo
-    or the continuous paper sleeve is on, because both follow residual_momentum.parquet.
+    refresh runs when EITHER the continuous demo or continuous paper sleeve is on,
+    because both follow residual_momentum.parquet.
     The watchdog must monitor those units under the SAME predicate the deploy uses to
     enable them — otherwise, when both continuous sleeves are off (the documented
     LONG-only kill-switch), the deploy disables the timers (systemctl disable --now ->
@@ -464,19 +466,9 @@ def _default_units_for_toggles() -> list[str]:
     if _continuous_rmom_refresh_on():
         units.extend(
             [
-                # The continuous forward-report and the daily rmom refresh are both
-                # enabled by the deploy under continuous_rmom_refresh_on (CONTINUOUS_SLEEVE
-                # OR CONTINUOUS_PAPER_SLEEVE — deploy_vps_live.sh:204-205) and disabled
-                # (systemctl disable --now -> "inactive") when both are off. Monitor them
-                # under the SAME predicate so the watchdog never pages CRITICAL on a timer
-                # the deploy intentionally disabled (audit 2026-06-12 round 4). The
-                # forward-report oneshot exits 1 on a failed send (round 3), so its SERVICE
-                # is monitored too. The rmom refresh feeds the live entry gate for both the
-                # demo and paper roots (paper follows the demo root's residual_momentum.parquet);
-                # unmonitored, a failing refresh was silent until the rmom-staleness CRITICAL
-                # at ~2 days (round 3).
-                "liquidity-migration-continuous-forward-report.service",
-                "liquidity-migration-continuous-forward-report.timer",
+                # The rmom refresh feeds the continuous entry gate for demo and paper
+                # roots. Monitor it under the same predicate the deploy uses, so the
+                # watchdog never pages on a timer intentionally disabled by sleeves.env.
                 "liquidity-migration-continuous-rmom-refresh.service",
                 "liquidity-migration-continuous-rmom-refresh.timer",
             ]
@@ -675,14 +667,15 @@ def gather_continuous_alerts(
     args: argparse.Namespace,
     cycles_dataset: str = "continuous_fade_demo_cycles",
     trades_dataset: str = "continuous_fade_demo_trades",
-    check_stops: bool = True,
+    check_stops: bool = False,
     cycle_checks: bool = True,
 ) -> list[Alert]:
     """Per-sleeve liveness for the continuous-fade daemon: cycle-age (hung/down), rmom-gate freshness
-    (the silent-blackout class), and server-side stop protection on its own open trades. The
-    continuous sleeve writes a SEPARATE ledger root + an unpartitioned cycle dataset, so it needs
-    its own gather. Paper mode passes the
-    ``continuous_fade_paper_*`` datasets and skips live stop checks because it submits no orders.
+    (the silent-blackout class), and optional legacy server-side stop protection on its own open
+    trades. The continuous sleeve writes a SEPARATE ledger root + an unpartitioned cycle dataset,
+    so it needs its own gather. Active v2 demo/paper intentionally has no venue stop, so the stop
+    check defaults off; paper mode passes the
+    ``continuous_fade_paper_*`` datasets and also skips live stop checks because it submits no orders.
     ``cycle_checks=False`` (sleeve toggled OFF) skips the daemon-liveness/rmom/universe checks —
     an off daemon is intentional — but stop/mismatch checks still run on any residual open rows,
     because "off" does NOT flatten: positions ride until natural exit and stayed unverified the
@@ -730,8 +723,9 @@ def gather_continuous_alerts(
                     key=f"continuous_kline_store_empty:{label}", severity=WARNING,
                     message=f"{label}: continuous sleeve WS kline store is EMPTY (kline_store_rows=0); zero candidates -- looks like a quiet market.",
                 ))
-    # Stop protection on the continuous sleeve's own open trades. Account-wide same-symbol exclusion
-    # (Rule A) means each netted venue position maps to one sleeve, so the same check is valid here.
+    # Optional legacy stop protection on the continuous sleeve's own open trades. Account-wide
+    # same-symbol exclusion (Rule A) means each netted venue position maps to one sleeve, so the
+    # same check is valid when a stopped continuous profile is explicitly being monitored.
     try:
         tdf = read_dataset(continuous_root, trades_dataset)
         open_ct = (
@@ -869,6 +863,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="warn if the newest captured depth JSONL is older than this (enabled collector only)")
     p.add_argument("--max-rmom-stale-days", type=float, default=2.0,
                    help="alert if the continuous rmom signal gate's newest day is older than this (silent-blackout guard)")
+    p.add_argument(
+        "--continuous-stop-check",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "verify venue stopLoss on continuous open trades. Default false because "
+            "continuous_ensemble_v2 is intentionally no-stop demo/paper; enable only "
+            "for legacy/stopped continuous profiles."
+        ),
+    )
     p.add_argument("--settle-coin", default="USDT", help="settle coin for the Bybit get_positions stop-protection check")
     p.add_argument("--cooldown-min", type=float, default=30.0, help="re-alert interval for a persisting condition")
     p.add_argument("--heartbeat-url", default=os.environ.get("LIVENESS_HEARTBEAT_URL") or None,
@@ -931,6 +935,7 @@ def main() -> int:
         alerts.extend(gather_continuous_alerts(
             continuous_root=continuous_root, now_ms=now_ms, args=args,
             cycle_checks=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
+            check_stops=args.continuous_stop_check,
         ))
     hedge_root = Path(args.hedge_root) if str(args.hedge_root).strip() else None
     if hedge_root is not None:

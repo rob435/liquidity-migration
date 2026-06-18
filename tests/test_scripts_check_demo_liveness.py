@@ -277,7 +277,12 @@ def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tm
     write_dataset(pl.DataFrame([{"trade_id": "k1", "symbol": "WIFUSDT", "status": "open", "stop_price": 1.0}]),
                   root, "continuous_fade_demo_trades", partition_by=())
     monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": ({}, "RuntimeError: api down"))
-    keys = {a.key for a in M.gather_continuous_alerts(continuous_root=root, now_ms=now, args=args)}
+    keys = {
+        a.key
+        for a in M.gather_continuous_alerts(
+            continuous_root=root, now_ms=now, args=args, check_stops=True
+        )
+    }
     assert "continuous_universe_empty:bybit-continuous-demo-event" in keys
     assert "continuous_kline_store_empty:bybit-continuous-demo-event" in keys
     assert "stop_verify_unavailable_continuous" in keys
@@ -288,10 +293,47 @@ def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tm
     keys_off = {
         a.key
         for a in M.gather_continuous_alerts(
-            continuous_root=root, now_ms=now, args=args, cycle_checks=False
+            continuous_root=root, now_ms=now, args=args, cycle_checks=False, check_stops=True
         )
     }
     assert keys_off == {"stop_verify_unavailable_continuous"}
+
+
+def test_gather_continuous_v2_default_skips_stop_check(tmp_path, monkeypatch) -> None:
+    """continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness must not page."""
+    import polars as pl
+
+    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2, settle_coin="USDT")
+    now = 10_000_000
+    root = tmp_path / "bybit-continuous-demo-event"
+    root.mkdir()
+
+    from liquidity_migration.storage import write_dataset
+
+    write_dataset(
+        pl.DataFrame([
+            {
+                "cycle_id": "c1",
+                "ts_ms": now,
+                "max_rmom_day_ts": now,
+                "universe_symbols": 10,
+                "kline_store_rows": 100,
+            }
+        ]),
+        root,
+        "continuous_fade_demo_cycles",
+        partition_by=(),
+    )
+    write_dataset(
+        pl.DataFrame([{"trade_id": "k1", "symbol": "WIFUSDT", "status": "open", "stop_price": 0.0}]),
+        root,
+        "continuous_fade_demo_trades",
+        partition_by=(),
+    )
+    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": (_ for _ in ()).throw(AssertionError))
+
+    alerts = M.gather_continuous_alerts(continuous_root=root, now_ms=now, args=args)
+    assert alerts == []
 
 
 def test_gather_continuous_paper_alerts_uses_paper_datasets_without_stop_check(tmp_path, monkeypatch) -> None:
@@ -522,10 +564,10 @@ def test_continuous_root_still_drives_default_state_dir(tmp_path, monkeypatch) -
 # audit bucket b05 (round-4 watchdog / kill-switch / telegram findings;
 # folded from test_audit_fix_b05.py)
 # --------------------------------------------------------------------------- #
-def test_forward_report_and_rmom_timers_not_monitored_when_continuous_off(monkeypatch) -> None:
+def test_rmom_timer_not_monitored_when_continuous_off(monkeypatch) -> None:
     """deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented
-    LONG-only kill-switch), the deploy disables the continuous-forward-report and
-    rmom-refresh timers (systemctl disable --now -> inactive). The watchdog must NOT
+    LONG-only kill-switch), the deploy disables the rmom-refresh timer
+    (systemctl disable --now -> inactive). The watchdog must NOT
     monitor them in that mode, else it pages CRITICAL forever on a timer the deploy
     intentionally disabled."""
     monkeypatch.setenv("LONG_SLEEVE", "on")
@@ -534,10 +576,8 @@ def test_forward_report_and_rmom_timers_not_monitored_when_continuous_off(monkey
 
     units = M._default_units_for_toggles()
 
-    # The forward-report + rmom-refresh service/timer must be ABSENT when both off.
+    # The rmom-refresh service/timer must be ABSENT when both continuous sleeves are off.
     for u in (
-        "liquidity-migration-continuous-forward-report.service",
-        "liquidity-migration-continuous-forward-report.timer",
         "liquidity-migration-continuous-rmom-refresh.service",
         "liquidity-migration-continuous-rmom-refresh.timer",
     ):
@@ -562,7 +602,6 @@ def test_rmom_refresh_monitored_in_paper_only_mode(monkeypatch) -> None:
 
     assert "liquidity-migration-continuous-rmom-refresh.service" in units
     assert "liquidity-migration-continuous-rmom-refresh.timer" in units
-    assert "liquidity-migration-continuous-forward-report.timer" in units
     # The DEMO-only hedge timer rides CONTINUOUS_SLEEVE alone, so it must be absent.
     assert "liquidity-migration-continuous-hedge.timer" not in units
     assert "liquidity-migration-bybit-continuous-demo.service" not in units
