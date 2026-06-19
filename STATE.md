@@ -109,6 +109,10 @@ Current work should be limited to:
 - Forward/demo reconciliation and drift diagnosis.
 - Cost/slippage/depth calibration from real demo fills.
 - Data-root maintenance and permitted-host top-ups.
+- Operator-directed next-level Continuous V2 research is registered in
+  `docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md`.
+  It does not reopen closed branches by itself; the first gate is full 1m PIT
+  data plus a 1m/trade-aware execution engine before any new alpha A/B cells.
 - C-book flow research may run on Binance only under the 2026-06-19 amendment.
   For any two-venue C2/C3 claim, still build a resumable Bybit full-market
   taker-flow archive first; do not treat the current event-scoped Bybit flow
@@ -160,6 +164,7 @@ pre-registration and explicit operator direction.
 - `docs/preregistration/2026-06-19-continuous-v2-f2b-vol-tp-verdict.md`
 - `docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md`
 - `docs/preregistration/2026-06-19-continuous-v2-voloff-retest-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md`
 - `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md`
 - `docs/preregistration/2026-06-15-operator-override-promote-continuous.md`
 - `docs/preregistration/continuous-capacity-impact-2026-06-09.md`

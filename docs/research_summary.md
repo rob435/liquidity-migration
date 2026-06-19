@@ -20,6 +20,9 @@ and systemd env overrides, see `docs/promoted_trading_logic.md`.
 - Broad parameter mining is not current work. A new experiment needs a fresh
   dated pre-registration unless explicitly marked exploratory; exploratory runs
   cannot support promotion, deployment, or alpha acceptance.
+- The 2026-06-19 next-level Continuous V2 plan is a program-level
+  pre-registration, not an executable construction receipt. Its first gate is
+  full 1m PIT data plus a path-aware execution engine before new alpha A/B cells.
 
 ## Current Objects
 
@@ -71,6 +74,11 @@ and systemd env overrides, see `docs/promoted_trading_logic.md`.
   operator-gated G2 venue-policy/forward-shadow lead. The recurring result is that v2's
   signals are real but diffuse — a real IC is not a tradable edge for this book. Final verdict:
   `docs/preregistration/2026-06-19-continuous-v2-ab-research-final-verdict.md`.
+- The next-level Continuous V2 plan is registered at
+  `docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md`.
+  It freezes both the live override control and the pre-override evidence anchor
+  as comparison baselines, then sequences data, execution, feature almanac, and
+  only then limited A/B waves.
 - Settings: inverse-vol component sizing (`target_vol_per_name=0.01`, clamp
   2.0), w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25, BTC-uptrend
   gate, TP/24h exits only, no daemon `left_decile`, `stop_approach`,
@@ -199,6 +207,9 @@ proposal/audit ledgers:
   one-venue arms under the vol-off system: the adjuster confounded both (penalized A4B-Binance,
   inflated B1-Bybit). With it off, A4B is venue-neutral/within-noise (Binance bootP 0.24) and B1 is
   negative both venues (beaten by hash) -> neither is a robust two-venue candidate. No new candidate.
+- `docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md` -
+  program-level next research plan; requires separate construction receipts
+  before data-root changes or A/B execution.
 - `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md` - BTC-vol
   hedge forward-watch clock.
 - `docs/preregistration/2026-06-15-operator-override-promote-continuous.md` -
