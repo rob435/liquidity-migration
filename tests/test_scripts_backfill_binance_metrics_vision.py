@@ -213,6 +213,42 @@ def test_metrics_backfill_symbol_merges_and_stamps_full_coverage(tmp_path, monke
     assert df2.height == 2, "day-1 rows were clobbered — read-merge failed"
     assert set(df2["coverage"].to_list()) == {"full"}
     assert st2["rows"] == 2
+    assert st2["new_rows"] == 1
+    assert st2["max_date"] == "2024-01-02"
+
+
+def test_metrics_existing_max_date_reads_symbol_tail(tmp_path):
+    mv = _load_backfill_metrics()
+    path = tmp_path / "XUSDT.parquet"
+    pl.DataFrame(
+        {
+            "symbol": ["XUSDT", "XUSDT"],
+            "ts_ms": [1_704_067_200_000, 1_704_153_600_000],
+            **{c: [1.0, 1.0] for c in mv.NUM_COLS},
+        }
+    ).write_parquet(path)
+
+    assert mv._max_date_from_file(path) == "2024-01-02"
+
+
+def test_metrics_all_404_tail_preserves_existing_manifest_rows(tmp_path, monkeypatch):
+    mv = _load_backfill_metrics()
+    path = tmp_path / "XUSDT.parquet"
+    pl.DataFrame(
+        {
+            "symbol": ["XUSDT"],
+            "ts_ms": [1_704_067_200_000],
+            **{c: [1.0] for c in mv.NUM_COLS},
+        }
+    ).write_parquet(path)
+    monkeypatch.setattr(mv, "_day_rows", lambda symbol, day: None)
+
+    st = mv.backfill_symbol("XUSDT", ["2024-01-02", "2024-01-03"], tmp_path, workers=2)
+
+    assert st["rows"] == 1
+    assert st["new_rows"] == 0
+    assert st["max_date"] == "2024-01-03"
+    assert pl.read_parquet(path).height == 1
 
 
 def test_metrics_backfill_symbol_transient_still_no_marker(tmp_path, monkeypatch):

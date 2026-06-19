@@ -1700,7 +1700,13 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         # btc_trend_gate is NOT pinned here: it is the single-source-of-truth
         # CLI/env knob (`--btc-trend-gate` / `BTC_TREND_GATE`), so the deploy
         # layer controls it (units pin `uptrend`; runner defaults `uptrend`).
-        daily_rebalance_enabled=True,
+        # OPERATOR OVERRIDE 2026-06-19: daily volatility adjuster DISABLED (constant
+        # gross) for the research phase; reversible (set True + retune when the
+        # volatility control is reworked). The remaining daily_rebalance_* params are
+        # retained verbatim so re-enabling is a one-line flip. Honest caveat: this
+        # removes the book's only daily risk control. Receipt:
+        # docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md.
+        daily_rebalance_enabled=False,
         daily_rebalance_realized_vol_window_days=90,
         daily_rebalance_target_daily_vol=0.045,
         daily_rebalance_max_scale=4.0,
@@ -1720,10 +1726,16 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         failed_fade_loss_pct=0.0,
         failed_fade_min_mfe_pct=0.0,
         breakeven_arm_pct=0.0,
+        # OPERATOR OVERRIDE 2026-06-19: component take-profit promoted 0.10 -> 0.12
+        # (the (name, trigger, age, take_profit_pct, weight) tuple). The daemon computes
+        # take_profit_price = price*(1-tp) live, so this needs no ledger rebuild. Honest
+        # caveat: TP12 is a robust Bybit MAR gain but Binance-MAR-negative (fails the
+        # two-venue bar); promoted by operator override against that evidence. Receipt:
+        # docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md.
         ensemble_components=(
-            ("p3", "turn3_pop3", 240, 0.10, 0.3333333333333333),
-            ("p4p3", "turn4_pop3", 240, 0.10, 0.2222222222222222),
-            ("p4p5", "turn4_pop5", 240, 0.10, 0.4444444444444444),
+            ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333),
+            ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222),
+            ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444),
         ),
     )
 

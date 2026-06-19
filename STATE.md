@@ -1,6 +1,6 @@
 # Research Program State
 
-**Last updated:** 2026-06-18
+**Last updated:** 2026-06-19
 
 Read this first. Detailed historical research belongs in git history and local run
 artifacts, not in the hot path.
@@ -14,6 +14,43 @@ artifacts, not in the hot path.
 - Active systems are the frozen continuous v2 fade book and the long-native v11a
   demo/paper sleeve.
 - Forward demo/paper is the arbiter. Internal backtests are not promotion evidence.
+- Continuous v2 A/B foundation has run through control, delayed-feature sanity,
+  feature almanac, discovery screens, and the amended A4B price/carry
+  hedge-intensity arm. A4B is mixed exploratory evidence only: loose pooled MAR
+  is positive, but Binance MAR worsens and bootstrap left tails are negative.
+- The 2026-06-19 data top-up removed Binance OI/taker-flow as an almanac blocker
+  by using Binance metrics archives, but the original A4/C2/C3 arms are still
+  two-venue blocked: Bybit OI/flow is partial or event-scoped, and
+  `flow_resid_return` / `flow_squeeze` are not value-built.
+- Operator amended the continuous v2 A/B plan on 2026-06-19 to let C-book flow
+  research proceed on Binance only. That branch is exploratory only and cannot
+  clear the two-venue candidate or demo/paper bar.
+- The 2026-06-19 deep A/B pass ran the full sequence and found **no candidate**.
+  Closed with falsifier-backed negatives: C-book flow (C0 screen + C2/C3 hedge
+  overlays + C1 idiosyncratic-flow sizing, all Binance-only exploratory) — flow is
+  a real trade-level signal but untradeable via hedge timing or sizing; and
+  Problem Book B conviction sizing (B1 score-margin, B1P path-shape, both venues)
+  — both beaten by their hash controls (the random hash even tripped the loose
+  pooled-MAR rule, exposing a sizing-mechanism artifact). Execution E1 intrabar
+  entry-timing ran Bybit-only exploratory (Bybit `klines_5m`) and is **closed by
+  mechanism**: net −20% to −35%, adverse selection (the missed shorts were the
+  better ones), loses to a random-bar null — so a Binance sub-hourly OHLC backfill
+  is not justified for entry timing. Remaining execution cost-axes (E2 maker, E3
+  clip-size) need both-venue order-book depth / fill data. Exit-timing (Book F,
+  both-venue no-order shadow) is also **closed and the 24h hold validated**:
+  shorter-hold / time-decay / MFE-giveback rules all lose 36–87% on both venues by
+  cutting the 150–420 trades that ride to the 10% TP (the 24h `max_hold` bucket
+  looks weak only because winners already left via TP — a selection illusion), so
+  the 24h hold stays. Exit-alpha phase 2 (TP sweep + full lifecycle + vol-scaled TP)
+  found the one robust improvement of the session — raising the take-profit to
+  12–15% lifts **Bybit** MAR +1.8/+2.2 (bootstrap 90–95%) — but the same change
+  **doubles Binance drawdown** (MAR −3.5), a fundamental venue split that a
+  volatility-scaled TP cannot reconcile. So the both-venue frozen object stays; the
+  Bybit-only TP gain is an operator-gated Book G2 venue-policy / forward-shadow lead,
+  not a frozen-object change. Final verdict:
+  `docs/preregistration/2026-06-19-continuous-v2-ab-research-final-verdict.md`.
+  Frozen v2 stays the anchor; next move is forward demo/paper accrual, not more
+  in-sample mechanism mining.
 
 ## Real-Money Gate
 
@@ -31,8 +68,15 @@ promoted-in-code without clearing the real-money gate. The gate remains:
 
 - **Continuous demo book:** `continuous_ensemble_v2`: p3 .333 / p4p3 .222 / p4p5 .444,
   inverse-vol component sizing (`target_vol_per_name=0.01`, clamp 2.0),
-  w90/tv0.045/max4/ddh-0.04, no momentum hurdle, rmom q25, BTC-uptrend gate,
-  TP/24h exits only, no daemon/server stop. Demo/paper only; not real-money-safe.
+  rmom q25, BTC-uptrend gate, TP/24h exits only, no daemon/server stop.
+  **OPERATOR OVERRIDE 2026-06-19 (demo/paper only): component TP promoted 10% -> 12%,
+  and the daily vol-target rebalance ("volatility adjuster", w90/tv0.045/max4/ddh-0.04)
+  is DISABLED** (`enabled=False`; constant gross, no daily risk control) for the research
+  phase — reversible one-line flip, to be reworked + retuned when research is finished.
+  This voids the prior forward ledger (config-hash pin) and removes the book's only daily
+  risk control; TP12 also fails the two-venue bar (Binance MAR-negative). Demo/paper only;
+  not real-money-safe. Receipt:
+  `docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md`.
 - The 2026-06-18 operator override froze the current three-component object and
   reset the continuous forward clock.
 - The v2-forward reconcile/control baseline starts at
@@ -65,7 +109,13 @@ Current work should be limited to:
 - Forward/demo reconciliation and drift diagnosis.
 - Cost/slippage/depth calibration from real demo fills.
 - Data-root maintenance and permitted-host top-ups.
+- C-book flow research may run on Binance only under the 2026-06-19 amendment.
+  For any two-venue C2/C3 claim, still build a resumable Bybit full-market
+  taker-flow archive first; do not treat the current event-scoped Bybit flow
+  tape as full-market evidence.
 - Operator-gated stability fixes for the frozen continuous v2 system.
+- Operator decision on whether A4B deserves a no-order forward shadow / separate
+  paper sleeve despite weak Binance robustness, or should be parked.
 - Long v11a demo/paper monitoring.
 
 Do not start broad in-sample research or parameter mining without a fresh
@@ -77,18 +127,39 @@ pre-registration and explicit operator direction.
    no-stop demo/paper only; any mainnet path needs a new risk-control design.
 2. Decide whether hedge warmstart staleness should remain calendar-age based or become
    ledger-aware after long flat periods.
-3. Finish Binance FAPI ancillary June top-ups from a permitted-region host.
+3. Keep Binance FAPI ancillary June top-ups current from a permitted-region host;
+   the Binance metrics archive tail is complete through the current Binance root
+   kline span as of the 2026-06-19 data receipt.
 4. PE2 long provisional-entry OOS re-judgment is armed only after both full-PIT roots
    extend at least 60 days past 2026-05-28 and have enough trades.
 5. Continue running the forward replay orchestrator at each data-root refresh; overlap
    drift is a hard alarm.
 6. Binance forward liquidation capture needs a permitted-region host.
+7. **2026-06-19 operator override (vol adjuster OFF + TP12) is a CODE change only.**
+   Before the live demo/paper book trades it, an owner-gated deploy must: archive the
+   continuous forward state dir + start a fresh clock (config hash changed), regenerate
+   the hedge warmstart CSVs, and redeploy the VPS daemon via the pre-push gate. Not done
+   here (no push/deploy). `REAL_MONEY` stays false. Reworking the volatility control
+   (re-enable + retune) is the planned follow-up once research is finished.
 
 ## Binding Receipts To Keep
 
 - `docs/preregistration/2026-06-18-continuous-live-v2-exit-redesign.md`
 - `docs/preregistration/2026-06-18-continuous-v2-invvol-max4-replay.md`
 - `docs/preregistration/2026-06-18-continuous-v2-forward-baseline.md`
+- `docs/preregistration/2026-06-19-continuous-v2-a4b-price-carry-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-ab-amendment-binance-only-flow.md`
+- `docs/preregistration/2026-06-19-continuous-v2-data-topup-flow-blockers.md`
+- `docs/preregistration/2026-06-19-continuous-v2-ab-research-final-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-c-flow-overlay-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-c1-flow-sizing-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-b-conviction-sizing-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-e1-entry-timing-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-f-exit-timing-shadow-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-f2-exit-tp-lifecycle-verdict.md`
+- `docs/preregistration/2026-06-19-continuous-v2-f2b-vol-tp-verdict.md`
+- `docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md`
+- `docs/preregistration/2026-06-19-continuous-v2-voloff-retest-verdict.md`
 - `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md`
 - `docs/preregistration/2026-06-15-operator-override-promote-continuous.md`
 - `docs/preregistration/continuous-capacity-impact-2026-06-09.md`

@@ -266,14 +266,16 @@ def test_equity_overlap_tolerance_allows_alpha_neutral_reassociation(tmp_path) -
 
     # Simulate an alpha-neutral float-order reassociation of the cumulative equity:
     # a relative perturbation strictly inside EQUITY_REL_TOL (so the relative overlap
-    # check does NOT alarm) yet large enough on the >1.0 peak equity to exceed the old
-    # pure 1e-9 absolute tol. basket_return is untouched. (0.8*rel_tol on the fixture's
-    # ~1.6 peak equity -> ~1.3e-9 abs: above 1e-9, below the ~1.6e-9 isclose threshold.)
-    perturbed = full.with_columns(
-        (pl.col("equity") * (1.0 + 0.8 * EQUITY_REL_TOL)).alias("equity")
-    )
-    # Confirm the perturbation would have tripped a pure-absolute 1e-9 check.
+    # check does NOT alarm) yet large enough on the peak equity to exceed the old pure
+    # 1e-9 absolute tol. Choose the bump as the midpoint of the valid window
+    # (1e-9/peak, EQUITY_REL_TOL) so it is robust to the equity magnitude (which is lower
+    # now that the daily vol adjuster is disabled by operator override 2026-06-19).
     eq_old = full["equity"].to_numpy()
+    peak = float(np.max(np.abs(eq_old)))
+    assert peak > 1.0  # window (1e-9/peak, rel_tol) is non-empty only for peak > 1
+    rel_bump = 0.5 * (1e-9 / peak + EQUITY_REL_TOL)
+    perturbed = full.with_columns((pl.col("equity") * (1.0 + rel_bump)).alias("equity"))
+    # Confirm the perturbation would have tripped a pure-absolute 1e-9 check.
     eq_new = perturbed["equity"].to_numpy()
     assert np.max(np.abs(eq_new - eq_old)) > 1e-9
     # ...but the relative-tolerant overlap check must NOT alarm.

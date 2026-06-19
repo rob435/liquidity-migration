@@ -12,6 +12,29 @@ gate remains unmet.
 The original daily SHORT sleeve was erased on 2026-06-11. Do not treat it as
 dormant.
 
+## OPERATOR OVERRIDE 2026-06-19 — vol adjuster OFF + TP12 (research-phase)
+
+By owner instruction, the promoted CONTINUOUS object was changed (demo/paper only;
+`REAL_MONEY` stays false):
+
+- **Daily volatility adjuster DISABLED.** The daily vol-target rebalance ("daily
+  volatility curve") is off (`FROZEN_FORWARD_CONFIG["rebalance"]["enabled"]=False`
+  and the v2 demo profile `daily_rebalance_enabled=False`); `compute_continuous_rebalance_scale`
+  returns a constant 1.0. **Why:** the rebalance is a path-dependent overlay that confounds
+  signal/exit research, so it is turned off for the research phase and **will be reworked
+  (re-enabled + retuned) once research is finished** — it is a one-line reversible flip
+  (`enabled=True`). The other rebalance params are retained for that rework.
+- **Component take-profit promoted 0.10 -> 0.12 system-wide** (live profile + research runner).
+
+**Honest caveats (this override goes against parts of the research evidence):** TP12 is a robust
+Bybit MAR gain but **Binance-MAR-negative (-3.66) and fails the two-venue gate**; disabling the
+adjuster **removes the book's only daily risk control and lowers MAR on both venues** (Binance's
+tight-drawdown edge was largely the rebalance). Acceptable only as a reversible research-phase
+state, not a real-money config. Both changes **void the prior forward ledger** (config-hash pin) —
+archive the state dir + start a fresh clock + regenerate the hedge warmstart + redeploy on the next
+owner-gated VPS deploy. Full rationale + reversibility:
+`docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md`.
+
 ## Source Hierarchy
 
 Use this order when files appear to disagree:

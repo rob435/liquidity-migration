@@ -23,10 +23,16 @@ The control is the frozen v2-forward baseline:
 - Baseline receipt:
   `docs/preregistration/2026-06-18-continuous-v2-forward-baseline.md`
 
-Every serious experiment changes exactly one mechanism versus that control and
-must produce both-venue, full-PIT, costed, reconstructable ledgers. A screen can
-rank ideas, but only a full trade-lifecycle A/B can accept or reject an alpha
-mechanism.
+Every candidate-track experiment changes exactly one mechanism versus that
+control and must produce both-venue, full-PIT, costed, reconstructable ledgers.
+A screen can rank ideas, but only a full trade-lifecycle A/B can accept or
+reject a candidate alpha mechanism.
+
+Operator amendment, 2026-06-19: Problem Book C flow/microstructure work may run
+on Binance only because Bybit full-market taker-flow is not available. Those
+C-book flow runs are `exploratory` / `single_venue_investigation` only. They can
+rank mechanisms and decide whether a Bybit archive build is worth doing; they
+cannot satisfy the two-venue candidate bar or support demo/paper wiring.
 
 The research program is organized as problem books:
 
@@ -41,8 +47,9 @@ The research program is organized as problem books:
 
 The first runnable deliverable is not a backtest. It is a feature almanac and
 research harness that proves every candidate input is causal, PIT-available,
-covered on both venues where claimed, and mapped to a live-compatible
-intervention.
+covered for its claimed venue scope, and mapped to a live-compatible
+intervention. The claimed scope must be explicit: both-venue candidate-track or
+Binance-only exploratory flow.
 
 ## Important Honesty
 
@@ -63,6 +70,8 @@ Therefore:
 - Forward demo/paper is the arbiter.
 - Nothing here approves real money.
 - Old research is a hypothesis map, not binding evidence for v2.
+- A Binance-only flow result can be useful, but it is not a candidate, not a
+  Bybit demo/paper input, and not a substitute for cross-venue agreement.
 
 ## Current Control
 
@@ -106,6 +115,9 @@ Every run in this plan must satisfy the repo methodology gate:
   run label, config hash, data-root identity, and report artifacts.
 - Run both venues for every both-venue claim. A one-venue win is not a
   candidate.
+- The amended C-book flow branch may run Binance only. Every such report must
+  declare `claimed_venue_scope=binance_only_flow_exploratory` and use the
+  `exploratory` run label.
 - Do not lower thresholds after seeing results.
 
 Run labels:
@@ -117,17 +129,22 @@ Run labels:
   lifecycle.
 
 No internal run can be real-money evidence.
+No Binance-only flow run can be candidate or paper-ready evidence by itself.
 
 ## Research Objective
 
 Primary objective:
 
 Find single-mechanism changes that improve v2 risk-adjusted performance without
-breaking cross-venue agreement or live reconstructability.
+breaking cross-venue agreement or live reconstructability. For the amended
+Binance-only C-book flow branch, the objective is narrower: learn whether the
+flow mechanism is worth further investment, not whether it is acceptable for
+demo/paper.
 
 Primary metric:
 
-- Delta MAR versus control, per venue and pooled.
+- Delta MAR versus control, per claimed venue scope. Pooled MAR applies only to
+  two-venue candidate-track arms.
 
 Secondary metrics:
 
@@ -145,7 +162,8 @@ Secondary metrics:
 
 Hard rejects:
 
-- Any arm negative on either venue.
+- Any candidate-track arm negative on either venue.
+- Any Binance-only flow arm negative on Binance.
 - Any arm improves headline return by accepting materially worse drawdown
   without a documented operator decision that return is the objective.
 - Any arm relies on non-PIT membership, future data, current-day BTC return, or
@@ -155,6 +173,8 @@ Hard rejects:
 - Any arm materially reduces trade count without explaining whether it is true
   selectivity or overfitting.
 - Any screen-only result called an alpha.
+- Any Binance-only flow result presented as a two-venue candidate, Bybit
+  deployment input, or promotion result.
 
 Candidate promotion bar:
 
@@ -166,6 +186,8 @@ Candidate promotion bar:
 - Bootstrap / leave-one-month-out / sub-period thirds from
   `scripts/r1_robustness.py` do not flip the Tier-2 decision negative.
 - The report names the falsifier and whether it fired.
+- Binance-only flow arms are excluded from this candidate bar regardless of
+  headline metrics.
 
 ## Prior Research Map
 
@@ -393,6 +415,10 @@ Feature families to inventory:
 No feature can enter a serious A/B unless the almanac marks it as causal and
 covered enough for the claimed venue scope.
 
+For the amended C-book flow branch, the claimed venue scope is Binance only and
+the admissible source is `binance_usdm_metrics_5m`. The current Bybit
+event-scoped `taker_flow_5m` tape must not be used as full-market flow evidence.
+
 ## Methodology Timestamps
 
 These must be stamped into every arm report:
@@ -463,7 +489,9 @@ Research approach:
   - BTC drawdown depth and trend flip age.
   - Cross-sectional breadth and dispersion.
   - Aggregate funding/carry stress.
-  - Aggregate OI/taker-flow squeeze pressure.
+  - Aggregate OI/taker-flow squeeze pressure only for Binance-only exploratory
+    variants; two-venue A-book arms must omit flow until Bybit full-market flow
+    exists.
   - Book equity drawdown state, lagged and causal.
 - Map that score into one intervention at a time.
 
@@ -531,7 +559,8 @@ Candidate score families:
 - `feature_agreement`: fraction of features that agree with the fade thesis.
 - `score_entropy`: concentrated versus diffuse feature support.
 - `residualized_composite`: composite residualized against BTC beta, funding,
-  volatility, liquidity, and market flow.
+  volatility, liquidity, and market flow. Market-flow residualization is
+  Binance-only exploratory until Bybit full-market flow exists.
 - `path_shape_augmented`: current composite plus pre-6h/24h return and pre-24h
   realized-vol residuals.
 - `monotone_nonlinear_score`: constrained nonlinear model, only after linear
@@ -579,6 +608,19 @@ What we already know:
 - Our data is not their data. We need venue-native proxies and a harsher
   translation.
 
+Venue scope amendment, 2026-06-19:
+
+- Run C-book flow work on Binance only using
+  `~/SHARED_DATA/binance_full_pit/binance_usdm_metrics_5m`.
+- Do not wait for Bybit full-market taker-flow before running the amended
+  Binance flow screens or Binance flow overlay diagnostics.
+- Do not use the current Bybit event-scoped `taker_flow_5m` tape to fill the
+  Bybit gap.
+- Every C-book flow run must declare
+  `claimed_venue_scope=binance_only_flow_exploratory`.
+- A positive result can justify a Bybit archive backfill or a later
+  venue-policy amendment. It cannot justify demo/paper wiring by itself.
+
 Feature construction:
 
 - `flow_imb_1h/6h/24h`: taker buy minus sell pressure, normalized by total
@@ -602,43 +644,48 @@ Screens:
 - Orthogonalize lagged flow against lagged returns before prediction.
 - Separate daily and weekly horizons if data supports both.
 - Symbol hash, calendar hash, within-symbol permutation, and flow-shuffle nulls.
-- Coverage by venue/year/component. Binance recent-window fields must not be
-  presented as full-history evidence.
+- Coverage by Binance symbol/year/component using metrics archives. Binance REST
+  recent-window fields must not be presented as full-history evidence.
+- Bybit flow coverage is reported as gated/unavailable for this branch.
 
 Arms:
 
-- `C0_ORDERFLOW_SCREEN`: residualized flow screen only.
-- `C1_FLOW_RESID_FEATURE_SIZING`: same entries as control; mean-1 size tilt
-  from residualized idiosyncratic flow. This is the closest translation of the
-  paper's residualized lagged order-flow idea.
-- `C2_MARKET_FLOW_HEDGE_INTENSITY`: keep entries unchanged; scale hedge
-  intensity when market-wide flow indicates squeeze risk.
-- `C3_FLOW_SQUEEZE_HEDGE_INTENSITY`: keep entries unchanged; hedge more when
-  the active book has high aggregate squeeze score.
-- `C4_FLOW_DIVERGENCE_ADMISSION`: admit or prioritize only candidates with a
-  predeclared divergence pattern. This is lower prior because old admission
-  concentrated tails; run only after C0/C2/C3.
-- `C5_FLOW_UNWIND_EXIT_SHADOW`: no-order exit timing shadow based on structural
-  squeeze completion, not price stop.
-- `C6_NONLINEAR_FLOW_SCORE`: monotone or tree-based score on residualized flow,
-  OI, funding, and premium features. Allowed only after C0 establishes stable
-  linear signal and the training protocol is purged and time-split.
-- `C7_FLOW_HASH_CONTROL`: same intervention using shuffled or hash flow.
+- `C0_ORDERFLOW_SCREEN_BINANCE_ONLY`: residualized flow screen only.
+- `C1_FLOW_RESID_FEATURE_SIZING_BINANCE_ONLY`: same entries as control; mean-1
+  size tilt from residualized idiosyncratic flow. This is the closest
+  translation of the paper's residualized lagged order-flow idea.
+- `C2_MARKET_FLOW_HEDGE_INTENSITY_BINANCE_ONLY`: keep entries unchanged; scale
+  hedge intensity when market-wide flow indicates squeeze risk.
+- `C3_FLOW_SQUEEZE_HEDGE_INTENSITY_BINANCE_ONLY`: keep entries unchanged; hedge
+  more when the active book has high aggregate squeeze score.
+- `C4_FLOW_DIVERGENCE_ADMISSION_BINANCE_ONLY`: admit or prioritize only
+  candidates with a predeclared divergence pattern. This is lower prior because
+  old admission concentrated tails; run only after C0/C2/C3.
+- `C5_FLOW_UNWIND_EXIT_SHADOW_BINANCE_ONLY`: no-order exit timing shadow based
+  on structural squeeze completion, not price stop.
+- `C6_NONLINEAR_FLOW_SCORE_BINANCE_ONLY`: monotone or tree-based score on
+  residualized flow, OI, funding, and premium features. Allowed only after C0
+  establishes stable linear signal and the training protocol is purged and
+  time-split.
+- `C7_FLOW_HASH_CONTROL_BINANCE_ONLY`: same intervention using shuffled or hash
+  flow.
 
-Preferred first serious arm:
+Preferred first amended flow arm:
 
-- `C2_MARKET_FLOW_HEDGE_INTENSITY` or `C3_FLOW_SQUEEZE_HEDGE_INTENSITY`, not
-  sizing. Historical evidence says tail-protection overlays are more likely to
-  harvest than adding exposure.
+- `C2_MARKET_FLOW_HEDGE_INTENSITY_BINANCE_ONLY` or
+  `C3_FLOW_SQUEEZE_HEDGE_INTENSITY_BINANCE_ONLY`, not sizing. Historical
+  evidence says tail-protection overlays are more likely to harvest than adding
+  exposure. The label remains exploratory.
 
 Falsifiers:
 
 - Raw flow is not incremental after lagged returns and composite.
-- Binance coverage is too shallow for a both-venue claim.
+- Flow-shuffle, symbol-hash, or calendar-hash controls match the feature.
+- The result is not stable across time splits, liquidity buckets, or component
+  subsets.
 - The nonlinear score beats linear only by overfitting one period.
 - The intervention raises drawdown faster than return.
-- A flow signal improves Bybit but Binance cannot be tested because data is
-  recent-window only; label bybit-primary exploratory, not candidate.
+- The result is described as a two-venue candidate or Bybit deployment input.
 
 ## Problem Book D - Squeeze, Crowding, Funding, And OI
 
@@ -739,7 +786,8 @@ Arms:
 - `F0_EXIT_ATTRIBUTION_REFRESH`: v2 exit-cause attribution under current
   control.
 - `F1_FLOW_UNWIND_EXIT_SHADOW`: no-order shadow exit when OI/flow/funding show
-  structural squeeze completion.
+  structural squeeze completion. Before a Bybit full-market flow build, any
+  flow-driven version is Binance-only exploratory.
 - `F2_TIME_DECAY_EXIT_SHADOW`: no-order shadow of hold-time-dependent exit
   after the historical MFE window, not before.
 - `F3_HEDGE_FIRST_DRAWDOWN_CONTROL`: risk control acts through hedge intensity
@@ -774,8 +822,9 @@ Arms and diagnostics:
   intervention. Requires that the feature has a clear component-specific
   mechanism.
 - `G2_VENUE_SPECIFIC_HEDGE_DIAGNOSTIC`: compare Bybit and Binance response to
-  BTC-vol, book drawdown, dispersion, and flow squeeze. Diagnostic only unless
-  a per-venue deployment policy is explicitly registered.
+  BTC-vol, book drawdown, and dispersion. Flow squeeze is Binance-only
+  diagnostic until Bybit full-market flow exists. Diagnostic only unless a
+  per-venue deployment policy is explicitly registered.
 - `G3_LONG_CONTINUOUS_REGIME_OVERLAP`: diagnostic only. The old dynamic tilt
   failed; do not re-open allocator work until per-sleeve alphas are clean.
 - `G4_COMPONENT_HASH_CONTROL`: random component label or random venue split.
@@ -794,19 +843,26 @@ Do not run every arm at once. The correct sequence is:
 1. Build the checked-in v2 A/B harness.
 2. Build the feature almanac.
 3. Reproduce `V2_CONTROL` in the same run directory.
-4. Run cheap screens for Regime, Composite, Orderflow, and Squeeze books.
-5. Pick at most two serious A/B arms from different mechanisms:
-   - one overlay arm, preferably regime/flow hedge intensity;
+4. Run cheap screens for Regime, Composite, Squeeze, and Binance-only Orderflow
+   books.
+5. Pick at most two candidate-track serious A/B arms from different mechanisms:
+   - one overlay arm, preferably regime hedge intensity;
    - one non-overlay arm, preferably score-margin sizing or execution timing.
-6. Run both venues, full lifecycle, with negative controls.
-7. Apply `scripts/r1_robustness.py`.
+   A Binance-only flow overlay can run alongside these only as exploratory.
+6. Run both venues, full lifecycle, with negative controls for candidate-track
+   arms. Run amended C-book flow arms on Binance only and label them
+   exploratory.
+7. Apply `scripts/r1_robustness.py` to candidate-track arms. For Binance-only
+   flow arms, report the same diagnostics where possible but force the verdict
+   to exploratory / no Tier-2 candidate pass.
 8. Write a dated verdict receipt.
 9. Only then decide the next arm.
 
 Recommended first wave:
 
 - `A4_REGIME_HEDGE_INTENSITY`
-- `C2_MARKET_FLOW_HEDGE_INTENSITY` or `C3_FLOW_SQUEEZE_HEDGE_INTENSITY`
+- `C2_MARKET_FLOW_HEDGE_INTENSITY_BINANCE_ONLY` or
+  `C3_FLOW_SQUEEZE_HEDGE_INTENSITY_BINANCE_ONLY` as exploratory flow work
 - `B1_SCORE_MARGIN_SIZING`
 - `E1_INTRABAR_ENTRY_TIMING` if sub-hourly data coverage passes
 
@@ -826,7 +882,9 @@ amendment:
 
 - Regime scoring: 4 serious arms after screens.
 - Composite scoring: 4 serious arms after screens.
-- Order flow: 5 serious arms, but nonlinear ML counts as 2.
+- Order flow: 5 Binance-only exploratory arms under the 2026-06-19 amendment;
+  nonlinear ML counts as 2. No C-book flow arm can enter the candidate budget
+  until a later amendment restores two-venue or venue-policy evidence.
 - Squeeze/crowding/funding: 4 serious arms.
 - Execution/cost: 4 serious arms, because it is not alpha-mining in the same
   way but still needs controls.
@@ -844,9 +902,12 @@ Every completed arm writes a verdict under `docs/preregistration/` with:
 - Control and arm config hashes.
 - Data-root identities.
 - Causal timestamp declarations.
-- Full per-venue metrics.
-- Pooled MAR delta.
-- Robustness output from `scripts/r1_robustness.py`.
+- Full metrics for the claimed venue scope. Candidate-track receipts still need
+  full per-venue metrics.
+- Pooled MAR delta for candidate-track arms; Binance MAR delta for Binance-only
+  flow arms.
+- Robustness output from `scripts/r1_robustness.py` where applicable; Binance-only
+  flow receipts must state that no Tier-2 candidate pass is possible.
 - Negative-control comparison.
 - Cost/funding/capacity stress.
 - Failure root cause.
@@ -869,7 +930,10 @@ Stop the current line and write the negative receipt if any of these happen:
 - Negative controls match the feature.
 - Costs/funding erase the result.
 - Drawdown worsens faster than return improves.
-- One month, one venue, or one component carries the result.
+- For candidate-track arms, one month, one venue, or one component carries the
+  result.
+- For Binance-only flow arms, one month, one liquidity bucket, or one component
+  carries the result.
 - The mechanism cannot be expressed in live/paper code.
 - The result depends on old helper scripts or artifact directories.
 
@@ -881,10 +945,11 @@ control, but it is not the interesting question.
 The highest-value first pass is:
 
 1. Build the v2 harness and feature almanac.
-2. Run the regime-score and order-flow screens with residualization and proper
-   nulls.
+2. Run the regime-score screens and Binance-only order-flow screens with
+   residualization and proper nulls.
 3. Test one overlay that keeps the whole book:
-   `A4_REGIME_HEDGE_INTENSITY` or `C3_FLOW_SQUEEZE_HEDGE_INTENSITY`.
+   `A4_REGIME_HEDGE_INTENSITY` or
+   `C3_FLOW_SQUEEZE_HEDGE_INTENSITY_BINANCE_ONLY` as exploratory flow work.
 4. Test one non-overlay that does not drop trades:
    `B1_SCORE_MARGIN_SIZING` or `E1_INTRABAR_ENTRY_TIMING`.
 

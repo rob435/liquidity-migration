@@ -35,7 +35,7 @@ import time
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -184,6 +184,27 @@ def _merge_with_existing(df: pl.DataFrame, path: Path) -> pl.DataFrame:
     )
 
 
+def _max_date_from_file(path: Path) -> str | None:
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    try:
+        max_ts = pl.scan_parquet(str(path)).select(pl.col("ts_ms").max().alias("max_ts")).collect()["max_ts"][0]
+    except Exception:
+        return None
+    if max_ts is None:
+        return None
+    return datetime.fromtimestamp(int(max_ts) / 1000, tz=timezone.utc).date().isoformat()
+
+
+def _row_count_from_file(path: Path) -> int:
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+    try:
+        return int(pl.scan_parquet(str(path)).select(pl.len().alias("rows")).collect()["rows"][0])
+    except Exception:
+        return 0
+
+
 def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -> dict:
     rows: list[dict] = []
     miss = 0          # genuine 404 / no-data days
@@ -209,6 +230,7 @@ def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -
             pl.col("create_time").str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False)
             .dt.replace_time_zone("UTC").dt.epoch("ms").alias("ts_ms")
         ).drop("create_time").drop_nulls("ts_ms").unique(["symbol", "ts_ms"]).sort("ts_ms")
+        new_rows = df.height
         # READ-MERGE the existing per-symbol parquet rather than clobbering it
         # (audit backfill-writers-1). This dir is a CANONICAL PIT root shared with the
         # event-anchored wrapper, which passes only [t0-26h, t0] window days. A bare
@@ -223,16 +245,23 @@ def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -
         # "manifest says X, parquet holds Y" ambiguity at the writer (backfill-writers-1).
         df = _stamp_coverage(df, "full")
         df.write_parquet(out_dir / f"{symbol}.parquet")
+        max_date = datetime.fromtimestamp(int(df["ts_ms"].max()) / 1000, tz=timezone.utc).date().isoformat()
+        checked_through = days[-1] if complete and days else max_date
         return {"symbol": symbol, "rows": df.height, "days_404": miss,
+                "new_rows": new_rows, "max_date": checked_through,
                 "transient_fail": transient, "complete": complete, "coverage": "full"}
     if not complete:
         # No rows AND a transient failure: do NOT write the empty .touch() marker.
         # Freezing it would turn a transient outage into permanent zero coverage,
         # which the resume guard would skip forever — exactly the silent-gap bug.
-        return {"symbol": symbol, "rows": 0, "days_404": miss,
+        return {"symbol": symbol, "rows": 0, "days_404": miss, "new_rows": 0,
                 "transient_fail": transient, "complete": False, "coverage": "full"}
-    (out_dir / f"{symbol}.parquet").touch()  # empty marker: genuinely no data on the archive
-    return {"symbol": symbol, "rows": 0, "days_404": miss,
+    existing = out_dir / f"{symbol}.parquet"
+    existing_rows = _row_count_from_file(existing)
+    if existing_rows == 0:
+        existing.touch()  # empty marker: genuinely no data on the archive
+    return {"symbol": symbol, "rows": existing_rows, "days_404": miss, "new_rows": 0,
+            "max_date": days[-1] if days else None,
             "transient_fail": 0, "complete": True, "coverage": "full"}
 
 
@@ -248,7 +277,7 @@ def main() -> int:
     out_dir = root / "binance_usdm_metrics_5m"
     out_dir.mkdir(exist_ok=True)
     manifest_path = out_dir / "_manifest.json"
-    manifest: dict = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    manifest: dict = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
 
     spans = _kline_spans(root)
     if args.symbols:
@@ -264,9 +293,15 @@ def main() -> int:
         # from being frozen into permanent zero coverage (audit backfill-writers-2).
         prior = manifest.get(s)
         prior_incomplete = isinstance(prior, dict) and prior.get("complete") is False
-        if (out_dir / f"{s}.parquet").exists() and not prior_incomplete:
-            continue
         first = max(a, args.start)
+        symbol_path = out_dir / f"{s}.parquet"
+        if symbol_path.exists() and not prior_incomplete:
+            max_date = prior.get("max_date") if isinstance(prior, dict) else None
+            max_date = max_date or _max_date_from_file(symbol_path)
+            if max_date is not None:
+                first = max(first, (date.fromisoformat(max_date) + timedelta(days=1)).isoformat())
+            elif symbol_path.stat().st_size == 0:
+                continue
         if first > b:
             continue
         todo.append((s, first, b))
@@ -279,10 +314,14 @@ def main() -> int:
         st = backfill_symbol(s, _days(a, b), out_dir, args.workers)
         manifest[s] = st
         if i % 10 == 0 or i == len(todo):
-            manifest_path.write_text(json.dumps(manifest, indent=0))
+            manifest_path.write_text(json.dumps(manifest, indent=0), encoding="utf-8")
             done_rows = sum(v["rows"] for v in manifest.values())
-            print(f"  [{i}/{len(todo)}] {s}: rows={st['rows']:,} 404s={st['days_404']}  (total rows {done_rows:,})", flush=True)
-    manifest_path.write_text(json.dumps(manifest, indent=0))
+            print(
+                f"  [{i}/{len(todo)}] {s}: rows={st['rows']:,} new={st.get('new_rows', 0):,} "
+                f"404s={st['days_404']}  (total rows {done_rows:,})",
+                flush=True,
+            )
+    manifest_path.write_text(json.dumps(manifest, indent=0), encoding="utf-8")
     rows = sum(v["rows"] for v in manifest.values())
     print(f"DONE: {len(manifest)} symbols, {rows:,} rows in {out_dir}", flush=True)
     return 0

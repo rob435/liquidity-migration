@@ -24,14 +24,15 @@ def test_ensemble_profile_resolves_continuous_ensemble_v2() -> None:
     # Current three-component object frozen 2026-06-18;
     # remaining three weights renormalized = old/0.90.
     assert set(comps) == {"p3", "p4p3", "p4p5"}
-    assert comps["p3"] == ("p3", "turn3_pop3", 240, 0.10, 0.3333333333333333)
-    assert comps["p4p3"] == ("p4p3", "turn4_pop3", 240, 0.10, 0.2222222222222222)
-    assert comps["p4p5"] == ("p4p5", "turn4_pop5", 240, 0.10, 0.4444444444444444)
+    # operator override 2026-06-19: component TP promoted 0.10 -> 0.12
+    assert comps["p3"] == ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333)
+    assert comps["p4p3"] == ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222)
+    assert comps["p4p5"] == ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444)
     assert abs(sum(c[4] for c in cfg.ensemble_components) - 1.0) < 1e-12  # renormalized weights sum to 1
     assert cfg.rmom_quantile == 0.25
     assert cfg.btc_trend_gate == "uptrend"
     assert cfg.max_hold_hours == 24
-    assert cfg.daily_rebalance_enabled
+    assert not cfg.daily_rebalance_enabled  # operator override 2026-06-19: daily vol adjuster disabled
     assert cfg.daily_rebalance_realized_vol_window_days == 90
     assert cfg.daily_rebalance_max_scale == 4.0
     assert cfg.daily_rebalance_target_daily_vol == 0.045
@@ -56,7 +57,7 @@ def test_ensemble_v2_disables_damaging_daemon_exits() -> None:
     assert cfg.sizing_mode == "inverse_vol"
     assert cfg.target_vol_per_name == 0.01
     assert cfg.vol_weight_clamp == 2.0
-    assert cfg.daily_rebalance_enabled
+    assert not cfg.daily_rebalance_enabled  # operator override 2026-06-19: daily vol adjuster disabled
     assert cfg.daily_rebalance_realized_vol_window_days == 90
     assert cfg.daily_rebalance_target_daily_vol == 0.045
     assert cfg.daily_rebalance_max_scale == 4.0

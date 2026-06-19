@@ -35,6 +35,13 @@ class ContinuousRebalanceRule:
     strategy_momentum_window_days: int = 180
     strategy_momentum_min_return: float = 0.02
     strategy_momentum_scale_when_below: float = 0.0
+    # Operator-override kill switch for the daily volatility adjuster (2026-06-19).
+    # enabled=False forces the daily scale to a constant 1.0 (no vol-target, no
+    # drawdown-halving, no momentum gate) so signal/exit research is not confounded
+    # by the path-dependent rebalance. Reversible: flip back to True (and re-tune)
+    # when the volatility control is reworked. Default True keeps prior behavior
+    # byte-identical. See docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md.
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -221,6 +228,10 @@ def compute_continuous_rebalance_scale(
     This is the live/paper equivalent of the scale calculation inside the
     backtest loop. ``prior_raw_returns`` must exclude the day being sized.
     """
+    if not rule.enabled:
+        # Operator override (2026-06-19): daily volatility adjuster disabled ->
+        # constant gross. Reversible via ContinuousRebalanceRule.enabled.
+        return 1.0
     prior = [float(x) for x in state.prior_raw_returns]
     scale = 1.0
     vol_window = int(rule.realized_vol_window_days)

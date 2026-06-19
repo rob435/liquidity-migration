@@ -64,6 +64,17 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
         "vol_weight_clamp": 2.0,
     },
     "rebalance": {
+        # OPERATOR OVERRIDE 2026-06-19: daily volatility adjuster DISABLED
+        # (enabled=False -> constant gross, no vol-target / drawdown-halving). This
+        # un-confounds signal/exit research from the path-dependent rebalance and
+        # adopts TP12; it is RESEARCH-PHASE and reversible (flip enabled=True + retune
+        # when the volatility control is reworked). Changing this block changes
+        # frozen_config_hash -> the prior forward ledger is VOIDED (archive the state
+        # dir + start a fresh clock on deploy). The remaining params are retained
+        # verbatim so re-enabling is a one-line flip. Honest caveat: this removes the
+        # book's only daily risk control and lowers MAR on both venues; receipt
+        # docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md.
+        "enabled": False,
         "realized_vol_window_days": 90,
         "target_daily_vol": 0.045,
         "max_scale": 4.0,
