@@ -87,9 +87,15 @@ stop. Receipt: `...-disaster-stop-tail-construction.md`.
   fades) is a real Binance-only refinement (+0.00149 EW, beats flat TP15 and its hash) —
   sharpens the Binance wide-TP lead. Receipt: `...-book-e2-conditional-tp-construction.md`.
 - **Methodology adopted (operator direction):** perfect the trade rule on EQUAL-WEIGHT raw
-  returns first; apply inverse-vol sizing only at portfolio construction. A richer
-  gates-off (btc_trend_gate=off + flat sizing) research dataset is being built for more
-  statistical power. Receipt: `...-research-dataset-construction.md`.
+  returns first; apply inverse-vol sizing only at portfolio construction. Built a richer
+  gates-off (btc_trend_gate=off + flat sizing) research dataset: +68%/+71% more trades.
+- **The BTC-uptrend gate is empirically validated** (using the gates-off trades the live
+  strategy skips): BTC-uptrend fades earn 2× (Bybit) / 6× (Binance) the per-trade gross of
+  BTC-downtrend fades, with smaller MAE and lower blow-up. Downtrends are stress regimes
+  where the fade's LEFT TAIL fattens — so the characterization's "scary high-vol = best"
+  holds in calm/uptrend but INVERTS in stress, which is exactly what the gate removes.
+  Disabling the gate for research let us learn WHY the gate works. Receipt:
+  `...-research-dataset-construction.md`.
 
 ## Honest framing
 
