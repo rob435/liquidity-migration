@@ -44,8 +44,14 @@ def _hash01(s):
     return int(hashlib.sha256(s.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
 
 
-def build_upperwick_lookup(ab_root: Path, k: float = K, clip: tuple = CLIP):
-    """Causal per-symbol expanding-z upper_wick multiplier keyed by (symbol, signal_ts)."""
+def build_upperwick_lookup(ab_root: Path, k: float = K, clip: tuple = CLIP, vol_attenuate: bool = False):
+    """Causal per-symbol expanding-z upper_wick multiplier keyed by (symbol, signal_ts).
+
+    vol_attenuate=True tapers the tilt by the name's vol: mult = clip(1 + k*z*att), where
+    att = 1 - (per-symbol expanding-prior percentile of rv_30), so the wick tilt is full on
+    low-vol names (where upper_wick has signal) and ~off on high-vol names (where it is
+    blind and inverse-vol is already downsizing). Strictly causal (prior-only, min 10 obs).
+    """
     tr = pl.read_csv(ab_root / "V2_CONTROL" / VENUE / "trades.csv").filter(pl.col("side") == "short")
     recs = []
     for t in tr.sort("entry_signal_ts_ms").to_dicts():
@@ -55,23 +61,29 @@ def build_upperwick_lookup(ab_root: Path, k: float = K, clip: tuple = CLIP):
         f = enriched_features(df, float(t["entry_price"]))
         if f is None:
             continue
-        recs.append((str(t["symbol"]), int(t["entry_signal_ts_ms"]), float(f["upper_wick_mean"])))
-    # per-symbol expanding-prior z (min 10 obs), causal
+        recs.append((str(t["symbol"]), int(t["entry_signal_ts_ms"]), float(f["upper_wick_mean"]), float(f["rv_30"])))
+    # per-symbol expanding-prior z (min 10 obs), causal; optional vol attenuation
     by_sym: dict[str, list] = {}
-    for sym, sig, val in recs:
-        by_sym.setdefault(sym, []).append((sig, val))
+    for sym, sig, val, rv in recs:
+        by_sym.setdefault(sym, []).append((sig, val, rv))
     real: dict[tuple[str, int], float] = {}
     for sym, seq in by_sym.items():
         seq.sort()
         hist = []
-        for sig, val in seq:
+        rv_hist = []
+        for sig, val, rv in seq:
             if len(hist) >= 10:
                 mu, sd = float(np.mean(hist)), float(np.std(hist)) or 1.0
                 z = (val - mu) / sd
-                real[(sym, sig)] = float(np.clip(1.0 + k * z, *clip))
+                att = 1.0
+                if vol_attenuate:
+                    pctl = float(np.mean([1.0 if x <= rv else 0.0 for x in rv_hist]))  # causal expanding percentile
+                    att = 1.0 - pctl
+                real[(sym, sig)] = float(np.clip(1.0 + k * z * att, *clip))
             else:
                 real[(sym, sig)] = 1.0
             hist.append(val)
+            rv_hist.append(rv)
     # hash null: permute the multiplier multiset across keys
     keys = list(real)
     mults = [real[k] for k in keys]
@@ -110,10 +122,12 @@ def main() -> int:
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--k", type=float, default=K)
     ap.add_argument("--clip", type=float, default=CLIP[1], help="symmetric clip c -> [1/c, c]")
+    ap.add_argument("--vol-attenuate", action="store_true", help="taper the wick tilt by causal vol percentile")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    real, hashed = build_upperwick_lookup(Path(args.ab_root), k=args.k, clip=(1.0 / args.clip, args.clip))
+    real, hashed = build_upperwick_lookup(Path(args.ab_root), k=args.k, clip=(1.0 / args.clip, args.clip),
+                                          vol_attenuate=args.vol_attenuate)
     print(f"built upper_wick lookup: {len(real)} keys, mult mean={np.mean(list(real.values())):.4f} "
           f"min={min(real.values()):.3f} max={max(real.values()):.3f}", flush=True)
     res = {}
