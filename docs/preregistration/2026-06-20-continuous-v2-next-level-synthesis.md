@@ -32,6 +32,7 @@ quant can audit the whole effort without trusting my memory or re-reading every 
 | Book | Question | Verdict | Killing falsifier |
 |------|----------|---------|-------------------|
 | A — stops/TPSL | Can real stops cut tails without cutting the edge? | No. Stops lose 2–5 MAR both venues, worsen drawdown. | Loses to hash-time null; mechanism = stop cuts the reversion-to-TP trades. |
+| A2 — disaster stops (tail lens) | Does a wide disaster stop cap the liquidation tail? | No — inverse-vol SIZING already caps each name to ~1% of equity; price stops cap ≈0 of the tail at 0.9–4.7 MAR cost. | worst_trade-capped ≈ 0 (Binance: worse); disaster-stop need is downstream of the leverage (G) decision. |
 | B — entry admission | Do causal 1m pre-entry features admit/size better? | No two-venue candidate, but the program's BEST signal: `upper_wick` 1m-exhaustion, real IC +0.10/+0.12, beats hash, fresh info. | Admission loses to diversified control; sizing beats hash but Binance-only. |
 | E — dynamic TP | Does path-conditional (MFE-extension trailing) TP reconcile the venue split? | No. Pleases neither venue. | Binance loses to hash; closes exit-TP end-to-end (flat F2 + vol-scaled F2b + trailing E5). |
 | G — vol-control rework | Is there a daily risk-control timing edge to recover? | No — the adjuster is a pure LEVERAGE dial. | Constant-gross controls match/beat the vol-timed arms; prior "hurts Bybit" was a TP confound. |
@@ -56,6 +57,16 @@ So the two operator-gated, venue-specific leads point in OPPOSITE directions:
 
 Neither is a two-venue candidate; both would need a separate operator-gated no-order
 forward shadow and would void the frozen forward ledger.
+
+## Mainnet risk-control answer (disaster-stop addendum)
+
+A disaster/price stop is NOT the missing mainnet risk control. Inverse-vol per-name
+sizing already bounds each name's hit to ~0.85% of book equity even on −143%/−258% MAE
+names (the blow-up-prone high-vol names get sized down to ~1% notional). Wide stops
+(25–80%) cap ≈0 of that tail and cost 0.9–4.7 MAR. The liquidation tail only reappears
+if gross is levered up (Book G's dial), so the real mainnet design is: cap gross +
+position-level liquidation guard + correlated-squeeze-day cap — NOT a per-name profit
+stop. Receipt: `...-disaster-stop-tail-construction.md`.
 
 ## Honest framing
 

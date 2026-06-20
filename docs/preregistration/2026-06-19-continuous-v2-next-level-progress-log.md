@@ -264,6 +264,19 @@ dispersion is concentration-noise-dominated (hash swings bybit −1.34 / binance
 The BTC-vol regime stays on the HEDGE (already wired, validated) — extending it to book
 gross adds no two-venue value. No candidate.
 
+### Book A disaster-stop TAIL addendum (2026-06-20)
+
+Receipt: `docs/preregistration/2026-06-20-continuous-v2-disaster-stop-tail-construction.md`.
+Driver: `scripts/continuous_v2_book_a_disaster_stops.py`. Re-tested stops on the TAIL
+objective (not MAR): wide disaster stops 25/40/60/80% + worst-trade / CVaR / worst-day /
+MAE-breach. **Key finding: inverse-vol per-name sizing IS the disaster control** — the
+worst single trade costs only ~0.85% of book equity even on −143%/−258% MAE names
+(high-vol blow-up names sized down to ~1% notional). Price stops cap ≈0 of that tail
+(Binance: worse, the stop fills the spike) and cost 0.9–4.7 MAR. The disaster-stop need
+is downstream of the LEVERAGE decision (Book G): the liquidation tail only reappears if
+gross is levered up. Mainnet risk answer: cap gross + position-level liquidation guard +
+correlated-squeeze cap, NOT a per-name profit stop.
+
 ### Mid-program synthesis (WRITTEN 2026-06-20)
 
 `docs/preregistration/2026-06-20-continuous-v2-next-level-synthesis.md` — the one-page
