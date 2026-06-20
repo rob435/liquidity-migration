@@ -90,6 +90,7 @@ def evaluate_venue(trades: list[dict[str, Any]], venue: str, cache_root: Path, s
 
     def run(stop_pct):
         contribs, daily = [], {}
+        raw_gross = []  # EQUAL-WEIGHT per-trade return (no sizing) — "perfect the trade first"
         stopped = 0
         breach_n = 0
         breach_w = 0.0
@@ -99,6 +100,7 @@ def evaluate_venue(trades: list[dict[str, Any]], venue: str, cache_root: Path, s
                                   planned_exit_ts_ms=int(tr["planned_exit_ts_ms"]))
             c = _contrib(res.side_return, tr)
             contribs.append(c)
+            raw_gross.append(float(res.side_return))
             daily[int(res.exit_ts_ms) // MS_DAY] = daily.get(int(res.exit_ts_ms) // MS_DAY, 0.0) + c
             if res.exit_reason == "stop_loss":
                 stopped += 1
@@ -107,8 +109,14 @@ def evaluate_venue(trades: list[dict[str, Any]], venue: str, cache_root: Path, s
                 breach_n += 1
                 breach_w += float(tr["notional_weight"])
         st = tail_stats(contribs, daily)
+        rg = sorted(raw_gross)
+        kw = max(1, len(rg) // 100)
         st.update({"stop_pct": stop_pct, "stopped": stopped, "stop_rate": stopped / n,
-                   "mae_breach_trades": breach_n, "mae_breach_weight": breach_w})
+                   "mae_breach_trades": breach_n, "mae_breach_weight": breach_w,
+                   # EQUAL-WEIGHT ("perfect the trade") view, sizing applied only at portfolio level:
+                   "eq_mean_trade": statistics.fmean(raw_gross), "eq_median_trade": statistics.median(raw_gross),
+                   "eq_winrate": sum(1 for x in raw_gross if x > 0) / len(raw_gross),
+                   "eq_worst_trade": rg[0], "eq_cvar_1pct": statistics.fmean(rg[:kw])})
         return st
 
     out["policies"]["control_nostop"] = run(0.0)
@@ -141,11 +149,12 @@ def main() -> int:
         summary["venues"][venue] = evaluate_venue(tr.to_dicts(), venue, Path(args.cache_root), stops)
         v = summary["venues"][venue]
         print(f"[{venue}] n={v['n']}", flush=True)
+        ctrl = v["policies"]["control_nostop"]
         for name, m in v["policies"].items():
-            print(f"   {name:14s} mar={m['mar']:.2f} Δmar={m['mar_delta']} ret_cost={m['return_cost']:+.3f} "
-                  f"worst_trade={m['worst_trade']:+.4f} (capped {m['worst_trade_capped']:+.4f}) "
-                  f"worstday={m['worst_day']:+.4f} CVaR1%={m['cvar_1pct']:+.4f} stop_rate={m['stop_rate']:.3f} "
-                  f"mae_breach={m['mae_breach_trades']}", flush=True)
+            d_eq = m["eq_mean_trade"] - ctrl["eq_mean_trade"]
+            print(f"   {name:14s} | EQUAL-WT trade: mean={m['eq_mean_trade']:+.4f} (Δ{d_eq:+.4f}) "
+                  f"median={m['eq_median_trade']:+.4f} winrate={m['eq_winrate']:.3f} worst={m['eq_worst_trade']:+.3f} "
+                  f"| SIZED: mar={m['mar']:.2f} ret_cost={m['return_cost']:+.3f} | stop_rate={m['stop_rate']:.3f}", flush=True)
     (out / "disaster_stops.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     print(f"written: {out / 'disaster_stops.json'}", flush=True)
     return 0

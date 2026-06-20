@@ -53,6 +53,36 @@ binance (control: MAR 4.32, worst_trade −0.82%, worst_day −2.67%):
 | 60% | 2.43 / −1.89 | −0.126 | −1.15% (−0.32%) | 1.6% |
 | 80% | 2.56 / −1.75 | −0.119 | −0.84% (−0.01%) | 0.9% |
 
+## Why a wide stop lowers returns (mean-reversion) + equal-weight "perfect the trade" view
+
+Methodology note (operator direction 2026-06-20): perfect the trade rule on EQUAL-WEIGHT
+raw returns FIRST; apply position sizing only at portfolio construction. The original
+screen weighted by inverse-vol notional, which conflates the exit rule with sizing. Redone
+equal-weight below; the conclusion holds at the trade level (not a sizing artifact).
+
+**Q: how does a 50% disaster stop lower returns — it should only fire on −50% trades?**
+Because the fade reverts: of the control trades that breach −50% MAE intrabar, WITHOUT a
+stop ~77% end BETTER than −50% (Bybit n=39: mean realized −34%, 76.9% beat −50%, 7.7%
+end profitable; Binance n=46: mean −34%, 76.1% beat −50%, 13% profitable). A −50% stop
+forces all of them to −50% — it sells at the point of maximum reversion. For a short
+fade, the worst adverse excursion is the BEST reversion setup, so a stop there is adverse
+selection.
+
+**Equal-weight (unsized) per-trade mean return — the stop lowers it at every level:**
+
+| stop | bybit mean trade (Δ) | bybit winrate | binance mean trade (Δ) | binance winrate |
+|------|---------------------:|--------------:|-----------------------:|----------------:|
+| none (control) | +0.0256 | 0.706 | +0.0191 | 0.668 |
+| 25% | +0.0163 (−0.0093) | 0.692 | +0.0119 (−0.0072) | 0.656 |
+| 40% | +0.0219 (−0.0037) | 0.703 | +0.0154 (−0.0037) | 0.665 |
+| 50% | +0.0229 (−0.0027) | 0.704 | +0.0156 (−0.0035) | 0.665 |
+| 80% | +0.0233 (−0.0023) | 0.706 | +0.0154 (−0.0038) | 0.667 |
+
+So "stops hurt" is a TRADE-LEVEL fact (reversion), independent of sizing. The drag looks
+small per-trade because only ~1–10% of trades are affected, but each breach trade is made
+~16 points worse (−34% → −50%) and some would-be winners become −50% losses, which at the
+sized book level costs 0.10–0.43 total return and 0.9–4.7 MAR.
+
 ## Verdict — sizing is the disaster control, not a price stop
 
 1. **The worst single trade costs only ~0.85% of book equity even with MAE −143%/−258%**,
