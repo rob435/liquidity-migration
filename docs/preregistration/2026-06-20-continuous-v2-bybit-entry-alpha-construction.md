@@ -122,6 +122,28 @@ upper_wick) — the strongest entry result of the program. NOT a frozen-object c
 real-money evidence; the next bar is a no-order forward shadow under a separate operator
 receipt.
 
+## Sensitivity sweep (operator: "why not more sensitive? test a broader range")
+
+`scripts/continuous_v2_bybit_sizing_sensitivity.py`, decoupled (k = tilt strength, clip =
+cap), fine/broad, IS(early) vs OOS(late) MAR proxy.
+
+(A) k sweep at FIXED clip 3.0 — OOS MAR Δ vs control: k0.10 +0.97, k0.25 +2.52,
+**k0.40 +4.20 (peak)**, k0.50 +4.07, k0.75 +3.61, k1.0 +3.11, k1.5 +2.78, k2.0 +2.22,
+k2.5 +0.97, **k3.0 −0.40**. More sensitivity LOSES — OOS MAR peaks at k≈0.4–0.5 and goes
+negative by k=3.0; the `%clipped` rises with k (0%→31%), i.e. cranking k just pins trades
+at the cap (stealth admission), which degrades MAR. Classic weak-signal (IC ~0.15) result.
+
+(B) clip sweep at FIXED k=0.5 — OOS MAR Δ: clip1.25 +1.84, **clip1.5 +3.12 (the original)**,
+clip2.0 +3.97, **clip3.0 +4.07**, clip5.0 +4.03, clip10 +4.02. The original [0.5,1.5] clip
+was TOO TIGHT — binding on ~18% of trades and chopping the gentle tilt. Widening to ~[1/3,3]
+lifts the OOS proxy +3.1→+4.1, a broad PLATEAU (k0.4–0.6 × clip2–10 all ≈ +4.0; robust, not
+a spike).
+
+**Refinement found:** the lever is the CLIP, not the sensitivity — let the gentle tilt breathe
+(wider clip ~3) rather than tilt harder. Registered as a wider-clip FULL-LEDGER re-confirm
+(the banked full-ledger pass used clip 1.5; expect a small absolute move since the 2f
+hedge/rebalance dominate hedged MAR). More sensitivity (higher k) is closed: it does not help OOS.
+
 ## No real-money / promotion claim
 
 `REAL_MONEY` stays false. Bybit-only, operator-gated; full-ledger pass is in-sample working

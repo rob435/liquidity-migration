@@ -80,24 +80,36 @@ def main() -> int:
         mult = np.clip(1.0 + k * z, 1.0 / c, c)
         mult = (mult / mult.mean()).tolist()
         mean_trade = statistics.fmean([r["_gross"] * m for r, m in zip(members, mult)])
-        return mean_trade, mar_proxy(members, mult)
+        frac_clipped = float(np.mean((np.array(mult) <= 1.0001 / c) | (np.array(mult) >= 0.9999 * c)))
+        return mean_trade, mar_proxy(members, mult), frac_clipped
 
     base_e_mar = mar_proxy(early, [1.0] * len(early))
     base_l_mar = mar_proxy(late, [1.0] * len(late))
-    grid = [(0.25, 1.5), (0.5, 1.5), (1.0, 2.0), (1.5, 3.0), (2.0, 4.0), (3.0, 6.0)]
     res = {"venue": args.venue, "n_early": len(early), "n_late": len(late),
-           "control": {"early_mar": base_e_mar, "late_mar": base_l_mar}, "grid": []}
+           "control": {"early_mar": base_e_mar, "late_mar": base_l_mar}, "k_sweep": [], "clip_sweep": []}
     print(f"[{args.venue}] control MAR proxy: IS(early)={base_e_mar:.2f}  OOS(late)={base_l_mar:.2f}")
-    print(f"   {'k':>4s} {'clip':>5s} | {'IS_mean':>8s} {'IS_MAR':>7s} {'ΔIS_MAR':>8s} | {'OOS_mean':>8s} {'OOS_MAR':>8s} {'ΔOOS_MAR':>9s}")
-    for k, c in grid:
-        em, emar = sweep(early, k, c)
-        lm, lmar = sweep(late, k, c)
-        row = {"k": k, "clip": c, "is_mean": em, "is_mar": emar, "oos_mean": lm, "oos_mar": lmar,
-               "d_is_mar": (emar - base_e_mar) if emar and base_e_mar else None,
-               "d_oos_mar": (lmar - base_l_mar) if lmar and base_l_mar else None}
-        res["grid"].append(row)
-        print(f"   {k:4.2f} {c:5.1f} | {em:+8.4f} {emar:7.2f} {row['d_is_mar']:+8.2f} | "
-              f"{lm:+8.4f} {lmar:8.2f} {row['d_oos_mar']:+9.2f}")
+
+    # (A) fine, broad k sweep at FIXED clip (only the tilt strength varies)
+    FIXED_CLIP = 3.0
+    print(f"\n   (A) k sweep, clip fixed at {FIXED_CLIP} (tilt strength is the only variable):")
+    print(f"   {'k':>5s} | {'IS_mean':>8s} {'IS_MAR':>7s} {'ΔIS':>6s} | {'OOS_mean':>8s} {'OOS_MAR':>8s} {'ΔOOS':>7s} {'%clip':>6s}")
+    for k in [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]:
+        em, emar, _ = sweep(early, k, FIXED_CLIP)
+        lm, lmar, fc = sweep(late, k, FIXED_CLIP)
+        row = {"k": k, "clip": FIXED_CLIP, "is_mean": em, "is_mar": emar, "oos_mean": lm, "oos_mar": lmar,
+               "d_oos_mar": (lmar - base_l_mar) if lmar and base_l_mar else None, "oos_frac_clipped": fc}
+        res["k_sweep"].append(row)
+        print(f"   {k:5.2f} | {em:+8.4f} {emar:7.2f} {emar-base_e_mar:+6.2f} | "
+              f"{lm:+8.4f} {lmar:8.2f} {lmar-base_l_mar:+7.2f} {fc:6.1%}")
+
+    # (B) clip sweep at FIXED k=0.5
+    print("\n   (B) clip sweep, k fixed at 0.5:")
+    print(f"   {'clip':>5s} | {'OOS_mean':>8s} {'OOS_MAR':>8s} {'ΔOOS':>7s} {'%clip':>6s}")
+    for c in [1.25, 1.5, 2.0, 3.0, 5.0, 10.0]:
+        lm, lmar, fc = sweep(late, 0.5, c)
+        res["clip_sweep"].append({"k": 0.5, "clip": c, "oos_mean": lm, "oos_mar": lmar, "oos_frac_clipped": fc})
+        print(f"   {c:5.2f} | {lm:+8.4f} {lmar:8.2f} {lmar-base_l_mar:+7.2f} {fc:6.1%}")
+
     Path(args.out).mkdir(parents=True, exist_ok=True)
     (Path(args.out) / "sizing_sensitivity.json").write_text(json.dumps(res, indent=2, default=str), encoding="utf-8")
     return 0

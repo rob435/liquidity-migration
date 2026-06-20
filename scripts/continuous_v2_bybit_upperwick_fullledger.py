@@ -36,7 +36,7 @@ from liquidity_migration.continuous_regime import btcvol_intensity_series  # noq
 
 VENUE = "bybit"
 START, END = "2023-04-01", "2026-06-12"
-K, CLIP = 0.5, (0.5, 1.5)
+K, CLIP = 0.5, (0.5, 1.5)  # defaults; overridable via CLI (sensitivity sweep found clip~3 better)
 CACHE = Path.home() / "SHARED_DATA" / "continuous_v2_1m"
 
 
@@ -44,7 +44,7 @@ def _hash01(s):
     return int(hashlib.sha256(s.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
 
 
-def build_upperwick_lookup(ab_root: Path):
+def build_upperwick_lookup(ab_root: Path, k: float = K, clip: tuple = CLIP):
     """Causal per-symbol expanding-z upper_wick multiplier keyed by (symbol, signal_ts)."""
     tr = pl.read_csv(ab_root / "V2_CONTROL" / VENUE / "trades.csv").filter(pl.col("side") == "short")
     recs = []
@@ -68,7 +68,7 @@ def build_upperwick_lookup(ab_root: Path):
             if len(hist) >= 10:
                 mu, sd = float(np.mean(hist)), float(np.std(hist)) or 1.0
                 z = (val - mu) / sd
-                real[(sym, sig)] = float(np.clip(1.0 + K * z, *CLIP))
+                real[(sym, sig)] = float(np.clip(1.0 + k * z, *clip))
             else:
                 real[(sym, sig)] = 1.0
             hist.append(val)
@@ -108,10 +108,12 @@ def main() -> int:
     ap.add_argument("--ab-root", default="backtest-runs/continuous_v2_phase0_freeze_2026-06-19")
     ap.add_argument("--out", default="backtest-runs/continuous_v2_bybit_upperwick_fullledger_2026-06-20")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--k", type=float, default=K)
+    ap.add_argument("--clip", type=float, default=CLIP[1], help="symmetric clip c -> [1/c, c]")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    real, hashed = build_upperwick_lookup(Path(args.ab_root))
+    real, hashed = build_upperwick_lookup(Path(args.ab_root), k=args.k, clip=(1.0 / args.clip, args.clip))
     print(f"built upper_wick lookup: {len(real)} keys, mult mean={np.mean(list(real.values())):.4f} "
           f"min={min(real.values()):.3f} max={max(real.values()):.3f}", flush=True)
     res = {}
