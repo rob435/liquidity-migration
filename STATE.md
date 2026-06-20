@@ -157,11 +157,16 @@ pre-registration and explicit operator direction.
 5. Continue running the forward replay orchestrator at each data-root refresh; overlap
    drift is a hard alarm.
 6. Binance forward liquidation capture needs a permitted-region host.
-8. **2026-06-20 upper_wick entry-sizing override: WITHDRAWN.** The live pipeline was built and
-   the parity reconcile run; it failed (the +0.168 was a duplicate-counting artifact;
-   corrected = −0.003, below hash). Do NOT activate `entry_upperwick_sizing_enabled`. If a
-   corrected/alternative construction is ever pursued (e.g. global-z, full-ledger-UNTESTED),
-   it needs its own parity reconcile + receipt before any activation. `REAL_MONEY` stays false.
+8. **2026-06-20 upper_wick entry-sizing override: WITHDRAWN; two constructions tested, neither
+   ships.** (a) PER-SYMBOL: duplicate-counting artifact; corrected = −0.003, below hash. (b)
+   GLOBAL-z (active, parity-clean): single-seed hash "passed" (+1.13) but the 7-seed permutation
+   null shows it at the FAVORABLE TAIL, NOT significant — beats 6/7 seeds, perm p=0.25 (MAR) /
+   0.14 (return); the hedged-MAR null is too wide (tiny-drawdown sensitivity) to confirm the
+   small real IC. Do NOT activate `entry_upperwick_sizing_enabled` (the live sizer is per-symbol
+   anyway; global would need its own global live sizer + parity). A GATES-OFF larger-N power test
+   is RUNNING to resolve the borderline (`scripts/continuous_v2_gatesoff_upperwick.py`). Any
+   activation needs significance + a parity reconcile + receipt. `REAL_MONEY` stays false.
+   Receipt: `docs/preregistration/2026-06-20-continuous-v2-bybit-upperwick-global-construction.md`.
 7. **2026-06-19 operator override (vol adjuster OFF + TP12) is a CODE change only.**
    Before the live demo/paper book trades it, an owner-gated deploy must: archive the
    continuous forward state dir + start a fresh clock (config hash changed), regenerate

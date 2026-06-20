@@ -104,10 +104,13 @@ def build_upperwick_lookup(ab_root: Path, k: float = K, clip: tuple = CLIP, vol_
     return real, hashed
 
 
-def run_arm(lookup, tag, out_root, resume):
+def run_arm(lookup, tag, out_root, resume, gate=None):
     pieces = {}
     for spec in abr.V2_COMPONENTS:
         cfg = abr.v2_component_config(spec, start_date=START, end_date=END)
+        if gate is not None:  # gates-off larger-N test: override the BTC-trend gate
+            from dataclasses import replace
+            cfg = replace(cfg, btc_trend_gate=gate)
         cdir = out_root / tag / spec.key
         cdir.mkdir(parents=True, exist_ok=True)
         rep = cdir / "continuous_report.json"
@@ -160,7 +163,8 @@ def main() -> int:
         return 0
     if args.hash_only:
         m = run_arm(hashed, f"hash_{args.hash_seed or '0'}", out, args.resume)
-        print(f"hash[seed={args.hash_seed or '0'}]: MAR={m['mar']:.3f} early/late={m.get('early_mar')}/{m.get('late_mar')}", flush=True)
+        print(f"hash[seed={args.hash_seed or '0'}]: MAR={m['mar']:.3f} tot={m['total_return']:.4f} "
+              f"dd={m['max_drawdown']:.4f} early/late={m.get('early_mar')}/{m.get('late_mar')}", flush=True)
         return 0
     res = {}
     def _show(tag, m):
