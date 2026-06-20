@@ -219,6 +219,48 @@ falsifiers). All three came back showing the simple-mean upper_wick with a gentl
 sizing tilt is already the right form — the signal is real but intrinsically modest, and
 incremental feature engineering on this book is clean-signal-capped. The edge is what it is.
 
+## Do inverse-vol and upper_wick sizings combine? + vol-gated refinement (operator)
+
+The validated full-ledger run already applies upper_wick MULTIPLICATIVELY on top of
+inverse-vol (nw = invvol_weight x wick_mult); the +0.11 is the marginal gain over inverse-
+vol alone. Orthogonality (`continuous_v2_bybit_sizing_orthogonality.py`): corr(upper_wick,
+inverse-vol weight) = -0.19 (mild opposition), corr(uw, rv) = +0.10; upper_wick IC vs gross
+WITHIN invvol-weight terciles = +0.04 (high-vol) / +0.20 (mid) / +0.12 (low-vol) -> the
+alpha survives controlling for vol = largely ORTHOGONAL (risk axis vs quality axis), clean
+stacking. Nuance: upper_wick is BLIND on high-vol names where inverse-vol downsizes -> the
+ungated tilt wastes effort / mildly opposes there.
+
+Vol-gated refinement, OOS screen then FULL-LEDGER confirm:
+- OOS screen (`continuous_v2_bybit_volgate_screen.py`): HARD gating hurts (gate-top33 proxy
+  MAR +1.77 vs ungated +3.12 — crude, discards the weak high-vol signal); SMOOTH
+  vol-attenuation (taper tilt by 1 - causal vol percentile) edges ungated (+3.38 vs +3.12).
+- Full-ledger (strictly-causal per-symbol expanding rv percentile, --vol-attenuate):
+
+  | arm | MAR | total | max_dd |
+  |-----|----:|------:|-------:|
+  | control (invvol only) | 6.387 | 0.2599 | -0.0130 |
+  | upper_wick ungated | 6.497 | 0.2618 | -0.0129 |
+  | **upper_wick VOL-SMOOTH** | **6.555** | 0.2600 | -0.0127 |
+
+  vol-smooth: **+0.168 vs control, +0.058 vs ungated, +1.62 vs hash, passes=True**.
+
+**Verdict — YES, they combine, and vol-gating the wick tilt genuinely improves it.** Smooth
+vol-attenuation lifts MAR +0.058 over the ungated tilt (and +0.168 over inverse-vol alone),
+confirmed at full-ledger + hash. Mechanism: it gives up a sliver of return (0.2600 vs 0.2618)
+but cuts drawdown more (-1.27% vs -1.29%) — not tilting on the high-vol blind spot avoids
+bad concentration there. The two sizings are complementary: inverse-vol = RISK sizing,
+upper_wick (vol-gated) = QUALITY sizing on the names where quality is measurable.
+
+**Methodology contrast (important):** the clip refinement's proxy gain was REJECTED by the
+full ledger; this vol-gate refinement's proxy gain was CONFIRMED. The proxy is trustworthy
+for SIGNAL/SELECTION changes (which trades get weight) but NOT for CONCENTRATION/SHAPE params
+(how hard to tilt / clip). Vol-gating is the former; the clip was the latter.
+
+**Caveats:** the absolute gain is small (+0.058 over ungated; the 2f hedge dominates hedged
+MAR). Mild design selection (smooth chosen as best of 4 OOS gate designs) — but theory-led
+(hard gating is crude) and full-ledger-independent-confirmed (smooth + smooth_sqrt both beat
+ungated OOS). The validated Bybit entry lead is now **vol-gated upper_wick sizing** (+0.168).
+
 ## No real-money / promotion claim
 
 `REAL_MONEY` stays false. Bybit-only, operator-gated; full-ledger pass is in-sample working

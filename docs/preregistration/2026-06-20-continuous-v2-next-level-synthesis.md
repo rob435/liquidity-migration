@@ -112,9 +112,15 @@ tail; stable across a train/test split).
 - **Admission fails** (per-trade illusion — concentration collapses MAR; Book B lesson).
 - **upper_wick-conditional TP** (+0.0014 OOS, beats hash) is a coherent companion — high-
   exhaustion fades earn a wider TP. Reversion-speed-adaptive TP failed.
-- **Status:** an operator-gated Bybit-only forward-shadow CANDIDATE — the strongest entry
-  result of the program. NOT a frozen-object change. Receipt:
-  `...-bybit-entry-alpha-construction.md`.
+- **Combines with inverse-vol sizing** (different axes: inverse-vol = RISK, upper_wick =
+  QUALITY; alpha survives within vol terciles). Vol-GATING the wick tilt (taper by causal vol
+  percentile, since upper_wick is blind on high-vol names) improves it: full-ledger MAR
+  6.555 = **+0.168 vs inverse-vol alone / +0.058 vs the ungated tilt / +1.62 vs hash**,
+  passes. The proxy correctly predicted this (a signal/selection change) — vs the clip
+  refinement the proxy wrongly oversold (a concentration/shape param the full ledger rejected).
+- **Status:** the validated Bybit entry lead is **vol-gated upper_wick sizing** (+0.168 MAR),
+  an operator-gated Bybit-only forward-shadow CANDIDATE — the strongest entry result of the
+  program. NOT a frozen-object change. Receipt: `...-bybit-entry-alpha-construction.md`.
 
 ## Honest framing
 
