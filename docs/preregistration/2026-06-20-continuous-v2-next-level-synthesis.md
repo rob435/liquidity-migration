@@ -68,6 +68,29 @@ if gross is levered up (Book G's dial), so the real mainnet design is: cap gross
 position-level liquidation guard + correlated-squeeze-day cap — NOT a per-name profit
 stop. Receipt: `...-disaster-stop-tail-construction.md`.
 
+## Operator-directed deep dive (2026-06-20): adverse trades, TWAP entry, dynamic TP
+
+- **What goes hard against us = high vol + big run-up** (rv_30 / run_up_120 IC ≈ −0.21 vs
+  MAE, both venues; top vol decile blows up ~20% vs ~0% bottom). The TWIST: the SAME
+  features have +0.17/+0.24 IC vs realized GROSS — the scary trades are the BEST trades
+  (run hard against, then revert to a bigger profit). This single fact explains why stops
+  fail, why inverse-vol sizing is the right tail control, and why disaster stops are
+  unnecessary at native gross. Receipt: `...-adverse-trade-characterization.md`.
+- **Event-driven TWAP/VWAP entry does NOT help** — it gets a WORSE average short price
+  (~58% of the time) because the fade's edge is the immediate post-entry reversion;
+  averaging in shorts the reversion at lower prices. Single-shot at the signal is optimal
+  on price. TWAP's only real use is impact reduction on large clips (capacity/cost, gated
+  on demo fills), not entry alpha. Receipt: `...-twap-entry-construction.md`.
+- **Dynamic TP, pushed five ways** (flat F2 / vol-scaled F2b / trailing E5 / time-decay E6
+  / run-up-conditional E2): the Bybit-tight / Binance-wide split is FUNDAMENTAL; no single
+  rule reconciles it. New result: a run-up-CONDITIONAL TP (wider target on bigger-pop
+  fades) is a real Binance-only refinement (+0.00149 EW, beats flat TP15 and its hash) —
+  sharpens the Binance wide-TP lead. Receipt: `...-book-e2-conditional-tp-construction.md`.
+- **Methodology adopted (operator direction):** perfect the trade rule on EQUAL-WEIGHT raw
+  returns first; apply inverse-vol sizing only at portfolio construction. A richer
+  gates-off (btc_trend_gate=off + flat sizing) research dataset is being built for more
+  statistical power. Receipt: `...-research-dataset-construction.md`.
+
 ## Honest framing
 
 - This is mining done as the operator asked: registered, ledgered, exploratory-labelled,
