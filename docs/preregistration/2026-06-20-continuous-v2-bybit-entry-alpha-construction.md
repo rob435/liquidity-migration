@@ -66,7 +66,30 @@ rv_30/range/run_up cluster lifts gross by taking more risk (sizing's job, not en
 - Bybit-only by construction (operator focus). Even if confirmed it is an operator-gated
   per-venue lead, not a frozen-object change.
 
+## Dynamic-TP push (upper_wick is the unifying signal)
+
+`scripts/continuous_v2_bybit_dyntp.py` (OOS, Bybit, equal-weight). Continuing "keep
+pushing dynamic TP" — two new path-/feature-aware ideas:
+
+| policy | OOS mean (Δ vs flat TP12) | beats hash |
+|--------|-------------------------:|:----------:|
+| **uw_cond_12to15** (top-tercile upper_wick → TP15, else TP12) | +0.04146 (**+0.0014**) | **yes** (hash −0.00001) |
+| speed_arm4_t90 (reversion-speed-adaptive) | +0.04041 (+0.0004) | marginal |
+| flat_TP15 | +0.03925 (−0.0008) | — |
+| reversion-speed-adaptive (other variants) | −0.0009 to −0.0023 | no |
+
+- **upper_wick-conditional TP works** (+0.0014 OOS, beats hash): high-exhaustion fades
+  revert further and earn a wider TP, while the rest keep the tight TP. Flat TP15 still
+  LOSES on Bybit (−0.0008) — uniform widening hurts; upper_wick identifies WHICH trades
+  deserve it.
+- **Reversion-speed-adaptive TP fails** — pre-entry exhaustion (upper_wick) beats path-speed
+  as the signal.
+- So `upper_wick` improves BOTH entry sizing (MAR proxy +3.0) AND TP conditioning (+0.0014,
+  beats hash) OOS — one coherent, mechanism-backed Bybit edge (exhaustion/rejection entries
+  are better AND want a wider target).
+
 ## No real-money / promotion claim
 
-`REAL_MONEY` stays false. Exploratory OOS screen; full-ledger + forward demo/paper remain
-the bars.
+`REAL_MONEY` stays false. Exploratory OOS screens; full-ledger + forward demo/paper remain
+the bars. The full-ledger upper_wick-sizing validation result is appended below when its
+(heavy) run completes.
