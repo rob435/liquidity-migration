@@ -113,6 +113,12 @@ Current work should be limited to:
   `docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md`.
   It does not reopen closed branches by itself; the first gate is full 1m PIT
   data plus a 1m/trade-aware execution engine before any new alpha A/B cells.
+  Wave 0 (freeze both controls) COMPLETE 2026-06-20: `V2_LIVE_RESEARCH_CONTROL`
+  (`bfa8d385210d`) and `V2_EVIDENCE_ANCHOR` (`6579c8ece3bb`) reproduced and
+  frozen (in-sample diagnostics, not promotion evidence); progress tracked in
+  `docs/preregistration/2026-06-19-continuous-v2-next-level-progress-log.md`.
+  Both 1m sources (Bybit trade archive, Binance Vision) confirmed reachable +
+  checksum-valid; Wave 1 (build/audit 1m roots) is the active wave.
 - C-book flow research may run on Binance only under the 2026-06-19 amendment.
   For any two-venue C2/C3 claim, still build a resumable Bybit full-market
   taker-flow archive first; do not treat the current event-scoped Bybit flow
@@ -165,6 +171,8 @@ pre-registration and explicit operator direction.
 - `docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md`
 - `docs/preregistration/2026-06-19-continuous-v2-voloff-retest-verdict.md`
 - `docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md`
+- `docs/preregistration/2026-06-19-continuous-v2-phase0-baseline-construction.md`
+- `docs/preregistration/2026-06-19-continuous-v2-next-level-progress-log.md`
 - `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md`
 - `docs/preregistration/2026-06-15-operator-override-promote-continuous.md`
 - `docs/preregistration/continuous-capacity-impact-2026-06-09.md`

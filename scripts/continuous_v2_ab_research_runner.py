@@ -28,7 +28,7 @@ import random
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -54,7 +54,10 @@ from liquidity_migration.continuous_forward_replay import (  # noqa: E402
     frozen_hedge_rule,
     frozen_rebalance_rule,
 )
-from liquidity_migration.continuous_rebalance import decompose_continuous_components  # noqa: E402
+from liquidity_migration.continuous_rebalance import (  # noqa: E402
+    ContinuousRebalanceRule,
+    decompose_continuous_components,
+)
 from liquidity_migration.continuous_regime import btcvol_intensity_series  # noqa: E402
 from liquidity_migration.signal_harness import (  # noqa: E402
     _autodetect_dataset_names,
@@ -123,9 +126,44 @@ EXIT_TP15_ARM = "EXIT_TP15_BOTH_VENUE"
 TP_VARIANT_SPECS: dict[str, float] = {EXIT_TP12_ARM: 0.12, EXIT_TP15_ARM: 0.15}
 TP_VARIANT_ARMS = set(TP_VARIANT_SPECS)
 
+# --- Continuous V2 next-level plan: the two frozen baseline objects ----------------
+# docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md requires
+# every future A/B arm to be judged vs BOTH frozen baselines:
+#   * V2_CONTROL (= V2_LIVE_RESEARCH_CONTROL): post-override object, TP 0.12, daily
+#     vol-target adjuster OFF (frozen_rebalance_rule().enabled is False).
+#   * V2_EVIDENCE_ANCHOR: pre-override object, TP 0.10, daily vol-target adjuster ON
+#     (prior max4 wiring: enabled=True, max_scale 4.0, target_daily_vol 0.045, w90,
+#     ddh -0.04). Same frozen component object otherwise.
+# The anchor reuses the SAME apply_rebalance_rule path via build_full_ledger's
+# rebalance_rule kwarg; it does NOT touch frozen_config_hash or the live forward
+# ledger (which is always built with rebalance_rule=None).
+ANCHOR_ARM = "V2_EVIDENCE_ANCHOR"
+AMENDMENT_NEXT_LEVEL = "docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md"
+OBJECT_POLICY: dict[str, dict[str, Any]] = {
+    ANCHOR_ARM: {"take_profit_pct": 0.10, "rebalance_enabled": True},
+}
+
 
 def tp_override_for(arm_id: str) -> float | None:
+    policy = OBJECT_POLICY.get(arm_id)
+    if policy is not None and "take_profit_pct" in policy:
+        return float(policy["take_profit_pct"])
     return TP_VARIANT_SPECS.get(arm_id)
+
+
+def _arm_rebalance_rule(arm_id: str) -> ContinuousRebalanceRule:
+    """Daily vol-target adjuster state for an arm's full-ledger reconstruction.
+
+    Default = the frozen rule (operator-override OFF). The V2_EVIDENCE_ANCHOR baseline
+    re-enables it (prior max4 wiring) by flipping ``enabled`` only; every other param
+    stays frozen so the anchor is the SAME object as pre-override. All other arms get
+    the frozen rule unchanged (byte-identical to the prior hardwired path).
+    """
+    rule = frozen_rebalance_rule()
+    policy = OBJECT_POLICY.get(arm_id)
+    if policy is not None and policy.get("rebalance_enabled"):
+        rule = replace(rule, enabled=True)
+    return rule
 
 # Two-venue candidate-track Problem Book B sizing arms. Entries unchanged; a causal
 # mean-1 per-trade size multiplier from a single conviction feature is passed to the
@@ -147,7 +185,7 @@ A4B_FEATURES = (
     "premium_change",
     "btc_drawdown_30d",
 )
-PHASE0_ARMS = {CONTROL_ARM, "V2_CONTROL_DELAYED_FEATURES"}
+PHASE0_ARMS = {CONTROL_ARM, "V2_CONTROL_DELAYED_FEATURES", ANCHOR_ARM}
 RUN_LABEL = "exploratory_registered_foundation"
 AUDIT_RUN_LABEL = "exploratory"
 ARTIFACT_WRITER_VERSION = "continuous_v2_ab_foundation_v2"
@@ -207,6 +245,17 @@ ARM_DEFINITIONS: dict[str, ArmDefinition] = {
         True,
         "Same runnable control; current v2 uses no new uncertain external feature path.",
         "Differs from V2_CONTROL without a declared delayed feature dependency.",
+    ),
+    ANCHOR_ARM: ArmDefinition(
+        ANCHOR_ARM,
+        "Frozen Continuous V2 evidence anchor (pre-override object)",
+        "Phase 0",
+        True,
+        "Same frozen v2 component book as V2_CONTROL but the PRE-override object: "
+        "component TP 0.10 and the daily vol-target adjuster ON (prior max4 wiring, "
+        "enabled=True). Judged-against baseline #2 for every future A/B arm.",
+        "Differs from the registered pre-override forward baseline beyond the declared "
+        "{TP10, vol-adjuster max4} object, or PIT/lifecycle mismatch.",
     ),
     "A4_REGIME_HEDGE_INTENSITY": ArmDefinition(
         "A4_REGIME_HEDGE_INTENSITY",
@@ -495,6 +544,8 @@ def claimed_scope_for(arm_id: str) -> str:
 
 
 def amendment_for(arm_id: str) -> str | None:
+    if arm_id == ANCHOR_ARM:
+        return AMENDMENT_NEXT_LEVEL
     if arm_id in HEDGE_OVERLAY_SPECS:
         return str(HEDGE_OVERLAY_SPECS[arm_id]["amendment"])
     if arm_id in {C1_FLOW_SIZING_ARM, C1H_FLOW_SIZING_HASH_ARM}:
@@ -786,7 +837,7 @@ def arm_config_payload(
         "end_date_exclusive": end_date,
         "continuous_profile_hash": frozen_config_hash(),
         "frozen_forward_config": FROZEN_FORWARD_CONFIG,
-        "rebalance_rule": asdict(frozen_rebalance_rule()),
+        "rebalance_rule": asdict(_arm_rebalance_rule(arm_id)),
         "hedge_rule": asdict(frozen_hedge_rule()),
         "components": components,
         "methodology_timestamps": methodology_timestamps(),
@@ -1616,7 +1667,15 @@ def run_arm_venue(
         almanac_root=almanac_root,
         out_path=arm_dir / "hedge_intensity.csv",
     )
-    ledger = build_full_ledger(pieces, btc_ret, btc_fund, eth_ret, eth_fund, hedge_intensity=hedge_intensity)
+    ledger = build_full_ledger(
+        pieces,
+        btc_ret,
+        btc_fund,
+        eth_ret,
+        eth_fund,
+        hedge_intensity=hedge_intensity,
+        rebalance_rule=_arm_rebalance_rule(arm_id),
+    )
     ledger.write_csv(arm_dir / "mtm.csv")
     equity = ledger.select([c for c in ("ts_ms", "basket_return", "equity", "drawdown") if c in ledger.columns])
     equity.write_csv(arm_dir / "equity.csv")

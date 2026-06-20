@@ -232,6 +232,8 @@ def build_full_ledger(
     hedge_returns_2: dict[int, float] | None = None,
     hedge_funding_2: dict[int, float] | None = None,
     hedge_intensity: dict[int, float] | None = None,
+    *,
+    rebalance_rule: ContinuousRebalanceRule | None = None,
 ) -> pl.DataFrame:
     """Rebuild the full-history hedged ledger from component pieces (frozen params).
 
@@ -248,11 +250,19 @@ def build_full_ledger(
 
     ``hedge_intensity`` (default None -> byte-identical) is a causal
     per-day multiplier on the hedge leg only; the frozen control passes None.
+
+    ``rebalance_rule`` (default None -> ``frozen_rebalance_rule()``, byte-identical
+    for every existing caller and the live forward clock) lets a registered RESEARCH
+    arm reconstruct the SAME component object under a different daily vol-target
+    adjuster state without touching the frozen config hash. The continuous v2
+    next-level plan uses this for the ``V2_EVIDENCE_ANCHOR`` baseline (vol adjuster
+    ON / max4) vs the ``V2_LIVE_RESEARCH_CONTROL`` (adjuster OFF). It does NOT change
+    the frozen object: the live forward ledger is built with ``rebalance_rule=None``.
     """
     combined = combine_continuous_components(pieces, FROZEN_FORWARD_CONFIG["weights"])
     return apply_rebalance_rule(
         combined,
-        frozen_rebalance_rule(),
+        rebalance_rule if rebalance_rule is not None else frozen_rebalance_rule(),
         frozen_hedge_rule(),
         hedge_returns,
         hedge_funding,
