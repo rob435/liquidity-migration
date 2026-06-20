@@ -74,6 +74,30 @@ cache can never be mistaken for a dense full-universe `klines_1m`).
   --ab-root backtest-runs/continuous_v2_phase0_freeze_2026-06-19
 ```
 
+## Results (build complete 2026-06-20, exit 0)
+
+Targeted 1m cache built with **100% coverage, zero gaps, zero checksum failures**:
+
+| venue | partitions | rows | complete 1440-row days | missing_404 | checksum_fail | zero_vol_min (med / p95) |
+|-------|-----------:|-----:|:----------------------:|:-----------:|:-------------:|:------------------------:|
+| bybit | 2401 | 3,457,440 | 2401/2401 | 0 | 0 | 10 / 404 |
+| binance | 2238 | 3,222,720 | 2238/2238 | 0 | 0 | 0 / 14 |
+
+- rows = partitions × 1440 exactly → every needed (symbol,date) is a complete UTC
+  day. `missing_partitions.csv` is EMPTY: every partition the book trades exists on
+  its archive (expected — the book only traded symbols listed/active at the time).
+- Binance bodies sha256-checksum-validated (0 failures). Bybit days densified to
+  the full 1440-minute grid; no-trade minutes carry-forward close (median 10/day,
+  p95 404 on thin alt days) and are LEDGERED, not fabricated — on those minutes
+  high=low=close=prior close, so they cannot spuriously trigger an intrabar
+  high/low touch in Phase 2.
+- Total cache 176 MB / 4639 parquet partitions under
+  `~/SHARED_DATA/continuous_v2_1m/<venue>/klines_1m/`; audit ledgers under
+  `~/SHARED_DATA/continuous_v2_1m/audit_2026-06-20/`.
+
+**Acceptance: PASS.** Sufficient and clean for Phase 2 intrabar resolution and
+Books A/C/E. Wave 1 COMPLETE.
+
 ## Stop conditions
 
 - If a venue's missing-partition fraction is high enough that intrabar tests would

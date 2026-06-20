@@ -19,8 +19,8 @@ expected. Forward demo/paper stays the only OOS arbiter.
 | Wave | Scope | Status |
 |------|-------|--------|
 | 0 | Freeze + reproduce both controls | **COMPLETE** (both baselines reproduced, hashes verified, bundle written) |
-| 1 | 1m PIT data foundation (trade-window-scoped) | DESIGNED + registered (manifests persisted); build script + run pending |
-| 2 | 1m / trade-aware execution engine + order-fill ledger | not started |
+| 1 | 1m PIT data foundation (trade-window-scoped) | **COMPLETE** — 100% coverage, 0 gaps, 0 checksum fail (176 MB) |
+| 2 | 1m / trade-aware execution engine + order-fill ledger | **ACTIVE** |
 | 3 | Feature Almanac V3 (`data_available_ts`) | not started |
 | 4 | First A/B wave (≤1 stops/TPSL, ≤1 TWAP, ≤1 regime/vol) | gated on Waves 1–3 |
 | 5 | No-order forward shadow | gated on a Wave-4 candidate |
@@ -127,6 +127,35 @@ gap-ledgered), then produce the D4 coverage ledger. Deferred deliberately — a
 buggy 1m build (bad aggregation / missed PIT gap / unverified checksum) would
 silently poison every downstream intrabar book, so it gets careful fresh-context
 implementation, not a rushed tail-of-turn one.
+
+**Result (build complete 2026-06-20):** 100% coverage, zero gaps, zero checksum
+failures. bybit 2401 partitions / 3,457,440 rows (all 1440-row days); binance 2238
+/ 3,222,720 (all 1440); 0 missing, 0 checksum-fail; 176 MB. Build script committed
+(`8fbd543`), smoke-validated. `missing_partitions.csv` empty. Bybit no-trade
+minutes carry-forward-densified (med 10/day, ledgered); Binance fully dense (med 0).
+Audit at `~/SHARED_DATA/continuous_v2_1m/audit_2026-06-20/`. **Wave 1 COMPLETE.**
+
+### Wave 2 — design note (intrabar execution engine + order/fill ledger)
+
+Target: `liquidity_migration/trade_lifecycle.py::_simulate_indexed_trade` (the 1h
+bar loop, lines ~861-951). Key design (from reading it):
+
+- Add a registered `intrabar_resolution` setting: `1h` (current behavior, baseline
+  reproduction), `1m` (next-level), with `trade` deferred.
+- It must be a **hybrid**, NOT a naive bar-array swap: the HIGH/LOW-based exits
+  (stop, TP) get a **1m first-touch resolver** (actual stop-vs-TP order + exact
+  fill ts/price from the trade-window 1m cache), while the CLOSE-based soft exits
+  (mfe_giveback, breakeven, failed_fade, event_decay, rank_exit, hash_exit) stay
+  on their registered (hourly) cadence. This satisfies the plan's "1m changes only
+  path-dependent trades": the TP-only control stays ~unchanged (TP fills at TP
+  price either way); stops (Book A) are where 1m actually bites (the current code
+  resolves same-bar stop+TP as adverse-first — stop wins — which 1m can refute).
+- Same-1m-bar stop+TP (still ambiguous at 1m) → ambiguity ledger, adverse-first.
+- Add the X2 order/fill ledger (decision/order/fill/slippage/fee/funding/position
+  rows) around entry (currently instantaneous at entry-bar close) and exits.
+- Acceptance: `intrabar_resolution=1h` reproduces Wave-0 baselines byte-for-byte
+  (numerical-equivalence); `1m` changes only path-dependent trades; ambiguous
+  same-bucket events visible in the ledger.
 
 ## Open risks / honest caveats
 
