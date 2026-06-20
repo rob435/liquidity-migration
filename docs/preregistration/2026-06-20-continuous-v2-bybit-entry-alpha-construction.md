@@ -144,6 +144,30 @@ a spike).
 (the banked full-ledger pass used clip 1.5; expect a small absolute move since the 2f
 hedge/rebalance dominate hedged MAR). More sensitivity (higher k) is closed: it does not help OOS.
 
+## Recency-weighting test (operator: "should it be an EMA favouring recent wicks?")
+
+`scripts/continuous_v2_bybit_wick_recency.py` — IC vs gross for EMA half-lives 5..120m,
+linear-recent, last-15/30, and an OLDEST-weighted falsifier. Bybit, train/test stable.
+
+| variant | IC gross | IC MAE |
+|---------|---------:|-------:|
+| **uw_mean (simple)** | **+0.146** | −0.005 |
+| ema h120 (≈mean) | +0.142 | −0.013 |
+| ema OLDEST-weighted (falsifier) | +0.136 | +0.020 |
+| ema h60 | +0.130 | −0.022 |
+| ema h30 | +0.105 | −0.034 |
+| ema h15 | +0.066 | −0.054 |
+| last15 / ema h5 | +0.024 / +0.023 (unstable) | −0.07 |
+
+**Recency-weighting monotonically HURTS** — the more recent the weighting, the weaker the
+IC, down to unstable near-zero for the shortest. The simple full-window mean is best. The
+OLDEST-weighted falsifier (+0.136) BEATS every recency-weighted variant, so the signal if
+anything leans to EARLIER exhaustion — the opposite of recency. Recent windows are also
+noisier (sign-flip OOS) and couple more to MAE. Interpretation: the predictive content is
+PERSISTENT/broad rejection across the 120m (sustained exhaustion), not the freshest wick;
+also the +1h entry delay puts the signal event well before the recent minutes. **Keep the
+simple mean** (the form already full-ledger-validated). Recency EMA: closed.
+
 ## No real-money / promotion claim
 
 `REAL_MONEY` stays false. Bybit-only, operator-gated; full-ledger pass is in-sample working
