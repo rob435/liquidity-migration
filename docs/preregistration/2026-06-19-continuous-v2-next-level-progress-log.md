@@ -19,7 +19,7 @@ expected. Forward demo/paper stays the only OOS arbiter.
 | Wave | Scope | Status |
 |------|-------|--------|
 | 0 | Freeze + reproduce both controls | **COMPLETE** (both baselines reproduced, hashes verified, bundle written) |
-| 1 | Full 1m PIT data foundation (Bybit + Binance) | feasibility CONFIRMED (1m download+checksum verified); build pending |
+| 1 | 1m PIT data foundation (trade-window-scoped) | DESIGNED + registered (manifests persisted); build script + run pending |
 | 2 | 1m / trade-aware execution engine + order-fill ledger | not started |
 | 3 | Feature Almanac V3 (`data_available_ts`) | not started |
 | 4 | First A/B wave (≤1 stops/TPSL, ≤1 TWAP, ≤1 regime/vol) | gated on Waves 1–3 |
@@ -102,6 +102,31 @@ is currently 1h-shaped and must be extended to `--interval 1m` per D2; the Bybit
 `archive-download-klines` 1m-from-trades path exists but must be audited for
 dense-day coverage and PIT lifecycle gaps. The checksum-validated sample above
 removes the source-integrity uncertainty.
+
+### Wave 1 — construction design (registered 2026-06-20)
+
+Receipt: `docs/preregistration/2026-06-20-continuous-v2-1m-data-foundation-construction.md`.
+
+**Scoping decision (deliberate, documented):** build a **trade-window-scoped** 1m
+cache, not a full-universe root. Sized from the Phase 0 trade ledgers: bybit 2401
+symbol-day partitions (~141 MB), binance 2238 (~131 MB) — exactly the
+`[entry_date−1 … exit_date]` partitions the book's trades touch. Sufficient for
+Phase 2 intrabar + Books A/C/E; full-universe root deferred as a registered
+optional extension. Manifests persisted at
+`~/SHARED_DATA/continuous_v2_1m/coverage_needed_{venue}.parquet`.
+
+**Reuse identified (no ingestion from scratch):** Bybit →
+`ingestion.aggregate_trade_klines_1m` + `densify_trade_klines_1m` +
+`archive.read_public_trade_archive`; Binance → `binance_vision._fetch_expected_sha256`
++ `_verify_download` (sha256 gate) pointed at the daily-1m Vision URL.
+
+**Next (Wave 1 build, next iteration with fresh context for correctness):**
+implement `scripts/continuous_v2_build_1m_trade_windows.py`, smoke on a few
+symbol-days/venue, run the targeted build (background, resumable, checksum-gated,
+gap-ledgered), then produce the D4 coverage ledger. Deferred deliberately — a
+buggy 1m build (bad aggregation / missed PIT gap / unverified checksum) would
+silently poison every downstream intrabar book, so it gets careful fresh-context
+implementation, not a rushed tail-of-turn one.
 
 ## Open risks / honest caveats
 
