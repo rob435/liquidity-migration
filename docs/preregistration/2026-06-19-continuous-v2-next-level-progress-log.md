@@ -22,7 +22,7 @@ expected. Forward demo/paper stays the only OOS arbiter.
 | 1 | 1m PIT data foundation (trade-window-scoped) | **COMPLETE** — 100% coverage, 0 gaps, 0 checksum fail (176 MB) |
 | 2 | 1m / trade-aware execution engine + order-fill ledger | **X1 engine DONE + validated** (1m vs 1h: 100% reason agree); X2 driver + Book A next |
 | 3 | Feature Almanac V3 (`data_available_ts`) | not started |
-| 4 | A/B books on the 1m engine | **Books A (stops) + B (admission) CLOSED — no both-venue candidate** |
+| 4 | A/B books on the 1m engine | **Books A (stops), B (admission), G (vol-control) CLOSED — no candidate** |
 | 5 | No-order forward shadow | gated on a Wave-4 candidate |
 
 ## Wave 0 — baseline freeze (in progress)
@@ -202,6 +202,27 @@ The Binance-only 1m-exhaustion sizing tilt is an operator-gated venue-policy lea
 program's recurring truth — real but diffuse / venue-split — now with the best signal
 found and a proper hash + delayed-copy + both-venue falsifier set. **Next:** Book C
 (TWAP execution) or Book E (dynamic TP), both on the existing 1m engine.
+
+### Book G — volatility-control rework (CLOSED 2026-06-20, full-ledger)
+
+Receipt: `docs/preregistration/2026-06-20-continuous-v2-book-g-volcontrol-construction.md`.
+Driver: `scripts/continuous_v2_book_g_volcontrol.py` (loads V2_CONTROL TP12 pieces,
+sweeps `build_full_ledger(rebalance_rule=...)`; G0 reproduces the Phase-0 control
+exactly → validated). Full daily-marked ledger (the adjuster acts on daily equity),
+not the per-trade proxy.
+
+**Verdict: the daily vol-adjuster is a pure LEVERAGE dial, not a timing edge.** The
+constant-gross controls (G_CONST2/3/4 = flat leverage, no vol-timing) are the
+load-bearing falsifier: G2_CAP2==G_CONST2 exactly, G5≈G_CONST3, and flat-4× BEATS
+G1_MAX4 on both venues. The hedged book's realized vol sits far below target so the
+scale pins at the cap → the "adjuster" = constant leverage; where it deviates
+(drawdown-half, momentum-derisk) it slightly HURTS. MAR rises with gross only because
+drawdowns are tiny + book positive, while absolute drawdown/worst-day inflate linearly
+(worst-day −0.93%→−3.71% at 4×) — a capital decision, not alpha. Bonus: the prior
+"adjuster hurts Bybit" was a TP10-vs-TP12 confound; isolated, re-enabling helps both
+venues (as leverage). No candidate. Only operator-gated lead: G2_CAP2 (moderate ~2×
+gross, less drawdown inflation) IF more daily risk control is wanted — risk-appetite,
+not a research win. **Next:** Book C (TWAP) / Book E (dynamic TP).
 
 ## Open risks / honest caveats
 
