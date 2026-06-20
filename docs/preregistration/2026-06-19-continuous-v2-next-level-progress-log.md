@@ -22,7 +22,7 @@ expected. Forward demo/paper stays the only OOS arbiter.
 | 1 | 1m PIT data foundation (trade-window-scoped) | **COMPLETE** — 100% coverage, 0 gaps, 0 checksum fail (176 MB) |
 | 2 | 1m / trade-aware execution engine + order-fill ledger | **X1 engine DONE + validated** (1m vs 1h: 100% reason agree); X2 driver + Book A next |
 | 3 | Feature Almanac V3 (`data_available_ts`) | not started |
-| 4 | A/B books — exit books need only the 1m engine | **Book A (stops/TPSL) CLOSED: no both-venue candidate** |
+| 4 | A/B books on the 1m engine | **Books A (stops) + B (admission) CLOSED — no both-venue candidate** |
 | 5 | No-order forward shadow | gated on a Wave-4 candidate |
 
 ## Wave 0 — baseline freeze (in progress)
@@ -184,6 +184,24 @@ better than a random-time hash null. Engine gained a byte-identical
 lives — consistent with the prior 1h exit-timing closure, now confirmed at 1m.
 **Next mining:** Book C (TWAP/execution-impact, needs the X2 fill/cost layer) or
 Book E (dynamic TP, uses this engine); entry/flow Books B/F/H need Wave-3 almanac.
+
+### Book B — entry admission via 1m pre-entry features (CLOSED 2026-06-20)
+
+Receipt: `docs/preregistration/2026-06-20-continuous-v2-book-b-admission-construction.md`.
+Driver: `scripts/continuous_v2_book_b_admission.py`. Done as a focused Wave-3
+"1m path feature" slice (causal pre-entry features), not a full almanac re-build.
+
+**Verdict: the strongest signal in the program — but venue-split, no candidate.**
+`upper_wick` (pre-entry upper-wick fraction = exhaustion) has a real both-venue IC
+(+0.10 bybit / +0.12 binance), beats its hash null, and uses fresh pre-entry info
+(live IC > delayed-copy). But admission (cut half) loses to the diversified control
+on both venues; sizing (mean-1 tilt) beats hash on both venues and beats control on
+**Binance** only (Bybit slightly worse) → venue split, killed by the both-venue rule.
+The Binance-only 1m-exhaustion sizing tilt is an operator-gated venue-policy lead
+(symmetric to, opposite-venue from, the Bybit-only TP12 exit lead). Confirms the
+program's recurring truth — real but diffuse / venue-split — now with the best signal
+found and a proper hash + delayed-copy + both-venue falsifier set. **Next:** Book C
+(TWAP execution) or Book E (dynamic TP), both on the existing 1m engine.
 
 ## Open risks / honest caveats
 
