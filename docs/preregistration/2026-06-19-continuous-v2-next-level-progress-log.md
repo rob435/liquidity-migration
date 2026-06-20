@@ -22,7 +22,8 @@ expected. Forward demo/paper stays the only OOS arbiter.
 | 1 | 1m PIT data foundation (trade-window-scoped) | **COMPLETE** — 100% coverage, 0 gaps, 0 checksum fail (176 MB) |
 | 2 | 1m / trade-aware execution engine + order-fill ledger | **X1 engine DONE + validated** (1m vs 1h: 100% reason agree); X2 driver + Book A next |
 | 3 | Feature Almanac V3 (`data_available_ts`) | not started |
-| 4 | A/B books on the 1m engine | **Books A, B, E, G CLOSED — no both-venue candidate (4 falsifier-backed negatives)** |
+| 4 | A/B books on the 1m engine | **Books A, B, E, G, F CLOSED — no both-venue candidate (5 falsifier-backed negatives)** |
+| — | Mid-program synthesis | **WRITTEN** — `...-next-level-synthesis.md` |
 | 5 | No-order forward shadow | gated on a Wave-4 candidate |
 
 ## Wave 0 — baseline freeze (in progress)
@@ -247,6 +248,31 @@ calibration from VPS demo fills, not local), D (rank exits — adjacent to close
 F-exit-timing), F (BTC regime — full-ledger tractable like G), H (flow — Binance-only
 per prior amendment), I (portfolio — needs the long sleeve). Next: Book F (BTC regime)
 or a mid-program synthesis.
+
+### Book F — BTC regime book-sizing (CLOSED 2026-06-20)
+
+Receipt: `docs/preregistration/2026-06-20-continuous-v2-book-f-btc-regime-construction.md`.
+Driver: `scripts/continuous_v2_book_f_btc_regime.py`. Tests whether the causal BTC-vol
+regime, applied to the BOOK gross (mean-1 gross-neutral, keyed on entry day), times
+exposure better than random — using Book G's lesson (mean-1 + hash-permuted null so any
+gain is timing, not leverage).
+
+**Verdict: no robust regime book-timing edge.** F2_DERISK_HIVOL marginally beats control
+on Bybit (+0.03, within noise) and beats its hash there, but on Binance it HURTS (−0.33)
+and LOSES to its hash null → not real on both venues. The mean-1 reweighting at lam-0.5
+dispersion is concentration-noise-dominated (hash swings bybit −1.34 / binance +0.20).
+The BTC-vol regime stays on the HEDGE (already wired, validated) — extending it to book
+gross adds no two-venue value. No candidate.
+
+### Mid-program synthesis (WRITTEN 2026-06-20)
+
+`docs/preregistration/2026-06-20-continuous-v2-next-level-synthesis.md` — the one-page
+decision surface. **One robust conclusion: v2's edges are real but diffuse and the
+tradable residual is venue-split; nothing clears the both-venue bar at 1m fidelity.**
+Two opposite-direction operator-gated leads (Bybit-only TP raise / Binance-only
+upper_wick sizing). The frozen object stands; the next useful evidence is FORWARD
+demo/paper accrual, not more in-sample mining. Remaining books C/D/H/I are data-gated or
+low-prior (see synthesis).
 
 ## Open risks / honest caveats
 
