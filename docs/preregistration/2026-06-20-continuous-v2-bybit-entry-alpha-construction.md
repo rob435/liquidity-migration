@@ -1,0 +1,72 @@
+# Construction + Result: Bybit Entry-Alpha — Exhaustion Features (operator direction 2026-06-20)
+
+Date: 2026-06-20
+Author: Claude (operator-directed; Bybit-only entry-alpha push)
+Run label: `exploratory` (OOS screen). **Result: a real, diversification-preserving, OOS, hash-beating Bybit entry-alpha improvement — sizing UP the high-upper-wick (exhaustion/rejection) entries lifts MAR proxy +3.0. Admission fails (concentration kills MAR). Needs full-ledger confirmation via the engine's size_mult_lookup before any candidate claim.**
+
+## Approach (honest creative mining)
+
+Bybit only; perfect the ENTRY. Theory of the fade: short a pop, profit on reversion → the
+best entries are where the pop is EXHAUSTING (climactic, rejected, over-extended) not
+trending. Built a rich causal pre-entry 1m feature library and ranked by IC vs realized
+gross with a TIME SPLIT (early/late) for stability; then AB-tested admission/sizing OUT OF
+SAMPLE (features standardized on the early window, rule applied to the late window) vs hash
+nulls. Mining is allowed; fooling ourselves is not — hence OOS + hash + theory-driven
+feature choice. Scripts: `continuous_v2_bybit_entry_alpha.py` (stage 1 IC),
+`continuous_v2_bybit_entry_ab.py` (stage 2 AB + MAR proxy).
+
+## Stage 1 — feature IC vs realized gross (Bybit V2_CONTROL, n=2367; stable across early/late)
+
+| feature | IC gross | IC vs MAE | note |
+|---------|---------:|----------:|------|
+| rv_30 | +0.24 | −0.21 | risk-coupled (scary=best) |
+| range_expansion | +0.18 | −0.21 | risk-coupled |
+| run_up_120 | +0.17 | −0.21 | risk-coupled |
+| vol_climax | +0.15 | −0.11 | partly risk-coupled |
+| **upper_wick_mean** | +0.15 | **−0.005** | CLEAN: better trades, ~no extra tail |
+| ext_from_vwap | +0.12 | −0.08 | exhaustion |
+| pv_divergence | +0.12 | +0.01 | exhaustion |
+
+The clean ENTRY edge is exhaustion features that lift gross WITHOUT raising MAE; the
+rv_30/range/run_up cluster lifts gross by taking more risk (sizing's job, not entry's).
+
+## Stage 2 — OOS AB (late window n=894; control mean trade +0.0401, MAR proxy 14.19)
+
+| arm | OOS mean (Δ) | n | MAR proxy (Δ) |
+|-----|-------------:|--:|--------------:|
+| admit50_EXHAUST | +0.0474 (+0.0073) | 447 | 7.69 (**−6.50**) |
+| admit67_EXHAUST | +0.0463 (+0.0062) | 598 | 12.49 (−1.69) |
+| **size_upper_wick_mean** | +0.0416 (+0.0015) | 894 | **17.19 (+3.00)** |
+| size_EXHAUST (composite) | +0.0430 (+0.0030) | 894 | 11.87 (−2.32) |
+| size_HASH (null) | +0.0406 (+0.0006) | 894 | 14.66 (+0.47) |
+| admit67_HASH (null) | +0.0379 (−0.0022) | 598 | 7.50 (−6.69) |
+
+## Findings
+
+1. **Admission is a per-trade illusion.** The exhaustion composite admission has the best
+   per-trade mean (+0.0073 OOS) but its MAR proxy COLLAPSES (−6.50) — dropping half the
+   trades concentrates the book. The Book B lesson, reconfirmed: judge entry rules on
+   portfolio MAR, not per-trade mean. Admission is OUT.
+2. **Sizing UP by upper_wick is a real, clean win.** It keeps all trades (no diversification
+   loss), improves the OOS mean (+0.0015) AND the MAR proxy (+3.0), and BEATS its hash null
+   (+3.0 vs +0.47). Mechanism: upper_wick (+0.15 gross IC, ≈0 MAE IC) selects better trades
+   without adding tail, so sizing up raises return without raising drawdown → MAR up.
+3. **upper_wick alone beats the composite for sizing.** The composite's vol_climax /
+   ext_from_vwap are risk-coupled and drag MAR (size_vol_climax MAR −4.34). The cleanest
+   single signal wins — don't dilute it.
+
+## Status & next (NOT yet a candidate)
+
+- This is an OOS SCREEN on a rough daily MAR proxy with equal-base sizing. Before any
+  candidate claim it needs FULL-LEDGER confirmation: run upper_wick sizing through the real
+  engine via `run_continuous_event_research(size_mult_lookup=...)` + `build_full_ledger`
+  (the rebalance/hedge re-solve), with the prior B-sizing discipline (beat the matched hash
+  at the full-ledger level, not just the proxy). The prior both-venue B1 sizing was beaten
+  by hash at full-ledger — so this must clear that bar.
+- Bybit-only by construction (operator focus). Even if confirmed it is an operator-gated
+  per-venue lead, not a frozen-object change.
+
+## No real-money / promotion claim
+
+`REAL_MONEY` stays false. Exploratory OOS screen; full-ledger + forward demo/paper remain
+the bars.
