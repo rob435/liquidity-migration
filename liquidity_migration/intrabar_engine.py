@@ -172,3 +172,76 @@ def resolve_exit_1m(
         reason, exit_ts, last_close, _side_return(entry_price, last_close, side=side),
         mae, mfe, n, null_bars, False, None,
     )
+
+
+def resolve_dynamic_tp_1m(
+    bars: pl.DataFrame,
+    *,
+    entry_ts_ms: int,
+    entry_price: float,
+    side: str,
+    base_tp_pct: float,
+    trail_arm_pct: float,
+    trail_give_pct: float,
+    planned_exit_ts_ms: int,
+) -> ExitResolution:
+    """Book E MFE-extension / trailing TP on the 1m path (separate from the validated
+    ``resolve_exit_1m`` core so the control-reproduction guarantee is untouched).
+
+    A hard take-profit at ``base_tp_pct`` (the ceiling) PLUS a path-armed trailing
+    exit: once the favorable excursion reaches ``trail_arm_pct``, exit when the bar
+    CLOSE gives back ``trail_give_pct`` from the best favorable excursion (close-based
+    giveback, matching the deployed engine's ``mfe_giveback`` convention). This lets a
+    strongly-reverting fade run past the control TP while protecting the armed gain —
+    the path-dependent winner-management the 1h bar could not measure. ``trail_arm_pct
+    <= 0`` disables the trail (pure ``base_tp_pct`` flat TP). max_hold at the last 1m
+    close; data_end if the cache ends early.
+    """
+    tp_price = _take_profit_price(entry_price, side=side, take_profit_pct=base_tp_pct)
+    win = bars.filter((pl.col("ts_ms") >= entry_ts_ms) & (pl.col("ts_ms") < planned_exit_ts_ms))
+    n = 0
+    null_bars = 0
+    mae = 0.0
+    mfe = 0.0
+    armed = False
+    if win.height == 0:
+        return ExitResolution("data_end", entry_ts_ms, entry_price, 0.0, 0.0, 0, 0, False, None)
+    ts_a = win["ts_ms"].to_list()
+    hi = win["high"].to_list()
+    lo = win["low"].to_list()
+    cl = win["close"].to_list()
+    last_close = entry_price
+    last_ts = entry_ts_ms
+    for i in range(len(ts_a)):
+        bar_high = hi[i]
+        bar_low = lo[i]
+        if bar_high is None or bar_low is None:
+            null_bars += 1
+            continue
+        n += 1
+        last_ts = int(ts_a[i])
+        if cl[i] is not None:
+            last_close = float(cl[i])
+        adverse, favorable = _bar_excursion(entry_price, side=side, high=bar_high, low=bar_low)
+        mae = min(mae, adverse)
+        mfe = max(mfe, favorable)
+        _stop, tp_hit = _bar_exit_hits(side=side, high=bar_high, low=bar_low, stop_price=None, take_profit_price=tp_price)
+        if tp_hit:  # ceiling reached -> best outcome, take it first
+            return ExitResolution(
+                "take_profit", int(ts_a[i]) + MS_PER_MINUTE, float(tp_price),
+                _side_return(entry_price, float(tp_price), side=side), mae, mfe, n, null_bars, False, int(ts_a[i]),
+            )
+        if trail_arm_pct > 0.0 and mfe >= trail_arm_pct:
+            armed = True
+        close_fav = _side_return(entry_price, last_close, side=side)
+        if armed and close_fav <= mfe - trail_give_pct:
+            return ExitResolution(
+                "trail_tp", int(ts_a[i]) + MS_PER_MINUTE, last_close,
+                close_fav, mae, mfe, n, null_bars, False, int(ts_a[i]),
+            )
+    exit_ts = last_ts + MS_PER_MINUTE
+    reason = "max_hold" if exit_ts >= planned_exit_ts_ms else "data_end"
+    return ExitResolution(
+        reason, exit_ts, last_close, _side_return(entry_price, last_close, side=side),
+        mae, mfe, n, null_bars, False, None,
+    )

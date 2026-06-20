@@ -11,7 +11,11 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from liquidity_migration.intrabar_engine import MS_PER_MINUTE, resolve_exit_1m
+from liquidity_migration.intrabar_engine import (
+    MS_PER_MINUTE,
+    resolve_dynamic_tp_1m,
+    resolve_exit_1m,
+)
 
 ENTRY = 100.0
 
@@ -116,3 +120,34 @@ def test_delayed_arm_ignores_early_stop() -> None:
     )
     assert r2.exit_reason == "stop_loss"
     assert r2.first_touch_ts_ms == 2 * MS_PER_MINUTE
+
+
+def _dyn(bars, *, base=0.15, arm=0.12, give=0.02, planned=10 * MS_PER_MINUTE):
+    return resolve_dynamic_tp_1m(
+        bars, entry_ts_ms=0, entry_price=ENTRY, side="short", base_tp_pct=base,
+        trail_arm_pct=arm, trail_give_pct=give, planned_exit_ts_ms=planned,
+    )
+
+
+def test_dynamic_tp_ceiling_hit() -> None:
+    # short base TP at 85 (=100*(1-0.15)); bar 2 low pierces it -> take_profit ceiling
+    res = _dyn(_bars([(101, 99, 100), (100, 95, 96), (96, 84, 85)]))
+    assert res.exit_reason == "take_profit"
+    assert res.exit_price == pytest.approx(85.0)
+    assert res.side_return == pytest.approx(0.15)
+
+
+def test_dynamic_tp_trailing_exit_after_arm() -> None:
+    # favorable reaches 13% (low 87 -> fav 0.13 >= arm 0.12) then closes back to 90
+    # (close_fav 0.10 <= mfe 0.13 - give 0.02 = 0.11) -> trail_tp at that close.
+    res = _dyn(_bars([(101, 99, 100), (95, 87, 88), (92, 89, 90)]))
+    assert res.exit_reason == "trail_tp"
+    assert res.exit_price == pytest.approx(90.0)
+    assert res.side_return == pytest.approx(0.10)
+
+
+def test_dynamic_tp_trail_disabled_is_flat_tp() -> None:
+    # arm<=0 disables the trail -> only the base TP ceiling can fire; otherwise max_hold
+    res = _dyn(_bars([(101, 99, 100), (95, 88, 90), (94, 90, 92)]), arm=0.0, planned=3 * MS_PER_MINUTE)
+    assert res.exit_reason == "max_hold"
+    assert res.exit_price == pytest.approx(92.0)

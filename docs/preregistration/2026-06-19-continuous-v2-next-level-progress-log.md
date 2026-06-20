@@ -22,7 +22,7 @@ expected. Forward demo/paper stays the only OOS arbiter.
 | 1 | 1m PIT data foundation (trade-window-scoped) | **COMPLETE** — 100% coverage, 0 gaps, 0 checksum fail (176 MB) |
 | 2 | 1m / trade-aware execution engine + order-fill ledger | **X1 engine DONE + validated** (1m vs 1h: 100% reason agree); X2 driver + Book A next |
 | 3 | Feature Almanac V3 (`data_available_ts`) | not started |
-| 4 | A/B books on the 1m engine | **Books A (stops), B (admission), G (vol-control) CLOSED — no candidate** |
+| 4 | A/B books on the 1m engine | **Books A, B, E, G CLOSED — no both-venue candidate (4 falsifier-backed negatives)** |
 | 5 | No-order forward shadow | gated on a Wave-4 candidate |
 
 ## Wave 0 — baseline freeze (in progress)
@@ -223,6 +223,30 @@ drawdowns are tiny + book positive, while absolute drawdown/worst-day inflate li
 venues (as leverage). No candidate. Only operator-gated lead: G2_CAP2 (moderate ~2×
 gross, less drawdown inflation) IF more daily risk control is wanted — risk-appetite,
 not a research win. **Next:** Book C (TWAP) / Book E (dynamic TP).
+
+### Book E — dynamic / MFE-extension TP (CLOSED 2026-06-20)
+
+Receipt: `docs/preregistration/2026-06-20-continuous-v2-book-e-dynamic-tp-construction.md`.
+Driver: `scripts/continuous_v2_book_e_dynamic_tp.py`. Added `resolve_dynamic_tp_1m`
+(separate from the validated core; 3 new unit tests -> 11 total). Tested the ONE exit
+axis the 1h bar couldn't: path-conditional winner management (TP15 ceiling + 1m-armed
+trailing giveback), NOT the closed flat/vol-scaled raises.
+
+**Verdict: the exit-TP venue split is fundamental; trailing does not reconcile it.**
+The MFE-extension trailing pleases neither venue — Bybit still prefers tight TP12 (E5
+-0.5/-0.66 vs control, though better than flat TP15's -1.49); Binance is worse than
+control AND loses to its own hash null (the giveback cuts the runners that give Binance
+its wide-TP benefit). Mechanism: Bybit fades revert fast-and-hard then bounce (tight TP
+best); Binance fades revert slow-and-far (wide TP best) -> opposite microstructure,
+irreconcilable with any single TP rule. Closes the exit-TP question end-to-end (flat F2
++ vol-scaled F2b + path-conditional E5 all fail). No candidate.
+
+**Exit side is now exhaustively closed** (Book A stops, Book E dynamic-TP, Book G
+vol-control, + prior F/F2/F2b). **Remaining books:** C (TWAP — gated on X3 cost
+calibration from VPS demo fills, not local), D (rank exits — adjacent to closed
+F-exit-timing), F (BTC regime — full-ledger tractable like G), H (flow — Binance-only
+per prior amendment), I (portfolio — needs the long sleeve). Next: Book F (BTC regime)
+or a mid-program synthesis.
 
 ## Open risks / honest caveats
 
