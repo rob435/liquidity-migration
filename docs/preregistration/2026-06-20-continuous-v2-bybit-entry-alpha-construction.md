@@ -139,10 +139,21 @@ was TOO TIGHT — binding on ~18% of trades and chopping the gentle tilt. Wideni
 lifts the OOS proxy +3.1→+4.1, a broad PLATEAU (k0.4–0.6 × clip2–10 all ≈ +4.0; robust, not
 a spike).
 
-**Refinement found:** the lever is the CLIP, not the sensitivity — let the gentle tilt breathe
-(wider clip ~3) rather than tilt harder. Registered as a wider-clip FULL-LEDGER re-confirm
-(the banked full-ledger pass used clip 1.5; expect a small absolute move since the 2f
-hedge/rebalance dominate hedged MAR). More sensitivity (higher k) is closed: it does not help OOS.
+**Proxy refinement found, then FALSIFIED at full ledger:** the proxy said a wider clip (~3)
+beats the original 1.5 (+4.1 vs +3.1). The full-ledger re-confirm (clip 3, k 0.5) REJECTS it:
+
+| setting | upperwick MAR | Δ control | Δ hash | passes |
+|---------|--------------:|----------:|-------:|:------:|
+| clip 1.5 (original) | 6.497 | **+0.11** | +1.62 | YES |
+| clip 3.0 (proxy "refinement") | 6.383 | **−0.003** | +2.88 | NO |
+
+The MAR proxy (equal-weight per-trade, no hedge/rebalance) MISLED: a wider clip's bigger
+tilts (up to 3x) concentrate weight in a way that interacts badly with the daily rebalance +
+2f hedge, which the proxy cannot see. **Keep the original clip 1.5** (the validated setting).
+Both still beat hash decisively, so the SIGNAL is real either way; only the clip-WIDTH tweak
+fails. Methodology win: the proxy is fine for ranking signals but NOT for portfolio-
+construction params (clip width) — full-ledger is the arbiter, and it kept the conventional
+gentle clip. More sensitivity (higher k) is closed too.
 
 ## Recency-weighting test (operator: "should it be an EMA favouring recent wicks?")
 
