@@ -168,6 +168,46 @@ PERSISTENT/broad rejection across the 120m (sustained exhaustion), not the fresh
 also the +1h entry delay puts the signal event well before the recent minutes. **Keep the
 simple mean** (the form already full-ledger-validated). Recency EMA: closed.
 
+## Taker-flow exhaustion (operator: "go after order flow")
+
+`scripts/continuous_v2_bybit_takerflow.py` + `...flow_combo.py`, from the bybit_full_pit
+`taker_flow_5m` tape (taker_buy/sell_quote, n_buy/n_sell; 100% causal coverage of the
+V2_CONTROL windows). Theory: best fades are buyer-EXHAUSTION pops.
+
+Feature IC vs gross (vs upper_wick +0.146): **absorption +0.163** (price rose WITHOUT
+aggressive net buying = hollow pop → better fade) is the best, ~orthogonal to upper_wick
+(corr +0.10). `buy_ratio` −0.07 and `cvd_slope` −0.07 (real aggressive buying = momentum =
+WORSE fade — signs cohere). So order flow found a HIGHER-IC signal than the candle shape.
+
+BUT the decisive test (sizing) flips it — higher IC ≠ better signal:
+
+| signal | IC gross | IC MAE | OOS sizing MAR Δ |
+|--------|---------:|-------:|-----------------:|
+| upper_wick (clean) | +0.146 | −0.005 | **+4.07** |
+| absorption (raw) | +0.163 | −0.162 | **−5.23** |
+| uw + absorption | +0.215 | −0.116 | −2.04 |
+| absorption residualized on run_up+rv | +0.096 | −0.058 | −0.86 |
+| uw + resid-absorption | +0.173 | −0.041 | +1.25 |
+
+- **Absorption is RISK-COUPLED** (IC_mae −0.16): it predicts pops that revert further but
+  also drop further first, so sizing up on it DESTROYS MAR (−5.23) despite the higher IC.
+- **Residualizing** absorption on the risk features (run_up, rv; fit early, apply late)
+  cleans it (IC_mae → −0.058, MAR → −0.86) — but the cleaned residual is too WEAK (+0.096)
+  to beat upper_wick; the combo (+1.25) is still worse than upper_wick alone (+4.07).
+
+**Verdict — order flow confirms the mechanism but does not improve the edge.** Absorption
+gives order-flow evidence for the exhaustion story (hollow pops revert), but its predictive
+power is mostly RISK PREMIUM, not clean alpha; stripped of that it cannot beat the
+candle-shape signal. **upper_wick alone stays the best deployable entry signal.** Flow
+angle closed.
+
+## Meta: three knobs tested, all confirm upper_wick (simple mean, gentle clean sizing)
+
+Sensitivity (k), recency (EMA), and order flow were each tested rigorously (OOS + hash +
+falsifiers). All three came back showing the simple-mean upper_wick with a gentle clean
+sizing tilt is already the right form — the signal is real but intrinsically modest, and
+incremental feature engineering on this book is clean-signal-capped. The edge is what it is.
+
 ## No real-money / promotion claim
 
 `REAL_MONEY` stays false. Bybit-only, operator-gated; full-ledger pass is in-sample working
