@@ -142,6 +142,15 @@ class ContinuousDemoCycleConfig:
     sizing_mode: str = "flat"                       # "flat" | "inverse_vol" (target_vol_per_name / rv_168h)
     target_vol_per_name: float = 0.02               # inverse-vol per-name hourly-vol target
     vol_weight_clamp: float = 3.0                   # inverse-vol multiplier clamp [1/clamp, clamp]
+    # OPERATOR OVERRIDE 2026-06-20: vol-gated upper_wick entry-QUALITY sizing tilt, applied
+    # MULTIPLICATIVELY on top of inverse-vol. Validated full-ledger (Bybit MAR 6.387->6.555,
+    # +0.168 vs invvol-alone, +1.62 vs hash). Default False: the multiplier is a SAFE NO-OP
+    # until the live 1m upper_wick feature pipeline + per-symbol history are wired and the
+    # mult is populated into the candidate row (cand["upperwick_size_mult"]); flipping this
+    # True without that live feature is a documented misconfiguration. The shared causal
+    # multiplier lives in continuous_entry_sizing.upperwick_size_mult so live==backtest by
+    # construction. Receipt: docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md
+    entry_upperwick_sizing_enabled: bool = False
     notional_multiplier: float = 1.0                # read by the shared daemon scaffolding (logging only)
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
@@ -1802,6 +1811,21 @@ def _continuous_vol_weight_multiplier(config: ContinuousDemoCycleConfig, entry_v
     return min(max(float(config.target_vol_per_name) / rv, 1.0 / clamp), clamp)
 
 
+def _continuous_upperwick_multiplier(config: ContinuousDemoCycleConfig, cand: dict[str, Any]) -> float:
+    """Operator-override (2026-06-20) vol-gated upper_wick entry-quality multiplier.
+
+    SAFE NO-OP (1.0) unless ``entry_upperwick_sizing_enabled`` AND the live feature pipeline
+    has populated ``cand['upperwick_size_mult']`` (computed by the SHARED
+    continuous_entry_sizing.upperwick_size_mult so live==backtest). Until the live 1m
+    upper_wick feature pipeline is wired, this returns 1.0 and the book is unchanged. A
+    finite, positive populated value is applied multiplicatively on top of inverse-vol.
+    """
+    if not getattr(config, "entry_upperwick_sizing_enabled", False):
+        return 1.0
+    m = _finite_or_none(cand.get("upperwick_size_mult"))
+    return float(m) if (m is not None and m > 0.0) else 1.0
+
+
 # ============================================================================
 # Live cycle runner + short executors (clone of the long-sleeve order path,
 # side=Sell, lm-en-c- prefix; reuses the shared event_demo execution helpers).
@@ -2626,13 +2650,18 @@ def _execute_continuous_entries(
         component = str(cand.get("component") or "")
         component_weight = _float(cand.get("component_weight")) or 1.0
         entry_vol = _float(cand.get("rv_168h"))
+        # inverse-vol (RISK) sizing x optional vol-gated upper_wick (QUALITY) sizing.
+        # The upper_wick factor is a SAFE NO-OP (1.0) until the live 1m feature pipeline
+        # populates cand["upperwick_size_mult"] and the profile flag is on (override 2026-06-20).
         vol_weight_multiplier = _continuous_vol_weight_multiplier(demo, cand.get("rv_168h"))
+        upperwick_multiplier = _continuous_upperwick_multiplier(demo, cand)
         capped_notional = (
             equity_usdt
             * demo.wallet_balance_fraction
             * order_notional_frac
             * component_weight
             * vol_weight_multiplier
+            * upperwick_multiplier
         )
         max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
         # NOTE (EXEC-3): like the short/long ENTRY paths, a single entry whose qty exceeds Bybit's

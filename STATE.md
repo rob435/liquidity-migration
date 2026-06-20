@@ -77,6 +77,16 @@ promoted-in-code without clearing the real-money gate. The gate remains:
   risk control; TP12 also fails the two-venue bar (Binance MAR-negative). Demo/paper only;
   not real-money-safe. Receipt:
   `docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md`.
+- **OPERATOR OVERRIDE 2026-06-20 (code-resident, live-INACTIVE):** vol-gated upper_wick
+  entry-quality sizing tilt promoted into the demo/paper object (multiplicative on inverse-vol;
+  validated full-ledger Bybit MAR 6.387->6.555, +0.168, +1.62 vs hash; in-sample / Bybit-only /
+  modest, against the forward-first gate by owner direction). Shared causal function
+  `continuous_entry_sizing.upperwick_size_mult` (live==backtest by construction); live hook
+  `entry_upperwick_sizing_enabled` defaults **False** -> SAFE NO-OP, live book UNCHANGED, forward
+  ledger NOT yet voided. Activation requires building the live 1m upper_wick feature pipeline +
+  per-symbol history + a live<->backtest parity reconcile, then flag-flip + state-archive/fresh-
+  clock + owner-gated VPS deploy. REAL_MONEY false. Receipt:
+  `docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md`.
 - The 2026-06-18 operator override froze the current three-component object and
   reset the continuous forward clock.
 - The v2-forward reconcile/control baseline starts at
@@ -145,6 +155,13 @@ pre-registration and explicit operator direction.
 5. Continue running the forward replay orchestrator at each data-root refresh; overlap
    drift is a hard alarm.
 6. Binance forward liquidation capture needs a permitted-region host.
+8. **2026-06-20 operator override (upper_wick entry sizing) is code-resident but live-INACTIVE.**
+   Before the live demo book trades it, the live 1m upper_wick feature pipeline + per-symbol
+   history must be built and live<->backtest parity reconciled (hard gate), then
+   `entry_upperwick_sizing_enabled` flipped, the forward state dir archived + a fresh clock
+   started (config-hash change), hedge warmstart regenerated, and the VPS redeployed via the
+   pre-push gate. Not done here. `REAL_MONEY` stays false. Receipt:
+   `docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md`.
 7. **2026-06-19 operator override (vol adjuster OFF + TP12) is a CODE change only.**
    Before the live demo/paper book trades it, an owner-gated deploy must: archive the
    continuous forward state dir + start a fresh clock (config hash changed), regenerate
@@ -179,10 +196,14 @@ pre-registration and explicit operator direction.
 - `docs/preregistration/2026-06-20-continuous-v2-book-g-volcontrol-construction.md`
 - `docs/preregistration/2026-06-20-continuous-v2-book-e-dynamic-tp-construction.md`
 - `docs/preregistration/2026-06-20-continuous-v2-book-f-btc-regime-construction.md`
+- `docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md` -
+  OPERATOR OVERRIDE promoting vol-gated upper_wick entry sizing into demo/paper (code-resident,
+  live-INACTIVE no-op; shared causal function; activation needs the live 1m feature pipeline +
+  parity reconcile + deploy). In-sample/Bybit-only/modest; REAL_MONEY false.
 - `docs/preregistration/2026-06-20-continuous-v2-bybit-entry-alpha-construction.md` -
-  Bybit-only upper_wick entry sizing: PASSES full-ledger + hash (MAR +0.11 vs control,
-  +1.62 vs hash) — the program's first full-ledger-confirmed signal; modest, operator-gated
-  forward-shadow candidate, NOT a frozen-object change. + upper_wick-conditional TP companion.
+  Bybit-only upper_wick entry sizing: PASSES full-ledger + hash (vol-gated MAR +0.168 vs
+  control, +1.62 vs hash) — the program's first full-ledger-confirmed signal; modest. Full
+  research arc (sensitivity/recency/order-flow/vol-gate all tested) + upper_wick-conditional TP.
 - `docs/preregistration/2026-06-20-continuous-v2-adverse-trade-characterization.md`,
   `...-twap-entry-construction.md`, `...-book-e2-conditional-tp-construction.md`,
   `...-disaster-stop-tail-construction.md`, `...-research-dataset-construction.md`,

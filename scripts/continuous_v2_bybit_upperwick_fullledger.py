@@ -66,22 +66,15 @@ def build_upperwick_lookup(ab_root: Path, k: float = K, clip: tuple = CLIP, vol_
     by_sym: dict[str, list] = {}
     for sym, sig, val, rv in recs:
         by_sym.setdefault(sym, []).append((sig, val, rv))
+    # Use the SHARED causal multiplier so the backtest == the live demo book by construction.
+    from liquidity_migration.continuous_entry_sizing import upperwick_size_mult
     real: dict[tuple[str, int], float] = {}
     for sym, seq in by_sym.items():
         seq.sort()
-        hist = []
-        rv_hist = []
+        hist: list[float] = []
+        rv_hist: list[float] = []
         for sig, val, rv in seq:
-            if len(hist) >= 10:
-                mu, sd = float(np.mean(hist)), float(np.std(hist)) or 1.0
-                z = (val - mu) / sd
-                att = 1.0
-                if vol_attenuate:
-                    pctl = float(np.mean([1.0 if x <= rv else 0.0 for x in rv_hist]))  # causal expanding percentile
-                    att = 1.0 - pctl
-                real[(sym, sig)] = float(np.clip(1.0 + k * z * att, *clip))
-            else:
-                real[(sym, sig)] = 1.0
+            real[(sym, sig)] = upperwick_size_mult(val, rv, hist, rv_hist, k=k, clip=clip, vol_attenuate=vol_attenuate)
             hist.append(val)
             rv_hist.append(rv)
     # hash null: permute the multiplier multiset across keys
