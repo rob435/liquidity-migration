@@ -22,7 +22,7 @@ expected. Forward demo/paper stays the only OOS arbiter.
 | 1 | 1m PIT data foundation (trade-window-scoped) | **COMPLETE** — 100% coverage, 0 gaps, 0 checksum fail (176 MB) |
 | 2 | 1m / trade-aware execution engine + order-fill ledger | **X1 engine DONE + validated** (1m vs 1h: 100% reason agree); X2 driver + Book A next |
 | 3 | Feature Almanac V3 (`data_available_ts`) | not started |
-| 4 | First A/B wave (≤1 stops/TPSL, ≤1 TWAP, ≤1 regime/vol) | gated on Waves 1–3 |
+| 4 | A/B books — exit books need only the 1m engine | **Book A (stops/TPSL) CLOSED: no both-venue candidate** |
 | 5 | No-order forward shadow | gated on a Wave-4 candidate |
 
 ## Wave 0 — baseline freeze (in progress)
@@ -164,6 +164,26 @@ TP-only control, so it changes only path-dependent (stop) trades, as required.
 Receipt: `docs/preregistration/2026-06-20-continuous-v2-intrabar-execution-engine-construction.md`.
 Next: X2 order/fill ledger driver, then **Book A (real stops/TPSL)** — the first
 mining the 1h engine couldn't do. X3 cost calibration is gated on VPS demo fills.
+
+### Book A — real stops / TPSL (CLOSED 2026-06-20, no both-venue candidate)
+
+Receipt: `docs/preregistration/2026-06-20-continuous-v2-book-a-stops-tpsl-construction.md`.
+Driver: `scripts/continuous_v2_book_a_stops.py` (re-resolves control trades on 1m
+under A1 immediate + A2 delayed-arm stops + A7 hash null; realized-PnL MAR proxy).
+
+**Verdict: stops do not help the fade book, even at 1m fidelity.** Control MAR proxy
+bybit 6.15 / binance 4.32 (recon 0.00002/0.00000). A1 immediate stops lose 2–5 MAR
+on both venues, beat no hash null, worsen drawdown. A2 delayed-arm only helps by
+almost never firing; the single positive cell (bybit `stop15_arm12h` +0.75 MAR) is
+−0.04 on binance → venue split, killed by the both-venue rule (like the F2 TP12
+Bybit lead — operator-gated venue-policy item at most, not a frozen-object change).
+Mechanism: the fade's adverse excursion is exactly where reversion to the −12% TP is
+most likely, so stopping there cuts the edge; exiting AT the adverse excursion is no
+better than a random-time hash null. Engine gained a byte-identical
+`stop_arm_after_ms` (A2), unit-tested. The exit side is not where this book's edge
+lives — consistent with the prior 1h exit-timing closure, now confirmed at 1m.
+**Next mining:** Book C (TWAP/execution-impact, needs the X2 fill/cost layer) or
+Book E (dynamic TP, uses this engine); entry/flow Books B/F/H need Wave-3 almanac.
 
 ## Open risks / honest caveats
 

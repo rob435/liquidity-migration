@@ -98,3 +98,21 @@ def test_null_minutes_are_skipped_and_counted() -> None:
     assert res.exit_reason == "take_profit"
     assert res.null_bars == 1
     assert res.n_bars == 2
+
+
+def test_delayed_arm_ignores_early_stop() -> None:
+    # stop at 105; bars 1 & 2 both spike to 106. No arming -> stops at bar 1;
+    # armed after 2 min -> bar 1 ignored, bar 2 stops (A2 delayed-arm).
+    bars = _bars([(101, 99, 100), (106, 100, 105), (106, 100, 105), (100, 89, 90)])
+    r0 = resolve_exit_1m(
+        bars, entry_ts_ms=0, entry_price=ENTRY, side="short", take_profit_pct=0.10,
+        stop_loss_pct=0.05, planned_exit_ts_ms=10 * MS_PER_MINUTE, stop_arm_after_ms=0,
+    )
+    assert r0.exit_reason == "stop_loss"
+    assert r0.first_touch_ts_ms == 1 * MS_PER_MINUTE
+    r2 = resolve_exit_1m(
+        bars, entry_ts_ms=0, entry_price=ENTRY, side="short", take_profit_pct=0.10,
+        stop_loss_pct=0.05, planned_exit_ts_ms=10 * MS_PER_MINUTE, stop_arm_after_ms=2 * MS_PER_MINUTE,
+    )
+    assert r2.exit_reason == "stop_loss"
+    assert r2.first_touch_ts_ms == 2 * MS_PER_MINUTE

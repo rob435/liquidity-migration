@@ -173,6 +173,8 @@ pre-registration and explicit operator direction.
 - `docs/preregistration/2026-06-19-continuous-v2-next-level-ab-research-plan.md`
 - `docs/preregistration/2026-06-19-continuous-v2-phase0-baseline-construction.md`
 - `docs/preregistration/2026-06-20-continuous-v2-1m-data-foundation-construction.md`
+- `docs/preregistration/2026-06-20-continuous-v2-intrabar-execution-engine-construction.md`
+- `docs/preregistration/2026-06-20-continuous-v2-book-a-stops-tpsl-construction.md`
 - `docs/preregistration/2026-06-19-continuous-v2-next-level-progress-log.md`
 - `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md`
 - `docs/preregistration/2026-06-15-operator-override-promote-continuous.md`

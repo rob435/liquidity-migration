@@ -95,6 +95,7 @@ def resolve_exit_1m(
     planned_exit_ts_ms: int,
     stop_fill_mode: str = "stop",
     stop_slippage_cap_pct: float = 0.10,
+    stop_arm_after_ms: int = 0,
 ) -> ExitResolution:
     """Resolve a trade's exit on the 1m path under (take_profit_pct, stop_loss_pct, max_hold).
 
@@ -102,6 +103,11 @@ def resolve_exit_1m(
     [entry_ts_ms, planned_exit_ts_ms) window (see ``load_1m_window``). Window
     semantics match the 1h engine: bars with entry_ts_ms <= ts_ms < planned_exit_ts_ms
     (each 1m bar-open ts covers [ts, ts+60s)); exit ts is the resolving bar's end.
+
+    ``stop_arm_after_ms`` (default 0 -> byte-identical) delays stop arming: stop
+    touches before ``entry_ts_ms + stop_arm_after_ms`` are ignored (Book A's A2
+    delayed-arm stop, which avoids cutting the initial mean-reversion window). TP
+    and max_hold are unaffected.
     """
     tp_price = _take_profit_price(entry_price, side=side, take_profit_pct=take_profit_pct)
     stop_price = _stop_price(entry_price, side=side, stop_loss_pct=stop_loss_pct or 0.0)
@@ -131,8 +137,9 @@ def resolve_exit_1m(
         adverse, favorable = _bar_excursion(entry_price, side=side, high=bar_high, low=bar_low)
         mae = min(mae, adverse)
         mfe = max(mfe, favorable)
+        armed_stop = stop_price if int(ts_a[i]) >= entry_ts_ms + stop_arm_after_ms else None
         stop_hit, tp_hit = _bar_exit_hits(
-            side=side, high=bar_high, low=bar_low, stop_price=stop_price, take_profit_price=tp_price
+            side=side, high=bar_high, low=bar_low, stop_price=armed_stop, take_profit_price=tp_price
         )
         if stop_hit and tp_hit:
             # genuinely ambiguous at 1m -> adverse-first (stop)
