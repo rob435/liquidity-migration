@@ -2,9 +2,46 @@
 
 Date: 2026-06-20
 Author: Claude (at operator/owner direction)
-Stage: operator override (promotion into the demo/paper object, code-level)
+Stage: **WITHDRAWN — NOT ACTIVATED.** The override was prepared, but the live-wiring parity
+reconcile uncovered that the validated edge was a duplicate-counting artifact; the corrected
+re-validation FAILS, so the tilt is disabled (flag False) and not promoted.
 Scope: continuous v2 fade book, Bybit demo/paper only
-Run label: `exploratory` evidence promoted by operator override. **`REAL_MONEY` stays false.**
+Run label: `exploratory`. **`REAL_MONEY` stays false. Override DISABLED.**
+
+## ⛔ VERDICT (2026-06-20): RETRACTED — the edge was an artifact, not activated
+
+Wiring the live pipeline forced a strict live↔backtest parity reconcile, which revealed two
+compounding flaws in the validated result:
+
+1. **Duplicate counting.** The 3 ensemble components enter the same `(symbol, signal_ts)`
+   ~61% of the time (2367 component-entries → 932 unique decisions). The original
+   `build_upperwick_lookup` counted each component as a separate point in the per-symbol
+   expanding history, which SHRANK the std and INFLATED the tilt (multipliers ranged
+   [0.67, 1.5]).
+2. **Sparse per-symbol history.** The per-symbol expanding-z needs ≥10 PRIOR entries of the
+   SAME symbol, but deduped there are only ~2.7 entries/symbol — so done correctly, almost
+   every trade gets NO tilt (multipliers collapse to [0.89, 1.07], mostly 1.0).
+
+Corrected to one principled observation per decision (now bit-exact with the live sizer),
+the full-ledger re-validation:
+
+| arm | MAR | Δ vs control | Δ vs hash |
+|-----|----:|-------------:|----------:|
+| control | 6.387 | — | — |
+| upper_wick (principled) | 6.384 | **−0.003** | **−0.005 (below hash)** |
+
+`passes: false`. The +0.168 reported earlier was ENTIRELY the artifact. The tilt, correctly
+constructed, does nothing (fractionally negative, below its own hash null).
+
+**Action taken:** the override is NOT activated. `entry_upperwick_sizing_enabled` stays
+False; the live book is unchanged; the forward ledger is untouched. The code (shared
+function, live sizer, parity machinery, corrected backtest) is retained flag-OFF as the
+record of the investigation and the parity infrastructure. The Bybit entry-alpha "first
+full-ledger pass" claim is RETRACTED.
+
+The text below is the original (pre-retraction) override plan, kept for the audit trail.
+
+---
 
 ## Decision
 

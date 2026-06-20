@@ -1,5 +1,22 @@
 # Construction + Result: Bybit Entry-Alpha — Exhaustion Features (operator direction 2026-06-20)
 
+> ## ⛔ RETRACTION (2026-06-20): the full-ledger "pass" was a duplicate-counting artifact
+>
+> The headline full-ledger result below (vol-gated upper_wick sizing, MAR 6.387→6.555,
+> +0.168, "the program's first full-ledger pass") DOES NOT HOLD. The live-wiring parity
+> reconcile found that `build_upperwick_lookup` counted each of the 3 ensemble components as a
+> separate point in the per-symbol expanding history (they share `(symbol, signal_ts)` ~61% of
+> the time), which inflated the tilt; and that the per-symbol-expanding-z is too sparse
+> (~2.7 entries/symbol vs the 10-obs minimum) to tilt at all when corrected. Re-validated with
+> one principled observation per decision: **MAR 6.384, −0.003 vs control, −0.005 vs hash,
+> passes=FALSE.** The signal's IC is real (+0.146 on gross) but it is NOT a tradable edge via
+> this sizing — consistent with the program's recurring "real but not tradable" theme. The
+> override was NOT activated. Retraction receipt:
+> `docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md`. The OOS
+> screens below used a different (global-z) construction whose full-ledger validity is UNTESTED
+> and must not be assumed. Read the rest of this receipt as the (now-falsified) original work.
+
+
 Date: 2026-06-20
 Author: Claude (operator-directed; Bybit-only entry-alpha push)
 Run label: `exploratory` (OOS screen). **Result: a real, diversification-preserving, OOS, hash-beating Bybit entry-alpha improvement — sizing UP the high-upper-wick (exhaustion/rejection) entries lifts MAR proxy +3.0. Admission fails (concentration kills MAR). Needs full-ledger confirmation via the engine's size_mult_lookup before any candidate claim.**

@@ -18,11 +18,45 @@ which improved the full-ledger MAR over the ungated tilt.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 UPPERWICK_K = 0.5
 UPPERWICK_CLIP = (0.5, 1.5)
 UPPERWICK_MIN_OBS = 10
+UPPERWICK_WINDOW_MIN = 120
+UPPERWICK_RV_N = 30
+
+
+def upper_wick_and_rv_from_ohlc(
+    opens: Sequence[float],
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+) -> tuple[float, float]:
+    """Canonical pre-entry (upper_wick_mean, rv_30) from a 1m OHLC window.
+
+    EXACTLY matches the research feature builder (continuous_v2_bybit_entry_alpha.
+    enriched_features): upper_wick_mean = mean over the window of
+    (high - max(open, close)) / (high - low) on bars with high > low; rv_30 =
+    POPULATION std of the last 30 one-minute log returns (>5 returns required, else 0).
+    Both the backtest and the live demo book compute the feature through this one
+    function so they cannot drift. Parity tests pin the equivalence.
+    """
+    wicks = [
+        (h - max(o, c)) / (h - low_)
+        for o, h, low_, c in zip(opens, highs, lows, closes)
+        if None not in (o, h, low_, c) and h > low_
+    ]
+    uw = (sum(wicks) / len(wicks)) if wicks else 0.0
+    logr = [
+        math.log(closes[i] / closes[i - 1])
+        for i in range(1, len(closes))
+        if closes[i] and closes[i - 1]
+    ]
+    tail = logr[-UPPERWICK_RV_N:]
+    rv = _std(tail) if len(logr) > 5 else 0.0
+    return float(uw), float(rv)
 
 
 def _mean(xs: Sequence[float]) -> float:

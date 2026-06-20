@@ -151,6 +151,9 @@ class ContinuousDemoCycleConfig:
     # multiplier lives in continuous_entry_sizing.upperwick_size_mult so live==backtest by
     # construction. Receipt: docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md
     entry_upperwick_sizing_enabled: bool = False
+    # warm-start seed (per-symbol upper_wick/rv history) loaded on the live cold-start so the
+    # book begins with the state it would have had if it had tilted since inception.
+    entry_upperwick_warmstart_path: str | None = None
     notional_multiplier: float = 1.0                # read by the shared daemon scaffolding (logging only)
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
@@ -1811,6 +1814,28 @@ def _continuous_vol_weight_multiplier(config: ContinuousDemoCycleConfig, entry_v
     return min(max(float(config.target_vol_per_name) / rv, 1.0 / clamp), clamp)
 
 
+def _build_upperwick_sizer(config: ContinuousDemoCycleConfig, root: Path) -> Any | None:
+    """Build the live UpperwickLiveSizer (or None when disabled). Warm-starts the per-symbol
+    history from ``entry_upperwick_warmstart_path`` on the first run (state file absent)."""
+    if not getattr(config, "entry_upperwick_sizing_enabled", False):
+        return None
+    state_path = Path(root) / "upperwick_state.parquet"
+    sizer = UpperwickLiveSizer(state_path)
+    if not state_path.exists():
+        seed_path = getattr(config, "entry_upperwick_warmstart_path", None)
+        if seed_path and Path(seed_path).expanduser().exists():
+            seed_df = pl.read_parquet(Path(seed_path).expanduser())
+            sizer.seed([
+                (str(r["symbol"]), int(r["signal_ts"]), float(r["upper_wick"]), float(r["rv"]))
+                for r in seed_df.iter_rows(named=True)
+            ])
+            sizer.save()
+            _logger.info("upperwick: warm-started %d seed rows from %s", seed_df.height, seed_path)
+        else:
+            _logger.warning("upperwick: enabled with no warm-start seed -> cold start (tilt ramps in)")
+    return sizer
+
+
 def _continuous_upperwick_multiplier(config: ContinuousDemoCycleConfig, cand: dict[str, Any]) -> float:
     """Operator-override (2026-06-20) vol-gated upper_wick entry-quality multiplier.
 
@@ -1839,6 +1864,10 @@ from pathlib import Path  # noqa: E402
 from typing import Callable  # noqa: E402
 
 from .bybit import BybitMarketData  # noqa: E402
+from .continuous_upperwick_live import (  # noqa: E402
+    UpperwickLiveSizer,
+    fetch_upper_wick_rv as _upperwick_fetch,
+)
 from .continuous_rebalance import (  # noqa: E402
     compute_continuous_rebalance_scale,
     ContinuousRebalanceResizePlan,
@@ -2635,6 +2664,7 @@ def _execute_continuous_entries(
     strategy_id: str,
     record_preflight: Callable[[dict[str, Any]], None] | None,
     execution_event_router: Any | None,
+    upperwick_sizer: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Open a SHORT (Sell, stop ABOVE entry). Mirrors _execute_single_long_entry, side=Sell."""
     rows: list[dict[str, Any]] = []
@@ -2645,6 +2675,18 @@ def _execute_continuous_entries(
         contract = contract_by_symbol.get(symbol, {})
         if price <= 0.0:
             continue
+        # OPERATOR OVERRIDE 2026-06-20: vol-gated upper_wick entry-quality multiplier. Compute it
+        # here from a live trailing-1m fetch via the SHARED causal path (== backtest), populate
+        # cand["upperwick_size_mult"] for the sizing below; record() after the qty check books one
+        # history point per (symbol, signal_ts) decision (the dedup guard makes components idempotent).
+        _uw_record: tuple[int, float, float] | None = None
+        if upperwick_sizer is not None:
+            _uwrv = _upperwick_fetch(trading_client, symbol, now_ms)
+            if _uwrv is not None:
+                _sig_ts = int(cand.get("signal_ts_ms") or now_ms)
+                _uw, _rv = _uwrv
+                cand["upperwick_size_mult"] = upperwick_sizer.mult_for(symbol, _sig_ts, _uw, _rv)
+                _uw_record = (_sig_ts, _uw, _rv)
         tick_size = _float(contract.get("tick_size")) or 0.0001
         qty_step = _float(contract.get("qty_step")) or 0.001
         component = str(cand.get("component") or "")
@@ -2679,6 +2721,8 @@ def _execute_continuous_entries(
             _logger.info("continuous entry sizing rejected symbol=%s notional=%.2f price=%.6g", symbol, capped_notional, price)
             continue
         qty, actual_notional = quantity
+        if upperwick_sizer is not None and _uw_record is not None:
+            upperwick_sizer.record(symbol, _uw_record[0], _uw_record[1], _uw_record[2])
         stop_loss_pct = _float(cand.get("stop_loss_pct"))
         stop_price = (
             _stop_price_for_entry(entry_price=price, side="short", stop_loss_pct=stop_loss_pct, tick_size=tick_size)
@@ -2802,6 +2846,8 @@ def _execute_continuous_entries(
             # already-booked leg double-added on the next reconcile (audit 2026-06-11).
             "filled_qty": str(filled_qty) if filled_qty > 0 else "", "target_qty": qty,
         })
+    if upperwick_sizer is not None:
+        upperwick_sizer.save()  # persist the per-symbol history appended this cycle
     return rows, order_rows
 
 
@@ -3471,7 +3517,8 @@ def run_continuous_demo_cycle(
             candidates, trading_client=trading_client, demo=demo, equity_usdt=equity_usdt,
             order_notional_frac=order_notional_frac, price_by_symbol=price_by_symbol,
             contract_by_symbol=contract_by_symbol, now_ms=cycle_now_ms, strategy_id=strategy_id,
-            record_preflight=preflight_cb, execution_event_router=execution_event_router)
+            record_preflight=preflight_cb, execution_event_router=execution_event_router,
+            upperwick_sizer=_build_upperwick_sizer(demo, root))
         if exec_entries and (demo.submit_orders or demo.record_dry_run):
             cycle_trade_rows.extend(exec_entries)
         if entry_orders and (demo.submit_orders or demo.record_dry_run):

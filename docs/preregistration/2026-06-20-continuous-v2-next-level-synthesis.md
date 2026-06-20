@@ -97,7 +97,18 @@ stop. Receipt: `...-disaster-stop-tail-construction.md`.
   Disabling the gate for research let us learn WHY the gate works. Receipt:
   `...-research-dataset-construction.md`.
 
-## Bybit entry-alpha (2026-06-20, operator-directed) — the program's first full-ledger PASS
+## Bybit entry-alpha (2026-06-20) — RETRACTED: the full-ledger "pass" was an artifact
+
+**UPDATE:** the result below (vol-gated upper_wick sizing, full-ledger +0.168) was RETRACTED.
+The live-wiring parity reconcile found it was a duplicate-counting artifact (the 3 components
+share (symbol,signal_ts) ~61% of the time; per-symbol history counted them thrice → inflated
+tilt) compounded by a too-sparse per-symbol history (~2.7 entries/symbol < 10-obs min → no
+tilt when corrected). Re-validated principled: MAR −0.003 vs control, below hash, FAILS. The
+upper_wick IC is real (+0.146) but NOT tradable via this sizing. Override NOT activated. The
+section below is the falsified original. Lesson: even a full-ledger backtest can hide a
+sizing-history artifact — the live↔backtest parity reconcile is the gate that caught it.
+
+### (falsified) original write-up
 
 After exhaustively showing the EXIT side has no edge, the ENTRY side does. Bybit-only, a
 rich causal pre-entry exhaustion feature library → the clean signal is `upper_wick_mean`

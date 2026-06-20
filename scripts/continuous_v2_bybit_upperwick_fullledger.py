@@ -62,9 +62,17 @@ def build_upperwick_lookup(ab_root: Path, k: float = K, clip: tuple = CLIP, vol_
         if f is None:
             continue
         recs.append((str(t["symbol"]), int(t["entry_signal_ts_ms"]), float(f["upper_wick_mean"]), float(f["rv_30"])))
-    # per-symbol expanding-prior z (min 10 obs), causal; optional vol attenuation
+    # PRINCIPLED per-decision history: the 3 components enter the same (symbol, signal_ts)
+    # ~61% of the time, but upper_wick is a property of the DECISION, not the component, so it
+    # is counted ONCE (dedup, first occurrence in signal_ts order). This matches the live
+    # UpperwickLiveSizer exactly (live==backtest), correcting the earlier per-component
+    # duplicate-counting that inflated identical observations in the std/percentile.
+    seen: set[tuple[str, int]] = set()
     by_sym: dict[str, list] = {}
     for sym, sig, val, rv in recs:
+        if (sym, sig) in seen:
+            continue
+        seen.add((sym, sig))
         by_sym.setdefault(sym, []).append((sig, val, rv))
     # Use the SHARED causal multiplier so the backtest == the live demo book by construction.
     from liquidity_migration.continuous_entry_sizing import upperwick_size_mult
