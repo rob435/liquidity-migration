@@ -97,6 +97,25 @@ stop. Receipt: `...-disaster-stop-tail-construction.md`.
   Disabling the gate for research let us learn WHY the gate works. Receipt:
   `...-research-dataset-construction.md`.
 
+## Bybit entry-alpha (2026-06-20, operator-directed) — the program's first full-ledger PASS
+
+After exhaustively showing the EXIT side has no edge, the ENTRY side does. Bybit-only, a
+rich causal pre-entry exhaustion feature library → the clean signal is `upper_wick_mean`
+(sellers rejecting the highs; +0.15 IC on gross, ≈0 IC on MAE — better trades, no extra
+tail; stable across a train/test split).
+
+- **Sizing up by upper_wick PASSES the full-ledger + hash bar** (the bar the prior both-venue
+  B-sizing failed): real engine `size_mult_lookup` + `build_full_ledger`, Bybit MAR
+  6.387→6.497 (**+0.11 vs control**, **+1.62 vs hash** — the hash permutation hurts, so the
+  alignment carries real info). MODEST uplift (the 2f hedge/rebalance dominate the hedged
+  MAR) but real, OOS, mechanism-backed, hash-surviving.
+- **Admission fails** (per-trade illusion — concentration collapses MAR; Book B lesson).
+- **upper_wick-conditional TP** (+0.0014 OOS, beats hash) is a coherent companion — high-
+  exhaustion fades earn a wider TP. Reversion-speed-adaptive TP failed.
+- **Status:** an operator-gated Bybit-only forward-shadow CANDIDATE — the strongest entry
+  result of the program. NOT a frozen-object change. Receipt:
+  `...-bybit-entry-alpha-construction.md`.
+
 ## Honest framing
 
 - This is mining done as the operator asked: registered, ledgered, exploratory-labelled,

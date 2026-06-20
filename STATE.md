@@ -179,6 +179,16 @@ pre-registration and explicit operator direction.
 - `docs/preregistration/2026-06-20-continuous-v2-book-g-volcontrol-construction.md`
 - `docs/preregistration/2026-06-20-continuous-v2-book-e-dynamic-tp-construction.md`
 - `docs/preregistration/2026-06-20-continuous-v2-book-f-btc-regime-construction.md`
+- `docs/preregistration/2026-06-20-continuous-v2-bybit-entry-alpha-construction.md` -
+  Bybit-only upper_wick entry sizing: PASSES full-ledger + hash (MAR +0.11 vs control,
+  +1.62 vs hash) — the program's first full-ledger-confirmed signal; modest, operator-gated
+  forward-shadow candidate, NOT a frozen-object change. + upper_wick-conditional TP companion.
+- `docs/preregistration/2026-06-20-continuous-v2-adverse-trade-characterization.md`,
+  `...-twap-entry-construction.md`, `...-book-e2-conditional-tp-construction.md`,
+  `...-disaster-stop-tail-construction.md`, `...-research-dataset-construction.md`,
+  `...-next-level-synthesis.md` - operator-directed deep dive (adverse=high-vol/run-up,
+  TWAP entry fails, run-up-conditional TP Binance lead, sizing-is-the-disaster-control,
+  gates-off dataset validates the BTC-uptrend gate).
 - `docs/preregistration/2026-06-20-continuous-v2-next-level-synthesis.md`
 - `docs/preregistration/2026-06-19-continuous-v2-next-level-progress-log.md`
 - `docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md`

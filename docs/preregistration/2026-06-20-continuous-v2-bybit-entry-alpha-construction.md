@@ -88,8 +88,41 @@ pushing dynamic TP" — two new path-/feature-aware ideas:
   beats hash) OOS — one coherent, mechanism-backed Bybit edge (exhaustion/rejection entries
   are better AND want a wider target).
 
+## Full-ledger validation — PASSES (the bar the prior B-sizing failed)
+
+`scripts/continuous_v2_bybit_upperwick_fullledger.py` (2026-06-20): built a strictly-causal
+per-symbol expanding-z upper_wick multiplier (932 keys, mult mean 1.0045, range [0.5,1.5]),
+ran the 3 fade components through the REAL engine via `size_mult_lookup`, then
+`build_full_ledger` (frozen rebalance + 2f hedge). Bybit.
+
+| arm | MAR | max_dd | total |
+|-----|----:|-------:|------:|
+| control | 6.387 | −0.0130 | 0.2599 |
+| **upper_wick sizing** | **6.497** | −0.0129 | 0.2618 |
+| hash null | 4.879 | −0.0168 | 0.2565 |
+
+- **MAR Δ vs control +0.110**, **MAR Δ vs hash +1.618** → `passes: true`.
+- The hash permutation (same multiplier distribution, alignment destroyed) HURTS MAR
+  (6.39→4.88), so the upper_wick→trade ALIGNMENT carries real information — not a
+  distribution artifact. This is the test the prior both-venue B1 conviction sizing FAILED.
+
+### Honest verdict — REAL and full-ledger-confirmed, but MODEST
+
+upper_wick entry sizing is the FIRST mechanism in the entire continuous-v2 next-level
+program to pass the full-ledger + hash bar: it improves Bybit MAR (+0.11, 6.39→6.50),
+nudges total return up (+0.7%), leaves drawdown flat, and decisively beats its hash
+(+1.62). The uplift is SMALL at the portfolio level (the 2f hedge + rebalance dominate the
+hedged book's MAR; a within-book sizing tilt moves it only a little) — the equal-weight
+proxy's +3.0 was the un-hedged per-trade view. So: a real, mechanism-backed, OOS,
+hash-surviving, full-ledger-confirmed Bybit entry edge of modest size. The upper_wick-
+conditional TP (+0.0014 OOS, beats hash) is a coherent companion.
+
+**Status: an operator-gated Bybit-only forward-shadow CANDIDATE** (entry sizing tilt by
+upper_wick) — the strongest entry result of the program. NOT a frozen-object change, NOT
+real-money evidence; the next bar is a no-order forward shadow under a separate operator
+receipt.
+
 ## No real-money / promotion claim
 
-`REAL_MONEY` stays false. Exploratory OOS screens; full-ledger + forward demo/paper remain
-the bars. The full-ledger upper_wick-sizing validation result is appended below when its
-(heavy) run completes.
+`REAL_MONEY` stays false. Bybit-only, operator-gated; full-ledger pass is in-sample working
+-dataset evidence, not the forward-demo arbiter.
