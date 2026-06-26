@@ -118,6 +118,15 @@ def _cache_cutoff_month(now: datetime) -> str:
     return f"{y:04d}-{m:02d}"
 
 
+def _vision_funding_interval_min(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    hours = float(value)
+    if hours <= 0:
+        return None
+    return int(hours * 60)
+
+
 def _month_rows(symbol: str, month: str, cache: Path, cache_cutoff: str) -> list[dict]:
     cpath = cache / f"{symbol}-{month}.zip"
     if cpath.exists():
@@ -144,8 +153,7 @@ def _month_rows(symbol: str, month: str, cache: Path, cache_cutoff: str) -> list
                         "symbol": symbol,
                         "funding_rate": float(r["last_funding_rate"]),
                         "mark_price": float("nan"),
-                        "funding_interval_min": int(float(r["funding_interval_hours"]) * 60)
-                        if r.get("funding_interval_hours") not in (None, "", "0") else 480,
+                        "funding_interval_min": _vision_funding_interval_min(r.get("funding_interval_hours")),
                         "source": "binance_usdm_funding_vision",
                     })
                 except (KeyError, ValueError):
@@ -177,7 +185,7 @@ def _fapi_topup(symbol: str, since_ms: int) -> list[dict]:
                     "symbol": symbol,
                     "funding_rate": float(r["fundingRate"]),
                     "mark_price": float("nan"),
-                    "funding_interval_min": 480,  # REST omits the interval; P&L path ignores it
+                    "funding_interval_min": None,  # REST omits interval metadata; cadence is derived from stamps
                     "source": "binance_usdm_funding_fapi",
                 }
             except (KeyError, ValueError):

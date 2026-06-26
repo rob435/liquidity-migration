@@ -1,6 +1,4 @@
-"""Wave 2 X1: 1m intrabar exit resolver (continuous v2 next-level program).
-
-Receipt: docs/preregistration/2026-06-20-continuous-v2-intrabar-execution-engine-construction.md
+"""1m intrabar exit resolver tests.
 
 Synthetic 1m paths exercise every resolution branch. The resolver reuses the
 deployed engine's price/exit helpers, so these also pin the side-convention

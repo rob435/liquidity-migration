@@ -269,7 +269,7 @@ def test_equity_overlap_tolerance_allows_alpha_neutral_reassociation(tmp_path) -
     # check does NOT alarm) yet large enough on the peak equity to exceed the old pure
     # 1e-9 absolute tol. Choose the bump as the midpoint of the valid window
     # (1e-9/peak, EQUITY_REL_TOL) so it is robust to the equity magnitude (which is lower
-    # now that the daily vol adjuster is disabled by operator override 2026-06-19).
+    # now that the daily vol adjuster is disabled in the local target).
     eq_old = full["equity"].to_numpy()
     peak = float(np.max(np.abs(eq_old)))
     assert peak > 1.0  # window (1e-9/peak, rel_tol) is non-empty only for peak > 1

@@ -47,6 +47,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent))
@@ -97,6 +101,7 @@ DATA_REFRESH_STAGE_TIMEOUT_S = 2700  # 45 min
 # the same UTC signal day — LONG is a daily-close-stamped strategy, so day-level
 # keying is the robust, tolerance-free pairing.
 LONG_REPORT_SUBDIR = "long_native_v11a_threeway"
+LONG_CADENCE_REFERENCE_GLOB = "backtest-runs/long_v11a_*_refreshed_*/long/long_native_trades.csv"
 
 
 def _date(s: str) -> dt.date:
@@ -405,6 +410,105 @@ def _key_set(df, sig_col: str, start_ms: int, end_ms: int) -> set[tuple[str, str
     return out
 
 
+def _quantile_nearest(values: list[int], q: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, int(q * len(ordered)))
+    return int(ordered[idx])
+
+
+def _venue_from_reference_path(path: Path) -> str:
+    text = str(path).replace("\\", "/").lower()
+    if "binance" in text:
+        return "binance"
+    if "bybit" in text:
+        return "bybit"
+    return path.parent.parent.name
+
+
+def _long_cadence_stats(path: Path, *, as_of: dt.date, forward_start: dt.date) -> dict[str, object] | None:
+    """Sparse-cadence context for LONG zero-trade reconciles."""
+    if not path.exists():
+        return None
+    import polars as pl
+    try:
+        trades = pl.read_csv(path)
+    except Exception:
+        return None
+    if trades.is_empty() or "entry_ts_ms" not in trades.columns:
+        return None
+    try:
+        entries = (
+            trades
+            .with_columns(pl.col("entry_ts_ms").cast(pl.Int64).alias("_entry_ts_ms"))
+            .with_columns(pl.from_epoch(pl.col("_entry_ts_ms"), time_unit="ms").dt.date().alias("_entry_date"))
+            .sort("_entry_ts_ms")
+        )
+    except Exception:
+        return None
+    dates = entries.select("_entry_date").drop_nulls().unique().sort("_entry_date")["_entry_date"].to_list()
+    if not dates:
+        return None
+    gaps = [(dates[i] - dates[i - 1]).days for i in range(1, len(dates))]
+    first_ms = int(entries["_entry_ts_ms"].min())
+    last_ms = int(entries["_entry_ts_ms"].max())
+    span_days = max((last_ms - first_ms) / 86_400_000.0, 1.0)
+    current_gap = max((as_of - dates[-1]).days, 0)
+    p95 = _quantile_nearest(gaps, 0.95)
+    max_gap = max(gaps) if gaps else current_gap
+    if current_gap > max_gap:
+        status = "above_historical_max"
+    elif p95 and current_gap >= max(p95 - 2, int(0.9 * p95)):
+        status = "near_or_above_p95"
+    else:
+        status = "inside_history"
+    return {
+        "venue": _venue_from_reference_path(path),
+        "trades": int(entries.height),
+        "entry_days": len(dates),
+        "first_entry": dates[0].isoformat(),
+        "last_entry": dates[-1].isoformat(),
+        "trades_per_30d": int(entries.height) / span_days * 30.0,
+        "p95_gap_days": int(p95),
+        "max_gap_days": int(max_gap),
+        "current_gap_days": int(current_gap),
+        "trades_since_forward_start": int(entries.filter(pl.col("_entry_ts_ms") >= _ms(forward_start)).height),
+        "status": status,
+    }
+
+
+def _format_long_cadence_diagnostic(
+    reference_paths: list[Path],
+    *,
+    as_of: dt.date,
+    forward_start: dt.date,
+) -> str | None:
+    stats = [
+        s for s in (
+            _long_cadence_stats(path, as_of=as_of, forward_start=forward_start)
+            for path in reference_paths
+        )
+        if s is not None
+    ]
+    if not stats:
+        return None
+    order = {"above_historical_max": 3, "near_or_above_p95": 2, "inside_history": 1}
+    overall = max((str(s["status"]) for s in stats), key=lambda s: order.get(s, 0))
+    pieces = []
+    for s in sorted(stats, key=lambda x: str(x["venue"])):
+        pieces.append(
+            f"{s['venue']}: gap={s['current_gap_days']}d p95={s['p95_gap_days']}d "
+            f"max={s['max_gap_days']}d trades_since_forward_start={s['trades_since_forward_start']} "
+            f"rate={float(s['trades_per_30d']):.2f}/30d"
+        )
+    return f"LONG cadence diagnostic [{overall}]: " + "; ".join(pieces)
+
+
+def _long_cadence_reference_paths() -> list[Path]:
+    return sorted(REPO.glob(LONG_CADENCE_REFERENCE_GLOB))
+
+
 def reconcile_long_three_way(step: rc.Step, *, trades_csv: Path, run_label: str,
                              demo_root: str, paper_root: str,
                              start: dt.date, end: dt.date) -> tuple[str, bool]:
@@ -445,6 +549,13 @@ def reconcile_long_three_way(step: rc.Step, *, trades_csv: Path, run_label: str,
         f"demo_not_in_model={len(demo_not_in_model)} paper_not_in_model={len(paper_not_in_model)} "
         f"| backtest_run_label={run_label} window={start}..{end} keys_csv={csv_path}{label_flag}"
     )
+    cadence_summary = _format_long_cadence_diagnostic(
+        _long_cadence_reference_paths(),
+        as_of=end - dt.timedelta(days=1),
+        forward_start=start,
+    )
+    if cadence_summary:
+        summary = f"{summary}\n  {cadence_summary}"
     print("\n" + summary, flush=True)
     if demo_not_in_model:
         print(f"  ⚠️ {len(demo_not_in_model)} demo entries with NO matching backtest signal "

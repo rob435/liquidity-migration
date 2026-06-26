@@ -1,7 +1,6 @@
 """Walk-forward ridge combiner: frozen causal features -> one forward-return score.
 
-Role (pre-registration ``docs/preregistration/ridge-combiner-2026-06-09.md``): a
-*ranker/sizer within* the event-selected short pool, not a selector. The event
+Role: a *ranker/sizer within* the event-selected short pool, not a selector. The event
 trigger still decides which names enter; this maps a frozen feature vector to a
 single predicted forward return so downstream sizing can rank within the pool.
 

@@ -29,8 +29,10 @@ from liquidity_migration.long_native import (
     _evaluate_promotion,
     _finalize_trade,
     _load_sector_map,
+    _methodology_run_label,
     _run_label,
     _run_long_pipeline,
+    format_long_native_report,
 )
 
 
@@ -706,6 +708,56 @@ def test_run_label_partial_default_fraction_is_backward_compatible() -> None:
         archive_manifest_empty=False,
     )
     assert label == "full_pit_universe_funding_partial"
+
+
+def test_methodology_run_label_is_conservative_for_raw_reports() -> None:
+    assert _methodology_run_label(
+        full_pit_universe_pass=True,
+        archive_manifest_empty=False,
+        tainted=False,
+    ) == "exploratory"
+    assert _methodology_run_label(
+        full_pit_universe_pass=False,
+        archive_manifest_empty=False,
+        tainted=False,
+    ) == "biased_benchmark"
+    assert _methodology_run_label(
+        full_pit_universe_pass=True,
+        archive_manifest_empty=False,
+        tainted=True,
+    ) == "invalid"
+
+
+def test_long_native_report_separates_methodology_and_data_labels() -> None:
+    report = format_long_native_report({
+        "methodology_run_label": "exploratory",
+        "run_label": "full_pit_universe",
+        "config": {
+            "universe_size": 50,
+            "universe_volume_window_days": 90,
+            "regime_sma_days": 30,
+            "enable_capitulation_rebound": False,
+            "enable_funding_squeeze": False,
+            "enable_volume_resurrection": False,
+            "enable_fomo_chase": True,
+            "max_concurrent_positions": 10,
+            "cooldown_days": 7,
+            "cost_multiplier": 3.0,
+        },
+        "rows": {"features": 10, "trades": 2},
+        "date_range": {"start": "2023-01-01", "end": "2023-01-31"},
+        "pit_manifest": {"full_pit_universe_pass": True},
+        "summary": {},
+        "promotion": {},
+        "splits": [],
+        "lifecycle": {},
+        "event_counts": {"fomo_chase": 3},
+    })
+    assert "- Run label: `exploratory`" in report
+    assert "- Data integrity label: `full_pit_universe`" in report
+    assert "v11a is FC-only" in report
+    assert "fc=True" in report
+    assert "- fomo_chase: 3" in report
 
 
 # --------------------------------------------------------------------------- #

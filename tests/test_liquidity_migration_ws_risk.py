@@ -672,6 +672,106 @@ def test_ws_risk_ws_exit_splits_close_when_position_exceeds_max_mkt_qty(tmp_path
     assert suffixes == ["0", "1"], suffixes
 
 
+def test_ws_risk_split_ws_close_aggregates_fee_and_weighted_gross_return(tmp_path: Path) -> None:
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": "t1",
+                    "symbol": "SUPERUSDT",
+                    "side": "short",
+                    "status": "open",
+                    "qty": "3",
+                    "entry_price": 100.0,
+                    "notional_usdt": 300.0,
+                    "equity_usdt": 1_000.0,
+                    "stop_price": 112.0,
+                    "take_profit_price": 80.0,
+                    "planned_exit_ts_ms": 9_999_999_999_999,
+                    "qty_step": 1.0,
+                    "max_market_order_qty": 2.0,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    private_client = FakePrivateClient(
+        positions=[
+            {
+                "symbol": "SUPERUSDT",
+                "side": "Sell",
+                "size": "3",
+                "avgPrice": "100",
+                "markPrice": "100",
+                "positionValue": "300",
+                "unrealisedPnl": "0",
+                "stopLoss": "112",
+                "takeProfit": "80",
+            }
+        ]
+    )
+    trade_client = FakeTradeClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="ws",
+            rest_fallback=False,
+            exit_untracked_positions=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=trade_client,
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "SUPERUSDT", "markPrice": "113"}})
+    assert len(trade_client.orders) == 2
+    orders_by_qty = {str(order["qty"]): str(order["orderLinkId"]) for order in trade_client.orders}
+
+    engine.on_execution_message(
+        {
+            "data": [
+                {
+                    "symbol": "SUPERUSDT",
+                    "orderLinkId": orders_by_qty["2"],
+                    "execQty": "2",
+                    "execPrice": "110",
+                    "execValue": "220",
+                    "execFee": "0.20",
+                },
+                {
+                    "symbol": "SUPERUSDT",
+                    "orderLinkId": orders_by_qty["1"],
+                    "execQty": "1",
+                    "execPrice": "120",
+                    "execValue": "120",
+                    "execFee": "0.10",
+                },
+            ]
+        }
+    )
+
+    closed = read_dataset(tmp_path, "event_demo_trades").filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    assert closed["status"] == "closed"
+    # Weighted raw gross return across both close legs:
+    # 2/3 * ((100-110)/100) + 1/3 * ((100-120)/100) = -0.133333...
+    assert float(closed["gross_trade_return"]) == pytest.approx((-0.10 * 2 + -0.20 * 1) / 3)
+    # Return contribution: (-10% * 200/1000) + (-20% * 100/1000).
+    assert float(closed["net_return"]) == pytest.approx(-0.04)
+    assert float(closed["rebalance_realized_return"]) == pytest.approx(-0.04)
+    assert float(closed["exit_fee_usdt"]) == pytest.approx(0.30)
+
+
 def test_ws_risk_execution_stream_partial_fill_reduces_trade_qty(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     private_client = FakePrivateClient(confirm_fills=False)
@@ -1143,6 +1243,90 @@ def test_ws_risk_reconcile_flat_pending_exit_backfills_exit_price_from_closed_pn
     # too — they were previously extracted for price/time only and discarded.
     assert float(closed.select("gross_trade_return").item()) == pytest.approx((100.0 - 112.5) / 100.0)
     assert closed.select("net_return").item() is not None
+
+
+def test_ws_risk_reconcile_flat_pending_exit_preserves_prior_partial_realized_pnl(tmp_path: Path) -> None:
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": "t2",
+                    "symbol": "BBBUSDT",
+                    "side": "short",
+                    "status": "open",
+                    "qty": "2",
+                    "entry_price": 50.0,
+                    "equity_usdt": 10_000.0,
+                    "notional_usdt": 100.0,
+                    "stop_price": 56.0,
+                    "take_profit_price": 40.0,
+                    "planned_exit_ts_ms": 9_999_999_999_999,
+                    # Prior partial close: 1 unit at 55, short gross -10%, weight 0.005.
+                    "rebalance_realized_return": -0.0005,
+                    "rebalance_realized_weight": 0.005,
+                    "rebalance_exit_fee_usdt": 0.01,
+                    "exit_fee_usdt": 0.01,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "lm-rx-BBB-1",
+                    "ts_ms": 9_999_999_999_000,
+                    "trade_id": "t2",
+                    "symbol": "BBBUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "2",
+                    "reduce_only": True,
+                    "submit_mode": "submitted",
+                    "status": "submitted_unconfirmed",
+                    "avg_price": 56.0,
+                    "exit_reason": "stop_loss",
+                    "exit_trigger_ts_ms": 1_700_000_000_000,
+                    "target_qty": "2",
+                    "filled_qty": "",
+                    "fee_usdt": 0.02,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=False,
+        ),
+        private_client=FakePrivateClient(positions=[], confirm_fills=False),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.rest_reconcile()
+
+    closed = read_dataset(tmp_path, "event_demo_trades").filter(pl.col("trade_id") == "t2").to_dicts()[0]
+    assert closed["status"] == "closed"
+    assert float(closed["net_return"]) == pytest.approx(-0.0017)
+    assert float(closed["rebalance_realized_return"]) == pytest.approx(-0.0017)
+    assert float(closed["gross_trade_return"]) == pytest.approx((-0.0005 - 0.0012) / 0.015)
+    assert float(closed["exit_fee_usdt"]) == pytest.approx(0.03)
 
 
 def _submit_exit_engine(tmp_path: Path, trade_client: "FakeTradeClient") -> "EventWebSocketRiskEngine":
@@ -2031,6 +2215,83 @@ def test_ws_risk_stale_tracked_exit_closes_trade_when_exchange_is_flat(tmp_path:
     assert trade["exit_trigger_ts_ms"] == 1_234_567_890
 
 
+def test_ws_risk_aged_pending_tracked_exit_still_tracks_late_ws_fill(tmp_path: Path) -> None:
+    """An old pending tracked exit must remain link-mapped while the trade is open.
+
+    The duplicate-submit guard may age out, but dropping submitted_link_to_trade_id
+    makes a late WS execution for that link look unrelated and silently discards
+    the close.
+    """
+    _write_open_trade(tmp_path)
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "lm-ex-aged",
+                    "ts_ms": 1,
+                    "trade_id": "t1",
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": True,
+                    "submit_mode": "submitted",
+                    "status": "submitted_unconfirmed",
+                    "exit_reason": "stop_loss",
+                    "exit_trigger_ts_ms": 1_234_567_890,
+                    "target_qty": "1",
+                    "filled_qty": "",
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            pending_exit_guard_seconds=1.0,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=FakePrivateClient(confirm_fills=False),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    assert engine.state.submitted_link_to_trade_id["lm-ex-aged"] == "t1"
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+
+    engine.on_execution_message(
+        {
+            "data": [
+                {
+                    "symbol": "AAAUSDT",
+                    "orderLinkId": "lm-ex-aged",
+                    "execQty": "1",
+                    "execPrice": "113",
+                    "execValue": "113",
+                    "execFee": "0.03",
+                }
+            ]
+        }
+    )
+
+    trade = read_dataset(tmp_path, "event_demo_trades").filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    assert trade["status"] == "closed"
+    assert trade["exit_reason"] == "stop_loss"
+    assert float(trade["gross_trade_return"]) == pytest.approx(-0.13)
+    assert float(trade["exit_fee_usdt"]) == pytest.approx(0.03)
+
+
 def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> None:
     private_client = FakePrivateClient(confirm_fills=False)
     engine = EventWebSocketRiskEngine(
@@ -2907,7 +3168,7 @@ def _write_pending_entry_order(root: Path, *, status: str, ts_ms: int) -> None:
     )
 
 
-def test_validate_ws_risk_config_warns_untracked_exit_without_long_root(caplog) -> None:
+def test_validate_ws_risk_config_warns_untracked_exit_without_sibling_roots(caplog) -> None:
     """exit_untracked_positions on a shared account with long_data_root unset
     would force-close the long sleeve's positions. The validator must emit a
     loud warning (it does not raise: a dedicated single-sleeve account is a
@@ -2916,7 +3177,11 @@ def test_validate_ws_risk_config_warns_untracked_exit_without_long_root(caplog) 
 
     from liquidity_migration.ws_risk import _validate_ws_risk_config
 
-    def _cfg(long_root: str, continuous_root: str = "") -> EventWebSocketRiskConfig:
+    def _cfg(
+        long_root: str,
+        continuous_root: str = "",
+        continuous_addon_root: str = "",
+    ) -> EventWebSocketRiskConfig:
         return EventWebSocketRiskConfig(
             submit_orders=False,  # keep validate_order_submit_allowed a no-op
             order_submit_mode="rest",
@@ -2928,25 +3193,34 @@ def test_validate_ws_risk_config_warns_untracked_exit_without_long_root(caplog) 
             exit_untracked_positions=True,
             long_data_root=long_root,
             continuous_data_root=continuous_root,
+            continuous_addon_data_root=continuous_addon_root,
         )
 
-    # No sibling roots -> warns (would flatten BOTH the long + continuous sleeves).
+    # No sibling roots -> warns (would flatten long / continuous / add-on sleeves).
     with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
         _validate_ws_risk_config(_cfg(""))
     assert any("exit_untracked_positions=ON" in r.message for r in caplog.records)
+    assert any("continuous_addon_data_root" in r.message for r in caplog.records)
 
-    # Long set but continuous still unset -> STILL warns (continuous positions
+    # Long + continuous set but add-on still unset -> STILL warns (add-on positions
     # would be flattened as untracked on the shared account).
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
-        _validate_ws_risk_config(_cfg("data/bybit-long-demo-event"))
-    assert any("exit_untracked_positions=ON" in r.message for r in caplog.records)
-
-    # BOTH sibling roots set (fully multi-sleeve aware) -> no warning.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
         _validate_ws_risk_config(
             _cfg("data/bybit-long-demo-event", "data/bybit-continuous-demo-event")
+        )
+    assert any("exit_untracked_positions=ON" in r.message for r in caplog.records)
+    assert any("continuous_addon_data_root" in r.message for r in caplog.records)
+
+    # All sibling roots set (fully multi-sleeve aware) -> no warning.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
+        _validate_ws_risk_config(
+            _cfg(
+                "data/bybit-long-demo-event",
+                "data/bybit-continuous-demo-event",
+                "data/bybit-continuous-addon-demo-event",
+            )
         )
     assert not any("exit_untracked_positions=ON" in r.message for r in caplog.records)
 

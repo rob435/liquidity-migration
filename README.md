@@ -1,39 +1,31 @@
 # liquidity-migration
 
-A research codebase for crypto-perp trading systems. Two systems remain:
+Research and demo/paper execution code for two remaining crypto-perp systems:
 
-- **Continuous fade book** - the live demo system, research-stage only.
-- **Long-native v11a sleeve** - promoted-in-code for demo/paper only, currently
-  toggled on in `deploy/sleeves.env`.
+- `continuous_ensemble_v2`: continuous fade book.
+- `LongV11aDivWeekendVol`: long-native v11a sleeve.
 
-The original daily SHORT strategy was erased from the system on 2026-06-11 by
-operator order. Git history is the archive.
+The old daily short sleeve is gone; git history is the archive. The runtime
+surface defaults to demo/paper. Mainnet use requires an explicit owner action
+and a fresh evidence pack.
 
-## Status
+## Read First
 
-Nothing is approved for real money. Forward demo/paper, both venues, and the
-real-money gate in [STATE.md](STATE.md) are the arbiter.
+- [STATE.md](STATE.md) - live state and immediate next work.
+- [docs/research_summary.md](docs/research_summary.md) - compact decision log.
+- [docs/promoted_trading_logic.md](docs/promoted_trading_logic.md) - active
+  profile lifecycle and runtime env boundary.
+- [docs/preregistration/INDEX.md](docs/preregistration/INDEX.md) - active
+  anchors and closed research arcs.
 
-Read first:
+## Map
 
-- [STATE.md](STATE.md) - live state, open operator decisions, decision rules.
-- [docs/research_summary.md](docs/research_summary.md) - current research
-  decisions, failure ledger, and revisit queue.
-- [docs/promoted_trading_logic.md](docs/promoted_trading_logic.md) - full
-  demo/paper lifecycle for the promoted-in-code continuous and long sleeves.
-
-## Repository Map
-
-- `liquidity_migration/` - package, data ingestion, PIT builders, strategy
-  engines, execution helpers, and `python -m liquidity_migration`.
-- `scripts/` - runtime helpers, deploy/reconcile tools, data builders, and a
-  smaller set of active research drivers.
+- `liquidity_migration/` - package, PIT/data builders, strategy engines,
+  execution helpers, and `python -m liquidity_migration`.
+- `scripts/` - deploy, reconcile, data, equity, and active research tools.
 - `tests/` - pytest suite.
-- `docs/backtesting_errors_we_never_repeat.md` - methodology standard.
-- `docs/data_roots.md` - research/live/OOS data-root contract.
-- `docs/preregistration/` - only active/binding receipts.
-- `.codex/skills/` - Codex project skills.
-- `.claude/` - Claude Code memory, skills, and the local MCP server.
-- `AGENTS.md` - repo rules.
+- `docs/` - methodology, data-root contracts, and compact research state.
+- `.codex/skills/` - Codex project workflows.
+- `.claude/` - Claude memory, skills, and local MCP server.
 
 Python 3.11+.

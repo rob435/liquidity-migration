@@ -1,19 +1,11 @@
-"""Live upper_wick entry-sizing for the continuous demo book (operator override 2026-06-20).
+"""Flag-off live upper_wick helper retained after a withdrawn sizing attempt.
 
-Receipt: docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md
+Live<->backtest parity exposed that the apparent Bybit full-ledger lift was a
+duplicate-counting artifact; corrected one-observation-per-decision validation
+failed. This module remains only as disabled audit plumbing and as a starting
+point for future explicitly registered wick research.
 
-Activates the vol-gated upper_wick entry-quality tilt in the LIVE demo book. At each entry
-it fetches the trailing-120m 1m klines from the exchange, computes (upper_wick_mean, rv_30)
-through the SHARED canonical function (continuous_entry_sizing.upper_wick_and_rv_from_ohlc —
-identical to the research backtest), and applies the SHARED causal multiplier
-(upperwick_size_mult) using a per-symbol expanding history.
-
-The per-symbol history is WARM-STARTED from the research trade history (the state the book
-would have had if it had been tilting since inception — the repo's warm-started-state rule),
-then extended with the book's own live entries. State persists to a self-contained parquet
-under the demo data root (NOT the trade ledger, so the ledger schema is unchanged).
-Data-source parity (archive 1m vs exchange REST 1m upper_wick) was reconciled to mean
-|diff| ~0.007 before activation. ``REAL_MONEY`` stays false.
+When disabled, callers return 1.0 and the live book is unchanged.
 """
 from __future__ import annotations
 
@@ -72,7 +64,7 @@ def fetch_upper_wick_rv(
 
 
 class UpperwickLiveSizer:
-    """Per-symbol causal upper_wick history + multiplier, persisted under the demo data root."""
+    """Per-symbol causal upper_wick history + multiplier for disabled audit plumbing."""
 
     def __init__(
         self,

@@ -20,9 +20,11 @@ These tests FAIL against the old code and PASS with the fix.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import zipfile
 
 import polars as pl
 
@@ -109,6 +111,47 @@ def test_cache_cutoff_protects_just_closed_month_in_publish_lag():
     # Well past the lag window -> cutoff is just the current month.
     mid = datetime(2026, 6, 20, tzinfo=timezone.utc)
     assert _mod._cache_cutoff_month(mid) == "2026-06"
+
+
+def test_vision_rows_preserve_missing_or_nonpositive_interval_as_null(tmp_path):
+    cache = tmp_path / "_funding_rebuild_cache"
+    cache.mkdir()
+    symbol = "ALTUSDT"
+    month = "2026-05"
+    cpath = cache / f"{symbol}-{month}.zip"
+    csv_text = "\n".join(
+        [
+            "calc_time,last_funding_rate,funding_interval_hours",
+            "1000,0.0001,4",
+            "2000,0.0002,",
+            "3000,0.0003,0",
+            "4000,0.0004,0.0",
+            "5000,0.0005,-1",
+        ]
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(f"{symbol}-fundingRate-{month}.csv", csv_text)
+    cpath.write_bytes(buf.getvalue())
+
+    rows = _mod._month_rows(symbol, month, cache, "2026-06")
+
+    assert [r["funding_interval_min"] for r in rows] == [240, None, None, None, None]
+    assert all(r["funding_interval_min"] != 480 for r in rows)
+
+
+def test_fapi_topup_preserves_missing_interval_metadata(monkeypatch):
+    since_ms = 1_700_000_000_000
+
+    def fake_fetch(url: str, timeout: int = 30):
+        st = int(url.split("startTime=")[1].split("&")[0])
+        return _make_page(st, 2)
+
+    monkeypatch.setattr(_mod, "_fetch", fake_fetch)
+
+    rows = _mod._fapi_topup("BTCUSDT", since_ms)
+
+    assert [r["funding_interval_min"] for r in rows] == [None, None]
 
 
 # --------------------------------------------------------------------------- #

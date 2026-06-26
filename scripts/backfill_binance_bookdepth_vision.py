@@ -73,6 +73,23 @@ def _days(first: str, last: str) -> list[str]:
     return out
 
 
+def _missing_days_from_csv(path: Path) -> dict[str, list[str]]:
+    frame = pl.read_csv(path)
+    missing = {"symbol", "date"} - set(frame.columns)
+    if missing:
+        raise ValueError(f"missing required column(s) in {path}: {sorted(missing)}")
+    rows = (
+        frame.select([pl.col("symbol").cast(pl.String), pl.col("date").cast(pl.String)])
+        .drop_nulls(["symbol", "date"])
+        .unique()
+        .sort(["symbol", "date"])
+    )
+    out: dict[str, list[str]] = {}
+    for row in rows.iter_rows(named=True):
+        out.setdefault(str(row["symbol"]), []).append(str(row["date"]))
+    return out
+
+
 def _fetch(url: str, timeout: int = 30) -> bytes | None:
     req = urllib.request.Request(url, headers={"User-Agent": "liqmig-bookdepth-backfill"})
     for attempt in range(4):
@@ -144,6 +161,16 @@ def _day_rows(symbol: str, day: str) -> list[dict] | None | object:
     return rows
 
 
+def _bookdepth_frame(rows: list[dict]) -> pl.DataFrame:
+    schema = {"symbol": pl.String, "hour": pl.String, "percentage": pl.String,
+              "depth_mean": pl.Float64, "notional_mean": pl.Float64,
+              "depth_last": pl.Float64, "notional_last": pl.Float64, "n_snaps": pl.Int64}
+    return pl.DataFrame(rows, schema=schema).with_columns(
+        (pl.col("hour") + ":00:00").str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False)
+        .dt.replace_time_zone("UTC").dt.epoch("ms").alias("ts_ms")
+    ).drop_nulls("ts_ms").sort(["ts_ms", "percentage"])
+
+
 def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -> dict:
     rows: list[dict] = []
     miss = 0          # genuine 404 / no-data days
@@ -163,13 +190,7 @@ def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -
     # resume guard in main() skips a symbol only when complete (backfill-writers-2).
     complete = transient == 0
     if rows:
-        schema = {"symbol": pl.String, "hour": pl.String, "percentage": pl.String,
-                  "depth_mean": pl.Float64, "notional_mean": pl.Float64,
-                  "depth_last": pl.Float64, "notional_last": pl.Float64, "n_snaps": pl.Int64}
-        df = pl.DataFrame(rows, schema=schema).with_columns(
-            (pl.col("hour") + ":00:00").str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False)
-            .dt.replace_time_zone("UTC").dt.epoch("ms").alias("ts_ms")
-        ).drop_nulls("ts_ms").sort(["ts_ms", "percentage"])
+        df = _bookdepth_frame(rows)
         df.write_parquet(out_dir / f"{symbol}.parquet")
         return {"symbol": symbol, "rows": df.height, "days_404": miss,
                 "transient_fail": transient, "complete": complete}
@@ -184,6 +205,68 @@ def backfill_symbol(symbol: str, days: list[str], out_dir: Path, workers: int) -
             "transient_fail": 0, "complete": True}
 
 
+def backfill_symbol_missing_days(symbol: str, days: list[str], out_dir: Path, workers: int) -> dict:
+    requested_days = sorted(set(days))
+    rows: list[dict] = []
+    miss = 0
+    transient = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_day_rows, symbol, d): d for d in requested_days}
+        for fut in as_completed(futs):
+            r = fut.result()
+            if r is _TRANSIENT_DAY:
+                transient += 1
+            elif r is None:
+                miss += 1
+            else:
+                rows.extend(r)
+
+    complete = transient == 0
+    path = out_dir / f"{symbol}.parquet"
+    rows_fetched = 0
+    rows_after_merge = 0
+    if rows:
+        new_df = _bookdepth_frame(rows)
+        rows_fetched = int(new_df.height)
+        frames = []
+        if path.exists() and path.stat().st_size > 0:
+            old_df = pl.read_parquet(path)
+            old_keep = old_df.filter(~pl.col("hour").str.slice(0, 10).is_in(requested_days))
+            frames.append(old_keep)
+        frames.append(new_df)
+        merged = (
+            pl.concat(frames, how="diagonal_relaxed")
+            .unique(subset=["symbol", "hour", "percentage"], keep="last")
+            .sort(["ts_ms", "percentage"])
+        )
+        merged.write_parquet(path)
+        rows_after_merge = int(merged.height)
+    elif path.exists() and path.stat().st_size > 0:
+        rows_after_merge = int(pl.scan_parquet(path).select(pl.len()).collect().item())
+
+    return {
+        "symbol": symbol,
+        "days_requested": len(requested_days),
+        "rows_fetched": rows_fetched,
+        "rows_after_merge": rows_after_merge,
+        "days_404": miss,
+        "transient_fail": transient,
+        "complete": complete,
+    }
+
+
+def _missing_day_request_complete(prior: object, days: list[str], out_dir: Path) -> bool:
+    if not isinstance(prior, dict):
+        return False
+    if prior.get("complete") is not True:
+        return False
+    prior_days = {str(day) for day in prior.get("requested_days", [])}
+    requested_days = set(days)
+    if not requested_days or not requested_days.issubset(prior_days):
+        return False
+    return (out_dir / f"{prior.get('symbol')}.parquet").exists()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=str(Path.home() / "SHARED_DATA" / "binance_full_pit"))
@@ -192,13 +275,76 @@ def main() -> int:
     ap.add_argument("--symbols")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--shard", help="i/N: process every N-th symbol starting at i (per-shard manifest)")
+    ap.add_argument("--missing-days-csv", help="CSV with symbol,date rows to fetch and merge into existing parquets")
+    ap.add_argument("--dry-run", action="store_true", help="summarize planned missing-day work without fetching/writing")
     args = ap.parse_args()
     root = Path(args.root).expanduser()
     out_dir = root / "binance_usdm_bookdepth_1h"
-    out_dir.mkdir(exist_ok=True)
     shard_i, shard_n = (0, 1)
     if args.shard:
         shard_i, shard_n = (int(x) for x in args.shard.split("/"))
+
+    if args.missing_days_csv:
+        missing_days = _missing_days_from_csv(Path(args.missing_days_csv).expanduser())
+        if args.symbols:
+            wanted = {s.strip() for s in args.symbols.split(",") if s.strip()}
+            missing_days = {s: days for s, days in missing_days.items() if s in wanted}
+        todo_days = sorted(missing_days.items())
+        if shard_n > 1:
+            todo_days = [t for j, t in enumerate(todo_days) if j % shard_n == shard_i]
+        if args.limit:
+            todo_days = todo_days[: args.limit]
+        planned_days = sum(len(days) for _, days in todo_days)
+        if args.dry_run:
+            print(
+                json.dumps(
+                    {
+                        "mode": "missing_days",
+                        "dry_run": True,
+                        "manifest": str(Path(args.missing_days_csv).expanduser()),
+                        "symbols": len(todo_days),
+                        "symbol_days": planned_days,
+                        "shard": f"{shard_i}/{shard_n}",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            return 0
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = out_dir / (f"_missing_day_manifest_{shard_i}.json" if args.shard else "_missing_day_manifest.json")
+        manifest: dict = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+        runnable_days = [
+            (s, days)
+            for s, days in todo_days
+            if not _missing_day_request_complete(manifest.get(s), days, out_dir)
+        ]
+        runnable_symbol_days = sum(len(days) for _, days in runnable_days)
+        skipped_symbols = len(todo_days) - len(runnable_days)
+        print(
+            f"missing symbol-days todo: {runnable_symbol_days} across {len(runnable_days)} symbols "
+            f"(planned {planned_days} across {len(todo_days)}; skipped complete {skipped_symbols})",
+            flush=True,
+        )
+        for i, (s, days) in enumerate(runnable_days, 1):
+            st = backfill_symbol_missing_days(s, days, out_dir, args.workers)
+            prior = manifest.get(s)
+            prior_days = set(prior.get("requested_days", [])) if isinstance(prior, dict) else set()
+            requested_days = sorted(prior_days | set(days))
+            manifest[s] = {**st, "days_requested": len(requested_days), "requested_days": requested_days}
+            manifest_path.write_text(json.dumps(manifest, indent=0))
+            print(
+                f"  [{i}/{len(runnable_days)}] {s}: days={st['days_requested']} "
+                f"rows_fetched={st['rows_fetched']:,} 404s={st['days_404']} "
+                f"transient={st['transient_fail']}",
+                flush=True,
+            )
+        print(f"DONE missing-days: {runnable_symbol_days} fetched symbol-days in {out_dir}", flush=True)
+        return 0
+
+    out_dir.mkdir(exist_ok=True)
     manifest_path = out_dir / (f"_manifest_{shard_i}.json" if args.shard else "_manifest.json")
     manifest: dict = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
 

@@ -1,4 +1,4 @@
-"""Machine registry for promoted-in-code demo/paper strategy objects.
+"""Machine registry for active demo/paper strategy objects.
 
 For the full trading lifecycle (runtime env overrides, entry, sizing, exits,
 paper/demo boundaries, and what the official backtests do or do not reproduce),
@@ -8,14 +8,9 @@ Do not delete it as "stale" without first replacing every importer of
 ``promoted.PROFILES``, ``promoted.long_profile()``, and
 ``promoted.continuous_profile()``.
 
-There are two promoted-in-code sleeves: LONG (v11a) and CONTINUOUS (the deployed
-fade book including the BTC-vol regime-hedge). The daily SHORT sleeve was erased
-from the system by operator order on 2026-06-11.
-
-The CONTINUOUS-fade sleeve was removed from the promoted set on 2026-06-05, then
-re-added on 2026-06-15 by explicit operator override. That was not a demo-arbiter
-gate pass. It is demo/paper only; ``REAL_MONEY`` stays false and the Tier-3
-real-money gate is unmet.
+There are two active registry sleeves: LONG (v11a) and CONTINUOUS (the fade book
+including the BTC-vol regime-hedge). The daily SHORT sleeve was erased from the
+system on 2026-06-11.
 
 Historical continuous research candidates do not live here. Keep them in
 receipts, reports, or git history so this registry cannot be mistaken for a

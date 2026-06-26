@@ -24,6 +24,8 @@ import json
 import zipfile
 from pathlib import Path
 
+import polars as pl
+
 _REPO = Path(__file__).resolve().parent.parent
 
 
@@ -198,6 +200,135 @@ def test_backfill_partial_transient_keeps_rows_but_incomplete(tmp_path, monkeypa
     assert st["transient_fail"] == 1
     assert st["complete"] is False  # incomplete -> re-runnable
     assert (out_dir / "CCCUSDT.parquet").exists()  # rows preserved, not clobbered
+
+
+def test_backfill_missing_days_merges_existing_symbol_parquet(tmp_path, monkeypatch) -> None:
+    """The manifest-driven top-up fetches only listed days, replaces those dates in
+    the existing symbol parquet, and preserves unrelated dates."""
+    bf = _load_backfill_bookdepth()
+    out_dir = tmp_path / "bookdepth"
+    out_dir.mkdir()
+    old = bf._bookdepth_frame(
+        [
+            {"symbol": "AAAUSDT", "hour": "2024-01-01 00", "percentage": "1",
+             "depth_mean": 1.0, "notional_mean": 2.0, "depth_last": 1.0,
+             "notional_last": 2.0, "n_snaps": 1},
+            {"symbol": "AAAUSDT", "hour": "2024-01-02 00", "percentage": "1",
+             "depth_mean": 10.0, "notional_mean": 20.0, "depth_last": 10.0,
+             "notional_last": 20.0, "n_snaps": 1},
+        ]
+    )
+    old.write_parquet(out_dir / "AAAUSDT.parquet")
+
+    def _day_rows(symbol, day):
+        if day == "2024-01-02":
+            return [{"symbol": symbol, "hour": "2024-01-02 00", "percentage": "1",
+                     "depth_mean": 30.0, "notional_mean": 40.0, "depth_last": 30.0,
+                     "notional_last": 40.0, "n_snaps": 1}]
+        return None
+
+    monkeypatch.setattr(bf, "_day_rows", _day_rows)
+    st = bf.backfill_symbol_missing_days("AAAUSDT", ["2024-01-02", "2024-01-03"], out_dir, workers=1)
+    rows = pl.read_parquet(out_dir / "AAAUSDT.parquet").sort(["hour", "percentage"]).to_dicts()
+
+    assert st["days_requested"] == 2
+    assert st["rows_fetched"] == 1
+    assert st["days_404"] == 1
+    assert st["complete"] is True
+    assert [(row["hour"], row["depth_mean"]) for row in rows] == [
+        ("2024-01-01 00", 1.0),
+        ("2024-01-02 00", 30.0),
+    ]
+
+
+def test_main_missing_days_dry_run_does_not_touch_root(tmp_path, monkeypatch, capsys) -> None:
+    """Dry-run plans deduped symbol-days without fetching or creating the output root."""
+    bf = _load_backfill_bookdepth()
+    manifest = tmp_path / "missing_days.csv"
+    manifest.write_text(
+        "symbol,date\nAAAUSDT,2024-01-02\nAAAUSDT,2024-01-02\nBBBUSDT,2024-01-03\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "binance_full_pit"
+
+    def _should_not_fetch(*_args, **_kwargs):
+        raise AssertionError("dry-run should not fetch")
+
+    monkeypatch.setattr(bf, "_day_rows", _should_not_fetch)
+    monkeypatch.setattr(
+        bf.sys,
+        "argv",
+        ["prog", "--root", str(root), "--missing-days-csv", str(manifest), "--dry-run"],
+    )
+    rc = bf.main()
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out["mode"] == "missing_days"
+    assert out["dry_run"] is True
+    assert out["symbols"] == 2
+    assert out["symbol_days"] == 2
+    assert not (root / "binance_usdm_bookdepth_1h").exists()
+
+
+def test_main_missing_days_resume_skips_complete_symbols(tmp_path, monkeypatch, capsys) -> None:
+    """A completed missing-day request is resume-skipped; incomplete symbols rerun."""
+    bf = _load_backfill_bookdepth()
+    manifest_csv = tmp_path / "missing_days.csv"
+    manifest_csv.write_text(
+        "symbol,date\nAAAUSDT,2024-01-02\nBBBUSDT,2024-01-03\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "binance_full_pit"
+    out_dir = root / "binance_usdm_bookdepth_1h"
+    out_dir.mkdir(parents=True)
+    (out_dir / "AAAUSDT.parquet").touch()
+    (out_dir / "_missing_day_manifest.json").write_text(
+        json.dumps(
+            {
+                "AAAUSDT": {
+                    "symbol": "AAAUSDT",
+                    "requested_days": ["2024-01-01", "2024-01-02"],
+                    "complete": True,
+                },
+                "BBBUSDT": {
+                    "symbol": "BBBUSDT",
+                    "requested_days": ["2024-01-02"],
+                    "complete": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen: list[tuple[str, list[str]]] = []
+
+    def _fake_backfill(symbol, days, out, workers):
+        seen.append((symbol, days))
+        return {
+            "symbol": symbol,
+            "days_requested": len(days),
+            "rows_fetched": 0,
+            "rows_after_merge": 0,
+            "days_404": 1,
+            "transient_fail": 0,
+            "complete": True,
+        }
+
+    monkeypatch.setattr(bf, "backfill_symbol_missing_days", _fake_backfill)
+    monkeypatch.setattr(
+        bf.sys,
+        "argv",
+        ["prog", "--root", str(root), "--missing-days-csv", str(manifest_csv), "--workers", "1"],
+    )
+    rc = bf.main()
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert seen == [("BBBUSDT", ["2024-01-03"])]
+    assert "skipped complete 1" in out
+    updated = json.loads((out_dir / "_missing_day_manifest.json").read_text(encoding="utf-8"))
+    assert updated["BBBUSDT"]["days_requested"] == 2
+    assert updated["BBBUSDT"]["requested_days"] == ["2024-01-02", "2024-01-03"]
 
 
 # ---------------------------------------------------------------------------

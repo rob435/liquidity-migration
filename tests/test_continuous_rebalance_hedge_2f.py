@@ -1,6 +1,4 @@
-"""Two-leg (BTC+ETH) hedge tests for the continuous rebalance engine (Stage-B 2026-06-10).
-
-Pre-registered in docs/preregistration/continuous-hedge-2f-engine-2026-06-10.md.
+"""Two-leg (BTC+ETH) hedge tests for the continuous rebalance engine.
 Covers: unchanged unhedged/single-leg paths, per-leg causality, joint cap
 proportionality, collinearity fallback, warm-start, accounting identity,
 gap close/reopen, and live-twin parity.

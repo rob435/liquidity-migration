@@ -1,35 +1,36 @@
-# Pre-registration: <change name>
+# Pre-Registration: <change>
 
-**Date:** YYYY-MM-DD
-**Author:** <handle>
-**Stage:** proposed | run-pending | run-complete | rejected | accepted | EXPLORATORY
+Date: YYYY-MM-DD
+Stage: proposed | run-pending | run-complete | rejected | accepted | EXPLORATORY
 
-## What's changing
-Single sentence. e.g. "Lower fc_sigma_mult from 2.5 to 2.0 on v11a."
+## Change
+
+One sentence.
 
 ## Hypothesis
-Why this might work — specific mechanism, not "should improve Sharpe".
 
-## Predicted direction + magnitude
-- Sharpe Δ: +/- range
-- Trade count Δ: +/- N
-- Failure mode if hypothesis wrong: what would falsify
+Mechanism and expected direction.
 
-## Roots that will be touched
-- [ ] bybit_full_pit (per-venue working dataset)
-- [ ] binance_full_pit (per-venue working dataset)
-- [ ] forward demo/paper (always, by virtue of being live)
+## Data
 
-## Decision rule (a priori)
-"If post-run Sharpe Δ < +0.3 on either venue OR sign flips between venues, reject."
+- Roots:
+- Window:
+- PIT/cost/funding assumptions:
 
-## Run command
+## Decision Rule
+
+Reject / accept / inconclusive thresholds before results are known.
+
+## Command
+
 ```bash
-... exact CLI ...
+...
 ```
 
-## Post-run results
-(fill in after run; include report paths + commit SHA at which the runs landed)
+## Artifacts
 
-## Verdict
-accepted | rejected | inconclusive — with one-paragraph why.
+Expected output paths.
+
+## Result
+
+Headline metrics, artifact paths, verdict, commit SHA if relevant.

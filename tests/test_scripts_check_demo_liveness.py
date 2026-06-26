@@ -642,6 +642,49 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
     assert M._default_root("data/x") == str(REPO_ROOT / "data/x")
 
 
+def test_depth_collector_unit_monitored_only_when_operator_enabled(monkeypatch) -> None:
+    unit = "liquidity-migration-depth-collector.service"
+    monkeypatch.setattr(M, "_unit_enabled", lambda name: name == unit)
+
+    units = M._default_units_for_toggles()
+
+    assert unit in units
+
+    monkeypatch.setattr(M, "_unit_enabled", lambda _name: False)
+
+    assert unit not in M._default_units_for_toggles()
+
+
+def test_depth_capture_stale_alert_is_gated_by_enabled_collector(tmp_path, monkeypatch) -> None:
+    import os
+
+    unit = "liquidity-migration-depth-collector.service"
+    now_ms = 1_000 * HOUR
+    root = tmp_path / "depth"
+    bybit = root / "bybit"
+    bybit.mkdir(parents=True)
+    path = bybit / "2026-06-24.jsonl"
+    path.write_text("{}\n")
+    stale_s = (now_ms - 6 * HOUR) / 1000.0
+    os.utime(path, (stale_s, stale_s))
+
+    monkeypatch.setattr(M, "_unit_enabled", lambda _name: False)
+
+    assert M.gather_depth_capture_alerts(depth_root=root, now_ms=now_ms, max_age_hours=3) == []
+
+    monkeypatch.setattr(M, "_unit_enabled", lambda name: name == unit)
+
+    alerts = M.gather_depth_capture_alerts(depth_root=root, now_ms=now_ms, max_age_hours=3)
+    assert len(alerts) == 1
+    assert alerts[0].key == "depth_capture_stale"
+    assert alerts[0].severity == M.WARNING
+    assert "Bybit book history is unbuyable" in alerts[0].message
+
+    fresh_s = (now_ms - 10 * MIN) / 1000.0
+    os.utime(path, (fresh_s, fresh_s))
+    assert M.gather_depth_capture_alerts(depth_root=root, now_ms=now_ms, max_age_hours=3) == []
+
+
 def test_silent_venue_caught_while_sibling_keeps_root_fresh(tmp_path) -> None:
     """liquidation-collector-3: a binance leg that wrote before but went silent must
     page even while a healthy bybit leg keeps the WHOLE-ROOT mtime fresh. A whole-root

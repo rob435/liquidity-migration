@@ -1316,6 +1316,11 @@ class EventWebSocketRiskEngine:
         )
         delta_weight = _ratio_or_zero(abs(delta_qty * entry_price), trade.get("equity_usdt"))
         prior_realized = _float(trade.get("rebalance_realized_return"))
+        prior_realized_weight = _float(trade.get("rebalance_realized_weight"))
+        current_fee_usdt = fee_usdt or _float(order.get("fee_usdt"))
+        prior_exit_fee_usdt = _float(trade.get("rebalance_exit_fee_usdt")) or _float(trade.get("exit_fee_usdt"))
+        if current_fee_usdt > 0.0:
+            order["fee_usdt"] = current_fee_usdt
         if fully_filled:
             # A closed trade must carry gross_trade_return and net_return — the
             # ws-stream close is the STEADY-STATE close path under
@@ -1329,17 +1334,23 @@ class EventWebSocketRiskEngine:
             # single-leg close prior_realized is 0.0 and this reduces to the
             # historical gross*weight, so a non-partial close is unchanged.
             final_realized = prior_realized + gross_trade_return * delta_weight
+            final_realized_weight = prior_realized_weight + delta_weight
+            if final_realized_weight > 0.0:
+                gross_trade_return = final_realized / final_realized_weight
+            exit_fee_usdt = prior_exit_fee_usdt + current_fee_usdt
             trade.update(
                 {
                     "status": "closed",
                     "exit_ts_ms": now_ms,
                     "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
                     "exit_price": exit_price,
-                    "exit_fee_usdt": fee_usdt or _float(order.get("fee_usdt")),
+                    "exit_fee_usdt": exit_fee_usdt,
                     "exit_exec_time_ms": now_ms,
                     "gross_trade_return": gross_trade_return,
                     "net_return": final_realized,
                     "rebalance_realized_return": final_realized,
+                    "rebalance_realized_weight": final_realized_weight,
+                    "rebalance_exit_fee_usdt": exit_fee_usdt,
                     "exit_reason": exit_reason,
                     "exit_order_link_id": order_link_id,
                     "exit_order_id": order.get("order_id", ""),
@@ -1363,12 +1374,17 @@ class EventWebSocketRiskEngine:
             # partial rows must be done in continuous_demo (a file this engine does
             # not own).
             realized_so_far = prior_realized + delta_gross_return * delta_weight
+            realized_weight_so_far = prior_realized_weight + delta_weight
+            exit_fee_so_far = prior_exit_fee_usdt + current_fee_usdt
             trade.update(
                 {
                     "status": "open",
                     "qty": _quantity_text(remaining_qty),
                     "notional_usdt": abs(entry_price * remaining_qty),
                     "rebalance_realized_return": realized_so_far,
+                    "rebalance_realized_weight": realized_weight_so_far,
+                    "rebalance_exit_fee_usdt": exit_fee_so_far,
+                    "exit_fee_usdt": exit_fee_so_far,
                     "partial_exit_order_link_id": order_link_id,
                     "partial_exit_order_id": order.get("order_id", ""),
                     "partial_exit_price": exit_price,
@@ -2511,11 +2527,28 @@ class EventWebSocketRiskEngine:
                     # were previously extracted for price/time only and the PnL
                     # was discarded — the closed row carried no gross/net return
                     # (round 4).
+                    prior_realized = _float(trade.get("rebalance_realized_return"))
+                    prior_weight = _float(trade.get("rebalance_realized_weight"))
+                    prior_fee = _float(trade.get("rebalance_exit_fee_usdt")) or _float(trade.get("exit_fee_usdt"))
+                    backfill_gross = _float(backfill.get("gross_trade_return"))
+                    backfill_net = _float(backfill.get("net_return"))
+                    backfill_weight = (
+                        abs(backfill_net / backfill_gross)
+                        if abs(backfill_gross) > 1e-12
+                        else _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
+                    )
+                    final_net = prior_realized + backfill_net
+                    final_weight = prior_weight + backfill_weight
+                    final_gross = final_net / final_weight if final_weight > 0.0 else backfill_gross
+                    final_fee = prior_fee + _float(backfill.get("exit_fee_usdt"))
                     pnl_fields = {
-                        "exit_fee_usdt": _float(backfill.get("exit_fee_usdt")),
+                        "exit_fee_usdt": final_fee,
                         "exit_exec_time_ms": int(backfill.get("exit_exec_time_ms") or 0),
-                        "gross_trade_return": _float(backfill.get("gross_trade_return")),
-                        "net_return": _float(backfill.get("net_return")),
+                        "gross_trade_return": final_gross,
+                        "net_return": final_net,
+                        "rebalance_realized_return": final_net,
+                        "rebalance_realized_weight": final_weight,
+                        "rebalance_exit_fee_usdt": final_fee,
                     }
             if not pnl_fields and close_exit_price > 0.0:
                 # No backfill ran (the recovered order carried a usable
@@ -2527,11 +2560,21 @@ class EventWebSocketRiskEngine:
                     if entry_price > 0.0
                     else 0.0
                 )
+                current_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
+                prior_realized = _float(trade.get("rebalance_realized_return"))
+                prior_weight = _float(trade.get("rebalance_realized_weight"))
+                prior_fee = _float(trade.get("rebalance_exit_fee_usdt")) or _float(trade.get("exit_fee_usdt"))
+                net_return = prior_realized + gross_trade_return * current_weight
+                realized_weight = prior_weight + current_weight
+                if realized_weight > 0.0:
+                    gross_trade_return = net_return / realized_weight
                 pnl_fields = {
-                    "exit_fee_usdt": _float(order.get("fee_usdt")),
+                    "exit_fee_usdt": prior_fee + _float(order.get("fee_usdt")),
                     "gross_trade_return": gross_trade_return,
-                    "net_return": gross_trade_return
-                    * _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt")),
+                    "net_return": net_return,
+                    "rebalance_realized_return": net_return,
+                    "rebalance_realized_weight": realized_weight,
+                    "rebalance_exit_fee_usdt": prior_fee + _float(order.get("fee_usdt")),
                 }
             trade.update(
                 {
@@ -2698,12 +2741,19 @@ class EventWebSocketRiskEngine:
             if str(row.get("status", "")) not in PENDING_ORDER_STATUSES:
                 continue
             ts_ms = int(row.get("ts_ms") or 0)
-            if ts_ms > 0 and max_age_ms > 0 and now_ms - ts_ms > max_age_ms:
+            aged_out = ts_ms > 0 and max_age_ms > 0 and now_ms - ts_ms > max_age_ms
+            if aged_out and not trade_id:
                 continue
             if trade_id:
+                # Keep the link->trade mapping even after the duplicate-submit
+                # guard ages out. A delayed private-WS execution for an old
+                # reduce-only exit can still arrive while the trade is open; if
+                # we drop this mapping, record_tracked_exit_stream_fill treats
+                # that fill as unrelated and silently loses the close.
                 self.state.submitted_link_to_trade_id[link] = trade_id
             self.state.submitted_link_submit_mode[link] = str(row.get("submit_mode") or "submitted")
-            self.mark_submitted_symbol(symbol, now_ms=ts_ms or now_ms)
+            if not aged_out:
+                self.mark_submitted_symbol(symbol, now_ms=ts_ms or now_ms)
             if link not in loaded_order_links:
                 self._record_orders([dict(row)])
                 loaded_order_links.add(link)
@@ -3189,14 +3239,24 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
         raise ValueError("pending_exit_guard_seconds must be non-negative")
     if config.exit_untracked_positions and config.order_submit_mode == "ws" and not config.rest_fallback:
         raise ValueError("exit_untracked_positions requires REST fallback in Bybit demo mode")
-    if config.exit_untracked_positions and (not config.long_data_root or not config.continuous_data_root):
+    if config.exit_untracked_positions and (
+        not config.long_data_root
+        or not config.continuous_data_root
+        or not config.continuous_addon_data_root
+    ):
         # exit_untracked_positions flattens any Bybit position not found in this engine's ledger(s).
         # On the SHARED demo account this engine must read EVERY sleeve's ledger (short + long +
-        # continuous) or a sibling sleeve's open positions look untracked and get force-closed. Warn
-        # per missing root; the launch script hard-fails the shared-account combination.
-        missing = [name for name, present in
-                   (("long_data_root", config.long_data_root), ("continuous_data_root", config.continuous_data_root))
-                   if not present]
+        # continuous + continuous add-on) or a sibling sleeve's open positions look
+        # untracked and get force-closed. Warn per missing root; the launch script
+        # hard-fails the shared-account combination.
+        missing = [
+            name for name, present in (
+                ("long_data_root", config.long_data_root),
+                ("continuous_data_root", config.continuous_data_root),
+                ("continuous_addon_data_root", config.continuous_addon_data_root),
+            )
+            if not present
+        ]
         _logger.warning(
             "exit_untracked_positions=ON with %s unset: this engine will FLATTEN any Bybit position "
             "absent from the ledgers it reads. If another sleeve shares this account its positions WILL "

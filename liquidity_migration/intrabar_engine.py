@@ -1,8 +1,6 @@
-"""1m intrabar path resolution for the continuous v2 next-level program.
+"""1m intrabar path resolution for the continuous v2 research program.
 
-Receipt: docs/preregistration/2026-06-20-continuous-v2-intrabar-execution-engine-construction.md
-
-A RESEARCH OVERLAY: it consumes the Wave-1 trade-window 1m cache
+Research overlay: it consumes the Wave-1 trade-window 1m cache
 (``~/SHARED_DATA/continuous_v2_1m``) to re-resolve a trade's exit on the ACTUAL
 1m path instead of the 1h OHLC adverse-first approximation. It does NOT touch the
 deployed forward-replay engine (``trade_lifecycle._simulate_indexed_trade``); it

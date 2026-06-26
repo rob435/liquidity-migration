@@ -25,7 +25,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import polars as pl
+
 _DATE_DIR_RE = re.compile(r"date=(\d{4}-\d{2}-\d{2})")
+_SYMBOL_DIR_RE = re.compile(r"symbol=([^\\/]+)")
 
 MANIFEST_DATASET = "archive_trade_manifest"
 KLINE_DATASET = "klines_1h"
@@ -75,6 +78,77 @@ def _max_partition_date(dataset_dir: Path) -> _dt.date | None:
     return best
 
 
+def _symbol_from_path(path: Path) -> str | None:
+    for part in path.parts:
+        m = _SYMBOL_DIR_RE.fullmatch(part)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _has_parquet(path: Path) -> bool:
+    try:
+        return next(path.rglob("*.parquet"), None) is not None
+    except OSError:
+        return False
+
+
+def _symbols_from_parquet_files(path: Path) -> set[str]:
+    symbols: set[str] = set()
+    try:
+        files = list(path.glob("*.parquet"))
+    except OSError:
+        return symbols
+    for file in files:
+        try:
+            df = pl.read_parquet(file, columns=["symbol"])
+        except Exception:
+            continue
+        for symbol in df.get_column("symbol").drop_nulls().unique().to_list():
+            symbols.add(str(symbol))
+    return symbols
+
+
+def _symbols_on_date(dataset_dir: Path, day: _dt.date) -> set[str]:
+    """Return symbols with at least one parquet partition for ``day``.
+
+    The canonical layout is ``date=YYYY-MM-DD/symbol=SYMBOL``. The recursive
+    fallback keeps the diagnostic compatible with symbol-first layouts without
+    scanning every date on the normal path.
+    """
+    if not dataset_dir.exists():
+        return set()
+    date_name = f"date={day.isoformat()}"
+    symbols: set[str] = set()
+    date_dir = dataset_dir / date_name
+    if date_dir.exists():
+        try:
+            children = list(date_dir.iterdir())
+        except OSError:
+            return set()
+        for child in children:
+            if not child.is_dir() or not child.name.startswith("symbol="):
+                continue
+            if _has_parquet(child):
+                symbol = _symbol_from_path(child)
+                if symbol:
+                    symbols.add(symbol)
+        symbols.update(_symbols_from_parquet_files(date_dir))
+        return symbols
+
+    try:
+        candidates = list(dataset_dir.rglob(date_name))
+    except OSError:
+        return set()
+    for candidate in candidates:
+        if not candidate.is_dir() or not _has_parquet(candidate):
+            continue
+        symbol = _symbol_from_path(candidate)
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
 def _today_utc() -> _dt.date:
     return _dt.datetime.now(_dt.timezone.utc).date()
 
@@ -90,6 +164,19 @@ def latest_signal_trading_day(today: _dt.date | None = None) -> _dt.date:
 
 
 @dataclass(frozen=True)
+class SymbolCoverageLag:
+    symbol: str
+    kline_day: _dt.date
+    manifest_end: _dt.date | None
+
+    @property
+    def lag_days(self) -> int | None:
+        if self.manifest_end is None:
+            return None
+        return (self.kline_day - self.manifest_end).days
+
+
+@dataclass(frozen=True)
 class CoverageStatus:
     data_root: str
     manifest_end: _dt.date | None
@@ -100,6 +187,9 @@ class CoverageStatus:
     manifest_margin_days: int | None
     # kline_end - manifest_end, in days. > 0 means the manifest lags the klines.
     manifest_lag_vs_klines_days: int | None
+    # Symbols with latest-day kline partitions whose manifest coverage is missing
+    # or behind within the recent tail lookback.
+    per_symbol_manifest_lags: tuple[SymbolCoverageLag, ...] = ()
 
     @property
     def manifest_covers_latest_signal(self) -> bool:
@@ -110,18 +200,63 @@ class CoverageStatus:
         """The manifest cannot PIT-validate the most recent daily-close signal."""
         return not self.manifest_covers_latest_signal
 
+    @property
+    def has_per_symbol_manifest_lag(self) -> bool:
+        return bool(self.per_symbol_manifest_lags)
 
-def coverage_status(data_root: str | Path, *, today: _dt.date | None = None) -> CoverageStatus:
+
+def _per_symbol_manifest_lags(
+    *,
+    manifest_dir: Path,
+    kline_dir: Path,
+    kline_day: _dt.date | None,
+    lookback_days: int,
+) -> tuple[SymbolCoverageLag, ...]:
+    if kline_day is None:
+        return ()
+    kline_symbols = _symbols_on_date(kline_dir, kline_day)
+    if not kline_symbols:
+        return ()
+
+    manifest_latest: dict[str, _dt.date] = {}
+    for offset in range(max(1, lookback_days)):
+        day = kline_day - _dt.timedelta(days=offset)
+        for symbol in _symbols_on_date(manifest_dir, day):
+            manifest_latest.setdefault(symbol, day)
+
+    lags: list[SymbolCoverageLag] = []
+    for symbol in sorted(kline_symbols):
+        manifest_end = manifest_latest.get(symbol)
+        if manifest_end is None or manifest_end < kline_day:
+            lags.append(SymbolCoverageLag(symbol=symbol, kline_day=kline_day, manifest_end=manifest_end))
+    return tuple(lags)
+
+
+def coverage_status(
+    data_root: str | Path,
+    *,
+    today: _dt.date | None = None,
+    per_symbol_lookback_days: int = 7,
+) -> CoverageStatus:
     root = Path(data_root).expanduser()
     today = today or _today_utc()
-    manifest_end = _max_partition_date(root / MANIFEST_DATASET)
-    kline_end = _max_partition_date(root / KLINE_DATASET)
+    manifest_dir = root / MANIFEST_DATASET
+    kline_dir = root / KLINE_DATASET
+    manifest_end = _max_partition_date(manifest_dir)
+    kline_end = _max_partition_date(kline_dir)
     sig_day = latest_signal_trading_day(today)
     margin = (manifest_end - sig_day).days if manifest_end is not None else None
     lag = (
         (kline_end - manifest_end).days
         if (manifest_end is not None and kline_end is not None)
         else None
+    )
+    per_symbol_check_day = min(kline_end, sig_day) if kline_end is not None else None
+    per_symbol_lags = _per_symbol_manifest_lags(
+        manifest_dir=manifest_dir,
+        kline_dir=kline_dir,
+        kline_day=per_symbol_check_day,
+        lookback_days=per_symbol_lookback_days,
     )
     return CoverageStatus(
         data_root=str(root),
@@ -130,6 +265,7 @@ def coverage_status(data_root: str | Path, *, today: _dt.date | None = None) -> 
         latest_signal_trading_day=sig_day,
         manifest_margin_days=margin,
         manifest_lag_vs_klines_days=lag,
+        per_symbol_manifest_lags=per_symbol_lags,
     )
 
 
@@ -175,4 +311,15 @@ def format_coverage(status: CoverageStatus) -> str:
             f"  note: manifest is {status.manifest_lag_vs_klines_days}d behind klines_1h "
             "(klines were refreshed without refreshing the manifest)."
         )
+    if status.per_symbol_manifest_lags:
+        examples = []
+        for lag in status.per_symbol_manifest_lags[:5]:
+            manifest = lag.manifest_end.isoformat() if lag.manifest_end is not None else "MISSING"
+            lag_text = f"{lag.lag_days}d" if lag.lag_days is not None else "unknown"
+            examples.append(f"{lag.symbol}: manifest {manifest}, kline {lag.kline_day.isoformat()}, lag {lag_text}")
+        lines.append(
+            f"  WARNING: {len(status.per_symbol_manifest_lags)} symbols have latest-day "
+            "klines_1h coverage without matching archive-manifest coverage."
+        )
+        lines.append("           examples: " + "; ".join(examples))
     return "\n".join(lines)

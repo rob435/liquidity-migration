@@ -1,3 +1,9 @@
 [mcp_servers.liqmig-research]
 command = "python"
 args = [".claude/mcp/research_server.py"]
+
+[mcp_servers.liqmig-research.tools.current_state]
+approval_mode = "approve"
+
+[mcp_servers.liqmig-research.tools.data_roots]
+approval_mode = "approve"

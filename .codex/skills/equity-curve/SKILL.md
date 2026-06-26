@@ -19,6 +19,11 @@ bash scripts/equity_curves.sh --sleeves long,continuous    # side-by-side run
 bash scripts/equity_curves.sh --years 2                    # shorter window
 bash scripts/equity_curves.sh --start 2023-06-01 --end 2026-06-12
 bash scripts/equity_curves.sh --sleeves continuous --chart-leverage 2.5
+bash scripts/equity_curves.sh --sleeves continuous \
+  --continuous-component-take-profit-pct 0.12 \
+  --continuous-btc-risk-sizing \
+  --continuous-backtest-leverage 5 \
+  --continuous-chart-leverage 1
 ```
 
 Venue roots:
@@ -64,6 +69,22 @@ configs when the original one-off receipt directories are absent.
 pure-leverage continuous chart next to the 1x chart. Default is `4`; pass `1`
 to suppress the extra leveraged PNG. This is chart/report leverage only:
 margin and liquidation are not modeled.
+
+`--continuous-backtest-leverage N` is the modeled continuous leverage path. It
+scales component gross exposure before the component engine prices fees, impact
+and funding, and scales the portfolio hedge cap with the book leverage. Use this
+for "run the backtest levered" requests. Use chart leverage only for display.
+
+`--continuous-btc-risk-sizing` applies the current `CTRL_BTC_RISK_70_90_35`
+entry-size overlay in the component backtest. If the user asks for the closest
+live continuous config, pair it with `--continuous-component-take-profit-pct
+0.12`, `--continuous-backtest-leverage <N>` when requested, and
+`--continuous-chart-leverage 1` to avoid an extra presentation-only leverage
+curve.
+
+Do not create ad hoc equity-curve scripts or homemade PNG/CSV formats. If the
+official runner lacks a needed option, add the option to this runner and tests,
+then use this runner.
 
 ## Outputs
 

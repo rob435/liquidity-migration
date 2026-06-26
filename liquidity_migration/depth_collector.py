@@ -293,13 +293,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Exposed for the unit↔argparse parity test (unit ExecStart args must parse).
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default="data/depth")
-    ap.add_argument("--once", action="store_true", help="One cycle then exit (smoke/test).")
+    cycle_mode = ap.add_mutually_exclusive_group()
+    cycle_mode.add_argument("--once", action="store_true", help="One cycle then exit (smoke/test).")
+    cycle_mode.add_argument(
+        "--cycles",
+        type=int,
+        default=None,
+        help="Run a finite number of hourly-aligned cycles, then exit.",
+    )
     ap.add_argument("--symbols", default=None, help="Comma list override (default: live Trading universe).")
     return ap
 
 
 def main() -> None:
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    if args.cycles is not None and args.cycles < 1:
+        parser.error("--cycles must be >= 1")
+    cycles_limit = 1 if args.once else args.cycles
+    cycles_done = 0
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     root = Path(args.root)
     symbols: list[str] = []
@@ -323,7 +335,7 @@ def main() -> None:
                 "depth collector: free disk %d B below floor %d B under %s; skipping cycle",
                 free, MIN_FREE_DISK_BYTES, root,
             )
-            if args.once:
+            if cycles_limit is not None:
                 return
             time.sleep(max(60.0, 3600.0 - (time.time() % 3600.0)))
             continue
@@ -334,7 +346,8 @@ def main() -> None:
             enforce_retention(root)
         except OSError as exc:  # retention must never kill the capture loop
             _logger.warning("depth retention pass failed: %s", exc)
-        if args.once:
+        cycles_done += 1
+        if cycles_limit is not None and cycles_done >= cycles_limit:
             return
         # align the next cycle to the next top-of-hour
         now = time.time()

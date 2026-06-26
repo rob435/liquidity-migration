@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -266,3 +267,44 @@ def test_band_notionals_rejects_crossed_or_locked_book() -> None:
     assert band_notionals([(100.0, 5.0)], [(100.0, 5.0)]) is None  # locked
     # a normal book still aggregates
     assert band_notionals([(99.9, 5.0)], [(100.1, 5.0)]) is not None
+
+
+def test_main_cycles_runs_bounded_number_of_cycles(tmp_path, monkeypatch) -> None:
+    """A finite multi-cycle local capture can prove hourly accrual without
+    enabling the systemd daemon or leaving the collector running forever."""
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "depth_collector",
+            "--root",
+            str(tmp_path),
+            "--cycles",
+            "2",
+            "--symbols",
+            "BTCUSDT,ETHUSDT",
+        ],
+    )
+    monkeypatch.setattr(depth_collector, "free_disk_bytes", lambda _root: depth_collector.MIN_FREE_DISK_BYTES + 1)
+    monkeypatch.setattr(depth_collector, "collect_cycle", lambda _root, symbols: calls.append(list(symbols)) or {})
+    monkeypatch.setattr(depth_collector, "enforce_retention", lambda _root: {})
+    monkeypatch.setattr(depth_collector.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(depth_collector.time, "time", lambda: 0.0)
+
+    depth_collector.main()
+
+    assert calls == [["BTCUSDT", "ETHUSDT"], ["BTCUSDT", "ETHUSDT"]]
+
+
+def test_cycles_and_once_are_mutually_exclusive() -> None:
+    parser = depth_collector.build_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--once", "--cycles", "2"])
+
+
+def test_cycles_must_be_positive(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["depth_collector", "--cycles", "0"])
+    with pytest.raises(SystemExit):
+        depth_collector.main()

@@ -867,6 +867,45 @@ def test_storageconcurrency4_orphaned_tmp_swept_on_next_write(tmp_path: Path) ->
     assert set(got["order_id"].to_list()) == {"a", "b"}
 
 
+def test_storageconcurrency4_full_tmp_sweep_is_throttled(tmp_path: Path, monkeypatch) -> None:
+    """The broad orphan-temp sweep must not recursively walk a large dataset on
+    every partition write; the target partition directory is still checked every
+    time so same-partition orphans are cleaned promptly."""
+    storage._DATASET_TMP_SWEEP_LAST.clear()
+    real_sweep = storage._sweep_orphaned_tmp_parts
+    full_sweeps: list[Path] = []
+    local_sweeps: list[Path] = []
+
+    def recording_sweep(
+        path: Path,
+        *,
+        stale_seconds: float = storage._STALE_TMP_SECONDS,
+        recursive: bool = True,
+    ) -> None:
+        if recursive:
+            full_sweeps.append(path)
+        else:
+            local_sweeps.append(path)
+        real_sweep(path, stale_seconds=stale_seconds, recursive=recursive)
+
+    monkeypatch.setattr(storage, "_sweep_orphaned_tmp_parts", recording_sweep)
+
+    write_dataset(
+        pl.DataFrame({"ts_ms": [1_704_067_200_000], "symbol": ["BTCUSDT"], "close": [1.0]}),
+        tmp_path,
+        "klines_1h",
+    )
+    write_dataset(
+        pl.DataFrame({"ts_ms": [1_704_070_800_000], "symbol": ["ETHUSDT"], "close": [2.0]}),
+        tmp_path,
+        "klines_1h",
+    )
+
+    assert len(full_sweeps) == 1
+    assert len(local_sweeps) >= 2
+    storage._DATASET_TMP_SWEEP_LAST.clear()
+
+
 def test_storageconcurrency5_parent_dir_fsynced_after_rename(tmp_path: Path, monkeypatch) -> None:
     """_write_part must fsync the PARENT DIRECTORY fd after temp_path.replace(path),
     not just the temp file — otherwise the rename is not power-loss durable. Pin it

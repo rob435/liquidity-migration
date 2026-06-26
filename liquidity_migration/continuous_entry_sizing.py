@@ -1,20 +1,17 @@
-"""Causal upper_wick entry-size multiplier — shared by backtest and the live demo book.
+"""Causal upper_wick entry-size multiplier retained for audit, flag-off.
 
-Receipt: docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md
-
-The continuous v2 entry-quality sizing tilt validated 2026-06-20 (full-ledger Bybit MAR
-6.387 -> 6.555, +0.168 vs inverse-vol alone, +1.62 vs hash). To guarantee the LIVE demo
-book and the research backtest compute the IDENTICAL multiplier (the live<->backtest parity
-gate this repo enforces), both call this single pure function.
+The upper_wick sizing attempt was withdrawn after live<->backtest parity exposed
+a component duplicate-counting artifact. Corrected one-observation-per-decision
+validation was slightly negative and below hash. This pure helper stays for the
+disabled audit path and future explicitly registered wick work; it is not
+evidence that the tilt is valid or active.
 
 The multiplier is strictly causal: it uses only PRIOR observations of the same symbol.
 mult = clip(1 + k * z_uw * att), where
   z_uw = (upper_wick - mean(prior upper_wick)) / std(prior upper_wick)   [per-symbol, expanding]
   att  = 1 - (expanding percentile of rv among prior rv)                 [vol attenuation]
 Below ``min_obs`` prior observations -> 1.0 (no tilt). Mean-1 in expectation (z ~ mean 0),
-so it is a within-book reweighting, not a leverage change. att tapers the tilt toward 0 on
-high-vol names (where upper_wick is empirically blind and inverse-vol is already downsizing),
-which improved the full-ledger MAR over the ungated tilt.
+so it is a within-book reweighting, not a leverage change. The live flag remains off.
 """
 from __future__ import annotations
 
@@ -36,12 +33,10 @@ def upper_wick_and_rv_from_ohlc(
 ) -> tuple[float, float]:
     """Canonical pre-entry (upper_wick_mean, rv_30) from a 1m OHLC window.
 
-    EXACTLY matches the research feature builder (continuous_v2_bybit_entry_alpha.
-    enriched_features): upper_wick_mean = mean over the window of
-    (high - max(open, close)) / (high - low) on bars with high > low; rv_30 =
-    POPULATION std of the last 30 one-minute log returns (>5 returns required, else 0).
-    Both the backtest and the live demo book compute the feature through this one
-    function so they cannot drift. Parity tests pin the equivalence.
+    upper_wick_mean = mean over the window of (high - max(open, close)) /
+    (high - low) on bars with high > low; rv_30 = population std of the last 30
+    one-minute log returns (>5 returns required, else 0). Both the corrected
+    audit path and the flag-off live helper use this one construction.
     """
     wicks = [
         (h - max(o, c)) / (h - low_)
@@ -81,7 +76,7 @@ def upperwick_size_mult(
     vol_attenuate: bool = True,
     min_obs: int = UPPERWICK_MIN_OBS,
 ) -> float:
-    """Causal per-symbol upper_wick size multiplier (see module docstring).
+    """Causal per-symbol upper_wick size multiplier (flag-off audit helper).
 
     ``prior_upper_wick`` / ``prior_rv`` are this symbol's observations STRICTLY BEFORE the
     current entry (the caller must not include the current row). Returns 1.0 until at least

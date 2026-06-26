@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from urllib.error import HTTPError
 
 import polars as pl
 import pytest
@@ -90,6 +91,25 @@ def test_parse_month_csv_skips_malformed():
     assert [r["ts_ms"] for r in rows] == [1609459200000, 1609462800000]
 
 
+def test_fetch_daily_klines_returns_empty_for_archive_404(monkeypatch) -> None:
+    def _not_found(url, timeout=60):
+        raise HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(bv.urllib.request, "urlopen", _not_found)
+
+    assert bv.fetch_daily_klines("AAAUSDT", "2024-01-01", retries=1) == []
+
+
+def test_list_usdm_usdt_daily_symbols_filters_non_ascii_archive_dirs(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bv,
+        "_s3_common_prefixes",
+        lambda prefix: ["BTCUSDT", "1000PEPEUSDT", "币安人生USDT", "ETHUSDC", "badusdt"],
+    )
+
+    assert bv.list_usdm_usdt_daily_symbols() == ["1000PEPEUSDT", "BTCUSDT"]
+
+
 def _write_klines(root, symbol, date_ms, n_bars):
     rows = [{
         "ts_ms": date_ms + i * MS_PER_HOUR, "symbol": symbol,
@@ -125,6 +145,33 @@ def test_rewrite_manifest_to_coverage_drops_thin_and_uncovered(tmp_path):
     assert pairs == {("AAAUSDT", "2024-01-01"), ("BBBUSDT", "2024-01-01")}
 
 
+def test_rewrite_manifest_to_coverage_extends_stale_manifest_tail(tmp_path):
+    """A narrow REST/current-month top-up can add covered kline days after the
+    persisted manifest's old end. The coverage rewrite must synthesize those
+    newly covered rows instead of clipping the manifest at its stale boundary."""
+    root = tmp_path / "root"
+    jan01 = 1704067200000
+    jan02 = jan01 + 24 * MS_PER_HOUR
+    _write_klines(root, "AAAUSDT", jan01, 24)
+    _write_klines(root, "AAAUSDT", jan02, 24)
+
+    write_dataset(
+        pl.DataFrame([{"symbol": "AAAUSDT", "date": "2024-01-01", "url": "existing"}]),
+        root,
+        "archive_trade_manifest",
+        partition_by=("date",),
+    )
+
+    surviving = rewrite_manifest_to_coverage(root)
+
+    assert surviving == 2
+    out = read_dataset(root, "archive_trade_manifest").sort(["date", "symbol"])
+    assert out.select(["date", "symbol", "url"]).to_dicts() == [
+        {"date": "2024-01-01", "symbol": "AAAUSDT", "url": "existing"},
+        {"date": "2024-01-02", "symbol": "AAAUSDT", "url": "kline_coverage"},
+    ]
+
+
 def test_rewrite_manifest_to_coverage_synthesises_when_manifest_absent(tmp_path):
     root = tmp_path / "root"
     jan01 = 1704067200000
@@ -135,6 +182,56 @@ def test_rewrite_manifest_to_coverage_synthesises_when_manifest_absent(tmp_path)
     out = read_dataset(root, "archive_trade_manifest")
     assert out["symbol"].to_list() == ["AAAUSDT"]
     assert out["url"].to_list() == ["kline_coverage"]
+
+
+def test_topup_binance_daily_klines_appends_and_extends_manifest(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    jan01 = 1704067200000
+    jan02 = jan01 + 24 * MS_PER_HOUR
+    _write_klines(root, "AAAUSDT", jan01, 24)
+    write_dataset(
+        pl.DataFrame([{"symbol": "AAAUSDT", "date": "2024-01-01", "url": "existing"}]),
+        root,
+        "archive_trade_manifest",
+        partition_by=("date",),
+    )
+
+    monkeypatch.setattr(bv, "list_usdm_usdt_daily_symbols", lambda: ["AAAUSDT"])
+
+    def _fake_fetch(symbol, day):
+        assert symbol == "AAAUSDT"
+        assert day == "2024-01-02"
+        return [
+            {
+                "ts_ms": jan02 + i * MS_PER_HOUR,
+                "symbol": symbol,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume_base": 1.0,
+                "turnover_quote": 1.0,
+                "source": "test_daily",
+            }
+            for i in range(24)
+        ]
+
+    monkeypatch.setattr(bv, "fetch_daily_klines", _fake_fetch)
+
+    summary = bv.topup_binance_daily_klines(
+        root,
+        start="2024-01-02",
+        end="2024-01-03",
+        workers=1,
+    )
+
+    assert summary["kline_rows"] == 24
+    assert summary["manifest_rows"] == 2
+    manifest = read_dataset(root, "archive_trade_manifest").sort(["date", "symbol"])
+    assert manifest.select(["date", "symbol", "url"]).to_dicts() == [
+        {"date": "2024-01-01", "symbol": "AAAUSDT", "url": "existing"},
+        {"date": "2024-01-02", "symbol": "AAAUSDT", "url": "kline_coverage"},
+    ]
 
 
 # --------------------------------------------------------------------------

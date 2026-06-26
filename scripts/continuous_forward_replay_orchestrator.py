@@ -143,15 +143,14 @@ def venue_update(venue: str, state_dir: Path, forward_start_ms: int) -> dict:
         for name, cell in NAME_TO_CELL.items()
     }
     all_days = sorted({d for p in pieces.values() for d in p.days})
-    # forward-replay-1: BTC+ETH 2f hedge — track the SAME object the live demo book
-    # runs (operator decision 2026-06-14). The ETH second leg goes through
+    # BTC+ETH 2f hedge: track the same object the live demo book runs.
+    # The ETH second leg goes through
     # build_full_ledger's hedge_returns_2 / hedge_funding_2; FROZEN_FORWARD_CONFIG now
     # carries instrument2=ETHUSDT (its config-hash voids any prior btc_only ledger).
     rets, fund = btc_inputs(venue, all_days, "BTCUSDT")
     rets2, fund2 = btc_inputs(venue, all_days, "ETHUSDT")
-    # BTC-vol regime-hedge overlay (operator-approved 2026-06-15; receipt:
-    # docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md): a causal,
-    # mean-1 daily intensity from the BTC return series scales BOTH 2f hedge legs
+    # BTC-vol regime-hedge overlay: a causal, mean-1 daily intensity from the
+    # BTC return series scales BOTH 2f hedge legs
     # (hedge more in turbulence). The same params are part of frozen_config_hash and
     # the live demo book applies the identical signal, so demo and forward track one
     # object. regime=None reduces build_full_ledger to the plain 2f hedge.

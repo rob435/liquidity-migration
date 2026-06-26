@@ -11,7 +11,7 @@ alt-season factor are new here, plus the cross-sectional factor-return regressio
 
 Built incrementally + test-gated. The panel scaffolding, the BTC-beta factor, the
 remaining factors, `fit_factor_returns`, and `decompose_strategy_pnl` have all
-landed (verdict: `docs/preregistration/r4-risk-model-verdict.md`). A standalone
+landed. A standalone
 `risk-model` CLI was scoped but deprioritised and is not implemented; the model is
 consumed programmatically (e.g. `scripts/precompute_residual_momentum.py`).
 

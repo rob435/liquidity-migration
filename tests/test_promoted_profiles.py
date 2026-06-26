@@ -1,14 +1,7 @@
-"""Pin the promoted profile registry (liquidity_migration.promoted).
+"""Pin the active profile registry (liquidity_migration.promoted).
 
-These assert that the deployed-profile accessors resolve to the exact values the live
-sleeves run, so the equity-curve tool (and anyone asking "what's deployed?") can trust
-them and a silent drift fails CI. If a profile legitimately changes on deploy, update
-its factory AND the expected value here in the same change.
-
-Two promoted-in-code sleeves: LONG and CONTINUOUS. The daily-short sleeve was
-ERASED 2026-06-11 (operator order); the continuous-fade sleeve was RE-ADDED
-2026-06-15 by explicit operator override, demo/paper only. This module must stay
-a registry, not a research-candidate manifest archive.
+These assertions keep the registry narrow: active LONG and CONTINUOUS profile
+accessors only, not a research-candidate manifest archive.
 """
 from __future__ import annotations
 
@@ -29,11 +22,12 @@ def test_promoted_trading_logic_doc_exists_and_names_lifecycles() -> None:
     assert "SIZING_MODE=inverse_vol" in text
     assert "TARGET_VOL_PER_NAME=0.01" in text
     assert "VOL_WEIGHT_CLAMP=2" in text
+    assert "CTRL_BTC_RISK_70_90_35" in text
+    assert "btc_risk_stack_mult" in text
     assert "w90/tv0.045/max4/ddh=-0.04" in text
     assert "FROZEN_FORWARD_CONFIG" in text
-    assert "2026-06-18 Full Live-Config Backtest Receipt" in text
-    assert "2026-06-18 Exit-Cause Ablation Receipt" in text
-    assert "2026-06-18 InvVol + Max4 Promotion Receipt" in text
+    assert "Reconstruction Boundary" in text
+    assert "docs/preregistration/INDEX.md" in text
     assert "stop_approach" in text
     assert "left_decile" in text
     assert "fc_sniper_retrace_pct" in text
@@ -52,7 +46,6 @@ def test_windowing_sets_dates_on_all_sleeves() -> None:
 
 
 def test_registry_covers_long_and_continuous() -> None:
-    # CONTINUOUS re-added 2026-06-15 by operator override (demo/paper only).
     assert set(promoted.PROFILES) == {"long", "continuous"}
 
 
@@ -79,5 +72,4 @@ def test_continuous_profile_is_deployed_book_with_regime_hedge() -> None:
     assert cfg["rebalance"]["strategy_momentum_window_days"] == 0
     # the BTC-vol regime-hedge overlay is embedded
     assert cfg["hedge"]["regime"]["lam"] == 0.5
-    # promoted by operator override -> it IS in PROFILES now
     assert promoted.PROFILES["continuous"] is promoted.continuous_profile

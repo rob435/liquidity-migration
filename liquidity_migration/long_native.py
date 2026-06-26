@@ -322,8 +322,7 @@ class LongNativeConfig:
     # notional_multiplier=10 (an explicit owner choice, 2x the research-Sharpe
     # peak of ~5x), so its live P&L volatility/drawdown is NOT comparable to a
     # multiplier=1 backtest. Set this to the deployed value to validate the long
-    # sleeve at the gross it actually trades before any real-money decision.
-    # See docs/preregistration/round2/r-audit-methodology-hardening.md.
+    # sleeve at the gross it actually trades.
     notional_multiplier: float = 1.0
     sizing: str = "vol_parity"  # or "equal"
     vol_estimate_window_days: int = 30
@@ -384,7 +383,7 @@ def _vol_target_scale(config: "LongNativeConfig", btc_rv: float | None) -> float
     vol_target_max_scale] (max_scale=1.0 => de-risk only, never lever up). Returns 1.0
     when disabled. SHARED by the backtest portfolio (_run_long_pipeline) and the live
     demo cycle (long_native_event_demo) so deployed sizing can never drift from the
-    validated backtest — see docs/preregistration/div-promotion.md.
+    validated backtest.
     """
     if not config.enable_vol_target:
         return 1.0
@@ -781,6 +780,11 @@ def run_long_native_research(
         "run_label": _run_label(full_pit_universe_pass=full_pit_universe_pass, funding_mode=funding_mode,
                                  archive_manifest_empty=archive_manifest.is_empty(),
                                  funding_modeled_fraction=float(summary.get("funding_modeled_fraction", 1.0))),
+        "methodology_run_label": _methodology_run_label(
+            full_pit_universe_pass=full_pit_universe_pass,
+            archive_manifest_empty=archive_manifest.is_empty(),
+            tainted=is_tainted(warnings),
+        ),
         "warnings": [w.as_dict() for w in warnings],
         "tainted": is_tainted(warnings),
         "equity_chart": chart_metadata,
@@ -2565,6 +2569,25 @@ def _safe_float(value: Any) -> float | None:
     return f
 
 
+def _methodology_run_label(
+    *,
+    full_pit_universe_pass: bool,
+    archive_manifest_empty: bool,
+    tainted: bool,
+) -> str:
+    """Conservative backtest-integrity label for raw long-native reports.
+
+    The raw report cannot prove the separate forward-demo arbiter or untouched
+    decision process required for candidate/paper_ready. Those higher labels
+    belong in a dated verdict receipt, not the engine's one-run markdown.
+    """
+    if tainted:
+        return "invalid"
+    if archive_manifest_empty or not full_pit_universe_pass:
+        return "biased_benchmark"
+    return "exploratory"
+
+
 def format_long_native_report(metadata: dict[str, Any]) -> str:
     cfg = metadata.get("config", {})
     summary = metadata.get("summary", {})
@@ -2577,16 +2600,17 @@ def format_long_native_report(metadata: dict[str, Any]) -> str:
     lines = [
         "# Long-Native Long-Only Sleeve",
         "",
-        "Crypto-native long-only strategy. Three asymmetric setups: CAPITULATION_REBOUND, FUNDING_SQUEEZE, VOLUME_RESURRECTION. NOT derived from academic papers.",
+        "Crypto-native long-only strategy. Enabled setup flags are listed below; v11a is FC-only. NOT derived from academic papers.",
         "",
         "## Inputs",
-        f"- Run label: `{metadata.get('run_label')}`",
+        f"- Run label: `{metadata.get('methodology_run_label', 'exploratory')}`",
+        f"- Data integrity label: `{metadata.get('run_label')}`",
         f"- Date range: {date_range.get('start')} to {date_range.get('end')}",
         f"- Feature rows: {metadata.get('rows', {}).get('features', 0)}",
         f"- Trades: {metadata.get('rows', {}).get('trades', 0)}",
         f"- Universe: top {cfg.get('universe_size')} by {cfg.get('universe_volume_window_days')}d turnover",
         f"- BTC regime SMA: {cfg.get('regime_sma_days')}d  (regime gate active: {cfg.get('regime_sma_days', 0) > 0})",
-        f"- Patterns enabled: cap={cfg.get('enable_capitulation_rebound')}  fs={cfg.get('enable_funding_squeeze')}  res={cfg.get('enable_volume_resurrection')}",
+        f"- Patterns enabled: cap={cfg.get('enable_capitulation_rebound')}  fs={cfg.get('enable_funding_squeeze')}  res={cfg.get('enable_volume_resurrection')}  fc={cfg.get('enable_fomo_chase')}",
         f"- Max concurrent: {cfg.get('max_concurrent_positions')}  Cooldown: {cfg.get('cooldown_days')}d",
         f"- Cost multiplier: {cfg.get('cost_multiplier')}x",
         f"- Full PIT: {pit.get('full_pit_universe_pass', False)}",
@@ -2595,6 +2619,7 @@ def format_long_native_report(metadata: dict[str, Any]) -> str:
         f"- capitulation_rebound: {event_counts.get('capitulation_rebound', 0)}",
         f"- funding_squeeze: {event_counts.get('funding_squeeze', 0)}",
         f"- volume_resurrection: {event_counts.get('volume_resurrection', 0)}",
+        f"- fomo_chase: {event_counts.get('fomo_chase', 0)}",
         f"- TOTAL signal-firings: {lifecycle.get('candidates_total', 0)}",
         f"- Skipped: capacity={lifecycle.get('skipped_capacity', 0)}, cooldown={lifecycle.get('skipped_cooldown', 0)}, held={lifecycle.get('skipped_already_held', 0)}, no_entry_bar={lifecycle.get('skipped_no_entry_bar', 0)}",
         "",

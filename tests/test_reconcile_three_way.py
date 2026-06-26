@@ -71,3 +71,50 @@ def test_backtest_keys_reads_entry_signal_column(tmp_path):
     }).write_csv(csv)
     keys = tw._backtest_keys(csv, _ms(2026, 6, 4), _ms(2026, 6, 18))
     assert keys == {("BTCUSDT", "long", "2026-06-10")}
+
+
+def test_long_cadence_stats_classifies_near_p95_gap(tmp_path):
+    csv = tmp_path / "long_v11a_bybit_refreshed_2026-06-24" / "long" / "long_native_trades.csv"
+    csv.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "B", "C", "D", "E"],
+        "side": ["long"] * 5,
+        "entry_ts_ms": [
+            _ms(2026, 1, 1),
+            _ms(2026, 1, 3),
+            _ms(2026, 1, 10),
+            _ms(2026, 2, 20),
+            _ms(2026, 3, 1),
+        ],
+    }).write_csv(csv)
+    stats = tw._long_cadence_stats(
+        csv,
+        as_of=dt.date(2026, 4, 9),
+        forward_start=dt.date(2026, 3, 15),
+    )
+    assert stats is not None
+    assert stats["venue"] == "bybit"
+    assert stats["current_gap_days"] == 39
+    assert stats["p95_gap_days"] == 41
+    assert stats["max_gap_days"] == 41
+    assert stats["trades_since_forward_start"] == 0
+    assert stats["status"] == "near_or_above_p95"
+
+
+def test_format_long_cadence_diagnostic_summarizes_references(tmp_path):
+    csv = tmp_path / "long_v11a_binance_refreshed_2026-06-24" / "long" / "long_native_trades.csv"
+    csv.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "B", "C"],
+        "side": ["long"] * 3,
+        "entry_ts_ms": [_ms(2026, 1, 1), _ms(2026, 1, 5), _ms(2026, 1, 9)],
+    }).write_csv(csv)
+    line = tw._format_long_cadence_diagnostic(
+        [csv],
+        as_of=dt.date(2026, 1, 20),
+        forward_start=dt.date(2026, 1, 10),
+    )
+    assert line is not None
+    assert line.startswith("LONG cadence diagnostic [above_historical_max]:")
+    assert "binance: gap=11d" in line
+    assert "trades_since_forward_start=0" in line

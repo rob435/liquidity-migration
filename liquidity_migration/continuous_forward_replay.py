@@ -1,9 +1,8 @@
 """No-order signal-replay forward collector for the banked continuous object.
 
-Design receipt: docs/preregistration/continuous-forward-clock-spec-2026-06-09.md
-(R3, live-readiness program). This module accrues SIGNAL forward evidence for the
-frozen winner+hedge configuration by re-running the same code path that produced the
-banked receipts and appending only out-of-sample days to a persistent forward ledger.
+This module accrues signal-forward evidence for the frozen winner+hedge
+configuration by re-running the same code path and appending only out-of-sample
+days to a persistent forward ledger.
 
 Safety properties (all tested):
 - the frozen configuration is hash-pinned: a state dir created under one config
@@ -54,8 +53,7 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
     # NOTE: this changes frozen_config_hash -> the prior continuous forward ledger is VOIDED;
     # archive the old state dir + regenerate the hedge warmstart + start a fresh clock on deploy.
     "weights": {"turn3p3": 0.3333333333333333, "turn4p3": 0.2222222222222222, "turn4p5": 0.4444444444444444},
-    # Official v2 entry sizing, promoted 2026-06-18
-    # (docs/preregistration/2026-06-18-continuous-v2-invvol-max4-replay.md).
+    # Official v2 entry sizing.
     # The frozen component source ledgers were generated with this recipe; keep
     # it explicit here so promoted.continuous_profile() is not ambiguous.
     "entry_sizing": {
@@ -64,16 +62,9 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
         "vol_weight_clamp": 2.0,
     },
     "rebalance": {
-        # OPERATOR OVERRIDE 2026-06-19: daily volatility adjuster DISABLED
-        # (enabled=False -> constant gross, no vol-target / drawdown-halving). This
-        # un-confounds signal/exit research from the path-dependent rebalance and
-        # adopts TP12; it is RESEARCH-PHASE and reversible (flip enabled=True + retune
-        # when the volatility control is reworked). Changing this block changes
-        # frozen_config_hash -> the prior forward ledger is VOIDED (archive the state
-        # dir + start a fresh clock on deploy). The remaining params are retained
-        # verbatim so re-enabling is a one-line flip. Honest caveat: this removes the
-        # book's only daily risk control and lowers MAR on both venues; receipt
-        # docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md.
+        # Local target: daily volatility adjuster disabled. Changing this block
+        # changes frozen_config_hash, so archive/reset the forward state clock on
+        # deploy. Remaining params are retained so re-enabling is explicit.
         "enabled": False,
         "realized_vol_window_days": 90,
         "target_daily_vol": 0.045,
@@ -87,8 +78,7 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
         # BTC+ETH 2f hedge — tracks the SAME object the live demo book executes
         # (deploy/systemd/liquidity-migration-continuous-hedge.service, HEDGE_MODE=2f,
         # banked 2026-06-10), so forward readiness validates the deployed strategy
-        # (operator decision 2026-06-14, forward-replay-1; receipt
-        # docs/preregistration/2026-06-14-forward-clock-2f.md). frozen_hedge_mode()
+        # (forward-replay-1). frozen_hedge_mode()
         # reads "2f" from instrument2 and stamps it into every readiness summary.
         # NOTE: adding instrument2 changes frozen_config_hash, so the prior BTC-only
         # forward ledger is VOIDED by the config-hash pin — init_or_check_state will
@@ -97,9 +87,8 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
         # drift alarm). build_full_ledger wires the second (ETH) leg from the
         # orchestrator's hedge_returns_2 / hedge_funding_2 inputs.
         #
-        # 'regime' (operator-approved 2026-06-15; receipt
-        # docs/preregistration/2026-06-15-forward-btcvol-regime-hedge.md): the BTC-vol
-        # regime-hedge overlay. A causal, mean-1 daily intensity (continuous_regime.
+        # 'regime': the BTC-vol regime-hedge overlay. A causal, mean-1 daily
+        # intensity (continuous_regime.
         # btcvol_intensity_series) multiplies BOTH 2f hedge legs — hedge more in
         # turbulence, less in calm. Embedding it here puts it in frozen_config_hash, so
         # turning it on VOIDS the prior 2f forward ledger (another clean reset: archive
@@ -410,7 +399,7 @@ def forward_readiness_summary(
     # annualizer convention — NOT deployed_equity.stats()'s inclusive span+1 — so
     # forward_mar/annualized here differ from deployed_equity by one calendar day on
     # short windows. That divergence is intentional; do NOT "reconcile" it by adding
-    # +1, which would shift a Tier-3-facing reported number (operator-gated).
+    # +1, which would shift a forward-readiness reported number.
     ts = df["ts_ms"].to_numpy()
     first_ms, last_ms = int(ts[0]), int(ts[-1])
     span_days = int((last_ms - first_ms) // MS_PER_DAY) + 1  # calendar span (inclusive)

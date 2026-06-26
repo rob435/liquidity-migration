@@ -1,99 +1,46 @@
-# Parameter pre-registration
+# Parameter Pre-Registration
 
-Every parameter change that will touch a per-venue working dataset gets a
-pre-registration entry under `docs/preregistration/` **before** the run. The
-receipt is committed to git in the same PR as the code change.
+Use pre-registration to stop parameter mining. Keep it short.
 
-This is the standard antidote to the parameter-mining (error #17), OOS reuse
-(#18) and multiple-testing-denial (#19) failure modes catalogued in
-[backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
-Without it, every additional sweep on the per-venue datasets dilutes their
-evidentiary value — and we no longer have a clean internal OOS surface to
-recover that value from.
+## When Required
 
-## When pre-reg is mandatory
+- Any serious parameter sweep over `bybit_full_pit` or `binance_full_pit`.
+- Any sleeve-engine knob that changes per-venue backtest numbers.
+- Any pattern, cost, funding, slippage, or fill-model change used as evidence.
 
-- Any new parameter sweep over the v11a long-only sleeve.
-- Any change to a sleeve-engine knob (long-native, continuous) with an effect
-  on per-venue backtest numbers.
-- Any addition or alteration of a pattern (FOMO_CHASE / CAPITULATION_REBOUND /
-  etc.) that touches per-venue backtest numbers.
-- Any change to cost / funding / slippage assumptions.
+## When Optional
 
-## When pre-reg is optional
+- Pure infra or execution plumbing with no backtest-number change.
+- Throwaway investigation explicitly labelled `EXPLORATORY`.
 
-- Pure execution-layer / infra changes that do not change backtest numbers
-  (WebSocket kline pool, daemon scheduling, ledger schemas, etc.). Mark the
-  PR description `execution/infra: no backtest change` so reviewers can
-  audit the claim quickly.
-- Exploratory runs that will never be cited as evidence. Add the literal
-  string `EXPLORATORY` to the pre-reg `Stage` field if you do write one;
-  exploratory runs may not be cited in any promotion / deployment / "we
-  found alpha" claim.
+Exploratory work cannot accept a parameter, justify deployment, or claim alpha.
 
-## Template
+## Minimal Receipt
 
-Copy `docs/preregistration/_template.md` to a dated file like
-`docs/preregistration/2026-05-31-fc-sigma-mult-22.md` and fill it in
-before the run.
+For a serious run, record this before running:
 
-```markdown
-# Pre-registration: <change name>
+- Change: one sentence.
+- Hypothesis: mechanism, not vibes.
+- Data roots and date boundary.
+- Decision rule: reject/accept/inconclusive thresholds.
+- Exact command or script.
+- Expected artifacts.
+- Run label.
 
-**Date:** YYYY-MM-DD
-**Author:** <handle>
-**Stage:** proposed | run-pending | run-complete | rejected | accepted | EXPLORATORY
+After the run, add:
 
-## What's changing
-Single sentence. e.g. "Lower fc_sigma_mult from 2.5 to 2.0 on v11a."
+- Artifact paths.
+- Headline metrics.
+- Verdict.
+- Commit SHA if relevant.
 
-## Hypothesis
-Why this might work — specific mechanism, not "should improve Sharpe".
+Use `docs/preregistration/_template.md` if a standalone receipt is worth keeping.
+Otherwise summarize the decision in `docs/preregistration/INDEX.md` and
+`docs/research_summary.md`; git history is the archive.
 
-## Predicted direction + magnitude
-- Sharpe Δ: +/- range
-- Trade count Δ: +/- N
-- Failure mode if hypothesis wrong: what would falsify
+## Honesty Rules
 
-## Roots that will be touched
-- [ ] bybit_full_pit (per-venue working dataset)
-- [ ] binance_full_pit (per-venue working dataset)
-- [ ] forward demo/paper (always, by virtue of being live)
-
-## Decision rule (a priori)
-"If post-run Sharpe Δ < +0.3 on either venue OR sign flips between venues, reject."
-
-## Run command
-```bash
-... exact CLI ...
-```
-
-## Post-run results
-(fill in after run; include report paths + commit SHA at which the runs landed)
-
-## Verdict
-accepted | rejected | inconclusive — with one-paragraph why.
-```
-
-## Honesty rules
-
-- A pre-reg whose **predicted direction** is wrong cannot be quietly
-  re-purposed as a different finding. Either reject the original hypothesis
-  in this pre-reg and file a new pre-reg for the new hypothesis, or accept
-  that the original was wrong and stop here.
-- The pre-reg's `Decision rule` is binding. If you find yourself wanting to
-  loosen the rule after seeing the result, the rule was wrong — write a
-  retrospective addendum, do not silently soften it.
-- The `Verdict` is committed to git and must never be rewritten or softened
-  after the fact. Receipt files may later be folded and removed per the
-  STATE.md retention policy: `docs/preregistration/` holds only receipts that
-  still bind an active deployment, candidate, or methodology decision; the
-  verdict must be recorded in `docs/research_summary.md` before deletion, and
-  git history remains the archive.
-
-## Cross-venue rule
-
-For any per-venue test, both venues are touched simultaneously by default.
-The two roots are not independent (Bybit and Binance share most of their top
-20 perps), but a sign flip between venues is informative — it usually flags a
-venue-specific microstructure effect rather than alpha.
+- Do not soften the decision rule after seeing results.
+- Do not repurpose a failed hypothesis as a different win.
+- Both venues matter by default; a sign flip is usually a microstructure warning,
+  not a technicality.

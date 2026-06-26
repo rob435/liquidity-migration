@@ -83,7 +83,9 @@ asymmetry is the original trap. Two guards now exist:
   when the manifest lags the klines, plus `--refresh-manifest` to do both at once.
 - `liquidity_migration.pit_coverage.coverage_status(root)` /
   `format_coverage(...)` is the cheap, reusable staleness check (it reads the
-  `date=` partition names only).
+  `date=` partition names and the recent tail manifest `symbol` column only).
+  It also warns when global max dates look current but individual symbols have
+  latest signal-day klines without matching archive-manifest coverage.
 
 ## Membership modes
 

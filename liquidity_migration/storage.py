@@ -20,6 +20,8 @@ import polars as pl
 # one thread of this process ever enters the file-lock acquire/release dance.
 _DATASET_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _DATASET_THREAD_LOCKS_GUARD = threading.Lock()
+_DATASET_TMP_SWEEP_LAST: dict[str, float] = {}
+_DATASET_TMP_SWEEP_GUARD = threading.Lock()
 
 
 # storage-concurrency-2: per-acquisition tokens currently OWNED by THIS live
@@ -586,9 +588,15 @@ def _recent_ledger_month_dirs(path: Path, months_back: int) -> list[Path]:
 # slow in-flight write on another (impossible here — we hold the dataset lock)
 # path is never clobbered.
 _STALE_TMP_SECONDS = 600.0
+_TMP_SWEEP_INTERVAL_SECONDS = 600.0
 
 
-def _sweep_orphaned_tmp_parts(path: Path, *, stale_seconds: float = _STALE_TMP_SECONDS) -> None:
+def _sweep_orphaned_tmp_parts(
+    path: Path,
+    *,
+    stale_seconds: float = _STALE_TMP_SECONDS,
+    recursive: bool = True,
+) -> None:
     """Remove orphaned `.*.tmp` part files left by a crash between
     ``write_parquet`` and the atomic rename in :func:`_write_part`.
 
@@ -606,7 +614,8 @@ def _sweep_orphaned_tmp_parts(path: Path, *, stale_seconds: float = _STALE_TMP_S
     if not path.exists():
         return
     now = time.time()
-    for tmp in path.glob("**/.*.tmp"):
+    pattern = "**/.*.tmp" if recursive else ".*.tmp"
+    for tmp in path.glob(pattern):
         try:
             if now - tmp.stat().st_mtime <= stale_seconds:
                 continue
@@ -617,6 +626,29 @@ def _sweep_orphaned_tmp_parts(path: Path, *, stale_seconds: float = _STALE_TMP_S
             # Best-effort cleanup: a transient stat/unlink failure (e.g. Windows
             # delete-pending) must never break the write that triggered the sweep.
             continue
+
+
+def _sweep_orphaned_tmp_parts_if_due(
+    path: Path,
+    *,
+    interval_seconds: float = _TMP_SWEEP_INTERVAL_SECONDS,
+) -> None:
+    """Throttle the expensive full-tree temp sweep per process and dataset.
+
+    Full-PIT datasets can contain hundreds of thousands of partition files. A
+    recursive glob before every tiny partition write turns a top-up into
+    O(writes * whole-tree walk). _write_part still sweeps the target directory
+    on every write; this preserves the broad cleanup safety net without putting
+    it on every partition.
+    """
+    key = str(path.resolve())
+    now = time.time()
+    with _DATASET_TMP_SWEEP_GUARD:
+        last = _DATASET_TMP_SWEEP_LAST.get(key)
+        if last is not None and now - last < interval_seconds:
+            return
+        _DATASET_TMP_SWEEP_LAST[key] = now
+    _sweep_orphaned_tmp_parts(path, recursive=True)
 
 
 def write_dataset(
@@ -644,7 +676,8 @@ def _write_dataset_unlocked(
     # storage-concurrency-4: opportunistically sweep orphaned `.*.tmp` part files
     # left by a prior crash before this write. Safe here because we hold the
     # dataset lock (no concurrent writer's in-flight temp can be clobbered).
-    _sweep_orphaned_tmp_parts(path)
+    _sweep_orphaned_tmp_parts(path, recursive=False)
+    _sweep_orphaned_tmp_parts_if_due(path)
     if df.is_empty():
         path.mkdir(parents=True, exist_ok=True)
         return path
@@ -840,6 +873,7 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
     # filename therefore can't collide with a concurrent writer — there ISN'T
     # one. If this is ever called from outside that lock, switch to a uuid4
     # temp name and re-derive the dedup story per dataset.
+    _sweep_orphaned_tmp_parts(path.parent, recursive=False)
     output = df
     if append and path.exists():
         existing = pl.read_parquet(path)

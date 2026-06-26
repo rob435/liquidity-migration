@@ -3,7 +3,7 @@
 The current long/continuous research surface needs per-venue full-PIT roots that
 include delisted, renamed, and migrated instruments. Reading live
 ``fapi.binance.com/exchangeInfo`` only returns currently listed symbols and is
-survivorship-biased — forbidden by ``docs/backtesting_errors_we_never_repeat.md``.
+survivorship-biased and invalid under the backtest-integrity standard.
 
 The ``data.binance.vision`` monthly archive enumerates every symbol that ever had
 bars. This module discovers that universe, downloads 1h klines, and writes the
@@ -30,7 +30,9 @@ import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from pathlib import Path
+from urllib.error import HTTPError
 
 import polars as pl
 
@@ -40,6 +42,7 @@ from .storage import read_dataset, write_dataset
 VISION_S3 = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 VISION_FILES = "https://data.binance.vision"
 MONTHLY_KLINES_PREFIX = "data/futures/um/monthly/klines/"
+DAILY_KLINES_PREFIX = "data/futures/um/daily/klines/"
 
 # A (symbol, date) partition needs at least this many hourly bars to count as a
 # tradable PIT day — matches volume_events._covered_kline_date_symbol_set.
@@ -105,6 +108,12 @@ def list_usdm_usdt_symbols() -> list[str]:
     """Every USDT-quoted USD-M perp symbol that ever appears in the monthly archive."""
     symbols = _s3_common_prefixes(MONTHLY_KLINES_PREFIX)
     return sorted(s for s in symbols if s.endswith("USDT"))
+
+
+def list_usdm_usdt_daily_symbols() -> list[str]:
+    """Every USDT-quoted USD-M perp symbol that appears in the daily archive."""
+    symbols = _s3_common_prefixes(DAILY_KLINES_PREFIX)
+    return sorted(s for s in symbols if re.fullmatch(r"[A-Z0-9]+USDT", s))
 
 
 def list_symbol_months(symbol: str, *, max_month: str) -> list[str]:
@@ -276,6 +285,136 @@ def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict] 
     return None  # audit2b: hard failure sentinel
 
 
+def fetch_daily_klines(symbol: str, day: str, *, retries: int = 4) -> list[dict] | None:
+    """Download, integrity-verify, and parse one daily 1h kline file.
+
+    A genuine archive 404 is a permanent no-file condition and returns an empty
+    list. ``None`` is reserved for transient/integrity failures after retries.
+    """
+    url = f"{VISION_FILES}/{DAILY_KLINES_PREFIX}{symbol}/1h/{symbol}-1h-{day}.zip"
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - public archive
+                raw = resp.read()
+                header_len = resp.getheader("Content-Length")
+            content_length = int(header_len) if header_len is not None else None
+            expected_sha256 = _fetch_expected_sha256(url)
+            _verify_download(raw, expected_sha256, content_length)
+            return parse_month_csv(symbol, raw)
+        except HTTPError as exc:
+            if exc.code == 404:
+                return []
+            if attempt == retries - 1:
+                return None
+            time.sleep(0.5 * (attempt + 1))
+        except Exception:  # noqa: BLE001 - network/integrity; retry then give up
+            if attempt == retries - 1:
+                return None
+            time.sleep(0.5 * (attempt + 1))
+    return None
+
+
+def _days_between(start: str, end: str) -> list[str]:
+    start_day = date.fromisoformat(start[:10])
+    end_day = date.fromisoformat(end[:10])
+    days: list[str] = []
+    cursor = start_day
+    while cursor < end_day:
+        days.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return days
+
+
+def topup_binance_daily_klines(
+    data_root: str | Path,
+    *,
+    start: str,
+    end: str,
+    workers: int = 16,
+    symbols: tuple[str, ...] = (),
+    max_failure_ratio: float = 0.005,
+) -> dict:
+    """Append current-month daily Vision 1h klines to canonical ``klines_1h``.
+
+    The full monthly builder remains the canonical all-history rebuild path.
+    This function is for the current-month tail before a monthly ZIP exists:
+    it discovers symbols from the daily archive, writes only archive-backed rows,
+    and rewrites PIT membership from actual kline coverage afterwards.
+    """
+    root = Path(data_root).expanduser()
+    selected = tuple(dict.fromkeys(symbol.upper() for symbol in symbols if symbol.strip()))
+    if not selected:
+        selected = tuple(list_usdm_usdt_daily_symbols())
+    days = _days_between(start, end)
+    jobs = [(symbol, day) for symbol in selected for day in days]
+    if not jobs:
+        raise RuntimeError(f"empty Binance daily top-up window: start={start!r} end={end!r}")
+
+    print(
+        f"[binance_vision] daily top-up {len(selected)} symbols x {len(days)} days "
+        f"({start} -> {end} exclusive)",
+        file=sys.stderr,
+    )
+    all_rows: list[dict] = []
+    failed_jobs: list[tuple[str, str]] = []
+    missing_files = 0
+    done = 0
+    worker_count = max(1, min(workers, len(jobs)))
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        futs = {ex.submit(fetch_daily_klines, symbol, day): (symbol, day) for symbol, day in jobs}
+        for fut in as_completed(futs):
+            rows = fut.result()
+            symbol, day = futs[fut]
+            if rows is None:
+                failed_jobs.append((symbol, day))
+            elif rows:
+                all_rows.extend(rows)
+            else:
+                missing_files += 1
+            done += 1
+            if done % 500 == 0 or done == len(jobs):
+                print(
+                    f"[binance_vision]  {done}/{len(jobs)} daily files, "
+                    f"{len(all_rows):,} rows, {missing_files} 404, {len(failed_jobs)} failed",
+                    file=sys.stderr,
+                )
+
+    _assert_download_completeness(
+        failed_jobs,
+        len(jobs),
+        max_failure_ratio=max_failure_ratio,
+        artifact_path=root / "binance_vision_daily_failed_jobs.json",
+    )
+
+    written_rows = 0
+    if all_rows:
+        start_ms = int(pl.Series([start[:10]]).str.to_datetime().dt.timestamp("ms")[0])
+        end_ms = int(pl.Series([end[:10]]).str.to_datetime().dt.timestamp("ms")[0])
+        df = (
+            pl.DataFrame(all_rows)
+            .filter((pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
+            .unique(subset=["ts_ms", "symbol"], keep="last")
+            .sort(["symbol", "ts_ms"])
+        )
+        written_rows = df.height
+        if written_rows:
+            write_dataset(df, root, "klines_1h", partition_by=("date", "symbol"), append=True)
+
+    manifest_rows = rewrite_manifest_to_coverage(root)
+    return {
+        "data_root": str(root),
+        "start": start,
+        "end": end,
+        "symbols": len(selected),
+        "days": len(days),
+        "jobs": len(jobs),
+        "kline_rows": written_rows,
+        "missing_files": missing_files,
+        "failed_files": len(failed_jobs),
+        "manifest_rows": manifest_rows,
+    }
+
+
 # --------------------------------------------------------------------------
 # Manifest coverage filter (generic — also used for the Bybit OOS root)
 # --------------------------------------------------------------------------
@@ -306,7 +445,21 @@ def rewrite_manifest_to_coverage(data_root: str | Path, *, min_hourly_bars: int 
     if existing.is_empty():
         manifest = covered.with_columns(pl.lit("kline_coverage").alias("url"))
     else:
-        manifest = existing.join(covered, on=["date", "symbol"], how="inner")
+        covered_pairs = covered.select(["date", "symbol"]).unique()
+        kept_existing = existing.join(covered_pairs, on=["date", "symbol"], how="inner")
+        new_pairs = covered_pairs.join(
+            existing.select(["date", "symbol"]).unique(),
+            on=["date", "symbol"],
+            how="anti",
+        )
+        if new_pairs.is_empty():
+            manifest = kept_existing
+        else:
+            synthesized = new_pairs.with_columns(pl.lit("kline_coverage").alias("url"))
+            for col in existing.columns:
+                if col not in synthesized.columns:
+                    synthesized = synthesized.with_columns(pl.lit(None).alias(col))
+            manifest = pl.concat([kept_existing, synthesized.select(existing.columns)], how="diagonal_relaxed")
     manifest = manifest.sort(["date", "symbol"])
 
     dst = root / "archive_trade_manifest"
@@ -508,6 +661,17 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--data-root", required=True)
     f.add_argument("--min-hourly-bars", type=int, default=MIN_HOURLY_BARS)
 
+    d = sub.add_parser(
+        "topup-daily-klines",
+        help="Append current-month Binance Vision daily 1h klines and refresh manifest coverage.",
+    )
+    d.add_argument("--data-root", required=True)
+    d.add_argument("--start", required=True, help="Inclusive start date YYYY-MM-DD.")
+    d.add_argument("--end", required=True, help="Exclusive end date YYYY-MM-DD.")
+    d.add_argument("--workers", type=int, default=16)
+    d.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
+    d.add_argument("--max-failure-ratio", type=float, default=0.005)
+
     args = parser.parse_args(argv)
     if args.mode == "build-binance-oos":
         summary = build_binance_oos(
@@ -518,6 +682,17 @@ def main(argv: list[str] | None = None) -> int:
     elif args.mode == "filter-manifest":
         n = rewrite_manifest_to_coverage(args.data_root, min_hourly_bars=args.min_hourly_bars)
         print(f"archive_trade_manifest rewritten: {n:,} covered symbol-days under {args.data_root}")
+    elif args.mode == "topup-daily-klines":
+        symbols = tuple(symbol.strip() for symbol in args.symbols.split(",") if symbol.strip())
+        summary = topup_binance_daily_klines(
+            args.data_root,
+            start=args.start,
+            end=args.end,
+            workers=args.workers,
+            symbols=symbols,
+            max_failure_ratio=args.max_failure_ratio,
+        )
+        print(summary)
     return 0
 
 

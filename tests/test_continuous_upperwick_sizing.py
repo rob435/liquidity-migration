@@ -1,11 +1,9 @@
-"""Operator override 2026-06-20: vol-gated upper_wick entry sizing.
+"""Withdrawn upper_wick entry-sizing audit plumbing.
 
-Receipt: docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md
-
-Guards the SHARED causal multiplier (used by both the backtest full-ledger validator and
-the live demo book, so they cannot drift) and the live demo no-op safety: the upper_wick
-factor must be exactly 1.0 until the live feature pipeline populates it AND the override
-flag is on.
+Guards the shared causal multiplier retained after the duplicate-counting
+artifact was found, and the live no-op safety: the upper_wick factor must be
+exactly 1.0 unless the disabled flag is explicitly enabled and a finite
+multiplier is populated.
 """
 from __future__ import annotations
 
