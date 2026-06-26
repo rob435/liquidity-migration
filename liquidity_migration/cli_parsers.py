@@ -431,6 +431,15 @@ def _add_event_risk_ws_parser(subparsers) -> None:
     event_ws_risk.add_argument("--no-exit-untracked-positions", dest="exit_untracked_positions", action="store_false")
     event_ws_risk.set_defaults(exit_untracked_positions=ws_risk_defaults.exit_untracked_positions)
     event_ws_risk.add_argument(
+        "--allow-incomplete-untracked-position-roots",
+        action="store_true",
+        default=ws_risk_defaults.allow_incomplete_untracked_position_roots,
+        help=(
+            "Explicit dedicated-account escape hatch for --exit-untracked-positions when not every "
+            "sibling sleeve data root is configured. Leave false on the shared demo account."
+        ),
+    )
+    event_ws_risk.add_argument(
         "--untracked-position-grace-seconds",
         type=float,
         default=ws_risk_defaults.untracked_position_grace_seconds,

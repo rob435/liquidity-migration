@@ -1977,7 +1977,7 @@ def test_protective_exit_cycle_skips_in_flight_exit(tmp_path) -> None:
     write_dataset(pl.DataFrame([{
         "trade_id": f"{strat}-WIFUSDT-1699", "strategy_id": strat, "symbol": "WIFUSDT", "side": "short",
         "status": "open", "entry_price": 100.0, "qty": "2", "notional_usdt": 200.0, "equity_usdt": 10_000.0,
-        "entry_ts_ms": now - 3 * MS_PER_HOUR, "updated_at_ms": now - 3 * MS_PER_HOUR,
+        "entry_ts_ms": now - 25 * MS_PER_HOUR, "updated_at_ms": now - 10_000,
         "exit_order_link_id": "lm-ux-c-WIF-zzz",   # cover already submitted, not yet confirmed closed
     }], infer_schema_length=None), root, trades_ds, partition_by=())
     tc = TickerCache()
@@ -1987,6 +1987,63 @@ def test_protective_exit_cycle_skips_in_flight_exit(tmp_path) -> None:
     assert payload["exits"] == 0                  # in-flight guard suppressed the second cover
     after = read_dataset(root, trades_ds)
     assert after.filter(pl.col("status") == "closed").height == 0
+
+
+def test_protective_exit_cycle_retries_stale_in_flight_exit(tmp_path) -> None:
+    """A stale submitted_unconfirmed exit link must not suppress protective covers forever."""
+    from liquidity_migration.config import ResearchConfig
+    from liquidity_migration.continuous_demo import continuous_strategy_id
+    from liquidity_migration.storage import read_dataset, write_dataset
+    from liquidity_migration.ws_state_cache import TickerCache
+
+    cfg = ContinuousDemoCycleConfig(
+        submit_orders=False,
+        record_dry_run=True,
+        stop_loss_pct=0.25,
+        stop_approach_frac=0.8,
+    )
+    root = tmp_path / "bybit-continuous-demo-event"
+    trades_ds, _orders, _cycles = continuous_dataset_names(cfg)
+    now = 1_700_000_000_000
+    strat = continuous_strategy_id(cfg)
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": f"{strat}-WIFUSDT-1699",
+                    "strategy_id": strat,
+                    "symbol": "WIFUSDT",
+                    "side": "short",
+                    "status": "open",
+                    "entry_price": 100.0,
+                    "qty": "2",
+                    "notional_usdt": 200.0,
+                    "equity_usdt": 10_000.0,
+                    "entry_ts_ms": now - 25 * MS_PER_HOUR,
+                    "updated_at_ms": now - 3 * MS_PER_HOUR,
+                    "exit_order_link_id": "lm-ux-c-WIF-stale",
+                }
+            ],
+            infer_schema_length=None,
+        ),
+        root,
+        trades_ds,
+        partition_by=(),
+    )
+    tc = TickerCache()
+    tc.seed([{"symbol": "WIFUSDT", "lastPrice": "130.0"}])
+
+    payload = run_continuous_protective_exit_cycle(
+        root,
+        config=ResearchConfig(),
+        demo_config=cfg,
+        ticker_cache=tc,
+        now_ms=now,
+    )
+
+    assert payload["exits"] == 1
+    after = read_dataset(root, trades_ds)
+    assert after.filter(pl.col("status") == "closed").height == 1
 
 
 def test_protective_exit_cycle_noop_without_open_trades(tmp_path) -> None:

@@ -1123,6 +1123,36 @@ def test_place_order_duplicate_link_uses_history_only_for_active_status(monkeypa
         )
 
 
+def test_place_order_duplicate_link_ignores_wrong_history_link(monkeypatch) -> None:
+    """A history row is usable only when its orderLinkId matches the requested link."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            return {"retCode": 110089, "retMsg": "orderLinkID exists", "result": {}}
+
+        def get_open_orders(self, **_params):
+            return {"retCode": 0, "result": {"list": [], "nextPageCursor": ""}}
+
+        def get_order_history(self, **_params):
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {"orderId": "other", "orderLinkId": "agc-other", "orderStatus": "Filled"}
+                    ]
+                },
+            }
+
+    client = _make_private_client(monkeypatch, FakeHTTP)
+    with pytest.raises(bybit.BybitDataError):
+        client.place_order(
+            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-z",
+        )
+
+
 def test_is_duplicate_order_link_matches_code_and_message() -> None:
     """exec-router-2: classify by retCode 110089 AND by message text so a
     re-worded retMsg still resolves as a duplicate."""

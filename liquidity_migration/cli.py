@@ -620,6 +620,7 @@ def _cmd_event_risk_ws(args: argparse.Namespace, config: ResearchConfig, data_ro
             pending_exit_guard_seconds=args.pending_exit_guard_seconds,
             adopt_untracked_positions=args.adopt_untracked_positions,
             exit_untracked_positions=args.exit_untracked_positions,
+            allow_incomplete_untracked_position_roots=args.allow_incomplete_untracked_position_roots,
             untracked_position_grace_seconds=args.untracked_position_grace_seconds,
             adopt_stop_loss_pct=args.adopt_stop_loss_pct,
             adopt_take_profit_pct=args.adopt_take_profit_pct,

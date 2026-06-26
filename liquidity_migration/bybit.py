@@ -1380,7 +1380,8 @@ class BybitTradeRouter:
             # are active by definition and need no status filter.
             rows.extend(
                 row for row in (history or [])
-                if str(row.get("orderStatus") or row.get("order_status") or "").lower()
+                if str(row.get("orderLinkId") or row.get("order_link_id") or "") == order_link_id
+                and str(row.get("orderStatus") or row.get("order_status") or "").lower()
                 in _PROBE_PRESENT_STATUSES
             )
         if not rows:

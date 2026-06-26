@@ -2075,6 +2075,23 @@ from .storage import exclusive_file_lock, read_dataset, read_ledger_window, writ
 from . import cross_sleeve as _cross_sleeve  # noqa: E402
 
 _logger = logging.getLogger(__name__)
+_EXIT_LINK_GUARD_MIN_SECONDS = 120.0
+
+
+def _exit_link_still_guarded(
+    trade: dict[str, Any],
+    *,
+    now_ms: int,
+    demo: ContinuousDemoCycleConfig,
+) -> bool:
+    """Whether an unconfirmed exit link is still fresh enough to suppress retries."""
+    if not str(trade.get("exit_order_link_id") or ""):
+        return False
+    updated_ms = _float(trade.get("updated_at_ms") or trade.get("exit_ts_ms") or trade.get("closed_at_ms"))
+    if updated_ms <= 0.0:
+        return False
+    guard_seconds = max(_EXIT_LINK_GUARD_MIN_SECONDS, _float(demo.order_fill_confirm_seconds) * 5.0)
+    return int(now_ms) - int(updated_ms) <= int(guard_seconds * 1000.0)
 
 
 def _open_continuous_trades(all_trades: pl.DataFrame, strategy_id: str | tuple[str, ...]) -> pl.DataFrame:
@@ -3507,14 +3524,16 @@ def run_continuous_demo_cycle(
             open_trades.to_dicts(), entry_state, now_ms=cycle_now_ms, config=demo,
             klines=klines, price_by_symbol=price_by_symbol)
         # don't double-submit a symbol that already has a live reduce-only order,
-        # OR one whose open trade row already carries an exit_order_link_id (an
+        # OR one whose open trade row carries a recent exit_order_link_id (an
         # exit submitted but fill-unconfirmed — e.g. a Market cover whose confirm
         # timed out: it is no longer an OPEN venue order, so live_exit_syms misses
         # it and the next cycle would re-plan a second cover). Same ledger-based
         # in-flight guard the fast protective loop applies (round 4).
         live_exit_syms = _live_open_order_symbols(raw_open_orders, reduce_only=True)
         exit_in_flight = {
-            str(t["symbol"]) for t in open_trades.to_dicts() if str(t.get("exit_order_link_id") or "")
+            str(t["symbol"])
+            for t in open_trades.to_dicts()
+            if _exit_link_still_guarded(t, now_ms=cycle_now_ms, demo=demo)
         }
         exit_plans = [
             p for p in exit_plans
@@ -4063,13 +4082,13 @@ def run_continuous_protective_exit_cycle(
             except Exception:  # noqa: BLE001
                 live_exit_syms = set()
         open_dicts = open_trades.to_dicts()
-        # Ledger-based in-flight guard (WS-snapshot-independent): a held trade whose row already
-        # carries an exit_order_link_id has a cover submitted but not yet confirmed closed. At the
-        # fast loop's ~2s cadence the WS order event for the main cycle's (or our own prior) cover can
-        # still be in flight, so `live_exit_syms` (from the WS snapshot) may miss it; this guard stops
-        # a second reduce-only. Retry of a genuinely-failed cover is deferred to the slower main cycle
-        # (whose snapshot has a REST fallback).
-        in_flight = {str(t["symbol"]) for t in open_dicts if str(t.get("exit_order_link_id") or "")}
+        # Ledger-based in-flight guard (WS-snapshot-independent). Recent unconfirmed exit links
+        # suppress duplicate reduce-only orders; stale links expire so covers can be retried.
+        in_flight = {
+            str(t["symbol"])
+            for t in open_dicts
+            if _exit_link_still_guarded(t, now_ms=now, demo=demo)
+        }
         exit_plans = plan_protective_exits(
             open_dicts, now_ms=now, config=demo, klines=klines, price_by_symbol=price_by_symbol)
         exit_plans = [

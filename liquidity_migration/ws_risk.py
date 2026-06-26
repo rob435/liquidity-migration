@@ -145,6 +145,7 @@ class EventWebSocketRiskConfig:
     pending_exit_guard_seconds: float = 120.0
     adopt_untracked_positions: bool = True
     exit_untracked_positions: bool = False
+    allow_incomplete_untracked_position_roots: bool = False
     untracked_position_grace_seconds: float = 90.0
     adopt_stop_loss_pct: float = 0.12
     adopt_take_profit_pct: float = 0.21
@@ -3239,16 +3240,38 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
         raise ValueError("pending_exit_guard_seconds must be non-negative")
     if config.exit_untracked_positions and config.order_submit_mode == "ws" and not config.rest_fallback:
         raise ValueError("exit_untracked_positions requires REST fallback in Bybit demo mode")
+    if (
+        config.submit_orders
+        and config.exit_untracked_positions
+        and not config.allow_incomplete_untracked_position_roots
+        and (
+            not config.long_data_root
+            or not config.continuous_data_root
+            or not config.continuous_addon_data_root
+        )
+    ):
+        missing = [
+            name for name, present in (
+                ("long_data_root", config.long_data_root),
+                ("continuous_data_root", config.continuous_data_root),
+                ("continuous_addon_data_root", config.continuous_addon_data_root),
+            )
+            if not present
+        ]
+        # exit_untracked_positions flattens any Bybit position not found in this engine's ledger(s).
+        # On the SHARED demo account this engine must read EVERY sleeve's ledger (short + long +
+        # continuous + continuous add-on) or a sibling sleeve's open positions look untracked.
+        # Fail closed for direct CLI/programmatic order-submitting runs; dry-run diagnostics may
+        # still warn below so dedicated-account checks remain possible without order submission.
+        raise ValueError(
+            "exit_untracked_positions with submit_orders=True requires sibling ledger roots: "
+            + ", ".join(missing)
+        )
     if config.exit_untracked_positions and (
         not config.long_data_root
         or not config.continuous_data_root
         or not config.continuous_addon_data_root
     ):
-        # exit_untracked_positions flattens any Bybit position not found in this engine's ledger(s).
-        # On the SHARED demo account this engine must read EVERY sleeve's ledger (short + long +
-        # continuous + continuous add-on) or a sibling sleeve's open positions look
-        # untracked and get force-closed. Warn per missing root; the launch script
-        # hard-fails the shared-account combination.
         missing = [
             name for name, present in (
                 ("long_data_root", config.long_data_root),

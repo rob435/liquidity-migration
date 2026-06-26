@@ -1484,6 +1484,7 @@ def test_ws_risk_logs_untracked_close_to_logger(tmp_path: Path, caplog) -> None:
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -1525,6 +1526,7 @@ def test_ws_risk_untracked_grace_period_defers_close_then_fires(tmp_path: Path) 
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=90.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -1569,6 +1571,7 @@ def test_ws_risk_untracked_grace_cleared_when_symbol_becomes_tracked(tmp_path: P
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=90.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -1608,6 +1611,7 @@ def test_exit_untracked_blocked_when_a_ledger_read_failed(tmp_path: Path, caplog
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -1645,6 +1649,7 @@ def test_ws_risk_flattens_untracked_position_on_bootstrap(tmp_path: Path) -> Non
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -1774,6 +1779,7 @@ def test_ws_risk_stale_pending_entry_no_longer_blocks_untracked_flatten(tmp_path
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -1868,6 +1874,7 @@ def test_ws_risk_untracked_exit_blocks_duplicate_until_fill(tmp_path: Path) -> N
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -1898,6 +1905,7 @@ def test_ws_risk_untracked_exit_history_error_stays_pending(tmp_path: Path) -> N
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -1932,6 +1940,7 @@ def test_ws_risk_untracked_execution_partial_keeps_duplicate_guard(tmp_path: Pat
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -2307,6 +2316,7 @@ def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> N
             untracked_position_grace_seconds=0.0,
             pending_exit_guard_seconds=1.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -2338,6 +2348,7 @@ def test_ws_risk_untracked_reconcile_history_error_keeps_pending(tmp_path: Path)
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -2369,6 +2380,7 @@ def test_ws_risk_untracked_reconcile_flattens_when_position_missing_even_if_hist
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -2400,6 +2412,7 @@ def test_ws_risk_reconciles_untracked_exit_when_position_is_flat(tmp_path: Path)
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
@@ -3225,6 +3238,29 @@ def test_validate_ws_risk_config_warns_untracked_exit_without_sibling_roots(capl
     assert not any("exit_untracked_positions=ON" in r.message for r in caplog.records)
 
 
+def test_validate_ws_risk_config_rejects_submitting_untracked_exit_without_sibling_roots() -> None:
+    """Direct CLI/programmatic order submission must fail closed without every sibling ledger root."""
+    from liquidity_migration.ws_risk import _validate_ws_risk_config
+
+    cfg = EventWebSocketRiskConfig(
+        submit_orders=True,
+        confirm_demo_orders=True,
+        order_submit_mode="rest",
+        rest_reconcile_seconds=0.0,
+        heartbeat_seconds=0.0,
+        untracked_position_grace_seconds=0.0,
+        max_runtime_seconds=0.0,
+        stream_start_timeout_seconds=0.0,
+        exit_untracked_positions=True,
+        long_data_root="data/bybit-long-demo-event",
+        continuous_data_root="data/bybit-continuous-demo-event",
+        continuous_addon_data_root="",
+    )
+
+    with pytest.raises(ValueError, match="continuous_addon_data_root"):
+        _validate_ws_risk_config(cfg)
+
+
 def test_validate_trade_row_invariants_catches_entry_before_signal() -> None:
     """The 2026-05-25 WAVESUSDT premature-exit bug: entry_ts_ms set to
     signal_ts_ms (i.e. before the actual fill). The validator must catch
@@ -3699,6 +3735,7 @@ def test_ws_risk_does_not_flatten_tracked_continuous_position(tmp_path: Path) ->
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
             continuous_data_root=str(continuous_root),
         ),
@@ -3737,6 +3774,7 @@ def test_ws_risk_flattens_untracked_when_continuous_root_set_but_symbol_absent(t
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
             continuous_data_root=str(continuous_root),
         ),
@@ -4392,6 +4430,7 @@ def test_untracked_long_position_is_closed_with_a_sell(tmp_path: Path) -> None:
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             exit_untracked_positions=True,
+            allow_incomplete_untracked_position_roots=True,
             adopt_untracked_positions=False,
         ),
         private_client=private_client,
