@@ -211,6 +211,8 @@ systemctl daemon-reload
 # continuous_ensemble_v2 carries no server-side stop and must remain demo/paper only.
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
+lm_write_resolved_sleeve_toggles
+lm_verify_resolved_sleeve_toggles
 echo "sleeves: LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
 systemctl enable liquidity-migration-bybit-risk.service
 # Forward-only data collection (P3, operator-approved 2026-06-10): liquidation
@@ -346,7 +348,10 @@ PY
     _hedge_timer_state=off
   fi
 fi
-apply_timer_enable "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS
+CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"
+lm_write_resolved_sleeve_toggles
+lm_verify_resolved_sleeve_toggles
+apply_hedge_timer_enable "$_hedge_timer_state"
 
 # --- restart: only the ON sleeves (off sleeves were disable --now'd above); risk always. ---
 # Long/continuous share the liquidity_migration package with the short side, so any Python
@@ -395,7 +400,7 @@ fi
 # enabled when continuous is off but an open hedge leg still needs winding down -
 # deploy-env-timers-1), not raw CONTINUOUS_SLEEVE, so a deliberately-kept-open timer
 # does not fail verify.
-verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS
+verify_hedge_timer_enable "$_hedge_timer_state"
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
 # so deploys can't silently leave the watchdog or daily report off. (The

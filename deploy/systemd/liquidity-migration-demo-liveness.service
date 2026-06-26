@@ -9,11 +9,10 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
-# Per-sleeve kill-switch toggles (deploy/sleeves.env defaults, then the optional host override)
-# so the watchdog skips an intentionally-off sleeve instead of paging it as a dead daemon.
-# `-` = optional (don't fail the unit if absent). Host file (loaded last) wins.
-EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env
-EnvironmentFile=-/etc/liquidity-migration/sleeves.env
+# Per-sleeve kill-switch toggles resolved by deploy/lib_sleeves.sh. Host overrides
+# can only turn a repo-on sleeve off; stale host "on" values cannot resurrect a
+# repo-disabled sleeve.
+EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 # Hardening + memory-cap parity with the sibling units (round 4): handles
 # credentials and pings external URLs as root.

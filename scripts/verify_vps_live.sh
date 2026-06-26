@@ -173,7 +173,9 @@ PY
     _hedge_timer_state=off
   fi
 fi
-verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS
+CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"
+lm_verify_resolved_sleeve_toggles
+verify_hedge_timer_enable "$_hedge_timer_state"
 if continuous_rmom_refresh_on; then
   _verify_rmom_root() {
     _rmom_label="$1"

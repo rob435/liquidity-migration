@@ -27,8 +27,10 @@ The deployable VPS units are:
   (The demo-health timer was erased with the short sleeve.)
 
 Which sleeve units actually run is governed by `deploy/sleeves.env` plus the
-optional host override `/etc/liquidity-migration/sleeves.env` (the host file
-wins); together they are the source of truth for which sleeves are enabled.
+optional host override `/etc/liquidity-migration/sleeves.env`. The host override
+can only narrow a repo-on sleeve to off; repo-side off is a hard ceiling. Deploy
+writes the final values to `/etc/liquidity-migration/sleeves.resolved.env`, which
+systemd units consume.
 As of 2026-06-18 the live set is long demo/paper, continuous demo, and
 continuous paper (`LONG_SLEEVE=on`, `CONTINUOUS_SLEEVE=on`,
 `CONTINUOUS_PAPER_SLEEVE=on`). All are demo/paper only.

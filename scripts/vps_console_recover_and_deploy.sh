@@ -285,6 +285,8 @@ systemctl daemon-reload
 # disabled continuous sleeve (it ships SUBMIT_ORDERS=1) regardless of the toggle. ------
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
+lm_write_resolved_sleeve_toggles
+lm_verify_resolved_sleeve_toggles
 echo "sleeves: LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
 # One-time cleanup for the ERASED daily-short sleeve (2026-06-11): a recovered older
 # host may still have its retired units installed/enabled.
@@ -350,7 +352,10 @@ PY
     _hedge_timer_state=off
   fi
 fi
-apply_timer_enable "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS
+CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"
+lm_write_resolved_sleeve_toggles
+lm_verify_resolved_sleeve_toggles
+apply_hedge_timer_enable "$_hedge_timer_state"
 # Seed the continuous rmom gate BEFORE restarting the continuous daemon - same fix as
 # deploy_vps_live.sh (the 2026-06-02 empty-gate blackout: a daemon started into an
 # empty gate emits zero entries silently). Best-effort: a first boot with the kline
@@ -428,7 +433,7 @@ if continuous_rmom_refresh_on; then
 else
   verify_timer off $CONTINUOUS_SLEEVE_TIMERS
 fi
-verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS
+verify_hedge_timer_enable "$_hedge_timer_state"
 # Timer parity - recovery must catch a missed enable just like deploy does.
 # (demo-health was erased with the short sleeve 2026-06-11 - don't check it.)
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer

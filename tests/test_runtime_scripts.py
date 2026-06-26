@@ -220,6 +220,7 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
     assert "CONTINUOUS_SNIPER=1" not in paper_text
     # 2f hedge submit armed (demo-only; runner enforces demo credentials + confirm flag)
     hedge_text = (repo / "deploy" / "systemd" / "liquidity-migration-continuous-hedge.service").read_text(encoding="utf-8")
+    assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in hedge_text
     assert "Environment=HEDGE_MODE=2f" in hedge_text
     assert "Environment=SUBMIT_HEDGE=1" in hedge_text
     assert "Environment=CONFIRM_DEMO_ORDERS=1" in hedge_text
@@ -324,6 +325,7 @@ def test_continuous_rmom_timer_wired_to_paper_evidence_gate() -> None:
     assert "CONTINUOUS_FORWARD_REPORT_TIMERS" not in lib
     assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
     assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
+    assert 'CONTINUOUS_HEDGE_SERVICES="liquidity-migration-continuous-hedge.service"' in lib
 
 
 def test_combined_book_report_includes_continuous_roots_and_sleeve_toggles() -> None:
@@ -332,8 +334,8 @@ def test_combined_book_report_includes_continuous_roots_and_sleeve_toggles() -> 
         encoding="utf-8"
     )
 
-    assert "EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env" in service
-    assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" in service
+    assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in service
+    assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" not in service
     # deploy-ci-4: the daily-SHORT sleeve was ERASED 2026-06-11, so the report
     # unit no longer wires its --short-data-root (the erased root). Guard against
     # the dead-sleeve arg drifting back in.
@@ -518,6 +520,8 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # still can't silently drop a unit — the names just live in one canonical place.
     assert "lib_sleeves.sh" in text
     assert "lm_load_sleeve_toggles" in text
+    assert "lm_write_resolved_sleeve_toggles" in text
+    assert "lm_verify_resolved_sleeve_toggles" in text
     for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
@@ -532,8 +536,16 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
     assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
     assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
+    assert 'CONTINUOUS_HEDGE_SERVICES="liquidity-migration-continuous-hedge.service"' in lib
     assert "apply_timer_enable()" in lib
     assert "verify_timer()" in lib
+    assert "apply_hedge_timer_enable()" in lib
+    assert "verify_hedge_timer_enable()" in lib
+    assert "LM_HOST_SLEEVES_ENV" in lib
+    assert "LM_RESOLVED_SLEEVES_ENV" in lib
+    assert "lm_write_resolved_sleeve_toggles()" in lib
+    assert "lm_verify_resolved_sleeve_toggles()" in lib
+    assert "Host overrides may only turn repo-on sleeves off" in lib
     assert "timer is OFF in sleeves.env but still enabled" in lib
     assert "continuous_rmom_refresh_on()" in lib
     assert "is OFF in sleeves.env but still enabled" in lib
@@ -563,8 +575,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # stopless hedge leg — when continuous is off it keeps the timer enabled (and
     # pages CRITICAL) while the hedge addon ledger holds open rows, disabling only
     # once flat. apply and verify must use the SAME computed state.
-    assert 'apply_timer_enable "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
-    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"' in text
+    assert 'apply_hedge_timer_enable "$_hedge_timer_state"' in text
+    assert 'verify_hedge_timer_enable "$_hedge_timer_state"' in text
     assert "data/bybit-continuous-hedge-event" in text  # the open-hedge ledger check
     assert "_hedge_timer_state=on" in text              # fail-safe keeps it enabled while open
     assert "continuous_rmom_refresh_on" in text
@@ -688,6 +701,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     # risk service is NOT toggled — always verified up (it protects every sleeve).
     assert "lib_sleeves.sh" in text
     assert "lm_load_sleeve_toggles" in text
+    assert "lm_verify_resolved_sleeve_toggles" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-enabled --quiet liquidity-migration-liquidation-collector.service" in text
@@ -701,6 +715,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
     assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
     assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
+    assert 'CONTINUOUS_HEDGE_SERVICES="liquidity-migration-continuous-hedge.service"' in lib
     # Read-only verify must catch a missing-timer regression that the deploy
     # script would have caused — parity check, no-write semantics.
     assert "systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer" in text
@@ -718,7 +733,8 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "ALLOW_EMPTY_RMOM_GATE" in text
     assert "CONTINUOUS_FORWARD_REPORT_TIMERS" not in text
     assert "_hedge_timer_state" in text
-    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"' in text
+    assert 'verify_hedge_timer_enable "$_hedge_timer_state"' in text
     assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
@@ -988,6 +1004,8 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     # could resurrect an OFF sleeve (e.g. the look-ahead-disabled continuous sleeve).
     assert "lib_sleeves.sh" in text
     assert "lm_load_sleeve_toggles" in text
+    assert "lm_write_resolved_sleeve_toggles" in text
+    assert "lm_verify_resolved_sleeve_toggles" in text
     assert "systemctl enable liquidity-migration-bybit-risk.service" in text
     assert "systemctl restart liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
@@ -1006,8 +1024,9 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "liquidity-migration-bybit-continuous-demo.service" in text
     assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
     assert "_hedge_timer_state" in text
-    assert 'apply_timer_enable "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
-    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"' in text
+    assert 'apply_hedge_timer_enable "$_hedge_timer_state"' in text
+    assert 'verify_hedge_timer_enable "$_hedge_timer_state"' in text
     assert 'apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
     assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
@@ -1634,7 +1653,8 @@ def test_deploy_keeps_hedge_timer_when_continuous_off_but_leg_open() -> None:
     assert "_hedge_timer_state" in txt
     assert "bybit-continuous-hedge-event" in txt
     # The verify side must mirror the apply side, not raw CONTINUOUS_SLEEVE.
-    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in txt
+    assert 'CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"' in txt
+    assert 'verify_hedge_timer_enable "$_hedge_timer_state"' in txt
     assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in txt
 
 

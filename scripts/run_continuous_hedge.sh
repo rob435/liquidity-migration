@@ -10,6 +10,13 @@ PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 VENUE="${HEDGE_VENUE:-bybit}"
 PRIMARY_ROOT="${PRIMARY_ROOT:-data/bybit-continuous-demo-event}"
 DATA_ROOT="${HEDGE_DATA_ROOT:-data/bybit-continuous-hedge-event}"
+case "${CONTINUOUS_HEDGE_TIMER:-off}" in
+    on|ON|On|1|true|TRUE|yes|YES) ;;
+    *)
+        echo "continuous hedge lifecycle is off; refusing to run armed hedge service." >&2
+        exit 0
+        ;;
+esac
 args=(--venue "$VENUE" --data-root "$DATA_ROOT" --primary-root "$PRIMARY_ROOT")
 if [[ "${SUBMIT_HEDGE:-0}" == "1" ]]; then
     args+=(--submit)

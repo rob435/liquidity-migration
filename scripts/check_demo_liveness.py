@@ -443,6 +443,29 @@ def _unit_enabled(unit: str) -> bool:
         return False
 
 
+def _unit_active(unit: str) -> bool:
+    """systemctl is-active, fail-quiet (a watchdog must never crash)."""
+    try:
+        return (
+            subprocess.run(
+                ["systemctl", "is-active", "--quiet", unit],
+                capture_output=True, text=True, timeout=10,
+            ).returncode
+            == 0
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _continuous_hedge_lifecycle_on() -> bool:
+    """Return true when the hedge timer/service should be monitored."""
+    return (
+        _sleeve_on("CONTINUOUS_HEDGE_TIMER", default="off")
+        or _sleeve_on("CONTINUOUS_SLEEVE", default="off")
+        or _unit_enabled("liquidity-migration-continuous-hedge.timer")
+    )
+
+
 def _default_units_for_toggles() -> list[str]:
     units = [
         "liquidity-migration-bybit-risk.service",
@@ -484,6 +507,13 @@ def _default_units_for_toggles() -> list[str]:
                 # reports "failed", which evaluate_unit_states alerts on. The hedge timer
                 # rides $CONTINUOUS_SLEEVE alone (deploy_vps_live.sh:239), not the
                 # rmom-refresh predicate, so it stays in this DEMO-only branch.
+                "liquidity-migration-continuous-hedge.service",
+            ]
+        )
+    elif _continuous_hedge_lifecycle_on():
+        units.extend(
+            [
+                "liquidity-migration-continuous-hedge.timer",
                 "liquidity-migration-continuous-hedge.service",
             ]
         )
@@ -943,10 +973,19 @@ def main() -> int:
         # deploy_vps_live.sh deliberately KEEPS the hedge timer enabled while a leg is
         # open even when CONTINUOUS_SLEEVE=off (to trim it flat), so reading the toggle
         # paged a false CRITICAL "ORPHANED HEDGE" every cycle during the intended
-        # wind-down. _unit_enabled mirrors the deploy's decision (audit-iter5 deploy-1).
+        # wind-down. The timer is only a manager if the resolved lifecycle flag is on
+        # AND systemd says the timer is enabled+active; otherwise the wrapper refuses
+        # to run or the scheduled job will never fire.
         alerts.extend(gather_hedge_orphan_alerts(
             hedge_root=hedge_root,
-            hedge_timer_enabled=_unit_enabled("liquidity-migration-continuous-hedge.timer"),
+            hedge_timer_enabled=(
+                (
+                    _sleeve_on("CONTINUOUS_HEDGE_TIMER", default="off")
+                    or _sleeve_on("CONTINUOUS_SLEEVE", default="off")
+                )
+                and _unit_enabled("liquidity-migration-continuous-hedge.timer")
+                and _unit_active("liquidity-migration-continuous-hedge.timer")
+            ),
         ))
     if continuous_paper_root is not None and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         alerts.extend(

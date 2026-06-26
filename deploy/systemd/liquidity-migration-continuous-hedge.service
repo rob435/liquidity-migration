@@ -8,6 +8,7 @@ Type=oneshot
 User=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=HEDGE_VENUE=bybit
 Environment=PRIMARY_ROOT=data/bybit-continuous-demo-event

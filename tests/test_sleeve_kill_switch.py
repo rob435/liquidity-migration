@@ -35,6 +35,7 @@ case "$cmd" in
   enable)  for u in "${args[@]}"; do touch "$STATE/$u.enabled"; [ "$now" = 1 ] && touch "$STATE/$u.active"; done ;;
   disable) for u in "${args[@]}"; do rm -f "$STATE/$u.enabled" "$STATE/$u.active"; done ;;
   restart|start) for u in "${args[@]}"; do touch "$STATE/$u.active"; done ;;
+  stop) for u in "${args[@]}"; do rm -f "$STATE/$u.active"; done ;;
   is-active)  for u in "${args[@]}"; do [ -f "$STATE/$u.active"  ] || exit 1; done ;;
   is-enabled) for u in "${args[@]}"; do [ -f "$STATE/$u.enabled" ] || exit 1; done ;;
 esac
@@ -51,9 +52,12 @@ def _run(tmp_path: Path, body: str) -> tuple[int, str, str]:
     state.mkdir(exist_ok=True)
     log = tmp_path / "systemctl.log"
     log.write_text("")
+    host_env = tmp_path / "missing-host-sleeves.env"
+    resolved_env = tmp_path / "sleeves.resolved.env"
     script = textwrap.dedent(f"""
         set -euo pipefail
         export PATH="{fake_bin}:$PATH" STATE="{state}" LOG="{log}"
+        export LM_HOST_SLEEVES_ENV="{host_env}" LM_RESOLVED_SLEEVES_ENV="{resolved_env}"
         cd "{REPO}"
         . deploy/lib_sleeves.sh
         {body}
@@ -130,6 +134,27 @@ def test_continuous_paper_split_keeps_demo_orders_off_runs_paper(tmp_path: Path)
     assert "enable liquidity-migration-bybit-continuous-demo.service" not in calls
 
 
+def test_hedge_lifecycle_off_stops_armed_service(tmp_path: Path) -> None:
+    rc, calls, err = _run(tmp_path, """
+        systemctl enable --now $CONTINUOUS_HEDGE_TIMERS
+        systemctl start $CONTINUOUS_HEDGE_SERVICES
+        apply_hedge_timer_enable off
+        verify_hedge_timer_enable off
+    """)
+    assert rc == 0, err
+    assert "disable --now liquidity-migration-continuous-hedge.timer" in calls
+    assert "stop liquidity-migration-continuous-hedge.service" in calls
+
+
+def test_hedge_lifecycle_off_verify_fails_when_service_active(tmp_path: Path) -> None:
+    rc, _calls, err = _run(tmp_path, """
+        systemctl start $CONTINUOUS_HEDGE_SERVICES
+        verify_hedge_timer_enable off
+    """)
+    assert rc != 0
+    assert "liquidity-migration-continuous-hedge.service service is OFF" in err
+
+
 def test_loaded_toggles_long_continuous_and_paper_on(tmp_path: Path) -> None:
     # Loaded toggles: LONG re-enabled 2026-06-16 by operator (demo diversifier, shares the
     # netted demo account with continuous); continuous demo + paper stay on.
@@ -141,6 +166,64 @@ def test_loaded_toggles_long_continuous_and_paper_on(tmp_path: Path) -> None:
     assert rc == 0, err
 
 
+def test_host_override_can_only_turn_repo_on_sleeve_off(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    host_env = tmp_path / "host-sleeves.env"
+    resolved_env = tmp_path / "resolved-sleeves.env"
+    (lib_dir / "lib_sleeves.sh").write_text((REPO / "deploy" / "lib_sleeves.sh").read_text())
+    (lib_dir / "sleeves.env").write_text(
+        "LONG_SLEEVE=off\n"
+        "CONTINUOUS_SLEEVE=off\n"
+        "CONTINUOUS_PAPER_SLEEVE=on\n"
+    )
+    host_env.write_text(
+        "LONG_SLEEVE=on\n"
+        "CONTINUOUS_SLEEVE=on\n"
+        "CONTINUOUS_PAPER_SLEEVE=off\n"
+    )
+    script = textwrap.dedent(f"""
+        set -euo pipefail
+        export LM_HOST_SLEEVES_ENV="{host_env}" LM_RESOLVED_SLEEVES_ENV="{resolved_env}"
+        . "{lib_dir}/lib_sleeves.sh"
+        lm_load_sleeve_toggles
+        test "$LONG_SLEEVE" = off
+        test "$CONTINUOUS_SLEEVE" = off
+        test "$CONTINUOUS_PAPER_SLEEVE" = off
+        lm_write_resolved_sleeve_toggles
+        lm_verify_resolved_sleeve_toggles
+        grep -Fx LONG_SLEEVE=off "{resolved_env}"
+        grep -Fx CONTINUOUS_SLEEVE=off "{resolved_env}"
+        grep -Fx CONTINUOUS_PAPER_SLEEVE=off "{resolved_env}"
+    """)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_host_override_keeps_repo_on_sleeve_on_when_host_on(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    host_env = tmp_path / "host-sleeves.env"
+    (lib_dir / "lib_sleeves.sh").write_text((REPO / "deploy" / "lib_sleeves.sh").read_text())
+    (lib_dir / "sleeves.env").write_text(
+        "LONG_SLEEVE=on\n"
+        "CONTINUOUS_SLEEVE=on\n"
+        "CONTINUOUS_PAPER_SLEEVE=on\n"
+    )
+    host_env.write_text("LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=off\n")
+    script = textwrap.dedent(f"""
+        set -euo pipefail
+        export LM_HOST_SLEEVES_ENV="{host_env}"
+        . "{lib_dir}/lib_sleeves.sh"
+        lm_load_sleeve_toggles
+        test "$LONG_SLEEVE" = on
+        test "$CONTINUOUS_SLEEVE" = off
+        test "$CONTINUOUS_PAPER_SLEEVE" = on
+    """)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     """Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):
     EVERY sleeve defaults OFF since audit 2026-06-12 round 3 — LONG previously
@@ -149,15 +232,13 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     LONG=off intent. A missing config disables everything; it can never
     resurrect a sleeve. Exercises the lib's ACTUAL lm_load_sleeve_toggles
     against a copy with no sleeves.env beside it."""
-    import pytest
-
-    if Path("/etc/liquidity-migration/sleeves.env").exists():
-        pytest.skip("host sleeves.env override present — fallback path untestable here")
     lib_dir = tmp_path / "lib"
     lib_dir.mkdir()
+    host_env = tmp_path / "missing-host-sleeves.env"
     (lib_dir / "lib_sleeves.sh").write_text((REPO / "deploy" / "lib_sleeves.sh").read_text())
     script = textwrap.dedent(f"""
         set -euo pipefail
+        export LM_HOST_SLEEVES_ENV="{host_env}"
         unset LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE 2>/dev/null || true
         . "{lib_dir}/lib_sleeves.sh"
         lm_load_sleeve_toggles

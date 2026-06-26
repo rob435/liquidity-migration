@@ -9,12 +9,10 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
-# Per-sleeve kill-switch toggles (deploy/sleeves.env defaults, then the optional host
-# override) so ws_risk can compute the equal-split IM budget = 1/len(active sleeves):
-# toggle a sleeve off and the remaining sleeves' shares grow on the next reconcile pass.
-# `-` = optional (don't fail the unit if absent). Host file (loaded last) wins.
-EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env
-EnvironmentFile=-/etc/liquidity-migration/sleeves.env
+# Per-sleeve kill-switch toggles resolved by deploy/lib_sleeves.sh so ws_risk can
+# compute the equal-split IM budget = 1/len(active sleeves). Host overrides can
+# turn a repo-on sleeve off, but cannot turn a repo-off sleeve back on.
+EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 Environment=DATA_ROOT=data/bybit-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=SUBMIT_ORDERS=1

@@ -185,6 +185,16 @@ def test_orphan_hedge_pages_only_when_timer_off_with_open_leg() -> None:
     assert "ORPHANED HEDGE" in a.message and "BTCUSDT" in a.message and "ETHUSDT" in a.message
 
 
+def test_orphan_hedge_pages_when_timer_enabled_but_inactive() -> None:
+    # The caller passes hedge_timer_enabled only when systemd says enabled AND
+    # active. Enabled-but-inactive means the daily job will not fire.
+    a = M.evaluate_orphan_hedge(
+        hedge_timer_enabled=False,
+        open_hedge_trades=[{"symbol": "BTCUSDT", "status": "open"}],
+    )
+    assert a is not None and a.severity == M.CRITICAL
+
+
 def test_ws_staleness_threshold() -> None:
     now = 1_000 * HOUR
     assert M.evaluate_ws_staleness(store_max_ts_ms=now - 1 * HOUR, now_ms=now, max_lag_hours=6, label="demo") is None
@@ -427,7 +437,21 @@ def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     assert "liquidity-migration-bybit-long-paper.service" in units
     assert "liquidity-migration-bybit-continuous-demo.service" in units
     assert "liquidity-migration-continuous-hedge.timer" in units
+    assert "liquidity-migration-continuous-hedge.service" in units
     assert "liquidity-migration-bybit-continuous-paper.service" not in units
+
+
+def test_hedge_lifecycle_monitored_during_continuous_off_winddown(monkeypatch) -> None:
+    monkeypatch.setenv("LONG_SLEEVE", "off")
+    monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
+    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
+    monkeypatch.setenv("CONTINUOUS_HEDGE_TIMER", "on")
+
+    units = M._default_units_for_toggles()
+
+    assert "liquidity-migration-bybit-continuous-demo.service" not in units
+    assert "liquidity-migration-continuous-hedge.timer" in units
+    assert "liquidity-migration-continuous-hedge.service" in units
 
 
 def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, capsys) -> None:
@@ -604,6 +628,7 @@ def test_rmom_refresh_monitored_in_paper_only_mode(monkeypatch) -> None:
     assert "liquidity-migration-continuous-rmom-refresh.timer" in units
     # The DEMO-only hedge timer rides CONTINUOUS_SLEEVE alone, so it must be absent.
     assert "liquidity-migration-continuous-hedge.timer" not in units
+    assert "liquidity-migration-continuous-hedge.service" not in units
     assert "liquidity-migration-bybit-continuous-demo.service" not in units
     # The paper daemon IS monitored.
     assert "liquidity-migration-bybit-continuous-paper.service" in units
