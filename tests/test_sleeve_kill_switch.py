@@ -36,6 +36,7 @@ case "$cmd" in
   disable) for u in "${args[@]}"; do rm -f "$STATE/$u.enabled" "$STATE/$u.active"; done ;;
   restart|start) for u in "${args[@]}"; do touch "$STATE/$u.active"; done ;;
   stop) for u in "${args[@]}"; do rm -f "$STATE/$u.active"; done ;;
+  reset-failed) : ;;
   is-active)  for u in "${args[@]}"; do [ -f "$STATE/$u.active"  ] || exit 1; done ;;
   is-enabled) for u in "${args[@]}"; do [ -f "$STATE/$u.enabled" ] || exit 1; done ;;
   list-unit-files)
@@ -183,6 +184,7 @@ def test_unknown_liquidity_migration_unit_is_cleaned_and_verified(tmp_path: Path
     """)
     assert rc == 0, err
     assert "disable --now liquidity-migration-stale-alpha.service" in calls
+    assert "reset-failed liquidity-migration-stale-alpha.service" in calls
 
 
 def test_loaded_toggles_long_continuous_and_paper_on(tmp_path: Path) -> None:

@@ -186,6 +186,7 @@ lm_cleanup_unknown_liqmig_units() {
         echo "cleanup: unknown liquidity-migration unit -> disable/remove $_lcu_unit" >&2
         systemctl disable --now "$_lcu_unit" 2>/dev/null || true
         rm -f "/etc/systemd/system/$_lcu_unit"
+        systemctl reset-failed "$_lcu_unit" 2>/dev/null || true
     done
 }
 
