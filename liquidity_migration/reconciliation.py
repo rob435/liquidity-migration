@@ -52,6 +52,17 @@ CONTINUOUS_V2_STRATEGY_IDS = (CONTINUOUS_V2_DEMO_STRATEGY_ID, CONTINUOUS_V2_PAPE
 CONTINUOUS_V2_PROFILE = "continuous_ensemble_v2"
 
 
+def _rebalance_telemetry_required(strategy_profile: str | None) -> bool:
+    """Whether forward-readiness should require rebalance telemetry columns.
+
+    The deployed v2 continuous profile intentionally keeps daily vol-target
+    rebalance disabled. Its cycle rows therefore do not carry
+    ``rebalance_day_ts`` telemetry; requiring those columns makes the live
+    execution reconcile fail for the intended runtime config.
+    """
+    return str(strategy_profile or "") != CONTINUOUS_V2_PROFILE
+
+
 def _is_snipe_trade(row: dict[str, Any]) -> bool:
     return str(row.get("trade_id") or "").endswith(SNIPER_TRADE_SUFFIX)
 
@@ -703,6 +714,7 @@ def audit_continuous_rebalance_cycles(
     strategy_profile: str | None = None,
     cycle_strategy_id: str | tuple[str, ...] | None = None,
     order_strategy_id: str | tuple[str, ...] | None = None,
+    require_rebalance_telemetry: bool = True,
 ) -> dict[str, Any]:
     """Audit daily-rebalance cycle telemetry for causal scale and resize discipline."""
     rule = rule or ContinuousRebalanceRule()
@@ -723,6 +735,41 @@ def audit_continuous_rebalance_cycles(
         "cycles_before_filter": raw_cycles,
         "orders_before_filter": raw_orders,
     }
+
+    def _resize_order_count(frame: pl.DataFrame) -> int:
+        if frame.is_empty() or "resize_reason" not in frame.columns:
+            return 0
+        return frame.filter(pl.col("resize_reason").is_not_null()).height
+
+    def _disabled_rebalance_payload(kind: str | None = None) -> dict[str, Any]:
+        order_resize_orders = _resize_order_count(orders)
+        disabled_issues: list[dict[str, Any]] = []
+        if kind is not None:
+            disabled_issues.append({"kind": kind, "message": "daily rebalance telemetry absent"})
+        if order_resize_orders > 0:
+            disabled_issues.append(
+                {
+                    "kind": "resize_orders_with_rebalance_disabled",
+                    "order_resize_orders": order_resize_orders,
+                }
+            )
+        return {
+            "ok": not disabled_issues,
+            "summary": {
+                "cycles": cycles.height,
+                "rebalance_cycles": 0,
+                "days": 0,
+                "scale_mismatches": 0,
+                "same_day_resize_violations": 0,
+                "cycle_resize_orders": 0,
+                "order_resize_orders": order_resize_orders,
+                "resize_order_count_mismatch": False,
+                "rebalance_telemetry_required": False,
+                **filters,
+            },
+            "issues": disabled_issues,
+        }
+
     if cycles.is_empty():
         return {
             "ok": False,
@@ -732,13 +779,18 @@ def audit_continuous_rebalance_cycles(
                 "days": 0,
                 "scale_mismatches": 0,
                 "same_day_resize_violations": 0,
+                "cycle_resize_orders": 0,
+                "order_resize_orders": _resize_order_count(orders),
                 "resize_order_count_mismatch": False,
+                "rebalance_telemetry_required": bool(require_rebalance_telemetry),
                 **filters,
             },
             "issues": [{"kind": "empty_cycles", "message": "no cycle rows"}],
         }
 
     if "rebalance_day_ts" not in cycles.columns:
+        if not require_rebalance_telemetry:
+            return _disabled_rebalance_payload()
         return {
             "ok": False,
             "summary": {
@@ -747,13 +799,18 @@ def audit_continuous_rebalance_cycles(
                 "days": 0,
                 "scale_mismatches": 0,
                 "same_day_resize_violations": 0,
+                "cycle_resize_orders": 0,
+                "order_resize_orders": _resize_order_count(orders),
                 "resize_order_count_mismatch": False,
+                "rebalance_telemetry_required": True,
                 **filters,
             },
             "issues": [{"kind": "missing_rebalance_columns", "message": "rebalance_day_ts column missing"}],
         }
 
     rebalance = cycles.filter(pl.col("rebalance_day_ts").is_not_null()).sort("ts_ms")
+    if rebalance.is_empty() and not require_rebalance_telemetry:
+        return _disabled_rebalance_payload()
     # Materialize the rebalance rows ONCE and reuse the list everywhere below
     # (reconciliation-4): every downstream pass previously re-ran rebalance.to_dicts(),
     # and the scale loop re-scanned the whole frame per row => O(n^2) over operating
@@ -836,6 +893,7 @@ def audit_continuous_rebalance_cycles(
         "cycle_resize_orders": cycle_resize_orders,
         "order_resize_orders": order_resize_orders,
         "resize_order_count_mismatch": mismatch,
+        "rebalance_telemetry_required": bool(require_rebalance_telemetry),
         **filters,
     }
     return {"ok": not issues, "summary": summary, "issues": issues}
@@ -854,6 +912,7 @@ def format_continuous_rebalance_audit_report(payload: dict[str, Any]) -> str:
         f"same_day_resize_violations: `{summary['same_day_resize_violations']}`",
         f"cycle_resize_orders: `{summary.get('cycle_resize_orders', 0)}`",
         f"order_resize_orders: `{summary.get('order_resize_orders', 0)}`",
+        f"rebalance_telemetry_required: `{summary.get('rebalance_telemetry_required', True)}`",
         f"start_ts_ms: `{summary.get('start_ts_ms') or ''}`",
         f"start_utc: `{summary.get('start_utc') or ''}`",
         f"strategy_profile: `{summary.get('strategy_profile') or ''}`",
@@ -882,6 +941,7 @@ def run_continuous_rebalance_cycle_audit(
     strategy_profile: str | None = None,
     cycle_strategy_id: str | tuple[str, ...] | None = None,
     order_strategy_id: str | tuple[str, ...] | None = None,
+    require_rebalance_telemetry: bool = True,
 ) -> dict[str, Any]:
     root = Path(data_root).expanduser()
     payload = audit_continuous_rebalance_cycles(
@@ -891,6 +951,7 @@ def run_continuous_rebalance_cycle_audit(
         strategy_profile=strategy_profile,
         cycle_strategy_id=cycle_strategy_id,
         order_strategy_id=order_strategy_id,
+        require_rebalance_telemetry=require_rebalance_telemetry,
     )
     report = format_continuous_rebalance_audit_report(payload)
     report_dir = Path(output_dir).expanduser() if output_dir else root / "reports" / "continuous_rebalance_cycle_audit"
@@ -939,6 +1000,7 @@ def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
         "",
         f"- cycles: `{paper_summary['cycles']}`",
         f"- rebalance_cycles: `{paper_summary['rebalance_cycles']}`",
+        f"- rebalance telemetry required: `{paper_summary.get('rebalance_telemetry_required', True)}`",
         f"- scale_mismatches: `{paper_summary['scale_mismatches']}`",
         f"- same_day_resize_violations: `{paper_summary['same_day_resize_violations']}`",
         f"- resize_order_count_mismatch: `{paper_summary['resize_order_count_mismatch']}`",
@@ -952,6 +1014,7 @@ def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
                 "",
                 f"- cycles: `{demo_summary['cycles']}`",
                 f"- rebalance_cycles: `{demo_summary['rebalance_cycles']}`",
+                f"- rebalance telemetry required: `{demo_summary.get('rebalance_telemetry_required', True)}`",
                 f"- scale_mismatches: `{demo_summary['scale_mismatches']}`",
                 f"- same_day_resize_violations: `{demo_summary['same_day_resize_violations']}`",
                 f"- resize_order_count_mismatch: `{demo_summary['resize_order_count_mismatch']}`",
@@ -1017,6 +1080,7 @@ def run_continuous_forward_readiness(
         else paper_root_p / "reports" / "continuous_forward_readiness"
     )
     out_root.mkdir(parents=True, exist_ok=True)
+    require_rebalance_telemetry = _rebalance_telemetry_required(strategy_profile)
 
     paper_rebalance = run_continuous_rebalance_cycle_audit(
         paper_root_p,
@@ -1027,6 +1091,7 @@ def run_continuous_forward_readiness(
         strategy_profile=strategy_profile,
         cycle_strategy_id=paper_strategy_id,
         order_strategy_id=paper_strategy_id,
+        require_rebalance_telemetry=require_rebalance_telemetry,
     )
     demo_rebalance = None
     paper_demo = None
@@ -1047,6 +1112,7 @@ def run_continuous_forward_readiness(
             strategy_profile=strategy_profile,
             cycle_strategy_id=demo_strategy_id,
             order_strategy_id=demo_strategy_id,
+            require_rebalance_telemetry=require_rebalance_telemetry,
         )
         paper_demo = run_continuous_paper_demo_reconciliation(
             paper_root_p,

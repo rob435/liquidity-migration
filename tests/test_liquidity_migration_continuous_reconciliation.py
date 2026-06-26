@@ -13,6 +13,8 @@ from liquidity_migration.continuous_rebalance import (
     compute_continuous_rebalance_scale,
 )
 from liquidity_migration.reconciliation import (
+    CONTINUOUS_V2_PAPER_STRATEGY_ID,
+    CONTINUOUS_V2_PROFILE,
     _calendar_metrics,
     _continuous_cycle_daily_returns,
     audit_continuous_rebalance_cycles,
@@ -354,6 +356,91 @@ def test_continuous_forward_readiness_v2_filter_ignores_pre_v2_poison(tmp_path: 
     assert payload["paper_rebalance"]["result"]["summary"]["cycles"] == 1
     assert "continuous_ensemble_v2" in payload["report"]
     assert str(v2_start) in payload["report"]
+
+
+def test_continuous_forward_readiness_v2_allows_disabled_rebalance_telemetry(tmp_path: Path) -> None:
+    paper_root = tmp_path / "paper"
+    demo_root = tmp_path / "demo"
+    paper_root.mkdir()
+    demo_root.mkdir()
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+
+    cycles = pl.DataFrame(
+        [
+            {
+                "cycle_id": "v2-paper-no-rebalance",
+                "ts_ms": day0 + 1,
+                "strategy_profile": CONTINUOUS_V2_PROFILE,
+                "strategy_id": CONTINUOUS_V2_PAPER_STRATEGY_ID,
+            }
+        ],
+        infer_schema_length=None,
+    )
+    write_dataset(cycles, paper_root, "continuous_fade_paper_cycles", partition_by=())
+
+    payload = run_continuous_forward_readiness(
+        paper_root,
+        demo_root,
+        require_demo=False,
+        output_dir=tmp_path / "readiness",
+        strategy_profile=CONTINUOUS_V2_PROFILE,
+        paper_strategy_id=CONTINUOUS_V2_PAPER_STRATEGY_ID,
+    )
+
+    assert payload["ok"] is True
+    assert payload["summary"]["paper_rebalance_ok"] is True
+    paper_summary = payload["paper_rebalance"]["result"]["summary"]
+    assert paper_summary["rebalance_telemetry_required"] is False
+    assert paper_summary["rebalance_cycles"] == 0
+    assert "rebalance telemetry required: `False`" in payload["report"]
+
+
+def test_continuous_forward_readiness_v2_rejects_resize_orders_without_rebalance_telemetry(
+    tmp_path: Path,
+) -> None:
+    paper_root = tmp_path / "paper"
+    demo_root = tmp_path / "demo"
+    paper_root.mkdir()
+    demo_root.mkdir()
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+
+    cycles = pl.DataFrame(
+        [
+            {
+                "cycle_id": "v2-paper-no-rebalance",
+                "ts_ms": day0 + 1,
+                "strategy_profile": CONTINUOUS_V2_PROFILE,
+                "strategy_id": CONTINUOUS_V2_PAPER_STRATEGY_ID,
+            }
+        ],
+        infer_schema_length=None,
+    )
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "resize-1",
+                "ts_ms": day0 + 2,
+                "strategy_id": CONTINUOUS_V2_PAPER_STRATEGY_ID,
+                "resize_reason": "daily_rebalance",
+            }
+        ],
+        infer_schema_length=None,
+    )
+    write_dataset(cycles, paper_root, "continuous_fade_paper_cycles", partition_by=())
+    write_dataset(orders, paper_root, "continuous_fade_paper_orders", partition_by=())
+
+    payload = run_continuous_forward_readiness(
+        paper_root,
+        demo_root,
+        require_demo=False,
+        output_dir=tmp_path / "readiness",
+        strategy_profile=CONTINUOUS_V2_PROFILE,
+        paper_strategy_id=CONTINUOUS_V2_PAPER_STRATEGY_ID,
+    )
+
+    assert payload["ok"] is False
+    issues = payload["paper_rebalance"]["result"]["issues"]
+    assert issues == [{"kind": "resize_orders_with_rebalance_disabled", "order_resize_orders": 1}]
 
 
 def test_continuous_paper_mode_resolves_distinct_dataset_names() -> None:
