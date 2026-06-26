@@ -286,6 +286,64 @@ def test_ws_risk_bootstrap_exits_crossed_stop_before_stop_repair(tmp_path: Path)
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_reason").item() == "stop_loss"
 
 
+def test_ws_risk_rest_exit_writes_preflight_before_place_order(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    call_order: list[str] = []
+
+    class PreflightAssertingClient(FakePrivateClient):
+        def place_order(self, **params):
+            call_order.append("place_order")
+            orders = read_dataset(tmp_path, "event_demo_orders")
+            assert not orders.is_empty(), "preflight order row must exist before REST submit"
+            row = orders.filter(pl.col("order_link_id") == params["orderLinkId"]).to_dicts()[0]
+            assert row["submit_mode"] == "preflight"
+            assert row["status"] == "submitted"
+            assert row["trade_id"] == "t1"
+            assert row["exit_reason"] == "stop_loss"
+            assert row["target_qty"] == "1"
+            return super().place_order(**params)
+
+    private_client = PreflightAssertingClient(
+        positions=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100",
+                "markPrice": "113",
+                "positionValue": "113",
+                "unrealisedPnl": "-13",
+                "stopLoss": "",
+                "takeProfit": "80",
+            }
+        ]
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    assert call_order == ["place_order"]
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    final = stored_orders.filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    assert final["submit_mode"] == "submitted"
+    assert final["status"] == "filled"
+
+
 def test_ws_risk_skips_stop_repair_when_exit_order_pending(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     write_dataset(

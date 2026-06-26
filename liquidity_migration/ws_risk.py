@@ -1773,6 +1773,12 @@ class EventWebSocketRiskEngine:
             exit_order_mode="market",
             settle_coin=self.risk.settle_coin,
         )
+
+        def _record_preflight(row: dict[str, Any]) -> None:
+            tagged = dict(row)
+            self._tag_sleeve_from_trades([], [tagged], fallback_symbol=str(tagged.get("symbol") or ""))
+            self._write_order_rows_routed([tagged])
+
         return _execute_risk_exits(
             exits,
             self.state.all_trades,
@@ -1781,6 +1787,7 @@ class EventWebSocketRiskEngine:
             now_ms=_now_ms(),
             price_by_symbol=self.state.price_by_symbol,
             tick_size_by_symbol={},
+            record_preflight=_record_preflight if submit_orders else None,
         )
 
     def repair_exchange_stops(self) -> None:
