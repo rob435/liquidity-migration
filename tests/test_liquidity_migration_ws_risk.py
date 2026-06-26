@@ -1143,6 +1143,54 @@ def test_ws_risk_order_stream_partial_fill_reduces_trade_qty(tmp_path: Path) -> 
     assert "AAAUSDT" in engine.state.submitted_symbols
 
 
+def test_ws_risk_order_stream_partial_cancel_is_not_rejected(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    link = str(engine.state.orders[0]["order_link_id"])
+    engine.on_order_message(
+        {
+            "data": [
+                {
+                    "symbol": "AAAUSDT",
+                    "orderLinkId": link,
+                    "orderStatus": "PartiallyFilledCanceled",
+                    "cumExecQty": "0.4",
+                    "avgPrice": "113",
+                }
+            ]
+        }
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_order = read_dataset(tmp_path, "event_demo_orders").filter(pl.col("order_link_id") == link).to_dicts()[0]
+    trade = stored.filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    assert trade["status"] == "open"
+    assert trade["qty"] == "0.6"
+    assert stored_order["status"] == "partial_cancelled"
+    assert stored_order["filled_qty"] == "0.4"
+    assert stored_order["avg_price"] == pytest.approx(113.0)
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
 def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     write_dataset(
@@ -2357,6 +2405,52 @@ def test_ws_risk_aged_pending_tracked_exit_still_tracks_late_ws_fill(tmp_path: P
     assert trade["exit_reason"] == "stop_loss"
     assert float(trade["gross_trade_return"]) == pytest.approx(-0.13)
     assert float(trade["exit_fee_usdt"]) == pytest.approx(0.03)
+
+
+def test_ws_risk_loads_continuous_exit_preflight_for_restart_guard(tmp_path: Path) -> None:
+    continuous_root = tmp_path / "continuous"
+    continuous_root.mkdir()
+    _write_continuous_open_trade(continuous_root, "AAAUSDT")
+    trade_id = read_dataset(continuous_root, "continuous_fade_demo_trades").select("trade_id").item()
+    link = "lm-ux-c-AAA-restart"
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": link,
+                    "ts_ms": 1_700_000_000_000,
+                    "updated_at_ms": 1_700_000_000_000,
+                    "trade_id": trade_id,
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "target_qty": "1",
+                    "reduce_only": True,
+                    "submit_mode": "preflight",
+                    "status": "submitted",
+                    "exit_reason": "left_decile",
+                    "exit_trigger_ts_ms": 1_700_000_000_000,
+                    "filled_qty": "",
+                    "sleeve": "continuous",
+                }
+            ]
+        ),
+        continuous_root,
+        "continuous_fade_demo_orders",
+        partition_by=(),
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(continuous_data_root=str(continuous_root)),
+    )
+
+    engine.state.open_trades = engine._read_trades_combined(full=True)
+    engine.load_pending_exit_orders(engine._read_orders_combined(full=True))
+
+    assert engine.state.submitted_link_to_trade_id[link] == trade_id
+    assert engine.state.submitted_link_submit_mode[link] == "preflight"
 
 
 def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> None:

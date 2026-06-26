@@ -8,7 +8,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration.storage import dataset_lock_path, exclusive_file_lock, read_dataset, write_dataset
+from liquidity_migration.storage import dataset_lock_path, dataset_path, exclusive_file_lock, read_dataset, write_dataset
 
 
 def test_incremental_parquet_writes_merge_existing_partition(tmp_path: Path) -> None:
@@ -91,6 +91,53 @@ def test_continuous_fade_datasets_registered_and_roundtrip(tmp_path: Path) -> No
             write_dataset(row.with_columns(pl.lit(2).alias("v")), tmp_path, dataset, partition_by=())
             stored = read_dataset(tmp_path, dataset)
             assert stored.height == 1 and stored["v"][0] == 2
+
+
+def test_continuous_orders_read_prefers_bucketed_final_over_legacy_preflight(tmp_path: Path) -> None:
+    """A migrated continuous order can have an old monolithic preflight row and a
+    newer bucketed final row. The read path must keep the newest order state by
+    updated_at_ms, otherwise restart reconciliation can resurrect a stale intent."""
+    root = dataset_path(tmp_path, "continuous_fade_demo_orders")
+    root.mkdir(parents=True, exist_ok=True)
+    link = "lm-en-c-ABC-aaaa"
+    pl.DataFrame(
+        [
+            {
+                "order_link_id": link,
+                "ts_ms": 1_700_000_000_000,
+                "trade_id": "t1",
+                "symbol": "ABCUSDT",
+                "submit_mode": "preflight",
+                "status": "submitted",
+            }
+        ]
+    ).write_parquet(root / "part.parquet")
+
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": link,
+                    "ts_ms": 1_700_000_010_000,
+                    "updated_at_ms": 1_700_000_010_000,
+                    "trade_id": "t1",
+                    "symbol": "ABCUSDT",
+                    "submit_mode": "submitted",
+                    "status": "filled",
+                }
+            ]
+        ),
+        tmp_path,
+        "continuous_fade_demo_orders",
+        partition_by=(),
+    )
+
+    stored = read_dataset(tmp_path, "continuous_fade_demo_orders")
+    assert stored.height == 1
+    row = stored.to_dicts()[0]
+    assert row["submit_mode"] == "submitted"
+    assert row["status"] == "filled"
+    assert row["updated_at_ms"] == 1_700_000_010_000
 
 
 def test_event_demo_trades_dedupe_keeps_freshest_updated_at_ms_not_last_written(tmp_path: Path) -> None:
@@ -468,7 +515,6 @@ def test_event_demo_orders_lock_serializes_concurrent_writers(tmp_path: Path) ->
 # --- reconcile-ledger-5 / quality-dup-5: month-bucketed ledgers -------------
 from liquidity_migration.storage import (  # noqa: E402
     _LEDGER_MONTH_COL,
-    dataset_path,
     read_ledger_window,
 )
 

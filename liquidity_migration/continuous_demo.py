@@ -2396,9 +2396,15 @@ def _execute_continuous_exits(
         if demo.submit_orders:
             assert trading_client is not None
             if record_preflight is not None:
-                record_preflight({"order_link_id": exit_link, "ts_ms": now_ms, "trade_id": str(trade.get("trade_id", "")),
-                                  "symbol": symbol, "side": "Buy", "qty": qty, "reduce_only": True,
-                                  "submit_mode": "preflight", "status": "submitted", "trade_side": "short",
+                record_preflight({"order_link_id": exit_link, "ts_ms": now_ms, "updated_at_ms": now_ms,
+                                  "trade_id": str(trade.get("trade_id", "")),
+                                  "symbol": symbol, "side": "Buy", "order_type": demo.exit_order_type,
+                                  "qty": qty, "target_qty": qty, "reduce_only": True, "order_id": "",
+                                  "submit_mode": "preflight", "avg_price": 0.0, "notional_usdt": 0.0,
+                                  "status": "submitted", "trade_side": "short",
+                                  "exit_reason": str(plan.get("exit_reason", "left_decile")),
+                                  "exit_trigger_ts_ms": int(_float(plan.get("exit_trigger_ts_ms")) or now_ms),
+                                  "filled_qty": "", "error": "",
                                   "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo))})
             try:
                 order_result = trading_client.place_order(**_order_params(
@@ -2465,12 +2471,14 @@ def _execute_continuous_exits(
                     )
                 upd.update({"exit_order_link_id": exit_link, "submit_mode": submit_mode, "updated_at_ms": now_ms})
             rows.append(upd)
-        order_rows.append({"order_link_id": exit_link, "ts_ms": now_ms, "trade_id": str(trade.get("trade_id", "")),
+        order_rows.append({"order_link_id": exit_link, "ts_ms": now_ms, "updated_at_ms": now_ms,
+                           "trade_id": str(trade.get("trade_id", "")),
                            "symbol": symbol, "side": "Buy", "order_type": demo.exit_order_type, "qty": qty,
                            "reduce_only": True, "order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
                            "avg_price": exit_price, "fee_usdt": exit_fee, "exec_time_ms": exit_exec_time_ms,
                            "status": status, "trade_side": "short", "exit_reason": str(plan.get("exit_reason", "left_decile")),
-                           "filled_qty": str(filled_qty) if filled_qty > 0 else "", "error": error,
+                           "exit_trigger_ts_ms": int(_float(plan.get("exit_trigger_ts_ms")) or now_ms),
+                           "target_qty": qty, "filled_qty": str(filled_qty) if filled_qty > 0 else "", "error": error,
                            "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo))})
     return rows, order_rows
 
@@ -2619,6 +2627,7 @@ def _build_continuous_rebalance_resize_rows(
             {
                 "order_link_id": order_link,
                 "ts_ms": now_ms,
+                "updated_at_ms": now_ms,
                 "trade_id": str(trade.get("trade_id", "")),
                 "strategy_id": strategy_id,
                 "symbol": symbol,
@@ -2721,6 +2730,7 @@ def _execute_continuous_rebalance_resizes(
         preflight = {
             "order_link_id": order_link,
             "ts_ms": now_ms,
+            "updated_at_ms": now_ms,
             "trade_id": str(plan.trade_id),
             "strategy_id": strategy_id,
             "symbol": symbol,
@@ -2737,6 +2747,15 @@ def _execute_continuous_rebalance_resizes(
             "resize_reason": plan.reason,
             "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo)),
         }
+        if plan.reduce_only:
+            preflight.update(
+                {
+                    "exit_reason": str(plan.reason or "rebalance_reduce"),
+                    "exit_trigger_ts_ms": now_ms,
+                    "filled_qty": "",
+                    "error": "",
+                }
+            )
         if record_preflight is not None:
             record_preflight(preflight)
 
@@ -2946,7 +2965,8 @@ def _execute_continuous_entries(
                 submit_mode, order_status, error, filled_qty, filled_notional = "error", "failed", f"set_leverage failed: {exc}"[:500], 0.0, 0.0
             if not error:
                 if record_preflight is not None:
-                    record_preflight({"order_link_id": entry_link, "ts_ms": now_ms, "trade_id": trade_id,
+                    record_preflight({"order_link_id": entry_link, "ts_ms": now_ms, "updated_at_ms": now_ms,
+                                      "trade_id": trade_id,
                                       "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "qty": qty, "reduce_only": False,
                                       "submit_mode": "preflight", "status": "submitted", "trade_side": "short",
                                       "sleeve": continuous_sleeve_name(demo),
@@ -3023,7 +3043,7 @@ def _execute_continuous_entries(
                 "entry_order_link_id": entry_link, "entry_order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
             })
         order_rows.append({
-            "order_link_id": entry_link, "ts_ms": now_ms, "trade_id": trade_id,
+            "order_link_id": entry_link, "ts_ms": now_ms, "updated_at_ms": now_ms, "trade_id": trade_id,
             "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "order_type": demo.entry_order_type,
             "qty": qty, "reduce_only": False, "order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
             "avg_price": entry_price if filled_qty > 0 else 0.0, "fee_usdt": entry_fee, "exec_time_ms": entry_exec_time_ms,

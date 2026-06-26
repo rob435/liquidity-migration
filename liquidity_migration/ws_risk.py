@@ -1479,7 +1479,10 @@ class EventWebSocketRiskEngine:
         status: str,
         row: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        normalized_status = "cancelled" if status in {"cancelled", "canceled", "deactivated"} else "rejected"
+        if status in {"partiallyfilledcanceled", "partiallyfilledcancelled"}:
+            normalized_status = "partial_cancelled"
+        else:
+            normalized_status = "cancelled" if status in {"cancelled", "canceled", "deactivated"} else "rejected"
         order = self.state.orders_by_link.get(order_link_id)
         if order is None:
             return []

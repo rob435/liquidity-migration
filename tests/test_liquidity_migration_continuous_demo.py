@@ -411,6 +411,7 @@ def test_execute_entries_dry_run_builds_short_rows() -> None:
     assert abs(r["notional_usdt"] - 200.0) < 1e-6        # 2% of 10k
     assert r["status"] == "open" and o["reduce_only"] is False
     assert r["sleeve"] == "continuous"                   # self-identifying for ws_risk routing
+    assert o["updated_at_ms"] == 1_700_000_000_000
 
 
 def test_execute_exits_dry_run_closes_short() -> None:
@@ -429,6 +430,7 @@ def test_execute_exits_dry_run_closes_short() -> None:
     assert rows[0]["status"] == "closed" and rows[0]["exit_reason"] == "left_decile"
     assert rows[0]["sleeve"] == "continuous"             # exit row inherits the entry's sleeve tag (dict(trade))
     assert orders[0]["sleeve"] == "continuous" and orders[0]["order_link_id"].startswith("lm-ux-c-")
+    assert orders[0]["updated_at_ms"] == 1_700_100_000_000
     # Regression (audit 2026-06-12 round 3): paper/dry-run closes must mark at the
     # LIVE price, not the entry price — the entry fallback booked every paper
     # round-trip at exactly 0% PnL and gutted paper<->demo reconciliation.
@@ -436,6 +438,36 @@ def test_execute_exits_dry_run_closes_short() -> None:
     # short 100 -> 92: gross = (100-92)/100 = +8%; net = gross * (200/10000)
     assert rows[0]["gross_trade_return"] == pytest.approx(0.08)
     assert rows[0]["net_return"] == pytest.approx(0.08 * 0.02)
+
+
+def test_execute_exits_live_preflight_is_restart_loadable() -> None:
+    from liquidity_migration.continuous_demo import _execute_continuous_exits
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, record_dry_run=False)
+    trade = {"trade_id": "continuous_fade_v2-WIFUSDT-1700000000", "symbol": "WIFUSDT", "side": "short",
+             "sleeve": "continuous",
+             "status": "open", "entry_price": 100.0, "qty": "2", "equity_usdt": 10_000.0, "notional_usdt": 200.0}
+    plan = [{**trade, "exit_reason": "left_decile", "exit_trigger_ts_ms": 1_700_099_999_000}]
+    preflight_rows: list[dict[str, object]] = []
+
+    class FailingClient:
+        def place_order(self, **_kwargs: object) -> dict[str, str]:
+            raise RuntimeError("venue down")
+
+    _rows, orders = _execute_continuous_exits(
+        plan, pl.DataFrame([trade]), trading_client=FailingClient(), demo=cfg,
+        now_ms=1_700_100_000_000, record_preflight=preflight_rows.append,
+        price_by_symbol={"WIFUSDT": 92.0})
+
+    assert len(preflight_rows) == 1
+    pre = preflight_rows[0]
+    assert pre["updated_at_ms"] == 1_700_100_000_000
+    assert pre["exit_reason"] == "left_decile"
+    assert pre["exit_trigger_ts_ms"] == 1_700_099_999_000
+    assert pre["target_qty"] == "2"
+    assert pre["filled_qty"] == ""
+    assert pre["order_type"] == cfg.exit_order_type
+    assert orders[0]["target_qty"] == "2"
 
 
 def test_execute_exits_dry_run_without_live_price_falls_back_to_entry() -> None:
@@ -692,6 +724,7 @@ def test_execute_rebalance_resizes_submitted_uses_confirmed_fill(monkeypatch: py
     assert client.orders[0]["side"] == "Sell"
     assert client.orders[0]["reduceOnly"] is False
     assert len(preflight_rows) == 1
+    assert preflight_rows[0]["updated_at_ms"] == 1_700_100_000_000
     assert rows[0]["qty"] == "3"
     assert rows[0]["entry_price"] == pytest.approx((100.0 + 2.0 * 120.0) / 3.0)
     assert rows[0]["last_rebalance_fee_usdt"] == pytest.approx(0.12)
@@ -699,6 +732,7 @@ def test_execute_rebalance_resizes_submitted_uses_confirmed_fill(monkeypatch: py
     assert orders[0]["status"] == "filled"
     assert orders[0]["order_id"] == "oid-1"
     assert orders[0]["fee_usdt"] == pytest.approx(0.12)
+    assert orders[0]["updated_at_ms"] == 1_700_100_000_000
 
 
 def test_execute_rebalance_resizes_unconfirmed_does_not_mutate_trade(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -753,6 +787,7 @@ def test_execute_rebalance_resizes_unconfirmed_does_not_mutate_trade(monkeypatch
     assert len(orders) == 1
     assert orders[0]["status"] == "submitted_unconfirmed"
     assert orders[0]["filled_qty"] == ""
+    assert orders[0]["updated_at_ms"] == 1_700_100_000_000
 
 
 def test_rebalance_scale_state_uses_latest_prior_cycle_per_day() -> None:
