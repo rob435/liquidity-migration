@@ -822,6 +822,99 @@ def test_execute_rebalance_resizes_unconfirmed_does_not_mutate_trade(monkeypatch
     assert orders[0]["updated_at_ms"] == 1_700_100_000_000
 
 
+def test_execute_rebalance_resizes_duplicate_generated_link_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import liquidity_migration.continuous_demo as cd
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, confirm_demo_orders=True, daily_rebalance_enabled=True)
+    trades = [
+        {
+            "trade_id": "t1",
+            "strategy_id": continuous_strategy_id(cfg),
+            "symbol": "ABCUSDT",
+            "side": "short",
+            "sleeve": "continuous",
+            "status": "open",
+            "entry_price": 100.0,
+            "qty": "1",
+            "notional_usdt": 100.0,
+            "equity_usdt": 10_000.0,
+            "qty_step": 0.1,
+        },
+        {
+            "trade_id": "t2",
+            "strategy_id": continuous_strategy_id(cfg),
+            "symbol": "ABCUSDT",
+            "side": "short",
+            "sleeve": "continuous",
+            "status": "open",
+            "entry_price": 100.0,
+            "qty": "1",
+            "notional_usdt": 100.0,
+            "equity_usdt": 10_000.0,
+            "qty_step": 0.1,
+        },
+    ]
+    plans = [
+        ContinuousRebalanceResizePlan(
+            trade_id="t1",
+            symbol="ABCUSDT",
+            side="Sell",
+            reduce_only=False,
+            qty=1.0,
+            current_notional_usdt=100.0,
+            target_notional_usdt=200.0,
+            delta_notional_usdt=100.0,
+            reason="rebalance_increase",
+        ),
+        ContinuousRebalanceResizePlan(
+            trade_id="t2",
+            symbol="ABCUSDT",
+            side="Sell",
+            reduce_only=False,
+            qty=1.0,
+            current_notional_usdt=100.0,
+            target_notional_usdt=200.0,
+            delta_notional_usdt=100.0,
+            reason="rebalance_increase",
+        ),
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.orders: list[dict[str, object]] = []
+
+        def place_order(self, **kwargs: object) -> dict[str, str]:
+            self.orders.append(kwargs)
+            return {"orderId": f"oid-{len(self.orders)}"}
+
+    def fake_wait(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"qty": "1", "avg_price": "100", "fee": "0.01", "exec_time_ms": 1}
+
+    monkeypatch.setattr(cd.zlib, "crc32", lambda _data: 7)
+    monkeypatch.setattr(cd, "_wait_for_execution_summary", fake_wait)
+    client = FakeClient()
+
+    _rows, orders = _execute_continuous_rebalance_resizes(
+        plans,
+        pl.DataFrame(trades),
+        trading_client=client,
+        demo=cfg,
+        price_by_symbol={"ABCUSDT": 100.0},
+        contract_by_symbol={"ABCUSDT": {"qty_step": 0.1, "min_order_qty": 0.1}},
+        now_ms=1_700_100_000_000,
+        strategy_id=continuous_strategy_id(cfg),
+    )
+
+    assert len(client.orders) == 1
+    assert len(orders) == 2
+    assert orders[0]["status"] == "filled"
+    assert orders[1]["status"] == "failed"
+    assert orders[1]["submit_mode"] == "error"
+    assert "duplicate generated order_link_id collision" in orders[1]["error"]
+
+
 def test_rebalance_scale_state_uses_latest_prior_cycle_per_day() -> None:
     base = 1_700_000_000_000
     day0 = (base // MS_PER_DAY) * MS_PER_DAY

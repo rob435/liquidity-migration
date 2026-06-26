@@ -783,6 +783,7 @@ def _execute_sniper_placements(
         contract_by_symbol=contract_by_symbol,
     )
     order_rows: list[dict[str, Any]] = []
+    used_links: dict[str, str] = {}
     for plan in plans:
         symbol = plan["symbol"]
         tick = _float(plan.get("tick_size"))
@@ -832,8 +833,13 @@ def _execute_sniper_placements(
             _continuous_sniper_link_prefix(demo), symbol=symbol, signal_ts_ms=signal_ts, trade_id=trade_id
         )
         qty_text = _decimal_text(Decimal(str(qty)))
-        submit_mode, status, order_id, error = "dry_run", "resting", "", ""
-        if demo.submit_orders:
+        collision_error = _reserve_generated_order_link(
+            used_links, link, owner=trade_id, context="continuous_sniper"
+        )
+        submit_mode, status, order_id, error = (
+            ("error", "failed", "", collision_error) if collision_error else ("dry_run", "resting", "", "")
+        )
+        if demo.submit_orders and not collision_error:
             assert trading_client is not None
             if record_preflight is not None:
                 # sniper-5: carry base_trade_id + reason on the preflight intent so a
@@ -1511,6 +1517,23 @@ def _continuous_suborder_link_id(prefix: str, *, symbol: str, signal_ts_ms: int,
     link = _continuous_order_link_id(prefix, symbol=symbol, signal_ts_ms=signal_ts_ms)
     suffix = "-x" + _base36(zlib.crc32(str(trade_id).encode("utf-8")) % 1_679_616).rjust(4, "0")
     return f"{link[: 36 - len(suffix)]}{suffix}"
+
+
+def _reserve_generated_order_link(
+    used_links: dict[str, str],
+    link: str,
+    *,
+    owner: str,
+    context: str,
+) -> str:
+    prior = used_links.get(link)
+    if prior is not None and prior != owner:
+        return (
+            f"duplicate generated order_link_id collision context={context} "
+            f"link={link} prior_owner={prior} owner={owner}"
+        )[:500]
+    used_links[link] = owner
+    return ""
 
 
 def _known_ensemble_component_tags() -> tuple[str, ...]:
@@ -2418,6 +2441,7 @@ def _execute_continuous_exits(
     lookup = {str(r["trade_id"]): r for r in all_trades.to_dicts()} if not all_trades.is_empty() else {}
     rows: list[dict[str, Any]] = []
     order_rows: list[dict[str, Any]] = []
+    used_links: dict[str, str] = {}
     for plan in exits:
         trade = dict(lookup.get(str(plan.get("trade_id", "")), plan))
         symbol = str(plan["symbol"])
@@ -2436,7 +2460,15 @@ def _execute_continuous_exits(
         exit_price = exit_fee = 0.0
         exit_exec_time_ms = 0
         filled_qty = _float(qty)
-        if demo.submit_orders:
+        collision_error = _reserve_generated_order_link(
+            used_links,
+            exit_link,
+            owner=str(trade.get("trade_id") or plan.get("trade_id") or symbol),
+            context="continuous_exit",
+        )
+        if collision_error:
+            submit_mode, status, error, filled_qty = "error", "failed", collision_error, 0.0
+        if demo.submit_orders and not collision_error:
             assert trading_client is not None
             if record_preflight is not None:
                 record_preflight({"order_link_id": exit_link, "ts_ms": now_ms, "updated_at_ms": now_ms,
@@ -2736,6 +2768,7 @@ def _execute_continuous_rebalance_resizes(
     execution_by_trade_id: dict[str, dict[str, Any]] = {}
     failed_orders: list[dict[str, Any]] = []
     lookup = {str(r.get("trade_id") or ""): r for r in all_trades.to_dicts()} if not all_trades.is_empty() else {}
+    used_links: dict[str, str] = {}
     for plan in plans:
         trade = dict(lookup.get(str(plan.trade_id), {}))
         symbol = str(plan.symbol or trade.get("symbol") or "")
@@ -2799,6 +2832,26 @@ def _execute_continuous_rebalance_resizes(
                     "error": "",
                 }
             )
+        collision_error = _reserve_generated_order_link(
+            used_links,
+            order_link,
+            owner=str(plan.trade_id),
+            context="continuous_rebalance_resize",
+        )
+        if collision_error:
+            failed_orders.append(
+                {
+                    **preflight,
+                    "submit_mode": "error",
+                    "status": "failed",
+                    "avg_price": 0.0,
+                    "fee_usdt": 0.0,
+                    "exec_time_ms": 0,
+                    "filled_qty": "",
+                    "error": collision_error,
+                }
+            )
+            continue
         if record_preflight is not None:
             record_preflight(preflight)
 
