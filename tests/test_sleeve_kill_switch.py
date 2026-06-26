@@ -49,7 +49,7 @@ case "$cmd" in
     for f in "$STATE"/liquidity-migration-*.*.active; do
       [ -e "$f" ] || continue
       b="$(basename "$f")"; u="${b%.active}"
-      echo "$u loaded active running fake"
+      printf '\342\227\217 %s loaded active running fake\n' "$u"
     done | sort -u
     ;;
 esac

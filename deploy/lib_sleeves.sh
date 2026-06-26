@@ -170,11 +170,11 @@ lm_expected_systemd_units() {
 lm_host_liqmig_units() {
     {
         systemctl list-unit-files 'liquidity-migration-*' --no-legend --no-pager 2>/dev/null || true
-        systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager 2>/dev/null || true
+        systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager --plain 2>/dev/null || true
         for _lhlu_path in /etc/systemd/system/liquidity-migration-*; do
             [ -e "$_lhlu_path" ] && basename "$_lhlu_path"
         done
-    } | awk '{print $1}' | sed '/^$/d' | sort -u
+    } | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^liquidity-migration-/) {print $i; break}}' | sed '/^$/d' | sort -u
 }
 
 lm_cleanup_unknown_liqmig_units() {
