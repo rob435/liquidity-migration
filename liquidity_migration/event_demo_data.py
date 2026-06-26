@@ -153,6 +153,7 @@ def _download_recent_1h_klines(
     market_client: Any | None,
     cache_root: Path | None = None,
     kline_store: Any | None = None,
+    write_compact_cache: bool = True,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Return the (symbol, ts_ms) rectangular klines for the demo cycle.
 
@@ -254,9 +255,10 @@ def _download_recent_1h_klines(
     if not fetch_ranges:
         output = _dedupe_recent_klines(combined)
         stats["output_rows"] = output.height
-        _write_demo_kline_compact_cache(
-            cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output,
-        )
+        if write_compact_cache:
+            _write_demo_kline_compact_cache(
+                cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output,
+            )
         return output, stats
 
     # 3) REST fallback for remaining ranges.
@@ -286,7 +288,14 @@ def _download_recent_1h_klines(
     output = _dedupe_recent_klines(
         pl.concat(frames, how="diagonal_relaxed") if frames else _empty_klines()
     )
-    _write_demo_kline_compact_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output)
+    if write_compact_cache:
+        _write_demo_kline_compact_cache(
+            cache_root,
+            symbols=symbols,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            klines=output,
+        )
     stats["output_rows"] = output.height
     return output, stats
 

@@ -196,6 +196,49 @@ def test_demo_kline_compact_cache_serves_repeat_window(tmp_path: Path) -> None:
     assert second_stats["fetch_symbols"] == 0
 
 
+def test_demo_kline_compact_cache_opt_out_preserves_existing_window(tmp_path: Path) -> None:
+    """Gate-only side loads must not replace the main universe compact cache."""
+    market = FakeKlineMarket()
+    first, _ = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+    )
+    assert first.height == 6
+
+    _btc, btc_stats = _download_recent_1h_klines(
+        ["BTCUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+        write_compact_cache=False,
+    )
+    assert btc_stats["fetched_rows"] == 3
+
+    shutil.rmtree(tmp_path / "event_demo_klines_1h")
+    second, second_stats = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=FailingKlineMarket(),
+        cache_root=tmp_path,
+    )
+
+    assert sorted(second["symbol"].unique().to_list()) == ["AAAUSDT", "BBBUSDT"]
+    assert second.height == 6
+    assert second_stats["cache_rows"] == 6
+    assert second_stats["fetch_symbols"] == 0
+
+
 def test_download_recent_1h_klines_uses_store_fast_path(tmp_path: Path) -> None:
     """With a fully-covering kline_store, REST is never called and the output
     is sourced entirely from the store."""
