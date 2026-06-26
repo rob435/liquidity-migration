@@ -522,6 +522,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "lm_load_sleeve_toggles" in text
     assert "lm_write_resolved_sleeve_toggles" in text
     assert "lm_verify_resolved_sleeve_toggles" in text
+    assert "lm_cleanup_unknown_liqmig_units" in text
     for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
@@ -702,6 +703,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "lib_sleeves.sh" in text
     assert "lm_load_sleeve_toggles" in text
     assert "lm_verify_resolved_sleeve_toggles" in text
+    assert "lm_verify_no_unknown_liqmig_units" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-enabled --quiet liquidity-migration-liquidation-collector.service" in text
@@ -1006,6 +1008,7 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "lm_load_sleeve_toggles" in text
     assert "lm_write_resolved_sleeve_toggles" in text
     assert "lm_verify_resolved_sleeve_toggles" in text
+    assert "lm_cleanup_unknown_liqmig_units" in text
     assert "systemctl enable liquidity-migration-bybit-risk.service" in text
     assert "systemctl restart liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text

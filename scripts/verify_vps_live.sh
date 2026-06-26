@@ -236,6 +236,7 @@ fi
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
+lm_verify_no_unknown_liqmig_units
 
 require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'
 # SHARED-ACCOUNT SAFETY: the single risk service must read EVERY sleeve's ledger root,

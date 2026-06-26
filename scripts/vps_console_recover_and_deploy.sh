@@ -294,6 +294,7 @@ for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liqu
     systemctl disable --now "$_retired" 2>/dev/null || true
     rm -f "/etc/systemd/system/$_retired"
 done
+lm_cleanup_unknown_liqmig_units
 # Reload AFTER removing retired unit files (deploy_vps_live.sh parity) so stale
 # erased-unit definitions don't linger in systemd memory on a recovered host.
 systemctl daemon-reload

@@ -235,6 +235,7 @@ for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liqu
     systemctl disable --now "$_retired" 2>/dev/null || true
     rm -f "/etc/systemd/system/$_retired"
 done
+lm_cleanup_unknown_liqmig_units
 systemctl daemon-reload
 # Restart already-running repo timers (round 4): on several systemd versions an
 # ACTIVE timer does not reschedule a changed OnCalendar= until restarted, so a

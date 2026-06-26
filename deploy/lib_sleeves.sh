@@ -160,6 +160,46 @@ verify_hedge_timer_enable() {
     fi
 }
 
+lm_expected_systemd_units() {
+    _lesu_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for _lesu_path in "$_lesu_dir"/systemd/liquidity-migration-*.service "$_lesu_dir"/systemd/liquidity-migration-*.timer; do
+        [ -e "$_lesu_path" ] && basename "$_lesu_path"
+    done
+}
+
+lm_host_liqmig_units() {
+    {
+        systemctl list-unit-files 'liquidity-migration-*' --no-legend --no-pager 2>/dev/null || true
+        systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager 2>/dev/null || true
+        for _lhlu_path in /etc/systemd/system/liquidity-migration-*; do
+            [ -e "$_lhlu_path" ] && basename "$_lhlu_path"
+        done
+    } | awk '{print $1}' | sed '/^$/d' | sort -u
+}
+
+lm_cleanup_unknown_liqmig_units() {
+    _lcu_expected=" $(lm_expected_systemd_units | tr '\n' ' ') "
+    for _lcu_unit in $(lm_host_liqmig_units); do
+        case "$_lcu_expected" in
+            *" $_lcu_unit "*) continue ;;
+        esac
+        echo "cleanup: unknown liquidity-migration unit -> disable/remove $_lcu_unit" >&2
+        systemctl disable --now "$_lcu_unit" 2>/dev/null || true
+        rm -f "/etc/systemd/system/$_lcu_unit"
+    done
+}
+
+lm_verify_no_unknown_liqmig_units() {
+    _lvnu_expected=" $(lm_expected_systemd_units | tr '\n' ' ') "
+    for _lvnu_unit in $(lm_host_liqmig_units); do
+        case "$_lvnu_expected" in
+            *" $_lvnu_unit "*) continue ;;
+        esac
+        echo "verify failed: unknown liquidity-migration unit present: $_lvnu_unit" >&2
+        return 1
+    done
+}
+
 # apply_sleeve_enable <flag-value> <unit...> - on: `systemctl enable` each unit; off:
 # `systemctl disable --now` each (stops it + survives the deploy). Default on => identical
 # to the previous unconditional enables.

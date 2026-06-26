@@ -38,6 +38,20 @@ case "$cmd" in
   stop) for u in "${args[@]}"; do rm -f "$STATE/$u.active"; done ;;
   is-active)  for u in "${args[@]}"; do [ -f "$STATE/$u.active"  ] || exit 1; done ;;
   is-enabled) for u in "${args[@]}"; do [ -f "$STATE/$u.enabled" ] || exit 1; done ;;
+  list-unit-files)
+    for f in "$STATE"/liquidity-migration-*.*.enabled "$STATE"/liquidity-migration-*.*.active; do
+      [ -e "$f" ] || continue
+      b="$(basename "$f")"; u="${b%.enabled}"; u="${u%.active}"
+      echo "$u enabled"
+    done | sort -u
+    ;;
+  list-units)
+    for f in "$STATE"/liquidity-migration-*.*.active; do
+      [ -e "$f" ] || continue
+      b="$(basename "$f")"; u="${b%.active}"
+      echo "$u loaded active running fake"
+    done | sort -u
+    ;;
 esac
 exit 0
 """
@@ -153,6 +167,22 @@ def test_hedge_lifecycle_off_verify_fails_when_service_active(tmp_path: Path) ->
     """)
     assert rc != 0
     assert "liquidity-migration-continuous-hedge.service service is OFF" in err
+
+
+def test_unknown_liquidity_migration_unit_is_cleaned_and_verified(tmp_path: Path) -> None:
+    rc, calls, err = _run(tmp_path, """
+        systemctl enable --now liquidity-migration-bybit-risk.service
+        lm_verify_no_unknown_liqmig_units
+        systemctl enable --now liquidity-migration-stale-alpha.service
+        if lm_verify_no_unknown_liqmig_units; then
+            echo "unknown unit passed verify" >&2
+            exit 1
+        fi
+        lm_cleanup_unknown_liqmig_units
+        lm_verify_no_unknown_liqmig_units
+    """)
+    assert rc == 0, err
+    assert "disable --now liquidity-migration-stale-alpha.service" in calls
 
 
 def test_loaded_toggles_long_continuous_and_paper_on(tmp_path: Path) -> None:
