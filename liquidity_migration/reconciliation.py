@@ -411,6 +411,9 @@ def reconcile_paper_demo(
                     "side": side,
                     "paper_trade_id": paper_trade["trade_id"],
                     "demo_trade_id": demo_trade["trade_id"],
+                    "paper_status": paper_trade["status"],
+                    "demo_status": demo_trade["status"],
+                    "status_match": paper_trade["status"] == demo_trade["status"],
                     "entry_gap_ms": abs(demo_trade["entry_ts_ms"] - paper_trade["entry_ts_ms"]),
                     "exit_gap_ms": exit_gap_ms,
                     "paper_entry_price": paper_trade["entry_price"],
@@ -437,6 +440,7 @@ def reconcile_paper_demo(
     exit_bps_list = [pair["exit_slippage_bps"] for pair in pairs if pair["exit_slippage_bps"] is not None]
     exit_gaps = [pair["exit_gap_ms"] for pair in pairs if pair["exit_gap_ms"] is not None]
     fee_gaps = [pair["fee_gap_usdt"] for pair in pairs if pair["fee_gap_usdt"] is not None]
+    status_divergent = [pair for pair in pairs if not pair["status_match"]]
     exit_reason_known = [pair for pair in pairs if pair["exit_reason_match"] is not None]
     exit_reason_divergent = [pair for pair in exit_reason_known if not pair["exit_reason_match"]]
     summary = {
@@ -459,6 +463,7 @@ def reconcile_paper_demo(
         "exit_gap_ms_mean": mean(exit_gaps) if exit_gaps else 0,
         "exit_gap_ms_median": median(exit_gaps) if exit_gaps else 0,
         "exit_gap_ms_worst": max(exit_gaps) if exit_gaps else 0,
+        "status_divergent": len(status_divergent),
         "exit_reason_divergent": len(exit_reason_divergent),
         "exit_reason_compared": len(exit_reason_known),
         "fee_gap_usdt_total": sum(fee_gaps) if fee_gaps else 0.0,
@@ -499,6 +504,7 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
         "",
         "## Exit-reason divergence",
         "",
+        f"- status-divergent pairs: {summary.get('status_divergent', 0)}",
         f"- pairs with both reasons known: {summary['exit_reason_compared']}",
         f"- diverged (paper closed for a different reason than demo): {summary['exit_reason_divergent']}",
         "",
@@ -536,6 +542,29 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
     else:
         lines.append("No paired trades yet — both ledgers need overlapping trades to reconcile.")
     return "\n".join(lines) + "\n"
+
+
+def paper_demo_reconciliation_failures(summary: dict[str, Any]) -> list[str]:
+    """Hard paper/demo drift gates.
+
+    Sample-size warnings, slippage, and fee gaps are evidence to inspect, but
+    they are not lifecycle-consistency failures. Unpaired trades or divergent
+    lifecycle/exit semantics are.
+    """
+    failures: list[str] = []
+    if int(summary.get("paper_only", 0) or 0) > 0:
+        failures.append(f"paper_only={summary.get('paper_only')}")
+    if int(summary.get("demo_only", 0) or 0) > 0:
+        failures.append(f"demo_only={summary.get('demo_only')}")
+    if int(summary.get("status_divergent", 0) or 0) > 0:
+        failures.append(f"status_divergent={summary.get('status_divergent')}")
+    if int(summary.get("exit_reason_divergent", 0) or 0) > 0:
+        failures.append(f"exit_reason_divergent={summary.get('exit_reason_divergent')}")
+    return failures
+
+
+def paper_demo_reconciliation_ok(summary: dict[str, Any]) -> bool:
+    return not paper_demo_reconciliation_failures(summary)
 
 
 def run_long_paper_demo_reconciliation(

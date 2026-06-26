@@ -23,6 +23,7 @@ def _load(name: str, rel: str):
 
 
 reconcile = _load("reconcile_b15", "scripts/reconcile.py")
+continuous_signal_check = _load("continuous_signal_check_b15", "scripts/continuous_demo_signal_check.py")
 
 
 def test_summarize_leg_passes_only_on_clean_leg() -> None:
@@ -52,6 +53,32 @@ def test_summarize_leg_flags_missing_summary_as_failed_not_no_output() -> None:
     assert ok is False
     assert line != "(no output)"
     assert "FAILED" in line
+
+
+def test_continuous_signal_check_exits_nonzero_on_hard_miss() -> None:
+    assert continuous_signal_check._signal_check_exit_code(
+        checked=3,
+        off_decile=1,
+        no_panel=0,
+    ) == 1
+    assert continuous_signal_check._signal_check_exit_code(
+        checked=3,
+        off_decile=0,
+        no_panel=1,
+    ) == 1
+
+
+def test_continuous_signal_check_allows_empty_or_clean_windows() -> None:
+    assert continuous_signal_check._signal_check_exit_code(
+        checked=0,
+        off_decile=0,
+        no_panel=0,
+    ) == 0
+    assert continuous_signal_check._signal_check_exit_code(
+        checked=3,
+        off_decile=0,
+        no_panel=0,
+    ) == 0
 
 
 def test_reconcile_main_returns_nonzero_when_a_leg_fails(monkeypatch) -> None:

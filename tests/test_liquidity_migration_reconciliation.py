@@ -12,6 +12,8 @@ from liquidity_migration.reconciliation import (
     _trade_ledger_daily_returns,
     _write_pairs_csv,
     format_reconciliation_report,
+    paper_demo_reconciliation_failures,
+    paper_demo_reconciliation_ok,
     reconcile_paper_demo,
 )
 
@@ -140,6 +142,9 @@ def test_reconcile_surfaces_exit_ts_gap_and_reason_divergence() -> None:
     # one pair, one exit_reason known, one divergent
     assert summary["exit_reason_compared"] == 1
     assert summary["exit_reason_divergent"] == 1
+    assert summary["status_divergent"] == 0
+    assert paper_demo_reconciliation_ok(summary) is False
+    assert paper_demo_reconciliation_failures(summary) == ["exit_reason_divergent=1"]
     # fee residual = (0.05+0.07) - 0 = 0.12 USDT
     assert summary["fee_gap_usdt_total"] == pytest.approx(0.12)
     pair = result["pairs"][0]
@@ -155,6 +160,37 @@ def test_reconcile_surfaces_exit_ts_gap_and_reason_divergence() -> None:
     assert "Fee residual" in report
     assert "take_profit" in report
     assert "failed_fade" in report
+
+
+def test_reconciliation_gate_flags_unpaired_and_lifecycle_drift() -> None:
+    summary = {
+        "paper_only": 1,
+        "demo_only": 2,
+        "status_divergent": 1,
+        "exit_reason_divergent": 3,
+        "sample_warning": True,
+    }
+
+    assert paper_demo_reconciliation_ok(summary) is False
+    assert paper_demo_reconciliation_failures(summary) == [
+        "paper_only=1",
+        "demo_only=2",
+        "status_divergent=1",
+        "exit_reason_divergent=3",
+    ]
+
+
+def test_reconciliation_gate_allows_clean_empty_sample_warning() -> None:
+    summary = {
+        "paper_only": 0,
+        "demo_only": 0,
+        "status_divergent": 0,
+        "exit_reason_divergent": 0,
+        "sample_warning": True,
+    }
+
+    assert paper_demo_reconciliation_ok(summary) is True
+    assert paper_demo_reconciliation_failures(summary) == []
 
 
 def test_reconcile_paper_demo_pairs_via_signal_ts_when_entry_ts_diverges() -> None:

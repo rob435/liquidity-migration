@@ -169,6 +169,9 @@ while true; do
     if [[ "$status" -ne 0 ]]; then
         echo "long-native demo cycle failed with status=$status; sleeping before retry" >&2
     fi
+    if [[ "${RUN_ONCE:-0}" == "1" ]]; then
+        exit "$status"
+    fi
     cycle_elapsed_seconds=$(($(date +%s) - cycle_start_epoch))
     sleep_seconds=$((INTERVAL_SECONDS - cycle_elapsed_seconds))
     if [[ "$sleep_seconds" -gt 0 ]]; then

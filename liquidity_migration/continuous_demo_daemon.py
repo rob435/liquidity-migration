@@ -8,10 +8,9 @@ reconcile loop, graceful shutdown, telegram) and only swaps in:
     the FULL ~570-symbol store blew the long sleeve's 1G cap, so scope to the top-N by 24h turnover —
     which covers the liquid names the strategy actually trades).
 
-**No 1h.** The daemon's heartbeat (default 60s) recomputes the live cross-sectional decile off the
-fresh TickerCache prices each tick, so a name entering/leaving the top fade decile is acted on within
-~60s — NOT gated on the hourly bar close. (Event-driven bar wakes still fire too; the heartbeat is the
-sub-hourly floor.)
+The live entry profile uses confirmed-bar +1h selection. The daemon still wakes every 60s so
+protective exits, state reconciliation, and any newly eligible confirmed-bar entries are handled
+promptly, but entry membership is not the old intra-hour "No 1h" decile-cross mode.
 
 Separate ledger root (`data/bybit-continuous-demo-event`) + `lm-en-c-`/`lm-ux-c-` orderLinkId prefix
 keep it fully isolated from the short and long sleeves. Demo-only.

@@ -93,7 +93,10 @@ class ContinuousDemoCycleConfig:
     # the frozen v2 profile pins it to 1.
     entry_confirm_delay_hours: int = 1
     entry_event_trigger: str = "none"      # opt-in confirmed-hour event gate: none | fresh_pop25 | popX_gbY | ...
-    btc_trend_gate: str = "off"            # off | uptrend | downtrend; causal prior-30d BTC return gate.
+    # The live profile is the uptrend-gated object. Keep the direct CLI/config
+    # default aligned with the runner + systemd units; explicit overrides remain
+    # available for diagnostics.
+    btc_trend_gate: str = "uptrend"        # off | uptrend | downtrend; causal prior-30d BTC return gate.
     # --- anti-thrash (a name oscillating on the D9 boundary would otherwise churn fees) ---
     # Hysteresis: ENTER on the top decile (`decile`), but only cover on the state-exit ("left
     # decile") once the name is CLEARLY out — its decile has dropped below `decile - exit_decile_buffer`.

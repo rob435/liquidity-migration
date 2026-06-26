@@ -329,8 +329,14 @@ CONTINUOUS_LIQ_MIN = 500_000.0  # ContinuousDemoCycleConfig.liq_turnover_min for
 CONTINUOUS_DECILE = 9  # the deployed continuous_ensemble_v2 shorts the top composite decile
 
 
-def continuous_backtest_candidates(k: pl.DataFrame, rmom: pl.DataFrame,
-                                   start_ms: int, end_ms: int) -> tuple[dict, dict]:
+def continuous_backtest_candidates(
+    k: pl.DataFrame,
+    rmom: pl.DataFrame,
+    start_ms: int,
+    end_ms: int,
+    *,
+    listing_ts_by_symbol: dict[str, int] | None = None,
+) -> tuple[dict, dict]:
     """Reproduce the continuous_ensemble_v2 ENTRY candidate set on a klines+rmom panel.
 
     Mirrors the live ``select_continuous_entries`` FILTER (continuous_demo.py:580) exactly,
@@ -345,11 +351,10 @@ def continuous_backtest_candidates(k: pl.DataFrame, rmom: pl.DataFrame,
     already-held), while a LIVE entry that is NOT a candidate here is the tripwire
     (look-ahead / drift / reproduction error). Returns ``(symbol, signal-bar) -> [components]``.
 
-    The listing-age floor (210/240d) is ALWAYS delegated to the live engine, not re-checked
-    here: this leg only loads a ``PANEL_WARMUP_DAYS`` (~45d) window (``load_klines_window``),
-    far short of the floor, so a first-kline-ts proxy can never evaluate it correctly. Live
-    entries are already age-filtered upstream by the engine's authoritative universe
-    launchTime, so omitting the floor only RELAXES the candidate set (never a false tripwire).
+    The listing-age floor is enforced from a full-root listing map when the caller can
+    provide one. ``load_klines_window`` only loads the warmup panel needed for deciles,
+    so the map must be read independently of that window; otherwise the first in-window
+    bar would make every old symbol look newly listed.
 
     NB: NOT spell-fresh — the live engine enters on not-held (which can be mid-decile-spell),
     so the candidate is per-bar decile membership, not the spell-start bar that the
@@ -378,9 +383,17 @@ def continuous_backtest_candidates(k: pl.DataFrame, rmom: pl.DataFrame,
         tag: (base if trigger == "none" else base.filter(_entry_event_expr(trigger))).select(["symbol", "ts_ms"])
         for tag, trigger, _age in ENSEMBLE_COMPONENTS
     }
-    # ages={} -> age floor delegated to the live engine (see docstring); assemble_candidates
-    # keeps the age machinery for callers that DO load full history.
-    return assemble_candidates(filtered_by_component, {}, {}, start_ms, end_ms), decile_index
+    ages = {tag: age for tag, _trigger, age in ENSEMBLE_COMPONENTS}
+    return (
+        assemble_candidates(
+            filtered_by_component,
+            listing_ts_by_symbol or {},
+            ages,
+            start_ms,
+            end_ms,
+        ),
+        decile_index,
+    )
 
 
 def _close_index(k: pl.DataFrame) -> dict:
@@ -522,7 +535,25 @@ def _match_plane(demo: dict, paper: dict, keys_entry_bar: dict, klines_root: str
         reachable = rmom_end_ms is not None and bool(live_days) and rmom_end_ms >= min(live_days)
         if reachable:
             k = load_klines_window(klines_root, start_ms, end_ms)
-            candidates, decile_index = continuous_backtest_candidates(k, rmom, start_ms, end_ms)
+            from liquidity_migration.continuous_events import _listing_ts_by_symbol
+
+            root_path = Path(klines_root).expanduser()
+            if not root_path.is_absolute():
+                root_path = REPO / root_path
+            listing_ts_by_symbol = _listing_ts_by_symbol(root_path)
+            if not listing_ts_by_symbol:
+                print(
+                    f"  (continuous backtest plane [{klines_root}] has no full-root listing map; "
+                    "component age floor cannot be independently verified on this plane)",
+                    flush=True,
+                )
+            candidates, decile_index = continuous_backtest_candidates(
+                k,
+                rmom,
+                start_ms,
+                end_ms,
+                listing_ts_by_symbol=listing_ts_by_symbol,
+            )
             cand_keys = set(candidates)
             close_idx = _close_index(k)
             for key, comps in candidates.items():

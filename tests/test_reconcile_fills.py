@@ -210,6 +210,37 @@ def test_assemble_candidates_window_clip():
     assert all(k[0] != "BBB" for k in cand)
 
 
+def test_continuous_backtest_candidates_applies_component_age_map(monkeypatch):
+    bar = _ms(2026, 6, 17, 11)
+    panel = pl.DataFrame(
+        {
+            "symbol": ["OLDUSDT", "YOUNGUSDT"],
+            "ts_ms": [bar, bar],
+            "decile": [9, 9],
+            "turnover_quote": [1_000_000.0, 1_000_000.0],
+        }
+    )
+
+    import liquidity_migration.continuous_events as ce
+
+    monkeypatch.setattr(ce, "compute_continuous_decile_panel", lambda *a, **k: panel)
+    monkeypatch.setattr(ce, "_entry_event_expr", lambda _trigger: pl.lit(True))
+
+    candidates, _ = rf.continuous_backtest_candidates(
+        pl.DataFrame(),
+        pl.DataFrame(),
+        0,
+        9_999_999_999_999,
+        listing_ts_by_symbol={
+            "OLDUSDT": _ms(2024, 1, 1),
+            "YOUNGUSDT": _ms(2026, 6, 16),
+        },
+    )
+
+    assert ("OLDUSDT", bar) in candidates
+    assert ("YOUNGUSDT", bar) not in candidates
+
+
 # ----------------------------------------------------------------------------- tripwire split
 def test_continuous_tripwire_splits_hard_vs_pending():
     covered_bar = _ms(2026, 6, 15, 11)   # within rmom coverage

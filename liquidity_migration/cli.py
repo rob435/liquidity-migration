@@ -38,6 +38,7 @@ from .event_demo import (
 from .ingestion import generate_fixture_data
 from .pit_coverage import coverage_status, format_coverage
 from .reconciliation import (
+    paper_demo_reconciliation_failures,
     run_continuous_forward_readiness,
     run_continuous_paper_demo_reconciliation,
     run_continuous_rebalance_cycle_audit,
@@ -920,16 +921,20 @@ def _cmd_reconcile_long_paper_demo(args: argparse.Namespace, config: ResearchCon
         )
         summary = payload["result"]["summary"]
         warning = " [SAMPLE WARNING]" if summary.get("sample_warning") else ""
+        failures = paper_demo_reconciliation_failures(summary)
+        hard_status = f" hard_failures={';'.join(failures)}" if failures else " hard_failures=0"
         print(
             "long paper-demo reconciliation "
             f"paired={summary['paired']} "
             f"paper_only={summary['paper_only']} "
             f"demo_only={summary['demo_only']} "
+            f"status_divergent={summary.get('status_divergent', 0)} "
+            f"exit_reason_divergent={summary.get('exit_reason_divergent', 0)} "
             f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
             f"path={payload['report_path']} "
-            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}"
+            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}{hard_status}"
         )
-        return 0
+        return 1 if failures else 0
 
 
 def _cmd_reconcile_continuous_paper_demo(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
@@ -942,16 +947,20 @@ def _cmd_reconcile_continuous_paper_demo(args: argparse.Namespace, config: Resea
         )
         summary = payload["result"]["summary"]
         warning = " [SAMPLE WARNING]" if summary.get("sample_warning") else ""
+        failures = paper_demo_reconciliation_failures(summary)
+        hard_status = f" hard_failures={';'.join(failures)}" if failures else " hard_failures=0"
         print(
             "continuous paper-demo reconciliation "
             f"paired={summary['paired']} "
             f"paper_only={summary['paper_only']} "
             f"demo_only={summary['demo_only']} "
+            f"status_divergent={summary.get('status_divergent', 0)} "
+            f"exit_reason_divergent={summary.get('exit_reason_divergent', 0)} "
             f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
             f"path={payload['report_path']} "
-            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}"
+            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}{hard_status}"
         )
-        return 0
+        return 1 if failures else 0
 
 
 def _cmd_continuous_rebalance_cycle_audit(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:

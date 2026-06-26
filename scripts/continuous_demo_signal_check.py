@@ -42,6 +42,12 @@ def _ts(ms: int) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, dt.UTC).strftime("%m-%d %H:%M")
 
 
+def _signal_check_exit_code(*, checked: int, off_decile: int, no_panel: int) -> int:
+    if checked <= 0:
+        return 0
+    return 1 if off_decile > 0 or no_panel > 0 else 0
+
+
 def load_klines(root: str) -> pl.DataFrame:
     # The live daemon's decile reads the rolling WS kline store; prefer it (it is
     # the exact live source). Fall back to the partitioned event_demo_klines_1h.
@@ -173,8 +179,13 @@ def main() -> int:
     n = entries.height
     print(f"\nSUMMARY: {hit}/{n} confirmed D{DECILE} at signal bar; "
           f"{miss} off-decile; {nopanel} no-panel-row.")
+    if miss or nopanel:
+        print(
+            f"FAILED: {miss} off-decile and {nopanel} no-panel live entries need explanation.",
+            file=sys.stderr,
+        )
     print("(Signal-consistency check on live data; not promotion/OOS evidence.)")
-    return 0
+    return _signal_check_exit_code(checked=n, off_decile=miss, no_panel=nopanel)
 
 
 if __name__ == "__main__":

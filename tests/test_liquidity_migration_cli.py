@@ -95,6 +95,21 @@ def test_cli_continuous_demo_exit_redesign_parser(tmp_path: Path) -> None:
     assert args.vol_weight_clamp == 2
 
 
+def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "continuous-event-demo-cycle",
+            "--strategy-profile",
+            "continuous_ensemble_v2",
+        ]
+    )
+
+    assert args.btc_trend_gate == "uptrend"
+
+
+
 def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

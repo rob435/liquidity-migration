@@ -1335,10 +1335,11 @@ def test_wrapper_unit_env_builds_argv_that_parses(unit_name: str, wrapper_name: 
     env.setdefault("TELEGRAM_CHAT_ID", "1")
     env.setdefault("BYBIT_DEMO_API_KEY", "test-key")
     env.setdefault("BYBIT_DEMO_API_SECRET", "test-secret")
+    env["RUN_ONCE"] = "1"
 
     # Daemon-mode wrappers exec the stub and return immediately; the legacy
-    # single-cycle loop (USE_DAEMON=0, the long paper unit) loops forever, so a
-    # timeout there is expected — the first iteration already captured argv.
+    # single-cycle loop (USE_DAEMON=0, the long paper unit) honors RUN_ONCE here
+    # so this smoke gate remains deterministic.
     try:
         result = subprocess.run(
             ["bash", str(repo / "scripts" / wrapper_name)],
