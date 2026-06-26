@@ -22,7 +22,14 @@ fi
 echo "[pre-push] ruff check..."
 "$PYTHON_BIN" -m ruff check liquidity_migration tests scripts
 
-echo "[pre-push] pytest -q..."
-"$PYTHON_BIN" -m pytest -q
+PYTEST_BASETEMP="${PYTEST_BASETEMP:-}"
+if [[ -z "$PYTEST_BASETEMP" ]]; then
+    PYTEST_TMP_ROOT="$REPO_ROOT/.git/tmp"
+    mkdir -p "$PYTEST_TMP_ROOT"
+    PYTEST_BASETEMP="$PYTEST_TMP_ROOT/pytest-pre-push-$(date +%Y%m%d%H%M%S)-$$"
+fi
+
+echo "[pre-push] pytest -q (basetemp=$PYTEST_BASETEMP)..."
+"$PYTHON_BIN" -m pytest -q --basetemp "$PYTEST_BASETEMP"
 
 echo "[pre-push] OK — pushing."
