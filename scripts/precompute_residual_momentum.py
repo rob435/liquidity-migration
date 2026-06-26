@@ -12,7 +12,7 @@ funding/premium are 38.8% null on binance, see binance-derivative-metrics-missin
 
 CAUSALITY (fixed 2026-06-03 — was a confirmed look-ahead; STATE.md "rmom look-ahead unconfirmed"):
 the residual is fit against a FORWARD return (fit_factor_returns target_col='fwd_ret_1d' =
-first_bar_close[d+2]/first_bar_close[d+1] - 1, signal_harness._attach_forward_returns), so
+first_bar_close[d+2]/first_bar_close[d+1] - 1, daily_feature_panel._attach_forward_returns), so
 residual_return[d] does NOT complete until first_bar_close[d+2] is available ≈ (d+2) 01:00 UTC. The
 LIVE continuous consumer wakes from 00:00 UTC of day D and reads residual_momentum[day D]; for that
 to be strictly PIT, the NEWEST summed residual_return must complete ≤ D 00:00 UTC, i.e. its index
@@ -58,7 +58,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 import polars as pl  # noqa: E402
 from liquidity_migration.risk_model import build_factor_panel, fit_factor_returns  # noqa: E402
-from liquidity_migration.signal_harness import MS_PER_DAY, _date_str_to_ms  # noqa: E402
+from liquidity_migration.daily_feature_panel import MS_PER_DAY, _date_str_to_ms  # noqa: E402
 
 SHARED = Path.home() / "SHARED_DATA"
 # pad the panel start so the trailing residual window is warm at the first traded signal day

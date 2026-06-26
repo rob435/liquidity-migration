@@ -1,17 +1,14 @@
-"""Pin the signal-research harness — Change 4 from the 2026-05-27 plan.
+"""Pin the daily feature-panel builders.
 
 Causality is the only thing that matters in this module: if a feature for
-(symbol, date=D) ever uses data from after D's EOD-close, the IC results
-from Phase 5 are meaningless. These tests pin:
+(symbol, date=D) ever uses data from after D's EOD-close, residual momentum
+and risk-model consumers become invalid. These tests pin:
 
   * forward returns match the entry+1h fill-model exactly (D's signal trades
     at D+1's first-bar close; exit N days later at D+1+N's first-bar close)
   * each feature is causal at its EOD — explicitly tested on a synthetic
     fixture where a future-only price spike would be detectable if leaked
   * cross-sectional ranks are per-day and dense
-  * IC computation recovers a planted edge with the expected sign
-  * IC computation does NOT show a spurious edge on uncorrelated noise
-  * combined-portfolio weights are signed and top-decile-correct
   * registry has all 20 features the plan listed
 """
 from __future__ import annotations
@@ -24,10 +21,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration.signal_harness import (
+from liquidity_migration.daily_feature_panel import (
     FEATURE_REGISTRY,
     FeatureContext,
-    ICReport,
     _aggregate_daily_funding,
     _aggregate_daily_klines,
     _aggregate_daily_open_interest,
@@ -36,9 +32,7 @@ from liquidity_migration.signal_harness import (
     _attach_forward_returns,
     _make_turnover_delta,
     _make_xs_rank_ret_Nd,
-    build_combined_signal_portfolio,
     build_feature_panel,
-    compute_univariate_ic,
     resolve_feature_specs,
 )
 
@@ -414,193 +408,6 @@ def test_liquidity_rank_orders_by_trailing_turnover() -> None:
 
 
 # ============================================================================
-# Univariate IC
-# ============================================================================
-
-
-def _planted_edge_panel() -> pl.DataFrame:
-    """Build a panel where feature1 IS forward return up to noise — IC ~ 1.
-    feature2 is iid noise — IC ~ 0 in expectation.
-
-    Sized so the IC stats stabilize: 120 days × 100 symbols ≈ 12k observations,
-    enough to put the noise feature's mean IC inside +/- 0.01 with high
-    probability under the null."""
-    import random
-    rng = random.Random(42)
-    rows: list[dict] = []
-    n_days = 120
-    n_symbols = 100
-    for d in range(n_days):
-        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
-        per_day_fwd = [rng.gauss(0.0, 0.05) for _ in range(n_symbols)]
-        for s in range(n_symbols):
-            fwd = per_day_fwd[s]
-            feature1 = fwd + rng.gauss(0.0, 0.005)  # high IC by construction
-            feature2 = rng.gauss(0.0, 1.0)  # noise feature
-            rows.append({
-                "symbol": f"S{s:02d}",
-                "ts_ms": ts,
-                "feature1": feature1,
-                "feature2": feature2,
-                "fwd_ret_3d": fwd,
-            })
-    return pl.DataFrame(rows)
-
-
-def test_compute_univariate_ic_recovers_planted_positive_edge() -> None:
-    panel = _planted_edge_panel()
-    report = compute_univariate_ic(panel, feature="feature1", target="fwd_ret_3d")
-    # Construction: feature1 ≈ fwd_ret_3d → IC should be very high (>0.9)
-    assert isinstance(report, ICReport)
-    assert report.mean_ic > 0.9
-    assert report.t_stat > 5.0
-    assert report.sub_period_sign_consistent is True
-
-
-def test_compute_univariate_ic_does_not_survive_phase_5_rule_on_noise() -> None:
-    """The Phase 5 conjunctive survival rule is:
-        |mean_ic| >= 0.03 AND sub_period_sign_consistent AND |t_stat| >= 3.
-    A noise feature must FAIL the rule (the whole point of the rule is to
-    reject noise). With 120d × 100 symbols, mean_ic for noise is well within
-    +/- 0.02 in expectation; we check the conjunctive rule rather than the
-    individual stats so the test isn't flaky on a particular sample."""
-    panel = _planted_edge_panel()
-    report = compute_univariate_ic(panel, feature="feature2", target="fwd_ret_3d")
-    survives = (
-        abs(report.mean_ic) >= 0.03
-        and report.sub_period_sign_consistent
-        and abs(report.t_stat) >= 3.0
-    )
-    assert not survives, (
-        f"Noise feature falsely survived Phase 5 rule: mean_ic={report.mean_ic:.4f}, "
-        f"t={report.t_stat:.2f}, sub_period_sign_consistent={report.sub_period_sign_consistent}"
-    )
-
-
-def test_compute_univariate_ic_filters_nan_days_not_just_null_days() -> None:
-    """polars' pl.corr returns NaN (not null) when a per-day cross-section
-    has zero variance — e.g. all-identical funding rates or a 1-symbol day.
-    drop_nulls doesn't catch NaN, so the naive sum(ics)/n_days propagates
-    NaN to mean_ic, t_stat, and every sub-period IC. Observed in Phase 5b
-    on Binance funding_rate_z (frequent zero-variance days). The fix is to
-    explicitly filter NaN from the daily IC series before averaging."""
-    # Build a panel where most days have valid IC but one day has zero
-    # variance in the feature (all symbols share the same value) → pl.corr
-    # returns NaN. Mean over the remaining valid days must come back valid.
-    rows: list[dict] = []
-    import random
-    rng = random.Random(0)
-    n_symbols = 20
-    n_days = 50
-    bad_day = 25
-    for d in range(n_days):
-        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
-        for s in range(n_symbols):
-            if d == bad_day:
-                # zero-variance day: every symbol shares the same feature value.
-                feature_val = 0.0
-            else:
-                feature_val = rng.gauss(0.0, 1.0)
-            rows.append({
-                "symbol": f"S{s:02d}",
-                "ts_ms": ts,
-                "feature_x": feature_val,
-                "fwd_ret_3d": rng.gauss(0.0, 0.05),
-            })
-    panel = pl.DataFrame(rows)
-    report = compute_univariate_ic(panel, feature="feature_x", target="fwd_ret_3d")
-    # mean_ic, t_stat, sub_period_ics MUST be valid finite numbers (the noisy
-    # feature has IC ~ 0 with small sample size, but the value itself is
-    # well-defined).
-    assert math.isfinite(report.mean_ic), f"mean_ic was {report.mean_ic} (expected finite)"
-    assert math.isfinite(report.t_stat) or report.ic_std == 0.0
-    for sub in report.sub_period_ics:
-        assert math.isfinite(sub) or report.n_days < 3
-    # n_days should equal valid (non-NaN) day count = n_days - 1 (we dropped
-    # the zero-variance day).
-    assert report.n_days == n_days - 1
-
-
-def test_compute_univariate_ic_raises_on_unknown_feature_or_target() -> None:
-    panel = _planted_edge_panel()
-    with pytest.raises(KeyError):
-        compute_univariate_ic(panel, feature="missing", target="fwd_ret_3d")
-    with pytest.raises(KeyError):
-        compute_univariate_ic(panel, feature="feature1", target="fwd_ret_99d")
-
-
-# ============================================================================
-# Combined portfolio
-# ============================================================================
-
-
-def _portfolio_panel() -> pl.DataFrame:
-    rows: list[dict] = []
-    n_days = 5
-    n_symbols = 20
-    for d in range(n_days):
-        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
-        for s in range(n_symbols):
-            rows.append({
-                "symbol": f"S{s:02d}",
-                "ts_ms": ts,
-                "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
-                "feature_a": float(s),  # monotone in symbol id
-                "realized_vol_7d": 0.5,  # constant so sizing is constant
-                "fwd_ret_3d": 0.0,
-            })
-    return pl.DataFrame(rows)
-
-
-def test_build_combined_signal_portfolio_assigns_top_decile_shorts() -> None:
-    panel = _portfolio_panel()
-    out = build_combined_signal_portfolio(
-        panel,
-        surviving_features=["feature_a"],
-        weighting="equal",
-        top_decile=0.20,  # 20% of 20 symbols/day = 4 shorts + 4 longs
-        vol_target_per_name=0.01,
-        forward_horizon=3,
-    )
-    # Per day: 4 shorts (lowest feature_a → most-negative Z), 4 longs (highest), 12 flats
-    by_side_per_day = (
-        out.group_by(["ts_ms", "position_side"]).agg(pl.len().alias("n"))
-    )
-    assert by_side_per_day.filter(pl.col("position_side") == "short")["n"].max() == 4
-    assert by_side_per_day.filter(pl.col("position_side") == "long")["n"].max() == 4
-    assert by_side_per_day.filter(pl.col("position_side") == "flat")["n"].max() == 12
-
-    # Short weights are negative; long weights are positive; flat is zero.
-    shorts = out.filter(pl.col("position_side") == "short")
-    longs = out.filter(pl.col("position_side") == "long")
-    assert (shorts["weight"] < 0.0).all()
-    assert (longs["weight"] > 0.0).all()
-    assert (out.filter(pl.col("position_side") == "flat")["weight"] == 0.0).all()
-
-
-def test_build_combined_signal_portfolio_raises_without_vol_column() -> None:
-    panel = _portfolio_panel().drop("realized_vol_7d")
-    with pytest.raises(KeyError, match="realized_vol_7d"):
-        build_combined_signal_portfolio(
-            panel,
-            surviving_features=["feature_a"],
-            weighting="equal",
-            forward_horizon=3,
-        )
-
-
-def test_build_combined_signal_portfolio_requires_ic_weights_when_ic_weighted() -> None:
-    panel = _portfolio_panel()
-    with pytest.raises(ValueError, match="ic_weights"):
-        build_combined_signal_portfolio(
-            panel,
-            surviving_features=["feature_a"],
-            weighting="ic_weighted",
-            forward_horizon=3,
-        )
-
-
-# ============================================================================
 # Registry + resolver
 # ============================================================================
 
@@ -673,7 +480,7 @@ def test_autodetect_dataset_names_picks_binance_when_prefixed_subdirs_exist(tmp_
     funding/oi/premium-derived features, and Phase 5b IC returned all NaN
     for those features. The autodetector picks the right convention by
     sniffing which subdirs exist."""
-    from liquidity_migration.signal_harness import _autodetect_dataset_names
+    from liquidity_migration.daily_feature_panel import _autodetect_dataset_names
 
     # Bybit-shaped root: plain dataset dirs
     (tmp_path / "bybit_like" / "funding").mkdir(parents=True)
@@ -738,135 +545,8 @@ def test_attach_daily_returns_is_calendar_exact_across_gaps() -> None:
 
 
 # ============================================================================
-# audit2c: decile under-deploy + daily-aggregation day-key snap
+# audit2c: daily-aggregation day-key snap
 # ============================================================================
-#
-# Two corrected behaviours are pinned here:
-#
-#   (1) Decile under-deploy — ``build_combined_signal_portfolio`` must exclude
-#       names with null / non-positive ``realized_vol`` from the rank pool BEFORE
-#       selecting the per-day decile, so every selected (short/long) name is
-#       sizable and carries a non-null weight. The old code ranked un-sizable
-#       names into the decile and they silently deployed weight=null.
-#
-#   (2) Daily-aggregation day key — ``_aggregate_daily_{funding,open_interest,
-#       premium}`` must snap the per-day key to the 00:00-UTC day floor
-#       ((ts_ms // MS_PER_DAY) * MS_PER_DAY) rather than the first intraday ts,
-#       so the daily row joins the kline 00:00 grid even on a gap-edge day whose
-#       first observation is not at midnight.
-
-
-# ---------------------------------------------------------------------------
-# (1) Decile breadth: no selected name with a null weight
-# ---------------------------------------------------------------------------
-
-
-def _panel_with_unsizable_extremes() -> pl.DataFrame:
-    """Panel where the most-extreme names by signal have unusable realized_vol.
-
-    Per day, 12 symbols. ``feature_a`` is monotone in symbol id, so the
-    lowest-id symbols are the most-negative-signal (short candidates) and the
-    highest-id the most-positive (long candidates). The single most-extreme
-    name on EACH tail has a non-sizable realized_vol (null on the short tail,
-    0.0 on the long tail) — under the old code those two names would be picked
-    into the decile and deploy weight=null.
-    """
-    rows: list[dict] = []
-    n_days = 3
-    n_symbols = 12
-    for d in range(n_days):
-        ts = _date_ms("2025-03-01") + d * MS_PER_DAY
-        for s in range(n_symbols):
-            if s == 0:
-                vol = None  # most-negative signal, null vol -> not sizable
-            elif s == n_symbols - 1:
-                vol = 0.0  # most-positive signal, zero vol -> not sizable
-            else:
-                vol = 0.5
-            rows.append(
-                {
-                    "symbol": f"S{s:02d}",
-                    "ts_ms": ts,
-                    "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
-                    "feature_a": float(s),
-                    "realized_vol_7d": vol,
-                    "fwd_ret_3d": 0.0,
-                }
-            )
-    return pl.DataFrame(rows)
-
-
-def test_decile_excludes_unsizable_names_from_pool() -> None:
-    """No selected (short/long) name carries a null weight (fix #1).
-
-    Old behaviour: S00 (null vol) and S11 (0.0 vol) rank into the decile and
-    get weight=null, silently zeroing one slot per side.
-    """
-    panel = _panel_with_unsizable_extremes()
-    out = build_combined_signal_portfolio(
-        panel,
-        surviving_features=["feature_a"],
-        weighting="equal",
-        top_decile=0.20,  # ceil(0.20 * 10 sizable) = 2 per side
-        vol_target_per_name=0.01,
-        forward_horizon=3,
-    )
-
-    selected = out.filter(pl.col("position_side") != "flat")
-    # Every selected name must have a finite, non-null weight.
-    assert selected["weight"].null_count() == 0
-    assert selected["weight"].is_finite().all()
-
-    # The un-sizable extremes must NOT be selected — they were masked out of the
-    # rank pool, so they fall through to "flat" with weight 0.
-    unsizable = out.filter(pl.col("symbol").is_in(["S00", "S11"]))
-    assert (unsizable["position_side"] == "flat").all()
-    assert (unsizable["weight"] == 0.0).all()
-
-    # Breadth guarantee holds over the 10 sizable names: ceil(0.20 * 10) = 2
-    # shorts and 2 longs each day, all sizable.
-    by_side = out.group_by(["ts_ms", "position_side"]).agg(pl.len().alias("n"))
-    assert by_side.filter(pl.col("position_side") == "short")["n"].max() == 2
-    assert by_side.filter(pl.col("position_side") == "long")["n"].max() == 2
-    shorts = out.filter(pl.col("position_side") == "short")
-    longs = out.filter(pl.col("position_side") == "long")
-    assert (shorts["weight"] < 0.0).all()
-    assert (longs["weight"] > 0.0).all()
-
-
-def test_decile_all_sizable_unchanged() -> None:
-    """When every name is sizable the selection is unchanged (no regression)."""
-    rows: list[dict] = []
-    n_symbols = 10
-    ts = _date_ms("2025-03-01")
-    for s in range(n_symbols):
-        rows.append(
-            {
-                "symbol": f"S{s:02d}",
-                "ts_ms": ts,
-                "date": "2025-03-01",
-                "feature_a": float(s),
-                "realized_vol_7d": 0.5,
-                "fwd_ret_3d": 0.0,
-            }
-        )
-    out = build_combined_signal_portfolio(
-        pl.DataFrame(rows),
-        surviving_features=["feature_a"],
-        weighting="equal",
-        top_decile=0.20,
-        vol_target_per_name=0.01,
-        forward_horizon=3,
-    )
-    by_side = out.group_by("position_side").agg(pl.len().alias("n"))
-    assert by_side.filter(pl.col("position_side") == "short")["n"][0] == 2
-    assert by_side.filter(pl.col("position_side") == "long")["n"][0] == 2
-    assert out["weight"].null_count() == 0
-
-
-# ---------------------------------------------------------------------------
-# (2) Daily-aggregation day key snapped to the 00:00 day floor
-# ---------------------------------------------------------------------------
 
 
 def _gap_edge_intraday(value_col: str, *, extra: dict[str, list] | None = None) -> pl.DataFrame:
@@ -1048,130 +728,14 @@ def test_turnover_delta_window_shrinks_across_a_gap_not_stretches() -> None:
     assert by_day[30] is None
 
 
-def test_calendar_helpers_are_imported_in_signal_harness() -> None:
+def test_calendar_helpers_are_imported_in_daily_feature_panel() -> None:
     """The module must actually route through the gap-aware primitives; importing
     them is the structural part of the fix (test-gaps-3)."""
-    import liquidity_migration.signal_harness as sh
+    import liquidity_migration.daily_feature_panel as fp
 
-    src = inspect.getsource(sh)
+    src = inspect.getsource(fp)
     assert "calendar_shift" in src
     assert "calendar_roll" in src
     # No bare positional shift on the daily panel should survive in the N-day builders.
     assert ".shift(n).over(\"symbol\")" not in src
     assert ".shift(7).over(\"symbol\")" not in src
-
-
-# ============================================================================
-# research-methodology-4 — tied bottom signals must not shrink the short book
-# ============================================================================
-
-
-def _tie_panel() -> pl.DataFrame:
-    """10 symbols/day for 2 days; the 4 lowest feature values are TIED so an
-    average-rank fractional cut would zero out the short side."""
-    rows: list[dict] = []
-    n_symbols = 10
-    # 4 tied lowest (value 0.0), then 6 distinct higher values.
-    values = [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-    for d in range(2):
-        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
-        for s in range(n_symbols):
-            rows.append(
-                {
-                    "symbol": f"S{s:02d}",
-                    "ts_ms": ts,
-                    "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
-                    "feature_a": values[s],
-                    "realized_vol_7d": 0.5,
-                    "fwd_ret_3d": 0.0,
-                }
-            )
-    return pl.DataFrame(rows)
-
-
-def test_tied_bottom_signals_still_deploy_exact_decile_short_count() -> None:
-    """top_decile=0.40 over 10 names => exactly 4 shorts and 4 longs per day, even
-    though the 4 lowest feature values tie. With the original rank(method="average")
-    + frac<=top_decile cut, the tied bottom group's average rank (2.5/10=0.25) was
-    NOT <= 0.40 for all four and could collapse the short count below 4."""
-    out = build_combined_signal_portfolio(
-        _tie_panel(),
-        surviving_features=["feature_a"],
-        weighting="equal",
-        top_decile=0.40,
-        vol_target_per_name=0.01,
-        forward_horizon=3,
-    )
-    per_day = out.group_by(["ts_ms", "position_side"]).agg(pl.len().alias("n"))
-    shorts = per_day.filter(pl.col("position_side") == "short")["n"].to_list()
-    longs = per_day.filter(pl.col("position_side") == "long")["n"].to_list()
-    assert shorts and all(n == 4 for n in shorts)
-    assert longs and all(n == 4 for n in longs)
-    # The short book is non-empty every day (the under-deployment bug produced 0).
-    assert (out.filter(pl.col("position_side") == "short")["weight"] < 0.0).all()
-
-
-def test_decile_selection_uses_ordinal_rank_not_average() -> None:
-    import liquidity_migration.signal_harness as sh
-
-    src = inspect.getsource(sh.build_combined_signal_portfolio)
-    assert 'rank(method="ordinal")' in src
-    # The selection must not fall back to the fractional <= top_decile cut.
-    assert "signal_rank_frac\") <= top_decile" not in src
-
-
-def test_build_combined_signal_portfolio_keeps_name_missing_one_of_several_features() -> None:
-    """audit-iter2 harness-cli-1: a plain column sum nulls the whole name when ANY one
-    feature is null, silently dropping it from BOTH pools and biasing the decile pool.
-    A name missing ONE feature must still get a (neutral-filled) combined signal; a
-    name missing ALL features is still excluded (null signal)."""
-    rows: list[dict] = []
-    n_days, n_symbols = 3, 12
-    for d in range(n_days):
-        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
-        for s in range(n_symbols):
-            rows.append({
-                "symbol": f"S{s:02d}",
-                "ts_ms": ts,
-                "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
-                # S05: only feature_b null (one missing). S06: both null (no data).
-                "feature_a": (None if s == 6 else float(s)),
-                "feature_b": (None if s in (5, 6) else float(n_symbols - s)),
-                "realized_vol_7d": 0.5,
-                "fwd_ret_3d": 0.0,
-            })
-    panel = pl.DataFrame(rows, infer_schema_length=None)
-    out = build_combined_signal_portfolio(
-        panel,
-        surviving_features=["feature_a", "feature_b"],
-        weighting="equal",
-        top_decile=0.20,
-        vol_target_per_name=0.01,
-        forward_horizon=3,
-    )
-    day0 = out.filter(pl.col("ts_ms") == _date_ms("2025-01-01"))
-    sig = dict(zip(day0["symbol"].to_list(), day0["combined_signal"].to_list()))
-    assert sig["S00"] is not None
-    assert sig["S05"] is not None   # one feature missing -> still signalled (not dropped)
-    assert sig["S06"] is None       # all features missing -> excluded
-
-
-def test_build_combined_signal_portfolio_ic_weighted_combines_math() -> None:
-    """audit-iter5: exercise the ic_weighted COMBINATION math (only its missing-weights
-    error path was tested). With feature_b weighted 0, the result must reduce to ranking
-    on feature_a alone (lowest feature_a -> short)."""
-    panel = _portfolio_panel().with_columns((pl.col("feature_a") * -1.0).alias("feature_b"))
-    out = build_combined_signal_portfolio(
-        panel,
-        surviving_features=["feature_a", "feature_b"],
-        weighting="ic_weighted",
-        ic_weights={"feature_a": 1.0, "feature_b": 0.0},
-        top_decile=0.20,
-        vol_target_per_name=0.01,
-        forward_horizon=3,
-    )
-    day0 = out.filter(pl.col("ts_ms") == out["ts_ms"].min())
-    shorts = set(day0.filter(pl.col("position_side") == "short")["symbol"].to_list())
-    longs = set(day0.filter(pl.col("position_side") == "long")["symbol"].to_list())
-    assert "S00" in shorts   # lowest feature_a -> most-negative combined -> short
-    assert "S19" in longs    # highest feature_a -> long

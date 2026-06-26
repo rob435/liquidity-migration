@@ -69,7 +69,6 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
     _add_long_native_event_demo_cycle_parser,
     _add_reconcile_continuous_paper_demo_parser,
     _add_reconcile_long_paper_demo_parser,
-    _add_signal_harness_parser,
 )
 
 
@@ -173,7 +172,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_download_klines_1h_parser(subparsers)
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_continuous_events_parser(subparsers)
-    _add_signal_harness_parser(subparsers)
     _add_event_risk_cycle_parser(subparsers)
     _add_event_risk_ws_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
@@ -230,107 +228,6 @@ def _resolve_data_root(command: str, data_root: str | Path) -> Path:
 
 def _expanded_report_dir(report_dir: str | Path | None, *, default: Path) -> Path:
     return Path(report_dir).expanduser() if report_dir else default
-
-
-def _run_signal_harness(args, data_root: Path) -> int:
-    """Dispatcher for ``signal-harness {build-panel,compute-ic,combined-portfolio}``.
-
-    Kept as a module-level helper so the signal_harness module isn't imported
-    until the user actually invokes the subcommand (polars-heavy module).
-    """
-    import json
-    from dataclasses import asdict
-
-    import polars as pl
-
-    from liquidity_migration import signal_harness as sh
-
-    action = args.signal_harness_action
-
-    if action == "build-panel":
-        horizons = tuple(int(h.strip()) for h in args.forward_horizons.split(",") if h.strip())
-        panel = sh.build_feature_panel(
-            data_root,
-            start=args.start,
-            end=args.end,
-            feature_specs=args.features,
-            forward_horizons=horizons,
-            universe_min_daily_turnover=args.universe_min_daily_turnover,
-        )
-        out_path = Path(args.output).expanduser()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        panel.write_parquet(out_path)
-        feature_count = sum(1 for c in panel.columns if c not in {"symbol", "ts_ms", "date", "close", "turnover_quote"} and not c.startswith("fwd_ret_"))
-        print(
-            f"signal-harness build-panel: rows={panel.height}  symbols={panel['symbol'].n_unique() if panel.height else 0}  "
-            f"features={feature_count}  horizons={horizons}  -> {out_path}"
-        )
-        return 0
-
-    if action == "compute-ic":
-        panel = pl.read_parquet(Path(args.panel).expanduser())
-        if args.features == "all":
-            features = [c for c in panel.columns if c in sh.FEATURE_REGISTRY]
-        else:
-            features = [f.strip() for f in args.features.split(",") if f.strip()]
-        reports = []
-        for feature in features:
-            report = sh.compute_univariate_ic(
-                panel,
-                feature=feature,
-                target=args.target,
-                sub_periods=args.sub_periods,
-            )
-            reports.append(asdict(report))
-        out_path = Path(args.output).expanduser()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(reports, indent=2))
-        survived = sum(
-            1 for r in reports
-            if not (r["mean_ic"] != r["mean_ic"])  # not nan
-            and abs(r["mean_ic"]) >= 0.03
-            and r["sub_period_sign_consistent"]
-            and abs(r["t_stat"]) >= 3.0
-        )
-        print(
-            f"signal-harness compute-ic: target={args.target}  features={len(reports)}  "
-            f"survived (|IC|>=0.03 AND sign-consistent AND |t|>=3): {survived}  -> {out_path}"
-        )
-        return 0
-
-    if action == "combined-portfolio":
-        panel = pl.read_parquet(Path(args.panel).expanduser())
-        features = [f.strip() for f in args.features.split(",") if f.strip()]
-        ic_weights = None
-        if args.weighting == "ic_weighted":
-            if not args.ic_weights:
-                raise RuntimeError("--ic-weights required when --weighting=ic_weighted")
-            ic_weights = {}
-            for pair in args.ic_weights.split(","):
-                if "=" not in pair:
-                    raise RuntimeError(f"--ic-weights entry missing '=': {pair!r}")
-                k, v = pair.split("=", 1)
-                ic_weights[k.strip()] = float(v)
-        portfolio = sh.build_combined_signal_portfolio(
-            panel,
-            surviving_features=features,
-            weighting=args.weighting,
-            ic_weights=ic_weights,
-            top_decile=args.top_decile,
-            vol_target_per_name=args.vol_target_per_name,
-            forward_horizon=args.forward_horizon,
-        )
-        out_path = Path(args.output).expanduser()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        portfolio.write_parquet(out_path)
-        active = portfolio.filter(pl.col("position_side") != "flat").height
-        print(
-            f"signal-harness combined-portfolio: weighting={args.weighting}  features={features}  "
-            f"rows={portfolio.height}  active={active}  -> {out_path}"
-        )
-        return 0
-
-    raise RuntimeError(f"unknown signal-harness action: {action!r}")
 
 
 
@@ -908,10 +805,6 @@ def _cmd_continuous_events(args: argparse.Namespace, config: ResearchConfig, dat
         return 0
 
 
-def _cmd_signal_harness(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
-        return _run_signal_harness(args, data_root)
-
-
 def _cmd_reconcile_long_paper_demo(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         payload = run_long_paper_demo_reconciliation(
             args.paper_data_root,
@@ -1259,7 +1152,6 @@ _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Pat
     "long-native-event-demo-cycle": _cmd_long_native_event_demo_cycle,
     "continuous-event-demo-cycle": _cmd_continuous_event_demo_cycle,
     "continuous-events": _cmd_continuous_events,
-    "signal-harness": _cmd_signal_harness,
     "reconcile-long-paper-demo": _cmd_reconcile_long_paper_demo,
     "reconcile-continuous-paper-demo": _cmd_reconcile_continuous_paper_demo,
     "continuous-rebalance-cycle-audit": _cmd_continuous_rebalance_cycle_audit,

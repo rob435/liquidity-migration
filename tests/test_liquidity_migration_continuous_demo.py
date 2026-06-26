@@ -20,6 +20,8 @@ from liquidity_migration.continuous_demo import (
     SNIPER_REASON,
     ContinuousDemoCycleConfig,
     LivePanelCache,
+    _btc_risk_sizing_payload_fields,
+    _btc_trend_gate_payload_fields,
     _build_continuous_rebalance_resize_rows,
     _continuous_age_eligible_symbols,
     _continuous_rebalance_cycle_fields,
@@ -35,9 +37,12 @@ from liquidity_migration.continuous_demo import (
     _execute_sniper_placements,
     _finite_or_none,
     _known_ensemble_component_tags,
+    _payload_float,
     _recent_adverse_exit_count,
+    _rmom_freshness_payload_fields,
     _sniper_fill_ts_ms,
     _sniper_order_state,
+    _submission_error_count,
     _validate_continuous_demo_config,
     active_primary_pnl_gate_allows_addon,
     apply_continuous_demo_profile,
@@ -826,6 +831,7 @@ def test_execute_rebalance_resizes_duplicate_generated_link_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import liquidity_migration.continuous_demo as cd
+    import liquidity_migration.continuous_identity as ci
 
     cfg = ContinuousDemoCycleConfig(submit_orders=True, confirm_demo_orders=True, daily_rebalance_enabled=True)
     trades = [
@@ -892,7 +898,7 @@ def test_execute_rebalance_resizes_duplicate_generated_link_fails_closed(
     def fake_wait(*_args: object, **_kwargs: object) -> dict[str, object]:
         return {"qty": "1", "avg_price": "100", "fee": "0.01", "exec_time_ms": 1}
 
-    monkeypatch.setattr(cd.zlib, "crc32", lambda _data: 7)
+    monkeypatch.setattr(ci.zlib, "crc32", lambda _data: 7)
     monkeypatch.setattr(cd, "_wait_for_execution_summary", fake_wait)
     client = FakeClient()
 
@@ -1445,6 +1451,56 @@ def test_cycle_refreshes_btc_trend_gate_input_outside_tradable_universe(
     assert payload["btc_trend_gate_allows_entry"] is True
     assert payload["btc_trend_gate_btc_rows"] == btc_klines.height
     assert payload["btc_trend_gate_btc_max_ts_ms"] == signal_day
+
+
+def test_btc_trend_gate_payload_fields_apply_cycle_defaults() -> None:
+    fields = _btc_trend_gate_payload_fields(
+        config=ContinuousDemoCycleConfig(btc_trend_gate="uptrend"),
+        allows_entry=True,
+        trend_value=0.12,
+        kline_stats={"btc_rows": 42, "btc_max_ts_ms": 123, "fetch_symbols": 1},
+    )
+
+    assert fields == {
+        "btc_trend_gate": "uptrend",
+        "btc_trend_gate_allows_entry": True,
+        "btc_trend_gate_value": 0.12,
+        "btc_trend_gate_btc_rows": 42,
+        "btc_trend_gate_btc_max_ts_ms": 123,
+        "btc_trend_gate_kline_store_rows": 0,
+        "btc_trend_gate_kline_cache_rows": 0,
+        "btc_trend_gate_kline_fetch_symbols": 1,
+        "btc_trend_gate_kline_fetched_rows": 0,
+        "btc_trend_gate_kline_error": 0,
+    }
+
+
+def test_btc_risk_sizing_payload_fields_apply_cycle_defaults() -> None:
+    fields = _btc_risk_sizing_payload_fields(
+        {
+            "enabled": True,
+            "arm_id": "btc-risk-v1",
+            "candidate_rows": 3,
+            "scored": 2,
+            "tail_selected": 1,
+            "mean_btc_risk_score": 0.4,
+        }
+    )
+
+    assert fields == {
+        "btc_risk_sizing_enabled": True,
+        "btc_risk_sizing_arm_id": "btc-risk-v1",
+        "btc_risk_sizing_candidate_rows": 3,
+        "btc_risk_sizing_scored": 2,
+        "btc_risk_sizing_duplicates": 0,
+        "btc_risk_sizing_tail_selected": 1,
+        "btc_risk_sizing_warmup": 0,
+        "btc_risk_sizing_state_rows": 0,
+        "btc_risk_sizing_min_stack_mult": 1.0,
+        "btc_risk_sizing_max_stack_mult": 1.0,
+        "btc_risk_sizing_mean_score": 0.4,
+        "btc_risk_sizing_error": 0,
+    }
 
 
 def test_daemon_constructs_without_network(tmp_path) -> None:
@@ -2375,6 +2431,38 @@ def test_format_continuous_demo_cycle_summary_handles_flat_payload() -> None:
     assert "$0.00" in format_continuous_demo_cycle_summary({"rmom_present": False})
 
 
+def test_payload_float_keeps_continuous_formatter_fallback() -> None:
+    assert _payload_float("12.5") == 12.5
+    assert _payload_float(None) == 0.0
+    assert _payload_float("not-a-number") == 0.0
+
+
+def test_rmom_freshness_payload_fields_floor_future_refresh() -> None:
+    current_day_ts = 10 * MS_PER_DAY
+    rmom = pl.DataFrame({"day_ts": [current_day_ts + MS_PER_DAY]})
+
+    fields = _rmom_freshness_payload_fields(rmom, current_day_ts=current_day_ts)
+
+    assert fields == {
+        "rmom_present": True,
+        "max_rmom_day_ts": current_day_ts + MS_PER_DAY,
+        "rmom_stale_days": 0,
+    }
+
+
+def test_rmom_freshness_payload_fields_handles_absent_or_unusable_table() -> None:
+    assert _rmom_freshness_payload_fields(None, current_day_ts=10 * MS_PER_DAY) == {
+        "rmom_present": False,
+        "max_rmom_day_ts": 0,
+        "rmom_stale_days": None,
+    }
+    assert _rmom_freshness_payload_fields(pl.DataFrame(), current_day_ts=10 * MS_PER_DAY) == {
+        "rmom_present": True,
+        "max_rmom_day_ts": 0,
+        "rmom_stale_days": None,
+    }
+
+
 def test_entry_caps_qty_at_max_order_qty_documented() -> None:
     """EXEC-3: a single continuous entry whose notional exceeds Bybit's maxMktOrderQty is CAPPED to
     max_order_qty (documented behaviour), not split. Pins the cap so a future split fix is a conscious
@@ -2573,6 +2661,19 @@ def test_continuous_telegram_order_row_errors_reach_reason_via_payload() -> None
     )
     assert "submit errors: entries=1 exits=0 resizes=2" in msg
     assert "rebalance resizes: 2" in msg
+
+
+def test_submission_error_count_preserves_continuous_notification_modes() -> None:
+    rows = [
+        {"submit_mode": "error", "status": "submitted"},
+        {"submit_mode": "submitted", "status": "failed"},
+        {"submit_mode": "submitted", "status": "partial", "error": "venue warning"},
+        {"submit_mode": "submitted", "status": "filled"},
+    ]
+
+    assert _submission_error_count(rows) == 2
+    assert _submission_error_count(rows, include_failed_status=False) == 1
+    assert _submission_error_count(rows, include_error_text=True) == 3
 
 
 def test_continuous_telegram_failure_is_isolated(monkeypatch: pytest.MonkeyPatch) -> None:

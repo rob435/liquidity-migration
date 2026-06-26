@@ -13,7 +13,7 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY, coerce_int
+from ._common import coerce_int
 from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, build_ws_trade_client, resolve_private_credentials
 from .config import ResearchConfig
 from decimal import Decimal
@@ -34,7 +34,6 @@ from .event_demo import (
     _execute_stop_repairs,
     _float,
     _orphan_close_pnl_backfill,
-    _normalized_position_side,
     _open_trades,
     _order_params,
     _price_lookup_from_positions,
@@ -49,26 +48,40 @@ from .event_demo import (
     _live_open_order_symbols,
     _safe_open_orders,
     _safe_raw_positions,
-    _stop_price_for_entry,
-    _take_profit_price_for_entry,
     _terminalize_stale_pending_entry_orders,
     _telegram_notification_reason,
     _trade_return,
     _upsert_rows,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
-    decode_entry_order_link_id,
     format_event_risk_cycle_report,
     format_telegram_status_message,
     plan_risk_exits,
     plan_stop_repairs,
     summarize_position_pnl,
 )
-from .long_native_event_demo import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
 from . import cross_sleeve as _cross_sleeve
 from .event_demo import wallet_equity_usdt
+from .order_execution import (
+    order_fill_status,
+    order_fully_filled,
+    remaining_qty_within_tolerance,
+)
 from .telegram import send_telegram_message, telegram_configured
+from .ws_risk_adoption import (
+    adopt_strategy_id_for_sleeve,
+    build_adopted_trade_row,
+    first_price as _first_price,
+    select_recovered_entry_link_metadata,
+    validate_trade_row_invariants as _validate_trade_row_invariants,
+)
+from .ws_risk_sleeves import (
+    build_sleeve_routes,
+    owned_sleeves,
+    resolve_sleeve,
+    tag_sleeve_from_trades,
+)
 
 
 _logger = logging.getLogger("liquidity_migration.ws_risk")
@@ -584,21 +597,14 @@ class EventWebSocketRiskEngine:
         """Map sleeve -> (root, dataset) for every ledger this engine owns. Short is always present;
         long/continuous only when their data_root is configured. Drives both reads and routed writes
         so a 4th sleeve is one entry, not N call-site edits."""
-        routes: dict[str, tuple[Path, str]] = {
-            "short": (self.root, "event_demo_trades" if trades else "event_demo_orders"),
-        }
-        if self.long_root is not None:
-            routes["long"] = (self.long_root,
-                              self.risk.long_trades_dataset if trades else self.risk.long_orders_dataset)
-        if self.continuous_root is not None:
-            routes["continuous"] = (self.continuous_root,
-                                    self.risk.continuous_trades_dataset if trades else self.risk.continuous_orders_dataset)
-        if self.continuous_addon_root is not None:
-            routes["continuous_addon"] = (
-                self.continuous_addon_root,
-                self.risk.continuous_addon_trades_dataset if trades else self.risk.continuous_addon_orders_dataset,
-            )
-        return routes
+        return build_sleeve_routes(
+            self.root,
+            self.risk,
+            long_root=self.long_root,
+            continuous_root=self.continuous_root,
+            continuous_addon_root=self.continuous_addon_root,
+            trades=trades,
+        )
 
     def _note_ledger_read_error(self, sleeve: str, dataset: str, exc: BaseException) -> None:
         """Record a RAISED (not merely empty) owned-ledger read/combine for this
@@ -685,22 +691,25 @@ class EventWebSocketRiskEngine:
         tag we don't own is a possible mis-attribution (corrupt/misspelled tag, or a sleeve whose
         root is unconfigured) -- surface it (counter + warning) rather than silently mis-filing it
         into the short ledger, which would defeat sleeve independence on the netted account."""
-        sleeve = str(row.get("sleeve") or "").lower()
-        owned = (
-            {"short"}
-            | ({"long"} if self.long_root is not None else set())
-            | ({"continuous"} if self.continuous_root is not None else set())
-            | ({"continuous_addon"} if self.continuous_addon_root is not None else set())
+        routed = resolve_sleeve(
+            row,
+            owned_sleeves(
+                long_root=self.long_root,
+                continuous_root=self.continuous_root,
+                continuous_addon_root=self.continuous_addon_root,
+            ),
         )
-        if sleeve in owned:
-            return sleeve
-        if sleeve:
+        if routed.misroute:
             self.state.sleeve_misroutes += 1
             _logger.warning(
                 "ws_risk: row sleeve=%r not owned (owned=%s); routing to short -- possible misroute; "
-                "trade_id=%s symbol=%s", sleeve, sorted(owned), row.get("trade_id"), row.get("symbol"),
+                "trade_id=%s symbol=%s",
+                routed.requested,
+                list(routed.owned),
+                row.get("trade_id"),
+                row.get("symbol"),
             )
-        return "short"
+        return routed.sleeve
 
     def _write_rows_routed(self, rows: list[dict[str, Any]], *, trades: bool) -> None:
         if not rows:
@@ -1294,7 +1303,10 @@ class EventWebSocketRiskEngine:
         # reconciler fix; this is its WS-path twin (solo sweep 2026-06-12).
         # A plain full exit (target == position) still closes here because the
         # final delta drives remaining_qty to ~0.
-        fully_filled = remaining_qty <= max(current_trade_qty * 1e-8, 1e-12)
+        fully_filled = remaining_qty_within_tolerance(
+            target_qty=current_trade_qty,
+            remaining_qty=remaining_qty,
+        )
         if delta_qty <= 0.0 and not fully_filled:
             return
         now_ms = _now_ms()
@@ -1440,8 +1452,11 @@ class EventWebSocketRiskEngine:
         if order is None:
             return []
         target_qty = _float(order.get("target_qty") or order.get("qty"))
-        fully_filled = target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
-        order["status"] = "filled" if fully_filled else "partial" if filled_qty > 0.0 else order.get("status", "")
+        order["status"] = order_fill_status(
+            target_qty=target_qty,
+            filled_qty=filled_qty,
+            unfilled_status=str(order.get("status", "")),
+        )
         order["filled_qty"] = _quantity_text(filled_qty) if filled_qty > 0.0 else ""
         order["avg_price"] = exit_price
         order["notional_usdt"] = abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0
@@ -1621,36 +1636,12 @@ class EventWebSocketRiskEngine:
         """Fill in the `sleeve` column on rows/orders from event_demo helpers
         that don't carry it. Looks up the row's trade_id in the combined
         ledger; falls back to the symbol lookup; final fallback is 'short'."""
-        if not trade_rows and not order_rows:
-            return
-        # reconcile-core-5: one .to_dicts() pass builds BOTH indexes (was two).
-        trade_index: dict[str, str] = {}
-        symbol_index: dict[str, str] = {}
-        if not self.state.all_trades.is_empty():
-            for row in self.state.all_trades.to_dicts():
-                tid = str(row.get("trade_id") or "")
-                sym = str(row.get("symbol") or "")
-                sleeve = str(row.get("sleeve") or "")
-                if tid:
-                    trade_index[tid] = sleeve
-                if sym and sleeve and sym not in symbol_index:
-                    symbol_index[sym] = sleeve
-
-        def _resolve(row: dict[str, Any]) -> str:
-            existing = str(row.get("sleeve") or "")
-            if existing:
-                return existing
-            tid = str(row.get("trade_id") or "")
-            sleeve = trade_index.get(tid, "")
-            if sleeve:
-                return sleeve
-            sym = str(row.get("symbol") or fallback_symbol)
-            return symbol_index.get(sym, "short")
-
-        for row in trade_rows:
-            row["sleeve"] = _resolve(row)
-        for order in order_rows:
-            order["sleeve"] = _resolve(order)
+        tag_sleeve_from_trades(
+            trade_rows,
+            order_rows,
+            all_trades=self.state.all_trades,
+            fallback_symbol=fallback_symbol,
+        )
 
     def exit_plan_from_order(self, order: dict[str, Any]) -> dict[str, Any] | None:
         trade_id = str(order.get("trade_id") or "")
@@ -2006,208 +1997,28 @@ class EventWebSocketRiskEngine:
         self.repair_exchange_stops()
 
     def _build_adopted_trade(self, position: dict[str, Any], *, now_ms: int) -> dict[str, Any] | None:
-        symbol = str(position.get("symbol", ""))
-        qty = str(position.get("size") or "")
-        entry_price = _first_price(position, ("avgPrice", "avg_price", "entryPrice", "entry_price"))
-        side = _normalized_position_side(position.get("side"))
-        if not symbol or _float(qty) <= 0.0 or entry_price <= 0.0 or side not in {"long", "short"}:
-            return None
-        # Route through _float first (like the sibling recovery path at ~line 2217): a
-        # float-formatted venue ms string ("1.7e12", "...0") makes int(str) raise and
-        # silently date the adopted trade to now_ms, skewing planned_exit by up to
-        # adopt_hold_days. int(_float(...)) parses it; identical for integer strings
-        # (audit-iter1 ws-2).
-        opened_ms = int(_float(position.get("createdTime") or position.get("created_time"))) or now_ms
-        stop_loss_pct = max(self.risk.adopt_stop_loss_pct, 0.0)
-        take_profit_pct = max(self.risk.adopt_take_profit_pct, 0.0)
-        tick_size = _float(position.get("tickSize") or position.get("tick_size"))
-        stop_price = (
-            _stop_price_for_entry(entry_price=entry_price, side=side, stop_loss_pct=stop_loss_pct, tick_size=tick_size)
-            if stop_loss_pct > 0.0
-            else 0.0
+        result = build_adopted_trade_row(
+            position,
+            now_ms=now_ms,
+            risk=self.risk,
+            recover_entry_link_metadata=lambda symbol, side: self._recover_entry_link_metadata(
+                symbol=symbol,
+                side=side,
+            ),
+            adoption_equity_usdt=self._adoption_equity_usdt,
+            continuous_root_configured=self.continuous_root is not None,
         )
-        take_profit_price = _take_profit_price_for_entry(
-            entry_price=entry_price, side=side, take_profit_pct=take_profit_pct, tick_size=tick_size
-        )
-        planned_exit_ts_ms = opened_ms + int(max(self.risk.adopt_hold_days, 0.0) * MS_PER_DAY)
-        # Sleeve tag drives the routed writer: a LONG orphan must land in the
-        # long ledger, not the short. Without this tag _sleeve_of() defaults to
-        # 'short' and the adopted trade goes to event_demo_trades — downstream
-        # plan_risk_exits then correctly computes a Sell reduce-only (from the
-        # `side` column), but ws_risk would write the close into the wrong
-        # ledger so the long sleeve's open-trade tracking diverges from venue
-        # reality. Tag from the venue-observed position side.
-        sleeve = "long" if side == "long" else "short"
-        # Rebuild-safe recovery: before falling back to the lossy adopted-*
-        # trade_id, look up Bybit's order history for this symbol and try to
-        # find the original entry order. Our entry order_link_ids encode
-        # signal_ts (lm-en-{base}-{ts36} short, lm-en-l-{base}-{ts36} long),
-        # so we can decode them back to (sleeve, signal_ts_ms) and rebuild
-        # the deterministic strategy trade_id verbatim — which is what the
-        # paper sleeve uses, so reconciliation can now pair on these post-
-        # rebuild positions instead of seeing 3 demo_only / 3 paper_only.
-        recovered = self._recover_entry_link_metadata(symbol=symbol, side=side)
-        if recovered is not None:
-            link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq, component_tag = recovered
-            if decoded_sleeve == "continuous_addon":
-                from .continuous_hedge_manager import (
-                    HEDGE_SYMBOL,
-                    HEDGE_SYMBOL_2,
-                    ContinuousHedgeConfig,
-                    build_hedge_tracking_row,
-                )
-
-                # BOTH 2f hedge legs (BTC + ETH) share the hedge link prefix and
-                # the externally-managed safety contract (track, NEVER force-exit).
-                # The old BTC-only check sent an orphaned ETH leg down the generic
-                # recovered path, which stamps adopt stop/TP/3d-hold — ws_risk
-                # would force-exit the leg and the next daily hedge run would
-                # re-buy it, a silent churn loop (round 4).
-                if symbol in (HEDGE_SYMBOL, HEDGE_SYMBOL_2) and side == "long":
-                    return build_hedge_tracking_row(
-                        ContinuousHedgeConfig(),
-                        qty=_float(qty),
-                        entry_price=entry_price,
-                        opened_ms=opened_ms,
-                        updated_ms=now_ms,
-                        order_link_id=link,
-                        order_id="",
-                        signal_ts_ms=signal_ts_ms,
-                        submit_mode="adopted_recovered",
-                        symbol=symbol,
-                    )
-            # Rebuild the deterministic trade_id, carrying the continuous re-entry seq so a rebuilt
-            # same-signal-window re-entry reconstructs its DISTINCT id (continuous-2). seq=0 (every
-            # short/long link + a first continuous entry) reproduces the legacy form verbatim.
-            trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}" + (f"-{reentry_seq}" if reentry_seq > 0 else "")
-            # The live continuous trade_id carries the ensemble component ({base}-{component});
-            # the deployed ensemble profiles emit ONLY component-tagged links, so a
-            # component-less reconstruction matched NO paper-twin row — every post-rebuild
-            # adoption broke reconciliation pairing (audit 2026-06-12). The sniper tag "s"
-            # maps to the -snipe suffix; the BASE component is not in the link, but the
-            # link's -x{crc} suffix lets us recover the exact live trade_id by enumerating
-            # the known components (round 3) — falling back to the lossy {base}-snipe form
-            # when no/ambiguous match.
-            component_fields: dict[str, Any] = {}
-            if decoded_sleeve == "continuous" and component_tag:
-                if component_tag == "s":
-                    from .continuous_demo import recover_snipe_trade_id_from_link
-
-                    recovered_snipe = recover_snipe_trade_id_from_link(
-                        link, strategy_id=strategy_id, symbol=symbol, signal_ts_ms=signal_ts_ms,
-                    )
-                    trade_id = recovered_snipe or (trade_id + "-snipe")
-                else:
-                    trade_id += f"-{component_tag}"
-                    # Stamp the ensemble entry-sizing weight back onto the adopted
-                    # row. Without it the daily rebalance defaults the missing
-                    # weight to 1.0 and resizes a 0.10-0.40x component entry to
-                    # FULL base notional — the round-3 CRITICAL re-entering via
-                    # the adoption path (round 4). Unknown/ambiguous tags stay
-                    # un-stamped; the rebalance planner now fail-safes by
-                    # skipping such rows instead of defaulting.
-                    from .continuous_demo import ensemble_component_weight_for_tag
-
-                    component_weight = ensemble_component_weight_for_tag(component_tag)
-                    if component_weight is not None:
-                        component_fields = {
-                            "component": component_tag,
-                            "component_weight": component_weight,
-                        }
-            # entry_ts_ms must reflect the actual fill time (Bybit's
-            # createdTime) not signal_ts. The cycle's exit logic computes
-            # planned_exit_ts_ms = entry_ts_ms + hold_days*MS_PER_DAY and
-            # event_decay rank-checks start FROM entry_ts_ms — putting
-            # signal_ts (which can be 1-6h earlier than the actual fill)
-            # in entry_ts_ms makes the position look older than it is and
-            # trips both exits prematurely. Observed live 2026-05-25:
-            # WAVESUSDT got event_decay on demo ~13h after signal while
-            # paper (correct entry_ts) still held the position.
-            return {
-                "trade_id": trade_id,
-                "sleeve": decoded_sleeve,
-                "strategy_id": strategy_id,
-                "symbol": symbol,
-                "side": side,
-                "status": "open",
-                "qty": qty,
-                "entry_price": entry_price,
-                **component_fields,
-                # Adopted positions carry zero fee/venue-time on the ledger by
-                # default; the demo↔Bybit reconciliation will surface the real
-                # fee as a pnl_gap on this trade, which is the correct semantic
-                # ("we don't know what we paid; ask the venue"). A future
-                # enhancement could query get_trade_history to backfill.
-                "entry_fee_usdt": 0.0,
-                "entry_exec_time_ms": opened_ms,
-                "notional_usdt": abs(entry_price * _float(qty)),
-                # Equity snapshot so per-row notional/equity consumers (the armed
-                # hedge's book-state resolver) never see an un-stamped row — a
-                # zero-equity row flips the WHOLE book to unknown and blocks the
-                # hedge (snipe-fill twin, audit 2026-06-12 round 3 / solo sweep).
-                # ws-risk-8: cache-only (bootstrap/rest_reconcile seed it first) so
-                # adoption on the consumer thread never blocks on a wallet REST.
-                "equity_usdt": self._adoption_equity_usdt(),
-                "ts_ms": now_ms,
-                "entry_ts_ms": opened_ms,
-                "opened_at_ms": opened_ms,
-                "updated_at_ms": now_ms,
-                "stop_price": stop_price,
-                "take_profit_price": take_profit_price,
-                "stop_loss_pct": stop_loss_pct,
-                "take_profit_pct": take_profit_pct,
-                "planned_exit_ts_ms": opened_ms + int(max(self.risk.adopt_hold_days, 0.0) * MS_PER_DAY),
-                "entry_order_link_id": link,
-                "entry_order_id": "",
-                "signal_ts_ms": signal_ts_ms,
-                "submit_mode": "adopted_recovered",
-            }
-        # Link recovery failed (order-history window exhausted, or a hand-placed
-        # position) -> fall back to the side-based sleeve tag. But short and
-        # continuous are BOTH short-direction, so the side heuristic cannot tell
-        # them apart: a continuous orphan here is tagged 'short' and lands in the
-        # short ledger. Surface the ambiguity so the operator can reconcile.
-        if side == "short" and self.continuous_root is not None:
+        if result.ambiguous_short:
             self.state.sleeve_misroutes += 1
             _logger.warning(
                 "ws_risk: adopting un-recoverable SHORT-side orphan %s as sleeve='short' "
                 "(entry-link recovery failed); short vs continuous is ambiguous on the netted "
                 "account -- verify the sleeve manually (qty=%s entry_price=%s)",
-                symbol, qty, entry_price,
+                result.ambiguous_symbol,
+                result.ambiguous_qty,
+                result.ambiguous_entry_price,
             )
-        return {
-            "trade_id": f"adopted-{symbol}-{opened_ms}",
-            "sleeve": sleeve,
-            "strategy_id": "adopted",
-            "symbol": symbol,
-            "side": side,
-            "status": "open",
-            "qty": qty,
-            "entry_price": entry_price,
-            # See above: zero fee/venue-time on adopted ledger; reconciliation
-            # surfaces the real fee as pnl_gap.
-            "entry_fee_usdt": 0.0,
-            "entry_exec_time_ms": opened_ms,
-            "notional_usdt": abs(entry_price * _float(qty)),
-            # See the recovered path: never write an equity-less open row.
-            # ws-risk-8: cache-only (seeded before adoption) — no wallet REST here.
-            "equity_usdt": self._adoption_equity_usdt(),
-            "ts_ms": now_ms,
-            "entry_ts_ms": opened_ms,
-            "opened_at_ms": opened_ms,
-            "updated_at_ms": now_ms,
-            "stop_price": stop_price,
-            "take_profit_price": take_profit_price,
-            "stop_loss_pct": stop_loss_pct,
-            "take_profit_pct": take_profit_pct,
-            "planned_exit_ts_ms": planned_exit_ts_ms,
-            "entry_order_link_id": "",
-            "entry_order_id": "",
-            # Signal_ts unknown for hand-placed positions — leave 0 so the
-            # reconciliation doesn't accidentally pair a random other trade.
-            "signal_ts_ms": 0,
-            "submit_mode": "adopted",
-        }
+        return result.row
 
     def _recover_entry_link_metadata(
         self, *, symbol: str, side: str,
@@ -2231,52 +2042,13 @@ class EventWebSocketRiskEngine:
                 "falling back to adopted-*", symbol, exc,
             )
             return None
-        venue_side = "Buy" if side == "long" else "Sell"
-        # Pick the LATEST re-entry, not the first match: a same-signal-window cover-then-re-enter
-        # leaves TWO decodable entry links for one symbol in history (seq=0 covered, seq=1 the live
-        # position). Prefer the highest (reentry_seq, createdTime) so the rebuild adopts the LIVE id
-        # — deterministic regardless of Bybit's get_order_history ordering (re-audit
-        # scan-continuous-identity-1). seq=0-only history (the common case) is unaffected.
-        best_key: tuple[int, int] | None = None
-        best: tuple[str, str, int, str, int, str] | None = None
-        for order in history:
-            order_side = str(order.get("side") or "")
-            if order_side != venue_side:
-                continue
-            link = str(order.get("orderLinkId") or order.get("order_link_id") or "")
-            decoded = decode_entry_order_link_id(link)
-            if decoded is None:
-                continue
-            decoded_sleeve, signal_ts_ms, reentry_seq, component_tag = decoded
-            strategy_id = self._adopt_strategy_id_for_sleeve(decoded_sleeve)
-            if not strategy_id:
-                continue
-            created_ts = int(_float(order.get("createdTime") or order.get("updatedTime") or 0))
-            key = (reentry_seq, created_ts)
-            if best_key is None or key > best_key:
-                best_key = key
-                best = (link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq, component_tag)
-        return best
+        return select_recovered_entry_link_metadata(history, self.risk, side=side)
 
     def _adopt_strategy_id_for_sleeve(self, sleeve: str) -> str:
         """Resolve the strategy_id used to reconstruct a deterministic
         trade_id for a recovered adoption. Falls back to canonical defaults
         when adopt_*_strategy_id was left empty in EventWebSocketRiskConfig."""
-        if sleeve == "long":
-            return self.risk.adopt_long_strategy_id or LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-        if sleeve == "continuous":
-            from .continuous_demo import CONTINUOUS_STRATEGY_ID  # lazy: avoid heavy import at module load
-            return self.risk.adopt_continuous_strategy_id or CONTINUOUS_STRATEGY_ID
-        if sleeve == "continuous_addon":
-            from .continuous_demo import CONTINUOUS_ADDON_STRATEGY_ID
-            return self.risk.adopt_continuous_addon_strategy_id or CONTINUOUS_ADDON_STRATEGY_ID
-        if sleeve == "short":
-            # The daily-short sleeve was erased (operator order 2026-06-11). Legacy
-            # ledger rows tagged sleeve="short" can still be adopted, but only with
-            # an explicitly configured strategy_id — there is no canonical scenario
-            # to derive any more.
-            return self.risk.adopt_short_strategy_id or ""
-        return ""
+        return adopt_strategy_id_for_sleeve(self.risk, sleeve)
 
     def exit_untracked_positions(self) -> None:
         if not self.risk.exit_untracked_positions:
@@ -2365,15 +2137,12 @@ class EventWebSocketRiskEngine:
                             self.mark_submitted_symbol(symbol, now_ms=now_ms)
                         else:
                             filled_qty = _float(exec_summary.get("qty"))
-                            target_qty = _float(qty)
-                            if target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty:
-                                status = "filled"
+                            status = order_fill_status(target_qty=qty, filled_qty=filled_qty)
+                            if status == "filled":
                                 self.state.positions_by_symbol.pop(symbol, None)
-                            elif filled_qty > 0.0:
-                                status = "partial"
+                            elif status == "partial":
                                 self.mark_submitted_symbol(symbol, now_ms=now_ms)
                             else:
-                                status = "submitted_unconfirmed"
                                 self.mark_submitted_symbol(symbol, now_ms=now_ms)
             filled_qty = _float(exec_summary.get("qty")) if exec_summary else 0.0
             avg_price = _float(exec_summary.get("avg_price")) or _position_price(position)
@@ -2448,7 +2217,7 @@ class EventWebSocketRiskEngine:
                 filled_qty = target_qty
             if filled_qty <= 0.0:
                 continue
-            full = target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
+            full = order_fully_filled(target_qty=target_qty, filled_qty=filled_qty)
             order["status"] = "filled" if full or position_flat else "partial"
             order["filled_qty"] = str(filled_qty)
             order["avg_price"] = avg_price
@@ -3333,41 +3102,6 @@ def _ack_order_link(message: dict[str, Any]) -> str:
 
 def _position_price(row: dict[str, Any]) -> float:
     return _first_price(row, ("markPrice", "mark_price", "lastPrice", "indexPrice", "avgPrice"))
-
-
-def _first_price(row: dict[str, Any], keys: tuple[str, ...]) -> float:
-    for key in keys:
-        value = _float(row.get(key))
-        if value > 0.0:
-            return value
-    return 0.0
-
-
-def _validate_trade_row_invariants(row: dict[str, Any]) -> tuple[bool, str]:
-    """Cheap defensive check before writing a trade row to the ledger.
-
-    Catches the 2026-05-25 class of bug where entry_ts_ms collapsed onto
-    signal_ts_ms (1-6h before the actual venue fill), which made
-    planned_exit_ts_ms + event_decay trip prematurely. The cycle's exit
-    logic uses entry_ts as the basis for hold-window math; any divergence
-    between entry_ts and the actual fill time silently corrupts every
-    exit decision.
-
-    See docs/timestamp_glossary.md for the full reasoning. Returns
-    ``(ok, reason)`` — callers should log + skip the row on a failed
-    invariant rather than write it.
-    """
-    signal_ts = int(row.get("signal_ts_ms") or 0)
-    entry_ts = int(row.get("entry_ts_ms") or 0)
-    opened_at = int(row.get("opened_at_ms") or 0)
-    planned_exit = int(row.get("planned_exit_ts_ms") or 0)
-    if signal_ts > 0 and entry_ts > 0 and entry_ts < signal_ts:
-        return False, f"entry_ts_ms ({entry_ts}) < signal_ts_ms ({signal_ts})"
-    if planned_exit > 0 and entry_ts > 0 and planned_exit <= entry_ts:
-        return False, f"planned_exit_ts_ms ({planned_exit}) must exceed entry_ts_ms ({entry_ts})"
-    if signal_ts > 0 and opened_at > 0 and opened_at < signal_ts:
-        return False, f"opened_at_ms ({opened_at}) < signal_ts_ms ({signal_ts})"
-    return True, ""
 
 
 def _int(value: Any) -> int:

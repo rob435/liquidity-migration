@@ -53,6 +53,11 @@ from .event_demo import (
     _trade_return,
     _wait_for_execution_summary,
 )
+from .order_execution import (
+    order_fill_status,
+    order_fully_filled,
+    remaining_qty_within_tolerance,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -289,15 +294,9 @@ def _execute_exits(
             )
             sub_fee = _float(sub_exec_summary.get("fee")) if demo.submit_orders else 0.0
             sub_exec_time_ms = int(_float(sub_exec_summary.get("exec_time_ms") or 0)) if demo.submit_orders else 0
-            sub_tolerance = max(sub_target * 1e-8, 1e-12)
             if demo.submit_orders and sub_status not in {"failed", "submitted_unconfirmed"}:
-                if sub_target > 0.0 and sub_filled_qty + sub_tolerance >= sub_target:
-                    sub_status = "filled"
-                elif sub_filled_qty > 0.0:
-                    sub_status = "partial"
-                    any_submitted_unconfirmed = True
-                else:
-                    sub_status = "submitted_unconfirmed"
+                sub_status = order_fill_status(target_qty=sub_target, filled_qty=sub_filled_qty)
+                if sub_status != "filled":
                     any_submitted_unconfirmed = True
             total_filled_qty += sub_filled_qty
             if sub_filled_qty > 0.0 and sub_avg_price > 0.0:
@@ -342,9 +341,9 @@ def _execute_exits(
             if priced_filled_qty > 0.0 and total_fill_value > 0.0
             else _float(exit_plan.get("planned_exit_price"))
         )
-        qty_tolerance = max(target_qty * 1e-8, 1e-12)
-        fully_filled = not demo.submit_orders or (
-            target_qty > 0.0 and total_filled_qty + qty_tolerance >= target_qty
+        fully_filled = not demo.submit_orders or order_fully_filled(
+            target_qty=target_qty,
+            filled_qty=total_filled_qty,
         )
         entry_price = _float(trade.get("entry_price"))
         gross_trade_return = _trade_return(entry_price, exit_price, side=side)
@@ -491,8 +490,6 @@ def _reconcile_pending_order_fills(
         if filled_qty <= 0.0:
             continue
         target_qty = _float(order.get("target_qty") or order.get("qty"))
-        qty_tolerance = max(target_qty * 1e-8, 1e-12)
-        fully_filled = target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty
         avg_price = _float(summary.get("avg_price")) or _float(order.get("avg_price"))
         fee_usdt = _float(summary.get("fee"))
         exec_time_ms = int(_float(summary.get("exec_time_ms") or 0))
@@ -553,7 +550,11 @@ def _reconcile_pending_order_fills(
         order_update = dict(order)
         order_update.update(
             {
-                "status": "filled" if fully_filled else "partial",
+                "status": order_fill_status(
+                    target_qty=target_qty,
+                    filled_qty=filled_qty,
+                    unfilled_status="partial",
+                ),
                 "filled_qty": _decimal_text(Decimal(str(filled_qty))),
                 "avg_price": avg_price,
                 "fee_usdt": fee_usdt,
@@ -579,7 +580,7 @@ def _reconcile_pending_order_fills(
             # remainder from the ledger while it stayed live on the venue
             # (audit 2026-06-12 round 3). `fully_filled` still drives the order
             # row's status above.
-            if remaining_qty <= max(_float(trade.get("qty")) * 1e-8, 1e-12):
+            if remaining_qty_within_tolerance(target_qty=trade.get("qty"), remaining_qty=remaining_qty):
                 # gross_trade_return / net_return must land on the close so the
                 # ledger carries realized PnL without depending on the orphan
                 # reconciler. Both fields use the same formula as the cycle-exit
@@ -822,21 +823,18 @@ def _execute_risk_exits(
         filled_qty = _float(submit["exec_summary"].get("qty"))
         exit_fee_usdt = _float(submit["exec_summary"].get("fee"))
         exit_exec_time_ms = int(_float(submit["exec_summary"].get("exec_time_ms") or 0))
-        qty_tolerance = max(target_qty * 1e-8, 1e-12)
-        fully_filled = not risk.submit_orders or (target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty)
+        fully_filled = not risk.submit_orders or order_fully_filled(
+            target_qty=target_qty,
+            filled_qty=filled_qty,
+        )
         for order_row in submit["order_rows"]:
             row_target_qty = str(order_row.get("target_qty") or order_row.get("qty") or qty)
             row_filled_qty = _float(order_row.get("filled_qty"))
             row_status = str(order_row.get("status") or "")
             if risk.submit_orders and row_status in {"", "submitted"}:
-                row_target_float = _float(row_target_qty)
-                row_tolerance = max(row_target_float * 1e-8, 1e-12)
-                order_row["status"] = (
-                    "filled"
-                    if row_target_float > 0.0 and row_filled_qty + row_tolerance >= row_target_float
-                    else "partial"
-                    if row_filled_qty > 0.0
-                    else "submitted_unconfirmed"
+                order_row["status"] = order_fill_status(
+                    target_qty=row_target_qty,
+                    filled_qty=row_filled_qty,
                 )
             row_avg_price = _float(order_row.get("avg_price")) or exit_price
             row_fee = _float(order_row.get("fee_usdt"))
@@ -1133,13 +1131,8 @@ def _submit_reduce_only_exit(
                 any_submitted_unconfirmed = True
             sub_filled_qty = _float(sub_exec_summary.get("qty"))
             if sub_status != "submitted_unconfirmed":
-                if sub_target > 0.0 and sub_filled_qty + max(sub_target * 1e-8, 1e-12) >= sub_target:
-                    sub_status = "filled"
-                elif sub_filled_qty > 0.0:
-                    sub_status = "partial"
-                    any_submitted_unconfirmed = True
-                else:
-                    sub_status = "submitted_unconfirmed"
+                sub_status = order_fill_status(target_qty=sub_target, filled_qty=sub_filled_qty)
+                if sub_status != "filled":
                     any_submitted_unconfirmed = True
             sub_avg_price = _float(sub_exec_summary.get("avg_price"))
             # Fee + venue fill-time aggregation (audit 2026-06-09): the cycle-exit
@@ -1238,7 +1231,7 @@ def _submit_limit_chase_exit(
     attempts = max(1, risk.limit_chase_attempts)
     for attempt in range(attempts):
         remaining_qty = max(target_qty - filled_qty, 0.0)
-        if remaining_qty <= max(target_qty * 1e-8, 1e-12):
+        if remaining_qty_within_tolerance(target_qty=target_qty, remaining_qty=remaining_qty):
             break
         link = _risk_order_link_id("lc", symbol=symbol, ts_ms=now_ms, attempt=attempt)
         last_link = link
@@ -1303,12 +1296,10 @@ def _submit_limit_chase_exit(
         executions.extend(batch)
         remaining_qty_text = _quantity_text(remaining_qty)
         order_avg_price = _float(summary.get("avg_price"))
-        row_status = (
-            "filled"
-            if remaining_qty > 0.0 and order_filled_qty + max(remaining_qty * 1e-8, 1e-12) >= remaining_qty
-            else "partial"
-            if order_filled_qty > 0.0
-            else "unfilled"
+        row_status = order_fill_status(
+            target_qty=remaining_qty,
+            filled_qty=order_filled_qty,
+            unfilled_status="unfilled",
         )
         row = _risk_order_row(
             link=link,
@@ -1333,7 +1324,10 @@ def _submit_limit_chase_exit(
         )
         order_rows.append(row)
     remaining_qty = max(target_qty - filled_qty, 0.0)
-    if remaining_qty > max(target_qty * 1e-8, 1e-12) and risk.limit_chase_fallback_market:
+    if (
+        not remaining_qty_within_tolerance(target_qty=target_qty, remaining_qty=remaining_qty)
+        and risk.limit_chase_fallback_market
+    ):
         link = _risk_order_link_id("lm", symbol=symbol, ts_ms=now_ms, attempt=attempts)
         last_link = link
         remaining_qty_text = _quantity_text(remaining_qty)
@@ -1371,12 +1365,10 @@ def _submit_limit_chase_exit(
             error = f"fill confirmation failed: {exc}"[:500]
         order_filled_qty = _float(summary.get("qty"))
         if status != "submitted_unconfirmed":
-            status = (
-                "filled"
-                if remaining_qty > 0.0 and order_filled_qty + max(remaining_qty * 1e-8, 1e-12) >= remaining_qty
-                else "partial"
-                if order_filled_qty > 0.0
-                else "fallback_market"
+            status = order_fill_status(
+                target_qty=remaining_qty,
+                filled_qty=order_filled_qty,
+                unfilled_status="fallback_market",
             )
         order_avg_price = _float(summary.get("avg_price"))
         row = _risk_order_row(

@@ -891,7 +891,7 @@ def _build_root(tmp_path, *, n_symbols: int = 26, n_bars: int = 720, funding_8h:
 
 
 def _iso_to_ms(date_str: str) -> int:
-    from liquidity_migration.signal_harness import _date_str_to_ms
+    from liquidity_migration.daily_feature_panel import _date_str_to_ms
 
     return _date_str_to_ms(date_str)
 

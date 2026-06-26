@@ -59,7 +59,7 @@ module = [
     "liquidity_migration.kline_store",
     "liquidity_migration.volume_events_charts",
     "liquidity_migration.continuous_events",
-    "liquidity_migration.signal_harness",
+    "liquidity_migration.daily_feature_panel",
     "liquidity_migration.universe",
 ]
 disable_error_code = ["arg-type"]

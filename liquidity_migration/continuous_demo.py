@@ -26,6 +26,13 @@ import polars as pl
 
 from ._common import MS_PER_DAY, MS_PER_HOUR, finite_float
 from .config import DEFAULT_EXCLUDED_SYMBOLS
+from .continuous_identity import (
+    continuous_order_link_id as _continuous_order_link_id_impl,
+    continuous_suborder_link_id as _continuous_suborder_link_id_impl,
+    continuous_trade_id as _continuous_trade_id_impl,
+    recover_snipe_trade_id_from_link as _recover_snipe_trade_id_from_link_impl,
+)
+from .order_execution import order_fill_status
 from .order_link_id import assert_routable_component_tags
 from .continuous_events import (
     FEATURES,
@@ -1488,13 +1495,12 @@ def _continuous_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, re
     tolerates a non-int signal_ts (continuous-specific defensiveness). ``reentry_seq`` > 0 appends a
     same-signal-window re-entry suffix (continuous-2): seq=0 is byte-identical to the legacy 5-part
     form, so existing links are unchanged; decode_entry_order_link_id round-trips the seq."""
-    from .event_demo import _order_link_id
-
-    link = _order_link_id(prefix, symbol=symbol, signal_ts_ms=int(signal_ts_ms))
-    if reentry_seq > 0:
-        suffix = f"-{int(reentry_seq)}"
-        link = f"{link[: 36 - len(suffix)]}{suffix}"  # truncate-safe append within Bybit's 36-char cap
-    return link
+    return _continuous_order_link_id_impl(
+        prefix,
+        symbol=symbol,
+        signal_ts_ms=signal_ts_ms,
+        reentry_seq=reentry_seq,
+    )
 
 
 def _continuous_suborder_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, trade_id: str) -> str:
@@ -1514,9 +1520,12 @@ def _continuous_suborder_link_id(prefix: str, *, symbol: str, signal_ts_ms: int,
     char short of the 6-char ts36 tail, so the decoder can still unambiguously strip it. The decoder
     (order_link_id.decode_entry_order_link_id) accepts BOTH the old len-4 and the new len-5 shape, so
     orderLinkIds written before the widening still decode on a VPS rebuild (backward compatible)."""
-    link = _continuous_order_link_id(prefix, symbol=symbol, signal_ts_ms=signal_ts_ms)
-    suffix = "-x" + _base36(zlib.crc32(str(trade_id).encode("utf-8")) % 1_679_616).rjust(4, "0")
-    return f"{link[: 36 - len(suffix)]}{suffix}"
+    return _continuous_suborder_link_id_impl(
+        prefix,
+        symbol=symbol,
+        signal_ts_ms=signal_ts_ms,
+        trade_id=trade_id,
+    )
 
 
 def _reserve_generated_order_link(
@@ -1593,41 +1602,16 @@ def recover_snipe_trade_id_from_link(
     3-char link written before the widening still recovers; the candidate suffix is
     recomputed at the width carried by THIS link (modulus = 36**width) so old and new
     links each round-trip against the id that produced them, never cross-matching widths."""
-    match = re.search(r"-x([0-9a-z]{3,4})$", str(link))
-    if not match:
-        return None
-    want = match.group(1)
-    width = len(want)
-    modulus = 36 ** width
     comps = components if components is not None else _known_ensemble_component_tags()
-    found: set[str] = set()
-    for seq in range(max_seq + 1):
-        base = _continuous_trade_id(strategy_id, symbol, int(signal_ts_ms), seq)
-        for comp in (*comps, ""):
-            candidate = f"{base}-{comp}-snipe" if comp else f"{base}-snipe"
-            suffix = _base36(zlib.crc32(candidate.encode("utf-8")) % modulus).rjust(width, "0")
-            if suffix == want:
-                found.add(candidate)
-    if len(found) == 1:
-        return next(iter(found))
-    # sniper-4: an ambiguous (>=2 candidates collide on the crc suffix) or empty
-    # match silently returns None and ws_risk then books the lossy component-less
-    # {base}-snipe id — a DIFFERENT trade_id than the live {base}-{component}-snipe
-    # row, re-introducing the paper<->demo mis-pairing this function exists to
-    # prevent (audit 2026-06-12 round 3). The empty case is the routine "this link
-    # is for a different sleeve/symbol" non-event, but a 2+ collision is the silent
-    # landmine: surface it to the operator log so a post-rebuild mis-pairing is
-    # diagnosable instead of invisible. (The collision space was widened from 46656
-    # to 1.68M buckets in exec-router-6 — a 4-char suffix; legacy 3-char links still
-    # recover at their original width.)
-    if len(found) >= 2:
-        _logger.warning(
-            "snipe trade_id recovery AMBIGUOUS for link=%s symbol=%s signal_ts_ms=%s: "
-            "%d candidates collide on the crc suffix (width=%d, %s) — falling back to the "
-            "lossy component-less id, paper<->demo pairing may break",
-            link, symbol, signal_ts_ms, len(found), width, sorted(found),
-        )
-    return None
+    return _recover_snipe_trade_id_from_link_impl(
+        link,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        signal_ts_ms=signal_ts_ms,
+        components=comps,
+        max_seq=max_seq,
+        logger=_logger,
+    )
 
 
 def _continuous_trade_id(strategy_id: str, symbol: str, signal_ts_ms: int, reentry_seq: int = 0) -> str:
@@ -1637,8 +1621,7 @@ def _continuous_trade_id(strategy_id: str, symbol: str, signal_ts_ms: int, reent
     overwritten by storage's trade_id dedup (continuous-2 ledger data loss). A crash-retry of the SAME
     open recomputes the same seq (the closed row count is unchanged) -> the same id+link -> idempotent.
     Round-trips with the orderLinkId seq via decode_entry_order_link_id + the ws_risk reconstruction."""
-    base = f"{strategy_id}-{symbol}-{int(signal_ts_ms)}"
-    return f"{base}-{int(reentry_seq)}" if reentry_seq > 0 else base
+    return _continuous_trade_id_impl(strategy_id, symbol, signal_ts_ms, reentry_seq)
 
 
 def _continuous_entry_candidates_with_signal_metadata(
@@ -2042,6 +2025,84 @@ def _apply_btc_risk_sizing(
     return stats
 
 
+def _btc_trend_gate_payload_fields(
+    *,
+    config: ContinuousDemoCycleConfig,
+    allows_entry: bool,
+    trend_value: float | None,
+    kline_stats: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "btc_trend_gate": config.btc_trend_gate,
+        "btc_trend_gate_allows_entry": allows_entry,
+        "btc_trend_gate_value": trend_value,
+        "btc_trend_gate_btc_rows": kline_stats.get("btc_rows", 0),
+        "btc_trend_gate_btc_max_ts_ms": kline_stats.get("btc_max_ts_ms", 0),
+        "btc_trend_gate_kline_store_rows": kline_stats.get("store_rows", 0),
+        "btc_trend_gate_kline_cache_rows": kline_stats.get("cache_rows", 0),
+        "btc_trend_gate_kline_fetch_symbols": kline_stats.get("fetch_symbols", 0),
+        "btc_trend_gate_kline_fetched_rows": kline_stats.get("fetched_rows", 0),
+        "btc_trend_gate_kline_error": kline_stats.get("error", 0),
+    }
+
+
+def _btc_risk_sizing_payload_fields(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "btc_risk_sizing_enabled": stats.get("enabled", False),
+        "btc_risk_sizing_arm_id": stats.get("arm_id", ""),
+        "btc_risk_sizing_candidate_rows": stats.get("candidate_rows", 0),
+        "btc_risk_sizing_scored": stats.get("scored", 0),
+        "btc_risk_sizing_duplicates": stats.get("duplicates", 0),
+        "btc_risk_sizing_tail_selected": stats.get("tail_selected", 0),
+        "btc_risk_sizing_warmup": stats.get("warmup", 0),
+        "btc_risk_sizing_state_rows": stats.get("state_rows", 0),
+        "btc_risk_sizing_min_stack_mult": stats.get("min_stack_mult", 1.0),
+        "btc_risk_sizing_max_stack_mult": stats.get("max_stack_mult", 1.0),
+        "btc_risk_sizing_mean_score": stats.get("mean_btc_risk_score"),
+        "btc_risk_sizing_error": stats.get("error", 0),
+    }
+
+
+def _submission_error_count(
+    rows: list[dict[str, Any]],
+    *,
+    include_failed_status: bool = True,
+    include_error_text: bool = False,
+) -> int:
+    return sum(
+        1
+        for row in rows
+        if str(row.get("submit_mode", "")) == "error"
+        or (include_failed_status and str(row.get("status", "")) == "failed")
+        or (include_error_text and bool(str(row.get("error") or "")))
+    )
+
+
+def _payload_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _rmom_freshness_payload_fields(rmom: pl.DataFrame | None, *, current_day_ts: int) -> dict[str, Any]:
+    rmom_day_max = (
+        rmom["day_ts"].max()
+        if (rmom is not None and not rmom.is_empty() and "day_ts" in rmom.columns)
+        else None
+    )
+    max_rmom_day_ts = int(cast(int, rmom_day_max)) if rmom_day_max is not None else 0
+    return {
+        "rmom_present": rmom is not None,
+        "max_rmom_day_ts": max_rmom_day_ts,
+        # 0-floored: the refresh seeds a today/tomorrow row (the daily-rollover guard)
+        # so the gate day can lead cur_day -> a raw diff would read negative.
+        "rmom_stale_days": max(0, (current_day_ts - max_rmom_day_ts) // MS_PER_DAY)
+        if max_rmom_day_ts
+        else None,
+    }
+
+
 def _btc_risk_decision_key(row: dict[str, Any]) -> str:
     symbol = str(row.get("symbol") or "")
     signal_ts = int(_float(row.get("signal_ts_ms") or row.get("entry_signal_ts_ms")) or 0)
@@ -2090,9 +2151,7 @@ def _continuous_accepted_entry_symbols(
 # side=Sell, lm-en-c- prefix; reuses the shared event_demo execution helpers).
 # ============================================================================
 import logging  # noqa: E402
-import re  # noqa: E402
 import time  # noqa: E402
-import zlib  # noqa: E402
 from decimal import Decimal  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable  # noqa: E402
@@ -2109,11 +2168,14 @@ from .continuous_rebalance import (  # noqa: E402
     ContinuousRebalanceScaleState,
     plan_continuous_rebalance_resizes,
 )
+from .continuous_rebalance_ledger import (  # noqa: E402
+    build_rebalance_resize_rows as _build_rebalance_resize_rows_impl,
+    prepare_rebalance_resize_order as _prepare_rebalance_resize_order_impl,
+)
 from .config import ResearchConfig  # noqa: E402
 from .event_demo import (  # noqa: E402
     EventDemoCycleConfig,
     _active_position_by_symbol,
-    _base36,
     _build_private_client,
     _contract_lookup,
     _decimal_text,
@@ -2505,8 +2567,7 @@ def _execute_continuous_exits(
                     exit_price = _float(summ.get("avg_price"))
                     exit_fee = _float(summ.get("fee"))
                     exit_exec_time_ms = int(_float(summ.get("exec_time_ms") or 0))
-                    tgt = _float(qty)
-                    status = "filled" if (tgt > 0 and filled_qty + max(tgt * 1e-8, 1e-12) >= tgt) else ("partial" if filled_qty > 0 else "submitted_unconfirmed")
+                    status = order_fill_status(target_qty=qty, filled_qty=filled_qty)
                 finally:
                     # Router contract: drop the WS buffer once this link is reconciled
                     # (or given up on) — never leave rows a later link could inherit.
@@ -2575,167 +2636,18 @@ def _build_continuous_rebalance_resize_rows(
     vocabulary without submitting orders. Live submission must call the venue
     router and confirm fills before using the same ledger transforms.
     """
-    if not plans or all_trades.is_empty():
-        return [], []
-
-    lookup = {str(r.get("trade_id") or ""): r for r in all_trades.to_dicts()}
-    trade_rows: list[dict[str, Any]] = []
-    order_rows: list[dict[str, Any]] = []
-
-    for plan in plans:
-        trade = dict(lookup.get(str(plan.trade_id), {}))
-        if not trade:
-            continue
-        symbol = str(plan.symbol or trade.get("symbol") or "")
-        execution = (execution_by_trade_id or {}).get(str(plan.trade_id), {})
-        price = _float(execution.get("avg_price")) or _float(price_by_symbol.get(symbol))
-        entry_price = _float(trade.get("entry_price"))
-        current_qty = abs(_float(trade.get("qty")))
-        equity_usdt = _float(trade.get("equity_usdt"))
-        if not symbol or price <= 0.0 or entry_price <= 0.0 or current_qty <= 0.0:
-            continue
-
-        contract = contract_by_symbol.get(symbol, {})
-        qty_step = _float(contract.get("qty_step")) or _float(trade.get("qty_step")) or 0.001
-        if execution:
-            order_qty = abs(_float(execution.get("qty")))
-        else:
-            max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
-            quantity = order_quantity_for_notional(
-                notional_usdt=abs(plan.delta_notional_usdt),
-                price=price,
-                qty_step=qty_step,
-                min_order_qty=_float(contract.get("min_order_qty")),
-                min_notional_value=_float(contract.get("min_notional_value")),
-                max_order_qty=max_qty,
-            )
-            if quantity is None:
-                continue
-
-            raw_qty_text, _actual_notional = quantity
-            order_qty = _float(raw_qty_text)
-        if plan.reduce_only:
-            order_qty = min(order_qty, current_qty)
-        if order_qty <= 0.0:
-            continue
-
-        order_qty_text = _decimal_text(Decimal(str(order_qty)))
-        order_notional = order_qty * price
-        link_prefix = _continuous_exit_link_prefix(demo) if plan.reduce_only else _continuous_entry_link_prefix(demo)
-        order_link = str(execution.get("order_link_id") or _continuous_order_link_id(link_prefix, symbol=symbol, signal_ts_ms=now_ms))
-        sleeve = str(trade.get("sleeve") or continuous_sleeve_name(demo))
-        resize_reason = plan.reason or ("rebalance_reduce" if plan.reduce_only else "rebalance_increase")
-        submit_mode = str(execution.get("submit_mode") or "dry_run")
-        order_status = str(execution.get("status") or "planned")
-        fee_usdt = _float(execution.get("fee_usdt"))
-        exec_time_ms = int(_float(execution.get("exec_time_ms") or 0))
-        order_id = str(execution.get("order_id") or "")
-        error = str(execution.get("error") or "")
-
-        upd = dict(trade)
-        prior_realized = _float(trade.get("rebalance_realized_return"))
-        if plan.reduce_only:
-            realized_gross = _trade_return(entry_price, price, side="short")
-            realized_weight = _ratio_or_zero(order_qty * entry_price, equity_usdt)
-            realized_delta = realized_gross * realized_weight
-            total_realized = prior_realized + realized_delta
-            remaining_qty = max(current_qty - order_qty, 0.0)
-            if remaining_qty <= qty_step * 0.5:
-                upd.update(
-                    {
-                        "status": "closed",
-                        "qty": "0",
-                        "notional_usdt": 0.0,
-                        "exit_ts_ms": now_ms,
-                        "exit_price": price,
-                        "exit_fee_usdt": fee_usdt,
-                        "exit_exec_time_ms": exec_time_ms,
-                        "gross_trade_return": realized_gross,
-                        "net_return": total_realized,
-                        "rebalance_realized_return": total_realized,
-                        "exit_reason": "rebalance_zero",
-                        "exit_order_link_id": order_link,
-                        "exit_order_id": order_id,
-                        "submit_mode": submit_mode,
-                        "closed_at_ms": now_ms,
-                        "updated_at_ms": now_ms,
-                    }
-                )
-            else:
-                upd.update(
-                    {
-                        "qty": _decimal_text(Decimal(str(remaining_qty))),
-                        "notional_usdt": remaining_qty * entry_price,
-                        "rebalance_realized_return": total_realized,
-                        "last_rebalance_ts_ms": now_ms,
-                        "last_rebalance_price": price,
-                        "last_rebalance_reason": resize_reason,
-                        "last_rebalance_order_link_id": order_link,
-                        "last_rebalance_fee_usdt": fee_usdt,
-                        "submit_mode": submit_mode,
-                        "updated_at_ms": now_ms,
-                    }
-                )
-        else:
-            add_qty = order_qty
-            new_qty = current_qty + add_qty
-            old_cost_basis = current_qty * entry_price
-            add_cost_basis = add_qty * price
-            new_entry = (old_cost_basis + add_cost_basis) / new_qty
-            upd.update(
-                {
-                    "qty": _decimal_text(Decimal(str(new_qty))),
-                    "entry_price": new_entry,
-                    "notional_usdt": old_cost_basis + add_cost_basis,
-                    "last_rebalance_ts_ms": now_ms,
-                    "last_rebalance_price": price,
-                    "last_rebalance_reason": resize_reason,
-                    "last_rebalance_order_link_id": order_link,
-                    "last_rebalance_fee_usdt": fee_usdt,
-                    "submit_mode": submit_mode,
-                    "updated_at_ms": now_ms,
-                }
-            )
-
-        trade_rows.append(upd)
-        order_rows.append(
-            {
-                "order_link_id": order_link,
-                "ts_ms": now_ms,
-                "updated_at_ms": now_ms,
-                "trade_id": str(trade.get("trade_id", "")),
-                "strategy_id": strategy_id,
-                "symbol": symbol,
-                "side": plan.side,
-                "order_type": "Market",
-                "qty": order_qty_text,
-                # SUBMITTED qty, not the filled qty — the pending-fill reconciler
-                # derives order fullness from target_qty and a filled-qty fallback
-                # marks a partial resize spuriously "filled" (audit 2026-06-12 r3).
-                "target_qty": str(execution.get("target_qty") or order_qty_text),
-                "reduce_only": bool(plan.reduce_only),
-                "order_id": order_id,
-                "submit_mode": submit_mode,
-                "avg_price": price,
-                "fee_usdt": fee_usdt,
-                "exec_time_ms": exec_time_ms,
-                "notional_usdt": order_notional,
-                "status": order_status,
-                "trade_side": "short",
-                "signal_ts_ms": now_ms,
-                "equity_usdt": equity_usdt,
-                "qty_step": qty_step,
-                "resize_reason": resize_reason,
-                "target_notional_usdt": plan.target_notional_usdt,
-                "current_notional_usdt": plan.current_notional_usdt,
-                "delta_notional_usdt": plan.delta_notional_usdt,
-                "filled_qty": order_qty_text,
-                "error": error,
-                "sleeve": sleeve,
-            }
-        )
-
-    return trade_rows, order_rows
+    return _build_rebalance_resize_rows_impl(
+        plans,
+        all_trades,
+        price_by_symbol=price_by_symbol,
+        contract_by_symbol=contract_by_symbol,
+        now_ms=now_ms,
+        strategy_id=strategy_id,
+        entry_link_prefix=_continuous_entry_link_prefix(demo),
+        exit_link_prefix=_continuous_exit_link_prefix(demo),
+        default_sleeve=continuous_sleeve_name(demo),
+        execution_by_trade_id=execution_by_trade_id,
+    )
 
 
 def _execute_continuous_rebalance_resizes(
@@ -2771,67 +2683,24 @@ def _execute_continuous_rebalance_resizes(
     used_links: dict[str, str] = {}
     for plan in plans:
         trade = dict(lookup.get(str(plan.trade_id), {}))
-        symbol = str(plan.symbol or trade.get("symbol") or "")
-        price = _float(price_by_symbol.get(symbol))
-        if not trade or not symbol or price <= 0.0:
-            continue
-        contract = contract_by_symbol.get(symbol, {})
-        qty_step = _float(contract.get("qty_step")) or _float(trade.get("qty_step")) or 0.001
-        max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
-        quantity = order_quantity_for_notional(
-            notional_usdt=abs(plan.delta_notional_usdt),
-            price=price,
-            qty_step=qty_step,
-            min_order_qty=_float(contract.get("min_order_qty")),
-            min_notional_value=_float(contract.get("min_notional_value")),
-            max_order_qty=max_qty,
+        prepared = _prepare_rebalance_resize_order_impl(
+            plan,
+            trade,
+            price_by_symbol=price_by_symbol,
+            contract_by_symbol=contract_by_symbol,
+            now_ms=now_ms,
+            strategy_id=strategy_id,
+            entry_link_prefix=_continuous_entry_link_prefix(demo),
+            exit_link_prefix=_continuous_exit_link_prefix(demo),
+            default_sleeve=continuous_sleeve_name(demo),
         )
-        if quantity is None:
+        if prepared is None:
             continue
-        qty, planned_notional = quantity
-        current_qty = abs(_float(trade.get("qty")))
-        if plan.reduce_only and _float(qty) > current_qty:
-            qty = _decimal_text(Decimal(str(current_qty)))
-            planned_notional = current_qty * price
-        if _float(qty) <= 0.0:
-            continue
-
-        link_prefix = _continuous_exit_link_prefix(demo) if plan.reduce_only else _continuous_entry_link_prefix(demo)
-        # Trade-id-hashed link: multi-component same-symbol trades resize in the same cycle at
-        # the same now_ms — a shared link cross-wires fill attribution; the increase side uses
-        # the ENTRY prefix and decode_entry_order_link_id strips the hash suffix.
-        order_link = _continuous_suborder_link_id(
-            link_prefix, symbol=symbol, signal_ts_ms=now_ms, trade_id=str(plan.trade_id)
-        )
-        preflight = {
-            "order_link_id": order_link,
-            "ts_ms": now_ms,
-            "updated_at_ms": now_ms,
-            "trade_id": str(plan.trade_id),
-            "strategy_id": strategy_id,
-            "symbol": symbol,
-            "side": plan.side,
-            "order_type": "Market",
-            "qty": qty,
-            "target_qty": qty,
-            "reduce_only": bool(plan.reduce_only),
-            "submit_mode": "preflight",
-            "status": "submitted",
-            "trade_side": "short",
-            "signal_ts_ms": now_ms,
-            "notional_usdt": planned_notional,
-            "resize_reason": plan.reason,
-            "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo)),
-        }
-        if plan.reduce_only:
-            preflight.update(
-                {
-                    "exit_reason": str(plan.reason or "rebalance_reduce"),
-                    "exit_trigger_ts_ms": now_ms,
-                    "filled_qty": "",
-                    "error": "",
-                }
-            )
+        symbol = prepared.symbol
+        price = prepared.price
+        qty = prepared.qty
+        order_link = prepared.order_link
+        preflight = prepared.preflight
         collision_error = _reserve_generated_order_link(
             used_links,
             order_link,
@@ -2896,12 +2765,7 @@ def _execute_continuous_rebalance_resizes(
                 avg_price = _float(summ.get("avg_price")) or price
                 fee_usdt = _float(summ.get("fee"))
                 exec_time_ms = int(_float(summ.get("exec_time_ms") or 0))
-                target_qty = _float(qty)
-                status = (
-                    "filled"
-                    if target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
-                    else ("partial" if filled_qty > 0.0 else "submitted_unconfirmed")
-                )
+                status = order_fill_status(target_qty=qty, filled_qty=filled_qty)
             finally:
                 # Router contract: drop the reconciled link's WS buffer (see exits).
                 if execution_event_router is not None:
@@ -3096,8 +2960,7 @@ def _execute_continuous_entries(
                     entry_fee = _float(summ.get("fee"))
                     entry_exec_time_ms = int(_float(summ.get("exec_time_ms") or 0))
                     filled_notional = abs(entry_price * filled_qty) if filled_qty > 0 else 0.0
-                    tgt = _float(qty)
-                    order_status = "filled" if (tgt > 0 and filled_qty + max(tgt * 1e-8, 1e-12) >= tgt) else ("partial" if filled_qty > 0 else "submitted_unconfirmed")
+                    order_status = order_fill_status(target_qty=qty, filled_qty=filled_qty)
                 finally:
                     # Router contract: drop the reconciled link's WS buffer (see exits).
                     if execution_event_router is not None:
@@ -3208,12 +3071,6 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
     daemon subclasses the long daemon, whose `format_long_demo_cycle_summary` expects `payload['cycle']`;
     feeding it the flat continuous payload KeyError'd every cycle (audit 2026-06-02). This is the
     continuous-shaped override so the cycle summary prints (incl. the rmom-gate freshness)."""
-    def _f(v: Any) -> float:
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return 0.0
-
     return (
         "continuous-fade demo cycle "
         f"id={payload.get('cycle_id', '')} mode={payload.get('mode')} "
@@ -3223,7 +3080,7 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"d9={payload.get('live_d9_symbols')} cand={payload.get('candidates')} "
         f"entries={payload.get('entries')} exits={payload.get('exits')} open={payload.get('open_positions')} "
         f"sniper={payload.get('sniper_fills', 0)}/{payload.get('sniper_exits', 0)}/{payload.get('sniper_errors', 0)} "
-        f"equity=${_f(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')} "
+        f"equity=${_payload_float(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')} "
         f"same_signal_reentry_skips={payload.get('skipped_same_signal_reentry', 0)} "
         f"addon_entry_cooldown_symbols={payload.get('addon_same_symbol_entry_cooldown_symbols', 0)} "
         f"addon_pnl_gate_skips={payload.get('addon_primary_pnl_gate_skips', 0)} "
@@ -3253,13 +3110,11 @@ def _continuous_telegram_reason(
     # live entry/exit appends NO trade row, so the trade-row checks below never
     # fired for real venue rejects (audit 2026-06-12 round 3). The trade-row
     # checks stay for dry-run/legacy callers that pass error rows directly.
-    if int(payload.get("entry_errors") or 0) > 0 or any(
-        str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
-        for r in entry_rows
-    ):
+    if int(payload.get("entry_errors") or 0) > 0 or _submission_error_count(entry_rows) > 0:
         return "continuous_entry_error"
-    if int(payload.get("exit_errors") or 0) > 0 or any(
-        str(r.get("submit_mode", "")) == "error" for r in exit_rows
+    if (
+        int(payload.get("exit_errors") or 0) > 0
+        or _submission_error_count(exit_rows, include_failed_status=False) > 0
     ):
         return "continuous_exit_error"
     # Daily-rebalance resizes are real Market orders resizing live positions —
@@ -3289,17 +3144,11 @@ def format_continuous_telegram_status_message(
     *,
     reason: str,
 ) -> str:
-    def _f(v: Any) -> float:
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return 0.0
-
     # "NA" when the payload carries no equity (the fast protective loop is
     # network-free and never reads the wallet) — printing $0.00 for a missing
     # read misstates the account on an operator-facing message (audit r3).
     equity = payload.get("equity_usdt")
-    equity_text = f"${_f(equity):,.2f}" if equity is not None else "NA"
+    equity_text = f"${_payload_float(equity):,.2f}" if equity is not None else "NA"
     # reports-charts-1: on a wallet-read failure resolve_snapshot_equity returns the fixed
     # $10,000 fallback (not None / not 0), so the equity print looks like a real successful
     # read. Tag it as a fallback and surface the underlying error so the operator sees the
@@ -3353,15 +3202,15 @@ def format_continuous_telegram_status_message(
         lines.append("Entries:")
         for row in entry_rows[:6]:
             lines.append(
-                f"- {row.get('symbol', '')} qty={_f(row.get('qty')):g} "
-                f"@${_f(row.get('entry_price')):.6g} status={row.get('status', '')}"
+                f"- {row.get('symbol', '')} qty={_payload_float(row.get('qty')):g} "
+                f"@${_payload_float(row.get('entry_price')):.6g} status={row.get('status', '')}"
             )
     if exit_rows:
         lines.append("Exits:")
         for row in exit_rows[:6]:
             lines.append(
                 f"- {row.get('symbol', '')} reason={row.get('exit_reason', '')} "
-                f"@${_f(row.get('exit_price')):.6g} mode={row.get('submit_mode', '')}"
+                f"@${_payload_float(row.get('exit_price')):.6g} mode={row.get('submit_mode', '')}"
             )
     return "\n".join(lines)[:3900]
 
@@ -3896,10 +3745,10 @@ def run_continuous_demo_cycle(
                 write_dataset(
                     pl.DataFrame(sniper_orders, infer_schema_length=None), root, orders_dataset, partition_by=()
                 )
-        sniper_errors = sum(
-            1
-            for r in (sniper_orders + snipe_updates + snipe_exit_orders)
-            if str(r.get("submit_mode", "")) == "error" or str(r.get("error") or "")
+        sniper_errors = _submission_error_count(
+            sniper_orders + snipe_updates + snipe_exit_orders,
+            include_failed_status=False,
+            include_error_text=True,
         )
 
         # Dynamic-exit forward shadow (paper-only bookkeeping; can never affect orders).
@@ -4010,21 +3859,11 @@ def run_continuous_demo_cycle(
         # Surface the rmom FRESHNESS (not just file-existence): a stale table silently empties the
         # decile join (the is_not_null filter drops every symbol) yet rmom_present would read True.
         # max_rmom_day_ts lets the watchdog distinguish "quiet market" from "stale signal gate".
-        _rmom_day_max = (
-            rmom["day_ts"].max()
-            if (rmom is not None and not rmom.is_empty() and "day_ts" in rmom.columns)
-            else None
-        )
-        max_rmom_day_ts = int(cast(int, _rmom_day_max)) if _rmom_day_max is not None else 0
         payload = {
             "cycle_id": cycle_id, "ts_ms": cycle_now_ms, "strategy_id": strategy_id, "mode": "submit" if demo.submit_orders else "dry_run",
             "strategy_profile": demo.strategy_profile,
             "feature_set": ",".join(demo.feature_set),
             "universe_symbols": len(symbols), "ticker_source": ticker_source, "kline_store_rows": kline_stats.get("store_rows", 0),
-            "rmom_present": rmom is not None, "max_rmom_day_ts": max_rmom_day_ts,
-            # 0-floored: the refresh seeds a today/tomorrow row (the daily-rollover guard) so the gate
-            # day can lead cur_day -> a raw diff would read negative; "0 = fresh" is the meaningful floor.
-            "rmom_stale_days": max(0, (cur_day_ts - max_rmom_day_ts) // MS_PER_DAY) if max_rmom_day_ts else None,
             "live_d9_symbols": live_d9, "open_positions": open_count,
             # exec_entries are TRADE rows — appended only when an entry actually
             # opened (filled_qty > 0) or was dry-run planned, always status="open".
@@ -4050,42 +3889,11 @@ def run_continuous_demo_cycle(
             # reason filter never fired for them (audit 2026-06-12 round 3; the
             # sniper got the same fix in round 2). Resize orders were invisible
             # to the notify plane entirely.
-            "entry_errors": sum(
-                1 for r in entry_orders
-                if str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
-            ),
-            "exit_errors": sum(
-                1 for r in exit_orders + snipe_exit_orders
-                if str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
-            ),
+            "entry_errors": _submission_error_count(entry_orders),
+            "exit_errors": _submission_error_count(exit_orders + snipe_exit_orders),
             "rebalance_resizes": len(resize_orders),
-            "resize_errors": sum(
-                1 for r in resize_orders
-                if str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
-            ),
+            "resize_errors": _submission_error_count(resize_orders),
             "entry_signal_ts_ms": signal_ts,
-            "btc_trend_gate": demo.btc_trend_gate,
-            "btc_trend_gate_allows_entry": btc_trend_gate_allows_entry,
-            "btc_trend_gate_value": btc_trend_gate_value,
-            "btc_trend_gate_btc_rows": btc_gate_kline_stats.get("btc_rows", 0),
-            "btc_trend_gate_btc_max_ts_ms": btc_gate_kline_stats.get("btc_max_ts_ms", 0),
-            "btc_trend_gate_kline_store_rows": btc_gate_kline_stats.get("store_rows", 0),
-            "btc_trend_gate_kline_cache_rows": btc_gate_kline_stats.get("cache_rows", 0),
-            "btc_trend_gate_kline_fetch_symbols": btc_gate_kline_stats.get("fetch_symbols", 0),
-            "btc_trend_gate_kline_fetched_rows": btc_gate_kline_stats.get("fetched_rows", 0),
-            "btc_trend_gate_kline_error": btc_gate_kline_stats.get("error", 0),
-            "btc_risk_sizing_enabled": btc_risk_sizing_stats.get("enabled", False),
-            "btc_risk_sizing_arm_id": btc_risk_sizing_stats.get("arm_id", ""),
-            "btc_risk_sizing_candidate_rows": btc_risk_sizing_stats.get("candidate_rows", 0),
-            "btc_risk_sizing_scored": btc_risk_sizing_stats.get("scored", 0),
-            "btc_risk_sizing_duplicates": btc_risk_sizing_stats.get("duplicates", 0),
-            "btc_risk_sizing_tail_selected": btc_risk_sizing_stats.get("tail_selected", 0),
-            "btc_risk_sizing_warmup": btc_risk_sizing_stats.get("warmup", 0),
-            "btc_risk_sizing_state_rows": btc_risk_sizing_stats.get("state_rows", 0),
-            "btc_risk_sizing_min_stack_mult": btc_risk_sizing_stats.get("min_stack_mult", 1.0),
-            "btc_risk_sizing_max_stack_mult": btc_risk_sizing_stats.get("max_stack_mult", 1.0),
-            "btc_risk_sizing_mean_score": btc_risk_sizing_stats.get("mean_btc_risk_score"),
-            "btc_risk_sizing_error": btc_risk_sizing_stats.get("error", 0),
             "entry_paused": entry_paused, "recent_adverse_exits": recent_adverse,
             "skipped_continuous_margin_budget": skipped_continuous_margin_budget,  # ls-5 cross-sleeve IM clamp
             "skipped_continuous_reservation": skipped_continuous_reservation,  # ls-6 symbol taken by a sibling
@@ -4095,6 +3903,16 @@ def run_continuous_demo_cycle(
             "addon_primary_pnl_gate_skips": addon_gate_stats["addon_primary_pnl_gate_skips"],
             "addon_primary_pnl_gate_skip_symbols": ",".join(addon_gate_stats["addon_primary_pnl_gate_skip_symbols"]),
         }
+        payload.update(_rmom_freshness_payload_fields(rmom, current_day_ts=cur_day_ts))
+        payload.update(
+            _btc_trend_gate_payload_fields(
+                config=demo,
+                allows_entry=btc_trend_gate_allows_entry,
+                trend_value=btc_trend_gate_value,
+                kline_stats=btc_gate_kline_stats,
+            )
+        )
+        payload.update(_btc_risk_sizing_payload_fields(btc_risk_sizing_stats))
         payload.update(rebalance_fields)
         # Flatten the daemon's reactivity-loop counters (rx_*) into the persisted cycle so the watchdog
         # can see a dead/stale fast protective-exit loop instead of it failing silently.
@@ -4234,10 +4052,7 @@ def run_continuous_protective_exit_cycle(
             "fast_loop": True,
             "entries": 0,
             "exits": len(exec_exits),
-            "exit_errors": sum(
-                1 for r in exit_orders
-                if str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
-            ),
+            "exit_errors": _submission_error_count(exit_orders),
             "open_positions": len(held),
         }
     # Per-event telegram AFTER the ledger writes, exception-isolated, and OUTSIDE

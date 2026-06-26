@@ -22,6 +22,7 @@ from ._common import PENDING_ORDER_STATUSES  # noqa: F401  re-exported: tests + 
 # orderLinkId encode/decode live in order_link_id.py (cohesive home); re-exported here so
 # existing `from .event_demo import _order_link_id` callers (3 sleeves, ws_risk, tests) are unaffected.
 from .order_link_id import _base36, _order_link_id, _risk_order_link_id, _split_order_link_id, decode_entry_order_link_id, is_exit_link  # noqa: F401
+from .order_execution import filled_qty_reaches_target_or_unknown
 
 
 _logger = logging.getLogger("liquidity_migration.event_demo")
@@ -1157,8 +1158,10 @@ def _wait_for_execution_summary(
                     # deadline passes; when unknown (0.0) preserve the legacy
                     # first-fill return.
                     if summary_qty > 0.0 and (
-                        target_qty <= 0.0
-                        or summary_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
+                        filled_qty_reaches_target_or_unknown(
+                            target_qty=target_qty,
+                            filled_qty=summary_qty,
+                        )
                         or time.monotonic() >= deadline
                     ):
                         return summary
@@ -1170,7 +1173,10 @@ def _wait_for_execution_summary(
         # still bounds a genuine partial (only one leg ever arrives) to the poll budget.
         if (
             rest_qty > 0.0
-            and (target_qty <= 0.0 or rest_qty + max(target_qty * 1e-8, 1e-12) >= target_qty)
+            and filled_qty_reaches_target_or_unknown(
+                target_qty=target_qty,
+                filled_qty=rest_qty,
+            )
         ) or time.monotonic() >= deadline:
             return summary
         if execution_event_router is None:

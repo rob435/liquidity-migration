@@ -88,6 +88,7 @@ from .event_demo import (
     order_quantity_for_notional,
     summarize_position_pnl,
 )
+from .order_execution import order_fill_status
 from .cross_sleeve import (
     claim_symbol_reservation,
     clamp_max_new_entries,
@@ -1531,14 +1532,7 @@ def _execute_long_exits(
                     exit_price = _float(exec_summary.get("avg_price"))
                     exit_fee_usdt = _float(exec_summary.get("fee"))
                     exit_exec_time_ms = int(_float(exec_summary.get("exec_time_ms") or 0))
-                    target_qty = _float(qty)
-                    tolerance = max(target_qty * 1e-8, 1e-12)
-                    if target_qty > 0.0 and filled_qty + tolerance >= target_qty:
-                        status = "filled"
-                    elif filled_qty > 0.0:
-                        status = "partial"
-                    else:
-                        status = "submitted_unconfirmed"
+                    status = order_fill_status(target_qty=qty, filled_qty=filled_qty)
                 finally:
                     # Router contract: drop the reconciled link's WS buffer.
                     if execution_event_router is not None:
@@ -1885,14 +1879,7 @@ def _execute_single_long_entry(
                 entry_fee_usdt = _float(exec_summary.get("fee"))
                 entry_exec_time_ms = int(_float(exec_summary.get("exec_time_ms") or 0))
                 filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
-                target_qty = _float(qty)
-                tolerance = max(target_qty * 1e-8, 1e-12)
-                if target_qty > 0.0 and filled_qty + tolerance >= target_qty:
-                    order_status = "filled"
-                elif filled_qty > 0.0:
-                    order_status = "partial"
-                else:
-                    order_status = "submitted_unconfirmed"
+                order_status = order_fill_status(target_qty=qty, filled_qty=filled_qty)
             finally:
                 # Router contract: drop the reconciled link's WS buffer.
                 if execution_event_router is not None:

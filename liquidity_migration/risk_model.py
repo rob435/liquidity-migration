@@ -4,7 +4,7 @@ Pre-reg: docs/research_summary.md sub-phase R4.
 
 Builds a per-(date, symbol) factor-exposure panel so every Round-2 strategy can be
 evaluated on RESIDUAL alpha (the return NOT explained by exposure to known
-systematic factors). Reuses signal_harness's daily-aggregation + cross-sectional
+systematic factors). Reuses daily feature-panel aggregation + cross-sectional
 helpers (6 of the 8 factors already exist there as builders); BTC-beta and the
 alt-season factor are new here, plus the cross-sectional factor-return regression
 + residualization.
@@ -26,7 +26,7 @@ import numpy as np
 import polars as pl
 
 from liquidity_migration._common import MS_PER_DAY, calendar_roll
-from liquidity_migration.signal_harness import (
+from liquidity_migration.daily_feature_panel import (
     _aggregate_daily_klines,
     _attach_daily_returns,
     _autodetect_dataset_names,
@@ -36,7 +36,7 @@ from liquidity_migration.signal_harness import (
     build_feature_panel,
 )
 
-# The 5 R4 factors that already exist as signal_harness builders (reused as-is via
+# The 5 R4 factors that already exist as daily feature-panel builders (reused as-is via
 # build_feature_panel). realized_vol_7d is additionally cross-sectionally ranked
 # below ("realized vol regime"). BTC-beta is computed separately. xs_rank_ret_3d
 # was DROPPED by the R4 validation (2026-05-29): sign-inconsistent factor-return
@@ -70,7 +70,7 @@ def compute_btc_beta(
     """Rolling-window OLS beta of each symbol's daily return on BTC's daily return.
 
     ``daily_returns`` has columns ``symbol, ts_ms, ret_1d`` (the
-    ``signal_harness._attach_daily_returns`` output). Returns ``symbol, ts_ms,
+    ``daily_feature_panel._attach_daily_returns`` output). Returns ``symbol, ts_ms,
     btc_beta``: at each (symbol, ts_ms) ``btc_beta`` is the OLS slope over the
     trailing ``window`` rows (with at least ``min_periods``), computed causally via
     the rolling-moment identity beta = Cov(x, y) / Var(y) with
@@ -138,7 +138,7 @@ def build_factor_panel(
     daily bars, and attaches factor exposures. Pads 90d back so the rolling-60
     betas warm up; the returned panel covers [start, end).
 
-    Attaches 6 factor exposures: the 5 reused signal_harness factors (via
+    Attaches 6 factor exposures: the 5 reused daily feature-panel factors (via
     ``build_feature_panel``) + ``btc_beta``. ``realized_vol_7d`` is converted to
     its cross-sectional rank (``realized_vol_rank``). The R4 validation
     (2026-05-29) pruned ``xs_rank_ret_3d`` (sign-inconsistent factor return across
