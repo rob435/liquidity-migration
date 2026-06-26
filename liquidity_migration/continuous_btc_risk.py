@@ -173,6 +173,7 @@ class BtcRiskLiveSizer:
         self.tail_mult = float(tail_mult)
         self.state = ExpandingBtcRiskState(min_prior=min_prior)
         self._rows: list[dict[str, Any]] = []
+        self._loaded_row_count = 0
         self._dirty = False
         self.load()
 
@@ -186,13 +187,18 @@ class BtcRiskLiveSizer:
         df = pl.read_parquet(self.state_path)
         if df.is_empty():
             return
-        rows = sorted(df.to_dicts(), key=lambda row: (int(row["signal_ts_ms"]), str(row["symbol"])))
+        self._replace_rows(df.to_dicts())
+        self._dirty = False
+
+    def _replace_rows(self, rows: list[dict[str, Any]]) -> None:
+        sorted_rows = sorted(rows, key=lambda row: (int(row["signal_ts_ms"]), str(row["symbol"])))
         self._rows = []
         self.state = ExpandingBtcRiskState(min_prior=self.state.min_prior)
-        for row in rows:
+        for row in sorted_rows:
             raw_values = {name: _finite(row.get(name)) for name in BTC_RISK_COMPONENTS}
             self.state.score(decision_key=str(row["decision_key"]), raw_values=raw_values)
             self._rows.append(dict(row))
+        self._loaded_row_count = len(self._rows)
 
     def score_decisions(
         self,
@@ -251,6 +257,25 @@ class BtcRiskLiveSizer:
             "state_rows": len(self._rows),
         }
 
+    def save_scored_decisions(self, decision_keys: set[str]) -> None:
+        """Persist only newly scored decisions that reached accepted execution."""
+
+        if not self._dirty:
+            return
+        accepted = {str(key) for key in decision_keys if str(key)}
+        committed = self._rows[: self._loaded_row_count]
+        pending = [
+            row
+            for row in self._rows[self._loaded_row_count :]
+            if str(row.get("decision_key") or "") in accepted
+        ]
+        self._replace_rows([*committed, *pending])
+        if not pending:
+            self._dirty = False
+            return
+        self._dirty = True
+        self.save()
+
     def save(self) -> None:
         if not self._dirty:
             return
@@ -261,3 +286,4 @@ class BtcRiskLiveSizer:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame(rows, schema=STATE_SCHEMA).write_parquet(self.state_path)
         self._dirty = False
+        self._loaded_row_count = len(self._rows)

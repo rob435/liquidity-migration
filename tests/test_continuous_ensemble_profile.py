@@ -10,6 +10,7 @@ from liquidity_migration.continuous_demo import (
     CONTINUOUS_DEMO_PROFILES,
     ContinuousDemoCycleConfig,
     _apply_btc_risk_sizing,
+    _commit_btc_risk_sizing_state,
     _execute_continuous_entries,
     apply_continuous_demo_profile,
 )
@@ -206,6 +207,59 @@ def test_btc_risk_sizing_annotations_are_shared_across_components(tmp_path) -> N
     assert stats["scored"] == 1
     assert candidates[0]["btc_risk_stack_mult"] == candidates[1]["btc_risk_stack_mult"]
     assert candidates[0]["btc_risk_score"] == candidates[1]["btc_risk_score"]
+
+
+def test_btc_risk_sizing_commits_only_accepted_orders(tmp_path) -> None:
+    import polars as pl
+
+    demo = ContinuousDemoCycleConfig(
+        entry_btc_risk_sizing_enabled=True,
+        entry_btc_risk_min_prior=0,
+    )
+    btc_klines = pl.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 40,
+            "ts_ms": [i * 86_400_000 + 23 * 60 * 60 * 1000 for i in range(40)],
+            "close": [100.0 + i for i in range(40)],
+        }
+    )
+    failed_root = tmp_path / "failed"
+    failed_candidates = [{"symbol": "AAAUSDT", "signal_ts_ms": 11 * 86_400_000}]
+    failed_stats = _apply_btc_risk_sizing(
+        failed_candidates,
+        config=demo,
+        root=failed_root,
+        btc_klines=btc_klines,
+    )
+    failed_state = failed_root / "btc_risk_sizing_state.parquet"
+    assert not failed_state.exists()
+
+    _commit_btc_risk_sizing_state(
+        failed_stats,
+        [{"symbol": "AAAUSDT", "signal_ts_ms": 11 * 86_400_000, "submit_mode": "error"}],
+    )
+    assert not failed_state.exists()
+    assert failed_stats["committed"] == 0
+
+    accepted_root = tmp_path / "accepted"
+    accepted_candidates = [{"symbol": "BBBUSDT", "signal_ts_ms": 12 * 86_400_000}]
+    accepted_stats = _apply_btc_risk_sizing(
+        accepted_candidates,
+        config=demo,
+        root=accepted_root,
+        btc_klines=btc_klines,
+    )
+    accepted_state = accepted_root / "btc_risk_sizing_state.parquet"
+    assert not accepted_state.exists()
+
+    _commit_btc_risk_sizing_state(
+        accepted_stats,
+        [{"symbol": "BBBUSDT", "signal_ts_ms": 12 * 86_400_000, "submit_mode": "submitted"}],
+    )
+    saved = pl.read_parquet(accepted_state)
+    assert saved.select("decision_key").to_series().to_list() == ["BBBUSDT|1036800000"]
+    assert accepted_stats["committed"] == 1
+    assert accepted_stats["state_rows"] == 1
 
 
 def test_two_components_same_symbol_distinct_ids() -> None:

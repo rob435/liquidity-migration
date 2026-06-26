@@ -414,6 +414,38 @@ def test_execute_entries_dry_run_builds_short_rows() -> None:
     assert o["updated_at_ms"] == 1_700_000_000_000
 
 
+def test_submitted_unconfirmed_entry_keeps_reservation_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    import liquidity_migration.continuous_demo as cd
+    from liquidity_migration.continuous_demo import _continuous_accepted_entry_symbols, _execute_continuous_entries
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, record_dry_run=False)
+    cand = [{"symbol": "WIFUSDT", "decile": 9, "composite": 0.95, "turnover_quote": 2e6,
+             "signal_ts_ms": 1_700_000_000_000, "stop_loss_pct": 0.25, "live_price": 100.0}]
+    contracts = {"WIFUSDT": {"tick_size": 0.0001, "qty_step": 0.001, "min_order_qty": 0.001}}
+
+    class FakeClient:
+        def set_leverage(self, **_kwargs: object) -> None:
+            return None
+
+        def place_order(self, **_kwargs: object) -> dict[str, str]:
+            return {"orderId": "oid-accepted"}
+
+    def fail_confirm(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("confirmation timeout")
+
+    monkeypatch.setattr(cd, "_wait_for_execution_summary", fail_confirm)
+    rows, orders = _execute_continuous_entries(
+        cand, trading_client=FakeClient(), demo=cfg, equity_usdt=10_000.0, order_notional_frac=0.02,
+        price_by_symbol={"WIFUSDT": 100.0}, contract_by_symbol=contracts, now_ms=1_700_000_000_000,
+        strategy_id="continuous_fade_v2", record_preflight=None, execution_event_router=None)
+
+    assert rows == []
+    assert orders[0]["submit_mode"] == "submitted"
+    assert orders[0]["status"] == "submitted_unconfirmed"
+    assert _continuous_accepted_entry_symbols(rows, orders) == {"WIFUSDT"}
+    assert _continuous_accepted_entry_symbols([], [{"symbol": "BADUSDT", "submit_mode": "error"}]) == set()
+
+
 def test_execute_exits_dry_run_closes_short() -> None:
     from liquidity_migration.continuous_demo import _execute_continuous_exits
 

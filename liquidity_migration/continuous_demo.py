@@ -1982,12 +1982,12 @@ def _apply_btc_risk_sizing(
         return stats
     try:
         lookup, score_stats = sizer.score_decisions(candidates, btc_context=btc_context_by_day(btc_klines))
-        sizer.save()
     except Exception:  # noqa: BLE001 - fail safe: keep base sizing this cycle
         _logger.exception("BTC-risk sizing failed; using 1.0 multipliers this cycle")
         stats["error"] = 1
         return stats
     stats.update(score_stats)
+    stats["_live_sizer"] = sizer
     multipliers: list[float] = []
     scores: list[float] = []
     for cand in candidates:
@@ -2017,6 +2017,49 @@ def _apply_btc_risk_sizing(
     stats["max_stack_mult"] = max(multipliers) if multipliers else 1.0
     stats["mean_btc_risk_score"] = (sum(scores) / len(scores)) if scores else None
     return stats
+
+
+def _btc_risk_decision_key(row: dict[str, Any]) -> str:
+    symbol = str(row.get("symbol") or "")
+    signal_ts = int(_float(row.get("signal_ts_ms") or row.get("entry_signal_ts_ms")) or 0)
+    return f"{symbol}|{signal_ts}" if symbol and signal_ts > 0 else ""
+
+
+def _commit_btc_risk_sizing_state(
+    stats: dict[str, Any],
+    accepted_orders: list[dict[str, Any]],
+) -> None:
+    sizer = stats.pop("_live_sizer", None)
+    if sizer is None:
+        return
+    keys: set[str] = set()
+    for row in accepted_orders:
+        if str(row.get("submit_mode") or "") != "submitted":
+            continue
+        key = _btc_risk_decision_key(row)
+        if key:
+            keys.add(key)
+    stats["committed"] = len(keys)
+    try:
+        sizer.save_scored_decisions(keys)
+        stats["state_rows"] = sizer.rows
+    except Exception:  # noqa: BLE001 - fail safe: sizing overlay should not crash execution
+        _logger.exception("BTC-risk sizing state failed to save accepted decisions")
+        stats["error"] = 1
+
+
+def _continuous_accepted_entry_symbols(
+    exec_entries: list[dict[str, Any]],
+    entry_orders: list[dict[str, Any]],
+) -> set[str]:
+    symbols = {str(row.get("symbol", "")) for row in exec_entries if str(row.get("symbol", ""))}
+    for row in entry_orders:
+        if str(row.get("submit_mode") or "") != "submitted":
+            continue
+        symbol = str(row.get("symbol", ""))
+        if symbol:
+            symbols.add(symbol)
+    return symbols
 
 
 # ============================================================================
@@ -3770,16 +3813,15 @@ def run_continuous_demo_cycle(
             cycle_trade_rows.extend(exec_entries)
         if entry_orders and (demo.submit_orders or demo.record_dry_run):
             cycle_order_rows.extend(entry_orders)
+        _commit_btc_risk_sizing_state(btc_risk_sizing_stats, entry_orders)
         if demo.submit_orders and candidates:
-            # LON-9 parity (audit 2026-06-12 round 3): a claimed candidate whose
-            # entry did NOT open a trade row (sizing reject / place failed / fill
-            # unconfirmed) must release its reservation now instead of blocking
-            # sibling sleeves from the symbol for the full TTL. Fail-open; the
-            # TTL + closed_trade_ids GC remain the backstop.
-            opened_symbols = {str(r.get("symbol", "")) for r in exec_entries}
+            # Release only pre-submit/hard failures. A submitted-but-unconfirmed
+            # order can still fill after the REST polling window, so keep its
+            # reservation until venue/ledger reconciliation proves otherwise.
+            accepted_symbols = _continuous_accepted_entry_symbols(exec_entries, entry_orders)
             for cand in candidates:
                 cand_symbol = str(cand.get("symbol", ""))
-                if cand_symbol and cand_symbol not in opened_symbols:
+                if cand_symbol and cand_symbol not in accepted_symbols:
                     _cross_sleeve.release_symbol_reservation(
                         _cs_root, symbol=cand_symbol, sleeve=sleeve_name,
                         trade_id=str(cand.get("trade_id", "")), now_ms=cycle_now_ms)
