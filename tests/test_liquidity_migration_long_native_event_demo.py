@@ -92,6 +92,7 @@ def test_v11a_config_matches_research_run() -> None:
     assert cfg.cooldown_days == 7
     assert cfg.entry_delay_hours == 1
     assert cfg.max_position_weight == pytest.approx(0.30)
+    assert cfg.max_per_symbol_weight == pytest.approx(cfg.max_position_weight)
     assert cfg.sizing == "vol_parity"
     # div risk-engineering (promoted 2026-05-30): de-risk-only volatility targeting
     assert cfg.enable_vol_target
@@ -139,6 +140,14 @@ def test_projected_margin_guard_allows_explicit_safe_levered_demo() -> None:
     projection = projected_long_initial_margin_pct_equity(safe, strategy)
     assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.375)
     _validate_long_demo_config(safe, strategy)
+
+
+def test_live_sizing_rejects_unmirrored_per_symbol_cap_drift() -> None:
+    strategy = replace(_v11a_long_native_config(), max_per_symbol_weight=0.10)
+    demo = LongNativeDemoCycleConfig(notional_multiplier=1.0)
+
+    with pytest.raises(ValueError, match="max_per_symbol_weight == strategy.max_position_weight"):
+        _validate_long_demo_config(demo, strategy)
 
 
 def test_vol_target_scale_volup125() -> None:
@@ -243,6 +252,18 @@ def _build_features_with_fc_signal(*, symbol: str, signal_ts_ms: int, signal_clo
     ])
 
 
+def _build_features_without_fc_signal(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:
+    """Minimal full feature row that does not pass detect_pattern_fomo_chase."""
+    return _build_features_with_fc_signal(
+        symbol=symbol,
+        signal_ts_ms=signal_ts_ms,
+        signal_close=signal_close,
+    ).with_columns([
+        pl.lit(math.log1p(0.01)).alias("log_return"),
+        pl.lit(0.10).alias("close_location"),
+    ])
+
+
 def test_sniper_retrace_enters_when_live_price_reaches_threshold() -> None:
     """signal_close=100, retrace_threshold=99 (1% below), live_price=98.5
     → entry fires with reason='sniper_retrace'."""
@@ -263,6 +284,29 @@ def test_sniper_retrace_enters_when_live_price_reaches_threshold() -> None:
     assert cand["entry_reason"] == "sniper_retrace"
     assert cand["signal_close"] == pytest.approx(100.0)
     assert cand["retrace_threshold"] == pytest.approx(99.0)
+
+
+def test_sniper_retrace_respects_entry_delay_before_live_check() -> None:
+    """Live v11a must not enter before the same first sniper hour the backtest uses."""
+    strategy = _v11a_long_native_config()
+    assert strategy.entry_delay_hours == 1
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + MS_PER_HOUR // 2
+    features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
+
+    candidates, skips = _select_long_entry_candidates(
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.5},
+        max_new_entries=5,
+    )
+
+    assert candidates == []
+    assert skips["entry_delay"] == 1
+    assert skips["no_retrace_yet"] == 0
 
 
 def test_sniper_falls_through_after_deadline_when_no_retrace() -> None:
@@ -341,6 +385,33 @@ def test_stale_signal_beyond_24h_is_dropped() -> None:
     # previously mis-counted as no_signal, leaving stale_signal stuck at 0).
     assert skips["stale_signal"] == 1
     assert skips["no_signal"] == 0
+
+
+def test_old_non_signal_history_does_not_count_as_stale_signal() -> None:
+    strategy = _v11a_long_native_config()
+    fresh_ts = 1_700_000_000_000
+    now = fresh_ts + 2 * MS_PER_HOUR
+    old_non_signal = _build_features_without_fc_signal(
+        symbol="OLDUSDT",
+        signal_ts_ms=fresh_ts - 30 * MS_PER_DAY,
+    )
+    fresh_non_signal = _build_features_without_fc_signal(
+        symbol="FRESHUSDT",
+        signal_ts_ms=fresh_ts,
+    )
+    features = pl.concat([old_non_signal, fresh_non_signal], how="vertical_relaxed")
+    candidates, skips = _select_long_entry_candidates(
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"OLDUSDT": 98.0, "FRESHUSDT": 98.0},
+        max_new_entries=5,
+    )
+    assert candidates == []
+    assert skips["stale_signal"] == 0
+    assert skips["no_signal"] == 1
 
 
 def test_cooldown_blocks_re_entry() -> None:
@@ -753,6 +824,63 @@ def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
     n0, s0 = _compute_long_order_sizing(demo=demo, strategy=strategy, features=bare)
     assert s0 == _vol_target_scale(strategy, None)
     assert n0 == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * s0)
+
+
+def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> None:
+    from liquidity_migration.long_native import _vol_target_scale
+    from liquidity_migration.long_native_event_demo import (
+        _compute_long_order_sizing,
+        target_long_order_notional_pct_equity,
+    )
+
+    demo = LongNativeDemoCycleConfig()
+    strategy = _long_demo_event_config(demo.strategy_profile)
+    now = 1_700_000_000_000
+    current_day_start = now - (now % MS_PER_DAY)
+    closed_day_end = current_day_start
+    unclosed_day_end = current_day_start + MS_PER_DAY
+    features = pl.DataFrame(
+        {
+            "ts_ms": [unclosed_day_end, closed_day_end],
+            "btc_rv_30": [0.10, 1.20],
+        }
+    )
+
+    notional, scale = _compute_long_order_sizing(
+        demo=demo, strategy=strategy, features=features, now_ms=now,
+    )
+
+    expected_scale = _vol_target_scale(strategy, 1.20)
+    assert scale == pytest.approx(expected_scale)
+    assert scale != pytest.approx(_vol_target_scale(strategy, 0.10))
+    assert notional == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * expected_scale)
+
+
+def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists() -> None:
+    from liquidity_migration.long_native import _vol_target_scale
+    from liquidity_migration.long_native_event_demo import (
+        _compute_long_order_sizing,
+        target_long_order_notional_pct_equity,
+    )
+
+    demo = LongNativeDemoCycleConfig()
+    strategy = _long_demo_event_config(demo.strategy_profile)
+    now = 1_700_000_000_000
+    current_day_start = now - (now % MS_PER_DAY)
+    features = pl.DataFrame(
+        {
+            "ts_ms": [current_day_start + MS_PER_DAY],
+            "btc_rv_30": [0.10],
+        }
+    )
+
+    notional, scale = _compute_long_order_sizing(
+        demo=demo, strategy=strategy, features=features, now_ms=now,
+    )
+
+    expected_scale = _vol_target_scale(strategy, None)
+    assert scale == pytest.approx(expected_scale)
+    assert notional == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * expected_scale)
 
 
 def test_median_universe_selection_steady_state_is_byte_match_noop() -> None:

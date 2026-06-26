@@ -29,16 +29,18 @@ Environment=WORKERS=2
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
 Environment=MAX_HOLD_HOURS=24
-# 2026-06-18: mirrors the repaired demo live-v2 demo/paper lifecycle:
-# inverse-vol component sizing, max4 daily vol-target rebalance, TP/24h only.
+# Mirrors demo continuous_ensemble_v2 profile: TP12, daily vol-target rebalance
+# disabled, CTRL_BTC_RISK_70_90_35 BTC-risk sizing, TP/24h only.
 Environment=STRATEGY_PROFILE=continuous_ensemble_v2
 Environment=FEATURE_SET=max_ret168
 Environment=ENTRY_EVENT_TRIGGER=none
 Environment=BTC_TREND_GATE=uptrend
-Environment=DAILY_REBALANCE_ENABLED=1
+Environment=DAILY_REBALANCE_ENABLED=0
+Environment=DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90
 Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045
 Environment=DAILY_REBALANCE_MAX_SCALE=4
 Environment=DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04
+Environment=DAILY_REBALANCE_RESIZE_COST_BPS=10
 Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0
 Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN=0
 Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW=0

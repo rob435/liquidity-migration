@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One command -> official equity curves.
-# LONG and CONTINUOUS are promoted-in-code for demo/paper tooling. CONTINUOUS is
-# operator-override demo/paper only, not a real-money or gate-pass claim.
+# LONG and CONTINUOUS come from liquidity_migration/promoted.py. CONTINUOUS
+# output is demo/forward analysis, not a mainnet approval package.
 #
 #   bash scripts/equity_curves.sh                 # the promoted LONG sleeve, last 3 years
 #   bash scripts/equity_curves.sh --sleeves continuous

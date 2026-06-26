@@ -35,10 +35,8 @@ WORKERS="${WORKERS:-4}"
 MAX_ACTIVE="${MAX_ACTIVE:-25}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 MAX_HOLD_HOURS="${MAX_HOLD_HOURS:-48}"
-# 2026-06-18: the live default is the frozen v2 demo/paper lifecycle:
-# 3-component ensemble, inverse-vol component sizing, max4 daily vol-target
-# rebalance, and TP/24h exits with no daemon or server stop.
-# This is NOT real-money-safe; any mainnet candidate needs a different risk design.
+# Default lifecycle: 3-component ensemble, inverse-vol component sizing, daily
+# vol-target rebalance disabled, and TP/24h exits with no daemon or server stop.
 STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v2}"
 FEATURE_SET="${FEATURE_SET:-rv_168h,vov,dist_low,xsret7,xsret3}"
 ENTRY_EVENT_TRIGGER="${ENTRY_EVENT_TRIGGER:-none}"
@@ -60,7 +58,7 @@ TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"
 VOL_WEIGHT_CLAMP="${VOL_WEIGHT_CLAMP:-2}"
 LIQ_TURNOVER_MIN="${LIQ_TURNOVER_MIN:-500000}"
 FALLBACK_EQUITY_USDT="${FALLBACK_EQUITY_USDT:-10000}"
-DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-1}"
+DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-0}"
 DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS="${DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS:-90}"
 DAILY_REBALANCE_TARGET_DAILY_VOL="${DAILY_REBALANCE_TARGET_DAILY_VOL:-0.045}"
 DAILY_REBALANCE_MAX_SCALE="${DAILY_REBALANCE_MAX_SCALE:-4}"

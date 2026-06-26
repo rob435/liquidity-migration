@@ -9,6 +9,7 @@ from __future__ import annotations
 from liquidity_migration.continuous_demo import (
     CONTINUOUS_DEMO_PROFILES,
     ContinuousDemoCycleConfig,
+    _apply_btc_risk_sizing,
     _execute_continuous_entries,
     apply_continuous_demo_profile,
 )
@@ -24,7 +25,7 @@ def test_ensemble_profile_resolves_continuous_ensemble_v2() -> None:
     # Current three-component object frozen 2026-06-18;
     # remaining three weights renormalized = old/0.90.
     assert set(comps) == {"p3", "p4p3", "p4p5"}
-    # operator override 2026-06-19: component TP promoted 0.10 -> 0.12
+    # Local target: component TP is 12%.
     assert comps["p3"] == ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333)
     assert comps["p4p3"] == ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222)
     assert comps["p4p5"] == ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444)
@@ -32,11 +33,17 @@ def test_ensemble_profile_resolves_continuous_ensemble_v2() -> None:
     assert cfg.rmom_quantile == 0.25
     assert cfg.btc_trend_gate == "uptrend"
     assert cfg.max_hold_hours == 24
-    assert not cfg.daily_rebalance_enabled  # operator override 2026-06-19: daily vol adjuster disabled
+    assert not cfg.daily_rebalance_enabled  # local target disables daily vol adjuster
     assert cfg.daily_rebalance_realized_vol_window_days == 90
     assert cfg.daily_rebalance_max_scale == 4.0
     assert cfg.daily_rebalance_target_daily_vol == 0.045
     assert cfg.daily_rebalance_strategy_momentum_window_days == 0  # the merged test's winning arm
+    assert cfg.entry_btc_risk_sizing_enabled is True
+    assert cfg.entry_btc_risk_arm_id == "CTRL_BTC_RISK_70_90_35"
+    assert cfg.entry_btc_risk_low == 0.70
+    assert cfg.entry_btc_risk_high == 0.90
+    assert cfg.entry_btc_risk_tail_mult == 0.35
+    assert cfg.entry_btc_risk_min_prior == 50
 
 
 def test_ensemble_v2_disables_damaging_daemon_exits() -> None:
@@ -57,7 +64,7 @@ def test_ensemble_v2_disables_damaging_daemon_exits() -> None:
     assert cfg.sizing_mode == "inverse_vol"
     assert cfg.target_vol_per_name == 0.01
     assert cfg.vol_weight_clamp == 2.0
-    assert not cfg.daily_rebalance_enabled  # operator override 2026-06-19: daily vol adjuster disabled
+    assert not cfg.daily_rebalance_enabled  # local target disables daily vol adjuster
     assert cfg.daily_rebalance_realized_vol_window_days == 90
     assert cfg.daily_rebalance_target_daily_vol == 0.045
     assert cfg.daily_rebalance_max_scale == 4.0
@@ -139,6 +146,66 @@ def test_inverse_vol_entry_sizing_multiplies_component_weight() -> None:
     assert abs(float(rows[0]["entry_vol"]) - 0.02) < 1e-12
     assert abs(float(rows[0]["vol_weight_multiplier"]) - 0.5) < 1e-12
     assert abs(float(orders[0]["vol_weight_multiplier"]) - 0.5) < 1e-12
+
+
+def test_btc_risk_entry_sizing_multiplies_component_weight_and_inverse_vol() -> None:
+    demo = ContinuousDemoCycleConfig(
+        submit_orders=False,
+        sizing_mode="inverse_vol",
+        target_vol_per_name=0.01,
+        vol_weight_clamp=2.0,
+        entry_btc_risk_sizing_enabled=True,
+    )
+    rows, orders = _execute_continuous_entries(
+        [
+            _cand(component="p4p5", weight=0.40, tp=0.10)
+            | {"rv_168h": 0.02, "btc_risk_stack_mult": 0.35, "btc_risk_score": 0.75}
+        ],
+        trading_client=None,
+        demo=demo,
+        equity_usdt=10_000.0,
+        order_notional_frac=0.02,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={"AAAUSDT": {"tick_size": 0.01, "qty_step": 0.1}},
+        now_ms=1_700_000_100_000,
+        strategy_id="s",
+        record_preflight=None,
+        execution_event_router=None,
+    )
+
+    assert len(rows) == 1
+    assert len(orders) == 1
+    # 10_000 * 0.02 * 0.40 * (0.01 / 0.02) * 0.35 = 14 USDT at price 100 -> 0.1 qty after floor.
+    assert abs(float(rows[0]["qty"]) - 0.1) < 1e-9
+    assert rows[0]["btc_risk_score"] == 0.75
+    assert rows[0]["btc_risk_stack_mult"] == 0.35
+    assert orders[0]["btc_risk_stack_mult"] == 0.35
+
+
+def test_btc_risk_sizing_annotations_are_shared_across_components(tmp_path) -> None:
+    import polars as pl
+
+    demo = ContinuousDemoCycleConfig(
+        entry_btc_risk_sizing_enabled=True,
+        entry_btc_risk_min_prior=0,
+    )
+    candidates = [
+        {"symbol": "AAAUSDT", "signal_ts_ms": 11 * 86_400_000, "component": "p3"},
+        {"symbol": "AAAUSDT", "signal_ts_ms": 11 * 86_400_000, "component": "p4p5"},
+    ]
+    btc_klines = pl.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 40,
+            "ts_ms": [i * 86_400_000 + 23 * 60 * 60 * 1000 for i in range(40)],
+            "close": [100.0 + i for i in range(40)],
+        }
+    )
+
+    stats = _apply_btc_risk_sizing(candidates, config=demo, root=tmp_path, btc_klines=btc_klines)
+
+    assert stats["scored"] == 1
+    assert candidates[0]["btc_risk_stack_mult"] == candidates[1]["btc_risk_stack_mult"]
+    assert candidates[0]["btc_risk_score"] == candidates[1]["btc_risk_score"]
 
 
 def test_two_components_same_symbol_distinct_ids() -> None:

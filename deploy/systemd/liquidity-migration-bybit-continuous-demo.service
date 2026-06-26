@@ -11,11 +11,9 @@ WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 Environment=DATA_ROOT=data/bybit-continuous-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-# Order-submitting demo unit. The committed deploy toggle currently sets
-# CONTINUOUS_SLEEVE=on by explicit operator instruction (2026-06-09); demo fills
-# are execution evidence only, not promotion evidence. The risk service reads
-# CONTINUOUS_DATA_ROOT, the continuous_fade_* datasets are registered, and ws_risk
-# routes continuous fills/orphans into the continuous ledger. Demo account ONLY; never REAL_MONEY.
+# Order-submitting demo unit. The risk service reads CONTINUOUS_DATA_ROOT, the
+# continuous_fade_* datasets are registered, and ws_risk routes continuous
+# fills/orphans into the continuous ledger.
 Environment=SUBMIT_ORDERS=1
 Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1
@@ -26,19 +24,20 @@ Environment=WORKERS=2
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
 Environment=MAX_HOLD_HOURS=24
-# 2026-06-18: repaired live-v2 demo/paper lifecycle. Same 3-component entry book
-# with inverse-vol component sizing, max4 daily vol-target rebalance; daemon
-# exits are TP/24h only and no server stop is attached. Not real-money-safe.
+# continuous_ensemble_v2 resolves TP12, daily vol-target rebalance disabled,
+# CTRL_BTC_RISK_70_90_35 BTC-risk sizing, TP/24h daemon exits, and no server stop.
 Environment=STRATEGY_PROFILE=continuous_ensemble_v2
 Environment=FEATURE_SET=max_ret168
 Environment=ENTRY_EVENT_TRIGGER=none
 # Sniper ARMED by operator instruction 2026-06-10 (PostOnly +8% quarter-size adds).
 Environment=CONTINUOUS_SNIPER=1
 Environment=BTC_TREND_GATE=uptrend
-Environment=DAILY_REBALANCE_ENABLED=1
+Environment=DAILY_REBALANCE_ENABLED=0
+Environment=DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90
 Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045
 Environment=DAILY_REBALANCE_MAX_SCALE=4
 Environment=DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04
+Environment=DAILY_REBALANCE_RESIZE_COST_BPS=10
 Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0
 Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN=0
 Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW=0

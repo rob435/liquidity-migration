@@ -17,7 +17,7 @@ Construction (matches the engine the betas were banked on):
 overlapping dates and GATES the overwrite (semantics check; small diffs are the
 rebuilt-ledger vintage, e.g. p3 858 vs 857 trades). The warm-start CSV feeds the
 live 2f hedge beta (continuous_hedge_manager.load_warmstart_2f) and auto-deploys
-on commit, so a regression must not be written silently: if the max |Δunit_ret|
+on commit, so a regression must not be written silently: if the max |delta_unit_ret|
 over the overlap exceeds --max-unit-drift, or the regeneration has FEWER rows
 than the banked CSV, the overwrite is REFUSED unless --force is given. --force
 keeps the manual escape hatch for a legitimate data-vintage shift.
@@ -43,6 +43,7 @@ import polars as pl  # noqa: E402
 
 from liquidity_migration.continuous_component_sources import (  # noqa: E402
     CONTINUOUS_COMPONENT_SOURCES,
+    ContinuousComponentSource,
     load_continuous_component_source,
 )
 from liquidity_migration.continuous_rebalance import (  # noqa: E402
@@ -53,6 +54,12 @@ from liquidity_migration.continuous_rebalance import (  # noqa: E402
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
 ROOTS = {"bybit": SHARED / "bybit_full_pit", "binance": SHARED / "binance_full_pit"}
 OUT_DIR = Path(__file__).resolve().parent.parent / "deploy" / "hedge_warmstart"
+FALLBACK_COMPONENT_ROOT = Path(
+    os.environ.get(
+        "CONTINUOUS_COMPONENT_FALLBACK_ROOT",
+        str(SHARED / "continuous_deployed_equity_refresh_2026-06-12" / "components"),
+    )
+).expanduser()
 # Current three-component object frozen 2026-06-18; renorm = old/0.90.
 WINNER = {"turn3p3": 0.3333333333333333, "turn4p3": 0.2222222222222222, "turn4p5": 0.4444444444444444}
 MS_DAY = 86_400_000
@@ -83,11 +90,20 @@ def daily_returns(closes: dict[int, float]) -> dict[int, float]:
     return out
 
 
+def load_component_for_warmstart(src: str, venue: str):
+    spec = CONTINUOUS_COMPONENT_SOURCES[src]
+    try:
+        return load_continuous_component_source(spec, venue)
+    except FileNotFoundError as original_error:
+        fallback = ContinuousComponentSource(FALLBACK_COMPONENT_ROOT, spec.cell)
+        try:
+            return load_continuous_component_source(fallback, venue)
+        except FileNotFoundError:
+            raise original_error
+
+
 def unit_series(venue: str) -> dict[int, float]:
-    comps = {
-        src: load_continuous_component_source(CONTINUOUS_COMPONENT_SOURCES[src], venue)[0]
-        for src in WINNER
-    }
+    comps = {src: load_component_for_warmstart(src, venue)[0] for src in WINNER}
     combined = combine_continuous_components(comps, WINNER)
     out: dict[int, float] = {}
     for day in combined.days:
@@ -117,7 +133,7 @@ def validate(venue: str, rows: list[dict]) -> dict:
     """Compare the regenerated series against the banked CSV on overlapping dates.
 
     Returns a dict the overwrite gate consumes:
-      max_drift : max |Δunit_ret| over the overlap (0.0 when no CSV/overlap)
+      max_drift : max |delta_unit_ret| over the overlap (0.0 when no CSV/overlap)
       old_rows  : row count of the existing CSV (0 when none)
       new_rows  : row count of the regenerated series
       overlap   : number of shared dates
@@ -137,8 +153,8 @@ def validate(venue: str, rows: list[dict]) -> dict:
     import statistics
     max_drift = max(diffs)
     print(
-        f"  [{venue}] overlap {len(overlap)}d: max|Δunit| {max_drift:.2e}, "
-        f"mean|Δ| {statistics.mean(diffs):.2e} (vintage drift expected at ledger-rebuild scale)"
+        f"  [{venue}] overlap {len(overlap)}d: max|delta_unit| {max_drift:.2e}, "
+        f"mean|delta| {statistics.mean(diffs):.2e} (vintage drift expected at ledger-rebuild scale)"
     )
     return {"max_drift": max_drift, "old_rows": len(old), "new_rows": new_rows, "overlap": len(overlap)}
 
@@ -153,8 +169,10 @@ def overwrite_blocked(venue: str, report: dict, *, max_drift: float, force: bool
     """
     if force:
         return None
+    if report["old_rows"] and not report["overlap"]:
+        return "regeneration has no date overlap with the existing CSV"
     if report["overlap"] and report["max_drift"] > max_drift:
-        return (f"max|Δunit| {report['max_drift']:.2e} over {report['overlap']}d exceeds "
+        return (f"max|delta_unit| {report['max_drift']:.2e} over {report['overlap']}d exceeds "
                 f"--max-unit-drift {max_drift:.2e}")
     if report["old_rows"] and report["new_rows"] < report["old_rows"]:
         return (f"regeneration has {report['new_rows']} rows < existing {report['old_rows']} "
@@ -167,7 +185,7 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=200)
     ap.add_argument("--validate-only", action="store_true")
     ap.add_argument("--max-unit-drift", type=float, default=1e-3,
-                    help="Refuse the overwrite when max|Δunit_ret| over the overlap exceeds this "
+                    help="Refuse the overwrite when max|delta_unit_ret| over the overlap exceeds this "
                          "(unless --force). Default 1e-3 admits ledger-rebuild vintage drift.")
     ap.add_argument("--force", action="store_true",
                     help="Overwrite even when the drift/row-count gate would refuse (known-good "
@@ -178,12 +196,15 @@ def main() -> int:
         rows = regenerate(venue, args.days)
         report = validate(venue, rows)
         last = rows[-1]["date"] if rows else "none"
+        block = overwrite_blocked(venue, report, max_drift=args.max_unit_drift, force=args.force)
         if args.validate_only:
             print(f"  [{venue}] would write {len(rows)} rows, last day {last}")
+            if block is not None:
+                print(f"  [{venue}] WOULD REFUSE overwrite: {block}. Re-run with --force to override.")
+                refused = True
             continue
-        block = overwrite_blocked(venue, report, max_drift=args.max_unit_drift, force=args.force)
         if block is not None:
-            print(f"  [{venue}] ❌ REFUSING overwrite: {block}. Re-run with --force to override.")
+            print(f"  [{venue}] REFUSING overwrite: {block}. Re-run with --force to override.")
             refused = True
             continue
         path = OUT_DIR / f"{venue}_warmstart.csv"

@@ -35,6 +35,13 @@ def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Pat
     assert _resolve_data_root("reconcile-long-paper-demo", noop) == noop and not noop.exists()
 
 
+def test_reconcile_long_paper_demo_defaults_to_long_roots() -> None:
+    args = build_parser().parse_args(["reconcile-long-paper-demo"])
+
+    assert args.paper_data_root == "data/bybit-long-paper-event"
+    assert args.demo_data_root == "data/bybit-long-demo-event"
+
+
 def test_cli_continuous_demo_rejects_retired_strategy_profile(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(

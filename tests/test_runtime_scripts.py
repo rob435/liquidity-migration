@@ -7,7 +7,16 @@ from pathlib import Path
 
 import pytest
 
-DEPLOY_SH = Path(__file__).resolve().parents[1] / "scripts" / "deploy_vps_live.sh"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEPLOY_SH = REPO_ROOT / "scripts" / "deploy_vps_live.sh"
+VERIFY_SH = REPO_ROOT / "scripts" / "verify_vps_live.sh"
+RECOVERY_SH = REPO_ROOT / "scripts" / "vps_console_recover_and_deploy.sh"
+
+
+def test_reconcile_shell_exports_utf8_python_io() -> None:
+    text = (REPO_ROOT / "scripts" / "reconcile.sh").read_text(encoding="utf-8")
+
+    assert 'PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"' in text
 
 
 def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
@@ -154,7 +163,7 @@ def test_continuous_runner_wires_rebalance_profile_env() -> None:
     assert "--sizing-mode \"$SIZING_MODE\"" in text
     assert "--target-vol-per-name \"$TARGET_VOL_PER_NAME\"" in text
     assert "--vol-weight-clamp \"$VOL_WEIGHT_CLAMP\"" in text
-    assert 'DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-1}"' in text
+    assert 'DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-0}"' in text
     assert 'DAILY_REBALANCE_TARGET_DAILY_VOL="${DAILY_REBALANCE_TARGET_DAILY_VOL:-0.045}"' in text
     assert 'DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS="${DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS:-0}"' in text
     assert "--daily-rebalance-enabled" in text
@@ -194,13 +203,14 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
         assert "Environment=STOP_APPROACH_FRAC=0" in text
         assert "Environment=FAILED_FADE_HOURS=0" in text
         assert "Environment=BREAKEVEN_ARM_PCT=0" in text
-        assert "Environment=DAILY_REBALANCE_ENABLED=1" in text
+        assert "Environment=DAILY_REBALANCE_ENABLED=0" in text
         assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
         assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
         assert "Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0" in text
         assert "Environment=SIZING_MODE=inverse_vol" in text
         assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
         assert "Environment=VOL_WEIGHT_CLAMP=2" in text
+        assert "CTRL_BTC_RISK_70_90_35" in text
     demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service").read_text(encoding="utf-8")
     paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service").read_text(encoding="utf-8")
     # sniper armed on the DEMO unit only (paper is a no-order shadow)
@@ -244,6 +254,10 @@ def test_continuous_rmom_refresh_rebuilds_each_active_sleeve_root() -> None:
     assert 'sleeve_on "${CONTINUOUS_PAPER_SLEEVE' in script
     assert "--root data/bybit-continuous-demo-event" in script
     assert "--root data/bybit-continuous-paper-event" in script  # the fix
+    deploy = (repo / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
+    assert '_check_rmom_root "demo" "data/bybit-continuous-demo-event/residual_momentum.parquet"' in deploy
+    assert '_check_rmom_root "paper" "data/bybit-continuous-paper-event/residual_momentum.parquet"' in deploy
+    assert "run_continuous_rmom_refresh.sh never writes the paper root" not in deploy
 
 
 def _active_lines(unit_text: str) -> list[str]:
@@ -515,7 +529,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
     assert "apply_timer_enable()" in lib
     assert "verify_timer()" in lib
+    assert "timer is OFF in sleeves.env but still enabled" in lib
     assert "continuous_rmom_refresh_on()" in lib
+    assert "is OFF in sleeves.env but still enabled" in lib
     sleeves = (repo / "deploy" / "sleeves.env").read_text(encoding="utf-8")
     # Continuous demo orders are ON; long is controlled by its own sleeve toggle.
     assert "CONTINUOUS_SLEEVE=on" in sleeves
@@ -529,7 +545,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
-    assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    assert "require_unit_env()" in text
+    assert "systemctl cat" not in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
     assert "liquidity-migration-bybit-continuous-demo.service" in text
@@ -545,18 +563,32 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "data/bybit-continuous-hedge-event" in text  # the open-hedge ledger check
     assert "_hedge_timer_state=on" in text              # fail-safe keeps it enabled while open
     assert "continuous_rmom_refresh_on" in text
-    assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
-    assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
-    assert "Environment=SUBMIT_ORDERS=1" in text
-    assert "Environment=SIZING_MODE=inverse_vol" in text
-    assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
-    assert "Environment=VOL_WEIGHT_CLAMP=2" in text
-    assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
-    assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'MAX_HOLD_HOURS=24'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_ENABLED=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_RESIZE_COST_BPS=10'" in text
     assert 'cont.sizing_mode == "inverse_vol"' in text
     assert "cont.target_vol_per_name == 0.01" in text
+    assert "cont.daily_rebalance_enabled is False" in text
     assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
-    assert "Environment=STOP_LOSS_PCT=0" in text
+    assert "cont.entry_btc_risk_low == 0.70" in text
+    assert "cont.entry_btc_risk_high == 0.90" in text
+    assert "cont.entry_btc_risk_tail_mult == 0.35" in text
+    assert "c[0]: c[3] for c in cont.ensemble_components" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_LOSS_PCT=0'" in text
     # The deploy must SEED the rmom gate (start the oneshot service), not just enable the
     # daily timer — else a fresh deploy starts the continuous daemon into an empty gate and
     # blacks out until 00:20 UTC (the 2026-06-02 incident). Seed must run BEFORE the
@@ -568,6 +600,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     )
     assert text.index("systemctl start liquidity-migration-continuous-rmom-refresh.service") < first_continuous_restart
     assert "rmom gate is EMPTY after seed" in text
+    assert "ALLOW_EMPTY_RMOM_GATE" in text
     # Reboot-safety invariant (audit 2026-06-02 #51): the risk service (the single
     # reconcile authority that tracks the continuous sleeve's positions) must come
     # up BEFORE the continuous daemon, else the continuous sleeve's live positions
@@ -581,7 +614,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
         < text.index("systemctl restart liquidity-migration-bybit-continuous-demo.service")
     )
     assert "deploy-verify-ok commit=" in text
-    assert "--property=Environment" not in text
+    assert "--property=Environment --value" in text
     # Daemons no longer fire startup telegrams (default off as of the
     # rapid-deploy-spam fix), so the deploy script owns the single
     # "deploy succeeded" signal — one telegram per deploy regardless of
@@ -641,7 +674,9 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "ContinuousDemoCycleConfig" in text
     assert "TELEGRAM_CHAT_ID" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
-    assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    assert "require_unit_env()" in text
+    assert "systemctl cat" not in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'" in text
     # Per-sleeve kill-switch: verify is toggle-aware — it sources the shared lib, loads
     # the toggles, and routes per-sleeve active+enabled checks through verify_sleeve (so
     # an intentionally-off sleeve is required DOWN, not flagged as a failed deploy). The
@@ -650,6 +685,8 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "lm_load_sleeve_toggles" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-liquidation-collector.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-liquidation-collector.service" in text
     for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The exact unit set each sleeve must bring up is pinned in the shared lib, so a
@@ -672,22 +709,40 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     # below, unconditional) — else its open positions would silently flatten.
     assert "continuous_rmom_refresh_on" in text
     assert "verify_timer on $CONTINUOUS_SLEEVE_TIMERS" in text
+    assert "_verify_rmom_root" in text
+    assert "ALLOW_EMPTY_RMOM_GATE" in text
     assert "CONTINUOUS_FORWARD_REPORT_TIMERS" not in text
-    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
-    assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
-    assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
-    assert "Environment=SUBMIT_ORDERS=1" in text
-    assert "Environment=SIZING_MODE=inverse_vol" in text
-    assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
-    assert "Environment=VOL_WEIGHT_CLAMP=2" in text
-    assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
-    assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
+    assert "_hedge_timer_state" in text
+    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'MAX_HOLD_HOURS=24'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_ENABLED=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_RESIZE_COST_BPS=10'" in text
     assert 'cont.sizing_mode == "inverse_vol"' in text
     assert "cont.target_vol_per_name == 0.01" in text
+    assert "cont.daily_rebalance_enabled is False" in text
     assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
-    assert "Environment=STOP_LOSS_PCT=0" in text
+    assert "cont.entry_btc_risk_low == 0.70" in text
+    assert "cont.entry_btc_risk_high == 0.90" in text
+    assert "cont.entry_btc_risk_tail_mult == 0.35" in text
+    assert "c[0]: c[3] for c in cont.ensemble_components" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_LOSS_PCT=0'" in text
     assert "verify-ok commit=" in text
-    assert "--property=Environment" not in text
+    assert "--property=Environment --value" in text
 
 
 def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
@@ -931,33 +986,53 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "systemctl enable liquidity-migration-bybit-risk.service" in text
     assert "systemctl restart liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
+    assert "liquidity-migration-liquidation-collector.service" in text
     for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The continuous rmom timer + its go-live asserts are gated behind the toggle, so a
     # recovery with CONTINUOUS_SLEEVE=off cannot bring the disabled sleeve back.
     assert "continuous_rmom_refresh_on" in text
-    assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    assert "require_unit_env()" in text
+    assert "systemctl cat" not in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
     assert "liquidity-migration-bybit-continuous-demo.service" in text
     assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
-    assert 'apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
-    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
-    assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
-    assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
-    assert "Environment=SUBMIT_ORDERS=1" in text
-    assert "Environment=SIZING_MODE=inverse_vol" in text
-    assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
-    assert "Environment=VOL_WEIGHT_CLAMP=2" in text
-    assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
-    assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
+    assert "_hedge_timer_state" in text
+    assert 'apply_timer_enable "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'verify_timer "$_hedge_timer_state" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
+    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'MAX_HOLD_HOURS=24'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_ENABLED=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_RESIZE_COST_BPS=10'" in text
     assert 'cont.sizing_mode == "inverse_vol"' in text
     assert "cont.target_vol_per_name == 0.01" in text
+    assert "cont.daily_rebalance_enabled is False" in text
     assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
-    assert "Environment=STOP_LOSS_PCT=0" in text
+    assert "cont.entry_btc_risk_low == 0.70" in text
+    assert "cont.entry_btc_risk_high == 0.90" in text
+    assert "cont.entry_btc_risk_tail_mult == 0.35" in text
+    assert "c[0]: c[3] for c in cont.ensemble_components" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_LOSS_PCT=0'" in text
     assert "deploy-verify-ok commit=" in text
-    assert "--property=Environment" not in text
+    assert "--property=Environment --value" in text
 
 
 def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Path) -> None:
@@ -1028,6 +1103,42 @@ def test_reset_demo_paper_ledgers_covers_continuous_sleeve(tmp_path: Path) -> No
     assert real.returncode == 0, real.stderr
     assert not cont.exists(), "continuous trade ledger must be wiped"
     assert cont_klines.exists(), "continuous WS kline store must be preserved"
+
+
+def test_reset_demo_paper_ledgers_can_reset_continuous_only(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+
+    if shutil.which("bash") is None:
+        pytest.skip("bash unavailable")
+
+    repo = Path(__file__).resolve().parents[1]
+    script = repo / "scripts" / "reset_demo_paper_ledgers.sh"
+
+    (tmp_path / "liquidity_migration").mkdir()
+    long_ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    long_paper_ledger = tmp_path / "data" / "bybit-long-paper-event" / "long_native_paper_trades"
+    cont_ledger = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_trades"
+    cont_paper_ledger = tmp_path / "data" / "bybit-continuous-paper-event" / "continuous_fade_paper_trades"
+    cont_klines = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_klines_1h"
+    cont_paper_klines = tmp_path / "data" / "bybit-continuous-paper-event" / "continuous_fade_paper_klines_1h"
+    for d in (long_ledger, long_paper_ledger, cont_ledger, cont_paper_ledger, cont_klines, cont_paper_klines):
+        d.mkdir(parents=True)
+        (d / "part.parquet").write_bytes(b"x")
+
+    real = subprocess.run(
+        ["bash", str(script), "--sleeves", "continuous"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert real.returncode == 0, real.stderr
+    assert long_ledger.exists(), "continuous-only reset must not wipe long ledgers"
+    assert long_paper_ledger.exists(), "continuous-only reset must not wipe long paper ledgers"
+    assert not cont_ledger.exists(), "continuous ledger must be wiped"
+    assert not cont_paper_ledger.exists(), "continuous paper ledger must be wiped"
+    assert cont_klines.exists(), "continuous WS kline store must be preserved"
+    assert cont_paper_klines.exists(), "continuous paper WS kline store must be preserved"
 
 
 def test_unit_execstart_args_parse_against_their_script_parsers() -> None:
@@ -1468,6 +1579,40 @@ def test_deploy_verifies_liquidation_collector_active() -> None:
     assert "systemctl is-enabled --quiet liquidity-migration-liquidation-collector.service" in txt
 
 
+def _assert_depth_collector_operator_gated_but_verified(text: str, *, success_marker: str) -> None:
+    unit = "liquidity-migration-depth-collector.service"
+    assert f"systemctl enable {unit}" not in text
+    assert f"systemctl enable --now {unit}" not in text
+    assert f"systemctl is-enabled --quiet {unit} 2>/dev/null" in text
+    assert f"systemctl is-active --quiet {unit}" in text
+    assert "is active but not enabled" in text
+    verify_block = text[text.index('if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then') : text.index(success_marker)]
+    assert f"systemctl is-enabled --quiet {unit} 2>/dev/null" in verify_block
+    assert f"systemctl is-active --quiet {unit}" in verify_block
+
+
+def test_deploy_depth_collector_is_operator_gated_but_verified_if_enabled() -> None:
+    # Bybit historical book depth is unbuyable: deploy must not enable this data
+    # collector by surprise, but once an operator enables it, success must require
+    # the enabled unit to be active.
+    text = DEPLOY_SH.read_text()
+    assert "systemctl restart liquidity-migration-depth-collector.service" in text
+    _assert_depth_collector_operator_gated_but_verified(text, success_marker='echo "deploy-verify-ok')
+
+
+def test_verify_depth_collector_is_operator_gated_but_verified_if_enabled() -> None:
+    _assert_depth_collector_operator_gated_but_verified(
+        VERIFY_SH.read_text(),
+        success_marker='echo "verify-ok',
+    )
+
+
+def test_recovery_depth_collector_is_operator_gated_but_verified_if_enabled() -> None:
+    text = RECOVERY_SH.read_text()
+    assert "systemctl restart liquidity-migration-depth-collector.service" in text
+    _assert_depth_collector_operator_gated_but_verified(text, success_marker='echo "deploy-verify-ok')
+
+
 def test_deploy_refuses_real_money_env() -> None:
     # deploy-ci-6: the deploy must fail-closed if the sourced env sets REAL_MONEY truthy.
     txt = DEPLOY_SH.read_text()
@@ -1487,11 +1632,13 @@ def test_deploy_keeps_hedge_timer_when_continuous_off_but_leg_open() -> None:
     assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in txt
 
 
-def test_deploy_warns_on_paper_following_frozen_demo_root() -> None:
-    # deploy-env-timers-3: demo-off + paper-on must warn that the paper shadow follows
-    # a frozen demo kline store.
+def test_deploy_no_longer_warns_on_paper_following_frozen_demo_root() -> None:
+    # deploy-env-timers-3 follow-up: paper no longer follows the demo kline/rmom
+    # root, so deploy must validate the paper root instead of printing the stale
+    # frozen-demo warning.
     txt = DEPLOY_SH.read_text()
-    assert "KLINES_FOLLOW_ROOT" in txt
+    assert "KLINES_FOLLOW_ROOT still points at the now-FROZEN demo kline store" not in txt
+    assert "data/bybit-continuous-paper-event/residual_momentum.parquet" in txt
     assert 'sleeve_on "$CONTINUOUS_PAPER_SLEEVE"' in txt
 
 

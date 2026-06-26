@@ -855,7 +855,7 @@ def test_continuous_rebalance_profile_resolves_to_pinned_candidate_contract() ->
     assert cfg.entry_confirm_delay_hours == 1
     assert cfg.entry_event_trigger == "none"
     assert cfg.btc_trend_gate == "uptrend"  # pass-through from the CLI/env knob, not pinned by the profile
-    assert cfg.daily_rebalance_enabled is False  # operator override 2026-06-19: daily vol adjuster disabled
+    assert cfg.daily_rebalance_enabled is False  # local target disables daily vol adjuster
     assert continuous_rebalance_rule(cfg).target_daily_vol == pytest.approx(0.045)  # params retained for the rework
 
 
@@ -1147,7 +1147,7 @@ def test_continuous_cycle_daily_rebalance_disabled_under_v2_override(
     after_first = read_dataset(root, trades_ds)
     resized = after_first.filter(pl.col("trade_id") == "t1").to_dicts()[0]
 
-    # OPERATOR OVERRIDE 2026-06-19: the v2 profile FORCES daily_rebalance_enabled=False
+    # The v2 profile forces daily_rebalance_enabled=False.
     # (the daily volatility adjuster is disabled), so run_continuous_demo_cycle resolves it
     # off even though the raw cfg requested True -> no resize occurs and the open trade qty
     # is unchanged. The resize MECHANISM itself stays covered by the continuous_rebalance
@@ -1204,6 +1204,87 @@ def test_live_v2_ships_without_server_stop_demo_paper_only() -> None:
         execution_event_router=None)
     assert rows[0]["stop_price"] == 0.0
     assert rows[0]["stop_loss_pct"] == cfg.stop_loss_pct
+
+
+def test_cycle_refreshes_btc_trend_gate_input_outside_tradable_universe(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The BTC regime gate is market context, not a tradable-universe member.
+
+    If BTC is missing/stale in the main universe kline frame, the cycle must still
+    load BTC separately for the gate and must not rewrite the main compact kline
+    cache with a BTC-only symbol set.
+    """
+    import liquidity_migration.continuous_demo as cd
+    from liquidity_migration.config import ResearchConfig
+
+    day0 = (1_700_000_000_000 // MS_PER_DAY) * MS_PER_DAY
+    signal_day = day0 + 31 * MS_PER_DAY
+    now = signal_day + 3 * MS_PER_HOUR
+    price = 100.0
+    btc_rows = []
+    for i in range(32):
+        price *= 1.01
+        btc_rows.append(
+            {
+                "ts_ms": day0 + i * MS_PER_DAY,
+                "symbol": "BTCUSDT",
+                "close": price,
+                "turnover_quote": 1_000_000_000.0,
+            }
+        )
+    btc_klines = pl.DataFrame(btc_rows)
+
+    def fake_resolve_cycle_universe(**_kwargs: object):
+        universe = pl.DataFrame(
+            [
+                {
+                    "symbol": "AAAUSDT",
+                    "listing_age_days": 365.0,
+                    "tick_size": 0.0001,
+                    "qty_step": 0.1,
+                    "min_order_qty": 0.1,
+                    "min_notional_value": 1.0,
+                    "max_market_order_qty": 10_000.0,
+                }
+            ],
+            infer_schema_length=None,
+        )
+        tickers = pl.DataFrame(
+            [{"symbol": "AAAUSDT", "mark_price": 100.0, "last_price": 100.0}],
+            infer_schema_length=None,
+        )
+        return universe, ["AAAUSDT"], tickers, "test"
+
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_klines(symbols: list[str], **kwargs: object):
+        calls.append((list(symbols), dict(kwargs)))
+        if symbols == ["BTCUSDT"]:
+            return btc_klines, {
+                "fetch_symbols": 1,
+                "fetched_rows": btc_klines.height,
+                "output_rows": btc_klines.height,
+            }
+        return pl.DataFrame(), {"fetch_symbols": 1, "output_rows": 0}
+
+    monkeypatch.setattr(cd, "_resolve_cycle_universe", fake_resolve_cycle_universe)
+    monkeypatch.setattr(cd, "_download_recent_1h_klines", fake_klines)
+
+    payload = cd.run_continuous_demo_cycle(
+        tmp_path / "continuous-btc-gate",
+        config=ResearchConfig(),
+        demo_config=ContinuousDemoCycleConfig(btc_trend_gate="uptrend"),
+        now_ms=now,
+    )
+
+    assert calls[0][0] == ["AAAUSDT"]
+    assert calls[1][0] == ["BTCUSDT"]
+    assert calls[1][1]["write_compact_cache"] is False
+    assert payload["btc_trend_gate_value"] > 0.0
+    assert payload["btc_trend_gate_allows_entry"] is True
+    assert payload["btc_trend_gate_btc_rows"] == btc_klines.height
+    assert payload["btc_trend_gate_btc_max_ts_ms"] == signal_day
 
 
 def test_daemon_constructs_without_network(tmp_path) -> None:
@@ -2051,7 +2132,7 @@ def test_continuous_live_config_golden_values() -> None:
     assert c.sizing_mode == "inverse_vol"
     assert c.target_vol_per_name == 0.01
     assert c.vol_weight_clamp == 2.0
-    assert c.daily_rebalance_enabled is False  # operator override 2026-06-19: daily vol adjuster disabled
+    assert c.daily_rebalance_enabled is False  # local target disables daily vol adjuster
     assert c.daily_rebalance_realized_vol_window_days == 90
     assert c.daily_rebalance_target_daily_vol == 0.045
     assert c.daily_rebalance_max_scale == 4.0

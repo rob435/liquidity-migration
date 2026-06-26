@@ -229,10 +229,8 @@ def _v11a_long_native_config() -> LongNativeConfig:
     confirmation (Bybit MAR 1.46->1.58, Binance 0.91->1.30, both DD lower,
     trades ~2x): universe 10->50, max_concurrent 5->10, vol
     targeting (vol_target_annual=0.60, floor 0.30, max_scale=1.25 — sizes the
-    book DOWN in high-BTC-vol regimes and up to 1.25x in calm ones; the cap was
-    1.0 until the volup125 promotion 2026-06-09). It is risk-engineering, not
-    a new signal (FC remains the alpha ceiling). See
-    docs/preregistration/div-promotion.md and git history for pre-div values.
+    book DOWN in high-BTC-vol regimes and up to 1.25x in calm ones). It is
+    risk-engineering, not a new signal; FC remains the alpha ceiling.
     """
     return LongNativeConfig(
         universe_size=50,  # div (was 10): wider book diversifies idiosyncratic risk
@@ -280,24 +278,18 @@ def _v11a_long_native_config() -> LongNativeConfig:
         vol_estimate_window_days=30,
         vol_floor_annual=0.30,
         max_position_weight=0.30,
-        # div: volatility targeting (Moreira-Muir) — scale the book by
-        # vol_target/BTC-realized-vol, floored at 0.30. volup125 (operator-promoted
-        # 2026-06-09): cap raised 1.0 -> 1.25, allowing MILD scale-up in calm-vol
-        # regimes (+24% relative return both venues at unchanged ret/DD/Sharpe,
-        # identical trade set; receipt
-        # docs/preregistration/long-volup-candidate-2026-06-09.md).
+        # Volatility targeting (Moreira-Muir): scale the book by
+        # vol_target/BTC-realized-vol, floored at 0.30 and capped at 1.25.
         enable_vol_target=True,
         vol_target_annual=0.60,
         vol_target_max_scale=1.25,
         vol_target_min_scale=0.30,
-        # TA1 atlas gate (2026-06-11, OPERATOR-DIRECTED wiring — owner override of the
-        # TA1 receipt's forward-only path; demo/paper only).
+        # Weekend size bonus.
         # weekend bonus -> 1.5x Sat/Sun size: the sweep WINNER for the LONG book
         # (long_regularity TA41: dMAR +0.25 bybit / +0.28 binance, Sharpe up on both).
         # The 30d cooldown was sweep-rejected here (hurts both venues: dMAR -0.28/-0.22;
         # it ships on the SHORT book instead — cooldown_days stays 7 above).
-        # In-sample-derived; sweep numbers are descriptive, never promotion evidence.
-        # Receipt: docs/preregistration/trade-atlas-2026-06-11.md.
+        # In-sample-derived; sweep numbers are descriptive.
         weekend_size_mult=1.5,
         cost_multiplier=3.0,
         require_full_pit_universe=False,
@@ -337,6 +329,7 @@ def _validate_long_demo_config(
     config: LongNativeDemoCycleConfig,
     strategy_config: LongNativeConfig | None = None,
 ) -> None:
+    strategy = strategy_config or _long_demo_event_config(config.strategy_profile)
     if config.strategy_profile not in LONG_DEMO_STRATEGY_PROFILES:
         raise ValueError(
             f"strategy_profile must be one of: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}"
@@ -362,11 +355,20 @@ def _validate_long_demo_config(
         raise ValueError("entry_leverage must be positive")
     if not 0.0 < config.max_projected_initial_margin_pct_equity <= 1.0:
         raise ValueError("max_projected_initial_margin_pct_equity must be in (0, 1]")
+    if (
+        abs(float(strategy.max_per_symbol_weight) - float(strategy.max_position_weight))
+        > 1e-12
+    ):
+        raise ValueError(
+            "long demo live sizing requires strategy.max_per_symbol_weight == "
+            "strategy.max_position_weight until the live order path explicitly "
+            "replicates the backtest per-symbol gross cap"
+        )
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
     margin_projection = projected_long_initial_margin_pct_equity(
         config,
-        strategy_config or _long_demo_event_config(config.strategy_profile),
+        strategy,
     )
     if (
         margin_projection["full_book_initial_margin_pct_equity"]
@@ -448,18 +450,24 @@ def _compute_long_order_sizing(
     demo: LongNativeDemoCycleConfig,
     strategy: LongNativeConfig,
     features: pl.DataFrame,
+    now_ms: int | None = None,
 ) -> tuple[float, float]:
     """Per-position notional fraction of equity after the de-risk-only vol-target scalar
     (long-sleeve-9 extraction — numerically identical to the prior inline block).
 
     Applies the SAME de-risk-only vol-target scalar the backtest uses, so the live book
     sizes DOWN in high-BTC-vol regimes (never up). ``btc_rv_30`` is a trailing feature
-    broadcast across symbols; take the latest non-null. Shared helper => no drift.
+    broadcast across symbols; take the latest non-null closed row when ``now_ms`` is
+    provided. Shared helper => no drift.
     Returns ``(order_notional_pct_equity_after_scale, vol_target_scale)``."""
     order_notional_pct_equity = target_long_order_notional_pct_equity(demo, strategy)
     latest_btc_rv: float | None = None
     if "btc_rv_30" in features.columns and not features.is_empty():
-        _rv = features.sort("ts_ms")["btc_rv_30"].drop_nulls()
+        rv_features = features
+        if now_ms is not None:
+            # daily_bars stamps rows at UTC day-end; rows after now are not closed yet.
+            rv_features = rv_features.filter(pl.col("ts_ms") <= int(now_ms))
+        _rv = rv_features.sort("ts_ms")["btc_rv_30"].drop_nulls()
         if len(_rv) > 0:
             latest_btc_rv = float(_rv[-1])
     vol_target_scale = _vol_target_scale(strategy, latest_btc_rv)
@@ -584,7 +592,7 @@ def run_long_native_demo_cycle(
         all_orders = read_dataset(root, orders_dataset)
         margin_projection = projected_long_initial_margin_pct_equity(demo, strategy)
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
-            demo=demo, strategy=strategy, features=features)
+            demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms)
 
         cycle_trade_rows: list[dict[str, Any]] = []
         cycle_order_rows: list[dict[str, Any]] = []
@@ -1076,6 +1084,7 @@ def _select_long_entry_candidates(
         "stale_signal": 0,
         "already_open": 0,
         "cooldown": 0,
+        "entry_delay": 0,
         "no_retrace_yet": 0,
         "no_live_price": 0,
     }
@@ -1091,30 +1100,41 @@ def _select_long_entry_candidates(
     # long-sleeve-1: a daily signal's ts_ms is the day-END stamp, so the current still-forming
     # bar has a FUTURE ts. Require int(ts) <= now_ms (closed bar) — firing FC on a not-yet-closed
     # bar is look-ahead vs the backtest's closed-bar signal (a no-look-ahead correctness gate).
-    # Count stale drops explicitly so a cycle where every closed-bar signal aged out
-    # reports skipped_stale_signal>0 rather than masquerading as skipped_no_signal
-    # (audit-iter3 backlog; observability only — no effect on selection/sizing/PIT).
-    closed_ts = [
-        ts for ts in features["ts_ms"].unique().to_list()
+    # Count stale drops only for actual recent FC signals. Old historical feature
+    # rows without FC should not make a flat cycle look stale-signal blocked.
+    closed_ts = sorted(
+        int(ts)
+        for ts in features["ts_ms"].unique().to_list()
         if ts is not None and int(ts) <= now_ms
-    ]
+    )
+    recent_closed_ts = closed_ts[-2:]
+    rows_by_ts = {
+        ts: features.filter(pl.col("ts_ms") == ts).to_dicts()
+        for ts in recent_closed_ts
+    }
     eligible_ts = []
-    for ts in closed_ts:
-        if (now_ms - int(ts)) > SIGNAL_FRESHNESS_MS:
-            skips["stale_signal"] += 1
+    for ts in recent_closed_ts:
+        fc_signal_count = 0
+        for row in rows_by_ts.get(ts, []):
+            pattern, _stop_pct, _tp_pct, _hold_days = _classify_entry(row, strategy)
+            if pattern == "fomo_chase":
+                fc_signal_count += 1
+        if fc_signal_count == 0:
+            continue
+        if (now_ms - ts) > SIGNAL_FRESHNESS_MS:
+            skips["stale_signal"] += fc_signal_count
         else:
             eligible_ts.append(ts)
-    eligible_ts.sort()
     if not eligible_ts:
-        # "no_signal" only when there were no closed-bar signals at all; if signals
-        # existed but all aged out, stale_signal already records it.
+        # "no_signal" means no recent closed-bar FC signals; if FC signals existed
+        # but all aged out, stale_signal already records it.
         if skips["stale_signal"] == 0:
             skips["no_signal"] = 1
         return [], skips
 
     candidates: list[dict[str, Any]] = []
     for ts in eligible_ts:
-        rows_today = features.filter(pl.col("ts_ms") == ts).to_dicts()
+        rows_today = rows_by_ts.get(ts, [])
         for row in rows_today:
             pattern, stop_pct, tp_pct, hold_days = _classify_entry(row, strategy)
             if pattern is None:
@@ -1128,6 +1148,10 @@ def _select_long_entry_candidates(
                 continue
             if cooldown_until.get(symbol, 0) > now_ms:
                 skips["cooldown"] += 1
+                continue
+            first_entry_check_ms = int(ts) + max(1, int(strategy.entry_delay_hours)) * MS_PER_HOUR
+            if now_ms < first_entry_check_ms:
+                skips["entry_delay"] += 1
                 continue
             live_price = price_by_symbol.get(symbol, 0.0)
             if live_price <= 0.0:
@@ -1186,6 +1210,7 @@ def _select_long_entry_candidates(
                 "signal_close": signal_close,
                 "live_price": live_price,
                 "retrace_threshold": retrace_threshold,
+                "first_entry_check_ts_ms": first_entry_check_ms,
                 "sniper_deadline_ms": deadline_ms,
                 "entry_reason": entry_reason,
                 "entry_ready_ts_ms": now_ms,

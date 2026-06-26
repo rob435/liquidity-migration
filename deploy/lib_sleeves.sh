@@ -1,10 +1,10 @@
-# Shared per-sleeve kill-switch helpers — sourced by deploy_vps_live.sh + verify_vps_live.sh
+# Shared per-sleeve kill-switch helpers - sourced by deploy_vps_live.sh + verify_vps_live.sh
 # so the sleeve->units mapping and the on/off predicate live in ONE place (no drift between
 # deploy and verify). Toggles come from deploy/sleeves.env (+ host override). bash-3.2-safe
 # (no associative arrays). See deploy/sleeves.env for semantics.
 
 # Space-separated unit lists per sleeve (entry/exit daemons + paper shadow). The risk service
-# is intentionally NOT here — it always runs and protects every sleeve's open positions.
+# is intentionally NOT here - it always runs and protects every sleeve's open positions.
 # The daily SHORT sleeve was ERASED from the system (operator order 2026-06-11);
 # its units are gone and the deploy actively removes them from a live host.
 # Continuous is split: the DEMO order-submitting sleeve vs the no-order PAPER
@@ -26,7 +26,7 @@ lm_load_sleeve_toggles() {
     [ -f "$_lm_dir/sleeves.env" ] && . "$_lm_dir/sleeves.env"
     [ -f /etc/liquidity-migration/sleeves.env ] && . /etc/liquidity-migration/sleeves.env
     # Fallbacks if NEITHER file set a toggle (a stripped checkout): EVERY sleeve
-    # fails safe to OFF (audit 2026-06-12 round 3 — LONG previously failed OPEN,
+    # fails safe to OFF (audit 2026-06-12 round 3 - LONG previously failed OPEN,
     # so an accidentally deleted/renamed sleeves.env would have enabled and
     # restarted the order-submitting long demo against the operator's LONG=off
     # intent). The committed deploy/sleeves.env is the real source of truth;
@@ -38,7 +38,7 @@ lm_load_sleeve_toggles() {
 }
 
 # sleeve_on <value> -> 0 (true) if the toggle means "run this sleeve".
-# An EMPTY/unset value is OFF (fail-safe, round 3) — callers load toggles first.
+# An EMPTY/unset value is OFF (fail-safe, round 3) - callers load toggles first.
 sleeve_on() {
     case "${1:-off}" in
         on|ON|On|1|true|TRUE|yes|YES) return 0 ;;
@@ -72,11 +72,14 @@ verify_timer() {
             if systemctl is-active --quiet "$_vt_u" 2>/dev/null; then
                 echo "verify failed: $_vt_u timer is OFF in sleeves.env but still active" >&2; return 1
             fi
+            if systemctl is-enabled --quiet "$_vt_u" 2>/dev/null; then
+                echo "verify failed: $_vt_u timer is OFF in sleeves.env but still enabled" >&2; return 1
+            fi
         done
     fi
 }
 
-# apply_sleeve_enable <flag-value> <unit...> — on: `systemctl enable` each unit; off:
+# apply_sleeve_enable <flag-value> <unit...> - on: `systemctl enable` each unit; off:
 # `systemctl disable --now` each (stops it + survives the deploy). Default on => identical
 # to the previous unconditional enables.
 apply_sleeve_enable() {
@@ -89,7 +92,7 @@ apply_sleeve_enable() {
     fi
 }
 
-# verify_sleeve <flag-value> <unit...> — on: each unit must be active AND enabled; off: each
+# verify_sleeve <flag-value> <unit...> - on: each unit must be active AND enabled; off: each
 # unit must NOT be active (the kill-switch actually stopped it). Returns 1 (fail-loud) on mismatch.
 verify_sleeve() {
     _vs_flag="$1"; shift
@@ -102,6 +105,9 @@ verify_sleeve() {
         for _vs_u in "$@"; do
             if systemctl is-active --quiet "$_vs_u" 2>/dev/null; then
                 echo "verify failed: $_vs_u is OFF in sleeves.env but still active" >&2; return 1
+            fi
+            if systemctl is-enabled --quiet "$_vs_u" 2>/dev/null; then
+                echo "verify failed: $_vs_u is OFF in sleeves.env but still enabled" >&2; return 1
             fi
         done
     fi

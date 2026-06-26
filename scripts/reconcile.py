@@ -35,10 +35,15 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -154,8 +159,14 @@ def _today() -> dt.date:
 
 
 def _py() -> str:
-    venv = REPO / ".venv" / "bin" / "python"
-    return str(venv) if venv.exists() else sys.executable
+    candidates = (
+        REPO / ".venv" / "Scripts" / "python.exe",
+        REPO / ".venv" / "bin" / "python",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
 
 
 def _cli(*args: str) -> list[str]:
@@ -168,6 +179,51 @@ def _script(name: str, *args: str) -> list[str]:
 
 def _have_rsync() -> bool:
     return shutil.which("rsync") is not None
+
+
+def _have_scp() -> bool:
+    return shutil.which("scp") is not None
+
+
+def _scp_ssh_options() -> list[str]:
+    raw_key = os.environ.get("LIQMIG_VPS_SSH_KEY", "").strip()
+    key = Path(raw_key).expanduser() if raw_key else Path.home() / ".ssh" / "liqmig_deploy_20260609"
+    identity = ["-i", str(key), "-o", "IdentitiesOnly=yes"] if key.exists() else []
+    return [*identity, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
+
+
+def _remote_dir_state(step: Step, host: str, path: str, ssh_options: list[str]) -> str:
+    """Return nonempty/empty/absent/error for a remote dataset directory."""
+    if getattr(step, "dry_run", False):
+        return "nonempty"
+    quoted = shlex.quote(path)
+    cmd = (
+        f"if [ ! -d {quoted} ]; then echo absent; "
+        f"elif find {quoted} -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then echo nonempty; "
+        "else echo empty; fi"
+    )
+    rc, out = step.run_capture(["ssh", *ssh_options, host, cmd], check=False)
+    if rc != 0:
+        return "error"
+    state = out.strip().splitlines()[-1] if out.strip() else ""
+    return state if state in {"nonempty", "empty", "absent"} else "error"
+
+
+def _remote_nonempty_dir(step: Step, host: str, path: str, ssh_options: list[str]) -> bool:
+    return _remote_dir_state(step, host, path, ssh_options) == "nonempty"
+
+
+def _remove_local_dataset(dest: Path, *, dry_run: bool) -> None:
+    if dry_run:
+        return
+    if dest.exists():
+        shutil.rmtree(dest)
+
+
+def _remote_file_exists(step: Step, host: str, path: str, ssh_options: list[str]) -> bool:
+    if getattr(step, "dry_run", False):
+        return True
+    return step.run(["ssh", *ssh_options, host, f"test -f {shlex.quote(path)}"], check=False) == 0
 
 
 def _read_signal_days(root: Path, dataset: str) -> list[int]:
@@ -186,25 +242,56 @@ def _read_signal_days(root: Path, dataset: str) -> list[int]:
 def pull_sleeve(step: Step, host: str, sleeve: str) -> None:
     spec = SLEEVES[sleeve]
     step.banner(f"Pull {spec['label']} demo+paper ledgers from {host}")
-    if not _have_rsync():
-        print("⚠️  rsync not found — skipping pull; using local ledgers as-is.")
+    use_rsync = _have_rsync()
+    use_scp = not use_rsync and _have_scp()
+    if not use_rsync and not use_scp:
+        print("⚠️  neither rsync nor scp found — skipping pull; using local ledgers as-is.")
         return
+    if use_scp:
+        print("rsync not found; using scp fallback for VPS ledger pull.")
+    scp_options = _scp_ssh_options()
     for role in ("demo", "paper"):
         remote_sub, local, datasets = spec[role]  # type: ignore[misc]
         for ds in datasets:
-            remote = f"{host}:{VPS_BASE}/{remote_sub}/{ds}/"
+            remote_path = f"{VPS_BASE}/{remote_sub}/{ds}"
+            remote_dir = f"{host}:{remote_path}/"
             dest = REPO / local / ds
+            state = _remote_dir_state(step, host, remote_path, scp_options)
+            if state == "error":
+                raise SystemExit(f"could not inspect remote dataset: {remote_path}")
+            if state in {"absent", "empty"}:
+                _remove_local_dataset(dest, dry_run=step.dry_run)
+                print(f"  remote dataset {state}: {remote_path} — local mirror cleared")
+                continue
+            _remove_local_dataset(dest, dry_run=step.dry_run)
             dest.mkdir(parents=True, exist_ok=True)
-            # -a archive, -z compress, -q quiet; no --delete (never clobber local-only
-            # history). -q (not --info=stats0) for macOS openrsync 2.6.9 + Linux rsync 3.x.
-            step.run(["rsync", "-azq", remote, f"{dest}/"], check=False)
+            if use_rsync:
+                # -a archive, -z compress, -q quiet; --delete makes the local
+                # live-ledger mirror match the VPS after reset/compaction.
+                # -q (not --info=stats0) for macOS openrsync 2.6.9 + Linux rsync 3.x.
+                step.run(["rsync", "-azq", "--delete", remote_dir, f"{dest}/"], check=True)
+            else:
+                step.run(
+                    ["scp", "-q", *scp_options, "-r", f"{remote_dir}*", str(dest)],
+                    check=True,
+                )
     # extra single files (rmom panel, WS kline store) live under the demo root.
     demo_remote, demo_local, _ = spec["demo"]  # type: ignore[misc]
     for rel in spec["extra_files"]:  # type: ignore[union-attr]
-        remote = f"{host}:{VPS_BASE}/{demo_remote}/{rel}"
+        remote_path = f"{VPS_BASE}/{demo_remote}/{rel}"
+        remote = f"{host}:{remote_path}"
         dest = REPO / demo_local / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        step.run(["rsync", "-azq", remote, str(dest)], check=False)
+        if use_rsync:
+            step.run(["rsync", "-azq", remote, str(dest)], check=True)
+        else:
+            if not _remote_file_exists(step, host, remote_path, scp_options):
+                print(f"  remote file absent: {remote_path} — skipping")
+                continue
+            step.run(
+                ["scp", "-q", *scp_options, remote, str(dest)],
+                check=True,
+            )
 
 
 def refresh_rmom(step: Step, root: str, today: dt.date) -> None:

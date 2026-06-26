@@ -17,7 +17,7 @@ SPEC.loader.exec_module(equity_curves)
 
 def test_continuous_is_runner_sleeve_and_promoted_profile() -> None:
     # CONTINUOUS is both an equity-tool runner sleeve AND (since the 2026-06-15
-    # operator-override promotion) a promoted profile. demo/paper only; Tier-3 unmet.
+    # registry) an active profile.
     assert set(equity_curves.RUNNERS) == {"long", "continuous"}
     assert promoted.PROFILES == {
         "long": promoted.long_profile,
@@ -105,6 +105,9 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
         render_only=True,
         frozen_fallback=fallback,
         chart_leverage=2.5,
+        component_take_profit_pct=0.12,
+        btc_risk_sizing=True,
+        backtest_leverage=5.0,
     )
 
     assert captured == {
@@ -116,6 +119,9 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
         "frozen_fallback": fallback,
         "data_root": root,
         "chart_leverage": 2.5,
+        "component_take_profit_pct": 0.12,
+        "btc_risk_sizing": True,
+        "backtest_leverage": 5.0,
     }
     assert payload["run_label"] == "continuous_demo_paper_research_stage"
     assert payload["summary"]["total_return"] == 0.1

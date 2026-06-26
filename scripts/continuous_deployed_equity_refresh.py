@@ -25,6 +25,8 @@ import datetime as dt
 import json
 import os
 import sys
+import time
+from collections import defaultdict
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,12 @@ from liquidity_migration.continuous_component_sources import (  # noqa: E402
     CONTINUOUS_COMPONENT_SOURCES,
     ContinuousComponentSource,
     load_continuous_component_source,
+)
+from liquidity_migration.continuous_btc_risk import (  # noqa: E402
+    BTC_RISK_MIN_PRIOR,
+    CTRL_BTC_RISK_70_90_35_ID,
+    BtcRiskLiveSizer,
+    btc_context_by_day,
 )
 from liquidity_migration.continuous_forward_replay import (  # noqa: E402
     FROZEN_FORWARD_CONFIG,
@@ -117,6 +125,22 @@ def config_from_report(path: Path) -> ContinuousEventConfig:
     return ContinuousEventConfig(**kwargs)
 
 
+def _with_optional_component_overrides(
+    cfg: ContinuousEventConfig,
+    *,
+    component_take_profit_pct: float | None = None,
+    backtest_leverage: float = 1.0,
+) -> ContinuousEventConfig:
+    if backtest_leverage <= 0.0:
+        raise ValueError("--backtest-leverage must be positive")
+    updates: dict[str, Any] = {}
+    if component_take_profit_pct is not None:
+        updates["take_profit_pct"] = float(component_take_profit_pct)
+    if abs(float(backtest_leverage) - 1.0) > 1e-12:
+        updates["gross_exposure"] = float(cfg.gross_exposure) * float(backtest_leverage)
+    return replace(cfg, **updates) if updates else cfg
+
+
 def frozen_config(
     component: str,
     venue: str,
@@ -124,6 +148,8 @@ def frozen_config(
     end_date: str,
     start_date: str | None = None,
     fallback_root: Path | None = None,
+    component_take_profit_pct: float | None = None,
+    backtest_leverage: float = 1.0,
 ) -> ContinuousEventConfig:
     spec = CONTINUOUS_COMPONENT_SOURCES[component]
     report_path = spec.root / venue / spec.cell / "continuous_report.json"
@@ -137,7 +163,11 @@ def frozen_config(
     cfg = replace(config_from_report(report_path), end_date=end_date)
     if start_date is not None:
         cfg = replace(cfg, start_date=start_date)
-    return cfg
+    return _with_optional_component_overrides(
+        cfg,
+        component_take_profit_pct=component_take_profit_pct,
+        backtest_leverage=backtest_leverage,
+    )
 
 
 # The frozen feature-panel filename is a CACHE key, not a hard dependency. It was
@@ -317,13 +347,127 @@ def instrument_inputs(
     return rets, fund
 
 
-def component_report_matches_window(payload: dict[str, Any], *, start_date: str | None, end_date: str) -> bool:
+def component_report_matches_window(
+    payload: dict[str, Any],
+    *,
+    start_date: str | None,
+    end_date: str,
+    component_take_profit_pct: float | None = None,
+    expected_gross_exposure: float | None = None,
+) -> bool:
     cfg = payload.get("config") or {}
     if str(cfg.get("end_date")) != end_date:
         return False
     if start_date is not None and str(cfg.get("start_date")) != start_date:
         return False
+    if component_take_profit_pct is not None:
+        if abs(float(cfg.get("take_profit_pct") or 0.0) - float(component_take_profit_pct)) > 1e-12:
+            return False
+    if expected_gross_exposure is not None:
+        if abs(float(cfg.get("gross_exposure") or 0.0) - float(expected_gross_exposure)) > 1e-12:
+            return False
     return True
+
+
+def _btc_klines(root: Path) -> pl.DataFrame:
+    return (
+        pl.scan_parquet(str(root / "klines_1h" / "**" / "*.parquet"))
+        .filter(pl.col("symbol") == "BTCUSDT")
+        .select("ts_ms", "close")
+        .collect()
+        .sort("ts_ms")
+    )
+
+
+def _component_decision_rows(
+    *,
+    output_root: Path,
+    venue: str,
+) -> tuple[list[dict[str, Any]], dict[tuple[str, int], int]]:
+    component_count: dict[tuple[str, int], int] = defaultdict(int)
+    rows_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    for component in WINNER_WEIGHTS:
+        spec = CONTINUOUS_COMPONENT_SOURCES[component]
+        trades_path = output_root / "components" / venue / spec.cell / "continuous_trades.csv"
+        if not trades_path.exists():
+            continue
+        trades = pl.read_csv(trades_path)
+        if trades.is_empty():
+            continue
+        for row in trades.select("symbol", "entry_signal_ts_ms").iter_rows(named=True):
+            symbol = str(row["symbol"])
+            signal_ts = int(row["entry_signal_ts_ms"])
+            key = (symbol, signal_ts)
+            component_count[key] += 1
+            rows_by_key.setdefault(key, {"symbol": symbol, "signal_ts_ms": signal_ts})
+    rows = sorted(rows_by_key.values(), key=lambda r: (int(r["signal_ts_ms"]), str(r["symbol"])))
+    return rows, component_count
+
+
+def btc_risk_size_lookup(
+    venue: str,
+    *,
+    decision_component_root: Path,
+    output_root: Path,
+    data_root: Path,
+) -> tuple[dict[tuple[str, int], float], dict[str, Any]]:
+    """Score CTRL_BTC_RISK_70_90_35 chronologically across ensemble decisions."""
+    decisions, component_count = _component_decision_rows(output_root=decision_component_root, venue=venue)
+    context = btc_context_by_day(_btc_klines(data_root))
+    sizer = BtcRiskLiveSizer(
+        output_root / "btc_risk" / venue / "btc_risk_sizing_state.parquet",
+        low=0.70,
+        high=0.90,
+        tail_mult=0.35,
+        min_prior=BTC_RISK_MIN_PRIOR,
+    )
+    by_ts: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in decisions:
+        by_ts[int(row["signal_ts_ms"])].append(row)
+
+    rows: list[dict[str, Any]] = []
+    lookup: dict[tuple[str, int], float] = {}
+    stack_values: list[float] = []
+    tail_selected = 0
+    warmup = 0
+    for signal_ts in sorted(by_ts):
+        scored, _cycle = sizer.score_decisions(by_ts[signal_ts], btc_context=context)
+        for (symbol, ts), score in sorted(scored.items(), key=lambda item: (item[0][1], item[0][0])):
+            mult = float(score.get("stack_mult", 1.0))
+            lookup[(symbol, int(ts))] = mult
+            stack_values.append(mult)
+            tail_selected += int(bool(score.get("tail_selected")))
+            warmup += int(bool(score.get("score_warmup")))
+            rows.append(
+                {
+                    "venue": venue,
+                    "symbol": symbol,
+                    "signal_ts_ms": int(ts),
+                    "signal_date": dt.datetime.fromtimestamp(int(ts) / 1000, tz=dt.timezone.utc).date().isoformat(),
+                    "component_count": component_count.get((symbol, int(ts)), 0),
+                    "btc_risk_score": score.get("btc_risk_score"),
+                    "score_warmup": bool(score.get("score_warmup")),
+                    "tail_selected": bool(score.get("tail_selected")),
+                    "stack_mult": mult,
+                    "prior_decision_count": score.get("prior_decision_count"),
+                }
+            )
+    sizer.save()
+    out_csv = output_root / "btc_risk" / venue / "btc_risk_multipliers.csv"
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    if rows:
+        pl.DataFrame(rows).write_csv(out_csv)
+    else:
+        out_csv.write_text("", encoding="utf-8")
+    return lookup, {
+        "arm_id": CTRL_BTC_RISK_70_90_35_ID,
+        "decision_keys": len(decisions),
+        "tail_selected": tail_selected,
+        "warmup": warmup,
+        "min_stack_mult": float(min(stack_values)) if stack_values else 1.0,
+        "mean_stack_mult": float(sum(stack_values) / len(stack_values)) if stack_values else 1.0,
+        "multipliers_csv": str(out_csv),
+    }
 
 
 def monthly_trade_counts(*, output_root: Path, venue: str) -> pl.DataFrame:
@@ -388,6 +532,197 @@ def chart_leverages(extra_leverage: float | None) -> tuple[float, ...]:
     return tuple(values)
 
 
+def _component_report_payloads(output_root: Path, venue: str) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    components_root = output_root / "components" / venue
+    for report_path in sorted(components_root.glob("*/continuous_report.json")):
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        payload["_component"] = report_path.parent.name
+        payload["_report_path"] = str(report_path)
+        payloads.append(payload)
+    return payloads
+
+
+def _component_report_rows(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for payload in payloads:
+        cfg = payload.get("config") or {}
+        metrics = ((payload.get("metrics") or {}).get("full") or {})
+        rows.append(
+            {
+                "component": payload.get("_component"),
+                "config_hash": payload.get("config_hash"),
+                "trades": payload.get("n_trades"),
+                "funding_mode": payload.get("funding_mode"),
+                "take_profit_pct": cfg.get("take_profit_pct"),
+                "gross_exposure": cfg.get("gross_exposure"),
+                "total_return_pct": None
+                if metrics.get("total_return") is None
+                else round(float(metrics["total_return"]) * 100.0, 2),
+                "max_drawdown_pct": None
+                if metrics.get("max_drawdown") is None
+                else round(float(metrics["max_drawdown"]) * 100.0, 2),
+            }
+        )
+    return rows
+
+
+def write_continuous_equity_report(
+    *,
+    venue: str,
+    output_root: Path,
+    out_dir: Path,
+    data_root: Path,
+    end_date: str,
+    start_date: str | None,
+    venue_summary: dict[str, Any],
+    df: pl.DataFrame,
+    chart_leverage: float | None,
+    component_take_profit_pct: float | None,
+    btc_risk_sizing: bool,
+    backtest_leverage: float,
+) -> None:
+    payloads = _component_report_payloads(output_root, venue)
+    component_rows = _component_report_rows(payloads)
+    first_payload = payloads[0] if payloads else {}
+    first_cfg = first_payload.get("config") or {}
+    stats_1x = venue_summary.get("1x") or stats(df)
+    inferred_tp = component_take_profit_pct
+    if inferred_tp is None and first_cfg.get("take_profit_pct") is not None:
+        inferred_tp = float(first_cfg["take_profit_pct"])
+    funding_modes = sorted({str(row.get("funding_mode")) for row in component_rows if row.get("funding_mode")})
+    final_equity = None if df.is_empty() else float(df["equity"][-1])
+    summary = {
+        "run_label": "exploratory",
+        "strategy_run_label": "continuous_demo_paper_research_stage",
+        "venue": venue,
+        "data_root": str(data_root),
+        "output_dir": str(out_dir),
+        "start_date": start_date,
+        "end_date": end_date,
+        "window": stats_1x.get("window"),
+        "component_take_profit_pct": inferred_tp,
+        "btc_risk_sizing": btc_risk_sizing,
+        "backtest_leverage": backtest_leverage,
+        "chart_leverage": chart_leverage,
+        "final_equity": final_equity,
+        "stats": stats_1x,
+        "funding_modes": funding_modes,
+        "cost_model": {
+            "taker_fee_bps": first_cfg.get("taker_fee_bps"),
+            "spread_bps": first_cfg.get("spread_bps"),
+            "impact_coef_bps": first_cfg.get("impact_coef_bps"),
+            "impact_exponent": first_cfg.get("impact_exponent"),
+            "use_funding": first_cfg.get("use_funding"),
+            "funding_modes": funding_modes,
+        },
+        "components": component_rows,
+        "artifacts": {
+            "equity_curve": str(out_dir / "continuous_equity.csv"),
+            "monthly": str(out_dir / "continuous_monthly.csv"),
+            "png": str(out_dir / "continuous_equity_btc.png"),
+            "btc_risk_multipliers": str(output_root / "btc_risk" / venue / "btc_risk_multipliers.csv"),
+        },
+    }
+    (out_dir / "continuous_equity_summary.json").write_text(
+        json.dumps(summary, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    cost = summary["cost_model"]
+    rows_md = [
+        "| Component | Trades | Funding | TP | Gross Exposure | Return | Max DD |",
+        "|---|---:|---|---:|---:|---:|---:|",
+    ]
+    for row in component_rows:
+        rows_md.append(
+            "| {component} | {trades} | {funding_mode} | {tp} | {gross} | {ret} | {dd} |".format(
+                component=row.get("component") or "-",
+                trades=row.get("trades") if row.get("trades") is not None else "-",
+                funding_mode=row.get("funding_mode") or "-",
+                tp="-" if row.get("take_profit_pct") is None else f"{float(row['take_profit_pct']):.4g}",
+                gross="-" if row.get("gross_exposure") is None else f"{float(row['gross_exposure']):.4g}",
+                ret="-" if row.get("total_return_pct") is None else f"{float(row['total_return_pct']):.2f}%",
+                dd="-" if row.get("max_drawdown_pct") is None else f"{float(row['max_drawdown_pct']):.2f}%",
+            )
+        )
+    def fmt_stat(key: str, suffix: str = "") -> str:
+        value = stats_1x.get(key)
+        return "n/a" if value is None else f"{float(value):.2f}{suffix}"
+
+    report = "\n".join(
+        [
+            "# Continuous Equity Report",
+            "",
+            "Run label: exploratory",
+            "Strategy run label: continuous_demo_paper_research_stage",
+            f"Venue: {venue}",
+            f"Data root: {data_root}",
+            f"Window: {stats_1x.get('window')}",
+            f"End date: {end_date}",
+            "",
+            "## Method",
+            "",
+            (
+                "Official equity-curve runner: scripts/equity_curves.sh -> "
+                "scripts/equity_curves.py -> scripts/continuous_deployed_equity_refresh.py."
+            ),
+            f"Component TP: {inferred_tp}",
+            f"BTC-risk sizing: {btc_risk_sizing}",
+            f"Modeled backtest leverage: {backtest_leverage:g}x",
+            f"Chart leverage: {chart_leverage:g}x" if chart_leverage is not None else "Chart leverage: none",
+            "",
+            "## Metrics",
+            "",
+            f"Final equity: {final_equity:.10f}" if final_equity is not None else "Final equity: n/a",
+            f"Total return: {fmt_stat('total_return_pct', '%')}",
+            f"Annualized return: {fmt_stat('annualized_pct', '%')}",
+            f"Max drawdown: {fmt_stat('max_drawdown_pct', '%')}",
+            f"MAR: {fmt_stat('mar')}",
+            f"Sharpe daily annualized: {fmt_stat('sharpe_daily_ann')}",
+            f"Worst day: {fmt_stat('worst_day_pct', '%')}",
+            "",
+            "## Cost Model",
+            "",
+            f"Taker fee bps: {cost.get('taker_fee_bps')}",
+            f"Spread bps: {cost.get('spread_bps')}",
+            f"Impact coef bps: {cost.get('impact_coef_bps')}",
+            f"Impact exponent: {cost.get('impact_exponent')}",
+            f"Funding modeled: {cost.get('use_funding')}",
+            f"Funding modes: {', '.join(funding_modes) if funding_modes else 'unknown'}",
+            "",
+            "## Split And OOS",
+            "",
+            (
+                "Split metrics: component reports retain their configured split_date and full/early/recent "
+                "metrics where available; this equity curve is a diagnostic portfolio render, not a new "
+                "promotion split study."
+            ),
+            (
+                "OOS window: none for this run. Continuous remains demo/paper research-stage; forward demo/paper "
+                "is the decision surface."
+            ),
+            "",
+            "## Components",
+            "",
+            *rows_md,
+            "",
+            "## Artifacts",
+            "",
+            f"Equity curve: {out_dir / 'continuous_equity.csv'}",
+            f"Monthly: {out_dir / 'continuous_monthly.csv'}",
+            f"PNG: {out_dir / 'continuous_equity_btc.png'}",
+            f"Summary JSON: {out_dir / 'continuous_equity_summary.json'}",
+            f"BTC-risk multipliers: {output_root / 'btc_risk' / venue / 'btc_risk_multipliers.csv'}",
+            "",
+        ]
+    )
+    (out_dir / "continuous_equity_report.md").write_text(report, encoding="utf-8")
+
+
 def run_components(
     venue: str,
     *,
@@ -396,6 +731,9 @@ def run_components(
     start_date: str | None = None,
     frozen_fallback: Path | None = None,
     data_root: Path | None = None,
+    component_take_profit_pct: float | None = None,
+    backtest_leverage: float = 1.0,
+    size_mult_lookup: dict[tuple[str, int], float] | None = None,
 ) -> dict[str, Any]:
     data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
@@ -403,27 +741,34 @@ def run_components(
         spec = CONTINUOUS_COMPONENT_SOURCES[component]
         cell_dir = output_root / "components" / venue / spec.cell
         report_path = cell_dir / "continuous_report.json"
-        if report_path.exists():
+        cfg = frozen_config(
+            component,
+            venue,
+            end_date=end_date,
+            start_date=start_date,
+            fallback_root=frozen_fallback,
+            component_take_profit_pct=component_take_profit_pct,
+            backtest_leverage=backtest_leverage,
+        )
+        t0 = time.time()
+        if report_path.exists() and size_mult_lookup is None:
             payload = json.loads(report_path.read_text(encoding="utf-8"))
-            resumed = component_report_matches_window(payload, start_date=start_date, end_date=end_date)
+            resumed = component_report_matches_window(
+                payload,
+                start_date=start_date,
+                end_date=end_date,
+                component_take_profit_pct=component_take_profit_pct,
+                expected_gross_exposure=float(cfg.gross_exposure),
+            )
             if not resumed:
-                cfg = frozen_config(
-                    component,
-                    venue,
-                    end_date=end_date,
-                    start_date=start_date,
-                    fallback_root=frozen_fallback,
-                )
                 payload = run_continuous_event_research(data_root, config=cfg, report_dir=cell_dir)
         else:
-            cfg = frozen_config(
-                component,
-                venue,
-                end_date=end_date,
-                start_date=start_date,
-                fallback_root=frozen_fallback,
+            payload = run_continuous_event_research(
+                data_root,
+                config=cfg,
+                report_dir=cell_dir,
+                size_mult_lookup=size_mult_lookup,
             )
-            payload = run_continuous_event_research(data_root, config=cfg, report_dir=cell_dir)
             resumed = False
         meta[component] = {
             "config_hash": payload["config_hash"],
@@ -431,6 +776,7 @@ def run_components(
             "funding_mode": payload["funding_mode"],
             "skips": payload.get("skips"),
             "resumed": resumed,
+            "seconds": round(time.time() - t0, 1),
         }
         print(
             f"[{venue}] component {component}: trades={payload['n_trades']} "
@@ -450,6 +796,8 @@ def render_curves(
     venue_summary: dict[str, Any],
     monthly_trades: pl.DataFrame,
     leverage: float | None = 4.0,
+    backtest_leverage: float = 1.0,
+    btc_risk_sizing: bool = False,
 ) -> None:
     for mult in chart_leverages(leverage):
         tag = "" if mult == 1.0 else f"_{mult:g}x"
@@ -464,10 +812,20 @@ def render_curves(
         equity.write_csv(out_dir / f"continuous_equity{tag}.csv")
         monthly = monthly_returns_with_trades(equity, monthly_trades)
         monthly.write_csv(out_dir / f"continuous_monthly{tag}.csv")
-        name = "Continuous (deployed cfg)" if mult == 1.0 else f"Continuous (deployed cfg) {mult:g}x"
+        modeled = "" if abs(float(backtest_leverage) - 1.0) <= 1e-12 else f", modeled {backtest_leverage:g}x"
+        risk = " + BTC-risk sizing" if btc_risk_sizing else ""
+        name = (
+            f"Continuous (deployed cfg{risk}{modeled})"
+            if mult == 1.0
+            else f"Continuous (deployed cfg{risk}{modeled}) {mult:g}x chart"
+        )
         sub = "IN-SAMPLE RESEARCH refresh to June 2026 data (window spent; forward demo is the arbiter) — not a promotion claim"
+        if abs(float(backtest_leverage) - 1.0) > 1e-12:
+            sub += f" | modeled backtest leverage {backtest_leverage:g}x: component notional/costs/funding and hedge cap scaled"
         if mult != 1.0:
             sub += f" | {mult:g}x = pure leverage on the same returns; margin/liquidation NOT modeled"
+        title_modeled = "" if abs(float(backtest_leverage) - 1.0) <= 1e-12 else f", modeled {backtest_leverage:g}x"
+        title_chart = "" if mult == 1.0 else f", {mult:g}x chart"
         meta = _write_equity_benchmark_chart(
             out_dir,
             root=out_dir,
@@ -476,14 +834,18 @@ def render_curves(
             monthly=monthly,
             png_name=f"continuous_equity_btc{tag}.png",
             title=(
-                f"CONTINUOUS deployed — continuous_ensemble_v2 ensemble + 2f hedge (max4)"
-                f"{'' if mult == 1.0 else f', {mult:g}x levered'} [{venue}] — refreshed to {end_date}"
+                "CONTINUOUS deployed - continuous_ensemble_v2 ensemble + 2f hedge"
+                f"{title_modeled}{title_chart} [{venue}] - refreshed to {end_date}"
             ),
             subtitle=sub,
             strategy_name=name,
         )
-        venue_summary[f"{mult:g}x"] = stats(mdf)
-        print(f"[{venue}] {mult:g}x {json.dumps(venue_summary[f'{mult:g}x'])}", flush=True)
+        summary_key = f"{mult:g}x"
+        venue_summary[summary_key] = stats(mdf)
+        log_label = summary_key
+        if abs(float(backtest_leverage) - 1.0) > 1e-12:
+            log_label = f"modeled {backtest_leverage:g}x / chart {summary_key}"
+        print(f"[{venue}] {log_label} {json.dumps(venue_summary[summary_key])}", flush=True)
         print(f"[{venue}] png: {out_dir / f'continuous_equity_btc{tag}.png'} ({'ok' if meta else 'CHART FAILED'})", flush=True)
 
 
@@ -497,6 +859,9 @@ def run_venue(
     frozen_fallback: Path | None = None,
     data_root: Path | None = None,
     chart_leverage: float | None = 4.0,
+    component_take_profit_pct: float | None = None,
+    btc_risk_sizing: bool = False,
+    backtest_leverage: float = 1.0,
 ) -> dict[str, Any]:
     out_dir = output_root / venue
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -508,6 +873,27 @@ def run_venue(
         panel = load_extended_panel(venue, end_date=end_date, root=data_root)
         venue_summary: dict[str, Any] = {}
     else:
+        size_lookup = None
+        btc_risk_meta = None
+        if btc_risk_sizing:
+            decision_root = output_root / "_btc_risk_decision_components"
+            run_components(
+                venue,
+                output_root=decision_root,
+                end_date=end_date,
+                start_date=start_date,
+                frozen_fallback=frozen_fallback,
+                data_root=data_root,
+                component_take_profit_pct=component_take_profit_pct,
+                backtest_leverage=1.0,
+            )
+            root_for_context = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
+            size_lookup, btc_risk_meta = btc_risk_size_lookup(
+                venue,
+                decision_component_root=decision_root,
+                output_root=output_root,
+                data_root=root_for_context,
+            )
         component_meta = run_components(
             venue,
             output_root=output_root,
@@ -515,6 +901,9 @@ def run_venue(
             start_date=start_date,
             frozen_fallback=frozen_fallback,
             data_root=data_root,
+            component_take_profit_pct=component_take_profit_pct,
+            backtest_leverage=backtest_leverage,
+            size_mult_lookup=size_lookup,
         )
         pieces = {}
         for component in WINNER_WEIGHTS:
@@ -527,13 +916,18 @@ def run_venue(
         btc_ret, btc_fund = instrument_inputs(venue, combined.days, "BTCUSDT", panel, data_root=data_root)
         eth_ret, eth_fund = instrument_inputs(venue, combined.days, "ETHUSDT", panel, data_root=data_root)
         df = apply_rebalance_rule(
-            combined, winner_rule(), ContinuousHedgeRule(90, 60, 2.0, 5.0),
+            combined, winner_rule(), ContinuousHedgeRule(90, 60, 2.0 * float(backtest_leverage), 5.0),
             btc_ret, btc_fund, eth_ret, eth_fund,
             hedge_intensity=deployed_hedge_intensity(combined.days, btc_ret),
         )
         panel_last = dt.date.fromisoformat(str(panel["date"].max()))
         df = pad_flat_tail(df, through_date=panel_last)
-        venue_summary = {"components": component_meta}
+        venue_summary = {
+            "components": component_meta,
+            "component_take_profit_pct": component_take_profit_pct,
+            "btc_risk_sizing": btc_risk_meta,
+            "backtest_leverage": backtest_leverage,
+        }
     raw_klines = (
         panel.filter(pl.col("symbol") == "BTCUSDT")
         .with_columns(
@@ -547,6 +941,22 @@ def run_venue(
         end_date=end_date, venue_summary=venue_summary,
         monthly_trades=monthly_trade_counts(output_root=output_root, venue=venue),
         leverage=chart_leverage,
+        backtest_leverage=backtest_leverage,
+        btc_risk_sizing=btc_risk_sizing,
+    )
+    write_continuous_equity_report(
+        venue=venue,
+        output_root=output_root,
+        out_dir=out_dir,
+        data_root=data_root if data_root is not None else SHARED / f"{venue}_full_pit",
+        end_date=end_date,
+        start_date=start_date,
+        venue_summary=venue_summary,
+        df=df,
+        chart_leverage=chart_leverage,
+        component_take_profit_pct=component_take_profit_pct,
+        btc_risk_sizing=btc_risk_sizing,
+        backtest_leverage=backtest_leverage,
     )
     return venue_summary
 
@@ -581,6 +991,18 @@ def main() -> int:
         default=4.0,
         help="Extra pure-leverage continuous chart to render alongside 1x. Use 1 to suppress the extra chart.",
     )
+    parser.add_argument("--component-take-profit-pct", type=float, default=None)
+    parser.add_argument(
+        "--btc-risk-sizing",
+        action="store_true",
+        help=f"Apply {CTRL_BTC_RISK_70_90_35_ID} entry-size multipliers.",
+    )
+    parser.add_argument(
+        "--backtest-leverage",
+        type=float,
+        default=1.0,
+        help="Modeled backtest leverage: scales component gross exposure before costs/funding and scales hedge cap.",
+    )
     args = parser.parse_args()
     data_root = Path(args.data_root).expanduser() if args.data_root else None
     if data_root is not None and len(args.venues) != 1:
@@ -595,6 +1017,9 @@ def main() -> int:
             render_only=args.render_only, frozen_fallback=Path(args.frozen_fallback).expanduser(),
             data_root=data_root,
             chart_leverage=args.chart_leverage,
+            component_take_profit_pct=args.component_take_profit_pct,
+            btc_risk_sizing=args.btc_risk_sizing,
+            backtest_leverage=args.backtest_leverage,
         )
     if not args.render_only:
         (output_root / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")

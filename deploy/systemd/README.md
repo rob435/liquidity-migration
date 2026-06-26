@@ -19,7 +19,9 @@ The deployable VPS units are:
   collector (hourly band snapshots; public REST, append-only JSONL, no order path).
   Built but **NOT auto-enabled** — operator-gated (`systemctl enable --now
   liquidity-migration-depth-collector.service`); the deploy installs the unit and
-  restarts it only if already enabled.
+  restarts it only if already enabled. Once enabled, deploy/verify/recovery fail
+  loud unless the unit is both enabled and active, because Bybit depth history is
+  unbuyable after a capture gap.
 - Timers include the demo-liveness watchdog, combined-book report, continuous rmom
   refresh, and the daily continuous BTC+ETH hedge (submit-armed; see below).
   (The demo-health timer was erased with the short sleeve.)
@@ -191,8 +193,9 @@ order-submitting units are the long demo sleeve
 continuous demo sleeve
 (`liquidity-migration-bybit-continuous-demo.service`, `SUBMIT_ORDERS=1`,
 `continuous_ensemble_v2`, inverse-vol component sizing with
-`TARGET_VOL_PER_NAME=0.01`/`VOL_WEIGHT_CLAMP=2`, max4 daily vol-target
-rebalance, no venue-side stop; demo/paper only) and the daily BTC+ETH hedge timer
+`TARGET_VOL_PER_NAME=0.01`/`VOL_WEIGHT_CLAMP=2`, daily vol-target rebalance
+disabled, `CTRL_BTC_RISK_70_90_35` BTC-risk entry sizing enabled, no
+venue-side stop; demo/paper surface) and the daily BTC+ETH hedge timer
 (`liquidity-migration-continuous-hedge.timer`) — the hedge unit ships
 **`SUBMIT_HEDGE=1` + `CONFIRM_DEMO_ORDERS=1` (operator-armed 2026-06-10)**, so
 it SUBMITS demo orders; runtime guards + staleness gates still apply. The

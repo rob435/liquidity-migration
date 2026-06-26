@@ -24,8 +24,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-PY="$HERE/.venv/bin/python"
-[ -x "$PY" ] || PY="python3"
+if [ -x "$HERE/.venv/Scripts/python.exe" ]; then
+  PY="$HERE/.venv/Scripts/python.exe"
+elif [ -x "$HERE/.venv/bin/python" ]; then
+  PY="$HERE/.venv/bin/python"
+else
+  PY="python3"
+fi
+
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
 
 # --quick / --two-way  -> the fast paper<->demo execution check.
 if [ "${1:-}" = "--quick" ] || [ "${1:-}" = "--two-way" ]; then

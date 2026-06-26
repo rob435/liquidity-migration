@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """One command for official equity curves.
 
-LONG runs from the exact promoted-in-code profile in `liquidity_migration.promoted`.
-CONTINUOUS is reconstructed from the deployed continuous entry book
-(`continuous_ensemble_v2`, frozen continuous_ensemble_v2 components, plus 2f hedge +
-BTC-vol regime-hedge) via the continuous refresh runner.
-As of the 2026-06-15 operator-override promotion the continuous book is
-promoted-in-code (`promoted.continuous_profile`), but demo/paper ONLY —
-REAL_MONEY stays false and the Tier-3 real-money gate is unmet and unchanged, so
-this tool's continuous output is still demo/forward evidence, not a real-money
-promotion claim.
+LONG runs from the exact active profile in `liquidity_migration.promoted`.
+CONTINUOUS is reconstructed from the continuous entry book
+(`continuous_ensemble_v2`, frozen components, 2f hedge, BTC-vol regime) via the
+continuous refresh runner. Treat continuous output as demo/forward analysis, not
+a mainnet approval package.
 
     bash scripts/equity_curves.sh                      # promoted LONG sleeve, last 3 years, bybit_full_pit
     bash scripts/equity_curves.sh --sleeves continuous # research-stage continuous book
     bash scripts/equity_curves.sh --sleeves long,continuous
     bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
 
-Both promoted profiles live in ONE place: `liquidity_migration/promoted.py`
+Both active profiles live in ONE place: `liquidity_migration/promoted.py`
 (`long_profile`, `continuous_profile`). For continuous the forward demo remains the
-arbiter — its promotion was an operator override, not a gate pass.
+arbiter.
 """
 from __future__ import annotations
 
@@ -120,6 +116,9 @@ def _run_continuous(
     render_only: bool = False,
     frozen_fallback: str | Path | None = None,
     chart_leverage: float | None = 4.0,
+    component_take_profit_pct: float | None = None,
+    btc_risk_sizing: bool = False,
+    backtest_leverage: float = 1.0,
 ) -> dict[str, Any]:
     del costs, pit_tol
     scripts_dir = REPO / "scripts"
@@ -140,6 +139,9 @@ def _run_continuous(
         frozen_fallback=fallback,
         data_root=data_root,
         chart_leverage=chart_leverage,
+        component_take_profit_pct=component_take_profit_pct,
+        btc_risk_sizing=btc_risk_sizing,
+        backtest_leverage=backtest_leverage,
     )
     return _continuous_payload_from_summary(summary, report_dir=out / venue_name)
 
@@ -292,6 +294,23 @@ def main() -> int:
         default=4.0,
         help="Extra pure-leverage continuous chart to render alongside 1x. Use 1 to suppress the extra chart.",
     )
+    p.add_argument(
+        "--continuous-component-take-profit-pct",
+        type=float,
+        default=None,
+        help="Override continuous component take_profit_pct before running the official component backtest.",
+    )
+    p.add_argument(
+        "--continuous-btc-risk-sizing",
+        action="store_true",
+        help="Apply the live CTRL_BTC_RISK_70_90_35 entry-size overlay in the continuous component backtest.",
+    )
+    p.add_argument(
+        "--continuous-backtest-leverage",
+        type=float,
+        default=1.0,
+        help="Modeled continuous leverage: scales component gross exposure before costs/funding and scales hedge cap.",
+    )
     # audit2c: default --years to a sentinel so an unset window can preserve the
     # frozen continuous start instead of forcing a rolling 3y override.
     p.add_argument(
@@ -356,6 +375,9 @@ def main() -> int:
                     render_only=args.continuous_render_only,
                     frozen_fallback=args.continuous_frozen_fallback,
                     chart_leverage=args.continuous_chart_leverage,
+                    component_take_profit_pct=args.continuous_component_take_profit_pct,
+                    btc_risk_sizing=args.continuous_btc_risk_sizing,
+                    backtest_leverage=args.continuous_backtest_leverage,
                 )
         except Exception as exc:  # noqa: BLE001 - report per-sleeve, keep going
             print(f"  [X] {s} failed: {type(exc).__name__}: {exc}\n", flush=True)

@@ -271,6 +271,32 @@ def test_run_trades_respects_max_active_cap() -> None:
     assert skips["skipped_capacity"] == 4
 
 
+def test_run_trades_optional_admission_lookup_blocks_entries() -> None:
+    syms = ["A", "B"]
+    bars = _indexed_price_bars_by_symbol(_grid_klines(syms, 40))
+    entries = pl.DataFrame(
+        {
+            "symbol": syms,
+            "ts_ms": [0, 0],
+            "composite": [0.9, 0.9],
+            "turnover_quote": [1e6, 1e6],
+        }
+    )
+    cfg = ContinuousEventConfig(max_active=5, hold_hours=10, entry_delay_hours=1, use_funding=False)
+    control, _ = _run_trades(entries, bars, None, cfg)
+    admitted, skips = _run_trades(
+        entries,
+        bars,
+        None,
+        cfg,
+        admission_lookup={("A", 0): False, ("B", 0): True},
+    )
+    assert control.height == 2
+    assert admitted.height == 1
+    assert admitted["symbol"].to_list() == ["B"]
+    assert skips["skipped_admission"] == 1
+
+
 def test_run_trades_take_profit_exits_short_before_timer() -> None:
     rows = []
     for i in range(12):

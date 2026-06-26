@@ -11,9 +11,9 @@ old intra-hour "no 1h" entry. The decile pipeline is the SHARED, verified
 `continuous_events.compute_continuous_decile_panel`.
 
 The frozen `continuous_ensemble_v2` demo/paper profile uses inverse-vol
-component entry sizing, max4 daily vol-target rebalance, and TP/24h exits with
-no daemon or server stop. It is the only selectable continuous daemon profile.
-EXPLORATORY/forward-demo only; never real money.
+component entry sizing, daily vol-target rebalance disabled, and TP/24h exits
+with no daemon or server stop. It is the only selectable continuous daemon
+profile.
 """
 from __future__ import annotations
 
@@ -34,6 +34,12 @@ from .continuous_events import (
     _btc_trend_returns,
     _entry_event_expr,
     per_symbol_timeseries_features,
+)
+from .continuous_btc_risk import (
+    BTC_RISK_MIN_PRIOR,
+    CTRL_BTC_RISK_70_90_35_ID,
+    BtcRiskLiveSizer,
+    btc_context_by_day,
 )
 
 CONTINUOUS_STRATEGY_ID = "continuous_fade_v2"
@@ -56,6 +62,7 @@ CONTINUOUS_ENTRY_LINK_PREFIX = "en-c"   # lm-en-c-{base}-{ts36}  (5-part; distin
 CONTINUOUS_EXIT_LINK_PREFIX = "ux-c"    # lm-ux-c-{base}-{ts36}
 CONTINUOUS_ADDON_ENTRY_LINK_PREFIX = "en-ca"
 CONTINUOUS_ADDON_EXIT_LINK_PREFIX = "ux-ca"
+BTC_TREND_SYMBOL = "BTCUSDT"
 CONTINUOUS_DEMO_PROFILES = (
     "continuous_ensemble_v2",   # 2026-06-18 demo/paper lifecycle: inv-vol + max4 + TP/24h, no server stop
 )
@@ -67,11 +74,7 @@ class ContinuousDemoCycleConfig:
 
     # --- selection (must match the backtest engine's promoted/validated cell) ---
     decile: int = 9                       # short the top composite decile
-    # rmom-LOW gate: keep the lowest-residual-momentum THIRD within each ts (0.33). Tightened from the
-    # 0.50 half by the 2026-06-02 alpha sweep (operator-directed) — the one robust cross-venue strategy
-    # improvement found: engine MAR bybit 38.6→42.9 / binance 30.4→50.1, DD↓ both, neighbours hold; same
-    # validated rmom squeeze-filter used tighter (NOT a new signal). ~−23% return = MAR-primary win.
-    # docs/preregistration/alpha-sweep-2026-06-02.md. EXPLORATORY — forward demo is the arbiter.
+    # rmom-LOW gate: keep the lowest-residual-momentum third within each ts.
     rmom_quantile: float = 0.33
     feature_set: tuple[str, ...] = FEATURES
     liq_turnover_min: float = 500_000.0   # liquid gate: signal-bar hourly turnover_quote (USD)
@@ -119,16 +122,13 @@ class ContinuousDemoCycleConfig:
     # cover — the footprint of a market-wide alt melt-up squeezing many shorts at once) within the last
     # entry_pause_window_minutes. Stateless (recomputed from the ledger each cycle), so the pause lifts
     # automatically as the cluster ages out of the window. NEVER adds risk — it only stops opening fresh
-    # shorts into a squeeze. ENABLED at the engine-tested w24/n8 (8 adverse covers in 1440min=24h) by
-    # operator direction 2026-06-02 as protective TAIL INSURANCE, NOT a validated MAR improvement: the
-    # cb1 sweep (docs/preregistration/cb1-circuit-breaker-2026-06-02.md) showed it cuts drawdown but
-    # costs ~20% of bybit return in-sample and n8 was a fragile cell — it is a deliberate de-risking
-    # choice. Set entry_pause_after_adverse_exits=0 to disable.
+    # shorts into a squeeze. The current w24/n8 setting is a deliberate
+    # de-risking choice. Set entry_pause_after_adverse_exits=0 to disable.
     entry_pause_after_adverse_exits: int = 8
     entry_pause_window_minutes: int = 1440
-    # Generic server-side stop knob. The frozen v2 profile overrides this to 0.0 after
-    # the 2026-06-18 full-PIT redesign showed both daemon stops and the 25% venue stop
-    # destroy the fade edge. v2 is demo/paper only, not real-money-safe.
+    # Generic server-side stop knob. The frozen v2 profile overrides this to
+    # 0.0 after diagnostics showed both daemon stops and the 25% venue stop
+    # destroy the fade edge.
     stop_loss_pct: float = 0.25
     # --- inherited-from-daily exits/gate (validated cross-venue beneficial in the engine ablation,
     # docs/continuous_sleeve_inheritance.md). Checked each cycle off live price + kline-reconstructed MFE. ---
@@ -142,18 +142,24 @@ class ContinuousDemoCycleConfig:
     sizing_mode: str = "flat"                       # "flat" | "inverse_vol" (target_vol_per_name / rv_168h)
     target_vol_per_name: float = 0.02               # inverse-vol per-name hourly-vol target
     vol_weight_clamp: float = 3.0                   # inverse-vol multiplier clamp [1/clamp, clamp]
-    # OPERATOR OVERRIDE 2026-06-20: vol-gated upper_wick entry-QUALITY sizing tilt, applied
-    # MULTIPLICATIVELY on top of inverse-vol. Validated full-ledger (Bybit MAR 6.387->6.555,
-    # +0.168 vs invvol-alone, +1.62 vs hash). Default False: the multiplier is a SAFE NO-OP
-    # until the live 1m upper_wick feature pipeline + per-symbol history are wired and the
-    # mult is populated into the candidate row (cand["upperwick_size_mult"]); flipping this
-    # True without that live feature is a documented misconfiguration. The shared causal
-    # multiplier lives in continuous_entry_sizing.upperwick_size_mult so live==backtest by
-    # construction. Receipt: docs/preregistration/2026-06-20-operator-override-upperwick-entry-sizing.md
+    # WITHDRAWN 2026-06-20: upper_wick entry sizing was prepared but NOT ACTIVATED.
+    # Parity reconcile exposed a duplicate-counting artifact; corrected validation failed
+    # (-0.003 vs control, below hash). Default False is mandatory: the retained multiplier
+    # is disabled audit plumbing, not a validated live rule. Any future wick activation
+    # needs fresh registration, decision-level dedupe, and a new parity receipt.
     entry_upperwick_sizing_enabled: bool = False
-    # warm-start seed (per-symbol upper_wick/rv history) loaded on the live cold-start so the
-    # book begins with the state it would have had if it had tilted since inception.
+    # Optional audit seed for a future registered wick experiment. Inert while
+    # entry_upperwick_sizing_enabled is False; do not treat this as deployment wiring.
     entry_upperwick_warmstart_path: str | None = None
+    # Current BTC-risk entry-size overlay. It improved MAR and drawdown on both
+    # venues while cutting Binance total return; keep that caveat in the
+    # decision log, not as repeated runtime policy text.
+    entry_btc_risk_sizing_enabled: bool = False
+    entry_btc_risk_arm_id: str = CTRL_BTC_RISK_70_90_35_ID
+    entry_btc_risk_low: float = 0.70
+    entry_btc_risk_high: float = 0.90
+    entry_btc_risk_tail_mult: float = 0.35
+    entry_btc_risk_min_prior: int = BTC_RISK_MIN_PRIOR
     notional_multiplier: float = 1.0                # read by the shared daemon scaffolding (logging only)
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
@@ -1690,14 +1696,12 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
     """Resolve named demo profiles into explicit knobs.
 
     ``continuous_ensemble_v2`` is the frozen 2026-06-18 demo/paper lifecycle:
-    three-component entry book, inverse-vol component sizing, max4 daily
-    vol-target rebalance, and TP/24h exits with no daemon or server stop. It is
-    not real-money-safe.
+    three-component entry book, inverse-vol component sizing, daily vol-target
+    rebalance disabled, and TP/24h exits with no daemon or server stop.
 
     ``promoted.continuous_profile()`` exposes the frozen portfolio object for
     tooling. The deployed daemon lifecycle is ``continuous_ensemble_v2`` through
-    this resolver plus systemd/env overrides. Demo/paper ONLY (``REAL_MONEY``
-    false; Tier-3 real-money gate unmet and unchanged).
+    this resolver plus systemd/env.
     """
     if config.strategy_profile != "continuous_ensemble_v2":
         return config
@@ -1712,12 +1716,9 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         # btc_trend_gate is NOT pinned here: it is the single-source-of-truth
         # CLI/env knob (`--btc-trend-gate` / `BTC_TREND_GATE`), so the deploy
         # layer controls it (units pin `uptrend`; runner defaults `uptrend`).
-        # OPERATOR OVERRIDE 2026-06-19: daily volatility adjuster DISABLED (constant
-        # gross) for the research phase; reversible (set True + retune when the
-        # volatility control is reworked). The remaining daily_rebalance_* params are
-        # retained verbatim so re-enabling is a one-line flip. Honest caveat: this
-        # removes the book's only daily risk control. Receipt:
-        # docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md.
+        # Local target: daily volatility adjuster disabled. Remaining
+        # daily_rebalance_* params stay populated so re-enabling is explicit and
+        # cheap if the volatility control is rebuilt.
         daily_rebalance_enabled=False,
         daily_rebalance_realized_vol_window_days=90,
         daily_rebalance_target_daily_vol=0.045,
@@ -1730,6 +1731,15 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         sizing_mode="inverse_vol",
         target_vol_per_name=0.01,
         vol_weight_clamp=2.0,
+        # BTC-risk sizing overlay: after 50 prior live decisions, multiply all
+        # component entries for a `(symbol, signal_ts)` by 0.35 when the causal
+        # V0 BTC-risk score is in [0.70, 0.90).
+        entry_btc_risk_sizing_enabled=True,
+        entry_btc_risk_arm_id=CTRL_BTC_RISK_70_90_35_ID,
+        entry_btc_risk_low=0.70,
+        entry_btc_risk_high=0.90,
+        entry_btc_risk_tail_mult=0.35,
+        entry_btc_risk_min_prior=BTC_RISK_MIN_PRIOR,
         left_decile_exit_enabled=False,
         reentry_cooldown_minutes=0,
         stop_loss_pct=0.0,
@@ -1738,12 +1748,9 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         failed_fade_loss_pct=0.0,
         failed_fade_min_mfe_pct=0.0,
         breakeven_arm_pct=0.0,
-        # OPERATOR OVERRIDE 2026-06-19: component take-profit promoted 0.10 -> 0.12
-        # (the (name, trigger, age, take_profit_pct, weight) tuple). The daemon computes
-        # take_profit_price = price*(1-tp) live, so this needs no ledger rebuild. Honest
-        # caveat: TP12 is a robust Bybit MAR gain but Binance-MAR-negative (fails the
-        # two-venue bar); promoted by operator override against that evidence. Receipt:
-        # docs/preregistration/2026-06-19-operator-override-disable-voladjuster-tp12.md.
+        # Component take-profit target: 12%. Bybit liked the wider TP; Binance
+        # drawdown/MAR rejected it as broad proof, so keep the caveat in the
+        # decision log.
         ensemble_components=(
             ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333),
             ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222),
@@ -1782,16 +1789,86 @@ def _btc_trend_gate_allows_entries(
     signal_ts_ms: int,
     config: ContinuousDemoCycleConfig,
 ) -> bool:
-    gate = config.btc_trend_gate
+    return _btc_trend_gate_allows_value(
+        config.btc_trend_gate,
+        _btc_trend_gate_value(klines, signal_ts_ms=signal_ts_ms),
+    )
+
+
+def _btc_trend_gate_value(klines: pl.DataFrame, *, signal_ts_ms: int) -> float | None:
+    day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
+    return _btc_trend_returns(klines).get(day)
+
+
+def _btc_trend_gate_allows_value(gate: str, trend: float | None) -> bool:
     if gate == "off":
         return True
     if gate not in ("uptrend", "downtrend"):
         raise ValueError(f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {gate!r}")
-    day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
-    trend = _btc_trend_returns(klines).get(day)
     if trend is None:
         return False
     return trend > 0.0 if gate == "uptrend" else trend <= 0.0
+
+
+def _btc_rows_from_klines(klines: pl.DataFrame) -> pl.DataFrame:
+    if klines.is_empty() or "symbol" not in klines.columns:
+        return pl.DataFrame()
+    return klines.filter(pl.col("symbol") == BTC_TREND_SYMBOL)
+
+
+def _btc_trend_kline_stats(klines: pl.DataFrame) -> dict[str, int]:
+    btc = _btc_rows_from_klines(klines)
+    if btc.is_empty() or "ts_ms" not in btc.columns:
+        return {"btc_rows": 0, "btc_max_ts_ms": 0}
+    return {
+        "btc_rows": btc.height,
+        "btc_max_ts_ms": int(btc.select(pl.col("ts_ms").max()).item() or 0),
+    }
+
+
+def _load_btc_trend_gate_klines(
+    base_klines: pl.DataFrame,
+    *,
+    start_ms: int,
+    end_ms: int,
+    config: ResearchConfig,
+    market_client: Any | None,
+    cache_root: Path | None,
+    kline_store: Any | None,
+) -> tuple[pl.DataFrame, dict[str, int]]:
+    """Return BTC-only klines for the regime gate without altering the tradable universe."""
+    stats: dict[str, int] = {
+        "cache_rows": 0,
+        "cache_symbols": 0,
+        "fetch_symbols": 0,
+        "fetched_rows": 0,
+        "output_rows": 0,
+        "store_rows": 0,
+        "store_symbols": 0,
+        "store_max_ts_ms": 0,
+        "error": 0,
+    }
+    try:
+        btc_klines, loaded_stats = _download_recent_1h_klines(
+            [BTC_TREND_SYMBOL],
+            start_ms=start_ms,
+            end_ms=end_ms,
+            config=config,
+            workers=1,
+            market_client=market_client,
+            cache_root=cache_root,
+            kline_store=kline_store,
+            write_compact_cache=False,
+        )
+        stats.update({str(k): int(v) for k, v in loaded_stats.items()})
+    except Exception:  # noqa: BLE001 - the gate must fail closed, not crash the cycle
+        _logger.exception("BTC trend gate kline refresh failed; falling back to already-loaded klines")
+        stats["error"] = 1
+        btc_klines = _btc_rows_from_klines(base_klines)
+    if btc_klines.is_empty():
+        btc_klines = _btc_rows_from_klines(base_klines)
+    stats.update(_btc_trend_kline_stats(btc_klines))
+    return btc_klines, stats
 
 
 def _continuous_entry_link_prefix(config: ContinuousDemoCycleConfig) -> str:
@@ -1815,8 +1892,11 @@ def _continuous_vol_weight_multiplier(config: ContinuousDemoCycleConfig, entry_v
 
 
 def _build_upperwick_sizer(config: ContinuousDemoCycleConfig, root: Path) -> Any | None:
-    """Build the live UpperwickLiveSizer (or None when disabled). Warm-starts the per-symbol
-    history from ``entry_upperwick_warmstart_path`` on the first run (state file absent)."""
+    """Build the retained UpperwickLiveSizer only when a future receipt enables the flag.
+
+    The current profile keeps this disabled after the withdrawn 2026-06-20 override; an
+    optional warm-start is only for explicitly registered audit/research reruns.
+    """
     if not getattr(config, "entry_upperwick_sizing_enabled", False):
         return None
     state_path = Path(root) / "upperwick_state.parquet"
@@ -1837,18 +1917,103 @@ def _build_upperwick_sizer(config: ContinuousDemoCycleConfig, root: Path) -> Any
 
 
 def _continuous_upperwick_multiplier(config: ContinuousDemoCycleConfig, cand: dict[str, Any]) -> float:
-    """Operator-override (2026-06-20) vol-gated upper_wick entry-quality multiplier.
+    """Withdrawn 2026-06-20 upper_wick multiplier; safe no-op unless explicitly enabled.
 
     SAFE NO-OP (1.0) unless ``entry_upperwick_sizing_enabled`` AND the live feature pipeline
     has populated ``cand['upperwick_size_mult']`` (computed by the SHARED
-    continuous_entry_sizing.upperwick_size_mult so live==backtest). Until the live 1m
-    upper_wick feature pipeline is wired, this returns 1.0 and the book is unchanged. A
-    finite, positive populated value is applied multiplicatively on top of inverse-vol.
+    continuous_entry_sizing.upperwick_size_mult). The flag remains false because corrected
+    decision-deduped validation failed; any true value needs a fresh operator receipt.
     """
     if not getattr(config, "entry_upperwick_sizing_enabled", False):
         return 1.0
     m = _finite_or_none(cand.get("upperwick_size_mult"))
     return float(m) if (m is not None and m > 0.0) else 1.0
+
+
+def _build_btc_risk_sizer(config: ContinuousDemoCycleConfig, root: Path) -> BtcRiskLiveSizer | None:
+    if not getattr(config, "entry_btc_risk_sizing_enabled", False):
+        return None
+    try:
+        return BtcRiskLiveSizer(
+            Path(root) / "btc_risk_sizing_state.parquet",
+            low=float(config.entry_btc_risk_low),
+            high=float(config.entry_btc_risk_high),
+            tail_mult=float(config.entry_btc_risk_tail_mult),
+            min_prior=int(config.entry_btc_risk_min_prior),
+        )
+    except Exception:  # noqa: BLE001 - fail safe: no overlay rather than a crash loop
+        _logger.exception("BTC-risk sizing state failed to load; sizing overlay disabled for this cycle")
+        return None
+
+
+def _continuous_btc_risk_multiplier(config: ContinuousDemoCycleConfig, cand: dict[str, Any]) -> float:
+    if not getattr(config, "entry_btc_risk_sizing_enabled", False):
+        return 1.0
+    m = _finite_or_none(cand.get("btc_risk_stack_mult"))
+    return float(m) if (m is not None and m > 0.0) else 1.0
+
+
+def _apply_btc_risk_sizing(
+    candidates: list[dict[str, Any]],
+    *,
+    config: ContinuousDemoCycleConfig,
+    root: Path,
+    btc_klines: pl.DataFrame,
+) -> dict[str, Any]:
+    stats: dict[str, Any] = {
+        "enabled": bool(getattr(config, "entry_btc_risk_sizing_enabled", False)),
+        "arm_id": getattr(config, "entry_btc_risk_arm_id", ""),
+        "candidate_rows": len(candidates),
+        "scored": 0,
+        "duplicates": 0,
+        "tail_selected": 0,
+        "warmup": 0,
+        "state_rows": 0,
+        "error": 0,
+    }
+    if not stats["enabled"] or not candidates:
+        return stats
+    sizer = _build_btc_risk_sizer(config, root)
+    if sizer is None:
+        stats["error"] = 1
+        return stats
+    try:
+        lookup, score_stats = sizer.score_decisions(candidates, btc_context=btc_context_by_day(btc_klines))
+        sizer.save()
+    except Exception:  # noqa: BLE001 - fail safe: keep base sizing this cycle
+        _logger.exception("BTC-risk sizing failed; using 1.0 multipliers this cycle")
+        stats["error"] = 1
+        return stats
+    stats.update(score_stats)
+    multipliers: list[float] = []
+    scores: list[float] = []
+    for cand in candidates:
+        symbol = str(cand.get("symbol") or "")
+        signal_ts = int(cand.get("signal_ts_ms") or cand.get("entry_signal_ts_ms") or 0)
+        row = lookup.get((symbol, signal_ts))
+        if row is None:
+            cand["btc_risk_stack_mult"] = 1.0
+            continue
+        cand["btc_risk_arm_id"] = stats["arm_id"]
+        cand["btc_risk_score"] = row.get("btc_risk_score")
+        cand["btc_risk_stack_mult"] = row.get("stack_mult", 1.0)
+        cand["btc_risk_score_warmup"] = bool(row.get("score_warmup"))
+        cand["btc_risk_tail_selected"] = bool(row.get("tail_selected"))
+        cand["btc_trend_30d"] = row.get("btc_trend_30d")
+        cand["btc_return_7d"] = row.get("btc_return_7d")
+        cand["btc_vol_30d"] = row.get("btc_vol_30d")
+        cand["btc_trend_delta_7d"] = row.get("btc_trend_delta_7d")
+        mult = _finite_or_none(cand.get("btc_risk_stack_mult"))
+        score = _finite_or_none(cand.get("btc_risk_score"))
+        if mult is not None:
+            multipliers.append(mult)
+        if score is not None:
+            scores.append(score)
+    stats["candidate_tail_rows"] = sum(1 for cand in candidates if bool(cand.get("btc_risk_tail_selected")))
+    stats["min_stack_mult"] = min(multipliers) if multipliers else 1.0
+    stats["max_stack_mult"] = max(multipliers) if multipliers else 1.0
+    stats["mean_btc_risk_score"] = (sum(scores) / len(scores)) if scores else None
+    return stats
 
 
 # ============================================================================
@@ -2675,10 +2840,9 @@ def _execute_continuous_entries(
         contract = contract_by_symbol.get(symbol, {})
         if price <= 0.0:
             continue
-        # OPERATOR OVERRIDE 2026-06-20: vol-gated upper_wick entry-quality multiplier. Compute it
-        # here from a live trailing-1m fetch via the SHARED causal path (== backtest), populate
-        # cand["upperwick_size_mult"] for the sizing below; record() after the qty check books one
-        # history point per (symbol, signal_ts) decision (the dedup guard makes components idempotent).
+        # Withdrawn 2026-06-20 upper_wick audit hook. If a future registered experiment enables
+        # the flag, compute through the shared causal path and record one history point per
+        # (symbol, signal_ts) decision (the dedup guard makes components idempotent).
         _uw_record: tuple[int, float, float] | None = None
         if upperwick_sizer is not None:
             _uwrv = _upperwick_fetch(trading_client, symbol, now_ms)
@@ -2692,11 +2856,12 @@ def _execute_continuous_entries(
         component = str(cand.get("component") or "")
         component_weight = _float(cand.get("component_weight")) or 1.0
         entry_vol = _float(cand.get("rv_168h"))
-        # inverse-vol (RISK) sizing x optional vol-gated upper_wick (QUALITY) sizing.
-        # The upper_wick factor is a SAFE NO-OP (1.0) until the live 1m feature pipeline
-        # populates cand["upperwick_size_mult"] and the profile flag is on (override 2026-06-20).
+        # inverse-vol (RISK) sizing x retained flag-off upper_wick audit multiplier.
+        # The upper_wick factor is a SAFE NO-OP (1.0) unless a future registered experiment
+        # explicitly enables the profile flag and populates cand["upperwick_size_mult"].
         vol_weight_multiplier = _continuous_vol_weight_multiplier(demo, cand.get("rv_168h"))
         upperwick_multiplier = _continuous_upperwick_multiplier(demo, cand)
+        btc_risk_multiplier = _continuous_btc_risk_multiplier(demo, cand)
         capped_notional = (
             equity_usdt
             * demo.wallet_balance_fraction
@@ -2704,6 +2869,7 @@ def _execute_continuous_entries(
             * component_weight
             * vol_weight_multiplier
             * upperwick_multiplier
+            * btc_risk_multiplier
         )
         max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
         # NOTE (EXEC-3): like the short/long ENTRY paths, a single entry whose qty exceeds Bybit's
@@ -2766,6 +2932,9 @@ def _execute_continuous_entries(
                                       "sleeve": continuous_sleeve_name(demo),
                                       "component": component, "component_weight": component_weight,
                                       "equity_usdt": equity_usdt,
+                                      "btc_risk_arm_id": cand.get("btc_risk_arm_id", ""),
+                                      "btc_risk_score": cand.get("btc_risk_score"),
+                                      "btc_risk_stack_mult": btc_risk_multiplier,
                                       "signal_ts_ms": signal_ts_ms, "stop_price": stop_price})
                 try:
                     order_result = trading_client.place_order(**_order_params(
@@ -2820,6 +2989,15 @@ def _execute_continuous_entries(
                 "sizing_mode": demo.sizing_mode,
                 "entry_vol": entry_vol,
                 "vol_weight_multiplier": vol_weight_multiplier,
+                "btc_risk_arm_id": cand.get("btc_risk_arm_id", ""),
+                "btc_risk_score": cand.get("btc_risk_score"),
+                "btc_risk_stack_mult": btc_risk_multiplier,
+                "btc_risk_score_warmup": cand.get("btc_risk_score_warmup"),
+                "btc_risk_tail_selected": cand.get("btc_risk_tail_selected"),
+                "btc_trend_30d": cand.get("btc_trend_30d"),
+                "btc_return_7d": cand.get("btc_return_7d"),
+                "btc_vol_30d": cand.get("btc_vol_30d"),
+                "btc_trend_delta_7d": cand.get("btc_trend_delta_7d"),
                 "entry_fee_usdt": entry_fee, "entry_exec_time_ms": entry_exec_time_ms,
                 "decile": int(cand.get("decile") or 0), "composite": _float(cand.get("composite")),
                 "entry_order_link_id": entry_link, "entry_order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
@@ -2840,6 +3018,15 @@ def _execute_continuous_entries(
             "sizing_mode": demo.sizing_mode,
             "entry_vol": entry_vol,
             "vol_weight_multiplier": vol_weight_multiplier,
+            "btc_risk_arm_id": cand.get("btc_risk_arm_id", ""),
+            "btc_risk_score": cand.get("btc_risk_score"),
+            "btc_risk_stack_mult": btc_risk_multiplier,
+            "btc_risk_score_warmup": cand.get("btc_risk_score_warmup"),
+            "btc_risk_tail_selected": cand.get("btc_risk_tail_selected"),
+            "btc_trend_30d": cand.get("btc_trend_30d"),
+            "btc_return_7d": cand.get("btc_return_7d"),
+            "btc_vol_30d": cand.get("btc_vol_30d"),
+            "btc_trend_delta_7d": cand.get("btc_trend_delta_7d"),
             "take_profit_pct": take_profit_pct, "take_profit_price": take_profit_price,
             # filled_qty/target_qty: ws_risk's pending-fill reconciler delta-adds
             # (venue cumulative − filled_qty); without filled_qty a "partial" entry's
@@ -3230,6 +3417,18 @@ def run_continuous_demo_cycle(
         klines, kline_stats = _download_recent_1h_klines(
             symbols, start_ms=start_ms, end_ms=end_ms, config=config, workers=demo.workers,
             market_client=public if market_client is not None else None, cache_root=root, kline_store=kline_store)
+        btc_gate_klines = klines
+        btc_gate_kline_stats = _btc_trend_kline_stats(klines)
+        if demo.btc_trend_gate != "off" or demo.entry_btc_risk_sizing_enabled:
+            btc_gate_klines, btc_gate_kline_stats = _load_btc_trend_gate_klines(
+                klines,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                config=config,
+                market_client=public,
+                cache_root=root,
+                kline_store=kline_store,
+            )
 
         rmom = _load_rmom_table(_signal_source_root(demo, root))
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
@@ -3421,10 +3620,10 @@ def run_continuous_demo_cycle(
         # signal ts = the deciding (confirmed) bar for the +1h entry, else the current hour (legacy).
         signal_ts = (cur_hour_ts - (1 + demo.entry_confirm_delay_hours) * MS_PER_HOUR
                      if demo.entry_confirm_delay_hours > 0 else cur_hour_ts)
-        btc_trend_gate_allows_entry = _btc_trend_gate_allows_entries(
-            klines,
-            signal_ts_ms=signal_ts,
-            config=demo,
+        btc_trend_gate_value = _btc_trend_gate_value(btc_gate_klines, signal_ts_ms=signal_ts)
+        btc_trend_gate_allows_entry = _btc_trend_gate_allows_value(
+            demo.btc_trend_gate,
+            btc_trend_gate_value,
         )
         if (
             not (errors and demo.submit_orders)
@@ -3510,6 +3709,12 @@ def run_continuous_demo_cycle(
                 _cs_root, candidates, sleeve=sleeve_name, now_ms=cycle_now_ms,
                 live_position_symbols=live_position_symbols,
             )
+        btc_risk_sizing_stats = _apply_btc_risk_sizing(
+            candidates,
+            config=demo,
+            root=root,
+            btc_klines=btc_gate_klines,
+        )
         order_notional_frac = demo.per_position_notional_pct_equity / 100.0
         if demo.daily_rebalance_enabled:
             order_notional_frac *= rebalance_target_scale
@@ -3724,6 +3929,26 @@ def run_continuous_demo_cycle(
             "entry_signal_ts_ms": signal_ts,
             "btc_trend_gate": demo.btc_trend_gate,
             "btc_trend_gate_allows_entry": btc_trend_gate_allows_entry,
+            "btc_trend_gate_value": btc_trend_gate_value,
+            "btc_trend_gate_btc_rows": btc_gate_kline_stats.get("btc_rows", 0),
+            "btc_trend_gate_btc_max_ts_ms": btc_gate_kline_stats.get("btc_max_ts_ms", 0),
+            "btc_trend_gate_kline_store_rows": btc_gate_kline_stats.get("store_rows", 0),
+            "btc_trend_gate_kline_cache_rows": btc_gate_kline_stats.get("cache_rows", 0),
+            "btc_trend_gate_kline_fetch_symbols": btc_gate_kline_stats.get("fetch_symbols", 0),
+            "btc_trend_gate_kline_fetched_rows": btc_gate_kline_stats.get("fetched_rows", 0),
+            "btc_trend_gate_kline_error": btc_gate_kline_stats.get("error", 0),
+            "btc_risk_sizing_enabled": btc_risk_sizing_stats.get("enabled", False),
+            "btc_risk_sizing_arm_id": btc_risk_sizing_stats.get("arm_id", ""),
+            "btc_risk_sizing_candidate_rows": btc_risk_sizing_stats.get("candidate_rows", 0),
+            "btc_risk_sizing_scored": btc_risk_sizing_stats.get("scored", 0),
+            "btc_risk_sizing_duplicates": btc_risk_sizing_stats.get("duplicates", 0),
+            "btc_risk_sizing_tail_selected": btc_risk_sizing_stats.get("tail_selected", 0),
+            "btc_risk_sizing_warmup": btc_risk_sizing_stats.get("warmup", 0),
+            "btc_risk_sizing_state_rows": btc_risk_sizing_stats.get("state_rows", 0),
+            "btc_risk_sizing_min_stack_mult": btc_risk_sizing_stats.get("min_stack_mult", 1.0),
+            "btc_risk_sizing_max_stack_mult": btc_risk_sizing_stats.get("max_stack_mult", 1.0),
+            "btc_risk_sizing_mean_score": btc_risk_sizing_stats.get("mean_btc_risk_score"),
+            "btc_risk_sizing_error": btc_risk_sizing_stats.get("error", 0),
             "entry_paused": entry_paused, "recent_adverse_exits": recent_adverse,
             "skipped_continuous_margin_budget": skipped_continuous_margin_budget,  # ls-5 cross-sleeve IM clamp
             "skipped_continuous_reservation": skipped_continuous_reservation,  # ls-6 symbol taken by a sibling

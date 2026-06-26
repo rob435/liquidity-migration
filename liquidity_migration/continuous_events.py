@@ -15,7 +15,7 @@ It REPRODUCES the proxy SELECTION exactly (so it is auditable against p1d/p1j/p1
 It runs that selection through the daily engine's VALIDATED execution core
 (`_simulate_indexed_trade` + `trade_lifecycle`: stop fills, funding-to-exit, MAE/MFE,
 compounding equity, drawdown, Sharpe) and adds the three realism upgrades the proxy
-lacked (see docs/preregistration/continuous-engine-2026-06-01.md):
+lacked:
   1. HONEST +1h entry -- fill at the bar AFTER the deciding bar's close. The proxy
      filled at the same close it ranked on (execution look-ahead). entry_delay_hours=0
      reproduces the proxy (validation only).
@@ -27,9 +27,8 @@ lacked (see docs/preregistration/continuous-engine-2026-06-01.md):
      per-symbol cooldown, and the full artifact set (ledger, equity curve, splits,
      drawdown, worst-day, config hash, run label).
 
-EXPLORATORY engine: impact coefficients are MODELED, not venue-calibrated, and the
-selection params come from a heavily multiple-tested research arc -> never promotion
-evidence. Forward demo (operator-gated) is the only Tier-3 arbiter.
+EXPLORATORY engine: impact coefficients are modeled, not venue-calibrated, and
+the selection params come from a heavily multiple-tested research arc.
 """
 from __future__ import annotations
 
@@ -37,6 +36,7 @@ import bisect
 import hashlib
 import heapq
 import json
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +61,9 @@ from .trade_lifecycle import (
 )
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
+
+_RESEARCH_INPUT_CACHE_MAX = 4
+_RESEARCH_INPUT_CACHE: OrderedDict[tuple[str, str, str, int], dict[str, Any]] = OrderedDict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -793,6 +796,7 @@ def _run_trades(
     rank_lookup: dict[tuple[str, int], float] | None = None,
     candidate_sink: list[dict[str, Any]] | None = None,
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
+    admission_lookup: dict[tuple[str, int], bool] | None = None,
     listing_ts_by_symbol: dict[str, int] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
@@ -839,6 +843,7 @@ def _run_trades(
             f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}"
         )
     skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
+    skipped_admission = 0
     skipped_crowding = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
@@ -973,6 +978,10 @@ def _run_trades(
                 _emit("market", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
+        if admission_lookup is not None and not bool(admission_lookup.get((sym, int(sig_ts)), False)):
+            _emit("admission", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
+            skipped_admission += 1
+            continue
         # --- sizing + stop + exit planning (verbatim logic, extracted to helpers) ---
         nw, trade_stop = _compute_size_and_stop(
             config, close_arr, int(entry_bar),
@@ -1035,6 +1044,7 @@ def _run_trades(
         "skipped_breaker": skipped_breaker,
         "skipped_btc_trend": skipped_btc_trend,
         "skipped_crowding": skipped_crowding,
+        "skipped_admission": skipped_admission,
     }
     if not rows:
         return _empty_trades(), skips
@@ -1241,29 +1251,30 @@ def _write_equity_png(equity: pl.DataFrame, path: Path, *, title: str) -> None:
     plt.close(fig)
 
 
-def run_continuous_event_research(
-    data_root: str | Path,
-    *,
-    config: ContinuousEventConfig | None = None,
-    report_dir: str | Path | None = None,
-    candidate_tape_path: str | Path | None = None,
-    entry_order: str = "fcfs",
-    size_mult_lookup: dict[tuple[str, int], float] | None = None,
+def _research_input_cache_key(
+    root: Path, config: ContinuousEventConfig, entry_order: str, end_ms: int
+) -> tuple[str, str, str, int]:
+    return (str(root.resolve()), config.config_hash(), entry_order, int(end_ms))
+
+
+def _cache_research_inputs(cache_key: tuple[str, str, str, int], payload: dict[str, Any]) -> None:
+    _RESEARCH_INPUT_CACHE[cache_key] = payload
+    _RESEARCH_INPUT_CACHE.move_to_end(cache_key)
+    while len(_RESEARCH_INPUT_CACHE) > _RESEARCH_INPUT_CACHE_MAX:
+        _RESEARCH_INPUT_CACHE.popitem(last=False)
+
+
+def _prepare_research_inputs(
+    root: Path,
+    config: ContinuousEventConfig,
+    entry_order: str,
 ) -> dict[str, Any]:
-    """Run the execution-grade continuous-fade backtest and (optionally) write artifacts.
-
-    When `candidate_tape_path` is set, the full eligible candidate set (selected + rejected,
-    with the exact engine reason) is written to that parquet for candidate-tape reconstruction. The
-    extra emission is purely additive: with `candidate_tape_path=None` the run is unchanged.
-
-    `entry_order` re-orders candidates WITHIN each signal timestamp by an
-    entry-priority score before the unchanged selection loop; `"fcfs"` (default) reproduces the
-    frozen control exactly. See `_apply_entry_order`.
-    """
-    config = config or ContinuousEventConfig()
-    root = Path(str(data_root)).expanduser()
-    if not root.is_dir():
-        raise FileNotFoundError(f"Data root does not exist: {root}")
+    start_ms, end_ms = _date_str_to_ms(config.start_date), _resolve_end_ms(root, config)
+    cache_key = _research_input_cache_key(root, config, entry_order, end_ms)
+    cached = _RESEARCH_INPUT_CACHE.get(cache_key)
+    if cached is not None:
+        _RESEARCH_INPUT_CACHE.move_to_end(cache_key)
+        return cached
 
     panel = build_continuous_panel(root, config)
     entries = _fresh_entries(panel, config) if not panel.is_empty() else panel
@@ -1271,7 +1282,6 @@ def run_continuous_event_research(
         entries = _apply_entry_order(entries, entry_order)
 
     kname = _autodetect_dataset_names(root)["klines_dataset"]
-    start_ms, end_ms = _date_str_to_ms(config.start_date), _resolve_end_ms(root, config)
     pad_fwd = (config.hold_hours + config.entry_delay_hours + 4) * MS_PER_HOUR
     # audit2c: also reserve >=2 warmup days when the equal-weight market gate is on, so the
     # gate's one-day-lagged daily market return is available from the window's first day
@@ -1318,11 +1328,68 @@ def run_continuous_event_research(
     # run window so the age gate does not infer listing from the clamped window start (pit-engine-2).
     listing_ts_by_symbol = _listing_ts_by_symbol(root) if config.age_days_min > 0 else None
 
+    payload = {
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "panel": panel,
+        "entries": entries,
+        "klines": klines,
+        "symbol_bars": symbol_bars,
+        "funding_lookup": funding_lookup,
+        "market_daily": market_daily,
+        "btc_trend_daily": btc_trend_daily,
+        "rank_lookup": rank_lookup,
+        "listing_ts_by_symbol": listing_ts_by_symbol,
+    }
+    _cache_research_inputs(cache_key, payload)
+    return payload
+
+
+def run_continuous_event_research(
+    data_root: str | Path,
+    *,
+    config: ContinuousEventConfig | None = None,
+    report_dir: str | Path | None = None,
+    candidate_tape_path: str | Path | None = None,
+    entry_order: str = "fcfs",
+    size_mult_lookup: dict[tuple[str, int], float] | None = None,
+    admission_lookup: dict[tuple[str, int], bool] | None = None,
+) -> dict[str, Any]:
+    """Run the execution-grade continuous-fade backtest and (optionally) write artifacts.
+
+    When `candidate_tape_path` is set, the full eligible candidate set (selected + rejected,
+    with the exact engine reason) is written to that parquet for candidate-tape reconstruction. The
+    extra emission is purely additive: with `candidate_tape_path=None` the run is unchanged.
+
+    `entry_order` re-orders candidates WITHIN each signal timestamp by an
+    entry-priority score before the unchanged selection loop; `"fcfs"` (default) reproduces the
+    frozen control exactly. See `_apply_entry_order`.
+
+    `admission_lookup` is a research-only gate keyed by ``(symbol, signal_ts_ms)``. ``None``
+    preserves the control engine; when supplied, missing/false keys are rejected before sizing.
+    """
+    config = config or ContinuousEventConfig()
+    root = Path(str(data_root)).expanduser()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Data root does not exist: {root}")
+
+    inputs = _prepare_research_inputs(root, config, entry_order)
+    end_ms = int(inputs["end_ms"])
+    entries = inputs["entries"]
+    klines = inputs["klines"]
+    symbol_bars = inputs["symbol_bars"]
+    funding_lookup = inputs["funding_lookup"]
+    market_daily = inputs["market_daily"]
+    btc_trend_daily = inputs["btc_trend_daily"]
+    rank_lookup = inputs["rank_lookup"]
+    listing_ts_by_symbol = inputs["listing_ts_by_symbol"]
+
     candidate_sink: list[dict[str, Any]] | None = [] if candidate_tape_path is not None else None
     if not entries.is_empty() and symbol_bars:
         trades, skips = _run_trades(
             entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup,
             candidate_sink=candidate_sink, size_mult_lookup=size_mult_lookup,
+            admission_lookup=admission_lookup,
             listing_ts_by_symbol=listing_ts_by_symbol,
         )
     else:

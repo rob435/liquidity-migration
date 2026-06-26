@@ -9,8 +9,8 @@
 #   data/bybit-continuous-demo-event  : continuous_fade_demo_trades  continuous_fade_demo_orders  continuous_fade_demo_cycles
 #   data/bybit-continuous-paper-event : continuous_fade_paper_trades continuous_fade_paper_orders continuous_fade_paper_cycles
 #
-# WHAT IT PRESERVES: the WS kline stores (event_demo_klines_1h, …), instruments,
-# manifests, configs, and every other dataset — wiping those would force a slow
+# WHAT IT PRESERVES: the WS kline stores (event_demo_klines_1h, ...), instruments,
+# manifests, configs, and every other dataset - wiping those would force a slow
 # multi-day re-bootstrap and is NOT a "trading log".
 #
 # It ALWAYS archives the wiped datasets to a single timestamped tarball under
@@ -18,7 +18,7 @@
 # wipe), so the decision is auditable and reversible. If the archive step fails,
 # nothing is removed.
 #
-# This is a DATA operation on the VPS — it is NOT run by CI. (The old runbook
+# This is a DATA operation on the VPS - it is NOT run by CI. (The old runbook
 # docs/event_demo_daemon.md was erased with the short sleeve 2026-06-11; git
 # history is the archive.) The daemons recreate the emptied datasets on their
 # next cycle.
@@ -26,18 +26,21 @@
 # Usage (run from the repo root, e.g. /opt/liquidity-migration):
 #   scripts/reset_demo_paper_ledgers.sh --dry-run      # preview, touches nothing
 #   scripts/reset_demo_paper_ledgers.sh                # archive + wipe
+#   scripts/reset_demo_paper_ledgers.sh --sleeves continuous --dry-run
 #   scripts/reset_demo_paper_ledgers.sh --archive-dir /some/other/dir
 set -euo pipefail
 
 DRY_RUN=0
 ARCHIVE_DIR="data/_archive"
 LABEL=""
+SLEEVES="all"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --archive-dir) ARCHIVE_DIR="$2"; shift 2 ;;
     --label) LABEL="$2"; shift 2 ;;
+    --sleeves) SLEEVES="$2"; shift 2 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -50,15 +53,17 @@ if [ ! -d liquidity_migration ] || [ ! -d data ]; then
   exit 1
 fi
 
-# (root, dataset) pairs. Keep this list in sync with the deployed systemd units'
+# (root, dataset) pairs. Keep these lists in sync with the deployed systemd units'
 # DATA_ROOT values and storage.py dataset names.
-PAIRS="
+LONG_PAIRS="
 data/bybit-long-demo-event:long_native_demo_trades
 data/bybit-long-demo-event:long_native_demo_orders
 data/bybit-long-demo-event:long_native_demo_cycles
 data/bybit-long-paper-event:long_native_paper_trades
 data/bybit-long-paper-event:long_native_paper_orders
 data/bybit-long-paper-event:long_native_paper_cycles
+"
+CONTINUOUS_PAIRS="
 data/bybit-continuous-demo-event:continuous_fade_demo_trades
 data/bybit-continuous-demo-event:continuous_fade_demo_orders
 data/bybit-continuous-demo-event:continuous_fade_demo_cycles
@@ -66,6 +71,26 @@ data/bybit-continuous-paper-event:continuous_fade_paper_trades
 data/bybit-continuous-paper-event:continuous_fade_paper_orders
 data/bybit-continuous-paper-event:continuous_fade_paper_cycles
 "
+PAIRS=""
+for sleeve in $(printf '%s' "$SLEEVES" | tr ',' ' '); do
+  case "$sleeve" in
+    all)
+      PAIRS="$PAIRS $LONG_PAIRS $CONTINUOUS_PAIRS"
+      ;;
+    long)
+      PAIRS="$PAIRS $LONG_PAIRS"
+      ;;
+    continuous)
+      PAIRS="$PAIRS $CONTINUOUS_PAIRS"
+      ;;
+    "")
+      ;;
+    *)
+      echo "unknown sleeve in --sleeves: $sleeve (expected all, long, continuous)" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # Collect the targets that actually exist on disk.
 EXISTING=""

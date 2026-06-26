@@ -653,7 +653,7 @@ def _add_reconcile_long_paper_demo_parser(subparsers) -> None:
     )
     reconcile.add_argument(
         "--demo-data-root",
-        default="data/bybit-demo-event",
+        default="data/bybit-long-demo-event",
         help="Demo data root holding the long_native_demo_trades ledger.",
     )
     reconcile.add_argument(
@@ -1453,7 +1453,7 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument(
         "--sniper-enabled", action="store_true", default=d.sniper_enabled,
         help="S1 Amendment 6 Tier-2 demo candidate: rest a PostOnly Sell limit at "
-             "entry*(1+wick) per fresh short (quarter-size, disaster stop attached).",
+             "entry*(1+wick) per fresh short (quarter-size; v2 attaches no server stop).",
     )
     p.add_argument("--sniper-wick-pct", type=float, default=d.sniper_wick_pct)
     p.add_argument("--sniper-size-frac", type=float, default=d.sniper_size_frac)
