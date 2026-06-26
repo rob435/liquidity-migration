@@ -11,6 +11,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -168,6 +170,21 @@ def test_pull_sleeve_uses_rsync_delete_to_mirror_live_ledgers(monkeypatch, tmp_p
     rsync_commands = [cmd for cmd, _ in step.commands if cmd[0] == "rsync"]
     assert rsync_commands
     assert all("--delete" in cmd for cmd in rsync_commands)
+
+
+def test_pull_sleeve_refuses_stale_local_mirror_without_transfer_tool(monkeypatch, tmp_path) -> None:
+    class FakeStep:
+        dry_run = False
+
+        def banner(self, title: str) -> None:
+            self.title = title
+
+    monkeypatch.setattr(reconcile, "REPO", tmp_path)
+    monkeypatch.setattr(reconcile, "_have_rsync", lambda: False)
+    monkeypatch.setattr(reconcile, "_have_scp", lambda: False)
+
+    with pytest.raises(SystemExit, match="refusing to use possibly stale local ledgers"):
+        reconcile.pull_sleeve(FakeStep(), "root@example", "long")
 
 
 def test_pull_sleeve_clears_local_mirror_when_remote_dataset_empty(monkeypatch, tmp_path) -> None:

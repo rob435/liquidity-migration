@@ -244,6 +244,11 @@ def pull_sleeve(step: Step, host: str, sleeve: str) -> None:
     step.banner(f"Pull {spec['label']} demo+paper ledgers from {host}")
     use_rsync = _have_rsync()
     use_scp = not use_rsync and _have_scp()
+    if not use_rsync and not use_scp and not step.dry_run:
+        raise SystemExit(
+            "neither rsync nor scp found; refusing to use possibly stale local ledgers. "
+            "Re-run with --no-pull to use local ledgers explicitly."
+        )
     if not use_rsync and not use_scp:
         print("⚠️  neither rsync nor scp found — skipping pull; using local ledgers as-is.")
         return
