@@ -707,6 +707,22 @@ def _add_reconcile_continuous_paper_demo_parser(subparsers) -> None:
         default=20,
         help="Emit sample_warning when paired-trade count is below this threshold.",
     )
+    reconcile.add_argument(
+        "--start-ts-ms",
+        type=int,
+        default=None,
+        help="Only reconcile rows whose signal/entry timestamp is at or after this UTC ms boundary.",
+    )
+    reconcile.add_argument(
+        "--paper-strategy-id",
+        default=None,
+        help="Optional paper strategy_id filter, e.g. continuous_fade_v2_paper.",
+    )
+    reconcile.add_argument(
+        "--demo-strategy-id",
+        default=None,
+        help="Optional demo strategy_id filter, e.g. continuous_fade_v2.",
+    )
     reconcile.add_argument("--output-dir", default=None, help="Where to write the continuous reconciliation report.")
 
 

@@ -102,6 +102,37 @@ def test_reconcile_main_returns_zero_when_leg_clean(monkeypatch) -> None:
     assert reconcile.main() == 0
 
 
+def test_reconcile_continuous_runs_paper_demo_gate() -> None:
+    class FakeStep:
+        def __init__(self) -> None:
+            self.commands: list[list[str]] = []
+
+        def banner(self, title: str) -> None:
+            self.title = title
+
+        def run_capture(self, cmd: list[str]) -> tuple[int, str]:
+            self.commands.append(cmd)
+            joined = " ".join(cmd)
+            if "continuous-forward-readiness" in joined:
+                return 0, "continuous forward readiness ok=True\n"
+            if "reconcile-continuous-paper-demo" in joined:
+                return 1, "continuous paper-demo reconciliation paper_only=1 hard_failures=paper_only=1\n"
+            if "continuous_demo_signal_check.py" in joined:
+                return 0, "SUMMARY: 0/0 confirmed D9 at signal bar; 0 off-decile; 0 no-panel-row.\n"
+            raise AssertionError(f"unexpected command: {cmd}")
+
+    step = FakeStep()
+    summary, ok = reconcile.reconcile_continuous(step, paper="paper-root", demo="demo-root")
+
+    paper_demo_cmd = next(cmd for cmd in step.commands if "reconcile-continuous-paper-demo" in cmd)
+    assert ok is False
+    assert "paper-demo:" in summary
+    assert "--start-ts-ms" in paper_demo_cmd
+    assert "--paper-strategy-id" in paper_demo_cmd
+    assert "--demo-strategy-id" in paper_demo_cmd
+    assert paper_demo_cmd[paper_demo_cmd.index("--min-pairs-warning") + 1] == "0"
+
+
 def test_py_prefers_windows_venv_python(monkeypatch, tmp_path) -> None:
     repo = tmp_path / "repo"
     scripts = repo / ".venv" / "Scripts"

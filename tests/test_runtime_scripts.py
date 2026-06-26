@@ -181,9 +181,11 @@ def test_reconcile_continuous_uses_forward_readiness_gate() -> None:
     assert "CONTINUOUS_V2_START_MS" in text
     assert '"--strategy-profile", strategy_profile' in text
     assert '"--paper-strategy-id", paper_strategy_id' in text
+    assert '"reconcile-continuous-paper-demo"' in text
+    assert '"--demo-strategy-id", demo_strategy_id' in text
+    assert '"--min-pairs-warning", "0"' in text
     assert '"--root", paper' in text
     assert '"--trades-dataset", "continuous_fade_paper_trades"' in text
-    assert '"reconcile-continuous-paper-demo"' not in text
 
 
 def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controlled() -> None:

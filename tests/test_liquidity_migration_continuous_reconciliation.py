@@ -13,11 +13,13 @@ from liquidity_migration.continuous_rebalance import (
     compute_continuous_rebalance_scale,
 )
 from liquidity_migration.reconciliation import (
+    CONTINUOUS_V2_DEMO_STRATEGY_ID,
     CONTINUOUS_V2_PAPER_STRATEGY_ID,
     CONTINUOUS_V2_PROFILE,
     _calendar_metrics,
     _continuous_cycle_daily_returns,
     audit_continuous_rebalance_cycles,
+    paper_demo_reconciliation_failures,
     run_continuous_forward_readiness,
     run_continuous_paper_demo_reconciliation,
     run_continuous_rebalance_cycle_audit,
@@ -356,6 +358,71 @@ def test_continuous_forward_readiness_v2_filter_ignores_pre_v2_poison(tmp_path: 
     assert payload["paper_rebalance"]["result"]["summary"]["cycles"] == 1
     assert "continuous_ensemble_v2" in payload["report"]
     assert str(v2_start) in payload["report"]
+
+
+def test_continuous_paper_demo_reconcile_filters_v2_but_keeps_unmatched_gate(tmp_path: Path) -> None:
+    paper_root = tmp_path / "paper"
+    demo_root = tmp_path / "demo"
+    paper_root.mkdir()
+    demo_root.mkdir()
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+    v2_start = day0 + MS_PER_DAY
+
+    old_paper = _trade_row(
+        trade_id="old-paper",
+        symbol="OLDUSDT",
+        entry_ts_ms=day0 + 1,
+        signal_ts_ms=day0,
+        entry_price=1.0,
+        strategy_id="retired_continuous_paper",
+    )
+    old_demo = _trade_row(
+        trade_id="old-demo",
+        symbol="OLDUSDT",
+        entry_ts_ms=day0 + 2,
+        signal_ts_ms=day0,
+        entry_price=1.0,
+        strategy_id="retired_continuous_demo",
+    )
+    v2_paper = _trade_row(
+        trade_id="v2-paper-only",
+        symbol="ENAUSDT",
+        entry_ts_ms=v2_start + 1,
+        signal_ts_ms=v2_start,
+        entry_price=1.0,
+        strategy_id=CONTINUOUS_V2_PAPER_STRATEGY_ID,
+    )
+    write_dataset(
+        pl.DataFrame([old_paper, v2_paper], infer_schema_length=None),
+        paper_root,
+        "continuous_fade_paper_trades",
+        partition_by=(),
+    )
+    write_dataset(
+        pl.DataFrame([old_demo], infer_schema_length=None),
+        demo_root,
+        "continuous_fade_demo_trades",
+        partition_by=(),
+    )
+
+    payload = run_continuous_paper_demo_reconciliation(
+        paper_root,
+        demo_root,
+        output_dir=tmp_path / "reconcile",
+        min_pairs_warning=0,
+        start_ts_ms=v2_start,
+        paper_strategy_id=CONTINUOUS_V2_PAPER_STRATEGY_ID,
+        demo_strategy_id=CONTINUOUS_V2_DEMO_STRATEGY_ID,
+    )
+    summary = payload["result"]["summary"]
+
+    assert summary["paper_trades"] == 1
+    assert summary["demo_trades"] == 0
+    assert summary["paper_only"] == 1
+    assert summary["demo_only"] == 0
+    assert summary["sample_warning"] is False
+    assert paper_demo_reconciliation_failures(summary) == ["paper_only=1"]
+    assert "Forward-Window Filter" in payload["report"]
 
 
 def test_continuous_forward_readiness_v2_allows_disabled_rebalance_telemetry(tmp_path: Path) -> None:

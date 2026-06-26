@@ -340,6 +340,18 @@ def reconcile_continuous(
         )
     )
     pd_summary, pd_ok = _summarize_leg(out, "continuous forward readiness", rc_pd)
+    rc_exec, exec_out = step.run_capture(
+        _cli(
+            "reconcile-continuous-paper-demo",
+            "--paper-data-root", paper,
+            "--demo-data-root", demo,
+            "--start-ts-ms", str(start_ts_ms),
+            "--paper-strategy-id", paper_strategy_id,
+            "--demo-strategy-id", demo_strategy_id,
+            "--min-pairs-warning", "0",
+        )
+    )
+    exec_summary, exec_ok = _summarize_leg(exec_out, "continuous paper-demo reconciliation", rc_exec)
     # Signal-consistency: are the no-order paper entries genuine engine D9 picks?
     rc_sig, sig = step.run_capture(
         _script(
@@ -351,7 +363,9 @@ def reconcile_continuous(
         )
     )
     sig_summary, sig_ok = _summarize_leg(sig, "SUMMARY:", rc_sig)
-    return f"{pd_summary}  ||  signal: {sig_summary}", (pd_ok and sig_ok)
+    return f"{pd_summary}  ||  paper-demo: {exec_summary}  ||  signal: {sig_summary}", (
+        pd_ok and exec_ok and sig_ok
+    )
 
 
 def _summarize_leg(out: str, needle: str, rc: int) -> tuple[str, bool]:

@@ -945,6 +945,9 @@ def _cmd_reconcile_continuous_paper_demo(args: argparse.Namespace, config: Resea
             entry_tolerance_ms=args.entry_tolerance_ms,
             output_dir=args.output_dir,
             min_pairs_warning=args.min_pairs_warning,
+            start_ts_ms=args.start_ts_ms,
+            paper_strategy_id=args.paper_strategy_id,
+            demo_strategy_id=args.demo_strategy_id,
         )
         summary = payload["result"]["summary"]
         warning = " [SAMPLE WARNING]" if summary.get("sample_warning") else ""
@@ -958,6 +961,9 @@ def _cmd_reconcile_continuous_paper_demo(args: argparse.Namespace, config: Resea
             f"status_divergent={summary.get('status_divergent', 0)} "
             f"exit_reason_divergent={summary.get('exit_reason_divergent', 0)} "
             f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
+            f"start_ts_ms={args.start_ts_ms or '-'} "
+            f"paper_strategy_id={args.paper_strategy_id or '-'} "
+            f"demo_strategy_id={args.demo_strategy_id or '-'} "
             f"path={payload['report_path']} "
             f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}{hard_status}"
         )
