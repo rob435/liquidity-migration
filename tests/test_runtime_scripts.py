@@ -522,7 +522,10 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # The canonical unit set (what each sleeve enables/restarts/verifies, and what the
     # liveness watchdog/recovery must bring up) lives in the lib — pin it there.
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
-    assert 'RETIRED_SLEEVE_UNITS="liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service"' in lib
+    assert "liquidity-migration-bybit-demo.service" in lib
+    assert "liquidity-migration-bybit-paper.service" in lib
+    assert "liquidity-migration-continuous-forward-report.service" in lib
+    assert "liquidity-migration-continuous-forward-report.timer" in lib
     assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
     assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
     assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
