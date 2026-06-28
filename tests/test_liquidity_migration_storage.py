@@ -671,7 +671,7 @@ def test_lock_owner_is_dead_evicts_reused_pid(tmp_path: Path, monkeypatch) -> No
 
     from liquidity_migration import storage
 
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(15)"])
     try:
         lock = tmp_path / "y.lock"
         lock.write_text(
@@ -682,8 +682,13 @@ def test_lock_owner_is_dead_evicts_reused_pid(tmp_path: Path, monkeypatch) -> No
         monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: None)
         assert storage._lock_owner_is_dead(lock) is False
     finally:
-        proc.kill()
-        proc.wait()
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
 
 
 def test_pid_started_after_guards_and_current_process() -> None:

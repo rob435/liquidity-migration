@@ -33,7 +33,7 @@ from .continuous_identity import (
     recover_snipe_trade_id_from_link as _recover_snipe_trade_id_from_link_impl,
 )
 from .order_execution import order_fill_status
-from .order_link_id import assert_routable_component_tags
+from .order_link_id import assert_routable_component_tags, decode_entry_order_link_id
 from .continuous_events import (
     FEATURES,
     compute_continuous_decile_panel,
@@ -73,6 +73,92 @@ BTC_TREND_SYMBOL = "BTCUSDT"
 CONTINUOUS_DEMO_PROFILES = (
     "continuous_ensemble_v2",   # 2026-06-18 demo/paper lifecycle: inv-vol + max4 + TP/24h, no server stop
 )
+CONTINUOUS_RISK_EVENTS_FILE = "continuous_risk_events.jsonl"
+CONTINUOUS_LIFECYCLE_EVENTS_FILE = "continuous_lifecycle_events.jsonl"
+CONTINUOUS_LIFECYCLE_STATES = (
+    "SIGNAL_CREATED",
+    "ENTRY_APPROVED",
+    "ORDER_PREPARED",
+    "ORDER_SUBMITTED",
+    "PARTIAL_FILL",
+    "FILLED",
+    "PROTECTION_PENDING",
+    "PROTECTED",
+    "EXIT_SIGNALLED",
+    "EXIT_ORDER_SUBMITTED",
+    "EXIT_PARTIAL",
+    "CLOSED",
+    "RECONCILED",
+    "FAILED",
+    "ORPHAN",
+    "ADOPTED",
+    "FORCE_FLATTENED",
+)
+CONTINUOUS_LIFECYCLE_INITIAL_STATES = frozenset(
+    {
+        "SIGNAL_CREATED",
+        "ORDER_SUBMITTED",
+        "FILLED",
+        "PROTECTION_PENDING",
+        "PROTECTED",
+        "ADOPTED",
+        "FAILED",
+    }
+)
+CONTINUOUS_LIFECYCLE_TERMINAL_STATES = frozenset({"CLOSED", "RECONCILED", "FAILED", "FORCE_FLATTENED"})
+CONTINUOUS_LIFECYCLE_ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
+    "SIGNAL_CREATED": frozenset({"SIGNAL_CREATED", "ENTRY_APPROVED", "ORDER_PREPARED", "ORDER_SUBMITTED", "FAILED"}),
+    "ENTRY_APPROVED": frozenset({"ENTRY_APPROVED", "ORDER_PREPARED", "ORDER_SUBMITTED", "FAILED"}),
+    "ORDER_PREPARED": frozenset({"ORDER_PREPARED", "ORDER_SUBMITTED", "FAILED"}),
+    "ORDER_SUBMITTED": frozenset(
+        {
+            "ORDER_SUBMITTED",
+            "PARTIAL_FILL",
+            "FILLED",
+            "PROTECTION_PENDING",
+            "PROTECTED",
+            "EXIT_ORDER_SUBMITTED",
+            "CLOSED",
+            "FAILED",
+        }
+    ),
+    "PARTIAL_FILL": frozenset(
+        {
+            "PARTIAL_FILL",
+            "FILLED",
+            "PROTECTION_PENDING",
+            "PROTECTED",
+            "EXIT_ORDER_SUBMITTED",
+            "CLOSED",
+            "FAILED",
+        }
+    ),
+    "FILLED": frozenset({"FILLED", "EXIT_SIGNALLED", "EXIT_ORDER_SUBMITTED", "EXIT_PARTIAL", "CLOSED", "FAILED"}),
+    "PROTECTION_PENDING": frozenset(
+        {
+            "PROTECTION_PENDING",
+            "PROTECTED",
+            "EXIT_SIGNALLED",
+            "EXIT_ORDER_SUBMITTED",
+            "EXIT_PARTIAL",
+            "CLOSED",
+            "FAILED",
+            "FORCE_FLATTENED",
+        }
+    ),
+    "PROTECTED": frozenset(
+        {"PROTECTED", "EXIT_SIGNALLED", "EXIT_ORDER_SUBMITTED", "EXIT_PARTIAL", "CLOSED", "FAILED", "FORCE_FLATTENED"}
+    ),
+    "EXIT_SIGNALLED": frozenset({"EXIT_SIGNALLED", "EXIT_ORDER_SUBMITTED", "EXIT_PARTIAL", "CLOSED", "FAILED"}),
+    "EXIT_ORDER_SUBMITTED": frozenset({"EXIT_ORDER_SUBMITTED", "EXIT_PARTIAL", "CLOSED", "FAILED"}),
+    "EXIT_PARTIAL": frozenset({"EXIT_PARTIAL", "EXIT_ORDER_SUBMITTED", "CLOSED", "FAILED"}),
+    "ADOPTED": frozenset({"ADOPTED", "EXIT_SIGNALLED", "EXIT_ORDER_SUBMITTED", "EXIT_PARTIAL", "CLOSED", "FAILED"}),
+    "ORPHAN": frozenset({"ORPHAN", "ADOPTED", "EXIT_SIGNALLED", "EXIT_ORDER_SUBMITTED", "EXIT_PARTIAL", "CLOSED", "FAILED"}),
+    "CLOSED": frozenset({"CLOSED", "RECONCILED"}),
+    "RECONCILED": frozenset({"RECONCILED"}),
+    "FAILED": frozenset({"FAILED"}),
+    "FORCE_FLATTENED": frozenset({"FORCE_FLATTENED", "CLOSED", "RECONCILED"}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +226,17 @@ class ContinuousDemoCycleConfig:
     # 0.0 after diagnostics showed both daemon stops and the 25% venue stop
     # destroy the fade edge.
     stop_loss_pct: float = 0.25
+    # Submit-mode portfolio heat cap: current non-hedge open notional times this
+    # adverse shock, as a fraction of equity, must leave room for another entry.
+    # 5% under a +100% shock is deliberately conservative and only affects real
+    # submitted entries; dry-run/paper evidence remains visible.
+    entry_portfolio_heat_cap_frac: float = 0.05
+    entry_portfolio_heat_shock_frac: float = 1.0
+    # Submit-mode account drawdown kill-switch: pause new entries when current
+    # wallet equity is this far below the prior healthy cycle high-water mark.
+    # Snapshot errors are handled by the risk-health gate and do not trip this
+    # check on fallback equity.
+    entry_account_drawdown_kill_switch_frac: float = 0.02
     # --- inherited-from-daily exits/gate (validated cross-venue beneficial in the engine ablation,
     # docs/continuous_sleeve_inheritance.md). Checked each cycle off live price + kline-reconstructed MFE. ---
     failed_fade_hours: int = 6            # cut a fade that hasn't worked after N hours (the daily's ff6)
@@ -273,6 +370,18 @@ class ContinuousDemoCycleConfig:
     ws_klines_topics_per_connection: int = 180
     ws_klines_stale_warning_seconds: float = 60.0
     ws_klines_stale_reconnect_seconds: float = 180.0
+    # New-entry health gate. Existing live logic already suppresses entries on
+    # private snapshot errors; keep that behavior explicit and add a genuine WS
+    # silence check when a PrivateStateCache is available. ``inf`` means the WS
+    # stream has not emitted yet and does not block; a stream that emitted and
+    # then went quiet for longer than this does.
+    entry_private_ws_stale_seconds: float = 300.0
+    # A raw Bybit position has no sleeve id. For the inverse ledger/venue drift
+    # check, only attribute an exchange-only position to this sleeve when the
+    # continuous order ledger has a recent non-reduce-only entry attempt for the
+    # same symbol. Keep the horizon wider than max_hold so crash orphans remain
+    # visible after the nominal cover point.
+    entry_exchange_mismatch_lookback_hours: float = 72.0
 
 
 def continuous_dataset_names(config: ContinuousDemoCycleConfig) -> tuple[str, str, str]:
@@ -1487,6 +1596,615 @@ def entry_circuit_breaker_tripped(
     count = _recent_adverse_exit_count(
         all_trades, now_ms=now_ms, window_minutes=config.entry_pause_window_minutes, strategy_id=strategy_id)
     return count >= config.entry_pause_after_adverse_exits, count
+
+
+def _private_ws_silence_seconds(private_state_cache: Any | None) -> float | None:
+    if private_state_cache is None:
+        return None
+    try:
+        value = float(private_state_cache.seconds_since_last_ws_event())
+    except Exception:  # noqa: BLE001 - telemetry only; never break a cycle
+        return None
+    if not np.isfinite(value):
+        return None
+    return max(value, 0.0)
+
+
+def _truthy_order_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "t", "yes", "y"}
+
+
+def _continuous_entry_order_attributed_symbols(
+    all_orders: pl.DataFrame | None,
+    *,
+    now_ms: int,
+    lookback_hours: float,
+    managed_strategy_ids: tuple[str, ...],
+) -> set[str]:
+    """Symbols whose recent order-ledger rows can attribute a live position to
+    the continuous sleeve.
+
+    Exchange positions are account-level and do not identify the sleeve. This
+    intentionally ignores exchange-only positions unless there is a recent
+    continuous non-reduce-only entry attempt in this root, preventing long or
+    hedge positions from being misclassified as continuous ledger drift.
+    """
+    if all_orders is None or all_orders.is_empty():
+        return set()
+    min_ts_ms = 0
+    if now_ms > 0 and lookback_hours > 0.0:
+        min_ts_ms = int(now_ms - lookback_hours * MS_PER_HOUR)
+    managed = {str(strategy_id) for strategy_id in managed_strategy_ids if str(strategy_id)}
+    terminal_no_position_statuses = {
+        "cancelled",
+        "canceled",
+        "rejected",
+        "deactivated",
+        "failed",
+        "expired",
+    }
+    symbols: set[str] = set()
+    for row in all_orders.iter_rows(named=True):
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
+        if _truthy_order_flag(row.get("reduce_only")):
+            continue
+        status = (
+            str(row.get("status") or row.get("orderStatus") or row.get("order_status") or "")
+            .strip()
+            .lower()
+        )
+        if status in terminal_no_position_statuses:
+            continue
+        submit_mode = str(row.get("submit_mode") or "").strip().lower()
+        if submit_mode in {"dry_run", "error"}:
+            continue
+        row_ts = int(finite_float(row.get("updated_at_ms") or row.get("ts_ms"), default=0.0) or 0.0)
+        if min_ts_ms > 0 and (row_ts <= 0 or row_ts < min_ts_ms):
+            continue
+        strategy_id = str(row.get("strategy_id") or "")
+        link = str(row.get("order_link_id") or row.get("orderLinkId") or "")
+        decoded = decode_entry_order_link_id(link)
+        decoded_sleeve = decoded[0] if decoded is not None else ""
+        if strategy_id in managed or decoded_sleeve in {"continuous", "continuous_addon"}:
+            symbols.add(symbol)
+    return symbols
+
+
+def _position_stop_loss_price(position: dict[str, Any] | None) -> float:
+    if not position:
+        return 0.0
+    for key in ("stopLoss", "stop_loss", "sl", "stopLossPrice"):
+        value = finite_float(position.get(key), default=0.0) or 0.0
+        if value > 0.0:
+            return value
+    return 0.0
+
+
+def _is_hedge_trade_row(row: dict[str, Any]) -> bool:
+    sleeve = str(row.get("sleeve") or "").strip().lower()
+    side = str(row.get("side") or row.get("trade_side") or "").strip().lower()
+    return sleeve == "continuous_addon" or side in {"long", "buy"}
+
+
+def _continuous_unprotected_non_hedge_position_ages(
+    open_trades: pl.DataFrame,
+    *,
+    live_positions_by_symbol: dict[str, dict[str, Any]] | None,
+    now_ms: int,
+) -> dict[str, float]:
+    if open_trades.is_empty() or not live_positions_by_symbol:
+        return {}
+    output: dict[str, float] = {}
+    for row in open_trades.iter_rows(named=True):
+        if _is_hedge_trade_row(row):
+            continue
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
+        position = live_positions_by_symbol.get(symbol)
+        if position is None:
+            continue
+        if _position_stop_loss_price(position) <= 0.0:
+            opened_ms = _row_ts_ms(row, "opened_at_ms", "entry_ts_ms", "ts_ms", "signal_ts_ms")
+            age_seconds = max((int(now_ms) - opened_ms) / 1000.0, 0.0) if now_ms > 0 and opened_ms > 0 else 0.0
+            output[symbol] = max(output.get(symbol, 0.0), age_seconds)
+    return output
+
+
+def _compact_unprotected_position_ages(ages: dict[str, float]) -> str:
+    return ",".join(f"{symbol}:{int(seconds)}" for symbol, seconds in sorted(ages.items())[:25])
+
+
+def _continuous_lifecycle_state(
+    trade: dict[str, Any],
+    *,
+    live_position: dict[str, Any] | None,
+) -> str:
+    status = str(trade.get("status") or "").strip().lower()
+    submit_mode = str(trade.get("submit_mode") or "").strip().lower()
+    if status == "closed":
+        return "CLOSED"
+    if status == "failed" or submit_mode == "error":
+        return "FAILED"
+    if submit_mode == "adopted" or str(trade.get("trade_id") or "").startswith("adopted-"):
+        return "ADOPTED"
+    if str(trade.get("partial_exit_order_link_id") or ""):
+        return "EXIT_PARTIAL"
+    if str(trade.get("exit_order_link_id") or ""):
+        return "EXIT_ORDER_SUBMITTED"
+    if live_position is None:
+        return "ORPHAN"
+    if _is_hedge_trade_row(trade):
+        return "FILLED"
+    if _position_stop_loss_price(live_position) > 0.0:
+        return "PROTECTED"
+    return "PROTECTION_PENDING"
+
+
+def _continuous_trade_row_lifecycle_state(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "").strip().lower()
+    submit_mode = str(row.get("submit_mode") or "").strip().lower()
+    if status == "closed":
+        return "CLOSED"
+    if status == "failed" or submit_mode == "error":
+        return "FAILED"
+    if submit_mode == "adopted" or str(row.get("trade_id") or "").startswith("adopted-"):
+        return "ADOPTED"
+    if str(row.get("partial_exit_order_link_id") or ""):
+        return "EXIT_PARTIAL"
+    if str(row.get("exit_order_link_id") or ""):
+        return "EXIT_ORDER_SUBMITTED"
+    if status == "submitted":
+        return "ORDER_SUBMITTED"
+    if status == "open":
+        return "FILLED" if _is_hedge_trade_row(row) else "PROTECTION_PENDING"
+    return "FAILED" if status else "SIGNAL_CREATED"
+
+
+def _known_continuous_lifecycle_state(value: Any) -> str:
+    state = str(value or "").strip().upper()
+    return state if state in CONTINUOUS_LIFECYCLE_STATES else ""
+
+
+def _continuous_prior_lifecycle_state(prior: dict[str, Any] | None) -> str:
+    if prior is None:
+        return ""
+    return _known_continuous_lifecycle_state(prior.get("lifecycle_state")) or _continuous_trade_row_lifecycle_state(prior)
+
+
+def _continuous_incoming_lifecycle_state(
+    prior: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> str:
+    row_state = _continuous_trade_row_lifecycle_state(incoming)
+    explicit_state = _known_continuous_lifecycle_state(incoming.get("lifecycle_state"))
+    prior_state = _continuous_prior_lifecycle_state(prior)
+    if row_state == "PROTECTION_PENDING" and explicit_state == "PROTECTED" and prior_state == "PROTECTED":
+        return "PROTECTED"
+    return row_state
+
+
+def _continuous_lifecycle_transition_violation(
+    prior: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> str:
+    trade_id = str(incoming.get("trade_id") or "")
+    if not trade_id:
+        return "missing_trade_id"
+    incoming_status = str(incoming.get("status") or "").strip().lower()
+    prior_status = str(prior.get("status") or "").strip().lower() if prior is not None else ""
+    incoming_lifecycle = _known_continuous_lifecycle_state(
+        incoming.get("lifecycle_state")
+    ) or _continuous_trade_row_lifecycle_state(incoming)
+    if prior is None and incoming_status == "closed":
+        return "closed_without_prior_trade"
+    if prior is None and incoming_lifecycle not in CONTINUOUS_LIFECYCLE_INITIAL_STATES:
+        return "invalid_initial_lifecycle_state"
+    if prior_status == "closed" and incoming_status != "closed":
+        return "closed_trade_reopened"
+    prior_lifecycle = _continuous_prior_lifecycle_state(prior)
+    allowed_transitions = CONTINUOUS_LIFECYCLE_ALLOWED_TRANSITIONS.get(prior_lifecycle)
+    if prior_lifecycle in CONTINUOUS_LIFECYCLE_TERMINAL_STATES and incoming_lifecycle not in (
+        allowed_transitions or frozenset()
+    ):
+        return "terminal_lifecycle_reopened"
+    if allowed_transitions is not None and incoming_lifecycle not in allowed_transitions:
+        return "illegal_lifecycle_transition"
+    return ""
+
+
+def _enforce_continuous_lifecycle_transitions(
+    existing_trades: pl.DataFrame,
+    incoming_rows: list[dict[str, Any]],
+    *,
+    submit_orders: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not incoming_rows:
+        return [], []
+    state_by_trade_id: dict[str, dict[str, Any]] = {}
+    if not existing_trades.is_empty() and "trade_id" in existing_trades.columns:
+        for row in existing_trades.to_dicts():
+            trade_id = str(row.get("trade_id") or "")
+            if trade_id:
+                state_by_trade_id[trade_id] = row
+    accepted: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    for row in incoming_rows:
+        trade_id = str(row.get("trade_id") or "")
+        prior = state_by_trade_id.get(trade_id)
+        stamped = {**row, "lifecycle_state": _continuous_incoming_lifecycle_state(prior, row)}
+        prior_lifecycle = _continuous_prior_lifecycle_state(prior)
+        reason = _continuous_lifecycle_transition_violation(prior, stamped) if submit_orders else ""
+        if reason:
+            violations.append(
+                {
+                    "reason": reason,
+                    "trade_id": trade_id,
+                    "symbol": str(stamped.get("symbol") or ""),
+                    "incoming_status": str(stamped.get("status") or ""),
+                    "incoming_lifecycle_state": stamped["lifecycle_state"],
+                    "prior_status": str((prior or {}).get("status") or ""),
+                    "prior_lifecycle_state": prior_lifecycle,
+                }
+            )
+            continue
+        accepted.append(stamped)
+        if trade_id:
+            state_by_trade_id[trade_id] = stamped
+    return accepted, violations
+
+
+def _continuous_lifecycle_state_counts(
+    open_trades: pl.DataFrame,
+    *,
+    live_positions_by_symbol: dict[str, dict[str, Any]] | None,
+) -> dict[str, int]:
+    if open_trades.is_empty():
+        return {}
+    counts: dict[str, int] = {}
+    positions = live_positions_by_symbol or {}
+    for row in open_trades.iter_rows(named=True):
+        symbol = str(row.get("symbol") or "")
+        state = _continuous_lifecycle_state(row, live_position=positions.get(symbol))
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def _continuous_lifecycle_snapshot_update_rows(
+    open_trades: pl.DataFrame,
+    *,
+    live_positions_by_symbol: dict[str, dict[str, Any]] | None,
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    """Persist monotonic lifecycle promotions proven by a healthy venue snapshot."""
+    if open_trades.is_empty() or not live_positions_by_symbol:
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in open_trades.iter_rows(named=True):
+        trade_id = str(row.get("trade_id") or "")
+        symbol = str(row.get("symbol") or "")
+        if not trade_id or not symbol:
+            continue
+        live_position = live_positions_by_symbol.get(symbol)
+        if live_position is None:
+            continue
+        snapshot_state = _continuous_lifecycle_state(row, live_position=live_position)
+        if snapshot_state != "PROTECTED":
+            continue
+        current_state = _known_continuous_lifecycle_state(
+            row.get("lifecycle_state")
+        ) or _continuous_trade_row_lifecycle_state(row)
+        if current_state == snapshot_state:
+            continue
+        if current_state not in {"ORDER_SUBMITTED", "PARTIAL_FILL", "PROTECTION_PENDING"}:
+            continue
+        updated = dict(row)
+        updated.update(
+            {
+                "lifecycle_state": snapshot_state,
+                "lifecycle_state_source": "private_position_snapshot",
+                "lifecycle_state_updated_at_ms": int(now_ms),
+                "lifecycle_position_stop_loss": _position_stop_loss_price(live_position),
+                "updated_at_ms": int(now_ms),
+            }
+        )
+        rows.append(updated)
+    return rows
+
+
+def _compact_lifecycle_state_counts(counts: dict[str, int]) -> str:
+    return ",".join(
+        f"{state}:{counts[state]}"
+        for state in CONTINUOUS_LIFECYCLE_STATES
+        if counts.get(state, 0) > 0
+    )
+
+
+def _continuous_trade_notional_usdt(row: dict[str, Any]) -> float:
+    notional = finite_float(row.get("notional_usdt"), default=0.0) or 0.0
+    if notional > 0.0:
+        return abs(notional)
+    qty = finite_float(row.get("qty"), default=0.0) or 0.0
+    entry_price = finite_float(row.get("entry_price"), default=0.0) or 0.0
+    return abs(qty * entry_price) if qty > 0.0 and entry_price > 0.0 else 0.0
+
+
+def _continuous_portfolio_heat_fields(
+    open_trades: pl.DataFrame,
+    *,
+    equity_usdt: float,
+    config: ContinuousDemoCycleConfig,
+    max_new_entries: int,
+    enabled: bool,
+) -> dict[str, Any]:
+    shock_frac = max(float(config.entry_portfolio_heat_shock_frac or 0.0), 0.0)
+    cap_frac = max(float(config.entry_portfolio_heat_cap_frac or 0.0), 0.0)
+    current_notional = 0.0
+    if not open_trades.is_empty():
+        for row in open_trades.iter_rows(named=True):
+            if not _is_hedge_trade_row(row):
+                current_notional += _continuous_trade_notional_usdt(row)
+    current_heat_frac = (current_notional * shock_frac / equity_usdt) if equity_usdt > 0.0 else 0.0
+    unit_notional_frac = max(float(config.per_position_notional_pct_equity or 0.0), 0.0) / 100.0
+    if config.sizing_mode == "inverse_vol":
+        unit_notional_frac *= max(float(config.vol_weight_clamp or 1.0), 1.0)
+    entry_heat_unit_frac = unit_notional_frac * shock_frac
+    capacity = int(max_new_entries)
+    clamped = False
+    if enabled and cap_frac > 0.0 and shock_frac > 0.0 and equity_usdt > 0.0 and entry_heat_unit_frac > 0.0:
+        remaining = max(cap_frac - current_heat_frac, 0.0)
+        heat_capacity = int((remaining + 1e-12) // entry_heat_unit_frac)
+        capacity = max(0, min(int(max_new_entries), heat_capacity))
+        clamped = capacity < int(max_new_entries)
+    return {
+        "portfolio_heat_current_frac": current_heat_frac,
+        "portfolio_heat_cap_frac": cap_frac,
+        "portfolio_heat_shock_frac": shock_frac,
+        "portfolio_heat_entry_unit_frac": entry_heat_unit_frac,
+        "portfolio_heat_entry_capacity": capacity,
+        "portfolio_heat_clamped": clamped,
+        "skipped_portfolio_heat": max(int(max_new_entries) - capacity, 0) if clamped else 0,
+    }
+
+
+def _continuous_account_drawdown_fields(
+    cycles: pl.DataFrame,
+    *,
+    current_equity_usdt: float,
+    config: ContinuousDemoCycleConfig,
+    current_snapshot_ok: bool,
+) -> dict[str, Any]:
+    threshold = max(float(config.entry_account_drawdown_kill_switch_frac or 0.0), 0.0)
+    high_water = 0.0
+    if not cycles.is_empty() and "equity_usdt" in cycles.columns:
+        frame = cycles.filter(pl.col("equity_usdt").is_not_null() & (pl.col("equity_usdt") > 0.0))
+        if "wallet_error" in frame.columns:
+            frame = frame.filter(pl.col("wallet_error").fill_null("") == "")
+        if not frame.is_empty():
+            high_water = float(frame["equity_usdt"].max() or 0.0)
+    drawdown_frac = (
+        (float(current_equity_usdt) / high_water) - 1.0
+        if high_water > 0.0 and current_equity_usdt > 0.0
+        else 0.0
+    )
+    tripped = (
+        bool(config.submit_orders)
+        and current_snapshot_ok
+        and threshold > 0.0
+        and high_water > 0.0
+        and drawdown_frac <= -threshold
+    )
+    return {
+        "entry_account_drawdown_kill_switch_frac": threshold,
+        "entry_account_equity_high_water_usdt": high_water,
+        "entry_account_drawdown_frac": drawdown_frac,
+        "entry_account_drawdown_kill_switch_tripped": tripped,
+    }
+
+
+def _continuous_entry_risk_health(
+    *,
+    config: ContinuousDemoCycleConfig,
+    snapshot: dict[str, Any],
+    snapshot_source: str,
+    private_state_cache: Any | None,
+    open_trades: pl.DataFrame,
+    live_position_symbols: set[str],
+    live_positions_by_symbol: dict[str, dict[str, Any]] | None = None,
+    all_orders: pl.DataFrame | None = None,
+    now_ms: int = 0,
+    managed_strategy_ids: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """New-entry health gate for the live submit path.
+
+    Dry-run/paper evidence should keep flowing, but real submitted entries must
+    stop when the cycle cannot trust private account state. The checks are
+    deliberately side-effect free and persisted in the cycle row so blocked
+    cycles are auditable instead of looking like quiet signal cycles.
+    """
+    reasons: list[str] = []
+    snapshot_errors = [
+        name
+        for name in ("wallet_error", "open_order_error", "position_error")
+        if snapshot.get(name)
+    ]
+    if config.submit_orders and snapshot_errors:
+        reasons.append("private_snapshot_error")
+    private_ws_silence = _private_ws_silence_seconds(private_state_cache)
+    stale_threshold = float(config.entry_private_ws_stale_seconds or 0.0)
+    if config.submit_orders and stale_threshold > 0.0 and private_ws_silence is not None:
+        if private_ws_silence > stale_threshold:
+            reasons.append("private_ws_stale")
+    ledger_symbols: set[str] = set()
+    if not open_trades.is_empty() and "symbol" in open_trades.columns:
+        ledger_symbols = {str(symbol) for symbol in open_trades["symbol"].to_list()}
+    missing_positions = sorted(symbol for symbol in ledger_symbols if symbol not in live_position_symbols)
+    if config.submit_orders and missing_positions:
+        reasons.append("ledger_position_mismatch")
+    unprotected_position_ages = (
+        _continuous_unprotected_non_hedge_position_ages(
+            open_trades,
+            live_positions_by_symbol=live_positions_by_symbol,
+            now_ms=now_ms,
+        )
+        if config.submit_orders
+        else {}
+    )
+    unprotected_positions = sorted(unprotected_position_ages)
+    unprotected_max_age_seconds = max(unprotected_position_ages.values(), default=0.0)
+    if config.submit_orders and unprotected_positions:
+        reasons.append("unprotected_non_hedge_position")
+    lifecycle_state_counts = (
+        _continuous_lifecycle_state_counts(
+            open_trades,
+            live_positions_by_symbol=live_positions_by_symbol,
+        )
+        if config.submit_orders
+        else {}
+    )
+    exchange_only_positions: list[str] = []
+    if config.submit_orders:
+        lookback_hours = max(
+            float(config.entry_exchange_mismatch_lookback_hours or 0.0),
+            float(config.max_hold_hours or 0) + 24.0,
+        )
+        attributed_symbols = _continuous_entry_order_attributed_symbols(
+            all_orders,
+            now_ms=now_ms,
+            lookback_hours=lookback_hours,
+            managed_strategy_ids=managed_strategy_ids,
+        )
+        exchange_only_positions = sorted(
+            symbol
+            for symbol in live_position_symbols
+            if symbol in attributed_symbols and symbol not in ledger_symbols
+        )
+    if config.submit_orders and exchange_only_positions:
+        reasons.append("exchange_position_without_ledger")
+    return {
+        "entry_risk_health_ok": not reasons,
+        "entry_risk_health_reasons": ",".join(reasons),
+        "entry_risk_health_snapshot_source": snapshot_source,
+        "entry_risk_health_snapshot_errors": ",".join(snapshot_errors),
+        "entry_risk_health_private_ws_silence_seconds": private_ws_silence,
+        "entry_risk_health_private_ws_stale_seconds": stale_threshold,
+        "entry_risk_health_ledger_missing_positions": ",".join(missing_positions[:25]),
+        "entry_risk_health_unprotected_positions": ",".join(unprotected_positions[:25]),
+        "entry_risk_health_unprotected_position_ages": _compact_unprotected_position_ages(unprotected_position_ages),
+        "entry_risk_health_unprotected_max_age_seconds": unprotected_max_age_seconds,
+        "entry_risk_health_lifecycle_states": _compact_lifecycle_state_counts(lifecycle_state_counts),
+        "entry_risk_health_lifecycle_protection_pending": lifecycle_state_counts.get("PROTECTION_PENDING", 0),
+        "entry_risk_health_lifecycle_orphan": lifecycle_state_counts.get("ORPHAN", 0),
+        "entry_risk_health_exchange_only_positions": ",".join(exchange_only_positions[:25]),
+    }
+
+
+def _append_continuous_jsonl_event(root: Path, filename: str, event: dict[str, Any]) -> Path:
+    path = Path(root).expanduser() / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True, default=str, separators=(",", ":")) + "\n")
+    return path
+
+
+def _append_continuous_risk_event(root: Path, event: dict[str, Any]) -> Path:
+    return _append_continuous_jsonl_event(root, CONTINUOUS_RISK_EVENTS_FILE, event)
+
+
+def _append_continuous_lifecycle_event(root: Path, event: dict[str, Any]) -> Path:
+    return _append_continuous_jsonl_event(root, CONTINUOUS_LIFECYCLE_EVENTS_FILE, event)
+
+
+def _continuous_lifecycle_state_from_order_row(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or row.get("orderStatus") or row.get("order_status") or "").strip().lower()
+    submit_mode = str(row.get("submit_mode") or "").strip().lower()
+    reduce_only = _truthy_order_flag(row.get("reduce_only"))
+    if submit_mode == "preflight":
+        return "ORDER_PREPARED"
+    if submit_mode == "error" or status in {"failed", "rejected", "cancelled", "canceled", "expired"}:
+        return "FAILED"
+    if reduce_only:
+        if status == "partial":
+            return "EXIT_PARTIAL"
+        if status in {"filled", "closed"}:
+            return "CLOSED"
+        if submit_mode == "submitted" or status in {"submitted", "submitted_unconfirmed", "new", "partiallyfilled"}:
+            return "EXIT_ORDER_SUBMITTED"
+        return "EXIT_SIGNALLED"
+    if status == "partial":
+        return "PARTIAL_FILL"
+    if status in {"filled", "closed"}:
+        return "FILLED"
+    if submit_mode == "submitted" or status in {"submitted", "submitted_unconfirmed", "new", "partiallyfilled"}:
+        return "ORDER_SUBMITTED"
+    return "SIGNAL_CREATED"
+
+
+def _continuous_lifecycle_event_from_order_row(
+    row: dict[str, Any],
+    *,
+    cycle_id: str,
+    source: str,
+    now_ms: int,
+) -> dict[str, Any]:
+    lifecycle_state = _continuous_lifecycle_state_from_order_row(row)
+    order_link_id = str(row.get("order_link_id") or row.get("orderLinkId") or "")
+    trade_id = str(row.get("trade_id") or "")
+    ts_ms = int(finite_float(row.get("updated_at_ms") or row.get("ts_ms"), default=0.0) or now_ms)
+    return {
+        "event": "lifecycle_state_transition",
+        "event_key": f"{cycle_id}:{source}:{trade_id}:{order_link_id}:{lifecycle_state}",
+        "cycle_id": cycle_id,
+        "ts_ms": ts_ms,
+        "strategy_id": str(row.get("strategy_id") or ""),
+        "trade_id": trade_id,
+        "symbol": str(row.get("symbol") or ""),
+        "order_link_id": order_link_id,
+        "reduce_only": _truthy_order_flag(row.get("reduce_only")),
+        "submit_mode": str(row.get("submit_mode") or ""),
+        "order_status": str(row.get("status") or row.get("orderStatus") or row.get("order_status") or ""),
+        "lifecycle_state": lifecycle_state,
+        "lifecycle_state_source": source,
+        "side": str(row.get("side") or ""),
+        "sleeve": str(row.get("sleeve") or ""),
+    }
+
+
+def _continuous_lifecycle_event_from_trade_row(
+    row: dict[str, Any],
+    *,
+    cycle_id: str,
+    source: str,
+    now_ms: int,
+) -> dict[str, Any]:
+    lifecycle_state = _known_continuous_lifecycle_state(
+        row.get("lifecycle_state")
+    ) or _continuous_trade_row_lifecycle_state(row)
+    trade_id = str(row.get("trade_id") or "")
+    ts_ms = int(finite_float(row.get("updated_at_ms") or row.get("ts_ms"), default=0.0) or now_ms)
+    source_value = str(row.get("lifecycle_state_source") or source)
+    return {
+        "event": "lifecycle_state_transition",
+        "event_key": f"{cycle_id}:{source_value}:{trade_id}:{lifecycle_state}",
+        "cycle_id": cycle_id,
+        "ts_ms": ts_ms,
+        "strategy_id": str(row.get("strategy_id") or ""),
+        "trade_id": trade_id,
+        "symbol": str(row.get("symbol") or ""),
+        "status": str(row.get("status") or ""),
+        "submit_mode": str(row.get("submit_mode") or ""),
+        "lifecycle_state": lifecycle_state,
+        "lifecycle_state_source": source_value,
+        "side": str(row.get("side") or ""),
+        "sleeve": str(row.get("sleeve") or ""),
+        "entry_order_link_id": str(row.get("entry_order_link_id") or ""),
+        "exit_order_link_id": str(row.get("exit_order_link_id") or ""),
+    }
 
 
 def _continuous_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, reentry_seq: int = 0) -> str:
@@ -3081,6 +3799,7 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"entries={payload.get('entries')} exits={payload.get('exits')} open={payload.get('open_positions')} "
         f"sniper={payload.get('sniper_fills', 0)}/{payload.get('sniper_exits', 0)}/{payload.get('sniper_errors', 0)} "
         f"equity=${_payload_float(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')} "
+        f"risk_health={'ok' if payload.get('entry_risk_health_ok', True) else payload.get('entry_risk_health_reasons')} "
         f"same_signal_reentry_skips={payload.get('skipped_same_signal_reentry', 0)} "
         f"addon_entry_cooldown_symbols={payload.get('addon_same_symbol_entry_cooldown_symbols', 0)} "
         f"addon_pnl_gate_skips={payload.get('addon_primary_pnl_gate_skips', 0)} "
@@ -3106,6 +3825,10 @@ def _continuous_telegram_reason(
     # on a pure wallet outage even when no order activity fired this cycle.
     if payload.get("wallet_error"):
         return "continuous_wallet_error"
+    if payload.get("entry_risk_health_ok") is False:
+        return "continuous_entry_risk_health_blocked"
+    if int(payload.get("lifecycle_transition_violations") or 0) > 0:
+        return "continuous_lifecycle_transition_violation"
     # Submit failures live on ORDER rows, surfaced via payload counts: a failed
     # live entry/exit appends NO trade row, so the trade-row checks below never
     # fired for real venue rejects (audit 2026-06-12 round 3). The trade-row
@@ -3171,6 +3894,44 @@ def format_continuous_telegram_status_message(
         lines.append(
             f"rmom={'present' if payload.get('rmom_present') else 'MISSING'} "
             f"paused={payload.get('entry_paused')}"
+        )
+    if payload.get("entry_risk_health_ok") is False:
+        lines.append(
+            "entry_risk_health="
+            f"{payload.get('entry_risk_health_reasons') or 'blocked'} "
+            f"snapshot={payload.get('entry_risk_health_snapshot_source') or ''}"
+        )
+        missing = str(payload.get("entry_risk_health_ledger_missing_positions") or "")
+        if missing:
+            lines.append(f"ledger_missing_positions={missing[:200]}")
+        unprotected = str(payload.get("entry_risk_health_unprotected_positions") or "")
+        if unprotected:
+            lines.append(
+                "unprotected_positions="
+                f"{unprotected[:200]} max_age_s="
+                f"{_payload_float(payload.get('entry_risk_health_unprotected_max_age_seconds')):g}"
+            )
+            unprotected_ages = str(payload.get("entry_risk_health_unprotected_position_ages") or "")
+            if unprotected_ages:
+                lines.append(f"unprotected_position_ages={unprotected_ages[:200]}")
+        exchange_only = str(payload.get("entry_risk_health_exchange_only_positions") or "")
+        if exchange_only:
+            lines.append(f"exchange_only_positions={exchange_only[:200]}")
+        lifecycle_states = str(payload.get("entry_risk_health_lifecycle_states") or "")
+        if lifecycle_states:
+            lines.append(f"lifecycle_states={lifecycle_states[:200]}")
+        if payload.get("entry_account_drawdown_kill_switch_tripped"):
+            lines.append(
+                "account_drawdown="
+                f"{_payload_float(payload.get('entry_account_drawdown_frac')):.4f} "
+                f"high_water=${_payload_float(payload.get('entry_account_equity_high_water_usdt')):,.2f} "
+                f"limit={_payload_float(payload.get('entry_account_drawdown_kill_switch_frac')):.4f}"
+            )
+    if int(payload.get("lifecycle_transition_violations") or 0) > 0:
+        lines.append(
+            "lifecycle_transition_violations="
+            f"{payload.get('lifecycle_transition_violations')} "
+            f"reasons={payload.get('lifecycle_transition_violation_reasons') or ''}"
         )
     sniper_counts = (
         int(payload.get("sniper_fills") or 0),
@@ -3389,14 +4150,15 @@ def run_continuous_demo_cycle(
         trading_client = private_client
         if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
             trading_client = _build_private_client(config)
-        snapshot, _src = _resolve_private_snapshot(
+        snapshot, snapshot_source = _resolve_private_snapshot(
             trading_client, demo, private_state_cache=private_state_cache, state_cache_stale_seconds=state_cache_stale_seconds)
         equity_usdt = resolve_snapshot_equity(snapshot, fallback_equity_usdt=demo.fallback_equity_usdt)
         raw_open_orders = snapshot.get("raw_open_orders", [])
         raw_positions = snapshot.get("raw_positions", [])
         errors = bool(snapshot.get("wallet_error") or snapshot.get("open_order_error") or snapshot.get("position_error"))
         live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
-        live_position_symbols = set(_active_position_by_symbol(raw_positions))
+        live_positions_by_symbol = _active_position_by_symbol(raw_positions)
+        live_position_symbols = set(live_positions_by_symbol)
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
         klines, kline_stats = _download_recent_1h_klines(
@@ -3441,6 +4203,7 @@ def run_continuous_demo_cycle(
             entry_state = build_confirmed_entry_state(klines, rmom, now_ts_ms=cycle_now_ms, config=demo)
 
         all_trades = read_dataset(root, trades_dataset)
+        cycle_start_trades = all_trades
         all_orders = read_dataset(root, orders_dataset)
         # Windowed cycles read (round 4): the rebalance state consumes at most
         # max(realized-vol window 90d, strategy-momentum window 180d) of prior
@@ -3448,9 +4211,10 @@ def run_continuous_demo_cycle(
         # cover that, and the legacy pre-bucket monolith is included by
         # read_ledger_window until it ages out. A full-history read here grew
         # without bound (~525k rows/yr) inside the cycle's hot path.
+        needs_cycle_window = demo.daily_rebalance_enabled or demo.entry_account_drawdown_kill_switch_frac > 0.0
         all_cycles = (
             read_ledger_window(root, cycles_dataset, months_back=8)
-            if demo.daily_rebalance_enabled
+            if needs_cycle_window
             else pl.DataFrame()
         )
         rebalance_rule = continuous_rebalance_rule(demo) if demo.daily_rebalance_enabled else None
@@ -3469,12 +4233,76 @@ def run_continuous_demo_cycle(
         )
         open_trades = _open_continuous_trades(all_trades, managed_strategy_ids)
         held_symbols = set(open_trades["symbol"].to_list()) if not open_trades.is_empty() else set()
+        snapshot_ok = not any(
+            snapshot.get(name)
+            for name in ("wallet_error", "open_order_error", "position_error")
+        )
+        account_drawdown_fields = _continuous_account_drawdown_fields(
+            all_cycles,
+            current_equity_usdt=equity_usdt,
+            config=demo,
+            current_snapshot_ok=snapshot_ok,
+        )
+        entry_risk_health = _continuous_entry_risk_health(
+            config=demo,
+            snapshot=snapshot,
+            snapshot_source=snapshot_source,
+            private_state_cache=private_state_cache,
+            open_trades=open_trades,
+            live_position_symbols=live_position_symbols,
+            live_positions_by_symbol=live_positions_by_symbol,
+            all_orders=all_orders,
+            now_ms=cycle_now_ms,
+            managed_strategy_ids=managed_strategy_ids,
+        )
+        if bool(account_drawdown_fields["entry_account_drawdown_kill_switch_tripped"]):
+            existing_reasons = str(entry_risk_health["entry_risk_health_reasons"] or "")
+            reasons = [reason for reason in existing_reasons.split(",") if reason]
+            reasons.append("account_drawdown_kill_switch")
+            entry_risk_health["entry_risk_health_ok"] = False
+            entry_risk_health["entry_risk_health_reasons"] = ",".join(reasons)
+        if not bool(entry_risk_health["entry_risk_health_ok"]):
+            _logger.warning(
+                "continuous entry risk-health gate BLOCKED new entries: %s",
+                entry_risk_health["entry_risk_health_reasons"],
+            )
 
         cycle_trade_rows: list[dict[str, Any]] = []
         cycle_order_rows: list[dict[str, Any]] = []
+        lifecycle_events_written = 0
+
+        def _record_lifecycle_event(event: dict[str, Any]) -> None:
+            nonlocal lifecycle_events_written
+            try:
+                _append_continuous_lifecycle_event(root, event)
+            except Exception:  # noqa: BLE001 - ledger rows remain authoritative
+                _logger.exception("continuous lifecycle event append failed")
+            else:
+                lifecycle_events_written += 1
+
+        lifecycle_snapshot_rows = (
+            _continuous_lifecycle_snapshot_update_rows(
+                open_trades,
+                live_positions_by_symbol=live_positions_by_symbol,
+                now_ms=cycle_now_ms,
+            )
+            if demo.submit_orders and snapshot_ok
+            else []
+        )
+        if lifecycle_snapshot_rows:
+            cycle_trade_rows.extend(lifecycle_snapshot_rows)
         if demo.submit_orders or demo.record_dry_run:
             def _record_preflight(row: dict[str, Any]) -> None:
                 write_dataset(pl.DataFrame([row], infer_schema_length=None), root, orders_dataset, partition_by=())
+                if demo.submit_orders:
+                    _record_lifecycle_event(
+                        _continuous_lifecycle_event_from_order_row(
+                            row,
+                            cycle_id=cycle_id,
+                            source="order_preflight",
+                            now_ms=cycle_now_ms,
+                        )
+                    )
             preflight_cb: Callable[[dict[str, Any]], None] | None = _record_preflight
         else:
             preflight_cb = None
@@ -3596,6 +4424,22 @@ def run_continuous_demo_cycle(
         _eff_max, _cont_margin_clamped = _cross_sleeve.clamp_max_new_entries(
             demo.max_new_entries_per_cycle, sleeve=sleeve_name, state=_cs_state)
         skipped_continuous_margin_budget = demo.max_new_entries_per_cycle if _cont_margin_clamped else 0
+        portfolio_heat_fields = _continuous_portfolio_heat_fields(
+            open_trades,
+            equity_usdt=equity_usdt,
+            config=demo,
+            max_new_entries=_eff_max,
+            enabled=demo.submit_orders,
+        )
+        if bool(portfolio_heat_fields["portfolio_heat_clamped"]):
+            _logger.warning(
+                "continuous portfolio heat cap clamped entries: heat=%.4f cap=%.4f unit=%.4f capacity=%d",
+                float(portfolio_heat_fields["portfolio_heat_current_frac"]),
+                float(portfolio_heat_fields["portfolio_heat_cap_frac"]),
+                float(portfolio_heat_fields["portfolio_heat_entry_unit_frac"]),
+                int(portfolio_heat_fields["portfolio_heat_entry_capacity"]),
+            )
+        _eff_max = int(portfolio_heat_fields["portfolio_heat_entry_capacity"])
         skipped_continuous_reservation = 0
         skipped_same_signal_reentry = 0
         addon_gate_stats: dict[str, Any] = {
@@ -3613,7 +4457,7 @@ def run_continuous_demo_cycle(
             btc_trend_gate_value,
         )
         if (
-            not (errors and demo.submit_orders)
+            bool(entry_risk_health["entry_risk_health_ok"])
             and not entry_paused
             and _eff_max > 0
             and rebalance_target_scale > 0.0
@@ -3850,10 +4694,42 @@ def run_continuous_demo_cycle(
             )
 
         # Ledger flush: orders first, then trades (crash-durability ordering).
+        lifecycle_transition_violations: list[dict[str, Any]] = []
+        if cycle_trade_rows:
+            cycle_trade_rows, lifecycle_transition_violations = _enforce_continuous_lifecycle_transitions(
+                cycle_start_trades,
+                cycle_trade_rows,
+                submit_orders=demo.submit_orders,
+            )
+            if lifecycle_transition_violations:
+                _logger.error(
+                    "continuous lifecycle transition guard rejected %d trade rows: %s",
+                    len(lifecycle_transition_violations),
+                    ",".join(sorted({str(v.get("reason") or "") for v in lifecycle_transition_violations})),
+                )
         if cycle_order_rows:
             write_dataset(pl.DataFrame(cycle_order_rows, infer_schema_length=None), root, orders_dataset, partition_by=())
         if cycle_trade_rows:
             write_dataset(pl.DataFrame(cycle_trade_rows, infer_schema_length=None), root, trades_dataset, partition_by=())
+        if demo.submit_orders:
+            for row in cycle_order_rows:
+                _record_lifecycle_event(
+                    _continuous_lifecycle_event_from_order_row(
+                        row,
+                        cycle_id=cycle_id,
+                        source="order_final",
+                        now_ms=cycle_now_ms,
+                    )
+                )
+            for row in cycle_trade_rows:
+                _record_lifecycle_event(
+                    _continuous_lifecycle_event_from_trade_row(
+                        row,
+                        cycle_id=cycle_id,
+                        source="trade_ledger",
+                        now_ms=cycle_now_ms,
+                    )
+                )
 
         live_d9 = int(live_state.filter(pl.col("decile") == demo.decile).height) if not live_state.is_empty() else 0
         # Surface the rmom FRESHNESS (not just file-existence): a stale table silently empties the
@@ -3893,9 +4769,16 @@ def run_continuous_demo_cycle(
             "exit_errors": _submission_error_count(exit_orders + snipe_exit_orders),
             "rebalance_resizes": len(resize_orders),
             "resize_errors": _submission_error_count(resize_orders),
+            "lifecycle_events_written": lifecycle_events_written,
+            "lifecycle_snapshot_updates": len(lifecycle_snapshot_rows),
+            "lifecycle_transition_violations": len(lifecycle_transition_violations),
+            "lifecycle_transition_violation_reasons": ",".join(
+                sorted({str(row.get("reason") or "") for row in lifecycle_transition_violations})
+            ),
             "entry_signal_ts_ms": signal_ts,
             "entry_paused": entry_paused, "recent_adverse_exits": recent_adverse,
             "skipped_continuous_margin_budget": skipped_continuous_margin_budget,  # ls-5 cross-sleeve IM clamp
+            "skipped_portfolio_heat": portfolio_heat_fields["skipped_portfolio_heat"],
             "skipped_continuous_reservation": skipped_continuous_reservation,  # ls-6 symbol taken by a sibling
             "skipped_same_signal_reentry": skipped_same_signal_reentry,
             "addon_same_symbol_entry_cooldown_symbols": len(addon_entry_cooldown_symbols),
@@ -3903,6 +4786,9 @@ def run_continuous_demo_cycle(
             "addon_primary_pnl_gate_skips": addon_gate_stats["addon_primary_pnl_gate_skips"],
             "addon_primary_pnl_gate_skip_symbols": ",".join(addon_gate_stats["addon_primary_pnl_gate_skip_symbols"]),
         }
+        payload.update(entry_risk_health)
+        payload.update(account_drawdown_fields)
+        payload.update(portfolio_heat_fields)
         payload.update(_rmom_freshness_payload_fields(rmom, current_day_ts=cur_day_ts))
         payload.update(
             _btc_trend_gate_payload_fields(
@@ -3914,6 +4800,77 @@ def run_continuous_demo_cycle(
         )
         payload.update(_btc_risk_sizing_payload_fields(btc_risk_sizing_stats))
         payload.update(rebalance_fields)
+        if lifecycle_transition_violations:
+            for violation in lifecycle_transition_violations:
+                try:
+                    _append_continuous_risk_event(
+                        root,
+                        {
+                            "event": "lifecycle_transition_rejected",
+                            "cycle_id": cycle_id,
+                            "ts_ms": cycle_now_ms,
+                            "strategy_id": strategy_id,
+                            **violation,
+                        },
+                    )
+                except Exception:  # noqa: BLE001 - cycle row + telegram still carry the violation
+                    _logger.exception("continuous lifecycle transition event append failed")
+        if payload.get("entry_risk_health_ok") is False:
+            try:
+                _append_continuous_risk_event(
+                    root,
+                    {
+                        "event": "entry_risk_health_blocked",
+                        "cycle_id": cycle_id,
+                        "ts_ms": cycle_now_ms,
+                        "strategy_id": strategy_id,
+                        "mode": payload.get("mode"),
+                        "reasons": payload.get("entry_risk_health_reasons") or "",
+                        "snapshot_source": payload.get("entry_risk_health_snapshot_source") or "",
+                        "snapshot_errors": payload.get("entry_risk_health_snapshot_errors") or "",
+                        "private_ws_silence_seconds": payload.get(
+                            "entry_risk_health_private_ws_silence_seconds"
+                        ),
+                        "ledger_missing_positions": payload.get(
+                            "entry_risk_health_ledger_missing_positions"
+                        ) or "",
+                        "unprotected_positions": payload.get(
+                            "entry_risk_health_unprotected_positions"
+                        ) or "",
+                        "unprotected_position_ages": payload.get(
+                            "entry_risk_health_unprotected_position_ages"
+                        ) or "",
+                        "unprotected_max_age_seconds": payload.get(
+                            "entry_risk_health_unprotected_max_age_seconds"
+                        ),
+                        "exchange_only_positions": payload.get(
+                            "entry_risk_health_exchange_only_positions"
+                        ) or "",
+                        "lifecycle_states": payload.get(
+                            "entry_risk_health_lifecycle_states"
+                        ) or "",
+                        "lifecycle_protection_pending": payload.get(
+                            "entry_risk_health_lifecycle_protection_pending"
+                        ),
+                        "lifecycle_orphan": payload.get(
+                            "entry_risk_health_lifecycle_orphan"
+                        ),
+                        "account_drawdown_frac": payload.get(
+                            "entry_account_drawdown_frac"
+                        ),
+                        "account_equity_high_water_usdt": payload.get(
+                            "entry_account_equity_high_water_usdt"
+                        ),
+                        "account_drawdown_kill_switch_frac": payload.get(
+                            "entry_account_drawdown_kill_switch_frac"
+                        ),
+                        "account_drawdown_kill_switch_tripped": payload.get(
+                            "entry_account_drawdown_kill_switch_tripped"
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001 - cycle row + telegram still carry the block
+                _logger.exception("continuous risk event append failed")
         # Flatten the daemon's reactivity-loop counters (rx_*) into the persisted cycle so the watchdog
         # can see a dead/stale fast protective-exit loop instead of it failing silently.
         if reactivity_stats:

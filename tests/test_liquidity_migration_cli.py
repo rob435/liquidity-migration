@@ -107,6 +107,18 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
     )
 
     assert args.btc_trend_gate == "uptrend"
+    assert args.entry_private_ws_stale_seconds == 300.0
+
+    override = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "continuous-event-demo-cycle",
+            "--entry-private-ws-stale-seconds",
+            "180",
+        ]
+    )
+    assert override.entry_private_ws_stale_seconds == 180.0
 
 
 
@@ -140,6 +152,8 @@ def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
             "0.02",
             "--market-min-ret-1d",
             "-0.03",
+            "--btc-trend-lookback-days",
+            "20",
             "--round-trip-cost-multiplier",
             "2",
             "--failed-fade-hours",
@@ -154,6 +168,8 @@ def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
             "0.12",
             "--mfe-giveback-retain-pct",
             "0.4",
+            "--entry-skip-external-size-multiplier-lte",
+            "0.35",
         ]
     )
 
@@ -169,6 +185,7 @@ def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
     assert args.entry_decel_lookback_h == 6
     assert args.entry_decel_max_ret == 0.02
     assert args.market_min_ret_1d == -0.03
+    assert args.btc_trend_lookback_days == 20
     assert args.round_trip_cost_multiplier == 2
     assert args.failed_fade_hours == 6
     assert args.failed_fade_loss_pct == 0.04
@@ -176,6 +193,7 @@ def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
     assert args.breakeven_arm_pct == 0.08
     assert args.mfe_giveback_trigger_pct == 0.12
     assert args.mfe_giveback_retain_pct == 0.4
+    assert args.entry_skip_external_size_multiplier_lte == 0.35
 
 
 def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:

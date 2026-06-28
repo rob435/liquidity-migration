@@ -10,6 +10,7 @@ does not. Unpaired trades on either side are fill-rate divergence.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 from pathlib import Path
 from statistics import mean, median
@@ -931,6 +932,523 @@ def format_continuous_rebalance_audit_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def _nonempty(value: Any) -> bool:
+    return bool(str(value or "").strip())
+
+
+def _filtered_jsonl_events(
+    path: Path,
+    *,
+    start_ts_ms: int | None = None,
+    strategy_id: str | tuple[str, ...] | None = None,
+    invalid_lines: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    allowed = None
+    if strategy_id is not None:
+        allowed = {strategy_id} if isinstance(strategy_id, str) else set(strategy_id)
+        allowed = {str(value) for value in allowed if str(value)}
+    out: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                row = json.loads(text)
+            except json.JSONDecodeError:
+                if invalid_lines is not None:
+                    invalid_lines.append(f"{path}:{line_no}")
+                continue
+            ts_ms = _int(row.get("ts_ms"))
+            if start_ts_ms is not None and ts_ms > 0 and ts_ms < int(start_ts_ms):
+                continue
+            event_strategy = str(row.get("strategy_id") or "")
+            if allowed is not None and event_strategy and event_strategy not in allowed:
+                continue
+            out.append(row)
+    return out
+
+
+def _status_counts(rows: list[dict[str, Any]], column: str = "status") -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get(column) or "").strip().lower() or "unknown"
+        counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _compact_counts(counts: dict[str, int]) -> str:
+    return ",".join(f"{key}:{value}" for key, value in sorted(counts.items()) if value)
+
+
+def _latency_summary(values: list[float]) -> dict[str, float | None]:
+    if not values:
+        return {"count": 0, "mean": None, "median": None, "max": None}
+    return {
+        "count": len(values),
+        "mean": float(mean(values)),
+        "median": float(median(values)),
+        "max": float(max(values)),
+    }
+
+
+def _sum_rows(rows: list[dict[str, Any]], column: str) -> float:
+    return sum(_float(row.get(column)) for row in rows)
+
+
+def _count_rows_with_nonempty(rows: list[dict[str, Any]], column: str) -> int:
+    return sum(1 for row in rows if _nonempty(row.get(column)))
+
+
+def _is_reduce_only(row: dict[str, Any]) -> bool:
+    return _boolish(row.get("reduce_only"))
+
+
+def _is_post_only_order(row: dict[str, Any]) -> bool:
+    tif = str(row.get("time_in_force") or row.get("timeInForce") or "").strip().lower()
+    reason = str(row.get("reason") or "").strip().lower()
+    if tif == "postonly":
+        return True
+    return reason == "sniper_wick_add"
+
+
+def _latencies_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    start_column: str,
+    end_column: str,
+) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        start = _int(row.get(start_column))
+        end = _int(row.get(end_column))
+        if start > 0 and end >= start:
+            values.append(float(end - start))
+    return values
+
+
+def _continuous_operational_issues(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    if summary["cycles"] <= 0:
+        issues.append({"kind": "empty_cycles", "message": "no cycle rows"})
+    if summary["order_failure_count"] > 0:
+        issues.append({"kind": "order_failures", "count": summary["order_failure_count"]})
+    if summary["submitted_unconfirmed_orders"] > 0:
+        issues.append({"kind": "submitted_unconfirmed_orders", "count": summary["submitted_unconfirmed_orders"]})
+    if summary["risk_health_blocked_cycles"] > 0 or summary["risk_health_blocked_events"] > 0:
+        issues.append(
+            {
+                "kind": "entry_risk_health_blocks",
+                "cycles": summary["risk_health_blocked_cycles"],
+                "events": summary["risk_health_blocked_events"],
+            }
+        )
+    if summary["ledger_mismatch_cycles"] > 0:
+        issues.append({"kind": "ledger_mismatch_cycles", "count": summary["ledger_mismatch_cycles"]})
+    if summary["unprotected_position_seconds_max"] and summary["unprotected_position_seconds_max"] > 0:
+        issues.append(
+            {
+                "kind": "unprotected_position_time",
+                "max_seconds": summary["unprotected_position_seconds_max"],
+            }
+        )
+    if summary["account_drawdown_kill_switch_cycles"] > 0:
+        issues.append(
+            {
+                "kind": "account_drawdown_kill_switch",
+                "cycles": summary["account_drawdown_kill_switch_cycles"],
+            }
+        )
+    if summary["lifecycle_transition_rejected_events"] > 0:
+        issues.append(
+            {
+                "kind": "lifecycle_transition_rejected",
+                "count": summary["lifecycle_transition_rejected_events"],
+            }
+        )
+    if summary["stop_repair_error_count"] > 0:
+        issues.append({"kind": "stop_repair_errors", "count": summary["stop_repair_error_count"]})
+    if summary["invalid_jsonl_lines"] > 0:
+        issues.append(
+            {
+                "kind": "invalid_jsonl_telemetry",
+                "count": summary["invalid_jsonl_lines"],
+                "sources": summary["invalid_jsonl_sources"],
+            }
+        )
+    return issues
+
+
+def audit_continuous_operational_metrics(
+    cycles: pl.DataFrame,
+    orders: pl.DataFrame,
+    trades: pl.DataFrame,
+    *,
+    data_root: str | Path | None = None,
+    start_ts_ms: int | None = None,
+    strategy_profile: str | None = None,
+    strategy_id: str | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Audit Phase-13 live/paper telemetry that can be derived from ledgers.
+
+    Missing orders/trades are reported as unavailable metrics, not as a failure;
+    the forward-readiness sample gate is responsible for enforcing trade count.
+    Concrete safety anomalies that are present in the ledgers do fail the audit.
+    """
+    raw_cycles = cycles.height
+    raw_orders = orders.height
+    raw_trades = trades.height
+    cycles = _filter_min_ts(cycles, start_ts_ms, ("ts_ms",))
+    cycles = _filter_value(cycles, "strategy_profile", strategy_profile)
+    cycles = _filter_value(cycles, "strategy_id", strategy_id)
+    orders = _filter_min_ts(orders, start_ts_ms, ("signal_ts_ms", "ts_ms", "updated_at_ms", "exec_time_ms"))
+    orders = _filter_value(orders, "strategy_id", strategy_id)
+    trades = _filter_min_ts(trades, start_ts_ms, ("signal_ts_ms", "entry_ts_ms", "ts_ms"))
+    trades = _filter_value(trades, "strategy_id", strategy_id)
+
+    cycle_rows = cycles.to_dicts() if not cycles.is_empty() else []
+    order_rows = orders.to_dicts() if not orders.is_empty() else []
+    trade_rows = trades.to_dicts() if not trades.is_empty() else []
+    risk_events: list[dict[str, Any]] = []
+    lifecycle_events: list[dict[str, Any]] = []
+    stop_repair_events: list[dict[str, Any]] = []
+    invalid_jsonl_lines: list[str] = []
+    if data_root is not None:
+        root = Path(data_root).expanduser()
+        risk_events = _filtered_jsonl_events(
+            root / "continuous_risk_events.jsonl",
+            start_ts_ms=start_ts_ms,
+            strategy_id=strategy_id,
+            invalid_lines=invalid_jsonl_lines,
+        )
+        lifecycle_events = _filtered_jsonl_events(
+            root / "continuous_lifecycle_events.jsonl",
+            start_ts_ms=start_ts_ms,
+            strategy_id=strategy_id,
+            invalid_lines=invalid_jsonl_lines,
+        )
+        for stop_path in (
+            root / "reports" / "event-risk-ws" / "stop_audit_events.jsonl",
+            root / "stop_audit_events.jsonl",
+        ):
+            stop_repair_events.extend(
+                _filtered_jsonl_events(
+                    stop_path,
+                    start_ts_ms=start_ts_ms,
+                    invalid_lines=invalid_jsonl_lines,
+                )
+            )
+
+    signal_latency = []
+    for row in cycle_rows:
+        ts_ms = _int(row.get("ts_ms"))
+        signal_ts_ms = _int(row.get("entry_signal_ts_ms") or row.get("signal_ts_ms"))
+        if ts_ms > 0 and signal_ts_ms > 0 and ts_ms >= signal_ts_ms:
+            signal_latency.append(float(ts_ms - signal_ts_ms))
+
+    entry_order_rows = [row for row in order_rows if not _is_reduce_only(row)]
+    exit_order_rows = [row for row in order_rows if _is_reduce_only(row)]
+    considered_orders = [row for row in order_rows if str(row.get("submit_mode") or "").lower() != "preflight"]
+    filled_orders = [
+        row
+        for row in considered_orders
+        if str(row.get("status") or "").strip().lower() in {"filled", "partial", "closed"}
+    ]
+    submitted_unconfirmed = [
+        row for row in considered_orders if str(row.get("status") or "").strip().lower() == "submitted_unconfirmed"
+    ]
+    order_failures = [
+        row
+        for row in considered_orders
+        if str(row.get("submit_mode") or "").strip().lower() == "error"
+        or str(row.get("status") or "").strip().lower() in {"failed", "rejected"}
+        or _nonempty(row.get("error"))
+    ]
+    post_only_orders = [row for row in considered_orders if _is_post_only_order(row)]
+    post_only_cancelled = [
+        row
+        for row in post_only_orders
+        if str(row.get("status") or "").strip().lower() in {"canceled", "cancelled", "expired"}
+    ]
+    order_latency = _latencies_from_rows(considered_orders, start_column="signal_ts_ms", end_column="ts_ms")
+    fill_latency = _latencies_from_rows(considered_orders, start_column="ts_ms", end_column="exec_time_ms")
+    stop_placement_latency = []
+    for row in trade_rows:
+        state = str(row.get("lifecycle_state") or "").strip().upper()
+        protected_ts = _int(row.get("lifecycle_state_updated_at_ms"))
+        entry_ts = _int(row.get("entry_exec_time_ms") or row.get("entry_ts_ms") or row.get("opened_at_ms"))
+        if state == "PROTECTED" and entry_ts > 0 and protected_ts >= entry_ts:
+            stop_placement_latency.append(float(protected_ts - entry_ts))
+
+    maker_taker_counts: dict[str, int] = {}
+    for row in trade_rows:
+        for column in ("maker_taker", "entry_maker_taker", "exit_maker_taker", "liquidity"):
+            value = str(row.get(column) or "").strip().lower()
+            if value in {"maker", "taker"}:
+                maker_taker_counts[value] = maker_taker_counts.get(value, 0) + 1
+
+    risk_health_blocked_events = sum(
+        1 for row in risk_events if str(row.get("event") or "") == "entry_risk_health_blocked"
+    )
+    lifecycle_transition_rejected_events = sum(
+        1 for row in risk_events if str(row.get("event") or "") == "lifecycle_transition_rejected"
+    )
+    stop_repair_error_count = sum(1 for row in stop_repair_events if _nonempty(row.get("error")))
+    unprotected_values = [
+        _float(row.get("entry_risk_health_unprotected_max_age_seconds"))
+        for row in cycle_rows
+        if "entry_risk_health_unprotected_max_age_seconds" in row
+    ]
+    funding_total = 0.0
+    for column in ("funding_pnl", "funding_pnl_usdt", "funding_usdt", "funding_fee_usdt"):
+        funding_total += _sum_rows(trade_rows, column)
+    trade_fee_columns_present = any(
+        "entry_fee_usdt" in row or "exit_fee_usdt" in row for row in trade_rows
+    )
+    trade_fee_total = _sum_rows(trade_rows, "entry_fee_usdt") + _sum_rows(trade_rows, "exit_fee_usdt")
+    order_fee_total = _sum_rows(order_rows, "fee_usdt")
+    fees_usdt_total = trade_fee_total if trade_fee_columns_present else order_fee_total
+
+    unavailable: list[str] = []
+    if not order_rows:
+        unavailable.extend(
+            [
+                "order_latency",
+                "fill_latency",
+                "fill_rate",
+                "PostOnly_cancel_rate",
+                "WS_fill_confirmation_time",
+            ]
+        )
+    if not trade_rows:
+        unavailable.extend(["fees", "funding", "maker_taker_split", "stop_placement_latency"])
+    if not stop_repair_events:
+        unavailable.append("stop_repair_count")
+    if not signal_latency:
+        unavailable.append("signal_latency")
+    unavailable = sorted(set(unavailable))
+
+    order_status_counts = _status_counts(considered_orders)
+    lifecycle_status_counts = _status_counts(lifecycle_events, column="lifecycle_state")
+    fill_rate = (len(filled_orders) / len(considered_orders)) if considered_orders else None
+    post_only_cancel_rate = (len(post_only_cancelled) / len(post_only_orders)) if post_only_orders else None
+    signal_latency_summary = _latency_summary(signal_latency)
+    order_latency_summary = _latency_summary(order_latency)
+    fill_latency_summary = _latency_summary(fill_latency)
+    stop_placement_latency_summary = _latency_summary(stop_placement_latency)
+    unprotected_max = max(unprotected_values) if unprotected_values else 0.0
+    summary = {
+        "cycles": len(cycle_rows),
+        "orders": len(order_rows),
+        "trades": len(trade_rows),
+        "cycles_before_filter": raw_cycles,
+        "orders_before_filter": raw_orders,
+        "trades_before_filter": raw_trades,
+        "start_ts_ms": start_ts_ms,
+        "start_utc": _utc_ms(start_ts_ms),
+        "strategy_profile": strategy_profile or "",
+        "strategy_id": _id_label(strategy_id),
+        "candidate_cycles": sum(1 for row in cycle_rows if _int(row.get("candidates")) > 0),
+        "candidates_total": _sum_rows(cycle_rows, "candidates"),
+        "entries_total": _sum_rows(cycle_rows, "entries"),
+        "exits_total": _sum_rows(cycle_rows, "exits"),
+        "entry_errors_total": _sum_rows(cycle_rows, "entry_errors"),
+        "exit_errors_total": _sum_rows(cycle_rows, "exit_errors"),
+        "sniper_errors_total": _sum_rows(cycle_rows, "sniper_errors"),
+        "resize_errors_total": _sum_rows(cycle_rows, "resize_errors"),
+        "wallet_error_cycles": _count_rows_with_nonempty(cycle_rows, "wallet_error"),
+        "risk_health_blocked_cycles": sum(
+            1
+            for row in cycle_rows
+            if row.get("entry_risk_health_ok") is False or _nonempty(row.get("entry_risk_health_reasons"))
+        ),
+        "risk_health_blocked_events": risk_health_blocked_events,
+        "ledger_mismatch_cycles": sum(
+            1
+            for row in cycle_rows
+            if _nonempty(row.get("entry_risk_health_ledger_missing_positions"))
+            or _nonempty(row.get("entry_risk_health_exchange_only_positions"))
+        ),
+        "unprotected_position_cycles": _count_rows_with_nonempty(
+            cycle_rows,
+            "entry_risk_health_unprotected_positions",
+        ),
+        "unprotected_position_seconds_max": unprotected_max,
+        "portfolio_heat_clamped_cycles": sum(1 for row in cycle_rows if _boolish(row.get("portfolio_heat_clamped"))),
+        "account_drawdown_kill_switch_cycles": sum(
+            1 for row in cycle_rows if _boolish(row.get("entry_account_drawdown_kill_switch_tripped"))
+        ),
+        "entry_orders": len(entry_order_rows),
+        "exit_orders": len(exit_order_rows),
+        "orders_considered": len(considered_orders),
+        "filled_orders": len(filled_orders),
+        "fill_rate": fill_rate,
+        "submitted_unconfirmed_orders": len(submitted_unconfirmed),
+        "order_failure_count": len(order_failures),
+        "post_only_orders": len(post_only_orders),
+        "post_only_cancelled": len(post_only_cancelled),
+        "post_only_cancel_rate": post_only_cancel_rate,
+        "order_status_counts": order_status_counts,
+        "order_status_counts_text": _compact_counts(order_status_counts),
+        "signal_latency_ms": signal_latency_summary,
+        "order_latency_ms": order_latency_summary,
+        "fill_latency_ms": fill_latency_summary,
+        "stop_placement_latency_ms": stop_placement_latency_summary,
+        "open_trades": sum(1 for row in trade_rows if str(row.get("status") or "").strip().lower() == "open"),
+        "closed_trades": sum(1 for row in trade_rows if str(row.get("status") or "").strip().lower() == "closed"),
+        "fees_usdt_total": fees_usdt_total,
+        "trade_fees_usdt_total": trade_fee_total,
+        "order_fees_usdt_total": order_fee_total,
+        "funding_usdt_total": funding_total,
+        "maker_taker_counts": maker_taker_counts,
+        "maker_taker_counts_text": _compact_counts(maker_taker_counts),
+        "risk_events": len(risk_events),
+        "lifecycle_events": len(lifecycle_events),
+        "lifecycle_status_counts": lifecycle_status_counts,
+        "lifecycle_status_counts_text": _compact_counts(lifecycle_status_counts),
+        "lifecycle_transition_rejected_events": lifecycle_transition_rejected_events,
+        "stop_repair_events": len(stop_repair_events),
+        "stop_repair_error_count": stop_repair_error_count,
+        "invalid_jsonl_lines": len(invalid_jsonl_lines),
+        "invalid_jsonl_sources": ",".join(invalid_jsonl_lines[:25]),
+        "metrics_unavailable": unavailable,
+    }
+    issues = _continuous_operational_issues(summary)
+    return {"ok": not issues, "summary": summary, "issues": issues}
+
+
+def _fmt_optional_float(value: Any, *, digits: int = 2) -> str:
+    if value is None:
+        return ""
+    return f"{_float(value):.{digits}f}"
+
+
+def format_continuous_operational_metrics_report(payload: dict[str, Any]) -> str:
+    summary = payload["summary"]
+    lines = [
+        "# Continuous Operational Metrics Audit",
+        "",
+        f"ok: `{payload['ok']}`",
+        "",
+        "This is a Phase-13 telemetry audit, not alpha, promotion, or real-money evidence.",
+        "",
+        "## Filters",
+        "",
+        f"- start_ts_ms: `{summary.get('start_ts_ms') or ''}`",
+        f"- start_utc: `{summary.get('start_utc') or ''}`",
+        f"- strategy_profile: `{summary.get('strategy_profile') or ''}`",
+        f"- strategy_id: `{summary.get('strategy_id') or ''}`",
+        "",
+        "## Cycle Telemetry",
+        "",
+        f"- cycles: `{summary['cycles']}`",
+        f"- cycles_before_filter: `{summary['cycles_before_filter']}`",
+        f"- candidate_cycles: `{summary['candidate_cycles']}`",
+        f"- candidates_total: `{summary['candidates_total']:.0f}`",
+        f"- entries_total: `{summary['entries_total']:.0f}`",
+        f"- exits_total: `{summary['exits_total']:.0f}`",
+        f"- signal_latency_ms_median: `{_fmt_optional_float(summary['signal_latency_ms']['median'])}`",
+        f"- signal_latency_ms_max: `{_fmt_optional_float(summary['signal_latency_ms']['max'])}`",
+        f"- entry_errors_total: `{summary['entry_errors_total']:.0f}`",
+        f"- exit_errors_total: `{summary['exit_errors_total']:.0f}`",
+        f"- sniper_errors_total: `{summary['sniper_errors_total']:.0f}`",
+        f"- wallet_error_cycles: `{summary['wallet_error_cycles']}`",
+        f"- risk_health_blocked_cycles: `{summary['risk_health_blocked_cycles']}`",
+        f"- ledger_mismatch_cycles: `{summary['ledger_mismatch_cycles']}`",
+        f"- unprotected_position_seconds_max: `{summary['unprotected_position_seconds_max']:.2f}`",
+        f"- portfolio_heat_clamped_cycles: `{summary['portfolio_heat_clamped_cycles']}`",
+        f"- account_drawdown_kill_switch_cycles: `{summary['account_drawdown_kill_switch_cycles']}`",
+        "",
+        "## Order And Fill Telemetry",
+        "",
+        f"- orders: `{summary['orders']}`",
+        f"- orders_before_filter: `{summary['orders_before_filter']}`",
+        f"- entry_orders: `{summary['entry_orders']}`",
+        f"- exit_orders: `{summary['exit_orders']}`",
+        f"- orders_considered: `{summary['orders_considered']}`",
+        f"- filled_orders: `{summary['filled_orders']}`",
+        f"- fill_rate: `{_fmt_optional_float(summary['fill_rate'], digits=4)}`",
+        f"- order_latency_ms_median: `{_fmt_optional_float(summary['order_latency_ms']['median'])}`",
+        f"- fill_latency_ms_median: `{_fmt_optional_float(summary['fill_latency_ms']['median'])}`",
+        f"- submitted_unconfirmed_orders: `{summary['submitted_unconfirmed_orders']}`",
+        f"- order_failure_count: `{summary['order_failure_count']}`",
+        f"- post_only_orders: `{summary['post_only_orders']}`",
+        f"- post_only_cancelled: `{summary['post_only_cancelled']}`",
+        f"- post_only_cancel_rate: `{_fmt_optional_float(summary['post_only_cancel_rate'], digits=4)}`",
+        f"- order_status_counts: `{summary['order_status_counts_text']}`",
+        "",
+        "## Trade And Protection Telemetry",
+        "",
+        f"- trades: `{summary['trades']}`",
+        f"- trades_before_filter: `{summary['trades_before_filter']}`",
+        f"- open_trades: `{summary['open_trades']}`",
+        f"- closed_trades: `{summary['closed_trades']}`",
+        f"- fees_usdt_total: `{summary['fees_usdt_total']:.6f}`",
+        f"- trade_fees_usdt_total: `{summary['trade_fees_usdt_total']:.6f}`",
+        f"- order_fees_usdt_total: `{summary['order_fees_usdt_total']:.6f}`",
+        f"- funding_usdt_total: `{summary['funding_usdt_total']:.6f}`",
+        f"- maker_taker_counts: `{summary['maker_taker_counts_text']}`",
+        f"- stop_placement_latency_ms_median: `{_fmt_optional_float(summary['stop_placement_latency_ms']['median'])}`",
+        f"- risk_events: `{summary['risk_events']}`",
+        f"- risk_health_blocked_events: `{summary['risk_health_blocked_events']}`",
+        f"- lifecycle_events: `{summary['lifecycle_events']}`",
+        f"- lifecycle_status_counts: `{summary['lifecycle_status_counts_text']}`",
+        f"- lifecycle_transition_rejected_events: `{summary['lifecycle_transition_rejected_events']}`",
+        f"- stop_repair_events: `{summary['stop_repair_events']}`",
+        f"- stop_repair_error_count: `{summary['stop_repair_error_count']}`",
+        f"- invalid_jsonl_lines: `{summary['invalid_jsonl_lines']}`",
+        f"- invalid_jsonl_sources: `{summary['invalid_jsonl_sources']}`",
+        "",
+        "## Metrics Not Yet Measurable",
+        "",
+        f"`{', '.join(summary['metrics_unavailable'])}`" if summary["metrics_unavailable"] else "`none`",
+    ]
+    issues = payload.get("issues") or []
+    if issues:
+        lines.extend(["", "## Issues"])
+        for issue in issues[:50]:
+            lines.append(f"- `{issue}`")
+    return "\n".join(lines) + "\n"
+
+
+def run_continuous_operational_metrics_audit(
+    data_root: str | Path,
+    *,
+    cycles_dataset: str = "continuous_fade_paper_cycles",
+    orders_dataset: str = "continuous_fade_paper_orders",
+    trades_dataset: str = "continuous_fade_paper_trades",
+    output_dir: str | Path | None = None,
+    start_ts_ms: int | None = None,
+    strategy_profile: str | None = None,
+    strategy_id: str | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    root = Path(data_root).expanduser()
+    payload = audit_continuous_operational_metrics(
+        read_dataset(root, cycles_dataset),
+        read_dataset(root, orders_dataset),
+        read_dataset(root, trades_dataset),
+        data_root=root,
+        start_ts_ms=start_ts_ms,
+        strategy_profile=strategy_profile,
+        strategy_id=strategy_id,
+    )
+    report = format_continuous_operational_metrics_report(payload)
+    report_dir = Path(output_dir).expanduser() if output_dir else root / "reports" / "continuous_operational_metrics"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "continuous_operational_metrics.md"
+    report_path.write_text(report, encoding="utf-8")
+    return {"result": payload, "report": report, "report_path": str(report_path)}
+
+
 def run_continuous_rebalance_cycle_audit(
     data_root: str | Path,
     *,
@@ -965,8 +1483,14 @@ def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     paper_summary = payload["paper_rebalance"]["result"]["summary"]
     demo_rebalance = payload.get("demo_rebalance")
+    paper_operational = payload.get("paper_operational")
+    demo_operational = payload.get("demo_operational")
     paper_demo = payload.get("paper_demo")
     demo_summary = demo_rebalance["result"]["summary"] if demo_rebalance is not None else None
+    paper_operational_summary = (
+        paper_operational["result"]["summary"] if paper_operational is not None else None
+    )
+    demo_operational_summary = demo_operational["result"]["summary"] if demo_operational is not None else None
     reconcile_summary = paper_demo["result"]["summary"] if paper_demo is not None else None
     mode_text = (
         "paper-only telemetry gate for the no-order evidence collector"
@@ -985,6 +1509,8 @@ def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
         f"- paper-only mode: `{summary['paper_only_mode']}`",
         f"- paper rebalance ok: `{summary['paper_rebalance_ok']}`",
         f"- demo rebalance ok: `{summary['demo_rebalance_ok']}`",
+        f"- paper operational ok: `{summary['paper_operational_ok']}`",
+        f"- demo operational ok: `{summary['demo_operational_ok']}`",
         f"- paired trades: `{summary['paired']}`",
         f"- sample warning: `{summary['sample_warning']}`",
         f"- paper-only trades: `{summary['paper_only']}`",
@@ -1023,6 +1549,44 @@ def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
         )
     else:
         lines.extend(["", "## Demo Rebalance", "", "- skipped: `paper_only_mode`"])
+    if paper_operational_summary is not None and paper_operational is not None:
+        lines.extend(
+            [
+                "",
+                "## Paper Operational Metrics",
+                "",
+                f"- cycles: `{paper_operational_summary['cycles']}`",
+                f"- orders: `{paper_operational_summary['orders']}`",
+                f"- trades: `{paper_operational_summary['trades']}`",
+                f"- risk_health_blocked_cycles: `{paper_operational_summary['risk_health_blocked_cycles']}`",
+                f"- order_failure_count: `{paper_operational_summary['order_failure_count']}`",
+                f"- unprotected_position_seconds_max: `{paper_operational_summary['unprotected_position_seconds_max']:.2f}`",
+                f"- portfolio_heat_clamped_cycles: `{paper_operational_summary['portfolio_heat_clamped_cycles']}`",
+                f"- account_drawdown_kill_switch_cycles: `{paper_operational_summary['account_drawdown_kill_switch_cycles']}`",
+                f"- metrics_unavailable: `{', '.join(paper_operational_summary['metrics_unavailable'])}`",
+                f"- report: `{paper_operational['report_path']}`",
+            ]
+        )
+    if demo_operational_summary is not None and demo_operational is not None:
+        lines.extend(
+            [
+                "",
+                "## Demo Operational Metrics",
+                "",
+                f"- cycles: `{demo_operational_summary['cycles']}`",
+                f"- orders: `{demo_operational_summary['orders']}`",
+                f"- trades: `{demo_operational_summary['trades']}`",
+                f"- risk_health_blocked_cycles: `{demo_operational_summary['risk_health_blocked_cycles']}`",
+                f"- order_failure_count: `{demo_operational_summary['order_failure_count']}`",
+                f"- unprotected_position_seconds_max: `{demo_operational_summary['unprotected_position_seconds_max']:.2f}`",
+                f"- portfolio_heat_clamped_cycles: `{demo_operational_summary['portfolio_heat_clamped_cycles']}`",
+                f"- account_drawdown_kill_switch_cycles: `{demo_operational_summary['account_drawdown_kill_switch_cycles']}`",
+                f"- metrics_unavailable: `{', '.join(demo_operational_summary['metrics_unavailable'])}`",
+                f"- report: `{demo_operational['report_path']}`",
+            ]
+        )
+    else:
+        lines.extend(["", "## Demo Operational Metrics", "", "- skipped: `paper_only_mode`"])
     if reconcile_summary is not None and paper_demo is not None:
         lines.extend(
             [
@@ -1093,7 +1657,18 @@ def run_continuous_forward_readiness(
         order_strategy_id=paper_strategy_id,
         require_rebalance_telemetry=require_rebalance_telemetry,
     )
+    paper_operational = run_continuous_operational_metrics_audit(
+        paper_root_p,
+        cycles_dataset="continuous_fade_paper_cycles",
+        orders_dataset="continuous_fade_paper_orders",
+        trades_dataset="continuous_fade_paper_trades",
+        output_dir=out_root / "paper_operational",
+        start_ts_ms=start_ts_ms,
+        strategy_profile=strategy_profile,
+        strategy_id=paper_strategy_id,
+    )
     demo_rebalance = None
+    demo_operational = None
     paper_demo = None
     rec_summary: dict[str, Any] = {
         "paired": 0,
@@ -1114,6 +1689,16 @@ def run_continuous_forward_readiness(
             order_strategy_id=demo_strategy_id,
             require_rebalance_telemetry=require_rebalance_telemetry,
         )
+        demo_operational = run_continuous_operational_metrics_audit(
+            demo_root_p,
+            cycles_dataset="continuous_fade_demo_cycles",
+            orders_dataset="continuous_fade_demo_orders",
+            trades_dataset="continuous_fade_demo_trades",
+            output_dir=out_root / "demo_operational",
+            start_ts_ms=start_ts_ms,
+            strategy_profile=strategy_profile,
+            strategy_id=demo_strategy_id,
+        )
         paper_demo = run_continuous_paper_demo_reconciliation(
             paper_root_p,
             demo_root_p,
@@ -1129,8 +1714,12 @@ def run_continuous_forward_readiness(
     issues: list[str] = []
     if not paper_rebalance["result"]["ok"]:
         issues.append("paper rebalance telemetry audit failed")
+    if not paper_operational["result"]["ok"]:
+        issues.append("paper operational metrics audit failed")
     if require_demo and demo_rebalance is not None and not demo_rebalance["result"]["ok"]:
         issues.append("demo rebalance telemetry audit failed")
+    if require_demo and demo_operational is not None and not demo_operational["result"]["ok"]:
+        issues.append("demo operational metrics audit failed")
     if require_demo and rec_summary.get("sample_warning"):
         issues.append(
             f"paired trades {rec_summary['paired']} below min_pairs_warning {rec_summary['min_pairs_warning_threshold']}"
@@ -1147,11 +1736,17 @@ def run_continuous_forward_readiness(
     if require_demo:
         assert demo_rebalance is not None
         demo_rebalance_ok = bool(demo_rebalance["result"]["ok"])
+    demo_operational_ok = None
+    if require_demo:
+        assert demo_operational is not None
+        demo_operational_ok = bool(demo_operational["result"]["ok"])
 
     summary = {
         "paper_only_mode": not require_demo,
         "paper_rebalance_ok": bool(paper_rebalance["result"]["ok"]),
         "demo_rebalance_ok": demo_rebalance_ok,
+        "paper_operational_ok": bool(paper_operational["result"]["ok"]),
+        "demo_operational_ok": demo_operational_ok,
         "paired": int(rec_summary["paired"]),
         "paper_only": int(rec_summary["paper_only"]),
         "demo_only": int(rec_summary["demo_only"]),
@@ -1170,6 +1765,8 @@ def run_continuous_forward_readiness(
         "issues": issues,
         "paper_rebalance": paper_rebalance,
         "demo_rebalance": demo_rebalance,
+        "paper_operational": paper_operational,
+        "demo_operational": demo_operational,
         "paper_demo": paper_demo,
     }
     report = format_continuous_forward_readiness_report(payload)

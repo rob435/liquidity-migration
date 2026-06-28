@@ -123,7 +123,6 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   LONG systems.
 - Demo/forward execution is execution evidence only, never alpha proof.
 
-If the `liqmig-research` MCP server is available, its `audit_run_artifacts` tool
-can check artifact completeness against this standard. If it is not available,
-inspect the report directory directly. Artifact presence is necessary, not
-sufficient; the PIT, causal, and OOS-hygiene gates still require judgement.
+Inspect the report directory directly for artifact completeness against this
+standard. Artifact presence is necessary, not sufficient; the PIT, causal, and
+OOS-hygiene gates still require judgement.

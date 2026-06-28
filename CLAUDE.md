@@ -47,6 +47,6 @@ cp scripts/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-pus
   reconstructable run records are mandatory.
 - Use `.claude/skills/` only when the task matches a skill; do not treat skill
   files as general memory.
-- `liqmig-research.current_state` returns `STATE.md`; report tools are helpers,
-  not a substitute for reading the relevant file.
+- Read `STATE.md` and report files directly; do not rely on helper summaries as
+  substitutes for the relevant source files.
 - For architecture questions, read `graphify-out/GRAPH_REPORT.md` first.

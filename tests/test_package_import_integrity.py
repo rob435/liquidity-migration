@@ -40,6 +40,7 @@ def test_split_sibling_imports_cold_in_fresh_process(sibling: str) -> None:
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
+        timeout=10,
     )
     assert proc.returncode == 0, (
         f"cold import of liquidity_migration.{sibling} failed — likely a "

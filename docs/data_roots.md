@@ -21,11 +21,12 @@ signal, disagreement = regime/microstructure artefact.
 ```text
 ~/SHARED_DATA/bybit_full_pit       Bybit USDT linear perpetuals, ~2021-01..today
                                    source: public.bybit.com/trading archive
-                                   + Bybit v5 kline REST (manifest-gated)
+                                   + Bybit v5 kline REST (manifest-gated 1h/5m)
                                    + Bybit v5 REST funding/OI/mark/index/premium
 
 ~/SHARED_DATA/binance_full_pit     Binance USD-M perpetuals, ~2019-09..today
-                                   source: data.binance.vision monthly archives
+                                   source: data.binance.vision monthly/daily archives
+                                   (canonical 1h/5m klines)
                                    + Binance fapi REST funding/OI/mark/index/premium
                                    + taker_flow_1h
 ```

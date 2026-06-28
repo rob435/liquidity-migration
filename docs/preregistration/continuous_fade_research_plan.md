@@ -1866,6 +1866,21 @@ maker/taker split
 
 Research is not complete until live-demo path behavior matches backtest assumptions.
 
+2026-06-28 forward-readiness note:
+`continuous-forward-readiness` now has a current v2 report at
+`reports/continuous_forward_readiness/2026-06-28-v2-current/`. The gate was run
+from baseline clock `2026-06-18T19:54:00Z` with
+`strategy_profile=continuous_ensemble_v2`, paper strategy
+`continuous_fade_v2_paper`, and demo strategy `continuous_fade_v2`. Paper and
+demo rebalance-cycle audits passed (121 paper cycles / 123 demo cycles, no
+rebalance telemetry issues). Paper and demo operational-cycle audits also passed
+(0 entry-risk blocks, 0 order failures, 0 unprotected-position seconds), but
+there were 0 paper trades, 0 demo trades, and 0 paired trades. Forward readiness
+is therefore blocked by sample size, not by observed paper/demo drift or
+cycle-level operational anomalies. No slippage, fill-rate, fee,
+funding-performance, maker/taker, stop-placement-latency, or stop-repair claim
+can be made yet.
+
 ---
 
 # 19. Decision Framework
@@ -2276,56 +2291,207 @@ unless it survives costs, clusters, DSR/PBO, and synthetic squeezes.
 ## Immediate code/data tasks
 
 ```text
-[ ] Add signal table with skipped/unfilled signals.
-[ ] Add trade path table with forward returns and max adverse/favorable moves.
-[ ] Add profile hash to every signal and trade row.
-[ ] Add git commit to every signal and trade row.
-[ ] Add BTC regime value and config to every signal row.
-[ ] Add component ID and component score to every signal row.
-[ ] Add funding, OI, spread, and depth snapshots where available.
-[ ] Add MAE/MFE computation to research pipeline.
-[ ] Add PnL per original signal metric.
-[ ] Add active-period and cluster-adjusted Sharpe metric.
-[ ] Add synthetic squeeze injector.
-[ ] Add cost/slippage scenario runner.
-[ ] Add BTC regime robustness runner.
-[ ] Add stop frontier runner.
-[ ] Add timing-grid runner.
-[ ] Add conditional scale-in simulator.
-[ ] Add signal-invalidation simulator.
-[ ] Add portfolio heat calculator.
-[ ] Add disaster-loss sizing calculator.
+[x] Add signal table with skipped/unfilled signals.
+[x] Add trade path table with forward returns and max adverse/favorable moves.
+[x] Add profile hash to every signal and trade row.
+[x] Add git commit to every signal and trade row.
+[x] Add BTC regime value and config to every signal row.
+[x] Add component ID and component score to every signal row.
+[x] Add funding, OI, spread, and depth snapshots where available.
+[x] Add MAE/MFE computation to research pipeline.
+[x] Add PnL per original signal metric.
+[x] Add active-period and cluster-adjusted Sharpe metric.
+[x] Add synthetic squeeze injector.
+[x] Add cost/slippage scenario runner.
+[x] Add BTC regime robustness runner.
+[x] Add stop frontier runner.
+[x] Add timing-grid runner.
+[x] Add conditional scale-in simulator.
+[x] Add signal-invalidation simulator.
+[x] Add conditional scale-in full component+hedge replay.
+[x] Add portfolio heat calculator.
+[x] Add disaster-loss sizing calculator.
 ```
 
 ## Immediate research outputs
 
 ```text
-[ ] Baseline report.
-[ ] MAE/MFE report.
-[ ] Winner-vs-loser path report.
-[ ] Timing report.
-[ ] Stop frontier report.
-[ ] BTC regime robustness report.
-[ ] Component ablation report.
-[ ] Synthetic squeeze report.
-[ ] Cost/slippage/funding report.
-[ ] Worst-trade dependency report.
+[x] Baseline report.
+[x] MAE/MFE report.
+[x] Winner-vs-loser path report.
+[x] Timing report.
+[x] Stop frontier report.
+[x] BTC regime robustness report.
+[x] Component ablation report.
+[x] Synthetic squeeze report.
+[x] Cost/slippage/funding report.
+[x] Worst-trade dependency report.
 ```
+
+2026-06-28 artifact audit: the frozen baseline run
+`research/continuous_fade/runs/continuous_ensemble_v2_baseline_current/` now
+backs the checked research-tooling/report items above. Evidence includes
+`run_metadata.json` (`run_label=exploratory`, full-PIT roots, explicit
+decision/data/order/fill timestamps), `tables/artifact_index.json`, and
+`reports/final_research_report.md`. Current table coverage is 25,845
+`signal_table.parquet` rows (4,519 selected / 21,326 skipped or unfilled),
+25,845 `forward_path_by_signal.parquet` rows, 4,519 `trades_enriched.parquet`
+rows, and 4,519 `trade_path_metrics.parquet` rows. Signal rows carry
+`profile_hash`, `git_commit`, BTC trend/regime fields, component ids, component
+scores, and timing provenance. Trade rows carry `profile_hash`, `git_commit`,
+component ids/weights, funding fields, MAE/MFE, and path timing fields. OI,
+spread, and depth snapshots were unavailable in this frozen tape and are not
+claimed as active predictors. The result remains `exploratory`, not
+`candidate` or `paper_ready`; forward demo/paper remains the OOS arbiter.
+
+2026-06-28 scale-in diagnostic note:
+`scripts/continuous_scale_in_diagnostic.py` now writes
+`conditional_scale_in_by_trade.csv` and `conditional_scale_in_summary.csv` over
+the frozen baseline tape and refreshes the final report. The best diagnostic arm
+was 5% MAE trigger / 50% add-on: Bybit component net changed from 20.89% to
+29.85% with 54.63% fill rate, and Binance changed from 14.69% to 20.84% with
+53.21% fill rate. This is path-conditioned, leverage-like, and exploratory; it
+is not a full component+hedge portfolio replay and is not live-sizing evidence.
+
+2026-06-28 scale-in portfolio replay note:
+`scripts/continuous_scale_in_portfolio_replay.py` now writes
+`scale_in_portfolio_replay.csv` and component overlay artifacts under
+`portfolio_replays/scale_in_grid/`. The replay creates explicit child shorts,
+recomputes component MTM, recombines the deployed ensemble, and reapplies the
+BTC/ETH hedge. All three preregistered arms lifted return, but every arm
+worsened MAR and drawdown on both venues. Best MAR arms were Bybit
+`mae05_add25` (+31.17%/MAR 6.75/DD -1.43% vs baseline +26.64%/7.33/-1.13%) and
+Binance `mae10_add50` (+23.54%/MAR 5.36/DD -1.36% vs +18.84%/5.72/-1.02%).
+Reject live/paper scale-in behavior from this evidence.
+
+2026-06-28 signal-invalidation diagnostic note:
+`scripts/continuous_signal_invalidation_diagnostic.py` now writes
+`signal_invalidation_by_trade.csv`, `signal_invalidation_summary.csv`,
+`signal_invalidation_hourly_state_panel.parquet`, and
+`signal_invalidation_state_panel_summary.csv` over the frozen baseline
+signal/trade tape and refreshes the final report. The simulator uses only
+explicit future same-symbol candidate rows; absence of a row is not treated as
+invalidation because `signal_table.parquet` is sparse. Active
+candidate-pressure arms reduced component net on both venues. The least harmful
+active arm was `candidate_pressure_3h_score99`: Bybit changed from 20.89% to
+17.85% with 8.91% invalidation rate, and Binance changed from 14.69% to 12.87%
+with 5.90% invalidation rate. The BTC-trend rejection arm had zero in-window
+hits. The hourly coverage audit found Bybit candidate-state/OI/funding/BTC
+coverage of 2.45%/67.55%/100.00%/100.00% over 48,447 state rows and Binance
+2.25%/7.12%/99.74%/100.00% over 44,416 rows; spread/depth and sector proxy
+coverage remain 0.00%, so the full state panel is not ready. This closes the
+simulator/tooling item as exploratory negative/missing-data evidence; do not
+add a live invalidation exit without a full hourly state panel and a full
+component+hedge replay.
+
+2026-06-28 DSR/PBO diagnostic note:
+`scripts/continuous_overfit_diagnostic.py` now writes
+`overfit_variant_universe.csv`, `deflated_sharpe.csv`,
+`pbo_cscv_summary.csv`, and `pbo_cscv_splits.csv` from existing frozen
+full-portfolio replay artifacts only. It does not run new strategy variants.
+Across 21 full-replay variants per venue, PBO was 41.43% Bybit / 35.71%
+Binance and baseline DSR probability was 23.17% / 20.08%. Best-Sharpe variants
+were `mae05_add25` on Bybit and `skip_btc_tail_035` on Binance, both already
+rejected by their preregistered deployment rules. Treat the replay surface as
+inference-fragile; internal Sharpe/MAR rankings are not deployment proof.
 
 ## Immediate live-safety tasks
 
 ```text
-[ ] Add global risk-health gate for new entries.
-[ ] Block new entries if WS/private execution stream is stale.
-[ ] Block new entries if exchange position and ledger disagree.
-[ ] Block new entries if non-hedge position lacks disaster protection.
-[ ] Add unprotected-position timer.
-[ ] Add trade lifecycle state machine.
-[ ] Add append-only risk event log.
-[ ] Add stop placement/repair audit logs.
-[ ] Add portfolio heat cap.
-[ ] Add account-level drawdown kill-switch.
+[x] Add global risk-health gate for new entries.
+[x] Block new entries if WS/private execution stream is stale.
+[x] Block new entries if exchange position and ledger disagree for continuous-attributable positions.
+[x] Block new entries if non-hedge position lacks disaster protection.
+[x] Add unprotected-position timer.
+[x] Add trade lifecycle state machine.
+[x] Add append-only risk event log.
+[x] Add stop placement/repair audit logs.
+[x] Add portfolio heat cap.
+[x] Add account-level drawdown kill-switch.
 ```
+
+2026-06-28 progress note: `continuous_demo.py` now has a submit-mode
+entry-risk-health gate that records `entry_risk_health_*` cycle fields and
+alerts when blocked. It covers private snapshot errors, stale private execution
+WS after the stream has emitted, and continuous-ledger-open symbols missing from
+the venue position snapshot.
+
+2026-06-28 progress note: the same gate now also blocks live exchange-only
+positions when the continuous order ledger has a recent non-reduce-only entry
+attempt for the symbol but no open continuous trade row. Raw exchange-only
+positions with no continuous order evidence remain a ws_risk/reconciliation
+authority task. Blocked submit cycles also append `continuous_risk_events.jsonl`
+rows.
+
+2026-06-28 progress note: the gate now blocks new submitted entries while an
+open non-hedge continuous position has no venue `stopLoss` in the private
+position snapshot. The current v2 profile still has `STOP_LOSS_PCT=0`; this is
+a safety brake on adding exposure while primary positions are unprotected, not a
+claim that the no-stop policy is acceptable.
+
+2026-06-28 progress note: unprotected-position timer telemetry is now recorded
+as `entry_risk_health_unprotected_position_ages` and
+`entry_risk_health_unprotected_max_age_seconds` on cycle rows and blocked risk
+events.
+
+2026-06-28 progress note: initial continuous lifecycle-state telemetry is now
+recorded as `entry_risk_health_lifecycle_states` plus focused counts for
+`PROTECTION_PENDING` and `ORPHAN`. This derives explicit states from the ledger
+and private position snapshot, but does not yet enforce a full transition table;
+the lifecycle state-machine checklist item stays open.
+
+2026-06-28 progress note: submitted cycles now enforce terminal lifecycle
+transitions before flushing trade rows. A closed trade cannot be reopened, and a
+close row without a prior trade is rejected and appended to
+`continuous_risk_events.jsonl` as `lifecycle_transition_rejected`. This is a
+real guard against ledger corruption, but not the complete transition table, so
+the lifecycle state-machine checklist item remains open.
+
+2026-06-28 progress note: the submitted-row lifecycle guard now has an explicit
+legal transition table. It rejects protected-row regressions back to
+`PROTECTION_PENDING` unless the protected state was intentionally preserved on a
+plain open-row update, and it rejects loss of an in-flight exit marker. This is
+still not a complete lifecycle state machine at this checkpoint because
+venue-snapshot `PROTECTED` promotion is not yet persisted into trade-row state.
+
+2026-06-28 progress note: submitted live cycles with a healthy private position
+snapshot now persist monotonic `PROTECTED` promotions onto full copied trade rows
+before ledger flush, with `lifecycle_state_source=private_position_snapshot` and
+`lifecycle_state_updated_at_ms`. Missing stops are not demoted into the ledger;
+they remain entry-risk-health blocks. At this checkpoint the lifecycle checklist
+item still stayed open because preflight/order-prepared lifecycle states were
+split across order rows rather than a single end-to-end trade lifecycle event
+stream.
+
+2026-06-28 progress note: submitted live cycles now append
+`continuous_lifecycle_events.jsonl` lifecycle transition rows for crash-safe
+preflight/order-prepared events, final order events, and accepted trade-row
+state writes. The event stream covers `ORDER_PREPARED`, `ORDER_SUBMITTED`,
+`PARTIAL_FILL`, `FILLED`, `PROTECTED`, `EXIT_ORDER_SUBMITTED`, `EXIT_PARTIAL`,
+`CLOSED`, and `FAILED` transitions with deterministic `event_key` fields for
+downstream de-duplication. This closes the immediate lifecycle state-machine
+checklist item. `RECONCILED` and `FORCE_FLATTENED` remain reserved states, not
+active flow claims.
+
+2026-06-28 progress note: `ws_risk` now appends stop/take-profit repair attempts
+to `reports/event-risk-ws/stop_audit_events.jsonl` after sleeve tagging, with
+target/current protection prices, submit status, routed sleeve, link, and error
+text. Entry-side stop placement is still represented in the order ledger and the
+continuous entry-health/unprotected-position telemetry.
+
+2026-06-28 progress note: submit-mode entries now apply a portfolio heat cap
+before candidate selection. The default is 5% of equity under a +100% adverse
+shock, computed from current non-hedge open notional plus conservative per-entry
+heat; dry-run/paper cycles record the telemetry but are not clamped.
+
+2026-06-28 progress note: submit-mode entries now block when current wallet
+equity is more than 2% below the prior healthy cycle high-water mark. Snapshot
+errors do not trip this rule on fallback equity; they already block through the
+private-snapshot health gate. Cycle rows record `entry_account_drawdown_*`. The
+forward-readiness operational audit now fails explicitly on account-drawdown
+kill-switch rows, even when mixed-version rows lack newer
+`entry_risk_health_reasons` text; the top-level readiness report also surfaces
+portfolio-heat clamp and account-drawdown activation counts.
 
 ---
 

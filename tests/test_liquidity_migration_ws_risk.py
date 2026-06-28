@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -407,6 +408,58 @@ def test_ws_risk_skips_stop_repair_when_exit_order_pending(tmp_path: Path) -> No
     assert private_client.orders == []
     assert private_client.stop_updates == []
     assert "AAAUSDT" in engine.state.submitted_symbols
+
+
+def test_ws_risk_stop_repair_writes_append_only_audit_event(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(
+        confirm_fills=False,
+        positions=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100",
+                "markPrice": "100",
+                "positionValue": "100",
+                "unrealisedPnl": "0",
+                "stopLoss": "",
+                "takeProfit": "80",
+            }
+        ],
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=True,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    audit_path = tmp_path / "reports" / "event-risk-ws" / ws_risk.WS_RISK_STOP_AUDIT_FILE
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert private_client.stop_updates == [{"symbol": "AAAUSDT", "stop_loss": "112", "take_profit": "80"}]
+    assert len(rows) == 1
+    assert rows[0]["event"] == "stop_repair_attempt"
+    assert rows[0]["symbol"] == "AAAUSDT"
+    assert rows[0]["trade_id"] == "t1"
+    assert rows[0]["status"] == "stop_repaired"
+    assert rows[0]["submit_mode"] == "submitted"
+    assert rows[0]["stop_price"] == 112.0
+    assert rows[0]["current_stop_price"] == 0.0
+    assert rows[0]["needs_stop_repair"] is True
+    assert rows[0]["needs_take_profit_repair"] is False
 
 
 def test_ws_risk_live_open_exit_order_blocks_duplicate_tracked_exit(tmp_path: Path) -> None:

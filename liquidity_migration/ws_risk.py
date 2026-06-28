@@ -85,6 +85,7 @@ from .ws_risk_sleeves import (
 
 
 _logger = logging.getLogger("liquidity_migration.ws_risk")
+WS_RISK_STOP_AUDIT_FILE = "stop_audit_events.jsonl"
 
 
 def _ensure_default_log_handler() -> None:
@@ -101,6 +102,14 @@ def _ensure_default_log_handler() -> None:
     root_pkg_logger.addHandler(handler)
     level_name = os.environ.get("LIQMIG_LOG_LEVEL", "INFO").upper()
     root_pkg_logger.setLevel(getattr(logging, level_name, logging.INFO))
+
+
+def _append_ws_risk_stop_audit_event(report_dir: Path, event: dict[str, Any]) -> Path:
+    path = report_dir / WS_RISK_STOP_AUDIT_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True, default=str, separators=(",", ":")) + "\n")
+    return path
 
 
 # Default per-list cap on the append-only telemetry logs in WebSocketRiskState.
@@ -1795,6 +1804,7 @@ class EventWebSocketRiskEngine:
         )
         if not repairs:
             return
+        now_ms = _now_ms()
         rows = _execute_stop_repairs(
             repairs,
             trading_client=self.private_client,
@@ -1804,15 +1814,55 @@ class EventWebSocketRiskEngine:
                 repair_stops=True,
                 settle_coin=self.risk.settle_coin,
             ),
-            now_ms=_now_ms(),
+            now_ms=now_ms,
         )
         if rows:
             # _execute_stop_repairs emits rows without `sleeve` (it lives in
             # event_demo, which is short-only by design). Tag from the
             # originating trade so the repair order routes to the right ledger.
             self._tag_sleeve_from_trades([], rows)
+            self._append_stop_repair_audit_events(repairs, rows, now_ms=now_ms)
             self._write_order_rows_routed(rows)
             self.state.repairs.extend(rows)
+
+    def _append_stop_repair_audit_events(
+        self,
+        repairs: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+        *,
+        now_ms: int,
+    ) -> None:
+        repair_by_key = {
+            (str(repair.get("trade_id") or ""), str(repair.get("symbol") or "")): repair
+            for repair in repairs
+        }
+        for row in rows:
+            symbol = str(row.get("symbol") or "")
+            trade_id = str(row.get("trade_id") or "")
+            repair = repair_by_key.get((trade_id, symbol), {})
+            try:
+                _append_ws_risk_stop_audit_event(
+                    self.report_dir,
+                    {
+                        "event": "stop_repair_attempt",
+                        "ts_ms": now_ms,
+                        "symbol": symbol,
+                        "trade_id": trade_id,
+                        "sleeve": row.get("sleeve") or "",
+                        "order_link_id": row.get("order_link_id") or "",
+                        "status": row.get("status") or "",
+                        "submit_mode": row.get("submit_mode") or "",
+                        "stop_price": row.get("stop_price"),
+                        "take_profit_price": row.get("take_profit_price"),
+                        "current_stop_price": repair.get("current_stop_price", 0.0),
+                        "current_take_profit_price": repair.get("current_take_profit_price", 0.0),
+                        "needs_stop_repair": bool(repair.get("needs_stop_repair")),
+                        "needs_take_profit_repair": bool(repair.get("needs_take_profit_repair")),
+                        "error": row.get("error") or "",
+                    },
+                )
+            except Exception:  # noqa: BLE001 - audit cannot stop repair routing
+                _logger.exception("ws_risk stop repair audit append failed")
 
     def reconcile_positions(self, *, write: bool, require_evidence: bool = False) -> list[dict[str, Any]]:
         # ``trading_client`` enables the B3 closed-PnL backfill: when an orphan

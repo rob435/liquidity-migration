@@ -1,6 +1,7 @@
 """Tests for the continuous-fade sleeve reconcile-paper-demo analyzer."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import polars as pl
@@ -21,6 +22,7 @@ from liquidity_migration.reconciliation import (
     audit_continuous_rebalance_cycles,
     paper_demo_reconciliation_failures,
     run_continuous_forward_readiness,
+    run_continuous_operational_metrics_audit,
     run_continuous_paper_demo_reconciliation,
     run_continuous_rebalance_cycle_audit,
 )
@@ -197,8 +199,12 @@ def test_continuous_forward_readiness_accepts_clean_forward_bundle(tmp_path: Pat
     assert payload["ok"] is True
     assert payload["summary"]["paper_rebalance_ok"] is True
     assert payload["summary"]["demo_rebalance_ok"] is True
+    assert payload["summary"]["paper_operational_ok"] is True
+    assert payload["summary"]["demo_operational_ok"] is True
     assert payload["summary"]["paired"] == 1
     assert Path(payload["report_path"]).exists()
+    assert Path(payload["paper_operational"]["report_path"]).exists()
+    assert Path(payload["demo_operational"]["report_path"]).exists()
 
 
 def test_continuous_forward_readiness_paper_only_skips_demo_gate(tmp_path: Path) -> None:
@@ -221,9 +227,290 @@ def test_continuous_forward_readiness_paper_only_skips_demo_gate(tmp_path: Path)
     assert payload["summary"]["paper_only_mode"] is True
     assert payload["summary"]["paper_rebalance_ok"] is True
     assert payload["summary"]["demo_rebalance_ok"] is None
+    assert payload["summary"]["paper_operational_ok"] is True
+    assert payload["summary"]["demo_operational_ok"] is None
     assert payload["demo_rebalance"] is None
+    assert payload["demo_operational"] is None
     assert payload["paper_demo"] is None
     assert "skipped: `paper_only_mode`" in payload["report"]
+
+
+def test_continuous_operational_metrics_audit_reports_unavailable_forward_fill_metrics(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    root.mkdir()
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "cycle_id": "c0",
+                "ts_ms": day0 + 3_600_000,
+                "strategy_profile": CONTINUOUS_V2_PROFILE,
+                "strategy_id": CONTINUOUS_V2_PAPER_STRATEGY_ID,
+                "entry_signal_ts_ms": day0,
+                "candidates": 2,
+                "entries": 0,
+                "exits": 0,
+            }
+        ],
+        infer_schema_length=None,
+    )
+    write_dataset(cycles, root, "continuous_fade_paper_cycles", partition_by=())
+
+    payload = run_continuous_operational_metrics_audit(
+        root,
+        output_dir=tmp_path / "op",
+        strategy_profile=CONTINUOUS_V2_PROFILE,
+        strategy_id=CONTINUOUS_V2_PAPER_STRATEGY_ID,
+    )
+    summary = payload["result"]["summary"]
+
+    assert payload["result"]["ok"] is True
+    assert summary["cycles"] == 1
+    assert summary["signal_latency_ms"]["median"] == 3_600_000.0
+    assert summary["orders"] == 0
+    assert summary["trades"] == 0
+    assert "fill_rate" in summary["metrics_unavailable"]
+    assert "maker_taker_split" in summary["metrics_unavailable"]
+    assert Path(payload["report_path"]).exists()
+
+
+def test_continuous_operational_metrics_audit_flags_safety_anomalies(tmp_path: Path) -> None:
+    root = tmp_path / "demo"
+    root.mkdir()
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "cycle_id": "c0",
+                "ts_ms": day0 + 10_000,
+                "strategy_profile": CONTINUOUS_V2_PROFILE,
+                "strategy_id": CONTINUOUS_V2_DEMO_STRATEGY_ID,
+                "entry_signal_ts_ms": day0,
+                "candidates": 1,
+                "entries": 1,
+                "exits": 0,
+                "entry_risk_health_ok": False,
+                "entry_risk_health_reasons": "ledger_position_mismatch,unprotected_non_hedge_position",
+                "entry_risk_health_ledger_missing_positions": "AAAUSDT",
+                "entry_risk_health_unprotected_positions": "AAAUSDT",
+                "entry_risk_health_unprotected_max_age_seconds": 120.0,
+                "portfolio_heat_clamped": True,
+                "entry_account_drawdown_kill_switch_tripped": True,
+            }
+        ],
+        infer_schema_length=None,
+    )
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "lm-en-c-AAA-1",
+                "ts_ms": day0 + 12_000,
+                "updated_at_ms": day0 + 12_000,
+                "exec_time_ms": day0 + 16_000,
+                "strategy_id": CONTINUOUS_V2_DEMO_STRATEGY_ID,
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "status": "filled",
+                "submit_mode": "submitted",
+                "reduce_only": False,
+                "signal_ts_ms": day0,
+                "fee_usdt": 0.1,
+            },
+            {
+                "order_link_id": "lm-en-cs-AAA-2",
+                "ts_ms": day0 + 13_000,
+                "updated_at_ms": day0 + 13_000,
+                "strategy_id": CONTINUOUS_V2_DEMO_STRATEGY_ID,
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "status": "cancelled",
+                "submit_mode": "submitted",
+                "reduce_only": False,
+                "signal_ts_ms": day0,
+                "reason": "sniper_wick_add",
+            },
+        ],
+        infer_schema_length=None,
+    )
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t0",
+                "ts_ms": day0 + 10_000,
+                "entry_ts_ms": day0 + 12_000,
+                "entry_exec_time_ms": day0 + 16_000,
+                "lifecycle_state": "PROTECTED",
+                "lifecycle_state_updated_at_ms": day0 + 21_000,
+                "strategy_id": CONTINUOUS_V2_DEMO_STRATEGY_ID,
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "entry_price": 1.0,
+                "qty": 1.0,
+                "entry_fee_usdt": 0.1,
+                "exit_fee_usdt": 0.0,
+                "funding_pnl_usdt": -0.02,
+                "maker_taker": "taker",
+            }
+        ],
+        infer_schema_length=None,
+    )
+    write_dataset(cycles, root, "continuous_fade_demo_cycles", partition_by=())
+    write_dataset(orders, root, "continuous_fade_demo_orders", partition_by=())
+    write_dataset(trades, root, "continuous_fade_demo_trades", partition_by=())
+    (root / "continuous_risk_events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "entry_risk_health_blocked",
+                "ts_ms": day0 + 10_000,
+                "strategy_id": CONTINUOUS_V2_DEMO_STRATEGY_ID,
+                "reasons": "ledger_position_mismatch",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "event": "lifecycle_transition_rejected",
+                "ts_ms": day0 + 11_000,
+                "strategy_id": CONTINUOUS_V2_DEMO_STRATEGY_ID,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "continuous_lifecycle_events.jsonl").write_text("{bad-json\n", encoding="utf-8")
+    stop_dir = root / "reports" / "event-risk-ws"
+    stop_dir.mkdir(parents=True)
+    (stop_dir / "stop_audit_events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "stop_repair_attempt",
+                "ts_ms": day0 + 12_000,
+                "sleeve": "continuous",
+                "status": "failed",
+                "error": "repair failed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = run_continuous_operational_metrics_audit(
+        root,
+        cycles_dataset="continuous_fade_demo_cycles",
+        orders_dataset="continuous_fade_demo_orders",
+        trades_dataset="continuous_fade_demo_trades",
+        output_dir=tmp_path / "op",
+        strategy_profile=CONTINUOUS_V2_PROFILE,
+        strategy_id=CONTINUOUS_V2_DEMO_STRATEGY_ID,
+    )
+    summary = payload["result"]["summary"]
+    issue_kinds = {issue["kind"] for issue in payload["result"]["issues"]}
+
+    assert payload["result"]["ok"] is False
+    assert summary["risk_health_blocked_cycles"] == 1
+    assert summary["risk_health_blocked_events"] == 1
+    assert summary["ledger_mismatch_cycles"] == 1
+    assert summary["unprotected_position_seconds_max"] == 120.0
+    assert summary["fill_rate"] == 0.5
+    assert summary["fill_latency_ms"]["median"] == 4_000.0
+    assert summary["post_only_orders"] == 1
+    assert summary["post_only_cancel_rate"] == 1.0
+    assert summary["stop_placement_latency_ms"]["median"] == 5_000.0
+    assert summary["fees_usdt_total"] == pytest.approx(0.1)
+    assert summary["trade_fees_usdt_total"] == pytest.approx(0.1)
+    assert summary["order_fees_usdt_total"] == pytest.approx(0.1)
+    assert summary["funding_usdt_total"] == pytest.approx(-0.02)
+    assert summary["maker_taker_counts"] == {"taker": 1}
+    assert summary["lifecycle_transition_rejected_events"] == 1
+    assert summary["stop_repair_error_count"] == 1
+    assert summary["invalid_jsonl_lines"] == 1
+    assert {
+        "entry_risk_health_blocks",
+        "ledger_mismatch_cycles",
+        "unprotected_position_time",
+        "account_drawdown_kill_switch",
+        "lifecycle_transition_rejected",
+        "stop_repair_errors",
+        "invalid_jsonl_telemetry",
+    } <= issue_kinds
+
+
+def test_continuous_operational_metrics_audit_flags_drawdown_kill_switch_without_risk_reason(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    root.mkdir()
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "cycle_id": "drawdown-kill",
+                "ts_ms": day0 + 10_000,
+                "strategy_profile": CONTINUOUS_V2_PROFILE,
+                "strategy_id": CONTINUOUS_V2_PAPER_STRATEGY_ID,
+                "entry_account_drawdown_kill_switch_tripped": True,
+                "entry_account_drawdown_frac": -0.031,
+            }
+        ],
+        infer_schema_length=None,
+    )
+    write_dataset(cycles, root, "continuous_fade_paper_cycles", partition_by=())
+
+    payload = run_continuous_operational_metrics_audit(
+        root,
+        output_dir=tmp_path / "op",
+        strategy_profile=CONTINUOUS_V2_PROFILE,
+        strategy_id=CONTINUOUS_V2_PAPER_STRATEGY_ID,
+    )
+
+    summary = payload["result"]["summary"]
+    assert payload["result"]["ok"] is False
+    assert summary["account_drawdown_kill_switch_cycles"] == 1
+    assert summary["risk_health_blocked_cycles"] == 0
+    assert {issue["kind"] for issue in payload["result"]["issues"]} == {"account_drawdown_kill_switch"}
+
+
+def test_continuous_forward_readiness_fails_on_account_drawdown_kill_switch_only(
+    tmp_path: Path,
+) -> None:
+    paper_root = tmp_path / "paper"
+    demo_root = tmp_path / "demo"
+    paper_root.mkdir()
+    demo_root.mkdir()
+    day0 = 1_700_000_000_000 // MS_PER_DAY * MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "cycle_id": "drawdown-kill",
+                "ts_ms": day0 + 10_000,
+                "strategy_profile": CONTINUOUS_V2_PROFILE,
+                "strategy_id": CONTINUOUS_V2_PAPER_STRATEGY_ID,
+                "entry_account_drawdown_kill_switch_tripped": True,
+                "entry_account_drawdown_frac": -0.031,
+            }
+        ],
+        infer_schema_length=None,
+    )
+    write_dataset(cycles, paper_root, "continuous_fade_paper_cycles", partition_by=())
+
+    payload = run_continuous_forward_readiness(
+        paper_root,
+        demo_root,
+        require_demo=False,
+        output_dir=tmp_path / "readiness",
+        strategy_profile=CONTINUOUS_V2_PROFILE,
+        paper_strategy_id=CONTINUOUS_V2_PAPER_STRATEGY_ID,
+    )
+
+    assert payload["ok"] is False
+    assert payload["summary"]["paper_operational_ok"] is False
+    assert payload["paper_operational"]["result"]["issues"] == [
+        {"kind": "account_drawdown_kill_switch", "cycles": 1}
+    ]
+    assert "account_drawdown_kill_switch_cycles: `1`" in payload["report"]
 
 
 def test_continuous_forward_readiness_flags_unmatched_trades(tmp_path: Path) -> None:

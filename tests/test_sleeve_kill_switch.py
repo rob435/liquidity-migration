@@ -77,7 +77,7 @@ def _run(tmp_path: Path, body: str) -> tuple[int, str, str]:
         . deploy/lib_sleeves.sh
         {body}
     """)
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     return proc.returncode, log.read_text(), proc.stderr
 
 
@@ -228,7 +228,7 @@ def test_host_override_can_only_turn_repo_on_sleeve_off(tmp_path: Path) -> None:
         grep -Fx CONTINUOUS_SLEEVE=off "{resolved_env}"
         grep -Fx CONTINUOUS_PAPER_SLEEVE=off "{resolved_env}"
     """)
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0, proc.stderr
 
 
@@ -252,7 +252,7 @@ def test_host_override_keeps_repo_on_sleeve_on_when_host_on(tmp_path: Path) -> N
         test "$CONTINUOUS_SLEEVE" = off
         test "$CONTINUOUS_PAPER_SLEEVE" = on
     """)
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0, proc.stderr
 
 
@@ -279,7 +279,7 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
         test "$CONTINUOUS_PAPER_SLEEVE" = off
         echo "FALLBACK_OK"
     """)
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0, proc.stderr
     assert "FALLBACK_OK" in proc.stdout
 

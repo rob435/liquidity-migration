@@ -834,13 +834,14 @@ def _simulate_indexed_trade(
     funding_lookup: dict[str, dict[str, Any]] | None,
     stop_fill_mode: str = "stop",
     stop_slippage_cap_pct: float = 0.10,
+    entry_price_override: float | None = None,
 ) -> dict[str, Any] | None:
     bar_end_ts_arr = symbol_bars["bar_end_ts_ms"]
     high_arr = symbol_bars["high"]
     low_arr = symbol_bars["low"]
     close_arr = symbol_bars["close"]
     entry_ts_ms = int(bar_end_ts_arr[entry_bar])
-    entry_price = float(close_arr[entry_bar])
+    entry_price = float(entry_price_override) if entry_price_override is not None else float(close_arr[entry_bar])
     if entry_price <= 0.0:
         return None
     ends = symbol_bars["ends"]

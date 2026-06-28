@@ -700,7 +700,9 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
             target_vol_per_name=args.target_vol_per_name,
             vol_weight_clamp=args.vol_weight_clamp,
             fallback_equity_usdt=args.fallback_equity_usdt, entry_order_type=args.entry_order_type,
-            exit_order_type=args.exit_order_type, submit_orders=args.submit_orders,
+            exit_order_type=args.exit_order_type,
+            entry_private_ws_stale_seconds=args.entry_private_ws_stale_seconds,
+            submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders, telegram=args.telegram,
             record_dry_run=args.record_dry_run, paper_mode=args.paper_mode, data_name=args.data_name,
             daily_rebalance_enabled=args.daily_rebalance_enabled,
@@ -749,6 +751,7 @@ def _cmd_continuous_events(args: argparse.Namespace, config: ResearchConfig, dat
             rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
             feature_set=tuple(x.strip() for x in args.feature_set.split(",") if x.strip()),
             btc_trend_gate=args.btc_trend_gate,
+            btc_trend_lookback_days=args.btc_trend_lookback_days,
             entry_event_trigger=args.entry_event_trigger,
               entry_delay_hours=args.entry_delay_hours, exit_mode=args.exit_mode,
               hold_hours=args.hold_hours, max_hold_hours=args.max_hold_hours,
@@ -773,6 +776,7 @@ def _cmd_continuous_events(args: argparse.Namespace, config: ResearchConfig, dat
               entry_pause_after_adverse_exits=args.entry_pause_after_adverse_exits,
               entry_pause_window_hours=args.entry_pause_window_hours,
               entry_crowding_max_fresh=args.entry_crowding_max_fresh,
+              entry_skip_external_size_multiplier_lte=args.entry_skip_external_size_multiplier_lte,
             stop_fill_mode=args.stop_fill_mode, stop_slippage_cap_pct=args.stop_slippage_cap_pct,
               gross_exposure=args.gross_exposure, max_active=args.max_active,
               taker_fee_bps=args.taker_fee_bps, spread_bps=args.spread_bps,
@@ -913,6 +917,8 @@ def _cmd_continuous_forward_readiness(args: argparse.Namespace, config: Research
             f"paper_only_mode={summary['paper_only_mode']} "
             f"paper_rebalance_ok={summary['paper_rebalance_ok']} "
             f"demo_rebalance_ok={summary['demo_rebalance_ok']} "
+            f"paper_operational_ok={summary['paper_operational_ok']} "
+            f"demo_operational_ok={summary['demo_operational_ok']} "
             f"paired={summary['paired']} "
             f"paper_only={summary['paper_only']} "
             f"demo_only={summary['demo_only']} "

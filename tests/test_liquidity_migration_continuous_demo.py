@@ -7,6 +7,7 @@ entry/exit selection and the distinct continuous orderLinkId prefix (ws_risk fil
 from __future__ import annotations
 
 import logging
+import json
 import math
 import zlib
 
@@ -17,6 +18,8 @@ import pytest
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, finite_float
 from liquidity_migration.continuous_demo import (
     CONTINUOUS_ENTRY_LINK_PREFIX,
+    CONTINUOUS_LIFECYCLE_EVENTS_FILE,
+    CONTINUOUS_RISK_EVENTS_FILE,
     SNIPER_REASON,
     ContinuousDemoCycleConfig,
     LivePanelCache,
@@ -29,6 +32,16 @@ from liquidity_migration.continuous_demo import (
     _continuous_rebalance_resize_checked_today,
     _continuous_rebalance_scale_state_from_cycles,
     _continuous_entry_candidates_with_signal_metadata,
+    _continuous_entry_risk_health,
+    _continuous_account_drawdown_fields,
+    _append_continuous_risk_event,
+    _enforce_continuous_lifecycle_transitions,
+    _continuous_lifecycle_state,
+    _append_continuous_lifecycle_event,
+    _continuous_lifecycle_event_from_order_row,
+    _continuous_lifecycle_event_from_trade_row,
+    _continuous_lifecycle_snapshot_update_rows,
+    _continuous_portfolio_heat_fields,
     _continuous_sniper_link_prefix,
     _continuous_suborder_link_id,
     _continuous_telegram_reason,
@@ -3556,6 +3569,769 @@ def test_wsrisk6_legacy_schema_without_partial_columns_unchanged() -> None:
 
 
 # reports-charts-1 — wallet outage surfaced on the LIVE continuous telegram
+class _FakePrivateStateCache:
+    def __init__(self, seconds_since_ws: float) -> None:
+        self._seconds_since_ws = seconds_since_ws
+
+    def seconds_since_last_ws_event(self) -> float:
+        return self._seconds_since_ws
+
+
+def test_continuous_entry_risk_health_blocks_submit_on_private_ws_stale() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, entry_private_ws_stale_seconds=300.0)
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="rest",
+        private_state_cache=_FakePrivateStateCache(301.0),
+        open_trades=pl.DataFrame(),
+        live_position_symbols=set(),
+    )
+
+    assert got["entry_risk_health_ok"] is False
+    assert got["entry_risk_health_reasons"] == "private_ws_stale"
+    assert got["entry_risk_health_private_ws_silence_seconds"] == pytest.approx(301.0)
+
+
+def test_continuous_entry_risk_health_does_not_block_dry_run_on_private_ws_stale() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, entry_private_ws_stale_seconds=300.0)
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="rest",
+        private_state_cache=_FakePrivateStateCache(10_000.0),
+        open_trades=pl.DataFrame(),
+        live_position_symbols=set(),
+    )
+
+    assert got["entry_risk_health_ok"] is True
+    assert got["entry_risk_health_reasons"] == ""
+
+
+def test_continuous_entry_risk_health_blocks_submit_on_ledger_position_mismatch() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True)
+    open_trades = pl.DataFrame(
+        [{"strategy_id": _STRATEGY, "status": "open", "symbol": "AAAUSDT"}],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(1.0),
+        open_trades=open_trades,
+        live_position_symbols=set(),
+    )
+
+    assert got["entry_risk_health_ok"] is False
+    assert got["entry_risk_health_reasons"] == "ledger_position_mismatch"
+    assert got["entry_risk_health_ledger_missing_positions"] == "AAAUSDT"
+
+
+def test_continuous_entry_risk_health_blocks_submit_on_unprotected_non_hedge_position() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True)
+    now = 1_800_000_000_000
+    open_trades = pl.DataFrame(
+        [
+            {
+                "strategy_id": _STRATEGY,
+                "status": "open",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "opened_at_ms": now - 300_000,
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(1.0),
+        open_trades=open_trades,
+        live_position_symbols={"AAAUSDT"},
+        live_positions_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "1", "stopLoss": "0"}},
+        now_ms=now,
+    )
+
+    assert got["entry_risk_health_ok"] is False
+    assert got["entry_risk_health_reasons"] == "unprotected_non_hedge_position"
+    assert got["entry_risk_health_unprotected_positions"] == "AAAUSDT"
+    assert got["entry_risk_health_unprotected_position_ages"] == "AAAUSDT:300"
+    assert got["entry_risk_health_unprotected_max_age_seconds"] == pytest.approx(300.0)
+
+
+def test_continuous_entry_risk_health_accepts_protected_non_hedge_position() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True)
+    open_trades = pl.DataFrame(
+        [{"strategy_id": _STRATEGY, "status": "open", "symbol": "AAAUSDT", "side": "short"}],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(1.0),
+        open_trades=open_trades,
+        live_position_symbols={"AAAUSDT"},
+        live_positions_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "1", "stopLoss": "125"}},
+    )
+
+    assert got["entry_risk_health_ok"] is True
+    assert got["entry_risk_health_reasons"] == ""
+    assert got["entry_risk_health_unprotected_positions"] == ""
+
+
+def test_continuous_entry_risk_health_does_not_block_unprotected_hedge_position() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True)
+    open_trades = pl.DataFrame(
+        [
+            {
+                "strategy_id": _STRATEGY,
+                "status": "open",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "sleeve": "continuous_addon",
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(1.0),
+        open_trades=open_trades,
+        live_position_symbols={"BTCUSDT"},
+        live_positions_by_symbol={"BTCUSDT": {"symbol": "BTCUSDT", "side": "Buy", "size": "1", "stopLoss": "0"}},
+    )
+
+    assert got["entry_risk_health_ok"] is True
+    assert got["entry_risk_health_reasons"] == ""
+    assert got["entry_risk_health_unprotected_positions"] == ""
+
+
+def test_continuous_lifecycle_state_classifier() -> None:
+    live_stop = {"symbol": "AAAUSDT", "side": "Sell", "size": "1", "stopLoss": "125"}
+    live_no_stop = {"symbol": "AAAUSDT", "side": "Sell", "size": "1", "stopLoss": "0"}
+
+    assert _continuous_lifecycle_state({"status": "closed"}, live_position=live_stop) == "CLOSED"
+    assert _continuous_lifecycle_state({"status": "failed"}, live_position=live_stop) == "FAILED"
+    assert (
+        _continuous_lifecycle_state({"trade_id": "adopted-AAAUSDT", "status": "open"}, live_position=live_stop)
+        == "ADOPTED"
+    )
+    assert (
+        _continuous_lifecycle_state(
+            {"status": "open", "exit_order_link_id": "lm-ux-c-AAA-1"},
+            live_position=live_stop,
+        )
+        == "EXIT_ORDER_SUBMITTED"
+    )
+    assert _continuous_lifecycle_state({"status": "open", "side": "short"}, live_position=None) == "ORPHAN"
+    assert _continuous_lifecycle_state({"status": "open", "side": "short"}, live_position=live_stop) == "PROTECTED"
+    assert (
+        _continuous_lifecycle_state({"status": "open", "side": "short"}, live_position=live_no_stop)
+        == "PROTECTION_PENDING"
+    )
+    assert _continuous_lifecycle_state({"status": "open", "side": "long"}, live_position=live_no_stop) == "FILLED"
+
+
+def test_continuous_entry_risk_health_records_lifecycle_state_counts() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True)
+    open_trades = pl.DataFrame(
+        [
+            {"strategy_id": _STRATEGY, "status": "open", "symbol": "PROTUSDT", "side": "short"},
+            {"strategy_id": _STRATEGY, "status": "open", "symbol": "PENDUSDT", "side": "short"},
+            {"strategy_id": _STRATEGY, "status": "open", "symbol": "MISSUSDT", "side": "short"},
+        ],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(1.0),
+        open_trades=open_trades,
+        live_position_symbols={"PROTUSDT", "PENDUSDT"},
+        live_positions_by_symbol={
+            "PROTUSDT": {"symbol": "PROTUSDT", "side": "Sell", "size": "1", "stopLoss": "125"},
+            "PENDUSDT": {"symbol": "PENDUSDT", "side": "Sell", "size": "1", "stopLoss": "0"},
+        },
+    )
+
+    assert got["entry_risk_health_ok"] is False
+    assert got["entry_risk_health_lifecycle_states"] == "PROTECTION_PENDING:1,PROTECTED:1,ORPHAN:1"
+    assert got["entry_risk_health_lifecycle_protection_pending"] == 1
+    assert got["entry_risk_health_lifecycle_orphan"] == 1
+
+
+def test_continuous_lifecycle_snapshot_update_rows_promotes_protected_trade() -> None:
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "strategy_id": _STRATEGY,
+                "symbol": "AAAUSDT",
+                "status": "open",
+                "side": "short",
+                "qty": "1",
+                "entry_price": 100.0,
+                "updated_at_ms": 1,
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    rows = _continuous_lifecycle_snapshot_update_rows(
+        open_trades,
+        live_positions_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "1", "stopLoss": "125"}},
+        now_ms=123_000,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "t1"
+    assert rows[0]["lifecycle_state"] == "PROTECTED"
+    assert rows[0]["lifecycle_state_source"] == "private_position_snapshot"
+    assert rows[0]["lifecycle_state_updated_at_ms"] == 123_000
+    assert rows[0]["lifecycle_position_stop_loss"] == pytest.approx(125.0)
+    assert rows[0]["updated_at_ms"] == 123_000
+    assert rows[0]["qty"] == "1"
+
+
+def test_continuous_lifecycle_snapshot_update_rows_skips_already_protected_trade() -> None:
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "strategy_id": _STRATEGY,
+                "symbol": "AAAUSDT",
+                "status": "open",
+                "side": "short",
+                "lifecycle_state": "PROTECTED",
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    rows = _continuous_lifecycle_snapshot_update_rows(
+        open_trades,
+        live_positions_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "1", "stopLoss": "125"}},
+        now_ms=123_000,
+    )
+
+    assert rows == []
+
+
+def test_continuous_lifecycle_snapshot_update_rows_never_demotes_missing_stop() -> None:
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "strategy_id": _STRATEGY,
+                "symbol": "AAAUSDT",
+                "status": "open",
+                "side": "short",
+                "lifecycle_state": "PROTECTED",
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    rows = _continuous_lifecycle_snapshot_update_rows(
+        open_trades,
+        live_positions_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "1", "stopLoss": "0"}},
+        now_ms=123_000,
+    )
+
+    assert rows == []
+
+
+def test_continuous_lifecycle_transition_guard_rejects_closed_trade_reopen() -> None:
+    existing = pl.DataFrame(
+        [{"trade_id": "t1", "symbol": "AAAUSDT", "status": "closed", "lifecycle_state": "CLOSED"}],
+        infer_schema_length=None,
+    )
+
+    accepted, violations = _enforce_continuous_lifecycle_transitions(
+        existing,
+        [{"trade_id": "t1", "symbol": "AAAUSDT", "status": "open", "side": "short"}],
+        submit_orders=True,
+    )
+
+    assert accepted == []
+    assert violations == [
+        {
+            "reason": "closed_trade_reopened",
+            "trade_id": "t1",
+            "symbol": "AAAUSDT",
+            "incoming_status": "open",
+            "incoming_lifecycle_state": "PROTECTION_PENDING",
+            "prior_status": "closed",
+            "prior_lifecycle_state": "CLOSED",
+        }
+    ]
+
+
+def test_continuous_lifecycle_transition_guard_rejects_unknown_close() -> None:
+    accepted, violations = _enforce_continuous_lifecycle_transitions(
+        pl.DataFrame(),
+        [{"trade_id": "missing", "symbol": "AAAUSDT", "status": "closed"}],
+        submit_orders=True,
+    )
+
+    assert accepted == []
+    assert violations[0]["reason"] == "closed_without_prior_trade"
+    assert violations[0]["incoming_lifecycle_state"] == "CLOSED"
+
+
+def test_continuous_lifecycle_transition_guard_accepts_open_to_closed() -> None:
+    existing = pl.DataFrame(
+        [{"trade_id": "t1", "symbol": "AAAUSDT", "status": "open", "side": "short"}],
+        infer_schema_length=None,
+    )
+
+    accepted, violations = _enforce_continuous_lifecycle_transitions(
+        existing,
+        [{"trade_id": "t1", "symbol": "AAAUSDT", "status": "closed", "exit_order_link_id": "lm-ux-c-AAA-1"}],
+        submit_orders=True,
+    )
+
+    assert violations == []
+    assert accepted[0]["lifecycle_state"] == "CLOSED"
+
+
+def test_continuous_lifecycle_transition_guard_rejects_protection_regression() -> None:
+    existing = pl.DataFrame(
+        [{"trade_id": "t1", "symbol": "AAAUSDT", "status": "open", "side": "short", "lifecycle_state": "PROTECTED"}],
+        infer_schema_length=None,
+    )
+
+    accepted, violations = _enforce_continuous_lifecycle_transitions(
+        existing,
+        [{"trade_id": "t1", "symbol": "AAAUSDT", "status": "open", "side": "short"}],
+        submit_orders=True,
+    )
+
+    assert accepted == []
+    assert violations[0]["reason"] == "illegal_lifecycle_transition"
+    assert violations[0]["prior_lifecycle_state"] == "PROTECTED"
+    assert violations[0]["incoming_lifecycle_state"] == "PROTECTION_PENDING"
+
+
+def test_continuous_lifecycle_transition_guard_preserves_protected_plain_update() -> None:
+    existing = pl.DataFrame(
+        [{"trade_id": "t1", "symbol": "AAAUSDT", "status": "open", "side": "short", "lifecycle_state": "PROTECTED"}],
+        infer_schema_length=None,
+    )
+
+    accepted, violations = _enforce_continuous_lifecycle_transitions(
+        existing,
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "status": "open",
+                "side": "short",
+                "qty": "1.5",
+                "lifecycle_state": "PROTECTED",
+            }
+        ],
+        submit_orders=True,
+    )
+
+    assert violations == []
+    assert accepted[0]["lifecycle_state"] == "PROTECTED"
+
+
+def test_continuous_lifecycle_transition_guard_rejects_exit_link_loss() -> None:
+    existing = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "status": "open",
+                "side": "short",
+                "exit_order_link_id": "lm-ux-c-AAA-1",
+                "lifecycle_state": "EXIT_ORDER_SUBMITTED",
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    accepted, violations = _enforce_continuous_lifecycle_transitions(
+        existing,
+        [{"trade_id": "t1", "symbol": "AAAUSDT", "status": "open", "side": "short"}],
+        submit_orders=True,
+    )
+
+    assert accepted == []
+    assert violations[0]["reason"] == "illegal_lifecycle_transition"
+    assert violations[0]["prior_lifecycle_state"] == "EXIT_ORDER_SUBMITTED"
+    assert violations[0]["incoming_lifecycle_state"] == "PROTECTION_PENDING"
+
+
+def test_continuous_lifecycle_transition_guard_stamps_dry_run_without_rejecting() -> None:
+    accepted, violations = _enforce_continuous_lifecycle_transitions(
+        pl.DataFrame(),
+        [{"trade_id": "missing", "symbol": "AAAUSDT", "status": "closed"}],
+        submit_orders=False,
+    )
+
+    assert violations == []
+    assert accepted[0]["lifecycle_state"] == "CLOSED"
+
+
+def test_continuous_portfolio_heat_cap_clamps_submit_entry_capacity() -> None:
+    cfg = ContinuousDemoCycleConfig(
+        submit_orders=True,
+        entry_portfolio_heat_cap_frac=0.05,
+        entry_portfolio_heat_shock_frac=1.0,
+        per_position_notional_pct_equity=2.0,
+        sizing_mode="flat",
+    )
+    open_trades = pl.DataFrame(
+        [
+            {"status": "open", "symbol": "AAAUSDT", "side": "short", "notional_usdt": 400.0},
+            {"status": "open", "symbol": "BTCUSDT", "side": "long", "notional_usdt": 10_000.0},
+        ],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_portfolio_heat_fields(
+        open_trades,
+        equity_usdt=10_000.0,
+        config=cfg,
+        max_new_entries=5,
+        enabled=True,
+    )
+
+    assert got["portfolio_heat_current_frac"] == pytest.approx(0.04)
+    assert got["portfolio_heat_entry_unit_frac"] == pytest.approx(0.02)
+    assert got["portfolio_heat_entry_capacity"] == 0
+    assert got["portfolio_heat_clamped"] is True
+    assert got["skipped_portfolio_heat"] == 5
+
+
+def test_continuous_portfolio_heat_telemetry_does_not_clamp_when_disabled() -> None:
+    cfg = ContinuousDemoCycleConfig(
+        submit_orders=False,
+        entry_portfolio_heat_cap_frac=0.05,
+        entry_portfolio_heat_shock_frac=1.0,
+        per_position_notional_pct_equity=2.0,
+        sizing_mode="flat",
+    )
+    open_trades = pl.DataFrame(
+        [{"status": "open", "symbol": "AAAUSDT", "side": "short", "notional_usdt": 400.0}],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_portfolio_heat_fields(
+        open_trades,
+        equity_usdt=10_000.0,
+        config=cfg,
+        max_new_entries=5,
+        enabled=False,
+    )
+
+    assert got["portfolio_heat_current_frac"] == pytest.approx(0.04)
+    assert got["portfolio_heat_entry_capacity"] == 5
+    assert got["portfolio_heat_clamped"] is False
+    assert got["skipped_portfolio_heat"] == 0
+
+
+def test_continuous_account_drawdown_kill_switch_trips_on_healthy_equity_drawdown() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, entry_account_drawdown_kill_switch_frac=0.02)
+    cycles = pl.DataFrame(
+        [
+            {"equity_usdt": 10_000.0, "wallet_error": ""},
+            {"equity_usdt": 11_000.0, "wallet_error": ""},
+            {"equity_usdt": 12_000.0, "wallet_error": "wallet timeout"},
+        ],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_account_drawdown_fields(
+        cycles,
+        current_equity_usdt=10_600.0,
+        config=cfg,
+        current_snapshot_ok=True,
+    )
+
+    assert got["entry_account_equity_high_water_usdt"] == pytest.approx(11_000.0)
+    assert got["entry_account_drawdown_frac"] == pytest.approx((10_600.0 / 11_000.0) - 1.0)
+    assert got["entry_account_drawdown_kill_switch_tripped"] is True
+
+
+def test_continuous_account_drawdown_kill_switch_ignores_unhealthy_current_snapshot() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, entry_account_drawdown_kill_switch_frac=0.02)
+    cycles = pl.DataFrame([{"equity_usdt": 11_000.0, "wallet_error": ""}], infer_schema_length=None)
+
+    got = _continuous_account_drawdown_fields(
+        cycles,
+        current_equity_usdt=10_000.0,
+        config=cfg,
+        current_snapshot_ok=False,
+    )
+
+    assert got["entry_account_drawdown_frac"] == pytest.approx((10_000.0 / 11_000.0) - 1.0)
+    assert got["entry_account_drawdown_kill_switch_tripped"] is False
+
+
+def test_continuous_entry_risk_health_blocks_submit_on_attributed_exchange_only_position() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True)
+    now = 1_800_000_000_000
+    entry_link = _continuous_order_link_id("en-c", symbol="AAAUSDT", signal_ts_ms=now - MS_PER_HOUR)
+    all_orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": entry_link,
+                "strategy_id": _STRATEGY,
+                "symbol": "AAAUSDT",
+                "reduce_only": False,
+                "submit_mode": "submitted",
+                "status": "submitted_unconfirmed",
+                "ts_ms": now - 60_000,
+                "updated_at_ms": now - 60_000,
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(1.0),
+        open_trades=pl.DataFrame(),
+        live_position_symbols={"AAAUSDT"},
+        all_orders=all_orders,
+        now_ms=now,
+        managed_strategy_ids=(_STRATEGY,),
+    )
+
+    assert got["entry_risk_health_ok"] is False
+    assert got["entry_risk_health_reasons"] == "exchange_position_without_ledger"
+    assert got["entry_risk_health_exchange_only_positions"] == "AAAUSDT"
+
+
+def test_continuous_entry_risk_health_does_not_block_unattributed_exchange_only_position() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True)
+    now = 1_800_000_000_000
+    old_link = _continuous_order_link_id("en-c", symbol="OLDUSDT", signal_ts_ms=now - 100 * MS_PER_HOUR)
+    all_orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": old_link,
+                "strategy_id": _STRATEGY,
+                "symbol": "OLDUSDT",
+                "reduce_only": False,
+                "submit_mode": "submitted",
+                "status": "filled",
+                "ts_ms": now - 100 * MS_PER_HOUR,
+                "updated_at_ms": now - 100 * MS_PER_HOUR,
+            },
+            {
+                "order_link_id": "manual",
+                "strategy_id": "long_native_v11a",
+                "symbol": "LONGUSDT",
+                "reduce_only": False,
+                "submit_mode": "submitted",
+                "status": "submitted",
+                "ts_ms": now - 60_000,
+                "updated_at_ms": now - 60_000,
+            },
+        ],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(1.0),
+        open_trades=pl.DataFrame(),
+        live_position_symbols={"OLDUSDT", "LONGUSDT"},
+        all_orders=all_orders,
+        now_ms=now,
+        managed_strategy_ids=(_STRATEGY,),
+    )
+
+    assert got["entry_risk_health_ok"] is True
+    assert got["entry_risk_health_reasons"] == ""
+    assert got["entry_risk_health_exchange_only_positions"] == ""
+
+
+def test_continuous_entry_risk_health_pages_and_formats_reason() -> None:
+    payload = {
+        "mode": "submit",
+        "equity_usdt": 10_000.0,
+        "entries": 0,
+        "exits": 0,
+        "open_positions": 1,
+        "candidates": 0,
+        "rmom_present": True,
+        "entry_paused": False,
+        "entry_risk_health_ok": False,
+        "entry_risk_health_reasons": (
+            "private_ws_stale,ledger_position_mismatch,unprotected_non_hedge_position,"
+            "exchange_position_without_ledger,account_drawdown_kill_switch"
+        ),
+        "entry_risk_health_snapshot_source": "rest",
+        "entry_risk_health_ledger_missing_positions": "AAAUSDT",
+        "entry_risk_health_unprotected_positions": "CCCUSDT",
+        "entry_risk_health_unprotected_position_ages": "CCCUSDT:900",
+        "entry_risk_health_unprotected_max_age_seconds": 900.0,
+        "entry_risk_health_exchange_only_positions": "BBBUSDT",
+        "entry_risk_health_lifecycle_states": "PROTECTION_PENDING:1,ORPHAN:1",
+        "entry_account_drawdown_kill_switch_tripped": True,
+        "entry_account_drawdown_frac": -0.03125,
+        "entry_account_equity_high_water_usdt": 16_000.0,
+        "entry_account_drawdown_kill_switch_frac": 0.02,
+    }
+
+    assert _continuous_telegram_reason(payload, [], []) == "continuous_entry_risk_health_blocked"
+    msg = format_continuous_telegram_status_message(
+        payload,
+        [],
+        [],
+        reason="continuous_entry_risk_health_blocked",
+    )
+
+    assert (
+        "entry_risk_health=private_ws_stale,ledger_position_mismatch,unprotected_non_hedge_position,"
+        "exchange_position_without_ledger,account_drawdown_kill_switch snapshot=rest"
+    ) in msg
+    assert "ledger_missing_positions=AAAUSDT" in msg
+    assert "unprotected_positions=CCCUSDT max_age_s=900" in msg
+    assert "unprotected_position_ages=CCCUSDT:900" in msg
+    assert "exchange_only_positions=BBBUSDT" in msg
+    assert "lifecycle_states=PROTECTION_PENDING:1,ORPHAN:1" in msg
+    assert "account_drawdown=-0.0312 high_water=$16,000.00 limit=0.0200" in msg
+    assert (
+        "risk_health=private_ws_stale,ledger_position_mismatch,unprotected_non_hedge_position,"
+        "exchange_position_without_ledger,account_drawdown_kill_switch"
+    ) in format_continuous_demo_cycle_summary(payload)
+
+
+def test_append_continuous_risk_event_writes_jsonl(tmp_path) -> None:
+    first = _append_continuous_risk_event(
+        tmp_path,
+        {"event": "entry_risk_health_blocked", "ts_ms": 1, "reasons": "private_ws_stale"},
+    )
+    second = _append_continuous_risk_event(
+        tmp_path,
+        {"event": "entry_risk_health_blocked", "ts_ms": 2, "reasons": "ledger_position_mismatch"},
+    )
+
+    assert first == second == tmp_path / CONTINUOUS_RISK_EVENTS_FILE
+    rows = [json.loads(line) for line in first.read_text(encoding="utf-8").splitlines()]
+    assert rows == [
+        {"event": "entry_risk_health_blocked", "reasons": "private_ws_stale", "ts_ms": 1},
+        {"event": "entry_risk_health_blocked", "reasons": "ledger_position_mismatch", "ts_ms": 2},
+    ]
+
+
+def test_append_continuous_lifecycle_event_writes_jsonl(tmp_path) -> None:
+    path = _append_continuous_lifecycle_event(
+        tmp_path,
+        {
+            "event": "lifecycle_state_transition",
+            "cycle_id": "c1",
+            "trade_id": "t1",
+            "lifecycle_state": "ORDER_PREPARED",
+        },
+    )
+
+    assert path == tmp_path / CONTINUOUS_LIFECYCLE_EVENTS_FILE
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [
+        {
+            "cycle_id": "c1",
+            "event": "lifecycle_state_transition",
+            "lifecycle_state": "ORDER_PREPARED",
+            "trade_id": "t1",
+        }
+    ]
+
+
+def test_continuous_lifecycle_order_event_classifies_preflight_entry() -> None:
+    event = _continuous_lifecycle_event_from_order_row(
+        {
+            "order_link_id": "lm-en-c-AAA-abc",
+            "trade_id": "t1",
+            "strategy_id": _STRATEGY,
+            "symbol": "AAAUSDT",
+            "side": "Sell",
+            "reduce_only": False,
+            "submit_mode": "preflight",
+            "status": "submitted",
+            "updated_at_ms": 123,
+        },
+        cycle_id="cycle-1",
+        source="order_preflight",
+        now_ms=999,
+    )
+
+    assert event["event"] == "lifecycle_state_transition"
+    assert event["event_key"] == "cycle-1:order_preflight:t1:lm-en-c-AAA-abc:ORDER_PREPARED"
+    assert event["lifecycle_state"] == "ORDER_PREPARED"
+    assert event["lifecycle_state_source"] == "order_preflight"
+    assert event["ts_ms"] == 123
+
+
+def test_continuous_lifecycle_order_event_classifies_reduce_only_fill_as_closed() -> None:
+    event = _continuous_lifecycle_event_from_order_row(
+        {
+            "order_link_id": "lm-ux-c-AAA-abc",
+            "trade_id": "t1",
+            "strategy_id": _STRATEGY,
+            "symbol": "AAAUSDT",
+            "side": "Buy",
+            "reduce_only": True,
+            "submit_mode": "submitted",
+            "status": "filled",
+        },
+        cycle_id="cycle-1",
+        source="order_final",
+        now_ms=999,
+    )
+
+    assert event["lifecycle_state"] == "CLOSED"
+    assert event["lifecycle_state_source"] == "order_final"
+    assert event["ts_ms"] == 999
+
+
+def test_continuous_lifecycle_trade_event_uses_persisted_protection_source() -> None:
+    event = _continuous_lifecycle_event_from_trade_row(
+        {
+            "trade_id": "t1",
+            "strategy_id": _STRATEGY,
+            "symbol": "AAAUSDT",
+            "status": "open",
+            "side": "short",
+            "lifecycle_state": "PROTECTED",
+            "lifecycle_state_source": "private_position_snapshot",
+            "updated_at_ms": 123,
+        },
+        cycle_id="cycle-1",
+        source="trade_ledger",
+        now_ms=999,
+    )
+
+    assert event["event_key"] == "cycle-1:private_position_snapshot:t1:PROTECTED"
+    assert event["lifecycle_state"] == "PROTECTED"
+    assert event["lifecycle_state_source"] == "private_position_snapshot"
+    assert event["ts_ms"] == 123
+
+
 def _wallet_outage_payload() -> dict:
     return {
         "mode": "submit", "equity_usdt": 10_000.0,

@@ -44,8 +44,7 @@ python -m liquidity_migration <subcommand> --help
   OOS surface; both per-venue roots span their full available history. Cite
   the forward ledger as the OOS evidence.
 - Pass `--data-root` only when intentionally running a non-default audited
-  root. See `docs/data_roots.md`; if a `liqmig-research` MCP server is available,
-  its `data_roots` tool can be used as a convenience check.
+  root. See `docs/data_roots.md` and verify the chosen root directly.
 
 ## Canonical commands
 

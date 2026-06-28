@@ -1267,6 +1267,8 @@ def _add_continuous_events_parser(subparsers) -> None:
                    help="Comma-separated continuous composite features (e.g. rv_168h,max_ret168).")
     p.add_argument("--btc-trend-gate", default=d.btc_trend_gate, choices=["off", "uptrend", "downtrend"],
                    help="BTC prior-30d trend regime gate.")
+    p.add_argument("--btc-trend-lookback-days", type=int, default=d.btc_trend_lookback_days,
+                   help="BTC trend-gate lookback in prior daily returns, excluding the signal day.")
     p.add_argument("--entry-event-trigger", default=d.entry_event_trigger,
                    help="Hourly catalyst gate (e.g. fresh_pop10, pop10_gb1, turn5_pop3).")
     p.add_argument("--liq-turnover-min", type=float, default=d.liq_turnover_min,
@@ -1288,6 +1290,12 @@ def _add_continuous_events_parser(subparsers) -> None:
                      help="Trailing window for --entry-pause-after-adverse-exits.")
     p.add_argument("--entry-crowding-max-fresh", type=int, default=d.entry_crowding_max_fresh,
                    help="Skip signal hours with more fresh continuous candidates than this; 0 = off.")
+    p.add_argument(
+        "--entry-skip-external-size-multiplier-lte",
+        type=float,
+        default=d.entry_skip_external_size_multiplier_lte,
+        help="Skip entries whose supplied external size multiplier is <= this threshold; 0 = off.",
+    )
     p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct, help="Stop loss fraction; 0 = no stop.")
     p.add_argument("--take-profit-pct", type=float, default=d.take_profit_pct,
                      help="Take-profit fraction; 0 = no take-profit.")
@@ -1421,6 +1429,12 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument("--fallback-equity-usdt", type=float, default=d.fallback_equity_usdt)
     p.add_argument("--entry-order-type", default=d.entry_order_type)
     p.add_argument("--exit-order-type", default=d.exit_order_type)
+    p.add_argument(
+        "--entry-private-ws-stale-seconds",
+        type=float,
+        default=d.entry_private_ws_stale_seconds,
+        help="Submit-mode new-entry gate: block entries when the private execution WS stream is silent this long.",
+    )
     p.add_argument("--submit-orders", action="store_true", help="Place real DEMO orders (default off = dry-run).")
     p.add_argument("--confirm-demo-orders", action="store_true")
     p.add_argument("--telegram", action="store_true")

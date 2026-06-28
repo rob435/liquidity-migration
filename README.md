@@ -26,6 +26,6 @@ and a fresh evidence pack.
 - `tests/` - pytest suite.
 - `docs/` - methodology, data-root contracts, and compact research state.
 - `.codex/skills/` - Codex project workflows.
-- `.claude/` - Claude memory, skills, and local MCP server.
+- `.claude/` - Claude memory and project workflows.
 
 Python 3.11+.

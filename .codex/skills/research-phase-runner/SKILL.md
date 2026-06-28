@@ -113,13 +113,10 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
 - **Both venues.** Cross-venue agreement is the robustness bar; a single-venue
   edge does not clear Tier-2.
 
-## Optional MCP tools
+## State and report reads
 
-If available, the `liqmig-research` MCP server exposes report/state tooling
-(`current_state`, `parse_report`, `audit_run_artifacts`, `data_roots`, ...) —
-the MCP server itself is the source of truth for the current list. Treat those tools as accelerators,
-not dependencies. Without MCP, read `STATE.md`, `docs/data_roots.md`, and report
-files directly. `apply_decision_rule` is the legacy-bar verdict (reference only);
+Read `STATE.md`, `docs/data_roots.md`, and report files directly.
+`scripts/apply_decision_rule.py` is the legacy-bar verdict (reference only);
 the Tier-2 verdict is `scripts/r1_robustness.py`.
 
 ## Communication style during an experiment

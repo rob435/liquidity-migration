@@ -83,6 +83,8 @@ class ContinuousEventConfig:
     liq_turnover_min: float = 500_000.0   # liquid gate: signal-bar hourly turnover_quote (USD)
     # --- execution ---
     entry_delay_hours: int = 1            # bars AFTER the deciding bar's close (0 = proxy/look-ahead)
+    entry_adverse_limit_pct: float = 0.0  # research-only: wait for a better adverse limit; 0=market/close
+    entry_adverse_limit_wait_hours: int = 24  # max post-submit hours to wait for adverse limit fill
     exit_mode: str = "fixed"              # "fixed" = hold_hours timer; "state" = hold while in the fade decile
     exit_decile_buffer: int = 0            # state-mode hysteresis: D9/buffer=1 holds while decile >= D8
     hold_hours: int = 12                  # fixed-mode hold horizon
@@ -117,6 +119,7 @@ class ContinuousEventConfig:
     entry_decel_max_ret: float = 0.0      # fade-started confirmation: recent move must be <= this
     market_min_ret_1d: float = -1.0       # skip entry if equal-weight market 1d return < this (-1 = off)
     btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend"
+    btc_trend_lookback_days: int = 30     # prior BTC daily returns, excluding the signal day
     entry_event_trigger: str = "none"      # hourly catalyst gate; "none" preserves continuous spell entries
     failed_fade_hours: int = 0            # 0=off; cut a fade that hasn't worked after N hours
     failed_fade_loss_pct: float = 0.0
@@ -133,6 +136,7 @@ class ContinuousEventConfig:
     entry_pause_after_adverse_exits: int = 0
     entry_pause_window_hours: int = 24
     entry_crowding_max_fresh: int = 0     # 0=off; skip signal hours with more fresh candidates than this
+    entry_skip_external_size_multiplier_lte: float = 0.0  # 0=off; skip entries sized <= threshold by external hook
     # --- funding / splits / universe ---
     use_funding: bool = True
     split_date: str = "2025-06-01"        # early/recent boundary
@@ -246,7 +250,7 @@ def _panel_cache_path(root: Path, config: ContinuousEventConfig, *, end_ms: int)
     # a distinct, correct key.
     excl_part = "" if not config.exclude_symbols else f"_excl{_exclude_tag(config.exclude_symbols)}"
     return root / (
-        f"_continuous_engine_panel_v2_rmom{int(round(config.rmom_quantile * 100))}"
+        f"_continuous_engine_panel_v3_rmom{int(round(config.rmom_quantile * 100))}"
         f"_feat{_feature_tag(config.feature_set)}{excl_part}_{window_tag}.parquet"
     )
 
@@ -360,10 +364,23 @@ def per_symbol_timeseries_features(k: pl.DataFrame) -> pl.DataFrame:
         .rolling_mean(window_size=168, min_samples=48)
         .over("symbol")
         .alias("prior168_turnover_mean"),
+        pl.col("turnover_quote")
+        .shift(1)
+        .rolling_std(window_size=168, min_samples=48)
+        .over("symbol")
+        .alias("prior168_turnover_std"),
+        pl.col("turnover_quote")
+        .rolling_sum(window_size=24, min_samples=6)
+        .over("symbol")
+        .alias("turnover_24h"),
     )
     k = k.with_columns(
         (pl.col("close") / pl.col("prior6_close_max") - 1.0).alias("giveback_from_prior6_high"),
         (pl.col("turnover_quote") / pl.col("prior168_turnover_mean")).alias("turnover_spike_168h"),
+        pl.when(pl.col("prior168_turnover_std") > 0.0)
+        .then((pl.col("turnover_quote") - pl.col("prior168_turnover_mean")) / pl.col("prior168_turnover_std"))
+        .otherwise(None)
+        .alias("turnover_zscore_168h"),
     )
     return k
 
@@ -388,6 +405,16 @@ def cross_sectional_decile(
     )
     k = k.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day_ts"))
     k = k.join(rmom, on=["symbol", "day_ts"], how="left").filter(pl.col("residual_momentum").is_not_null())
+    k = k.with_columns(
+        (pl.col("ts_ms") + MS_PER_HOUR).alias("signal_bar_close_ts_ms"),
+        (pl.col("ts_ms") + MS_PER_HOUR).alias("decision_ts_ms"),
+        (pl.col("ts_ms") + MS_PER_HOUR).alias("feature_ts_ms"),
+        pl.col("day_ts").alias("rmom_source_day_ts_ms"),
+        pl.col("day_ts").alias("rmom_data_available_ts_ms"),
+    )
+    k = k.with_columns(
+        pl.max_horizontal("feature_ts_ms", "rmom_data_available_ts_ms").alias("data_available_ts_ms")
+    )
     # Rank-fraction denominator (len-1) must be clamped to >=1: a ts_ms group that collapses to a
     # single surviving symbol would otherwise divide by 0 -> NaN, and `filter(_rr <= q)` silently
     # drops the lone candidate (NaN <= x is False) instead of ranking it at 0.0. Matches the
@@ -396,6 +423,10 @@ def cross_sectional_decile(
     k = k.with_columns(
         ((pl.col("residual_momentum").rank().over("ts_ms") - 1) / _rank_denom).alias("_rr")
     ).filter(pl.col("_rr") <= rmom_quantile)
+    k = k.with_columns(
+        pl.col("_rr").alias("residual_momentum_rank"),
+        ((pl.col("turnover_quote").rank().over("ts_ms") - 1) / _rank_denom).alias("liquidity_rank"),
+    )
     present = [f for f in feature_set if f in k.columns]
     k = k.with_columns(
         [((pl.col(f).rank().over("ts_ms") - 1) / _rank_denom).alias(f"_n_{f}") for f in present]
@@ -410,14 +441,29 @@ def cross_sectional_decile(
         "decile",
         "composite",
         "turnover_quote",
+        "signal_bar_close_ts_ms",
+        "decision_ts_ms",
+        "feature_ts_ms",
+        "data_available_ts_ms",
+        "rmom_source_day_ts_ms",
+        "rmom_data_available_ts_ms",
+        "residual_momentum",
+        "residual_momentum_rank",
+        "liquidity_rank",
     ]
     event_cols = [
         "rv_168h",
+        "vov",
+        "dist_low",
+        "xsret7",
+        "xsret3",
         "ret1",
         "max_ret168",
         "prior6_ret1_max",
         "giveback_from_prior6_high",
         "turnover_spike_168h",
+        "turnover_24h",
+        "turnover_zscore_168h",
     ]
     return k.select(cols + [c for c in event_cols if c in k.columns]).sort(["symbol", "ts_ms"])
 
@@ -518,7 +564,35 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
         if "max_ret168" not in d.columns:
             raise ValueError("entry_max_ret168_max requires max_ret168 in the continuous panel")
         d = d.filter(pl.col("max_ret168") <= config.entry_max_ret168_max)
-    return d.select("symbol", "ts_ms", "composite", "turnover_quote", "spell_end_ts").sort(["ts_ms", "symbol"])
+    keep_cols = [
+        "symbol",
+        "ts_ms",
+        "composite",
+        "turnover_quote",
+        "spell_end_ts",
+        "signal_bar_close_ts_ms",
+        "decision_ts_ms",
+        "feature_ts_ms",
+        "data_available_ts_ms",
+        "rmom_source_day_ts_ms",
+        "rmom_data_available_ts_ms",
+        "residual_momentum",
+        "residual_momentum_rank",
+        "liquidity_rank",
+        "rv_168h",
+        "vov",
+        "dist_low",
+        "xsret7",
+        "xsret3",
+        "ret1",
+        "max_ret168",
+        "prior6_ret1_max",
+        "giveback_from_prior6_high",
+        "turnover_spike_168h",
+        "turnover_24h",
+        "turnover_zscore_168h",
+    ]
+    return d.select([c for c in keep_cols if c in d.columns]).sort(["ts_ms", "symbol"])
 
 
 def _symbol_priority_hash(symbol: str) -> int:
@@ -614,12 +688,14 @@ def _market_daily_returns(klines: pl.DataFrame) -> dict[int, float]:
     return {int(r[0]): float(r[1]) for r in dc.iter_rows()}
 
 
-def _btc_trend_returns(klines: pl.DataFrame) -> dict[int, float]:
-    """Prior-30d BTC return-sum by day, excluding the current signal day.
+def _btc_trend_returns(klines: pl.DataFrame, *, lookback_days: int = 30) -> dict[int, float]:
+    """Prior-N-day BTC return-sum by day, excluding the current signal day.
 
     Mirrors ``btc_return_30d`` in the daily event features: the current day is not
     included, so the regime value is known before any same-day continuous signal.
     """
+    if lookback_days < 1:
+        raise ValueError(f"lookback_days must be >= 1; got {lookback_days}")
     if klines.is_empty() or "symbol" not in klines.columns:
         return {}
     btc = (
@@ -638,10 +714,10 @@ def _btc_trend_returns(klines: pl.DataFrame) -> dict[int, float]:
     lo = 0
     for day, ret in btc.select("day", "ret").iter_rows():
         day_i = int(day)
-        while lo < len(days) and days[lo] < day_i - 30 * MS_PER_DAY:
+        while lo < len(days) and days[lo] < day_i - lookback_days * MS_PER_DAY:
             lo += 1
         window = rets[lo:]
-        if len(window) >= 30:
+        if len(window) >= lookback_days:
             out[day_i] = float(sum(window))
         days.append(day_i)
         rets.append(float(ret))
@@ -786,6 +862,66 @@ def _plan_exit(
     return entry_bar_end + hold_ms
 
 
+def _resolve_entry_fill(
+    config: ContinuousEventConfig,
+    bars: dict[str, Any],
+    *,
+    side: str,
+    order_submit_bar: int,
+    order_submit_ts_ms: int,
+) -> dict[str, Any] | None:
+    """Resolve the executable entry bar/price for the configured entry style.
+
+    Default continuous execution fills at the order-submit bar close. The
+    research-only adverse-limit mode submits after that close and therefore
+    scans only later bars; this avoids using an earlier same-bar high/low that a
+    live order could not have interacted with.
+    """
+    close_arr = bars["close"]
+    ref_price = float(close_arr[order_submit_bar])
+    if ref_price <= 0.0:
+        return None
+    adverse_pct = float(config.entry_adverse_limit_pct or 0.0)
+    if adverse_pct <= 0.0:
+        return {
+            "entry_bar": int(order_submit_bar),
+            "entry_bar_end_ts_ms": int(order_submit_ts_ms),
+            "entry_price_override": None,
+            "entry_reference_price": ref_price,
+            "entry_limit_price": None,
+            "entry_fill_mode": "bar_close",
+            "fill_window_start_ts_ms": int(order_submit_ts_ms),
+            "fill_window_end_ts_ms": int(order_submit_ts_ms),
+        }
+    wait_ms = max(int(config.entry_adverse_limit_wait_hours), 0) * MS_PER_HOUR
+    if wait_ms <= 0:
+        return None
+    limit_price = ref_price * (1.0 + adverse_pct) if side == "short" else ref_price * (1.0 - adverse_pct)
+    bar_end_ts_arr = bars["bar_end_ts_ms"]
+    high_arr = bars["high"]
+    low_arr = bars["low"]
+    start_idx = bisect.bisect_right(bar_end_ts_arr, int(order_submit_ts_ms))
+    end_idx = bisect.bisect_right(bar_end_ts_arr, int(order_submit_ts_ms) + wait_ms)
+    for idx in range(start_idx, end_idx):
+        if side == "short":
+            touched = float(high_arr[idx]) >= limit_price
+        else:
+            touched = float(low_arr[idx]) <= limit_price
+        if touched:
+            fill_ts = int(bar_end_ts_arr[idx])
+            return {
+                "entry_bar": int(idx),
+                "entry_bar_end_ts_ms": fill_ts,
+                "entry_price_override": float(limit_price),
+                "entry_reference_price": ref_price,
+                "entry_limit_price": float(limit_price),
+                "entry_fill_mode": "adverse_limit",
+                "fill_window_start_ts_ms": int(order_submit_ts_ms),
+                "fill_window_end_ts_ms": fill_ts,
+            }
+    return None
+
+
 def _run_trades(
     entries: pl.DataFrame,
     symbol_bars: dict[str, Any],
@@ -828,6 +964,13 @@ def _run_trades(
     pause_window_ms = config.entry_pause_window_hours * MS_PER_HOUR
     breaker_on = config.entry_pause_after_adverse_exits > 0 and pause_window_ms > 0
     crowding_on = config.entry_crowding_max_fresh > 0
+    external_size_skip_lte = float(config.entry_skip_external_size_multiplier_lte)
+    if external_size_skip_lte < 0.0:
+        raise ValueError(
+            "entry_skip_external_size_multiplier_lte must be >= 0; "
+            f"got {external_size_skip_lte}"
+        )
+    external_size_skip_on = external_size_skip_lte > 0.0 and size_mult_lookup is not None
     signal_counts: dict[int, int] = {}
     if crowding_on:
         for ts in entries["ts_ms"].to_list():
@@ -842,14 +985,20 @@ def _run_trades(
         raise ValueError(
             f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}"
         )
+    btc_lookback_days = int(config.btc_trend_lookback_days)
+    if btc_gate != "off" and btc_lookback_days < 1:
+        raise ValueError(f"btc_trend_lookback_days must be >= 1; got {btc_lookback_days}")
     skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
     skipped_admission = 0
     skipped_crowding = 0
+    skipped_external_size_multiplier = 0
+    skipped_entry_limit_unfilled = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
     turns = entries["turnover_quote"].to_list()
     spell_ends = entries["spell_end_ts"].to_list() if "spell_end_ts" in entries.columns else tss
+    entry_meta_rows = entries.to_dicts()
     stop_approach_on = (
         stop_pct is not None
         and config.stop_approach_frac > 0.0
@@ -868,22 +1017,91 @@ def _run_trades(
         regime_trend: float | None = None,
         regime_size_mult: float | None = None,
         notional_weight: float | None = None,
+        entry_volatility: float | None = None,
+        inverse_vol_multiplier: float | None = None,
+        external_size_multiplier: float | None = None,
         exit_ts_ms: int | None = None,
+        order_submit_ts_ms: int | None = None,
+        fill_window_start_ts_ms: int | None = None,
+        fill_window_end_ts_ms: int | None = None,
+        entry_reference_price: float | None = None,
+        entry_limit_price: float | None = None,
+        entry_fill_mode: str | None = None,
     ) -> None:
         if candidate_sink is None:
             return
+        signal_day = (int(sig_ts) // MS_PER_DAY) * MS_PER_DAY
+
+        def _meta_int(name: str) -> int | None:
+            value = cand_meta.get(name)
+            return int(value) if value is not None else None
+
+        def _meta_float(name: str) -> float | None:
+            value = cand_meta.get(name)
+            return float(value) if value is not None else None
+
+        order_ts = order_submit_ts_ms if order_submit_ts_ms is not None else entry_bar_end
+        fill_start_ts = (
+            fill_window_start_ts_ms
+            if fill_window_start_ts_ms is not None
+            else entry_bar_end if entry_bar_end is not None else order_ts
+        )
+        fill_end_ts = (
+            fill_window_end_ts_ms
+            if fill_window_end_ts_ms is not None
+            else entry_bar_end if entry_bar_end is not None else order_ts
+        )
         candidate_sink.append(
             {
                 "symbol": sym,
                 "signal_ts_ms": int(sig_ts),
+                "signal_bar_close_ts_ms": _meta_int("signal_bar_close_ts_ms"),
+                "decision_ts_ms": _meta_int("decision_ts_ms"),
+                "feature_ts_ms": _meta_int("feature_ts_ms"),
+                "data_available_ts_ms": _meta_int("data_available_ts_ms"),
+                "rmom_source_day_ts_ms": _meta_int("rmom_source_day_ts_ms"),
+                "rmom_data_available_ts_ms": _meta_int("rmom_data_available_ts_ms"),
+                "btc_trend_lookback_days": btc_lookback_days if btc_gate != "off" else None,
+                "btc_trend_source_start_ts_ms": signal_day - btc_lookback_days * MS_PER_DAY if btc_gate != "off" else None,
+                "btc_trend_source_end_ts_ms": signal_day - MS_PER_DAY if btc_gate != "off" else None,
+                "btc_trend_data_available_ts_ms": signal_day if btc_gate != "off" else None,
+                "order_submit_ts_ms": int(order_ts) if order_ts is not None else None,
+                "fill_window_start_ts_ms": int(fill_start_ts) if fill_start_ts is not None else None,
+                "fill_window_end_ts_ms": int(fill_end_ts) if fill_end_ts is not None else None,
                 "composite": float(comp) if comp is not None else None,
+                "residual_momentum_value": _meta_float("residual_momentum"),
+                "residual_momentum_rank": _meta_float("residual_momentum_rank"),
+                "feature_rv_168h": _meta_float("rv_168h"),
+                "feature_vov": _meta_float("vov"),
+                "feature_dist_low": _meta_float("dist_low"),
+                "feature_xsret7": _meta_float("xsret7"),
+                "feature_xsret3": _meta_float("xsret3"),
+                "feature_ret1": _meta_float("ret1"),
+                "feature_max_ret168": _meta_float("max_ret168"),
+                "feature_prior6_ret1_max": _meta_float("prior6_ret1_max"),
+                "feature_giveback_from_prior6_high": _meta_float("giveback_from_prior6_high"),
+                "feature_turnover_spike_168h": _meta_float("turnover_spike_168h"),
                 "turnover_quote": float(turn) if turn is not None else None,
+                "liquidity_value": float(turn) if turn is not None else None,
+                "liquidity_rank": _meta_float("liquidity_rank"),
+                "volume_1h_quote": float(turn) if turn is not None else None,
+                "volume_24h_quote": _meta_float("turnover_24h"),
+                "volume_zscore": _meta_float("turnover_zscore_168h"),
                 "spell_end_ts_ms": int(spell_end) if spell_end is not None else None,
                 "entry_bar_end_ts_ms": int(entry_bar_end) if entry_bar_end is not None else None,
+                "entry_reference_price": entry_reference_price,
+                "entry_limit_price": entry_limit_price,
+                "entry_fill_mode": entry_fill_mode,
                 "crowding_count": int(signal_counts.get(int(sig_ts), 0)) if crowding_on else None,
                 "active_count": active_count,
+                "btc_trend_gate": btc_gate,
                 "regime_trend": regime_trend,
                 "regime_size_mult": regime_size_mult,
+                "sizing_mode": config.sizing_mode,
+                "base_notional_weight": base_nw,
+                "entry_volatility": entry_volatility,
+                "inverse_vol_multiplier": inverse_vol_multiplier,
+                "external_size_multiplier": external_size_multiplier,
                 "notional_weight": notional_weight,
                 "exit_ts_ms": exit_ts_ms,
                 "selected": reason == "selected",
@@ -891,41 +1109,42 @@ def _run_trades(
             }
         )
 
-    for sym, sig_ts, comp, turn, spell_end in zip(syms, tss, comps, turns, spell_ends):
+    for idx, (sym, sig_ts, comp, turn, spell_end) in enumerate(zip(syms, tss, comps, turns, spell_ends)):
+        cand_meta = entry_meta_rows[idx]
         bars = symbol_bars.get(sym)
         if bars is None:
             _emit("no_bar_symbol")
             skipped_no_bar += 1
             continue
-        entry_bar_end = int(sig_ts) + delay_ms
+        order_submit_ts = int(sig_ts) + delay_ms
         cand_trend: float | None = None
-        while active and active[0] <= entry_bar_end:
+        while active and active[0] <= order_submit_ts:
             heapq.heappop(active)
         if crowding_on and signal_counts.get(int(sig_ts), 0) > config.entry_crowding_max_fresh:
-            _emit("crowding", entry_bar_end=entry_bar_end, active_count=len(active))
+            _emit("crowding", order_submit_ts_ms=order_submit_ts, active_count=len(active))
             skipped_crowding += 1
             continue
         # Circuit breaker: pause this entry if too many net-negative covers have CLOSED in the trailing
         # window (a correlated alt-squeeze). Causal — adverse_exit_ts holds only exits already simulated,
         # and the [entry_bar_end-window, entry_bar_end) slice counts only those that closed before now.
         if breaker_on:
-            lo = bisect.bisect_left(adverse_exit_ts, entry_bar_end - pause_window_ms)
-            hi = bisect.bisect_left(adverse_exit_ts, entry_bar_end)
+            lo = bisect.bisect_left(adverse_exit_ts, order_submit_ts - pause_window_ms)
+            hi = bisect.bisect_left(adverse_exit_ts, order_submit_ts)
             if hi - lo >= config.entry_pause_after_adverse_exits:
-                _emit("breaker", entry_bar_end=entry_bar_end, active_count=len(active))
+                _emit("breaker", order_submit_ts_ms=order_submit_ts, active_count=len(active))
                 skipped_breaker += 1
                 continue
-        if sym in last_entry and entry_bar_end - last_entry[sym] < cooldown_ms:
-            _emit("cooldown", entry_bar_end=entry_bar_end, active_count=len(active))
+        if sym in last_entry and order_submit_ts - last_entry[sym] < cooldown_ms:
+            _emit("cooldown", order_submit_ts_ms=order_submit_ts, active_count=len(active))
             skipped_cooldown += 1
             continue
         if len(active) >= config.max_active:
-            _emit("capacity", entry_bar_end=entry_bar_end, active_count=len(active))
+            _emit("capacity", order_submit_ts_ms=order_submit_ts, active_count=len(active))
             skipped_capacity += 1
             continue
-        entry_bar = bars["by_end"].get(entry_bar_end)
-        if entry_bar is None:
-            _emit("no_bar_entry", entry_bar_end=entry_bar_end, active_count=len(active))
+        order_submit_bar = bars["by_end"].get(order_submit_ts)
+        if order_submit_bar is None:
+            _emit("no_bar_entry", order_submit_ts_ms=order_submit_ts, active_count=len(active))
             skipped_no_bar += 1
             continue
         close_arr = bars["close"]
@@ -940,31 +1159,31 @@ def _run_trades(
             listing_ts = (listing_ts_by_symbol or {}).get(sym)
             if listing_ts is None:
                 listing_ts = int(bars["bar_end_ts_ms"][0])
-            if (entry_bar_end - int(listing_ts)) < age_min_ms:
-                _emit("age", entry_bar_end=entry_bar_end, active_count=len(active))
+            if (order_submit_ts - int(listing_ts)) < age_min_ms:
+                _emit("age", order_submit_ts_ms=order_submit_ts, active_count=len(active))
                 skipped_gate += 1
                 continue
         regime_size_mult = 1.0
         if btc_gate != "off":
             trend = (btc_trend_daily or {}).get((int(sig_ts) // MS_PER_DAY) * MS_PER_DAY)
             if trend is None:
-                _emit("btc_trend_unknown", entry_bar_end=entry_bar_end, active_count=len(active))
+                _emit("btc_trend_unknown", order_submit_ts_ms=order_submit_ts, active_count=len(active))
                 skipped_btc_trend += 1
                 continue
             cand_trend = float(trend)
             if btc_gate == "uptrend" and trend <= 0.0:
-                _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
+                _emit("btc_trend", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
             if btc_gate == "downtrend" and trend > 0.0:
-                _emit("btc_trend", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
+                _emit("btc_trend", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
-        if decel_h > 0 and entry_bar - decel_h >= 0:
-            base_px = float(close_arr[entry_bar - decel_h])
-            recent_ret = (float(close_arr[entry_bar]) / base_px - 1.0) if base_px > 0 else 0.0
+        if decel_h > 0 and order_submit_bar - decel_h >= 0:
+            base_px = float(close_arr[order_submit_bar - decel_h])
+            recent_ret = (float(close_arr[order_submit_bar]) / base_px - 1.0) if base_px > 0 else 0.0
             if recent_ret > config.entry_decel_max_ret:   # still ripping up -> not a confirmed fade
-                _emit("decel", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
+                _emit("decel", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
         if config.market_min_ret_1d > -1.0 and market_daily is not None:
@@ -972,19 +1191,67 @@ def _run_trades(
             # day's own full-day close-to-close return (which only realises at the
             # entry day's final bar and is future data at an intraday entry).
             # Mirrors the current-day exclusion in _btc_trend_returns.
-            entry_day = (entry_bar_end // MS_PER_DAY) * MS_PER_DAY
+            entry_day = (order_submit_ts // MS_PER_DAY) * MS_PER_DAY
             mkt = market_daily.get(entry_day - MS_PER_DAY)
             if mkt is not None and mkt < config.market_min_ret_1d:   # short into a weak tape = squeeze risk
-                _emit("market", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
+                _emit("market", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
         if admission_lookup is not None and not bool(admission_lookup.get((sym, int(sig_ts)), False)):
-            _emit("admission", entry_bar_end=entry_bar_end, active_count=len(active), regime_trend=cand_trend)
+            _emit("admission", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
             skipped_admission += 1
             continue
+        external_size_multiplier = 1.0
+        if size_mult_lookup is not None:
+            external_size_multiplier = float(size_mult_lookup.get((sym, int(sig_ts)), 1.0))
+        if external_size_skip_on and external_size_multiplier <= external_size_skip_lte:
+            _emit(
+                "external_size_multiplier",
+                order_submit_ts_ms=order_submit_ts,
+                active_count=len(active),
+                regime_trend=cand_trend,
+                regime_size_mult=regime_size_mult,
+                external_size_multiplier=external_size_multiplier,
+            )
+            skipped_external_size_multiplier += 1
+            continue
+        fill = _resolve_entry_fill(
+            config,
+            bars,
+            side=config.side,
+            order_submit_bar=int(order_submit_bar),
+            order_submit_ts_ms=order_submit_ts,
+        )
+        if fill is None:
+            ref_price = float(close_arr[order_submit_bar]) if int(order_submit_bar) < len(close_arr) else None
+            limit_price = (
+                ref_price * (1.0 + float(config.entry_adverse_limit_pct))
+                if ref_price is not None and config.side == "short"
+                else ref_price * (1.0 - float(config.entry_adverse_limit_pct)) if ref_price is not None else None
+            )
+            _emit(
+                "entry_limit_unfilled",
+                order_submit_ts_ms=order_submit_ts,
+                fill_window_start_ts_ms=order_submit_ts,
+                fill_window_end_ts_ms=order_submit_ts + max(int(config.entry_adverse_limit_wait_hours), 0) * MS_PER_HOUR,
+                active_count=len(active),
+                regime_trend=cand_trend,
+                entry_reference_price=ref_price,
+                entry_limit_price=limit_price,
+                entry_fill_mode="adverse_limit",
+            )
+            skipped_entry_limit_unfilled += 1
+            continue
+        entry_bar = int(fill["entry_bar"])
+        entry_bar_end = int(fill["entry_bar_end_ts_ms"])
         # --- sizing + stop + exit planning (verbatim logic, extracted to helpers) ---
+        entry_volatility = _entry_vol(close_arr, int(order_submit_bar))
+        inverse_vol_multiplier = (
+            min(max(config.target_vol_per_name / entry_volatility, 1.0 / clamp), clamp)
+            if inverse_vol and entry_volatility > 0 else 1.0
+        )
         nw, trade_stop = _compute_size_and_stop(
-            config, close_arr, int(entry_bar),
+            config, close_arr, int(order_submit_bar),
             base_nw=base_nw, inverse_vol=inverse_vol, clamp=clamp,
             regime_size_mult=regime_size_mult, stop_pct=stop_approach_pct if stop_approach_on else stop_pct,
         )
@@ -993,8 +1260,7 @@ def _run_trades(
         # selection gates, so entries/breadth/exits are unchanged; resize/impact cost is
         # recomputed at the new size by _round_trip_bps below. trade_stop is independent of nw,
         # so applying the multiplier after _compute_size_and_stop is numerically identical.
-        if size_mult_lookup is not None:
-            nw *= float(size_mult_lookup.get((sym, int(sig_ts)), 1.0))
+        nw *= external_size_multiplier
         planned_exit = _plan_exit(
             state_mode=state_mode, spell_end=int(spell_end), entry_bar_end=entry_bar_end,
             delay_ms=delay_ms, max_hold_ms=max_hold_ms, hold_ms=hold_ms,
@@ -1008,9 +1274,20 @@ def _run_trades(
             rank_lookup=rank_lookup or {}, event_decay_threshold=0.0,
             funding_lookup=funding_lookup if config.use_funding else None,
             stop_fill_mode=config.stop_fill_mode, stop_slippage_cap_pct=config.stop_slippage_cap_pct,
+            entry_price_override=fill.get("entry_price_override"),
         )
         if trade is None:
-            _emit("no_fill", entry_bar_end=entry_bar_end, active_count=len(active))
+            _emit(
+                "no_fill",
+                entry_bar_end=entry_bar_end,
+                order_submit_ts_ms=order_submit_ts,
+                fill_window_start_ts_ms=fill.get("fill_window_start_ts_ms"),
+                fill_window_end_ts_ms=fill.get("fill_window_end_ts_ms"),
+                active_count=len(active),
+                entry_reference_price=fill.get("entry_reference_price"),
+                entry_limit_price=fill.get("entry_limit_price"),
+                entry_fill_mode=fill.get("entry_fill_mode"),
+            )
             skipped_no_bar += 1
             continue
         if stop_approach_on and trade.get("exit_reason") == "stop_loss":
@@ -1026,14 +1303,23 @@ def _run_trades(
         _emit(
             "selected",
             entry_bar_end=entry_bar_end,
+            order_submit_ts_ms=order_submit_ts,
+            fill_window_start_ts_ms=fill.get("fill_window_start_ts_ms"),
+            fill_window_end_ts_ms=fill.get("fill_window_end_ts_ms"),
             active_count=len(active),
             regime_trend=cand_trend,
             regime_size_mult=regime_size_mult,
             notional_weight=nw,
+            entry_volatility=entry_volatility,
+            inverse_vol_multiplier=inverse_vol_multiplier,
+            external_size_multiplier=external_size_multiplier,
+            entry_reference_price=fill.get("entry_reference_price"),
+            entry_limit_price=fill.get("entry_limit_price"),
+            entry_fill_mode=fill.get("entry_fill_mode"),
             exit_ts_ms=int(trade["exit_ts_ms"]),
         )
         heapq.heappush(active, int(trade["exit_ts_ms"]))
-        last_entry[sym] = entry_bar_end
+        last_entry[sym] = order_submit_ts
         if breaker_on and float(trade.get("net_return") or 0.0) < 0.0:
             bisect.insort(adverse_exit_ts, int(trade["exit_ts_ms"]))
     skips = {
@@ -1045,6 +1331,8 @@ def _run_trades(
         "skipped_btc_trend": skipped_btc_trend,
         "skipped_crowding": skipped_crowding,
         "skipped_admission": skipped_admission,
+        "skipped_external_size_multiplier": skipped_external_size_multiplier,
+        "skipped_entry_limit_unfilled": skipped_entry_limit_unfilled,
     }
     if not rows:
         return _empty_trades(), skips
@@ -1282,13 +1570,19 @@ def _prepare_research_inputs(
         entries = _apply_entry_order(entries, entry_order)
 
     kname = _autodetect_dataset_names(root)["klines_dataset"]
-    pad_fwd = (config.hold_hours + config.entry_delay_hours + 4) * MS_PER_HOUR
+    pad_fwd = (
+        config.hold_hours
+        + config.entry_delay_hours
+        + max(config.entry_adverse_limit_wait_hours, 0)
+        + 4
+    ) * MS_PER_HOUR
     # audit2c: also reserve >=2 warmup days when the equal-weight market gate is on, so the
     # gate's one-day-lagged daily market return is available from the window's first day
     # instead of failing OPEN (allowing entries) for the first ~2 days. The btc-trend gate
     # already reserves 31d, so this only bites a btc_trend_gate=off + market_min_ret config.
+    btc_trend_lookback_days = max(int(config.btc_trend_lookback_days), 1)
     pad_back_days = max(
-        31 if config.btc_trend_gate != "off" else 0,
+        btc_trend_lookback_days + 1 if config.btc_trend_gate != "off" else 0,
         max(config.age_days_min, 0),
         2 if config.market_min_ret_1d > -1.0 else 0,
     )
@@ -1318,7 +1612,7 @@ def _prepare_research_inputs(
 
     btc_trend_daily = None
     if config.btc_trend_gate != "off" and not klines.is_empty():
-        btc_trend_daily = _btc_trend_returns(klines)
+        btc_trend_daily = _btc_trend_returns(klines, lookback_days=btc_trend_lookback_days)
 
     rank_lookup = None
     if config.rank_exit_threshold > 0.0 and not panel.is_empty():
@@ -1422,14 +1716,53 @@ def run_continuous_event_research(
         tape_schema = {
             "symbol": pl.Utf8,
             "signal_ts_ms": pl.Int64,
+            "signal_bar_close_ts_ms": pl.Int64,
+            "decision_ts_ms": pl.Int64,
+            "feature_ts_ms": pl.Int64,
+            "data_available_ts_ms": pl.Int64,
+            "rmom_source_day_ts_ms": pl.Int64,
+            "rmom_data_available_ts_ms": pl.Int64,
+            "btc_trend_source_start_ts_ms": pl.Int64,
+            "btc_trend_lookback_days": pl.Int64,
+            "btc_trend_source_end_ts_ms": pl.Int64,
+            "btc_trend_data_available_ts_ms": pl.Int64,
+            "order_submit_ts_ms": pl.Int64,
+            "fill_window_start_ts_ms": pl.Int64,
+            "fill_window_end_ts_ms": pl.Int64,
             "composite": pl.Float64,
+            "residual_momentum_value": pl.Float64,
+            "residual_momentum_rank": pl.Float64,
+            "feature_rv_168h": pl.Float64,
+            "feature_vov": pl.Float64,
+            "feature_dist_low": pl.Float64,
+            "feature_xsret7": pl.Float64,
+            "feature_xsret3": pl.Float64,
+            "feature_ret1": pl.Float64,
+            "feature_max_ret168": pl.Float64,
+            "feature_prior6_ret1_max": pl.Float64,
+            "feature_giveback_from_prior6_high": pl.Float64,
+            "feature_turnover_spike_168h": pl.Float64,
             "turnover_quote": pl.Float64,
+            "liquidity_value": pl.Float64,
+            "liquidity_rank": pl.Float64,
+            "volume_1h_quote": pl.Float64,
+            "volume_24h_quote": pl.Float64,
+            "volume_zscore": pl.Float64,
             "spell_end_ts_ms": pl.Int64,
             "entry_bar_end_ts_ms": pl.Int64,
+            "entry_reference_price": pl.Float64,
+            "entry_limit_price": pl.Float64,
+            "entry_fill_mode": pl.Utf8,
             "crowding_count": pl.Int64,
             "active_count": pl.Int64,
+            "btc_trend_gate": pl.Utf8,
             "regime_trend": pl.Float64,
             "regime_size_mult": pl.Float64,
+            "sizing_mode": pl.Utf8,
+            "base_notional_weight": pl.Float64,
+            "entry_volatility": pl.Float64,
+            "inverse_vol_multiplier": pl.Float64,
+            "external_size_multiplier": pl.Float64,
             "notional_weight": pl.Float64,
             "exit_ts_ms": pl.Int64,
             "selected": pl.Boolean,

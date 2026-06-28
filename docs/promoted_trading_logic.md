@@ -93,6 +93,50 @@ same-entry decisions, entries sharing a `(symbol, signal_ts)` use
 `btc_risk_stack_mult=0.35` when the causal V0 BTC-risk score is in
 `[0.70, 0.90)`. Otherwise the multiplier is `1.0`.
 
+### Continuous Entry Safety
+
+Submit-mode new entries pass a cycle-level risk-health gate before candidate
+selection. It blocks new entries when private account snapshots have errors, when
+a genuine private execution WS stream has emitted and then gone stale beyond
+`ENTRY_PRIVATE_WS_STALE_SECONDS` / `--entry-private-ws-stale-seconds` (default
+300 seconds), or when an open continuous ledger symbol is missing from the venue
+position snapshot. It also blocks a live exchange-only position when the
+continuous order ledger has a recent non-reduce-only entry attempt for that
+symbol but no open continuous trade row. Finally, it blocks new submitted
+entries while an open non-hedge continuous position has no venue `stopLoss`
+protection in the private position snapshot, and records the unprotected
+position age in seconds. It also records compact live lifecycle-state counts
+(`PROTECTED`, `PROTECTION_PENDING`, `EXIT_ORDER_SUBMITTED`, `ORPHAN`, etc.) for
+open continuous trades. Before submitted trade rows are flushed, the lifecycle
+guard enforces an explicit trade-row transition table: terminal rows cannot be
+reopened, close rows need prior ledger state, protected rows cannot silently
+regress to `PROTECTION_PENDING`, and in-flight exit markers cannot be dropped.
+Rejected rows are written to `continuous_risk_events.jsonl` and page as
+lifecycle-transition violations. Healthy submitted cycles also persist
+`PROTECTED` promotions from the private position snapshot onto full copied trade
+rows; missing stops remain entry-risk-health blocks rather than ledger
+demotions. Submitted live cycles also append
+`continuous_lifecycle_events.jsonl` rows for crash-safe preflight/order-prepared
+events, final order events, and accepted trade-row state writes.
+Dry-run and paper evidence cycles keep running and record the same fields
+without suppressing candidates. Blocked submit cycles append
+`continuous_risk_events.jsonl` with `event=entry_risk_health_blocked`.
+
+`ws_risk` appends stop/take-profit repair attempts to
+`reports/event-risk-ws/stop_audit_events.jsonl` after sleeve tagging. These rows
+are audit evidence for target/current protection and submit outcome; they do not
+change routing.
+
+Submit-mode entries are also capped by a portfolio heat proxy before candidate
+selection. The default cap is 5% of equity under a +100% adverse shock, computed
+from current non-hedge open notional plus conservative per-entry heat. Dry-run
+and paper evidence cycles record the fields but are not clamped.
+
+Submit-mode entries are blocked by an account drawdown kill-switch when current
+wallet equity is more than 2% below the prior healthy cycle high-water mark.
+Wallet/private snapshot errors block separately and are not treated as drawdown
+evidence from fallback equity.
+
 ### Continuous Exit Logic
 
 Active exits:

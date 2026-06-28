@@ -258,6 +258,26 @@ def test_btc_trend_returns_are_prior_30d_excluding_current_day() -> None:
     assert trend[31 * MS_PER_DAY] == pytest.approx(0.30)
 
 
+def test_btc_trend_returns_support_configured_lookback() -> None:
+    rows = []
+    for day in range(8):
+        rows.append(
+            {
+                "ts_ms": day * MS_PER_DAY,
+                "symbol": "BTCUSDT",
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0 * (1.02 ** day),
+            }
+        )
+
+    trend = _btc_trend_returns(pl.DataFrame(rows), lookback_days=3)
+
+    assert 3 * MS_PER_DAY not in trend
+    assert trend[4 * MS_PER_DAY] == pytest.approx(0.06)
+
+
 def test_run_trades_respects_max_active_cap() -> None:
     syms = [f"S{i}" for i in range(6)]
     bars = _indexed_price_bars_by_symbol(_grid_klines(syms, 40))
@@ -295,6 +315,125 @@ def test_run_trades_optional_admission_lookup_blocks_entries() -> None:
     assert admitted.height == 1
     assert admitted["symbol"].to_list() == ["B"]
     assert skips["skipped_admission"] == 1
+
+
+def test_run_trades_can_skip_external_size_multiplier_before_capacity_consumption() -> None:
+    syms = ["A", "B", "C"]
+    bars = _indexed_price_bars_by_symbol(_grid_klines(syms, 40))
+    entries = pl.DataFrame(
+        {
+            "symbol": syms,
+            "ts_ms": [0, 0, 0],
+            "composite": [0.9, 0.8, 0.7],
+            "turnover_quote": [1e6, 1e6, 1e6],
+        }
+    )
+    cfg = ContinuousEventConfig(
+        max_active=2,
+        hold_hours=10,
+        entry_delay_hours=1,
+        use_funding=False,
+        entry_skip_external_size_multiplier_lte=0.35,
+    )
+    tape: list[dict[str, object]] = []
+
+    trades, skips = _run_trades(
+        entries,
+        bars,
+        None,
+        cfg,
+        size_mult_lookup={("A", 0): 0.35, ("B", 0): 1.0, ("C", 0): 1.0},
+        candidate_sink=tape,
+    )
+
+    assert trades.height == 2
+    assert trades["symbol"].to_list() == ["B", "C"]
+    assert skips["skipped_external_size_multiplier"] == 1
+    assert skips["skipped_capacity"] == 0
+    assert tape[0]["selected"] is False
+    assert tape[0]["reason"] == "external_size_multiplier"
+    assert tape[0]["external_size_multiplier"] == pytest.approx(0.35)
+
+
+def test_run_trades_adverse_limit_fills_after_submit_bar_only() -> None:
+    h = MS_PER_HOUR
+    rows = []
+    for i in range(8):
+        rows.append(
+            {
+                "ts_ms": i * h,
+                "symbol": "A",
+                "open": 100.0,
+                # The order is submitted at 1h. This same bar's high must not
+                # fill a post-close limit; the 3h bar is the first valid touch.
+                "high": 102.0 if i == 0 else 101.2 if i == 2 else 100.0,
+                "low": 88.0 if i == 3 else 99.0,
+                "close": 100.0,
+            }
+        )
+    bars = _indexed_price_bars_by_symbol(pl.DataFrame(rows))
+    entries = pl.DataFrame({"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]})
+    cfg = ContinuousEventConfig(
+        max_active=5,
+        hold_hours=4,
+        entry_delay_hours=0,
+        entry_adverse_limit_pct=0.01,
+        entry_adverse_limit_wait_hours=4,
+        take_profit_pct=0.10,
+        use_funding=False,
+        flat_round_trip_bps=0.0,
+    )
+    tape: list[dict[str, object]] = []
+
+    trades, skips = _run_trades(entries, bars, None, cfg, candidate_sink=tape)
+
+    assert skips["skipped_entry_limit_unfilled"] == 0
+    assert trades.height == 1
+    assert trades["entry_ts_ms"][0] == 3 * h
+    assert trades["entry_price"][0] == pytest.approx(101.0)
+    assert trades["exit_reason"][0] == "take_profit"
+    assert tape[0]["order_submit_ts_ms"] == h
+    assert tape[0]["fill_window_start_ts_ms"] == h
+    assert tape[0]["fill_window_end_ts_ms"] == 3 * h
+    assert tape[0]["entry_bar_end_ts_ms"] == 3 * h
+    assert tape[0]["entry_limit_price"] == pytest.approx(101.0)
+    assert tape[0]["entry_fill_mode"] == "adverse_limit"
+
+
+def test_run_trades_adverse_limit_unfilled_rejects_candidate() -> None:
+    h = MS_PER_HOUR
+    rows = [
+        {
+            "ts_ms": i * h,
+            "symbol": "A",
+            "open": 100.0,
+            "high": 100.5,
+            "low": 99.0,
+            "close": 100.0,
+        }
+        for i in range(8)
+    ]
+    bars = _indexed_price_bars_by_symbol(pl.DataFrame(rows))
+    entries = pl.DataFrame({"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]})
+    cfg = ContinuousEventConfig(
+        max_active=5,
+        hold_hours=4,
+        entry_delay_hours=0,
+        entry_adverse_limit_pct=0.01,
+        entry_adverse_limit_wait_hours=3,
+        use_funding=False,
+        flat_round_trip_bps=0.0,
+    )
+    tape: list[dict[str, object]] = []
+
+    trades, skips = _run_trades(entries, bars, None, cfg, candidate_sink=tape)
+
+    assert trades.height == 0
+    assert skips["skipped_entry_limit_unfilled"] == 1
+    assert tape[0]["selected"] is False
+    assert tape[0]["reason"] == "entry_limit_unfilled"
+    assert tape[0]["order_submit_ts_ms"] == h
+    assert tape[0]["fill_window_end_ts_ms"] == 4 * h
 
 
 def test_run_trades_take_profit_exits_short_before_timer() -> None:
@@ -397,6 +536,33 @@ def test_run_trades_btc_trend_gate_uses_signal_day() -> None:
     assert trades.height == 1
     assert trades["symbol"][0] == "A"
     assert skips["skipped_btc_trend"] == 1
+
+
+def test_candidate_tape_records_configured_btc_trend_lookback() -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 80))
+    entries = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "ts_ms": [10 * MS_PER_DAY],
+            "composite": [0.9],
+            "turnover_quote": [1e6],
+        }
+    )
+    cfg = ContinuousEventConfig(
+        btc_trend_gate="uptrend",
+        btc_trend_lookback_days=5,
+        max_active=5,
+        hold_hours=1,
+        entry_delay_hours=1,
+        use_funding=False,
+    )
+    sink: list[dict[str, object]] = []
+
+    _run_trades(entries, bars, None, cfg, btc_trend_daily={10 * MS_PER_DAY: 0.10}, candidate_sink=sink)
+
+    assert sink[0]["btc_trend_lookback_days"] == 5
+    assert sink[0]["btc_trend_source_start_ts_ms"] == 5 * MS_PER_DAY
+    assert sink[0]["btc_trend_source_end_ts_ms"] == 9 * MS_PER_DAY
 
 
 def test_run_trades_market_gate_reads_prior_day_not_entry_day() -> None:
@@ -747,10 +913,23 @@ def test_end_to_end_btc_trend_gate_passes_computed_trend_to_trade_walker(tmp_pat
         btc_trend_gate="uptrend",
         split_date=_iso(start + 40 * MS_PER_DAY),
     )
-    payload = run_continuous_event_research(root, config=cfg, report_dir=tmp_path / "btc_gate_rep")
+    tape_path = tmp_path / "btc_gate_tape.parquet"
+    payload = run_continuous_event_research(
+        root,
+        config=cfg,
+        report_dir=tmp_path / "btc_gate_rep",
+        candidate_tape_path=tape_path,
+    )
     assert payload["n_fresh_entries"] > 0
     assert payload["n_trades"] > 0
     assert payload["skips"]["skipped_btc_trend"] < payload["n_fresh_entries"]
+    tape = pl.read_parquet(tape_path)
+    assert tape["btc_trend_source_start_ts_ms"].is_not_null().all()
+    assert tape["btc_trend_lookback_days"].is_not_null().all()
+    assert tape["btc_trend_source_end_ts_ms"].is_not_null().all()
+    assert tape["btc_trend_data_available_ts_ms"].is_not_null().all()
+    assert (tape["btc_trend_source_end_ts_ms"] < tape["decision_ts_ms"]).all()
+    assert (tape["btc_trend_data_available_ts_ms"] <= tape["decision_ts_ms"]).all()
 
 
 def test_end_to_end_age_gate_loads_enough_history_for_age_test(tmp_path) -> None:
@@ -1111,8 +1290,45 @@ def test_candidate_tape_selected_rows_match_executed_trades(tmp_path) -> None:
     payload = run_continuous_event_research(root, config=cfg, candidate_tape_path=tape_path)
     tape = pl.read_parquet(tape_path)
     assert tape.height >= 1
+    required = {
+        "signal_bar_close_ts_ms",
+        "decision_ts_ms",
+        "feature_ts_ms",
+        "data_available_ts_ms",
+        "rmom_source_day_ts_ms",
+        "rmom_data_available_ts_ms",
+        "order_submit_ts_ms",
+        "fill_window_start_ts_ms",
+        "fill_window_end_ts_ms",
+        "residual_momentum_value",
+        "residual_momentum_rank",
+        "feature_rv_168h",
+        "feature_vov",
+        "feature_dist_low",
+        "feature_xsret7",
+        "feature_xsret3",
+        "liquidity_value",
+        "liquidity_rank",
+        "volume_24h_quote",
+        "volume_zscore",
+        "sizing_mode",
+        "base_notional_weight",
+        "entry_volatility",
+        "inverse_vol_multiplier",
+        "external_size_multiplier",
+    }
+    assert required <= set(tape.columns)
+    assert (tape["signal_bar_close_ts_ms"] == tape["decision_ts_ms"]).all()
+    assert (tape["feature_ts_ms"] <= tape["decision_ts_ms"]).all()
+    assert (tape["data_available_ts_ms"] <= tape["decision_ts_ms"]).all()
+    assert (tape["rmom_data_available_ts_ms"] <= tape["decision_ts_ms"]).all()
+    assert (tape["order_submit_ts_ms"] >= tape["decision_ts_ms"]).all()
+    assert (tape["fill_window_start_ts_ms"] == tape["order_submit_ts_ms"]).all()
+    assert (tape["fill_window_end_ts_ms"] == tape["order_submit_ts_ms"]).all()
     selected = tape.filter(pl.col("selected"))
     assert selected.height == payload["n_trades"] == payload["n_candidates_selected"]
+    assert selected["notional_weight"].is_not_null().all()
+    assert selected["entry_volatility"].is_not_null().all()
     # Every non-selected row carries a concrete rejection reason (never the "selected" sentinel).
     rejected = tape.filter(~pl.col("selected"))
     assert (rejected["reason"] != "selected").all()

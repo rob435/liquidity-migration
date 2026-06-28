@@ -670,6 +670,7 @@ def test_vps_deploy_script_pytest_nodeids_still_collect() -> None:
                 cwd=repo,
                 capture_output=True,
                 text=True,
+                timeout=20,
             )
             assert proc.returncode == 0 and "no tests ran" not in proc.stdout.lower(), (
                 f"{script} smoke-test node-id no longer collects: {nodeid}\n"
@@ -1087,7 +1088,7 @@ def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Pat
 
     # --dry-run touches nothing.
     dry = subprocess.run(
-        ["bash", str(script), "--dry-run"], cwd=tmp_path, capture_output=True, text=True
+        ["bash", str(script), "--dry-run"], cwd=tmp_path, capture_output=True, text=True, timeout=10
     )
     assert dry.returncode == 0, dry.stderr
     assert "long_native_demo_trades" in dry.stdout
@@ -1096,7 +1097,7 @@ def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Pat
 
     # Real run: archive created, ledgers gone, kline store preserved.
     real = subprocess.run(
-        ["bash", str(script)], cwd=tmp_path, capture_output=True, text=True
+        ["bash", str(script)], cwd=tmp_path, capture_output=True, text=True, timeout=10
     )
     assert real.returncode == 0, real.stderr
     assert not ledger.exists(), "trade ledger must be wiped"
@@ -1126,7 +1127,7 @@ def test_reset_demo_paper_ledgers_covers_continuous_sleeve(tmp_path: Path) -> No
         d.mkdir(parents=True)
         (d / "part.parquet").write_bytes(b"x")
 
-    real = subprocess.run(["bash", str(script)], cwd=tmp_path, capture_output=True, text=True)
+    real = subprocess.run(["bash", str(script)], cwd=tmp_path, capture_output=True, text=True, timeout=10)
     assert real.returncode == 0, real.stderr
     assert not cont.exists(), "continuous trade ledger must be wiped"
     assert cont_klines.exists(), "continuous WS kline store must be preserved"
@@ -1158,6 +1159,7 @@ def test_reset_demo_paper_ledgers_can_reset_continuous_only(tmp_path: Path) -> N
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        timeout=10,
     )
     assert real.returncode == 0, real.stderr
     assert long_ledger.exists(), "continuous-only reset must not wipe long ledgers"
@@ -1425,6 +1427,7 @@ def _count_with_new_logic(symbols: str) -> int:
         capture_output=True,
         text=True,
         check=True,
+        timeout=5,
     )
     return int(out.stdout.strip())
 
@@ -1437,6 +1440,7 @@ def _count_with_old_logic(symbols: str) -> int:
         capture_output=True,
         text=True,
         check=True,
+        timeout=5,
     )
     return int(out.stdout.strip())
 
@@ -1529,6 +1533,7 @@ def _run_old_gate(tmp_path: Path, venv_body: str, path_body: str | None) -> int:
         capture_output=True,
         text=True,
         env={"PATH": f"{bindir}:/usr/bin:/bin"},
+        timeout=5,
     ).returncode
 
 
@@ -1558,6 +1563,7 @@ def _run_new_gate(tmp_path: Path, venv_body: str | None, path_body: str | None) 
         capture_output=True,
         text=True,
         env={"PATH": f"{bindir}:/usr/bin:/bin"},
+        timeout=5,
     ).returncode
 
 
@@ -1694,7 +1700,7 @@ def _run_bash(body: str, env_line: str = "") -> str:
         {env_line}
         {body}
     """)
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 
@@ -1749,11 +1755,11 @@ def test_fake_systemctl_enable_without_now_does_not_start_unit(tmp_path: Path) -
     log.write_text("")
     env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "STATE": str(state), "LOG": str(log)}
     unit = "demo.service"
-    subprocess.run(["bash", "-c", f"systemctl enable {unit}"], env=env, check=True)
+    subprocess.run(["bash", "-c", f"systemctl enable {unit}"], env=env, check=True, timeout=5)
     assert (state / f"{unit}.enabled").exists()
     assert not (state / f"{unit}.active").exists(), "bare enable must NOT start the unit"
     # enable --now and start DO mark active.
-    subprocess.run(["bash", "-c", f"systemctl start {unit}"], env=env, check=True)
+    subprocess.run(["bash", "-c", f"systemctl start {unit}"], env=env, check=True, timeout=5)
     assert (state / f"{unit}.active").exists()
 
 

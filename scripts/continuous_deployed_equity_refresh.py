@@ -29,7 +29,7 @@ import time
 from collections import defaultdict
 from dataclasses import fields, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import polars as pl
@@ -354,7 +354,10 @@ def component_report_matches_window(
     end_date: str,
     component_take_profit_pct: float | None = None,
     expected_gross_exposure: float | None = None,
+    expected_config_hash: str | None = None,
 ) -> bool:
+    if expected_config_hash is not None and str(payload.get("config_hash")) != expected_config_hash:
+        return False
     cfg = payload.get("config") or {}
     if str(cfg.get("end_date")) != end_date:
         return False
@@ -734,6 +737,7 @@ def run_components(
     component_take_profit_pct: float | None = None,
     backtest_leverage: float = 1.0,
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
+    config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
 ) -> dict[str, Any]:
     data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
@@ -750,6 +754,8 @@ def run_components(
             component_take_profit_pct=component_take_profit_pct,
             backtest_leverage=backtest_leverage,
         )
+        if config_transform is not None:
+            cfg = config_transform(cfg)
         t0 = time.time()
         if report_path.exists() and size_mult_lookup is None:
             payload = json.loads(report_path.read_text(encoding="utf-8"))
@@ -759,6 +765,7 @@ def run_components(
                 end_date=end_date,
                 component_take_profit_pct=component_take_profit_pct,
                 expected_gross_exposure=float(cfg.gross_exposure),
+                expected_config_hash=cfg.config_hash(),
             )
             if not resumed:
                 payload = run_continuous_event_research(data_root, config=cfg, report_dir=cell_dir)
@@ -862,6 +869,7 @@ def run_venue(
     component_take_profit_pct: float | None = None,
     btc_risk_sizing: bool = False,
     backtest_leverage: float = 1.0,
+    config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
 ) -> dict[str, Any]:
     out_dir = output_root / venue
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -886,6 +894,7 @@ def run_venue(
                 data_root=data_root,
                 component_take_profit_pct=component_take_profit_pct,
                 backtest_leverage=1.0,
+                config_transform=config_transform,
             )
             root_for_context = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
             size_lookup, btc_risk_meta = btc_risk_size_lookup(
@@ -904,6 +913,7 @@ def run_venue(
             component_take_profit_pct=component_take_profit_pct,
             backtest_leverage=backtest_leverage,
             size_mult_lookup=size_lookup,
+            config_transform=config_transform,
         )
         pieces = {}
         for component in WINNER_WEIGHTS:
