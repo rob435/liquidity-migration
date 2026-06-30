@@ -1,6 +1,6 @@
 # Active Trading Logic
 
-Last verified against code and deploy files: 2026-06-25.
+Last verified against code and deploy files: 2026-06-30.
 
 This file describes the active profile lifecycle. It is not a research diary.
 Historical receipts are in git history and summarized in
@@ -145,7 +145,7 @@ Active exits:
 - `max_hold` force cover after 24 hours.
 - `STOP_LOSS_PCT=0`; no venue/server disaster stop.
 
-Retired daemon exits that must not be silently reintroduced:
+Disabled daemon exits that must not be silently reintroduced:
 
 - `left_decile`.
 - `stop_approach`.
@@ -155,9 +155,9 @@ Retired daemon exits that must not be silently reintroduced:
 
 ### Rebalance, Hedge, Add-ons
 
-The local target has daily rebalance disabled, so `rebalance_scale=1.0`.
+The deployed target has daily rebalance disabled, so `rebalance_scale=1.0`.
 Historical replay context used `w90/tv0.045/max4/ddh=-0.04`; do not cite that
-as the current local target without checking deploy state.
+as the current deployed target without checking deploy state.
 
 The frozen object includes:
 
@@ -204,7 +204,8 @@ Data roots:
 - BTC and ETH regime gates required.
 - Multi-day close-location gate 0.6.
 - `fc_max_atr_pct=0.12`.
-- Sigma trigger enabled with `fc_sigma_mult=2.5`.
+- Sigma trigger enabled.
+- `fc_sigma_mult=2.5`.
 - 3-day and 7-day FC triggers enabled.
 
 The live cycle uses fully closed daily bars and drops signals older than 24

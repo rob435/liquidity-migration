@@ -1,20 +1,17 @@
 # Research Summary
 
-Updated: 2026-06-28.
+Updated: 2026-06-30.
 
-This is the durable decision log. Detailed receipts, command transcripts, and
-one-off append logs are intentionally out of the hot path. See
-`docs/preregistration/INDEX.md` for active anchors and use git history for exact
-deleted receipt text.
+This is the durable decision log. Historical receipts live in git history and
+`docs/preregistration/INDEX.md`.
 
 ## Active Objects
 
 | Object | Role | Current read |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Continuous fade demo/paper book | No forward trade sample yet; local target still needs checked deploy |
+| `continuous_ensemble_v2` | Continuous fade demo/paper book | VPS aligned; no forward trade sample yet |
 | `LongV11aDivWeekendVol` | Long-native v11a demo/paper sleeve | Strongest current internal object; TP-tail dependent |
 
-The old daily short sleeve is not dormant; it is gone from the active system.
 Mainnet is outside the current operating mode.
 
 ## Evidence Standards
@@ -28,7 +25,7 @@ Mainnet is outside the current operating mode.
 
 ## Continuous v2
 
-### Current Local Target
+### Current Target
 
 - Baseline clock: `2026-06-18T19:54:00Z`.
 - Components: p3 `0.3333333333333333`, p4p3 `0.2222222222222222`, p4p5
@@ -43,9 +40,9 @@ Mainnet is outside the current operating mode.
 - Add-ons: demo sniper execution watch; dynamic exit no-order shadow.
 - Sizing overlay: `CTRL_BTC_RISK_70_90_35`.
 
-Latest VPS observation is older than the local target: commit `e8c8080`, daily
-rebalance still enabled, local BTC gate telemetry absent, and BTC-risk sizing not
-proven live.
+Read-only VPS check on 2026-06-30 found commit `33ee7ffd2`,
+`main...origin/main`, with long demo/paper, continuous demo/paper, shared risk,
+and the continuous hedge timer active.
 
 ### Closed Continuous Research
 
@@ -53,11 +50,11 @@ proven live.
 | --- | --- |
 | Live-exit diagnosis | `stop_approach` and server-stop style exits broke the short-fade lifecycle; TP/24h became the v2 lifecycle. |
 | Deep A/B foundation | No accepted parameter. Flow, conviction sizing, entry timing, and exit timing failed controls or data requirements. |
-| TP variants | Bybit liked wider TP; Binance drawdown/MAR rejected the two-venue change. TP12 remains a local target, not broad proof. |
+| TP variants | Bybit liked wider TP; Binance drawdown/MAR rejected the two-venue change. TP12 remains the current target, not broad proof. |
 | One-minute execution books | No durable two-venue lead after path-aware controls. |
 | Upper-wick sizing | Initial apparent gain was duplicate-counting; corrected full-ledger and parity checks retracted it. |
 | BTC gate replacement | Replacement gates failed. `CTRL_BTC_RISK_70_90_35` improved MAR/drawdown but cut Binance total return, so it is a narrow sizing experiment. |
-| Daily vol rebalance | 2026-06-25 TP12 A/B rejected legacy ON. It mostly saturated at max leverage, worsened drawdown, and failed the MAR/worst-90d rule; keep disabled. |
+| Daily vol rebalance | 2026-06-25 TP12 A/B rejected rebalance ON. It mostly saturated at max leverage, worsened drawdown, and failed the MAR/worst-90d rule; keep disabled. |
 | Regime-score work | No common robust replacement survived the current-control and anchor checks. |
 
 Recurring conclusion: continuous signals exist, but most transforms either
@@ -72,7 +69,7 @@ evidence for any new risk layer.
 
 ### Continuous Validation Baseline
 
-2026-06-27 Phase-0 validation froze the current local target under
+2026-06-27 Phase-0 validation froze the current target under
 `research/continuous_fade/runs/continuous_ensemble_v2_baseline_current/`
 (`continuous_ensemble_v2_baseline_current`, commit `9644fec`, profile hash
 `c4eb2eed1658697aa1239afd847e0de9d04f87ffe98080d4607ea6c1fd86a4f6`).
@@ -243,8 +240,7 @@ Closed long research:
 - Bybit and Binance PIT roots are current enough for the latest long refresh and
   continuous replay maintenance.
 - 2026-06-27 5m backfill added canonical `klines_5m` coverage for every PIT
-  manifest symbol-day in the continuous validation sample on both venues
-  (`docs/preregistration/2026-06-27-continuous-fade-5m-data-backfill.md`).
+  manifest symbol-day in the continuous validation sample on both venues.
   Presence audit is clean; strict 288-bars/day audit still has partial source
   days after retry (781 Bybit / 25 Binance), so sub-hour research must handle
   those explicitly.
@@ -269,8 +265,9 @@ Closed long research:
   kill-switch counts in the top-level readiness report and treats any account
   drawdown kill-switch row as a readiness failure; the current rerun has 0 of
   both on paper and demo.
-- Continuous current rows still show no entries or exits; the false BTC uptrend
-  gate is explained by PIT BTC trend, not an unexplained daemon mismatch.
+- Continuous current rows still show no entries or exits. Rows with
+  `btc_trend_gate_allows_entry=false` are explained by PIT 30d BTC trend, not an
+  unexplained daemon mismatch.
 - Continuous submit-mode entries now have an entry-risk-health gate that blocks
   private snapshot errors, stale private execution WS after a stream has emitted,
   open continuous ledger symbols missing from the venue position snapshot, and
@@ -315,10 +312,9 @@ Closed long research:
 
 ## Revisit Queue
 
-1. Forward trade sample for both surviving systems.
-2. Continuous deploy alignment if the owner wants the local target live.
-3. Long v11a paper/demo/fill/funding audit once trades appear.
-4. Promote no continuous skip/tail change from the timestamped tape. Gate-off,
+1. Forward trade sample for both active systems.
+2. Long v11a paper/demo/fill/funding audit once trades appear.
+3. Promote no continuous skip/tail change from the timestamped tape. Gate-off,
    non-30d BTC-lookback regime changes, and BTC-risk 35% tail skip are already
    rejected by full replay. Synthetic active-book squeeze and cluster-bootstrap
    diagnostics plus the dynamic 5m outage overlay are survivable at current
@@ -330,10 +326,9 @@ Closed long research:
    hourly state-coverage audit confirms the full invalidation panel is still
    unavailable. The DSR/PBO diagnostic marks the internal replay variant surface
    inference-fragile.
-5. Continue live-safety implementation from remaining deployment/reconcile
-   gaps. Submitted-row lifecycle transition enforcement, `PROTECTED` trade-row
+4. Continue live-safety audit work. Submitted-row lifecycle transition enforcement, `PROTECTED` trade-row
    promotion, and the append-only lifecycle event stream now exist. Risk/audit
    logs currently cover blocked entry-health events, rejected lifecycle
    transitions, stop-repair attempts, and lifecycle state transitions.
-6. Only targeted continuous research with a specific missing-data or execution
+5. Only targeted continuous research with a specific missing-data or execution
    mechanism; no broad mining replay.

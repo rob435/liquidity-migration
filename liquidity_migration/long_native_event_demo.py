@@ -1,8 +1,7 @@
 """Long-side execution module - live counterpart to long_native.run_long_native_research.
 
 Mirrors event_demo.py for the v11a long sleeve (uni50 FC sniper retrace 1%/6h
-fall-through). (`event_demo.py` survives as shared execution infrastructure -
-the daily SHORT sleeve itself was ERASED 2026-06-11.) This module
+fall-through). `event_demo.py` remains shared execution infrastructure. This module
 runs alongside the continuous book on the same Bybit demo account with order-link prefix
 `lm-en-l-*` for entries and `lm-ux-l-*` for exits so the existing ws_risk
 service can route fill events per sleeve.
@@ -181,11 +180,10 @@ class LongNativeDemoCycleConfig:
     # sibling convention (cross_sleeve.shared_account_root). Read-only here; the whole
     # feature is a NO-OP until ws_risk writes the row AND the operator sets a budget split.
     cross_sleeve_account_root: str | None = None
-    # Mirrors EventDemoCycleConfig — daemon constructs a KlineStreamManager
-    # to feed an in-memory store. The long sleeve's small universe makes
-    # this less critical than the short side, but consistency simplifies
-    # operator mental model + the long lookback_days=90 makes the bootstrap
-    # the dominant startup cost worth doing once.
+    # Daemon constructs a KlineStreamManager to feed an in-memory store. The
+    # long sleeve's small universe makes this less critical than continuous, but
+    # consistency simplifies operator mental model and lookback_days=90 makes
+    # the bootstrap the dominant startup cost worth doing once.
     ws_klines_enabled: bool = True
     ws_klines_bootstrap_workers: int = 16
     ws_klines_lookback_days: int = 100  # ls-4: lockstep with lookback_days
@@ -347,7 +345,7 @@ def _validate_long_demo_config(
     if config.notional_multiplier <= 0.0:
         raise ValueError("notional_multiplier must be positive")
     if not 0.0 <= config.max_order_notional_pct_equity <= 10.0:
-        # Looser cap than short side (1.0); the long sleeve can legitimately
+        # Looser cap than the compatibility default (1.0); the long sleeve can legitimately
         # exceed 100% per-position notional via leverage.
         raise ValueError("max_order_notional_pct_equity must be in [0, 10]")
     if not 0.0 < config.wallet_balance_fraction <= 1.0:
@@ -809,9 +807,8 @@ def run_long_native_demo_cycle(
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
             "kline_store_rows": kline_cache_stats.get("store_rows", 0),
             "kline_store_symbols": kline_cache_stats.get("store_symbols", 0),
-            # WS-vs-REST telemetry — mirrors the short sleeve so a single
-            # query covers both daemons. See event_demo.py for the cache-
-            # vs-fallback contract.
+            # WS-vs-REST telemetry with the same cache-vs-fallback contract
+            # used by the active demo daemons.
             "ticker_source": ticker_source,
             "private_snapshot_source": private_snapshot_source,
             "feature_rows": features.height if not features.is_empty() else 0,
@@ -888,7 +885,7 @@ def run_long_native_demo_cycle(
         cycle_row["telegram_sent"] = False
         cycle_row["telegram_error"] = ""
 
-        # Persist cycle telemetry — matches the short sleeve's event_demo write path.
+        # Persist cycle telemetry using the standard partitioned cycle path.
         # Without this the long sleeve has zero observability: no cycle history,
         # no skip diagnostics, no per-cycle equity tracking. Found 2026-05-24:
         # the reports/long-native-event-demo/ dir stayed empty for the entire
@@ -910,9 +907,8 @@ def run_long_native_demo_cycle(
             format_long_demo_cycle_summary(payload), encoding="utf-8"
         )
         # Prune older per-cycle JSON to keep the report dir bounded — at ~1cycle/min
-        # the snapshots would otherwise grow to half a million per year. Shares
-        # the short sleeve's hourly-sentinel amortization so we don't stat
-        # thousands of files every 60s.
+        # the snapshots would otherwise grow to half a million per year. Use an
+        # hourly sentinel so we don't stat thousands of files every 60s.
         _prune_cycle_reports(
             report_dir, prefix="long_native_cycle_", keep_days=7, now_ms=cycle_now_ms,
         )
@@ -1015,9 +1011,7 @@ def _long_demo_private_rest_rate_limit_per_second() -> int:
     per-purpose limiter, NOT a per-IP coordinator: the continuous cycle fetch and
     the kline bootstrap run their own independent limiters, so the budgets do not
     compose into one per-IP allowance. The downsizing keeps the long burst well
-    under the per-account/per-IP caps with headroom for the other purposes; it is
-    no longer about starving any other sleeve (the daily SHORT sleeve was erased
-    2026-06-11, so the old cross-sleeve-starvation rationale is moot)."""
+    under the per-account/per-IP caps with headroom for the other purposes."""
     base = max(int(_demo_private_rest_rate_limit_per_second() / 3), 3)
     return base
 
@@ -1411,10 +1405,9 @@ def _preflight_long_exit_order_row(
 ) -> dict[str, Any]:
     """Crash-durability preflight row for a long-side exit submission.
 
-    Mirrors the short-side _preflight_exit_order_row: a row with
-    ``status='submitted'`` and ``submit_mode='preflight'`` is flushed to the
-    orders parquet BEFORE place_order so a crash between submission and the
-    cycle's end-of-cycle flush still leaves the order_link_id discoverable
+    A row with ``status='submitted'`` and ``submit_mode='preflight'`` is flushed
+    to the orders parquet BEFORE place_order so a crash between submission and
+    the cycle's end-of-cycle flush still leaves the order_link_id discoverable
     for ws_risk pending-fill reconciliation.
     """
     return {
@@ -1541,7 +1534,7 @@ def _execute_long_exits(
         if not demo.submit_orders or filled_qty > 0.0 or status == "submitted_unconfirmed":
             trade_update = dict(trade)
             if status == "filled" or (not demo.submit_orders):
-                # Mirror the short-sleeve exit path: realized PnL + venue fee +
+                # Close rows must carry realized PnL + venue fee +
                 # venue execTime must land on the close so the ledger carries
                 # the full audit trail without needing the orphan reconciler.
                 # long-sleeve-2: a paper/dry-run close marks to the LIVE ticker price so the
@@ -2248,13 +2241,13 @@ def format_combined_book_summary(
             now_ms=now_ms,
         ),
     ])
-    # The daily SHORT sleeve was ERASED 2026-06-11. Its legacy ledger line existed for
-    # residual-position wind-down only — with nothing residual it is pure noise, so it
-    # renders ONLY while legacy open rows remain (operator request 2026-06-12). The
-    # ledger still counts toward the tracked totals above either way.
+    # Compatibility ledger line: render it only while open compatibility rows remain.
+    # The ledger still counts toward the tracked totals above either way.
     if short.open_count > 0:
         lines.append(
-            _format_book_line("Short (erased)", _state_label(states.get("SHORT_SLEEVE"), default="off"), short, None, now_ms=now_ms)
+            _format_book_line(
+                "Short (compatibility)", _state_label(states.get("SHORT_SLEEVE"), default="off"), short, None, now_ms=now_ms
+            )
         )
     lines.extend([
         _format_book_line("Long", _state_label(states.get("LONG_SLEEVE"), default="off"), long, None, now_ms=now_ms),

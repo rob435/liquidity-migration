@@ -3,8 +3,7 @@
 
 Answers "is the system ALIVE, and are stop-required open positions PROTECTED?"
 and runs every few minutes so the operator can manually close positions when something breaks.
-(The hourly short-sleeve entry-health companion was erased with that sleeve,
-2026-06-11.) It Telegrams on:
+It Telegrams on:
 
   * DAEMON DOWN / HUNG -- no cycle has been written within --max-cycle-age-min
     (catches a crash-loop under ``Restart=always``, a hang, or a stop), and/or a
@@ -576,11 +575,10 @@ def gather_risk_alerts(*, risk_root: Path, now_ms: int, args: argparse.Namespace
     It writes a heartbeat cycle row every ~10s to ``<risk-root>/event_demo_cycles``;
     no fresh row within --max-cycle-age-min means the engine is STOPPED or HUNG.
     ``systemctl is-active`` catches neither (a stopped unit is "inactive", a hung
-    one "active") — only a fast crash-loop ever reaches "failed". The short-sleeve
-    erasure (e03e9ab) deleted the only check that covered this; while ws_risk is
-    down, stop repair, orphan adoption and fill reconciliation are all silently
-    dead (audit 2026-06-12 round 3). The risk service has no sleeve toggle, so
-    this gather is unconditional (skip with --risk-root '')."""
+    one "active") — only a fast crash-loop ever reaches "failed". While ws_risk
+    is down, stop repair, orphan adoption and fill reconciliation are all silently
+    dead. The risk service has no sleeve toggle, so this gather is unconditional
+    (skip with --risk-root '')."""
     if not risk_root.exists():
         return []
     cyc = _latest_cycle_df(risk_root / "event_demo_cycles")
@@ -942,7 +940,6 @@ def main() -> int:
     # deliberately-retired daemon doesn't false-page as "down" — but stop/mismatch
     # checks on residual open rows always run ("off" does not flatten). Unset-defaults
     # mirror deploy/lib_sleeves.sh: LONG off (round-3 fail-safe change), CONTINUOUS off.
-    # (The daily-short sleeve was erased 2026-06-11.)
     unit_states = _unit_states(units)
     not_active_timers = {
         u for u, s in unit_states.items() if u.endswith(".timer") and s != "active"

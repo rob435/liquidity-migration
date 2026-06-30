@@ -3,13 +3,6 @@ name: pit-reconcile
 description: "Reconcile the live demo/paper ledgers for the LONG (v11a) and CONTINUOUS (fade) sleeves, and fix/diagnose PIT membership (archive_trade_manifest) problems. ONE command: `bash scripts/reconcile.sh` runs the full demo<->backtest<->paper three-way for both sleeves by default (downloads fresh PIT data, runs each sleeve's backtest over the live forward window, reconciles the model against demo+paper); add `--quick` for the fast two-way (paper<->demo execution only). Use whenever asked to reconcile the ledgers, run a demo-backtest-paper reconciliation, when a reconcile shows paper-only / demo-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest is stale. Continuous is demo/paper research-stage and promoted-in-code only by operator override; the backtest leg is agreement/execution evidence, never alpha proof or a promotion gate."
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED — its specific short reconcile commands no longer exist. The
-> demo<->backtest<->paper *backtest leg* was REBUILT generically (2026-06-17) for
-> the surviving LONG + CONTINUOUS sleeves. **2026-06-18:** the scripts were
-> consolidated behind ONE front door — `scripts/reconcile.sh` now runs the full
-> three-way by default; `--quick` is the fast paper<->demo check.
-
 # PIT reconcile + membership runbook
 
 There is ONE command for the whole reconciliation. By default it runs the full
@@ -44,9 +37,8 @@ shot it:
 
 ## Three-way (demo ↔ backtest ↔ paper) — the default of `reconcile.sh`
 
-The full three-corner reconciliation of **both** sleeves (rebuilds the backtest
-leg lost with the erased SHORT sleeve) is what `bash scripts/reconcile.sh` runs
-by default. In one shot it:
+The full three-corner reconciliation of **both** sleeves is what
+`bash scripts/reconcile.sh` runs by default. In one shot it:
 1. **refreshes PIT data** on the research root (`~/SHARED_DATA/bybit_full_pit`):
    archive-manifest + 1h klines, bounded to a gap-only tail window. Funding is
    OFF by default (it affects backtest PnL only, not which entries the model
@@ -75,16 +67,15 @@ by default. In one shot it:
 6. prints one **three-way summary** and a non-zero exit if a LIVE entry lacks a model
    justification (continuous: only a HARD off-decile unmatched entry fails).
 
-(The old manifest-refresh / kline-fill / coverage steps from the two-way path are
-now folded into the three-way's bounded PIT refresh. Manifest refresh can still be
-run manually: `python -m liquidity_migration --data-root <root> archive-manifest`.)
+Manifest refresh / kline-fill / coverage steps are folded into the three-way's
+bounded PIT refresh. Manifest refresh can still be run manually:
+`python -m liquidity_migration --data-root <root> archive-manifest`.
 
 ## The sleeves it reconciles
 
 - **Default (full three-way):** BOTH **LONG** (v11a) and **CONTINUOUS** (fade).
 - **`--quick` (two-way):** **LONG** only by default (`reconcile-long-paper-demo`);
   add `--sleeves long,continuous` to include continuous diagnostics.
-- The SHORT legs were ERASED 2026-06-11 with the sleeve.
 
 > **CONTINUOUS** (fade) is the live demo/paper book. It remains research-stage
 > and is promoted-in-code only by operator override, not by a real-money gate. Its
@@ -92,7 +83,7 @@ run manually: `python -m liquidity_migration --data-root <root> archive-manifest
 > (`scripts/reconcile_fills.py`, reusing the engine's shared decile + trigger
 > functions) and cross-checks fills; the directional check is "every live entry
 > must be a candidate" (a candidate not taken live is expected capacity). A costed
-> re-sim of `FROZEN_FORWARD_CONFIG`'s ensemble+hedge is NOT attempted. The older
+> re-sim of `FROZEN_FORWARD_CONFIG`'s ensemble+hedge is NOT attempted. The
 > `continuous_demo_signal_check.py` decile check still runs as a complementary leg.
 
 ## When to use

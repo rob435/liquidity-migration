@@ -3,10 +3,6 @@ name: equity-curve
 description: "Produce official equity curves for the promoted LONG v11a sleeve and the research-stage CONTINUOUS demo book. Use scripts/equity_curves.sh for long, continuous, or long-vs-continuous comparisons; LONG comes from liquidity_migration/promoted.py, CONTINUOUS delegates to scripts/continuous_deployed_equity_refresh.py and is a promoted-in-code profile by operator override (2026-06-15), demo/paper only - not a real-money or gate-pass claim. Covers per-venue full-PIT roots, outputs, and run-label interpretation."
 ---
 
-> ERASURE NOTE (2026-06-11, operator order): the daily SHORT sleeve was erased
-> from the system. Ignore old short/volume-events commands. The surviving curve
-> surfaces are LONG v11a and the CONTINUOUS fade demo book.
-
 # Equity Curves - One Runner
 
 Use the official wrapper:
@@ -48,8 +44,7 @@ inferred from `--root`.
   by an explicit operator override (2026-06-15), NOT a demo-arbiter gate pass: it
   is demo/paper ONLY (REAL_MONEY stays false, Tier-3 real-money gate unmet), not a
   real-money claim, and not promotion evidence. The forward demo/paper record is
-  the arbiter. Receipt:
-  `docs/preregistration/2026-06-15-operator-override-promote-continuous.md`.
+  the arbiter; the durable status lives in `docs/research_summary.md`.
 
 Continuous-specific options:
 

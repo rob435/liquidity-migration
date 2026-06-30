@@ -3,7 +3,7 @@
 Every prior continuous-fade result (P0 -> p1m) is an EXPLORATORY proxy: per-spell
 additive PnL, a mid-fill at the SAME close used to rank, a flat 15/30 bps cost with
 NO market impact, and no compounding. This module closes those gaps so the continuous
-book is measured under the SAME execution machinery as the deployed daily strategy.
+book is measured under the shared execution-grade lifecycle machinery.
 
 It REPRODUCES the proxy SELECTION exactly (so it is auditable against p1d/p1j/p1k):
   - 5 trailing closed-bar features (rv_168h, vov, dist_low, xsret7, xsret3),
@@ -12,7 +12,7 @@ It REPRODUCES the proxy SELECTION exactly (so it is auditable against p1d/p1j/p1
   - short the top composite decile (D9), fresh spell entry (gap > 1h), liquid gate
     (signal-bar hourly turnover_quote >= threshold).
 
-It runs that selection through the daily engine's VALIDATED execution core
+It runs that selection through the validated execution core
 (`_simulate_indexed_trade` + `trade_lifecycle`: stop fills, funding-to-exit, MAE/MFE,
 compounding equity, drawdown, Sharpe) and adds the three realism upgrades the proxy
 lacked:
@@ -789,9 +789,9 @@ def _assert_funding_one_per_settlement(
 
 
 def _build_lifecycle_config(config: ContinuousEventConfig) -> TradeLifecycleConfig:
-    """Translate the continuous-event config into the daily engine's exit-ladder config.
+    """Translate the continuous-event config into the shared lifecycle config.
 
-    The exit ladder is inherited from the daily engine and is off unless the config sets it.
+    The optional exit ladder is off unless the config sets it.
     Pure; lifted verbatim out of `_run_trades` so the setup reads in one place."""
     return TradeLifecycleConfig(
         start_date=config.start_date, end_date=config.end_date,
@@ -937,7 +937,7 @@ def _run_trades(
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
     (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
-    daily engine's `_simulate_indexed_trade` (identical fills/funding/exit semantics).
+    shared `_simulate_indexed_trade` path (identical fills/funding/exit semantics).
 
     `candidate_sink` (default None) is the candidate-tape audit hook: when a list is supplied, every
     candidate fed into this loop appends one decision row (selected OR the exact rejection reason,
@@ -948,7 +948,7 @@ def _run_trades(
     Returns (trades, skip-counts)."""
     if entries.is_empty():
         return _empty_trades(), {}
-    # Exit ladder inherited from the daily engine (off unless the config sets them).
+    # Optional exit ladder (off unless the config sets it).
     lifecycle = _build_lifecycle_config(config)
     base_nw = config.notional_weight
     inverse_vol = config.sizing_mode == "inverse_vol"
@@ -1377,7 +1377,7 @@ def _additive_summary(trades: pl.DataFrame, config: ContinuousEventConfig) -> di
     funding_modes = set(str(m) for m in trades["funding_mode"].to_list()) if "funding_mode" in trades.columns else set()
     fmode = "missing" if (not funding_modes or funding_modes == {"missing"}) else (
         "modeled" if funding_modes == {"modeled"} else "partial")
-    # compounding reference (the daily engine's accounting) -- shown for transparency, NOT headline
+    # Compounding reference from the lifecycle accounting; shown for transparency, NOT headline.
     comp = float((pl.Series([p + 1.0 for p in pnl]).cum_prod()[-1]) - 1.0) if pnl else 0.0
     return {
         "n_trades": int(trades.height),

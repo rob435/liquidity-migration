@@ -64,9 +64,8 @@ The live Bybit demo runner intentionally uses a separate operational root,
 **on the VPS** (these are not local on the research machine):
 
 ```text
-/opt/liquidity-migration/data/bybit-demo-event            # ws_risk ENGINE root (heartbeat cycles + reports;
-                                                          # its legacy short ledger is inert history)
-/opt/liquidity-migration/data/bybit-paper-event           # INERT legacy (erased short paper root, no writer)
+/opt/liquidity-migration/data/bybit-demo-event            # ws_risk engine root: heartbeat cycles + reports
+/opt/liquidity-migration/data/bybit-paper-event           # unused paper root, no writer
 /opt/liquidity-migration/data/bybit-long-demo-event
 /opt/liquidity-migration/data/bybit-long-paper-event
 /opt/liquidity-migration/data/bybit-continuous-demo-event
@@ -91,9 +90,7 @@ Each sleeve has a paper (dry-run) shadow on its own root (long:
 Comparing the paper and demo ledgers measures demo-vs-paper execution slippage.
 Run `bash scripts/reconcile.sh` (skill: `pit-reconcile`) — the single reconcile
 entrypoint (full demo↔backtest↔paper by default; `--quick` for the fast
-demo↔paper-only check). Do not hand-assemble the `reconcile-*` calls. (The daily-short sleeve and its roots were erased
-2026-06-11; legacy `data/bybit-demo-event` / `data/bybit-paper-event` dirs on a
-live host are inert history.)
+demo↔paper-only check). Do not hand-assemble the `reconcile-*` calls.
 
 Do not use ad hoc current-universe or temporary recent roots for promotion
 evidence. Current-universe research is biased by construction unless

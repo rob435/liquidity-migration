@@ -1,9 +1,7 @@
 """Daily PIT feature-panel builders used by residual momentum and risk models.
 
 This module builds a wide (symbol, date, feature_1..feature_k, fwd_ret_Nd)
-panel from PIT venue roots. It is deliberately a data-preparation module now:
-the old signal-research harness, IC reporter, and combined-signal portfolio
-builder were removed after the daily SHORT research surface was erased.
+panel from PIT venue roots. It is deliberately a data-preparation module.
 
 Design contract — non-negotiable:
 

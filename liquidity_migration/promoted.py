@@ -9,8 +9,7 @@ Do not delete it as "stale" without first replacing every importer of
 ``promoted.continuous_profile()``.
 
 There are two active registry sleeves: LONG (v11a) and CONTINUOUS (the fade book
-including the BTC-vol regime-hedge). The daily SHORT sleeve was erased from the
-system on 2026-06-11.
+including the BTC-vol regime-hedge).
 
 Historical continuous research candidates do not live here. Keep them in
 receipts, reports, or git history so this registry cannot be mistaken for a

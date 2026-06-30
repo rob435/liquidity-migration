@@ -57,20 +57,10 @@ Environment=SIZING_MODE=inverse_vol
 Environment=TARGET_VOL_PER_NAME=0.01
 Environment=VOL_WEIGHT_CLAMP=2
 Environment=LIQ_TURNOVER_MIN=500000
-# Market-data plane: this PAPER shadow runs its OWN kline pool.
-# 2026-06-14 (deploy-env-timers-3): we previously set
-#   Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event
-# so the shadow followed the demo root's flushed kline snapshot (+rmom gate)
-# read-only to halve the box's WS decode CPU. That was only safe while the demo
-# (leader) sleeve was ON. The documented-valid CONTINUOUS_SLEEVE=off +
-# CONTINUOUS_PAPER_SLEEVE=on combo (continuous_rmom_refresh_on() is true if
-# EITHER sleeve is on; tests/test_sleeve_kill_switch.py pins this) stops the demo
-# daemon, freezes its kline store, and left this shadow following a stale snapshot
-# for up to ~2 days while appearing healthy — defeating the paper sleeve's whole
-# purpose (forward execution/cost calibration). Dropping the follow override means
-# the shadow always streams its own pool, so it stays live regardless of the demo
-# sleeve's state. Re-add the line ONLY behind a systemd drop-in conditional on the
-# demo sleeve being on if the WS-CPU saving is needed again.
+# Market-data plane (deploy-env-timers-3): this PAPER shadow runs its OWN kline pool. Do not set
+# KLINES_FOLLOW_ROOT here; paper may be enabled while demo is off, so following
+# demo's kline store can freeze paper execution while the unit appears healthy.
+# Use a conditional drop-in only if the paper lifecycle is explicitly tied to demo.
 # Two daemons x full-width default threadpools on a 2-core box just buys context
 # switching; pin to 1 — the daemon's own WORKERS parallelism is the intended knob.
 Environment=POLARS_MAX_THREADS=1

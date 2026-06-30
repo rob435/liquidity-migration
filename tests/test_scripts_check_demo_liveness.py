@@ -79,11 +79,7 @@ def test_unit_states_timers_alert_on_not_active() -> None:
 
 
 def test_gather_risk_alerts_pages_on_stale_or_missing_heartbeat(tmp_path) -> None:
-    """REGRESSION (audit 2026-06-12 round 3): the short-sleeve erasure deleted the
-    only ws_risk liveness check — a STOPPED ('inactive') or HUNG ('active') risk
-    engine paged nobody while stop repair / orphan adoption / fill reconciliation
-    were all dead. The engine heartbeats a cycle row every ~10s; its age is the
-    only reliable liveness signal."""
+    """A stopped or hung risk engine must page from heartbeat age."""
     import argparse
 
     import polars as pl

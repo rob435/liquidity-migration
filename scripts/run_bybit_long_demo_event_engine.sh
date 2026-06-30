@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Long-sleeve (LongV11aDivWeekendVol, v11a uni50 sniper retrace 1%/6h fall-through)
-# forward-testing engine. Runs on the same Bybit demo account as the other sleeves
-# sleeve but with order-link prefix lm-en-l-* so the extended ws_risk routes
+# forward-testing engine. Runs on the same Bybit demo account as the other
+# sleeves but with order-link prefix lm-en-l-* so the extended ws_risk routes
 # fills back to the long ledger.
 #
 # Hard gates:
@@ -141,7 +141,7 @@ if [[ "${USE_DAEMON:-1}" == "1" ]]; then
         "${ws_klines_args[@]}"
 fi
 
-echo "long-native demo engine: legacy single-cycle loop (USE_DAEMON=1 enables daemon)"
+echo "long-native demo engine: single-cycle loop (USE_DAEMON=1 enables daemon)"
 while true; do
     cycle_start_epoch="$(date +%s)"
     set +e

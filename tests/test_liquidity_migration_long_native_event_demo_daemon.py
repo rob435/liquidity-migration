@@ -101,13 +101,13 @@ def test_long_daemon_force_reconnects_private_stream_when_socket_down(tmp_path: 
         def is_connected(self) -> bool:
             return False
 
-        def subscribe_positions(self, cb) -> None:  # noqa: ANN001
+        def subscribe_positions(self, _cb) -> None:  # noqa: ANN001
             pass
 
-        def subscribe_orders(self, cb) -> None:  # noqa: ANN001
+        def subscribe_orders(self, _cb) -> None:  # noqa: ANN001
             pass
 
-        def subscribe_wallet(self, cb) -> None:  # noqa: ANN001
+        def subscribe_wallet(self, _cb) -> None:  # noqa: ANN001
             pass
 
     class _LivePrivate(_DeadPrivate):

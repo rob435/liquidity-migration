@@ -587,8 +587,8 @@ def run_long_paper_demo_reconciliation(
     output_dir: str | Path | None = None,
     min_pairs_warning: int = 30,
 ) -> dict[str, Any]:
-    """B.4 — same pairing as the short reconciler but reads the long sleeve's
-    own ledger datasets (``long_native_paper_trades`` vs
+    """B.4 — reconcile the long sleeve's paper/demo ledger datasets
+    (``long_native_paper_trades`` vs
     ``long_native_demo_trades``). Emits an additional ``sample_warning`` flag
     in the summary when fewer than ``min_pairs_warning`` pairs were matched —
     surfacing the case where slippage statistics are not yet trustworthy.
@@ -620,14 +620,15 @@ def run_continuous_paper_demo_reconciliation(
     paper_strategy_id: str | tuple[str, ...] | None = None,
     demo_strategy_id: str | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Continuous-fade sleeve (3rd sleeve) paper/demo execution-slippage
-    reconciler. Same pairing as the short/long reconcilers but reads the
+    """Continuous-fade sleeve paper/demo execution-slippage
+    reconciler. Same pairing as the long reconciler but reads the
     continuous sleeve's own ledger datasets (``continuous_fade_paper_trades``
     vs ``continuous_fade_demo_trades``). Like the long reconciler it emits a
     ``sample_warning`` when fewer than ``min_pairs_warning`` pairs were matched
     (continuous is sub-hourly so its pair count grows fast, but a fresh sleeve
-    still warrants the caveat). The continuous demo is intra-hour decile-cross
-    driven, so a small entry-time skew vs the paper fill is expected.
+    still warrants the caveat). The active profile enters from confirmed-bar
+    +1h membership; small paper/demo entry-time skew can still come from order
+    confirmation and fill timing.
     """
     payload = _run_reconciliation(
         paper_root=paper_root,

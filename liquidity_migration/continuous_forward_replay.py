@@ -62,7 +62,7 @@ FROZEN_FORWARD_CONFIG: dict[str, Any] = {
         "vol_weight_clamp": 2.0,
     },
     "rebalance": {
-        # Local target: daily volatility adjuster disabled. Changing this block
+        # Current target: daily volatility adjuster disabled. Changing this block
         # changes frozen_config_hash, so archive/reset the forward state clock on
         # deploy. Remaining params are retained so re-enabling is explicit.
         "enabled": False,

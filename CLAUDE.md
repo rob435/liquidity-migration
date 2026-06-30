@@ -1,8 +1,6 @@
 # liquidity-migration
 
 Research-stage crypto-perp repo: continuous fade demo book plus long-native v11a.
-The daily SHORT sleeve was erased on 2026-06-11 by operator order; git history is
-the archive.
 
 @AGENTS.md
 

@@ -3,12 +3,6 @@ name: research-phase-runner
 description: "Execution workflow for running a pre-registered research experiment in this quant repo. Current open experiments are tracked in STATE.md ('Current Status' / 'Current Research Direction') + docs/research_summary.md; the per-arc forward plans were consolidated there. Use any time you are about to run, conditionally-run, or write up an experiment — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), the verdict receipt, STATE.md update, and the commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
-
 # Running a research experiment
 
 Use this every time you run, conditionally-run, or write up an experiment. **The current
@@ -17,15 +11,13 @@ per-arc forward plans (intraday kernel, continuous-fade) concluded and were cons
 the summary (git history has the originals). Always read **STATE.md** first — it tells you
 what's done, what's pending, and the current binding decision rules.
 
-## The program you are working (post-erasure, 2026-06-11)
+## The program you are working
 
-Two research lines survive: the **CONTINUOUS fade book** (the live demo/paper book,
+The active research lines are the **CONTINUOUS fade book** (live demo/paper,
 research-stage, promoted-in-code only by operator override) and the
-**long-native v11a sleeve** (demo/paper enabled in current deploy state). The daily SHORT selection program was ERASED 2026-06-11 by operator
-order — do not propose short work or re-mine its window. As of 2026-06-12 the
-window is open again only for pre-registered, tightly scoped research; closed
-families in `docs/research_summary.md` stay closed. The active queue and decision
-rules live in STATE.md plus `docs/research_summary.md`.
+**long-native v11a sleeve** (demo/paper enabled in current deploy state). Closed
+families in `docs/research_summary.md` stay closed. The active queue and
+decision rules live in STATE.md plus `docs/research_summary.md`.
 
 ## The decision framework — three-tier, demo-arbiter
 
@@ -59,11 +51,10 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    any added arm, cell, metric, data source, or mechanism, write a dated
    amendment or a new pre-registration receipt first.
 
-3. **Dispatch.** (`volume_events_cell.sh` was erased with the short engine —
-   single-cell runs now go through a dispatcher too.) For a serious sweep, write
-   a small dated dispatcher for the specific pre-registered cells and call the
-   relevant package runner directly. Do not revive deleted generic sweep scripts.
-   Preserve the old sweep discipline:
+3. **Dispatch.** For a serious sweep, write a small dated dispatcher for the
+   specific pre-registered cells and call the relevant package runner directly.
+   Do not revive deleted generic sweep scripts.
+   Preserve sweep discipline:
    predeclare worker/thread counts for memory-heavy cells because
    over-parallelizing OOMs the box. Always run **both venues**.
 
@@ -73,7 +64,7 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    ```
    emits the pooled-MAR-Δ Tier-2 verdict (engine-DD MAR) + bootstrap p5,
    leave-one-month-out, and sub-period thirds from the per-cell ledgers.
-   `scripts/apply_decision_rule.py` is the **legacy strict (Sharpe) bar** —
+   `scripts/apply_decision_rule.py` is the **strict Sharpe reference bar** —
    reference only, not the promotion gate (run with `--help` for args).
    Do not move thresholds downward to rescue a cell (see non-negotiables).
 
@@ -116,7 +107,7 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
 ## State and report reads
 
 Read `STATE.md`, `docs/data_roots.md`, and report files directly.
-`scripts/apply_decision_rule.py` is the legacy-bar verdict (reference only);
+`scripts/apply_decision_rule.py` is the strict Sharpe reference verdict;
 the Tier-2 verdict is `scripts/r1_robustness.py`.
 
 ## Communication style during an experiment

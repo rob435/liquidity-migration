@@ -29,7 +29,7 @@ def test_binance_negative_error_payload_is_not_retried(monkeypatch) -> None:
         def __enter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        def __exit__(self, _exc_type, exc, _tb):
             return False
 
         def read(self):
@@ -64,7 +64,7 @@ class _FakeJsonResponse:
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, _exc_type, exc, _tb):
         return False
 
     def read(self):

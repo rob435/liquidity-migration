@@ -1,9 +1,8 @@
 """Shared cross-sleeve account-state control table (long-sleeve-5 / -6).
 
 ONE on-disk control row per netted demo account, OWNED + rewritten by ws_risk each
-reconcile pass (it is the only component that reads all three sleeve roots). The three
-separate sleeve processes (short event_demo, long long_native_event_demo, continuous
-continuous_demo) consult it READ-ONLY before sizing and claim same-symbol reservations
+reconcile pass (it is the only component that reads every configured sleeve root).
+The sleeve processes consult it READ-ONLY before sizing and claim same-symbol reservations
 through it under the dataset lock. Everything here is safe-by-default: a missing row, a
 read error, or a null budget split is a NO-OP (legacy behavior).
 
@@ -59,7 +58,7 @@ RESERVATION_TTL_MS = 180_000
 # names ws_risk._active_sleeves() can emit and with the sleeve tag the live books write to
 # the ledger (continuous_demo tags its add-on trades sleeve="continuous_addon"). Omitting a
 # routed sleeve here is silently unsafe: equal_split_budget drops it from the denominator
-# (the surviving sleeves' shares inflate and over-commit the shared account) while
+# (active sleeves' shares inflate and over-commit the shared account) while
 # compute_im_used still counts its IM and clamp_max_new_entries never throttles it
 # (budget_for is None). CS cross-sleeve-1.
 VALID_SLEEVES = ("short", "long", "continuous", "continuous_addon")

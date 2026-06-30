@@ -7,7 +7,7 @@ demo is the only thing that can settle the open questions the audit flagged (OOS
 borrow/short-availability, sub-hourly squeezes).
 
 The current deployed ensemble enters from the confirmed-bar +1h path, not the
-old intra-hour "no 1h" entry. The decile pipeline is the SHARED, verified
+retired intra-hour entry. The decile pipeline is the SHARED, verified
 `continuous_events.compute_continuous_decile_panel`.
 
 The frozen `continuous_ensemble_v2` demo/paper profile uses inverse-vol
@@ -71,7 +71,7 @@ CONTINUOUS_ADDON_ENTRY_LINK_PREFIX = "en-ca"
 CONTINUOUS_ADDON_EXIT_LINK_PREFIX = "ux-ca"
 BTC_TREND_SYMBOL = "BTCUSDT"
 CONTINUOUS_DEMO_PROFILES = (
-    "continuous_ensemble_v2",   # 2026-06-18 demo/paper lifecycle: inv-vol + max4 + TP/24h, no server stop
+    "continuous_ensemble_v2",   # 2026-06-18 demo/paper lifecycle: inv-vol + rebalance off + TP/24h, no stop
 )
 CONTINUOUS_RISK_EVENTS_FILE = "continuous_risk_events.jsonl"
 CONTINUOUS_LIFECYCLE_EVENTS_FILE = "continuous_lifecycle_events.jsonl"
@@ -182,7 +182,7 @@ class ContinuousDemoCycleConfig:
     # decile + this many hours' delay, NOT the live intra-hour decile cross. The engine validated the
     # +1h point (d1) and it ~DOUBLES MAR vs intra-hour entry (d0) cross-venue — shorting intra-hour enters
     # into the first-hour continuation/squeeze. 1 = the validated +1h entry (default). 0 = legacy intra-hour
-    # ("no-1h") entry off the live decile. Kept as an integer knob for A/B tests only;
+    # entry off the live decile. Kept as an integer knob for A/B tests only;
     # the frozen v2 profile pins it to 1.
     entry_confirm_delay_hours: int = 1
     entry_event_trigger: str = "none"      # opt-in confirmed-hour event gate: none | fresh_pop25 | popX_gbY | ...
@@ -237,9 +237,9 @@ class ContinuousDemoCycleConfig:
     # Snapshot errors are handled by the risk-health gate and do not trip this
     # check on fallback equity.
     entry_account_drawdown_kill_switch_frac: float = 0.02
-    # --- inherited-from-daily exits/gate (validated cross-venue beneficial in the engine ablation,
-    # docs/continuous_sleeve_inheritance.md). Checked each cycle off live price + kline-reconstructed MFE. ---
-    failed_fade_hours: int = 6            # cut a fade that hasn't worked after N hours (the daily's ff6)
+    # --- optional protective exits/gate (disabled by the active profile unless explicitly configured).
+    # Checked each cycle off live price + kline-reconstructed MFE. ---
+    failed_fade_hours: int = 6            # cut a fade that hasn't worked after N hours
     failed_fade_loss_pct: float = 0.04    # ...if down more than this
     failed_fade_min_mfe_pct: float = 0.01 # ...and never reached this favorable excursion
     breakeven_arm_pct: float = 0.10       # once MFE>=this, cover if price returns to entry (protect the winner)
@@ -385,7 +385,7 @@ class ContinuousDemoCycleConfig:
 
 
 def continuous_dataset_names(config: ContinuousDemoCycleConfig) -> tuple[str, str, str]:
-    """(trades, orders, cycles) dataset names — separate from the short/long sleeves."""
+    """(trades, orders, cycles) dataset names for the continuous demo/paper books."""
     if config.paper_mode:
         return ("continuous_fade_paper_trades", "continuous_fade_paper_orders", "continuous_fade_paper_cycles")
     return ("continuous_fade_demo_trades", "continuous_fade_demo_orders", "continuous_fade_demo_cycles")
@@ -2443,7 +2443,7 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         # btc_trend_gate is NOT pinned here: it is the single-source-of-truth
         # CLI/env knob (`--btc-trend-gate` / `BTC_TREND_GATE`), so the deploy
         # layer controls it (units pin `uptrend`; runner defaults `uptrend`).
-        # Local target: daily volatility adjuster disabled. Remaining
+        # Current target: daily volatility adjuster disabled. Remaining
         # daily_rebalance_* params stay populated so re-enabling is explicit and
         # cheap if the volatility control is rebuilt.
         daily_rebalance_enabled=False,
@@ -2865,7 +2865,7 @@ def _continuous_accepted_entry_symbols(
 
 
 # ============================================================================
-# Live cycle runner + short executors (clone of the long-sleeve order path,
+# Live cycle runner + short-side executors (clone of the long-sleeve order path,
 # side=Sell, lm-en-c- prefix; reuses the shared event_demo execution helpers).
 # ============================================================================
 import logging  # noqa: E402
@@ -3589,7 +3589,7 @@ def _execute_continuous_entries(
             * btc_risk_multiplier
         )
         max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
-        # NOTE (EXEC-3): like the short/long ENTRY paths, a single entry whose qty exceeds Bybit's
+        # NOTE (EXEC-3): like the Sell/Buy entry paths, a single entry whose qty exceeds Bybit's
         # per-order maxMktOrderQty is CAPPED here (order_quantity_for_notional floors to max_qty), NOT
         # split into child orders. At 2% per-name notional the cap effectively never binds for the
         # liquid (>=$500k/h) names this fade trades, so the live-vs-backtest size gap is nil in practice;
@@ -4070,8 +4070,8 @@ def _continuous_age_eligible_symbols(
     """Symbols old enough to trade under the fresh-listing-squeezer floor.
 
     ``None`` means no age gate (floor <= 0). Prefers the AUTHORITATIVE per-cycle
-    universe listing age (``listing_age_days`` = (now - Bybit v5 launchTime)/day,
-    the same source the daily sleeve's ``pit_age_days`` gate uses), so the
+    universe listing age (``listing_age_days`` = (now - Bybit v5 launchTime)/day),
+    so the
     continuous sleeve no longer infers age from its rolling kline cache: a
     genuinely old coin whose cache only reaches back a few weeks would otherwise
     be wrongly gated out (the live-vs-PIT age definition debt). A null/unknown
@@ -4399,8 +4399,8 @@ def run_continuous_demo_cycle(
         cooldown = set(held_symbols) | live_position_symbols | live_entry_order_symbols | exit_cooldown_symbols | addon_entry_cooldown_symbols
         open_count = len(held_symbols)
         # age floor (fresh-listing-squeezer defense): eligible = listed >= age_days_min ago.
-        # Authoritative listing age from the v5 universe (matches the daily sleeve's pit_age_days
-        # gate), not the rolling kline cache — see _continuous_age_eligible_symbols.
+        # Authoritative listing age from the v5 universe, not the rolling kline
+        # cache — see _continuous_age_eligible_symbols.
         eligible = _continuous_age_eligible_symbols(
             universe, klines, age_days_min=demo.age_days_min, now_ms=cycle_now_ms
         )

@@ -9,7 +9,6 @@ from __future__ import annotations
 import math
 
 import polars as pl
-import pytest
 
 from liquidity_migration._common import MS_PER_DAY
 from liquidity_migration.config import TradeLifecycleConfig
@@ -155,8 +154,7 @@ def test_daily_sharpe_ignores_non_finite() -> None:
     assert math.isfinite(s)
 
 
-@pytest.mark.parametrize("ddof_safe_size", [1])
-def test_daily_sharpe_single_diff_returns_zero(ddof_safe_size: int) -> None:
+def test_daily_sharpe_single_diff_returns_zero() -> None:
     # Two equity points produce a single diff. ddof=1 → division by zero, so
     # the helper must short-circuit to 0 rather than emitting NaN/inf.
     eq = pl.DataFrame(

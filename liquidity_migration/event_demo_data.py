@@ -119,11 +119,8 @@ def _build_demo_universe(
     # when age_days_min > 0. Filtering fresh listings twice (once here, once
     # downstream) would just narrow the universe before the real gate runs.
     # When the legacy narrow-universe is active the 30-day safety floor stays in
-    # place to mirror prior demo behaviour.
-    # (Historical note: this floor was previously justified by the erased daily
-    # SHORT strategy's `prior7_liquidity_rank` null-exclusion. That strategy was
-    # removed 2026-06-11; the age compensation that actually runs today is the
-    # continuous downstream gate referenced above.)
+    # place to mirror prior demo behaviour. The active age compensation is the
+    # continuous downstream gate referenced above.
     unlimited_universe = (
         config.universe_rank_end == 0 and config.universe_max_symbols == 0
     )
@@ -687,4 +684,3 @@ def _write_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any], fea
     except (OSError, pl.exceptions.PolarsError):
         temp_parquet.unlink(missing_ok=True)
         temp_metadata.unlink(missing_ok=True)
-

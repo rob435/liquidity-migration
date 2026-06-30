@@ -1,6 +1,6 @@
 # Research Program State
 
-Last updated: 2026-06-28.
+Last updated: 2026-06-30.
 
 Read this first. This page is live state, not a receipt archive. Historical
 details are in git history, local artifacts, and
@@ -10,10 +10,9 @@ details are in git history, local artifacts, and
 
 | System | Current role | Read |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Continuous fade demo/paper book | Needs forward trade sample; local target and VPS are not fully aligned yet |
+| `continuous_ensemble_v2` | Continuous fade demo/paper book | VPS aligned; needs forward trade sample |
 | `LongV11aDivWeekendVol` | Long-native v11a demo/paper sleeve | Best current internal positive object; still needs forward sample |
 
-The daily short sleeve was removed from the active system on 2026-06-11.
 Mainnet is not the current operating mode; changing that requires explicit owner
 action and fresh evidence.
 
@@ -21,14 +20,12 @@ action and fresh evidence.
 
 - `deploy/sleeves.env`: long demo/paper ON, continuous demo ON, continuous paper
   ON.
-- Continuous local target: TP12, daily rebalance disabled, no daemon/server
+- Continuous deployed target: TP12, daily rebalance disabled, no daemon/server
   stop, inverse-vol sizing, BTC/ETH hedge, BTC-vol regime, and
   `CTRL_BTC_RISK_70_90_35` sizing overlay.
-- Latest read-only VPS observation still showed older continuous code on commit
-  `e8c8080`: daily rebalance enabled and missing the local BTC gate telemetry
-  and BTC-risk sizing changes.
-- Deploying the local continuous target requires owner confirmation, checked
-  deploy, state-clock archival/reset, and hedge warmstart regeneration.
+- Read-only VPS check on 2026-06-30: commit `33ee7ffd2`,
+  `main...origin/main`; long demo/paper, continuous demo/paper, shared risk,
+  and the continuous hedge timer are active.
 
 ## Continuous Read
 
@@ -41,7 +38,7 @@ action and fresh evidence.
 - `CTRL_BTC_RISK_70_90_35`: MAR and drawdown improved on both venues; Binance
   total return fell. Treat it as a local demo/paper sizing experiment, not
   broad acceptance proof.
-- Daily vol rebalance A/B on 2026-06-25 rejected turning legacy ON back on for
+- Daily vol rebalance A/B on 2026-06-25 rejected turning rebalance ON for
   TP12 components. The ON rule mostly hit max leverage and failed the
   MAR/drawdown/worst-90d rule; keep it disabled.
 - Continuous validation baseline, 2026-06-27:
@@ -90,18 +87,16 @@ action and fresh evidence.
   7.15/DD -0.89%. Net component trade removal was 7.52% Bybit / 7.53% Binance.
   Keep the current 35% sizing behavior unless forward OOS evidence contradicts
   this replay.
-- Synthetic squeeze survival diagnostic, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-fade-synthetic-squeeze-survival.md`
-  injected median/p95/worst active-book shocks into the frozen baseline. Worst
+- Synthetic squeeze survival diagnostic, 2026-06-28: injected median/p95/worst
+  active-book shocks into the frozen baseline. Worst
   active one-coin +100% shocks lost 3.12% Bybit / 3.15% Binance; worst
   three-coin +50% shocks lost 3.28% / 3.49%; a one-hour exchange-outage
   surcharge lifted one-coin +100% losses to 3.43% / 3.46%. All survived the
   50% ruin bar, but drawdowns reached about -3% to -4% and recovery could take
   259 days. This is diagnostic sizing evidence, not a liquidation-engine or
   live-size approval.
-- Cluster risk-of-ruin bootstrap, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-fade-cluster-risk-of-ruin.md`
-  ran 10,000 deterministic same-signal cluster bootstrap paths plus
+- Cluster risk-of-ruin bootstrap, 2026-06-28: ran 10,000 deterministic
+  same-signal cluster bootstrap paths plus
   tail-injected variants. Plain cluster bootstrap had p(DD >=10%) 0% both
   venues and no account-impairment paths; one worst +100% outage shock still
   had p(DD >=10%) 0% and account-impairment p 0%. The stress read is
@@ -109,41 +104,36 @@ action and fresh evidence.
   p(DD >=10%) 33.70% Bybit / 66.18% Binance and annual-return p1 -5.40% /
   -6.64%. This supports tiny-size observation but keeps heat caps and circuit
   breakers in scope.
-- Dynamic liquidation/outage overlay, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-fade-dynamic-liquidation-outage.md`
-  overlaid synthetic active-book shocks on actual post-event 5m paths. All 42
+- Dynamic liquidation/outage overlay, 2026-06-28: overlaid synthetic active-book
+  shocks on actual post-event 5m paths. All 42
   rows had complete 5m coverage and no maintenance-proxy liquidation. Worst
   peak net loss was 3.33% Bybit / 3.56% Binance with peak DD -4.02% / -3.70%;
   worst flatten loss was 3.59% / 3.68% under the risk-daemon-down one-coin
   +100% scenario. This supports continued tiny-size observation, not a size
   increase or exchange-liquidation-engine claim.
-- Disaster-loss sizing diagnostic, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-fade-disaster-loss-sizing.md`
-  compared current per-trade notional with loss-budgeted safe notional. Fixed
+- Disaster-loss sizing diagnostic, 2026-06-28: compared current per-trade
+  notional with loss-budgeted safe notional. Fixed
   +100% adverse moves with a 0.10% equity per-trade budget flag 97.34% Bybit /
   97.44% Binance component trades over budget; medians are 3.88x / 4.17x
   current/safe notional. Even a 0.25% budget still flags 77.14% / 78.53% over
   budget under +100%. This argues for explicit loss-at-disaster caps before any
   size increase.
-- Conditional scale-in diagnostic, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-fade-conditional-scale-in.md`
-  simulated add-on shorts after MAE thresholds on the frozen baseline tape. The
+- Conditional scale-in diagnostic, 2026-06-28: simulated add-on shorts after MAE
+  thresholds on the frozen baseline tape. The
   best diagnostic arm was 5% MAE trigger / 50% add-on: Bybit component net
   changed from 20.89% to 29.85%, Binance from 14.69% to 20.84%. This is a
   directionally positive mechanism lead, but it is path-conditioned and not a
   full component+hedge portfolio replay; no live sizing change follows from it.
-- Scale-in portfolio replay, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-fade-scale-in-portfolio-replay.md`
-  replayed `mae05_add25`, `mae05_add50`, and `mae10_add50` as explicit child
+- Scale-in portfolio replay, 2026-06-28: replayed `mae05_add25`,
+  `mae05_add50`, and `mae10_add50` as explicit child
   shorts through component MTM and the BTC/ETH hedge. Returns increased on both
   venues, but every arm worsened MAR and drawdown. Best MAR arms were Bybit
   `mae05_add25` (+31.17%/MAR 6.75/DD -1.43% vs +26.64%/7.33/-1.13%) and
   Binance `mae10_add50` (+23.54%/MAR 5.36/DD -1.36% vs +18.84%/5.72/-1.02%).
   Reject live/paper scale-in behavior unless new forward evidence contradicts
   this replay.
-- Signal-invalidation diagnostic, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-fade-signal-invalidation.md`
-  simulated sparse candidate-tape exits over explicit future same-symbol
+- Signal-invalidation diagnostic, 2026-06-28: simulated sparse candidate-tape
+  exits over explicit future same-symbol
   candidate rows only. All active candidate-pressure arms reduced component net
   on both venues; the least harmful active arm was score>=99 after 3h, changing
   Bybit from 20.89% to 17.85% and Binance from 14.69% to 12.87%. The BTC-trend
@@ -154,9 +144,8 @@ action and fresh evidence.
   and depth plus sector proxy coverage remain 0.00%, so the full panel is not
   ready. Do not add this live exit without a full hourly state panel and full
   component+hedge replay.
-- DSR/PBO diagnostic, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-fade-dsr-pbo.md` used only frozen
-  full-replay artifacts, no new strategy sweeps. Across 21 full-replay variants
+- DSR/PBO diagnostic, 2026-06-28: used only frozen full-replay artifacts, no new
+  strategy sweeps. Across 21 full-replay variants
   per venue, PBO was 41.43% Bybit / 35.71% Binance and baseline DSR probability
   was 23.17% / 20.08%; best-Sharpe variants were already rejected by the
   scale-in and BTC-risk tail-skip replay rules. Treat the internal replay
@@ -210,8 +199,7 @@ action and fresh evidence.
   below the prior healthy cycle high-water mark. Snapshot errors do not trip the
   drawdown check on fallback equity; they already block through
   `private_snapshot_error`. Cycle rows record `entry_account_drawdown_*`.
-- Continuous forward-readiness gate, 2026-06-28:
-  `docs/preregistration/2026-06-28-continuous-forward-readiness.md` ran
+- Continuous forward-readiness gate, 2026-06-28: ran
   `continuous-forward-readiness` from the v2 baseline clock
   (`2026-06-18T19:54:00Z`) against local paper/demo roots. Paper and demo
   rebalance-cycle audits passed (121 paper cycles / 123 demo cycles, no
@@ -258,9 +246,8 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
 
 - Full-PIT Bybit and Binance roots are current enough for the latest internal
   long refresh and continuous replay maintenance.
-- Continuous 5m kline backfill, 2026-06-27:
-  `docs/preregistration/2026-06-27-continuous-fade-5m-data-backfill.md`
-  filled `klines_5m` across the validation sample for every PIT manifest
+- Continuous 5m kline backfill, 2026-06-27: filled `klines_5m` across the
+  validation sample for every PIT manifest
   symbol-day on both venues. Final presence audit has 0 missing symbol-days;
   strict 288-bars/day audit still shows partial exchange source days
   (781 Bybit / 25 Binance) after retry. Do not synthesize 5m paths from 1h bars.
@@ -268,7 +255,7 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
   refreshed long trades used modeled funding.
 - Latest full three-way reconcile exited 0, pulled demo/paper telemetry, rebuilt
   PIT context, and found no unexplained live/paper/model drift.
-- No active forward trade/order rows yet for the surviving sleeves; current
+- No active forward trade/order rows yet for the active sleeves; current
   evidence is therefore state/reconciliation/readiness, not performance.
 
 ## Current Next Work
@@ -290,8 +277,7 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
    sector-proxy state. DSR/PBO now flags the full-replay variant surface as
    inference-fragile. None of these can influence deployment without new forward
    OOS evidence.
-4. Continue live-safety implementation from remaining deployment/reconcile
-   gaps: the submitted-row lifecycle transition table, `PROTECTED` trade-row
+4. Continue live-safety audit work: the submitted-row lifecycle transition table, `PROTECTED` trade-row
    promotion, and append-only lifecycle event stream are now implemented. The
    new entry risk-health gate covers private snapshot/WS stale,
    continuous-ledger-missing-position, recent-continuous-entry
@@ -301,11 +287,9 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
    attempts now have append-only audit JSONL. Submit-mode entries are also
    portfolio-heat capped and account-drawdown gated; the forward-readiness
    operational audit now fails explicitly on account-drawdown kill-switch rows.
-5. Before deploying the local continuous target, archive/reset the continuous
-   forward clock and regenerate hedge warmstarts.
-6. Do not reopen broad continuous mining without a specific falsifiable
+5. Do not reopen broad continuous mining without a specific falsifiable
    hypothesis and missing-data plan.
-7. If long v11a receives forward trades, audit paper/demo/fills/funding before
+6. If long v11a receives forward trades, audit paper/demo/fills/funding before
    making any claim from the sample.
 
 ## Canonical Docs

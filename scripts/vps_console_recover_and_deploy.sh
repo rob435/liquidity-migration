@@ -178,8 +178,7 @@ PYTHON=.venv/bin/python
   tests/test_promoted_profiles.py
 
 "$PYTHON" - <<'PY'
-# The daily-short sleeve was ERASED 2026-06-11 (operator order). Pin the surviving
-# deployed configs - identical to the strategy-settings gate in deploy_vps_live.sh.
+# Pin the deployed configs - identical to the strategy-settings gate in deploy_vps_live.sh.
 from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 
 long_cfg = _v11a_long_native_config()
@@ -281,22 +280,19 @@ done
 systemctl daemon-reload
 # --- per-sleeve kill-switch (deploy/sleeves.env) - the SAME single source of truth as
 # scripts/deploy_vps_live.sh, so disaster recovery can NEVER resurrect an OFF sleeve.
-# Previously this path hardcoded every sleeve ON, which would re-enable the look-ahead-
-# disabled continuous sleeve (it ships SUBMIT_ORDERS=1) regardless of the toggle. ------
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
 lm_write_resolved_sleeve_toggles
 lm_verify_resolved_sleeve_toggles
 echo "sleeves: LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
-# One-time cleanup for the ERASED daily-short sleeve (2026-06-11): a recovered older
-# host may still have its retired units installed/enabled.
+# Host cleanup: a recovered older host may still have retired units installed/enabled.
 for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liquidity-migration-demo-health.service; do
     systemctl disable --now "$_retired" 2>/dev/null || true
     rm -f "/etc/systemd/system/$_retired"
 done
 lm_cleanup_unknown_liqmig_units
 # Reload AFTER removing retired unit files (deploy_vps_live.sh parity) so stale
-# erased-unit definitions don't linger in systemd memory on a recovered host.
+# unit definitions don't linger in systemd memory on a recovered host.
 systemctl daemon-reload
 systemctl enable liquidity-migration-bybit-risk.service
 # Forward-only data collection - parity with scripts/deploy_vps_live.sh: liquidation
@@ -316,8 +312,7 @@ apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # Timers must be enable --now: enable alone writes the symlink but doesn't
 # start the timer, so the liveness watchdog + daily combined-book report would
-# sit dormant on a freshly-recovered VPS. (The demo-health watchdog was erased
-# with the short sleeve 2026-06-11 and is removed from the host above.)
+# sit dormant on a freshly-recovered VPS.
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
 # The continuous rmom-refresh timer is required if either continuous demo or
@@ -436,7 +431,6 @@ else
 fi
 verify_hedge_timer_enable "$_hedge_timer_state"
 # Timer parity - recovery must catch a missed enable just like deploy does.
-# (demo-health was erased with the short sleeve 2026-06-11 - don't check it.)
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
@@ -464,8 +458,17 @@ require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_th
 require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'
 require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
 require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'
-# Order-submitting continuous config asserts only when the sleeve is toggled ON - a
-# retired sleeve's file content must not be an unconditional recovery gate.
+# Long sleeve assertions: recovery restarts the long demo/paper units, so it
+# must prove the same profile and paper/no-order boundaries as deploy/verify.
+if sleeve_on "$LONG_SLEEVE"; then
+  require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'
+  require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'
+  require_unit_env liquidity-migration-bybit-long-paper.service 'SUBMIT_ORDERS=0'
+  require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'
+  require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'
+fi
+# Order-submitting continuous config asserts only when the sleeve is toggled ON.
+# Disabled unit file content must not be an unconditional recovery gate.
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'STRATEGY_PROFILE=continuous_ensemble_v2'

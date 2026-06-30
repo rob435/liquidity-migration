@@ -5,16 +5,9 @@ import polars as pl
 from ._common import MS_PER_DAY, calendar_shift
 
 
-# This module is what remains of an earlier momentum-strategy iteration.
-# Most of its features (clenow slope/r², sharpe ranker, BTC regime, funding
-# overheat, coil release, liquidity tier, realized-vol/SMA/ATR helpers,
-# MomentumSignalsConfig) were never wired into the active strategies after
-# the liquidity-migration short took over — the dead exports lingered as
-# ~330 LOC of carrying cost. Only ``daily_bars`` and ``add_returns_and_age``
-# survived as real utilities used by ``long_native.py`` to resample WS
-# klines to daily and tag per-symbol age. If a future strategy needs the
-# old momentum building blocks, recover them from git history at commit
-# ``c425537`` or earlier.
+# Shared daily-bar helpers used by ``long_native.py``. Earlier unused momentum
+# exports were removed; recover them from git history if a future strategy
+# needs those building blocks.
 
 
 def daily_bars(klines_1h: pl.DataFrame, *, min_hourly_bars: int = 20) -> pl.DataFrame:

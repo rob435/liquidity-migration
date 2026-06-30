@@ -3,12 +3,6 @@ name: run-strategy
 description: "Correct command invocations for the liquidity_migration CLI: data builders, audits, and the long/continuous forward runners. Use whenever running or constructing a 'python -m liquidity_migration' command, so the right data root, end-date boundary, and point-in-time flags are applied."
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
-
 # Running the liquidity_migration CLI
 
 Entry point: `python -m liquidity_migration [--config ...] [--data-root ...] <subcommand>`.
@@ -31,13 +25,12 @@ python -m liquidity_migration <subcommand> --help
   across both venues is the robustness signal, disagreement flags a regime
   or microstructure artefact.
 - **Live demo ledgers** → `data/bybit-continuous-demo-event` +
-  `data/bybit-long-demo-event` (`data/bybit-demo-event` is the erased short
-  sleeve's inert legacy root). NEVER point a research run at a live ledger
+  `data/bybit-long-demo-event`. `data/bybit-demo-event` is the shared risk
+  engine root, not a research root. NEVER point a research run at a live ledger
   root, and never point demo ledgers at the research root.
 - **Paper-shadow ledgers** → `data/bybit-long-paper-event` +
-  `data/bybit-continuous-paper-event` (`data/bybit-paper-event` is the erased
-  short sleeve's inert root). Reconciliation is fully scripted behind ONE
-  front door — `bash scripts/reconcile.sh` (skill: `pit-reconcile`) runs the full
+  `data/bybit-continuous-paper-event`. Reconciliation is fully scripted behind
+  ONE front door — `bash scripts/reconcile.sh` (skill: `pit-reconcile`) runs the full
   demo↔backtest↔paper three-way for BOTH sleeves by default; add `--quick` for
   the fast paper↔demo execution-only check. Do not hand-assemble `reconcile-*`
   calls. (`scripts/reconcile_three_way.sh` is a back-compat alias for the default
@@ -52,9 +45,7 @@ python -m liquidity_migration <subcommand> --help
 
 Research sweeps: use a small dated dispatcher for the specific pre-registered
 cells and call the relevant package runner directly per cell. Do not revive
-deleted generic sweep helpers. The erased
-`volume_events_cell.sh` single-cell path has NO replacement — the daily-short
-engine it drove is gone.
+deleted generic sweep helpers.
 
 Build/verify the per-venue full-PIT data roots (archives old roots, builds both
 roots — manifest + klines — and validates coverage; see `docs/data_roots.md`):
@@ -82,9 +73,8 @@ subcommand list — do not maintain a copy here.
 ## Guardrails
 
 - Every backtest engine requires full PIT by default; partial-PIT runs (config
-  `require_full_pit_universe=False` / `require_pit_membership=False` — the old
-  `--allow-partial-pit` flag was erased with the volume-events CLI) are only for
-  explicitly biased diagnostics, and that run must be labelled biased.
+  `require_full_pit_universe=False` / `require_pit_membership=False`) are only
+  for explicitly biased diagnostics, and that run must be labelled biased.
 - Demo order submission requires `SUBMIT_ORDERS=1` + `CONFIRM_DEMO_ORDERS=1`
   and a known `STRATEGY_PROFILE`; the DEPLOYED profile is pinned by the
   deploy/verify scripts, not refused at runtime — check STATE.md > What Is
@@ -92,8 +82,7 @@ subcommand list — do not maintain a copy here.
   (`bybit.resolve_private_credentials`), which defaults to demo; keep it on demo
   without explicit owner instruction.
 - Continuous and LONG have separate lifecycles; do not transfer assumptions
-  between them. Legacy fixed-day rebalance grids and erased short-sleeve paths
-  are retired evidence only.
+  between them. Closed fixed-day rebalance grids are historical evidence only.
 - What is deployed vs. research-gated is tracked in STATE.md and
   `docs/research_summary.md` — defer to them.
 - Every serious run must leave enough report output to audit the decision.

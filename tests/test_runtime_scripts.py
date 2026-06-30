@@ -13,6 +13,44 @@ VERIFY_SH = REPO_ROOT / "scripts" / "verify_vps_live.sh"
 RECOVERY_SH = REPO_ROOT / "scripts" / "vps_console_recover_and_deploy.sh"
 
 
+def _unit_env(unit: str) -> dict[str, str]:
+    text = (REPO_ROOT / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
+    env: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("Environment="):
+            continue
+        body = line.split("=", 1)[1]
+        if "=" not in body:
+            continue
+        key, value = body.split("=", 1)
+        env[key] = value
+    return env
+
+
+def test_deploy_verify_require_unit_env_matches_unit_files() -> None:
+    units = {
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-long-paper.service",
+        "liquidity-migration-bybit-continuous-demo.service",
+        "liquidity-migration-bybit-continuous-paper.service",
+        "liquidity-migration-bybit-risk.service",
+    }
+    unit_env = {unit: _unit_env(unit) for unit in units}
+    pattern = re.compile(r"require_unit_env\s+([^\s]+)\s+'([^'=]+)=([^']*)'")
+
+    for script in (DEPLOY_SH, VERIFY_SH, RECOVERY_SH):
+        text = script.read_text(encoding="utf-8")
+        for unit, key, expected in pattern.findall(text):
+            if unit not in unit_env:
+                continue
+            assert key in unit_env[unit], f"{script.name}: {unit} checks missing env {key}"
+            assert unit_env[unit][key] == expected, (
+                f"{script.name}: {unit} checks {key}={expected!r}, "
+                f"but unit file sets {unit_env[unit][key]!r}"
+            )
+
+
 def test_reconcile_shell_exports_utf8_python_io() -> None:
     text = (REPO_ROOT / "scripts" / "reconcile.sh").read_text(encoding="utf-8")
 
@@ -151,7 +189,14 @@ def test_continuous_runner_wires_rebalance_profile_env() -> None:
 
     # 2026-06-18: the live default is the repaired v2 lifecycle.
     assert 'STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v2}"' in text
+    assert 'FEATURE_SET="${FEATURE_SET:-max_ret168}"' in text
+    assert 'MAX_HOLD_HOURS="${MAX_HOLD_HOURS:-24}"' in text
+    assert "confirmed-bar +1h membership" in text
+    stale_entry_labels = ("no " + "1h", "no" + "-1h")
+    assert all(label not in text.casefold() for label in stale_entry_labels)
     assert "--strategy-profile \"$STRATEGY_PROFILE\"" in text
+    assert "--feature-set \"$FEATURE_SET\"" in text
+    assert "--max-hold-hours \"$MAX_HOLD_HOURS\"" in text
     assert 'LEFT_DECILE_EXIT_ENABLED="${LEFT_DECILE_EXIT_ENABLED:-0}"' in text
     assert 'STOP_APPROACH_FRAC="${STOP_APPROACH_FRAC:-0}"' in text
     assert "--stop-approach-frac \"$STOP_APPROACH_FRAC\"" in text
@@ -272,8 +317,8 @@ def test_continuous_paper_unit_streams_its_own_kline_plane() -> None:
     """audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
     KLINES_FOLLOW_ROOT was dropped so the shadow stays live even when the demo (leader)
     sleeve is off. Guard against a regression that re-adds an ACTIVE follow directive
-    (the old string survives only in an explanatory comment), and against the optional
-    drop-in mechanism being deleted. Both continuous units still pin their threadpools."""
+    and against the optional drop-in mechanism being deleted. Both continuous units still
+    pin their threadpools."""
     repo = Path(__file__).resolve().parents[1]
     paper = (
         repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service"
@@ -336,9 +381,7 @@ def test_combined_book_report_includes_continuous_roots_and_sleeve_toggles() -> 
 
     assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in service
     assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" not in service
-    # deploy-ci-4: the daily-SHORT sleeve was ERASED 2026-06-11, so the report
-    # unit no longer wires its --short-data-root (the erased root). Guard against
-    # the dead-sleeve arg drifting back in.
+    # Guard against the compatibility root drifting back into the active report.
     assert "--short-data-root" not in service
     assert "--long-data-root data/bybit-long-demo-event" in service
     assert "--continuous-data-root data/bybit-continuous-demo-event" in service
@@ -384,10 +427,8 @@ def test_long_paper_service_enables_paper_mode() -> None:
     """Long-paper writes need to land in long_native_paper_* datasets so the
     reconcile-long-paper-demo CLI can pair them against the live long-demo
     ledger. The long reconciler looks for paper_dataset='long_native_paper_trades'
-    specifically (unlike the short reconciler which reads the same dataset
-    name from both roots); without PAPER_MODE=1 the long-paper service
-    writes to long_native_demo_trades and reconciliation silently returns
-    paired=0."""
+    specifically; without PAPER_MODE=1 the long-paper service writes to
+    long_native_demo_trades and reconciliation silently returns paired=0."""
     repo = Path(__file__).resolve().parents[1]
     text = (
         repo / "deploy" / "systemd" / "liquidity-migration-bybit-long-paper.service"
@@ -426,7 +467,7 @@ def test_long_runner_and_units_default_to_safe_1x_sizing() -> None:
 
 
 def test_services_enable_ws_klines() -> None:
-    """All four demo services (short+long, demo+paper) must enable the WS
+    """Long demo/paper services must enable the WS
     kline manager. WS_KLINES_ENABLED=1 flips the daemon onto the in-memory
     store, eliminating the per-cycle REST kline burst that caused 3-4h late
     entries on the legacy path."""
@@ -489,8 +530,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "http.https://github.com/.extraheader" in text
     assert "x-access-token:%s" in text
     assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text
-    # The daily-short sleeve was erased (2026-06-11): the deploy gate now pins the
-    # LONG profile (the one promoted sleeve) instead of the old short scenario ids.
+    # The deploy gate pins the active LONG profile constants.
     assert "long_cfg.universe_size == 50" in text
     assert "long_cfg.weekend_size_mult == 1.5" in text
     assert "TELEGRAM_CHAT_ID" in text
@@ -500,14 +540,13 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
     assert "apply_timer_enable" in text
     assert "systemctl disable --now" in lib
-    # 2026-06-09 audit: the model050426 retired-unit cleanup/assertions were removed —
-    # the 2026-06-04 box (116.202.15.128) is a fresh host that never ran those units.
-    assert "model050426" not in text
-    # Erased daily-short sleeve: the deploy actively removes the retired units.
+    retired_unit_marker = "model" "050426"
+    assert retired_unit_marker not in text
+    # Deploy actively removes retired units.
     assert "RETIRED_SLEEVE_UNITS" in text
     assert "liquidity-migration-bybit-risk.service" in text
     # The risk service has NO sleeve toggle — it is the shared reconcile authority for
-    # all three sleeves and must always enable/restart/verify regardless of which
+    # the whole demo account and must always enable/restart/verify regardless of which
     # entry sleeves are on (turning a sleeve off must never stop position protection).
     assert "systemctl enable liquidity-migration-bybit-risk.service" in text
     assert "systemctl restart liquidity-migration-bybit-risk.service" in text
@@ -585,6 +624,11 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'SUBMIT_ORDERS=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
@@ -653,8 +697,7 @@ def test_vps_deploy_script_pytest_nodeids_still_collect() -> None:
     (e.g. a test moved by a test-file split, or deleted in a purge) makes pytest
     exit non-zero and aborts the deploy/recovery. String-presence tests can't
     catch a moved path, so verify every `tests/...` node-id BOTH scripts
-    reference actually collects. (The 2026-06-11 short-sleeve erasure left the
-    recovery script pinning two deleted node-ids; only deploy was scanned then.)"""
+    reference actually collects."""
     import re
     import subprocess
     import sys
@@ -684,10 +727,9 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
 
     assert "git pull" not in text
     assert "systemctl restart" not in text
-    # 2026-06-09 audit: retired-unit (model050426) checks removed — fresh 2026-06-04 box.
-    assert "model050426" not in text
-    # 2026-06-11 erasure: verify must pin the SURVIVING configs and must NOT import
-    # the erased short engine — a dead import made every verify invocation fail.
+    retired_unit_marker = "model" "050426"
+    assert retired_unit_marker not in text
+    # Verify must pin active configs and must not import removed strategy hubs.
     assert "liquidity_migration.volume_events" not in text
     assert "_demo_event_config" not in text
     assert "_v11a_long_native_config" in text
@@ -742,6 +784,11 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'SUBMIT_ORDERS=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
@@ -989,7 +1036,7 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "http.https://github.com/.extraheader" in text
     assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text
     assert "pip install -e \".[dev]\"" in text
-    # 2026-06-11 erasure: recovery pins the SURVIVING configs, never the erased engine.
+    # Recovery pins active configs and does not import removed strategy hubs.
     assert "liquidity_migration.volume_events" not in text
     assert "_demo_event_config" not in text
     assert "_v11a_long_native_config" in text
@@ -997,9 +1044,9 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
     assert "apply_timer_enable" in text
     assert "systemctl disable --now" in lib
-    # 2026-06-09 audit: retired-unit (model050426) cleanup removed — fresh 2026-06-04 box.
-    assert "model050426" not in text
-    # Erased daily-short sleeve: the deploy actively removes the retired units.
+    retired_unit_marker = "model" "050426"
+    assert retired_unit_marker not in text
+    # Deploy actively removes retired units.
     assert "RETIRED_SLEEVE_UNITS" in text
     assert "liquidity-migration-bybit-risk.service" in text
     # Recovery routes sleeve enable/restart/verify through the SAME kill-switch as
@@ -1036,6 +1083,11 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'SUBMIT_ORDERS=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
@@ -1896,10 +1948,8 @@ def test_recovery_collector_verify_matches_risk_service_pattern() -> None:
 
 
 # --- relocated from tests/test_audit_int_iJ.py (audit integration bucket iJ) ---
-# deploy-ci-4: the combined-book report systemd unit once wired
-# ``--short-data-root data/bybit-demo-event`` for the daily-SHORT sleeve that was
-# ERASED 2026-06-11. These guard that the dead-sleeve concept stays out of the
-# live report unit while every surviving sleeve root stays wired.
+# deploy-ci-4: the combined-book report systemd unit must keep compatibility
+# roots out of the active report while every active sleeve root stays wired.
 _REPORT_UNIT = (
     Path(__file__).resolve().parents[1]
     / "deploy"
@@ -1912,24 +1962,19 @@ def _report_unit_text() -> str:
     return _REPORT_UNIT.read_text(encoding="utf-8")
 
 
-def test_report_unit_no_longer_wires_erased_short_data_root() -> None:
-    """deploy-ci-4: the erased daily-SHORT sleeve's root must not appear in the
-    live combined-book report ExecStart. Both the flag and the erased root path
-    are gone, so a reader/operator can't mistake a dead short book for a reported
-    one."""
+def test_report_unit_no_longer_wires_compatibility_short_data_root() -> None:
+    """Compatibility short roots must not appear in the live report ExecStart."""
     text = _report_unit_text()
     assert "--short-data-root" not in text, (
-        "report unit still wires --short-data-root for the erased daily-SHORT sleeve"
+        "report unit still wires --short-data-root for the compatibility root"
     )
     assert "bybit-demo-event" not in text, (
-        "report unit still references the erased daily-SHORT data root"
+        "report unit still references the compatibility data root"
     )
 
 
-def test_report_unit_still_wires_every_surviving_sleeve_root() -> None:
-    """Dropping the short arg must not disturb the surviving sleeves: long demo,
-    continuous demo, continuous paper, and the continuous hedge ledger all stay
-    wired so the daily aggregate keeps covering the live books."""
+def test_report_unit_still_wires_every_active_sleeve_root() -> None:
+    """Long, continuous, paper, and hedge roots stay wired for the active books."""
     text = _report_unit_text()
     assert "combined-book-telegram-report" in text
     for arg in (
@@ -1939,7 +1984,7 @@ def test_report_unit_still_wires_every_surviving_sleeve_root() -> None:
         "--continuous-hedge-data-root data/bybit-continuous-hedge-event",
         "--include-live-positions",
     ):
-        assert arg in text, f"report unit dropped a surviving-sleeve arg: {arg}"
+        assert arg in text, f"report unit dropped an active-sleeve arg: {arg}"
 
 
 def test_report_unit_execstart_still_well_formed() -> None:
@@ -1964,17 +2009,10 @@ def test_report_unit_execstart_still_well_formed() -> None:
 
 
 # --- relocated from tests/test_audit_int_iM.py (audit bucket iM) ---------------
-# deploy-env-timers-3: the continuous-PAPER systemd unit hard-coded
-# ``Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event`` so the paper
-# shadow followed the demo (leader) sleeve's flushed kline snapshot read-only to
-# halve WS decode CPU. That follow is only safe while the demo sleeve is ON. The
-# documented-valid ``CONTINUOUS_SLEEVE=off`` + ``CONTINUOUS_PAPER_SLEEVE=on`` combo
-# stops the demo daemon and freezes its kline store, leaving the shadow following a
-# stale snapshot for up to ~2 days while it appears healthy. The robust completion
-# drops the follow override from the PAPER unit so the shadow always streams its own
-# kline pool. These tests pin that the override is gone, that no reference to the
-# demo root survives in the paper unit's environment, and that the rest of the
-# (load-bearing) paper config is undisturbed.
+# deploy-env-timers-3: the continuous-PAPER systemd unit must stream its own
+# kline pool. These tests pin that the follow override is absent, no paper
+# Environment assignment points at the demo root, and the rest of the
+# load-bearing paper config is undisturbed.
 _PAPER_UNIT = (
     Path(__file__).resolve().parents[1]
     / "deploy"

@@ -5,11 +5,11 @@ the right ledger and, on a VPS rebuild, reconstruct the deterministic trade_id f
 Bybit's retained orderLinkId (avoiding the lossy adopted-* fallback). Encode
 (``_order_link_id`` / ``_risk_order_link_id``, per-sleeve prefix) and decode
 (``decode_entry_order_link_id``) live together so a round-trip test pins them as one
-unit; the three sleeve modules build links via the prefix and ws_risk decodes them.
+unit; the sleeve modules build links via the prefix and ws_risk decodes them.
 
 Extracted verbatim from event_demo.py (which re-exports these for backward
 compatibility). This module is a leaf — it imports nothing from the package — so it
-can be a shared dependency of all three sleeves + ws_risk without a circular import.
+can be a shared dependency of the sleeve runtimes + ws_risk without a circular import.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from collections.abc import Iterable
 # The orderLinkId prefix vocabulary — ONE registry so a new sleeve/exit prefix is added in a single
 # place. Entry links are decoded by ``decode_entry_order_link_id``; exit/risk-side links are matched
 # by ``is_exit_link`` (event_demo._is_own_exit_order enumerated these inline; quality-dup-12).
-#   entry:  lm-en-{base}-{ts36} (short, erased 2026-06-11 — decoded for legacy adoption only)
+#   entry:  lm-en-{base}-{ts36} (compatibility short rows — decoded for adoption only)
 #           lm-en-l-… (long) · lm-en-c{tag}-…[-seq] (continuous: plain "c", ensemble component
 #           tags "cp3"/"cp4p3"/"cp4p5", sniper "cs") · lm-en-ca-… (continuous_addon/hedge)
 #           CONSTRAINT: a continuous component tag must never begin with "a" — "c"+"a…" would
@@ -130,7 +130,7 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int, str] 
         else:
             parts = parts[:-1]
     reentry_seq = 0
-    # Short:      lm-en-{base}-{ts36}                → 4 parts, sleeve="short" (legacy adoption)
+    # Short:      lm-en-{base}-{ts36}                -> 4 parts, sleeve="short" (compatibility adoption)
     # Long:       lm-en-l-{base}-{ts36}              → 5 parts (parts[2]=="l"), sleeve="long"
     # Continuous: lm-en-c{tag}-{base}-{ts36}[-{seq}] → 5/6 parts; tag is "" (plain), an ensemble
     #             component ("p3"/"p4p3"/"p4p5" → "cp3"…), or the sniper "s" → "cs".

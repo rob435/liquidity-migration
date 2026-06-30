@@ -522,9 +522,8 @@ def _cmd_event_risk_ws(args: argparse.Namespace, config: ResearchConfig, data_ro
             adopt_stop_loss_pct=args.adopt_stop_loss_pct,
             adopt_take_profit_pct=args.adopt_take_profit_pct,
             adopt_hold_days=args.adopt_hold_days,
-            # Legacy escape hatch (short sleeve erased 2026-06-11): the config field
-            # documents "set explicitly to adopt old short rows" — env passthrough is
-            # that setting (it was otherwise unreachable without a code edit).
+            # Compatibility escape hatch: env passthrough exposes the explicit
+            # strategy ID for historical short-row adoption.
             adopt_short_strategy_id=os.environ.get("ADOPT_SHORT_STRATEGY_ID", ""),
             data_name=args.data_name,
             long_data_root=args.long_data_root,
@@ -586,9 +585,8 @@ def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: Researc
             bybit_positions=bybit_positions,
             live_positions_error=live_positions_error,
             sleeve_states={
-                # SHORT was ERASED 2026-06-11 — no toggle exists, so the unset default
-                # must be "off" (an "on" default rendered the erased sleeve live forever).
-                # LONG/PAPER unset-defaults are "off" too since round 3 — every reader
+                # Compatibility short rows default off. LONG/PAPER unset-defaults
+                # are "off" too since round 3 — every reader
                 # of the sleeve toggles fails safe the same way (deploy/lib_sleeves.sh).
                 "SHORT_SLEEVE": os.environ.get("SHORT_SLEEVE", "off"),
                 "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "off"),

@@ -576,7 +576,7 @@ def _reconcile_pending_order_fills(
             remaining_qty = max(_float(trade.get("qty")) - delta_qty, 0.0)
             # Close only when the POSITION is gone. `fully_filled` is ORDER-level
             # fullness; a reduce order may target only part of the trade (e.g. a
-            # rebalance_reduce), and closing on order fullness erased the unfilled
+            # rebalance_reduce), and closing on order fullness dropped the unfilled
             # remainder from the ledger while it stayed live on the venue
             # (audit 2026-06-12 round 3). `fully_filled` still drives the order
             # row's status above.
@@ -699,8 +699,8 @@ def _reconcile_pending_order_fills(
                 # Identity fields ride the ORDER row for exactly this recovery
                 # path. Without them the recovered trade had no sleeve tag —
                 # _sleeve_of() defaults empty to "short", so a recovered
-                # CONTINUOUS entry was mis-filed into the erased short sleeve's
-                # ledger and became invisible to the continuous cycle's exits
+                # CONTINUOUS entry was mis-filed into the compatibility ledger
+                # and became invisible to the continuous cycle's exits
                 # and rebalance; a component row without component_weight would
                 # additionally be resized to full base notional (round 4).
                 "sleeve": str(order.get("sleeve") or ""),
@@ -1506,7 +1506,7 @@ def _risk_reconcile_missing_positions(
         return open_trades, []
     # Side-aware keep-open check, mirroring the cycle path (_reconcile_open_trades):
     # key on (symbol, normalized_side) so a same-symbol flip (ledger short while the
-    # venue now holds a long on that symbol) is surfaced as a short-side orphan
+    # venue now holds a long on that symbol) is surfaced as a compatibility short orphan
     # close instead of being masked by the opposite-side position. position_by_symbol
     # values carry `side` in both the WS (on_position_message) and REST
     # (_active_position_by_symbol) population paths.
@@ -1904,9 +1904,7 @@ def _limit_chase_price(*, bybit_side: str, reference_price: float, bps: float, t
     raw = reference_price * (1.0 - bps / 10_000.0)
     return _round_price(raw, tick_size=tick_size or _fallback_tick_size(reference_price), rounding=ROUND_FLOOR)
 
-# --- risk-exit planning (relocated from event_demo_planning.py when the daily-short
-# entry stack was erased, operator order 2026-06-11; these serve the always-on risk
-# service for every sleeve) ---
+# --- risk-exit planning for the always-on risk service ---
 
 def _price_crosses_stop(*, side: str, price: float, stop_price: float) -> bool:
     return price >= stop_price if side == "short" else price <= stop_price

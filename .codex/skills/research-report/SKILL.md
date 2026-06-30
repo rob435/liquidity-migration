@@ -1,13 +1,7 @@
 ---
 name: research-report
-description: "Read, interpret, and label research and backtest reports in this quant repo. Use when reading a volume_event_research_report.md, extracting run metrics like return, drawdown, OOS and split stability, comparing runs, or assigning a run label. Read report files and artifacts directly."
+description: "Read, interpret, and label research and backtest reports in this quant repo. Use when extracting run metrics like return, drawdown, OOS and split stability, comparing runs, or assigning a run label. Read report files and artifacts directly."
 ---
-
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
 
 # Research reports
 
@@ -15,8 +9,6 @@ Reports live under `<DATA_ROOT>/reports/...`. The main kinds:
 
 - `long_native_research_report.md` — a long-native v11a strategy run.
 - continuous report files — the continuous fade book's runs/forward reports.
-- (legacy `volume_event_research_report.md` files are the erased short engine's —
-  historical only.)
 
 ## Report discovery
 
@@ -46,7 +38,7 @@ record is "a screenshot", not evidence (error #23).
 - The binding verdict is the three-tier demo-arbiter rule (STATE.md), computed
   from per-cell ledgers by `scripts/r1_robustness.py` (Tier-2 demo-candidate
   verdict + fragility diagnostics) with `scripts/apply_decision_rule.py` as the
-  legacy strict (Sharpe) bar. A within-report `pass` is never real-money proof:
+  strict Sharpe reference bar. A within-report `pass` is never real-money proof:
   the Tier-3 gate is the forward demo (see STATE.md / the research-phase-runner
   skill).
 

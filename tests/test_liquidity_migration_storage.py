@@ -677,9 +677,9 @@ def test_lock_owner_is_dead_evicts_reused_pid(tmp_path: Path, monkeypatch) -> No
         lock.write_text(
             json.dumps({"pid": proc.pid, "created": time.time() - 100}), encoding="utf-8"
         )
-        monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: True)
+        monkeypatch.setattr(storage, "_pid_started_after", lambda pid, _created: True)
         assert storage._lock_owner_is_dead(lock) is True
-        monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: None)
+        monkeypatch.setattr(storage, "_pid_started_after", lambda pid, _created: None)
         assert storage._lock_owner_is_dead(lock) is False
     finally:
         if proc.poll() is None:

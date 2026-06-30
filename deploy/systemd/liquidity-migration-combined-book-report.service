@@ -14,9 +14,7 @@ EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 # overrides as an off-only narrowing layer.
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-# The daily-SHORT sleeve was ERASED 2026-06-11; its short-data-root argument was
-# dropped from this report unit (the report fails open on a missing root and the
-# SHORT_SLEEVE toggle defaults to off, so the erased sleeve no longer renders).
+# The report reads the active ledger roots below and fails open on a missing root.
 ExecStart=/opt/liquidity-migration/.venv/bin/python -m liquidity_migration \
     combined-book-telegram-report \
     --long-data-root data/bybit-long-demo-event \

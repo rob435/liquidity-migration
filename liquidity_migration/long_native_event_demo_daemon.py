@@ -1,4 +1,4 @@
-"""Long-side daemon — mirror of event_demo_daemon for the v11a sleeve.
+"""Long-side daemon for the v11a sleeve.
 
 Keeps a single Python process up, subscribes once to the Bybit private
 execution WebSocket, and routes WS-pushed fill events through an
@@ -6,14 +6,9 @@ ExecutionEventRouter so the cycle's _wait_for_execution_summary returns
 in <30ms instead of REST-polling get_trade_history. REST polling remains the
 safety net (always active); SIGTERM drains the current cycle and exits clean.
 
-The long sleeve shares the same Bybit demo account as the short. To avoid
-the short and long both bursting the kline REST endpoint at the same time,
-the long daemon does NOT run a kline cache warmer of its own — the long
-universe is small (≤10 symbols) so the in-cycle kline pull is already fast.
-
-This file is intentionally short. The plumbing (signal handlers, WS reopen
-on error, cycle telemetry) is copy-adapted from event_demo_daemon. If the
-short-side daemon grows new features, port them here too.
+The long daemon keeps one private WS stream and relies on REST as the safety
+net. It does not run an independent kline cache warmer because the long
+universe is small (<=10 symbols), so the in-cycle kline pull is already fast.
 """
 
 from __future__ import annotations
@@ -80,7 +75,6 @@ class LongNativeDemoDaemon:
         state_cache_seeder: Callable[..., None] | None = None,
         # Reconcile must be < stale threshold so the cache stays fresh on a
         # quiet account (Bybit private WS only emits on state changes).
-        # See event_demo_daemon for the full reasoning.
         ticker_reconcile_interval_seconds: float = 60.0,
         state_cache_stale_seconds: float = 120.0,
         # Both default OFF — see EventDemoDaemon for the full rationale.
@@ -113,8 +107,8 @@ class LongNativeDemoDaemon:
         self._telegram_sender = telegram_sender
         self.router = ExecutionEventRouter()
         self._shutdown = threading.Event()
-        # WS-event-driven cycle (mirrors the short daemon): fire on a new
-        # confirmed bar boundary, with a safety heartbeat + debounce.
+        # WS-event-driven cycle: fire on a new confirmed bar boundary, with a
+        # safety heartbeat + debounce.
         self._bar_event = threading.Event()
         self._event_driven_cycle = bool(event_driven_cycle)
         self._min_cycle_interval_seconds = max(0.0, float(min_cycle_interval_seconds))
@@ -133,11 +127,10 @@ class LongNativeDemoDaemon:
         self._cycle_overruns = 0
         self._max_cycle_seconds = 0.0
         self._next_cycle_at = 0.0
-        # WS-driven kline manager (same shape as short side; see
-        # event_demo_daemon for the rationale). Long sleeve's small universe
-        # makes the per-cycle REST burst less painful than the short's, but
-        # the consistency simplifies operator mental model + 90-day lookback
-        # bootstrap is worth doing once at startup rather than re-paying it.
+        # WS-driven kline manager. Long sleeve's small universe makes the
+        # per-cycle REST burst manageable, but the consistency simplifies the
+        # operator model and the 90-day lookback bootstrap is worth doing once
+        # at startup rather than re-paying it.
         self._kline_stream_manager: Any | None = kline_stream_manager
         self._kline_stream_manager_factory = (
             kline_stream_manager_factory or _default_long_kline_stream_manager_factory
@@ -178,11 +171,9 @@ class LongNativeDemoDaemon:
         self._reconcile_stop = threading.Event()
         self._reconciles_total = 0
         self._reconcile_errors = 0
-        # WS health watchdog — see EventDemoDaemon for the same surface on
-        # the short side. Logs one-shot warnings when private/ticker WS
-        # goes silent past the stale threshold; the cycle's REST fallback
-        # keeps the system alive but a silently-dead WS otherwise hides
-        # from telemetry.
+        # WS health watchdog. Logs one-shot warnings when private/ticker WS goes
+        # silent past the stale threshold; the cycle's REST fallback keeps the
+        # system alive but a silently-dead WS otherwise hides from telemetry.
         self._ws_stale_warning_seconds = float(state_cache_stale_seconds)
         # Private WS socket-level force-reconnect (see EventDemoDaemon for the rationale):
         # reconnect off pybit's is_connected() (true liveness, not data-silence — the
@@ -556,9 +547,7 @@ class LongNativeDemoDaemon:
     # -- trade router (WS-first / REST-fallback order submission) ----
 
     def _ensure_trade_router(self) -> Any | None:
-        """Lazily build the BybitTradeRouter on first cycle. Mirrors the
-        short daemon's _ensure_trade_router. See EventDemoDaemon for the
-        full rationale."""
+        """Lazily build the BybitTradeRouter on first cycle."""
         if self._trade_router is not None:
             return self._trade_router
         try:
@@ -579,9 +568,9 @@ class LongNativeDemoDaemon:
     def _seed_state_caches(self) -> None:
         """Kick off a one-shot REST seed in the background.
 
-        Same pattern as the short daemon — non-blocking startup so a slow
-        Bybit response can't wedge the cycle loop. The seed thread also
-        opens the public ticker WS once the cache has a symbol set."""
+        Non-blocking startup keeps a slow Bybit response from wedging the cycle
+        loop. The seed thread also opens the public ticker WS once the cache has
+        a symbol set."""
         self._seed_thread = threading.Thread(
             target=self._run_state_cache_seed,
             name="long-state-cache-seed",
@@ -713,10 +702,9 @@ class LongNativeDemoDaemon:
                 self._reconcile_errors += 1
                 _logger.warning("long state cache reconcile failed: %s", exc)
                 continue
-            # Recover from a startup ticker-stream skip — see
-            # EventDemoDaemon._reconcile_loop for the symmetric short-side fix.
-            # Without this retry, a single REST seed failure at startup would
-            # permanently disable the WS ticker feed for the daemon's lifetime.
+            # Recover from a startup ticker-stream skip. Without this retry, a
+            # single REST seed failure at startup would permanently disable the
+            # WS ticker feed for the daemon's lifetime.
             if self._ticker_stream is None and self._ticker_cache.symbol_count() > 0:
                 try:
                     self._open_ticker_stream()
@@ -726,9 +714,7 @@ class LongNativeDemoDaemon:
 
     def _check_ws_health(self) -> None:
         """Watchdog: log one-shot warnings when the private or ticker WS
-        streams go silent past the stale threshold. See
-        EventDemoDaemon._check_ws_health for the symmetric short-side
-        rationale."""
+        streams go silent past the stale threshold."""
         threshold = self._ws_stale_warning_seconds
         if threshold <= 0.0:
             return
@@ -903,7 +889,7 @@ class LongNativeDemoDaemon:
         self._shutdown.wait(timeout=seconds)
 
     def _wait_for_next_cycle_timer(self) -> None:
-        """Legacy fixed-interval grid (mirrors the short daemon)."""
+        """Fixed-interval fallback grid."""
         self._next_cycle_at += self.interval_seconds
         sleep_for = self._next_cycle_at - time.monotonic()
         if sleep_for < 0.0:
@@ -920,9 +906,8 @@ class LongNativeDemoDaemon:
         self._sleep_interruptible(sleep_for)
 
     def _wait_for_next_cycle_event(self) -> None:
-        """WS-event-driven wait (mirrors the short daemon): wake on a new
-        confirmed-bar boundary, the safety heartbeat, or shutdown — whichever
-        first, with a min-interval debounce floor."""
+        """WS-event-driven wait: wake on a new confirmed-bar boundary, the
+        safety heartbeat, or shutdown, with a min-interval debounce floor."""
         if self._min_cycle_interval_seconds > 0.0:
             self._sleep_interruptible(self._min_cycle_interval_seconds)
             if self._shutdown.is_set():
@@ -1032,10 +1017,11 @@ def _default_long_trade_router_factory(
     order_submit_mode: str = "ws_then_rest",
     ws_timeout_seconds: float = 5.0,
 ) -> Any | None:
-    """Build a BybitTradeRouter for the long sleeve. Identical to the
-    short side's factory — Bybit's WS trade endpoint is the same for
-    both sleeves; the only difference is the data root + ledger paths
-    (which the cycle handles separately)."""
+    """Build a BybitTradeRouter for the long sleeve.
+
+    Bybit's WS trade endpoint is shared across sleeves; the cycle-specific
+    differences are the data root and ledger paths.
+    """
     api_key, api_secret, demo = resolve_private_credentials()
     if not api_key or not api_secret:
         _logger.info("long trade router skipped: no private credentials configured")

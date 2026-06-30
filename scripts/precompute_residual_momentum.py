@@ -19,9 +19,8 @@ to be strictly PIT, the NEWEST summed residual_return must complete ≤ D 00:00 
 ≤ D-3. Hence shift(3): residual_momentum[D] = sum residual_return[D-9..D-3], whose newest term
 residual_return[D-3] completes (D-1) 01:00 UTC < D 00:00 UTC. (The old shift(1) summed
 residual_return[D-1], which completes D+1 01:00 UTC — up to ~25h of future data: that was the bug.)
-The live/continuous join (continuous_events: floor to start-of-day D) is aligned to the same
-trading day (date(ts_ms-1ms)). (The former backtest event-research join helper was erased
-with the daily SHORT engine on 2026-06-11; only the continuous join remains.)
+The live/continuous join (continuous_events: floor to start-of-day D) is aligned
+to the same trading day (date(ts_ms-1ms)).
 
 Deployment note: the live continuous profile now uses the post-look-ahead shift(3)
 rmom table with `rmom_quantile=0.25`. Treat any further rmom latency or target

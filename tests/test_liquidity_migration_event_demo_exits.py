@@ -831,7 +831,7 @@ def test_pending_reduce_full_fill_smaller_than_trade_reduces_not_closes() -> Non
     # Regression (audit 2026-06-12 round 3): a reduce order (e.g. rebalance_reduce)
     # that targets only PART of the trade and fully fills must shrink the trade,
     # not close it — order-level fullness is not position-level fullness. The old
-    # `fully_filled or ...` close erased the live remainder from the ledger.
+    # `fully_filled or ...` close dropped the live remainder from the ledger.
     orders = pl.DataFrame(
         [
             {
@@ -2368,8 +2368,8 @@ def test_account_closed_pnl_does_not_merge_distinct_orderidless_legs() -> None:
 def test_pending_entry_recovery_carries_identity_fields() -> None:
     """ROUND 4: the new-trade recovery branch built the trade row WITHOUT
     sleeve/strategy_id/component fields. _sleeve_of() defaults an empty sleeve
-    to "short", so a recovered CONTINUOUS entry was mis-filed into the erased
-    short sleeve's ledger — invisible to the continuous cycle's exits and
+    to "short", so a recovered CONTINUOUS entry was mis-filed into the
+    compatibility short ledger — invisible to the continuous cycle's exits and
     rebalance — and a component row without its weight would be resized to
     full base notional. The identity fields ride the ORDER row for exactly
     this path."""

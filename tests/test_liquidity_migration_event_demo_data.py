@@ -897,11 +897,10 @@ def _hour_floor_now_ms() -> int:
     return (int(time.time() * 1000) // MS_PER_HOUR) * MS_PER_HOUR
 
 
-def test_build_demo_universe_comment_no_longer_references_erased_strategy() -> None:
+def test_build_demo_universe_comment_no_longer_references_removed_strategy() -> None:
     """universe-pit-4: the _build_demo_universe justification must not reference
-    the erased SHORT strategy's prior7_liquidity_rank null-exclusion (it points
-    at code removed 2026-06-11). The live age compensation is the continuous
-    downstream gate; the comment must say so."""
+    the removed strategy's prior7_liquidity_rank null-exclusion. The live age
+    compensation is the continuous downstream gate; the comment must say so."""
     import inspect
 
     src = inspect.getsource(event_demo_data._build_demo_universe)

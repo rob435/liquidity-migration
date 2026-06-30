@@ -105,7 +105,7 @@ not be called proof, candidate alpha, promotion evidence, or real-money support.
    liquidity, and participation. Larger crypto baskets need participation or
    square-root impact stress tests, not flat bps fantasy fills.
 
-9. **Borrow availability fantasy.** Short-side alpha is often strongest exactly
+9. **Borrow availability fantasy.** Short alpha is often strongest exactly
    where borrow is unavailable. Any short strategy must prove the instrument can
    be borrowed or use a venue where short exposure is actually available.
 
@@ -183,7 +183,7 @@ not be called proof, candidate alpha, promotion evidence, or real-money support.
 
 ## Repo Application
 
-For the surviving liquidity-migration systems:
+For the active liquidity-migration systems:
 
 - Signal features must use only data known at the decision timestamp. For LONG
   daily FC signals, the daily close is not an executable fill and the configured
@@ -194,11 +194,9 @@ For the surviving liquidity-migration systems:
   `current_universe_biased`.
 - Promotion requires archive-derived point-in-time symbol/date membership,
   including delisted instruments and historical status changes.
-- Every backtest engine must require full PIT universe coverage by default
-  (the erased short engine's `volume-events` rule, carried forward). Relax it
-  (run-config `require_full_pit_universe=False`; the old `--allow-partial-pit`
-  flag was erased with the volume-events CLI) only for explicitly biased
-  diagnostics.
+- Every backtest engine must require full PIT universe coverage by default.
+  Relax it with run-config `require_full_pit_universe=False` only for explicitly
+  biased diagnostics.
 - Liquidity rank, rank improvement, turnover expansion, and event-rank filters
   must use prior/current data available at the event decision time.
 - Adaptive exits, max hold, cooldown, max-active, sniper/add-on state, hedge
@@ -209,11 +207,10 @@ For the surviving liquidity-migration systems:
 - Report promotion tests by full distribution and split stability, not by the
   best isolated parameter set.
 
-For retired paths:
+For closed paths:
 
-- The daily SHORT sleeve is erased and no longer an active strategy.
-- Old daily-close short tests and fixed-day volume rebalance grids are legacy
-  evidence only. They must not be cited as promotion evidence for the surviving
+- Closed strategy families and fixed-day volume rebalance grids are historical
+  evidence only. They must not be cited as promotion evidence for the active
   continuous or LONG systems.
 
 For paper/demo:

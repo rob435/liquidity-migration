@@ -355,7 +355,7 @@ def _add_event_risk_ws_parser(subparsers) -> None:
         help=(
             "When set, ws_risk also reads/writes the long-sleeve ledger at this "
             "data root and routes WS fill events per the per-row `sleeve` column. "
-            "Empty string keeps short-only behavior (legacy)."
+            "Empty string keeps the single-root compatibility path."
         ),
     )
     event_ws_risk.add_argument(
@@ -401,20 +401,19 @@ def _add_event_risk_ws_parser(subparsers) -> None:
 def _add_combined_book_report_parser(subparsers) -> None:
     """Daily/weekly aggregate report covering the shared Bybit demo account.
 
-    Reads the short, long, continuous demo, continuous paper, and hedge roots,
+    Reads the configured long, continuous demo, continuous paper, and hedge roots,
     computes realized + open PnL and live Bybit positions, and sends a single
     operator-readable Telegram message.
     Schedule on cron / systemd timer for the daily/weekly cadence.
     """
     report = subparsers.add_parser(
         "combined-book-telegram-report",
-        help="Send a Telegram message with aggregate PnL across both sleeves.",
+        help="Send a Telegram message with aggregate PnL across configured book roots.",
     )
     report.add_argument(
         "--short-data-root",
         default=None,
-        help="Legacy daily-short ledger root (sleeve ERASED 2026-06-11; inert history only). "
-             "Defaults to global --data-root.",
+        help="Optional compatibility ledger root. Defaults to global --data-root.",
     )
     report.add_argument(
         "--long-data-root",
@@ -469,7 +468,12 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
                            help="Top-N by trailing 90d turnover (matches v11a universe_size; div=50).")
     long_demo.add_argument("--lookback-days", type=int, default=demo_defaults.lookback_days,
                            help="1h kline lookback in days. ≥60 so 30d returns and 30d vol populate.")
-    long_demo.add_argument("--workers", type=int, default=demo_defaults.workers)
+    long_demo.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Cycle worker threads. Direct CLI default matches the wrapper; systemd pins 2 on the VPS.",
+    )
     long_demo.add_argument(
         "--notional-multiplier",
         type=float,
@@ -581,7 +585,7 @@ def _add_reconcile_long_paper_demo_parser(subparsers) -> None:
 def _add_reconcile_continuous_paper_demo_parser(subparsers) -> None:
     reconcile = subparsers.add_parser(
         "reconcile-continuous-paper-demo",
-        help="Continuous-fade sleeve (3rd) paper/demo execution slippage analyzer.",
+        help="Continuous-fade sleeve paper/demo execution slippage analyzer.",
     )
     reconcile.add_argument(
         "--paper-data-root",
@@ -1355,8 +1359,12 @@ def _add_continuous_events_parser(subparsers) -> None:
 
 def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     """CLI for the continuous-fade demo sleeve (sub-hourly, ticker-driven; separate ledger + lm-en-c-)."""
-    from .continuous_demo import CONTINUOUS_DEMO_PROFILES, ContinuousDemoCycleConfig
-    d = ContinuousDemoCycleConfig()
+    from .continuous_demo import (
+        CONTINUOUS_DEMO_PROFILES,
+        ContinuousDemoCycleConfig,
+        apply_continuous_demo_profile,
+    )
+    d = apply_continuous_demo_profile(ContinuousDemoCycleConfig())
     p = subparsers.add_parser(
         "continuous-event-demo-cycle",
         help="Run one continuous-fade demo cycle (separate sleeve; --daemon for the sub-hourly loop).",
@@ -1366,11 +1374,16 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument(
         "--feature-set",
         default=",".join(d.feature_set),
-        help="Comma-separated causal continuous composite features, e.g. rv_168h,vov,dist_low,xsret7,xsret3 or max_ret168.",
+        help="Comma-separated causal continuous composite features, e.g. max_ret168.",
     )
     p.add_argument("--liq-turnover-min", type=float, default=d.liq_turnover_min)
     p.add_argument("--lookback-days", type=int, default=d.lookback_days)
-    p.add_argument("--workers", type=int, default=d.workers)
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Cycle worker threads. Direct CLI default matches the wrapper; systemd pins 2 on the VPS.",
+    )
     p.add_argument(
         "--klines-follow-root",
         default=d.klines_follow_root,

@@ -594,8 +594,8 @@ def main(argv: list[str] | None = None) -> int:
         for ex in excluded:
             print(f"  - {ex['cell_id']}/{ex['venue']}: status={ex['status']} {ex['error']}".rstrip())
     # A cell whose run was NOT full-PIT is current-universe (survivorship) biased
-    # and is not valid promotion evidence. The volume-events backtest fails such a
-    # run by default, so this only fires for an explicitly --allow-partial-pit
+    # and is not valid promotion evidence. Backtests fail such a run by default,
+    # so this only fires for an explicitly partial-PIT
     # EXPLORATORY cell. Warning alone is not enough — such a cell must be HARD-
     # EXCLUDED from any positive verdict below (it previously could still receive
     # investigation_positive/candidate on good-looking but tainted numbers).

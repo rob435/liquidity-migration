@@ -2,8 +2,8 @@
 """Continuous fade validation harness.
 
 This is intentionally research-local.  It reuses the production/research engine
-for fills and portfolio construction, then writes post-run diagnostics required
-by docs/preregistration/continuous_fade_research_plan.md.
+for fills and portfolio construction, then writes diagnostics summarized in
+STATE.md, docs/research_summary.md, and docs/preregistration/INDEX.md.
 """
 
 from __future__ import annotations
@@ -28,6 +28,11 @@ import polars as pl
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = REPO_ROOT / "scripts"
+HOT_PATH_DOCS = (
+    REPO_ROOT / "STATE.md",
+    REPO_ROOT / "docs" / "research_summary.md",
+    REPO_ROOT / "docs" / "preregistration" / "INDEX.md",
+)
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 if str(SCRIPTS_ROOT) not in sys.path:
@@ -2862,7 +2867,7 @@ TIMING_PORTFOLIO_REPLAY_VARIANTS: tuple[dict[str, Any], ...] = (
         "entry_delay_hours": 1,
         "adverse_limit_pct": 0.0,
         "adverse_limit_wait_hours": 0,
-        "note": "Frozen current local target; one post-decision bar delay.",
+        "note": "Frozen current target; one post-decision bar delay.",
     },
     {
         "variant": "delay_plus_1h",
@@ -2896,7 +2901,7 @@ STOP_PORTFOLIO_REPLAY_VARIANTS: tuple[dict[str, Any], ...] = (
         "variant": "baseline_current",
         "kind": "baseline",
         "stop_loss_pct": 0.0,
-        "note": "Frozen current local target; no fixed price stop.",
+        "note": "Frozen current target; no fixed price stop.",
     },
     {
         "variant": "fixed_stop_20pct",
@@ -2925,7 +2930,7 @@ REGIME_PORTFOLIO_REPLAY_VARIANTS: tuple[dict[str, Any], ...] = (
         "kind": "baseline",
         "btc_trend_gate": "uptrend",
         "btc_trend_lookback_days": 30,
-        "note": "Frozen current local target; prior-30d BTC uptrend gate.",
+        "note": "Frozen current target; prior-30d BTC uptrend gate.",
     },
     {
         "variant": "btc_gate_off",
@@ -2955,7 +2960,7 @@ SKIP_PORTFOLIO_REPLAY_VARIANTS: tuple[dict[str, Any], ...] = (
         "variant": "baseline_current",
         "kind": "baseline",
         "entry_skip_external_size_multiplier_lte": 0.0,
-        "note": "Frozen current local target; BTC-risk tail state downsizes entries to 35%.",
+        "note": "Frozen current target; BTC-risk tail state downsizes entries to 35%.",
     },
     {
         "variant": "skip_btc_tail_035",
@@ -5808,9 +5813,14 @@ def build_metadata(output_root: Path, venues: list[str]) -> dict[str, Any]:
         "profile_hash": frozen_profile["profile_hash"],
         "run_config_hash": _json_hash(frozen_profile | {"data_roots": data_roots}),
         "plan": {
-            "path": str(REPO_ROOT / "docs" / "preregistration" / "continuous_fade_research_plan.md"),
-            "sha256": _file_sha256(REPO_ROOT / "docs" / "preregistration" / "continuous_fade_research_plan.md"),
+            "path": str(REPO_ROOT / "docs" / "preregistration" / "INDEX.md"),
+            "sha256": _file_sha256(REPO_ROOT / "docs" / "preregistration" / "INDEX.md"),
+            "note": "Hot-path preregistration index; detailed historical receipts live in git history and run artifacts.",
         },
+        "source_docs": [
+            {"path": str(path), "sha256": _file_sha256(path)}
+            for path in HOT_PATH_DOCS
+        ],
         "data_roots": data_roots,
         "methodology": {
             "decision_ts": "closed 1h signal bar; candidate signal_ts_ms from engine tape",

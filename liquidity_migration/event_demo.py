@@ -69,8 +69,7 @@ class EventDemoCycleConfig:
     data_name: str = "event-demo"
     strategy_profile: str = "promoted"
     # long-sleeve-5/-6: shared cross-sleeve control root (owned and written by ws_risk in
-    # ITS configured root; the erased daily-short sleeve was the original authority root —
-    # legacy roots still resolve). None => auto-resolve from this sleeve's root. NO-OP until
+    # its configured root; compatibility roots still resolve). None => auto-resolve from this sleeve's root. NO-OP until
     # ws_risk writes it / until the operator sets a budget split (read-only, fail-open).
     cross_sleeve_account_root: str | None = None
     max_active_symbols: int = 0  # 0 = use the strategy profile's value; >0 overrides it
@@ -179,7 +178,7 @@ def _prune_cycle_reports(
     swallowed so a noisy filesystem can't break the cycle.
 
     ``extensions`` is the set of suffixes (no dot) to prune for this prefix.
-    The short + long cycles write only a per-cycle ``.json``; ws_risk also
+    The compatibility and long cycles write only a per-cycle ``.json``; ws_risk also
     writes a paired ``.md`` (event_ws_risk_cycle_*.md), so it passes
     ("json", "md") to avoid leaking the markdown half.
 

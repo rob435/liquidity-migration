@@ -7,7 +7,7 @@ Pulls the live ledgers and reconciles each selected sleeve:
 
 CONTINUOUS (fade) is research-stage demo/paper only. This quick path defaults to
 LONG; pass `--sleeves long,continuous` when the execution-only check should cover
-both surviving sleeves.
+both active sleeves.
 
 Pipeline:
     1. pull        — rsync the live demo+paper ledgers for every selected sleeve  [--no-pull]
@@ -15,9 +15,8 @@ Pipeline:
     3. reconcile   — per-sleeve paper/demo (+ continuous signal check)            [--sleeves]
     4. summary     — one consolidated headline across selected sleeves
 
-The old manifest-refresh / kline-fill / coverage / backtest provisioning steps
-served the erased daily-SHORT sleeve's backtest leg (operator order 2026-06-11)
-and are gone; refresh the PIT manifest manually when needed:
+Manifest refresh / kline-fill / coverage / backtest provisioning is not part of
+the quick path; refresh the PIT manifest manually when needed:
 `python -m liquidity_migration --data-root <root> archive-manifest`.
 
 Safe by default: read-only against the VPS, demo only, never real money.
@@ -420,9 +419,8 @@ def main() -> int:
         for s in sleeves:
             pull_sleeve(step, args.vps, s)
 
-    # 2. Research-data provisioning: the SHORT backtest leg was erased with the
-    # daily-short sleeve (operator order 2026-06-11). Only the continuous
-    # signal-check's rmom refresh remains.
+    # 2. Research-data provisioning: the quick path only needs the continuous
+    # signal-check's rmom refresh.
     if "continuous" in sleeves and not args.no_rmom:
         refresh_rmom(step, root, today)
 

@@ -1,9 +1,9 @@
-"""Point-in-time (PIT) membership + full-PIT universe validation — the
-methodology-critical no-look-ahead / no-survivorship gate, isolated into one
-heavily-tested module. Originally a slice of the volume_events hub (the daily
-SHORT engine, ERASED 2026-06-11 by operator order); it survives standalone as
-the generic PIT gate consumed by the long/continuous engines, with its shared
-frame helpers imported from _common / trade_lifecycle."""
+"""Point-in-time (PIT) membership + full-PIT universe validation.
+
+This is the methodology-critical no-look-ahead / no-survivorship gate consumed
+by the long/continuous engines, with shared frame helpers imported from
+_common / trade_lifecycle.
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -164,4 +164,3 @@ def _covered_kline_date_symbol_set(klines: pl.DataFrame, *, min_hourly_bars: int
         .select(["date", "symbol"])
     )
     return _date_symbol_set(covered)
-

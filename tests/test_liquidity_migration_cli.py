@@ -108,6 +108,19 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
 
     assert args.btc_trend_gate == "uptrend"
     assert args.entry_private_ws_stale_seconds == 300.0
+    assert args.feature_set == "max_ret168"
+    assert args.max_hold_hours == 24
+    assert args.left_decile_exit_enabled is False
+    assert args.stop_loss_pct == 0.0
+    assert args.stop_approach_frac == 0.0
+    assert args.failed_fade_hours == 0
+    assert args.failed_fade_loss_pct == 0.0
+    assert args.failed_fade_min_mfe_pct == 0.0
+    assert args.breakeven_arm_pct == 0.0
+    assert args.sizing_mode == "inverse_vol"
+    assert args.target_vol_per_name == 0.01
+    assert args.vol_weight_clamp == 2.0
+    assert args.workers == 4
 
     override = build_parser().parse_args(
         [
@@ -120,6 +133,14 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
     )
     assert override.entry_private_ws_stale_seconds == 180.0
 
+
+def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:
+    parser = build_parser()
+    continuous = parser.parse_args(["--data-root", str(tmp_path), "continuous-event-demo-cycle"])
+    long = parser.parse_args(["--data-root", str(tmp_path), "long-native-event-demo-cycle"])
+
+    assert continuous.workers == 4
+    assert long.workers == 4
 
 
 def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:

@@ -105,10 +105,9 @@ DATASETS = {
     "index_price_1h",
     "premium_index_1h",
     # Read-only legacy: the download path was deleted with the signed_flow
-    # cleanup (validated as not-an-edge, commit 6e5e977) and its last consumer
-    # (volume_events._signed_flow_feature_frame) was erased with the short
-    # engine 2026-06-11. Kept ONLY so old research roots that still hold a
-    # signed_flow_1h directory stay readable by ad-hoc tooling.
+    # cleanup (validated as not-an-edge, commit 6e5e977). Kept ONLY so old
+    # research roots that still hold a signed_flow_1h directory stay readable
+    # by ad-hoc tooling.
     "signed_flow_1h",
     "ticker_snapshots",
     "archive_trade_manifest",
@@ -126,8 +125,8 @@ DATASETS = {
     "long_native_paper_trades",
     "long_native_paper_orders",
     "long_native_paper_cycles",
-    # Continuous-fade sleeve (3rd sleeve, SHORT-direction): own ledger root,
-    # own datasets so it nets/reconciles separately from short + long on the
+    # Continuous-fade sleeve (SHORT-direction): own ledger root,
+    # own datasets so it nets/reconciles separately from compatibility + long on the
     # shared demo account. demo = live-submitted; paper = idealised-fill shadow.
     "continuous_fade_demo_trades",
     "continuous_fade_demo_orders",

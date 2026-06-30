@@ -1034,7 +1034,7 @@ def test_continuous_rebalance_profile_resolves_to_pinned_candidate_contract() ->
     assert cfg.entry_confirm_delay_hours == 1
     assert cfg.entry_event_trigger == "none"
     assert cfg.btc_trend_gate == "uptrend"  # pass-through from the CLI/env knob, not pinned by the profile
-    assert cfg.daily_rebalance_enabled is False  # local target disables daily vol adjuster
+    assert cfg.daily_rebalance_enabled is False  # current target disables daily vol adjuster
     assert continuous_rebalance_rule(cfg).target_daily_vol == pytest.approx(0.045)  # params retained for the rework
 
 
@@ -2324,7 +2324,7 @@ def test_ticker_batch_wake_off_by_default(tmp_path) -> None:
 
 def test_execution_fill_nudge_only_for_continuous_sleeve(tmp_path) -> None:
     d = _daemon(tmp_path)
-    # a SHORT-sleeve fill (4-part link) must NOT nudge the continuous daemon
+    # a compatibility short fill (4-part link) must NOT nudge the continuous daemon
     d._handle_execution_message({"data": [{"orderLinkId": "lm-en-BTC-abcd", "execId": "1"}]})
     assert d._fill_nudges == 0 and not d._tick_event.is_set() and not d._bar_event.is_set()
     # a CONTINUOUS fill (lm-en-c- / lm-ux-c-) triggers Tier-4 state refresh
@@ -2418,7 +2418,7 @@ def test_continuous_live_config_golden_values() -> None:
     assert c.sizing_mode == "inverse_vol"
     assert c.target_vol_per_name == 0.01
     assert c.vol_weight_clamp == 2.0
-    assert c.daily_rebalance_enabled is False  # local target disables daily vol adjuster
+    assert c.daily_rebalance_enabled is False  # current target disables daily vol adjuster
     assert c.daily_rebalance_realized_vol_window_days == 90
     assert c.daily_rebalance_target_daily_vol == 0.045
     assert c.daily_rebalance_max_scale == 4.0
@@ -2708,7 +2708,7 @@ def test_component_and_sniper_links_decode_as_continuous() -> None:
     component tag to the link prefix ('en-c'+'p3' -> lm-en-cp3-...) and the sniper
     appends 's' (lm-en-cs-...). The decoder only knew bare 'c' — every LIVE entry's
     link decoded to None, so on a VPS rebuild/orphan ws_risk's side-based fallback
-    adopted continuous positions into the ERASED short sleeve's legacy root with the
+    adopted continuous positions into the compatibility root with the
     default adopt stops instead of the ensemble contract."""
     sig = 1_765_400_000_000
     expected_ts = (sig // 1000) * 1000
@@ -2747,7 +2747,7 @@ def test_tier4_link_matcher_catches_component_and_sniper_fills() -> None:
     assert _continuous_links_in_message(_msg(exit_link))
     # other sleeves' fills must NOT nudge the continuous daemon
     assert not _continuous_links_in_message(_msg(_continuous_order_link_id("en-l", symbol="WIFUSDT", signal_ts_ms=sig)))
-    assert not _continuous_links_in_message(_msg("lm-en-BTC-abcd"))  # legacy short
+    assert not _continuous_links_in_message(_msg("lm-en-BTC-abcd"))  # compatibility short
     assert not _continuous_links_in_message(_msg("manual-order-1"))
 
 

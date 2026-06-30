@@ -43,9 +43,8 @@ require_unit_env() {
 }
 
 "$PYTHON" - <<'PY'
-# The daily-short sleeve was ERASED 2026-06-11 (operator order). Pin the surviving
-# deployed configs - the LONG promoted profile and the continuous sleeve's demo/paper guards -
-# mirroring the strategy-settings gate in scripts/deploy_vps_live.sh.
+# Pin the deployed configs - the LONG promoted profile and the continuous
+# sleeve's demo/paper guards - mirroring scripts/deploy_vps_live.sh.
 from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 
 long_cfg = _v11a_long_native_config()
@@ -208,8 +207,7 @@ PY
 fi
 # Timer parity - read-only verify must catch a deploy that forgot to enable
 # (or someone manually disabled) the liveness watchdog or daily combined-book
-# report. Both fail loud if missing. (The demo-health watchdog was erased with
-# the short sleeve 2026-06-11; deploy removes it from hosts - don't check it.)
+# report. Both fail loud if missing.
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
@@ -245,8 +243,8 @@ require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_th
 require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'
 require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
 require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'
-# Long sleeve assertions: the profile name is intentionally explicit so the old
-# ambiguous label cannot re-enter the live env by accident.
+# Long sleeve assertions: the profile name is intentionally explicit so the live
+# env cannot drift to an ambiguous label.
 if sleeve_on "$LONG_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'
   require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'
@@ -254,8 +252,8 @@ if sleeve_on "$LONG_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'
   require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'
 fi
-# Order-submitting continuous sleeve config - only when toggled ON
-# (a retired sleeve's file content must not be an unconditional verify gate).
+# Order-submitting continuous sleeve config - only when toggled ON.
+# Disabled unit file content must not be an unconditional verify gate.
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'STRATEGY_PROFILE=continuous_ensemble_v2'

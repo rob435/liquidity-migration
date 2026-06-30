@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from liquidity_migration import promoted
+from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, apply_continuous_demo_profile
+from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 
 
 def test_promoted_trading_logic_doc_exists_and_names_lifecycles() -> None:
@@ -31,6 +33,52 @@ def test_promoted_trading_logic_doc_exists_and_names_lifecycles() -> None:
     assert "stop_approach" in text
     assert "left_decile" in text
     assert "fc_sniper_retrace_pct" in text
+
+
+def test_promoted_trading_logic_doc_matches_resolved_profile_values() -> None:
+    text = Path(promoted.PROMOTED_TRADING_LOGIC_DOC).read_text(encoding="utf-8")
+
+    cont = apply_continuous_demo_profile(
+        ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2", btc_trend_gate="uptrend")
+    )
+    assert f"- `BTC_TREND_GATE={cont.btc_trend_gate}`." in text
+    assert f"- `rmom_quantile={cont.rmom_quantile}`." in text
+    assert f'- `feature_set=("{cont.feature_set[0]}",)`.' in text
+    assert f"- `liq_turnover_min={int(cont.liq_turnover_min)}`." in text
+    assert f"- Max active shorts: {cont.max_active}." in text
+    assert f"- Max new entries per cycle: {cont.max_new_entries_per_cycle}." in text
+    assert f"- `ENTRY_LEVERAGE={int(cont.entry_leverage)}`." in text
+    assert f"- `PER_POSITION_NOTIONAL_PCT_EQUITY={int(cont.per_position_notional_pct_equity)}`." in text
+    assert f"- `SIZING_MODE={cont.sizing_mode}`." in text
+    assert f"- `TARGET_VOL_PER_NAME={cont.target_vol_per_name}`." in text
+    assert f"- `VOL_WEIGHT_CLAMP={int(cont.vol_weight_clamp)}`." in text
+    assert f"`[{cont.entry_btc_risk_low:.2f}, {cont.entry_btc_risk_high:.2f})`" in text
+    assert f"`btc_risk_stack_mult={cont.entry_btc_risk_tail_mult}`" in text
+    assert f"- `max_hold` force cover after {cont.max_hold_hours} hours." in text
+    assert f"- `STOP_LOSS_PCT={int(cont.stop_loss_pct)}`; no venue/server disaster stop." in text
+    for name, trigger, age_days, take_profit_pct, weight in cont.ensemble_components:
+        pct = int(round(take_profit_pct * 100))
+        assert f"| `{name}` | `{trigger}` | {age_days}d | {pct}% | {weight} |" in text
+
+    long_cfg = _v11a_long_native_config()
+    assert f"- Universe size {long_cfg.universe_size} by trailing {long_cfg.universe_volume_window_days}-day turnover." in text
+    assert f"- Minimum listing history {long_cfg.min_listing_history_days} days." in text
+    assert f"- `fc_min_day_return={long_cfg.fc_min_day_return}`." in text
+    assert f"- `fc_top_volume_rank_max={long_cfg.fc_top_volume_rank_max}`." in text
+    assert f"- `fc_min_close_location={long_cfg.fc_min_close_location}`." in text
+    assert f"- `fc_max_atr_pct={long_cfg.fc_max_atr_pct}`." in text
+    assert f"- `fc_sigma_mult={long_cfg.fc_sigma_mult}`." in text
+    assert f"- `fc_sniper_retrace_pct={long_cfg.fc_sniper_retrace_pct}`." in text
+    assert f"- `fc_sniper_deadline_hours={long_cfg.fc_sniper_deadline_hours}`." in text
+    assert f"- `fc_sniper_skip_on_no_retrace={long_cfg.fc_sniper_skip_on_no_retrace}`." in text
+    assert f"- `gross_exposure={long_cfg.gross_exposure}`." in text
+    assert f"- `max_concurrent_positions={long_cfg.max_concurrent_positions}`." in text
+    assert f"- Max position weight {long_cfg.max_position_weight:.2f}." in text
+    assert f"- Weekend multiplier {long_cfg.weekend_size_mult}." in text
+    assert f"- Exit cooldown {long_cfg.cooldown_days} days." in text
+    assert f"- ATR stop multiple {long_cfg.fc_atr_stop_mult}." in text
+    assert f"- ATR take-profit multiple {long_cfg.fc_atr_tp_mult}." in text
+    assert f"- Max hold {long_cfg.fc_max_hold_days} days." in text
 
 
 def test_long_profile_is_v11a() -> None:

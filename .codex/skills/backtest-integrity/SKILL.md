@@ -3,12 +3,6 @@ name: backtest-integrity
 description: "Mandatory methodology gate for any backtest, research run, strategy or feature change, or result interpretation in this Bybit quant repo. Use before running a backtest, when designing a research run, when reviewing results, and before calling a result alpha, edge, candidate, or promotion evidence. Enforces the non-negotiable gates and run labels from docs/backtesting_errors_we_never_repeat.md."
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
-
 # Backtest integrity gate
 
 `docs/backtesting_errors_we_never_repeat.md` is a **mandatory standard** for
@@ -102,15 +96,13 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   zero-delay entry must be justified by that causal construction and remains
   research-gated.
 - Run sweeps via a dated dispatcher script, not hand-assembled engine flags.
-  The old volume-events dispatcher and generic alpha sweep scripts were erased
-  with the research scrub. For new serious work, write a small pre-registered
-  dispatcher that calls the relevant package runner directly per cell.
+  For new serious work, write a small pre-registered dispatcher that calls the
+  relevant package runner directly per cell.
   The Tier-2 verdict comes from
-  `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
+  `scripts/r1_robustness.py`; the strict Sharpe reference bar from
   `scripts/apply_decision_rule.py`. Every engine requires full PIT by default;
-  partial-PIT runs (config `require_full_pit_universe=False` — the old
-  `--allow-partial-pit` flag was erased with the volume-events CLI) are for
-  explicitly biased diagnostics only, labelled biased.
+  partial-PIT runs (config `require_full_pit_universe=False`) are for explicitly
+  biased diagnostics only, labelled biased.
 - The per-venue full-PIT roots now carry funding (Bybit v5 REST funding;
   Binance `binance_usdm_funding`, full-coverage), so costed runs include
   funding/carry per the cost-model gate above. Only a root that genuinely lacks
@@ -118,9 +110,8 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   but funding-missing. (Separately, the three-way reconcile's backtest leg keeps
   funding OFF by default for speed — `--with-funding` to enable; that is a
   reconcile choice, not a data gap.)
-- Legacy fixed-day rebalance-grid benchmarks and erased short-sleeve results are
-  retired evidence. Do not cite them as evidence for the surviving continuous or
-  LONG systems.
+- Closed fixed-day rebalance-grid benchmarks are historical evidence. Do not
+  cite them as evidence for the active continuous or LONG systems.
 - Demo/forward execution is execution evidence only, never alpha proof.
 
 Inspect the report directory directly for artifact completeness against this

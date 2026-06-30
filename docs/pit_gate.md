@@ -1,11 +1,4 @@
-# The PIT membership gate (and how to never break the reconcile again)
-
-> **2026-06-11:** the daily SHORT sleeve was ERASED from the system by operator
-> order — the short engine, its CLI reconcile commands, and the short ledgers'
-> live writers no longer exist. The PIT gate itself survives (it is generic);
-> everything below that mentions the short sleeve is HISTORICAL. The full
-> reconcile default is BOTH surviving sleeves; the `--quick` execution-only path
-> defaults to LONG unless `--sleeves long,continuous` is supplied.
+# The PIT membership gate
 
 This is the operator + maintainer reference for the point-in-time (PIT) universe
 membership gate — the thing that decides whether a backtest signal is allowed to
@@ -36,12 +29,10 @@ public trades on that UTC calendar day.
   `public.bybit.com/trading` archive scrape (deep history) **and** the Bybit v5
   `instruments-info` listing (currently-Trading perps), the latter filling both
   the archive's symbol-coverage gaps and its ~24h publishing lag.
-- Consumed by (historical): `volume_events_features._attach_event_archive_membership`
-  / `volume_events_filters` — both erased with the SHORT sleeve 2026-06-11. The
-  gate survives standalone as `liquidity_migration/volume_events_pit.py` (PIT
-  membership + full-PIT universe validation), consumed by the surviving engines'
-  membership attach (`long_native.py`, with shared frame helpers from
-  `trade_lifecycle.py`); a failed gate still labels the run `pit_membership_fail`.
+- Consumed by: `liquidity_migration/volume_events_pit.py` for PIT membership
+  and full-PIT universe validation, plus the active engines' membership attach
+  paths (`long_native.py`, with shared frame helpers from `trade_lifecycle.py`);
+  a failed gate still labels the run `pit_membership_fail`.
 
 ## The off-by-one (fixed 2026-05-30)
 
@@ -61,11 +52,9 @@ of the signal's **trading day** (`2026-05-29`). Two consequences:
 The fix (`_attach_event_archive_membership`): membership is keyed on the trading
 day = `date of (ts_ms - 1 ms)`. The stamp-day `date` column is preserved as-is for
 the age features, so nothing else moves. Numerically this only changes
-listing/delisting-boundary and recent-tail rows. (The original regression lock,
-`tests/test_pit_membership_trading_day.py`, was deleted with the short engine in
-e03e9ab; the surviving trading-day keying lives in
-`liquidity_migration/volume_events_pit.py` and is exercised via
-`tests/test_pit_coverage.py`.)
+listing/delisting-boundary and recent-tail rows. The trading-day
+keying lives in `liquidity_migration/volume_events_pit.py` and is exercised via
+`tests/test_pit_coverage.py`.
 
 After the fix, a `2026-05-30 00:00` signal validates against the `2026-05-29`
 manifest day — which Bybit publishes on `2026-05-30`. So a same-day reconcile
@@ -89,10 +78,9 @@ asymmetry is the original trap. Two guards now exist:
 
 ## Membership modes
 
-(The `--pit-membership` / `--allow-partial-pit` CLI flags were erased with the
-`volume-events` subcommand in e03e9ab; the surviving knob is a run-config field.)
+The active knob is a run-config field.
 
-The surviving gate is `require_full_pit_universe` (default `True`): the run aborts
+The gate is `require_full_pit_universe` (default `True`): the run aborts
 unless every archive-manifest `(trading-day, symbol)` within each symbol's traded
 lifespan is covered by klines — the no-survivorship / no-look-ahead
 universe-completeness check enforced in `volume_events_pit.py`.
@@ -135,8 +123,7 @@ The `--quick` path, in order:
    (the continuous gate) on the research root. Skip with `--no-rmom`.
 3. **reconcile** — per sleeve: LONG `reconcile-long-paper-demo` (paper ↔ demo),
    and, only when selected, CONTINUOUS `continuous-forward-readiness --paper-only`
-   + a signal-consistency replay. (The SHORT `reconcile-all` path was erased with
-   the sleeve, 2026-06-11.)
+   + a signal-consistency replay.
 4. **summary** — one unified headline across selected sleeves.
 
 `--quick` flags: `--sleeves long,continuous`, `--dry-run`, `--no-pull`,
@@ -146,11 +133,10 @@ skills are `.claude/skills/pit-reconcile` / `.codex/skills/pit-reconcile`.
 Refreshing the manifest on its own is the manual command above
 (`python -m liquidity_migration --data-root <root> archive-manifest`).
 
-## The three-way (demo ↔ backtest ↔ paper) workflow — rebuilt 2026-06-17
+## The three-way (demo ↔ backtest ↔ paper) workflow
 
 This is the **default** of `scripts/reconcile.sh` (the whole reconciliation in
-one run). The backtest leg that the daily-SHORT erasure removed was rebuilt
-generically as `scripts/reconcile_three_way.py`, covering BOTH surviving sleeves:
+one run), implemented by `scripts/reconcile_three_way.py` for BOTH active sleeves:
 
 ```bash
 bash scripts/reconcile.sh                    # long + continuous, full pipeline (default)

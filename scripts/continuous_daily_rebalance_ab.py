@@ -58,7 +58,7 @@ from liquidity_migration.trade_lifecycle import annualized_sharpe  # noqa: E402
 ANN_DAYS = 365.25
 MS_PER_DAY = 86_400_000
 CONTROL = "off_current"
-PRIMARY_ON = "on_045_max4_legacy"
+PRIMARY_ON = "on_045_max4_primary"
 RUN_LABEL = "RESEARCH_ONLY_CONTINUOUS_DAILY_VOL_REBALANCE_AB"
 COMPONENT_TP = 0.12
 TP12_CELL_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -347,7 +347,7 @@ def primary_acceptance(comparisons: list[dict[str, Any]], summaries: list[dict[s
             reasons.append(f"{venue}: positive edge is single-month fragile")
     if reasons:
         return "REJECT_KEEP_DAILY_REBALANCE_DISABLED", reasons
-    return "ACCEPT_REENABLE_DAILY_VOL_REBALANCE_RESEARCH_ONLY", ["primary legacy ON arm passed both venues"]
+    return "ACCEPT_REENABLE_DAILY_VOL_REBALANCE_RESEARCH_ONLY", ["primary rebalance-ON arm passed both venues"]
 
 
 def _csv_write(path: Path, rows: list[dict[str, Any]]) -> None:

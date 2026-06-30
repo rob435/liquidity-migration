@@ -22,7 +22,7 @@ MS_PER_DAY = 86_400_000
 
 # Order statuses that are still in-flight (not terminal): a pending entry/exit that
 # ws_risk and the sleeves must not double-submit or treat as flat. Single source of
-# truth so the short and long sleeves can't silently drift apart.
+# truth so sleeve implementations cannot silently drift apart.
 PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
 
 

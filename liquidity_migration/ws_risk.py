@@ -175,8 +175,8 @@ class EventWebSocketRiskConfig:
     adopt_hold_days: float = 3.0
     # Strategy IDs used to reconstruct the deterministic trade_id when an
     # adopted position's orderLinkId decodes back to a known signal_ts.
-    # adopt_short_strategy_id: legacy-ledger support only — the daily-short
-    # sleeve was erased 2026-06-11; set explicitly to adopt old short rows.
+    # adopt_short_strategy_id: compatibility-ledger support only; set explicitly
+    # to adopt historical short rows.
     adopt_short_strategy_id: str = ""
     adopt_long_strategy_id: str = ""
     # How many recent orders per symbol to scan when looking for the
@@ -188,13 +188,13 @@ class EventWebSocketRiskConfig:
     # Long-sleeve dual-side support: when long_data_root is set, this engine
     # ALSO reads the long-side ledger (long_native_demo_trades /
     # long_native_demo_orders by default) from that root and routes write
-    # updates back to it per the per-row `sleeve` column. Set to "" to keep
-    # short-only behavior. Per owner: extend ws_risk to handle both sides
-    # rather than running two processes.
+    # updates back to it per the per-row `sleeve` column. Set to "" for the
+    # single-root compatibility path. Per owner: extend ws_risk to handle both
+    # sides rather than running two processes.
     long_data_root: str = ""
     long_trades_dataset: str = "long_native_demo_trades"
     long_orders_dataset: str = "long_native_demo_orders"
-    # Continuous-fade sleeve (3rd sleeve, also SHORT-direction). Same dual-side rationale: when
+    # Continuous-fade sleeve (SHORT-direction). Same shared-account rationale: when
     # continuous_data_root is set this engine ALSO reads + routes that ledger so continuous positions
     # are recognised (not flattened as untracked, not mis-routed to the short ledger) on the shared
     # demo account. Set to "" to ignore the continuous sleeve.
@@ -314,7 +314,7 @@ class WebSocketRiskState:
     ledger_read_error: str = ""
     # Cumulative count of cross-sleeve mis-attributions: rows whose `sleeve` tag
     # was non-empty but unowned (routed to short as a fallback) plus
-    # un-recoverable short-side orphans adopted while a continuous sleeve is
+    # un-recoverable compatibility short orphans adopted while a continuous sleeve is
     # configured (short vs continuous is ambiguous by venue side alone).
     # Surfaced in write_report so a recurring mis-attribution is visible.
     sleeve_misroutes: int = 0
@@ -342,7 +342,7 @@ class EventWebSocketRiskEngine:
         # owns the long-sleeve ledger. Reads concat both sides (tagged by
         # `sleeve` column); writes route per-row via _write_*_rows_routed.
         # When long_data_root is "" / unset, the long_root is None and the
-        # engine behaves identically to the short-only legacy path.
+        # engine behaves identically to the single-root compatibility path.
         self.long_root: Path | None = (
             Path(self.risk.long_data_root).expanduser() if self.risk.long_data_root else None
         )
@@ -606,11 +606,10 @@ class EventWebSocketRiskEngine:
     # ------------------------------------------------------------------
     # Dual-side ledger routing
     #
-    # ws_risk now reads the short ledger (self.root) and optionally the long
-    # ledger (self.long_root). Both are concatenated into self.state.all_trades
-    # with a `sleeve` column ("short" or "long"). All writes are routed via
-    # the two helpers below — they inspect each row's `sleeve` field and write
-    # to the appropriate root/dataset. Existing callsites that used to call
+    # ws_risk reads the compatibility root plus every configured sleeve ledger.
+    # Rows are concatenated into self.state.all_trades with a `sleeve` column.
+    # All writes are routed via the helpers below — they inspect each row's
+    # `sleeve` field and write to the appropriate root/dataset. Existing callsites that used to call
     # _write_trade_rows / _write_order_rows directly are migrated to these
     # helpers; the legacy module-level helpers are kept for callers outside
     # this engine that already pass a per-root path.
@@ -638,10 +637,10 @@ class EventWebSocketRiskEngine:
 
     def _combine_sleeve_frames(self, frames: list[pl.DataFrame], *, trades: bool) -> pl.DataFrame:
         """diagonal_relaxed concat that ISOLATES a schema-incompatible sibling
-        ledger so one corrupt sleeve can't abort reconcile for all three. A
+        ledger so one corrupt sleeve can't abort reconcile for the other books. A
         single corrupt ledger (e.g. a scalar column written as a list) would make
         a plain pl.concat raise SchemaError, propagate out of rest_reconcile and
-        crash the shared reconcile loop for the short + long + continuous sleeves.
+        crash the shared reconcile loop for the compatibility, long, and continuous books.
         Fold pairwise so a bad frame is dropped (logged + flagged) while the
         healthy sleeves still reconcile. frames[0] (short, the always-present
         root) seeds the fold and is never dropped; a dropped sibling sets
@@ -754,7 +753,7 @@ class EventWebSocketRiskEngine:
         self._write_rows_routed(rows, trades=False)
 
     # --- cross-sleeve control-row OWNER (long-sleeve-5/6) ------------------
-    # ws_risk is the only component that reads all three sleeve roots, so it owns the
+    # ws_risk is the only component that reads every configured sleeve root, so it owns the
     # one shared control row: each reconcile pass it recomputes aggregate IM-used,
     # GCs expired reservations, and rewrites the row (UNDER the dataset lock via
     # cross_sleeve.write_account_state, so a concurrent sleeve reservation claim is
@@ -766,7 +765,7 @@ class EventWebSocketRiskEngine:
         return _cross_sleeve.account_key(account_type=self.risk.account_type, settle_coin=self.risk.settle_coin)
 
     def _sleeve_entry_leverage(self) -> dict[str, float]:
-        # The short sleeve's leverage from ws_risk's own demo config; long/continuous
+        # Compatibility short rows use ws_risk's own demo config; long/continuous
         # trades carry their own initial_margin_usdt / entry_leverage, which
         # compute_im_used prefers, so they need no entry here.
         demo = getattr(self.config, "demo", None)
@@ -782,15 +781,14 @@ class EventWebSocketRiskEngine:
         round 3 — a missing sleeves.env must never resurrect an order-submitting sleeve) so
         this denominator can never drift from the kill-switch; in production the risk unit's
         EnvironmentFile always sets the toggles explicitly, so the default only matters
-        off-VPS. The daily-short sleeve was ERASED 2026-06-11 — no toggle exists and it can
-        never trade, so it must not claim a budget share (the legacy root stays read-only
-        reconciled regardless)."""
+        off-VPS. Compatibility roots stay read-only reconciled and must not claim
+        a budget share."""
         _defaults = {"SHORT_SLEEVE": "off", "LONG_SLEEVE": "off", "CONTINUOUS_SLEEVE": "off"}
 
         def _on(var: str) -> bool:
             return os.environ.get(var, _defaults[var]).strip().lower() in {"on", "1", "true", "yes"}
         active: list[str] = []
-        if _on("SHORT_SLEEVE"):  # legacy escape hatch only — see docstring
+        if _on("SHORT_SLEEVE"):  # compatibility escape hatch only — see docstring
             active.append("short")
         if self.long_root is not None and _on("LONG_SLEEVE"):
             active.append("long")
@@ -926,7 +924,7 @@ class EventWebSocketRiskEngine:
 
     def _handle_consumer_error(self, exc: BaseException, *, where: str) -> None:
         """Isolate a single bad event/idle cycle so one unexpected raise can't kill the
-        SOLE reconcile/exit authority for all three sleeves. A crash here leaves every
+        SOLE reconcile/exit authority for the shared demo account. A crash here leaves every
         open position on its server-side disaster stop ONLY -- no intrabar TP/max-hold,
         no orphan close, no cross-sleeve control-row refresh -- until systemd restarts,
         and a DETERMINISTIC raise (e.g. a corrupt ledger re-read every bootstrap) would
@@ -1332,7 +1330,7 @@ class EventWebSocketRiskEngine:
         # (filled_qty >= order_target_qty) closed the WHOLE trade when a reduce
         # order that targets only PART of the position (a rebalance_reduce)
         # fully filled via the WS execution stream — the live remainder was
-        # erased from the ledger. Same class as the round-3 pending-fill
+        # dropped from the ledger. Same class as the round-3 pending-fill
         # reconciler fix; this is its WS-path twin (solo sweep 2026-06-12).
         # A plain full exit (target == position) still closes here because the
         # final delta drives remaining_qty to ~0.
@@ -1841,8 +1839,7 @@ class EventWebSocketRiskEngine:
             now_ms=now_ms,
         )
         if rows:
-            # _execute_stop_repairs emits rows without `sleeve` (it lives in
-            # event_demo, which is short-only by design). Tag from the
+            # _execute_stop_repairs emits rows without `sleeve`. Tag from the
             # originating trade so the repair order routes to the right ledger.
             self._tag_sleeve_from_trades([], rows)
             self._append_stop_repair_audit_events(repairs, rows, now_ms=now_ms)
@@ -2085,7 +2082,7 @@ class EventWebSocketRiskEngine:
         if result.ambiguous_short:
             self.state.sleeve_misroutes += 1
             _logger.warning(
-                "ws_risk: adopting un-recoverable SHORT-side orphan %s as sleeve='short' "
+                "ws_risk: adopting un-recoverable compatibility short orphan %s as sleeve='short' "
                 "(entry-link recovery failed); short vs continuous is ambiguous on the netted "
                 "account -- verify the sleeve manually (qty=%s entry_price=%s)",
                 result.ambiguous_symbol,
@@ -3078,7 +3075,7 @@ def _persist_ws_risk_history(payload: dict[str, Any]) -> bool:
 def _ensure_sleeve_column(df: pl.DataFrame, default: str) -> pl.DataFrame:
     """Ensure the DataFrame has a `sleeve` column populated with `default`
     for rows that don't already specify one. Used by _read_*_combined so
-    legacy short-side rows (written before the sleeve column existed) and
+    compatibility short rows (written before the sleeve column existed) and
     new long-side rows can be concatenated and routed correctly on write-back.
     """
     if df.is_empty():
@@ -3128,8 +3125,8 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
             if not present
         ]
         # exit_untracked_positions flattens any Bybit position not found in this engine's ledger(s).
-        # On the SHARED demo account this engine must read EVERY sleeve's ledger (short + long +
-        # continuous + continuous add-on) or a sibling sleeve's open positions look untracked.
+        # On the shared demo account this engine must read every configured
+        # sibling ledger or a sibling sleeve's open positions look untracked.
         # Fail closed for direct CLI/programmatic order-submitting runs; dry-run diagnostics may
         # still warn below so dedicated-account checks remain possible without order submission.
         raise ValueError(

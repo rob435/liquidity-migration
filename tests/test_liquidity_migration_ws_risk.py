@@ -2969,10 +2969,10 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     now_ms = (int(time.time() * 1000) // 1000) * 1000
     signal_ts_ms = now_ms - 24 * 60 * 60 * 1000  # 1 day ago — enough for fill but before max-hold
     entry_link = _order_link_id("en", symbol="AAAUSDT", signal_ts_ms=signal_ts_ms)
-    # The daily-short sleeve was erased (2026-06-11): legacy short rows are only
-    # recoverable with an explicitly configured adopt_short_strategy_id.
-    legacy_strategy_id = "legacy-short-strategy"
-    expected_trade_id = f"{legacy_strategy_id}-AAAUSDT-{signal_ts_ms}"
+    # Historical short rows are only recoverable with an explicitly configured
+    # adopt_short_strategy_id.
+    compatibility_strategy_id = "compatibility-short-strategy"
+    expected_trade_id = f"{compatibility_strategy_id}-AAAUSDT-{signal_ts_ms}"
 
     # Bybit createdTime is typically 1-6h AFTER signal_ts (the cycle waits
     # for the feature pipeline before submitting). Use a realistic offset so
@@ -3013,7 +3013,7 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
-            adopt_short_strategy_id=legacy_strategy_id,
+            adopt_short_strategy_id=compatibility_strategy_id,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -3030,7 +3030,7 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     assert trade["trade_id"] == expected_trade_id, (
         f"expected recovered trade_id {expected_trade_id!r}, got {trade['trade_id']!r}"
     )
-    assert trade["strategy_id"] == legacy_strategy_id
+    assert trade["strategy_id"] == compatibility_strategy_id
     # entry_ts_ms must reflect the actual venue fill time, NOT signal_ts.
     # The cycle's exit logic computes planned_exit_ts_ms + event_decay rank
     # checks from entry_ts_ms — putting signal_ts there (1-6h before fill)
@@ -3551,8 +3551,8 @@ def test_rebuild_flow_end_to_end_preserves_trade_ids_for_reconciliation(tmp_path
     signal_ts_ms = 1_779_667_200_000
     bybit_created_ms = signal_ts_ms + 3 * 3600 * 1000  # +3h, realistic fill lag
     symbols = ["AAAUSDT", "BBBUSDT", "CCCUSDT"]
-    # The daily-short sleeve was erased (2026-06-11): legacy short rows are only
-    # recoverable with an explicitly configured adopt_short_strategy_id.
+    # Historical short rows are only recoverable with an explicitly configured
+    # adopt_short_strategy_id.
     scenario_id = "legacy-short-strategy"
 
     # Bybit state: 3 open short positions with valid bot orderLinkIds (this is
@@ -4028,7 +4028,7 @@ def test_ws_risk_read_combined_includes_and_tags_continuous(tmp_path: Path) -> N
     continuous_root = tmp_path / "continuous"
     continuous_root.mkdir()
     _write_continuous_open_trade(continuous_root, "AAAUSDT")
-    _write_open_trade(tmp_path)  # short-sleeve trade (BBB? -> AAAUSDT default)
+    _write_open_trade(tmp_path)  # compatibility short trade (BBB? -> AAAUSDT default)
     engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -4270,7 +4270,7 @@ def test_tracked_stream_fill_partial_target_reduce_shrinks_not_closes(tmp_path: 
     pending-fill fix. A reduce order targeting only PART of the position (a
     rebalance_reduce) that FULLY fills via the execution stream must shrink the
     trade, not close it — the old order-fullness clause (filled >= target)
-    erased the live remainder from the ledger."""
+    dropped the live remainder from the ledger."""
     write_dataset(
         pl.DataFrame(
             [{"trade_id": "t2", "symbol": "BBBUSDT", "side": "short", "status": "open",
@@ -4400,13 +4400,13 @@ def test_ws_risk_rebuilds_private_stream_when_socket_down(tmp_path: Path, monkey
         def close(self) -> None:
             closed.append("c")
 
-        def subscribe_positions(self, cb) -> None:  # noqa: ANN001
+        def subscribe_positions(self, _cb) -> None:  # noqa: ANN001
             pass
 
-        def subscribe_orders(self, cb) -> None:  # noqa: ANN001
+        def subscribe_orders(self, _cb) -> None:  # noqa: ANN001
             pass
 
-        def subscribe_executions(self, cb, **k) -> None:  # noqa: ANN001
+        def subscribe_executions(self, _cb, **k) -> None:  # noqa: ANN001
             pass
 
     class _LivePrivate(_DeadPrivate):
@@ -4699,13 +4699,13 @@ class _DeadPrivate:
     def close(self) -> None:
         pass
 
-    def subscribe_positions(self, cb) -> None:  # noqa: ANN001
+    def subscribe_positions(self, _cb) -> None:  # noqa: ANN001
         pass
 
-    def subscribe_orders(self, cb) -> None:  # noqa: ANN001
+    def subscribe_orders(self, _cb) -> None:  # noqa: ANN001
         pass
 
-    def subscribe_executions(self, cb, **k) -> None:  # noqa: ANN001
+    def subscribe_executions(self, _cb, **k) -> None:  # noqa: ANN001
         pass
 
 
@@ -4824,7 +4824,7 @@ def test_cap_qty_predicate_includes_addon_only_sibling(tmp_path: Path) -> None:
     old_predicate = engine.long_root is not None or engine.continuous_root is not None
     assert old_predicate is False, "the addon-only config exposes the omitted-root bug"
 
-    # A short-only engine has a single owned ledger -> cap must NOT engage.
+    # A single-root compatibility engine has one owned ledger -> cap must NOT engage.
     short_only = EventWebSocketRiskEngine(
         tmp_path / "short_only",
         config=ResearchConfig(data_root=tmp_path / "short_only"),

@@ -853,7 +853,7 @@ def test_archive_klines_report_surfaces_skipped_count() -> None:
     assert "| Skipped (v5 listing) | 2 |" in report
 
 
-# pit-data-4: a narrow rebuild UNIONs with the persisted manifest (no PIT erasure)
+# pit-data-4: a narrow rebuild UNIONs with the persisted manifest (no PIT data loss)
 def _manifest(rows: list[tuple[str, str, str]]) -> pl.DataFrame:
     return pl.DataFrame(
         {

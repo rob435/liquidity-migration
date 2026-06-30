@@ -2,9 +2,6 @@
 
 The deployable VPS units are:
 
-- (The daily-short sleeve's units — `bybit-demo` / `bybit-paper` — and the
-  `demo-health` entry watchdog were ERASED with the sleeve, operator order
-  2026-06-11; the deploy removes them from a live host.)
 - `liquidity-migration-bybit-long-demo.service` and
   `liquidity-migration-bybit-long-paper.service`: long-native v11a demo/paper pair.
 - `liquidity-migration-bybit-risk.service`: shared fast exit-only risk runner for every
@@ -24,14 +21,13 @@ The deployable VPS units are:
   unbuyable after a capture gap.
 - Timers include the demo-liveness watchdog, combined-book report, continuous rmom
   refresh, and the daily continuous BTC+ETH hedge (submit-armed; see below).
-  (The demo-health timer was erased with the short sleeve.)
 
 Which sleeve units actually run is governed by `deploy/sleeves.env` plus the
 optional host override `/etc/liquidity-migration/sleeves.env`. The host override
 can only narrow a repo-on sleeve to off; repo-side off is a hard ceiling. Deploy
 writes the final values to `/etc/liquidity-migration/sleeves.resolved.env`, which
 systemd units consume.
-As of 2026-06-18 the live set is long demo/paper, continuous demo, and
+As of 2026-06-30 the live set is long demo/paper, continuous demo, and
 continuous paper (`LONG_SLEEVE=on`, `CONTINUOUS_SLEEVE=on`,
 `CONTINUOUS_PAPER_SLEEVE=on`). All are demo/paper only.
 
@@ -140,8 +136,8 @@ The generated full recovery command sets `CLEAN_DIRTY_CHECKOUT=1` by default.
 If the existing `/opt/liquidity-migration` checkout is dirty, the script saves tracked
 diffs, status, and a tarball/list of untracked non-ignored files under
 `/root/liquidity-migration-deploy-backups` before running `git reset --hard` and
-`git clean -fd`. Ignored live data such as `data/bybit-demo-event` is not
-removed by that clean command. The generated strict command omits
+`git clean -fd`. Ignored live data is not removed by that clean command. The
+generated strict command omits
 `CLEAN_DIRTY_CHECKOUT=1` and refuses a dirty checkout.
 
 Manual install or refresh on the VPS, if you are deliberately bypassing the checked
@@ -152,7 +148,7 @@ cp deploy/systemd/liquidity-migration-*.service /etc/systemd/system/
 cp deploy/systemd/liquidity-migration-*.timer /etc/systemd/system/
 systemctl daemon-reload
 # Enable only the units whose toggle is on in deploy/sleeves.env, plus the always-on
-# risk service and support timers. As of 2026-06-18:
+# risk service and support timers. As of 2026-06-30:
 systemctl enable --now liquidity-migration-bybit-risk.service
 systemctl enable --now liquidity-migration-bybit-long-demo.service
 systemctl enable --now liquidity-migration-bybit-long-paper.service
@@ -189,8 +185,7 @@ demo private socket rejects that topic.
 blocked subscription is reported while REST reconciliation and exchange-native
 stops keep covering open risk.
 
-Single-submitter safety (post the 2026-06-11 short-sleeve erasure): the
-order-submitting units are the long demo sleeve
+Single-submitter safety: the order-submitting units are the long demo sleeve
 (`liquidity-migration-bybit-long-demo.service`, `SUBMIT_ORDERS=1`), the
 continuous demo sleeve
 (`liquidity-migration-bybit-continuous-demo.service`, `SUBMIT_ORDERS=1`,

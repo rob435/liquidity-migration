@@ -10,10 +10,10 @@ reconcile loop, graceful shutdown, telegram) and only swaps in:
 
 The live entry profile uses confirmed-bar +1h selection. The daemon still wakes every 60s so
 protective exits, state reconciliation, and any newly eligible confirmed-bar entries are handled
-promptly, but entry membership is not the old intra-hour "No 1h" decile-cross mode.
+promptly, but entry membership is not the intra-hour decile-cross mode.
 
 Separate ledger root (`data/bybit-continuous-demo-event`) + `lm-en-c-`/`lm-ux-c-` orderLinkId prefix
-keep it fully isolated from the short and long sleeves. Demo-only.
+keep it fully isolated from other sleeve ledgers. Demo-only.
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def _message_row_count(message: Mapping[str, Any]) -> int:
 
 def _continuous_links_in_message(message: Mapping[str, Any]) -> bool:
     """True if any execution row in the message belongs to the continuous family.
-    Used by Tier 4 to nudge a state refresh only on OUR fills, not the short/long sleeves'.
+    Used by Tier 4 to nudge a state refresh only on OUR fills, not sibling sleeves'.
 
     Entry links are DECODED, not prefix-matched: the deployed ensemble profiles emit
     component-tagged links (lm-en-cp3-…, sniper lm-en-cs-…) which a literal

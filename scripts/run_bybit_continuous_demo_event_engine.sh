@@ -5,9 +5,9 @@
 # it runs is toggled per-sleeve in deploy/sleeves.env (CONTINUOUS_SLEEVE — the single
 # source of truth, don't hardcode its state here). The paper service uses the same
 # runner with SUBMIT_ORDERS=0, RECORD_DRY_RUN=1, PAPER_MODE=1. Order-link prefix lm-en-c-*
-# lets ws_risk route any continuous fills to data/bybit-continuous-demo-event. "No 1h":
-# the decile is recomputed off the live ticker price every INTERVAL_SECONDS heartbeat,
-# not gated on the hourly bar close.
+# lets ws_risk route any continuous fills to data/bybit-continuous-demo-event.
+# The daemon wakes every INTERVAL_SECONDS, but the active continuous_ensemble_v2
+# entries come from confirmed-bar +1h membership, not intra-hour live-decile membership.
 #
 # Hard gates: SUBMIT_ORDERS=1 requires CONFIRM_DEMO_ORDERS=1. Demo account only.
 # The signal needs a fresh data/bybit-continuous-demo-event/residual_momentum.parquet
@@ -34,11 +34,11 @@ LOOKBACK_DAYS="${LOOKBACK_DAYS:-45}"
 WORKERS="${WORKERS:-4}"
 MAX_ACTIVE="${MAX_ACTIVE:-25}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
-MAX_HOLD_HOURS="${MAX_HOLD_HOURS:-48}"
+MAX_HOLD_HOURS="${MAX_HOLD_HOURS:-24}"
 # Default lifecycle: 3-component ensemble, inverse-vol component sizing, daily
 # vol-target rebalance disabled, and TP/24h exits with no daemon or server stop.
 STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v2}"
-FEATURE_SET="${FEATURE_SET:-rv_168h,vov,dist_low,xsret7,xsret3}"
+FEATURE_SET="${FEATURE_SET:-max_ret168}"
 ENTRY_EVENT_TRIGGER="${ENTRY_EVENT_TRIGGER:-none}"
 # Default to the DEPLOYED gate (uptrend) so a dropped env line cannot silently
 # disable the 30d-BTC trend gate. The systemd units pin BTC_TREND_GATE explicitly;

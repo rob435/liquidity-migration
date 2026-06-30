@@ -56,13 +56,9 @@ unset GITHUB_TOKEN
 # whether the dependency manifests changed and the venv needs a pip refresh.
 previous_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
 if [ -n "$EXPECTED_COMMIT" ]; then
-  # Deploy EXACTLY the commit that triggered this run, not whatever the remote
-  # branch head is by fetch time (round 4): with the old check-after-checkout, a
-  # second push landing in the trigger->fetch window failed the run AFTER the
-  # checkout - box left disk=newer / processes=old, and if the second push was
-  # docs-only (outside the workflow paths filter) no later run ever redeployed
-  # the first commit. Each run now deploys its own SHA; a queued newer run then
-  # moves the box forward.
+  # Deploy exactly the commit that triggered this run. A queued newer run can
+  # move the box forward later; this run must not silently checkout a different
+  # branch head during the trigger->fetch window.
   if ! git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH"; then
     echo "Refusing deploy: expected commit $EXPECTED_COMMIT is not on $REMOTE/$BRANCH" >&2
     exit 1
@@ -94,8 +90,7 @@ fi
   tests/test_runtime_scripts.py \
   tests/test_promoted_profiles.py
 "$PYTHON" - <<'PY'
-# The daily-short sleeve was ERASED 2026-06-11 (operator order); the long profile
-# is the one promoted sleeve and is pinned by tests/test_promoted_profiles.py above.
+# Pin the deployed long profile; tests/test_promoted_profiles.py also covers it.
 from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 
 long_cfg = _v11a_long_native_config()
@@ -228,9 +223,8 @@ systemctl restart liquidity-migration-liquidation-collector.service
 if systemctl is-enabled --quiet liquidity-migration-depth-collector.service 2>/dev/null; then
     systemctl restart liquidity-migration-depth-collector.service
 fi
-# One-time cleanup for the ERASED daily-short sleeve (2026-06-11): stop, disable,
-# and remove its units from the host so stale enabled units can't crash-loop on a
-# deleted entrypoint.
+# Host cleanup: stop, disable, and remove retired units so stale enabled units
+# can't crash-loop on removed entrypoints.
 for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liquidity-migration-demo-health.service; do
     systemctl disable --now "$_retired" 2>/dev/null || true
     rm -f "/etc/systemd/system/$_retired"
@@ -355,8 +349,8 @@ lm_verify_resolved_sleeve_toggles
 apply_hedge_timer_enable "$_hedge_timer_state"
 
 # --- restart: only the ON sleeves (off sleeves were disable --now'd above); risk always. ---
-# Long/continuous share the liquidity_migration package with the short side, so any Python
-# change requires restarting every running sleeve to pick up the new code.
+# Long/continuous share the liquidity_migration package, so any Python change
+# requires restarting every running sleeve to pick up the new code.
 systemctl restart liquidity-migration-bybit-risk.service
 if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
 if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service; fi
@@ -404,9 +398,7 @@ fi
 verify_hedge_timer_enable "$_hedge_timer_state"
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
-# so deploys can't silently leave the watchdog or daily report off. (The
-# demo-health watchdog was erased with the short sleeve 2026-06-11 and is
-# actively removed from the host above - do not re-add checks for it.)
+# so deploys can't silently leave the watchdog or daily report off.
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
@@ -435,8 +427,8 @@ require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_th
 require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'
 require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
 require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'
-# Long sleeve assertions: the profile name is intentionally explicit so the old
-# ambiguous label cannot re-enter the live env by accident.
+# Long sleeve assertions: the profile name is intentionally explicit so the live
+# env cannot drift to an ambiguous label.
 if sleeve_on "$LONG_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'
   require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'
@@ -445,8 +437,8 @@ if sleeve_on "$LONG_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'
 fi
 # Order-submitting continuous sleeve assertions: submit-orders config + v2 no-stop lifecycle.
-# Only when the sleeve is toggled ON; a retired sleeve's file content must not be an
-# unconditional deploy gate.
+# Only when the sleeve is toggled ON; disabled unit file content must not become
+# an unconditional deploy gate.
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'STRATEGY_PROFILE=continuous_ensemble_v2'

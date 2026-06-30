@@ -1,7 +1,6 @@
 """Crypto-native long-only event sleeve — NOT derived from academic papers.
 
-Three asymmetric setups that exploit specific crypto market-structure patterns
-the (erased 2026-06-11) daily short sleeve did not cover:
+Three asymmetric setups that exploit specific crypto market-structure patterns:
 
 1. CAPITULATION_REBOUND
    Violent 5-day flush + same-day absorption + volume spike + broad-regime
@@ -726,8 +725,8 @@ def run_long_native_research(
     except Exception:  # noqa: BLE001 - rendering must not fail the run
         mtm_metadata = {}
 
-    # Equity-vs-BTC PNG mirrors the short-sleeve `volume_event_best_equity_btc.png`
-    # so operators get a comparable visual benchmark without a side-step renderer.
+    # Equity-vs-BTC PNG gives operators a comparable visual benchmark without a
+    # side-step renderer.
     # The long-only sleeve fires sparse FOMO-chase setups so the strategy line is
     # near-flat compared to BTC over the same window — that's the design (low DD,
     # uncorrelated returns). For a purer view of strategy P&L use the CSVs.

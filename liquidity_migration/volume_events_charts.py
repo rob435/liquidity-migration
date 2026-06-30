@@ -1,8 +1,4 @@
-"""Shared chart writers. Originally a slice of the volume_events hub (the daily
-SHORT engine, ERASED 2026-06-11 by operator order — `from
-liquidity_migration.volume_events import X` no longer works); this module
-survives standalone, consumed by the long/continuous report paths.
-"""
+"""Shared chart writers consumed by the long/continuous report paths."""
 
 from __future__ import annotations
 
@@ -72,9 +68,9 @@ def _write_equity_benchmark_chart(
     overlays: Sequence[OverlaySpec] | None = None,
     strategy_name: str = "Strategy",
 ) -> dict[str, Any]:
-    """Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves
+    """Write the strategy-vs-BTC equity PNG. ``png_name`` lets active sleeves
     (e.g. ``long_native``, ``continuous``) reuse this without inheriting the
-    short-sleeve filename — each sleeve drops its own ``*_equity_btc.png``
+    default filename — each sleeve drops its own ``*_equity_btc.png``
     alongside its research report. ``title``/``subtitle`` override the chart
     header (e.g. an EXPLORATORY-grade sleeve marks its curve as such).
 

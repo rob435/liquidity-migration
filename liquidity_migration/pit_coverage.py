@@ -11,9 +11,8 @@ deliberately cheap: coverage is read from the dataset's ``date=YYYY-MM-DD``
 partition directory names, so no parquet is parsed.
 
 Membership is keyed on the signal's TRADING DAY (the day whose close produced the
-signal); the gate lives in ``volume_events_pit.py`` (consumed by the surviving
-long/continuous engines — the original ``volume_events_features`` host was erased
-with the short sleeve 2026-06-11) and ``docs/pit_gate.md``. The most recent fully-closed daily bar as of ``now`` has
+signal); the gate lives in ``volume_events_pit.py`` (consumed by the active
+long/continuous engines) and ``docs/pit_gate.md``. The most recent fully-closed daily bar as of ``now`` has
 trading day ``today_utc - 1``; that is the latest trading day a daily-close signal
 can reference, so the manifest must cover at least that day for a strict reconcile.
 """
@@ -303,8 +302,7 @@ def format_coverage(status: CoverageStatus) -> str:
         )
         lines.append(
             "           or set require_full_pit_universe=False in the run config for a clearly "
-            "biased same-day diagnostic (never promotion evidence; the old "
-            "--pit-membership flag was erased with the volume-events CLI)."
+            "biased same-day diagnostic (never promotion evidence)."
         )
     if status.manifest_lag_vs_klines_days is not None and status.manifest_lag_vs_klines_days > 0:
         lines.append(

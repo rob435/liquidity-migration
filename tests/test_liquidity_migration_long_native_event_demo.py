@@ -680,10 +680,9 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
     assert "Combined book" in text
     assert "Live sleeves" in text
     assert "Continuous demo (ON)" in text
-    # 2026-06-11 erasure + 2026-06-12 operator request: the legacy short line renders
-    # ONLY while residual OPEN rows remain — a closed-only ledger shows no line (its
-    # realized PnL still counts in the tracked totals, asserted below).
-    assert "Short (erased)" not in text
+    # The compatibility short line renders only while residual OPEN rows remain;
+    # a closed-only ledger shows no line, but realized PnL still counts below.
+    assert "Short (compatibility)" not in text
     assert "Long (OFF)" in text
     # The hedge label rides the continuous toggle — never a hardcoded "DRY-RUN"
     # (the live unit ships SUBMIT_HEDGE=1; a hardcoded dry-run label misstated it).
@@ -699,10 +698,8 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
     assert "trades=0" not in text
 
 
-def test_combined_book_summary_shows_erased_short_only_while_residual_open(tmp_path: Path) -> None:
-    """The erased short's legacy line is a wind-down view: an OPEN residual row must
-    still surface (never as ON); flat/empty ledgers render nothing (operator request
-    2026-06-12 — the permanent 'Short (erased): flat $0.00' line was noise)."""
+def test_combined_book_summary_shows_compatibility_short_only_while_residual_open(tmp_path: Path) -> None:
+    """Compatibility short rows surface only while residual OPEN rows exist."""
     short_root = tmp_path / "short"
     write_dataset(
         pl.DataFrame([{
@@ -715,7 +712,7 @@ def test_combined_book_summary_shows_erased_short_only_while_residual_open(tmp_p
         short_root=short_root, long_root=None,
         now_ms=1_700_000_000_000, sleeve_states={"SHORT_SLEEVE": "off"},
     )
-    assert "Short (erased) (OFF)" in text  # residual open row: wind-down view stays
+    assert "Short (compatibility) (OFF)" in text  # residual open row: compatibility view stays
 
 
 def test_combined_book_summary_fails_open_on_missing_roots(tmp_path: Path) -> None:
@@ -1358,7 +1355,7 @@ def test_rate_limit_docstring_no_longer_overstates_cross_sleeve_protection() -> 
     doc = _long_demo_private_rest_rate_limit_per_second.__doc__ or ""
     assert "ratelimit-rest-4" in doc
     assert "per-IP" in doc  # explicitly states it is NOT a per-IP coordinator
-    assert "never gets starved" not in doc  # the stale erased-short claim is gone
+    assert "never gets starved" not in doc  # the stale claim is gone
 
 
 # --------------------------------------------------------------------------- #

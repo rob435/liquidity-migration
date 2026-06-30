@@ -21,10 +21,10 @@ FAST_EXECUTION_STREAM="${FAST_EXECUTION_STREAM:-0}"
 PENDING_EXIT_GUARD_SECONDS="${PENDING_EXIT_GUARD_SECONDS:-120}"
 EXIT_UNTRACKED_POSITIONS="${EXIT_UNTRACKED_POSITIONS:-1}"
 UNTRACKED_POSITION_GRACE_SECONDS="${UNTRACKED_POSITION_GRACE_SECONDS:-90}"
-# Dual-side support (combined-book deployment): set LONG_DATA_ROOT to the
-# long-sleeve data root (e.g. data/bybit-long-demo-event) and this single ws_risk
-# instance will read/write BOTH ledgers, routing by per-row `sleeve` column.
-# Leave empty to keep short-only behavior (legacy default).
+# Combined-book support: set LONG_DATA_ROOT to the long-sleeve data root
+# (e.g. data/bybit-long-demo-event) and this single ws_risk instance reads/writes
+# every configured ledger, routing by per-row `sleeve` column.
+# Leave empty for the single-root compatibility path.
 LONG_DATA_ROOT="${LONG_DATA_ROOT:-}"
 CONTINUOUS_DATA_ROOT="${CONTINUOUS_DATA_ROOT:-}"
 # Continuous BTC-beta hedge ledger (WP3). When set, ws_risk reads it so the hedge's

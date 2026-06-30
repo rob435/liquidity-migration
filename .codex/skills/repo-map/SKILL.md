@@ -3,19 +3,12 @@ name: repo-map
 description: "Orient in the liquidity-migration codebase: module map, core abstractions, key docs, and the graphify knowledge-graph workflow. Use when answering architecture or where-does-X-live questions, navigating modules, tracing how modules relate, or before cross-module changes."
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
-
 # Repo map
 
 A Bybit (+Binance) research codebase for the **CONTINUOUS fade book** (the live
-demo system) + the **long-native v11a sleeve** (the daily SHORT strategy was
-erased 2026-06-11; git history is the archive). Research-stage;
-promoted profiles are demo/paper only and actual running sleeves are operator-toggled
-in `deploy/sleeves.env`; never real money. Live state + what's next live in **STATE.md**;
+demo system) + the **long-native v11a sleeve**. Research-stage promoted profiles
+are demo/paper only and actual running sleeves are operator-toggled in
+`deploy/sleeves.env`; never real money. Live state + what's next live in **STATE.md**;
 the single consolidated research record is **docs/research_summary.md** — this file is
 just the map.
 
@@ -44,14 +37,12 @@ and `graphify-out/GRAPH_REPORT.md`.
   `--help` for the subcommand list).
 - `continuous_demo.py` / `continuous_demo_daemon.py` / `continuous_events.py` —
   the LIVE continuous-fade system (the demo book; sub-hourly ticker-driven).
-  (The daily SHORT engine — `volume_events.py` + `event_demo_daemon.py` — was
-  ERASED 2026-06-11 by operator order; git history is the archive.)
 - `event_demo.py` / `event_demo_exits.py` / `ws_risk.py` — shared live-execution
   helpers + the websocket-first risk watchdog (REST fallback; always-on).
 - `trade_lifecycle.py` / `_common.py` / `momentum_signals.py` — the shared
   simulate stack, date/frame utils, and the `daily_bars` / `add_returns_and_age`
-  resampling helpers that `long_native.py` uses (the rest of `momentum_signals`
-  is legacy/dead). The residual-momentum (rmom) signal is built in `risk_model.py`
+  resampling helpers that `long_native.py` uses. The residual-momentum (rmom)
+  signal is built in `risk_model.py`
   (`build_factor_panel` / `fit_factor_returns`, driven by
   `scripts/precompute_residual_momentum.py`), not here.
 - `long_native.py` — the long-native v11a sleeve (the `equity-curve` skill drives it).

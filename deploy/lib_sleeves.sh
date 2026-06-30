@@ -6,10 +6,8 @@
 
 # Space-separated unit lists per sleeve (entry/exit daemons + paper shadow). The risk service
 # is intentionally NOT here - it always runs and protects every sleeve's open positions.
-# The daily SHORT sleeve was ERASED from the system (operator order 2026-06-11);
-# its units are gone and the deploy actively removes them from a live host. The
-# old continuous-vs-daily report was later removed too; keep its orphaned unit
-# files in this cleanup list so stale VPS timers do not keep failing daily.
+# Retired units stay in this cleanup list so stale VPS timers/services do not
+# keep failing after a deploy or recovery.
 # Continuous is split: the DEMO order-submitting sleeve vs the no-order PAPER
 # evidence collector.
 RETIRED_SLEEVE_UNITS="liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service liquidity-migration-continuous-forward-report.service liquidity-migration-continuous-forward-report.timer"

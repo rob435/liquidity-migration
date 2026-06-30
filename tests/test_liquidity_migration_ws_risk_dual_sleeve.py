@@ -1,10 +1,4 @@
-"""Tests for the dual-sleeve extension of ws_risk.
-
-Per owner: ws_risk extends to handle both short and long sleeves on the same
-Bybit demo account. Reads concat both ledgers (tagged with `sleeve`); writes
-route per-row to the correct ledger; rollback path = unset long_data_root and
-behave exactly like the legacy short-only engine.
-"""
+"""Tests for the multi-ledger extension of ws_risk."""
 from __future__ import annotations
 
 import logging
@@ -61,12 +55,12 @@ def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch
     assert engine._active_sleeves() == ["long", "continuous_addon"]
     monkeypatch.setenv("CONTINUOUS_ADDON_SLEEVE", "off")
     assert engine._active_sleeves() == ["long"]
-    # the legacy escape hatch still works when set EXPLICITLY (old short-ledger adoption)
+    # the compatibility escape hatch still works when set explicitly
     monkeypatch.setenv("SHORT_SLEEVE", "on")
     assert engine._active_sleeves() == ["short", "long"]
     assert equal_split_budget(engine._active_sleeves()) == {"short": 0.5, "long": 0.5}
     monkeypatch.delenv("SHORT_SLEEVE", raising=False)
-    # also kill long ⇒ nothing active (no sleeve can claim the erased short's share)
+    # also kill long => nothing active
     monkeypatch.setenv("LONG_SLEEVE", "0")
     assert engine._active_sleeves() == []
 
@@ -78,12 +72,12 @@ def test_active_sleeves_excludes_unconfigured_roots(tmp_path: Path, monkeypatch)
         monkeypatch.delenv(var, raising=False)
     cfg = EventWebSocketRiskConfig()  # legacy-root-only (no long/continuous roots)
     engine = EventWebSocketRiskEngine(tmp_path, config=ResearchConfig(), risk_config=cfg)
-    # long/continuous have no roots; the erased short defaults OFF ⇒ nothing active.
+    # long/continuous have no roots; compatibility short defaults off => nothing active.
     assert engine._active_sleeves() == []
 
 
-def test_long_root_unset_keeps_short_only_behavior(tmp_path: Path) -> None:
-    cfg = EventWebSocketRiskConfig()  # long_data_root="" → short-only
+def test_long_root_unset_keeps_single_root_compatibility_path(tmp_path: Path) -> None:
+    cfg = EventWebSocketRiskConfig()  # long_data_root="" -> single-root compatibility path
     engine = EventWebSocketRiskEngine(tmp_path, config=ResearchConfig(), risk_config=cfg)
     assert engine.long_root is None
     rows = [{
@@ -114,14 +108,14 @@ def test_dual_root_routes_writes_to_correct_ledger(tmp_path: Path) -> None:
     assert long_ledger["trade_id"].to_list() == ["l1"]
 
 
-def test_combined_read_tags_legacy_rows_as_short(tmp_path: Path) -> None:
-    """Existing short ledgers (written before the sleeve column existed) must
+def test_combined_read_tags_compatibility_rows_as_short(tmp_path: Path) -> None:
+    """Existing compatibility rows (written before the sleeve column existed) must
     still load and be treated as short."""
     short_root = tmp_path / "short"
     long_root = tmp_path / "long"
     short_root.mkdir()
     long_root.mkdir()
-    # Legacy short rows: no sleeve column
+    # Compatibility short rows: no sleeve column
     write_dataset(
         pl.DataFrame([
             {"trade_id": "legacy-s", "symbol": "AAAUSDT", "side": "short",
@@ -221,7 +215,7 @@ def test_adopted_long_orphan_lands_in_long_ledger(tmp_path: Path) -> None:
     the resulting reduce-only exit is a Sell (not a Buy). Without sleeve
     tagging from position.side, the adopted trade defaults to short and the
     routed writer puts it in the short ledger — risking an inverted close
-    and a corrupt short-side ledger. Regression for the audit bug found
+    and a corrupt compatibility short ledger. Regression for the audit bug found
     2026-05-24 before any orphan ever appeared in the wild.
     """
     short_root = tmp_path / "short"
@@ -347,7 +341,7 @@ def test_ws_exit_propagates_sleeve_to_order_row(tmp_path: Path) -> None:
 
 def test_combined_read_handles_missing_long_dataset(tmp_path: Path) -> None:
     """If the long ledger doesn't exist yet (fresh deployment, never wrote),
-    the combined read should fail open and return short-only."""
+    the combined read should fail open and return compatibility short rows."""
     short_root = tmp_path / "short"
     long_root = tmp_path / "long"
     short_root.mkdir()
@@ -365,7 +359,7 @@ def test_combined_read_handles_missing_long_dataset(tmp_path: Path) -> None:
 
 def test_corrupt_sibling_ledger_is_isolated_not_fatal(tmp_path: Path) -> None:
     """A single SCHEMA-incompatible sibling ledger (a scalar column written as a
-    list) must NOT abort reconcile for all three sleeves. The combined read folds
+    list) must NOT abort reconcile for other books. The combined read folds
     pairwise, drops the bad frame, and still returns the healthy short rows -- and
     sets ledger_read_error so exit/adopt fail closed (independence: a fault in one
     sleeve cannot corrupt another)."""
@@ -377,7 +371,7 @@ def test_corrupt_sibling_ledger_is_isolated_not_fatal(tmp_path: Path) -> None:
         pl.DataFrame([{"trade_id": "s1", "symbol": "AAAUSDT", "status": "open", "qty": 1.0}]),
         short_root, "event_demo_trades", partition_by=(),
     )
-    # `qty` written as a List (nested vs the short sleeve's scalar f64) -> a plain
+    # `qty` written as a List (nested vs the compatibility sleeve's scalar f64) -> a plain
     # diagonal_relaxed concat raises SchemaError; a String would coerce and not
     # reproduce the cross-sleeve crash.
     write_dataset(
@@ -387,7 +381,7 @@ def test_corrupt_sibling_ledger_is_isolated_not_fatal(tmp_path: Path) -> None:
     cfg = EventWebSocketRiskConfig(continuous_data_root=str(cont_root))
     engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
     combined = engine._read_trades_combined()  # must NOT raise
-    assert "s1" in combined["trade_id"].to_list(), "healthy short sleeve must survive a corrupt sibling"
+    assert "s1" in combined["trade_id"].to_list(), "healthy compatibility sleeve must survive a corrupt sibling"
     assert engine.state.ledger_read_error, "a dropped corrupt sibling must flag fail-closed"
 
 

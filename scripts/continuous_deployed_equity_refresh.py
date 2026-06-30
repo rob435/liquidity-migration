@@ -3,9 +3,10 @@
 
 Re-runs the EXACT frozen continuous_ensemble_v2 component configs (loaded from the
 2026-06-07 source receipts; only `end_date` is overridden) against the
-refreshed per-venue full-PIT roots, then reproduces the deployed book —
-continuous_ensemble_v2 3-component ensemble @ w90/tv0.045/max4/ddh-0.04 + banked 2f
-BTC+ETH hedge — and the official strategy-vs-BTC chart.
+refreshed per-venue full-PIT roots, then reproduces the deployed book:
+continuous_ensemble_v2 three-component inverse-vol ensemble with daily rebalance
+disabled, retained rebalance params w90/tv0.045/max4/ddh-0.04, and the banked 2f
+BTC+ETH hedge. It also writes the official strategy-vs-BTC chart.
 
 IN-SAMPLE RESEARCH refresh (data-boundary extension, zero parameter changes;
 the window is spent; forward demo is the arbiter) — not a promotion claim.

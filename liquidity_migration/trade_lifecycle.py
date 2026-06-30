@@ -772,9 +772,7 @@ def _empty_baskets() -> pl.DataFrame:
     )
 
 
-# --- shared indexed-bar simulation core (relocated from volume_events.py when the
-# daily-short research engine was erased, operator order 2026-06-11; used by the
-# continuous engine and any future event-trade simulation) ---
+# --- shared indexed-bar simulation core for event-trade simulation ---
 
 def _indexed_price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, Any]]:
     # Wraps the per-symbol parallel arrays from _price_bars_by_symbol with an
@@ -1066,6 +1064,5 @@ def _stop_fill_price(
 def _has_columns(frame: pl.DataFrame, *columns: str) -> bool:
     available = set(frame.columns)
     return all(column in available for column in columns)
-
 
 

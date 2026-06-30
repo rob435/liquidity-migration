@@ -11,6 +11,6 @@ __version__ = "0.1.0"
 # importing a SIBLING first in a fresh process deadlocks on the partially-
 # initialized hub. Preloading the hub here guarantees it finishes initializing
 # before any sibling can be imported standalone.
-# (The volume_events hub — the retired daily-short research engine — was erased
-# by operator order 2026-06-11; shared helpers moved to trade_lifecycle/_common.)
+# Shared helpers that used to live in larger strategy hubs now live in
+# trade_lifecycle/_common.
 from . import event_demo as _event_demo  # noqa: E402,F401

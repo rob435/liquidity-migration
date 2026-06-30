@@ -285,10 +285,8 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
 
 
 def test_committed_sleeves_env_long_and_continuous_on() -> None:
-    # The committed file is the source of truth. 2026-06-16 operator instruction: LONG
-    # re-enabled (demo diversifier on the shared demo account) alongside the continuous
-    # demo + paper sleeves. 2026-06-11: the daily-short sleeve was ERASED — no SHORT
-    # toggles remain. Each line must be systemd-EnvironmentFile-safe (plain KEY=value,
+    # The committed file is the source of truth. LONG runs alongside continuous
+    # demo + paper. Each line must be systemd-EnvironmentFile-safe (plain KEY=value,
     # no inline comment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {

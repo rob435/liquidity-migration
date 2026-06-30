@@ -2,10 +2,8 @@
 """Three-way demo<->backtest<->paper reconciliation for the LONG (v11a) and
 CONTINUOUS (fade) sleeves.
 
-This rebuilds the backtest leg that was removed with the erased daily-SHORT
-sleeve (operator order 2026-06-11; see docs/pit_gate.md). The two-way
-``scripts/reconcile.py`` covers demo<->paper (execution slippage). This driver
-adds the third corner — the model — so we can answer "does a backtest, run on
+The two-way ``scripts/reconcile.py`` covers demo<->paper execution slippage.
+This driver adds the third corner — the model — so we can answer "does a backtest, run on
 freshly-downloaded point-in-time data over the live forward window, agree with
 what the demo and paper books actually did?".
 

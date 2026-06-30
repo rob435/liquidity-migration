@@ -53,8 +53,8 @@ def adopt_strategy_id_for_sleeve(risk: Any, sleeve: str) -> str:
 
         return risk.adopt_continuous_addon_strategy_id or CONTINUOUS_ADDON_STRATEGY_ID
     if sleeve == "short":
-        # The daily-short sleeve was erased (operator order 2026-06-11). Legacy
-        # rows can still be recovered, but only with an explicitly configured ID.
+        # Compatibility rows can still be recovered, but only with an explicitly
+        # configured ID.
         return risk.adopt_short_strategy_id or ""
     return ""
 

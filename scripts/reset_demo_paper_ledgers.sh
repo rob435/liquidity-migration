@@ -18,10 +18,8 @@
 # wipe), so the decision is auditable and reversible. If the archive step fails,
 # nothing is removed.
 #
-# This is a DATA operation on the VPS - it is NOT run by CI. (The old runbook
-# docs/event_demo_daemon.md was erased with the short sleeve 2026-06-11; git
-# history is the archive.) The daemons recreate the emptied datasets on their
-# next cycle.
+# This is a DATA operation on the VPS - it is NOT run by CI. The daemons
+# recreate the emptied datasets on their next cycle.
 #
 # Usage (run from the repo root, e.g. /opt/liquidity-migration):
 #   scripts/reset_demo_paper_ledgers.sh --dry-run      # preview, touches nothing

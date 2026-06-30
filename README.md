@@ -1,13 +1,12 @@
 # liquidity-migration
 
-Research and demo/paper execution code for two remaining crypto-perp systems:
+Research and demo/paper execution code for two crypto-perp systems:
 
 - `continuous_ensemble_v2`: continuous fade book.
 - `LongV11aDivWeekendVol`: long-native v11a sleeve.
 
-The old daily short sleeve is gone; git history is the archive. The runtime
-surface defaults to demo/paper. Mainnet use requires an explicit owner action
-and a fresh evidence pack.
+The runtime surface defaults to demo/paper. Mainnet use requires an explicit
+owner action and a fresh evidence pack.
 
 ## Read First
 

@@ -28,8 +28,8 @@ Environment=FAST_EXECUTION_STREAM=0
 # sleeve/addon ledgers and routes WS fills per the per-row sleeve column. Owner
 # picked "extend ws_risk to handle all sides" over running multiple risk processes.
 Environment=LONG_DATA_ROOT=data/bybit-long-demo-event
-# Continuous-fade sleeve (3rd, also short-direction): this single risk service must ALSO
-# read its ledger, else any legacy/future continuous positions look untracked and get
+# Continuous-fade sleeve (short-direction): this single risk service must ALSO
+# read its ledger, else any continuous positions look untracked and get
 # flattened. Keep wired whenever the continuous sleeve can submit or has live positions.
 Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event
 # Continuous BTC-beta hedge ledger (WP3): the risk service reads it so the hedge's
