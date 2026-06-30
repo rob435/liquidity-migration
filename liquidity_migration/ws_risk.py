@@ -26,6 +26,7 @@ from .event_demo import (
     _active_position_by_symbol,
     _bool,
     _build_private_client,
+    _combine_errors,
     _column_values,
     _decimal_text,
     _empty_trades,
@@ -293,6 +294,13 @@ class WebSocketRiskState:
     # so a transient REST failure -- which leaves ``positions_by_symbol``
     # empty -- does not false-positive orphan-close every open trade.
     last_position_error: str = ""
+    # Current private snapshot / stream errors for operator-facing health.
+    # ``errors`` is append-only audit history; these latches clear on the next
+    # successful read/reconnect so stale 401s do not keep paging as current.
+    last_open_order_error: str = ""
+    last_wallet_error: str = ""
+    last_private_stream_error: str = ""
+    last_public_stream_error: str = ""
     ws_order_unavailable: str = ""
     # Non-empty when a configured sibling-sleeve ledger READ raised this
     # reconcile pass (a torn/corrupt parquet or I/O error -- NOT a merely
@@ -505,6 +513,7 @@ class EventWebSocketRiskEngine:
         )
         if error:
             self.state.errors.append(error)
+            self.state.last_private_stream_error = error
             return
         self.private_stream = new_stream
         _, sub_error = _call_with_timeout(
@@ -517,6 +526,7 @@ class EventWebSocketRiskEngine:
             # live but feeds nothing; tear it back down and keep retrying so we
             # don't sit on a subscribe-less stream that looks healthy.
             self.state.errors.append(sub_error)
+            self.state.last_private_stream_error = sub_error
             try:
                 new_stream.close()
             except Exception:  # noqa: BLE001 - close errors must not break reconcile
@@ -525,6 +535,7 @@ class EventWebSocketRiskEngine:
             self._private_disconnected_since = now
             return
         # Replacement is fully live and subscribed: clear the owed-rebuild latch.
+        self.state.last_private_stream_error = ""
         self._private_rebuild_pending = False
         self._private_disconnected_since = None
 
@@ -583,8 +594,10 @@ class EventWebSocketRiskEngine:
         )
         if error:
             self.state.errors.append(error)
+            self.state.last_public_stream_error = error
             return
         self.public_stream = stream
+        self.state.last_public_stream_error = ""
         self._public_stream_built_monotonic = now
         self._public_rebuild_pending = False
         self._public_resubscribe = set()
@@ -794,10 +807,13 @@ class EventWebSocketRiskEngine:
         if client is None:
             return 0.0
         try:
-            return wallet_equity_usdt(
+            equity = wallet_equity_usdt(
                 client.get_wallet_balance(account_type=self.risk.account_type, coin=self.risk.settle_coin)
             )
+            self.state.last_wallet_error = ""
+            return equity
         except Exception as exc:  # noqa: BLE001 - wallet read must never break reconcile
+            self.state.last_wallet_error = str(exc)[:500]
             _logger.warning("ws_risk: cross-sleeve equity read failed: %s", exc)
             return 0.0
 
@@ -998,6 +1014,7 @@ class EventWebSocketRiskEngine:
             )
             if error:
                 self.state.errors.append(error)
+                self.state.last_private_stream_error = error
             else:
                 self.private_stream = stream
         if self.private_stream is not None:
@@ -1008,6 +1025,9 @@ class EventWebSocketRiskEngine:
             )
             if error:
                 self.state.errors.append(error)
+                self.state.last_private_stream_error = error
+            else:
+                self.state.last_private_stream_error = ""
         if self.public_stream is None:
             stream, error = _call_with_timeout(
                 "public ticker websocket stream construction",
@@ -1020,8 +1040,10 @@ class EventWebSocketRiskEngine:
             )
             if error:
                 self.state.errors.append(error)
+                self.state.last_public_stream_error = error
             else:
                 self.public_stream = stream
+                self.state.last_public_stream_error = ""
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
         # audit2c: anchor the public-WS health "built" timestamp to the ACTUAL stream
         # construction + first subscription here, not to __init__. The watchdog
@@ -1073,7 +1095,9 @@ class EventWebSocketRiskEngine:
         )
         if error:
             self.state.errors.append(error)
+            self.state.last_public_stream_error = error
             return
+        self.state.last_public_stream_error = ""
         self.state.subscribed_symbols.update(missing)
 
     def _assert_consumer_thread(self) -> None:
@@ -2437,7 +2461,9 @@ class EventWebSocketRiskEngine:
             open_orders, error = _safe_open_orders(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
+            self.state.last_open_order_error = error
             return False
+        self.state.last_open_order_error = ""
         self.state.live_entry_order_symbols = _live_open_order_symbols(open_orders, reduce_only=False)
         self.state.live_exit_order_symbols = _live_open_order_symbols(open_orders, reduce_only=True)
         return True
@@ -2738,6 +2764,7 @@ class EventWebSocketRiskEngine:
             and str(row.get("symbol", "")) not in open_symbols
             and str(row.get("symbol", "")) not in self.state.pending_entry_symbols
         ]
+        position_report_error = self._current_position_report_error()
         cycle = {
             "cycle_id": f"ws-risk-{now_ms}",
             "ts_ms": now_ms,
@@ -2770,7 +2797,7 @@ class EventWebSocketRiskEngine:
             "ledger_position_value_usdt": ledger_summary["position_value_usdt"],
             "ledger_unrealized_pnl_usdt": ledger_summary["unrealized_pnl_usdt"],
             "ledger_position_pnl_pct": ledger_summary["pnl_pct"],
-            "position_report_error": "; ".join(self.state.errors[-3:]),
+            "position_report_error": position_report_error,
             "untracked_positions": len(untracked_positions),
             "ws_order_unavailable": self.state.ws_order_unavailable,
             "ledger_read_error": self.state.ledger_read_error,
@@ -2828,6 +2855,19 @@ class EventWebSocketRiskEngine:
         latest_md_path.write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
         self.state.last_report_monotonic = time.monotonic()
         return payload
+
+    def _current_position_report_error(self) -> str:
+        private_connected = self._private_stream_connected()
+        private_stream_error = self.state.last_private_stream_error
+        if private_connected is False and not private_stream_error:
+            private_stream_error = "private websocket disconnected"
+        return _combine_errors(
+            self.state.last_position_error,
+            self.state.last_open_order_error,
+            self.state.last_wallet_error,
+            private_stream_error,
+            self.state.last_public_stream_error,
+        )
 
     def _telegram_sender_loop(self) -> None:
         """Background daemon: drain (dedupe_key, pre-rendered text) pairs and do the

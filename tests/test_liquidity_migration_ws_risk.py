@@ -140,6 +140,9 @@ class FakePrivateClient:
             return [row for row in self.open_orders if str(row.get("symbol") or "") == symbol]
         return self.open_orders
 
+    def get_wallet_balance(self, *, account_type: str = "UNIFIED", coin: str = "USDT"):
+        return {"list": [{"totalEquity": "10000"}]}
+
     def place_order(self, **params):
         if self.fail_order:
             raise RuntimeError("rest order rejected")
@@ -2725,7 +2728,7 @@ def test_ws_risk_telegram_dedupe_survives_restart(tmp_path: Path, monkeypatch) -
         private_stream=FakePrivateStream(),
         public_stream=FakePublicStream(),
     )
-    first_engine.state.errors.append("position snapshot failed")
+    first_engine.state.last_position_error = "position snapshot failed"
     first = first_engine.write_report(reason="heartbeat")
 
     second_engine = EventWebSocketRiskEngine(
@@ -2736,7 +2739,7 @@ def test_ws_risk_telegram_dedupe_survives_restart(tmp_path: Path, monkeypatch) -
         private_stream=FakePrivateStream(),
         public_stream=FakePublicStream(),
     )
-    second_engine.state.errors.append("position snapshot failed")
+    second_engine.state.last_position_error = "position snapshot failed"
     second = second_engine.write_report(reason="heartbeat")
 
     dedupe_path = tmp_path / "reports" / "event-risk-ws" / "telegram_dedupe_keys.json"
@@ -2838,7 +2841,7 @@ def test_ws_risk_material_heartbeat_keeps_timestamped_audit_copy(tmp_path: Path)
         private_stream=FakePrivateStream(),
         public_stream=FakePublicStream(),
     )
-    engine.state.errors.append("position snapshot failed")
+    engine.state.last_position_error = "position snapshot failed"
 
     payload = engine.write_report(reason="heartbeat")
 
@@ -4139,6 +4142,40 @@ def test_transient_get_positions_failure_does_not_orphan_close_open_trades(tmp_p
     assert engine.state.open_trades.height == 1, "the open trade must survive the failed fetch"
     assert engine.state.last_position_error, "the positions error must be recorded"
     assert engine.state.reconciliations == [], "no false reconciliation rows"
+
+
+def test_position_report_error_clears_after_clean_rest_snapshot(tmp_path: Path) -> None:
+    """A transient private REST failure must stay in audit history but stop
+    paging once a later positions snapshot succeeds."""
+    private_client = FakePrivateClient(fail_positions=True, positions=[])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            adopt_untracked_positions=False,
+            exit_untracked_positions=False,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    engine.rest_reconcile()
+    failed = engine.write_report(reason="heartbeat")
+    assert "get_positions timeout" in failed["cycle"]["position_report_error"]
+
+    private_client.fail_positions = False
+    engine.rest_reconcile()
+    recovered = engine.write_report(reason="heartbeat")
+
+    assert recovered["cycle"]["position_report_error"] == ""
+    assert any("get_positions timeout" in err for err in engine.state.errors)
 
 
 def test_empty_but_successful_positions_snapshot_does_not_orphan_close(tmp_path: Path) -> None:
