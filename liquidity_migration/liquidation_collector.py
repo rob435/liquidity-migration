@@ -45,7 +45,9 @@ _logger = logging.getLogger(__name__)
 
 BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_INSTRUMENTS = "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000"
-BINANCE_WS = "wss://fstream.binance.com/ws/!forceOrder@arr"
+# Binance's 2026 futures WebSocket split moved liquidation streams to /market.
+# The legacy /ws endpoint still handshakes but no longer pushes this market feed.
+BINANCE_WS = "wss://fstream.binance.com/market/ws/!forceOrder@arr"
 BYBIT_TOPICS_PER_SUBSCRIBE = 10
 # Force a clean reconnect once a connection is this old. The bybit leg
 # subscribes a symbol list fetched once per connection, so a weeks-long healthy

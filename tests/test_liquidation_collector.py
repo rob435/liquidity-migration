@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from liquidity_migration.liquidation_collector import (
+    BINANCE_WS,
     MAX_CONNECTION_AGE_SECONDS,
     JsonlDayWriter,
     connection_expired,
@@ -15,6 +16,11 @@ from liquidity_migration.liquidation_collector import (
 )
 
 RECV = 1_765_000_000_000  # 2025-12-06ish UTC
+
+
+def test_binance_force_order_uses_market_websocket_route() -> None:
+    """Binance forceOrder is a market stream; legacy /ws connects but emits no rows."""
+    assert BINANCE_WS == "wss://fstream.binance.com/market/ws/!forceOrder@arr"
 
 
 def test_parse_bybit_event_list_and_dict_shapes() -> None:
