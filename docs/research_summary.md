@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated: 2026-06-30.
+Updated: 2026-07-02.
 
 This is the durable decision log. Historical receipts live in git history and
 `docs/preregistration/INDEX.md`.
@@ -248,6 +248,11 @@ Closed long research:
 - Binance daily Vision kline/manifest coverage is current; June-tail funding is
   sparse for many manifest symbols, but refreshed long trades use modeled
   funding.
+- VPS forward capture is Bybit-only for live liquidation `allLiquidation` rows
+  and hourly order-book depth bands. The short-lived
+  `data/liquidations/binance` capture from 2026-07-02 is historical residue, not
+  an active feed; the Binance liquidation leg is retired and excluded from
+  liveness freshness checks.
 - Reconciliation now runs from Windows with UTF-8 Python I/O and SCP fallback
   when `rsync` is absent.
 - Latest full three-way reconcile found no unexplained drift and no active

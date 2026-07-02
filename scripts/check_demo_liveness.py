@@ -607,53 +607,36 @@ def _venue_newest_mtime_ms(venue_dir: Path) -> int:
 def gather_liquidation_capture_alerts(
     *, liquidations_root: Path, now_ms: int, max_age_hours: float
 ) -> list[Alert]:
-    """Freshness of the forward liquidation capture, checked PER VENUE.
+    """Freshness of the forward Bybit liquidation capture.
 
     The collector unit can never reach systemd "failed" (Restart=always with
     RestartSec=15 spaces starts beyond the default start-limit window), so a
     crash-looping or hung-but-connected collector loses unbuyable history silently
     forever (audit 2026-06-12 round 3).
 
-    A whole-root newest-mtime check is NOT enough: with two venues (bybit + binance)
-    a healthy bybit leg keeps the root mtime fresh and MASKS a binance leg that
-    connected but then went silent — exactly the 2026-06-10 incident the per-venue
-    write counter was added for (audit 2026-06-12 round 4). So freshness is evaluated
-    independently for EACH venue subdir that has ever written: a venue that produced
-    data before and is now stale pages a per-venue WARNING (key
-    ``liquidation_capture_stale:<venue>``) even while another venue streams. A venue
-    that has NEVER written (no subdir / no files — the region-blocked binance leg
-    pending a permitted-region host, STATE.md) contributes nothing and is NOT alarmed,
-    preserving the documented "region-quiet != broken" distinction. If EVERY venue
-    that has written goes stale, each pages its own per-venue WARNING, so the
-    all-venues-stopped case is still covered; a fresh box that has never written
-    anything emits nothing (the unit check covers a dead service)."""
+    Binance forward liquidation capture was removed from the deployed collector.
+    Old ``data/liquidations/binance`` files may remain on disk as historical data,
+    but they are intentionally ignored here. Freshness is checked only for Bybit,
+    the currently deployed venue. A fresh box that has never written anything emits
+    nothing (the unit check covers a dead service)."""
     if not liquidations_root.exists():
         return []
-    try:
-        venue_dirs = sorted(d for d in liquidations_root.iterdir() if d.is_dir())
-    except OSError:
-        venue_dirs = []
-    venue_mtimes = {d.name: _venue_newest_mtime_ms(d) for d in venue_dirs}
-    written_mtimes = {v: m for v, m in venue_mtimes.items() if m > 0}
-    if not written_mtimes:
+    bybit_mtime_ms = _venue_newest_mtime_ms(liquidations_root / "bybit")
+    if bybit_mtime_ms <= 0:
         return []  # nothing ever captured here (fresh box) — the unit check covers a dead service
-    alerts: list[Alert] = []
-    # Per-venue: a venue that HAS written before but has now gone stale is a silent
-    # leg, even if a sibling venue keeps the root fresh.
-    for venue, mtime_ms in sorted(written_mtimes.items()):
-        age_h = (now_ms - mtime_ms) / 3_600_000.0
-        if age_h > max_age_hours:
-            alerts.append(Alert(
-                key=f"liquidation_capture_stale:{venue}",
-                severity=WARNING,
-                message=(
-                    f"liquidation capture STALE for venue '{venue}' — newest JSONL {age_h:.1f}h old "
-                    f"(> {max_age_hours:.0f}h) while the leg has written before. The collector is "
-                    f"alive-but-not-writing for this venue (it cannot reach systemd 'failed'); check "
-                    f"its journal. Every silent hour is forward history lost."
-                ),
-            ))
-    return alerts
+    age_h = (now_ms - bybit_mtime_ms) / 3_600_000.0
+    if age_h > max_age_hours:
+        return [Alert(
+            key="liquidation_capture_stale:bybit",
+            severity=WARNING,
+            message=(
+                f"Bybit liquidation capture STALE — newest JSONL {age_h:.1f}h old "
+                f"(> {max_age_hours:.0f}h). The collector is alive-but-not-writing "
+                f"(it cannot reach systemd 'failed'); check its journal. Every silent "
+                f"hour is forward history lost."
+            ),
+        )]
+    return []
 
 
 def gather_depth_capture_alerts(
@@ -881,7 +864,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="continuous hedge addon root; paged CRITICAL when it holds an open hedge leg while the "
                         "hedge timer is disabled (orphaned stopless position) ('' to skip)")
     p.add_argument("--liquidations-root", default=_default_root("data/liquidations"),
-                   help="forward liquidation-capture root for the newest-JSONL freshness check ('' to skip)")
+                   help="forward Bybit liquidation-capture root for the newest-JSONL freshness check ('' to skip)")
     p.add_argument("--max-liquidation-age-hours", type=float, default=3.0,
                    help="warn if the newest captured liquidation JSONL is older than this")
     p.add_argument("--depth-root", default=_default_root("data/depth"),

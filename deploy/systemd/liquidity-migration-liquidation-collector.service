@@ -1,5 +1,5 @@
 [Unit]
-Description=Live liquidation collectors (Bybit allLiquidation + Binance forceOrder; append-only JSONL, no order path)
+Description=Live Bybit liquidation collector (allLiquidation; append-only JSONL, no order path)
 After=network-online.target
 Wants=network-online.target
 # [Unit]-section options since systemd 230 — in [Service] they are ignored.

@@ -9,9 +9,9 @@ The deployable VPS units are:
 - `liquidity-migration-bybit-continuous-demo.service`: continuous-fade demo runner.
 - `liquidity-migration-bybit-continuous-paper.service`: no-order continuous evidence
   collector.
-- `liquidity-migration-liquidation-collector.service`: always-on live liquidation
-  collectors (Bybit `allLiquidation` + Binance `forceOrder`; append-only JSONL, no
-  order path). Enabled by the deploy.
+- `liquidity-migration-liquidation-collector.service`: always-on live Bybit
+  liquidation collector (`allLiquidation`; append-only JSONL, no order path).
+  Enabled by the deploy.
 - `liquidity-migration-depth-collector.service`: Bybit forward order-book depth
   collector (hourly band snapshots; public REST, append-only JSONL, no order path).
   Built but **NOT auto-enabled** — operator-gated (`systemctl enable --now

@@ -1,12 +1,12 @@
-"""Live liquidation collectors — Bybit allLiquidation + Binance forceOrder (P3, 2026-06-10).
+"""Live liquidation collector — Bybit allLiquidation (P3, 2026-06-10).
 
-Raw liquidation HISTORY is unbuyable (Binance deleted its Vision archive, Bybit never
-published one, third-party archives gap our window), so forward collection is the only
-way this data will ever exist. Two append-only WS listeners writing one JSONL file per
-venue per UTC day under ``data/liquidations/{venue}/{YYYY-MM-DD}.jsonl``. NO order
-path, no credentials, public streams only. Known stream caveat (recorded in the
-scoping note): both venues sample/throttle their public liquidation broadcasts, so
-this is a FLOOR on liquidation activity — still the best obtainable signal.
+Raw Bybit liquidation history is unbuyable (Bybit never published one, third-party
+archives gap our window), so forward collection is the only way this data will ever
+exist. One append-only WS listener writes one JSONL file per UTC day under
+``data/liquidations/bybit/{YYYY-MM-DD}.jsonl``. NO order path, no credentials,
+public streams only. Known stream caveat (recorded in the scoping note): public
+liquidation broadcasts are sampled/throttled, so this is a FLOOR on liquidation
+activity — still the best obtainable signal for the deployed venue.
 
     .venv/bin/python -m liquidity_migration.liquidation_collector --root data/liquidations
 
@@ -15,19 +15,15 @@ venue reports them, NOT normalized — so the eventual P12 calibration consumer 
 read this note):
 
   * recv_ms : int  — local receive wall-clock ms (used for UTC-day file rotation).
-  * venue   : str  — "bybit" | "binance".
+  * venue   : str  — "bybit".
   * symbol  : str  — venue-native perp symbol (e.g. "BTCUSDT").
-  * side    : str  — RAW, per-venue casing AND semantics:
-      - bybit:   d["S"] is title-case "Buy"/"Sell" = the side of the LIQUIDATED order.
-      - binance: o["S"] is upper-case "BUY"/"SELL" = the side of the liquidation
-                 (forceOrder); "SELL" means a LONG was liquidated, "BUY" a short.
-    A consumer normalizing on, e.g., side == "Buy" would silently miss every binance
-    row — lower-case and reconcile the per-venue meaning before deriving any feature.
+  * side    : str  — RAW, title-case "Buy"/"Sell" from d["S"], the side of the
+                LIQUIDATED order.
   * qty     : float — base-asset size; only qty > 0 rows are kept.
-  * price   : float — bybit "p"; binance "ap" (avg fill) else "p" fallback. Only
-                price > 0 rows are kept, so notional (qty * price) is never polluted
-                by a zero-price row (audit 2026-06-12 round 4).
-  * ts_ms   : int  — venue event time (bybit "T"; binance "T" else "E" else recv_ms).
+  * price   : float — bybit "p". Only price > 0 rows are kept, so notional
+                (qty * price) is never polluted by a zero-price row
+                (audit 2026-06-12 round 4).
+  * ts_ms   : int  — venue event time (bybit "T" else recv_ms).
 """
 
 from __future__ import annotations
@@ -45,9 +41,6 @@ _logger = logging.getLogger(__name__)
 
 BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_INSTRUMENTS = "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000"
-# Binance's 2026 futures WebSocket split moved liquidation streams to /market.
-# The legacy /ws endpoint still handshakes but no longer pushes this market feed.
-BINANCE_WS = "wss://fstream.binance.com/market/ws/!forceOrder@arr"
 BYBIT_TOPICS_PER_SUBSCRIBE = 10
 # Force a clean reconnect once a connection is this old. The bybit leg
 # subscribes a symbol list fetched once per connection, so a weeks-long healthy
@@ -105,34 +98,6 @@ def parse_bybit_event(msg: dict[str, Any], recv_ms: int) -> list[dict[str, Any]]
     return [r for r in rows if r["symbol"] and r["qty"] > 0.0 and r["price"] > 0.0]
 
 
-def parse_binance_event(msg: dict[str, Any], recv_ms: int) -> list[dict[str, Any]]:
-    """Rows from a Binance UM ``!forceOrder@arr`` message (single or list shape)."""
-    events = msg if isinstance(msg, list) else [msg]
-    rows = []
-    for e in events:
-        if not isinstance(e, dict) or e.get("e") != "forceOrder":
-            continue
-        o = e.get("o") or {}
-        try:
-            rows.append({
-                "recv_ms": recv_ms,
-                "venue": "binance",
-                "symbol": str(o.get("s", "")),
-                "side": str(o.get("S", "")),
-                "qty": float(o.get("q", 0.0)),
-                # ap (avg fill) else p fallback. A string "0"/"0.00" ap is TRUTHY,
-                # so `o.get("ap") or o.get("p")` would keep the zero ap and never
-                # fall back; parse numerically and fall back only when ap is not > 0.
-                "price": (float(o.get("ap") or 0.0) or float(o.get("p") or 0.0)),
-                "ts_ms": int(o.get("T", e.get("E", recv_ms))),
-            })
-        except (TypeError, ValueError):
-            continue
-    # Drop zero/negative price (see parse_bybit_event): protects the consumer's
-    # notional aggregations from a missing/garbage avg-price field.
-    return [r for r in rows if r["symbol"] and r["qty"] > 0.0 and r["price"] > 0.0]
-
-
 class JsonlDayWriter:
     """Thread-safe append-only writer, one file per venue per UTC day."""
 
@@ -140,10 +105,8 @@ class JsonlDayWriter:
         self.root = Path(root)
         self._lock = threading.Lock()
         self.written = 0
-        # Per-venue counts so the alive heartbeat can show a SILENT leg (a venue
-        # stuck at 0 while the other streams) — a totals-only counter hid exactly
-        # that on 2026-06-10 (binance leg quiet for 70+ min, indistinguishable
-        # from healthy in the journal).
+        # Per-venue counts keep the alive heartbeat explicit even though the
+        # deployed collector is currently Bybit-only.
         self.written_by_venue: dict[str, int] = {}
         # Rows lost to writer OSErrors (disk full / permissions). Counted, not
         # raised: an OSError previously propagated into websocket-client's
@@ -298,47 +261,10 @@ def _run_bybit(writer: JsonlDayWriter, stop: threading.Event) -> None:
             time.sleep(10)
 
 
-def _run_binance(writer: JsonlDayWriter, stop: threading.Event) -> None:
-    import websocket
-
-    while not stop.is_set():
-        try:
-            def on_message(_ws: Any, message: str) -> None:
-                try:
-                    writer.write(parse_binance_event(json.loads(message), now_ms()))
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    pass
-
-            # Connection-state logging is load-bearing here: run_forever returns
-            # (rather than raises) on a refused/dropped connection, so without
-            # these handlers a permanently-failing leg retried SILENTLY forever
-            # and the journal showed nothing — observed 2026-06-10 while
-            # diagnosing a zero-row binance leg.
-            def on_open(_ws: Any) -> None:
-                _logger.info("binance collector: connected to %s", BINANCE_WS)
-
-            def on_error(_ws: Any, error: Any) -> None:
-                _logger.warning("binance collector ws error: %s", error)
-
-            def on_close(_ws: Any, status_code: Any, msg: Any) -> None:
-                _logger.warning("binance collector ws closed (code=%s msg=%s)", status_code, msg)
-
-            ws = websocket.WebSocketApp(
-                BINANCE_WS, on_message=on_message, on_open=on_open,
-                on_error=on_error, on_close=on_close,
-            )
-            ws.run_forever(ping_interval=180, ping_timeout=30)
-        except Exception:  # noqa: BLE001
-            _logger.exception("binance collector error; reconnecting")
-        if not stop.is_set():
-            time.sleep(10)
-
-
 def build_arg_parser() -> argparse.ArgumentParser:
     # Exposed for the unit↔argparse parity test (unit ExecStart args must parse).
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="data/liquidations")
-    ap.add_argument("--venues", default="bybit,binance")
     return ap
 
 
@@ -347,12 +273,8 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     writer = JsonlDayWriter(Path(args.root))
     stop = threading.Event()
-    threads = []
-    venues = {v.strip() for v in args.venues.split(",") if v.strip()}
-    if "bybit" in venues:
-        threads.append(threading.Thread(target=_run_bybit, args=(writer, stop), daemon=True, name="bybit-liq"))
-    if "binance" in venues:
-        threads.append(threading.Thread(target=_run_binance, args=(writer, stop), daemon=True, name="binance-liq"))
+    venues = {"bybit"}
+    threads = [threading.Thread(target=_run_bybit, args=(writer, stop), daemon=True, name="bybit-liq")]
     for t in threads:
         t.start()
     try:

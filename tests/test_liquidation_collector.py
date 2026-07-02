@@ -7,20 +7,13 @@ import time
 from pathlib import Path
 
 from liquidity_migration.liquidation_collector import (
-    BINANCE_WS,
     MAX_CONNECTION_AGE_SECONDS,
     JsonlDayWriter,
     connection_expired,
-    parse_binance_event,
     parse_bybit_event,
 )
 
 RECV = 1_765_000_000_000  # 2025-12-06ish UTC
-
-
-def test_binance_force_order_uses_market_websocket_route() -> None:
-    """Binance forceOrder is a market stream; legacy /ws connects but emits no rows."""
-    assert BINANCE_WS == "wss://fstream.binance.com/market/ws/!forceOrder@arr"
 
 
 def test_parse_bybit_event_list_and_dict_shapes() -> None:
@@ -37,22 +30,6 @@ def test_parse_bybit_event_list_and_dict_shapes() -> None:
     assert parse_bybit_event({"topic": "tickers.BTCUSDT", "data": []}, RECV) == []
 
 
-def test_parse_binance_event_single_and_array() -> None:
-    e = {"e": "forceOrder", "E": 100,
-         "o": {"s": "BBBUSDT", "S": "Sell", "q": "10", "ap": "3.2", "p": "3.1", "T": 99}}
-    rows = parse_binance_event(e, RECV)
-    assert len(rows) == 1
-    r = rows[0]
-    assert (r["venue"], r["symbol"], r["side"]) == ("binance", "BBBUSDT", "Sell")
-    assert r["qty"] == 10.0 and r["price"] == 3.2 and r["ts_ms"] == 99
-    assert parse_binance_event([e, e], RECV) and len(parse_binance_event([e, e], RECV)) == 2
-    assert parse_binance_event({"e": "aggTrade"}, RECV) == []
-    # falls back to mark/last price p when ap missing; zero-qty dropped
-    e2 = {"e": "forceOrder", "o": {"s": "C", "S": "Buy", "q": "1", "p": "5", "T": 7}}
-    assert parse_binance_event(e2, RECV)[0]["price"] == 5.0
-    assert parse_binance_event({"e": "forceOrder", "o": {"s": "C", "S": "Buy", "q": "0", "p": "5"}}, RECV) == []
-
-
 def test_writer_rotates_by_utc_day_and_venue(tmp_path) -> None:
     w = JsonlDayWriter(tmp_path)
     day1 = 1_765_000_000_000
@@ -60,12 +37,11 @@ def test_writer_rotates_by_utc_day_and_venue(tmp_path) -> None:
     w.write([
         {"recv_ms": day1, "venue": "bybit", "symbol": "A", "side": "Buy", "qty": 1.0, "price": 2.0, "ts_ms": day1},
         {"recv_ms": day2, "venue": "bybit", "symbol": "A", "side": "Buy", "qty": 1.0, "price": 2.0, "ts_ms": day2},
-        {"recv_ms": day1, "venue": "binance", "symbol": "B", "side": "Sell", "qty": 3.0, "price": 4.0, "ts_ms": day1},
     ])
     files = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*.jsonl"))
-    assert len(files) == 3
-    assert any(f.startswith("bybit/") for f in files) and any(f.startswith("binance/") for f in files)
-    assert w.written == 3
+    assert len(files) == 2
+    assert all(f.startswith("bybit/") for f in files)
+    assert w.written == 2
     # appends accumulate (no truncation)
     w.write([{"recv_ms": day1, "venue": "bybit", "symbol": "A", "side": "Buy", "qty": 1.0, "price": 2.0, "ts_ms": day1}])
     byb = [p for p in tmp_path.rglob("*.jsonl") if "bybit" in str(p) and p.stem != ""][0]
@@ -74,8 +50,7 @@ def test_writer_rotates_by_utc_day_and_venue(tmp_path) -> None:
 
 
 def test_writer_counts_rows_per_venue(tmp_path) -> None:
-    """The alive heartbeat must be able to show a SILENT leg — a venue stuck at 0
-    while the other streams was indistinguishable from healthy with only a total."""
+    """The alive heartbeat reports explicit per-venue counts for the Bybit leg."""
     from liquidity_migration.liquidation_collector import JsonlDayWriter
 
     writer = JsonlDayWriter(tmp_path)
@@ -83,11 +58,10 @@ def test_writer_counts_rows_per_venue(tmp_path) -> None:
         [
             {"venue": "bybit", "recv_ms": 1_781_100_000_000, "symbol": "AUSDT"},
             {"venue": "bybit", "recv_ms": 1_781_100_000_000, "symbol": "BUSDT"},
-            {"venue": "binance", "recv_ms": 1_781_100_000_000, "symbol": "CUSDT"},
         ]
     )
-    assert writer.written == 3
-    assert writer.written_by_venue == {"bybit": 2, "binance": 1}
+    assert writer.written == 2
+    assert writer.written_by_venue == {"bybit": 2}
 
 
 def test_connection_expired_age_check() -> None:
@@ -206,21 +180,13 @@ def test_parse_drops_zero_and_negative_price_rows() -> None:
         {"topic": "allLiquidation.X", "data": {"s": "X", "S": "Buy", "v": "1", "p": "2.5"}}, recv)
     assert len(kept) == 1 and kept[0]["price"] == 2.5
 
-    # Binance: ap=p=0 (the verified pollution case) dropped; ap fallback kept.
-    assert lc.parse_binance_event(
-        {"e": "forceOrder", "o": {"s": "Y", "S": "SELL", "q": "1", "ap": "0", "p": "0"}}, recv) == []
-    kept_b = lc.parse_binance_event(
-        {"e": "forceOrder", "o": {"s": "Y", "S": "SELL", "q": "1", "ap": "0", "p": "3"}}, recv)
-    assert len(kept_b) == 1 and kept_b[0]["price"] == 3.0
-
 
 def test_module_documents_per_venue_side_price_schema() -> None:
-    """liquidation-collector-6: the module docstring documents the per-venue side
-    casing/semantics and the zero-price drop so the eventual P12 consumer cannot
-    silently mis-normalize."""
+    """liquidation-collector-6: the module docstring documents the side/price schema."""
     lc = _liq()
     doc = lc.__doc__ or ""
     assert "Row schema" in doc
-    assert "Buy" in doc and "BUY" in doc  # the casing divergence is documented
+    assert "Buy" in doc
+    assert "binance" not in doc.lower()
     assert "LIQUIDATED order" in doc or "liquidated" in doc.lower()
     assert "price > 0" in doc

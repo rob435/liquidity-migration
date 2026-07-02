@@ -1,6 +1,6 @@
 # Research Program State
 
-Last updated: 2026-06-30.
+Last updated: 2026-07-02.
 
 Read this first. This page is live state, not a receipt archive. Historical
 details are in git history, local artifacts, and
@@ -253,6 +253,10 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
   (781 Bybit / 25 Binance) after retry. Do not synthesize 5m paths from 1h bars.
 - Binance June-tail funding remains sparse for many manifest symbols, but all
   refreshed long trades used modeled funding.
+- Forward capture on the VPS is Bybit-only for both live liquidation
+  `allLiquidation` rows and hourly order-book depth bands. The briefly collected
+  `data/liquidations/binance` files from 2026-07-02 are historical residue only;
+  the Binance liquidation leg is disabled and the liveness watchdog ignores it.
 - Latest full three-way reconcile exited 0, pulled demo/paper telemetry, rebuilt
   PIT context, and found no unexplained live/paper/model drift.
 - No active forward trade/order rows yet for the active sleeves; current

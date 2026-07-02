@@ -111,8 +111,7 @@ def test_gather_risk_alerts_pages_on_stale_or_missing_heartbeat(tmp_path) -> Non
 def test_gather_liquidation_capture_alerts_freshness(tmp_path) -> None:
     """The collector unit can never reach systemd 'failed' (RestartSec spaces starts
     beyond the start-limit window), so capture death must be caught by JSONL
-    freshness (audit 2026-06-12 round 3). Venues that never wrote (region-blocked
-    Binance leg) contribute nothing and never alarm."""
+    freshness (audit 2026-06-12 round 3). The deployed capture is Bybit-only."""
     import os
 
     now_ms = 1_000 * HOUR
@@ -131,7 +130,6 @@ def test_gather_liquidation_capture_alerts_freshness(tmp_path) -> None:
     stale_s = (now_ms - 5 * HOUR) / 1000.0
     os.utime(f, (stale_s, stale_s))
     alerts = M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3)
-    # Per-venue keyed (audit 2026-06-12 round 4): the stale leg pages under its own key.
     assert [a.key for a in alerts] == ["liquidation_capture_stale:bybit"]
     assert alerts[0].severity == M.WARNING
 
@@ -706,10 +704,9 @@ def test_depth_capture_stale_alert_is_gated_by_enabled_collector(tmp_path, monke
     assert M.gather_depth_capture_alerts(depth_root=root, now_ms=now_ms, max_age_hours=3) == []
 
 
-def test_silent_venue_caught_while_sibling_keeps_root_fresh(tmp_path) -> None:
-    """liquidation-collector-3: a binance leg that wrote before but went silent must
-    page even while a healthy bybit leg keeps the WHOLE-ROOT mtime fresh. A whole-root
-    mtime check masked this (the 2026-06-10 incident)."""
+def test_retired_binance_liquidation_files_are_ignored(tmp_path) -> None:
+    """The deployed liquidation collector is Bybit-only; stale historical Binance
+    files left on disk must not page after the Binance leg is removed."""
     import os
 
     now_ms = 1_000 * HOUR
@@ -724,38 +721,31 @@ def test_silent_venue_caught_while_sibling_keeps_root_fresh(tmp_path) -> None:
 
     fresh_s = (now_ms - 10 * MIN) / 1000.0
     stale_s = (now_ms - 6 * HOUR) / 1000.0
-    os.utime(byb, (fresh_s, fresh_s))     # bybit fresh -> root mtime looks healthy
-    os.utime(bin_, (stale_s, stale_s))    # binance silent for 6h
+    os.utime(byb, (fresh_s, fresh_s))
+    os.utime(bin_, (stale_s, stale_s))
 
     alerts = M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3)
-    keys = {a.key for a in alerts}
-    assert keys == {"liquidation_capture_stale:binance"}
-    assert all(a.severity == M.WARNING for a in alerts)
-    assert "binance" in alerts[0].message
+    assert alerts == []
 
 
-def test_never_written_venue_does_not_alarm(tmp_path) -> None:
-    """A venue that has NEVER written (region-blocked binance leg pending a
-    permitted-region host) contributes no files and must NOT alarm — region-quiet is
-    not broken (by design)."""
+def test_missing_bybit_liquidation_files_do_not_alarm_on_fresh_box(tmp_path) -> None:
+    """A fresh box that has not written Bybit liquidation rows yet emits no alert;
+    the unit active check covers a dead service."""
     import os
 
     now_ms = 1_000 * HOUR
     root = tmp_path / "liquidations"
-    (root / "bybit").mkdir(parents=True)
-    (root / "binance").mkdir(parents=True)  # exists but never wrote
-
-    byb = root / "bybit" / "2024-01-01.jsonl"
-    byb.write_text("{}\n")
-    fresh_s = (now_ms - 10 * MIN) / 1000.0
-    os.utime(byb, (fresh_s, fresh_s))
+    (root / "binance").mkdir(parents=True)
+    bin_ = root / "binance" / "2024-01-01.jsonl"
+    bin_.write_text("{}\n")
+    stale_s = (now_ms - 6 * HOUR) / 1000.0
+    os.utime(bin_, (stale_s, stale_s))
 
     assert M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3) == []
 
 
-def test_all_venues_stopped_each_pages(tmp_path) -> None:
-    """If every venue that wrote goes stale, each pages its own per-venue WARNING
-    (the all-venues-stopped case is still covered)."""
+def test_stale_bybit_pages_even_if_binance_exists(tmp_path) -> None:
+    """Only the deployed Bybit leg is monitored for liquidation freshness."""
     import os
 
     now_ms = 1_000 * HOUR
@@ -769,7 +759,7 @@ def test_all_venues_stopped_each_pages(tmp_path) -> None:
 
     keys = {a.key for a in M.gather_liquidation_capture_alerts(
         liquidations_root=root, now_ms=now_ms, max_age_hours=3)}
-    assert keys == {"liquidation_capture_stale:bybit", "liquidation_capture_stale:binance"}
+    assert keys == {"liquidation_capture_stale:bybit"}
 
 
 def test_timer_not_active_debounced_warning_then_critical() -> None:
