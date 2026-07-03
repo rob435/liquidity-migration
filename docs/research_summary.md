@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated: 2026-07-02.
+Updated: 2026-07-03.
 
 This is the durable decision log. Historical receipts live in git history and
 `docs/preregistration/INDEX.md`.
@@ -78,6 +78,27 @@ and +18.84% Binance at full-book level, with MAR 7.33 / 5.72 and max DD
 -1.13% / -1.02%. Direct per-row feature/data timing assertions now pass.
 Label remains `exploratory`: skip/tail work is research maintenance rather
 than acceptance evidence.
+
+The 2026-07-03 no-hard-TP replay recomputed the same continuous target after a
+fresh PIT refresh through the 2026-07-02 signal day. Artifacts live under
+`/Users/jhbvdnsbkvnsd/SHARED_DATA/tail_no_tp_2026-07-03/`. Results:
+
+| Venue | Component TP | Return | Ann. | Max DD | MAR | Sharpe | Worst day |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bybit | 12% | +24.63% | +7.02% | -1.20% | 6.33 | 3.10 | -0.93% |
+| Bybit | none | +25.55% | +7.26% | -1.36% | 5.78 | 2.95 | -0.93% |
+| Binance | 12% | +18.82% | +5.44% | -1.02% | 5.68 | 2.63 | -0.63% |
+| Binance | none | +18.46% | +5.34% | -1.23% | 4.61 | 2.37 | -0.63% |
+
+Interpretation: the book survives this historical replay without the hard TP,
+but the hard TP improves risk quality. Bybit no-TP adds raw return but worsens
+drawdown, MAR, and Sharpe; Binance no-TP is worse on return and risk-adjusted
+metrics. Survival is mostly from small/inverse-vol exposure, max active/new
+limits, 24h max-hold, BTC-risk sizing, and hedge/regime controls, not from
+tail risk being solved. Label remains `exploratory`; this is not live-size
+approval. Binance funding in this replay is `partial`, and the fresh proxy pull
+failed for `ANTHROPICUSDT`, `EWTUSDT`, `IPUSDT`, `NFPUSDT`, and
+`OPENAIUSDT`.
 
 First diagnostics are cautionary. Trades that reached >=20% MAE recovered to
 profit only 19.76% Bybit / 15.47% Binance. A diagnostic 20% stop cut component
@@ -245,9 +266,11 @@ Closed long research:
   days after retry (781 Bybit / 25 Binance), so sub-hour research must handle
   those explicitly.
 - Bybit June manifest kline/funding coverage is clean for refreshed work.
-- Binance daily Vision kline/manifest coverage is current; June-tail funding is
-  sparse for many manifest symbols, but refreshed long trades use modeled
-  funding.
+- Binance daily Vision kline/manifest coverage is current through the
+  2026-07-02 signal day after the 2026-07-03 daily top-up. June/July-tail
+  funding remains sparse for many manifest symbols; continuous Binance
+  2026-07-03 replay funding is `partial`, while refreshed long trades use
+  modeled funding.
 - VPS forward capture is Bybit-only for live liquidation `allLiquidation` rows
   and hourly order-book depth bands. The short-lived
   `data/liquidations/binance` capture from 2026-07-02 is historical residue, not
@@ -323,7 +346,9 @@ Closed long research:
    non-30d BTC-lookback regime changes, and BTC-risk 35% tail skip are already
    rejected by full replay. Synthetic active-book squeeze and cluster-bootstrap
    diagnostics plus the dynamic 5m outage overlay are survivable at current
-   tiny size, but disaster-loss sizing flags strict per-trade budgets. Treat all
+   tiny size, but disaster-loss sizing flags strict per-trade budgets. The
+   2026-07-03 no-hard-TP replay says the book survives without TP in historical
+   data, but risk-adjusted quality gets worse, especially on Binance. Treat all
    of this as exploratory diagnostics rather than live-size evidence. The
    research tooling/report checklist is backed by frozen-baseline artifacts;
    conditional scale-in's full overlay replay lifted return but failed MAR/DD,

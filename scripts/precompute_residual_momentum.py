@@ -47,6 +47,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
+
 try:
     sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
@@ -74,6 +76,7 @@ DEFAULT_ROOTS = [SHARED / "bybit_full_pit", SHARED / "binance_full_pit"]
 # the module docstring; pinned by test_residual_momentum_is_causal_shift3.
 RMOM_WINDOW = 7
 RMOM_CAUSAL_SHIFT = 3
+DEFAULT_APPEND_OVERLAP_DAYS = 14
 
 
 def residual_momentum_expr() -> "pl.Expr":
@@ -108,13 +111,36 @@ def _resolve_klines_dataset(root: Path, override: str | None) -> str:
     return "klines_1h"  # default; an empty read is then reported by the EMPTY-panel branch
 
 
-def precompute(root: Path, *, start: str, end: str, klines_dataset: str | None = None) -> int:
+def _ms_to_date_str(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date().isoformat()
+
+
+def _append_trailing_pad(resid: pl.DataFrame, *, end: str) -> pl.DataFrame:
+    if resid.is_empty():
+        return resid
+    end_day = (_date_str_to_ms(end) // MS_PER_DAY) * MS_PER_DAY
+    active_cutoff = end_day - 8 * MS_PER_DAY  # only pad symbols with data within a rolling window of `end`
+    pad = (
+        resid.group_by("symbol").agg(pl.col("ts_ms").max().alias("_last"))
+        .filter(pl.col("_last") >= active_cutoff)
+        .with_columns(pl.int_ranges(pl.col("_last") + MS_PER_DAY, end_day + MS_PER_DAY, MS_PER_DAY).alias("ts_ms"))
+        .explode("ts_ms")
+        .filter(pl.col("ts_ms").is_not_null())
+        .with_columns(pl.lit(None, dtype=pl.Float64).alias("residual_return"))
+        .select("symbol", "ts_ms", "residual_return")
+    )
+    if pad.is_empty():
+        return resid
+    return pl.concat([resid, pad], how="vertical")
+
+
+def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | None = None) -> pl.DataFrame:
     kname = _resolve_klines_dataset(root, klines_dataset)
     print(f"[{root.name}] build factor panel + common4 residuals [{start}..{end}) (klines={kname}) ...", flush=True)
     panel = build_factor_panel(root, start=start, end=end, klines_dataset=kname)
     if panel.is_empty():
         print(f"[{root.name}] EMPTY panel -- skip")
-        return 0
+        return pl.DataFrame(schema={"symbol": pl.String, "ts_ms": pl.Int64, "residual_momentum": pl.Float64})
     _fr, resid = fit_factor_returns(panel, factor_cols=COMMON4)  # symbol, ts_ms, residual_return
     resid = resid.sort(["symbol", "ts_ms"]).select("symbol", "ts_ms", "residual_return")
     # The LIVE join floors `now` to TODAY's day_ts and exact-matches residual_momentum[day_ts]; but
@@ -129,34 +155,155 @@ def precompute(root: Path, *, start: str, end: str, klines_dataset: str | None =
     # nulls and counts only non-null obs against min_samples, so the sum stays correct. APPEND-ONLY:
     # every existing residual row keeps a byte-identical residual_momentum (a later row can't change
     # an earlier rolling window); this only ADDS the trailing-edge rows the old table silently dropped.
-    if not resid.is_empty():
-        end_day = (_date_str_to_ms(end) // MS_PER_DAY) * MS_PER_DAY
-        active_cutoff = end_day - 8 * MS_PER_DAY  # only pad symbols with data within a rolling window of `end`
-        pad = (
-            resid.group_by("symbol").agg(pl.col("ts_ms").max().alias("_last"))
-            .filter(pl.col("_last") >= active_cutoff)
-            .with_columns(pl.int_ranges(pl.col("_last") + MS_PER_DAY, end_day + MS_PER_DAY, MS_PER_DAY).alias("ts_ms"))
-            .explode("ts_ms")
-            .filter(pl.col("ts_ms").is_not_null())
-            .with_columns(pl.lit(None, dtype=pl.Float64).alias("residual_return"))
-            .select("symbol", "ts_ms", "residual_return")
-        )
-        if not pad.is_empty():
-            resid = pl.concat([resid, pad], how="vertical")
-    sig = (
+    resid = _append_trailing_pad(resid, end=end)
+    return (
         resid.sort(["symbol", "ts_ms"])
         .with_columns(residual_momentum_expr())
         .select("symbol", "ts_ms", "residual_momentum")
         .drop_nulls("residual_momentum")
     )
-    out_path = root / "residual_momentum.parquet"
+
+
+def _write_signal_atomic(path: Path, sig: pl.DataFrame) -> None:
     # Atomic write: a killed/failed refresh must not leave a torn parquet that the live join reads.
-    tmp_path = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         sig.write_parquet(tmp_path)
-        tmp_path.replace(out_path)
+        tmp_path.replace(path)
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+def _validate_rmom_schema(sig: pl.DataFrame, *, path: Path) -> None:
+    required = {"symbol", "ts_ms", "residual_momentum"}
+    missing = required.difference(sig.columns)
+    if missing:
+        raise RuntimeError(f"{path} missing required residual_momentum columns: {sorted(missing)}")
+    dupes = sig.group_by(["symbol", "ts_ms"]).len().filter(pl.col("len") > 1)
+    if not dupes.is_empty():
+        raise RuntimeError(f"{path} has duplicate residual_momentum keys; refusing append: {dupes.head(5).to_dicts()}")
+
+
+def _assert_append_overlap_matches(
+    existing: pl.DataFrame,
+    rebuilt: pl.DataFrame,
+    *,
+    overlap_start_ms: int,
+    overlap_end_ms: int,
+    rtol: float = 1e-10,
+    atol: float = 1e-12,
+) -> int:
+    old = (
+        existing.filter((pl.col("ts_ms") >= overlap_start_ms) & (pl.col("ts_ms") <= overlap_end_ms))
+        .select(["symbol", "ts_ms", pl.col("residual_momentum").alias("old_residual_momentum")])
+        .sort(["symbol", "ts_ms"])
+    )
+    new = (
+        rebuilt.filter((pl.col("ts_ms") >= overlap_start_ms) & (pl.col("ts_ms") <= overlap_end_ms))
+        .select(["symbol", "ts_ms", pl.col("residual_momentum").alias("new_residual_momentum")])
+        .sort(["symbol", "ts_ms"])
+    )
+    if old.is_empty():
+        raise RuntimeError("residual_momentum append cannot verify overlap: existing overlap is empty")
+    joined = old.join(new, on=["symbol", "ts_ms"], how="inner")
+    if joined.height != old.height:
+        raise RuntimeError(
+            "residual_momentum append overlap key mismatch: "
+            f"existing={old.height} rebuilt={new.height} matched={joined.height}; use --full-rewrite after inspection"
+        )
+    old_vals = joined["old_residual_momentum"].to_numpy()
+    new_vals = joined["new_residual_momentum"].to_numpy()
+    if not np.array_equal(np.isnan(old_vals), np.isnan(new_vals)):
+        raise RuntimeError("residual_momentum append overlap NaN positions changed; use --full-rewrite after inspection")
+    finite = ~np.isnan(old_vals)
+    if finite.any() and not np.allclose(old_vals[finite], new_vals[finite], rtol=rtol, atol=atol):
+        diffs = np.abs(old_vals[finite] - new_vals[finite])
+        raise RuntimeError(
+            "residual_momentum append overlap values changed: "
+            f"max_abs_diff={float(diffs.max()):.12g}; use --full-rewrite after inspection"
+        )
+    return joined.height
+
+
+def _append_signal(
+    root: Path,
+    *,
+    existing: pl.DataFrame,
+    end: str,
+    klines_dataset: str | None,
+    append_overlap_days: int,
+) -> int:
+    out_path = root / "residual_momentum.parquet"
+    if append_overlap_days < 1:
+        raise ValueError("append_overlap_days must be positive")
+    _validate_rmom_schema(existing, path=out_path)
+    existing = existing.select(["symbol", "ts_ms", "residual_momentum"]).sort(["symbol", "ts_ms"])
+    if existing.is_empty():
+        sig = _compute_signal(root, start=START, end=end, klines_dataset=klines_dataset)
+        _write_signal_atomic(out_path, sig.sort(["symbol", "ts_ms"]))
+        print(f"[{root.name}] wrote {sig.height} rows (empty existing table) -> {out_path}", flush=True)
+        return sig.height
+
+    existing_max = int(existing["ts_ms"].max())
+    end_day = (_date_str_to_ms(end) // MS_PER_DAY) * MS_PER_DAY
+    if existing_max > end_day:
+        print(
+            f"[{root.name}] residual_momentum already current through {_ms_to_date_str(existing_max)} "
+            f"(requested {_ms_to_date_str(end_day)}); skip append",
+            flush=True,
+        )
+        return 0
+
+    history_days = append_overlap_days + RMOM_WINDOW + RMOM_CAUSAL_SHIFT + 5
+    append_start = _ms_to_date_str(existing_max - history_days * MS_PER_DAY)
+    rebuilt = _compute_signal(root, start=append_start, end=end, klines_dataset=klines_dataset)
+    _validate_rmom_schema(rebuilt, path=out_path)
+    overlap_start_ms = existing_max - append_overlap_days * MS_PER_DAY
+    matched = _assert_append_overlap_matches(
+        existing, rebuilt, overlap_start_ms=overlap_start_ms, overlap_end_ms=existing_max
+    )
+    refreshed = rebuilt.filter(pl.col("ts_ms") >= overlap_start_ms).select(["symbol", "ts_ms", "residual_momentum"])
+    if refreshed.is_empty():
+        print(f"[{root.name}] overlap ok ({matched} rows); no new residual_momentum rows to append", flush=True)
+        return 0
+
+    preserved = existing.filter(pl.col("ts_ms") < overlap_start_ms)
+    combined = pl.concat([preserved, refreshed], how="vertical").sort(["symbol", "ts_ms"])
+    _validate_rmom_schema(combined, path=out_path)
+    _write_signal_atomic(out_path, combined)
+    rows_added = combined.height - existing.height
+    tail_rows = refreshed.filter(pl.col("ts_ms") > existing_max).height
+    overlap_rows = refreshed.height - tail_rows
+    print(
+        f"[{root.name}] overlap ok ({matched} rows); refreshed {overlap_rows} overlap rows "
+        f"and appended {tail_rows} tail rows (net {rows_added:+d}) "
+        f"through {_ms_to_date_str(int(combined['ts_ms'].max()))} -> {out_path}",
+        flush=True,
+    )
+    return max(rows_added, 0)
+
+
+def precompute(
+    root: Path,
+    *,
+    start: str,
+    end: str,
+    klines_dataset: str | None = None,
+    append: bool = True,
+    append_overlap_days: int = DEFAULT_APPEND_OVERLAP_DAYS,
+) -> int:
+    out_path = root / "residual_momentum.parquet"
+    if append and out_path.exists():
+        return _append_signal(
+            root,
+            existing=pl.read_parquet(out_path),
+            end=end,
+            klines_dataset=klines_dataset,
+            append_overlap_days=append_overlap_days,
+        )
+
+    sig = _compute_signal(root, start=start, end=end, klines_dataset=klines_dataset)
+    _write_signal_atomic(out_path, sig)
     max_day = sig["ts_ms"].max() if not sig.is_empty() else None
     print(f"[{root.name}] wrote {sig.height} rows (max ts_ms={max_day}) -> {out_path}", flush=True)
     return sig.height
@@ -168,6 +315,17 @@ def main() -> int:
     ap.add_argument("--start", default=START, help="inclusive panel start date (YYYY-MM-DD)")
     ap.add_argument("--end", default=None, help="exclusive end date (YYYY-MM-DD); default = tomorrow UTC (keeps the live table fresh)")
     ap.add_argument("--klines-dataset", default=None, help="kline store name; default = sniff (klines_1h, else event_demo_klines_1h for live roots)")
+    ap.add_argument(
+        "--full-rewrite",
+        action="store_true",
+        help="Recompute the full table and atomically replace residual_momentum.parquet instead of appending a checked tail.",
+    )
+    ap.add_argument(
+        "--append-overlap-days",
+        type=int,
+        default=DEFAULT_APPEND_OVERLAP_DAYS,
+        help="Existing trailing days to recompute and compare before appending new residual_momentum rows.",
+    )
     args = ap.parse_args()
     end = args.end or _default_end()
     roots = [Path(r).expanduser() for r in args.root] if args.root else DEFAULT_ROOTS
@@ -175,7 +333,14 @@ def main() -> int:
         if not root.exists():
             print(f"[skip] {root} not found")
             continue
-        precompute(root, start=args.start, end=end, klines_dataset=args.klines_dataset)
+        precompute(
+            root,
+            start=args.start,
+            end=end,
+            klines_dataset=args.klines_dataset,
+            append=not args.full_rewrite,
+            append_overlap_days=args.append_overlap_days,
+        )
     print("DONE precompute_residual_momentum", flush=True)
     return 0
 

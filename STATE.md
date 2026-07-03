@@ -1,6 +1,6 @@
 # Research Program State
 
-Last updated: 2026-07-02.
+Last updated: 2026-07-03.
 
 Read this first. This page is live state, not a receipt archive. Historical
 details are in git history, local artifacts, and
@@ -50,6 +50,14 @@ action and fresh evidence.
   max DD -1.13% / -1.02%. Direct per-row feature/data timing assertions now
   pass. Label remains `exploratory`: skip/tail work is research maintenance,
   not acceptance evidence.
+- No-hard-TP replay, 2026-07-03: recomputed continuous v2 after fresh PIT
+  refresh through the 2026-07-02 signal day. Artifacts:
+  `/Users/jhbvdnsbkvnsd/SHARED_DATA/tail_no_tp_2026-07-03/`. TP12 vs no-TP:
+  Bybit +24.63%/MAR 6.33/DD -1.20% vs +25.55%/5.78/-1.36%; Binance
+  +18.82%/5.68/-1.02% vs +18.46%/4.61/-1.23%. The book survived without hard
+  TP in this historical replay, but risk-adjusted quality worsened. Keep TP12
+  as the current target. This is `exploratory` survival evidence, not live-size
+  approval; Binance funding was `partial`.
 - 5m timing/path diagnostics, 2026-06-27: 15m delay, 30m delay, and next-red
   15m all underperformed the 1h immediate signal-level diagnostic on both
   venues. 5m complete-path exclusions were 0 Bybit and 33 Binance. Path labels
@@ -244,15 +252,17 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
 
 ## Data And Reconciliation
 
-- Full-PIT Bybit and Binance roots are current enough for the latest internal
-  long refresh and continuous replay maintenance.
+- Full-PIT Bybit and Binance roots are current through the 2026-07-02 signal
+  day for continuous replay maintenance after the 2026-07-03 Binance daily
+  Vision top-up.
 - Continuous 5m kline backfill, 2026-06-27: filled `klines_5m` across the
   validation sample for every PIT manifest
   symbol-day on both venues. Final presence audit has 0 missing symbol-days;
   strict 288-bars/day audit still shows partial exchange source days
   (781 Bybit / 25 Binance) after retry. Do not synthesize 5m paths from 1h bars.
-- Binance June-tail funding remains sparse for many manifest symbols, but all
-  refreshed long trades used modeled funding.
+- Binance June/July-tail funding remains sparse for many manifest symbols.
+  The 2026-07-03 continuous Binance replay used `partial` funding; refreshed
+  long trades used modeled funding.
 - Forward capture on the VPS is Bybit-only for both live liquidation
   `allLiquidation` rows and hourly order-book depth bands. The briefly collected
   `data/liquidations/binance` files from 2026-07-02 are historical residue only;
@@ -271,16 +281,17 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
    non-30d BTC-lookback, and BTC-risk 35% tail-skip replays are now rejected;
    synthetic active-book squeeze, cluster-bootstrap, and dynamic 5m outage
    diagnostics are survivable at current tiny size, while disaster-loss sizing
-   flags strict per-trade budgets. All remain exploratory, not live-size
-   evidence. The 5m data is present; keep excluding or explicitly accounting for
-   the documented partial source days. The plan's research tooling/report
-   checklist is now backed by frozen baseline artifacts. Conditional scale-in's
-   full overlay replay lifted return but failed MAR/DD, and signal-invalidation
-   exits were negative/zero-hit on the sparse tape. The hourly coverage audit
-   also confirms candidate-state sparsity, missing spread/depth, and missing
-   sector-proxy state. DSR/PBO now flags the full-replay variant surface as
-   inference-fragile. None of these can influence deployment without new forward
-   OOS evidence.
+   flags strict per-trade budgets. The 2026-07-03 no-hard-TP replay survives
+   historically but worsens risk-adjusted quality, especially on Binance. All
+   remain exploratory, not live-size evidence. The 5m data is present; keep
+   excluding or explicitly accounting for the documented partial source days.
+   The plan's research tooling/report checklist is now backed by frozen
+   baseline artifacts. Conditional scale-in's full overlay replay lifted return
+   but failed MAR/DD, and signal-invalidation exits were negative/zero-hit on
+   the sparse tape. The hourly coverage audit also confirms candidate-state
+   sparsity, missing spread/depth, and missing sector-proxy state. DSR/PBO now
+   flags the full-replay variant surface as inference-fragile. None of these can
+   influence deployment without new forward OOS evidence.
 4. Continue live-safety audit work: the submitted-row lifecycle transition table, `PROTECTED` trade-row
    promotion, and append-only lifecycle event stream are now implemented. The
    new entry risk-health gate covers private snapshot/WS stale,
