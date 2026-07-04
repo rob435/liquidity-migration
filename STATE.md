@@ -1,6 +1,6 @@
 # Research Program State
 
-Last updated: 2026-07-03.
+Last updated: 2026-07-04.
 
 Read this first. This page is live state, not a receipt archive. Historical
 details are in git history, local artifacts, and
@@ -291,7 +291,15 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
    the sparse tape. The hourly coverage audit also confirms candidate-state
    sparsity, missing spread/depth, and missing sector-proxy state. DSR/PBO now
    flags the full-replay variant surface as inference-fragile. None of these can
-   influence deployment without new forward OOS evidence.
+   influence deployment without new forward OOS evidence. The next registered
+   tail method is `docs/preregistration/continuous-tail-budget-control-2026-07-03.md`:
+   keep TP12/24h as lifecycle, then test loss-at-disaster sizing, portfolio heat
+   caps, and drawdown step-down as a risk governor rather than another fixed
+   price stop. The active blacklist follow-up is
+   `docs/preregistration/continuous-time-symbol-risk-2026-07-04.md`: forced
+   time stops are not the priority after the negative Bybit diagnostic; test
+   no-time-stop month-scale symbol blacklists and causal learned entry-time
+   blackouts instead.
 4. Continue live-safety audit work: the submitted-row lifecycle transition table, `PROTECTED` trade-row
    promotion, and append-only lifecycle event stream are now implemented. The
    new entry risk-health gate covers private snapshot/WS stale,

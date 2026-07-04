@@ -647,6 +647,52 @@ def _write_mtm_chart(output_dir: Path, mtm: pl.DataFrame, exit_booked: pl.DataFr
     return {"mtm_png": str(out), **s}
 
 
+def _long_equity_chart_metrics(summary: dict[str, Any], equity: pl.DataFrame) -> dict[str, Any]:
+    def finite(value: Any) -> float | None:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if math.isfinite(out) else None
+
+    years: float | None = None
+    if not equity.is_empty() and "date" in equity.columns:
+        dates: list[dt_date] = []
+        for raw in equity["date"].to_list():
+            try:
+                dates.append(dt_date.fromisoformat(str(raw)[:10]))
+            except ValueError:
+                continue
+        if dates:
+            years = ((max(dates) - min(dates)).days + 1) / 365.25
+
+    total = finite(summary.get("total_return"))
+    max_dd = finite(summary.get("max_drawdown"))
+    annualized = None
+    if total is not None and years is not None and years > 0.0 and total > -1.0:
+        annualized = (1.0 + total) ** (1.0 / years) - 1.0
+    mar = None
+    if total is not None and years is not None and years > 0.0 and max_dd is not None and abs(max_dd) > 1e-12:
+        mar = (total / years) / abs(max_dd)
+
+    metrics: dict[str, Any] = {}
+    if total is not None:
+        metrics["total_return_pct"] = total * 100.0
+    if annualized is not None:
+        metrics["annualized_pct"] = annualized * 100.0
+    if max_dd is not None:
+        metrics["max_drawdown_pct"] = max_dd * 100.0
+    if (worst_day := finite(summary.get("worst_day_return"))) is not None:
+        metrics["worst_day_pct"] = worst_day * 100.0
+    if (sharpe := finite(summary.get("sharpe_like"))) is not None:
+        metrics["sharpe_daily_ann"] = sharpe
+    if mar is not None:
+        metrics["mar"] = mar
+    if years is not None:
+        metrics["years"] = years
+    return metrics
+
+
 def run_long_native_research(
     data_root: str | Path,
     *,
@@ -740,6 +786,7 @@ def run_long_native_research(
                 raw_klines=raw_klines,
                 monthly=monthly if not monthly.is_empty() else None,
                 png_name="long_native_equity_btc.png",
+                metrics=_long_equity_chart_metrics(summary, equity),
             )
         except Exception:  # noqa: BLE001 - chart failure must not fail the run
             chart_metadata = {}

@@ -23,6 +23,8 @@ not use it as acceptance evidence.
 | Continuous live target | TP12, daily rebalance disabled, no daemon/server stop, `CTRL_BTC_RISK_70_90_35` sizing overlay | Deployed on VPS; forward paired trades still needed |
 | Continuous validation baseline | `continuous_ensemble_v2_baseline_current` under `research/continuous_fade/runs/` | Timestamped baseline plus expanded diagnostics complete; exploratory only |
 | Continuous forward readiness | `reports/continuous_forward_readiness/` | Paper/demo rebalance and operational-cycle telemetry are clean; 0 paired trades means no execution-performance evidence yet |
+| Continuous tail-budget control | `continuous-tail-budget-control-2026-07-03.md` | Proposed preregistration: loss-at-disaster sizing, portfolio heat, and drawdown step-down; no fixed-stop revival |
+| Continuous blacklist / entry-time controls | `continuous-time-symbol-risk-2026-07-04.md` | Proposed preregistration: no-time-stop symbol blacklists, month-scale lookbacks, learned entry-time blackouts, and train-frozen exclusions |
 | Long v11a | FC-only long sleeve with v11a sniper entry, vol parity, ATR exits | Best current internal positive object; forward sample still needed |
 | Reconciliation | `scripts/reconcile.sh` | Latest full three-way had no unexplained drift and no forward trades |
 

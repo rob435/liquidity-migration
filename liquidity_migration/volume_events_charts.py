@@ -67,6 +67,7 @@ def _write_equity_benchmark_chart(
     step: bool = True,
     overlays: Sequence[OverlaySpec] | None = None,
     strategy_name: str = "Strategy",
+    metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write the strategy-vs-BTC equity PNG. ``png_name`` lets active sleeves
     (e.g. ``long_native``, ``continuous``) reuse this without inheriting the
@@ -116,6 +117,7 @@ def _write_equity_benchmark_chart(
         start=start,
         end=end,
         monthly_rows=monthly_rows,
+        metrics=metrics,
         # The equity-derived fallback counts rows-with-marks per month, NOT trades —
         # label it honestly (a padded flat June showed "11 trades" with zero taken).
         count_label="Trades" if has_real_monthly else "Days",
@@ -130,6 +132,8 @@ def _write_equity_benchmark_chart(
         },
         "overlays": [item["name"] for item in overlay_series],
         "monthly_rows": len(monthly_rows),
+        "metric_tiles": len(_chart_metric_tiles(metrics)),
+        "legend_items": sum(1 for item in series if item["points"]),
         "annotations": [],
     }
 
@@ -191,6 +195,7 @@ def _write_equity_benchmark_png(
     start: str,
     end: str,
     monthly_rows: list[dict[str, Any]] | None = None,
+    metrics: dict[str, Any] | None = None,
     title: str = "Strategy Equity vs BTC",
     subtitle: str = "Strategy and BTC are normalised to $1 at the strategy start; gridlines mark monthly dates and growth levels.",
     count_label: str = "Trades",
@@ -202,19 +207,23 @@ def _write_equity_benchmark_png(
 
     scale = 2
     table_rows = monthly_rows or []
+    metric_tiles = _chart_metric_tiles(metrics)
     width = 1600
     chart_height = 940
-    table_height = 520 if table_rows else 0
+    table_height = 520 if table_rows else (118 if metric_tiles else 0)
     height = chart_height + table_height
     left, right, top, bottom = 120, 58, 150, 190
     plot_w = width - left - right
     plot_h = chart_height - top - bottom
     image = Image.new("RGBA", (width * scale, height * scale), (255, 255, 255, 255))
     draw = ImageDraw.Draw(image, "RGBA")
-    font_regular = _chart_font(ImageFont, 22 * scale)
     font_tiny = _chart_font(ImageFont, 14 * scale)
     font_table = _chart_font(ImageFont, 16 * scale)
     font_table_header = _chart_font(ImageFont, 15 * scale, bold=True)
+    font_metric_label = _chart_font(ImageFont, 13 * scale, bold=True)
+    font_metric_value = _chart_font(ImageFont, 23 * scale, bold=True)
+    font_legend_name = _chart_font(ImageFont, 19 * scale, bold=True)
+    font_legend_value = _chart_font(ImageFont, 18 * scale)
 
     def _fit_font(content: str, base_px: int, *, bold: bool, min_px: int) -> Any:
         # Shrink-to-fit: a long header (e.g. "... — refreshed to 2026-06-12") must not run
@@ -307,6 +316,8 @@ def _write_equity_benchmark_png(
     text(left, 46, title, (7, 14, 31, 255), font_title)
     text(left, 78, subtitle, (75, 85, 99, 255), font_subtitle)
     rounded((left, top, left + plot_w, top + plot_h), 4, (249, 250, 251, 255), (229, 231, 235, 255))
+    metric_top = chart_height + 6
+    table_top = chart_height + (104 if metric_tiles else 130)
 
     for value in y_ticks:
         y = y_pos(value)
@@ -330,25 +341,37 @@ def _write_equity_benchmark_png(
         rgb = tuple(item["color"])
         line(coords, (rgb[0], rgb[1], rgb[2], int(item["alpha"])), int(item["width"]))
 
-    legend_x: float = left
-    finals = _chart_final_values(series)
-    legend_y = chart_height - 56
-    for item in series:
-        if not item["points"]:
-            continue
-        rgb = tuple(item["color"])
-        label = f"{item['name']} {finals.get(str(item['name']), 0.0):.2f}x"
-        line([(legend_x, legend_y), (legend_x + 42, legend_y)], (rgb[0], rgb[1], rgb[2], 230), 5)
-        text(legend_x + 54, legend_y - 8, label, (17, 24, 39, 255), font_regular)
-        label_w = draw.textlength(label, font=font_regular) / scale
-        legend_x += 54 + label_w + 48
+    _draw_chart_legend(
+        rounded=rounded,
+        line=line,
+        text=text,
+        measure=lambda content, font: draw.textlength(content, font=font) / scale,
+        series=series,
+        finals=_chart_final_values(series),
+        left=left,
+        top=chart_height - 78,
+        width=plot_w,
+        font_name=font_legend_name,
+        font_value=font_legend_value,
+    )
+    if metric_tiles:
+        _draw_chart_metric_strip(
+            rounded=rounded,
+            text=text,
+            metrics=metric_tiles,
+            left=left,
+            top=metric_top,
+            width=plot_w,
+            font_label=font_metric_label,
+            font_value=font_metric_value,
+        )
     if table_rows:
         _draw_monthly_return_table(
             text=text,
             rect=rect,
             rows=table_rows,
             left=left,
-            top=chart_height + 130,
+            top=table_top,
             width=plot_w,
             font_table=font_table,
             font_table_header=font_table_header,
@@ -358,6 +381,110 @@ def _write_equity_benchmark_png(
     image = image.resize((width, height), Image.Resampling.LANCZOS).convert("RGB")
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, format="PNG", optimize=True)
+
+
+def _chart_metric_tiles(metrics: dict[str, Any] | None) -> list[tuple[str, str, tuple[int, int, int, int]]]:
+    if not metrics:
+        return []
+
+    def finite(value: Any) -> float | None:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if math.isfinite(out) else None
+
+    def pct(key: str, *, signed: bool = True) -> str | None:
+        value = finite(metrics.get(key))
+        if value is None:
+            return None
+        return f"{value:+.2f}%" if signed else f"{value:.2f}%"
+
+    def num(key: str, digits: int = 2) -> str | None:
+        value = finite(metrics.get(key))
+        if value is None:
+            return None
+        return f"{value:.{digits}f}"
+
+    candidates: list[tuple[str, str | None, tuple[int, int, int, int]]] = [
+        ("Total", pct("total_return_pct"), (22, 101, 52, 255)),
+        ("Annualized", pct("annualized_pct"), (22, 101, 52, 255)),
+        ("Max DD", pct("max_drawdown_pct", signed=False), (185, 28, 28, 255)),
+        ("Worst Day", pct("worst_day_pct", signed=False), (185, 28, 28, 255)),
+        ("Sharpe", num("sharpe_daily_ann"), (7, 14, 31, 255)),
+        ("MAR", num("mar"), (7, 14, 31, 255)),
+        ("Years", (f"{v:.2f}" if (v := finite(metrics.get("years"))) is not None else None), (7, 14, 31, 255)),
+    ]
+    return [(label, value, color) for label, value, color in candidates if value is not None]
+
+
+def _draw_chart_metric_strip(
+    *,
+    rounded: Any,
+    text: Any,
+    metrics: list[tuple[str, str, tuple[int, int, int, int]]],
+    left: float,
+    top: float,
+    width: float,
+    font_label: Any,
+    font_value: Any,
+) -> None:
+    if not metrics:
+        return
+    gap = 12
+    tile_count = min(8, len(metrics))
+    tile_w = (width - gap * (tile_count - 1)) / tile_count
+    tile_h = 74
+    for index, (label, value, color) in enumerate(metrics[:tile_count]):
+        x = left + index * (tile_w + gap)
+        rounded((x, top, x + tile_w, top + tile_h), 4, (248, 250, 252, 255), (226, 232, 240, 255))
+        text(x + 12, top + 12, label.upper(), (71, 85, 105, 255), font_label)
+        text(x + 12, top + 37, value, color, font_value)
+
+
+def _draw_chart_legend(
+    *,
+    rounded: Any,
+    line: Any,
+    text: Any,
+    measure: Any,
+    series: list[dict[str, Any]],
+    finals: dict[str, float],
+    left: float,
+    top: float,
+    width: float,
+    font_name: Any,
+    font_value: Any,
+) -> None:
+    x = left
+    y = top
+    chip_h = 46
+    gap = 14
+    for item in series:
+        if not item["points"]:
+            continue
+        rgb = tuple(item["color"])
+        name = str(item["name"])
+        value = f"{finals.get(name, 0.0):.2f}x"
+        name_w = measure(name, font_name)
+        value_w = measure(value, font_value)
+        chip_w = max(138.0, 62.0 + name_w + 14.0 + value_w + 20.0)
+        if x > left and x + chip_w > left + width:
+            x = left
+            y += chip_h + 10
+        rounded((x, y, x + chip_w, y + chip_h), 6, (255, 255, 255, 255), (226, 232, 240, 255))
+        line([(x + 13, y + 23), (x + 39, y + 23)], (rgb[0], rgb[1], rgb[2], 235), 5)
+        text(x + 51, y + 12, name, (15, 23, 42, 255), font_name)
+        text(x + 51 + name_w + 14, y + 13, value, (71, 85, 105, 255), font_value)
+        x += chip_w + gap
+
+
+def _monthly_return_color(value: float) -> tuple[int, int, int, int]:
+    if abs(value) < 0.00005:
+        return (100, 116, 139, 255)
+    if value > 0.0:
+        return (22, 101, 52, 255)
+    return (185, 28, 28, 255)
 
 def _fill_month_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Insert +0.00%/count-0 rows for months absent between the first and last row. A month
@@ -489,7 +616,7 @@ def _draw_monthly_return_table(
             if row_index % 2 == 1:
                 rect((x, y, x + block_w, y + row_h), (248, 250, 252, 255))
             value = _float_or_nan(row.get("return"))
-            color = (22, 101, 52, 255) if value >= 0.0 else (185, 28, 28, 255)
+            color = _monthly_return_color(value)
             text(x + 10, y + 7, str(row.get("month", "")), (51, 65, 85, 255), font_table)
             text(x + block_w * 0.48, y + 7, f"{value:+.2%}", color, font_table)
             text(x + block_w - 10, y + 7, str(int(row.get("count") or 0)), (51, 65, 85, 255), font_table, anchor="ra")

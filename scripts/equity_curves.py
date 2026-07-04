@@ -119,6 +119,7 @@ def _run_continuous(
     component_take_profit_pct: float | None = None,
     btc_risk_sizing: bool = False,
     backtest_leverage: float = 1.0,
+    btc_trend_gate: str | None = None,
 ) -> dict[str, Any]:
     del costs, pit_tol
     scripts_dir = REPO / "scripts"
@@ -142,6 +143,7 @@ def _run_continuous(
         component_take_profit_pct=component_take_profit_pct,
         btc_risk_sizing=btc_risk_sizing,
         backtest_leverage=backtest_leverage,
+        btc_trend_gate=btc_trend_gate,
     )
     return _continuous_payload_from_summary(summary, report_dir=out / venue_name)
 
@@ -311,6 +313,12 @@ def main() -> int:
         default=1.0,
         help="Modeled continuous leverage: scales component gross exposure before costs/funding and scales hedge cap.",
     )
+    p.add_argument(
+        "--continuous-btc-trend-gate",
+        choices=["downtrend", "off", "uptrend"],
+        default=None,
+        help="Override continuous BTC_TREND_GATE; omit to preserve each frozen source config.",
+    )
     # audit2c: default --years to a sentinel so an unset window can preserve the
     # frozen continuous start instead of forcing a rolling 3y override.
     p.add_argument(
@@ -378,6 +386,7 @@ def main() -> int:
                     component_take_profit_pct=args.continuous_component_take_profit_pct,
                     btc_risk_sizing=args.continuous_btc_risk_sizing,
                     backtest_leverage=args.continuous_backtest_leverage,
+                    btc_trend_gate=args.continuous_btc_trend_gate,
                 )
         except Exception as exc:  # noqa: BLE001 - report per-sleeve, keep going
             print(f"  [X] {s} failed: {type(exc).__name__}: {exc}\n", flush=True)

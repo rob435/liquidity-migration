@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated: 2026-07-03.
+Updated: 2026-07-04.
 
 This is the durable decision log. Historical receipts live in git history and
 `docs/preregistration/INDEX.md`.
@@ -355,7 +355,15 @@ Closed long research:
    and sparse-tape signal-invalidation exits were negative or zero-hit. The
    hourly state-coverage audit confirms the full invalidation panel is still
    unavailable. The DSR/PBO diagnostic marks the internal replay variant surface
-   inference-fragile.
+   inference-fragile. The next registered tail method is
+   `docs/preregistration/continuous-tail-budget-control-2026-07-03.md`: keep
+   TP12/24h as lifecycle, then test loss-at-disaster sizing, portfolio heat
+   caps, and drawdown step-down as a risk governor rather than another fixed
+   price stop. The revised blacklist plan is
+   `docs/preregistration/continuous-time-symbol-risk-2026-07-04.md`: after the
+   negative Bybit time-stop diagnostic, focus on no-time-stop month-scale symbol
+   blacklists and causal learned entry-time blackouts rather than forced UTC
+   exits.
 4. Continue live-safety audit work. Submitted-row lifecycle transition enforcement, `PROTECTED` trade-row
    promotion, and the append-only lifecycle event stream now exist. Risk/audit
    logs currently cover blocked entry-health events, rejected lifecycle

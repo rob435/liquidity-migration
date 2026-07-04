@@ -75,6 +75,7 @@ FUNDING_ROOT = {
     "bybit": SHARED / "bybit_full_pit" / "funding",
     "binance": SHARED / "binance_full_pit" / "binance_usdm_funding",
 }
+VALID_BTC_TREND_GATES = {"off", "uptrend", "downtrend"}
 
 
 def winner_rule():
@@ -140,6 +141,33 @@ def _with_optional_component_overrides(
     if abs(float(backtest_leverage) - 1.0) > 1e-12:
         updates["gross_exposure"] = float(cfg.gross_exposure) * float(backtest_leverage)
     return replace(cfg, **updates) if updates else cfg
+
+
+def _with_btc_trend_gate(cfg: ContinuousEventConfig, btc_trend_gate: str | None) -> ContinuousEventConfig:
+    if btc_trend_gate is None:
+        return cfg
+    if btc_trend_gate not in VALID_BTC_TREND_GATES:
+        raise ValueError(
+            f"--btc-trend-gate must be one of {', '.join(sorted(VALID_BTC_TREND_GATES))}; "
+            f"got {btc_trend_gate!r}"
+        )
+    return replace(cfg, btc_trend_gate=btc_trend_gate)
+
+
+def _combined_config_transform(
+    config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None,
+    *,
+    btc_trend_gate: str | None,
+) -> Callable[[ContinuousEventConfig], ContinuousEventConfig] | None:
+    if config_transform is None and btc_trend_gate is None:
+        return None
+
+    def transform(cfg: ContinuousEventConfig) -> ContinuousEventConfig:
+        if config_transform is not None:
+            cfg = config_transform(cfg)
+        return _with_btc_trend_gate(cfg, btc_trend_gate)
+
+    return transform
 
 
 def frozen_config(
@@ -474,6 +502,23 @@ def btc_risk_size_lookup(
     }
 
 
+def load_btc_risk_size_lookup(root: Path, venue: str) -> tuple[dict[tuple[str, int], float], dict[str, Any]]:
+    path = root / "btc_risk" / venue / "btc_risk_multipliers.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"missing BTC-risk multiplier cache: {path}")
+    df = pl.read_csv(path)
+    lookup = {
+        (str(row["symbol"]), int(row["signal_ts_ms"])): float(row["stack_mult"])
+        for row in df.to_dicts()
+    }
+    return lookup, {
+        "arm_id": CTRL_BTC_RISK_70_90_35_ID,
+        "decision_keys": len(lookup),
+        "multipliers_csv": str(path),
+        "reused_from": str(root),
+    }
+
+
 def monthly_trade_counts(*, output_root: Path, venue: str) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for component in WINNER_WEIGHTS:
@@ -562,6 +607,7 @@ def _component_report_rows(payloads: list[dict[str, Any]]) -> list[dict[str, Any
                 "trades": payload.get("n_trades"),
                 "funding_mode": payload.get("funding_mode"),
                 "take_profit_pct": cfg.get("take_profit_pct"),
+                "btc_trend_gate": cfg.get("btc_trend_gate"),
                 "gross_exposure": cfg.get("gross_exposure"),
                 "total_return_pct": None
                 if metrics.get("total_return") is None
@@ -597,6 +643,7 @@ def write_continuous_equity_report(
     inferred_tp = component_take_profit_pct
     if inferred_tp is None and first_cfg.get("take_profit_pct") is not None:
         inferred_tp = float(first_cfg["take_profit_pct"])
+    btc_trend_gate = first_cfg.get("btc_trend_gate")
     funding_modes = sorted({str(row.get("funding_mode")) for row in component_rows if row.get("funding_mode")})
     final_equity = None if df.is_empty() else float(df["equity"][-1])
     summary = {
@@ -609,6 +656,7 @@ def write_continuous_equity_report(
         "end_date": end_date,
         "window": stats_1x.get("window"),
         "component_take_profit_pct": inferred_tp,
+        "btc_trend_gate": btc_trend_gate,
         "btc_risk_sizing": btc_risk_sizing,
         "backtest_leverage": backtest_leverage,
         "chart_leverage": chart_leverage,
@@ -675,6 +723,7 @@ def write_continuous_equity_report(
                 "scripts/equity_curves.py -> scripts/continuous_deployed_equity_refresh.py."
             ),
             f"Component TP: {inferred_tp}",
+            f"BTC trend gate: {btc_trend_gate}",
             f"BTC-risk sizing: {btc_risk_sizing}",
             f"Modeled backtest leverage: {backtest_leverage:g}x",
             f"Chart leverage: {chart_leverage:g}x" if chart_leverage is not None else "Chart leverage: none",
@@ -739,6 +788,8 @@ def run_components(
     backtest_leverage: float = 1.0,
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
     config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
+    write_candidate_tape: bool = False,
+    write_symbol_events: bool = False,
 ) -> dict[str, Any]:
     data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
@@ -757,6 +808,8 @@ def run_components(
         )
         if config_transform is not None:
             cfg = config_transform(cfg)
+        candidate_tape_path = cell_dir / "candidate_tape.parquet" if write_candidate_tape else None
+        symbol_event_path = cell_dir / "symbol_quarantine_events.csv" if write_symbol_events else None
         t0 = time.time()
         if report_path.exists() and size_mult_lookup is None:
             payload = json.loads(report_path.read_text(encoding="utf-8"))
@@ -768,14 +821,26 @@ def run_components(
                 expected_gross_exposure=float(cfg.gross_exposure),
                 expected_config_hash=cfg.config_hash(),
             )
+            if candidate_tape_path is not None and not candidate_tape_path.exists():
+                resumed = False
+            if symbol_event_path is not None and not symbol_event_path.exists():
+                resumed = False
             if not resumed:
-                payload = run_continuous_event_research(data_root, config=cfg, report_dir=cell_dir)
+                payload = run_continuous_event_research(
+                    data_root,
+                    config=cfg,
+                    report_dir=cell_dir,
+                    candidate_tape_path=candidate_tape_path,
+                    symbol_event_path=symbol_event_path,
+                )
         else:
             payload = run_continuous_event_research(
                 data_root,
                 config=cfg,
                 report_dir=cell_dir,
                 size_mult_lookup=size_mult_lookup,
+                candidate_tape_path=candidate_tape_path,
+                symbol_event_path=symbol_event_path,
             )
             resumed = False
         meta[component] = {
@@ -806,6 +871,7 @@ def render_curves(
     leverage: float | None = 4.0,
     backtest_leverage: float = 1.0,
     btc_risk_sizing: bool = False,
+    btc_trend_gate: str | None = None,
 ) -> None:
     for mult in chart_leverages(leverage):
         tag = "" if mult == 1.0 else f"_{mult:g}x"
@@ -814,22 +880,30 @@ def render_curves(
             rets = mdf["basket_return"].fill_null(0.0).to_numpy() * mult
             eq = np.cumprod(1.0 + rets)
             mdf = mdf.with_columns(pl.Series("basket_return", rets), pl.Series("equity", eq))
+        chart_stats = stats(mdf)
+        chart_metrics = {
+            **chart_stats,
+            "final_equity": None if mdf.is_empty() else float(mdf["equity"][-1]),
+        }
         equity = mdf.with_columns(
             pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.date().cast(pl.String).alias("date")
         )
         equity.write_csv(out_dir / f"continuous_equity{tag}.csv")
         monthly = monthly_returns_with_trades(equity, monthly_trades)
         monthly.write_csv(out_dir / f"continuous_monthly{tag}.csv")
-        modeled = "" if abs(float(backtest_leverage) - 1.0) <= 1e-12 else f", modeled {backtest_leverage:g}x"
-        risk = " + BTC-risk sizing" if btc_risk_sizing else ""
-        name = (
-            f"Continuous (deployed cfg{risk}{modeled})"
-            if mult == 1.0
-            else f"Continuous (deployed cfg{risk}{modeled}) {mult:g}x chart"
-        )
+        if abs(float(backtest_leverage) - 1.0) > 1e-12:
+            name = (
+                f"Continuous {backtest_leverage:g}x"
+                if mult == 1.0
+                else f"Continuous {backtest_leverage:g}x / {mult:g}x chart"
+            )
+        else:
+            name = "Continuous" if mult == 1.0 else f"Continuous {mult:g}x chart"
         sub = "IN-SAMPLE RESEARCH refresh to June 2026 data (window spent; forward demo is the arbiter) — not a promotion claim"
         if abs(float(backtest_leverage) - 1.0) > 1e-12:
             sub += f" | modeled backtest leverage {backtest_leverage:g}x: component notional/costs/funding and hedge cap scaled"
+        if btc_trend_gate is not None:
+            sub += f" | BTC trend gate {btc_trend_gate}"
         if mult != 1.0:
             sub += f" | {mult:g}x = pure leverage on the same returns; margin/liquidation NOT modeled"
         title_modeled = "" if abs(float(backtest_leverage) - 1.0) <= 1e-12 else f", modeled {backtest_leverage:g}x"
@@ -847,9 +921,10 @@ def render_curves(
             ),
             subtitle=sub,
             strategy_name=name,
+            metrics=chart_metrics,
         )
         summary_key = f"{mult:g}x"
-        venue_summary[summary_key] = stats(mdf)
+        venue_summary[summary_key] = chart_stats
         log_label = summary_key
         if abs(float(backtest_leverage) - 1.0) > 1e-12:
             log_label = f"modeled {backtest_leverage:g}x / chart {summary_key}"
@@ -870,11 +945,18 @@ def run_venue(
     component_take_profit_pct: float | None = None,
     btc_risk_sizing: bool = False,
     backtest_leverage: float = 1.0,
+    btc_trend_gate: str | None = None,
     config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
+    write_candidate_tape: bool = False,
+    write_symbol_events: bool = False,
+    btc_risk_lookup_root: Path | None = None,
 ) -> dict[str, Any]:
     out_dir = output_root / venue
     out_dir.mkdir(parents=True, exist_ok=True)
+    effective_config_transform = _combined_config_transform(config_transform, btc_trend_gate=btc_trend_gate)
     if render_only:
+        if btc_trend_gate is not None:
+            raise ValueError("--render-only cannot apply --btc-trend-gate; rerun components")
         csv_path = out_dir / "continuous_equity.csv"
         if not csv_path.exists():
             raise FileNotFoundError(f"--render-only needs an existing {csv_path}")
@@ -885,25 +967,28 @@ def run_venue(
         size_lookup = None
         btc_risk_meta = None
         if btc_risk_sizing:
-            decision_root = output_root / "_btc_risk_decision_components"
-            run_components(
-                venue,
-                output_root=decision_root,
-                end_date=end_date,
-                start_date=start_date,
-                frozen_fallback=frozen_fallback,
-                data_root=data_root,
-                component_take_profit_pct=component_take_profit_pct,
-                backtest_leverage=1.0,
-                config_transform=config_transform,
-            )
-            root_for_context = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
-            size_lookup, btc_risk_meta = btc_risk_size_lookup(
-                venue,
-                decision_component_root=decision_root,
-                output_root=output_root,
-                data_root=root_for_context,
-            )
+            if btc_risk_lookup_root is not None:
+                size_lookup, btc_risk_meta = load_btc_risk_size_lookup(btc_risk_lookup_root, venue)
+            else:
+                decision_root = output_root / "_btc_risk_decision_components"
+                run_components(
+                    venue,
+                    output_root=decision_root,
+                    end_date=end_date,
+                    start_date=start_date,
+                    frozen_fallback=frozen_fallback,
+                    data_root=data_root,
+                    component_take_profit_pct=component_take_profit_pct,
+                    backtest_leverage=1.0,
+                    config_transform=effective_config_transform,
+                )
+                root_for_context = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
+                size_lookup, btc_risk_meta = btc_risk_size_lookup(
+                    venue,
+                    decision_component_root=decision_root,
+                    output_root=output_root,
+                    data_root=root_for_context,
+                )
         component_meta = run_components(
             venue,
             output_root=output_root,
@@ -914,7 +999,9 @@ def run_venue(
             component_take_profit_pct=component_take_profit_pct,
             backtest_leverage=backtest_leverage,
             size_mult_lookup=size_lookup,
-            config_transform=config_transform,
+            config_transform=effective_config_transform,
+            write_candidate_tape=write_candidate_tape,
+            write_symbol_events=write_symbol_events,
         )
         pieces = {}
         for component in WINNER_WEIGHTS:
@@ -954,6 +1041,7 @@ def run_venue(
         leverage=chart_leverage,
         backtest_leverage=backtest_leverage,
         btc_risk_sizing=btc_risk_sizing,
+        btc_trend_gate=btc_trend_gate,
     )
     write_continuous_equity_report(
         venue=venue,
@@ -1014,6 +1102,12 @@ def main() -> int:
         default=1.0,
         help="Modeled backtest leverage: scales component gross exposure before costs/funding and scales hedge cap.",
     )
+    parser.add_argument(
+        "--btc-trend-gate",
+        choices=sorted(VALID_BTC_TREND_GATES),
+        default=None,
+        help="Override component BTC_TREND_GATE; omit to preserve each frozen source config.",
+    )
     args = parser.parse_args()
     data_root = Path(args.data_root).expanduser() if args.data_root else None
     if data_root is not None and len(args.venues) != 1:
@@ -1031,6 +1125,7 @@ def main() -> int:
             component_take_profit_pct=args.component_take_profit_pct,
             btc_risk_sizing=args.btc_risk_sizing,
             backtest_leverage=args.backtest_leverage,
+            btc_trend_gate=args.btc_trend_gate,
         )
     if not args.render_only:
         (output_root / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")

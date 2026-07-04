@@ -7,6 +7,7 @@ import pytest
 
 from liquidity_migration.volume_events_charts import (
     _OVERLAY_PALETTE,
+    _monthly_return_color,
     OverlaySpec,
     _overlay_series_dicts,
     _write_equity_benchmark_chart,
@@ -113,4 +114,47 @@ def test_chart_renders_with_overlay(tmp_path: Path) -> None:
     )
     assert "Micron (MU)" in meta["overlays"]
     assert meta["series"]["Micron (MU)"] == 3
+    assert meta["legend_items"] == 3
     assert (tmp_path / "combined_equity_btc.png").exists()
+
+
+def test_chart_renders_metric_tiles(tmp_path: Path) -> None:
+    pil_image = pytest.importorskip("PIL.Image")
+    days = ["2021-01-01", "2021-01-02", "2021-01-03"]
+    ts = [1609459200000, 1609545600000, 1609632000000]
+    equity = pl.DataFrame({"ts_ms": ts, "date": days, "equity": [1.0, 1.1, 1.2]})
+    btc = pl.DataFrame(
+        {"symbol": ["BTCUSDT"] * 3, "date": days, "ts_ms": ts, "close": [30000.0, 31000.0, 33000.0]}
+    )
+
+    meta = _write_equity_benchmark_chart(
+        tmp_path,
+        root=tmp_path,
+        equity=equity,
+        raw_klines=btc,
+        png_name="metrics_equity_btc.png",
+        metrics={
+            "total_return_pct": 20.0,
+            "annualized_pct": 12.3,
+            "max_drawdown_pct": -4.5,
+            "worst_day_pct": -2.0,
+            "sharpe_daily_ann": 1.8,
+            "mar": 2.7,
+            "final_equity": 1.2,
+            "years": 1.0,
+        },
+    )
+
+    path = tmp_path / "metrics_equity_btc.png"
+    assert meta["metric_tiles"] == 7
+    assert meta["legend_items"] == 2
+    assert path.exists()
+    with pil_image.open(path) as image:
+        assert image.size[1] > 940
+
+
+def test_monthly_return_color_treats_display_zero_as_neutral() -> None:
+    assert _monthly_return_color(0.0) == (100, 116, 139, 255)
+    assert _monthly_return_color(0.000049) == (100, 116, 139, 255)
+    assert _monthly_return_color(0.000051) == (22, 101, 52, 255)
+    assert _monthly_return_color(-0.000051) == (185, 28, 28, 255)

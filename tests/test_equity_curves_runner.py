@@ -122,6 +122,7 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
         "component_take_profit_pct": 0.12,
         "btc_risk_sizing": True,
         "backtest_leverage": 5.0,
+        "btc_trend_gate": None,
     }
     assert payload["run_label"] == "continuous_demo_paper_research_stage"
     assert payload["summary"]["total_return"] == 0.1

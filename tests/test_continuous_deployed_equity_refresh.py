@@ -114,6 +114,16 @@ def test_component_overrides_model_take_profit_and_leverage() -> None:
     assert out.gross_exposure == pytest.approx(2.5)
 
 
+def test_btc_trend_gate_override_changes_config_hash() -> None:
+    from liquidity_migration.continuous_events import ContinuousEventConfig
+
+    cfg = ContinuousEventConfig(btc_trend_gate="uptrend")
+    out = refresh._with_btc_trend_gate(cfg, "off")
+
+    assert out.btc_trend_gate == "off"
+    assert out.config_hash() != cfg.config_hash()
+
+
 def test_component_report_match_checks_tp_and_gross_exposure() -> None:
     payload = {"config": {"start_date": "2023-04-01", "end_date": "2026-06-25", "take_profit_pct": 0.12, "gross_exposure": 2.5}}
 
@@ -144,6 +154,7 @@ def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path
             {
                 "config": {
                     "take_profit_pct": 0.12,
+                    "btc_trend_gate": "off",
                     "gross_exposure": 2.5,
                     "taker_fee_bps": 5.5,
                     "spread_bps": 2.5,
@@ -187,8 +198,10 @@ def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path
     summary = json.loads((out_dir / "continuous_equity_summary.json").read_text(encoding="utf-8"))
     assert "Run label: exploratory" in report
     assert "Data root:" in report
+    assert "BTC trend gate: off" in report
     assert "## Cost Model" in report
     assert "OOS window:" in report
     assert summary["backtest_leverage"] == pytest.approx(5.0)
+    assert summary["btc_trend_gate"] == "off"
     assert summary["final_equity"] == pytest.approx(1.0302)
     assert summary["funding_modes"] == ["modeled"]
