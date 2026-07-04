@@ -143,6 +143,38 @@ def validate_order_submit_allowed(*, submit_orders: bool, confirm_demo_orders: b
         )
 
 
+def api_key_allows_order_submit(api_key_info: Mapping[str, Any]) -> tuple[bool, str]:
+    """Return whether Bybit key metadata permits state-changing order actions.
+
+    Bybit can report granular ContractTrade permissions while the whole key is
+    still read-only. The readOnly flag is authoritative for this incident class:
+    a read-only key can read wallet/positions, so ordinary liveness checks pass,
+    but order-submitting daemons later fail on set_leverage/place_order.
+    """
+    raw_read_only = api_key_info.get("readOnly", api_key_info.get("readonly"))
+    if raw_read_only is None:
+        return False, "Bybit API key metadata is missing readOnly"
+    read_only = str(raw_read_only).strip().lower()
+    if read_only in {"1", "true", "yes", "on"}:
+        return False, "Bybit API key metadata reports readOnly=1"
+    if read_only not in {"0", "false", "no", "off"}:
+        return False, f"Bybit API key metadata has unrecognised readOnly={raw_read_only!r}"
+    permissions = api_key_info.get("permissions")
+    if not isinstance(permissions, Mapping):
+        return False, "Bybit API key metadata is missing permissions"
+    contract = permissions.get("ContractTrade")
+    if isinstance(contract, str):
+        contract_perms = {contract}
+    elif isinstance(contract, Iterable):
+        contract_perms = {str(item) for item in contract}
+    else:
+        contract_perms = set()
+    missing = {"Order", "Position"}.difference(contract_perms)
+    if missing:
+        return False, f"Bybit ContractTrade permissions missing {sorted(missing)}"
+    return True, ""
+
+
 class BybitRestRateLimiter:
     """Thread-safe sliding-window rate limiter shared across BybitMarketData
     instances. Bybit public REST endpoints allow ~120 requests / 5 seconds per
@@ -574,6 +606,10 @@ class BybitPrivateClient:
 
     def get_wallet_balance(self, *, account_type: str = "UNIFIED", coin: str = "USDT") -> dict[str, Any]:
         payload = self._call("get_wallet_balance", accountType=account_type, coin=coin)
+        return payload.get("result", {})
+
+    def get_api_key_information(self) -> dict[str, Any]:
+        payload = self._call("get_api_key_information")
         return payload.get("result", {})
 
     def place_order(self, **params: Any) -> dict[str, Any]:

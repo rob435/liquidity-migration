@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -302,6 +304,7 @@ def test_continuous_rmom_refresh_rebuilds_each_active_sleeve_root() -> None:
     assert 'sleeve_on "${CONTINUOUS_PAPER_SLEEVE' in script
     assert "--root data/bybit-continuous-demo-event" in script
     assert "--root data/bybit-continuous-paper-event" in script  # the fix
+    assert "--full-rewrite" in script  # live roots are rolling stores; append overlap can drift
     deploy = (repo / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
     assert '_check_rmom_root "demo" "data/bybit-continuous-demo-event/residual_momentum.parquet"' in deploy
     assert '_check_rmom_root "paper" "data/bybit-continuous-paper-event/residual_momentum.parquet"' in deploy
@@ -1704,6 +1707,70 @@ def test_deploy_refuses_real_money_env() -> None:
     txt = DEPLOY_SH.read_text()
     assert "REAL_MONEY" in txt
     assert "Refusing deploy: REAL_MONEY" in txt
+
+
+def test_deploy_and_verify_check_bybit_order_permissions_after_env_guard() -> None:
+    # The VPS verifier previously passed with a read-only demo key; the order
+    # daemons then failed later at set_leverage. Pin a live permission probe in
+    # every deploy/verify path after the REAL_MONEY guard has resolved the env.
+    for path, token in [
+        (DEPLOY_SH, "--context deploy"),
+        (VERIFY_SH, "--context verify"),
+        (REPO_ROOT / "scripts" / "vps_console_recover_and_deploy.sh", "--context recovery-deploy"),
+    ]:
+        text = path.read_text(encoding="utf-8")
+        source_idx = text.index(". /etc/liquidity-migration/bybit-demo.env")
+        guard_idx = text.index('case "${REAL_MONEY:-}" in')
+        check_idx = text.index("scripts/check_bybit_order_permissions.py")
+        assert source_idx < guard_idx < check_idx
+        assert token in text
+
+
+def test_order_submitting_runners_fail_fast_on_bybit_order_permissions() -> None:
+    # A read-only demo key can pass wallet/position reads and then fail only at
+    # set_leverage. Every submit-enabled wrapper should detect that at startup.
+    for script_name, confirm_token, context in [
+        ("run_bybit_long_demo_event_engine.sh", "CONFIRM_DEMO_ORDERS=1", "--context long-demo"),
+        ("run_bybit_continuous_demo_event_engine.sh", "CONFIRM_DEMO_ORDERS=1", "--context continuous-demo"),
+        ("run_bybit_demo_ws_risk_engine.sh", "CONFIRM_DEMO_ORDERS=1", "--context ws-risk"),
+        ("run_continuous_hedge.sh", "CONFIRM_DEMO_ORDERS=1", "--context continuous-hedge"),
+    ]:
+        text = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+        confirm_idx = text.index(confirm_token)
+        check_idx = text.index("scripts/check_bybit_order_permissions.py")
+        assert confirm_idx < check_idx
+        assert context in text
+
+
+def test_order_permission_checker_fails_cleanly_without_demo_credentials() -> None:
+    env = os.environ.copy()
+    for key in [
+        "BYBIT_DEMO_API_KEY",
+        "BYBIT_DEMO_API_SECRET",
+        "BYBIT_REAL_API_KEY",
+        "BYBIT_REAL_API_SECRET",
+        "REAL_MONEY",
+    ]:
+        env.pop(key, None)
+    env["DEMO"] = "true"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "check_bybit_order_permissions.py"),
+            "--context",
+            "unit-test",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert proc.returncode == 1
+    assert "missing BYBIT_DEMO_API_KEY/BYBIT_DEMO_API_SECRET" in proc.stderr
+    assert "Traceback" not in proc.stderr
 
 
 def test_deploy_keeps_hedge_timer_when_continuous_off_but_leg_open() -> None:

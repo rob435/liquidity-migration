@@ -15,6 +15,8 @@ It Telegrams on:
     place. Continuous v2 is intentionally no-stop demo/paper, so its stop check
     is opt-in via ``--continuous-stop-check``.
   * LEDGER<->VENUE MISMATCH -- a position open on one side but not the other.
+  * ORDER-PERMISSION FAILURE -- an active order-submitting unit is running with
+    a Bybit key that is read-only or missing ContractTrade mutation rights.
   * WS FEED STALL -- the WS kline store's newest bar is far behind wall clock
     (REST still covers correctness, so this is a warning).
 
@@ -53,6 +55,14 @@ from liquidity_migration.telegram import send_telegram_message  # noqa: E402
 # Severity order for message framing only.
 CRITICAL = "CRITICAL"
 WARNING = "WARNING"
+
+_ORDER_PERMISSION_UNITS = {
+    "liquidity-migration-bybit-risk.service",
+    "liquidity-migration-bybit-long-demo.service",
+    "liquidity-migration-bybit-continuous-demo.service",
+    "liquidity-migration-continuous-hedge.timer",
+    "liquidity-migration-continuous-hedge.service",
+}
 
 
 def _default_root(rel: str) -> str:
@@ -229,6 +239,29 @@ def evaluate_stop_protection(
                 )
             )
     return alerts
+
+
+def evaluate_order_permission(*, allowed: bool | None, reason: str) -> Alert | None:
+    """Confirmed read-only/missing mutation rights is critical; an unavailable
+    metadata check is a warning so transient Bybit/API issues do not masquerade
+    as a proven credential misconfiguration."""
+    if allowed is True:
+        return None
+    if allowed is False:
+        return Alert(
+            key="bybit_order_permissions",
+            severity=CRITICAL,
+            message=(
+                "Bybit demo API key cannot submit orders: "
+                f"{reason}. Order-submitting services will fail at set_leverage/place_order; "
+                "replace /etc/liquidity-migration/bybit-demo.env with a non-read-only demo key."
+            ),
+        )
+    return Alert(
+        key="bybit_order_permissions_unknown",
+        severity=WARNING,
+        message=f"could not verify Bybit order-submit permissions ({reason}); order-submit health is unchecked.",
+    )
 
 
 def evaluate_orphan_hedge(*, hedge_timer_enabled: bool, open_hedge_trades: list[dict]) -> Alert | None:
@@ -454,6 +487,37 @@ def _unit_active(unit: str) -> bool:
         )
     except Exception:  # noqa: BLE001
         return False
+
+
+def _order_permission_check_required(unit_states: dict[str, str]) -> bool:
+    return any(unit_states.get(unit) == "active" for unit in _ORDER_PERMISSION_UNITS)
+
+
+def _bybit_order_permission_status() -> tuple[bool | None, str]:
+    try:
+        from liquidity_migration.bybit import (
+            BybitPrivateClient,
+            api_key_allows_order_submit,
+            resolve_private_credentials,
+        )
+
+        api_key, api_secret, demo = resolve_private_credentials()
+        if not demo:
+            return False, "REAL_MONEY credentials are active on a demo/paper host"
+        if not api_key or not api_secret:
+            return False, "missing Bybit demo API credentials"
+        client = BybitPrivateClient(api_key=api_key, api_secret=api_secret, demo=True)
+        return api_key_allows_order_submit(client.get_api_key_information())
+    except Exception as exc:  # noqa: BLE001 - watchdog must not crash-loop
+        return None, f"{type(exc).__name__}: {exc}"[:200]
+
+
+def gather_order_permission_alerts(unit_states: dict[str, str]) -> list[Alert]:
+    if not _order_permission_check_required(unit_states):
+        return []
+    allowed, reason = _bybit_order_permission_status()
+    alert = evaluate_order_permission(allowed=allowed, reason=reason)
+    return [alert] if alert else []
 
 
 def _continuous_hedge_lifecycle_on() -> bool:
@@ -928,6 +992,7 @@ def main() -> int:
         u for u, s in unit_states.items() if u.endswith(".timer") and s != "active"
     }
     alerts = evaluate_unit_states(unit_states, prior_not_active_timers=prior_not_active_timers)
+    alerts.extend(gather_order_permission_alerts(unit_states))
     if risk_root is not None:
         alerts.extend(gather_risk_alerts(risk_root=risk_root, now_ms=now_ms, args=args))
     if liquidations_root is not None:

@@ -125,6 +125,7 @@ case "${REAL_MONEY:-}" in
     exit 1
     ;;
 esac
+"$PYTHON" scripts/check_bybit_order_permissions.py --context verify
 
 # Per-sleeve kill-switch: source the toggle lib so an intentionally-off sleeve is
 # verified DOWN, not flagged as a failed deploy. (Unit FILES are always synced by

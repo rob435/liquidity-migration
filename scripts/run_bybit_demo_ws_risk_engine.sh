@@ -61,6 +61,7 @@ if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
         echo "Set CONFIRM_DEMO_ORDERS=1 with SUBMIT_ORDERS=1 to submit Bybit demo risk orders." >&2
         exit 2
     fi
+    "$PYTHON_BIN" scripts/check_bybit_order_permissions.py --context ws-risk
     order_args+=(--submit-orders --confirm-demo-orders)
 fi
 

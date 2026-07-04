@@ -779,6 +779,59 @@ def test_validate_order_submit_allowed_requires_confirm_flag(monkeypatch) -> Non
         bybit.validate_order_submit_allowed(submit_orders=True, confirm_demo_orders=False)
 
 
+def test_api_key_allows_order_submit_rejects_read_only_key() -> None:
+    allowed, reason = bybit.api_key_allows_order_submit(
+        {
+            "readOnly": 1,
+            "permissions": {"ContractTrade": ["Order", "Position"]},
+        }
+    )
+    assert allowed is False
+    assert "readOnly=1" in reason
+
+
+def test_api_key_allows_order_submit_requires_contract_trade_permissions() -> None:
+    allowed, reason = bybit.api_key_allows_order_submit(
+        {
+            "readOnly": 0,
+            "permissions": {"ContractTrade": ["Order"]},
+        }
+    )
+    assert allowed is False
+    assert "Position" in reason
+
+
+def test_api_key_allows_order_submit_rejects_malformed_metadata() -> None:
+    allowed, reason = bybit.api_key_allows_order_submit({"readOnly": 0})
+    assert allowed is False
+    assert "missing permissions" in reason
+
+    allowed, reason = bybit.api_key_allows_order_submit({"permissions": {"ContractTrade": ["Order", "Position"]}})
+    assert allowed is False
+    assert "missing readOnly" in reason
+
+
+def test_private_client_get_api_key_information(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_api_key_information(self):
+            return {
+                "retCode": 0,
+                "result": {
+                    "readOnly": 0,
+                    "permissions": {"ContractTrade": ["Order", "Position"]},
+                },
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    info = client.get_api_key_information()
+    assert info["readOnly"] == 0
+    assert bybit.api_key_allows_order_submit(info) == (True, "")
+
+
 def test_private_credentials_present_uses_active_account(monkeypatch) -> None:
     from liquidity_migration.event_demo import _private_credentials_present
 

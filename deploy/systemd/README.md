@@ -169,10 +169,18 @@ Required secrets live outside git in:
 
 That environment file must define the Bybit demo API credentials and Telegram
 credentials. Deploy/recovery backs it up and sets only `TELEGRAM_CHAT_ID` to the
-expected target, preserving the API secrets and bot token. Telegram is enabled
-for material alerts only: entries, exits, position reconciliation, or
-position-report errors. Quiet no-trade cycles still write local reports but must
-not notify. The services submit demo orders only.
+expected target, preserving the API secrets and bot token. The Bybit key must be
+non-read-only and include `ContractTrade` `Order` and `Position` permissions.
+Bybit can still list those granular permissions while reporting `readOnly=1`;
+that key can read wallet/position state but fails later at
+`set_leverage`/`place_order` with `ErrCode: 10005`. Checked deploy, verify,
+console recovery, submit-armed wrappers, and the demo-liveness watchdog all
+probe `get_api_key_information()` and fail/page on read-only or missing mutation
+permissions. Recovery is to replace `/etc/liquidity-migration/bybit-demo.env`
+with a non-read-only demo key, never by setting `REAL_MONEY`.
+Telegram is enabled for material alerts only: entries, exits, position
+reconciliation, or position-report errors. Quiet no-trade cycles still write
+local reports but must not notify. The services submit demo orders only.
 The risk
 service does not open entries; it repairs exchange-native stop/TP state, listens to
 demo private WebSocket position/order/execution streams plus the mainnet public

@@ -268,6 +268,7 @@ case "${REAL_MONEY:-}" in
     exit 1
     ;;
 esac
+"$PYTHON" scripts/check_bybit_order_permissions.py --context recovery-deploy
 
 # Sync every .service / .timer in deploy/systemd/ so disaster recovery brings
 # up the same unit set scripts/deploy_vps_live.sh does - paper, both long

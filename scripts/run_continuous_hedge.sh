@@ -19,6 +19,11 @@ case "${CONTINUOUS_HEDGE_TIMER:-off}" in
 esac
 args=(--venue "$VENUE" --data-root "$DATA_ROOT" --primary-root "$PRIMARY_ROOT")
 if [[ "${SUBMIT_HEDGE:-0}" == "1" ]]; then
+    if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then
+        echo "Set CONFIRM_DEMO_ORDERS=1 with SUBMIT_HEDGE=1 to submit Bybit demo hedge orders." >&2
+        exit 2
+    fi
+    "$PYTHON_BIN" scripts/check_bybit_order_permissions.py --context continuous-hedge
     args+=(--submit)
 fi
 exec "$PYTHON_BIN" scripts/run_continuous_hedge.py "${args[@]}"

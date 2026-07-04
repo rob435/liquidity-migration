@@ -155,6 +155,42 @@ def test_stop_protection_flags_missing_and_wrong_and_mismatch() -> None:
     assert "CLOSE THE POSITION MANUALLY" in alerts["unprotected:NOSTOPUSDT"].message
 
 
+def test_order_permission_alerts_confirmed_denied_vs_unknown() -> None:
+    denied = M.evaluate_order_permission(allowed=False, reason="Bybit API key metadata reports readOnly=1")
+    assert denied is not None
+    assert denied.key == "bybit_order_permissions"
+    assert denied.severity == M.CRITICAL
+    assert "readOnly=1" in denied.message
+
+    unknown = M.evaluate_order_permission(allowed=None, reason="TimeoutError: Bybit down")
+    assert unknown is not None
+    assert unknown.key == "bybit_order_permissions_unknown"
+    assert unknown.severity == M.WARNING
+
+    assert M.evaluate_order_permission(allowed=True, reason="") is None
+
+
+def test_gather_order_permission_alerts_only_when_submit_unit_active(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    def fake_status():
+        calls["n"] += 1
+        return False, "Bybit API key metadata reports readOnly=1"
+
+    monkeypatch.setattr(M, "_bybit_order_permission_status", fake_status)
+
+    assert M.gather_order_permission_alerts({"liquidity-migration-bybit-risk.service": "inactive"}) == []
+    assert calls["n"] == 0
+
+    alerts = M.gather_order_permission_alerts({"liquidity-migration-bybit-risk.service": "active"})
+    assert [alert.key for alert in alerts] == ["bybit_order_permissions"]
+    assert calls["n"] == 1
+
+    alerts = M.gather_order_permission_alerts({"liquidity-migration-continuous-hedge.service": "active"})
+    assert [alert.key for alert in alerts] == ["bybit_order_permissions"]
+    assert calls["n"] == 2
+
+
 def test_orphan_hedge_pages_only_when_timer_off_with_open_leg() -> None:
     # Timer enabled -> the daily hedge run manages the leg; never page.
     assert M.evaluate_orphan_hedge(

@@ -186,6 +186,7 @@ case "${REAL_MONEY:-}" in
     exit 1
     ;;
 esac
+"$PYTHON" scripts/check_bybit_order_permissions.py --context deploy
 
 # Sync every .service / .timer in deploy/systemd/ so any unit added
 # to the repo (e.g. demo-health, combined-book-report, future units)
