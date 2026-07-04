@@ -2298,6 +2298,30 @@ def _daemon(tmp_path, **overrides):
     return ContinuousDemoDaemon(tmp_path / "r", config=ResearchConfig(), demo_config=cfg, interval_seconds=60.0)
 
 
+def test_daemon_cycle_kwargs_include_private_ws_health(tmp_path) -> None:
+    class _ConnectedPrivateWs:
+        def is_connected(self) -> bool:
+            return True
+
+    d = _daemon(tmp_path)
+    d._ws_stream = _ConnectedPrivateWs()  # type: ignore[assignment]
+    d._private_state_ws_subscriptions_ok = True
+
+    assert d._extra_cycle_kwargs()["private_ws_health_ok"] is True
+
+
+def test_daemon_cycle_kwargs_mark_private_ws_unhealthy_when_subscriptions_missing(tmp_path) -> None:
+    class _ConnectedPrivateWs:
+        def is_connected(self) -> bool:
+            return True
+
+    d = _daemon(tmp_path)
+    d._ws_stream = _ConnectedPrivateWs()  # type: ignore[assignment]
+    d._private_state_ws_subscriptions_ok = False
+
+    assert d._extra_cycle_kwargs()["private_ws_health_ok"] is False
+
+
 def test_ticker_message_nudges_fast_loop(tmp_path) -> None:
     d = _daemon(tmp_path)
     assert not d._tick_event.is_set()
@@ -3592,6 +3616,44 @@ def test_continuous_entry_risk_health_blocks_submit_on_private_ws_stale() -> Non
     assert got["entry_risk_health_ok"] is False
     assert got["entry_risk_health_reasons"] == "private_ws_stale"
     assert got["entry_risk_health_private_ws_silence_seconds"] == pytest.approx(301.0)
+    assert got["entry_risk_health_private_ws_health_ok"] is None
+
+
+def test_continuous_entry_risk_health_accepts_quiet_healthy_private_ws() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, entry_private_ws_stale_seconds=300.0)
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(10_000.0),
+        open_trades=pl.DataFrame(),
+        live_position_symbols=set(),
+        private_ws_health_ok=True,
+    )
+
+    assert got["entry_risk_health_ok"] is True
+    assert got["entry_risk_health_reasons"] == ""
+    assert got["entry_risk_health_private_ws_silence_seconds"] == pytest.approx(10_000.0)
+    assert got["entry_risk_health_private_ws_health_ok"] is True
+
+
+def test_continuous_entry_risk_health_blocks_quiet_unhealthy_private_ws() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, entry_private_ws_stale_seconds=300.0)
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(301.0),
+        open_trades=pl.DataFrame(),
+        live_position_symbols=set(),
+        private_ws_health_ok=False,
+    )
+
+    assert got["entry_risk_health_ok"] is False
+    assert got["entry_risk_health_reasons"] == "private_ws_stale"
+    assert got["entry_risk_health_private_ws_health_ok"] is False
 
 
 def test_continuous_entry_risk_health_does_not_block_dry_run_on_private_ws_stale() -> None:

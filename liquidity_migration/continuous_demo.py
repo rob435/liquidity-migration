@@ -2019,6 +2019,7 @@ def _continuous_entry_risk_health(
     all_orders: pl.DataFrame | None = None,
     now_ms: int = 0,
     managed_strategy_ids: tuple[str, ...] = (),
+    private_ws_health_ok: bool | None = None,
 ) -> dict[str, Any]:
     """New-entry health gate for the live submit path.
 
@@ -2038,7 +2039,7 @@ def _continuous_entry_risk_health(
     private_ws_silence = _private_ws_silence_seconds(private_state_cache)
     stale_threshold = float(config.entry_private_ws_stale_seconds or 0.0)
     if config.submit_orders and stale_threshold > 0.0 and private_ws_silence is not None:
-        if private_ws_silence > stale_threshold:
+        if private_ws_silence > stale_threshold and private_ws_health_ok is not True:
             reasons.append("private_ws_stale")
     ledger_symbols: set[str] = set()
     if not open_trades.is_empty() and "symbol" in open_trades.columns:
@@ -2093,6 +2094,7 @@ def _continuous_entry_risk_health(
         "entry_risk_health_snapshot_errors": ",".join(snapshot_errors),
         "entry_risk_health_private_ws_silence_seconds": private_ws_silence,
         "entry_risk_health_private_ws_stale_seconds": stale_threshold,
+        "entry_risk_health_private_ws_health_ok": private_ws_health_ok,
         "entry_risk_health_ledger_missing_positions": ",".join(missing_positions[:25]),
         "entry_risk_health_unprotected_positions": ",".join(unprotected_positions[:25]),
         "entry_risk_health_unprotected_position_ages": _compact_unprotected_position_ages(unprotected_position_ages),
@@ -3901,6 +3903,12 @@ def format_continuous_telegram_status_message(
             f"{payload.get('entry_risk_health_reasons') or 'blocked'} "
             f"snapshot={payload.get('entry_risk_health_snapshot_source') or ''}"
         )
+        if "private_ws_stale" in str(payload.get("entry_risk_health_reasons") or ""):
+            lines.append(
+                "private_ws="
+                f"health_ok={payload.get('entry_risk_health_private_ws_health_ok')} "
+                f"silence_s={_payload_float(payload.get('entry_risk_health_private_ws_silence_seconds')):g}"
+            )
         missing = str(payload.get("entry_risk_health_ledger_missing_positions") or "")
         if missing:
             lines.append(f"ledger_missing_positions={missing[:200]}")
@@ -4112,6 +4120,7 @@ def run_continuous_demo_cycle(
     private_state_cache: Any | None = None,
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
+    private_ws_health_ok: bool | None = None,
     panel_cache: "LivePanelCache | None" = None,
     reactivity_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -4254,6 +4263,7 @@ def run_continuous_demo_cycle(
             all_orders=all_orders,
             now_ms=cycle_now_ms,
             managed_strategy_ids=managed_strategy_ids,
+            private_ws_health_ok=private_ws_health_ok,
         )
         if bool(account_drawdown_fields["entry_account_drawdown_kill_switch_tripped"]):
             existing_reasons = str(entry_risk_health["entry_risk_health_reasons"] or "")
@@ -4830,6 +4840,9 @@ def run_continuous_demo_cycle(
                         "snapshot_errors": payload.get("entry_risk_health_snapshot_errors") or "",
                         "private_ws_silence_seconds": payload.get(
                             "entry_risk_health_private_ws_silence_seconds"
+                        ),
+                        "private_ws_health_ok": payload.get(
+                            "entry_risk_health_private_ws_health_ok"
                         ),
                         "ledger_missing_positions": payload.get(
                             "entry_risk_health_ledger_missing_positions"

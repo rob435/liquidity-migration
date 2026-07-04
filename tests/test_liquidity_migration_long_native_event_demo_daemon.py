@@ -183,3 +183,40 @@ def test_long_daemon_private_ws_silence_no_false_alarm_when_socket_healthy(tmp_p
     down = _daemon(False)
     down._check_ws_health()
     assert down._ws_private_stale_warned is True, "silence + non-alive socket must still warn"
+
+
+def test_long_daemon_private_state_ws_health_requires_socket_and_subscriptions(tmp_path: Path) -> None:
+    class _PrivateStateWs(_RecordingWsStream):
+        def __init__(self, connected: bool = True) -> None:
+            super().__init__()
+            self.connected = connected
+
+        def is_connected(self) -> bool:
+            return self.connected
+
+        def subscribe_positions(self, _cb) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_orders(self, _cb) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_wallet(self, _cb) -> None:  # noqa: ANN001
+            pass
+
+    daemon = LongNativeDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=LongNativeDemoCycleConfig(submit_orders=False, ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: _PrivateStateWs(True),
+        cycle_runner=_stub_long_cycle_runner([]),
+    )
+    daemon._open_ws()
+    assert daemon._private_state_ws_health_ok() is True
+
+    daemon._private_state_ws_subscriptions_ok = False
+    assert daemon._private_state_ws_health_ok() is False
+
+    daemon._private_state_ws_subscriptions_ok = True
+    daemon._ws_stream = _PrivateStateWs(False)  # type: ignore[assignment]
+    assert daemon._private_state_ws_health_ok() is False

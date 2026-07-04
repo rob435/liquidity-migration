@@ -151,6 +151,7 @@ class LongNativeDemoDaemon:
         )
         self._ticker_cache: TickerCache = ticker_cache if ticker_cache is not None else TickerCache()
         self._ticker_stream: Any | None = None
+        self._private_state_ws_subscriptions_ok = False
         # Serializes _ticker_stream open/close across the seed/reconcile/watchdog threads
         # so a race can't leak a second ticker WS (DAEM-002; see EventDemoDaemon).
         self._ticker_stream_lock = threading.Lock()
@@ -235,6 +236,7 @@ class LongNativeDemoDaemon:
         return delivered
 
     def _open_ws(self) -> None:
+        self._private_state_ws_subscriptions_ok = False
         try:
             self._ws_stream = self._ws_stream_factory(self.config)
         except Exception as exc:  # noqa: BLE001
@@ -251,6 +253,7 @@ class LongNativeDemoDaemon:
         # An individual subscription failure degrades that one signal to REST
         # via the cache's stale fallback path; we never tear down the whole
         # WS connection because positions or wallet subscribes failed.
+        private_subscriptions_ok = True
         for subscribe_name, handler in (
             ("subscribe_positions", self._handle_position_message),
             ("subscribe_orders", self._handle_order_message),
@@ -258,18 +261,26 @@ class LongNativeDemoDaemon:
         ):
             subscribe = getattr(self._ws_stream, subscribe_name, None)
             if not callable(subscribe):
+                private_subscriptions_ok = False
+                _logger.warning(
+                    "long private WS %s missing; that signal will REST-fallback",
+                    subscribe_name,
+                )
                 continue
             try:
                 subscribe(handler)
             except Exception as exc:  # noqa: BLE001 - one bad sub must not break the rest
+                private_subscriptions_ok = False
                 _logger.warning(
                     "long private WS %s failed; that signal will REST-fallback: %s",
                     subscribe_name, exc,
                 )
+        self._private_state_ws_subscriptions_ok = private_subscriptions_ok
 
     def _close_ws(self) -> None:
         stream = self._ws_stream
         self._ws_stream = None
+        self._private_state_ws_subscriptions_ok = False
         self.router.clear_all()
         if stream is None:
             return
@@ -537,6 +548,22 @@ class LongNativeDemoDaemon:
             except Exception:  # noqa: BLE001
                 _logger.exception("failed to format cycle summary")
         _logger.debug("long cycle complete elapsed=%.2fs", elapsed)
+
+    def _private_state_ws_health_ok(self) -> bool | None:
+        """True only when the private state subscriptions are installed and the
+        underlying pybit socket is confirmed connected. False means known down or
+        incomplete; None means the stream object cannot report socket liveness."""
+        stream = self._ws_stream
+        if stream is None or not self._private_state_ws_subscriptions_ok:
+            return False
+        is_connected = getattr(stream, "is_connected", None)
+        if not callable(is_connected):
+            return None
+        try:
+            return bool(is_connected())
+        except Exception as exc:  # noqa: BLE001 - health telemetry must not break cycles
+            _logger.warning("long private WS is_connected probe failed: %s", exc)
+            return None
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
         """Pretty cycle line for stdout/journald. Overridable: a subclass whose cycle payload has a

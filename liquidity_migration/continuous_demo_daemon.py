@@ -263,7 +263,11 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
     # -- Tier 2: inject the panel cache into the cycle runner ----------
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
-        return {"panel_cache": self._panel_cache, "reactivity_stats": self._reactivity_snapshot()}
+        return {
+            "panel_cache": self._panel_cache,
+            "private_ws_health_ok": self._private_state_ws_health_ok(),
+            "reactivity_stats": self._reactivity_snapshot(),
+        }
 
     def _reactivity_snapshot(self) -> dict[str, Any]:
         """Fast-loop health for the cycle telemetry (persisted as rx_* so the watchdog sees a dead loop)."""

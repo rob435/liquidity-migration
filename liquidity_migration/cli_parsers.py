@@ -1446,7 +1446,10 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
         "--entry-private-ws-stale-seconds",
         type=float,
         default=d.entry_private_ws_stale_seconds,
-        help="Submit-mode new-entry gate: block entries when the private execution WS stream is silent this long.",
+        help=(
+            "Submit-mode new-entry gate: block entries when private state WS silence exceeds "
+            "this bound and the daemon cannot confirm the private state stream is healthy."
+        ),
     )
     p.add_argument("--submit-orders", action="store_true", help="Place real DEMO orders (default off = dry-run).")
     p.add_argument("--confirm-demo-orders", action="store_true")
