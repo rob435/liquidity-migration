@@ -34,7 +34,7 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_HOUR
+from ._common import exact_duration_ms
 from .kline_store import KlineStore
 
 _logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ DEFAULT_POLL_SECONDS = 5.0
 # universe_symbols() scopes the daemon's ticker subscriptions to "recently active
 # in the leader store"; a few hours of slack keeps names whose latest bar is
 # mid-write or briefly gapped from flapping out of the ticker set.
-_UNIVERSE_COVERAGE_SLACK_MS = 3 * MS_PER_HOUR
+_UNIVERSE_COVERAGE_SLACK_MS = exact_duration_ms(hours=3)
 
 # Confirmed bars land hourly, so the leader snapshot normally changes at least
 # once an hour. An age beyond this means the LEADER daemon is down or wedged —

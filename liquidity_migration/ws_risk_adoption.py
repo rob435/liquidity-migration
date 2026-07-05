@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple
 
-from ._common import MS_PER_DAY
+from ._common import exact_duration_ms
 from .event_demo import (
     _float,
     _normalized_position_side,
@@ -133,7 +133,7 @@ def build_adopted_trade_row(
         take_profit_pct=take_profit_pct,
         tick_size=tick_size,
     )
-    planned_exit_ts_ms = opened_ms + int(max(risk.adopt_hold_days, 0.0) * MS_PER_DAY)
+    planned_exit_ts_ms = opened_ms + exact_duration_ms(days=max(risk.adopt_hold_days, 0.0))
     sleeve = "long" if side == "long" else "short"
 
     recovered = recover_entry_link_metadata(symbol, side)

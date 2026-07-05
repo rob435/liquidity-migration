@@ -17,7 +17,7 @@ from .config import ResearchConfig
 from .downloaders import _normalize_instruments, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
-from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, finite_float
+from ._common import MS_PER_HOUR, MS_PER_MINUTE, exact_duration_ms, finite_float
 from ._common import PENDING_ORDER_STATUSES  # noqa: F401  re-exported: tests + the pending-order guard constant below consume it via event_demo
 # orderLinkId encode/decode live in order_link_id.py (cohesive home); re-exported here so
 # existing `from .event_demo import _order_link_id` callers (3 sleeves, ws_risk, tests) are unaffected.
@@ -1338,7 +1338,7 @@ def _round_price(price: float | Decimal, *, tick_size: float, rounding: str) -> 
 
 def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
     end_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
-    start_ms = end_ms - lookback_days * MS_PER_DAY
+    start_ms = end_ms - exact_duration_ms(days=lookback_days)
     return start_ms, end_ms
 
 

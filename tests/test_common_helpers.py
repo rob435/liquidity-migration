@@ -5,11 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import polars as pl
+import pytest
 
 from liquidity_migration._common import (
     MS_PER_DAY,
     calendar_roll,
     calendar_shift,
+    exact_duration_ms,
+    exact_lookback_cutoff_ms,
     is_weekend_ms,
 )
 
@@ -58,6 +61,24 @@ def test_calendar_roll_window_is_calendar_bounded_not_row_bounded() -> None:
     # day3's 2-day window is (day1, day3]; it excludes day1, so the sum is 1.0.
     # A row-based rolling_sum(window_size=2) would include day1 and give 2.0.
     assert out["cr"].to_list() == [1.0, 2.0, 1.0]
+
+
+def test_exact_duration_ms_keeps_month_equivalent_precise() -> None:
+    month_ms = 2_629_800_000  # 365.25 / 12 days, in milliseconds.
+    anchor = 1_700_000_123_456
+
+    assert exact_duration_ms(days=365.25 / 12) == month_ms
+    assert exact_lookback_cutoff_ms(anchor, days=365.25 / 12) == anchor - month_ms
+
+
+def test_exact_duration_ms_rejects_sub_millisecond_duration() -> None:
+    with pytest.raises(ValueError, match="whole milliseconds"):
+        exact_duration_ms(seconds="0.0001")
+
+
+def test_exact_duration_ms_rejects_negative_duration() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        exact_duration_ms(minutes=-1)
 
 
 def test_is_weekend_ms() -> None:

@@ -24,7 +24,7 @@ import polars as pl
 import pytest
 
 import liquidity_migration.long_native_event_demo as lnd
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
 from liquidity_migration.config import ResearchConfig
 from liquidity_migration.long_native_event_demo import (
     FC_VOLUME_RANK_TELEMETRY_MARGIN,
@@ -307,6 +307,49 @@ def test_sniper_retrace_respects_entry_delay_before_live_check() -> None:
     assert candidates == []
     assert skips["entry_delay"] == 1
     assert skips["no_retrace_yet"] == 0
+
+
+def test_sniper_entry_delay_uses_exact_elapsed_hours() -> None:
+    strategy = replace(_v11a_long_native_config(), entry_delay_hours=1.5)
+    signal_ts = 1_700_000_123_456
+    delay_ms = exact_duration_ms(hours=1.5)
+    features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
+
+    early, early_skips = _select_long_entry_candidates(
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=signal_ts + delay_ms - 1,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.5},
+        max_new_entries=5,
+    )
+    on_boundary, boundary_skips = _select_long_entry_candidates(
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=signal_ts + delay_ms,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.5},
+        max_new_entries=5,
+    )
+
+    assert early == []
+    assert early_skips["entry_delay"] == 1
+    assert len(on_boundary) == 1
+    assert on_boundary[0]["first_entry_check_ts_ms"] == signal_ts + delay_ms
+    assert boundary_skips["entry_delay"] == 0
+
+
+def test_long_cooldown_until_uses_exact_elapsed_days() -> None:
+    exit_ts = 1_700_000_123_456
+    trades = pl.DataFrame([
+        {"symbol": "BTCUSDT", "status": "closed", "exit_ts_ms": exit_ts},
+    ])
+
+    cooldown = lnd._cooldown_until_long(trades, cooldown_days=7)
+
+    assert cooldown == {"BTCUSDT": exit_ts + exact_duration_ms(days=7)}
 
 
 def test_sniper_falls_through_after_deadline_when_no_retrace() -> None:

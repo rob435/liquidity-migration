@@ -8,6 +8,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from ._common import exact_duration_ms
+
 
 class BinanceDataError(RuntimeError):
     pass
@@ -333,7 +335,7 @@ def _raise_if_suspicious_empty_page(
 
 
 def _recent_history_start(start: int, end: int, *, days: int) -> int:
-    window_ms = days * 24 * 60 * 60_000
+    window_ms = exact_duration_ms(days=days)
     latest_available_start = int(time.time() * 1000) - window_ms
     return max(start, end - window_ms + 1, latest_available_start)
 

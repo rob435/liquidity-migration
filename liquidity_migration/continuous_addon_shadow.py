@@ -8,7 +8,7 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY, coerce_int, finite_float
+from ._common import MS_PER_DAY, coerce_int, exact_duration_ms, finite_float
 from .storage import read_dataset
 
 
@@ -818,7 +818,7 @@ def _same_symbol_cooldown_simulation_rows(
 ) -> list[dict[str, Any]]:
     if cooldown_minutes < 0.0:
         return []
-    cooldown_ms = int(cooldown_minutes * 60_000)
+    cooldown_ms = exact_duration_ms(minutes=cooldown_minutes)
     last_accepted_by_symbol: dict[str, dict[str, Any]] = {}
     out: list[dict[str, Any]] = []
     for event in sorted(

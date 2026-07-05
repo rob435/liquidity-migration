@@ -108,8 +108,13 @@ def _ensure_default_log_handler() -> None:
 def _append_ws_risk_stop_audit_event(report_dir: Path, event: dict[str, Any]) -> Path:
     path = report_dir / WS_RISK_STOP_AUDIT_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Single write call + flush + fsync so each audit event is durable and a
+    # SIGKILL/power loss cannot leave a partial last line.
+    line = json.dumps(event, sort_keys=True, default=str, separators=(",", ":")) + "\n"
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True, default=str, separators=(",", ":")) + "\n")
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
     return path
 
 

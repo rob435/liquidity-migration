@@ -1165,6 +1165,47 @@ def test_continuous_addon_shadow_audit_same_symbol_gap_gates(tmp_path: Path) -> 
     ]
 
 
+def test_cooldown_simulation_uses_exact_millisecond_boundary() -> None:
+    base = 1_700_000_123_456
+    events = [
+        {
+            "symbol": "AAAUSDT",
+            "ts_ms": base,
+            "signal_ts_ms": base,
+            "trade_id": "first",
+            "order_link_id": "first-link",
+            "status": "open",
+        },
+        {
+            "symbol": "AAAUSDT",
+            "ts_ms": base + 6_000 - 1,
+            "signal_ts_ms": base + 6_000 - 1,
+            "trade_id": "one-ms-early",
+            "order_link_id": "early-link",
+            "status": "open",
+        },
+        {
+            "symbol": "AAAUSDT",
+            "ts_ms": base + 6_000,
+            "signal_ts_ms": base + 6_000,
+            "trade_id": "at-boundary",
+            "order_link_id": "boundary-link",
+            "status": "open",
+        },
+    ]
+
+    rows = cas._same_symbol_cooldown_simulation_rows(
+        source="addon",
+        record_type="trade",
+        events=events,
+        cooldown_minutes=0.1,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "one-ms-early"
+    assert rows[0]["gap_minutes"] == pytest.approx((6_000 - 1) / 60_000)
+
+
 def test_continuous_addon_shadow_audit_cooldown_simulation(tmp_path: Path) -> None:
     primary_root, addon_root, _historical_csv = _write_shadow_fixture(tmp_path)
     write_dataset(

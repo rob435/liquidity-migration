@@ -15,6 +15,7 @@ from typing import Any
 
 import polars as pl
 
+from ._common import exact_duration_ms
 from .continuous_entry_sizing import (
     UPPERWICK_CLIP,
     UPPERWICK_K,
@@ -53,7 +54,7 @@ def fetch_upper_wick_rv(
     if client is None:
         return None
     try:
-        items = client.get_klines(symbol, "1", end_ms - window_min * 60_000, end_ms - 1)
+        items = client.get_klines(symbol, "1", end_ms - exact_duration_ms(minutes=window_min), end_ms - 1)
     except Exception as exc:  # noqa: BLE001 - any live-data failure -> no tilt (safe)
         _logger.warning("upperwick: 1m fetch failed for %s: %r", symbol, exc)
         return None

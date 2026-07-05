@@ -45,7 +45,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift, exact_duration_ms, exact_lookback_cutoff_ms
 from .config import DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .daily_feature_panel import _autodetect_dataset_names, _date_str_to_ms, _read_window
 from .storage import read_dataset_columns
@@ -61,6 +61,17 @@ from .trade_lifecycle import (
 )
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
+BTC_TREND_MODE_DAILY_PRIOR = "daily_prior"
+BTC_TREND_MODE_HOURLY_30D = "hourly_30d"
+BTC_TREND_MODE_HOURLY_EXACT_MONTH = "hourly_exact_month"
+BTC_TREND_MODE_SMART_MONTH = "smart_month"
+BTC_TREND_MODES = (
+    BTC_TREND_MODE_DAILY_PRIOR,
+    BTC_TREND_MODE_HOURLY_30D,
+    BTC_TREND_MODE_HOURLY_EXACT_MONTH,
+    BTC_TREND_MODE_SMART_MONTH,
+)
+BTC_EXACT_MONTH_DAYS = 365.25 / 12.0
 
 _RESEARCH_INPUT_CACHE_MAX = 4
 _RESEARCH_INPUT_CACHE: OrderedDict[tuple[str, str, str, int], dict[str, Any]] = OrderedDict()
@@ -120,6 +131,9 @@ class ContinuousEventConfig:
     market_min_ret_1d: float = -1.0       # skip entry if equal-weight market 1d return < this (-1 = off)
     btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend"
     btc_trend_lookback_days: int = 30     # prior BTC daily returns, excluding the signal day
+    btc_trend_mode: str = BTC_TREND_MODE_DAILY_PRIOR
+    btc_trend_month_days: float = BTC_EXACT_MONTH_DAYS
+    btc_trend_smart_tolerance: float = 0.01
     entry_event_trigger: str = "none"      # hourly catalyst gate; "none" preserves continuous spell entries
     failed_fade_hours: int = 0            # 0=off; cut a fade that hasn't worked after N hours
     failed_fade_loss_pct: float = 0.0
@@ -137,14 +151,6 @@ class ContinuousEventConfig:
     entry_pause_window_hours: int = 24
     entry_crowding_max_fresh: int = 0     # 0=off; skip signal hours with more fresh candidates than this
     entry_skip_external_size_multiplier_lte: float = 0.0  # 0=off; skip entries sized <= threshold by external hook
-    # Dated research hooks. All default OFF and are intentionally narrow so the
-    # deployed profile cannot inherit experimental time/symbol controls by accident.
-    research_time_boundary_rule: str = "off"
-    research_symbol_rule: str = "off"
-    research_permanent_blacklist_symbols: tuple[str, ...] = ()
-    research_permanent_blacklist_cutoff_ts_ms: int = 0
-    research_portfolio_heat_cap: float = 0.0
-    research_portfolio_heat_shock_frac: float = 1.0
     # --- funding / splits / universe ---
     use_funding: bool = True
     split_date: str = "2025-06-01"        # early/recent boundary
@@ -732,6 +738,128 @@ def _btc_trend_returns(klines: pl.DataFrame, *, lookback_days: int = 30) -> dict
     return out
 
 
+def _btc_hourly_month_returns(klines: pl.DataFrame, *, lookback_ms: int) -> dict[int, float]:
+    """BTC return keyed by hourly signal bar, using only that confirmed bar close.
+
+    The key is the BTC kline ``ts_ms`` (the hour's bar start). The close is known at
+    ``ts_ms + 1h``, which is still before the existing continuous default entry
+    submit time. The source close is the latest BTC bar whose timestamp is <= the
+    exact cutoff. If the source is more than one hour older than the cutoff, the
+    value is treated as unavailable instead of smearing over an archive gap.
+    """
+    if lookback_ms <= 0:
+        raise ValueError(f"lookback_ms must be positive; got {lookback_ms}")
+    if klines.is_empty() or "symbol" not in klines.columns:
+        return {}
+    btc = (
+        klines.filter(pl.col("symbol") == "BTCUSDT")
+        .select("ts_ms", "close")
+        .sort("ts_ms")
+        .drop_nulls(["ts_ms", "close"])
+    )
+    if btc.is_empty():
+        return {}
+    ts = [int(v) for v in btc["ts_ms"].to_list()]
+    closes = [float(v) for v in btc["close"].to_list()]
+    out: dict[int, float] = {}
+    for idx, anchor_ts in enumerate(ts):
+        source_cutoff = int(anchor_ts) - int(lookback_ms)
+        source_idx = bisect.bisect_right(ts, source_cutoff) - 1
+        if source_idx < 0:
+            continue
+        source_ts = int(ts[source_idx])
+        if source_ts < source_cutoff - MS_PER_HOUR:
+            continue
+        source_close = float(closes[source_idx])
+        anchor_close = float(closes[idx])
+        if source_close > 0.0 and np.isfinite(source_close) and np.isfinite(anchor_close):
+            out[int(anchor_ts)] = anchor_close / source_close - 1.0
+    return out
+
+
+def _btc_smart_month_value(hourly_month_return: float, daily_prior_return: float, *, tolerance: float) -> float:
+    """Signed consensus score for the research smart-month BTC gate.
+
+    Positive means an uptrend gate passes. It tolerates a small disagreement
+    between the faster hourly exact-month return and the slower daily prior-N-day
+    return, but requires at least one leg to be positive. This is deliberately
+    low-capacity; it is a robustness hypothesis, not a classifier.
+    """
+    tol = max(float(tolerance), 0.0)
+    h = float(hourly_month_return)
+    d = float(daily_prior_return)
+    return max(min(h, d + tol), min(d, h + tol))
+
+
+def _btc_trend_return_lookup(
+    klines: pl.DataFrame,
+    *,
+    mode: str,
+    lookback_days: int,
+    month_days: float = BTC_EXACT_MONTH_DAYS,
+    smart_tolerance: float = 0.01,
+) -> dict[int, float]:
+    if mode == BTC_TREND_MODE_DAILY_PRIOR:
+        return _btc_trend_returns(klines, lookback_days=lookback_days)
+    if mode == BTC_TREND_MODE_HOURLY_30D:
+        return _btc_hourly_month_returns(klines, lookback_ms=exact_duration_ms(days=lookback_days))
+    if mode == BTC_TREND_MODE_HOURLY_EXACT_MONTH:
+        return _btc_hourly_month_returns(klines, lookback_ms=exact_duration_ms(days=month_days))
+    if mode == BTC_TREND_MODE_SMART_MONTH:
+        hourly = _btc_hourly_month_returns(klines, lookback_ms=exact_duration_ms(days=month_days))
+        daily = _btc_trend_returns(klines, lookback_days=lookback_days)
+        out: dict[int, float] = {}
+        for signal_ts, hourly_value in hourly.items():
+            day = (int(signal_ts) // MS_PER_DAY) * MS_PER_DAY
+            daily_value = daily.get(day)
+            if daily_value is None:
+                continue
+            out[int(signal_ts)] = _btc_smart_month_value(
+                float(hourly_value),
+                float(daily_value),
+                tolerance=smart_tolerance,
+            )
+        return out
+    raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {mode!r}")
+
+
+def _btc_trend_lookup_key(signal_ts_ms: int, *, mode: str) -> int:
+    if mode == BTC_TREND_MODE_DAILY_PRIOR:
+        return (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
+    return int(signal_ts_ms)
+
+
+def _btc_trend_lookback_duration_ms(config: ContinuousEventConfig) -> int:
+    if config.btc_trend_mode == BTC_TREND_MODE_DAILY_PRIOR:
+        return int(config.btc_trend_lookback_days) * MS_PER_DAY
+    if config.btc_trend_mode == BTC_TREND_MODE_HOURLY_30D:
+        return exact_duration_ms(days=int(config.btc_trend_lookback_days))
+    if config.btc_trend_mode in (BTC_TREND_MODE_HOURLY_EXACT_MONTH, BTC_TREND_MODE_SMART_MONTH):
+        return exact_duration_ms(days=float(config.btc_trend_month_days))
+    raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {config.btc_trend_mode!r}")
+
+
+def _btc_trend_metadata(signal_ts_ms: int, config: ContinuousEventConfig) -> dict[str, int | str | None]:
+    mode = config.btc_trend_mode
+    if mode == BTC_TREND_MODE_DAILY_PRIOR:
+        signal_day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
+        return {
+            "btc_trend_mode": mode,
+            "btc_trend_lookback_duration_ms": _btc_trend_lookback_duration_ms(config),
+            "btc_trend_source_start_ts_ms": signal_day - int(config.btc_trend_lookback_days) * MS_PER_DAY,
+            "btc_trend_source_end_ts_ms": signal_day - MS_PER_DAY,
+            "btc_trend_data_available_ts_ms": signal_day,
+        }
+    duration = _btc_trend_lookback_duration_ms(config)
+    return {
+        "btc_trend_mode": mode,
+        "btc_trend_lookback_duration_ms": duration,
+        "btc_trend_source_start_ts_ms": int(signal_ts_ms) - duration,
+        "btc_trend_source_end_ts_ms": int(signal_ts_ms),
+        "btc_trend_data_available_ts_ms": int(signal_ts_ms) + MS_PER_HOUR,
+    }
+
+
 def _entry_vol(close_arr: "np.ndarray", entry_bar: int, window: int = 168, min_n: int = 48) -> float:
     """Trailing hourly return std ending at entry_bar (the per-name vol for risk-sizing)."""
     lo = max(0, entry_bar - window)
@@ -901,7 +1029,7 @@ def _resolve_entry_fill(
             "fill_window_start_ts_ms": int(order_submit_ts_ms),
             "fill_window_end_ts_ms": int(order_submit_ts_ms),
         }
-    wait_ms = max(int(config.entry_adverse_limit_wait_hours), 0) * MS_PER_HOUR
+    wait_ms = exact_duration_ms(hours=max(config.entry_adverse_limit_wait_hours, 0))
     if wait_ms <= 0:
         return None
     limit_price = ref_price * (1.0 + adverse_pct) if side == "short" else ref_price * (1.0 - adverse_pct)
@@ -930,376 +1058,6 @@ def _resolve_entry_fill(
     return None
 
 
-def _research_side_return(entry_price: float, exit_price: float, *, side: str) -> float:
-    if side == "short":
-        return 1.0 - exit_price / entry_price
-    return exit_price / entry_price - 1.0
-
-
-def _next_utc_hour_after(ts_ms: int, hour: int) -> int:
-    dt0 = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc)
-    day = datetime(dt0.year, dt0.month, dt0.day, hour, tzinfo=timezone.utc)
-    out = int(day.timestamp() * 1000)
-    if out <= int(ts_ms):
-        out += MS_PER_DAY
-    return out
-
-
-def _hash_boundary_hour(symbol: str, entry_ts_ms: int) -> int:
-    raw = hashlib.sha256(f"{symbol}:{int(entry_ts_ms)}".encode("utf-8")).hexdigest()[:8]
-    return int(raw, 16) % 24
-
-
-def _time_boundary_rule_spec(rule: str, symbol: str, entry_ts_ms: int) -> tuple[int, str, str, float] | None:
-    if rule == "off":
-        return None
-    specs = {
-        "time_00_cut_unprofitable_age4": (0, "cut", "unprofitable", 4.0),
-        "time_00_cut_weak_age6": (0, "cut", "weak_mfe", 6.0),
-        "time_00_cut_far_tp_age6": (0, "cut", "far_tp", 6.0),
-        "time_00_half_unprofitable_age4": (0, "half", "unprofitable", 4.0),
-        "time_00_half_weak_age6": (0, "half", "weak_mfe", 6.0),
-        "time_05_cut_unprofitable_age4": (5, "cut", "unprofitable", 4.0),
-    }
-    if rule == "time_hash_boundary_cut":
-        return (_hash_boundary_hour(symbol, entry_ts_ms), "cut", "unprofitable", 4.0)
-    return specs.get(rule)
-
-
-def _boundary_condition_hit(
-    *,
-    condition: str,
-    age_hours: float,
-    current_return: float,
-    mfe: float,
-    take_profit_pct: float,
-    min_age_hours: float,
-) -> bool:
-    if age_hours + 1e-12 < min_age_hours:
-        return False
-    if condition == "unprofitable":
-        return current_return <= 0.0
-    if condition == "weak_mfe":
-        return mfe < 0.04
-    if condition == "far_tp":
-        return (max(float(take_profit_pct), 0.0) - mfe) > 0.08
-    return False
-
-
-def _mark_research_trade(
-    trade: dict[str, Any],
-    *,
-    rule: str,
-    boundary_ts_ms: int,
-    boundary_current_return: float,
-    boundary_mfe: float,
-    boundary_mae: float,
-    boundary_action: str,
-) -> dict[str, Any]:
-    trade["research_time_boundary_rule"] = rule
-    trade["boundary_ts_ms"] = int(boundary_ts_ms)
-    trade["boundary_current_return"] = float(boundary_current_return)
-    trade["boundary_mfe"] = float(boundary_mfe)
-    trade["boundary_mae"] = float(boundary_mae)
-    trade["boundary_action"] = boundary_action
-    return trade
-
-
-def _annotate_first_utc_boundary(trade: dict[str, Any], bars: dict[str, Any], *, hour: int = 0) -> None:
-    """Attach first-boundary state used by local boundary-fail quarantines.
-
-    The annotation is causal: it is present only when the boundary lies strictly
-    after entry and before the trade's realized exit.
-    """
-    entry_ts = int(trade.get("entry_ts_ms") or 0)
-    exit_ts = int(trade.get("exit_ts_ms") or 0)
-    boundary_ts = _next_utc_hour_after(entry_ts, hour)
-    trade[f"boundary_{hour:02d}_ts_ms"] = boundary_ts
-    trade[f"boundary_{hour:02d}_present"] = False
-    if boundary_ts >= exit_ts:
-        return
-    idx = bars.get("by_end", {}).get(boundary_ts)
-    entry_idx = bars.get("by_end", {}).get(entry_ts)
-    if idx is None or entry_idx is None:
-        return
-    entry_price = float(trade.get("entry_price") or 0.0)
-    if entry_price <= 0.0:
-        return
-    high_arr = bars["high"]
-    low_arr = bars["low"]
-    close_arr = bars["close"]
-    side = str(trade.get("side") or "short")
-    mae = 0.0
-    mfe = 0.0
-    start = int(entry_idx) + 1
-    end = int(idx) + 1
-    for bar_idx in range(start, end):
-        high = float(high_arr[bar_idx])
-        low = float(low_arr[bar_idx])
-        if side == "short":
-            adverse = 1.0 - high / entry_price
-            favorable = 1.0 - low / entry_price
-        else:
-            adverse = low / entry_price - 1.0
-            favorable = high / entry_price - 1.0
-        mae = min(mae, adverse)
-        mfe = max(mfe, favorable)
-    current = _research_side_return(entry_price, float(close_arr[int(idx)]), side=side)
-    trade[f"boundary_{hour:02d}_present"] = True
-    trade[f"boundary_{hour:02d}_current_return"] = current
-    trade[f"boundary_{hour:02d}_mfe"] = mfe
-    trade[f"boundary_{hour:02d}_mae"] = mae
-
-
-def _time_boundary_trades(
-    *,
-    rule: str,
-    sym: str,
-    sig_ts: int,
-    bars: dict[str, Any],
-    entry_bar: int,
-    entry_bar_end: int,
-    planned_exit: int,
-    side: str,
-    score: float,
-    rank: int,
-    notional_weight: float,
-    lifecycle: TradeLifecycleConfig,
-    round_trip_cost_bps: float,
-    trade_stop: float | None,
-    rank_lookup: dict[tuple[str, int], float],
-    funding_lookup: dict[str, dict[str, Any]] | None,
-    stop_fill_mode: str,
-    stop_slippage_cap_pct: float,
-    entry_price_override: float | None,
-) -> list[dict[str, Any]] | None:
-    spec = _time_boundary_rule_spec(rule, sym, entry_bar_end)
-    if spec is None:
-        return None
-    hour, action, condition, min_age = spec
-    boundary_ts = _next_utc_hour_after(entry_bar_end, hour)
-    if boundary_ts >= planned_exit or boundary_ts not in bars.get("by_end", {}):
-        return None
-    common = {
-        "symbol": sym,
-        "side": side,
-        "score": score,
-        "rank": rank,
-        "basket_id": _iso_day(entry_bar_end),
-        "signal_ts_ms": int(sig_ts),
-        "entry_bar": int(entry_bar),
-        "symbol_bars": bars,
-        "config": lifecycle,
-        "round_trip_cost_bps": round_trip_cost_bps,
-        "stop_pct": trade_stop,
-        "rank_lookup": rank_lookup,
-        "event_decay_threshold": 0.0,
-        "funding_lookup": funding_lookup,
-        "stop_fill_mode": stop_fill_mode,
-        "stop_slippage_cap_pct": stop_slippage_cap_pct,
-        "entry_price_override": entry_price_override,
-    }
-    probe = _simulate_indexed_trade(
-        **common,
-        planned_exit_ts_ms=boundary_ts,
-        notional_weight=notional_weight,
-        position_weight=1.0,
-    )
-    if probe is None:
-        return None
-    # A TP/stop before the boundary is the same outcome the original lifecycle
-    # would see, so keep it and do not let the boundary rule act.
-    if int(probe["exit_ts_ms"]) < boundary_ts or probe.get("exit_reason") != "max_hold":
-        _annotate_first_utc_boundary(probe, bars, hour=0)
-        return [probe]
-    age_hours = (boundary_ts - entry_bar_end) / MS_PER_HOUR
-    current_return = float(probe["gross_trade_return"])
-    mfe = float(probe.get("mfe") or 0.0)
-    mae = float(probe.get("mae") or 0.0)
-    if not _boundary_condition_hit(
-        condition=condition,
-        age_hours=age_hours,
-        current_return=current_return,
-        mfe=mfe,
-        take_profit_pct=lifecycle.take_profit_pct,
-        min_age_hours=min_age,
-    ):
-        return None
-    if action == "cut":
-        probe["exit_reason"] = rule
-        _mark_research_trade(
-            probe,
-            rule=rule,
-            boundary_ts_ms=boundary_ts,
-            boundary_current_return=current_return,
-            boundary_mfe=mfe,
-            boundary_mae=mae,
-            boundary_action="cut",
-        )
-        _annotate_first_utc_boundary(probe, bars, hour=0)
-        return [probe]
-    if action == "half":
-        half = notional_weight * 0.5
-        boundary_leg = _simulate_indexed_trade(
-            **common,
-            planned_exit_ts_ms=boundary_ts,
-            notional_weight=half,
-            position_weight=1.0,
-        )
-        residual_leg = _simulate_indexed_trade(
-            **common,
-            planned_exit_ts_ms=planned_exit,
-            notional_weight=half,
-            position_weight=1.0,
-        )
-        if boundary_leg is None or residual_leg is None:
-            return None
-        boundary_leg["trade_id"] = f"{boundary_leg['trade_id']}-boundary-half"
-        residual_leg["trade_id"] = f"{residual_leg['trade_id']}-residual-half"
-        boundary_leg["exit_reason"] = rule
-        _mark_research_trade(
-            boundary_leg,
-            rule=rule,
-            boundary_ts_ms=boundary_ts,
-            boundary_current_return=current_return,
-            boundary_mfe=mfe,
-            boundary_mae=mae,
-            boundary_action="half_exit",
-        )
-        _mark_research_trade(
-            residual_leg,
-            rule=rule,
-            boundary_ts_ms=boundary_ts,
-            boundary_current_return=current_return,
-            boundary_mfe=mfe,
-            boundary_mae=mae,
-            boundary_action="half_residual",
-        )
-        _annotate_first_utc_boundary(boundary_leg, bars, hour=0)
-        _annotate_first_utc_boundary(residual_leg, bars, hour=0)
-        return [boundary_leg, residual_leg]
-    return None
-
-
-def _prior_symbol_rows(rows: list[dict[str, Any]], symbol: str, decision_ts_ms: int) -> list[dict[str, Any]]:
-    return [
-        row for row in rows
-        if str(row.get("symbol")) == symbol and int(row.get("exit_ts_ms") or 0) < int(decision_ts_ms)
-    ]
-
-
-_RESEARCH_MONTH_MS = int(round((365.25 / 12.0) * MS_PER_DAY))
-
-
-def _research_symbol_decision(
-    config: ContinuousEventConfig,
-    *,
-    symbol: str,
-    decision_ts_ms: int,
-    rows: list[dict[str, Any]],
-) -> tuple[bool, float, dict[str, Any] | None]:
-    rule = str(config.research_symbol_rule or "off")
-    if rule == "off":
-        return True, 1.0, None
-    event: dict[str, Any] = {
-        "rule": rule,
-        "symbol": symbol,
-        "decision_ts_ms": int(decision_ts_ms),
-        "action": "allow",
-        "size_multiplier": 1.0,
-        "trigger_count": 0,
-        "trigger_exit_ts_ms": None,
-        "quarantine_until_ts_ms": None,
-    }
-    if rule.startswith("perm_"):
-        cutoff = int(config.research_permanent_blacklist_cutoff_ts_ms or 0)
-        blocked = symbol in set(config.research_permanent_blacklist_symbols or ())
-        if blocked and cutoff > 0 and int(decision_ts_ms) >= cutoff:
-            event.update({"action": "block", "trigger_count": 1, "quarantine_until_ts_ms": None})
-            return False, 0.0, event
-        return True, 1.0, None
-
-    prior = _prior_symbol_rows(rows, symbol, decision_ts_ms)
-    trigger_rows: list[dict[str, Any]] = []
-    quarantine_ms = 0
-    multiplier = 0.0
-    if rule == "local_loss_30d_1":
-        trigger_rows = [r for r in prior if float(r.get("gross_trade_return") or 0.0) <= -0.20]
-        quarantine_ms = 30 * MS_PER_DAY
-    elif rule == "local_loss_1m_1":
-        trigger_rows = [r for r in prior if float(r.get("gross_trade_return") or 0.0) <= -0.20]
-        quarantine_ms = _RESEARCH_MONTH_MS
-    elif rule == "local_loss_90d_1":
-        trigger_rows = [r for r in prior if float(r.get("gross_trade_return") or 0.0) <= -0.20]
-        quarantine_ms = 90 * MS_PER_DAY
-    elif rule == "local_loss_3m_1":
-        trigger_rows = [r for r in prior if float(r.get("gross_trade_return") or 0.0) <= -0.20]
-        quarantine_ms = 3 * _RESEARCH_MONTH_MS
-    elif rule == "local_repeat_loss_60d_2":
-        floor = int(decision_ts_ms) - 90 * MS_PER_DAY
-        losses = [
-            r for r in prior
-            if int(r.get("exit_ts_ms") or 0) >= floor and float(r.get("net_return") or 0.0) < 0.0
-        ]
-        if len(losses) >= 2:
-            trigger_rows = losses[-2:]
-        quarantine_ms = 60 * MS_PER_DAY
-    elif rule in {"local_repeat_loss_2m_2", "local_toxic_half_2m"}:
-        floor = int(decision_ts_ms) - 3 * _RESEARCH_MONTH_MS
-        losses = [
-            r for r in prior
-            if int(r.get("exit_ts_ms") or 0) >= floor and float(r.get("net_return") or 0.0) < 0.0
-        ]
-        if len(losses) >= 2:
-            trigger_rows = losses[-2:]
-        quarantine_ms = 2 * _RESEARCH_MONTH_MS
-        if rule == "local_toxic_half_2m":
-            multiplier = 0.5
-    elif rule == "local_boundary_fail_30d":
-        trigger_rows = [
-            r for r in prior
-            if bool(r.get("boundary_00_present"))
-            and float(r.get("boundary_00_mfe") or 0.0) < 0.04
-            and float(r.get("net_return") or 0.0) < 0.0
-        ]
-        quarantine_ms = 30 * MS_PER_DAY
-    elif rule == "local_boundary_fail_1m":
-        trigger_rows = [
-            r for r in prior
-            if bool(r.get("boundary_00_present"))
-            and float(r.get("boundary_00_mfe") or 0.0) < 0.04
-            and float(r.get("net_return") or 0.0) < 0.0
-        ]
-        quarantine_ms = _RESEARCH_MONTH_MS
-    elif rule == "local_toxic_half_60d":
-        trigger_rows = [r for r in prior if float(r.get("gross_trade_return") or 0.0) <= -0.20]
-        quarantine_ms = 60 * MS_PER_DAY
-        multiplier = 0.5
-    else:
-        raise ValueError(f"Unknown research_symbol_rule: {rule}")
-
-    if not trigger_rows:
-        return True, 1.0, None
-    trigger = max(trigger_rows, key=lambda r: int(r.get("exit_ts_ms") or 0))
-    trigger_exit = int(trigger.get("exit_ts_ms") or 0)
-    quarantine_until = trigger_exit + quarantine_ms
-    if int(decision_ts_ms) >= quarantine_until:
-        return True, 1.0, None
-    action = "downsize" if multiplier > 0.0 else "block"
-    event.update(
-        {
-            "action": action,
-            "size_multiplier": multiplier if multiplier > 0.0 else 0.0,
-            "trigger_count": len(trigger_rows),
-            "trigger_exit_ts_ms": trigger_exit,
-            "quarantine_until_ts_ms": quarantine_until,
-        }
-    )
-    if multiplier > 0.0:
-        return True, multiplier, event
-    return False, 0.0, event
-
-
 def _run_trades(
     entries: pl.DataFrame,
     symbol_bars: dict[str, Any],
@@ -1312,7 +1070,6 @@ def _run_trades(
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
     admission_lookup: dict[tuple[str, int], bool] | None = None,
     listing_ts_by_symbol: dict[str, int] | None = None,
-    symbol_event_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
     (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
@@ -1332,15 +1089,15 @@ def _run_trades(
     base_nw = config.notional_weight
     inverse_vol = config.sizing_mode == "inverse_vol"
     clamp = max(config.vol_weight_clamp, 1.0)
-    cooldown_ms = config.effective_cooldown_hours * MS_PER_HOUR
-    hold_ms = config.hold_hours * MS_PER_HOUR
-    max_hold_ms = config.max_hold_hours * MS_PER_HOUR
-    delay_ms = (1 + config.entry_delay_hours) * MS_PER_HOUR
+    cooldown_ms = exact_duration_ms(hours=config.effective_cooldown_hours)
+    hold_ms = exact_duration_ms(hours=config.hold_hours)
+    max_hold_ms = exact_duration_ms(hours=config.max_hold_hours)
+    delay_ms = exact_duration_ms(hours=1 + config.entry_delay_hours)
     decel_h = config.entry_decel_lookback_h
-    age_min_ms = config.age_days_min * MS_PER_DAY
+    age_min_ms = exact_duration_ms(days=config.age_days_min)
     state_mode = config.exit_mode == "state"
     stop_pct = config.stop_loss_pct if config.stop_loss_pct > 0.0 else None
-    pause_window_ms = config.entry_pause_window_hours * MS_PER_HOUR
+    pause_window_ms = exact_duration_ms(hours=config.entry_pause_window_hours)
     breaker_on = config.entry_pause_after_adverse_exits > 0 and pause_window_ms > 0
     crowding_on = config.entry_crowding_max_fresh > 0
     external_size_skip_lte = float(config.entry_skip_external_size_multiplier_lte)
@@ -1365,16 +1122,18 @@ def _run_trades(
         raise ValueError(
             f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}"
         )
+    btc_mode = str(config.btc_trend_mode)
+    if btc_mode not in BTC_TREND_MODES:
+        raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {btc_mode!r}")
     btc_lookback_days = int(config.btc_trend_lookback_days)
     if btc_gate != "off" and btc_lookback_days < 1:
         raise ValueError(f"btc_trend_lookback_days must be >= 1; got {btc_lookback_days}")
+    btc_lookback_duration_ms = _btc_trend_lookback_duration_ms(config) if btc_gate != "off" else None
     skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
     skipped_admission = 0
     skipped_crowding = 0
     skipped_external_size_multiplier = 0
     skipped_entry_limit_unfilled = 0
-    skipped_research_symbol = 0
-    skipped_research_heat = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
@@ -1412,7 +1171,7 @@ def _run_trades(
     ) -> None:
         if candidate_sink is None:
             return
-        signal_day = (int(sig_ts) // MS_PER_DAY) * MS_PER_DAY
+        btc_meta = _btc_trend_metadata(int(sig_ts), config) if btc_gate != "off" else {}
 
         def _meta_int(name: str) -> int | None:
             value = cand_meta.get(name)
@@ -1444,9 +1203,11 @@ def _run_trades(
                 "rmom_source_day_ts_ms": _meta_int("rmom_source_day_ts_ms"),
                 "rmom_data_available_ts_ms": _meta_int("rmom_data_available_ts_ms"),
                 "btc_trend_lookback_days": btc_lookback_days if btc_gate != "off" else None,
-                "btc_trend_source_start_ts_ms": signal_day - btc_lookback_days * MS_PER_DAY if btc_gate != "off" else None,
-                "btc_trend_source_end_ts_ms": signal_day - MS_PER_DAY if btc_gate != "off" else None,
-                "btc_trend_data_available_ts_ms": signal_day if btc_gate != "off" else None,
+                "btc_trend_mode": btc_meta.get("btc_trend_mode") if btc_gate != "off" else None,
+                "btc_trend_lookback_duration_ms": btc_lookback_duration_ms,
+                "btc_trend_source_start_ts_ms": btc_meta.get("btc_trend_source_start_ts_ms"),
+                "btc_trend_source_end_ts_ms": btc_meta.get("btc_trend_source_end_ts_ms"),
+                "btc_trend_data_available_ts_ms": btc_meta.get("btc_trend_data_available_ts_ms"),
                 "order_submit_ts_ms": int(order_ts) if order_ts is not None else None,
                 "fill_window_start_ts_ms": int(fill_start_ts) if fill_start_ts is not None else None,
                 "fill_window_end_ts_ms": int(fill_end_ts) if fill_end_ts is not None else None,
@@ -1549,7 +1310,7 @@ def _run_trades(
                 continue
         regime_size_mult = 1.0
         if btc_gate != "off":
-            trend = (btc_trend_daily or {}).get((int(sig_ts) // MS_PER_DAY) * MS_PER_DAY)
+            trend = (btc_trend_daily or {}).get(_btc_trend_lookup_key(int(sig_ts), mode=btc_mode))
             if trend is None:
                 _emit("btc_trend_unknown", order_submit_ts_ms=order_submit_ts, active_count=len(active))
                 skipped_btc_trend += 1
@@ -1588,25 +1349,6 @@ def _run_trades(
         external_size_multiplier = 1.0
         if size_mult_lookup is not None:
             external_size_multiplier = float(size_mult_lookup.get((sym, int(sig_ts)), 1.0))
-        allowed, research_mult, research_event = _research_symbol_decision(
-            config,
-            symbol=sym,
-            decision_ts_ms=order_submit_ts,
-            rows=rows,
-        )
-        if research_event is not None and symbol_event_sink is not None:
-            symbol_event_sink.append(research_event)
-        if not allowed:
-            _emit(
-                f"research_symbol_{config.research_symbol_rule}",
-                order_submit_ts_ms=order_submit_ts,
-                active_count=len(active),
-                regime_trend=cand_trend,
-                external_size_multiplier=0.0,
-            )
-            skipped_research_symbol += 1
-            continue
-        external_size_multiplier *= research_mult
         if external_size_skip_on and external_size_multiplier <= external_size_skip_lte:
             _emit(
                 "external_size_multiplier",
@@ -1636,7 +1378,8 @@ def _run_trades(
                 "entry_limit_unfilled",
                 order_submit_ts_ms=order_submit_ts,
                 fill_window_start_ts_ms=order_submit_ts,
-                fill_window_end_ts_ms=order_submit_ts + max(int(config.entry_adverse_limit_wait_hours), 0) * MS_PER_HOUR,
+                fill_window_end_ts_ms=order_submit_ts
+                + exact_duration_ms(hours=max(config.entry_adverse_limit_wait_hours, 0)),
                 active_count=len(active),
                 regime_trend=cand_trend,
                 entry_reference_price=ref_price,
@@ -1664,77 +1407,23 @@ def _run_trades(
         # recomputed at the new size by _round_trip_bps below. trade_stop is independent of nw,
         # so applying the multiplier after _compute_size_and_stop is numerically identical.
         nw *= external_size_multiplier
-        if config.research_portfolio_heat_cap > 0.0:
-            shock_frac = max(float(config.research_portfolio_heat_shock_frac), 0.0)
-            current_heat = sum(float(item[1]) for item in active_notional) * shock_frac
-            projected_heat = current_heat + abs(float(nw)) * shock_frac
-            if projected_heat > float(config.research_portfolio_heat_cap) + 1e-15:
-                if symbol_event_sink is not None:
-                    symbol_event_sink.append(
-                        {
-                            "rule": "research_portfolio_heat_cap",
-                            "symbol": sym,
-                            "decision_ts_ms": int(order_submit_ts),
-                            "action": "block",
-                            "size_multiplier": 0.0,
-                            "trigger_count": len(active_notional),
-                            "trigger_exit_ts_ms": None,
-                            "quarantine_until_ts_ms": None,
-                            "portfolio_heat": current_heat,
-                            "projected_portfolio_heat": projected_heat,
-                            "portfolio_heat_cap": float(config.research_portfolio_heat_cap),
-                        }
-                    )
-                _emit(
-                    "research_portfolio_heat",
-                    order_submit_ts_ms=order_submit_ts,
-                    active_count=len(active),
-                    regime_trend=cand_trend,
-                    regime_size_mult=regime_size_mult,
-                    external_size_multiplier=external_size_multiplier,
-                    notional_weight=nw,
-                )
-                skipped_research_heat += 1
-                continue
         planned_exit = _plan_exit(
             state_mode=state_mode, spell_end=int(spell_end), entry_bar_end=entry_bar_end,
             delay_ms=delay_ms, max_hold_ms=max_hold_ms, hold_ms=hold_ms,
         )
         round_trip = _round_trip_bps(config, turn, notional_weight=nw)
-        trade_rows = _time_boundary_trades(
-            rule=config.research_time_boundary_rule,
-            sym=sym,
-            sig_ts=int(sig_ts),
-            bars=bars,
-            entry_bar=int(entry_bar),
-            entry_bar_end=entry_bar_end,
-            planned_exit=planned_exit,
-            side=config.side,
-            score=float(comp) if comp is not None else 0.0,
-            rank=int(config.decile),
-            notional_weight=nw,
-            lifecycle=lifecycle,
-            round_trip_cost_bps=round_trip,
-            trade_stop=trade_stop,
-            rank_lookup=rank_lookup or {},
+        trade = _simulate_indexed_trade(
+            symbol=sym, side=config.side, score=float(comp) if comp is not None else 0.0,
+            rank=int(config.decile), basket_id=_iso_day(entry_bar_end), signal_ts_ms=int(sig_ts),
+            entry_bar=int(entry_bar), symbol_bars=bars, planned_exit_ts_ms=planned_exit,
+            notional_weight=nw, position_weight=1.0, config=lifecycle,
+            round_trip_cost_bps=round_trip, stop_pct=trade_stop,
+            rank_lookup=rank_lookup or {}, event_decay_threshold=0.0,
             funding_lookup=funding_lookup if config.use_funding else None,
-            stop_fill_mode=config.stop_fill_mode,
-            stop_slippage_cap_pct=config.stop_slippage_cap_pct,
+            stop_fill_mode=config.stop_fill_mode, stop_slippage_cap_pct=config.stop_slippage_cap_pct,
             entry_price_override=fill.get("entry_price_override"),
         )
-        if trade_rows is None:
-            trade = _simulate_indexed_trade(
-                symbol=sym, side=config.side, score=float(comp) if comp is not None else 0.0,
-                rank=int(config.decile), basket_id=_iso_day(entry_bar_end), signal_ts_ms=int(sig_ts),
-                entry_bar=int(entry_bar), symbol_bars=bars, planned_exit_ts_ms=planned_exit,
-                notional_weight=nw, position_weight=1.0, config=lifecycle,
-                round_trip_cost_bps=round_trip, stop_pct=trade_stop,
-                rank_lookup=rank_lookup or {}, event_decay_threshold=0.0,
-                funding_lookup=funding_lookup if config.use_funding else None,
-                stop_fill_mode=config.stop_fill_mode, stop_slippage_cap_pct=config.stop_slippage_cap_pct,
-                entry_price_override=fill.get("entry_price_override"),
-            )
-            trade_rows = [] if trade is None else [trade]
+        trade_rows = [] if trade is None else [trade]
         if not trade_rows:
             _emit(
                 "no_fill",
@@ -1749,20 +1438,17 @@ def _run_trades(
             )
             skipped_no_bar += 1
             continue
-        max_exit_ts = max(int(trade["exit_ts_ms"]) for trade in trade_rows)
-        total_notional = sum(abs(float(trade.get("notional_weight") or 0.0)) for trade in trade_rows)
-        for trade in trade_rows:
-            if stop_approach_on and trade.get("exit_reason") == "stop_loss":
-                trade["exit_reason"] = "stop_approach"
-            if (
-                state_mode
-                and trade.get("exit_reason") == "max_hold"
-                and planned_exit < entry_bar_end + max_hold_ms
-                and int(trade.get("exit_ts_ms") or 0) == int(planned_exit)
-            ):
-                trade["exit_reason"] = "left_decile"
-            _annotate_first_utc_boundary(trade, bars, hour=0)
-            rows.append(trade)
+        if stop_approach_on and trade.get("exit_reason") == "stop_loss":
+            trade["exit_reason"] = "stop_approach"
+        if (
+            state_mode
+            and trade.get("exit_reason") == "max_hold"
+            and planned_exit < entry_bar_end + max_hold_ms
+            and int(trade.get("exit_ts_ms") or 0) == int(planned_exit)
+        ):
+            trade["exit_reason"] = "left_decile"
+        rows.append(trade)
+        exit_ts = int(trade["exit_ts_ms"])
         _emit(
             "selected",
             entry_bar_end=entry_bar_end,
@@ -1779,10 +1465,10 @@ def _run_trades(
             entry_reference_price=fill.get("entry_reference_price"),
             entry_limit_price=fill.get("entry_limit_price"),
             entry_fill_mode=fill.get("entry_fill_mode"),
-            exit_ts_ms=max_exit_ts,
+            exit_ts_ms=exit_ts,
         )
-        heapq.heappush(active, max_exit_ts)
-        heapq.heappush(active_notional, (max_exit_ts, total_notional))
+        heapq.heappush(active, exit_ts)
+        heapq.heappush(active_notional, (exit_ts, abs(float(trade.get("notional_weight") or 0.0))))
         last_entry[sym] = order_submit_ts
         if breaker_on:
             for trade in trade_rows:
@@ -1799,8 +1485,6 @@ def _run_trades(
         "skipped_admission": skipped_admission,
         "skipped_external_size_multiplier": skipped_external_size_multiplier,
         "skipped_entry_limit_unfilled": skipped_entry_limit_unfilled,
-        "skipped_research_symbol": skipped_research_symbol,
-        "skipped_research_heat": skipped_research_heat,
     }
     if not rows:
         return _empty_trades(), skips
@@ -2038,23 +1722,36 @@ def _prepare_research_inputs(
         entries = _apply_entry_order(entries, entry_order)
 
     kname = _autodetect_dataset_names(root)["klines_dataset"]
-    pad_fwd = (
-        config.hold_hours
+    pad_fwd = exact_duration_ms(
+        hours=config.hold_hours
         + config.entry_delay_hours
         + max(config.entry_adverse_limit_wait_hours, 0)
         + 4
-    ) * MS_PER_HOUR
+    )
     # audit2c: also reserve >=2 warmup days when the equal-weight market gate is on, so the
     # gate's one-day-lagged daily market return is available from the window's first day
-    # instead of failing OPEN (allowing entries) for the first ~2 days. The btc-trend gate
-    # already reserves 31d, so this only bites a btc_trend_gate=off + market_min_ret config.
+    # instead of failing OPEN (allowing entries) for the first ~2 days.
     btc_trend_lookback_days = max(int(config.btc_trend_lookback_days), 1)
-    pad_back_days = max(
-        btc_trend_lookback_days + 1 if config.btc_trend_gate != "off" else 0,
-        max(config.age_days_min, 0),
-        2 if config.market_min_ret_1d > -1.0 else 0,
+    pad_back = max(
+        exact_duration_ms(days=max(config.age_days_min, 0)),
+        exact_duration_ms(days=2) if config.market_min_ret_1d > -1.0 else 0,
     )
-    pad_back = pad_back_days * MS_PER_DAY
+    if config.btc_trend_gate != "off":
+        mode = str(config.btc_trend_mode)
+        if mode == BTC_TREND_MODE_DAILY_PRIOR:
+            pad_back = max(pad_back, exact_duration_ms(days=btc_trend_lookback_days + 1))
+        elif mode == BTC_TREND_MODE_HOURLY_30D:
+            pad_back = max(pad_back, exact_duration_ms(days=btc_trend_lookback_days) + MS_PER_HOUR)
+        elif mode == BTC_TREND_MODE_HOURLY_EXACT_MONTH:
+            pad_back = max(pad_back, exact_duration_ms(days=config.btc_trend_month_days) + MS_PER_HOUR)
+        elif mode == BTC_TREND_MODE_SMART_MONTH:
+            pad_back = max(
+                pad_back,
+                exact_duration_ms(days=config.btc_trend_month_days) + MS_PER_HOUR,
+                exact_duration_ms(days=btc_trend_lookback_days + 1),
+            )
+        else:
+            raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {mode!r}")
     klines = _read_window(
         root, kname, start_ms=start_ms - pad_back, end_ms=end_ms + pad_fwd,
         columns=["ts_ms", "symbol", "open", "high", "low", "close"],
@@ -2080,11 +1777,20 @@ def _prepare_research_inputs(
 
     btc_trend_daily = None
     if config.btc_trend_gate != "off" and not klines.is_empty():
-        btc_trend_daily = _btc_trend_returns(klines, lookback_days=btc_trend_lookback_days)
+        btc_trend_daily = _btc_trend_return_lookup(
+            klines,
+            mode=str(config.btc_trend_mode),
+            lookback_days=btc_trend_lookback_days,
+            month_days=float(config.btc_trend_month_days),
+            smart_tolerance=float(config.btc_trend_smart_tolerance),
+        )
 
     rank_lookup = None
     if config.rank_exit_threshold > 0.0 and not panel.is_empty():
-        rank_lookup = _continuous_rank_lookup(panel, delay_ms=(1 + config.entry_delay_hours) * MS_PER_HOUR)
+        rank_lookup = _continuous_rank_lookup(
+            panel,
+            delay_ms=exact_duration_ms(hours=1 + config.entry_delay_hours),
+        )
 
     # Authoritative per-symbol PIT listing (first-ever bar under the root), read independently of the
     # run window so the age gate does not infer listing from the clamped window start (pit-engine-2).
@@ -2113,7 +1819,6 @@ def run_continuous_event_research(
     config: ContinuousEventConfig | None = None,
     report_dir: str | Path | None = None,
     candidate_tape_path: str | Path | None = None,
-    symbol_event_path: str | Path | None = None,
     entry_order: str = "fcfs",
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
     admission_lookup: dict[tuple[str, int], bool] | None = None,
@@ -2148,14 +1853,12 @@ def run_continuous_event_research(
     listing_ts_by_symbol = inputs["listing_ts_by_symbol"]
 
     candidate_sink: list[dict[str, Any]] | None = [] if candidate_tape_path is not None else None
-    symbol_event_sink: list[dict[str, Any]] | None = [] if symbol_event_path is not None else None
     if not entries.is_empty() and symbol_bars:
         trades, skips = _run_trades(
             entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup,
             candidate_sink=candidate_sink, size_mult_lookup=size_mult_lookup,
             admission_lookup=admission_lookup,
             listing_ts_by_symbol=listing_ts_by_symbol,
-            symbol_event_sink=symbol_event_sink,
         )
     else:
         trades, skips = _empty_trades(), {}
@@ -2195,6 +1898,8 @@ def run_continuous_event_research(
             "rmom_data_available_ts_ms": pl.Int64,
             "btc_trend_source_start_ts_ms": pl.Int64,
             "btc_trend_lookback_days": pl.Int64,
+            "btc_trend_mode": pl.Utf8,
+            "btc_trend_lookback_duration_ms": pl.Int64,
             "btc_trend_source_end_ts_ms": pl.Int64,
             "btc_trend_data_available_ts_ms": pl.Int64,
             "order_submit_ts_ms": pl.Int64,
@@ -2248,36 +1953,6 @@ def run_continuous_event_research(
         payload["candidate_tape_path"] = str(tape_path)
         payload["n_candidates"] = int(tape_df.height)
         payload["n_candidates_selected"] = int(tape_df.filter(pl.col("selected")).height) if tape_df.height else 0
-
-    if symbol_event_path is not None:
-        events_path = Path(str(symbol_event_path)).expanduser()
-        events_path.parent.mkdir(parents=True, exist_ok=True)
-        event_schema = {
-            "rule": pl.Utf8,
-            "symbol": pl.Utf8,
-            "decision_ts_ms": pl.Int64,
-            "action": pl.Utf8,
-            "size_multiplier": pl.Float64,
-            "trigger_count": pl.Int64,
-            "trigger_exit_ts_ms": pl.Int64,
-            "quarantine_until_ts_ms": pl.Int64,
-            "portfolio_heat": pl.Float64,
-            "projected_portfolio_heat": pl.Float64,
-            "portfolio_heat_cap": pl.Float64,
-        }
-        if symbol_event_sink:
-            event_df = pl.DataFrame(symbol_event_sink)
-            for column, dtype in event_schema.items():
-                if column not in event_df.columns:
-                    event_df = event_df.with_columns(pl.lit(None).cast(dtype).alias(column))
-            event_df = event_df.select(
-                [pl.col(column).cast(dtype, strict=False).alias(column) for column, dtype in event_schema.items()]
-            )
-        else:
-            event_df = pl.DataFrame(schema=event_schema)
-        event_df.write_csv(events_path)
-        payload["symbol_event_path"] = str(events_path)
-        payload["n_symbol_events"] = int(event_df.height)
 
     if report_dir is not None:
         out_dir = Path(str(report_dir)).expanduser()

@@ -1476,6 +1476,9 @@ def test_btc_trend_gate_payload_fields_apply_cycle_defaults() -> None:
 
     assert fields == {
         "btc_trend_gate": "uptrend",
+        "btc_trend_gate_mode": "daily_prior",
+        "btc_trend_gate_lookback_days": 30,
+        "btc_trend_gate_lookback_duration_ms": 30 * MS_PER_DAY,
         "btc_trend_gate_allows_entry": True,
         "btc_trend_gate_value": 0.12,
         "btc_trend_gate_btc_rows": 42,
@@ -1803,6 +1806,24 @@ def test_reentry_cooldown_blocks_recently_exited_symbol() -> None:
                                          strategy_id="continuous_fade_v2") == set()
 
 
+def test_reentry_cooldown_uses_exact_millisecond_boundary() -> None:
+    now = 2_000_000_000_123
+    cutoff = now - 30 * 60_000
+    trades = pl.DataFrame([
+        {"trade_id": "t1", "strategy_id": "continuous_fade_v2", "symbol": "AT_BOUNDARY", "status": "closed",
+         "exit_ts_ms": cutoff},
+        {"trade_id": "t2", "strategy_id": "continuous_fade_v2", "symbol": "ONE_MS_OLD", "status": "closed",
+         "exit_ts_ms": cutoff - 1},
+    ])
+
+    assert _recent_exit_cooldown_symbols(
+        trades,
+        now_ms=now,
+        cooldown_minutes=30,
+        strategy_id="continuous_fade_v2",
+    ) == {"AT_BOUNDARY"}
+
+
 def test_recent_entry_cooldown_blocks_recent_addon_entry_symbol() -> None:
     now = 2_000_000_000_000
     trades = pl.DataFrame([
@@ -1826,6 +1847,24 @@ def test_recent_entry_cooldown_blocks_recent_addon_entry_symbol() -> None:
         cooldown_minutes=0,
         strategy_id="continuous_fade_addon_v2",
     ) == set()
+
+
+def test_recent_entry_cooldown_uses_exact_millisecond_boundary() -> None:
+    now = 2_000_000_000_123
+    cutoff = now - 30 * 60_000
+    trades = pl.DataFrame([
+        {"trade_id": "t1", "strategy_id": "continuous_fade_addon_v2", "symbol": "AT_BOUNDARY",
+         "entry_ts_ms": cutoff},
+        {"trade_id": "t2", "strategy_id": "continuous_fade_addon_v2", "symbol": "ONE_MS_OLD",
+         "entry_ts_ms": cutoff - 1},
+    ])
+
+    assert _recent_entry_cooldown_symbols(
+        trades,
+        now_ms=now,
+        cooldown_minutes=30,
+        strategy_id="continuous_fade_addon_v2",
+    ) == {"AT_BOUNDARY"}
 
 
 def test_entry_circuit_breaker_trips_on_adverse_cluster_and_self_clears() -> None:
@@ -1896,6 +1935,42 @@ def test_stop_approach_reason_fires_near_disaster_stop() -> None:
     off = ContinuousDemoCycleConfig(stop_loss_pct=0.25, stop_approach_frac=0.0,
                                     breakeven_arm_pct=0.0, failed_fade_hours=0, max_hold_hours=0)
     assert _protective_exit_reason(held_ms=0, mfe=0.0, cur_ret=-0.30, config=off) is None
+
+
+def test_protective_exit_timers_use_exact_millisecond_boundary() -> None:
+    cfg = ContinuousDemoCycleConfig(
+        failed_fade_hours=1.5,
+        failed_fade_loss_pct=0.01,
+        failed_fade_min_mfe_pct=0.01,
+        max_hold_hours=2.5,
+        stop_approach_frac=0.0,
+        breakeven_arm_pct=0.0,
+    )
+
+    assert _protective_exit_reason(
+        held_ms=90 * 60_000 - 1,
+        mfe=0.0,
+        cur_ret=-0.02,
+        config=cfg,
+    ) is None
+    assert _protective_exit_reason(
+        held_ms=90 * 60_000,
+        mfe=0.0,
+        cur_ret=-0.02,
+        config=cfg,
+    ) == "failed_fade"
+    assert _protective_exit_reason(
+        held_ms=150 * 60_000 - 1,
+        mfe=0.02,
+        cur_ret=0.0,
+        config=cfg,
+    ) is None
+    assert _protective_exit_reason(
+        held_ms=150 * 60_000,
+        mfe=0.02,
+        cur_ret=0.0,
+        config=cfg,
+    ) == "max_hold"
 
 
 def test_plan_protective_exits_is_state_free_and_uses_live_price() -> None:
@@ -3542,6 +3617,32 @@ def test_wsrisk6_partial_loss_outside_window_not_counted() -> None:
         infer_schema_length=None,
     )
     assert _recent_adverse_exit_count(df, now_ms=now, window_minutes=60, strategy_id=_STRATEGY) == 0
+
+
+def test_recent_adverse_exit_count_uses_exact_millisecond_boundary() -> None:
+    now = _SIG + 123
+    cutoff = now - 60 * 60_000
+    df = pl.DataFrame(
+        [
+            {"status": "closed", "strategy_id": _STRATEGY, "exit_ts_ms": cutoff, "net_return": -0.03},
+            {"status": "closed", "strategy_id": _STRATEGY, "exit_ts_ms": cutoff - 1, "net_return": -0.03},
+            {
+                "status": "open", "strategy_id": _STRATEGY, "exit_ts_ms": None,
+                "partial_exit_realized_return": -0.01,
+                "partial_exit_ts_ms": cutoff, "updated_at_ms": cutoff,
+                "net_return": None,
+            },
+            {
+                "status": "open", "strategy_id": _STRATEGY, "exit_ts_ms": None,
+                "partial_exit_realized_return": -0.01,
+                "partial_exit_ts_ms": cutoff - 1, "updated_at_ms": cutoff - 1,
+                "net_return": None,
+            },
+        ],
+        infer_schema_length=None,
+    )
+
+    assert _recent_adverse_exit_count(df, now_ms=now, window_minutes=60, strategy_id=_STRATEGY) == 2
 
 
 def test_wsrisk6_partial_plus_closed_are_additive_and_not_double_counted() -> None:

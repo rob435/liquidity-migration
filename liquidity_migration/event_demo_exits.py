@@ -22,7 +22,7 @@ from typing import Any, Callable
 import polars as pl
 
 from . import _common  # noqa: F401 — kept for completeness
-from ._common import MS_PER_DAY, MS_PER_HOUR
+from ._common import MS_PER_HOUR, exact_duration_ms
 from .event_demo import (
     PENDING_ORDER_GUARD_MS,
     PENDING_ORDER_STATUSES,
@@ -63,7 +63,7 @@ _logger = logging.getLogger(__name__)
 
 # Bybit's closed-PnL endpoint enforces a <=7-day startTime->endTime span, so a batched
 # account-wide fetch must be PAGED in <=7-day windows (reconcile-core-4 re-audit F1).
-CLOSED_PNL_MAX_WINDOW_MS = 7 * MS_PER_DAY
+CLOSED_PNL_MAX_WINDOW_MS = exact_duration_ms(days=7)
 
 
 def _terminalize_stale_pending_entry_orders(

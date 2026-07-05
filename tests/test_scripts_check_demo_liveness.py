@@ -255,6 +255,29 @@ def test_cooldown_sends_new_suppresses_persisting_then_reresends_and_resolves() 
     assert to_send == [] and resolved == ["liveness:demo"] and state == {}
 
 
+def test_alert_cooldown_uses_exact_millisecond_boundary() -> None:
+    now = 1_000 * HOUR + 123
+    a = M.Alert(key="liveness:demo", severity=M.CRITICAL, message="down")
+    _sent, _resolved, state = M.select_alerts_to_send(active=[a], state={}, now_ms=now, cooldown_minutes=30)
+
+    to_send, resolved, _state = M.select_alerts_to_send(
+        active=[a],
+        state=state,
+        now_ms=now + 30 * MIN - 1,
+        cooldown_minutes=30,
+    )
+    assert to_send == [] and resolved == []
+
+    to_send, resolved, state = M.select_alerts_to_send(
+        active=[a],
+        state=state,
+        now_ms=now + 30 * MIN,
+        cooldown_minutes=30,
+    )
+    assert [alert.key for alert in to_send] == ["liveness:demo"]
+    assert resolved == []
+    assert state["liveness:demo"] == now + 30 * MIN
+
 
 def test_gather_long_alerts_covers_cycle_age_and_stop_protection(tmp_path, monkeypatch) -> None:
     """The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must catch a

@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 
 from .archive_manifest import DEFAULT_BYBIT_V5_KLINE_URL
-from .continuous_events import ContinuousEventConfig
+from .continuous_events import BTC_TREND_MODES, ContinuousEventConfig
 from .data_layer import DEFAULT_DATA_LAYER_DATASETS
 from .downloaders import BINANCE_PROXY_DATASET_MAP
 from .event_demo import EventRiskCycleConfig
@@ -1273,6 +1273,12 @@ def _add_continuous_events_parser(subparsers) -> None:
                    help="BTC prior-30d trend regime gate.")
     p.add_argument("--btc-trend-lookback-days", type=int, default=d.btc_trend_lookback_days,
                    help="BTC trend-gate lookback in prior daily returns, excluding the signal day.")
+    p.add_argument("--btc-trend-mode", default=d.btc_trend_mode, choices=BTC_TREND_MODES,
+                   help="BTC trend-gate source: daily prior, hourly 30d, hourly exact month, or smart month.")
+    p.add_argument("--btc-trend-month-days", type=float, default=d.btc_trend_month_days,
+                   help="Month-equivalent duration for hourly_exact_month/smart_month modes.")
+    p.add_argument("--btc-trend-smart-tolerance", type=float, default=d.btc_trend_smart_tolerance,
+                   help="Allowed disagreement between hourly month and daily prior legs in smart_month mode.")
     p.add_argument("--entry-event-trigger", default=d.entry_event_trigger,
                    help="Hourly catalyst gate (e.g. fresh_pop10, pop10_gb1, turn5_pop3).")
     p.add_argument("--liq-turnover-min", type=float, default=d.liq_turnover_min,
@@ -1412,6 +1418,10 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
         default=d.btc_trend_gate,
         help="Causal prior-30d BTC regime gate for new entries.",
     )
+    p.add_argument("--btc-trend-lookback-days", type=int, default=d.btc_trend_lookback_days)
+    p.add_argument("--btc-trend-mode", default=d.btc_trend_mode, choices=BTC_TREND_MODES)
+    p.add_argument("--btc-trend-month-days", type=float, default=d.btc_trend_month_days)
+    p.add_argument("--btc-trend-smart-tolerance", type=float, default=d.btc_trend_smart_tolerance)
     p.add_argument(
         "--allow-same-signal-reentry",
         action="store_true",

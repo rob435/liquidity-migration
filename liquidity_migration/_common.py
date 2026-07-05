@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -24,6 +25,51 @@ MS_PER_DAY = 86_400_000
 # ws_risk and the sleeves must not double-submit or treat as flat. Single source of
 # truth so sleeve implementations cannot silently drift apart.
 PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
+
+
+def exact_duration_ms(
+    *,
+    milliseconds: Any = 0,
+    seconds: Any = 0,
+    minutes: Any = 0,
+    hours: Any = 0,
+    days: Any = 0,
+) -> int:
+    """Return an exact integer millisecond duration.
+
+    Use this for timestamp lookbacks and cooldowns where "X time ago" means the
+    same millisecond on the clock, not a floored hour/day bucket. Values are
+    parsed through ``Decimal(str(value))`` so month-equivalent constants such as
+    ``365.25 / 12`` resolve to the intended decimal duration. Durations that do
+    not land on a whole millisecond raise instead of being rounded.
+    """
+    try:
+        total = (
+            Decimal(str(milliseconds))
+            + Decimal(str(seconds)) * Decimal(1_000)
+            + Decimal(str(minutes)) * Decimal(MS_PER_MINUTE)
+            + Decimal(str(hours)) * Decimal(MS_PER_HOUR)
+            + Decimal(str(days)) * Decimal(MS_PER_DAY)
+        )
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("duration components must be finite numeric values") from exc
+    if not total.is_finite():
+        raise ValueError("duration components must be finite numeric values")
+    if total < 0:
+        raise ValueError("duration must be non-negative")
+    integral = total.to_integral_value()
+    if total != integral:
+        raise ValueError(f"duration does not resolve to whole milliseconds: {total}")
+    return int(integral)
+
+
+def exact_lookback_cutoff_ms(anchor_ts_ms: int, **duration: Any) -> int:
+    """Exact cutoff for timestamp lookbacks: ``anchor_ts_ms - duration``.
+
+    This intentionally does no UTC day/hour flooring. Callers doing daily-bar
+    features should use ``calendar_roll`` / ``calendar_shift`` instead.
+    """
+    return int(anchor_ts_ms) - exact_duration_ms(**duration)
 
 
 def is_weekend_ms(ts_ms: int) -> bool:
@@ -144,19 +190,6 @@ def calendar_roll(
     method = getattr(expr, f"rolling_{agg}_by")
     return method(time_col, window_size=window, closed=closed, min_samples=min_samples, **kwargs)
 
-
-def trading_day_expr(ts_col: str = "ts_ms") -> pl.Expr:
-    """The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.
-
-    A daily-close signal is stamped at 00:00 UTC of the day AFTER the bar it
-    summarises (``volume_features`` builds ``ts_ms = day_start_ms + one period``),
-    so the trading day -- the day whose bar produced the signal -- is the date of
-    ``ts_ms - 1 ms``. Keying PIT archive membership on the stamp date instead asks
-    the archive about the day *after* the decision (a look-ahead) and was the
-    2026-05-30 reconciliation bug. Single source of truth for every live PIT site;
-    see ``docs/pit_gate.md``.
-    """
-    return (pl.from_epoch(pl.col(ts_col), time_unit="ms") - pl.duration(milliseconds=1)).dt.date()
 
 # --- shared date/frame helpers (relocated from volume_events.py, 2026-06-11) ---
 

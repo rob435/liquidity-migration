@@ -12,7 +12,9 @@ This is the durable decision log. Historical receipts live in git history and
 | `continuous_ensemble_v2` | Continuous fade demo/paper book | VPS aligned; no forward trade sample yet |
 | `LongV11aDivWeekendVol` | Long-native v11a demo/paper sleeve | Strongest current internal object; TP-tail dependent |
 
-Mainnet is outside the current operating mode.
+Mainnet is outside the current operating mode. Live/forward operations are
+Bybit-only. Binance remains a research/replay venue only (its liquidation/depth
+forward feed is retired).
 
 ## Evidence Standards
 
@@ -135,6 +137,24 @@ trades. The non-30d simple-return lookback grid also failed: best Bybit was 25d
 at +20.72%/MAR 4.29, and best Binance was 60d at +20.25%/MAR 4.84, both below
 the 30d baseline MAR. Treat this as rejection of the regime retune, not support
 for the narrow 30d gate as a broader promoted parameter.
+
+BTC month-regime hooks were added on 2026-07-04 under
+`docs/preregistration/btc-month-regime-2026-07-04.md`. They test a different
+mechanism from the rejected simple daily grid: latest confirmed hourly BTC
+30d/exact-month returns and a low-capacity smart-month consensus, plus a
+comparable opt-in long-native month-regime gate. Defaults are unchanged and the
+new arms are exploratory until a two-venue verdict exists.
+
+The first completed continuous retime arm rejected naive `hourly_30d` against
+the refreshed current control: Bybit fell from +24.63%/MAR 6.33/DD -1.20% to
++20.07%/MAR 1.75/DD -3.54%, and Binance fell from +18.82%/MAR 5.68/DD -1.02%
+to +16.22%/MAR 1.50/DD -3.31%. Ledger diff:
+`research/btc_month_regime_2026-07-04/continuous/hourly_30d_vs_daily_prior_ledger_diff/`.
+Mechanism: the rolling hourly window flipped slightly positive intraday on
+2025-04-19 and admitted a full-size VOXEL/NKN/ALPACA/MEME/XAI/HIGH cluster
+that daily-prior still blocked; that cluster drove the 2025-04-20 drawdown on
+both venues. Further hourly BTC-gate work needs hysteresis/confirmation/cooldown
+instead of a bare faster update.
 
 BTC-risk tail skip replay rejected replacing the existing 35% BTC-risk tail
 sizing with a hard skip. The arm removed a net 7.52% Bybit / 7.53% Binance
@@ -355,15 +375,15 @@ Closed long research:
    and sparse-tape signal-invalidation exits were negative or zero-hit. The
    hourly state-coverage audit confirms the full invalidation panel is still
    unavailable. The DSR/PBO diagnostic marks the internal replay variant surface
-   inference-fragile. The next registered tail method is
-   `docs/preregistration/continuous-tail-budget-control-2026-07-03.md`: keep
-   TP12/24h as lifecycle, then test loss-at-disaster sizing, portfolio heat
-   caps, and drawdown step-down as a risk governor rather than another fixed
-   price stop. The revised blacklist plan is
-   `docs/preregistration/continuous-time-symbol-risk-2026-07-04.md`: after the
-   negative Bybit time-stop diagnostic, focus on no-time-stop month-scale symbol
-   blacklists and causal learned entry-time blackouts rather than forced UTC
-   exits.
+   inference-fragile. Tail-budget control (loss-at-disaster sizing, portfolio
+   heat caps, drawdown step-down) is closed: rejected — loss-at-disaster is a
+   fixed stop in disguise and the existing fixed-stop falsifiers already cover
+   it. The timing/symbol-blacklist plan
+   (`docs/preregistration/continuous-time-symbol-risk-2026-07-04.md`) is also
+   closed: rejected. Both preregistrations are retained as falsifier records.
+   Use `docs/lookback_audit.md` before adding or retuning any lookback:
+   lifecycle timers, feature windows, risk memory, reporting windows, and
+   operational SLAs need different units and different robustness tests.
 4. Continue live-safety audit work. Submitted-row lifecycle transition enforcement, `PROTECTED` trade-row
    promotion, and the append-only lifecycle event stream now exist. Risk/audit
    logs currently cover blocked entry-health events, rejected lifecycle

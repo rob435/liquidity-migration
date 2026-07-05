@@ -109,6 +109,19 @@ def test_eviction_drops_bars_past_retain_days() -> None:
     assert store.symbol_count() == 1
 
 
+def test_eviction_uses_exact_millisecond_retain_boundary() -> None:
+    store = KlineStore(cache_root=None, retain_days=1, flush_interval_seconds=0.0)
+    base = 100 * MS_PER_DAY + 123
+
+    store.add_bar("AT_BOUNDARY", _ws_bar(base - MS_PER_DAY), confirmed=True)
+    store.add_bar("ONE_MS_OLD", _ws_bar(base - MS_PER_DAY - 1), confirmed=True)
+    store.add_bar("FRESH", _ws_bar(base), confirmed=True)
+
+    assert "AT_BOUNDARY" in store.symbols_with_coverage_through(base - MS_PER_DAY)
+    assert "ONE_MS_OLD" not in store.symbols_with_coverage_through(0)
+    assert "FRESH" in store.symbols_with_coverage_through(base)
+
+
 def test_insert_drops_bar_older_than_retain_window_immediately() -> None:
     """An out-of-window historical bar from a broken upstream must be
     silently dropped — never inserted, never evicted later."""

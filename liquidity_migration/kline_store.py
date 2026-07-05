@@ -47,7 +47,7 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR
+from ._common import MS_PER_HOUR, exact_duration_ms
 
 
 _logger = logging.getLogger("liquidity_migration.kline_store")
@@ -71,7 +71,7 @@ _EVICTION_INTERVAL_MS = MS_PER_HOUR
 # the eviction reference so a single bad frame can never run the evictor away.
 # 1h bars can legitimately carry a start time up to the current/next boundary
 # plus clock skew, so 2h of slack is comfortably permissive.
-_MAX_FUTURE_TS_SLACK_MS = 2 * MS_PER_HOUR
+_MAX_FUTURE_TS_SLACK_MS = exact_duration_ms(hours=2)
 
 
 def _utc_now_ms() -> int:
@@ -205,7 +205,7 @@ class KlineStore:
             raise ValueError("retain_days must be positive")
         if flush_interval_seconds < 0.0:
             raise ValueError("flush_interval_seconds must be non-negative")
-        self._retain_ms = int(retain_days) * MS_PER_DAY
+        self._retain_ms = exact_duration_ms(days=retain_days)
         self._retain_days = int(retain_days)
         # Configurable far-future bar reject window (default = module constant).
         self._max_future_ts_slack_ms = int(max_future_ts_slack_ms)

@@ -37,7 +37,17 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_roll, calendar_shift, date_ms, is_weekend_ms, pct
+from ._common import (
+    MS_PER_DAY,
+    MS_PER_HOUR,
+    calendar_roll,
+    calendar_shift,
+    date_ms,
+    exact_duration_ms,
+    exact_lookback_cutoff_ms,
+    is_weekend_ms,
+    pct,
+)
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .momentum_signals import daily_bars, add_returns_and_age
 from .run_diagnostics import diagnose, is_tainted, render
@@ -58,6 +68,16 @@ from .volume_events_pit import (
     _full_pit_universe_pass,
     _pit_manifest_metadata,
 )
+
+BTC_MONTH_REGIME_MODE_DAILY_30D = "daily_30d"
+BTC_MONTH_REGIME_MODE_HOURLY_EXACT_MONTH = "hourly_exact_month"
+BTC_MONTH_REGIME_MODE_SMART_MONTH = "smart_month"
+BTC_MONTH_REGIME_MODES = (
+    BTC_MONTH_REGIME_MODE_DAILY_30D,
+    BTC_MONTH_REGIME_MODE_HOURLY_EXACT_MONTH,
+    BTC_MONTH_REGIME_MODE_SMART_MONTH,
+)
+BTC_EXACT_MONTH_DAYS = 365.25 / 12.0
 
 
 # Splits are now exclusively a per-run config: see LongNativeConfig.splits.
@@ -91,6 +111,11 @@ class LongNativeConfig:
     # --- broad regime ---
     regime_symbol: str = "BTCUSDT"
     regime_sma_days: int = 30  # looser than 50d so we catch capitulations early
+    btc_month_regime_gate: str = "off"  # off | uptrend | downtrend; opt-in research gate before classification
+    btc_month_regime_mode: str = BTC_MONTH_REGIME_MODE_DAILY_30D
+    btc_month_regime_lookback_days: int = 30
+    btc_month_regime_month_days: float = BTC_EXACT_MONTH_DAYS
+    btc_month_regime_smart_tolerance: float = 0.01
 
     # --- pattern toggles ---
     enable_capitulation_rebound: bool = True
@@ -391,6 +416,89 @@ def _vol_target_scale(config: "LongNativeConfig", btc_rv: float | None) -> float
     return max(config.vol_target_min_scale, min(config.vol_target_max_scale, vt))
 
 
+def _btc_smart_month_value(hourly_month_return: float, daily_return: float, *, tolerance: float) -> float:
+    tol = max(float(tolerance), 0.0)
+    h = float(hourly_month_return)
+    d = float(daily_return)
+    return max(min(h, d + tol), min(d, h + tol))
+
+
+def _btc_hourly_exact_month_context(
+    klines_1h: pl.DataFrame,
+    *,
+    regime_symbol: str,
+    month_days: float,
+) -> pl.DataFrame:
+    if klines_1h.is_empty() or "symbol" not in klines_1h.columns:
+        return pl.DataFrame(schema={"ts_ms": pl.Int64, "btc_month_ret_exact": pl.Float64})
+    btc = (
+        klines_1h.filter(pl.col("symbol") == regime_symbol)
+        .select("ts_ms", "close")
+        .sort("ts_ms")
+        .drop_nulls(["ts_ms", "close"])
+    )
+    if btc.is_empty():
+        return pl.DataFrame(schema={"ts_ms": pl.Int64, "btc_month_ret_exact": pl.Float64})
+    ts = [int(v) for v in btc["ts_ms"].to_list()]
+    closes = [float(v) for v in btc["close"].to_list()]
+    rows: list[dict[str, int | float]] = []
+    for idx, anchor_ts in enumerate(ts):
+        cutoff = exact_lookback_cutoff_ms(anchor_ts, days=month_days)
+        source_idx = bisect_right(ts, cutoff) - 1
+        if source_idx < 0:
+            continue
+        source_ts = int(ts[source_idx])
+        if source_ts < cutoff - MS_PER_HOUR:
+            continue
+        source_close = float(closes[source_idx])
+        anchor_close = float(closes[idx])
+        if source_close <= 0.0 or not np.isfinite(source_close) or not np.isfinite(anchor_close):
+            continue
+        rows.append(
+            {
+                "ts_ms": int(anchor_ts) + MS_PER_HOUR,
+                "btc_month_ret_exact": anchor_close / source_close - 1.0,
+                "btc_month_ret_exact_source_ts_ms": source_ts,
+            }
+        )
+    if not rows:
+        return pl.DataFrame(
+            schema={
+                "ts_ms": pl.Int64,
+                "btc_month_ret_exact": pl.Float64,
+                "btc_month_ret_exact_source_ts_ms": pl.Int64,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def _btc_month_regime_value(row: dict[str, Any], cfg: "LongNativeConfig") -> float | None:
+    if cfg.btc_month_regime_mode == BTC_MONTH_REGIME_MODE_DAILY_30D:
+        return _safe_float(row.get("btc_month_ret_30d"))
+    if cfg.btc_month_regime_mode == BTC_MONTH_REGIME_MODE_HOURLY_EXACT_MONTH:
+        return _safe_float(row.get("btc_month_ret_exact"))
+    if cfg.btc_month_regime_mode == BTC_MONTH_REGIME_MODE_SMART_MONTH:
+        return _safe_float(row.get("btc_month_ret_smart"))
+    raise ValueError(
+        f"btc_month_regime_mode must be one of {BTC_MONTH_REGIME_MODES}; "
+        f"got {cfg.btc_month_regime_mode!r}"
+    )
+
+
+def _btc_month_regime_allows(row: dict[str, Any], cfg: "LongNativeConfig") -> bool:
+    gate = str(cfg.btc_month_regime_gate)
+    if gate == "off":
+        return True
+    if gate not in ("uptrend", "downtrend"):
+        raise ValueError(
+            f"btc_month_regime_gate must be 'off', 'uptrend', or 'downtrend'; got {gate!r}"
+        )
+    value = _btc_month_regime_value(row, cfg)
+    if value is None:
+        return False
+    return value > 0.0 if gate == "uptrend" else value <= 0.0
+
+
 def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfig | None = None) -> dict[str, Any]:
     """Read + build everything run_long_native_research needs BEFORE the trade pipeline:
     raw klines, the PIT gate, the feature panel, and the per-symbol bar/funding lookups.
@@ -424,18 +532,33 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
         # consume btc_trend_200 (200d SMA) / btc_vol_pos (365d RV-position). If the read
         # floor doesn't pre-date start_date by that many days those features are computed
         # over a TRUNCATED history and diverge from a full read — fail loud instead.
-        if cfg.start_date and cfg.enable_xsec_momentum:
+        if cfg.start_date and (cfg.enable_xsec_momentum or cfg.btc_month_regime_gate != "off"):
             required_warmup = 0
             if cfg.xsec_require_btc_200:
                 required_warmup = max(required_warmup, 200)
             if cfg.xsec_min_btc_vol_pos > 0.0:
                 required_warmup = max(required_warmup, 365)
+            if cfg.btc_month_regime_gate != "off":
+                if cfg.btc_month_regime_mode == BTC_MONTH_REGIME_MODE_DAILY_30D:
+                    required_warmup = max(required_warmup, int(cfg.btc_month_regime_lookback_days) + 1)
+                elif cfg.btc_month_regime_mode in (
+                    BTC_MONTH_REGIME_MODE_HOURLY_EXACT_MONTH,
+                    BTC_MONTH_REGIME_MODE_SMART_MONTH,
+                ):
+                    required_warmup = max(required_warmup, int(math.ceil(float(cfg.btc_month_regime_month_days))) + 1)
+                    if cfg.btc_month_regime_mode == BTC_MONTH_REGIME_MODE_SMART_MONTH:
+                        required_warmup = max(required_warmup, int(cfg.btc_month_regime_lookback_days) + 1)
+                else:
+                    raise RuntimeError(
+                        f"unknown btc_month_regime_mode {cfg.btc_month_regime_mode!r}; "
+                        f"expected one of {BTC_MONTH_REGIME_MODES}"
+                    )
             if required_warmup:
                 warmup_days = (dt.date.fromisoformat(cfg.start_date) - dt.date.fromisoformat(rs)).days
                 if warmup_days < required_warmup:
                     raise RuntimeError(
                         f"read_start_date warmup {warmup_days}d < {required_warmup}d required by the "
-                        f"active xsec gate (btc_trend_200/btc_vol_pos): a shorter warmup silently "
+                        f"active BTC regime gate: a shorter warmup silently "
                         f"diverges from a full read. Widen read_start_date or disable the gate."
                     )
         rs_ms = int(dt.datetime.fromisoformat(rs).replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
@@ -843,6 +966,18 @@ def run_long_native_research(
 
 
 def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None, config: LongNativeConfig, open_interest: pl.DataFrame | None = None, metrics: pl.DataFrame | None = None) -> pl.DataFrame:
+    if config.btc_month_regime_gate not in ("off", "uptrend", "downtrend"):
+        raise ValueError(
+            f"btc_month_regime_gate must be 'off', 'uptrend', or 'downtrend'; "
+            f"got {config.btc_month_regime_gate!r}"
+        )
+    if config.btc_month_regime_mode not in BTC_MONTH_REGIME_MODES:
+        raise ValueError(
+            f"btc_month_regime_mode must be one of {BTC_MONTH_REGIME_MODES}; "
+            f"got {config.btc_month_regime_mode!r}"
+        )
+    if config.btc_month_regime_lookback_days < 1:
+        raise ValueError("btc_month_regime_lookback_days must be >= 1")
     daily = daily_bars(klines_1h)
     if daily.is_empty():
         return daily
@@ -1071,8 +1206,24 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
         btc = btc.with_columns([
                 _cal_roll(pl.col("close"), "mean", config.regime_sma_days, min_samples=config.regime_sma_days).alias("regime_sma"),
                 _cal_roll(pl.col("close"), "mean", 200, min_samples=100).alias("regime_sma_200"),
+                (
+                    pl.col("close") / calendar_shift(pl.col("close"), int(config.btc_month_regime_lookback_days))
+                    - 1.0
+                ).alias("btc_month_ret_30d"),
                 (_cal_roll(pl.col("log_return"), "std", 30, min_samples=20) * math.sqrt(365.0)).alias("btc_rv_30"),
         ])
+        btc_exact = _btc_hourly_exact_month_context(
+            klines_1h,
+            regime_symbol=config.regime_symbol,
+            month_days=float(config.btc_month_regime_month_days),
+        )
+        if not btc_exact.is_empty():
+            btc = btc.join(btc_exact, on="ts_ms", how="left")
+        else:
+            btc = btc.with_columns([
+                pl.lit(None, dtype=pl.Float64).alias("btc_month_ret_exact"),
+                pl.lit(None, dtype=pl.Int64).alias("btc_month_ret_exact_source_ts_ms"),
+            ])
         btc = btc.with_columns([
                 _cal_roll(pl.col("btc_rv_30"), "min", 365, min_samples=120).alias("_rvmin"),
                 _cal_roll(pl.col("btc_rv_30"), "max", 365, min_samples=120).alias("_rvmax"),
@@ -1091,10 +1242,37 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
             (pl.col("close") > pl.col("regime_sma")).alias("regime_on"),
             (pl.col("close") / pl.col("regime_sma") - 1.0).alias("btc_sma_dist"),
             (pl.col("close") > pl.col("regime_sma_200")).alias("btc_trend_200"),
+            pl.when(pl.col("btc_month_ret_exact").is_not_null() & pl.col("btc_month_ret_30d").is_not_null())
+              .then(
+                  pl.max_horizontal(
+                      pl.min_horizontal(
+                          pl.col("btc_month_ret_exact"),
+                          pl.col("btc_month_ret_30d") + float(config.btc_month_regime_smart_tolerance),
+                      ),
+                      pl.min_horizontal(
+                          pl.col("btc_month_ret_30d"),
+                          pl.col("btc_month_ret_exact") + float(config.btc_month_regime_smart_tolerance),
+                      ),
+                  )
+              )
+              .otherwise(None)
+              .alias("btc_month_ret_smart"),
             pl.when((pl.col("_rvmax") - pl.col("_rvmin")) > 1e-12)
               .then((pl.col("btc_rv_30") - pl.col("_rvmin")) / (pl.col("_rvmax") - pl.col("_rvmin")))
               .otherwise(0.5).alias("btc_vol_pos"),
-        ]).select(["ts_ms", "regime_on", "btc_high_proximity", "btc_sma_dist", "btc_trend_200", "btc_vol_pos", "btc_rv_30"])
+        ]).select([
+            "ts_ms",
+            "regime_on",
+            "btc_high_proximity",
+            "btc_sma_dist",
+            "btc_trend_200",
+            "btc_month_ret_30d",
+            "btc_month_ret_exact",
+            "btc_month_ret_smart",
+            "btc_month_ret_exact_source_ts_ms",
+            "btc_vol_pos",
+            "btc_rv_30",
+        ])
         daily = daily.join(btc, on="ts_ms", how="left").with_columns([
             pl.col("regime_on").fill_null(False),
             pl.col("btc_high_proximity").fill_null(0.0),
@@ -1109,6 +1287,10 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
             pl.lit(0.0, dtype=pl.Float64).alias("btc_high_proximity"),
             pl.lit(0.0, dtype=pl.Float64).alias("btc_sma_dist"),
             pl.lit(False).alias("btc_trend_200"),
+            pl.lit(None, dtype=pl.Float64).alias("btc_month_ret_30d"),
+            pl.lit(None, dtype=pl.Float64).alias("btc_month_ret_exact"),
+            pl.lit(None, dtype=pl.Float64).alias("btc_month_ret_smart"),
+            pl.lit(None, dtype=pl.Int64).alias("btc_month_ret_exact_source_ts_ms"),
             pl.lit(0.5, dtype=pl.Float64).alias("btc_vol_pos"),
             pl.lit(0.8, dtype=pl.Float64).alias("btc_rv_30"),
         ])
@@ -1511,7 +1693,15 @@ def detect_pattern_fomo_chase(row: dict[str, Any], cfg: LongNativeConfig) -> boo
 
 
 def _fc_exit_params(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[float, float]:
-    """Return (stop_pct, take_profit_pct) for FC. Dynamic if fc_use_atr_exits, else fixed."""
+    """Return (stop_pct, take_profit_pct) for FC. Dynamic if fc_use_atr_exits, else fixed.
+
+    When ATR exits are enabled but ``atr_14d_pct`` is missing or non-positive, the
+    params silently fall back to the fixed ``fc_stop_pct`` / ``fc_take_profit_pct``
+    bucket. The long v11a edge is TP-tail dependent (removing the TP bucket flips
+    both venues negative), so a silent fallback to the fixed TP materially changes
+    the trade's payoff distribution. Use ``_fc_atr_available`` to surface fallbacks
+    in cycle telemetry and backtest stats rather than relying on this return value.
+    """
     if not cfg.fc_use_atr_exits:
         return cfg.fc_stop_pct, cfg.fc_take_profit_pct
     atr_pct = _safe_float(row.get("atr_14d_pct"))
@@ -1519,6 +1709,18 @@ def _fc_exit_params(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[float, 
         # Fall back to fixed if ATR is missing
         return cfg.fc_stop_pct, cfg.fc_take_profit_pct
     return atr_pct * cfg.fc_atr_stop_mult, atr_pct * cfg.fc_atr_tp_mult
+
+
+def _fc_atr_available(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
+    """True when an FC entry will get ATR-driven exit params, False on silent fixed fallback.
+
+    A pure function over the same inputs as ``_fc_exit_params`` so callers can count
+    fallbacks without changing the ``(stop_pct, take_profit_pct)`` return contract.
+    """
+    if not cfg.fc_use_atr_exits:
+        return True
+    atr_pct = _safe_float(row.get("atr_14d_pct"))
+    return atr_pct is not None and atr_pct > 0
 
 
 def _coin_track_record_scale(symbol: str, trade_rows: list[dict[str, Any]], cfg: LongNativeConfig) -> tuple[float, float | None]:
@@ -1728,6 +1930,8 @@ def detect_pattern_metrics(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
 
 def _classify_entry(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[str | None, float, float, int]:
     """Returns (pattern_name, stop_pct, take_profit_pct, max_hold_days) or (None, ...)."""
+    if not _btc_month_regime_allows(row, cfg):
+        return None, 0.0, 0.0, 0
     if detect_pattern_capitulation(row, cfg):
         return "capitulation_rebound", cfg.cap_stop_pct, cfg.cap_take_profit_pct, cfg.cap_max_hold_days
     if detect_pattern_funding_squeeze(row, cfg):
@@ -1825,7 +2029,7 @@ def _provisional_trigger_panel(
     last_kept: dict[str, int] = {}
     for sym, bar_end, day_end in trig.iter_rows():
         prev = last_kept.get(sym)
-        if prev is not None and bar_end - prev < 24 * MS_PER_HOUR:
+        if prev is not None and bar_end - prev < exact_duration_ms(hours=24):
             continue
         last_kept[sym] = bar_end
         out.setdefault(int(day_end), []).append((int(bar_end), str(sym)))
@@ -1923,6 +2127,7 @@ def _run_long_pipeline(
         "skipped_sector_cap": 0, "skipped_symbol_cap": 0,
         "exits_stop": 0, "exits_take_profit": 0, "exits_time": 0,
         "provisional_entries": 0, "exits_unconfirmed_cut": 0, "provisional_confirmed": 0,
+        "fc_atr_exit_fallback_count": 0,
     }
     event_counts = {"capitulation_rebound": 0, "funding_squeeze": 0, "volume_resurrection": 0,
                     "oversold_bounce": 0, "fomo_chase": 0, "uptrend_dip": 0, "xsec_momentum": 0,
@@ -1980,7 +2185,7 @@ def _run_long_pipeline(
                     round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
                     notional_multiplier=config.notional_multiplier,
                 ))
-                cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
+                cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
                 stats["exits_stop"] += 1
                 return True
             if bar_high >= pos["take_profit_price"]:
@@ -1990,7 +2195,7 @@ def _run_long_pipeline(
                     round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
                     notional_multiplier=config.notional_multiplier,
                 ))
-                cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
+                cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
                 stats["exits_take_profit"] += 1
                 return True
             if bar_end_ts >= pos["planned_exit_ts_ms"]:
@@ -2000,7 +2205,7 @@ def _run_long_pipeline(
                     round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
                     notional_multiplier=config.notional_multiplier,
                 ))
-                cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
+                cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
                 stats["exits_time"] += 1
                 return True
         pos["last_exit_scan_ts_ms"] = through_ts
@@ -2044,6 +2249,8 @@ def _run_long_pipeline(
                     stats["skipped_no_entry_bar"] += 1
                     continue
                 stop_pct, tp_pct = _fc_exit_params(row_prev, config)
+                if not _fc_atr_available(row_prev, config):
+                    stats["fc_atr_exit_fallback_count"] += 1
                 if config.sizing == "equal":
                     position_weight = 1.0
                 else:
@@ -2078,7 +2285,7 @@ def _run_long_pipeline(
                     "entry_price": entry_price,
                     "stop_price": float(entry_price * (1.0 - stop_pct)),
                     "take_profit_price": float(entry_price * (1.0 + tp_pct)),
-                    "planned_exit_ts_ms": int(trig_ts + config.fc_max_hold_days * MS_PER_DAY),
+                    "planned_exit_ts_ms": int(trig_ts + exact_duration_ms(days=config.fc_max_hold_days)),
                     "position_weight": float(position_weight),
                     "stop_pct": float(stop_pct),
                     "tp_pct": float(tp_pct),
@@ -2146,7 +2353,7 @@ def _run_long_pipeline(
                     round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
                     notional_multiplier=config.notional_multiplier,
                 ))
-                cooldown_until[symbol] = int(ts) + config.cooldown_days * MS_PER_DAY
+                cooldown_until[symbol] = int(ts) + exact_duration_ms(days=config.cooldown_days)
                 stats["exits_unconfirmed_cut"] += 1
                 del open_positions[symbol]
 
@@ -2202,7 +2409,7 @@ def _run_long_pipeline(
             if len(open_positions) >= config.max_concurrent_positions:
                 stats["skipped_capacity"] += 1
                 continue
-            entry_ts_ms = ts + config.entry_delay_hours * MS_PER_HOUR
+            entry_ts_ms = ts + exact_duration_ms(hours=config.entry_delay_hours)
             if window_end_ts_ms is not None and entry_ts_ms > window_end_ts_ms:
                 stats["skipped_no_entry_bar"] += 1
                 continue
@@ -2230,7 +2437,7 @@ def _run_long_pipeline(
                 deadline_h = max(first_h, config.fc_sniper_deadline_hours)
                 fired = False
                 for hour in range(first_h, deadline_h + 1):
-                    cand_ts = ts + hour * MS_PER_HOUR
+                    cand_ts = ts + exact_duration_ms(hours=hour)
                     cand_idx = bars["by_end"].get(cand_ts)
                     if cand_idx is None:
                         continue
@@ -2246,7 +2453,7 @@ def _run_long_pipeline(
                     # Else fall through: use the actual deadline bar. If that bar
                     # is absent, the deadline decision cannot be backfilled to
                     # hour-1 without look-ahead.
-                    deadline_ts = ts + deadline_h * MS_PER_HOUR
+                    deadline_ts = ts + exact_duration_ms(hours=deadline_h)
                     if window_end_ts_ms is not None and deadline_ts > window_end_ts_ms:
                         stats["skipped_no_entry_bar"] += 1
                         continue
@@ -2270,7 +2477,7 @@ def _run_long_pipeline(
                 continue
             stop_price = entry_price * (1.0 - stop_pct)
             take_profit_price = entry_price * (1.0 + tp_pct)
-            planned_exit_ts_ms = entry_ts_ms + hold_days * MS_PER_DAY
+            planned_exit_ts_ms = entry_ts_ms + exact_duration_ms(days=hold_days)
 
             if config.sizing == "equal":
                 position_weight = 1.0

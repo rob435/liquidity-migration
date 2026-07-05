@@ -4,6 +4,7 @@ import polars as pl
 
 from liquidity_migration.continuous_demo import CONTINUOUS_STRATEGY_ID
 from liquidity_migration.continuous_identity import continuous_order_link_id
+from liquidity_migration._common import exact_duration_ms
 from liquidity_migration.ws_risk import EventWebSocketRiskConfig
 from liquidity_migration.ws_risk_adoption import build_adopted_trade_row, select_recovered_entry_link_metadata
 from liquidity_migration.ws_risk_sleeves import resolve_sleeve, tag_sleeve_from_trades
@@ -37,7 +38,7 @@ def test_build_adopted_trade_row_marks_unrecovered_short_ambiguous_when_continuo
             "createdTime": "1700000000000",
         },
         now_ms=1_700_000_010_000,
-        risk=EventWebSocketRiskConfig(adopt_hold_days=3.0),
+        risk=EventWebSocketRiskConfig(adopt_hold_days=3.5),
         recover_entry_link_metadata=lambda _symbol, _side: None,
         adoption_equity_usdt=lambda: 1234.5,
         continuous_root_configured=True,
@@ -49,6 +50,7 @@ def test_build_adopted_trade_row_marks_unrecovered_short_ambiguous_when_continuo
     assert result.row["trade_id"] == "adopted-WIFUSDT-1700000000000"
     assert result.row["sleeve"] == "short"
     assert result.row["equity_usdt"] == 1234.5
+    assert result.row["planned_exit_ts_ms"] == 1_700_000_000_000 + exact_duration_ms(days=3.5)
 
 
 def test_resolve_sleeve_routes_unowned_non_empty_tags_to_short_with_misroute_flag() -> None:

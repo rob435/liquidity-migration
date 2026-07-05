@@ -6,17 +6,18 @@ from urllib.error import HTTPError
 import pytest
 
 from liquidity_migration import binance
+from liquidity_migration._common import exact_duration_ms
 
 
 def test_recent_history_start_clamps_to_latest_30_days(monkeypatch) -> None:
-    now_ms = 1_700_000_000_000
-    day_ms = 24 * 60 * 60_000
+    now_ms = 1_700_000_123_456
+    day_ms = exact_duration_ms(days=1)
     monkeypatch.setattr(binance.time, "time", lambda: now_ms / 1000)
 
     start = now_ms - 90 * day_ms
     end = now_ms - 5 * day_ms
 
-    assert binance._recent_history_start(start, end, days=30) == now_ms - 30 * day_ms
+    assert binance._recent_history_start(start, end, days=30) == now_ms - exact_duration_ms(days=30)
 
 
 def test_recent_period_alignment_helpers() -> None:

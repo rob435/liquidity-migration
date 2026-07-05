@@ -1180,8 +1180,13 @@ class BybitTradeRouter:
 
     Bybit demo currently rejects WS trade order entry; on demo, the router's
     first WS attempt typically returns a non-zero retCode and we transparently
-    fall back to REST. The same code path works unchanged when REAL_MONEY is
-    flipped on — WS placement starts succeeding and saves ~150-200ms per order.
+    fall back to REST. Flipping on real money is NOT a one-flag change: every
+    client construction site would also need ``confirm_real_money=True`` wired in,
+    otherwise the signing-layer ``_assert_submit_allowed`` guard raises on every
+    submit. That is the intended fail-closed posture (real money requires a
+    deliberate code change plus explicit owner action, never a flag flip); on a
+    properly-wired real-money deployment WS placement would succeed and save
+    ~150-200ms per order.
 
     Submission stats are exposed via :meth:`stats` so the operator can
     observe whether placement is going WS or REST in production telemetry.

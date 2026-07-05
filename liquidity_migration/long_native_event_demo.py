@@ -43,7 +43,7 @@ from typing import Any, Callable
 
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, PENDING_ORDER_STATUSES, is_weekend_ms
+from ._common import MS_PER_DAY, MS_PER_HOUR, PENDING_ORDER_STATUSES, exact_duration_ms, is_weekend_ms
 from .bybit import BybitMarketData, BybitPrivateClient, BybitRestRateLimiter
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_tickers
@@ -95,7 +95,7 @@ from .cross_sleeve import (
     release_symbol_reservation,
     shared_account_root,
 )
-from .long_native import LongNativeConfig, _classify_entry, _vol_target_scale, build_long_features
+from .long_native import LongNativeConfig, _classify_entry, _fc_atr_available, _vol_target_scale, build_long_features
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import format_age_ms, format_pct, format_usd, format_utc_time_ms, send_telegram_message
 from .universe import build_current_universe_table
@@ -122,11 +122,11 @@ CONTINUOUS_PAPER_CYCLES_DATASET = "continuous_fade_paper_cycles"
 LONG_ENTRY_LINK_PREFIX = "en-l"
 LONG_EXIT_LINK_PREFIX = "ux-l"
 
-PENDING_ORDER_GUARD_MS = 15 * 60 * 1000
+PENDING_ORDER_GUARD_MS = exact_duration_ms(minutes=15)
 
 # Signals older than this aren't acted on. Without this bound a missed-cycle
 # event would later trigger a stale fill long after the retrace window closed.
-SIGNAL_FRESHNESS_MS = 24 * MS_PER_HOUR
+SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
 
 # long-sleeve-2: the FC gate `today_volume_rank <= fc_top_volume_rank_max` ranks
 # turnover over WHATEVER symbols build_long_features saw — the full per-venue PIT
@@ -927,7 +927,7 @@ def run_long_native_demo_cycle(
 
 def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
     end_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
-    start_ms = end_ms - lookback_days * MS_PER_DAY
+    start_ms = end_ms - exact_duration_ms(days=lookback_days)
     return start_ms, end_ms
 
 
@@ -1044,7 +1044,7 @@ def _cooldown_until_long(trades: pl.DataFrame, *, cooldown_days: int) -> dict[st
     )
     if closed.is_empty():
         return {}
-    cooldown_ms = cooldown_days * MS_PER_DAY
+    cooldown_ms = exact_duration_ms(days=cooldown_days)
     grouped = (
         closed.group_by("symbol")
         .agg(pl.col("exit_ts_ms").max().alias("last_exit_ts_ms"))
@@ -1082,6 +1082,7 @@ def _select_long_entry_candidates(
         "entry_delay": 0,
         "no_retrace_yet": 0,
         "no_live_price": 0,
+        "fc_atr_exit_fallback": 0,
     }
     if features.is_empty():
         skips["no_features"] = 1
@@ -1137,6 +1138,11 @@ def _select_long_entry_candidates(
             if pattern != "fomo_chase":
                 # v11a is FC-only — defensive, in case strategy config drifts
                 continue
+            if not _fc_atr_available(row, strategy):
+                # FC entry will fall back to fixed-TP exits (the negative-EV bucket
+                # per the long v11a TP-tail dependency). Surface it as telemetry so a
+                # feature-window or data hiccup cannot silently mutate exit geometry.
+                skips["fc_atr_exit_fallback"] += 1
             symbol = str(row["symbol"])
             if symbol in open_symbols:
                 skips["already_open"] += 1
@@ -1144,7 +1150,7 @@ def _select_long_entry_candidates(
             if cooldown_until.get(symbol, 0) > now_ms:
                 skips["cooldown"] += 1
                 continue
-            first_entry_check_ms = int(ts) + max(1, int(strategy.entry_delay_hours)) * MS_PER_HOUR
+            first_entry_check_ms = int(ts) + exact_duration_ms(hours=max(1, strategy.entry_delay_hours))
             if now_ms < first_entry_check_ms:
                 skips["entry_delay"] += 1
                 continue
@@ -1156,7 +1162,7 @@ def _select_long_entry_candidates(
             if signal_close <= 0.0:
                 continue
             retrace_threshold = signal_close * (1.0 - strategy.fc_sniper_retrace_pct)
-            deadline_ms = int(ts) + strategy.fc_sniper_deadline_hours * MS_PER_HOUR
+            deadline_ms = int(ts) + exact_duration_ms(hours=strategy.fc_sniper_deadline_hours)
             # Live retrace condition: enter NOW if current price <= threshold,
             # OR enter at deadline fall-through if we're past the deadline AND
             # signal is still fresh.
@@ -1212,7 +1218,7 @@ def _select_long_entry_candidates(
                 "stop_loss_pct": float(stop_pct),
                 "take_profit_pct": float(tp_pct),
                 "max_hold_days": int(hold_days),
-                "planned_exit_ts_ms": now_ms + int(hold_days) * MS_PER_DAY,
+                "planned_exit_ts_ms": now_ms + exact_duration_ms(days=hold_days),
                 "atr_14d_pct": atr_pct,
                 "realized_vol": realized_vol,
                 "position_weight": position_weight,
@@ -1907,7 +1913,10 @@ def _execute_single_long_entry(
 
     entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
     filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
-    planned_exit_ts_ms = int(candidate.get("planned_exit_ts_ms") or (now_ms + int(candidate.get("max_hold_days") or 3) * MS_PER_DAY))
+    planned_exit_ts_ms = int(
+        candidate.get("planned_exit_ts_ms")
+        or (now_ms + exact_duration_ms(days=candidate.get("max_hold_days") or 3))
+    )
 
     trade_row: dict[str, Any] | None = None
     if not demo.submit_orders or filled_qty > 0.0:
@@ -2320,7 +2329,7 @@ def _format_book_line(
 def _cycle_stale(cycles: _CycleSummary, *, now_ms: int, stale_minutes: float) -> bool:
     if not cycles.available or cycles.latest_ts_ms is None:
         return True
-    return (now_ms - cycles.latest_ts_ms) > stale_minutes * 60_000.0
+    return (now_ms - cycles.latest_ts_ms) > exact_duration_ms(minutes=stale_minutes)
 
 
 def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:

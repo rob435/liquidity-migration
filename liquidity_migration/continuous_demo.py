@@ -18,13 +18,14 @@ profile.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, finite_float
+from ._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms, exact_lookback_cutoff_ms, finite_float
 from .config import DEFAULT_EXCLUDED_SYMBOLS
 from .continuous_identity import (
     continuous_order_link_id as _continuous_order_link_id_impl,
@@ -35,10 +36,15 @@ from .continuous_identity import (
 from .order_execution import order_fill_status
 from .order_link_id import assert_routable_component_tags, decode_entry_order_link_id
 from .continuous_events import (
+    BTC_EXACT_MONTH_DAYS,
+    BTC_TREND_MODE_DAILY_PRIOR,
+    BTC_TREND_MODES,
     FEATURES,
     compute_continuous_decile_panel,
     cross_sectional_decile,
-    _btc_trend_returns,
+    _btc_trend_lookup_key,
+    _btc_trend_return_lookup,
+    _btc_trend_lookback_duration_ms,
     _entry_event_expr,
     per_symbol_timeseries_features,
 )
@@ -190,6 +196,10 @@ class ContinuousDemoCycleConfig:
     # default aligned with the runner + systemd units; explicit overrides remain
     # available for diagnostics.
     btc_trend_gate: str = "uptrend"        # off | uptrend | downtrend; causal prior-30d BTC return gate.
+    btc_trend_lookback_days: int = 30
+    btc_trend_mode: str = BTC_TREND_MODE_DAILY_PRIOR
+    btc_trend_month_days: float = BTC_EXACT_MONTH_DAYS
+    btc_trend_smart_tolerance: float = 0.01
     # --- anti-thrash (a name oscillating on the D9 boundary would otherwise churn fees) ---
     # Hysteresis: ENTER on the top decile (`decile`), but only cover on the state-exit ("left
     # decile") once the name is CLEARLY out — its decile has dropped below `decile - exit_decile_buffer`.
@@ -455,13 +465,13 @@ def build_confirmed_entry_state(
     closed `entry_confirm_delay_hours` ago. NO synthetic live bar → fully PIT/confirmed. Returns the same
     [symbol, decile, composite, turnover_quote] shape as build_live_continuous_state so the selector is a
     drop-in. (Used for ENTRIES only; EXITS keep the live tick-driven state.)"""
-    delay = max(1, int(config.entry_confirm_delay_hours))
+    delay = max(1, config.entry_confirm_delay_hours)
     if klines_recent.is_empty():
         return _empty_live_state()
     cur_ts = (int(now_ts_ms) // MS_PER_HOUR) * MS_PER_HOUR
     # deciding bar starts at ts_d, closes at ts_d+1h; entry is +delay h after that close, so the most
     # recent eligible deciding bar has ts_d = cur_ts - (1+delay)h (its +delay-after-close <= cur_ts <= now).
-    deciding_ts = cur_ts - (1 + delay) * MS_PER_HOUR
+    deciding_ts = cur_ts - exact_duration_ms(hours=1 + delay)
     k = klines_recent.select("ts_ms", "symbol", "close", "turnover_quote").filter(pl.col("ts_ms") < cur_ts)
     if config.exclude_symbols:
         k = k.filter(~pl.col("symbol").is_in(list(config.exclude_symbols)))
@@ -1353,10 +1363,10 @@ def _protective_exit_reason(
     if (config.stop_approach_frac > 0.0 and config.stop_loss_pct > 0.0
             and cur_ret <= -(config.stop_approach_frac * config.stop_loss_pct)):
         return "stop_approach"
-    if (config.failed_fade_hours > 0 and held_ms >= config.failed_fade_hours * MS_PER_HOUR
+    if (config.failed_fade_hours > 0 and held_ms >= exact_duration_ms(hours=config.failed_fade_hours)
             and mfe < config.failed_fade_min_mfe_pct and cur_ret <= -config.failed_fade_loss_pct):
         return "failed_fade"
-    if config.max_hold_hours > 0 and held_ms >= config.max_hold_hours * MS_PER_HOUR:
+    if config.max_hold_hours > 0 and held_ms >= exact_duration_ms(hours=config.max_hold_hours):
         return "max_hold"
     return None
 
@@ -1452,7 +1462,7 @@ def _recent_exit_cooldown_symbols(
     survives daemon restarts and never needs its own bookkeeping file."""
     if cooldown_minutes <= 0 or all_trades.is_empty() or "exit_ts_ms" not in all_trades.columns:
         return set()
-    cutoff = now_ms - cooldown_minutes * 60_000
+    cutoff = exact_lookback_cutoff_ms(now_ms, minutes=cooldown_minutes)
     recent = all_trades.filter(
         (pl.col("status") == "closed")
         & (pl.col("strategy_id") == strategy_id)
@@ -1487,7 +1497,7 @@ def _recent_entry_cooldown_symbols(
     """
     if cooldown_minutes <= 0 or all_trades.is_empty():
         return set()
-    cutoff = now_ms - cooldown_minutes * 60_000
+    cutoff = exact_lookback_cutoff_ms(now_ms, minutes=cooldown_minutes)
     out: set[str] = set()
     for row in all_trades.to_dicts():
         if str(row.get("strategy_id") or "") != strategy_id:
@@ -1548,7 +1558,7 @@ def _recent_adverse_exit_count(
     `window_minutes`. Drives the entry-pause circuit breaker. Stateless (ledger-derived)."""
     if window_minutes <= 0 or all_trades.is_empty() or "exit_ts_ms" not in all_trades.columns:
         return 0
-    cutoff = now_ms - window_minutes * 60_000
+    cutoff = exact_lookback_cutoff_ms(now_ms, minutes=window_minutes)
     partial_count = _recent_partial_adverse_exit_count(
         all_trades, now_ms=now_ms, cutoff=cutoff, strategy_id=strategy_id)
     df = all_trades.filter(
@@ -1636,7 +1646,7 @@ def _continuous_entry_order_attributed_symbols(
         return set()
     min_ts_ms = 0
     if now_ms > 0 and lookback_hours > 0.0:
-        min_ts_ms = int(now_ms - lookback_hours * MS_PER_HOUR)
+        min_ts_ms = exact_lookback_cutoff_ms(now_ms, hours=lookback_hours)
     managed = {str(strategy_id) for strategy_id in managed_strategy_ids if str(strategy_id)}
     terminal_no_position_statuses = {
         "cancelled",
@@ -2109,8 +2119,15 @@ def _continuous_entry_risk_health(
 def _append_continuous_jsonl_event(root: Path, filename: str, event: dict[str, Any]) -> Path:
     path = Path(root).expanduser() / filename
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Single write call + flush + fsync so each event is durable and a SIGKILL/power
+    # loss cannot leave a partial last line. The authoritative ledger uses atomic
+    # temp+rename; these streams are descriptive audit, but the same crash-safety
+    # bar applies (a truncated JSONL line would break the next reader's per-line parse).
+    line = json.dumps(event, sort_keys=True, default=str, separators=(",", ":")) + "\n"
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True, default=str, separators=(",", ":")) + "\n")
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
     return path
 
 
@@ -2520,13 +2537,25 @@ def _btc_trend_gate_allows_entries(
 ) -> bool:
     return _btc_trend_gate_allows_value(
         config.btc_trend_gate,
-        _btc_trend_gate_value(klines, signal_ts_ms=signal_ts_ms),
+        _btc_trend_gate_value(klines, signal_ts_ms=signal_ts_ms, config=config),
     )
 
 
-def _btc_trend_gate_value(klines: pl.DataFrame, *, signal_ts_ms: int) -> float | None:
-    day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
-    return _btc_trend_returns(klines).get(day)
+def _btc_trend_gate_value(
+    klines: pl.DataFrame,
+    *,
+    signal_ts_ms: int,
+    config: ContinuousDemoCycleConfig | None = None,
+) -> float | None:
+    cfg = config or ContinuousDemoCycleConfig()
+    lookup = _btc_trend_return_lookup(
+        klines,
+        mode=str(cfg.btc_trend_mode),
+        lookback_days=max(int(cfg.btc_trend_lookback_days), 1),
+        month_days=float(cfg.btc_trend_month_days),
+        smart_tolerance=float(cfg.btc_trend_smart_tolerance),
+    )
+    return lookup.get(_btc_trend_lookup_key(int(signal_ts_ms), mode=str(cfg.btc_trend_mode)))
 
 
 def _btc_trend_gate_allows_value(gate: str, trend: float | None) -> bool:
@@ -2754,6 +2783,11 @@ def _btc_trend_gate_payload_fields(
 ) -> dict[str, Any]:
     return {
         "btc_trend_gate": config.btc_trend_gate,
+        "btc_trend_gate_mode": config.btc_trend_mode,
+        "btc_trend_gate_lookback_days": int(config.btc_trend_lookback_days),
+        "btc_trend_gate_lookback_duration_ms": (
+            _btc_trend_lookback_duration_ms(config) if config.btc_trend_gate != "off" else None
+        ),
         "btc_trend_gate_allows_entry": allows_entry,
         "btc_trend_gate_value": trend_value,
         "btc_trend_gate_btc_rows": kline_stats.get("btc_rows", 0),
@@ -4031,6 +4065,10 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
         raise ValueError(
             f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {config.btc_trend_gate!r}"
         )
+    if config.btc_trend_mode not in BTC_TREND_MODES:
+        raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {config.btc_trend_mode!r}")
+    if config.btc_trend_gate != "off" and config.btc_trend_lookback_days < 1:
+        raise ValueError("btc_trend_lookback_days must be >= 1 when btc_trend_gate is active")
     if config.sizing_mode not in ("flat", "inverse_vol"):
         raise ValueError(f"sizing_mode must be 'flat' or 'inverse_vol'; got {config.sizing_mode!r}")
     if config.sizing_mode == "inverse_vol":
@@ -4101,7 +4139,7 @@ def _continuous_age_eligible_symbols(
             "listing_age_days); only correct when the cache spans >= %d days",
             age_days_min,
         )
-        age_min_ms = age_days_min * MS_PER_DAY
+        age_min_ms = exact_duration_ms(days=age_days_min)
         firsts = klines.group_by("symbol").agg(pl.col("ts_ms").min().alias("first"))
         return set(firsts.filter((now_ms - pl.col("first")) >= age_min_ms)["symbol"].to_list())
     return None
@@ -4459,9 +4497,9 @@ def run_continuous_demo_cycle(
         candidates: list[dict[str, Any]] = []
         cur_hour_ts = (cycle_now_ms // MS_PER_HOUR) * MS_PER_HOUR
         # signal ts = the deciding (confirmed) bar for the +1h entry, else the current hour (legacy).
-        signal_ts = (cur_hour_ts - (1 + demo.entry_confirm_delay_hours) * MS_PER_HOUR
+        signal_ts = (cur_hour_ts - exact_duration_ms(hours=1 + demo.entry_confirm_delay_hours)
                      if demo.entry_confirm_delay_hours > 0 else cur_hour_ts)
-        btc_trend_gate_value = _btc_trend_gate_value(btc_gate_klines, signal_ts_ms=signal_ts)
+        btc_trend_gate_value = _btc_trend_gate_value(btc_gate_klines, signal_ts_ms=signal_ts, config=demo)
         btc_trend_gate_allows_entry = _btc_trend_gate_allows_value(
             demo.btc_trend_gate,
             btc_trend_gate_value,
@@ -4971,7 +5009,7 @@ def run_continuous_protective_exit_cycle(
         # failed_fade (price+time only) still do; the next full cycle's REST fallback fills the gap.
         klines = pl.DataFrame()
         if kline_store is not None:
-            lookback = (demo.max_hold_hours + 2) * MS_PER_HOUR
+            lookback = exact_duration_ms(hours=demo.max_hold_hours + 2)
             try:
                 klines = kline_store.get_klines(sorted(held), start_ms=now - lookback, end_ms=now)
             except Exception:  # noqa: BLE001

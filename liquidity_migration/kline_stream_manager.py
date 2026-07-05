@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 
-from ._common import MS_PER_DAY, MS_PER_HOUR
+from ._common import MS_PER_HOUR, exact_duration_ms
 from .bybit import (
     BybitKlineStreamPool,
     BybitMarketData,
@@ -442,7 +442,7 @@ class KlineStreamManager:
         # both ends of the window so bootstrap re-fills any historical gap.
         now_ms = _utc_now_ms()
         recent_bar_ts_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
-        lookback_ms = self.lookback_days * MS_PER_DAY
+        lookback_ms = exact_duration_ms(days=self.lookback_days)
         end_ms = recent_bar_ts_ms
         start_ms = end_ms - lookback_ms
         already_covered = self._store.symbols_with_coverage_in_window(

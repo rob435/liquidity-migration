@@ -107,6 +107,10 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
     )
 
     assert args.btc_trend_gate == "uptrend"
+    assert args.btc_trend_mode == "daily_prior"
+    assert args.btc_trend_lookback_days == 30
+    assert args.btc_trend_month_days == 365.25 / 12
+    assert args.btc_trend_smart_tolerance == 0.01
     assert args.entry_private_ws_stale_seconds == 300.0
     assert args.feature_set == "max_ret168"
     assert args.max_hold_hours == 24
@@ -175,6 +179,12 @@ def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
             "-0.03",
             "--btc-trend-lookback-days",
             "20",
+            "--btc-trend-mode",
+            "hourly_exact_month",
+            "--btc-trend-month-days",
+            "30.4375",
+            "--btc-trend-smart-tolerance",
+            "0.02",
             "--round-trip-cost-multiplier",
             "2",
             "--failed-fade-hours",
@@ -207,6 +217,9 @@ def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
     assert args.entry_decel_max_ret == 0.02
     assert args.market_min_ret_1d == -0.03
     assert args.btc_trend_lookback_days == 20
+    assert args.btc_trend_mode == "hourly_exact_month"
+    assert args.btc_trend_month_days == 30.4375
+    assert args.btc_trend_smart_tolerance == 0.02
     assert args.round_trip_cost_multiplier == 2
     assert args.failed_fade_hours == 6
     assert args.failed_fade_loss_pct == 0.04

@@ -24,6 +24,7 @@ reports/
 backtest-runs/
 # Continuous research outputs are local artifacts; keep the harness/scripts tracked.
 /research/continuous_fade/runs/
+/research/btc_month_regime_2026-07-04/
 *.sqlite3.gz
 backtest.sqlite3
 backtest-*.sqlite3

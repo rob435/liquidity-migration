@@ -608,6 +608,9 @@ def _component_report_rows(payloads: list[dict[str, Any]]) -> list[dict[str, Any
                 "funding_mode": payload.get("funding_mode"),
                 "take_profit_pct": cfg.get("take_profit_pct"),
                 "btc_trend_gate": cfg.get("btc_trend_gate"),
+                "btc_trend_mode": cfg.get("btc_trend_mode"),
+                "btc_trend_lookback_days": cfg.get("btc_trend_lookback_days"),
+                "btc_trend_month_days": cfg.get("btc_trend_month_days"),
                 "gross_exposure": cfg.get("gross_exposure"),
                 "total_return_pct": None
                 if metrics.get("total_return") is None
@@ -644,6 +647,7 @@ def write_continuous_equity_report(
     if inferred_tp is None and first_cfg.get("take_profit_pct") is not None:
         inferred_tp = float(first_cfg["take_profit_pct"])
     btc_trend_gate = first_cfg.get("btc_trend_gate")
+    btc_trend_mode = first_cfg.get("btc_trend_mode")
     funding_modes = sorted({str(row.get("funding_mode")) for row in component_rows if row.get("funding_mode")})
     final_equity = None if df.is_empty() else float(df["equity"][-1])
     summary = {
@@ -657,6 +661,9 @@ def write_continuous_equity_report(
         "window": stats_1x.get("window"),
         "component_take_profit_pct": inferred_tp,
         "btc_trend_gate": btc_trend_gate,
+        "btc_trend_mode": btc_trend_mode,
+        "btc_trend_lookback_days": first_cfg.get("btc_trend_lookback_days"),
+        "btc_trend_month_days": first_cfg.get("btc_trend_month_days"),
         "btc_risk_sizing": btc_risk_sizing,
         "backtest_leverage": backtest_leverage,
         "chart_leverage": chart_leverage,
@@ -789,7 +796,6 @@ def run_components(
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
     config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
     write_candidate_tape: bool = False,
-    write_symbol_events: bool = False,
 ) -> dict[str, Any]:
     data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
@@ -809,7 +815,6 @@ def run_components(
         if config_transform is not None:
             cfg = config_transform(cfg)
         candidate_tape_path = cell_dir / "candidate_tape.parquet" if write_candidate_tape else None
-        symbol_event_path = cell_dir / "symbol_quarantine_events.csv" if write_symbol_events else None
         t0 = time.time()
         if report_path.exists() and size_mult_lookup is None:
             payload = json.loads(report_path.read_text(encoding="utf-8"))
@@ -823,15 +828,12 @@ def run_components(
             )
             if candidate_tape_path is not None and not candidate_tape_path.exists():
                 resumed = False
-            if symbol_event_path is not None and not symbol_event_path.exists():
-                resumed = False
             if not resumed:
                 payload = run_continuous_event_research(
                     data_root,
                     config=cfg,
                     report_dir=cell_dir,
                     candidate_tape_path=candidate_tape_path,
-                    symbol_event_path=symbol_event_path,
                 )
         else:
             payload = run_continuous_event_research(
@@ -840,7 +842,6 @@ def run_components(
                 report_dir=cell_dir,
                 size_mult_lookup=size_mult_lookup,
                 candidate_tape_path=candidate_tape_path,
-                symbol_event_path=symbol_event_path,
             )
             resumed = False
         meta[component] = {
@@ -948,7 +949,6 @@ def run_venue(
     btc_trend_gate: str | None = None,
     config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
     write_candidate_tape: bool = False,
-    write_symbol_events: bool = False,
     btc_risk_lookup_root: Path | None = None,
 ) -> dict[str, Any]:
     out_dir = output_root / venue
@@ -1001,7 +1001,6 @@ def run_venue(
             size_mult_lookup=size_lookup,
             config_transform=effective_config_transform,
             write_candidate_tape=write_candidate_tape,
-            write_symbol_events=write_symbol_events,
         )
         pieces = {}
         for component in WINNER_WEIGHTS:

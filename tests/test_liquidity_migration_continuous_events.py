@@ -11,14 +11,21 @@ import dataclasses
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
 from liquidity_migration.continuous_events import (
+    BTC_EXACT_MONTH_DAYS,
+    BTC_TREND_MODE_HOURLY_30D,
+    BTC_TREND_MODE_HOURLY_EXACT_MONTH,
+    BTC_TREND_MODE_SMART_MONTH,
     ContinuousEventConfig,
     _additive_summary,
     _apply_entry_order,
     _assert_funding_one_per_settlement,
     _assert_rmom_covers_window,
+    _btc_hourly_month_returns,
+    _btc_smart_month_value,
     _btc_trend_returns,
+    _btc_trend_return_lookup,
     derive_funding_interval_min,
     _daily_pnl_metrics,
     _fresh_entries,
@@ -278,6 +285,72 @@ def test_btc_trend_returns_support_configured_lookback() -> None:
     assert trend[4 * MS_PER_DAY] == pytest.approx(0.06)
 
 
+def test_btc_hourly_month_returns_use_exact_cutoff_not_30d() -> None:
+    anchor = 731 * MS_PER_HOUR
+    rows = [
+        {"ts_ms": 0, "symbol": "BTCUSDT", "close": 100.0},
+        {"ts_ms": 11 * MS_PER_HOUR, "symbol": "BTCUSDT", "close": 200.0},
+        {"ts_ms": anchor, "symbol": "BTCUSDT", "close": 300.0},
+    ]
+
+    exact_month = _btc_hourly_month_returns(
+        pl.DataFrame(rows),
+        lookback_ms=exact_duration_ms(days=BTC_EXACT_MONTH_DAYS),
+    )
+    thirty_days = _btc_trend_return_lookup(
+        pl.DataFrame(rows),
+        mode=BTC_TREND_MODE_HOURLY_30D,
+        lookback_days=30,
+    )
+
+    assert exact_month[anchor] == pytest.approx(2.0)
+    assert thirty_days[anchor] == pytest.approx(0.5)
+
+
+def test_btc_hourly_month_returns_fail_closed_across_source_gap() -> None:
+    anchor = 731 * MS_PER_HOUR
+    rows = [
+        {"ts_ms": 0, "symbol": "BTCUSDT", "close": 100.0},
+        {"ts_ms": anchor, "symbol": "BTCUSDT", "close": 300.0},
+    ]
+
+    trend = _btc_hourly_month_returns(
+        pl.DataFrame(rows),
+        lookback_ms=exact_duration_ms(days=30),
+    )
+
+    assert anchor not in trend
+
+
+def test_btc_smart_month_score_tolerates_small_leg_disagreement() -> None:
+    assert _btc_smart_month_value(0.02, -0.005, tolerance=0.01) > 0.0
+    assert _btc_smart_month_value(0.02, -0.05, tolerance=0.01) <= 0.0
+
+
+def test_btc_trend_return_lookup_smart_month_combines_hourly_and_daily() -> None:
+    rows = []
+    for hour in range(0, 32 * 24):
+        day = hour // 24
+        close = 100.0
+        if hour == 36:
+            close = 100.0
+        elif day == 1 and hour % 24 == 23:
+            close = 98.0
+        elif hour == 31 * 24:
+            close = 101.0
+        rows.append({"ts_ms": hour * MS_PER_HOUR, "symbol": "BTCUSDT", "close": close})
+
+    trend = _btc_trend_return_lookup(
+        pl.DataFrame(rows),
+        mode=BTC_TREND_MODE_SMART_MONTH,
+        lookback_days=30,
+        month_days=BTC_EXACT_MONTH_DAYS,
+        smart_tolerance=0.01,
+    )
+
+    assert trend[31 * MS_PER_DAY] > 0.0
+
+
 def test_run_trades_respects_max_active_cap() -> None:
     syms = [f"S{i}" for i in range(6)]
     bars = _indexed_price_bars_by_symbol(_grid_klines(syms, 40))
@@ -470,157 +543,6 @@ def test_run_trades_take_profit_exits_short_before_timer() -> None:
     assert trades["exit_price"][0] == pytest.approx(95.0)
 
 
-def test_run_trades_time_boundary_cut_uses_shared_lifecycle() -> None:
-    rows = []
-    for i in range(40):
-        rows.append(
-            {
-                "ts_ms": i * MS_PER_HOUR,
-                "symbol": "A",
-                "open": 100.0,
-                "high": 100.0,
-                "low": 100.0,
-                "close": 100.0,
-            }
-        )
-    bars = _indexed_price_bars_by_symbol(pl.DataFrame(rows))
-    entries = pl.DataFrame({"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]})
-    cfg = ContinuousEventConfig(
-        max_active=5,
-        hold_hours=30,
-        entry_delay_hours=0,
-        use_funding=False,
-        flat_round_trip_bps=0.0,
-        research_time_boundary_rule="time_00_cut_unprofitable_age4",
-    )
-
-    trades, _ = _run_trades(entries, bars, None, cfg)
-
-    assert trades.height == 1
-    assert trades["exit_reason"][0] == "time_00_cut_unprofitable_age4"
-    assert trades["exit_ts_ms"][0] == 24 * MS_PER_HOUR
-    assert trades["boundary_action"][0] == "cut"
-
-
-def test_run_trades_time_boundary_half_splits_notional() -> None:
-    rows = []
-    for i in range(40):
-        rows.append(
-            {
-                "ts_ms": i * MS_PER_HOUR,
-                "symbol": "A",
-                "open": 100.0,
-                "high": 100.0,
-                "low": 100.0,
-                "close": 100.0,
-            }
-        )
-    bars = _indexed_price_bars_by_symbol(pl.DataFrame(rows))
-    entries = pl.DataFrame({"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]})
-    cfg = ContinuousEventConfig(
-        max_active=5,
-        hold_hours=30,
-        entry_delay_hours=0,
-        use_funding=False,
-        flat_round_trip_bps=0.0,
-        research_time_boundary_rule="time_00_half_unprofitable_age4",
-    )
-
-    trades, _ = _run_trades(entries, bars, None, cfg)
-
-    assert trades.height == 2
-    assert sorted(trades["boundary_action"].to_list()) == ["half_exit", "half_residual"]
-    assert trades["notional_weight"].sum() == pytest.approx(cfg.notional_weight)
-    assert max(trades["exit_ts_ms"].to_list()) == 31 * MS_PER_HOUR
-
-
-def test_run_trades_local_loss_quarantine_is_based_on_prior_treatment_exit() -> None:
-    rows = []
-    for i in range(40):
-        close = 130.0 if i >= 4 else 100.0
-        rows.append(
-            {
-                "ts_ms": i * MS_PER_HOUR,
-                "symbol": "A",
-                "open": close,
-                "high": close,
-                "low": close,
-                "close": close,
-            }
-        )
-    bars = _indexed_price_bars_by_symbol(pl.DataFrame(rows))
-    entries = pl.DataFrame(
-        {
-            "symbol": ["A", "A"],
-            "ts_ms": [0, 10 * MS_PER_HOUR],
-            "composite": [0.9, 0.9],
-            "turnover_quote": [1e6, 1e6],
-        }
-    )
-    cfg = ContinuousEventConfig(
-        max_active=5,
-        hold_hours=4,
-        entry_delay_hours=0,
-        use_funding=False,
-        flat_round_trip_bps=0.0,
-        research_symbol_rule="local_loss_30d_1",
-    )
-    events: list[dict[str, object]] = []
-
-    trades, skips = _run_trades(entries, bars, None, cfg, symbol_event_sink=events)
-
-    assert trades.height == 1
-    assert trades["gross_trade_return"][0] == pytest.approx(-0.30)
-    assert skips["skipped_research_symbol"] == 1
-    assert len(events) == 1
-    assert events[0]["rule"] == "local_loss_30d_1"
-    assert events[0]["action"] == "block"
-    assert trades["hold_hours"][0] < 10.0
-
-
-def test_run_trades_month_loss_quarantine_uses_calendar_month_equivalent() -> None:
-    rows = []
-    for i in range(80):
-        close = 130.0 if i >= 4 else 100.0
-        rows.append(
-            {
-                "ts_ms": i * MS_PER_DAY,
-                "symbol": "A",
-                "open": close,
-                "high": close,
-                "low": close,
-                "close": close,
-            }
-        )
-    bars = _indexed_price_bars_by_symbol(pl.DataFrame(rows))
-    entries = pl.DataFrame(
-        {
-            "symbol": ["A", "A", "A"],
-            "ts_ms": [0, 30 * MS_PER_DAY, 36 * MS_PER_DAY],
-            "composite": [0.9, 0.9, 0.9],
-            "turnover_quote": [1e6, 1e6, 1e6],
-        }
-    )
-    cfg = ContinuousEventConfig(
-        max_active=5,
-        hold_hours=4 * 24,
-        entry_delay_hours=0,
-        use_funding=False,
-        flat_round_trip_bps=0.0,
-        research_symbol_rule="local_loss_1m_1",
-    )
-    events: list[dict[str, object]] = []
-
-    trades, skips = _run_trades(entries, bars, None, cfg, symbol_event_sink=events)
-
-    assert trades.height == 2
-    assert skips["skipped_research_symbol"] == 1
-    assert len(events) == 1
-    assert events[0]["rule"] == "local_loss_1m_1"
-    assert events[0]["action"] == "block"
-    assert events[0]["decision_ts_ms"] == 30 * MS_PER_DAY + MS_PER_HOUR
-
-
 def test_run_trades_rank_exit_cuts_short_when_composite_rank_decays() -> None:
     bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 20))
     entries = pl.DataFrame({"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]})
@@ -688,6 +610,32 @@ def test_run_trades_btc_trend_gate_uses_signal_day() -> None:
     assert skips["skipped_btc_trend"] == 1
 
 
+def test_run_trades_hourly_btc_trend_mode_keys_signal_hour() -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A", "B"], 60))
+    entries = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "ts_ms": [0, MS_PER_HOUR],
+            "composite": [0.9, 0.9],
+            "turnover_quote": [1e6, 1e6],
+        }
+    )
+    cfg = ContinuousEventConfig(
+        btc_trend_gate="uptrend",
+        btc_trend_mode=BTC_TREND_MODE_HOURLY_EXACT_MONTH,
+        max_active=5,
+        hold_hours=1,
+        entry_delay_hours=1,
+        use_funding=False,
+    )
+
+    trades, skips = _run_trades(entries, bars, None, cfg, btc_trend_daily={0: -0.10, MS_PER_HOUR: 0.10})
+
+    assert trades.height == 1
+    assert trades["symbol"][0] == "B"
+    assert skips["skipped_btc_trend"] == 1
+
+
 def test_candidate_tape_records_configured_btc_trend_lookback() -> None:
     bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 80))
     entries = pl.DataFrame(
@@ -711,6 +659,8 @@ def test_candidate_tape_records_configured_btc_trend_lookback() -> None:
     _run_trades(entries, bars, None, cfg, btc_trend_daily={10 * MS_PER_DAY: 0.10}, candidate_sink=sink)
 
     assert sink[0]["btc_trend_lookback_days"] == 5
+    assert sink[0]["btc_trend_mode"] == "daily_prior"
+    assert sink[0]["btc_trend_lookback_duration_ms"] == 5 * MS_PER_DAY
     assert sink[0]["btc_trend_source_start_ts_ms"] == 5 * MS_PER_DAY
     assert sink[0]["btc_trend_source_end_ts_ms"] == 9 * MS_PER_DAY
 

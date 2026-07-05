@@ -14,7 +14,9 @@ details are in git history, local artifacts, and
 | `LongV11aDivWeekendVol` | Long-native v11a demo/paper sleeve | Best current internal positive object; still needs forward sample |
 
 Mainnet is not the current operating mode; changing that requires explicit owner
-action and fresh evidence.
+action and fresh evidence. Live/forward operations are Bybit-only. Binance
+remains a research/replay venue only (its liquidation/depth forward feed is
+retired).
 
 ## What Is Wired
 
@@ -26,6 +28,20 @@ action and fresh evidence.
 - Read-only VPS check on 2026-06-30: commit `33ee7ffd2`,
   `main...origin/main`; long demo/paper, continuous demo/paper, shared risk,
   and the continuous hedge timer are active.
+
+### Known operational gaps (audit 2026-07-05)
+
+- **Liveness dead-man's-switch unprovisioned.** The on-box watchdog
+  (`liquidity-migration-demo-liveness.timer`) is the alerting single point of
+  failure: if that timer dies, no on-box alert fires. The `--heartbeat-url`
+  external dead-man's-switch (`LIVENESS_HEARTBEAT_URL` env var, e.g.
+  healthchecks.io) closes the gap but defaults to unset. Provision it before
+  any mainnet conversation.
+- **Long v11a ATR-fallback telemetry now exists.** FC entries that silently fall
+  back to fixed-TP exits (the negative-EV bucket per the TP-tail dependency)
+  when `atr_14d_pct` is missing are now counted in cycle telemetry
+  (`skips.fc_atr_exit_fallback` live; `stats.fc_atr_exit_fallback_count` in
+  backtest) so the fallback is observable, not silent.
 
 ## Continuous Read
 
@@ -87,6 +103,11 @@ action and fresh evidence.
   trailed the 30d baseline on MAR: 25d Bybit +20.72%/4.29 and 60d Binance
   +20.25%/4.84. This is not promotion evidence; it says not to retune the BTC
   gate from this grid.
+- BTC month-regime hooks, 2026-07-04: `docs/preregistration/btc-month-regime-2026-07-04.md`
+  registers opt-in continuous hourly 30d / hourly exact-month / smart-month
+  BTC gate modes plus a comparable long month-regime gate. Defaults remain the
+  existing daily-prior continuous gate and no extra long month gate; no arm is
+  accepted until a two-venue verdict exists.
 - BTC-risk tail skip replay, completed 2026-06-28: `skip_btc_tail_035` was a
   full component+BTC-risk+hedge replay replacing the existing 35% BTC-risk tail
   sizing with a hard skip. It is rejected by the preregistered two-venue rule:
@@ -291,15 +312,15 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
    the sparse tape. The hourly coverage audit also confirms candidate-state
    sparsity, missing spread/depth, and missing sector-proxy state. DSR/PBO now
    flags the full-replay variant surface as inference-fragile. None of these can
-   influence deployment without new forward OOS evidence. The next registered
-   tail method is `docs/preregistration/continuous-tail-budget-control-2026-07-03.md`:
-   keep TP12/24h as lifecycle, then test loss-at-disaster sizing, portfolio heat
-   caps, and drawdown step-down as a risk governor rather than another fixed
-   price stop. The active blacklist follow-up is
-   `docs/preregistration/continuous-time-symbol-risk-2026-07-04.md`: forced
-   time stops are not the priority after the negative Bybit diagnostic; test
-   no-time-stop month-scale symbol blacklists and causal learned entry-time
-   blackouts instead.
+   influence deployment without new forward OOS evidence. Tail-budget control
+   (loss-at-disaster sizing, portfolio heat caps, drawdown step-down) is closed:
+   rejected — loss-at-disaster is a fixed stop in disguise and the existing
+   fixed-stop falsifiers already cover it. The timing/symbol-blacklist plan
+   (`docs/preregistration/continuous-time-symbol-risk-2026-07-04.md`) is also
+   closed: rejected. Both preregistrations are retained as falsifier records.
+   Before adding or retuning any lookback, use `docs/lookback_audit.md` to
+   classify it as lifecycle, feature, risk memory, reporting, or operational
+   SLA, then require a plateau rather than a single winning duration.
 4. Continue live-safety audit work: the submitted-row lifecycle transition table, `PROTECTED` trade-row
    promotion, and append-only lifecycle event stream are now implemented. The
    new entry risk-health gate covers private snapshot/WS stale,

@@ -100,6 +100,23 @@ def test_parse_1m_klines_excludes_forming_bar():
     assert all(x == 2.0 for x in h)
 
 
+def test_fetch_upper_wick_uses_exact_minute_window():
+    from liquidity_migration.continuous_upperwick_live import fetch_upper_wick_rv
+
+    class Client:
+        calls = []
+
+        def get_klines(self, symbol, interval, start_ms, end_ms):
+            self.calls.append((symbol, interval, start_ms, end_ms))
+            return []
+
+    client = Client()
+    end_ms = 1_700_000_123_456
+
+    assert fetch_upper_wick_rv(client, "AAAUSDT", end_ms, window_min=30) is None
+    assert client.calls == [("AAAUSDT", "1", end_ms - 30 * 60_000, end_ms - 1)]
+
+
 def test_live_sizer_warmstart_record_and_parity(tmp_path):
     from liquidity_migration.continuous_upperwick_live import UpperwickLiveSizer
     sp = tmp_path / "uw_state.parquet"
