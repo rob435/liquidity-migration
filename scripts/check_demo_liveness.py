@@ -49,6 +49,7 @@ import polars as pl
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
+from liquidity_migration._common import exact_duration_ms  # noqa: E402
 from liquidity_migration.storage import read_dataset  # noqa: E402
 from liquidity_migration.telegram import send_telegram_message  # noqa: E402
 
@@ -380,7 +381,7 @@ def select_alerts_to_send(
     another delivery attempt; reserved bookkeeping entries (``resolved:``/
     ``pending_timer:``/``sev:``) never arm the alert-side cooldown, so a dropped
     resolved note can no longer suppress a genuine re-alert."""
-    cooldown_ms = cooldown_minutes * 60_000.0
+    cooldown_ms = exact_duration_ms(minutes=cooldown_minutes)
     active_by_key = {a.key: a for a in active}
     # The alert-cooldown namespace excludes the reserved bookkeeping entries (pending
     # resolved-note retries, the timer-debounce markers, last-sent severity) so they
@@ -626,11 +627,30 @@ def _load_state(path: Path) -> dict[str, int]:
 
 
 def _save_state(path: Path, state: dict[str, int]) -> None:
+    """Atomically persist cooldown state so a mid-write SIGKILL cannot truncate it.
+
+    Mirrors the ws_risk telegram-dedupe pattern: write a same-directory temp file,
+    fsync it, then ``os.replace`` onto the target. A bare ``write_text`` can leave a
+    partial JSON line on crash, and ``_load_state`` then returns ``{}``, silently
+    resetting every cooldown (fail-safe but noisy). The atomic write preserves the
+    prior cooldown state across crashes instead.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, sort_keys=True))
+        payload = json.dumps(state, sort_keys=True)
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
     except Exception:  # noqa: BLE001
-        pass
+        # Fail-safe: a write error must not crash the watchdog. The next healthy run
+        # re-attempts; cooldown state stays at the last good write.
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def gather_risk_alerts(*, risk_root: Path, now_ms: int, args: argparse.Namespace) -> list[Alert]:

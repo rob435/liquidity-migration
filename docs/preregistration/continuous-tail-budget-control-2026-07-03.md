@@ -1,7 +1,7 @@
 # Pre-Registration: Continuous Tail-Budget Control
 
 Date: 2026-07-03
-Stage: proposed
+Stage: closed: rejected (2026-07-05)
 Run label until proven otherwise: exploratory
 
 ## Change
@@ -237,4 +237,8 @@ Expected files:
 
 ## Result
 
-Pending.
+Rejected by owner review on 2026-07-05: loss-at-disaster sizing behaves as a
+fixed stop with extra steps, which the existing 20%/40%/80% fixed-stop
+falsifiers already rejected. The dispatcher was never implemented and the run
+never executed. Preregistration retained as the falsifier record; do not rerun
+without a new dated hypothesis.

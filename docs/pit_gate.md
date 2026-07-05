@@ -49,12 +49,15 @@ of the signal's **trading day** (`2026-05-29`). Two consequences:
    to `2026-05-29` did **not** surface the `2026-05-30 00:00` HEMIUSDT signal,
    because the lookup wanted a `2026-05-30` row.
 
-The fix (`_attach_event_archive_membership`): membership is keyed on the trading
-day = `date of (ts_ms - 1 ms)`. The stamp-day `date` column is preserved as-is for
-the age features, so nothing else moves. Numerically this only changes
-listing/delisting-boundary and recent-tail rows. The trading-day
-keying lives in `liquidity_migration/volume_events_pit.py` and is exercised via
-`tests/test_pit_coverage.py`.
+The fix lives in `liquidity_migration/volume_events_pit.py` and is exercised via
+`tests/test_pit_coverage.py`. The kline archive membership set is built from the
+**kline stamp date** (the `date=` partition name derived from each bar's `ts_ms`,
+which for a 1h kline at 00:00 UTC of day *D* is exactly the trading day *D* — no
+off-by-one at the kline plane). The bug above was confined to the
+`volume_features` signal plane; the kline-plane gate was already correct. The
+`_required_pit_date_symbols` helper additionally drops pre-listing and
+post-delist phantom manifest entries (genuine empty trade-archive files) while
+keeping genuine mid-history gaps flagged — survivorship-preserving scoping.
 
 After the fix, a `2026-05-30 00:00` signal validates against the `2026-05-29`
 manifest day — which Bybit publishes on `2026-05-30`. So a same-day reconcile

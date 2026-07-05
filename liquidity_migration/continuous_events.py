@@ -45,7 +45,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift, exact_duration_ms, exact_lookback_cutoff_ms
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift, exact_duration_ms
 from .config import DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .daily_feature_panel import _autodetect_dataset_names, _date_str_to_ms, _read_window
 from .storage import read_dataset_columns

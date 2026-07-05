@@ -1,7 +1,7 @@
 # Pre-Registration: Continuous Blacklist And Entry-Time Risk Controls
 
 Date: 2026-07-04
-Stage: proposed
+Stage: closed: rejected (2026-07-05)
 Run label until proven otherwise: exploratory
 
 ## Current Read
@@ -32,11 +32,16 @@ Some symbols repeatedly damage the continuous fade book after recent realized
 losses. A local blacklist can be causal if it uses only prior realized exits
 known at the new candidate's `decision_ts`.
 
-Use the canonical month length:
+Do not treat a single month convention as the answer. Use the month-equivalent
+baseline only as the center of a robustness family:
 
 ```text
 MONTH_DAYS = 365.25 / 12 = 30.4375
 ```
+
+Also report calendar-month arithmetic when implemented. If `1m` works but
+`0.5m`, `2m`, and calendar-month variants fail, reject the mechanism as a
+parameter artifact. The repo-wide policy lives in `docs/lookback_audit.md`.
 
 Expected good behavior:
 
@@ -171,6 +176,17 @@ Registered local arms:
   as a forced exit.
 - `local_toxic_half_2m`: same trigger as `local_repeat_loss_2m_2`, but size at
   50% instead of blocking.
+
+Lookback robustness:
+
+- Hard quarantine duration family: `0.5m`, `1m`, `2m`, `3m`, `6m`.
+- Repeat-loss trailing observation family: `1m`, `3m`, `6m`.
+- Decay-family alternative: exponential half-life `1m`, `3m`, `6m` with no
+  cliff expiration.
+- Calendar control: replay the best month-equivalent arm with true
+  calendar-month arithmetic before it can advance.
+- Plateau requirement: the selected arm must be part of a stable region, not an
+  isolated best value.
 
 Required diagnostics:
 
@@ -341,6 +357,8 @@ A local symbol blacklist may advance only if all are true:
 - It does not remove more than 20% of TP contribution on either venue.
 - It blocks/downsizes fewer than 25% of candidate entries.
 - It is causal at every `decision_ts`.
+- It is part of a lookback plateau across the declared family; a single winning
+  duration is not enough.
 
 An entry-time blacklist may advance only if all are true:
 
@@ -374,6 +392,8 @@ Required engine hooks/artifacts:
 - Research-only symbol admission and size-multiplier hook.
 - Candidate-sink rows for selected/rejected reasons.
 - Causal blacklist state object keyed by venue and component.
+- Lookback metadata in every per-cell config: unit, base duration, family,
+  decay mode if any, and whether calendar-month arithmetic was used.
 - Entry-time model state persisted before and after replay.
 - Explicit event CSVs for every skipped/downscaled candidate.
 
@@ -393,6 +413,10 @@ Expected files:
 
 ## Command
 
+> The dispatcher below was never completed to a two-venue verdict and has been
+> removed from the repo. The command is retained as the registered falsifier
+> record only.
+
 Full two-venue evidence command:
 
 ```bash
@@ -407,5 +431,9 @@ diagnostic, not acceptance evidence.
 
 ## Result
 
-Pending. The prior Bybit-only time-stop results are negative mechanism evidence
-and do not authorize a runtime change.
+Rejected by owner review on 2026-07-05: the time-stop arm underperformed
+control, and the H1 symbol-blacklist / H2 learned entry-time / H3 permanent
+blacklist branches did not produce a deployable improvement. The dated
+dispatcher (`scripts/continuous_time_symbol_risk_2026_07_04.py`) and its engine
+hooks have been removed. Preregistration retained as the falsifier record; do
+not rerun without a new dated hypothesis.

@@ -23,8 +23,8 @@ not use it as acceptance evidence.
 | Continuous live target | TP12, daily rebalance disabled, no daemon/server stop, `CTRL_BTC_RISK_70_90_35` sizing overlay | Deployed on VPS; forward paired trades still needed |
 | Continuous validation baseline | `continuous_ensemble_v2_baseline_current` under `research/continuous_fade/runs/` | Timestamped baseline plus expanded diagnostics complete; exploratory only |
 | Continuous forward readiness | `reports/continuous_forward_readiness/` | Paper/demo rebalance and operational-cycle telemetry are clean; 0 paired trades means no execution-performance evidence yet |
-| Continuous tail-budget control | `continuous-tail-budget-control-2026-07-03.md` | Proposed preregistration: loss-at-disaster sizing, portfolio heat, and drawdown step-down; no fixed-stop revival |
-| Continuous blacklist / entry-time controls | `continuous-time-symbol-risk-2026-07-04.md` | Proposed preregistration: no-time-stop symbol blacklists, month-scale lookbacks, learned entry-time blackouts, and train-frozen exclusions |
+| Lookback robustness | `docs/lookback_audit.md` | Repo-wide classification of lifecycle, feature, risk-memory, reporting, and operational lookbacks; use before adding time windows |
+| BTC month-regime lookbacks | `btc-month-regime-2026-07-04.md` | Proposed preregistration: continuous hourly confirmed 30d/month/smart BTC gate plus comparable long month-regime gate; defaults unchanged |
 | Long v11a | FC-only long sleeve with v11a sniper entry, vol parity, ATR exits | Best current internal positive object; forward sample still needed |
 | Reconciliation | `scripts/reconcile.sh` | Latest full three-way had no unexplained drift and no forward trades |
 
@@ -42,6 +42,8 @@ not use it as acceptance evidence.
 | Conditional scale-in | By-trade signal looked positive, but full component+hedge replay lifted returns while worsening MAR and drawdown; no deployment change. |
 | Signal invalidation | Sparse candidate-tape exits were zero-hit or reduced component net; hourly state coverage is insufficient. |
 | DSR/PBO | Frozen replay variant surface is fragile; do not trust internal rankings as deployment proof. |
+| Tail-budget control | Rejected (2026-07-05): loss-at-disaster sizing is a fixed stop in disguise, which the 20%/40%/80% fixed-stop falsifiers already covered. Dispatcher never implemented; prereg retained as the falsifier record. |
+| Blacklist / entry-time controls | Rejected (2026-07-05): time-stop arm underperformed control; H1 symbol / H2 learned entry-time / H3 permanent blacklist branches did not produce a deployable improvement. Dated dispatcher and engine hooks removed; prereg retained as the falsifier record. |
 
 ## Other Closed Research
 
