@@ -57,6 +57,9 @@ Environment=SIZING_MODE=inverse_vol
 Environment=TARGET_VOL_PER_NAME=0.01
 Environment=VOL_WEIGHT_CLAMP=2
 Environment=LIQ_TURNOVER_MIN=500000
+Environment=ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0
+Environment=ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1
+Environment=ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0
 # Market-data plane (deploy-env-timers-3): this PAPER shadow runs its OWN kline pool. Do not set
 # KLINES_FOLLOW_ROOT here; paper may be enabled while demo is off, so following
 # demo's kline store can freeze paper execution while the unit appears healthy.

@@ -124,6 +124,9 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
     assert args.sizing_mode == "inverse_vol"
     assert args.target_vol_per_name == 0.01
     assert args.vol_weight_clamp == 2.0
+    assert args.entry_portfolio_heat_cap_frac == 0.0
+    assert args.entry_portfolio_heat_shock_frac == 1.0
+    assert args.entry_account_drawdown_kill_switch_frac == 0.0
     assert args.workers == 4
 
     override = build_parser().parse_args(
@@ -133,9 +136,18 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
             "continuous-event-demo-cycle",
             "--entry-private-ws-stale-seconds",
             "180",
+            "--entry-portfolio-heat-cap-frac",
+            "0.05",
+            "--entry-portfolio-heat-shock-frac",
+            "1.25",
+            "--entry-account-drawdown-kill-switch-frac",
+            "0.02",
         ]
     )
     assert override.entry_private_ws_stale_seconds == 180.0
+    assert override.entry_portfolio_heat_cap_frac == 0.05
+    assert override.entry_portfolio_heat_shock_frac == 1.25
+    assert override.entry_account_drawdown_kill_switch_frac == 0.02
 
 
 def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:

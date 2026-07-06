@@ -236,17 +236,17 @@ class ContinuousDemoCycleConfig:
     # 0.0 after diagnostics showed both daemon stops and the 25% venue stop
     # destroy the fade edge.
     stop_loss_pct: float = 0.25
-    # Submit-mode portfolio heat cap: current non-hedge open notional times this
-    # adverse shock, as a fraction of equity, must leave room for another entry.
-    # 5% under a +100% shock is deliberately conservative and only affects real
-    # submitted entries; dry-run/paper evidence remains visible.
-    entry_portfolio_heat_cap_frac: float = 0.05
+    # Optional submit-mode portfolio heat cap: current non-hedge open notional times
+    # this adverse shock, as a fraction of equity, must leave room for another entry.
+    # Default OFF for the active v2 book so demo/paper/default backtest selection
+    # stay on the same object; opt in explicitly when testing a live-only risk
+    # overlay.
+    entry_portfolio_heat_cap_frac: float = 0.0
     entry_portfolio_heat_shock_frac: float = 1.0
-    # Submit-mode account drawdown kill-switch: pause new entries when current
-    # wallet equity is this far below the prior healthy cycle high-water mark.
-    # Snapshot errors are handled by the risk-health gate and do not trip this
-    # check on fallback equity.
-    entry_account_drawdown_kill_switch_frac: float = 0.02
+    # Optional submit-mode account drawdown kill-switch: pause new entries when
+    # current wallet equity is this far below the prior healthy cycle high-water
+    # mark. Default OFF for backtest/demo/paper lifecycle parity.
+    entry_account_drawdown_kill_switch_frac: float = 0.0
     # --- optional protective exits/gate (disabled by the active profile unless explicitly configured).
     # Checked each cycle off live price + kline-reconstructed MFE. ---
     failed_fade_hours: int = 6            # cut a fade that hasn't worked after N hours
@@ -2068,7 +2068,11 @@ def _continuous_entry_risk_health(
     )
     unprotected_positions = sorted(unprotected_position_ages)
     unprotected_max_age_seconds = max(unprotected_position_ages.values(), default=0.0)
-    if config.submit_orders and unprotected_positions:
+    # A missing venue stop is a blocking execution fault only for profiles that
+    # expect a stop. The active v2 object is intentionally stopless
+    # (stop_loss_pct=0), so keep recording the telemetry but do not suppress
+    # new entries solely because the venue stopLoss is absent.
+    if config.submit_orders and config.stop_loss_pct > 0.0 and unprotected_positions:
         reasons.append("unprotected_non_hedge_position")
     lifecycle_state_counts = (
         _continuous_lifecycle_state_counts(

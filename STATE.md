@@ -186,15 +186,16 @@ retired).
   configured threshold, or when an open continuous ledger symbol is missing from
   the venue position snapshot. It also blocks exchange-only positions that can
   be attributed to a recent continuous non-reduce-only entry order but have no
-  open continuous trade row, and blocks new submitted entries when an open
+  open continuous trade row. For profiles that expect venue stops
+  (`STOP_LOSS_PCT > 0`), it also blocks new submitted entries when an open
   non-hedge continuous position has no venue `stopLoss` protection in the
-  private position snapshot. The current v2 profile still has `STOP_LOSS_PCT=0`,
-  so this is a brake on adding risk while primary positions are unprotected, not
-  a stop-policy acceptance claim. The cycle rows and risk events now include
-  unprotected-position age telemetry (`entry_risk_health_unprotected_*`) so the
-  operator can see how long the exposure has been unprotected. This covers the
-  first live-safety checklist items without changing dry-run/paper evidence
-  flow. Exchange-only positions with no continuous order evidence remain a
+  private position snapshot. The current v2 profile has `STOP_LOSS_PCT=0`, so
+  missing stops are telemetry, not an entry-blocking reason, for that object.
+  Cycle rows and risk events include unprotected-position age telemetry
+  (`entry_risk_health_unprotected_*`) so the operator can see how long the
+  exposure has been unprotected. This keeps the submit-mode selection object in
+  line with dry-run/paper/backtest evidence while still blocking broken private
+  state. Exchange-only positions with no continuous order evidence remain a
   ws_risk/reconciliation authority task. Blocked submit cycles append
   `continuous_risk_events.jsonl` with `entry_risk_health_blocked` events.
 - Continuous lifecycle telemetry, 2026-06-28: the submit-mode entry gate now
@@ -218,16 +219,20 @@ retired).
   repair attempts after sleeve tagging. Each row carries target/current stop and
   TP, submit status, sleeve, link, and error text. This is audit telemetry only;
   it does not change order routing or repair behavior.
-- Continuous portfolio heat cap, 2026-06-28: submit-mode continuous entries now
-  clamp `_eff_max` using a disaster-loss heat proxy:
-  non-hedge open notional * `entry_portfolio_heat_shock_frac` / equity, with a
-  default 5% equity cap under a +100% shock. Dry-run/paper evidence is not
-  clamped. Cycle rows record `portfolio_heat_*` and `skipped_portfolio_heat`.
-- Continuous account drawdown kill-switch, 2026-06-28: submit-mode entries now
-  block through `entry_risk_health` when current wallet equity is more than 2%
-  below the prior healthy cycle high-water mark. Snapshot errors do not trip the
-  drawdown check on fallback equity; they already block through
-  `private_snapshot_error`. Cycle rows record `entry_account_drawdown_*`.
+- Continuous portfolio heat cap, 2026-06-28 / parity update 2026-07-06: the
+  submit-mode portfolio heat cap is an explicit live overlay, not part of the
+  active continuous v2 selection object. Default `entry_portfolio_heat_cap_frac`
+  is `0` on demo/paper/CLI defaults; setting it above zero clamps `_eff_max`
+  using non-hedge open notional * `entry_portfolio_heat_shock_frac` / equity.
+  Cycle rows still record `portfolio_heat_*` and `skipped_portfolio_heat`.
+- Continuous account drawdown kill-switch, 2026-06-28 / parity update
+  2026-07-06: the account drawdown kill-switch is also an explicit live overlay,
+  default `entry_account_drawdown_kill_switch_frac=0`, so the active demo/paper
+  selection object matches the default backtest lifecycle. If enabled, current
+  wallet equity more than the configured fraction below the prior healthy cycle
+  high-water mark blocks new entries through `entry_risk_health`. Snapshot
+  errors do not trip the drawdown check on fallback equity; they already block
+  through `private_snapshot_error`. Cycle rows record `entry_account_drawdown_*`.
 - Continuous forward-readiness gate, 2026-06-28: ran
   `continuous-forward-readiness` from the v2 baseline clock
   (`2026-06-18T19:54:00Z`) against local paper/demo roots. Paper and demo
@@ -312,10 +317,11 @@ recorded TP exits mechanically; it does not remove the concentration caveat.
    the sparse tape. The hourly coverage audit also confirms candidate-state
    sparsity, missing spread/depth, and missing sector-proxy state. DSR/PBO now
    flags the full-replay variant surface as inference-fragile. None of these can
-   influence deployment without new forward OOS evidence. Tail-budget control
-   (loss-at-disaster sizing, portfolio heat caps, drawdown step-down) is closed:
-   rejected — loss-at-disaster is a fixed stop in disguise and the existing
-   fixed-stop falsifiers already cover it. The timing/symbol-blacklist plan
+   influence deployment without new forward OOS evidence. Tail-budget control as
+   an active default book modification (loss-at-disaster sizing, portfolio heat
+   caps, drawdown step-down) is closed: rejected — loss-at-disaster is a fixed
+   stop in disguise and the existing fixed-stop falsifiers already cover it.
+   The timing/symbol-blacklist plan
    (`docs/preregistration/continuous-time-symbol-risk-2026-07-04.md`) is also
    closed: rejected. Both preregistrations are retained as falsifier records.
    Before adding or retuning any lookback, use `docs/lookback_audit.md` to

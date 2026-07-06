@@ -102,20 +102,22 @@ a genuine private execution WS stream has emitted and then gone stale beyond
 300 seconds), or when an open continuous ledger symbol is missing from the venue
 position snapshot. It also blocks a live exchange-only position when the
 continuous order ledger has a recent non-reduce-only entry attempt for that
-symbol but no open continuous trade row. Finally, it blocks new submitted
-entries while an open non-hedge continuous position has no venue `stopLoss`
-protection in the private position snapshot, and records the unprotected
-position age in seconds. It also records compact live lifecycle-state counts
-(`PROTECTED`, `PROTECTION_PENDING`, `EXIT_ORDER_SUBMITTED`, `ORPHAN`, etc.) for
-open continuous trades. Before submitted trade rows are flushed, the lifecycle
+symbol but no open continuous trade row. For profiles that expect venue stops
+(`STOP_LOSS_PCT > 0`), it blocks new submitted entries while an open non-hedge
+continuous position has no venue `stopLoss` protection in the private position
+snapshot. The active v2 object is stopless (`STOP_LOSS_PCT=0`), so missing stops
+remain telemetry rather than an entry-blocking reason for that profile. The gate
+also records compact live lifecycle-state counts (`PROTECTED`,
+`PROTECTION_PENDING`, `EXIT_ORDER_SUBMITTED`, `ORPHAN`, etc.) for open
+continuous trades. Before submitted trade rows are flushed, the lifecycle
 guard enforces an explicit trade-row transition table: terminal rows cannot be
 reopened, close rows need prior ledger state, protected rows cannot silently
 regress to `PROTECTION_PENDING`, and in-flight exit markers cannot be dropped.
 Rejected rows are written to `continuous_risk_events.jsonl` and page as
 lifecycle-transition violations. Healthy submitted cycles also persist
 `PROTECTED` promotions from the private position snapshot onto full copied trade
-rows; missing stops remain entry-risk-health blocks rather than ledger
-demotions. Submitted live cycles also append
+rows for stop-required profiles; missing stops never demote ledger state.
+Submitted live cycles also append
 `continuous_lifecycle_events.jsonl` rows for crash-safe preflight/order-prepared
 events, final order events, and accepted trade-row state writes.
 Dry-run and paper evidence cycles keep running and record the same fields
@@ -127,13 +129,17 @@ without suppressing candidates. Blocked submit cycles append
 are audit evidence for target/current protection and submit outcome; they do not
 change routing.
 
-Submit-mode entries are also capped by a portfolio heat proxy before candidate
-selection. The default cap is 5% of equity under a +100% adverse shock, computed
-from current non-hedge open notional plus conservative per-entry heat. Dry-run
-and paper evidence cycles record the fields but are not clamped.
+Submit-mode portfolio heat is recorded on cycle rows. The cap itself is an
+explicit live overlay, default OFF (`ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0`), because
+it is not part of the active v2 backtest selection object. If enabled, it caps
+entries before candidate selection using current non-hedge open notional plus
+conservative per-entry heat under `ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC`.
 
-Submit-mode entries are blocked by an account drawdown kill-switch when current
-wallet equity is more than 2% below the prior healthy cycle high-water mark.
+Submit-mode account drawdown is also recorded on cycle rows. The kill-switch is
+an explicit live overlay, default OFF
+(`ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0`), for the same demo/paper/backtest
+parity reason. If enabled, current wallet equity more than the configured
+fraction below the prior healthy cycle high-water mark blocks new entries.
 Wallet/private snapshot errors block separately and are not treated as drawdown
 evidence from fallback equity.
 

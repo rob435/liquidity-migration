@@ -3795,7 +3795,7 @@ def test_continuous_entry_risk_health_blocks_submit_on_ledger_position_mismatch(
 
 
 def test_continuous_entry_risk_health_blocks_submit_on_unprotected_non_hedge_position() -> None:
-    cfg = ContinuousDemoCycleConfig(submit_orders=True)
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, stop_loss_pct=0.25)
     now = 1_800_000_000_000
     open_trades = pl.DataFrame(
         [
@@ -3823,6 +3823,40 @@ def test_continuous_entry_risk_health_blocks_submit_on_unprotected_non_hedge_pos
 
     assert got["entry_risk_health_ok"] is False
     assert got["entry_risk_health_reasons"] == "unprotected_non_hedge_position"
+    assert got["entry_risk_health_unprotected_positions"] == "AAAUSDT"
+    assert got["entry_risk_health_unprotected_position_ages"] == "AAAUSDT:300"
+    assert got["entry_risk_health_unprotected_max_age_seconds"] == pytest.approx(300.0)
+
+
+def test_continuous_entry_risk_health_records_unprotected_stopless_v2_without_blocking() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, stop_loss_pct=0.0)
+    now = 1_800_000_000_000
+    open_trades = pl.DataFrame(
+        [
+            {
+                "strategy_id": _STRATEGY,
+                "status": "open",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "opened_at_ms": now - 300_000,
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    got = _continuous_entry_risk_health(
+        config=cfg,
+        snapshot={"equity_usdt": 10_000.0, "raw_open_orders": [], "raw_positions": []},
+        snapshot_source="ws_cache",
+        private_state_cache=_FakePrivateStateCache(1.0),
+        open_trades=open_trades,
+        live_position_symbols={"AAAUSDT"},
+        live_positions_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "1", "stopLoss": "0"}},
+        now_ms=now,
+    )
+
+    assert got["entry_risk_health_ok"] is True
+    assert got["entry_risk_health_reasons"] == ""
     assert got["entry_risk_health_unprotected_positions"] == "AAAUSDT"
     assert got["entry_risk_health_unprotected_position_ages"] == "AAAUSDT:300"
     assert got["entry_risk_health_unprotected_max_age_seconds"] == pytest.approx(300.0)

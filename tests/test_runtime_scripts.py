@@ -207,9 +207,21 @@ def test_continuous_runner_wires_rebalance_profile_env() -> None:
     assert 'SIZING_MODE="${SIZING_MODE:-inverse_vol}"' in text
     assert 'TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"' in text
     assert 'VOL_WEIGHT_CLAMP="${VOL_WEIGHT_CLAMP:-2}"' in text
+    assert 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC="${ENTRY_PORTFOLIO_HEAT_CAP_FRAC:-0}"' in text
+    assert 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC="${ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC:-1}"' in text
+    assert (
+        'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC="${ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC:-0}"'
+        in text
+    )
     assert "--sizing-mode \"$SIZING_MODE\"" in text
     assert "--target-vol-per-name \"$TARGET_VOL_PER_NAME\"" in text
     assert "--vol-weight-clamp \"$VOL_WEIGHT_CLAMP\"" in text
+    assert "--entry-portfolio-heat-cap-frac \"$ENTRY_PORTFOLIO_HEAT_CAP_FRAC\"" in text
+    assert "--entry-portfolio-heat-shock-frac \"$ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC\"" in text
+    assert (
+        "--entry-account-drawdown-kill-switch-frac \"$ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC\""
+        in text
+    )
     assert 'DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-0}"' in text
     assert 'DAILY_REBALANCE_TARGET_DAILY_VOL="${DAILY_REBALANCE_TARGET_DAILY_VOL:-0.045}"' in text
     assert 'DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS="${DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS:-0}"' in text
@@ -259,6 +271,9 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
         assert "Environment=SIZING_MODE=inverse_vol" in text
         assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
         assert "Environment=VOL_WEIGHT_CLAMP=2" in text
+        assert "Environment=ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0" in text
+        assert "Environment=ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1" in text
+        assert "Environment=ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0" in text
         assert "CTRL_BTC_RISK_70_90_35" in text
     demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service").read_text(encoding="utf-8")
     paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service").read_text(encoding="utf-8")
@@ -271,6 +286,29 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
     assert "Environment=HEDGE_MODE=2f" in hedge_text
     assert "Environment=SUBMIT_HEDGE=1" in hedge_text
     assert "Environment=CONFIRM_DEMO_ORDERS=1" in hedge_text
+
+
+def test_continuous_live_overlay_defaults_are_pinned_for_demo_paper_parity() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    required = (
+        "ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0",
+        "ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1",
+        "ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0",
+    )
+    units = (
+        "liquidity-migration-bybit-continuous-demo.service",
+        "liquidity-migration-bybit-continuous-paper.service",
+    )
+
+    for script_name in (
+        "deploy_vps_live.sh",
+        "verify_vps_live.sh",
+        "vps_console_recover_and_deploy.sh",
+    ):
+        text = (repo / "scripts" / script_name).read_text(encoding="utf-8")
+        for unit in units:
+            for assignment in required:
+                assert f"require_unit_env {unit} '{assignment}'" in text
 
 
 def test_long_units_pin_descriptive_v11a_profile() -> None:
@@ -640,6 +678,12 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1'" in text
+    assert (
+        "require_unit_env liquidity-migration-bybit-continuous-demo.service "
+        "'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0'"
+    ) in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text
@@ -800,6 +844,12 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1'" in text
+    assert (
+        "require_unit_env liquidity-migration-bybit-continuous-demo.service "
+        "'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0'"
+    ) in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text
@@ -1099,6 +1149,12 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1'" in text
+    assert (
+        "require_unit_env liquidity-migration-bybit-continuous-demo.service "
+        "'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0'"
+    ) in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text

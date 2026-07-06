@@ -180,7 +180,8 @@ each path still left p(DD >=10%) 0% and account-impairment p 0%. The fragility
 case is repeated bad clusters: sampling the worst 5% clusters at 3x weight made
 p(DD >=10%) 33.70% Bybit / 66.18% Binance and annual-return p1 -5.40% /
 -6.64%. This supports current tiny-size observation, but it is not a size
-increase argument; portfolio heat caps and circuit breakers remain in scope.
+increase argument; portfolio heat caps and circuit breakers remain in scope only
+as explicitly modelled overlays, not silent demo-only defaults.
 
 Dynamic liquidation/outage 5m overlay now exists for the same synthetic
 placements. All 42 rows had complete 5m coverage and no maintenance-proxy
@@ -320,14 +321,15 @@ Closed long research:
   private snapshot errors, stale private execution WS after a stream has emitted,
   open continuous ledger symbols missing from the venue position snapshot, and
   exchange-only positions that can be attributed to a recent continuous entry
-  order but have no open continuous trade row. It also blocks new submitted
-  entries while an open non-hedge continuous position has no venue `stopLoss` in
-  the private position snapshot; under current `STOP_LOSS_PCT=0`, that is a risk
-  brake, not an accepted disaster-stop policy. Cycle rows and blocked-event
-  JSONL now carry unprotected-position age telemetry. Dry-run/paper evidence
-  cycles are not suppressed. Blocked submit cycles append
-  `continuous_risk_events.jsonl` rows. Exchange-only positions with no
-  continuous order evidence remain a ws_risk/reconciliation authority task.
+  order but have no open continuous trade row. Profiles that expect venue stops
+  (`STOP_LOSS_PCT > 0`) also block new submitted entries while an open non-hedge
+  continuous position has no venue `stopLoss` in the private position snapshot.
+  The current v2 profile has `STOP_LOSS_PCT=0`, so missing stops are telemetry,
+  not an entry-blocking reason, for that object. Cycle rows and blocked-event
+  JSONL carry unprotected-position age telemetry. Dry-run/paper evidence cycles
+  are not suppressed. Blocked submit cycles append `continuous_risk_events.jsonl`
+  rows. Exchange-only positions with no continuous order evidence remain a
+  ws_risk/reconciliation authority task.
 - Continuous submit-mode lifecycle telemetry now classifies open ledger rows
   into explicit live states (`PROTECTED`, `PROTECTION_PENDING`,
   `EXIT_ORDER_SUBMITTED`, `ORPHAN`, etc.) from the ledger plus private position
@@ -346,17 +348,20 @@ Closed long research:
 - `ws_risk` now appends stop/take-profit repair attempts to
   `reports/event-risk-ws/stop_audit_events.jsonl` after sleeve tagging, carrying
   target/current stop and TP, submit status, routed sleeve, link, and error text.
-- Continuous submit-mode entries now apply a portfolio heat cap before candidate
-  selection: non-hedge open notional times `entry_portfolio_heat_shock_frac`
-  divided by equity, with a default 5% equity cap under a +100% shock. Dry-run
-  and paper evidence cycles are not clamped; cycle rows record `portfolio_heat_*`
-  and `skipped_portfolio_heat`.
-- Continuous submit-mode entries now also have an account drawdown kill-switch:
-  current wallet equity more than 2% below the prior healthy cycle high-water
+- Continuous submit-mode portfolio heat is recorded on cycle rows, but the heat
+  cap is now an explicit live overlay rather than part of the active v2 selection
+  object. Default `entry_portfolio_heat_cap_frac=0` keeps demo/paper/default
+  backtest lifecycle parity; setting it above zero clamps `_eff_max` using
+  non-hedge open notional times `entry_portfolio_heat_shock_frac` divided by
+  equity. Cycle rows record `portfolio_heat_*` and `skipped_portfolio_heat`.
+- Continuous submit-mode account drawdown is recorded on cycle rows, but the
+  kill-switch is also an explicit live overlay with default
+  `entry_account_drawdown_kill_switch_frac=0`. If enabled, current wallet equity
+  more than the configured fraction below the prior healthy cycle high-water
   blocks new entries through `entry_risk_health`. Snapshot errors do not trip the
   drawdown rule on fallback equity; they already block as private snapshot
-  errors. Cycle rows record `entry_account_drawdown_*`, and the
-  forward-readiness operational audit fails explicitly if the kill-switch trips.
+  errors. The forward-readiness operational audit fails explicitly if the
+  kill-switch trips.
 
 ## Revisit Queue
 

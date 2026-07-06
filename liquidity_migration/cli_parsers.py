@@ -1461,6 +1461,31 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
             "this bound and the daemon cannot confirm the private state stream is healthy."
         ),
     )
+    p.add_argument(
+        "--entry-portfolio-heat-cap-frac",
+        type=float,
+        default=d.entry_portfolio_heat_cap_frac,
+        help=(
+            "Optional submit-mode portfolio heat cap as a fraction of equity under "
+            "--entry-portfolio-heat-shock-frac. Default 0 disables it so demo/paper "
+            "match the default backtest lifecycle."
+        ),
+    )
+    p.add_argument(
+        "--entry-portfolio-heat-shock-frac",
+        type=float,
+        default=d.entry_portfolio_heat_shock_frac,
+        help="Adverse shock used by the optional portfolio heat cap.",
+    )
+    p.add_argument(
+        "--entry-account-drawdown-kill-switch-frac",
+        type=float,
+        default=d.entry_account_drawdown_kill_switch_frac,
+        help=(
+            "Optional submit-mode account drawdown pause from prior healthy equity "
+            "high-water mark. Default 0 disables it for backtest/demo/paper parity."
+        ),
+    )
     p.add_argument("--submit-orders", action="store_true", help="Place real DEMO orders (default off = dry-run).")
     p.add_argument("--confirm-demo-orders", action="store_true")
     p.add_argument("--telegram", action="store_true")

@@ -55,6 +55,9 @@ Environment=SIZING_MODE=inverse_vol
 Environment=TARGET_VOL_PER_NAME=0.01
 Environment=VOL_WEIGHT_CLAMP=2
 Environment=LIQ_TURNOVER_MIN=500000
+Environment=ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0
+Environment=ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1
+Environment=ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0
 # Two daemons x full-width default threadpools on a 2-core box just buys context
 # switching; pin to 1 — the daemon's own WORKERS parallelism is the intended knob.
 Environment=POLARS_MAX_THREADS=1
