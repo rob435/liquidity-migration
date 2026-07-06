@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -918,7 +919,19 @@ def run_long_native_demo_cycle(
 
     # Per-cycle telegram AFTER the ledger writes and OUTSIDE the cycle file lock
     # (round 4); exception-isolated inside _maybe_long_notify.
-    telegram_sent, telegram_error = _maybe_long_notify(payload, enabled=demo.telegram)
+    data_parent = root.parent
+    telegram_sent, telegram_error = _maybe_long_notify(
+        payload,
+        enabled=demo.telegram,
+        portfolio_overview_factory=lambda: safe_portfolio_alert_overview(
+            short_root=data_parent / "bybit-demo-event",
+            long_root=root,
+            continuous_root=data_parent / "bybit-continuous-demo-event",
+            continuous_paper_root=data_parent / "bybit-continuous-paper-event",
+            continuous_hedge_root=data_parent / "bybit-continuous-hedge-event",
+            now_ms=cycle_now_ms,
+        ),
+    )
     cycle_row["telegram_sent"] = telegram_sent
     if telegram_error:
         cycle_row["telegram_error"] = telegram_error
@@ -2071,7 +2084,12 @@ def _preflight_long_entry_order_row(
 # ---------------------------------------------------------------------------
 
 
-def _maybe_long_notify(payload: dict[str, Any], *, enabled: bool) -> tuple[bool, str]:
+def _maybe_long_notify(
+    payload: dict[str, Any],
+    *,
+    enabled: bool,
+    portfolio_overview_factory: Callable[[], str] | None = None,
+) -> tuple[bool, str]:
     if not enabled:
         return False, "disabled"
     try:
@@ -2081,6 +2099,8 @@ def _maybe_long_notify(payload: dict[str, Any], *, enabled: bool) -> tuple[bool,
         reason = _long_telegram_reason(payload)
         if not reason:
             return False, "quiet_no_material_event"
+        if portfolio_overview_factory is not None and not payload.get("portfolio_overview"):
+            payload = {**payload, "portfolio_overview": portfolio_overview_factory()}
         text = format_long_telegram_status_message(payload, reason=reason)
         sent = send_telegram_message(text, enabled=True)
     except Exception as exc:  # noqa: BLE001
@@ -2148,6 +2168,9 @@ def format_long_telegram_status_message(payload: dict[str, Any], *, reason: str)
                 f"- {ex.get('symbol', '')} reason={ex.get('exit_reason', '')} "
                 f"@${_float(ex.get('exit_price')):.6g}"
             )
+    portfolio_overview = str(payload.get("portfolio_overview") or "").strip()
+    if portfolio_overview:
+        lines.extend(["", portfolio_overview[:1400]])
     return "\n".join(lines)[:3900]
 
 
@@ -2163,6 +2186,7 @@ class _LedgerSummary:
     open_count: int = 0
     realized_pnl_usdt: float = 0.0
     open_notional_usdt: float = 0.0
+    open_positions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2289,6 +2313,11 @@ def format_combined_book_summary(
         action = "Check ledger mapping: Bybit has live positions but tracked live ledgers show flat."
     elif _cycle_stale(continuous_cycles, now_ms=now_ms, stale_minutes=20.0) and states.get("CONTINUOUS_SLEEVE", "off") != "off":
         action = "Continuous demo cycle is stale; check the continuous daemon and liveness journal."
+    elif continuous.open_count > 0 and hedge.open_count == 0:
+        action = (
+            "Continuous short exposure is open while the hedge ledger is flat; "
+            "verify hedge sizing/timer if exposure is material."
+        )
     lines.extend(["", f"Action: {action}"])
     return "\n".join(lines)[:3900]
 
@@ -2314,6 +2343,11 @@ def _format_book_line(
         base = "no ledger yet"
     elif ledger.open_count:
         base = f"{ledger.open_count} open, {format_usd(ledger.open_notional_usdt)} open value"
+        if ledger.open_positions:
+            base += " [" + "; ".join(ledger.open_positions[:4])
+            if len(ledger.open_positions) > 4:
+                base += f"; +{len(ledger.open_positions) - 4} more"
+            base += "]"
     else:
         base = "flat"
     parts = [f"- {name} ({state}): {base}", f"realized {format_usd(ledger.realized_pnl_usdt, signed=True)}"]
@@ -2324,6 +2358,102 @@ def _format_book_line(
     elif cycles is not None:
         parts.append("no cycle ledger yet")
     return "; ".join(parts)
+
+
+def format_portfolio_alert_overview(
+    *,
+    short_root: Path | None,
+    long_root: Path | None,
+    continuous_root: Path | None = None,
+    continuous_paper_root: Path | None = None,
+    continuous_hedge_root: Path | None = None,
+    now_ms: int,
+    sleeve_states: dict[str, str] | None = None,
+) -> str:
+    """Compact multi-sleeve context for material per-sleeve Telegram alerts."""
+    states = {
+        "SHORT_SLEEVE": os.environ.get("SHORT_SLEEVE", "off"),
+        "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "off"),
+        "CONTINUOUS_SLEEVE": os.environ.get("CONTINUOUS_SLEEVE", "off"),
+        "CONTINUOUS_PAPER_SLEEVE": os.environ.get("CONTINUOUS_PAPER_SLEEVE", "off"),
+    }
+    if sleeve_states:
+        states.update(sleeve_states)
+    states = {k: str(v).strip().lower() for k, v in states.items()}
+
+    short = _ledger_summary(short_root, "event_demo_trades")
+    long = _ledger_summary(long_root, LONG_DEMO_TRADES_DATASET)
+    continuous = _ledger_summary(continuous_root, CONTINUOUS_DEMO_TRADES_DATASET)
+    hedge = _ledger_summary(continuous_hedge_root, CONTINUOUS_DEMO_TRADES_DATASET)
+    continuous_paper = _ledger_summary(continuous_paper_root, CONTINUOUS_PAPER_TRADES_DATASET)
+    continuous_cycles = _cycle_summary(continuous_root, CONTINUOUS_DEMO_CYCLES_DATASET, now_ms=now_ms)
+
+    live_summaries = [short, long, continuous, hedge]
+    tracked_open_count = sum(s.open_count for s in live_summaries)
+    tracked_open_value = sum(s.open_notional_usdt for s in live_summaries)
+    tracked_realized = sum(s.realized_pnl_usdt for s in live_summaries)
+
+    lines = [
+        "Portfolio overview",
+        f"- tracked live: {tracked_open_count} open, {format_usd(tracked_open_value)} value, "
+        f"realized {format_usd(tracked_realized, signed=True)}",
+        _format_book_line(
+            "Continuous demo",
+            _state_label(states.get("CONTINUOUS_SLEEVE"), default="off"),
+            continuous,
+            continuous_cycles,
+            now_ms=now_ms,
+        ),
+        _format_book_line(
+            "Long",
+            _state_label(states.get("LONG_SLEEVE"), default="off"),
+            long,
+            None,
+            now_ms=now_ms,
+        ),
+        _format_book_line(
+            "BTC/ETH hedge",
+            _state_label(states.get("CONTINUOUS_SLEEVE"), default="off"),
+            hedge,
+            None,
+            now_ms=now_ms,
+        ),
+        _format_book_line(
+            "Continuous paper",
+            _state_label(states.get("CONTINUOUS_PAPER_SLEEVE"), default="off"),
+            continuous_paper,
+            None,
+            now_ms=now_ms,
+        ),
+    ]
+    if continuous.open_count > 0 and hedge.open_count == 0:
+        lines.append(
+            "Action: continuous short exposure is open while the hedge ledger is flat; "
+            "verify hedge sizing/timer if exposure is material."
+        )
+    return "\n".join(lines)[:1400]
+
+
+def safe_portfolio_alert_overview(
+    *,
+    short_root: Path | None,
+    long_root: Path | None,
+    continuous_root: Path | None = None,
+    continuous_paper_root: Path | None = None,
+    continuous_hedge_root: Path | None = None,
+    now_ms: int,
+) -> str:
+    try:
+        return format_portfolio_alert_overview(
+            short_root=short_root,
+            long_root=long_root,
+            continuous_root=continuous_root,
+            continuous_paper_root=continuous_paper_root,
+            continuous_hedge_root=continuous_hedge_root,
+            now_ms=now_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 - Telegram context must never break trading
+        return f"Portfolio overview unavailable: {type(exc).__name__}: {str(exc)[:200]}"
 
 
 def _cycle_stale(cycles: _CycleSummary, *, now_ms: int, stale_minutes: float) -> bool:
@@ -2363,6 +2493,7 @@ def _ledger_summary(root: Path | None, dataset: str) -> _LedgerSummary:
     realized = 0.0
     open_notional = 0.0
     open_count = 0
+    open_positions: list[str] = []
     if "status" not in trades.columns:
         return _LedgerSummary(available=True, trade_count=trade_count)
     has_entry_fee = "entry_fee_usdt" in trades.columns
@@ -2391,14 +2522,32 @@ def _ledger_summary(root: Path | None, dataset: str) -> _LedgerSummary:
                 qty = _float(row.get("qty"))
                 entry = _float(row.get("entry_price"))
                 if qty > 0.0 and entry > 0.0:
-                    open_notional += qty * entry
+                    notional = qty * entry
+                    open_notional += notional
+                    open_positions.append(_open_position_label(row, notional_usdt=notional))
     return _LedgerSummary(
         available=True,
         trade_count=trade_count,
         open_count=open_count,
         realized_pnl_usdt=realized,
         open_notional_usdt=open_notional,
+        open_positions=tuple(open_positions),
     )
+
+
+def _open_position_label(row: dict[str, Any], *, notional_usdt: float) -> str:
+    symbol = str(row.get("symbol") or "?")
+    side = str(row.get("side") or row.get("trade_side") or "").lower() or "open"
+    parts = [f"{symbol} {side}", format_usd(notional_usdt)]
+    stop = _float(row.get("stop_price") or row.get("stopLoss"))
+    take_profit = _float(row.get("take_profit_price") or row.get("takeProfit"))
+    if stop > 0.0:
+        parts.append(f"SL ${stop:.6g}")
+    elif side == "short":
+        parts.append("no SL")
+    if take_profit > 0.0:
+        parts.append(f"TP ${take_profit:.6g}")
+    return " ".join(parts)
 
 
 def _cycle_summary(root: Path | None, dataset: str, *, now_ms: int) -> _CycleSummary:

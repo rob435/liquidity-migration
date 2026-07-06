@@ -4015,6 +4015,9 @@ def format_continuous_telegram_status_message(
                 f"- {row.get('symbol', '')} reason={row.get('exit_reason', '')} "
                 f"@${_payload_float(row.get('exit_price')):.6g} mode={row.get('submit_mode', '')}"
             )
+    portfolio_overview = str(payload.get("portfolio_overview") or "").strip()
+    if portfolio_overview:
+        lines.extend(["", portfolio_overview[:1400]])
     return "\n".join(lines)[:3900]
 
 
@@ -4024,6 +4027,7 @@ def _maybe_continuous_notify(
     exit_rows: list[dict[str, Any]],
     *,
     enabled: bool,
+    portfolio_overview_factory: Callable[[], str] | None = None,
 ) -> tuple[bool, str]:
     """Per-cycle telegram for the LIVE order-submitting continuous sleeve. Until 2026-06-11
     this sleeve sent NO trade notifications at all despite TELEGRAM_ENABLED=1 in its unit
@@ -4035,6 +4039,8 @@ def _maybe_continuous_notify(
         reason = _continuous_telegram_reason(payload, entry_rows, exit_rows)
         if not reason:
             return False, "quiet_no_material_event"
+        if portfolio_overview_factory is not None and not payload.get("portfolio_overview"):
+            payload = {**payload, "portfolio_overview": portfolio_overview_factory()}
         text = format_continuous_telegram_status_message(
             payload, entry_rows, exit_rows, reason=reason
         )
@@ -4046,6 +4052,23 @@ def _maybe_continuous_notify(
     if not sent:
         return False, "telegram env missing or Telegram API returned false"
     return True, ""
+
+
+def _continuous_portfolio_alert_overview(root: Path, *, now_ms: int) -> str:
+    data_parent = root.parent
+    try:
+        from .long_native_event_demo import safe_portfolio_alert_overview
+
+        return safe_portfolio_alert_overview(
+            short_root=data_parent / "bybit-demo-event",
+            long_root=data_parent / "bybit-long-demo-event",
+            continuous_root=root,
+            continuous_paper_root=data_parent / "bybit-continuous-paper-event",
+            continuous_hedge_root=data_parent / "bybit-continuous-hedge-event",
+            now_ms=now_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 - Telegram context must never break trading
+        return f"Portfolio overview unavailable: {type(exc).__name__}: {str(exc)[:200]}"
 
 
 def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
@@ -4935,7 +4958,13 @@ def run_continuous_demo_cycle(
     # 2026-06-12). Outcome rides only on the returned payload — the persisted
     # cycle row above keeps its schema.
     telegram_sent, telegram_error = _maybe_continuous_notify(
-        payload, exec_entries, exec_exits + snipe_exits, enabled=demo.telegram
+        payload,
+        exec_entries,
+        exec_exits + snipe_exits,
+        enabled=demo.telegram,
+        portfolio_overview_factory=lambda: _continuous_portfolio_alert_overview(
+            root, now_ms=cycle_now_ms
+        ),
     )
     payload["telegram_sent"] = telegram_sent
     if telegram_error:
@@ -5072,7 +5101,13 @@ def run_continuous_protective_exit_cycle(
     # errors) invisible to the operator (round 3); the main cycle's `exits`
     # count never includes these.
     telegram_sent, telegram_error = _maybe_continuous_notify(
-        notify_payload, [], exec_exits, enabled=demo.telegram
+        notify_payload,
+        [],
+        exec_exits,
+        enabled=demo.telegram,
+        portfolio_overview_factory=lambda: _continuous_portfolio_alert_overview(
+            root, now_ms=now
+        ),
     )
     result["telegram_sent"] = telegram_sent
     if telegram_error:

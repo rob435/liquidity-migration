@@ -50,6 +50,7 @@ from liquidity_migration.long_native_event_demo import (
     _v11a_long_native_config,
     _vol_parity_weight,
     format_combined_book_summary,
+    format_portfolio_alert_overview,
     format_long_demo_cycle_summary,
     format_long_telegram_status_message,
     projected_long_initial_margin_pct_equity,
@@ -656,12 +657,15 @@ def test_format_long_telegram_message_contains_essentials() -> None:
         }],
         "exits": [],
         "ledger_position_summary": {"unrealized_pnl_usdt": 0.0, "pnl_pct": 0.0},
+        "portfolio_overview": "Portfolio overview\n- Long (ON): 1 open [ADAUSDT long $591.83]",
     }
     text = format_long_telegram_status_message(payload, reason="long_entry_executed")
     assert "LongV11aDivWeekendVol" in text
     assert "BTCUSDT" in text
     assert "sniper_retrace" in text
     assert "10×" in text or "10x" in text or "x10" in text or "x" in text  # multiplier marker present
+    assert "Portfolio overview" in text
+    assert "ADAUSDT long" in text
 
 
 def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
@@ -731,7 +735,10 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
     # (the live unit ships SUBMIT_HEDGE=1; a hardcoded dry-run label misstated it).
     assert "BTC hedge (ON)" in text
     assert "Continuous paper (ON)" in text
-    assert "Action: No action needed." in text
+    assert "BTCUSDT long" in text
+    assert "ETHUSDT short" in text
+    assert "no SL" in text
+    assert "Action: Continuous short exposure is open while the hedge ledger is flat" in text
     # Short realized PnL: (100 - 90) * 1 = 10
     assert "$10.00" in text
     # Long open notional: 0.001 * 50_000 = 50
@@ -739,6 +746,25 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
     # Continuous open notional: 2 * 2_000 = 4,000
     assert "$4,000.00" in text
     assert "trades=0" not in text
+
+    alert_text = format_portfolio_alert_overview(
+        short_root=short_root,
+        long_root=long_root,
+        continuous_root=continuous_root,
+        continuous_paper_root=continuous_paper_root,
+        continuous_hedge_root=hedge_root,
+        now_ms=1_700_000_000_000,
+        sleeve_states={
+            "LONG_SLEEVE": "on",
+            "CONTINUOUS_SLEEVE": "on",
+            "CONTINUOUS_PAPER_SLEEVE": "on",
+        },
+    )
+    assert "Portfolio overview" in alert_text
+    assert "tracked live: 2 open" in alert_text
+    assert "BTCUSDT long" in alert_text
+    assert "ETHUSDT short" in alert_text
+    assert "hedge ledger is flat" in alert_text
 
 
 def test_combined_book_summary_shows_compatibility_short_only_while_residual_open(tmp_path: Path) -> None:

@@ -4358,6 +4358,7 @@ def test_continuous_entry_risk_health_pages_and_formats_reason() -> None:
         "entry_account_drawdown_frac": -0.03125,
         "entry_account_equity_high_water_usdt": 16_000.0,
         "entry_account_drawdown_kill_switch_frac": 0.02,
+        "portfolio_overview": "Portfolio overview\n- Long (ON): 1 open [ADAUSDT long $591.83]",
     }
 
     assert _continuous_telegram_reason(payload, [], []) == "continuous_entry_risk_health_blocked"
@@ -4378,6 +4379,8 @@ def test_continuous_entry_risk_health_pages_and_formats_reason() -> None:
     assert "exchange_only_positions=BBBUSDT" in msg
     assert "lifecycle_states=PROTECTION_PENDING:1,ORPHAN:1" in msg
     assert "account_drawdown=-0.0312 high_water=$16,000.00 limit=0.0200" in msg
+    assert "Portfolio overview" in msg
+    assert "ADAUSDT long" in msg
     assert (
         "risk_health=private_ws_stale,ledger_position_mismatch,unprotected_non_hedge_position,"
         "exchange_position_without_ledger,account_drawdown_kill_switch"

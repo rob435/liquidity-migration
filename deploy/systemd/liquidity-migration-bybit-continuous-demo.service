@@ -9,6 +9,7 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 Environment=DATA_ROOT=data/bybit-continuous-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 # Order-submitting demo unit. The risk service reads CONTINUOUS_DATA_ROOT, the
