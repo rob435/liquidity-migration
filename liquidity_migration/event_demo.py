@@ -511,7 +511,7 @@ def build_ledger_position_pnl_snapshot(
     *,
     position_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Compute uPnL per open ledger row.
+    """Compute uPnL per net open ledger position.
 
     When ``position_by_symbol`` is provided, the per-symbol ``markPrice`` from
     the venue's position payload is preferred over ``price_by_symbol`` for
@@ -521,13 +521,19 @@ def build_ledger_position_pnl_snapshot(
     alts like TRUSTUSDT where the WS-cache ticker mark trails the position
     payload mark across a thin orderbook. Aligning to position markPrice
     makes ledger uPnL match Bybit's own position uPnL by construction.
+
+    The trading ledgers may keep multiple rows for one venue position, for
+    example continuous ensemble components. Operator reports should match the
+    venue view, so rows are netted by ``(symbol, side)`` while raw trade rows
+    remain component-level for audit/reconciliation.
     """
     if open_trades.is_empty():
         return []
-    rows: list[dict[str, Any]] = []
+    grouped: dict[tuple[str, str], dict[str, float | str]] = {}
     for trade in open_trades.to_dicts():
         symbol = str(trade.get("symbol", ""))
-        side = str(trade.get("side", ""))
+        raw_side = str(trade.get("side", "")).lower()
+        side = "short" if raw_side in {"short", "sell"} else "long" if raw_side in {"long", "buy"} else raw_side
         qty = _float(trade.get("qty"))
         entry_price = _float(trade.get("entry_price"))
         position_mark = 0.0
@@ -542,17 +548,44 @@ def build_ledger_position_pnl_snapshot(
         else:
             unrealized_pnl = (mark_price - entry_price) * qty
         position_value = mark_price * qty
-        rows.append(
+        key = (symbol, side)
+        bucket = grouped.setdefault(
+            key,
             {
                 "symbol": symbol,
                 "side": side,
-                "qty": qty,
-                "avg_price": entry_price,
+                "qty": 0.0,
+                "entry_value_usdt": 0.0,
                 "mark_price": mark_price,
+                "position_value_usdt": 0.0,
+                "unrealized_pnl_usdt": 0.0,
+                "leverage": 0.0,
+                "ledger_rows": 0.0,
+            },
+        )
+        bucket["qty"] = _float(bucket["qty"]) + qty
+        bucket["entry_value_usdt"] = _float(bucket["entry_value_usdt"]) + entry_price * qty
+        bucket["mark_price"] = mark_price
+        bucket["position_value_usdt"] = _float(bucket["position_value_usdt"]) + position_value
+        bucket["unrealized_pnl_usdt"] = _float(bucket["unrealized_pnl_usdt"]) + unrealized_pnl
+        bucket["ledger_rows"] = _float(bucket["ledger_rows"]) + 1.0
+    rows: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        qty = _float(bucket["qty"])
+        position_value = _float(bucket["position_value_usdt"])
+        unrealized_pnl = _float(bucket["unrealized_pnl_usdt"])
+        rows.append(
+            {
+                "symbol": str(bucket["symbol"]),
+                "side": str(bucket["side"]),
+                "qty": qty,
+                "avg_price": _float(bucket["entry_value_usdt"]) / qty if qty > 0.0 else 0.0,
+                "mark_price": _float(bucket["mark_price"]),
                 "position_value_usdt": position_value,
                 "unrealized_pnl_usdt": unrealized_pnl,
                 "pnl_pct": unrealized_pnl / position_value if position_value > 0.0 else 0.0,
-                "leverage": 0.0,
+                "leverage": _float(bucket["leverage"]),
+                "ledger_rows": int(_float(bucket["ledger_rows"])),
             }
         )
     return sorted(rows, key=lambda row: abs(float(row["unrealized_pnl_usdt"])), reverse=True)

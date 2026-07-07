@@ -241,14 +241,14 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
     else:
         lines.append("Bybit positions: none")
     lines.append(
-        f"ledger_open={ledger_summary.get('positions', 0)} "
+        f"ledger_open={ledger_summary.get('positions', 0)} (net) "
         f"value=${_float(ledger_summary.get('position_value_usdt')):,.2f} "
         f"uPnL=${_float(ledger_summary.get('unrealized_pnl_usdt')):,.2f} "
         f"({_float(ledger_summary.get('pnl_pct')):.2%})"
     )
     ledger_rows = payload.get("ledger_positions", [])[:6]
     if ledger_rows:
-        lines.append("Ledger positions:")
+        lines.append("Ledger positions (net):")
         for row in ledger_rows:
             lines.append(
                 f"{row['symbol']} {row['side']} qty={_float(row['qty']):g} "

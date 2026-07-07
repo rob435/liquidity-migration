@@ -105,6 +105,127 @@ def test_ledger_position_snapshot_marks_short_pnl_from_current_price() -> None:
     assert positions[0]["position_value_usdt"] == 950.0
 
 
+def test_ledger_position_snapshot_nets_component_rows_like_bybit() -> None:
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "continuous_fade_v2-ICNTUSDT-1-p3",
+                "symbol": "ICNTUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "188",
+                "entry_price": 0.1779,
+                "component": "p3",
+            },
+            {
+                "trade_id": "continuous_fade_v2-ICNTUSDT-1-p4p5",
+                "symbol": "ICNTUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "125",
+                "entry_price": 0.1779,
+                "component": "p4p5",
+            },
+        ]
+    )
+
+    positions = build_ledger_position_pnl_snapshot(
+        open_trades,
+        {"ICNTUSDT": 0.1790},
+        position_by_symbol={"ICNTUSDT": {"markPrice": "0.1795"}},
+    )
+    summary = summarize_position_pnl(positions)
+
+    assert len(positions) == 1
+    assert positions[0]["symbol"] == "ICNTUSDT"
+    assert positions[0]["side"] == "short"
+    assert positions[0]["qty"] == pytest.approx(313.0)
+    assert positions[0]["avg_price"] == pytest.approx(0.1779)
+    assert positions[0]["mark_price"] == pytest.approx(0.1795)
+    assert positions[0]["position_value_usdt"] == pytest.approx(0.1795 * 313.0)
+    assert positions[0]["unrealized_pnl_usdt"] == pytest.approx((0.1779 - 0.1795) * 313.0)
+    assert positions[0]["ledger_rows"] == 2
+    assert summary["positions"] == 1
+
+
+def test_ledger_position_snapshot_uses_weighted_average_entry_for_netted_rows() -> None:
+    open_trades = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "side": "Sell", "qty": "2", "entry_price": 100.0, "status": "open"},
+            {"symbol": "AAAUSDT", "side": "Sell", "qty": "1", "entry_price": 103.0, "status": "open"},
+        ]
+    )
+
+    positions = build_ledger_position_pnl_snapshot(open_trades, {"AAAUSDT": 99.0})
+
+    assert len(positions) == 1
+    assert positions[0]["side"] == "short"
+    assert positions[0]["qty"] == pytest.approx(3.0)
+    assert positions[0]["avg_price"] == pytest.approx(101.0)
+    assert positions[0]["unrealized_pnl_usdt"] == pytest.approx(6.0)
+
+
+def test_telegram_status_message_labels_ledger_positions_as_netted() -> None:
+    payload = {
+        "cycle": {
+            "ts_ms": 1_783_275_129_129,
+            "mode": "ws_risk_submit",
+            "equity_usdt": 10_038.23,
+            "entries_executed": 0,
+            "entry_candidates": 0,
+            "exits_executed": 0,
+            "exit_candidates": 4,
+            "pending_order_fills_reconciled": 0,
+            "position_report_error": "",
+        },
+        "bybit_position_summary": {
+            "positions": 1,
+            "position_value_usdt": 56.18,
+            "unrealized_pnl_usdt": -0.50,
+            "pnl_pct": -0.0089,
+        },
+        "bybit_positions": [
+            {
+                "symbol": "ICNTUSDT",
+                "side": "short",
+                "qty": 313.0,
+                "avg_price": 0.1779,
+                "mark_price": 0.1795,
+                "position_value_usdt": 56.18,
+                "unrealized_pnl_usdt": -0.50,
+                "pnl_pct": -0.0089,
+            }
+        ],
+        "ledger_position_summary": {
+            "positions": 1,
+            "position_value_usdt": 56.18,
+            "unrealized_pnl_usdt": -0.50,
+            "pnl_pct": -0.0089,
+        },
+        "ledger_positions": [
+            {
+                "symbol": "ICNTUSDT",
+                "side": "short",
+                "qty": 313.0,
+                "avg_price": 0.1779,
+                "mark_price": 0.1795,
+                "position_value_usdt": 56.18,
+                "unrealized_pnl_usdt": -0.50,
+                "pnl_pct": -0.0089,
+                "ledger_rows": 2,
+            }
+        ],
+    }
+
+    text = format_telegram_status_message(payload)
+
+    assert "ledger_open=1 (net)" in text
+    assert "Ledger positions (net):" in text
+    assert "ICNTUSDT short qty=313" in text
+    assert "qty=188" not in text
+    assert "qty=125" not in text
+
+
 def test_telegram_status_message_includes_positions_and_pnl() -> None:
     payload = {
         "cycle": {
@@ -341,4 +462,3 @@ def test_clean_wallet_read_is_not_tagged_or_notified() -> None:
     assert "FALLBACK" not in text
     assert "wallet_error" not in text
     assert _telegram_notification_reason(payload) == ""
-
