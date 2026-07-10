@@ -6,18 +6,18 @@ upstream daily frame but passes only the finite registered daily inputs to
 ``build_long_feature_tape``.  Caller-provided venue/canonical identity and every
 other unregistered column are therefore unable to influence the builder.
 
-The caller must independently supply ``expected_population`` at exact
-``(symbol, signal_ts_ms, symbol_age_days)`` grain.  Equality is checked before
-the builder and again after the final 138-field projection.  That establishes
-population/age agreement with the supplied receipt; it does not establish the
-receipt's provenance.
+The caller must supply a fully verified canonical expected-population object at
+exact ``(symbol, signal_ts_ms, symbol_age_days)`` grain. Equality is checked
+before the builder and again after the final 138-field projection. The receipt
+binds current config/root/PIT/map identities, while its explicit root
+completeness/authenticity and upstream PIT-provenance limitations remain.
 
 This remains diagnostic-only.  The source sidecars have strict shape, timing,
 formula, and coverage checks in ``attach_long_source_context``, and the runtime
 configuration must equal ``_v11a_long_native_config`` through the population
-builder's fail-closed check.  Their immutable provenance/config identity and an
-authoritative population receipt are not bound here, so this artifact is not
-confirmatory evidence and authorizes no deployment.
+builder's fail-closed check. Their immutable sidecar provenance is not yet
+bound, so this artifact is not confirmatory evidence and authorizes no
+deployment.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 
 import polars as pl
 
@@ -46,16 +46,27 @@ from .strategy_overhaul_identity_adapter import (
     SUPPORTED_VENUES,
     annotate_long_s02_identity,
 )
+from .strategy_overhaul_expected_population import (
+    ExpectedPopulationError,
+    VerifiedExpectedPopulation,
+    verified_expected_population_s02_inputs,
+)
 from .strategy_overhaul_long_context import attach_long_source_context
 from .strategy_overhaul_phase0 import InstrumentMapEntry
 from .strategy_overhaul_projection import (
     artifact_polars_schema,
     project_artifact_frame,
 )
-from .strategy_overhaul_schemas import ARTIFACT_SCHEMAS, LONG_SIGNAL_SCHEMA_ID
+from .strategy_overhaul_schemas import (
+    ARTIFACT_SCHEMAS,
+    LONG_SIGNAL_SCHEMA_ID,
+    long_schema_runtime_parity_surface,
+)
 
 
-LONG_S02_EVIDENCE_STATUS = "DIAGNOSTIC_ONLY_SIDECAR_PROVENANCE_CONFIG_HASH_AND_POPULATION_RECEIPT_UNBOUND"
+LONG_S02_EVIDENCE_STATUS = (
+    "DIAGNOSTIC_ONLY_POPULATION_AND_CONFIG_IDENTITY_BOUND_ROOT_COMPLETENESS_AUTHENTICITY_AND_SIDECAR_PROVENANCE_LIMITED"
+)
 LONG_S02_DIAGNOSTICS = MappingProxyType(
     {
         "outcome_blind": True,
@@ -63,8 +74,8 @@ LONG_S02_DIAGNOSTICS = MappingProxyType(
         "expected_population_keys_and_ages_checked": True,
         "sidecar_shape_timing_formula_and_coverage_checked": True,
         "sidecar_provenance_bound": False,
-        "config_hash_bound": False,
-        "population_receipt_identity_bound": False,
+        "config_hash_bound": True,
+        "population_receipt_identity_bound": True,
     }
 )
 
@@ -179,7 +190,7 @@ class LongS02Error(ValueError):
 def long_s02_runtime_parity_surface(
     config: LongNativeConfig,
     config_identity: dict[str, JsonValue],
-) -> dict[str, dict[str, JsonValue]]:
+) -> dict[str, object]:
     """Return and enforce the config surface actually consumed by LONG S02."""
 
     long_scout._require_frozen_v11a_config(config, stage="build_long_s02_feature_tape")
@@ -189,90 +200,115 @@ def long_s02_runtime_parity_surface(
     except A0ConfigIdentityError as exc:
         raise LongS02Error(f"LONG S02 config identity parity failed: {exc}") from exc
 
-    pattern_fields = (
-        "enable_capitulation_rebound",
-        "enable_volume_resurrection",
-        "enable_funding_squeeze",
-        "enable_oversold_bounce",
-        "enable_uptrend_dip",
-        "enable_fomo_chase",
-        "enable_xsec_momentum",
-        "enable_lowvol",
-        "enable_reversal",
-        "enable_funding_carry",
-        "enable_oi_momentum",
-        "enable_metrics_signal",
-    )
-    active_pattern_toggles: dict[str, JsonValue] = {
-        name: bool(getattr(config, name)) for name in pattern_fields
-    }
-    active_names = [name.removeprefix("enable_") for name, enabled in active_pattern_toggles.items() if enabled]
-    if active_names != [long_scout.LONG_S02_CLASSIFIER_PATTERN]:
-        raise LongS02Error(
-            "LONG S02 classifier parity failed: "
-            f"active config patterns={active_names}, runtime pattern={long_scout.LONG_S02_CLASSIFIER_PATTERN!r}"
+    try:
+        from .strategy_overhaul_expected_population import (
+            long_expected_population_consumer_parity_surface,
         )
 
-    regime_context: dict[str, JsonValue] = {
-        "regime_symbol": long_context.LONG_CONTEXT_REGIME_SYMBOL,
-        "regime_sma_days": long_context.LONG_CONTEXT_REGIME_SMA_DAYS,
-        "btc_month_regime_gate": long_context.LONG_CONTEXT_BTC_MONTH_REGIME_GATE,
-    }
-    expected_regime = {
-        "regime_symbol": config.regime_symbol,
-        "regime_sma_days": config.regime_sma_days,
-        "btc_month_regime_gate": config.btc_month_regime_gate,
-    }
-    if regime_context != expected_regime:
-        raise LongS02Error(
-            f"LONG S02 regime-context parity failed: expected={expected_regime}, observed={regime_context}"
+        expected_population_consumer = long_expected_population_consumer_parity_surface(
+            config,
+            config_identity,
         )
+        population_surface = long_scout.long_population_runtime_parity_surface(config)
+        context_surface = long_context.long_context_runtime_parity_surface(config)
+        schema_surface = long_schema_runtime_parity_surface(config)
+    except (TypeError, ValueError) as exc:
+        raise LongS02Error(f"LONG S02 consumer parity failed: {exc}") from exc
 
-    trigger_fields = (
-        "fc_min_day_return",
-        "fc_use_sigma_threshold",
-        "fc_sigma_mult",
-        "fc_enable_3d_trigger",
-        "fc_enable_7d_trigger",
-        "fc_enable_intraday_trigger",
-        "fc_intraday_window_hours",
-        "fc_use_own_pump_quantile",
-        "fc_min_close_location",
-        "fc_close_loc_multi_day",
-        "fc_use_atr_exits",
-        "fc_atr_stop_mult",
-        "fc_atr_tp_mult",
-        "fc_stop_pct",
-        "fc_take_profit_pct",
+    def agreed_target(
+        target: str,
+        primary: dict[str, object] | dict[str, JsonValue],
+        *partial_surfaces: dict[str, object],
+    ) -> dict[str, JsonValue]:
+        value = primary.get(target) if target in primary else primary
+        if not isinstance(value, dict):
+            raise LongS02Error(f"LONG S02 primary owner surface is malformed for {target}: {value!r}")
+        expected = value
+        observed_partials: list[object] = []
+        for surface in partial_surfaces:
+            partial = surface.get(target)
+            observed_partials.append(partial)
+            if not isinstance(partial, dict) or any(expected.get(name) != item for name, item in partial.items()):
+                raise LongS02Error(
+                    f"LONG S02 owner-validator parity failed for {target}: "
+                    f"expected={expected}, partials={observed_partials}"
+                )
+        if not expected:
+            raise LongS02Error(f"LONG S02 owner-validator parity surface is empty for {target}")
+        return cast(dict[str, JsonValue], expected)
+
+    population_and_rolling_windows = agreed_target(
+        "population_and_rolling_windows",
+        expected_population_consumer,
+        context_surface,
+        schema_surface,
     )
-    trigger_and_exit_profile: dict[str, JsonValue] = {
-        name: getattr(config, name) for name in trigger_fields
-    }
-    forced_null_expected = {
-        "fc_lsr_filter": config.fc_lsr_filter,
-        "fc_require_oi_rising": config.fc_require_oi_rising,
-    }
-    if forced_null_expected != {"fc_lsr_filter": False, "fc_require_oi_rising": False}:
-        raise LongS02Error(
-            "LONG S02 tier-C forced-null parity requires fc_lsr_filter and fc_require_oi_rising to be false"
-        )
+    regime_context = agreed_target("regime_context", context_surface)
+    classifier_and_exit_shape = agreed_target(
+        "classifier_and_exit_shape",
+        population_surface,
+        schema_surface,
+    )
+    trigger_and_exit_profile = agreed_target(
+        "trigger_and_exit_profile",
+        population_surface,
+        schema_surface,
+    )
+    forced_null_expected = agreed_target("tier_c_forced_null_gates", schema_surface)
     if _A0_FORCED_NULL_TIER_C_COLUMNS != ("global_lsr", "oi_chg_7d"):
         raise LongS02Error("LONG S02 tier-C forced-null column surface drifted")
 
     return {
+        "consumer_validator": ("liquidity_migration.strategy_overhaul_long_s02.long_s02_runtime_parity_surface"),
+        "validated_targets": [
+            "full_config_and_scope_identity",
+            "population_and_rolling_windows",
+            "regime_context",
+            "classifier_and_exit_shape",
+            "trigger_and_exit_profile",
+            "tier_c_forced_null_gates",
+        ],
+        "validated_target_fields": {
+            "full_config_and_scope_identity": [
+                "full_config_sha256",
+                "registered_scope_sha256",
+                "undated_window_fields",
+            ],
+            "population_and_rolling_windows": list(population_and_rolling_windows),
+            "regime_context": list(regime_context),
+            "classifier_and_exit_shape": list(classifier_and_exit_shape),
+            "trigger_and_exit_profile": list(trigger_and_exit_profile),
+            "tier_c_forced_null_gates": list(forced_null_expected),
+        },
+        "validated_consumers": {
+            "full_config_and_scope_identity": [
+                "long_population_scout._require_frozen_v11a_config",
+                "strategy_overhaul_long_s02.build_long_s02_feature_tape",
+            ],
+            "population_and_rolling_windows": [],
+            "regime_context": [],
+            "classifier_and_exit_shape": [],
+            "trigger_and_exit_profile": [],
+            "tier_c_forced_null_gates": [
+                "strategy_overhaul_long_s02._A0_FORCED_NULL_TIER_C_COLUMNS",
+            ],
+        },
         "full_config_and_scope_identity": {
             "full_config_sha256": config_identity["canonical_config_sha256"],
             "registered_scope_sha256": config_identity["scope_sha256"],
             "undated_window_fields": {name: getattr(config, name) for name in LONG_WINDOW_FIELDS},
         },
+        "population_and_rolling_windows": population_and_rolling_windows,
         "regime_context": regime_context,
-        "classifier_and_exit_shape": {
-            "active_pattern_toggles": active_pattern_toggles,
-            "fc_max_hold_days": config.fc_max_hold_days,
-            "fc_exit_max_hold_hours": config.fc_max_hold_days * 24,
-        },
+        "classifier_and_exit_shape": classifier_and_exit_shape,
         "trigger_and_exit_profile": trigger_and_exit_profile,
         "tier_c_forced_null_gates": forced_null_expected,
+        "consumer_validators": {
+            "strategy_overhaul_expected_population": expected_population_consumer,
+            "long_population_scout": population_surface,
+            "strategy_overhaul_long_context": context_surface,
+            "strategy_overhaul_schemas": schema_surface,
+        },
     }
 
 
@@ -474,7 +510,7 @@ def build_long_s02_feature_tape(
     *,
     config: LongNativeConfig,
     config_identity: dict[str, JsonValue],
-    expected_population: pl.DataFrame,
+    verified_population: VerifiedExpectedPopulation,
     source_availability: pl.DataFrame,
     regime_context: pl.DataFrame,
     btc_month_context: pl.DataFrame,
@@ -496,7 +532,20 @@ def build_long_s02_feature_tape(
     if not isinstance(venue, str) or venue != venue.strip().lower() or venue not in SUPPORTED_VENUES:
         raise LongS02Error(f"venue must be one of {sorted(SUPPORTED_VENUES)}")
 
-    expected = _validate_expected_population(expected_population)
+    try:
+        _verified_source, verified_expected = verified_expected_population_s02_inputs(
+            verified_population,
+            sleeve="long",
+            venue=venue,
+            config=config,
+            config_identity=config_identity,
+            manifest_pairs=manifest_pairs,
+            instrument_map=instrument_map,
+            instrument_map_version=instrument_map_version,
+        )
+    except ExpectedPopulationError as exc:
+        raise LongS02Error(f"LONG S02 expected-population receipt failed: {exc}") from exc
+    expected = _validate_expected_population(verified_expected)
     _assert_frame_in_registered_scope(
         expected,
         time_column="signal_ts_ms",
@@ -547,6 +596,7 @@ def build_long_s02_feature_tape(
 
     contextual = attach_long_source_context(
         built,
+        config=config,
         source_availability=source_availability,
         regime_context=regime_context,
         btc_month_context=btc_month_context,

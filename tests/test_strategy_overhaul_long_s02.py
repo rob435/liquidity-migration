@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import replace
+import tempfile
+from dataclasses import asdict, replace
+from pathlib import Path
 
 import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
 
 from liquidity_migration import long_population_scout as long_scout
-from liquidity_migration._common import MS_PER_HOUR
+from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.long_native_event_demo import _v11a_long_native_config
-from liquidity_migration.strategy_overhaul_config_identity import derive_long_a0_config_identity
+from liquidity_migration.strategy_overhaul_config_identity import (
+    JsonValue,
+    canonical_json_bytes,
+    canonical_json_sha256,
+    derive_long_a0_config_identity,
+)
+from liquidity_migration.strategy_overhaul_expected_population import (
+    BoundIdentityReceipt,
+    VerifiedExpectedPopulation,
+    build_expected_population_artifacts,
+    verify_expected_population_artifacts,
+)
 from liquidity_migration.strategy_overhaul_identity_adapter import (
     MANIFEST_PAIR_COLUMNS,
-    S02IdentityAdapterError,
 )
 from liquidity_migration.strategy_overhaul_long_context import (
     BTC_MONTH_CONTEXT_SCHEMA,
@@ -32,6 +44,10 @@ from liquidity_migration.strategy_overhaul_long_s02 import (
     build_long_s02_feature_tape,
 )
 from liquidity_migration.strategy_overhaul_phase0 import InstrumentMapEntry
+from liquidity_migration.strategy_overhaul_population_keys import (
+    HOURLY_KEY_SCHEMA,
+    MANIFEST_KEY_SCHEMA,
+)
 from liquidity_migration.strategy_overhaul_projection import artifact_polars_schema
 from liquidity_migration.strategy_overhaul_schemas import LONG_SIGNAL_SCHEMA_ID
 
@@ -225,6 +241,117 @@ def _instrument_map(*, symbol: str = SYMBOL) -> list[InstrumentMapEntry]:
     ]
 
 
+def _self_hashed(payload: dict[str, object]) -> dict[str, object]:
+    result = dict(payload)
+    result["artifact_sha256"] = canonical_json_sha256(result)
+    return result
+
+
+def _bound_identity(root: Path, name: str, payload: object) -> BoundIdentityReceipt:
+    path = root / name
+    path.write_bytes(canonical_json_bytes(payload) + b"\n")
+    return BoundIdentityReceipt(name, path)
+
+
+def _long_population_hourly_keys() -> pl.DataFrame:
+    current_bar_day = SIGNAL_TS_MS - MS_PER_DAY
+    first_bar_day = SIGNAL_TS_MS - 101 * MS_PER_DAY
+    return pl.DataFrame(
+        [
+            {"symbol": SYMBOL, "ts_ms": day + hour * MS_PER_HOUR}
+            for day in (first_bar_day, current_bar_day)
+            for hour in range(24)
+        ],
+        schema=dict(HOURLY_KEY_SCHEMA),
+    )
+
+
+def _fully_verified_population(
+    *,
+    manifest_pairs: pl.DataFrame,
+    instrument_map: list[InstrumentMapEntry],
+    instrument_map_version: str,
+    config_identity: dict[str, JsonValue],
+) -> VerifiedExpectedPopulation:
+    config = _v11a_long_native_config()
+    hourly_keys = _long_population_hourly_keys()
+    manifest_keys = manifest_pairs.select("symbol", "manifest_date").cast(dict(MANIFEST_KEY_SCHEMA))
+    scope = config_identity["scope"]
+    assert isinstance(scope, dict)
+    root_payload = _self_hashed(
+        {
+            "artifact_type": "strategy_overhaul_root_snapshot",
+            "venue": "bybit",
+            "window": {
+                "identity_history_start_date": scope["causal_read_start_date"],
+                "causal_read_start_date": scope["causal_read_start_date"],
+                "signal_end_date_exclusive": scope["signal_end_date_exclusive"],
+            },
+            "numeric_values_decoded": False,
+            "returns_calculated": False,
+            "labels_calculated": False,
+            "outcome_run_authorized": False,
+            "real_money_authorized": False,
+        }
+    )
+    pit_payload = _self_hashed(
+        {
+            "artifact_type": "strategy_overhaul_phase0_pit_provenance",
+            "collapsed_membership_key": ["venue", "symbol", "date"],
+            "venues": {"bybit": {"membership_pair_count": manifest_keys.height}},
+            "outcome_values_read": False,
+            "outcome_run_authorized": False,
+            "real_money_authorized": False,
+        }
+    )
+    map_payload = _self_hashed(
+        {
+            "artifact_type": "strategy_overhaul_venue_local_instrument_map",
+            "version": instrument_map_version,
+            "map_sha256": canonical_json_sha256([asdict(entry) for entry in instrument_map]),
+            "entry_count": len(instrument_map),
+            "outcome_values_read": False,
+            "outcome_run_authorized": False,
+            "real_money_authorized": False,
+        }
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config_receipt = _bound_identity(root, "config.json", config_identity)
+        root_receipt = _bound_identity(root, "root.json", root_payload)
+        pit_receipt = _bound_identity(root, "pit.json", pit_payload)
+        map_receipt = _bound_identity(root, "map.json", map_payload)
+        artifacts = build_expected_population_artifacts(
+            hourly_keys,
+            manifest_keys,
+            manifest_pairs,
+            sleeve="long",
+            venue="bybit",
+            config=config,
+            config_identity=config_identity,
+            config_identity_receipt=config_receipt,
+            root_identity_receipt=root_receipt,
+            pit_identity_receipt=pit_receipt,
+            instrument_map=instrument_map,
+            instrument_map_version=instrument_map_version,
+            instrument_map_identity_receipt=map_receipt,
+        )
+        return verify_expected_population_artifacts(
+            artifacts,
+            hourly_keys,
+            manifest_keys,
+            manifest_pairs,
+            config=config,
+            config_identity=config_identity,
+            config_identity_receipt=config_receipt,
+            root_identity_receipt=root_receipt,
+            pit_identity_receipt=pit_receipt,
+            instrument_map=instrument_map,
+            instrument_map_version=instrument_map_version,
+            instrument_map_identity_receipt=map_receipt,
+        )
+
+
 def _run(
     *,
     daily_features: pl.DataFrame | None = None,
@@ -236,20 +363,41 @@ def _run(
     btc_month_context: pl.DataFrame | None = None,
     manifest_pairs: pl.DataFrame | None = None,
     instrument_map: list[InstrumentMapEntry] | None = None,
+    verified_manifest_pairs: pl.DataFrame | None = None,
+    verified_instrument_map: list[InstrumentMapEntry] | None = None,
 ) -> pl.DataFrame:
+    runtime_config = _v11a_long_native_config() if config is None else config
+    config_identity = derive_long_a0_config_identity()
+    runtime_manifest = _manifest() if manifest_pairs is None else manifest_pairs
+    runtime_instrument_map = _instrument_map() if instrument_map is None else instrument_map
+    runtime_map_version = "reviewed-map-v1"
+    population_manifest = runtime_manifest if verified_manifest_pairs is None else verified_manifest_pairs
+    population_map = runtime_instrument_map if verified_instrument_map is None else verified_instrument_map
+    verified_population = _fully_verified_population(
+        manifest_pairs=population_manifest,
+        instrument_map=population_map,
+        instrument_map_version=runtime_map_version,
+        config_identity=config_identity,
+    )
+    if expected_population is not None and not verified_population.expected_population.equals(expected_population):
+        object.__setattr__(
+            verified_population,
+            "expected_population",
+            expected_population,
+        )
     return build_long_s02_feature_tape(
         _daily_features() if daily_features is None else daily_features,
         _hourly_bars() if hourly_bars is None else hourly_bars,
-        config=_v11a_long_native_config() if config is None else config,  # type: ignore[arg-type]
-        config_identity=derive_long_a0_config_identity(),
-        expected_population=(_expected_population() if expected_population is None else expected_population),
+        config=runtime_config,  # type: ignore[arg-type]
+        config_identity=config_identity,
+        verified_population=verified_population,
         source_availability=(_source_availability() if source_availability is None else source_availability),
         regime_context=_regime_context() if regime_context is None else regime_context,
         btc_month_context=(_btc_month_context() if btc_month_context is None else btc_month_context),
         venue="bybit",
-        manifest_pairs=_manifest() if manifest_pairs is None else manifest_pairs,
-        instrument_map=_instrument_map() if instrument_map is None else instrument_map,
-        instrument_map_version="reviewed-map-v1",
+        manifest_pairs=runtime_manifest,
+        instrument_map=runtime_instrument_map,
+        instrument_map_version=runtime_map_version,
     )
 
 
@@ -274,7 +422,8 @@ def test_nonempty_projection_has_exact_registered_order_and_dtypes() -> None:
     assert output["gate_oi_rising"].item() is True
     assert "unregistered_diagnostic" not in output.columns
     assert LONG_S02_EVIDENCE_STATUS.startswith("DIAGNOSTIC_ONLY_")
-    assert LONG_S02_DIAGNOSTICS["population_receipt_identity_bound"] is False
+    assert LONG_S02_DIAGNOSTICS["population_receipt_identity_bound"] is True
+    assert LONG_S02_DIAGNOSTICS["config_hash_bound"] is True
 
 
 def test_typed_empty_projection_has_exact_registered_order_and_dtypes() -> None:
@@ -315,11 +464,9 @@ def test_runtime_guard_rejects_monkeypatched_classifier_literal(monkeypatch: pyt
 def test_registered_scope_rejects_out_of_window_population() -> None:
     outside_ts = SIGNAL_TS_MS - 10 * 365 * 24 * MS_PER_HOUR
     daily = _daily_features().with_columns(pl.lit(outside_ts, dtype=pl.Int64).alias("ts_ms"))
-    expected = _expected_population().with_columns(
-        pl.lit(outside_ts, dtype=pl.Int64).alias("signal_ts_ms")
-    )
+    expected = _expected_population().with_columns(pl.lit(outside_ts, dtype=pl.Int64).alias("signal_ts_ms"))
 
-    with pytest.raises(LongS02Error, match="expected_population falls outside registered scope"):
+    with pytest.raises(LongS02Error, match="source/retained artifact identity drifted"):
         _run(daily_features=daily, expected_population=expected)
 
 
@@ -353,7 +500,7 @@ def test_expected_population_requires_keys_and_root_reconstructed_age() -> None:
     with pytest.raises(LongS02Error, match=r"missing=.*symbol_age_days"):
         _run(expected_population=missing_age)
 
-    with pytest.raises(LongS02Error, match="age_mismatch"):
+    with pytest.raises(LongS02Error, match="source/retained artifact identity drifted"):
         _run(expected_population=_expected_population(age=102))
 
     missing_registered_input = _daily_features().drop("coin_60d_return")
@@ -363,11 +510,14 @@ def test_expected_population_requires_keys_and_root_reconstructed_age() -> None:
 
 def test_pit_and_reviewed_map_fail_closed() -> None:
     wrong_date = _manifest(manifest_date=dt.date(2025, 12, 31))
-    with pytest.raises(S02IdentityAdapterError, match="PIT manifest row is missing"):
-        _run(manifest_pairs=wrong_date)
+    with pytest.raises(LongS02Error, match="runtime PIT/map identity drifted"):
+        _run(manifest_pairs=wrong_date, verified_manifest_pairs=_manifest())
 
-    with pytest.raises(S02IdentityAdapterError, match="missing an active reviewed mapping"):
-        _run(instrument_map=_instrument_map(symbol="BBBUSDT"))
+    with pytest.raises(LongS02Error, match="runtime PIT/map identity drifted"):
+        _run(
+            instrument_map=_instrument_map(symbol="BBBUSDT"),
+            verified_instrument_map=_instrument_map(),
+        )
 
 
 def test_context_availability_and_rank_receipts_propagate_exactly() -> None:

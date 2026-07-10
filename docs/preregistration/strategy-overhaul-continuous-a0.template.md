@@ -67,8 +67,20 @@ The config must be derived mechanically from
 apply_continuous_demo_profile applied to ContinuousDemoCycleConfig with
 strategy_profile equal to continuous_ensemble_v2 and btc_trend_gate equal to
 uptrend. Manual transcription is not an identity.
-The bundled S02 config-parity manifest may remain `UNWIRED`; that status blocks
-stage identity parity and is not changed merely by materializing the artifact.
+The bundled S02 config-parity manifest must derive `WIRED` from every required
+consumer-owned validator before S02. A historical `UNWIRED` bundle cannot be
+upgraded merely by materializing or relabeling the artifact.
+
+## Required S01 Outputs Before S02
+
+S01 must jointly identity-bind the canonical `source_keys.jsonl`,
+`expected_population.jsonl`, and `expected_population_receipt.json`. The full
+reconstruction verifier must validate those files against the bound
+config/root/PIT/manifest-pair/map inputs before the resulting in-memory object
+may enter S02. S02 must then reproduce the registered key population exactly.
+A stage-specific semantic receipt for S02 is required before S03, and the same
+semantic chain must be reverified through S04. These are S01/downstream gates,
+not facts supplied by the Phase-0 template itself.
 
 The Phase-0 bundle is an outcome-blind diagnostic: it does not decode,
 calculate, rank, or inspect outcome fields. That does not imply every opaque
@@ -565,6 +577,9 @@ The canonical child must substitute exact paths and hashes for:
 - root_receipts.json containing canonical semantic scope/history verification,
   not only byte snapshots;
 - source_hashes.json;
+- source_keys.jsonl;
+- expected_population.jsonl;
+- expected_population_receipt.json;
 - schema_signal_features.json;
 - schema_entry_anchor.json;
 - schema_path_labels.json;

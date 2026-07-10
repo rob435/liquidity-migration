@@ -70,9 +70,12 @@ class FieldSpec:
                 raise ValueError(f"field {self.name} requires an issue_id for {self.implementation}")
         elif self.implementation in {"builder", "passthrough"} and self.issue_id is not None:
             raise ValueError(f"implemented field {self.name} must not carry an issue_id")
-        if self.implementation in {"builder", "passthrough", "projection", "semantic_mismatch"}:
+        if self.implementation in {"builder", "passthrough", "semantic_mismatch"}:
             if not self.source_columns or any(not source.strip() for source in self.source_columns):
                 raise ValueError(f"field {self.name} requires non-blank source_columns")
+        elif self.implementation == "projection":
+            if any(not source.strip() for source in self.source_columns):
+                raise ValueError(f"field {self.name} has blank projection source_columns")
         elif self.source_columns:
             raise ValueError(f"field {self.name} cannot claim source_columns {self.source_columns!r}")
 
@@ -122,8 +125,8 @@ def _field(
         raise ValueError(f"field {name} cannot declare both source_column and source_columns")
     if source_columns is None:
         source_columns = (source_column,) if source_column is not None else ()
-    if implementation in {"builder", "passthrough", "projection", "semantic_mismatch"} and not source_columns:
-        source_columns = (name,)
+        if implementation in {"builder", "passthrough", "projection", "semantic_mismatch"} and not source_columns:
+            source_columns = (name,)
     return FieldSpec(
         name=name,
         dtype=dtype,
@@ -2700,6 +2703,242 @@ ARTIFACT_SCHEMAS = MappingProxyType(
 PROPOSED_SCHEMAS = MappingProxyType({schema_id: schema.fields for schema_id, schema in ARTIFACT_SCHEMAS.items()})
 
 
+class LongSchemaParityError(ValueError):
+    """The LONG S02 schema metadata disagrees with its runtime config."""
+
+
+def long_schema_runtime_parity_surface(config: object) -> dict[str, object]:
+    """Validate config-sensitive LONG S02 schema metadata.
+
+    The registry stays a static artifact, so every field name or explanatory
+    literal that embeds a runtime window/threshold needs a mechanical parity
+    check.  This surface is called by the real S02 guard and is also directly
+    consumable by the config-parity manifest.
+    """
+
+    from .long_native import LongNativeConfig
+    from .long_population_scout import (
+        LONG_S02_CLASSIFIER_PATTERN,
+        LONG_TRIGGER_AND_EXIT_PROFILE_FIELDS,
+    )
+
+    if not isinstance(config, LongNativeConfig):
+        raise TypeError("long_schema_runtime_parity_surface requires LongNativeConfig")
+    schema = ARTIFACT_SCHEMAS[LONG_SIGNAL_SCHEMA_ID]
+    fields_by_name = {field.name: field for field in schema.fields}
+    validated_fields: set[str] = set()
+
+    def require_field(name: str) -> FieldSpec:
+        field = fields_by_name.get(name)
+        if field is None:
+            raise LongSchemaParityError(f"LONG S02 schema is missing config-derived field {name!r}")
+        validated_fields.add(name)
+        return field
+
+    def require_contract(
+        name: str,
+        *,
+        dtype: str | None = None,
+        unit: str | None = None,
+        nullable: bool | None = None,
+        implementation: Implementation | None = None,
+        null_semantics: str | None = None,
+        available_at: str | None = None,
+    ) -> FieldSpec:
+        field = require_field(name)
+        expected = {
+            "dtype": dtype,
+            "unit": unit,
+            "nullable": nullable,
+            "implementation": implementation,
+            "null_semantics": null_semantics,
+            "available_at": available_at,
+        }
+        mismatches = {
+            key: {"expected": value, "observed": getattr(field, key)}
+            for key, value in expected.items()
+            if value is not None and getattr(field, key) != value
+        }
+        if mismatches:
+            raise LongSchemaParityError(f"LONG S02 schema field {name!r} metadata drifted: {mismatches}")
+        return field
+
+    universe_turnover_field = f"turnover_median_{config.universe_volume_window_days}d"
+    require_contract(
+        universe_turnover_field,
+        dtype="float64",
+        unit="quote_asset",
+        nullable=True,
+        implementation="passthrough",
+        null_semantics="null until the declared calendar-window minimum is met",
+        available_at="signal_ts_ms",
+    )
+    require_contract("universe_rank", dtype="uint32", nullable=True, implementation="passthrough")
+    require_contract("symbol_age_days", dtype="int64", nullable=False, implementation="passthrough")
+    require_contract("in_universe", dtype="bool", nullable=False, implementation="passthrough")
+
+    require_contract(
+        "realized_vol",
+        dtype="float64",
+        unit="fraction_sqrt_year",
+        nullable=True,
+        implementation="passthrough",
+        null_semantics=(f"null until {config.vol_estimate_window_days} daily log returns are available"),
+    )
+    require_contract(
+        f"sigma_daily_{config.vol_estimate_window_days}d",
+        dtype="float64",
+        unit="fraction",
+        nullable=True,
+        implementation="passthrough",
+        null_semantics="null until realized_vol is available",
+        available_at="signal_ts_ms",
+    )
+
+    hold_hours = config.fc_max_hold_days * 24
+    require_contract(
+        "fc_exit_max_hold_hours",
+        dtype="int64",
+        unit="hours",
+        nullable=False,
+        implementation="builder",
+        null_semantics=f"never null; frozen at {hold_hours}",
+        available_at="static config",
+    )
+    require_contract(
+        "classified_pattern",
+        dtype="utf8",
+        nullable=True,
+        implementation="builder",
+        null_semantics="null means no classifier pattern selected",
+    )
+    for name in ("classifier_stop_pct", "classifier_take_profit_pct"):
+        require_contract(
+            name,
+            dtype="float64",
+            nullable=True,
+            implementation="builder",
+            null_semantics=f"null unless the classifier selected {LONG_S02_CLASSIFIER_PATTERN}",
+        )
+    require_contract(
+        "classifier_max_hold_days",
+        dtype="int64",
+        nullable=True,
+        implementation="builder",
+        null_semantics=f"null unless the classifier selected {LONG_S02_CLASSIFIER_PATTERN}",
+    )
+
+    fixed_threshold_pct = f"{config.fc_min_day_return * 100:g}%"
+    threshold_null_semantics = f"never null because the fixed {fixed_threshold_pct} fallback is defined"
+    for name in ("fc_threshold_1d_log", "fc_threshold_3d_log", "fc_threshold_7d_log"):
+        require_contract(
+            name,
+            dtype="float64",
+            unit="log_fraction",
+            nullable=False,
+            implementation="builder",
+            null_semantics=threshold_null_semantics,
+            available_at="signal_ts_ms",
+        )
+    for name in ("fc_exit_stop_pct", "fc_exit_take_profit_pct"):
+        require_contract(
+            name,
+            dtype="float64",
+            nullable=False,
+            implementation="builder",
+            null_semantics="never null because the fixed fallback is defined",
+        )
+    for name in ("fc_atr_exit_available", "fc_atr_fallback_used"):
+        require_contract(name, dtype="bool", nullable=False, implementation="builder")
+
+    if config.fc_lsr_filter or config.fc_require_oi_rising:
+        raise LongSchemaParityError(
+            "LONG S02 Tier-C null projection requires fc_lsr_filter and fc_require_oi_rising to be false"
+        )
+    tier_c_semantics = {
+        "global_lsr": ("always null in A0 because positioning is Tier C and the frozen LSR gate is disabled"),
+        "oi_chg_7d": ("always null in A0 because open interest is Tier C and the frozen OI gate is disabled"),
+    }
+    for name, null_semantics in tier_c_semantics.items():
+        field = require_contract(
+            name,
+            dtype="float64",
+            nullable=True,
+            implementation="projection",
+            null_semantics=null_semantics,
+        )
+        if field.source_columns != ():
+            raise LongSchemaParityError(f"LONG S02 Tier-C field {name!r} must retain empty constant-projection lineage")
+
+    schema_version_field = require_contract(
+        "long_feature_tape_schema_version",
+        dtype="utf8",
+        nullable=False,
+        implementation="builder",
+        null_semantics=f"never null; expected {schema.schema_version}",
+    )
+    if schema_version_field.unit != "schema_id":
+        raise LongSchemaParityError("LONG feature schema-version field must retain schema_id units")
+
+    trigger_and_exit_profile = {name: getattr(config, name) for name in LONG_TRIGGER_AND_EXIT_PROFILE_FIELDS}
+    population_and_rolling_windows = {
+        "universe_volume_window_days": config.universe_volume_window_days,
+        "vol_estimate_window_days": config.vol_estimate_window_days,
+    }
+    classifier_and_exit_shape = {
+        "fc_max_hold_days": config.fc_max_hold_days,
+        "fc_exit_max_hold_hours": hold_hours,
+    }
+    schema_trigger_and_exit_profile = {
+        "fc_min_day_return": trigger_and_exit_profile["fc_min_day_return"],
+        "fc_use_atr_exits": trigger_and_exit_profile["fc_use_atr_exits"],
+    }
+    tier_c_forced_null_gates = {
+        "fc_lsr_filter": config.fc_lsr_filter,
+        "fc_require_oi_rising": config.fc_require_oi_rising,
+    }
+    return {
+        "consumer_validator": ("liquidity_migration.strategy_overhaul_schemas.long_schema_runtime_parity_surface"),
+        "validated_targets": [
+            "population_and_rolling_windows",
+            "classifier_and_exit_shape",
+            "trigger_and_exit_profile",
+            "tier_c_forced_null_gates",
+        ],
+        "validated_target_fields": {
+            "population_and_rolling_windows": [
+                "universe_volume_window_days",
+                "vol_estimate_window_days",
+            ],
+            "classifier_and_exit_shape": [
+                "fc_max_hold_days",
+                "fc_exit_max_hold_hours",
+            ],
+            "trigger_and_exit_profile": [
+                "fc_min_day_return",
+                "fc_use_atr_exits",
+            ],
+            "tier_c_forced_null_gates": [
+                "fc_lsr_filter",
+                "fc_require_oi_rising",
+            ],
+        },
+        "validated_consumers": {
+            "population_and_rolling_windows": [
+                "strategy_overhaul_schemas LONG S02 turnover_median_90d/realized_vol metadata"
+            ],
+            "classifier_and_exit_shape": ["strategy_overhaul_schemas LONG S02 classifier and frozen-72h metadata"],
+            "trigger_and_exit_profile": ["strategy_overhaul_schemas LONG S02 fixed-15pct/trigger/ATR-exit metadata"],
+            "tier_c_forced_null_gates": ["strategy_overhaul_schemas LONG S02 global_lsr/oi_chg_7d null semantics"],
+        },
+        "population_and_rolling_windows": population_and_rolling_windows,
+        "classifier_and_exit_shape": classifier_and_exit_shape,
+        "trigger_and_exit_profile": schema_trigger_and_exit_profile,
+        "tier_c_forced_null_gates": tier_c_forced_null_gates,
+        "validated_schema_fields": sorted(validated_fields),
+    }
+
+
 def _mismatch(
     issue_id: str,
     schema_ids: tuple[str, ...],
@@ -2721,39 +2960,25 @@ def _mismatch(
 
 SCHEMA_MISMATCHES = (
     _mismatch(
-        "A0-CONFIG-IDENTITY",
-        (
-            CONTINUOUS_SIGNAL_SCHEMA_ID,
-            CONTINUOUS_ENTRY_SCHEMA_ID,
-            CONTINUOUS_LABEL_SCHEMA_ID,
-            LONG_SIGNAL_SCHEMA_ID,
-            LONG_ENTRY_SCHEMA_ID,
-            LONG_LABEL_SCHEMA_ID,
-        ),
-        "Every versioned A0 artifact must be bound to the exact mechanically derived registered config and its hash.",
-        "Exact canonical config/scope/component identity primitives and an S02 parity manifest exist, but they remain unwired to a complete child runner and are not carried across every CONTINUOUS and LONG stage.",
-        "Bind the mechanically derived config identity artifacts in S01, have each registered wrapper verify them before S02, and recheck the same receipt chain through S04.",
-    ),
-    _mismatch(
         "A0-POPULATION-COMPLETENESS",
         (CONTINUOUS_SIGNAL_SCHEMA_ID, LONG_SIGNAL_SCHEMA_ID),
         "Cross-sectional ranks and breadth require proof that every expected PIT symbol/time row is present, not just validation of supplied rows.",
-        "Outcome-blind source/signal population-key primitives now detect omissions within supplied root projections, but root completeness and their receipts are not wired into S01/S02.",
-        "Build the expected population from receipt-bound complete root projections, bind its key artifact in S01, and fail S02 on any omission or extra.",
+        "Canonical source/expected JSONL artifacts, full reconstruction, and exact S02 key/age equality are implemented, but supplied root/PIT keys are not proven complete, authentic, or canonically derived.",
+        "Instantiate the canonical population from authenticated complete root/PIT projections and preserve that upstream proof through the semantic receipt chain.",
     ),
     _mismatch(
         "CONT-ADAPTER-IDENTITY",
         (CONTINUOUS_SIGNAL_SCHEMA_ID, CONTINUOUS_ENTRY_SCHEMA_ID, CONTINUOUS_LABEL_SCHEMA_ID),
         "Receipt-bound identity/PIT inputs and a venue-local map are required; cross-venue review is required only for portability claims.",
-        "The exact wrapper validates PIT coverage state, map intervals, product identity, and same-venue aliases, but still accepts caller-supplied sidecars and an unverified nonblank map-version label.",
-        "Load the normalized venue-local manifest/map from the registered receipt paths, verify their content hashes before S02, and carry that identity through S04.",
+        "S02 now rechecks the receipt-bound manifest-pair and reviewed-map content exactly; semantic receipts propagate canonical IDs but do not independently rederive them from the bound map.",
+        "Rederive S02 canonical IDs from the bound map during semantic verification and compare them through S04.",
     ),
     _mismatch(
         "LONG-ADAPTER-IDENTITY",
         (LONG_SIGNAL_SCHEMA_ID, LONG_ENTRY_SCHEMA_ID, LONG_LABEL_SCHEMA_ID),
         "Receipt-bound venue-local identity, PIT provenance, coverage, and independent age anchors are mandatory; cross-venue review is a separate portability gate.",
-        "The exact wrapper validates PIT/map state and independently supplied root-age parity, but those sidecars and the nonblank map-version label are not yet hash-bound to the Phase-0/S01 receipts.",
-        "Load the normalized venue-local manifest/map/age inventory from registered receipt paths and verify their content hashes before S02.",
+        "S02 now rechecks receipt-bound manifest-pair/map content and exact population ages; semantic receipts propagate canonical IDs but do not independently rederive them from the bound map.",
+        "Rederive S02 canonical IDs from the bound map during semantic verification and preserve authenticated root-age lineage.",
     ),
     _mismatch(
         "LONG-AVAILABILITY-TIMES",
@@ -2925,6 +3150,7 @@ __all__ = [
     "LONG_ENTRY_SCHEMA_ID",
     "LONG_LABEL_SCHEMA_ID",
     "LONG_SIGNAL_SCHEMA_ID",
+    "LongSchemaParityError",
     "PROPOSED_SCHEMAS",
     "REGISTRY_STATUS",
     "REGISTRY_VERSION",
@@ -2932,6 +3158,7 @@ __all__ = [
     "ArtifactSchema",
     "SchemaMismatch",
     "mismatches_for",
+    "long_schema_runtime_parity_surface",
     "registry_payload",
     "registry_sha256",
     "schema_payload",

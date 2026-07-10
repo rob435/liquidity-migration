@@ -53,6 +53,38 @@ _ENTRY_SCHEMA_VERSION = "long_a0_entry_policy_v1"
 _LABEL_SCHEMA_VERSION = "long_a0_minimal_labels_v1"
 LONG_S02_CLASSIFIER_PATTERN = "fomo_chase"
 
+LONG_PATTERN_TOGGLE_FIELDS = (
+    "enable_capitulation_rebound",
+    "enable_volume_resurrection",
+    "enable_funding_squeeze",
+    "enable_oversold_bounce",
+    "enable_uptrend_dip",
+    "enable_fomo_chase",
+    "enable_xsec_momentum",
+    "enable_lowvol",
+    "enable_reversal",
+    "enable_funding_carry",
+    "enable_oi_momentum",
+    "enable_metrics_signal",
+)
+LONG_TRIGGER_AND_EXIT_PROFILE_FIELDS = (
+    "fc_min_day_return",
+    "fc_use_sigma_threshold",
+    "fc_sigma_mult",
+    "fc_enable_3d_trigger",
+    "fc_enable_7d_trigger",
+    "fc_enable_intraday_trigger",
+    "fc_intraday_window_hours",
+    "fc_use_own_pump_quantile",
+    "fc_min_close_location",
+    "fc_close_loc_multi_day",
+    "fc_use_atr_exits",
+    "fc_atr_stop_mult",
+    "fc_atr_tp_mult",
+    "fc_stop_pct",
+    "fc_take_profit_pct",
+)
+
 _OUTCOME_COLUMN_TOKENS = (
     "adverse_magnitude",
     "first_passage",
@@ -214,17 +246,82 @@ def _require_frozen_v11a_config(config: LongNativeConfig, *, stage: str) -> Long
     if config == expected:
         return config
     mismatches = [
-        field.name
-        for field in fields(LongNativeConfig)
-        if getattr(config, field.name) != getattr(expected, field.name)
+        field.name for field in fields(LongNativeConfig) if getattr(config, field.name) != getattr(expected, field.name)
     ]
     preview = ", ".join(mismatches[:8])
     if len(mismatches) > 8:
         preview += f", ... (+{len(mismatches) - 8} more)"
     raise ValueError(
-        f"{stage} requires the exact _v11a_long_native_config; "
-        f"mismatched fields: {preview or '<unknown>'}"
+        f"{stage} requires the exact _v11a_long_native_config; mismatched fields: {preview or '<unknown>'}"
     )
+
+
+def long_population_runtime_parity_surface(config: LongNativeConfig) -> dict[str, object]:
+    """Validate and expose the config values consumed by the LONG row builder.
+
+    This is the consumer-owned proof surface for the classifier/exit and trigger
+    targets in the A0 config-parity manifest.  It deliberately validates the
+    live module constants and the schema version emitted by
+    :func:`build_long_feature_tape`; a central manifest need not assert that
+    these consumers were checked by hand.
+    """
+
+    cfg = _require_frozen_v11a_config(config, stage="long_population_runtime_parity_surface")
+    active_pattern_toggles = {name: bool(getattr(cfg, name)) for name in LONG_PATTERN_TOGGLE_FIELDS}
+    active_patterns = [name.removeprefix("enable_") for name, enabled in active_pattern_toggles.items() if enabled]
+    if active_patterns != [LONG_S02_CLASSIFIER_PATTERN]:
+        raise ValueError(
+            "LONG population classifier parity failed: "
+            f"active config patterns={active_patterns}, "
+            f"runtime pattern={LONG_S02_CLASSIFIER_PATTERN!r}"
+        )
+
+    # Lazy import avoids making this low-level row builder depend on the schema
+    # registry during ordinary module import.
+    from .strategy_overhaul_schemas import ARTIFACT_SCHEMAS, LONG_SIGNAL_SCHEMA_ID
+
+    registered_schema_version = ARTIFACT_SCHEMAS[LONG_SIGNAL_SCHEMA_ID].schema_version
+    if _FEATURE_SCHEMA_VERSION != registered_schema_version:
+        raise ValueError(
+            "LONG population feature-schema parity failed: "
+            f"builder={_FEATURE_SCHEMA_VERSION!r}, registry={registered_schema_version!r}"
+        )
+
+    classifier_and_exit_shape = {
+        "active_pattern_toggles": active_pattern_toggles,
+        "fc_max_hold_days": cfg.fc_max_hold_days,
+        "fc_exit_max_hold_hours": cfg.fc_max_hold_days * 24,
+    }
+    trigger_and_exit_profile = {name: getattr(cfg, name) for name in LONG_TRIGGER_AND_EXIT_PROFILE_FIELDS}
+    return {
+        "consumer_validator": ("liquidity_migration.long_population_scout.long_population_runtime_parity_surface"),
+        "validated_targets": [
+            "classifier_and_exit_shape",
+            "trigger_and_exit_profile",
+        ],
+        "validated_target_fields": {
+            "classifier_and_exit_shape": [
+                "active_pattern_toggles",
+                "fc_max_hold_days",
+                "fc_exit_max_hold_hours",
+            ],
+            "trigger_and_exit_profile": list(LONG_TRIGGER_AND_EXIT_PROFILE_FIELDS),
+        },
+        "validated_consumers": {
+            "classifier_and_exit_shape": [
+                "long_population_scout.build_long_feature_tape classifier_selected=fomo_chase",
+                "long_population_scout.build_long_feature_tape fc_exit_max_hold_hours",
+            ],
+            "trigger_and_exit_profile": [
+                "long_population_scout._trigger_diagnostics",
+                "long_population_scout._fc_gate_diagnostics",
+                "long_population_scout.build_long_feature_tape ATR/fallback exit fields",
+            ],
+        },
+        "classifier_and_exit_shape": classifier_and_exit_shape,
+        "trigger_and_exit_profile": trigger_and_exit_profile,
+        "feature_schema_version": _FEATURE_SCHEMA_VERSION,
+    }
 
 
 def _is_outcome_like_column(name: str) -> bool:
@@ -239,10 +336,7 @@ def _is_outcome_like_column(name: str) -> bool:
         return True
     if lowered.endswith(("_mfe", "_mae", "_pnl", "_stop_price", "_take_profit_price")):
         return True
-    return bool(
-        _HOURLY_PREFIX_OUTCOME_RE.search(lowered)
-        or _HORIZON_OUTCOME_RE.search(lowered)
-    )
+    return bool(_HOURLY_PREFIX_OUTCOME_RE.search(lowered) or _HORIZON_OUTCOME_RE.search(lowered))
 
 
 def _reject_outcome_like_columns(
@@ -252,11 +346,7 @@ def _reject_outcome_like_columns(
     allowed: set[str] | None = None,
 ) -> None:
     allowed = allowed or set()
-    rejected = sorted(
-        column
-        for column in frame.columns
-        if column not in allowed and _is_outcome_like_column(column)
-    )
+    rejected = sorted(column for column in frame.columns if column not in allowed and _is_outcome_like_column(column))
     if rejected:
         raise ValueError(f"{name} contains outcome-like caller columns: {rejected}")
 
@@ -340,9 +430,7 @@ def _require_exact_stage_column(
             and not isinstance(actual, bool)
         )
         if not type_matches or actual != expected:
-            raise ValueError(
-                f"{name} row {row_number} {column} must equal {expected!r}; got {actual!r}"
-            )
+            raise ValueError(f"{name} row {row_number} {column} must equal {expected!r}; got {actual!r}")
 
 
 def _with_typed_columns(
@@ -448,9 +536,7 @@ def _hourly_row_index(hourly_bars: pl.DataFrame) -> dict[tuple[str, int], int]:
     """Validate/index every source key without consuming any OHLC value."""
 
     index: dict[tuple[str, int], int] = {}
-    for row_number, (symbol_raw, open_ts_raw) in enumerate(
-        hourly_bars.select(["symbol", "ts_ms"]).iter_rows()
-    ):
+    for row_number, (symbol_raw, open_ts_raw) in enumerate(hourly_bars.select(["symbol", "ts_ms"]).iter_rows()):
         symbol = _strict_symbol(symbol_raw, name="hourly_bars", row_number=row_number)
         open_ts_ms = _strict_timestamp(
             open_ts_raw,
@@ -461,10 +547,7 @@ def _hourly_row_index(hourly_bars: pl.DataFrame) -> dict[tuple[str, int], int]:
         )
         key = (symbol, open_ts_ms + MS_PER_HOUR)
         if key in index:
-            raise ValueError(
-                "hourly_bars has duplicate ('symbol', 'ts_ms') key: "
-                f"{(symbol, open_ts_ms)}"
-            )
+            raise ValueError(f"hourly_bars has duplicate ('symbol', 'ts_ms') key: {(symbol, open_ts_ms)}")
         index[key] = row_number
     return index
 
@@ -500,9 +583,7 @@ def _indexed_bar(
         )
         for field in ("open", "high", "low", "close")
     }
-    if values["low"] > min(values["open"], values["close"]) or values["high"] < max(
-        values["open"], values["close"]
-    ):
+    if values["low"] > min(values["open"], values["close"]) or values["high"] < max(values["open"], values["close"]):
         raise ValueError(f"hourly_bars row {row_number} has OHLC outside [low, high]")
     if values["high"] < values["low"]:
         raise ValueError(f"hourly_bars row {row_number} has high below low")
@@ -637,11 +718,7 @@ def _trigger_diagnostics(row: Mapping[str, Any], cfg: LongNativeConfig) -> dict[
         "fc_all_trigger": bool(identities),
         "fc_trigger_identities": identities,
         "fc_trigger_identity": "+".join(identities) if identities else None,
-        "fc_trigger_bitmask": (
-            (1 if trigger_1d else 0)
-            | (2 if trigger_3d else 0)
-            | (4 if trigger_7d else 0)
-        ),
+        "fc_trigger_bitmask": ((1 if trigger_1d else 0) | (2 if trigger_3d else 0) | (4 if trigger_7d else 0)),
         "trigger_strength_ratio": max(location_qualified_ratios) if location_qualified_ratios else None,
         "active_trigger_close_location": max(fired_close_locations) if fired_close_locations else None,
     }
@@ -1063,9 +1140,7 @@ def _derive_entry_policy_fields(
     common_price = _positive_float(common.get("price"))
     current_price = _positive_float(current.get("price"))
     derived["entry_price_improvement"] = (
-        common_price / current_price - 1.0
-        if common_price is not None and current_price is not None
-        else None
+        common_price / current_price - 1.0 if common_price is not None and current_price is not None else None
     )
     derived["entry_delay_hours_vs_common"] = (
         int(current["hour"]) - int(common["hour"])
@@ -1282,6 +1357,10 @@ def build_long_feature_tape(
     """
 
     cfg = _require_frozen_v11a_config(config, stage="build_long_feature_tape")
+    # Invoke the same owner-local validator consumed by the central parity
+    # manifest so its receipt describes an actual runtime guard, not a
+    # separately asserted inspection result.
+    long_population_runtime_parity_surface(cfg)
     _require_columns(daily_features, {"symbol", "ts_ms", "close"}, name="daily_features")
     _require_columns(
         hourly_bars,
@@ -1296,14 +1375,9 @@ def build_long_feature_tape(
         grid_ms=MS_PER_DAY,
     )
     if "signal_ts_ms" in daily_features.columns:
-        for row_number, row in enumerate(
-            daily_features.select(["ts_ms", "signal_ts_ms"]).iter_rows(named=True)
-        ):
+        for row_number, row in enumerate(daily_features.select(["ts_ms", "signal_ts_ms"]).iter_rows(named=True)):
             raw_signal_ts_ms = row["signal_ts_ms"]
-            if (
-                isinstance(raw_signal_ts_ms, bool)
-                or not isinstance(raw_signal_ts_ms, Integral)
-            ):
+            if isinstance(raw_signal_ts_ms, bool) or not isinstance(raw_signal_ts_ms, Integral):
                 raise ValueError(
                     f"daily_features row {row_number} signal_ts_ms must be an integer millisecond timestamp"
                 )
@@ -1591,9 +1665,7 @@ def _label_projection(
             defaults[name] = True
     typed = _with_typed_columns(frame, dtypes, defaults=defaults)
     identity = [
-        name
-        for name in ("venue", "symbol", "signal_ts_ms", "canonical_instrument_id")
-        if name in typed.columns
+        name for name in ("venue", "symbol", "signal_ts_ms", "canonical_instrument_id") if name in typed.columns
     ]
     return typed.select(identity + list(dtypes))
 
@@ -1628,10 +1700,7 @@ def _label_bars_for_row(
         if anchor is None:
             continue
         anchor_ts_ms = int(anchor)
-        required_ends.update(
-            anchor_ts_ms + hour * MS_PER_HOUR
-            for hour in range(1, max_horizon + 1)
-        )
+        required_ends.update(anchor_ts_ms + hour * MS_PER_HOUR for hour in range(1, max_horizon + 1))
     bars: dict[int, Mapping[str, float | None]] = {}
     for bar_end_ts_ms in sorted(required_ends):
         bar = _indexed_bar(
@@ -1691,9 +1760,7 @@ def _minimal_anchor_labels(
 
         out[f"{horizon}h_endpoint_ts_ms"] = endpoint_ts
         if horizon in point_horizons:
-            out[f"{horizon}h_point_return"] = (
-                _return(endpoint_close, anchor_price) if point_available else None
-            )
+            out[f"{horizon}h_point_return"] = _return(endpoint_close, anchor_price) if point_available else None
         out[f"{horizon}h_point_available"] = point_available
         out[f"{horizon}h_observed_bars"] = observed
         out[f"{horizon}h_path_complete"] = complete
@@ -1703,11 +1770,7 @@ def _minimal_anchor_labels(
             missing_reasons.append(f"{horizon}h:{'+'.join(horizon_reasons)}")
         if horizon in excursion_horizons:
             mfe = max(0.0, max(highs) / anchor_price - 1.0) if complete and highs and anchor_price else None
-            signed_mae = (
-                min(0.0, min(lows) / anchor_price - 1.0)
-                if complete and lows and anchor_price
-                else None
-            )
+            signed_mae = min(0.0, min(lows) / anchor_price - 1.0) if complete and lows and anchor_price else None
             out[f"{horizon}h_mfe"] = mfe
             out[f"{horizon}h_signed_mae"] = signed_mae
             out[f"{horizon}h_adverse_magnitude"] = -signed_mae if signed_mae is not None else None
@@ -2040,7 +2103,9 @@ __all__ = [
     "DEFAULT_POINT_HORIZONS",
     "EXPLORATORY_LABEL_SCHEMA_VERSION",
     "FC_GATE_COLUMNS",
+    "LONG_PATTERN_TOGGLE_FIELDS",
     "LONG_S02_CLASSIFIER_PATTERN",
+    "LONG_TRIGGER_AND_EXIT_PROFILE_FIELDS",
     "SIGNAL_CLOSE_ABS_TOLERANCE",
     "SIGNAL_CLOSE_REL_TOLERANCE",
     "append_long_entry_policy",
@@ -2049,4 +2114,5 @@ __all__ = [
     "build_long_feature_tape",
     "build_long_population_scout",
     "build_long_population_tape",
+    "long_population_runtime_parity_surface",
 ]

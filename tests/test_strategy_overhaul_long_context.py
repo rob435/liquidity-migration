@@ -3,6 +3,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
+from liquidity_migration import strategy_overhaul_long_context as long_context
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 from liquidity_migration.long_population_scout import build_long_feature_tape
@@ -15,6 +16,7 @@ from liquidity_migration.strategy_overhaul_long_context import (
     SOURCE_AVAILABILITY_SCHEMA,
     LongSourceContextError,
     attach_long_source_context,
+    long_context_runtime_parity_surface,
 )
 
 
@@ -160,6 +162,7 @@ def _run(
     feature_tape = _feature_tape() if feature_tape is None else feature_tape
     return attach_long_source_context(
         feature_tape,
+        config=_v11a_long_native_config(),
         source_availability=(_availability(feature_tape) if availability is None else availability),
         regime_context=_regime_context() if regime_context is None else regime_context,
         btc_month_context=(_btc_month_context() if btc_month_context is None else btc_month_context),
@@ -182,8 +185,8 @@ def test_attaches_registered_context_and_exact_rank_receipts() -> None:
         assert row["universe_rank_population_peer_count"] == 3
         assert row["universe_rank_rankable_peer_count"] == 3
         assert row["universe_rank_missing_peer_count"] == 0
-        assert row["today_volume_rank_tie_method"] == "ordinal_descending"
-        assert row["universe_rank_tie_method"] == "ordinal_descending"
+        assert row["today_volume_rank_tie_method"] == "ordinal_descending_value_then_symbol_ascending"
+        assert row["universe_rank_tie_method"] == "ordinal_descending_value_then_symbol_ascending"
         assert row["today_volume_rank_denominator_rule"] == "supplied_signal_ts_population"
         assert row["universe_rank_denominator_rule"] == "supplied_signal_ts_population"
         assert row["btc_regime_available"] is True
@@ -244,6 +247,29 @@ def test_rank_parity_fails_closed() -> None:
         _run(feature)
 
 
+def test_context_owner_validates_config_and_reconstructs_universe_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _v11a_long_native_config()
+    surface = long_context_runtime_parity_surface(config)
+
+    assert surface["validated_targets"] == ["population_and_rolling_windows", "regime_context"]
+    assert surface["population_and_rolling_windows"] == {
+        "universe_size": config.universe_size,
+        "universe_volume_window_days": config.universe_volume_window_days,
+        "min_listing_history_days": config.min_listing_history_days,
+    }
+    assert surface["rank_specs"][1] == ["universe_rank", "turnover_median_90d"]
+
+    tampered_membership = _feature_tape().with_columns(pl.lit(False, dtype=pl.Boolean).alias("in_universe"))
+    with pytest.raises(LongSourceContextError, match="in_universe parity failed"):
+        _run(tampered_membership)
+
+    monkeypatch.setattr(long_context, "LONG_CONTEXT_UNIVERSE_VOLUME_WINDOW_DAYS", 91)
+    with pytest.raises(LongSourceContextError, match="context config parity failed"):
+        long_context_runtime_parity_surface(config)
+
+
 def test_future_availability_and_incomplete_key_coverage_fail_closed() -> None:
     feature = _feature_tape()
     future = _availability(feature).with_columns((pl.col("signal_ts_ms") + 1).alias("daily_bar_available_ts_ms"))
@@ -298,6 +324,7 @@ def test_strict_typed_empty_output() -> None:
     feature = _feature_tape().head(0)
     output = attach_long_source_context(
         feature,
+        config=_v11a_long_native_config(),
         source_availability=pl.DataFrame(schema=dict(SOURCE_AVAILABILITY_SCHEMA)),
         regime_context=pl.DataFrame(schema=dict(REGIME_CONTEXT_SCHEMA)),
         btc_month_context=pl.DataFrame(schema=dict(BTC_MONTH_CONTEXT_SCHEMA)),

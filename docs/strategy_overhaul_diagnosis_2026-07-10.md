@@ -142,7 +142,7 @@ synthetic fixtures:
   registry is now v4: its implementation vocabulary distinguishes builder,
   passthrough, adapter, projection, missing, and semantic mismatch, and each
   implemented/derived field records its `source_columns` lineage. No current
-  field is missing or semantically mismatched; seven receipt/provenance blockers
+  field is missing or semantically mismatched; six receipt/provenance blockers
   remain.
 
 This hardening does not establish data support or strategy merit. The local
@@ -155,16 +155,22 @@ canonical root lineage, an unconsumed partial auto map, and unwired S02 config
 parity. No S02 feature tape, S03 entry artifact, S04 path-label artifact, return,
 MFE/MAE, PnL, or other outcome has run. The derived RMOM timestamp proves only
 offline causal computability; the RMOM source-day, provisional-state, and
-root-content provenance are not yet authoritative and receipt-bound. The
-  independently expected population and config identities are not yet verified
-  inside every stage wrapper. The root-snapshot utility is only a byte-binding
+root-content provenance are not yet authoritative and receipt-bound. Current
+  source now derives config parity from consumer-owned validators, builds strict
+  canonical source/expected-population artifacts, requires the full-verifier
+  result at S02, and separately verifies current scope/config/population/selected
+  S02-S04 semantics and parent identities. Those prospective checks do not
+  rewrite the historical bundle or prove supplied-root completeness. The
+  root-snapshot utility is only a byte-binding
   precursor: it does not verify registered scope, earliest history, Phase-0
   semantics, or S01 readiness. The generic stage-receipt utility likewise binds
   bytes and declared metadata but does not validate the caller's artifact schema,
-  key/window semantics, outcome-blindness claim, or all transitive identities.
-  Consequently the mechanically derived LONG sidecars and PIT/map/rank-population
-  inputs are not yet linked by a canonical semantic receipt chain. Those are
-  blocking identity debts, not caveats that a favorable later result can waive.
+  key/window semantics, outcome-blindness claim, or all transitive identities;
+  the separate semantic verifier is deliberately narrower than feature/label
+  recomputation and does not rederive canonical IDs from the map. Consequently
+  no real root, LONG sidecar, or S02-S04 artifact has yet entered a canonical
+  semantic chain. Those are blocking identity debts, not caveats that a
+  favorable later result can waive.
 
 ## Provisional Architecture Hypotheses
 

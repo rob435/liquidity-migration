@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
+from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 from liquidity_migration.strategy_overhaul_schemas import (
     ARTIFACT_SCHEMAS,
     CONTINUOUS_ENTRY_SCHEMA_ID,
@@ -14,11 +16,13 @@ from liquidity_migration.strategy_overhaul_schemas import (
     LONG_ENTRY_SCHEMA_ID,
     LONG_LABEL_SCHEMA_ID,
     LONG_SIGNAL_SCHEMA_ID,
+    LongSchemaParityError,
     PROPOSED_SCHEMAS,
     REGISTRY_STATUS,
     SCHEMA_MISMATCHES,
     FieldSpec,
     mismatches_for,
+    long_schema_runtime_parity_surface,
     registry_payload,
     registry_sha256,
     schema_payload,
@@ -141,7 +145,6 @@ def test_builder_contract_gaps_are_explicit_and_blocking() -> None:
     assert len(issue_ids) == len(SCHEMA_MISMATCHES)
     assert issue_ids == {
         "CONT-ADAPTER-IDENTITY",
-        "A0-CONFIG-IDENTITY",
         "A0-POPULATION-COMPLETENESS",
         "LONG-ADAPTER-IDENTITY",
         "LONG-AVAILABILITY-TIMES",
@@ -149,27 +152,22 @@ def test_builder_contract_gaps_are_explicit_and_blocking() -> None:
         "LONG-BTC-MONTH-REGIME",
     }
     assert all(item.severity == "blocking" for item in SCHEMA_MISMATCHES)
-    assert {
-        schema_id: {mismatch.issue_id for mismatch in mismatches_for(schema_id)}
-        for schema_id in EXPECTED
-    } == {
+    assert {schema_id: {mismatch.issue_id for mismatch in mismatches_for(schema_id)} for schema_id in EXPECTED} == {
         CONTINUOUS_SIGNAL_SCHEMA_ID: {
-            "A0-CONFIG-IDENTITY",
             "A0-POPULATION-COMPLETENESS",
             "CONT-ADAPTER-IDENTITY",
         },
-        CONTINUOUS_ENTRY_SCHEMA_ID: {"A0-CONFIG-IDENTITY", "CONT-ADAPTER-IDENTITY"},
-        CONTINUOUS_LABEL_SCHEMA_ID: {"A0-CONFIG-IDENTITY", "CONT-ADAPTER-IDENTITY"},
+        CONTINUOUS_ENTRY_SCHEMA_ID: {"CONT-ADAPTER-IDENTITY"},
+        CONTINUOUS_LABEL_SCHEMA_ID: {"CONT-ADAPTER-IDENTITY"},
         LONG_SIGNAL_SCHEMA_ID: {
-            "A0-CONFIG-IDENTITY",
             "A0-POPULATION-COMPLETENESS",
             "LONG-ADAPTER-IDENTITY",
             "LONG-AVAILABILITY-TIMES",
             "LONG-REGIME-CONTEXT",
             "LONG-BTC-MONTH-REGIME",
         },
-        LONG_ENTRY_SCHEMA_ID: {"A0-CONFIG-IDENTITY", "LONG-ADAPTER-IDENTITY"},
-        LONG_LABEL_SCHEMA_ID: {"A0-CONFIG-IDENTITY", "LONG-ADAPTER-IDENTITY"},
+        LONG_ENTRY_SCHEMA_ID: {"LONG-ADAPTER-IDENTITY"},
+        LONG_LABEL_SCHEMA_ID: {"LONG-ADAPTER-IDENTITY"},
     }
     assert all(
         field.implementation not in {"missing", "semantic_mismatch"}
@@ -294,6 +292,27 @@ def test_long_exact_s02_wrapper_owns_rank_and_projection_surfaces() -> None:
             field = _field_by_name(LONG_SIGNAL_SCHEMA_ID, f"{prefix}_{suffix}")
             assert field.implementation == "adapter"
             assert field.issue_id is None
+
+
+def test_long_schema_owner_mechanically_validates_config_embedded_metadata() -> None:
+    config = _v11a_long_native_config()
+    surface = long_schema_runtime_parity_surface(config)
+
+    assert surface["validated_targets"] == [
+        "population_and_rolling_windows",
+        "classifier_and_exit_shape",
+        "trigger_and_exit_profile",
+        "tier_c_forced_null_gates",
+    ]
+    assert "turnover_median_90d" in surface["validated_schema_fields"]
+    assert "realized_vol" in surface["validated_schema_fields"]
+    assert "fc_exit_max_hold_hours" in surface["validated_schema_fields"]
+    assert surface["classifier_and_exit_shape"]["fc_exit_max_hold_hours"] == 72
+
+    with pytest.raises(LongSchemaParityError, match="realized_vol.*metadata drifted"):
+        long_schema_runtime_parity_surface(replace(config, vol_estimate_window_days=31))
+    with pytest.raises(LongSchemaParityError, match="fc_exit_max_hold_hours.*metadata drifted"):
+        long_schema_runtime_parity_surface(replace(config, fc_max_hold_days=4))
 
 
 def test_payloads_and_hashes_are_stable_json_ready_receipts() -> None:

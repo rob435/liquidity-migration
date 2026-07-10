@@ -84,8 +84,7 @@ def source_and_features() -> tuple[pl.DataFrame, pl.DataFrame]:
     hourly = _hourly_source(days=100)
     all_features = _built_features(hourly)
     features = all_features.filter(
-        (pl.col("ts_ms") >= START_TS_MS + 93 * MS_PER_DAY)
-        & (pl.col("ts_ms") < START_TS_MS + 96 * MS_PER_DAY)
+        (pl.col("ts_ms") >= START_TS_MS + 93 * MS_PER_DAY) & (pl.col("ts_ms") < START_TS_MS + 96 * MS_PER_DAY)
     ).sort(["ts_ms", "symbol"])
     assert features.height == 9
     return hourly, features
@@ -111,15 +110,9 @@ def test_builds_exact_source_sidecars_and_integrates_with_context_adapter(
     assert bundle.source_availability["signal_feature_available_ts_ms"].equals(
         bundle.source_availability["signal_ts_ms"]
     )
-    assert bundle.source_availability["daily_bar_available_ts_ms"].equals(
-        bundle.source_availability["signal_ts_ms"]
-    )
-    assert bundle.source_availability["btc_context_available_ts_ms"].equals(
-        bundle.source_availability["signal_ts_ms"]
-    )
-    assert bundle.source_availability["eth_context_available_ts_ms"].equals(
-        bundle.source_availability["signal_ts_ms"]
-    )
+    assert bundle.source_availability["daily_bar_available_ts_ms"].equals(bundle.source_availability["signal_ts_ms"])
+    assert bundle.source_availability["btc_context_available_ts_ms"].equals(bundle.source_availability["signal_ts_ms"])
+    assert bundle.source_availability["eth_context_available_ts_ms"].equals(bundle.source_availability["signal_ts_ms"])
     assert bundle.source_availability["btc_month_context_available_ts_ms"].equals(
         bundle.source_availability["signal_ts_ms"]
     )
@@ -128,15 +121,8 @@ def test_builds_exact_source_sidecars_and_integrates_with_context_adapter(
     assert bundle.btc_month_context["btc_month_regime_available"].to_list() == [True, True, True]
     assert bundle.btc_month_context["btc_month_regime_pass"].to_list() == [True, True, True]
 
-    feature_month = (
-        features.select("ts_ms", "btc_month_ret_30d")
-        .unique()
-        .sort("ts_ms")["btc_month_ret_30d"]
-        .to_list()
-    )
-    assert bundle.btc_month_context["btc_month_regime_value"].to_list() == pytest.approx(
-        feature_month
-    )
+    feature_month = features.select("ts_ms", "btc_month_ret_30d").unique().sort("ts_ms")["btc_month_ret_30d"].to_list()
+    assert bundle.btc_month_context["btc_month_regime_value"].to_list() == pytest.approx(feature_month)
 
     feature_tape = build_long_feature_tape(
         features,
@@ -145,6 +131,7 @@ def test_builds_exact_source_sidecars_and_integrates_with_context_adapter(
     )
     contextual = attach_long_source_context(
         feature_tape,
+        config=config,
         source_availability=bundle.source_availability,
         regime_context=bundle.regime_context,
         btc_month_context=bundle.btc_month_context,
@@ -179,8 +166,7 @@ def test_builds_exact_source_sidecars_and_integrates_with_context_adapter(
 def test_missing_btc_and_eth_remain_null_with_false_availability() -> None:
     hourly = _hourly_source(symbols=("AAAUSDT",))
     features = _built_features(hourly).filter(
-        (pl.col("symbol") == "AAAUSDT")
-        & (pl.col("ts_ms") == START_TS_MS + 35 * MS_PER_DAY)
+        (pl.col("symbol") == "AAAUSDT") & (pl.col("ts_ms") == START_TS_MS + 35 * MS_PER_DAY)
     )
     bundle = build_long_a0_sidecars(
         hourly,
@@ -222,9 +208,7 @@ def test_calendar_gap_nulls_regime_instead_of_stretching_the_30d_window() -> Non
         )
     )
     signal_ts_ms = START_TS_MS + 35 * MS_PER_DAY
-    features = _built_features(hourly).filter(
-        (pl.col("symbol") == "AAAUSDT") & (pl.col("ts_ms") == signal_ts_ms)
-    )
+    features = _built_features(hourly).filter((pl.col("symbol") == "AAAUSDT") & (pl.col("ts_ms") == signal_ts_ms))
     assert features["regime_on"].to_list() == [False]
     assert features["btc_sma_dist"].to_list() == [0.0]
 
@@ -333,9 +317,7 @@ def test_wrong_config_and_outcome_columns_fail_closed(
     with pytest.raises(LongA0SidecarError, match="exact _v11a_long_native_config"):
         build_long_a0_sidecars(hourly, features, config=wrong)
 
-    feature_with_outcome = features.with_columns(
-        pl.lit(0.1, dtype=pl.Float64).alias("future_return_24h")
-    )
+    feature_with_outcome = features.with_columns(pl.lit(0.1, dtype=pl.Float64).alias("future_return_24h"))
     with pytest.raises(LongA0SidecarError, match="outcome-like"):
         build_long_a0_sidecars(
             hourly,
@@ -343,9 +325,7 @@ def test_wrong_config_and_outcome_columns_fail_closed(
             config=_v11a_long_native_config(),
         )
 
-    hourly_with_outcome = hourly.with_columns(
-        pl.lit(1.0, dtype=pl.Float64).alias("next_hour_close")
-    )
+    hourly_with_outcome = hourly.with_columns(pl.lit(1.0, dtype=pl.Float64).alias("next_hour_close"))
     with pytest.raises(LongA0SidecarError, match="outcome-like"):
         build_long_a0_sidecars(
             hourly_with_outcome,

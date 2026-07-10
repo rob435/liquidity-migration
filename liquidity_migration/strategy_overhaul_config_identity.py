@@ -21,7 +21,7 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, fields, is_dataclass
-from typing import Any, TypeAlias, TypedDict
+from typing import Any, TypeAlias, TypedDict, cast
 
 from . import promoted
 from .continuous_demo import (
@@ -36,6 +36,11 @@ CONFIG_IDENTITY_SCHEMA_VERSION = "strategy_overhaul_a0_config_identity_v1"
 CANONICAL_CONFIG_ARTIFACT_TYPE = "strategy_overhaul_a0_canonical_config"
 SCOPE_ARTIFACT_TYPE = "strategy_overhaul_a0_registered_scope"
 COMPONENT_CONFIG_ARTIFACT_TYPE = "strategy_overhaul_a0_component_config"
+S02_CONFIG_PARITY_MANIFEST_SCHEMA_VERSION = "strategy_overhaul_a0_s02_config_parity_manifest_v2"
+# SHA-256 of the ordered target/field/consumer/validator contract projection.
+# Any coverage change must update the builder and this value together; otherwise
+# a reduced or substituted set of self-attested targets cannot derive WIRED.
+_S02_PARITY_CONTRACT_SHA256 = "bb878d7c3ecfdd969036736def792b8a2ce89a14d7ff5d74b53312bb681fade0"
 
 LONG_WINDOW_FIELDS = ("start_date", "end_date", "read_start_date")
 
@@ -422,13 +427,9 @@ def registered_scope_bounds_ms(
             date = dt.date.fromisoformat(raw)
         except ValueError as exc:
             raise A0ConfigIdentityError(f"registered scope {name} must be an ISO date") from exc
-        output[f"{name}_ms"] = int(
-            dt.datetime.combine(date, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000
-        )
+        output[f"{name}_ms"] = int(dt.datetime.combine(date, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000)
     if not (
-        output["causal_read_start_date_ms"]
-        <= output["signal_start_date_ms"]
-        < output["signal_end_date_exclusive_ms"]
+        output["causal_read_start_date_ms"] <= output["signal_start_date_ms"] < output["signal_end_date_exclusive_ms"]
     ):
         raise A0ConfigIdentityError("registered scope dates are not strictly ordered")
     return output
@@ -529,18 +530,111 @@ def _long_parity_values(identity: dict[str, JsonValue]) -> dict[str, JsonValue]:
     }
 
 
-def derive_s02_parity_status(targets: list[JsonValue]) -> str:
-    """Derive the aggregate status without trusting per-target declarations."""
+def _s02_parity_contract_projection(targets: list[JsonValue]) -> list[JsonValue] | None:
+    projection: list[JsonValue] = []
+    for target in targets:
+        if not isinstance(target, dict):
+            return None
+        expected = target.get("expected")
+        consumers = target.get("consumers")
+        required = target.get("required_validator_fields")
+        validations = target.get("consumer_validations")
+        if (
+            not isinstance(target.get("sleeve"), str)
+            or not isinstance(target.get("target"), str)
+            or not isinstance(expected, dict)
+            or not isinstance(consumers, list)
+            or not isinstance(required, dict)
+            or not isinstance(validations, list)
+        ):
+            return None
+        validator_projection: list[JsonValue] = []
+        for record in validations:
+            if not isinstance(record, dict):
+                return None
+            validator_projection.append(
+                {
+                    "consumer_validator": record.get("consumer_validator"),
+                    "required_fields": record.get("required_fields"),
+                    "required_consumers": record.get("required_consumers"),
+                }
+            )
+        projection.append(
+            {
+                "sleeve": target["sleeve"],
+                "target": target["target"],
+                "expected_fields": sorted(expected),
+                "consumers": consumers,
+                "required_validator_fields": required,
+                "validators": validator_projection,
+            }
+        )
+    return projection
 
-    if not targets:
+
+def derive_s02_parity_status(targets: list[JsonValue]) -> str:
+    """Derive aggregate wiring only from values and validator evidence.
+
+    Per-target ``status`` strings are deliberately ignored.  A target is wired
+    only when every independently required validator produced a verified
+    record, the observed values exactly equal the canonical expectation, and
+    every named consumer was covered by one of those verified records.
+    """
+
+    contract = _s02_parity_contract_projection(targets)
+    if contract is None or canonical_json_sha256(contract) != _S02_PARITY_CONTRACT_SHA256:
         return "UNWIRED"
     for target in targets:
         if not isinstance(target, dict):
             return "UNWIRED"
-        unresolved = target.get("unresolved_consumers")
-        if not isinstance(unresolved, list) or unresolved:
+        expected = target.get("expected")
+        observed = target.get("observed")
+        if not isinstance(expected, dict) or observed != expected:
             return "UNWIRED"
-        if target.get("observed") != target.get("expected"):
+        consumers = target.get("consumers")
+        checked = target.get("checked_consumers")
+        unresolved = target.get("unresolved_consumers")
+        if (
+            not isinstance(consumers, list)
+            or not isinstance(checked, list)
+            or checked != consumers
+            or not isinstance(unresolved, list)
+            or unresolved
+        ):
+            return "UNWIRED"
+        required = target.get("required_validator_fields")
+        validations = target.get("consumer_validations")
+        if not isinstance(required, dict) or not required or not isinstance(validations, list):
+            return "UNWIRED"
+        records = {
+            record.get("consumer_validator"): record
+            for record in validations
+            if isinstance(record, dict) and isinstance(record.get("consumer_validator"), str)
+        }
+        if len(records) != len(validations) or set(records) != set(required):
+            return "UNWIRED"
+        covered_fields: set[str] = set()
+        covered_consumers: set[str] = set()
+        for validator, field_names in required.items():
+            record = records.get(validator)
+            if (
+                not isinstance(field_names, list)
+                or not field_names
+                or not isinstance(record, dict)
+                or record.get("required_fields") != field_names
+                or record.get("metadata_match") is not True
+                or record.get("values_match") is not True
+                or record.get("status") != "VERIFIED"
+            ):
+                return "UNWIRED"
+            required_consumers = record.get("required_consumers")
+            if not isinstance(required_consumers, list) or any(
+                not isinstance(consumer, str) or not consumer for consumer in required_consumers
+            ):
+                return "UNWIRED"
+            covered_fields.update(field_names)
+            covered_consumers.update(required_consumers)
+        if covered_fields != set(expected) or covered_consumers != set(consumers):
             return "UNWIRED"
     return "WIRED"
 
@@ -548,14 +642,14 @@ def derive_s02_parity_status(targets: list[JsonValue]) -> str:
 def s02_config_parity_manifest(
     identities: dict[str, dict[str, JsonValue]] | None = None,
 ) -> dict[str, JsonValue]:
-    """Derive config-parity status from canonical values and live S02 guards.
+    """Derive config parity from canonical values and owner-local validators.
 
-    ``expected`` always comes from the canonical factories. ``observed`` comes
-    from the same guard functions invoked by the S02 builders and therefore
-    reflects the module globals and config flow actually used at runtime.  A
-    target is ``WIRED`` only when its values match and every listed consumer has
-    a mechanical check.  Future population builders and downstream receipt
-    propagation remain explicit unresolved consumers rather than declarations.
+    The manifest owns the required coverage matrix, but it does not assert that
+    a consumer was checked.  Each named consumer module returns an executable
+    validator receipt containing its exact target fields and consumers.  This
+    function calls those validators, checks their metadata and values against
+    the independent matrix below, and derives checked consumers solely from
+    successful validator records.
     """
 
     resolved = identities or derive_a0_config_identities()
@@ -594,6 +688,7 @@ def s02_config_parity_manifest(
                 "continuous_population_scout.CURRENT_LIQUIDITY_FLOOR",
                 "continuous_population_scout.build_continuous_feature_tape decile=9 literals",
                 "continuous_population_scout.build_continuous_feature_tape max_ret168 literals",
+                "strategy_overhaul_stage_receipt._validate_continuous_s02 rmom quantile semantics",
             ],
         },
         {
@@ -613,6 +708,7 @@ def s02_config_parity_manifest(
                 "strategy_overhaul_s02.CANONICAL_BTC_UPTREND_LOOKBACK_DAYS",
                 "strategy_overhaul_context.attach_continuous_market_context",
                 "strategy_overhaul_context.attach_continuous_static_diagnostics BTC-uptrend pass",
+                "strategy_overhaul_stage_receipt._validate_continuous_s02/_validate_continuous_s03 config-derived timing",
             ],
         },
         {
@@ -642,7 +738,7 @@ def s02_config_parity_manifest(
             "target": "population_exclusions",
             "expected": {"exclude_symbols": continuous["exclude_symbols"]},
             "consumers": [
-                "future receipt-bound CONTINUOUS expected-population builder",
+                "strategy_overhaul_expected_population.build_expected_population_artifacts",
             ],
         },
         {
@@ -673,9 +769,10 @@ def s02_config_parity_manifest(
                 )
             },
             "consumers": [
-                "future receipt-bound LONG expected-population builder",
+                "strategy_overhaul_expected_population.build_expected_population_artifacts",
                 "strategy_overhaul_schemas LONG S02 turnover_median_90d/realized_vol metadata",
                 "strategy_overhaul_long_context universe-rank reconstruction",
+                "strategy_overhaul_stage_receipt._validate_long_s02 rank/membership semantics",
             ],
         },
         {
@@ -708,6 +805,7 @@ def s02_config_parity_manifest(
                 "long_population_scout.build_long_feature_tape classifier_selected=fomo_chase",
                 "long_population_scout.build_long_feature_tape fc_exit_max_hold_hours",
                 "strategy_overhaul_schemas LONG S02 classifier and frozen-72h metadata",
+                "strategy_overhaul_stage_receipt._validate_long_s02 max-hold semantics",
             ],
         },
         {
@@ -719,6 +817,7 @@ def s02_config_parity_manifest(
                 "long_population_scout._fc_gate_diagnostics",
                 "long_population_scout.build_long_feature_tape ATR/fallback exit fields",
                 "strategy_overhaul_schemas LONG S02 fixed-15pct/trigger/ATR-exit metadata",
+                "strategy_overhaul_stage_receipt._validate_long_s02 ATR-fallback semantics",
             ],
         },
         {
@@ -734,107 +833,429 @@ def s02_config_parity_manifest(
             ],
         },
     ]
-    guard_surfaces: dict[str, dict[str, dict[str, JsonValue]]] = {}
+    continuous_s02_validator = "liquidity_migration.strategy_overhaul_s02.continuous_s02_runtime_parity_surface"
+    continuous_population_validator = (
+        "liquidity_migration.strategy_overhaul_expected_population."
+        "continuous_expected_population_consumer_parity_surface"
+    )
+    long_s02_validator = "liquidity_migration.strategy_overhaul_long_s02.long_s02_runtime_parity_surface"
+    long_population_builder_validator = (
+        "liquidity_migration.strategy_overhaul_expected_population.long_expected_population_consumer_parity_surface"
+    )
+    long_row_builder_validator = "liquidity_migration.long_population_scout.long_population_runtime_parity_surface"
+    long_context_validator = "liquidity_migration.strategy_overhaul_long_context.long_context_runtime_parity_surface"
+    long_schema_validator = "liquidity_migration.strategy_overhaul_schemas.long_schema_runtime_parity_surface"
+    stage_receipt_validator = (
+        "liquidity_migration.strategy_overhaul_stage_receipt.stage_receipt_config_consumer_parity_surface"
+    )
+
+    continuous_config = apply_continuous_demo_profile(ContinuousDemoCycleConfig(**CONTINUOUS_PROFILE_INPUTS))
+    long_config = _v11a_long_native_config()
+    validator_surfaces: dict[str, dict[str, object]] = {}
+    validator_errors: dict[str, str] = {}
     guard_errors: dict[str, str] = {}
-    try:
-        from .strategy_overhaul_s02 import continuous_s02_runtime_parity_surface
 
-        continuous_config = apply_continuous_demo_profile(ContinuousDemoCycleConfig(**CONTINUOUS_PROFILE_INPUTS))
-        guard_surfaces["continuous"] = continuous_s02_runtime_parity_surface(
-            continuous_config,
-            resolved["continuous"],
-        )
-    except (AssertionError, KeyError, TypeError, ValueError) as exc:
-        guard_errors["continuous"] = f"{type(exc).__name__}: {exc}"
-    try:
-        from .strategy_overhaul_long_s02 import long_s02_runtime_parity_surface
+    def capture(sleeve: str, validator: str, function: Any, *args: object) -> None:
+        try:
+            surface = function(*args)
+            if not isinstance(surface, dict):
+                raise TypeError("consumer validator did not return an object")
+            validator_surfaces[validator] = surface
+        except (AssertionError, KeyError, TypeError, ValueError) as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            validator_errors[validator] = error
+            guard_errors.setdefault(sleeve, error)
 
-        guard_surfaces["long"] = long_s02_runtime_parity_surface(
-            _v11a_long_native_config(),
-            resolved["long"],
-        )
-    except (AssertionError, KeyError, TypeError, ValueError) as exc:
-        guard_errors["long"] = f"{type(exc).__name__}: {exc}"
+    from .long_population_scout import long_population_runtime_parity_surface
+    from .strategy_overhaul_expected_population import (
+        continuous_expected_population_consumer_parity_surface,
+        long_expected_population_consumer_parity_surface,
+    )
+    from .strategy_overhaul_long_context import long_context_runtime_parity_surface
+    from .strategy_overhaul_long_s02 import long_s02_runtime_parity_surface
+    from .strategy_overhaul_s02 import continuous_s02_runtime_parity_surface
+    from .strategy_overhaul_schemas import long_schema_runtime_parity_surface
+    from .strategy_overhaul_stage_receipt import stage_receipt_config_consumer_parity_surface
 
-    checked_consumers: dict[tuple[str, str], set[str]] = {
-        (
-            "continuous",
-            "full_config_and_scope_identity",
-        ): {"strategy_overhaul_s02.build_continuous_s02_feature_tape"},
-        ("continuous", "selection_profile"): {
-            "continuous_population_scout.CURRENT_RMOM_QUANTILE",
-            "continuous_population_scout.CURRENT_LIQUIDITY_FLOOR",
-            "continuous_population_scout.build_continuous_feature_tape decile=9 literals",
-            "continuous_population_scout.build_continuous_feature_tape max_ret168 literals",
-        },
-        ("continuous", "decision_and_btc_gate"): {
-            "continuous_population_scout.build_continuous_feature_tape +1h decision literals",
-            "strategy_overhaul_s02.CANONICAL_BTC_UPTREND_LOOKBACK_DAYS",
-            "strategy_overhaul_context.attach_continuous_market_context",
-            "strategy_overhaul_context.attach_continuous_static_diagnostics BTC-uptrend pass",
-        },
-        ("continuous", "component_identity"): {
-            "continuous_population_scout.COMPONENT_BITS",
-            "continuous_population_scout.COMPONENT_WEIGHTS",
-            "continuous_population_scout.build_continuous_feature_tape trigger/tag/mask literals",
-            "strategy_overhaul_context.attach_continuous_static_diagnostics component map",
-            "strategy_overhaul_identity_adapter._attach_current_ages >=240 literal",
-            "strategy_overhaul_s02 component-field loops",
-        },
-        ("long", "full_config_and_scope_identity"): {
-            "long_population_scout._require_frozen_v11a_config",
-            "strategy_overhaul_long_s02.build_long_s02_feature_tape",
-        },
-        ("long", "regime_context"): {
-            "strategy_overhaul_long_context.REGIME_CONTEXT_SCHEMA *_sma_30d fields",
-            "strategy_overhaul_long_context._validate_regime_context",
-            "strategy_overhaul_long_context._require_feature_columns BTC-month gate-off assumption",
-            "strategy_overhaul_long_context._validate_btc_month_context gate-off pass semantics",
-        },
-        ("long", "classifier_and_exit_shape"): {
-            "long_population_scout.build_long_feature_tape classifier_selected=fomo_chase",
-            "long_population_scout.build_long_feature_tape fc_exit_max_hold_hours",
-        },
-        ("long", "trigger_and_exit_profile"): {
-            "long_population_scout._trigger_diagnostics",
-            "long_population_scout._fc_gate_diagnostics",
-            "long_population_scout.build_long_feature_tape ATR/fallback exit fields",
-        },
-        ("long", "tier_c_forced_null_gates"): {
-            "strategy_overhaul_long_s02._A0_FORCED_NULL_TIER_C_COLUMNS",
-        },
+    capture(
+        "continuous",
+        continuous_s02_validator,
+        continuous_s02_runtime_parity_surface,
+        continuous_config,
+        resolved["continuous"],
+    )
+    capture(
+        "continuous",
+        continuous_population_validator,
+        continuous_expected_population_consumer_parity_surface,
+        continuous_config,
+        resolved["continuous"],
+    )
+    capture(
+        "continuous",
+        stage_receipt_validator,
+        stage_receipt_config_consumer_parity_surface,
+        resolved["continuous"],
+    )
+    capture(
+        "long",
+        long_s02_validator,
+        long_s02_runtime_parity_surface,
+        long_config,
+        resolved["long"],
+    )
+    capture(
+        "long",
+        long_population_builder_validator,
+        long_expected_population_consumer_parity_surface,
+        long_config,
+        resolved["long"],
+    )
+    capture("long", long_row_builder_validator, long_population_runtime_parity_surface, long_config)
+    capture("long", long_context_validator, long_context_runtime_parity_surface, long_config)
+    capture("long", long_schema_validator, long_schema_runtime_parity_surface, long_config)
+    # The same validator implementation is called separately for each sleeve;
+    # retain both owner-local surfaces under sleeve-qualified internal keys.
+    long_stage_surface_key = f"{stage_receipt_validator}#long"
+    capture(
+        "long",
+        long_stage_surface_key,
+        stage_receipt_config_consumer_parity_surface,
+        resolved["long"],
+    )
+
+    # validator, required fields, consumers proved by that validator
+    requirements: dict[
+        tuple[str, str],
+        list[tuple[str, list[str], list[str]]],
+    ] = {
+        ("continuous", "full_config_and_scope_identity"): [
+            (
+                continuous_s02_validator,
+                ["full_config_sha256", "registered_scope_sha256", "component_config_sha256"],
+                ["strategy_overhaul_s02.build_continuous_s02_feature_tape"],
+            ),
+            (
+                stage_receipt_validator,
+                ["full_config_sha256", "registered_scope_sha256", "component_config_sha256"],
+                ["all downstream CONTINUOUS S03/S04 stage receipts"],
+            ),
+        ],
+        ("continuous", "selection_profile"): [
+            (
+                continuous_s02_validator,
+                ["strategy_profile", "side", "decile", "feature_set", "rmom_quantile", "liq_turnover_min"],
+                [
+                    "continuous_population_scout.CURRENT_RMOM_QUANTILE",
+                    "continuous_population_scout.CURRENT_LIQUIDITY_FLOOR",
+                    "continuous_population_scout.build_continuous_feature_tape decile=9 literals",
+                    "continuous_population_scout.build_continuous_feature_tape max_ret168 literals",
+                ],
+            ),
+            (
+                stage_receipt_validator,
+                ["rmom_quantile"],
+                ["strategy_overhaul_stage_receipt._validate_continuous_s02 rmom quantile semantics"],
+            ),
+        ],
+        ("continuous", "decision_and_btc_gate"): [
+            (
+                continuous_s02_validator,
+                ["entry_confirm_delay_hours", "btc_trend_gate", "btc_trend_lookback_days", "btc_trend_mode"],
+                [
+                    "continuous_population_scout.build_continuous_feature_tape +1h decision literals",
+                    "strategy_overhaul_s02.CANONICAL_BTC_UPTREND_LOOKBACK_DAYS",
+                    "strategy_overhaul_context.attach_continuous_market_context",
+                    "strategy_overhaul_context.attach_continuous_static_diagnostics BTC-uptrend pass",
+                ],
+            ),
+            (
+                stage_receipt_validator,
+                ["entry_confirm_delay_hours"],
+                [
+                    "strategy_overhaul_stage_receipt._validate_continuous_s02/_validate_continuous_s03 config-derived timing"
+                ],
+            ),
+        ],
+        ("continuous", "component_identity"): [
+            (
+                continuous_s02_validator,
+                [
+                    "component_order",
+                    "component_trigger_by_name",
+                    "component_age_days_min_by_name",
+                    "component_bit_by_name",
+                    "component_weight_by_name",
+                ],
+                [
+                    "continuous_population_scout.COMPONENT_BITS",
+                    "continuous_population_scout.COMPONENT_WEIGHTS",
+                    "continuous_population_scout.build_continuous_feature_tape trigger/tag/mask literals",
+                    "strategy_overhaul_context.attach_continuous_static_diagnostics component map",
+                    "strategy_overhaul_identity_adapter._attach_current_ages >=240 literal",
+                    "strategy_overhaul_s02 component-field loops",
+                ],
+            )
+        ],
+        ("continuous", "population_exclusions"): [
+            (continuous_s02_validator, ["exclude_symbols"], []),
+            (
+                continuous_population_validator,
+                ["exclude_symbols"],
+                ["strategy_overhaul_expected_population.build_expected_population_artifacts"],
+            ),
+        ],
+        ("long", "full_config_and_scope_identity"): [
+            (
+                long_s02_validator,
+                ["full_config_sha256", "registered_scope_sha256", "undated_window_fields"],
+                [
+                    "long_population_scout._require_frozen_v11a_config",
+                    "strategy_overhaul_long_s02.build_long_s02_feature_tape",
+                ],
+            ),
+            (
+                long_stage_surface_key,
+                ["full_config_sha256", "registered_scope_sha256", "undated_window_fields"],
+                ["all downstream LONG S03/S04 stage receipts"],
+            ),
+        ],
+        ("long", "population_and_rolling_windows"): [
+            (
+                long_s02_validator,
+                list(
+                    cast(
+                        dict[str, JsonValue],
+                        next(
+                            row
+                            for row in targets
+                            if isinstance(row, dict)
+                            and row["sleeve"] == "long"
+                            and row["target"] == "population_and_rolling_windows"
+                        )["expected"],
+                    )
+                ),
+                [],
+            ),
+            (
+                long_population_builder_validator,
+                [
+                    "exclude_symbols",
+                    "universe_size",
+                    "universe_volume_window_days",
+                    "min_listing_history_days",
+                    "vol_estimate_window_days",
+                ],
+                ["strategy_overhaul_expected_population.build_expected_population_artifacts"],
+            ),
+            (
+                long_context_validator,
+                ["universe_size", "universe_volume_window_days", "min_listing_history_days"],
+                ["strategy_overhaul_long_context universe-rank reconstruction"],
+            ),
+            (
+                long_schema_validator,
+                ["universe_volume_window_days", "vol_estimate_window_days"],
+                ["strategy_overhaul_schemas LONG S02 turnover_median_90d/realized_vol metadata"],
+            ),
+            (
+                long_stage_surface_key,
+                ["universe_size", "universe_volume_window_days", "min_listing_history_days"],
+                ["strategy_overhaul_stage_receipt._validate_long_s02 rank/membership semantics"],
+            ),
+        ],
+        ("long", "regime_context"): [
+            (long_s02_validator, ["regime_symbol", "regime_sma_days", "btc_month_regime_gate"], []),
+            (
+                long_context_validator,
+                ["regime_symbol", "regime_sma_days", "btc_month_regime_gate"],
+                [
+                    "strategy_overhaul_long_context.REGIME_CONTEXT_SCHEMA *_sma_30d fields",
+                    "strategy_overhaul_long_context._validate_regime_context",
+                    "strategy_overhaul_long_context._require_feature_columns BTC-month gate-off assumption",
+                    "strategy_overhaul_long_context._validate_btc_month_context gate-off pass semantics",
+                ],
+            ),
+        ],
+        ("long", "classifier_and_exit_shape"): [
+            (long_s02_validator, ["active_pattern_toggles", "fc_max_hold_days", "fc_exit_max_hold_hours"], []),
+            (
+                long_row_builder_validator,
+                ["active_pattern_toggles", "fc_max_hold_days", "fc_exit_max_hold_hours"],
+                [
+                    "long_population_scout.build_long_feature_tape classifier_selected=fomo_chase",
+                    "long_population_scout.build_long_feature_tape fc_exit_max_hold_hours",
+                ],
+            ),
+            (
+                long_schema_validator,
+                ["fc_max_hold_days", "fc_exit_max_hold_hours"],
+                ["strategy_overhaul_schemas LONG S02 classifier and frozen-72h metadata"],
+            ),
+            (
+                long_stage_surface_key,
+                ["fc_max_hold_days"],
+                ["strategy_overhaul_stage_receipt._validate_long_s02 max-hold semantics"],
+            ),
+        ],
+        ("long", "trigger_and_exit_profile"): [
+            (
+                long_s02_validator,
+                list(
+                    cast(
+                        dict[str, JsonValue],
+                        next(
+                            row
+                            for row in targets
+                            if isinstance(row, dict)
+                            and row["sleeve"] == "long"
+                            and row["target"] == "trigger_and_exit_profile"
+                        )["expected"],
+                    )
+                ),
+                [],
+            ),
+            (
+                long_row_builder_validator,
+                list(
+                    cast(
+                        dict[str, JsonValue],
+                        next(
+                            row
+                            for row in targets
+                            if isinstance(row, dict)
+                            and row["sleeve"] == "long"
+                            and row["target"] == "trigger_and_exit_profile"
+                        )["expected"],
+                    )
+                ),
+                [
+                    "long_population_scout._trigger_diagnostics",
+                    "long_population_scout._fc_gate_diagnostics",
+                    "long_population_scout.build_long_feature_tape ATR/fallback exit fields",
+                ],
+            ),
+            (
+                long_schema_validator,
+                ["fc_min_day_return", "fc_use_atr_exits"],
+                ["strategy_overhaul_schemas LONG S02 fixed-15pct/trigger/ATR-exit metadata"],
+            ),
+            (
+                long_stage_surface_key,
+                ["fc_use_atr_exits"],
+                ["strategy_overhaul_stage_receipt._validate_long_s02 ATR-fallback semantics"],
+            ),
+        ],
+        ("long", "tier_c_forced_null_gates"): [
+            (
+                long_s02_validator,
+                ["fc_lsr_filter", "fc_require_oi_rising"],
+                ["strategy_overhaul_long_s02._A0_FORCED_NULL_TIER_C_COLUMNS"],
+            ),
+            (
+                long_schema_validator,
+                ["fc_lsr_filter", "fc_require_oi_rising"],
+                ["strategy_overhaul_schemas LONG S02 global_lsr/oi_chg_7d null semantics"],
+            ),
+        ],
     }
+
     target_statuses: list[str] = []
     for raw in targets:
         assert isinstance(raw, dict)
         sleeve = str(raw["sleeve"])
         target = str(raw["target"])
         consumers = raw["consumers"]
-        assert isinstance(consumers, list)
-        observed = (guard_surfaces.get(sleeve) or {}).get(target)
-        checked = checked_consumers.get((sleeve, target), set()) if observed is not None else set()
+        expected = raw["expected"]
+        assert isinstance(consumers, list) and isinstance(expected, dict)
+        target_requirements = requirements[(sleeve, target)]
+        required_validator_fields = {
+            validator.removesuffix("#long"): field_names
+            for validator, field_names, _required_consumers in target_requirements
+        }
+        validation_records: list[JsonValue] = []
+        checked: set[str] = set()
+        observed_values: dict[str, JsonValue] = {}
+        conflicting_fields: set[str] = set()
+        for lookup_validator, field_names, required_consumers in target_requirements:
+            declared_validator = lookup_validator.removesuffix("#long")
+            surface = validator_surfaces.get(lookup_validator)
+            fragment = surface.get(target) if surface is not None else None
+            declared_targets = surface.get("validated_targets") if surface is not None else None
+            declared_fields = surface.get("validated_target_fields") if surface is not None else None
+            declared_consumers = surface.get("validated_consumers") if surface is not None else None
+            metadata_match = bool(
+                surface is not None
+                and surface.get("consumer_validator") == declared_validator
+                and isinstance(declared_targets, list)
+                and target in declared_targets
+                and isinstance(declared_fields, dict)
+                and declared_fields.get(target) == field_names
+                and isinstance(declared_consumers, dict)
+                and declared_consumers.get(target) == required_consumers
+                and isinstance(fragment, dict)
+                and list(fragment) == field_names
+            )
+            values_match = bool(
+                isinstance(fragment, dict) and all(fragment.get(field) == expected.get(field) for field in field_names)
+            )
+            if isinstance(fragment, dict):
+                for field in field_names:
+                    value = fragment.get(field)
+                    if field in observed_values and observed_values[field] != value:
+                        conflicting_fields.add(field)
+                    else:
+                        observed_values[field] = cast(JsonValue, value)
+            status = "VERIFIED" if metadata_match and values_match else "UNVERIFIED"
+            if status == "VERIFIED":
+                checked.update(required_consumers)
+            validation_records.append(
+                {
+                    "consumer_validator": declared_validator,
+                    "required_fields": field_names,
+                    "required_consumers": required_consumers,
+                    "metadata_match": metadata_match,
+                    "values_match": values_match,
+                    "status": status,
+                    "error": validator_errors.get(lookup_validator),
+                }
+            )
+        complete_fields = set(observed_values) == set(expected) and not conflicting_fields
+        observed: JsonValue = observed_values if complete_fields else None
         unresolved = [consumer for consumer in consumers if consumer not in checked]
-        values_match = observed == raw["expected"]
-        status = "WIRED" if values_match and not unresolved else "UNWIRED"
+        values_match = observed == expected
         raw["observed"] = observed
         raw["values_match"] = values_match
         raw["checked_consumers"] = [consumer for consumer in consumers if consumer in checked]
         raw["unresolved_consumers"] = unresolved
-        raw["status"] = status
-        if sleeve in guard_errors:
-            raw["guard_error"] = guard_errors[sleeve]
-        target_statuses.append(status)
+        raw["required_validator_fields"] = required_validator_fields
+        raw["consumer_validations"] = validation_records
+        target_status = (
+            "WIRED"
+            if values_match
+            and not unresolved
+            and all(isinstance(record, dict) and record.get("status") == "VERIFIED" for record in validation_records)
+            else "UNWIRED"
+        )
+        raw["status"] = target_status
+        if conflicting_fields:
+            raw["conflicting_observed_fields"] = sorted(conflicting_fields)
+        target_statuses.append(target_status)
     overall_status = derive_s02_parity_status(targets)
     return {
-        "schema_version": CONFIG_IDENTITY_SCHEMA_VERSION,
+        "schema_version": S02_CONFIG_PARITY_MANIFEST_SCHEMA_VERSION,
         "artifact_type": "strategy_overhaul_a0_s02_config_parity_manifest",
         "status": overall_status,
         "status_derivation": {
-            "rule": "WIRED iff every target has exact expected/observed parity and no unresolved consumer",
+            "rule": (
+                "WIRED iff every target has exact expected/observed parity, every independently "
+                "required owner validator is VERIFIED, and no named consumer is unresolved"
+            ),
             "target_count": len(target_statuses),
             "wired_target_count": target_statuses.count("WIRED"),
             "unwired_target_count": target_statuses.count("UNWIRED"),
             "guard_errors": guard_errors,
+            "validator_errors": validator_errors,
         },
         "targets": targets,
     }
@@ -845,6 +1266,7 @@ __all__ = [
     "CANONICAL_CONFIG_ARTIFACT_TYPE",
     "COMPONENT_CONFIG_ARTIFACT_TYPE",
     "CONFIG_IDENTITY_SCHEMA_VERSION",
+    "S02_CONFIG_PARITY_MANIFEST_SCHEMA_VERSION",
     "CONTINUOUS_COMPONENT_FIELDS",
     "CONTINUOUS_PROFILE_INPUTS",
     "LONG_WINDOW_FIELDS",

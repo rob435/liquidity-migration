@@ -214,7 +214,7 @@ Strategy-overhaul status is still synthetic and outcome blind:
   unique registered keys. Registry v4 distinguishes
   `builder`/`passthrough`/`adapter`/`projection`/`missing`/
   `semantic_mismatch`; no current field remains marked missing or semantically
-  mismatched, while seven receipt/provenance blockers remain explicit. This is
+  mismatched, while six receipt/provenance blockers remain explicit. This is
   structural software evidence, not a canonical child freeze.
 - Phase 0 now binds an internally replayable dirty source snapshot, a selected
   observed-environment identity, mechanically derived config/scope/component
@@ -232,10 +232,10 @@ Strategy-overhaul status is still synthetic and outcome blind:
   explicitly unverified caller declarations. Construction requires the config
   identity to equal the exact repository-derived canonical object; later
   archival byte verification intentionally does not reinterpret old declarations
-  through the mutable current schema registry or config factories. It does not
-  validate stage semantics or transitive provenance. These are diagnostic
-  primitives, not a canonical S00-S04 semantic chain; no real root has entered
-  that stage-receipt chain.
+  through the mutable current schema registry or config factories. That generic
+  byte utility does not validate stage semantics or transitive provenance. It
+  remains a diagnostic primitive, not a canonical S00-S04 semantic chain; no
+  real root has entered either the byte or semantic stage-receipt path.
 - A full-window outcome-blind Phase-0 inventory ran on the local workstation
   roots and wrote diagnostic bundle
   `strategy-overhaul-phase0-bccefdfc38ae9fda3c17` (`receipt.json` SHA-256
@@ -264,6 +264,21 @@ Strategy-overhaul status is still synthetic and outcome blind:
   `(symbol,date,url)` keys, and zero null source labels. This intentionally
   changed the root after the `NOT_READY` receipt; that receipt is historical and
   a new Phase-0 identity is required for current-root evidence.
+- Prospectively, current source now derives S02 config parity as `WIRED` for all
+  11 targets from consumer-owned validators, rather than a handwritten checked
+  set. Canonical sorted source/expected-population JSONL and a strict receipt
+  bind config/root/PIT/full manifest-pair/map identities; only the full
+  reconstructing verifier can construct the object accepted by either S02
+  builder. A separate Parquet/Arrow semantic verifier checks the current
+  registry, registered scope, config exclusions, exact S02 population and LONG
+  ages, selected S02-S04 invariants, and transitive parent identities. These are
+  synthetic implementation results only. They do not rewrite the historical
+  `UNWIRED` receipt, prove supplied root/PIT completeness or authenticity,
+  authenticate RMOM/LONG sidecar provenance, instantiate a real stage chain, or
+  authorize outcomes, deployment, or real money. The population and semantic
+  paths remain all-in-memory and the three population files are installed
+  atomically per file rather than transactionally as one directory bundle; the
+  big-PC run path therefore still needs memory/atomicity validation.
 
 ## Next actions
 
@@ -275,8 +290,9 @@ Strategy-overhaul status is still synthetic and outcome blind:
 3. Build and audit granular datasets before running the adverse-state study.
    Do not infer missing sub-hour data from 1h bars.
 4. Preserve the verified local `NOT_READY` Phase-0 bundle above as diagnostic
-   evidence; do not overwrite or promote it. Correct the source-label registry
-   and S02 parity wiring prospectively, then use `scripts/ops.sh overhaul-plan`
+   evidence; do not overwrite or promote it. Capture the prospective source-label
+   and now-`WIRED` consumer implementation in a new identity, then use
+   `scripts/ops.sh overhaul-plan`
    for the shallow preflight and `scripts/ops.sh overhaul-phase0` for a new
    content-addressed inventory after the roots are refreshed. The remaining
    seven-day Binance gap is 2026-07-03..09. No big-PC Phase-0 bundle has run.

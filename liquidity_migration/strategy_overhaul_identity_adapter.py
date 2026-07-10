@@ -255,7 +255,9 @@ def _validate_long_feature_tape(frame: pl.DataFrame) -> None:
     _reject_duplicate_keys(frame, ("symbol", "signal_ts_ms"), name="LONG feature tape")
 
 
-def _validate_manifest_pairs(frame: pl.DataFrame, *, venue: str) -> None:
+def validate_manifest_pairs(frame: pl.DataFrame, *, venue: str) -> None:
+    """Validate the exact pair-grain PIT projection consumed by S02."""
+
     _strict_columns(frame, MANIFEST_PAIR_COLUMNS, name="manifest pair-grain provenance")
     for column, dtype in (
         ("venue", pl.String),
@@ -465,7 +467,7 @@ def _annotate_identity(
         _validate_continuous_feature_tape(feature_tape)
     else:
         _validate_long_feature_tape(feature_tape)
-    _validate_manifest_pairs(manifest_pairs, venue=venue)
+    validate_manifest_pairs(manifest_pairs, venue=venue)
     map_frame = _validate_instrument_map(
         instrument_map,
         version=instrument_map_version,
@@ -642,6 +644,7 @@ __all__ = [
     "LONG_FEATURE_KEY_COLUMNS",
     "MANIFEST_PAIR_COLUMNS",
     "S02IdentityAdapterError",
+    "validate_manifest_pairs",
     "SUPPORTED_COVERAGE_STATES",
     "annotate_continuous_s02_identity",
     "annotate_long_s02_identity",

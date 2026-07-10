@@ -47,6 +47,15 @@
     "exposure_ledger_path": "REQUIRED_PHASE0_SUBSTITUTION",
     "label_tail_root_receipt": "REQUIRED_PHASE0_SUBSTITUTION"
   },
+  "required_s01_outputs_before_s02": {
+    "source_keys_jsonl": "REQUIRED_S01_OUTPUT",
+    "expected_population_jsonl": "REQUIRED_S01_OUTPUT",
+    "expected_population_receipt_json": "REQUIRED_S01_OUTPUT",
+    "full_reconstruction_verification": "REQUIRED_BEFORE_S02",
+    "exact_s02_population_equality": "REQUIRED_AT_S02",
+    "s02_semantic_receipt": "REQUIRED_BEFORE_S03",
+    "transitive_semantic_receipt_through_s04": "REQUIRED_AT_S04"
+  },
   "identity_derivation": {
     "config_expression": "apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile='continuous_ensemble_v2', btc_trend_gate='uptrend'))",
     "manual_config_transcription_allowed": false,
@@ -65,6 +74,8 @@
     "opaque_file_identity_bytes_guaranteed_outcome_free": false,
     "byte_snapshot_only_is_canonical_root_receipt": false,
     "generic_stage_receipt_establishes_semantic_provenance": false,
+    "verified_expected_population_required_by_s02": true,
+    "semantic_s02_receipt_required_before_s03": true,
     "registered_scope_and_earliest_history_verification_required": true,
     "stage_specific_semantic_validation_required": true,
     "transitive_identity_verification_required": true
@@ -1041,6 +1052,9 @@
     "identity.json",
     "root_receipts.json",
     "source_hashes.json",
+    "source_keys.jsonl",
+    "expected_population.jsonl",
+    "expected_population_receipt.json",
     "schema_signal_features.json",
     "schema_entry_anchor.json",
     "schema_path_labels.json",

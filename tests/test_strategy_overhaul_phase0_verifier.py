@@ -86,26 +86,13 @@ def _write_root(root: Path, *, venue: str) -> Path:
 
 
 @pytest.fixture(scope="module")
-def ready_phase0(tmp_path_factory: pytest.TempPathFactory):
+def ready_phase0(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureRequest):
     tmp_path = tmp_path_factory.mktemp("strict-phase0")
     roots = {venue: _write_root(tmp_path / venue, venue=venue) for venue in ("bybit", "binance")}
     patch = pytest.MonkeyPatch()
-    # Other metadata-focused tests can make the editable project distribution
-    # visible through duplicate finders in the same pytest process.  Freeze one
-    # exact object per identical normalized-name/version/location identity here;
-    # production still fails closed on genuinely conflicting duplicates.
-    installed: dict[tuple[str, str, str], Any] = {}
-    for distribution in scout.importlib.metadata.distributions():
-        name = distribution.metadata.get("Name") or getattr(distribution, "name", None)
-        if name:
-            key = (
-                scout._normalized_distribution_name(str(name)),
-                str(distribution.version),
-                str(Path(distribution.locate_file("")).resolve()),
-            )
-            installed.setdefault(key, distribution)
-    stable_distributions = list(installed.values())
-    patch.setattr(scout.importlib.metadata, "distributions", lambda: list(stable_distributions))
+    # Register cleanup before setup work so any setup exception cannot leak the
+    # synthetic registry or date windows into later test modules.
+    request.addfinalizer(patch.undo)
     patch.setattr(phase0, "REGISTERED_SLEEVE_WINDOWS", WINDOWS)
     patch.setattr(verifier, "REGISTERED_SLEEVE_WINDOWS", WINDOWS)
     patch.setattr(scout, "ROOT_START_DATE", START)
@@ -135,10 +122,7 @@ def ready_phase0(tmp_path_factory: pytest.TempPathFactory):
     assert scout.run_phase0_inventory(args) == 0
     receipts = list(output.glob("*/receipt.json"))
     assert len(receipts) == 1
-    try:
-        yield receipts[0], roots, tmp_path
-    finally:
-        patch.undo()
+    yield receipts[0], roots, tmp_path
 
 
 def _rewrite_json_artifact(receipt_path: Path, name: str, payload: dict[str, Any]) -> None:

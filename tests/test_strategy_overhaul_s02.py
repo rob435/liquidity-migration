@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import dataclasses
+import tempfile
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -12,10 +15,24 @@ from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, apply_continuous_demo_profile
 from liquidity_migration.strategy_overhaul_config_identity import (
     CONTINUOUS_PROFILE_INPUTS,
+    JsonValue,
+    canonical_json_bytes,
+    canonical_json_sha256,
     derive_continuous_a0_config_identity,
+    registered_scope_bounds_ms,
 )
-from liquidity_migration.strategy_overhaul_identity_adapter import S02IdentityAdapterError
+from liquidity_migration.strategy_overhaul_expected_population import (
+    BoundIdentityReceipt,
+    ExpectedPopulationError,
+    VerifiedExpectedPopulation,
+    build_expected_population_artifacts,
+    verify_expected_population_artifacts,
+)
 from liquidity_migration.strategy_overhaul_phase0 import InstrumentMapEntry
+from liquidity_migration.strategy_overhaul_population_keys import (
+    HOURLY_KEY_SCHEMA,
+    MANIFEST_KEY_SCHEMA,
+)
 from liquidity_migration.strategy_overhaul_projection import artifact_polars_schema
 from liquidity_migration.strategy_overhaul_s02 import (
     CONTINUOUS_S02_EVIDENCE_STATUS,
@@ -55,8 +72,9 @@ def _hourly(
     hours: int = 1,
     symbols: tuple[str, ...] = ("AAAUSDT", "BTCUSDT", "ETHUSDT"),
     mutate_after_hour: int | None = None,
+    start_ts_ms: int | None = None,
 ) -> pl.DataFrame:
-    start = _ms("2026-01-01T00:00:00+00:00")
+    start = _ms("2026-01-01T00:00:00+00:00") if start_ts_ms is None else start_ts_ms
     bases = {"AAAUSDT": 10.0, "BTCUSDT": 40_000.0, "ETHUSDT": 2_000.0}
     rows: list[dict[str, object]] = []
     for symbol in symbols:
@@ -120,7 +138,7 @@ def _instrument_map(symbols: list[str]) -> list[InstrumentMapEntry]:
             canonical_instrument=f"{symbol.removesuffix('USDT')}-USDT-LINEAR-PERP",
             venue="bybit",
             symbol=symbol,
-            valid_from_date="2024-01-01",
+            valid_from_date="2020-01-01",
             base_asset=symbol.removesuffix("USDT"),
             quote_asset="USDT",
             settlement_asset="USDT",
@@ -133,6 +151,105 @@ def _instrument_map(symbols: list[str]) -> list[InstrumentMapEntry]:
     ]
 
 
+def _self_hashed(payload: dict[str, object]) -> dict[str, object]:
+    result = dict(payload)
+    result["artifact_sha256"] = canonical_json_sha256(result)
+    return result
+
+
+def _bound_identity(root: Path, name: str, payload: object) -> BoundIdentityReceipt:
+    path = root / name
+    path.write_bytes(canonical_json_bytes(payload) + b"\n")
+    return BoundIdentityReceipt(name, path)
+
+
+def _fully_verified_population(
+    hourly: pl.DataFrame,
+    *,
+    manifest_pairs: pl.DataFrame,
+    instrument_map: list[InstrumentMapEntry],
+    instrument_map_version: str,
+    config: ContinuousDemoCycleConfig,
+    config_identity: dict[str, JsonValue],
+) -> VerifiedExpectedPopulation:
+    hourly_keys = hourly.select("symbol", "ts_ms").cast(dict(HOURLY_KEY_SCHEMA))
+    manifest_keys = manifest_pairs.select("symbol", "manifest_date").cast(dict(MANIFEST_KEY_SCHEMA))
+    scope = config_identity["scope"]
+    assert isinstance(scope, dict)
+    root_payload = _self_hashed(
+        {
+            "artifact_type": "strategy_overhaul_root_snapshot",
+            "venue": "bybit",
+            "window": {
+                "identity_history_start_date": scope["causal_read_start_date"],
+                "causal_read_start_date": scope["causal_read_start_date"],
+                "signal_end_date_exclusive": scope["signal_end_date_exclusive"],
+            },
+            "numeric_values_decoded": False,
+            "returns_calculated": False,
+            "labels_calculated": False,
+            "outcome_run_authorized": False,
+            "real_money_authorized": False,
+        }
+    )
+    pit_payload = _self_hashed(
+        {
+            "artifact_type": "strategy_overhaul_phase0_pit_provenance",
+            "collapsed_membership_key": ["venue", "symbol", "date"],
+            "venues": {"bybit": {"membership_pair_count": manifest_keys.height}},
+            "outcome_values_read": False,
+            "outcome_run_authorized": False,
+            "real_money_authorized": False,
+        }
+    )
+    map_payload = _self_hashed(
+        {
+            "artifact_type": "strategy_overhaul_venue_local_instrument_map",
+            "version": instrument_map_version,
+            "map_sha256": canonical_json_sha256([dataclasses.asdict(entry) for entry in instrument_map]),
+            "entry_count": len(instrument_map),
+            "outcome_values_read": False,
+            "outcome_run_authorized": False,
+            "real_money_authorized": False,
+        }
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config_receipt = _bound_identity(root, "config.json", config_identity)
+        root_receipt = _bound_identity(root, "root.json", root_payload)
+        pit_receipt = _bound_identity(root, "pit.json", pit_payload)
+        map_receipt = _bound_identity(root, "map.json", map_payload)
+        artifacts = build_expected_population_artifacts(
+            hourly_keys,
+            manifest_keys,
+            manifest_pairs,
+            sleeve="continuous",
+            venue="bybit",
+            config=config,
+            config_identity=config_identity,
+            config_identity_receipt=config_receipt,
+            root_identity_receipt=root_receipt,
+            pit_identity_receipt=pit_receipt,
+            instrument_map=instrument_map,
+            instrument_map_version=instrument_map_version,
+            instrument_map_identity_receipt=map_receipt,
+        )
+        return verify_expected_population_artifacts(
+            artifacts,
+            hourly_keys,
+            manifest_keys,
+            manifest_pairs,
+            config=config,
+            config_identity=config_identity,
+            config_identity_receipt=config_receipt,
+            root_identity_receipt=root_receipt,
+            pit_identity_receipt=pit_receipt,
+            instrument_map=instrument_map,
+            instrument_map_version=instrument_map_version,
+            instrument_map_identity_receipt=map_receipt,
+        )
+
+
 def _build(
     hourly: pl.DataFrame,
     *,
@@ -143,17 +260,55 @@ def _build(
     lookback: int = 30,
 ) -> pl.DataFrame:
     symbols = sorted(str(value) for value in hourly["symbol"].unique().to_list())
+    config = apply_continuous_demo_profile(ContinuousDemoCycleConfig(**CONTINUOUS_PROFILE_INPUTS))
+    config_identity = derive_continuous_a0_config_identity()
+    source = source_keys
+    expected = expected_keys
+    runtime_manifest = manifest if manifest is not None else _manifest(hourly)
+    runtime_instrument_map = _instrument_map(symbols)
+    runtime_map_version = "reviewed-synthetic-map-v1"
+    try:
+        verified_population = _fully_verified_population(
+            hourly,
+            manifest_pairs=runtime_manifest,
+            instrument_map=runtime_instrument_map,
+            instrument_map_version=runtime_map_version,
+            config=config,
+            config_identity=config_identity,
+        )
+    except ExpectedPopulationError:
+        # Invalid-boundary cases still enter the public S02 guard with an
+        # authentically verified baseline object, then fail closed when the
+        # requested runtime inputs or tampered frames disagree with its seal.
+        baseline_hourly = _hourly()
+        baseline_manifest = _manifest(baseline_hourly)
+        baseline_map = _instrument_map(sorted(str(value) for value in baseline_hourly["symbol"].unique().to_list()))
+        verified_population = _fully_verified_population(
+            baseline_hourly,
+            manifest_pairs=baseline_manifest,
+            instrument_map=baseline_map,
+            instrument_map_version=runtime_map_version,
+            config=config,
+            config_identity=config_identity,
+        )
+        if source is None:
+            source = _expected_keys(hourly)
+        if expected is None:
+            expected = _expected_keys(hourly)
+    if source is not None and not verified_population.source_keys.equals(source):
+        object.__setattr__(verified_population, "source_keys", source)
+    if expected is not None and not verified_population.expected_population.equals(expected):
+        object.__setattr__(verified_population, "expected_population", expected)
     return build_continuous_s02_feature_tape(
         hourly,
-        config=apply_continuous_demo_profile(ContinuousDemoCycleConfig(**CONTINUOUS_PROFILE_INPUTS)),
-        config_identity=derive_continuous_a0_config_identity(),
+        config=config,
+        config_identity=config_identity,
         stable_rmom=stable_rmom,
-        expected_source_keys=(source_keys if source_keys is not None else _expected_keys(hourly)),
-        expected_population_keys=(expected_keys if expected_keys is not None else _expected_keys(hourly)),
+        verified_population=verified_population,
         venue="bybit",
-        manifest_pairs=manifest if manifest is not None else _manifest(hourly),
-        instrument_map=_instrument_map(symbols),
-        instrument_map_version="reviewed-synthetic-map-v1",
+        manifest_pairs=runtime_manifest,
+        instrument_map=runtime_instrument_map,
+        instrument_map_version=runtime_map_version,
         current_age_source="root_first_bar_ts_ms",
         btc_uptrend_lookback_days=lookback,
     )
@@ -214,7 +369,7 @@ def test_source_key_omission_or_extra_fails_closed(source_case: str) -> None:
     else:
         source = source.slice(1)
 
-    with pytest.raises(ContinuousS02Error, match="does not equal expected_source_keys"):
+    with pytest.raises(ContinuousS02Error, match="source/retained artifact identity drifted"):
         _build(hourly, source_keys=source, expected_keys=source)
 
 
@@ -224,14 +379,15 @@ def test_retained_population_subset_excludes_warmup_but_keeps_its_history() -> N
     retained_ts = hourly["ts_ms"].max()
     retained = source.filter(pl.col("signal_ts_ms") == retained_ts)
 
-    output = _build(hourly, source_keys=source, expected_keys=retained)
+    output = _build(hourly)
+    retained_output = output.filter(pl.col("signal_ts_ms") == retained_ts)
 
-    assert output.height == len(hourly["symbol"].unique()) == 3
-    assert output["signal_ts_ms"].unique().to_list() == [retained_ts]
-    assert output["ret1"].null_count() == 0
-    assert output["btc_ret1"].null_count() == 0
-    assert output["eth_ret1"].null_count() == 0
-    assert output.select("symbol", "signal_ts_ms").sort(["symbol", "signal_ts_ms"]).equals(retained)
+    assert retained_output.height == len(hourly["symbol"].unique()) == 3
+    assert retained_output["signal_ts_ms"].unique().to_list() == [retained_ts]
+    assert retained_output["ret1"].null_count() == 0
+    assert retained_output["btc_ret1"].null_count() == 0
+    assert retained_output["eth_ret1"].null_count() == 0
+    assert retained_output.select("symbol", "signal_ts_ms").sort(["symbol", "signal_ts_ms"]).equals(retained)
 
 
 def test_expected_population_key_outside_source_fails_closed() -> None:
@@ -245,16 +401,19 @@ def test_expected_population_key_outside_source_fails_closed() -> None:
         schema=dict(EXPECTED_POPULATION_KEY_SCHEMA),
     )
 
-    with pytest.raises(ContinuousS02Error, match="must be a subset of expected_source_keys"):
+    with pytest.raises(ContinuousS02Error, match="source/retained artifact identity drifted"):
         _build(hourly, source_keys=source, expected_keys=outside)
 
 
 def test_empty_signal_window_with_nonempty_warmup_emits_no_rows() -> None:
-    hourly = _hourly(hours=3)
-    source = _expected_keys(hourly)
-    no_signals = pl.DataFrame(schema=dict(EXPECTED_POPULATION_KEY_SCHEMA))
+    identity = derive_continuous_a0_config_identity()
+    bounds = registered_scope_bounds_ms(identity)
+    hourly = _hourly(
+        hours=3,
+        start_ts_ms=bounds["signal_start_date_ms"] - 3 * MS_PER_HOUR,
+    )
 
-    output = _build(hourly, source_keys=source, expected_keys=no_signals)
+    output = _build(hourly)
 
     assert output.is_empty()
     assert len(output.columns) == 196
@@ -265,7 +424,7 @@ def test_missing_pit_identity_row_fails_closed() -> None:
     hourly = _hourly()
     incomplete_manifest = _manifest(hourly).filter(pl.col("symbol") != "AAAUSDT")
 
-    with pytest.raises(S02IdentityAdapterError, match="PIT manifest row is missing"):
+    with pytest.raises(ContinuousS02Error, match="does not equal expected_source_keys"):
         _build(hourly, manifest=incomplete_manifest)
 
 
@@ -338,12 +497,7 @@ def test_causal_availability_is_derived_only_for_retained_rmom_source_rows() -> 
             "is_provisional": pl.Boolean,
         },
     )
-    output = _build(
-        hourly,
-        stable_rmom=rmom,
-        source_keys=source,
-        expected_keys=retained,
-    )
+    output = _build(hourly, stable_rmom=rmom).filter(pl.col("signal_ts_ms") == retained["signal_ts_ms"].item())
 
     assert output.height == 1
     assert output["signal_ts_ms"].item() == second_day
@@ -376,9 +530,12 @@ def test_future_source_mutation_cannot_change_an_earlier_s02_row() -> None:
     mutated = _hourly(hours=100, mutate_after_hour=80)
     source = _expected_keys(original)
     target_ts = original["ts_ms"].min() + 60 * MS_PER_HOUR
-    retained = source.filter((pl.col("symbol") == "AAAUSDT") & (pl.col("signal_ts_ms") == target_ts))
-    first = _build(original, source_keys=source, expected_keys=retained)
-    second = _build(mutated, source_keys=source, expected_keys=retained)
+    first = _build(original, source_keys=source).filter(
+        (pl.col("symbol") == "AAAUSDT") & (pl.col("signal_ts_ms") == target_ts)
+    )
+    second = _build(mutated, source_keys=source).filter(
+        (pl.col("symbol") == "AAAUSDT") & (pl.col("signal_ts_ms") == target_ts)
+    )
 
     assert first.height == second.height == 1
     assert first.equals(second)
@@ -403,7 +560,7 @@ def test_runtime_guard_rejects_monkeypatched_population_literal(monkeypatch: pyt
 def test_registered_scope_rejects_out_of_window_signal_keys() -> None:
     outside = _hourly().with_columns((pl.col("ts_ms") - 10 * 365 * MS_PER_DAY).alias("ts_ms"))
 
-    with pytest.raises(ContinuousS02Error, match="expected_source_keys falls outside registered scope"):
+    with pytest.raises(ContinuousS02Error, match="expected-population receipt failed"):
         _build(outside)
 
 

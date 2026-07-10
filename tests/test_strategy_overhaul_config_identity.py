@@ -10,6 +10,7 @@ import pytest
 from liquidity_migration import promoted
 from liquidity_migration import continuous_population_scout as continuous_scout
 from liquidity_migration import long_population_scout as long_scout
+from liquidity_migration import strategy_overhaul_expected_population as expected_population_module
 from liquidity_migration.continuous_demo import (
     ContinuousDemoCycleConfig,
     apply_continuous_demo_profile,
@@ -234,11 +235,12 @@ def test_s02_parity_manifest_derives_every_expected_value_from_factories() -> No
     resolved_continuous = apply_continuous_demo_profile(ContinuousDemoCycleConfig(**CONTINUOUS_PROFILE_INPUTS))
     long_config = _v11a_long_native_config()
 
-    assert manifest["status"] == "UNWIRED"
+    assert manifest["status"] == "WIRED"
     assert manifest["status"] == derive_s02_parity_status(manifest["targets"])
-    assert manifest["status_derivation"]["wired_target_count"] == 4
-    assert manifest["status_derivation"]["unwired_target_count"] == 7
+    assert manifest["status_derivation"]["wired_target_count"] == 11
+    assert manifest["status_derivation"]["unwired_target_count"] == 0
     assert manifest["status_derivation"]["guard_errors"] == {}
+    assert manifest["status_derivation"]["validator_errors"] == {}
     targets = manifest["targets"]
     assert {(row["sleeve"], row["target"]) for row in targets} == {
         ("continuous", "full_config_and_scope_identity"),
@@ -314,18 +316,74 @@ def test_s02_parity_manifest_derives_every_expected_value_from_factories() -> No
     }
     trigger_exit = _target(manifest, "long", "trigger_and_exit_profile")["expected"]
     assert all(value == getattr(long_config, name) for name, value in trigger_exit.items())
+    for target in targets:
+        assert target["status"] == "WIRED"
+        assert target["observed"] == target["expected"]
+        assert target["checked_consumers"] == target["consumers"]
+        assert target["unresolved_consumers"] == []
+        assert target["consumer_validations"]
+        assert all(row["status"] == "VERIFIED" for row in target["consumer_validations"])
 
 
 def test_s02_parity_status_requires_values_and_every_consumer() -> None:
-    wired_target = {
-        "expected": {"value": 1},
-        "observed": {"value": 1},
-        "unresolved_consumers": [],
-    }
-    assert derive_s02_parity_status([wired_target]) == "WIRED"
-    assert derive_s02_parity_status([{**wired_target, "observed": {"value": 2}}]) == "UNWIRED"
-    assert derive_s02_parity_status([{**wired_target, "unresolved_consumers": ["consumer"]}]) == "UNWIRED"
+    targets = copy.deepcopy(s02_config_parity_manifest()["targets"])
+    assert derive_s02_parity_status(targets) == "WIRED"
+    json_roundtrip = json.loads(json.dumps(targets, sort_keys=True))
+    assert derive_s02_parity_status(json_roundtrip) == "WIRED"
+    drifted = copy.deepcopy(targets)
+    drifted[0]["observed"] = {"value": 2}
+    assert derive_s02_parity_status(drifted) == "UNWIRED"
+    unresolved = copy.deepcopy(targets)
+    unresolved[0]["unresolved_consumers"] = unresolved[0]["consumers"]
+    assert derive_s02_parity_status(unresolved) == "UNWIRED"
+    unchecked = copy.deepcopy(targets)
+    unchecked[0]["checked_consumers"] = []
+    assert derive_s02_parity_status(unchecked) == "UNWIRED"
+    invalid_validation = copy.deepcopy(targets)
+    invalid_validation[0]["consumer_validations"][0]["status"] = "UNVERIFIED"
+    assert derive_s02_parity_status(invalid_validation) == "UNWIRED"
+    forged_validation = copy.deepcopy(targets)
+    forged_validation[0]["consumer_validations"][0]["metadata_match"] = False
+    assert derive_s02_parity_status(forged_validation) == "UNWIRED"
+    reduced = copy.deepcopy(targets[:1])
+    assert derive_s02_parity_status(reduced) == "UNWIRED"
+    substituted = copy.deepcopy(targets)
+    substituted[0]["target"] = "made_up_target"
+    assert derive_s02_parity_status(substituted) == "UNWIRED"
     assert derive_s02_parity_status([]) == "UNWIRED"
+
+
+def test_manifest_requires_consumer_owned_metadata_not_central_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = expected_population_module.continuous_expected_population_consumer_parity_surface
+
+    def missing_consumer(config: object, identity: object) -> dict[str, object]:
+        surface = copy.deepcopy(original(config, identity))
+        surface["validated_consumers"]["population_exclusions"] = []
+        return surface
+
+    monkeypatch.setattr(
+        expected_population_module,
+        "continuous_expected_population_consumer_parity_surface",
+        missing_consumer,
+    )
+
+    manifest = s02_config_parity_manifest(derive_a0_config_identities())
+
+    assert manifest["status"] == "UNWIRED"
+    target = _target(manifest, "continuous", "population_exclusions")
+    assert target["status"] == "UNWIRED"
+    assert target["unresolved_consumers"] == [
+        "strategy_overhaul_expected_population.build_expected_population_artifacts"
+    ]
+    validation = next(
+        row
+        for row in target["consumer_validations"]
+        if row["consumer_validator"].endswith("continuous_expected_population_consumer_parity_surface")
+    )
+    assert validation["metadata_match"] is False
+    assert validation["status"] == "UNVERIFIED"
 
 
 @pytest.mark.parametrize(

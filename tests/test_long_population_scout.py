@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
 
+from liquidity_migration import long_population_scout as long_scout
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.long_native import LongNativeConfig, _classify_entry
 from liquidity_migration.long_native_event_demo import _v11a_long_native_config
@@ -18,6 +19,7 @@ from liquidity_migration.long_population_scout import (
     append_long_path_labels,
     build_long_feature_tape,
     build_long_population_tape,
+    long_population_runtime_parity_surface,
 )
 from liquidity_migration.strategy_overhaul_schemas import ARTIFACT_SCHEMAS, LONG_LABEL_SCHEMA_ID
 
@@ -139,8 +141,7 @@ def test_trigger_overlap_timing_retraces_and_both_anchors() -> None:
     assert feature_row["intraday_feature_available"] is False
     assert feature_row["first_sequential_rejection_reason"] == "selected"
     assert not any(
-        column.startswith(("common_entry", "current_entry")) or "entry_scan" in column
-        for column in feature_row
+        column.startswith(("common_entry", "current_entry")) or "entry_scan" in column for column in feature_row
     )
 
     row = _run_entry(_feature(), hourly)
@@ -230,9 +231,7 @@ def test_trigger_strength_and_active_close_location_follow_frozen_definitions() 
     )
     assert below_threshold["fc_trigger_bitmask"] == 0
     assert below_threshold["fc_all_trigger"] is False
-    assert below_threshold["trigger_strength_ratio"] == pytest.approx(
-        0.10 / (0.10 * math.sqrt(3.0))
-    )
+    assert below_threshold["trigger_strength_ratio"] == pytest.approx(0.10 / (0.10 * math.sqrt(3.0)))
     assert below_threshold["active_trigger_close_location"] is None
 
 
@@ -378,10 +377,7 @@ def test_signal_feature_tape_is_invariant_to_every_post_signal_bar() -> None:
     changed_outcomes = baseline.with_columns(
         # A bar with open timestamp SIGNAL_TS ends at h1.  Every such value is
         # post-signal and must be unread by the signal-time feature stage.
-        pl.when(pl.col("ts_ms") >= SIGNAL_TS)
-        .then(pl.lit(10_000.0))
-        .otherwise(pl.col(column))
-        .alias(column)
+        pl.when(pl.col("ts_ms") >= SIGNAL_TS).then(pl.lit(10_000.0)).otherwise(pl.col(column)).alias(column)
         for column in ("open", "high", "low", "close")
     )
 
@@ -477,9 +473,7 @@ def test_signal_key_alias_must_match_and_stage_empty_schemas_are_typed() -> None
             cfg,
         )
 
-    daily_empty = pl.DataFrame(
-        schema={"symbol": pl.String, "ts_ms": pl.Int64, "close": pl.Float64}
-    )
+    daily_empty = pl.DataFrame(schema={"symbol": pl.String, "ts_ms": pl.Int64, "close": pl.Float64})
     hourly_empty = pl.DataFrame(
         schema={
             "symbol": pl.String,
@@ -536,6 +530,26 @@ def test_every_frozen_stage_requires_the_exact_runtime_v11a_config() -> None:
         append_long_path_labels(entries, hourly, mutated)
 
 
+def test_population_owner_exposes_and_enforces_runtime_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _v11a_long_native_config()
+    surface = long_population_runtime_parity_surface(config)
+
+    assert surface["validated_targets"] == [
+        "classifier_and_exit_shape",
+        "trigger_and_exit_profile",
+    ]
+    classifier = surface["classifier_and_exit_shape"]
+    assert classifier["active_pattern_toggles"]["enable_fomo_chase"] is True
+    assert classifier["fc_exit_max_hold_hours"] == config.fc_max_hold_days * 24
+    assert surface["trigger_and_exit_profile"]["fc_min_day_return"] == config.fc_min_day_return
+
+    monkeypatch.setattr(long_scout, "LONG_S02_CLASSIFIER_PATTERN", "reversal")
+    with pytest.raises(ValueError, match="population classifier parity failed"):
+        long_population_runtime_parity_surface(config)
+
+
 def test_consumed_keys_enforce_grid_ohlc_and_daily_close_parity_only_when_read() -> None:
     cfg = _v11a_long_native_config()
     hourly = _hourly(close_by_hour={1: 100.0, 2: 99.4, 3: 98.9})
@@ -579,10 +593,7 @@ def test_consumed_keys_enforce_grid_ohlc_and_daily_close_parity_only_when_read()
         )
 
     malformed_signal_bar = hourly.with_columns(
-        pl.when(pl.col("ts_ms") == SIGNAL_TS - MS_PER_HOUR)
-        .then(pl.lit(99.0))
-        .otherwise(pl.col("high"))
-        .alias("high")
+        pl.when(pl.col("ts_ms") == SIGNAL_TS - MS_PER_HOUR).then(pl.lit(99.0)).otherwise(pl.col("high")).alias("high")
     )
     with pytest.raises(ValueError, match="OHLC outside"):
         build_long_feature_tape(pl.DataFrame([_feature()]), malformed_signal_bar, cfg)
@@ -630,38 +641,26 @@ def test_stage_identity_hold_and_anchor_geometry_fail_closed_on_null_or_mutation
     hourly = _hourly()
     features = build_long_feature_tape(pl.DataFrame([_feature()]), hourly, cfg)
 
-    null_version = features.with_columns(
-        pl.lit(None, dtype=pl.String).alias("long_feature_tape_schema_version")
-    )
+    null_version = features.with_columns(pl.lit(None, dtype=pl.String).alias("long_feature_tape_schema_version"))
     with pytest.raises(ValueError, match="long_feature_tape_schema_version must equal"):
         append_long_entry_policy(null_version, hourly, cfg)
-    null_hold = features.with_columns(
-        pl.lit(None, dtype=pl.Int64).alias("fc_exit_max_hold_hours")
-    )
+    null_hold = features.with_columns(pl.lit(None, dtype=pl.Int64).alias("fc_exit_max_hold_hours"))
     with pytest.raises(ValueError, match="fc_exit_max_hold_hours must equal"):
         append_long_entry_policy(null_hold, hourly, cfg)
-    null_key = features.with_columns(
-        pl.lit(None, dtype=pl.Int64).alias("signal_ts_ms")
-    )
+    null_key = features.with_columns(pl.lit(None, dtype=pl.Int64).alias("signal_ts_ms"))
     with pytest.raises(ValueError, match="integer millisecond timestamp"):
         append_long_entry_policy(null_key, hourly, cfg)
 
-    bad_exit = features.with_columns(
-        (pl.col("fc_exit_stop_pct") + 0.001).alias("fc_exit_stop_pct")
-    )
+    bad_exit = features.with_columns((pl.col("fc_exit_stop_pct") + 0.001).alias("fc_exit_stop_pct"))
     with pytest.raises(ValueError, match="exit percentages do not match"):
         append_long_entry_policy(bad_exit, hourly, cfg)
 
     entries = append_long_entry_policy(features, hourly, cfg)
-    null_entry_version = entries.with_columns(
-        pl.lit(None, dtype=pl.String).alias("long_entry_policy_schema_version")
-    )
+    null_entry_version = entries.with_columns(pl.lit(None, dtype=pl.String).alias("long_entry_policy_schema_version"))
     with pytest.raises(ValueError, match="long_entry_policy_schema_version must equal"):
         append_long_path_labels(null_entry_version, hourly, cfg)
 
-    mutated_anchor = entries.with_columns(
-        (pl.col("current_entry_price") + 1.0).alias("current_entry_price")
-    )
+    mutated_anchor = entries.with_columns((pl.col("current_entry_price") + 1.0).alias("current_entry_price"))
     with pytest.raises(ValueError, match="current_entry_price does not match reconstructed"):
         append_long_path_labels(mutated_anchor, hourly, cfg)
 

@@ -31,6 +31,7 @@ from types import MappingProxyType
 import polars as pl
 
 from ._common import MS_PER_DAY
+from .long_native import LongNativeConfig
 from .strategy_overhaul_schemas import ARTIFACT_SCHEMAS, LONG_SIGNAL_SCHEMA_ID
 
 
@@ -105,17 +106,18 @@ RANK_METADATA_COLUMNS = tuple(
 _KEY_COLUMNS = ("symbol", "signal_ts_ms")
 _AVAILABILITY_COLUMNS = tuple(SOURCE_AVAILABILITY_SCHEMA)[2:]
 _SCHEMA_VERSION = ARTIFACT_SCHEMAS[LONG_SIGNAL_SCHEMA_ID].schema_version
-_REQUIRED_FEATURE_DTYPES = MappingProxyType(
+_REQUIRED_FEATURE_BASE_DTYPES = MappingProxyType(
     {
         "symbol": pl.String,
         "signal_ts_ms": pl.Int64,
         "turnover_quote": pl.Float64,
-        f"turnover_median_{LONG_CONTEXT_UNIVERSE_VOLUME_WINDOW_DAYS}d": pl.Float64,
         # build_long_feature_tape reconstructs row dictionaries and therefore
         # currently materializes source ranks as Int64.  Exact parity is checked
         # before the adapter projects the registered UInt32 dtype.
         "today_volume_rank": pl.Int64,
         "universe_rank": pl.Int64,
+        "symbol_age_days": pl.Int64,
+        "in_universe": pl.Boolean,
         "regime_on": pl.Boolean,
         "eth_regime_on": pl.Boolean,
         "btc_sma_dist": pl.Float64,
@@ -135,11 +137,7 @@ _SIDECAR_OWNED_COLUMNS = frozenset(
         *RANK_METADATA_COLUMNS,
     }
 )
-_RANK_SPECS = (
-    ("today_volume_rank", "turnover_quote"),
-    ("universe_rank", f"turnover_median_{LONG_CONTEXT_UNIVERSE_VOLUME_WINDOW_DAYS}d"),
-)
-_TIE_METHOD = "ordinal_descending"
+_TIE_METHOD = "ordinal_descending_value_then_symbol_ascending"
 _DENOMINATOR_RULE = "supplied_signal_ts_population"
 _ROW_ORDER = "__long_context_row_order"
 _FLOAT_REL_TOLERANCE = 1e-12
@@ -188,6 +186,120 @@ class LongSourceContextError(ValueError):
     """A source-context shape, timing, parity, or cardinality invariant failed."""
 
 
+def _required_feature_dtypes(config: LongNativeConfig) -> dict[str, pl.DataType]:
+    return {
+        **_REQUIRED_FEATURE_BASE_DTYPES,
+        f"turnover_median_{config.universe_volume_window_days}d": pl.Float64,
+    }
+
+
+def _rank_specs(config: LongNativeConfig) -> tuple[tuple[str, str], ...]:
+    return (
+        ("today_volume_rank", "turnover_quote"),
+        ("universe_rank", f"turnover_median_{config.universe_volume_window_days}d"),
+    )
+
+
+def long_context_runtime_parity_surface(config: LongNativeConfig) -> dict[str, object]:
+    """Validate and expose config-sensitive LONG context consumers."""
+
+    if not isinstance(config, LongNativeConfig):
+        raise TypeError("long_context_runtime_parity_surface requires LongNativeConfig")
+    expected_constants = {
+        "regime_symbol": config.regime_symbol,
+        "regime_sma_days": config.regime_sma_days,
+        "btc_month_regime_gate": config.btc_month_regime_gate,
+        "universe_volume_window_days": config.universe_volume_window_days,
+    }
+    observed_constants = {
+        "regime_symbol": LONG_CONTEXT_REGIME_SYMBOL,
+        "regime_sma_days": LONG_CONTEXT_REGIME_SMA_DAYS,
+        "btc_month_regime_gate": LONG_CONTEXT_BTC_MONTH_REGIME_GATE,
+        "universe_volume_window_days": LONG_CONTEXT_UNIVERSE_VOLUME_WINDOW_DAYS,
+    }
+    if observed_constants != expected_constants:
+        raise LongSourceContextError(
+            f"LONG context config parity failed: expected={expected_constants}, observed={observed_constants}"
+        )
+
+    expected_regime_schema = {
+        "signal_ts_ms": pl.Int64,
+        "btc_close": pl.Float64,
+        f"btc_sma_{config.regime_sma_days}d": pl.Float64,
+        "btc_sma_dist": pl.Float64,
+        "btc_regime_available": pl.Boolean,
+        "btc_regime_pass": pl.Boolean,
+        "eth_close": pl.Float64,
+        f"eth_sma_{config.regime_sma_days}d": pl.Float64,
+        "eth_sma_dist": pl.Float64,
+        "eth_regime_available": pl.Boolean,
+        "eth_regime_pass": pl.Boolean,
+    }
+    if dict(REGIME_CONTEXT_SCHEMA) != expected_regime_schema:
+        raise LongSourceContextError("LONG context regime schema does not match config-derived SMA fields")
+    expected_rank_specs = (
+        ("today_volume_rank", "turnover_quote"),
+        (
+            "universe_rank",
+            f"turnover_median_{config.universe_volume_window_days}d",
+        ),
+    )
+    if _rank_specs(config) != expected_rank_specs:
+        raise LongSourceContextError("LONG context rank specs do not match the configured rolling window")
+    if (
+        _TIE_METHOD != "ordinal_descending_value_then_symbol_ascending"
+        or _DENOMINATOR_RULE != "supplied_signal_ts_population"
+    ):
+        raise LongSourceContextError("LONG context rank metadata literals drifted")
+
+    population_and_rolling_windows = {
+        "universe_size": config.universe_size,
+        "universe_volume_window_days": config.universe_volume_window_days,
+        "min_listing_history_days": config.min_listing_history_days,
+    }
+    regime_context = {
+        "regime_symbol": config.regime_symbol,
+        "regime_sma_days": config.regime_sma_days,
+        "btc_month_regime_gate": config.btc_month_regime_gate,
+    }
+    return {
+        "consumer_validator": (
+            "liquidity_migration.strategy_overhaul_long_context.long_context_runtime_parity_surface"
+        ),
+        "validated_targets": ["population_and_rolling_windows", "regime_context"],
+        "validated_target_fields": {
+            "population_and_rolling_windows": [
+                "universe_size",
+                "universe_volume_window_days",
+                "min_listing_history_days",
+            ],
+            "regime_context": [
+                "regime_symbol",
+                "regime_sma_days",
+                "btc_month_regime_gate",
+            ],
+        },
+        "validated_consumers": {
+            "population_and_rolling_windows": ["strategy_overhaul_long_context universe-rank reconstruction"],
+            "regime_context": [
+                "strategy_overhaul_long_context.REGIME_CONTEXT_SCHEMA *_sma_30d fields",
+                "strategy_overhaul_long_context._validate_regime_context",
+                "strategy_overhaul_long_context._require_feature_columns BTC-month gate-off assumption",
+                "strategy_overhaul_long_context._validate_btc_month_context gate-off pass semantics",
+            ],
+        },
+        "population_and_rolling_windows": population_and_rolling_windows,
+        "regime_context": regime_context,
+        "rank_specs": [list(spec) for spec in expected_rank_specs],
+        "rank_tie_method": _TIE_METHOD,
+        "rank_denominator_rule": _DENOMINATOR_RULE,
+        "scope_limitation": (
+            "registered research/S02 membership and steady-state demo parity only; "
+            "the demo latest-cycle cold-start fallback is a separate runtime path"
+        ),
+    }
+
+
 def _is_outcome_like_column(name: str) -> bool:
     lowered = name.lower()
     if lowered in _OUTCOME_COLUMN_EXACT:
@@ -230,9 +342,10 @@ def _require_exact_schema(
         raise LongSourceContextError(f"{name} has invalid dtypes: {mismatched}")
 
 
-def _require_feature_columns(frame: pl.DataFrame) -> None:
+def _require_feature_columns(frame: pl.DataFrame, config: LongNativeConfig) -> None:
     _reject_outcome_columns(frame, name="feature_tape")
-    missing = sorted(set(_REQUIRED_FEATURE_DTYPES) - set(frame.columns))
+    required_feature_dtypes = _required_feature_dtypes(config)
+    missing = sorted(set(required_feature_dtypes) - set(frame.columns))
     if missing:
         raise LongSourceContextError(f"feature_tape missing required columns: {missing}")
     mismatched = {
@@ -240,7 +353,7 @@ def _require_feature_columns(frame: pl.DataFrame) -> None:
             "expected": str(expected),
             "actual": str(frame.schema[column]),
         }
-        for column, expected in _REQUIRED_FEATURE_DTYPES.items()
+        for column, expected in required_feature_dtypes.items()
         if frame.schema[column] != expected
     }
     if mismatched:
@@ -263,6 +376,11 @@ def _require_feature_columns(frame: pl.DataFrame) -> None:
     )
     if not invalid_keys.is_empty():
         raise LongSourceContextError("feature_tape contains invalid symbol/daily signal keys")
+    invalid_membership_inputs = frame.filter(pl.col("symbol_age_days").is_null() | pl.col("in_universe").is_null())
+    if not invalid_membership_inputs.is_empty():
+        raise LongSourceContextError(
+            "feature_tape requires non-null symbol_age_days and in_universe for membership parity"
+        )
     duplicates = frame.group_by(list(_KEY_COLUMNS)).len().filter(pl.col("len") > 1)
     if not duplicates.is_empty():
         raise LongSourceContextError("feature_tape contains duplicate (symbol,signal_ts_ms) keys")
@@ -448,9 +566,12 @@ def _validate_btc_month_context(
     return sidecar
 
 
-def _attach_rank_metadata_and_check_parity(frame: pl.DataFrame) -> pl.DataFrame:
+def _attach_rank_metadata_and_check_parity(
+    frame: pl.DataFrame,
+    config: LongNativeConfig,
+) -> pl.DataFrame:
     output = frame
-    for rank_column, value_column in _RANK_SPECS:
+    for rank_column, value_column in _rank_specs(config):
         prefix = f"__{rank_column}"
         value = f"{prefix}_value"
         recomputed = f"{prefix}_recomputed"
@@ -500,6 +621,36 @@ def _attach_rank_metadata_and_check_parity(frame: pl.DataFrame) -> pl.DataFrame:
                 f"{examples.to_dicts()}"
             )
         output = output.with_columns(pl.col(recomputed).alias(rank_column)).drop(value, recomputed)
+
+    universe_turnover = f"turnover_median_{config.universe_volume_window_days}d"
+    recomputed_membership = "__in_universe_recomputed"
+    output = output.with_columns(
+        (
+            (pl.col("universe_rank") <= config.universe_size)
+            & (pl.col("symbol_age_days") >= config.min_listing_history_days)
+            & pl.col(universe_turnover).is_not_null()
+            & pl.col(universe_turnover).is_finite()
+        )
+        .fill_null(False)
+        .cast(pl.Boolean)
+        .alias(recomputed_membership)
+    )
+    membership_mismatch = output.filter(~pl.col("in_universe").eq_missing(pl.col(recomputed_membership)))
+    if not membership_mismatch.is_empty():
+        examples = membership_mismatch.select(
+            "symbol",
+            "signal_ts_ms",
+            universe_turnover,
+            "universe_rank",
+            "symbol_age_days",
+            "in_universe",
+            recomputed_membership,
+        ).head(5)
+        raise LongSourceContextError(
+            "in_universe parity failed against configured rank/listing-age/finite-turnover rules: "
+            f"{examples.to_dicts()}"
+        )
+    output = output.drop(recomputed_membership)
     return output
 
 
@@ -512,6 +663,7 @@ def _assert_population_preserved(output: pl.DataFrame, expected_keys: pl.DataFra
 def attach_long_source_context(
     feature_tape: pl.DataFrame,
     *,
+    config: LongNativeConfig,
     source_availability: pl.DataFrame,
     regime_context: pl.DataFrame,
     btc_month_context: pl.DataFrame,
@@ -535,7 +687,8 @@ def attach_long_source_context(
     complete PIT universe; see :data:`LONG_SOURCE_CONTEXT_DIAGNOSTICS`.
     """
 
-    _require_feature_columns(feature_tape)
+    long_context_runtime_parity_surface(config)
+    _require_feature_columns(feature_tape, config)
     availability = _validate_source_availability(source_availability, feature_tape)
     regimes = _validate_regime_context(regime_context, feature_tape)
     btc_month = _validate_btc_month_context(btc_month_context, feature_tape)
@@ -598,7 +751,7 @@ def attach_long_source_context(
             "available BTC/ETH/month context requires an explicit source availability timestamp"
         )
 
-    output = _attach_rank_metadata_and_check_parity(output)
+    output = _attach_rank_metadata_and_check_parity(output, config)
     output = output.sort(_ROW_ORDER).drop(_ROW_ORDER)
     _assert_population_preserved(output, expected_keys)
     return output
@@ -617,4 +770,5 @@ __all__ = [
     "REGIME_CONTEXT_SCHEMA",
     "SOURCE_AVAILABILITY_SCHEMA",
     "attach_long_source_context",
+    "long_context_runtime_parity_surface",
 ]

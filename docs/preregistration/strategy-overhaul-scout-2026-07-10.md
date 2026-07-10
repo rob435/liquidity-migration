@@ -4,8 +4,9 @@ Date: 2026-07-10
 Mode: exploratory
 Owner: strategy research
 Status: S00 tooling/templates and outcome-blind stage hardening implemented and
-synthetically validated; real-root S00 unrun and **not yet an executable outcome
-contract**
+synthetically validated; one historical local-root S00 returned `NOT_READY`,
+while current repaired-root and big-PC S00 evidence remains unrun, and this is
+**not yet an executable outcome contract**
 
 Planner/inventory: `scripts/strategy_overhaul_scout_2026_07_10.py --plan` and
 `--phase0-inventory`
@@ -211,34 +212,43 @@ checks; none of it represents a real-root artifact:
 - The shared projector enforces registered column order, dtypes,
   non-nullability, and unique/non-null keys. Proposed registry v4 distinguishes
   `builder`, `passthrough`, `adapter`, `projection`, `missing`, and
-  `semantic_mismatch`; no current field remains in the last two states. Seven
+  `semantic_mismatch`; no current field remains in the last two states. Six
   receipt/provenance blockers remain explicit. The registry remains proposed,
   not canonical.
 
 The remaining blocking debts are semantic identity and provenance, not missing
-projection code. Supporting builders can produce population, config, map, PIT,
-RMOM, and LONG-sidecar artifacts, but no real run has proved that complete,
-registered inputs flowed transitively into each stage. The root-snapshot utility
-is explicitly `BYTE_SNAPSHOT_ONLY`: it hashes selected file bytes but does not
-verify registered scope, earliest-history coverage, Phase-0 semantics, or S01
-readiness. The diagnostic stage byte-binding utility allows S00 to bind only
-config/source/environment before future S01 inputs exist. S01 adds
-root/PIT/map/population identities and begins the stable downstream run identity.
-Artifact schema, row count, key hash, and outcome blindness are stored only as
-explicitly unverified caller declarations; non-config identity JSON semantics
-are also unverified. Construction does require exact equality with the
-repository-derived canonical config identity. Archival byte verification uses
-the recorded schema/config identities and does not reinterpret them through the
-mutable current registry or factories. The utility does not validate key/window
-semantics or transitive contents. Neither utility is a canonical semantic
-receipt or an immutable S00-S04 evidence chain.
+projection code. Supporting builders can now produce config, map, PIT, RMOM,
+and LONG-sidecar artifacts plus canonical sorted `source_keys.jsonl` and
+`expected_population.jsonl` with a strict receipt. Only the full-reconstruction
+result, after rechecking the receipt-bound config/root/PIT/full manifest-pair/map
+content, can enter either S02 builder. A separate Parquet/Arrow semantic verifier
+checks the current registry, registered scope, config exclusions, exact S02
+population and LONG ages, selected S02-S04 invariants, and transitive parent
+identities. No real run has yet proved that complete, registered inputs flowed
+transitively into any stage.
+
+The root-snapshot utility is explicitly `BYTE_SNAPSHOT_ONLY`: it hashes selected
+file bytes but does not verify registered scope, earliest-history coverage,
+Phase-0 semantics, or S01 readiness. The diagnostic stage byte-binding utility
+allows S00 to bind only config/source/environment before future S01 inputs exist.
+S01 adds root/PIT/map/population identities and begins the stable downstream run
+identity. Artifact schema, row count, key hash, and outcome blindness in that
+generic receipt remain explicitly unverified caller declarations; non-config
+identity JSON semantics are also unverified. Construction does require exact
+equality with the repository-derived canonical config identity. Archival byte
+verification uses the recorded schema/config identities and does not reinterpret
+them through the mutable current registry or factories. The generic utility does
+not validate key/window semantics or transitive contents and is not a canonical
+semantic receipt or an immutable S00-S04 evidence chain.
 
 The derived RMOM time proves only when the frozen formula is causally computable;
 it does not prove which root row was consumed or measure refresh latency. The
-wrappers validate supplied values and formulas but cannot prove who produced all
-inputs. Stage-specific semantic validators and a canonical transitive identity
-chain must resolve these debts before S01 or an outcome-bearing stage; synthetic
-fail-closed behavior and self-consistent hashes cannot substitute for them.
+wrappers and semantic verifier validate supplied values, formulas, and selected
+relations but cannot authenticate who produced every input. Stage-specific
+validators now exist prospectively, but a real canonical transitive identity
+chain and the six registered provenance debts must still be resolved before a
+canonical S01 freeze or outcome-bearing stage; synthetic fail-closed behavior
+and self-consistent hashes cannot substitute for them.
 
 ## Child Contract Requirements
 
@@ -600,15 +610,18 @@ new Phase-0 identity mandatory.
 The engine, content-addressed bundle writer, non-executable child templates, gap-safe
 CONTINUOUS raw builder, exact diagnostic CONTINUOUS S02/S03/S04 paths, exact
 LONG S02/S03/S04 boundaries, mechanically derived LONG context sidecars, shared
-projector, non-authoritative root-byte snapshot precursor, generic diagnostic
-byte-binding stage-receipt utility, and registry-v4
+projector, canonical expected-population/full-reconstruction path,
+non-authoritative root-byte snapshot precursor, generic diagnostic byte-binding
+stage-receipt utility, separate Parquet/Arrow semantic verifier, and registry-v4
 leakage/refusal checks are synthetically validated. This is limited software
 evidence plus the narrow local readiness diagnostic above. No real S02 feature
 construction, real S03 entry/anchor artifact, real S04 path label, or outcome
 analysis has run. Existing narrow
 candidate/selected ledgers and current source were inspected only to diagnose
 missing population and dependence; no forward label from the proposed
-population has been calculated or inspected. The unresolved RMOM source/root
-provenance, population/config stage wiring, and canonical semantic-chain debts above
-keep both canonical child contracts absent and support no alpha, gate, promotion,
+population has been calculated or inspected. Consumer-owned config wiring is now
+prospectively `WIRED` for 11/11 targets, but authenticated RMOM source/root/PIT
+provenance, independently inventoried population completeness, semantic
+canonical-ID rederivation, and transitive LONG-sidecar/canonical-chain debts keep
+both canonical child contracts absent and support no alpha, gate, promotion,
 sizing, or deployment conclusion.

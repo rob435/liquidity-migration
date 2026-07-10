@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import hashlib
 import io
@@ -221,6 +222,59 @@ def test_dirty_commit_keeps_plan_incomplete(tmp_path, monkeypatch) -> None:
     assert plan["readiness"]["result_if_run_now"] == "phase0_only"
 
 
+def test_wired_preflight_cannot_claim_outcome_readiness_without_population_and_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for venue in ("bybit", "binance"):
+        (tmp_path / venue).mkdir()
+    snapshot = _fake_source_snapshot(clean=True)
+    monkeypatch.setattr(scout, "_git_state", lambda: snapshot.git)
+    monkeypatch.setattr(
+        scout,
+        "_source_receipts",
+        lambda: {
+            "liquidity_migration/continuous_population_scout.py": {
+                "present": True,
+                "sha256": "c",
+            },
+            "liquidity_migration/long_population_scout.py": {
+                "present": True,
+                "sha256": "l",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        scout,
+        "_root_plan",
+        lambda venue, root, deep_root_hash: {
+            "venue": venue,
+            "root": str(root),
+            "phase0_source_ready": True,
+            "tier_a0_label_ready": True,
+            "registered_receipt_ready": True,
+        },
+    )
+    monkeypatch.setattr(
+        scout,
+        "_canonical_child_status",
+        lambda sleeve, contract, analysis: {
+            "sleeve": sleeve,
+            "status": "READY",
+            "contract_path": str(contract),
+            "analysis_manifest_path": str(analysis),
+        },
+    )
+
+    plan = scout.build_plan(_args(tmp_path), include_generated_at_utc=False)
+
+    assert plan["readiness"]["s02_config_parity_wired"] is True
+    assert plan["readiness"]["s02_preflight_ready"] is True
+    assert plan["readiness"]["expected_population_artifacts_verified"] is False
+    assert plan["readiness"]["s02_semantic_receipt_verified"] is False
+    assert plan["readiness"]["outcome_run_ready"] is False
+
+
 def test_source_snapshot_is_reconstructable_and_excludes_canonical_children(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -345,7 +399,7 @@ def test_environment_manifest_records_every_sorted_distribution_and_dependency_h
     monkeypatch.setattr(
         scout.importlib.metadata,
         "distributions",
-        lambda: [Distribution("Zoo_pkg", "2.0"), Distribution("alpha.pkg", "10.1")],
+        lambda **_kwargs: [Distribution("Zoo_pkg", "2.0"), Distribution("alpha.pkg", "10.1")],
     )
 
     manifest = scout._environment_receipt()
@@ -365,7 +419,7 @@ def test_environment_manifest_records_every_sorted_distribution_and_dependency_h
     monkeypatch.setattr(
         scout.importlib.metadata,
         "distributions",
-        lambda: [Distribution("same_name", "1"), Distribution("same-name", "2")],
+        lambda **_kwargs: [Distribution("same_name", "1"), Distribution("same-name", "2")],
     )
     with pytest.raises(RuntimeError, match="conflicting duplicate normalized installed distribution"):
         scout._environment_receipt()
@@ -374,15 +428,39 @@ def test_environment_manifest_records_every_sorted_distribution_and_dependency_h
     monkeypatch.setattr(
         scout.importlib.metadata,
         "distributions",
-        lambda: [identical, identical],
+        lambda **_kwargs: [identical, identical],
     )
     aliased = scout._environment_receipt()
     assert aliased["installed_distribution_count"] == 1
     assert [row["normalized_name"] for row in aliased["installed_distributions"]] == ["same-name"]
 
     discoveries = iter(([identical], [identical, identical]))
-    monkeypatch.setattr(scout.importlib.metadata, "distributions", lambda: next(discoveries))
+    monkeypatch.setattr(scout.importlib.metadata, "distributions", lambda **_kwargs: next(discoveries))
     assert scout._environment_receipt() == scout._environment_receipt()
+
+
+def test_environment_discovery_excludes_only_repository_source_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    external_site_packages = tmp_path / "external-venv" / "site-packages"
+    nested_site_packages = repository / ".venv" / "site-packages"
+    external_site_packages.mkdir(parents=True)
+    nested_site_packages.mkdir(parents=True)
+    monkeypatch.setattr(scout, "REPO", repository)
+    monkeypatch.setattr(scout.os, "getcwd", lambda: str(repository))
+    monkeypatch.setattr(
+        scout.sys,
+        "path",
+        ["", str(repository), str(repository / "."), str(external_site_packages), str(nested_site_packages)],
+    )
+
+    assert scout._installed_distribution_search_path() == [
+        str(external_site_packages.resolve()),
+        str(nested_site_packages.resolve()),
+    ]
 
 
 def test_phase0_input_plan_identity_ignores_downstream_canonical_status(
@@ -547,6 +625,16 @@ def _phase0_inventory() -> dict[str, object]:
     }
 
 
+def test_config_bundle_rederives_parity_instead_of_trusting_top_level_status() -> None:
+    configs = copy.deepcopy(scout._config_receipts())
+    manifest = configs["s02_config_parity_manifest"]
+    manifest["status"] = "WIRED"
+    manifest["targets"][0]["consumer_validations"][0]["values_match"] = False
+
+    with pytest.raises(RuntimeError, match="does not match validator evidence"):
+        scout._config_bundle_artifacts(configs)
+
+
 def test_registered_designs_emit_support_counts_and_cover_every_s01_input() -> None:
     inventory = _phase0_inventory()
     designs = scout._load_registered_child_designs()
@@ -581,6 +669,11 @@ def test_registered_designs_emit_support_counts_and_cover_every_s01_input() -> N
     assert support["focal_arm_counts"]["status"] == "DEFERRED_TO_S02"
     assert len(support["sleeve_design"]["continuous"]["hypotheses"]) == 2
     assert len(support["sleeve_design"]["long"]["hypotheses"]) == 2
+    for sleeve in ("continuous", "long"):
+        template = designs["sleeves"][sleeve]["analysis_template"]
+        assert template["required_s01_outputs_before_s02"] == scout.REQUIRED_S01_OUTPUT_GATES[sleeve]
+        assert template["receipt_policy"] == scout.REQUIRED_RECEIPT_POLICY
+        assert scout.REQUIRED_DURABLE_POPULATION_ARTIFACTS <= set(template["required_artifacts"])
     assert status["all_sleeves_ready"] is False
     for sleeve, row in status["sleeves"].items():
         required = set(designs["sleeves"][sleeve]["analysis_template"]["required_phase0_substitutions"])
@@ -608,12 +701,12 @@ def test_registered_designs_emit_support_counts_and_cover_every_s01_input() -> N
         assert row["resolved"]["registered_scope_json_path"] == f"{sleeve}_registered_scope.json"
         assert row["resolved"]["s02_config_parity_manifest_path"] == "s02_config_parity_manifest.json"
         assert "canonical_config_json_path" not in row["blockers"]
-        assert row["implementation_blockers"] == {
-            "s02_config_parity": "canonical parity manifest status is 'UNWIRED'; stage consumers remain unwired"
-        }
+        assert row["implementation_blockers"] == {}
     assert status["config_artifacts_file_hash_verified"] is True
-    assert status["s02_config_parity_status"] == "UNWIRED"
-    assert status["a0_config_identity_mismatch_retired"] is False
+    assert status["s02_config_parity_status"] == "WIRED"
+    assert status["config_consumer_wiring_verified_prospectively"] is True
+    assert status["real_s00_s04_identity_chain_instantiated"] is False
+    assert all(not any(gates.values()) for gates in status["post_s01_s02_gates"].values())
     assert set(config_payloads) == {
         "continuous_canonical_config.json",
         "continuous_registered_scope.json",
@@ -886,6 +979,53 @@ def test_registered_design_loader_rejects_deleted_required_key(
         scout._load_registered_child_designs()
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("gate", "S01/S02 gate contract changed"),
+        ("receipt_policy", "receipt policy changed"),
+        ("artifact_inventory", "durable artifact inventory is invalid"),
+    ],
+)
+def test_registered_design_loader_rejects_weakened_population_or_semantic_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    original_contract, original_analysis = scout.CANONICAL_CHILDREN["continuous"]
+    source_contract = original_contract.with_name(original_contract.name.replace(".md", ".template.md"))
+    source_analysis = original_analysis.with_name(
+        original_analysis.name.replace(".analysis.json", ".analysis.template.json")
+    )
+    canonical_contract = tmp_path / original_contract.name
+    canonical_analysis = tmp_path / original_analysis.name
+    template_contract = canonical_contract.with_name(canonical_contract.name.replace(".md", ".template.md"))
+    template_analysis = canonical_analysis.with_name(
+        canonical_analysis.name.replace(".analysis.json", ".analysis.template.json")
+    )
+    template_contract.write_bytes(source_contract.read_bytes())
+    payload = json.loads(source_analysis.read_text(encoding="utf-8"))
+    if mutation == "gate":
+        payload["required_s01_outputs_before_s02"]["full_reconstruction_verification"] = "OPTIONAL"
+    elif mutation == "receipt_policy":
+        payload["receipt_policy"]["semantic_s02_receipt_required_before_s03"] = False
+    else:
+        payload["required_artifacts"].remove("source_keys.jsonl")
+    template_analysis.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        scout,
+        "CANONICAL_CHILDREN",
+        {
+            "continuous": (canonical_contract, canonical_analysis),
+            "long": scout.CANONICAL_CHILDREN["long"],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        scout._load_registered_child_designs()
+
+
 def _write_partial_phase0_root(root: Path, *, source: str) -> None:
     date = "2023-02-23"
     ts_ms = int(dt.datetime(2023, 2, 23, tzinfo=dt.timezone.utc).timestamp() * 1_000)
@@ -1006,12 +1146,13 @@ def test_full_phase0_wrapper_identity_is_invariant_to_numeric_outcomes(
         assert resolved["registered_scope_sha256"] == receipt_hashes[f"{sleeve}_registered_scope.json"]
         assert resolved["s02_config_parity_manifest_path"] == "s02_config_parity_manifest.json"
         assert resolved["s02_config_parity_manifest_sha256"] == receipt_hashes["s02_config_parity_manifest.json"]
-        assert s01_status["sleeves"][sleeve]["implementation_blockers"]
+        assert s01_status["sleeves"][sleeve]["implementation_blockers"] == {}
     continuous_resolved = s01_status["sleeves"]["continuous"]["resolved"]
     assert continuous_resolved["component_config_json_path"] == "continuous_component_config.json"
     assert continuous_resolved["component_config_sha256"] == receipt_hashes["continuous_component_config.json"]
-    assert s01_status["s02_config_parity_status"] == "UNWIRED"
-    assert s01_status["a0_config_identity_mismatch_retired"] is False
+    assert s01_status["s02_config_parity_status"] == "WIRED"
+    assert s01_status["config_consumer_wiring_verified_prospectively"] is True
+    assert s01_status["real_s00_s04_identity_chain_instantiated"] is False
     assert s01_status["config_artifact_index_file_sha256"] == receipt_hashes["config_artifact_index.json"]
 
     for root in (bybit, binance):

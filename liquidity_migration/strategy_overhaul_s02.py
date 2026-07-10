@@ -2,12 +2,11 @@
 
 This module composes the existing population, context, identity/PIT, and static
 diagnostic primitives.  It does not read an entry anchor, a future path, a PnL,
-or any other outcome.  The caller must supply an independently inventoried
-``expected_source_keys`` frame for every warm-up and signal-window input row,
-plus a separate ``expected_population_keys`` frame for the retained signal
-window.  Equality between the raw input and source inventory is a hard gate;
-the retained population must be an exact subset.  Features and market context
-are built on the complete source before warm-up-only rows are removed.
+or any other outcome.  The caller must supply a fully verified canonical
+expected-population object containing every warm-up/source key and the retained
+signal-window keys. Equality between the raw input and source inventory is a
+hard gate; the retained population must be an exact subset. Features and market
+context are built on the complete source before warm-up-only rows are removed.
 
 Historical RMOM publication times were never recorded and are not fabricated
 here. The population builder's day-start alias is replaced with the conservative
@@ -40,6 +39,12 @@ from .strategy_overhaul_context import (
     attach_continuous_market_context,
     attach_continuous_static_diagnostics,
 )
+from .strategy_overhaul_expected_population import (
+    ExpectedPopulationError,
+    VerifiedExpectedPopulation,
+    continuous_expected_population_consumer_parity_surface,
+    verified_expected_population_s02_inputs,
+)
 from .strategy_overhaul_identity_adapter import (
     COMMON_IDENTITY_COLUMNS,
     CONTINUOUS_FEATURE_KEY_COLUMNS,
@@ -61,7 +66,9 @@ from .strategy_overhaul_schemas import (
 )
 
 CANONICAL_BTC_UPTREND_LOOKBACK_DAYS = 30
-CONTINUOUS_S02_EVIDENCE_STATUS = "DIAGNOSTIC_ONLY_ROOT_CONFIG_POPULATION_AND_IDENTITY_RECEIPTS_UNBOUND"
+CONTINUOUS_S02_EVIDENCE_STATUS = (
+    "DIAGNOSTIC_ONLY_POPULATION_AND_CONFIG_IDENTITY_BOUND_ROOT_COMPLETENESS_AUTHENTICITY_AND_RMOM_PROVENANCE_LIMITED"
+)
 
 HOURLY_KLINE_SCHEMA = MappingProxyType(
     {
@@ -183,7 +190,7 @@ class ContinuousS02Error(ValueError):
 def continuous_s02_runtime_parity_surface(
     config: ContinuousDemoCycleConfig,
     config_identity: dict[str, JsonValue],
-) -> dict[str, dict[str, JsonValue]]:
+) -> dict[str, object]:
     """Return the config-derived surface actually consumed by CONTINUOUS S02.
 
     This is also the runtime guard used by the builder.  Expected values come
@@ -259,9 +266,7 @@ def continuous_s02_runtime_parity_surface(
     }
     expected_components: dict[str, JsonValue] = {
         "component_order": [str(row["component"]) for row in typed_rows],
-        "component_trigger_by_name": {
-            str(row["component"]): row["entry_event_trigger"] for row in typed_rows
-        },
+        "component_trigger_by_name": {str(row["component"]): row["entry_event_trigger"] for row in typed_rows},
         "component_age_days_min_by_name": {str(row["component"]): row["age_days_min"] for row in typed_rows},
         "component_bit_by_name": {str(row["component"]): row["component_bit"] for row in typed_rows},
         "component_weight_by_name": {str(row["component"]): row["weight"] for row in typed_rows},
@@ -270,10 +275,8 @@ def continuous_s02_runtime_parity_surface(
         tuple(context_adapter.CONTINUOUS_STATIC_COMPONENT_ORDER) == tuple(continuous_scout.COMPONENT_ORDER)
         and dict(context_adapter.CONTINUOUS_STATIC_COMPONENT_TRIGGER_BY_NAME)
         == dict(continuous_scout.COMPONENT_TRIGGERS)
-        and context_adapter.CONTINUOUS_STATIC_COMPONENT_AGE_DAYS_MIN
-        == identity_adapter.CONTINUOUS_CURRENT_AGE_DAYS_MIN
-        and set(continuous_scout.COMPONENT_AGE_DAYS_MIN.values())
-        == {identity_adapter.CONTINUOUS_CURRENT_AGE_DAYS_MIN}
+        and context_adapter.CONTINUOUS_STATIC_COMPONENT_AGE_DAYS_MIN == identity_adapter.CONTINUOUS_CURRENT_AGE_DAYS_MIN
+        and set(continuous_scout.COMPONENT_AGE_DAYS_MIN.values()) == {identity_adapter.CONTINUOUS_CURRENT_AGE_DAYS_MIN}
     )
     if component_identity != expected_components or not duplicate_component_surfaces_match:
         raise ContinuousS02Error(
@@ -282,7 +285,60 @@ def continuous_s02_runtime_parity_surface(
             f"duplicate_surfaces_match={duplicate_component_surfaces_match}"
         )
 
+    population_surface = continuous_expected_population_consumer_parity_surface(
+        config,
+        config_identity,
+    )
+    population_exclusions = population_surface.get("population_exclusions")
+    if not isinstance(population_exclusions, dict):
+        raise ContinuousS02Error("CONTINUOUS expected-population parity surface is malformed")
+
     return {
+        "consumer_validator": ("liquidity_migration.strategy_overhaul_s02.continuous_s02_runtime_parity_surface"),
+        "validated_targets": [
+            "full_config_and_scope_identity",
+            "selection_profile",
+            "decision_and_btc_gate",
+            "component_identity",
+            "population_exclusions",
+        ],
+        "validated_target_fields": {
+            "full_config_and_scope_identity": [
+                "full_config_sha256",
+                "registered_scope_sha256",
+                "component_config_sha256",
+            ],
+            "selection_profile": list(selection),
+            "decision_and_btc_gate": list(decision_gate),
+            "component_identity": list(component_identity),
+            "population_exclusions": list(population_exclusions),
+        },
+        "validated_consumers": {
+            "full_config_and_scope_identity": [
+                "strategy_overhaul_s02.build_continuous_s02_feature_tape",
+            ],
+            "selection_profile": [
+                "continuous_population_scout.CURRENT_RMOM_QUANTILE",
+                "continuous_population_scout.CURRENT_LIQUIDITY_FLOOR",
+                "continuous_population_scout.build_continuous_feature_tape decile=9 literals",
+                "continuous_population_scout.build_continuous_feature_tape max_ret168 literals",
+            ],
+            "decision_and_btc_gate": [
+                "continuous_population_scout.build_continuous_feature_tape +1h decision literals",
+                "strategy_overhaul_s02.CANONICAL_BTC_UPTREND_LOOKBACK_DAYS",
+                "strategy_overhaul_context.attach_continuous_market_context",
+                "strategy_overhaul_context.attach_continuous_static_diagnostics BTC-uptrend pass",
+            ],
+            "component_identity": [
+                "continuous_population_scout.COMPONENT_BITS",
+                "continuous_population_scout.COMPONENT_WEIGHTS",
+                "continuous_population_scout.build_continuous_feature_tape trigger/tag/mask literals",
+                "strategy_overhaul_context.attach_continuous_static_diagnostics component map",
+                "strategy_overhaul_identity_adapter._attach_current_ages >=240 literal",
+                "strategy_overhaul_s02 component-field loops",
+            ],
+            "population_exclusions": [],
+        },
         "full_config_and_scope_identity": {
             "full_config_sha256": config_identity["canonical_config_sha256"],
             "registered_scope_sha256": config_identity["scope_sha256"],
@@ -291,6 +347,10 @@ def continuous_s02_runtime_parity_surface(
         "selection_profile": selection,
         "decision_and_btc_gate": decision_gate,
         "component_identity": component_identity,
+        "population_exclusions": population_exclusions,
+        "consumer_validators": {
+            "strategy_overhaul_expected_population": population_surface,
+        },
     }
 
 
@@ -512,8 +572,7 @@ def build_continuous_s02_feature_tape(
     config: ContinuousDemoCycleConfig,
     config_identity: dict[str, JsonValue],
     stable_rmom: pl.DataFrame | None,
-    expected_source_keys: pl.DataFrame,
-    expected_population_keys: pl.DataFrame,
+    verified_population: VerifiedExpectedPopulation,
     venue: str,
     manifest_pairs: pl.DataFrame,
     instrument_map: Sequence[InstrumentMapEntry],
@@ -523,11 +582,10 @@ def build_continuous_s02_feature_tape(
 ) -> pl.DataFrame:
     """Build one exact 196-field, registry-typed CONTINUOUS S02 artifact.
 
-    ``expected_source_keys`` must independently inventory every supplied
-    warm-up and signal row. ``expected_population_keys`` independently defines
-    the retained signal window and must be its exact subset.  Both frames use
-    exactly ``(symbol, signal_ts_ms)``.  The function is diagnostic-only while
-    the authoritative root/config/population receipts remain unbound.
+    ``verified_population`` must come from the full reconstructing population
+    verifier. Its source frame inventories every supplied warm-up and signal
+    row; its retained frame defines the exact registered signal population.
+    Root completeness/authenticity remain separate limitations of that receipt.
     """
 
     continuous_s02_runtime_parity_surface(config, config_identity)
@@ -536,9 +594,23 @@ def build_continuous_s02_feature_tape(
     if btc_uptrend_lookback_days != CANONICAL_BTC_UPTREND_LOOKBACK_DAYS:
         raise ContinuousS02Error("btc_uptrend_lookback_days must equal the canonical registered value 30")
 
-    source_keys = _validate_expected_keys(expected_source_keys, name="expected_source_keys")
+    try:
+        verified_source_keys, verified_population_keys = verified_expected_population_s02_inputs(
+            verified_population,
+            sleeve="continuous",
+            venue=venue,
+            config=config,
+            config_identity=config_identity,
+            manifest_pairs=manifest_pairs,
+            instrument_map=instrument_map,
+            instrument_map_version=instrument_map_version,
+        )
+    except ExpectedPopulationError as exc:
+        raise ContinuousS02Error(f"CONTINUOUS S02 expected-population receipt failed: {exc}") from exc
+
+    source_keys = _validate_expected_keys(verified_source_keys, name="expected_source_keys")
     expected_keys = _validate_expected_keys(
-        expected_population_keys,
+        verified_population_keys,
         name="expected_population_keys",
     )
     _assert_keys_in_registered_scope(

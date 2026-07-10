@@ -34,7 +34,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 REPO = Path(__file__).resolve().parent.parent
 if not any(Path(entry or os.getcwd()).resolve() == REPO for entry in sys.path):
@@ -189,6 +189,44 @@ REQUIRED_S01_FIELDS = {
             "label_tail_root_receipt",
         }
     ),
+}
+REQUIRED_S01_OUTPUT_GATES = {
+    "continuous": {
+        "source_keys_jsonl": "REQUIRED_S01_OUTPUT",
+        "expected_population_jsonl": "REQUIRED_S01_OUTPUT",
+        "expected_population_receipt_json": "REQUIRED_S01_OUTPUT",
+        "full_reconstruction_verification": "REQUIRED_BEFORE_S02",
+        "exact_s02_population_equality": "REQUIRED_AT_S02",
+        "s02_semantic_receipt": "REQUIRED_BEFORE_S03",
+        "transitive_semantic_receipt_through_s04": "REQUIRED_AT_S04",
+    },
+    "long": {
+        "source_keys_jsonl": "REQUIRED_S01_OUTPUT",
+        "expected_population_jsonl": "REQUIRED_S01_OUTPUT",
+        "expected_population_receipt_json": "REQUIRED_S01_OUTPUT",
+        "full_reconstruction_verification": "REQUIRED_BEFORE_S02",
+        "exact_s02_population_and_symbol_age_equality": "REQUIRED_AT_S02",
+        "s02_semantic_receipt": "REQUIRED_BEFORE_S03",
+        "transitive_semantic_receipt_through_s04": "REQUIRED_AT_S04",
+    },
+}
+REQUIRED_RECEIPT_POLICY = {
+    "phase0_bundle_is_outcome_blind_diagnostic": True,
+    "outcome_blind_means_no_outcome_fields_decoded_calculated_ranked_or_inspected": True,
+    "opaque_file_identity_bytes_guaranteed_outcome_free": False,
+    "byte_snapshot_only_is_canonical_root_receipt": False,
+    "generic_stage_receipt_establishes_semantic_provenance": False,
+    "verified_expected_population_required_by_s02": True,
+    "semantic_s02_receipt_required_before_s03": True,
+    "registered_scope_and_earliest_history_verification_required": True,
+    "stage_specific_semantic_validation_required": True,
+    "transitive_identity_verification_required": True,
+}
+REQUIRED_DURABLE_POPULATION_ARTIFACTS = {
+    "source_keys.jsonl",
+    "expected_population.jsonl",
+    "expected_population_receipt.json",
+    "semantic_stage_validation_receipts",
 }
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA"))).expanduser()
 DEFAULT_ROOTS = {
@@ -616,6 +654,32 @@ def _normalized_distribution_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _installed_distribution_search_path() -> list[str]:
+    """Return metadata search paths without the repository source root.
+
+    Setuptools may leave ``*.egg-info`` in the source tree while a PEP-660
+    editable install also records the real installed ``*.dist-info`` in
+    site-packages.  The source metadata is already bound by the repository
+    snapshot and is not a second installed distribution.  Excluding only the
+    exact repository root keeps strict duplicate detection across installed
+    paths and intentionally retains virtual environments nested under the
+    repository.
+    """
+
+    repository = REPO.resolve()
+    search_path: list[str] = []
+    seen: set[str] = set()
+    for entry in sys.path:
+        resolved = Path(entry or os.getcwd()).resolve()
+        if resolved == repository:
+            continue
+        value = str(resolved)
+        if value not in seen:
+            search_path.append(value)
+            seen.add(value)
+    return search_path
+
+
 _PHASE0_EXECUTED_MODULES = (
     "numpy",
     "numpy._core._multiarray_umath",
@@ -709,7 +773,10 @@ def _executed_module_receipts() -> list[dict[str, Any]]:
 
 
 def _environment_receipt() -> dict[str, Any]:
-    discovered = [_distribution_receipt(distribution) for distribution in importlib.metadata.distributions()]
+    discovered = [
+        _distribution_receipt(distribution)
+        for distribution in importlib.metadata.distributions(path=_installed_distribution_search_path())
+    ]
     discovered.sort(key=lambda row: (row["normalized_name"], row["version"], row["name"]))
     distributions: list[dict[str, Any]] = []
     by_normalized_name: dict[str, dict[str, Any]] = {}
@@ -839,6 +906,7 @@ def _source_receipts() -> dict[str, Any]:
         REPO / "liquidity_migration" / "strategy_overhaul_schemas.py",
         REPO / "liquidity_migration" / "strategy_overhaul_config_identity.py",
         REPO / "liquidity_migration" / "strategy_overhaul_context.py",
+        REPO / "liquidity_migration" / "strategy_overhaul_expected_population.py",
         REPO / "liquidity_migration" / "strategy_overhaul_identity_adapter.py",
         REPO / "liquidity_migration" / "strategy_overhaul_instrument_map.py",
         REPO / "liquidity_migration" / "strategy_overhaul_long_context.py",
@@ -896,7 +964,13 @@ def _config_receipts() -> dict[str, Any]:
 def _config_bundle_artifacts(
     configs: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    from liquidity_migration.strategy_overhaul_config_identity import verify_a0_config_identity
+    from liquidity_migration.strategy_overhaul_config_identity import (
+        S02_CONFIG_PARITY_MANIFEST_SCHEMA_VERSION,
+        canonical_json_sha256,
+        derive_s02_parity_status,
+        s02_config_parity_manifest,
+        verify_a0_config_identity,
+    )
 
     payloads: dict[str, Any] = {}
     sleeves: dict[str, Any] = {}
@@ -925,8 +999,21 @@ def _config_bundle_artifacts(
         sleeves[sleeve] = sleeve_index
 
     parity = configs.get("s02_config_parity_manifest")
-    if not isinstance(parity, dict) or parity.get("artifact_type") != "strategy_overhaul_a0_s02_config_parity_manifest":
+    if (
+        not isinstance(parity, dict)
+        or parity.get("schema_version") != S02_CONFIG_PARITY_MANIFEST_SCHEMA_VERSION
+        or parity.get("artifact_type") != "strategy_overhaul_a0_s02_config_parity_manifest"
+        or not isinstance(parity.get("targets"), list)
+    ):
         raise RuntimeError("canonical S02 config parity manifest is absent or invalid")
+    derived_parity_status = derive_s02_parity_status(parity["targets"])
+    if parity.get("status") != derived_parity_status:
+        raise RuntimeError("canonical S02 config parity manifest status does not match validator evidence")
+    canonical_parity = s02_config_parity_manifest(
+        {sleeve: cast(dict[str, Any], configs[sleeve]) for sleeve in ("continuous", "long")}
+    )
+    if canonical_json_sha256(parity) != canonical_json_sha256(canonical_parity):
+        raise RuntimeError("supplied S02 config parity manifest does not equal the regenerated canonical manifest")
     parity_rendered = _render_json(parity)
     payloads[S02_CONFIG_PARITY_MANIFEST_ARTIFACT] = parity
     result = {
@@ -937,10 +1024,12 @@ def _config_bundle_artifacts(
             "path": S02_CONFIG_PARITY_MANIFEST_ARTIFACT,
             "file_sha256": hashlib.sha256(parity_rendered).hexdigest(),
             "payload_sha256": _json_hash(parity),
-            "status": parity.get("status"),
+            "status": derived_parity_status,
         },
         "parity_status_semantics": (
-            "UNWIRED is a blocking implementation status; artifact materialization does not clear config parity debt"
+            "WIRED means the current consumer-owned validators exactly match the canonical config; it does not "
+            "prove that population/stage artifacts were materialized or that their provenance is semantically valid. "
+            "UNWIRED remains a blocking implementation status."
         ),
     }
     result["artifact_sha256"] = _json_hash(result)
@@ -1191,6 +1280,9 @@ _DOWNSTREAM_READINESS_FIELDS = frozenset(
         "child_contracts_present",
         "analysis_manifests_present",
         "canonical_children_valid",
+        "s02_preflight_ready",
+        "expected_population_artifacts_verified",
+        "s02_semantic_receipt_verified",
         "outcome_run_ready",
     }
 )
@@ -1262,13 +1354,18 @@ def build_plan(
     }
     child_freeze_receipt["artifact_sha256"] = _json_hash(child_freeze_receipt)
     source_snapshot_ready = bool(git.get("snapshot_ready", git.get("clean", False)))
-    outcome_run_ready = bool(
+    s02_preflight_ready = bool(
         source_snapshot_ready
         and builders_present
         and both_tier_a0
         and both_receipts
         and canonical_children_valid
         and config_parity_wired
+    )
+    expected_population_artifacts_verified = False
+    s02_semantic_receipt_verified = False
+    outcome_run_ready = bool(
+        s02_preflight_ready and expected_population_artifacts_verified and s02_semantic_receipt_verified
     )
     plan = {
         "schema_version": 1,
@@ -1316,6 +1413,9 @@ def build_plan(
             "clean_commit": git["clean"],
             "source_snapshot_ready": source_snapshot_ready,
             "s02_config_parity_wired": config_parity_wired,
+            "s02_preflight_ready": s02_preflight_ready,
+            "expected_population_artifacts_verified": (expected_population_artifacts_verified),
+            "s02_semantic_receipt_verified": s02_semantic_receipt_verified,
             "phase0_ready": both_phase0,
             "outcome_run_ready": outcome_run_ready,
             "result_if_run_now": "phase0_only" if both_phase0 else "incomplete",
@@ -1566,6 +1666,18 @@ def _load_registered_child_designs(
             raise RuntimeError(f"child analysis template required-key set changed: {template_analysis}")
         if set(required.values()) != {"REQUIRED_PHASE0_SUBSTITUTION"}:
             raise RuntimeError(f"non-executable child template has pre-filled substitutions: {template_analysis}")
+        if payload.get("required_s01_outputs_before_s02") != REQUIRED_S01_OUTPUT_GATES[sleeve]:
+            raise RuntimeError(f"child analysis template S01/S02 gate contract changed: {template_analysis}")
+        if payload.get("receipt_policy") != REQUIRED_RECEIPT_POLICY:
+            raise RuntimeError(f"child analysis template receipt policy changed: {template_analysis}")
+        required_artifacts = payload.get("required_artifacts")
+        if (
+            not isinstance(required_artifacts, list)
+            or any(not isinstance(name, str) or not name for name in required_artifacts)
+            or len(required_artifacts) != len(set(required_artifacts))
+            or not REQUIRED_DURABLE_POPULATION_ARTIFACTS <= set(required_artifacts)
+        ):
+            raise RuntimeError(f"child analysis template durable artifact inventory is invalid: {template_analysis}")
         marker = re.search(
             r"<!-- REQUIRED_PHASE0_KEYS_JSON: (\[.*?\]) -->",
             contract_text,
@@ -1956,7 +2068,10 @@ def _s01_template_input_status(
         "config_artifact_index_payload_sha256": supplied_config_index.get("artifact_sha256"),
         "config_artifacts_file_hash_verified": config_artifacts_ready,
         "s02_config_parity_status": config_parity_status,
-        "a0_config_identity_mismatch_retired": False,
+        "config_consumer_wiring_verified_prospectively": bool(
+            config_artifacts_ready and config_parity_status == "WIRED"
+        ),
+        "real_s00_s04_identity_chain_instantiated": False,
         "instrument_map_identity_status": {
             "venue_local_substitution_ready": venue_local_map_ready,
             "source_kind": map_artifact.get("source_kind"),
@@ -1973,6 +2088,16 @@ def _s01_template_input_status(
             "reconstructable_artifact_sha256": map_artifact.get("artifact_sha256"),
         },
         "support_design_and_counts_sha256": support_artifact["artifact_sha256"],
+        "post_s01_s02_gates": {
+            sleeve: {
+                "source_keys_jsonl_verified": False,
+                "expected_population_jsonl_verified": False,
+                "expected_population_receipt_verified_by_full_reconstruction": False,
+                "s02_semantic_receipt_verified": False,
+                "s03_or_outcome_execution_ready": False,
+            }
+            for sleeve in ("continuous", "long")
+        },
         "sleeves": sleeves,
         "all_sleeves_ready": all(row["status"] == "READY" for row in sleeves.values()),
         "outcome_run_authorized": False,
@@ -2144,7 +2269,11 @@ def run_phase0_inventory(args: argparse.Namespace) -> int:
         "liquidity_migration/strategy_overhaul_phase0.py",
         "liquidity_migration/strategy_overhaul_phase0_verifier.py",
         "liquidity_migration/strategy_overhaul_instrument_map.py",
+        "liquidity_migration/strategy_overhaul_expected_population.py",
         "liquidity_migration/strategy_overhaul_population_keys.py",
+        "liquidity_migration/strategy_overhaul_s02.py",
+        "liquidity_migration/strategy_overhaul_long_s02.py",
+        "liquidity_migration/strategy_overhaul_stage_receipt.py",
         "liquidity_migration/strategy_overhaul_schemas.py",
         "liquidity_migration/strategy_overhaul_config_identity.py",
         "scripts/strategy_overhaul_scout_2026_07_10.py",

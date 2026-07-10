@@ -233,19 +233,20 @@ unchanged.
 
 | Surface | Synthetic hardening now present | Unresolved boundary |
 | --- | --- | --- |
-| CONTINUOUS raw/S02 | Gap-safe raw-history segments; exact 196-field S02 diagnostic projection; independent source/warmup and retained signal-window key inventories; stable RMOM causal-computability time derived as `D - 1 day + 1 hour`; provisional rows unavailable | RMOM source-day/provisional-state and root/population identities are not yet receipt-bound; actual historical publication, ingestion, and operational latency are not claimed |
+| CONTINUOUS raw/S02 | Gap-safe raw-history segments; exact 196-field S02 diagnostic projection; canonical sorted source/expected-population JSONL plus strict config/root/PIT/manifest-pair/map receipt binding; S02 accepts only the full-verifier result; stable RMOM causal-computability time derived as `D - 1 day + 1 hour`; provisional rows unavailable | No real population artifact has run; supplied-root/PIT completeness/authenticity and RMOM source-day/provisional-state provenance remain unproved; actual historical publication, ingestion, and operational latency are not claimed |
 | CONTINUOUS S03/S04 | Separate exact typed entry-anchor and minimal path projections; anchor tamper/parity and gap/completeness checks | No real entry or label artifact has run |
-| LONG S02 | Exact 138-field projection; exact runtime v11a config; canonical key; independently supplied population/age; mechanically reconstructed causal availability/regime/month sidecars; PIT/map checks; reconstructed rank metadata; post-signal invariance | Root/population/PIT/map and sidecar receipts are not yet threaded into a real S02 run |
+| LONG S02 | Exact 138-field projection; exact runtime v11a config; canonical key; full-verifier-only population/age with exact runtime PIT/map binding; mechanically reconstructed causal availability/regime/month sidecars; reconstructed rank metadata; post-signal invariance | No real population/S02 artifact has run; authenticated root/PIT completeness and raw-hourly provenance for the context sidecars remain unproved |
 | LONG S03/S04 | Separate exact 30-field entry and 71-field label projections; finite dependencies; geometry reconstruction; frozen horizons; future-bar invariance | No real entry or label artifact has run |
-| Shared contracts | Central exact order/dtype/non-null/key projector; proposed registry v4; mechanically derived config bundle; internally replayable source/selected-environment identity; venue-swap and physical-root-alias refusal; non-authoritative `BYTE_SNAPSHOT_ONLY` root precursor; diagnostic tamper-evident stage byte bindings with S00 config/source/environment separated from S01 root/PIT/map/population freeze; exact repository-derived config equality enforced at binding | Internal replay is not source/environment authentication; source labels and unsigned root receipts remain untrusted lineage inputs; external-map review/product/multiplier claims cannot establish canonical or portable identity; root snapshots do not prove registered scope/earliest history/S01 readiness; stage bindings do not validate transitive provenance; no canonical S00-S04 semantic chain exists; seven blockers remain |
+| Shared contracts | Central exact order/dtype/non-null/key projector; proposed registry v4; mechanically derived config bundle; 11/11 consumer-owned config validators; internally replayable source/selected-environment identity; venue-swap and physical-root-alias refusal; non-authoritative `BYTE_SNAPSHOT_ONLY` root precursor; generic byte bindings plus a separate Parquet/Arrow S02-S04 semantic verifier for current registry/scope/config/population/selected invariants/transitive parents | Internal replay is not source/environment authentication; source labels and unsigned root/PIT receipts remain untrusted lineage inputs; semantic verification does not rederive canonical IDs from the map, recompute every feature/label, or prove outcome-blind construction; no real semantic chain exists; six blockers remain; the new paths are all-in-memory and the population bundle is only atomic per file |
 
-The blocking debts are receipt-bound RMOM source-day/provisional-state and
-root-content provenance; a complete independently inventoried population;
-config verification inside every stage wrapper; stage-specific semantic
-validation; and transitive binding of the root, PIT/map, population, and
-mechanically derived LONG-sidecar artifacts into one canonical chain. The
-existing root/stage receipt utilities are diagnostics and cannot clear these
-debts by themselves. One outcome-blind Phase-0 inventory has now run on the
+The remaining blocking debts are authenticated RMOM source-day/provisional-state
+and root/PIT provenance; a complete independently inventoried supplied
+population; canonical-ID rederivation in semantic verification; and transitive
+source recomputation/binding of the mechanically derived LONG sidecars in a real
+chain. Consumer-owned config checks, canonical expected-population artifacts,
+and selected stage-specific semantic verification now exist prospectively, but
+the generic byte receipts cannot clear the remaining debts and no real semantic
+receipt has run. One outcome-blind Phase-0 inventory has now run on the
 local workstation roots: bundle
 `strategy-overhaul-phase0-bccefdfc38ae9fda3c17`, receipt SHA-256
 `ed5fb3687280db691dcda5e32e00005a8dd48dd2fb403c2f48fe6cb69a81bb03`,
@@ -272,7 +273,10 @@ deployment conclusion.
    provenance-unknown Binance membership pairs, absent Binance RMOM
    `is_provisional`, 360 Bybit kline rows without a source label, no canonical
    root-lineage receipts, incomplete auto-map consumption, and `UNWIRED` S02
-   config parity. It also exposed a prospective code defect: two legitimate
+   config parity in that exact historical bundle. Current source now derives
+   `WIRED` 11/11 prospectively, but a new Phase-0 identity and real population/
+   semantic artifacts are required before that can affect readiness. It also
+   exposed a prospective code defect: two legitimate
    Bybit kline source labels were omitted from the venue sanity registry. Fix
    code and roots, produce a new big-PC Phase-0 identity, and resolve the
    semantic provenance debts before instantiating canonical children.
