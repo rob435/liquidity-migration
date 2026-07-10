@@ -1,6 +1,6 @@
 """Live BTC-beta hedge manager for the continuous demo book (WP3, banked 2026-06-09).
 
-A once-daily manager that holds a small LONG BTC position sized to the continuous
+A periodic target-position manager that holds small LONG BTC/ETH positions sized to the continuous
 short book's causal rolling beta, market-neutralizing its uncompensated alt-season
 exposure (receipts: continuous-hedge-{overlay,engine}-2026-06-09.md). It is a
 SEPARATE sleeve from the entry daemon: its own ledger root, its own orderLinkId
@@ -85,7 +85,7 @@ class ContinuousHedgeConfig:
 
 @dataclass(slots=True)
 class HedgeDecision:
-    """The computed hedge action for one daily run (pure; no I/O)."""
+    """The computed hedge action for one target reconciliation (pure; no I/O)."""
 
     beta_window_days: int
     hedge_ratio_equity_frac: float
@@ -162,7 +162,7 @@ def compute_hedge_decision(
     current_hedge_qty: float,
     equity_usdt: float,
 ) -> HedgeDecision:
-    """Pure hedge sizing for one daily run (no orders, no I/O).
+    """Pure hedge sizing for one target reconciliation (no orders, no I/O).
 
     The beta is computed over the full supplied history (warm-start + live) via the
     parity-tested live twin; ``target_scale`` carries the live book's gross-short
@@ -251,7 +251,7 @@ def _beta_window_joint_observation_count(
 
 @dataclass(slots=True)
 class HedgeDecision2F:
-    """The computed two-leg (BTC+ETH) hedge action for one daily run (pure; no I/O)."""
+    """The computed two-leg (BTC+ETH) hedge action for one target run (pure; no I/O)."""
 
     beta_window_days: int
     ratio_btc: float
@@ -278,7 +278,7 @@ def compute_hedge_decision_2f(
     current_eth_qty: float,
     equity_usdt: float,
 ) -> HedgeDecision2F:
-    """Pure two-leg hedge sizing for one daily run (no orders, no I/O).
+    """Pure two-leg hedge sizing for one target reconciliation (no orders, no I/O).
 
     Per-leg ratios come from the parity-tested live twin
     (``compute_continuous_hedge_ratios_2f``, frozen Stage-B rule). If the joint
@@ -404,7 +404,7 @@ def build_hedge_tracking_row(
     SAFETY CONTRACT (verified against ws_risk.plan_risk_exits): stop_price,
     take_profit_price and planned_exit_ts_ms are ALL 0, so the risk service TRACKS
     this position (its symbol enters open_symbols -> adoption skips it) but NEVER
-    force-exits it — the daily hedge manager is its sole manager. side='long',
+    force-exits it — the periodic hedge manager is its sole manager. side='long',
     sleeve='continuous_addon' routes it to the addon ledger the risk service reads.
     """
     return {
@@ -438,6 +438,4 @@ def hedge_order_link_id(now_ms: int, symbol: str = HEDGE_SYMBOL) -> str:
     from .event_demo import _order_link_id
 
     return _order_link_id(HEDGE_LINK_PREFIX, symbol=symbol, signal_ts_ms=int(now_ms))
-
-
 

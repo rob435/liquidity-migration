@@ -405,6 +405,30 @@ def test_stale_warmstart_blocks_risk_increasing_legs(monkeypatch, tmp_path, caps
     assert submit_calls == []
 
 
+def test_stale_warmstart_blocks_nonflat_book_even_below_resize_floor(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """A missing plan must not make stale beta protection look healthy."""
+    _setup_runner(
+        monkeypatch,
+        tmp_path,
+        argv=SUBMIT_ARGS,
+        warmstart_last=date.today() - timedelta(days=10),
+    )
+    monkeypatch.setattr(
+        hedge_runner,
+        "compute_hedge_decision",
+        lambda cfg, **kw: _single_decision(None),
+    )
+
+    assert hedge_runner.main() == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["gross_short_frac"] > 0
+    assert out["plan"] is None
+    assert out["status"] == "submit_blocked_stale_warmstart"
+
+
 def test_stale_warmstart_lets_all_reduce_only_plans_proceed(monkeypatch, tmp_path, capsys) -> None:
     """Trimming/closing a hedge is risk-REDUCING — a stale beta window must not block it."""
     sell = _resize_plan(side="Sell", reduce_only=True, qty=0.003, delta_notional=-300.0, reason="hedge_reduce")
@@ -720,6 +744,16 @@ def test_warmstart_last_date_ordered_file_unchanged(tmp_path) -> None:
         encoding="utf-8",
     )
     assert hedge_runner._warmstart_last_date(p) == date(2026, 6, 12)
+
+
+def test_warmstart_freshness_prefers_validated_data_boundary(tmp_path) -> None:
+    p = tmp_path / "warm.csv"
+    p.write_text(
+        "date,unit_ret,btc_ret,eth_ret,data_through_date,source_summary_sha256\n"
+        "2026-06-12,0,0,0,2026-07-09,abc\n",
+        encoding="utf-8",
+    )
+    assert hedge_runner._warmstart_last_date(p) == date(2026, 7, 9)
 
 
 # ---------------------------------------------------------------------------

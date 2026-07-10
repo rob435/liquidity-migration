@@ -15,6 +15,15 @@ VERIFY_SH = REPO_ROOT / "scripts" / "verify_vps_live.sh"
 RECOVERY_SH = REPO_ROOT / "scripts" / "vps_console_recover_and_deploy.sh"
 
 
+def test_continuous_hedge_timer_reconciles_within_five_minutes() -> None:
+    timer = (
+        REPO_ROOT / "deploy/systemd/liquidity-migration-continuous-hedge.timer"
+    ).read_text(encoding="utf-8")
+    assert "OnBootSec=2min" in timer
+    assert "OnUnitActiveSec=5min" in timer
+    assert "OnCalendar=" not in timer
+
+
 def _unit_env(unit: str) -> dict[str, str]:
     text = (REPO_ROOT / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
     env: dict[str, str] = {}

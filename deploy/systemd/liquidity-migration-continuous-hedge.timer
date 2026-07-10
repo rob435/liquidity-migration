@@ -1,12 +1,15 @@
 [Unit]
-Description=Daily BTC-beta hedge run for the continuous demo book (WP3)
+Description=Periodic BTC+ETH target hedge reconciliation for the continuous demo book
 
 [Timer]
-# After the 00:20 rmom refresh so the book's prior-day state is settled before the
-# hedge re-sizes against it.
-OnCalendar=*-*-* 00:35:00 UTC
-Persistent=true
-RandomizedDelaySec=120
+# Entry/exit batches arrive hourly and can occur just after midnight.  A daily
+# 00:35 run left new exposure unhedged for almost 24h, while research applied the
+# hedge on every ledger day.  Reconcile the idempotent target frequently; the
+# manager's $25/leg floor prevents churn and all order guards remain in force.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=15s
 
 [Install]
 WantedBy=timers.target

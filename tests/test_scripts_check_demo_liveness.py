@@ -225,6 +225,68 @@ def test_orphan_hedge_pages_when_timer_enabled_but_inactive() -> None:
     assert a is not None and a.severity == M.CRITICAL
 
 
+def test_hedge_warmstart_freshness_warns_before_first_blocked_plan(tmp_path) -> None:
+    from datetime import date
+
+    stale = M.evaluate_hedge_warmstart_freshness(
+        last_date=date(2026, 5, 23),
+        now_date=date(2026, 7, 10),
+        max_age_days=3,
+    )
+    assert stale is not None
+    assert stale.key == "hedge_warmstart_stale"
+    assert stale.severity == M.WARNING
+    assert "48d old" in stale.message
+    assert "risk-increasing hedge order is blocked" in stale.message
+
+    critical = M.evaluate_hedge_warmstart_freshness(
+        last_date=date(2026, 5, 23),
+        now_date=date(2026, 7, 10),
+        max_age_days=3,
+        book_nonflat=True,
+    )
+    assert critical is not None and critical.severity == M.CRITICAL
+
+    assert M.evaluate_hedge_warmstart_freshness(
+        last_date=date(2026, 7, 8),
+        now_date=date(2026, 7, 10),
+        max_age_days=3,
+    ) is None
+
+    csv_path = tmp_path / "warmstart.csv"
+    csv_path.write_text(
+        "date,unit_ret,btc_ret,eth_ret\n"
+        "2026-07-08,0,0,0\n"
+        "2026-07-09,0,0,0\n",
+        encoding="utf-8",
+    )
+    assert M._warmstart_last_date(csv_path) == date(2026, 7, 9)
+
+    receipt_csv = tmp_path / "warmstart-with-boundary.csv"
+    receipt_csv.write_text(
+        "date,unit_ret,btc_ret,eth_ret,data_through_date,source_summary_sha256\n"
+        "2026-06-01,0,0,0,2026-07-09,abc\n",
+        encoding="utf-8",
+    )
+    assert M._warmstart_last_date(receipt_csv) == date(2026, 7, 9)
+
+
+def test_continuous_book_nonflat_reads_open_demo_rows(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        M,
+        "read_dataset",
+        lambda root, dataset: M.pl.DataFrame([{"status": "closed"}, {"status": "open"}]),
+    )
+    assert M._continuous_book_nonflat(tmp_path) is True
+
+    monkeypatch.setattr(
+        M,
+        "read_dataset",
+        lambda root, dataset: M.pl.DataFrame([{"status": "closed"}]),
+    )
+    assert M._continuous_book_nonflat(tmp_path) is False
+
+
 def test_ws_staleness_threshold() -> None:
     now = 1_000 * HOUR
     assert M.evaluate_ws_staleness(store_max_ts_ms=now - 1 * HOUR, now_ms=now, max_lag_hours=6, label="demo") is None
@@ -712,7 +774,8 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
     parser = M.build_arg_parser()
     args = parser.parse_args([])
     for attr in ("risk_root", "liquidations_root", "depth_root",
-                 "continuous_root", "continuous_paper_root", "long_root", "hedge_root"):
+                 "continuous_root", "continuous_paper_root", "long_root", "hedge_root",
+                 "hedge_warmstart"):
         value = Path(getattr(args, attr))
         assert value.is_absolute(), f"{attr} default must be absolute, got {value}"
         assert value.is_relative_to(REPO_ROOT), f"{attr} must be under the repo dir, got {value}"

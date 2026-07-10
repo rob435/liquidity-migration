@@ -84,6 +84,20 @@ quality:
 
 Keep TP12. Binance funding was partial, so this is survival/mechanism evidence.
 
+The 2026-07-10 operational refresh reran the exact Bybit TP12 + BTC-risk object
+through `2026-07-10` exclusive on stable-only RMOM and fully modeled funding:
++24.36% return, -1.20% max drawdown, MAR 6.22 at 1x. Label: `exploratory`.
+This refresh exists to rebuild the live hedge beta tape; it is not promotion or
+new alpha evidence.
+
+The replacement is intentionally non-equivalent to the old tape. Stable-only
+RMOM changed historical membership after the July 3 artifact: the pre-fix TP12
+overlap has 44.3 bps maximum / 0.885 bps mean daily unit-return drift, while the
+obsolete deployed TP10 overlap has 43.5 bps maximum / 5.46 bps mean drift. The
+live sizing impact is small at the present 1.55% gross book: `$3.12` BTC +
+`$0.88` ETH becomes `$4.12` BTC + `$0.00` ETH, still below the `$25` per-leg
+floor. The override is recorded as a correctness migration, not parity.
+
 ### Decisions retained from closed arcs
 
 | Mechanism | Durable read |
@@ -179,6 +193,15 @@ failure to learn from, not strategy validation.
   83.79%/79.48%/83.79%/83.31%. No granular treatment run is ready.
 - Bybit forward depth/liquidation collectors are useful shadow context. They do
   not backfill historical causal features.
+- The former hedge tape ended `2026-05-23` and left risk-increasing hedge plans
+  unavailable. The current TP12/stable-only tape has 200 observations and a
+  validated `2026-07-09` data boundary. Target reconciliation now runs every
+  five minutes; stale non-flat state fails and pages even below the resize
+  floor. Tape freshness is its validated data boundary, not merely its latest
+  nonzero strategy-return date.
+- The hedge is beta protection, not adverse single-name exit protection. Its
+  repair does not answer the 1000TAGUSDT tail problem and does not weaken the
+  requirement for the registered loss-budget/granular evidence.
 - Routine work goes through `scripts/ops.sh`; ledger reset is dry-run by default
   and checked deploy requires explicit `--execute`.
 - Safety release `77bf04304` is deployed. The pre-fix ledgers were archived with

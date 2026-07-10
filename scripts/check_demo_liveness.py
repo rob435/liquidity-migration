@@ -35,13 +35,14 @@ must not crash-loop); failures to verify degrade to a warning alert.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import subprocess
 import sys
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -162,7 +163,7 @@ def evaluate_unit_states(
     (audit 2026-06-12 round 4). So a timer's FIRST not-active observation is a
     debounced WARNING; it escalates to CRITICAL only when it is STILL not-active on
     the next run (``prior_not_active_timers`` — the set of units that were not-active
-    last run, threaded from the persisted watchdog state). A genuinely-dead daily/
+    last run, threaded from the persisted watchdog state). A genuinely-dead periodic/
     hourly timer is delayed at most one ~3-min interval before it pages CRITICAL,
     while a deploy-window blip never escalates past WARNING and self-resolves."""
     prior = prior_not_active_timers or set()
@@ -266,14 +267,14 @@ def evaluate_order_permission(*, allowed: bool | None, reason: str) -> Alert | N
 
 
 def evaluate_orphan_hedge(*, hedge_timer_enabled: bool, open_hedge_trades: list[dict]) -> Alert | None:
-    """The daily hedge timer is the SOLE lifecycle manager of the hedge's open
+    """The periodic hedge timer is the SOLE lifecycle manager of the hedge's open
     BTC/ETH long: build_hedge_tracking_row books it stopless (stop_price=0,
     planned_exit_ts_ms=0) precisely so the always-on risk service tracks but never
     force-exits it. Disabling that timer — the documented CONTINUOUS_SLEEVE=off
     retirement — therefore strands any open hedge leg as a permanently-open,
     unmonitored, stopless position (the risk service won't exit it and the watchdog
     never reads this root). Page CRITICAL so the operator flattens it manually (or
-    re-enables the hedge until flat). No alert while the timer is enabled (the daily
+    re-enables the hedge until flat). No alert while the timer is enabled (the periodic
     run manages it) or when there is no open leg to orphan."""
     if hedge_timer_enabled:
         return None
@@ -291,9 +292,93 @@ def evaluate_orphan_hedge(*, hedge_timer_enabled: bool, open_hedge_trades: list[
             f"ORPHANED HEDGE: {len(syms)} open hedge leg(s) {syms} but the continuous "
             "hedge timer is DISABLED (CONTINUOUS_SLEEVE=off). The hedge is booked "
             "stopless, so the risk service never exits it, and its only manager (the "
-            "daily hedge timer) is off — the position is permanently open and "
+            "periodic hedge timer) is off — the position is permanently open and "
             "unmanaged. Flatten it manually, or re-enable the hedge until flat."
         ),
+    )
+
+
+def evaluate_hedge_warmstart_freshness(
+    *,
+    last_date: date | None,
+    now_date: date,
+    max_age_days: float,
+    book_nonflat: bool = False,
+) -> Alert | None:
+    """Alert before a stale beta source reaches its first material hedge plan.
+
+    The hedge runner now fails a stale non-flat book even below its resize floor.
+    This independent check still matters while the book is flat: it surfaces the
+    unavailable protection before the next entry turns the condition critical.
+    """
+    if last_date is None:
+        return Alert(
+            key="hedge_warmstart_stale",
+            severity=CRITICAL if book_nonflat else WARNING,
+            message=(
+                "continuous hedge beta warm-start is missing or unreadable; the armed hedge "
+                "will block risk-increasing orders. Rebuild and validate the canonical "
+                "deploy/hedge_warmstart/bybit_warmstart.csv artifact."
+            ),
+        )
+    age_days = (now_date - last_date).days
+    if age_days > max_age_days:
+        return Alert(
+            key="hedge_warmstart_stale",
+            severity=CRITICAL if book_nonflat else WARNING,
+            message=(
+                f"continuous hedge beta warm-start is STALE: data through {last_date.isoformat()} "
+                f"({age_days}d old, max {max_age_days:g}d). The timer can look healthy while "
+                "every risk-increasing hedge order is blocked; refresh the canonical component "
+                "ledgers and warm-start before treating BTC+ETH protection as available."
+            ),
+        )
+    return None
+
+
+def _warmstart_last_date(path: Path) -> date | None:
+    observations: list[date] = []
+    data_boundaries: list[date] = []
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                for key, target in (
+                    ("date", observations),
+                    ("data_through_date", data_boundaries),
+                ):
+                    raw = str(row.get(key) or "").strip()
+                    if not raw:
+                        continue
+                    try:
+                        target.append(date.fromisoformat(raw))
+                    except ValueError:
+                        continue
+    except OSError:
+        return None
+    return max(data_boundaries) if data_boundaries else (max(observations) if observations else None)
+
+
+def gather_hedge_warmstart_alerts(
+    *, warmstart_path: Path, now_ms: int, max_age_days: float, book_nonflat: bool = False
+) -> list[Alert]:
+    alert = evaluate_hedge_warmstart_freshness(
+        last_date=_warmstart_last_date(warmstart_path),
+        now_date=datetime.fromtimestamp(now_ms / 1000, tz=UTC).date(),
+        max_age_days=max_age_days,
+        book_nonflat=book_nonflat,
+    )
+    return [alert] if alert else []
+
+
+def _continuous_book_nonflat(root: Path) -> bool:
+    try:
+        trades = read_dataset(root, "continuous_fade_demo_trades")
+    except Exception:  # noqa: BLE001 — watchdog never crashes
+        return False
+    return bool(
+        not trades.is_empty()
+        and "status" in trades.columns
+        and trades.filter(pl.col("status") == "open").height
     )
 
 
@@ -947,6 +1032,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--hedge-root", default=_default_root("data/bybit-continuous-hedge-event"),
                    help="continuous hedge addon root; paged CRITICAL when it holds an open hedge leg while the "
                         "hedge timer is disabled (orphaned stopless position) ('' to skip)")
+    p.add_argument(
+        "--hedge-warmstart",
+        default=_default_root("deploy/hedge_warmstart/bybit_warmstart.csv"),
+        help="canonical Bybit hedge beta warm-start; warned when stale while CONTINUOUS is on ('' to skip)",
+    )
+    p.add_argument(
+        "--max-hedge-warmstart-age-days",
+        type=float,
+        default=3.0,
+        help="warn when the hedge beta tape's validated data boundary is this many days stale",
+    )
     p.add_argument("--liquidations-root", default=_default_root("data/liquidations"),
                    help="forward Bybit liquidation-capture root for the newest-JSONL freshness check ('' to skip)")
     p.add_argument("--max-liquidation-age-hours", type=float, default=3.0,
@@ -1052,6 +1148,19 @@ def main() -> int:
                 and _unit_active("liquidity-migration-continuous-hedge.timer")
             ),
         ))
+    hedge_warmstart = Path(args.hedge_warmstart) if str(args.hedge_warmstart).strip() else None
+    if hedge_warmstart is not None and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
+        alerts.extend(
+            gather_hedge_warmstart_alerts(
+                warmstart_path=hedge_warmstart,
+                now_ms=now_ms,
+                max_age_days=args.max_hedge_warmstart_age_days,
+                book_nonflat=(
+                    continuous_root is not None
+                    and _continuous_book_nonflat(continuous_root)
+                ),
+            )
+        )
     if continuous_paper_root is not None and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         alerts.extend(
             gather_continuous_alerts(

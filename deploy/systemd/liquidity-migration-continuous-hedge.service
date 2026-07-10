@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily BTC+ETH 2f hedge for the continuous demo book (banked 2026-06-10; demo-only)
+Description=Periodic BTC+ETH 2f target hedge for the continuous demo book (demo-only)
 After=network-online.target
 Wants=network-online.target
 

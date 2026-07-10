@@ -1,6 +1,6 @@
-"""Daily hedge runner for the continuous demo book — banked BTC+ETH two-factor form.
+"""Periodic target-hedge runner for the continuous demo book — BTC+ETH two-factor form.
 
-Computes the day's two-leg hedge decision (parity-tested live twin of the Stage-B
+Computes the current two-leg hedge target (parity-tested live twin of the Stage-B
 engine leg, receipts continuous-hedge-{upgrade,2f-engine}-2026-06-10.md) from the
 warm-start series + realized live book days, and either logs it (dry-run, default)
 or submits the per-leg resizes through the REST private client into the
@@ -14,7 +14,7 @@ HEDGE_MODE=btc falls back to the single-leg WP3 form.
 
 Exit-code contract (paging): an ARMED (--submit) run that is blocked or fails —
 any submit_blocked_* status, submit_failed, or submit_partial — exits NONZERO, so
-the daily systemd oneshot lands in `failed` and the liveness watchdog pages the
+the systemd oneshot lands in `failed` and the liveness watchdog pages the
 operator. Dry-run statuses and genuine no-action runs always exit 0. (Before
 2026-06-12 a blocked armed run exited 0 and the book sat unhedged silently.)
 
@@ -183,23 +183,26 @@ def _current_hedge_qty(data_root: Path, trades_dataset: str, symbol: str = HEDGE
 def _warmstart_last_date(path: Path) -> date | None:
     if not path.exists():
         return None
-    last: date | None = None
+    last_observation: date | None = None
+    data_through: date | None = None
     with path.open(encoding="utf-8", newline="") as fh:
         for row in csv.DictReader(fh):
-            raw = row.get("date")
-            if not raw:
-                continue
-            try:
-                parsed = date.fromisoformat(raw)
-            except ValueError:
-                continue
-            # audit2c: track the MAX date, not the last row in file order. A
-            # warmstart CSV appended out of order (or non-monotonic) would otherwise
-            # mislabel staleness off a stale final row. Identical for the normal
-            # date-ordered file.
-            if last is None or parsed > last:
-                last = parsed
-    return last
+            for key, current in (("date", last_observation), ("data_through_date", data_through)):
+                raw = row.get(key)
+                if not raw:
+                    continue
+                try:
+                    parsed = date.fromisoformat(raw)
+                except ValueError:
+                    continue
+                if current is None or parsed > current:
+                    if key == "date":
+                        last_observation = parsed
+                    else:
+                        data_through = parsed
+    # New tapes carry the validated signal-data boundary.  Fall back to the
+    # latest unit observation for legacy four-column CSVs.
+    return data_through or last_observation
 
 
 def _latest_close(primary_root: Path, symbol: str) -> float:
@@ -539,6 +542,7 @@ def main() -> int:
         "gross_short_frac_known": live_book.gross_short_frac_known,
         "gross_short_frac_source": live_book.gross_short_frac_source,
         "warmstart_last_date": None if warmstart_last is None else warmstart_last.isoformat(),
+        "warmstart_data_through_date": None if warmstart_last is None else warmstart_last.isoformat(),
         "warmstart_age_days": warmstart_age_days,
         "warmstart_stale": warmstart_stale,
         "history_days": len(unit),
@@ -616,6 +620,14 @@ def main() -> int:
         # Mode flipped 2f -> single-leg while an ETH hedge leg is still open: the
         # single-leg path would never reduce/close it (round 3). Block + page.
         out["status"] = "submit_blocked_unmanaged_eth_leg"
+    elif args.submit and warmstart_stale and not plans and live_book.gross_short_frac > 0.0:
+        # The resize floor used to hide an unavailable hedge: a non-flat book
+        # whose stale beta happened to produce <$25/leg plans exited green even
+        # though any later risk-increasing resize would be refused.  A manager
+        # cannot claim healthy protection merely because the current defect is
+        # below the venue order floor.  Flat books remain a safe no-op, and the
+        # branch below still permits stale-state reduce-only trims.
+        out["status"] = "submit_blocked_stale_warmstart"
     elif args.submit and plans:
         # A stale beta window blocks only risk-INCREASING legs; trimming/closing a
         # hedge is risk-reducing and ALWAYS proceeds — even when a sibling leg in

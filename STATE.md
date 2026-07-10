@@ -10,7 +10,7 @@ This is the live operating page. Durable research decisions are in
 
 | Sleeve | Mode | Current state |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | Base sleeve and safety release are live; sniper is retired; four TAC/SKL rows are 4/4 matched |
+| `continuous_ensemble_v2` | Bybit demo + paper | Base sleeve and safety release are live; sniper is retired; four TAC/SKL rows are 4/4 matched; hedge target reconciliation is five-minute |
 | `LongV11aDivWeekendVol` | Bybit demo + paper | On and currently flat; the earlier ADA pair remains historical execution-skew evidence |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
@@ -31,6 +31,10 @@ This is the live operating page. Durable research decisions are in
   TAC replays as D9. SKL is a visible D8 boundary warning on the later live
   snapshot, but the independent full-PIT plane confirms it and both planes show
   zero hard (D7-or-lower) drift.
+- The refreshed funded three-way run reaches the same execution verdict: four
+  paper/demo pairs, no unmatched rows, no hard off-decile signal, and both
+  independent-PIT entries confirmed. This is agreement/execution evidence, not
+  alpha or exit-safety evidence.
 - The Bybit depth and liquidation collectors are active and fresh. They are
   forward context/shadow data, not historical alpha evidence.
 - An external liveness dead-man URL is still not provisioned. The on-box timer
@@ -74,6 +78,33 @@ loss budget, or reliable component attribution was unjustified.
 Sniper is pinned off in demo, paper, deploy, verify, and recovery. Cleanup still
 handles legacy or late sniper fills while new sniper entries remain disabled.
 
+## Hedge availability and limits
+
+- The shipped Bybit hedge warm-start had ended on `2026-05-23` and was 48 days
+  stale. The armed manager therefore could not safely increase protection once
+  a material resize appeared; because the current target was below the `$25`
+  per-leg order floor, the old daily unit still exited green.
+- The tape is now rebuilt from the exact live TP12 + BTC-risk-sizing object on
+  the stable-only RMOM engine, with modeled funding, 200 observations, and a
+  validated data boundary of `2026-07-09`. The official Bybit 1x receipt is
+  `exploratory`: +24.36% return, -1.20% max drawdown, MAR 6.22. It is an
+  operational beta input, not new alpha or promotion evidence.
+- This is a disclosed correctness migration, not numerical equivalence. The old
+  deployed TP10 overlap differed by at most 43.5 bps/day (5.46 bps mean). The
+  pre-stable-RMOM July 3 TP12 reference differed by at most 44.3 bps/day
+  (0.885 bps mean) because the stable-only fix changed historical membership.
+  At the current 1.55% gross book, the old target was `$3.12` BTC + `$0.88` ETH;
+  the corrected target is `$4.12` BTC + `$0.00` ETH. Both are below the floor,
+  so no hedge order is warranted now.
+- The manager now reconciles the idempotent BTC/ETH target every five minutes,
+  not only at 00:35 UTC. A stale non-flat book fails even when the desired order
+  is below the floor, and liveness treats stale beta with open positions as
+  critical. The CSV carries its validated data-through boundary and source
+  summary SHA-256, so a quiet no-trade gap is not mistaken for stale data.
+- This hedge covers portfolio beta only. It would not have protected the
+  idiosyncratic 1000TAGUSDT squeeze and is not a substitute for the registered
+  ex-ante loss-budget or granular adverse-state work.
+
 ## Deployed safety release
 
 - Side- and component-aware WS risk reconciliation, orphan adoption, side-flip
@@ -94,6 +125,9 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
   restart-safe and rate-limited by stable rejection class.
 - `scripts/ops.sh` is the one operator surface for status, reconcile, equity,
   reset, research plans, tests, and checked deploy.
+- Continuous hedge target reconciliation is five-minute and fail-loud on stale
+  non-flat state; the source tape is self-describing and hash-bound to its
+  official current-object summary.
 
 ## Latest pre-reset reconciliation
 

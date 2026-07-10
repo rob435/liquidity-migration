@@ -354,15 +354,15 @@ else
   echo "kill-switch: continuous demo+paper sleeves off -> skipping rmom timer + gate seed." >&2
   apply_timer_enable off $CONTINUOUS_SLEEVE_TIMERS
 fi
-# Hedge timer gating (deploy-env-timers-1): the daily BTC/ETH hedge long is booked
+# Hedge timer gating (deploy-env-timers-1): the periodic BTC/ETH hedge long is booked
 # with stop_price=take_profit_price=planned_exit_ts_ms=0, so the always-on risk service
-# TRACKS but is contractually FORBIDDEN from force-exiting it - the daily hedge timer is
+# TRACKS but is contractually FORBIDDEN from force-exiting it - the periodic hedge timer is
 # its ONLY lifecycle manager. Unconditionally disabling the timer when CONTINUOUS_SLEEVE
 # goes off (the documented retirement action) would ORPHAN any open hedge leg: never
 # resized/closed (manager dead), never stopped (stopless by contract), never monitored
 # (the watchdog only tracks the hedge units while continuous is on). So when continuous
 # is OFF we first check the hedge addon ledger: if it holds an open hedge row, keep the
-# timer ENABLED so the daily run can trim it to flat (its reduce-only legs proceed even
+# timer ENABLED so the next run can trim it to flat (its reduce-only legs proceed even
 # when warmstart is stale), and page loudly; only disable once the leg is flat.
 # _hedge_timer_state is the intended hedge-timer state; the verify block below reuses
 # it so apply and verify never disagree (a kept-open timer must not fail verify_timer off).
@@ -393,7 +393,7 @@ PY
   elif [ "${_hedge_open:-0}" -gt 0 ]; then
     echo "CRITICAL: CONTINUOUS_SLEEVE=off but the hedge addon ledger holds ${_hedge_open}" \
          "OPEN hedge row(s). The hedge long is stopless (risk service tracks but never exits it)" \
-         "and the daily hedge timer is its ONLY manager - KEEPING the timer enabled so the daily" \
+         "and the periodic hedge timer is its ONLY manager - KEEPING the timer enabled so the next" \
          "run can trim it to flat. It will auto-disable on the next deploy once the leg is flat." >&2
     _hedge_timer_state=on
   else

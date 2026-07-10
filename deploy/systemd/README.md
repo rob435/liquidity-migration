@@ -20,7 +20,7 @@ The deployable VPS units are:
   loud unless the unit is both enabled and active, because Bybit depth history is
   unbuyable after a capture gap.
 - Timers include the demo-liveness watchdog, combined-book report, continuous rmom
-  refresh, and the daily continuous BTC+ETH hedge (submit-armed; see below).
+  refresh, and the five-minute continuous BTC+ETH target hedge (submit-armed; see below).
 
 Which sleeve units actually run is governed by `deploy/sleeves.env` plus the
 optional host override `/etc/liquidity-migration/sleeves.env`. The host override
@@ -255,7 +255,7 @@ continuous demo sleeve
 `TARGET_VOL_PER_NAME=0.01`/`VOL_WEIGHT_CLAMP=2`, daily vol-target rebalance
 disabled, `CTRL_BTC_RISK_70_90_35` BTC-risk entry sizing enabled,
 `CONTINUOUS_SNIPER=0`, no
-venue-side stop; demo/paper surface) and the daily BTC+ETH hedge timer
+venue-side stop; demo/paper surface) and the five-minute BTC+ETH hedge timer
 (`liquidity-migration-continuous-hedge.timer`) — the hedge unit ships
 **`SUBMIT_HEDGE=1` + `CONFIRM_DEMO_ORDERS=1` (operator-armed 2026-06-10)**, so
 it SUBMITS demo orders; runtime guards + staleness gates still apply. The
