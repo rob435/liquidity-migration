@@ -41,7 +41,8 @@ MONTH_DAYS = 365.25 / 12 = 30.4375
 
 Also report calendar-month arithmetic when implemented. If `1m` works but
 `0.5m`, `2m`, and calendar-month variants fail, reject the mechanism as a
-parameter artifact. The repo-wide policy lives in `docs/lookback_audit.md`.
+parameter artifact. Claim-scoped validation and prospective parameter-family
+rules live in `docs/governance.md` and `docs/parameter_pre_registration.md`.
 
 Expected good behavior:
 

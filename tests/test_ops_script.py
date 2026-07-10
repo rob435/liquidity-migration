@@ -142,6 +142,17 @@ def test_ops_routes_canonical_shell_commands_with_exact_arguments(
             ["tail-run", "--cells", "budget_010", "control"],
             [str(REPO_ROOT / "scripts" / "continuous_tail_survival_2026_07_10.py")],
         ),
+        (
+            ["overhaul-plan", "--binance-root", "root with spaces"],
+            [str(REPO_ROOT / "scripts" / "strategy_overhaul_scout_2026_07_10.py"), "--plan"],
+        ),
+        (
+            ["overhaul-phase0", "--output-root", "root with spaces"],
+            [
+                str(REPO_ROOT / "scripts" / "strategy_overhaul_scout_2026_07_10.py"),
+                "--phase0-inventory",
+            ],
+        ),
         (["test", "-q", "tests/a file.py"], ["-m", "pytest"]),
     ],
 )
@@ -175,6 +186,10 @@ def test_ops_python_override_and_argument_forwarding(
         assert routed == [*expected_prefix, "--datasets", "funding"]
     elif args[0] == "tail-run":
         assert routed == [*expected_prefix, "--cells", "budget_010", "control"]
+    elif args[0] == "overhaul-plan":
+        assert routed == [*expected_prefix, "--binance-root", "root with spaces"]
+    elif args[0] == "overhaul-phase0":
+        assert routed == [*expected_prefix, "--output-root", "root with spaces"]
     else:
         assert routed == [*expected_prefix, "-q", "tests/a file.py"]
 

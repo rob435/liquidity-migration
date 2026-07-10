@@ -27,8 +27,8 @@ rebalance/portfolio book, so its faithful model leg is decile-membership of the
 live entries, not a trade-ledger pairing.
 
 Honest by default: read-only against the VPS, demo only, never real money. The
-backtest leg is execution/agreement evidence — NOT alpha proof, NOT a promotion
-gate (docs/backtesting_errors_we_never_repeat.md). The LONG backtest run_label is
+backtest leg is execution/agreement evidence; it does not itself support alpha or
+authorize deployment (docs/governance.md). The LONG backtest run_label is
 surfaced verbatim; a biased / PIT-failed label is flagged, never hidden.
 
     bash scripts/reconcile_three_way.sh                       # both sleeves, full pipeline
@@ -806,8 +806,8 @@ def main() -> int:
         print(f"\n## {rc.SLEEVES[s]['label']}")
         print(f"  {summary.get(s, '(skipped)')}")
     print(f"\nReports under: {REPO / 'data' / 'reconcile'}")
-    print("\nNote: the backtest leg is agreement/execution evidence, NOT alpha proof and NOT a "
-          "promotion gate (docs/backtesting_errors_we_never_repeat.md).")
+    print("\nNote: the backtest leg is agreement/execution evidence; it does not itself "
+          "support alpha or authorize deployment (docs/governance.md).")
     failed = [s for s in sleeves if not ok.get(s, False)]
     if failed:
         print(f"\n❌ THREE-WAY RECONCILE FLAGGED — sleeve(s) with an unexplained drift/crash: "

@@ -1,238 +1,90 @@
 ---
 name: vps-migrate
-description: "Migrate or rebuild the liquidity-migration live VPS and restore GitHub Actions deploy. Use when switching VPS IP, Hetzner rebuild, SSH/deploy workflow failures, host-key fingerprint errors, deploy-key mismatch, or 'expected commit X but VPS has Y'. Covers GitHub vars/secrets, pinned host/deploy fingerprints, authorized_keys recovery, local checked deploy, and workflow_dispatch modes. Canonical refs: .github/workflows/vps-deploy.yml, deploy/systemd/README.md, scripts/deploy_vps_live.sh."
+description: Migrate or rebuild the demo and paper VPS and restore checked GitHub Actions deployment. Use for VPS replacement, IP or host-key changes, SSH recovery, deploy-key mismatch, workflow failures, or expected-commit drift. Derive all hosts, fingerprints, keys, workflow modes, and service state from current canonical files and provider or GitHub state; never rely on values embedded in a skill, enable real money, or destroy a dirty checkout without explicit approval.
 ---
 
-# VPS migrate / rebuild runbook
+# Migrate or recover the VPS
 
-Live demo runs on a single VPS (`/opt/liquidity-migration`). GitHub Actions
-(`.github/workflows/vps-deploy.yml`) and local scripts share the same checked
-deploy path. **Demo only — never set `REAL_MONEY=true`.**
+Keep this workflow low-freedom because it crosses SSH, credentials, deploy, and
+running demo/paper services. Derive current values from:
 
-## When to use
+- `.github/workflows/vps-deploy.yml`;
+- `scripts/deploy_vps_live.sh` and `scripts/verify_vps_live.sh`;
+- `scripts/wait_for_vps_recovery_and_deploy.sh`;
+- `scripts/print_vps_recovery_command.sh` and local recovery scripts;
+- `deploy/systemd/README.md`, units, and `deploy/sleeves.env`;
+- GitHub variables/secrets and the provider console.
 
-- New box, Hetzner rebuild, IP change, or provider console recovery
-- CI step **Verify VPS host key** fails (wrong `VPS_ED25519_FINGERPRINT`)
-- CI step **Verify deploy key fingerprint** fails (wrong `VPS_SSH_PRIVATE_KEY`)
-- **Verification failed: expected commit … but VPS has …** (stale checkout; see §5)
-- User asks to migrate VPS, fix deploy workflow, or sync VPS to `main`
+Do not copy IPs, host fingerprints, public keys, chat IDs, or fallback branches
+from old docs or this skill.
 
-## Migration checklist
+## Preflight
 
-Copy and tick through:
+1. Confirm the target host, provider state, repository, branch, and exact commit.
+2. Inspect local and remote worktree status without cleaning anything.
+3. Confirm the task authorizes deploy/recovery, not merely diagnosis.
+4. Verify that all credential paths remain demo/paper and `REAL_MONEY=false`.
+5. Read current script/workflow help and refusal conditions.
 
-```
-- [ ] New VPS has /opt/liquidity-migration (clone or console recovery)
-- [ ] /etc/liquidity-migration/bybit-demo.env present (copy from old box or backup)
-- [ ] GitHub variable VPS_HOST = new IP/DNS
-- [ ] GitHub variable VPS_ED25519_FINGERPRINT = ssh-keyscan result (§2)
-- [ ] GitHub secret VPS_SSH_PRIVATE_KEY = canonical deploy key (§3) — NOT a new random key unless rotating
-- [ ] /root/.ssh/authorized_keys has GA + operator public keys (§4)
-- [ ] Local or CI deploy with EXPECTED_COMMIT = target main SHA (§5)
-- [ ] verify-ok / deploy-verify-ok on that SHA
-- [ ] (Optional) Update workflow default + tests if IP/fingerprint changed permanently (§6)
-```
+If the remote checkout is dirty, preserve and inspect its diff first. Do not use
+`CLEAN_DIRTY_CHECKOUT`, reset, overwrite, or delete files without explicit owner
+approval for that cleanup and a verified archive/patch.
 
----
+## Establish SSH identity
 
-## 1. Read canonical sources first
+- Obtain the new Ed25519 host fingerprint directly from the target and verify it
+  through the provider console or another trusted channel before updating pins.
+- Read the expected deploy-key fingerprint from the current workflow/scripts;
+  derive the supplied private key's public fingerprint locally without printing
+  the private key.
+- Distinguish host key, deploy key, and operator key. Rotate only the identity the
+  task calls for.
+- Update GitHub variables/secrets through the authorized interface. Never commit
+  private keys or environment secrets.
 
-| What | Where |
-|------|--------|
-| Workflow + pinned defaults | `.github/workflows/vps-deploy.yml` |
-| Systemd + SSH recovery keys | `deploy/systemd/README.md` |
-| Checked deploy | `scripts/deploy_vps_live.sh` |
-| Read-only verify | `scripts/verify_vps_live.sh` |
-| Wait for SSH then deploy | `scripts/wait_for_vps_recovery_and_deploy.sh` |
-| Pinned console paste commands | `scripts/print_vps_recovery_command.sh` |
+## Recover from a trusted source
 
-Default `SSH_TARGET` in scripts: `root@116.202.15.128` (override with env).
+Prefer commands generated from a trusted local checkout at the exact target
+commit. Avoid unpinned branch-tip `curl | bash` recovery. If the provider console
+is required, use the repository's generator, inspect its output, and have the
+operator paste only the scoped recovery command.
 
----
+Confirm on the host:
 
-## 2. Host key fingerprint (new box = new pin)
+- the repository and intended commit exist;
+- demo environment and sleeve files are present with correct ownership/mode;
+- authorized keys match the verified identities;
+- no unexpected mainnet credential or `REAL_MONEY` setting is active.
 
-Every rebuild gets a **new SSH host key**. You must update the pin.
+## Deploy and verify
+
+Use the checked deploy with an exact `EXPECTED_COMMIT`, then the read-only
+verifier. A verify-only workflow never repairs a stale checkout.
 
 ```bash
-NEW_HOST=116.202.15.128   # or the new IP
-ssh-keyscan -T 20 -t ed25519 "$NEW_HOST" | ssh-keygen -lf - -E sha256
+EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST scripts/deploy_vps_live.sh
+EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST scripts/verify_vps_live.sh
 ```
 
-Set GitHub **repository variable** (not secret):
+Use the current script syntax and environment names; the placeholders above are
+not literal values. Confirm the success marker, checked-out commit, resolved
+sleeves, credential mode, service/timer state, liveness, and reconciliation.
 
-- `VPS_ED25519_FINGERPRINT` → e.g. `SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4`
-  (the 2026-06-09 rebuild pin; canonical default lives in
-  `.github/workflows/vps-deploy.yml`, and every rebuild changes it)
+If the IP, host pin, or deploy identity changed permanently, update workflow,
+tests, script defaults, recovery material, and operator docs together. Run the
+focused runtime/deploy tests plus relevant lint before proposing a push.
 
-Optional: `VPS_HOST`, `VPS_USER` (default `root`).
+## Diagnose by symptom
 
-Workflow fallback default lives in `vps-deploy.yml` env block; vars override it.
+- Host-key failure: verify the new host independently, then update the host pin.
+- Deploy-key fingerprint failure: correct the secret or perform a complete,
+  intentional rotation across workflow, authorized keys, scripts, and tests.
+- Permission denied: verify user, authorized keys, file modes, and provider
+  console state.
+- Expected-commit mismatch: run checked deploy; do not pretend verify is deploy.
+- Dirty-checkout refusal: inspect, archive, and request cleanup authority.
+- CI-only failure: compare repository variables/secrets and workflow environment
+  with the successful local command without exposing secrets.
 
-**Do not skip this on a new VPS** — leaving the old fingerprint makes
-**Verify VPS host key** fail closed (by design).
-
----
-
-## 3. GitHub Actions deploy key (do not confuse with host key)
-
-The workflow **rejects** arbitrary private keys. Secret `VPS_SSH_PRIVATE_KEY`
-must derive to this fingerprint (checked in workflow + `tests/test_runtime_scripts.py`):
-
-```text
-SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU
-```
-
-Matching **public** key (must be in VPS `authorized_keys`):
-
-```text
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv liquidity-migration-github-actions-20260609
-```
-
-Source of truth: `GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT` in
-`.github/workflows/vps-deploy.yml` and the public key in
-`scripts/vps_restore_ssh_access.sh`.
-
-Operator console key (also installed by recovery scripts):
-
-```text
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner
-```
-
-If the user pasted a **new** key into `VPS_SSH_PRIVATE_KEY` during migration,
-either restore the canonical private key in the secret **or** do a full rotation
-(§6).
-
----
-
-## 4. Restore SSH on a fresh / rebuilt VPS
-
-From provider console as **root** (no SSH yet):
-
-```bash
-# From a trusted local checkout at the commit you will deploy:
-scripts/print_vps_recovery_command.sh --recommended-only
-# Paste the printed curl | bash into the Hetzner/install OS console
-```
-
-Minimal SSH-only restore:
-
-```bash
-scripts/print_vps_recovery_command.sh
-# Use the "Minimal SSH-only recovery" block, or:
-curl -fsSL https://raw.githubusercontent.com/rob435/liquidity-migration/main/scripts/vps_restore_ssh_access.sh | bash
-```
-
-Rescue mode (Hetzner Rescue boot):
-
-```bash
-scripts/print_vps_recovery_command.sh --rescue-only
-```
-
-Then either local deploy (§5) or GitHub **wait-deploy** (workflow_dispatch).
-
----
-
-## 5. Sync VPS to `main` (deploy vs verify)
-
-| Mode | Pulls? | When |
-|------|--------|------|
-| `scripts/deploy_vps_live.sh` | Yes — `fetch` + checkout `origin/main`, then pin check | Always to fix drift |
-| `scripts/verify_vps_live.sh` | **No** — only checks current `HEAD` | After deploy, or CI `verify` |
-| GH `workflow_dispatch` → **verify** | No | Read-only; fails if behind |
-| GH `workflow_dispatch` → **deploy** / **wait-deploy** | Yes (via deploy script) | Use to ship |
-| GH `push` to `main` (guarded paths) | Yes | Auto-deploy |
-
-**Commit mismatch** (`expected commit X but VPS has Y`):
-
-1. VPS is behind — `origin/main` may already be correct; working tree was not updated.
-2. **Fix:** run deploy with the SHA GitHub expects (usually `main` tip):
-
-```bash
-cd /path/to/liquidity-migration
-TARGET="$(git rev-parse origin/main)"   # or the failing GITHUB_SHA
-EXPECTED_COMMIT="$TARGET" \
-EXPECTED_TELEGRAM_CHAT_ID=8388367561 \
-SSH_TARGET=root@NEW_HOST \
-scripts/deploy_vps_live.sh
-
-EXPECTED_COMMIT="$TARGET" \
-SSH_TARGET=root@NEW_HOST \
-scripts/verify_vps_live.sh
-```
-
-Success markers: `deploy-verify-ok commit=…` and `verify-ok commit=…`.
-
-If deploy refuses **dirty checkout**, use console recovery with
-`CLEAN_DIRTY_CHECKOUT=1` (`print_vps_recovery_command.sh` recommended block).
-
-Probe without deploying:
-
-```bash
-ssh root@NEW_HOST 'cd /opt/liquidity-migration && git rev-parse HEAD && git fetch origin main && git rev-parse origin/main'
-```
-
----
-
-## 6. Permanent IP / fingerprint / key rotation (code change)
-
-When the new IP or host fingerprint is stable, update **in lockstep**:
-
-1. `.github/workflows/vps-deploy.yml` — `VPS_HOST` / `VPS_ED25519_FINGERPRINT` defaults
-2. `tests/test_runtime_scripts.py` — pinned fingerprint assertions
-3. Script defaults: `SSH_TARGET` in `deploy_vps_live.sh`, `verify_vps_live.sh`,
-   `wait_for_vps_recovery_and_deploy.sh`, `print_vps_recovery_command.sh` comments
-4. `deploy/systemd/README.md` — documented IP and recovery examples
-
-**Deploy key rotation only** (rare): also update
-`GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT` in the workflow, the public key in
-`vps_restore_ssh_access.sh` / `vps_console_recover_and_deploy.sh`, GitHub secret
-`VPS_SSH_PRIVATE_KEY`, and VPS `authorized_keys`.
-
-Run before push:
-
-```bash
-.venv/bin/python -m ruff check liquidity_migration tests scripts
-.venv/bin/python -m pytest -q tests/test_runtime_scripts.py -k vps_deploy
-```
-
----
-
-## 7. GitHub Actions workflow modes
-
-| `workflow_dispatch` mode | Effect |
-|--------------------------|--------|
-| **deploy** | Checked deploy to `GITHUB_SHA` |
-| **wait-deploy** | Poll SSH until up, then deploy + verify |
-| **verify** | Read-only; **fails if VPS behind** — not a deploy |
-
-Push to `main` on guarded paths runs **Checked deploy** only (not verify).
-
-Pre-push gate still applies if you commit workflow changes.
-
----
-
-## 8. Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---------|----------------|-----|
-| Host key verification failed | Old `VPS_ED25519_FINGERPRINT` | §2 |
-| Deploy key fingerprint grep failed | Wrong secret key | §3 — restore canonical or rotate §6 |
-| Permission denied (publickey) | Missing GA key on box | §4 |
-| expected commit X but VPS has Y | Verify-only or never deployed | §5 deploy |
-| Refusing deploy: dirty checkout | Local changes on VPS | Console recovery `CLEAN_DIRTY_CHECKOUT=1` |
-| ssh-keyscan timeouts in CI | Brute-force load on 22 | Workflow retries; check firewall allows GitHub |
-| Deploy OK locally, CI fails | Vars/secrets not set in GitHub | Set `VPS_HOST`, fingerprint, secret |
-
----
-
-## 9. Agent execution order
-
-1. Confirm target commit: `git rev-parse origin/main` (or user-supplied `GITHUB_SHA`).
-2. Get host fingerprint if IP changed (§2).
-3. Confirm user updated GitHub vars/secrets (or offer exact values from keyscan).
-4. If SSH works from environment: run §5 deploy then verify with `EXPECTED_COMMIT`.
-5. If SSH down: print `scripts/print_vps_recovery_command.sh` output for operator paste; suggest **wait-deploy** after keys restored.
-6. If IP/fingerprint defaults in repo are stale vs production, propose §6 PR after deploy is green.
-
-Never enable real-money trading. Never commit `.env` or private keys.
+Never enable real-money trading as part of VPS recovery. Mainnet requires a
+separate control plane and exact owner authorization under `docs/governance.md`.

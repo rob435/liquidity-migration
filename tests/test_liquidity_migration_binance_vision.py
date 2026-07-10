@@ -4,6 +4,7 @@ Network functions (discovery, download) are not exercised here — only the pure
 parsing and the manifest coverage filter, which are the parts that can break
 silently.
 """
+
 from __future__ import annotations
 
 import io
@@ -32,7 +33,10 @@ def test_assert_download_completeness_raises_above_tolerance(tmp_path):
     artifact = tmp_path / "failed.json"
     with pytest.raises(RuntimeError, match="survivorship-biased"):
         _assert_download_completeness(
-            failed, total_jobs=10, max_failure_ratio=0.005, artifact_path=artifact,
+            failed,
+            total_jobs=10,
+            max_failure_ratio=0.005,
+            artifact_path=artifact,
         )
     assert artifact.exists()
     recorded = {row["symbol"] for row in json.loads(artifact.read_text())}
@@ -43,7 +47,10 @@ def test_assert_download_completeness_passes_within_tolerance(tmp_path):
     """1 failure in 1000 (0.1%) is within the 0.5% tolerance — build proceeds."""
     artifact = tmp_path / "failed.json"
     _assert_download_completeness(
-        [("AAAUSDT", "2023-01")], total_jobs=1000, max_failure_ratio=0.005, artifact_path=artifact,
+        [("AAAUSDT", "2023-01")],
+        total_jobs=1000,
+        max_failure_ratio=0.005,
+        artifact_path=artifact,
     )
     # Artifact still written (empty-ish) for audit even when within tolerance.
     assert artifact.exists()
@@ -66,7 +73,7 @@ def test_parse_month_csv_basic_row():
     assert r["open"] == 100.0 and r["high"] == 110.0
     assert r["low"] == 90.0 and r["close"] == 105.0
     assert r["volume_base"] == 1000.0
-    assert r["turnover_quote"] == 105000.0       # column 7, not 6
+    assert r["turnover_quote"] == 105000.0  # column 7, not 6
     assert r["source"] == "binance_vision_um_1h"
 
 
@@ -76,7 +83,7 @@ def test_parse_month_csv_skips_header_row():
         "1609459200000,100,110,90,105,1000,1609462799999,105000,50,500,52500,0\n"
     )
     rows = parse_month_csv("AAAUSDT", _zip_csv(csv))
-    assert len(rows) == 1                         # header dropped, data kept
+    assert len(rows) == 1  # header dropped, data kept
     assert rows[0]["ts_ms"] == 1609459200000
 
 
@@ -111,30 +118,41 @@ def test_list_usdm_usdt_daily_symbols_filters_non_ascii_archive_dirs(monkeypatch
 
 
 def _write_klines(root, symbol, date_ms, n_bars):
-    rows = [{
-        "ts_ms": date_ms + i * MS_PER_HOUR, "symbol": symbol,
-        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
-        "volume_base": 1.0, "turnover_quote": 1.0, "source": "test",
-    } for i in range(n_bars)]
+    rows = [
+        {
+            "ts_ms": date_ms + i * MS_PER_HOUR,
+            "symbol": symbol,
+            "open": 1.0,
+            "high": 1.0,
+            "low": 1.0,
+            "close": 1.0,
+            "volume_base": 1.0,
+            "turnover_quote": 1.0,
+            "source": "test",
+        }
+        for i in range(n_bars)
+    ]
     write_dataset(pl.DataFrame(rows), root, "klines_1h", partition_by=("date", "symbol"))
 
 
 def test_rewrite_manifest_to_coverage_drops_thin_and_uncovered(tmp_path):
     root = tmp_path / "root"
-    jan01 = 1704067200000   # 2024-01-01 00:00 UTC
+    jan01 = 1704067200000  # 2024-01-01 00:00 UTC
     jan02 = jan01 + 24 * MS_PER_HOUR
     # AAA: a full day and a thin day; BBB: a full day
-    _write_klines(root, "AAAUSDT", jan01, 24)     # covered
-    _write_klines(root, "AAAUSDT", jan02, 10)     # too thin (<20 bars)
-    _write_klines(root, "BBBUSDT", jan01, 24)     # covered
+    _write_klines(root, "AAAUSDT", jan01, 24)  # covered
+    _write_klines(root, "AAAUSDT", jan02, 10)  # too thin (<20 bars)
+    _write_klines(root, "BBBUSDT", jan01, 24)  # covered
 
     # manifest also lists a symbol-day with no klines at all
-    manifest = pl.DataFrame([
-        {"symbol": "AAAUSDT", "date": "2024-01-01", "url": "x"},
-        {"symbol": "AAAUSDT", "date": "2024-01-02", "url": "x"},
-        {"symbol": "BBBUSDT", "date": "2024-01-01", "url": "x"},
-        {"symbol": "CCCUSDT", "date": "2024-01-01", "url": "x"},
-    ])
+    manifest = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "date": "2024-01-01", "url": "x"},
+            {"symbol": "AAAUSDT", "date": "2024-01-02", "url": "x"},
+            {"symbol": "BBBUSDT", "date": "2024-01-01", "url": "x"},
+            {"symbol": "CCCUSDT", "date": "2024-01-01", "url": "x"},
+        ]
+    )
     write_dataset(manifest, root, "archive_trade_manifest", partition_by=("date",))
 
     surviving = rewrite_manifest_to_coverage(root)
@@ -230,13 +248,24 @@ def test_topup_binance_daily_klines_appends_and_extends_manifest(tmp_path, monke
     manifest = read_dataset(root, "archive_trade_manifest").sort(["date", "symbol"])
     assert manifest.select(["date", "symbol", "url"]).to_dicts() == [
         {"date": "2024-01-01", "symbol": "AAAUSDT", "url": "existing"},
-        {"date": "2024-01-02", "symbol": "AAAUSDT", "url": "kline_coverage"},
+        {
+            "date": "2024-01-02",
+            "symbol": "AAAUSDT",
+            "url": "binance_vision_archive",
+        },
     ]
+    assert manifest["source"].unique().to_list() == ["binance_vision_archive"]
+    assert manifest["membership_source"].unique().to_list() == ["binance_vision_archive"]
+    assert manifest["membership_inferred"].unique().to_list() == [False]
+    assert manifest["first_archive_observed_date"].unique().to_list() == ["2024-01-01"]
+    assert summary["missing_files"] == 0
+    assert json.loads((root / "binance_vision_daily_missing_jobs.json").read_text(encoding="utf-8")) == []
 
 
 # --------------------------------------------------------------------------
 # audit2b: valid-but-empty month must NOT count as a download failure.
 # --------------------------------------------------------------------------
+
 
 def _patch_listing(monkeypatch, inventory):
     monkeypatch.setattr(bv, "discover", lambda **k: inventory)
@@ -258,11 +287,20 @@ def test_valid_empty_month_not_counted_as_failed_job(tmp_path, monkeypatch):
     def _fake_fetch(symbol, ym):
         if ym == "2024-01":
             # A full, valid month: 24 hourly bars.
-            return [{
-                "ts_ms": jan01 + i * MS_PER_HOUR, "symbol": symbol,
-                "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
-                "volume_base": 1.0, "turnover_quote": 1.0, "source": "test",
-            } for i in range(24)]
+            return [
+                {
+                    "ts_ms": jan01 + i * MS_PER_HOUR,
+                    "symbol": symbol,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "volume_base": 1.0,
+                    "turnover_quote": 1.0,
+                    "source": "test",
+                }
+                for i in range(24)
+            ]
         # A valid month with no parseable bars (e.g. header-only CSV).
         return []
 
@@ -271,10 +309,10 @@ def test_valid_empty_month_not_counted_as_failed_job(tmp_path, monkeypatch):
     # Zero tolerance: a single miscounted failure would abort.
     summary = bv.build_binance_oos(root, end_date="2024-03-01", max_failure_ratio=0.0)
 
-    assert summary["failed_files"] == 0          # empty-but-valid month not failed
+    assert summary["failed_files"] == 0  # empty-but-valid month not failed
     assert summary["symbols"] == 1
     klines = read_dataset(root, "klines_1h")
-    assert klines.height == 24                    # exactly the valid month's rows
+    assert klines.height == 24  # exactly the valid month's rows
 
 
 def test_real_download_failure_still_counted(tmp_path, monkeypatch):
@@ -288,11 +326,20 @@ def test_real_download_failure_still_counted(tmp_path, monkeypatch):
 
     def _fake_fetch(symbol, ym):
         if ym == "2024-01":
-            return [{
-                "ts_ms": jan01 + i * MS_PER_HOUR, "symbol": symbol,
-                "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
-                "volume_base": 1.0, "turnover_quote": 1.0, "source": "test",
-            } for i in range(24)]
+            return [
+                {
+                    "ts_ms": jan01 + i * MS_PER_HOUR,
+                    "symbol": symbol,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "volume_base": 1.0,
+                    "turnover_quote": 1.0,
+                    "source": "test",
+                }
+                for i in range(24)
+            ]
         return None  # hard download/integrity failure
 
     monkeypatch.setattr(bv, "fetch_month_klines", _fake_fetch)
@@ -321,14 +368,12 @@ def test_fetch_month_klines_returns_empty_list_on_valid_empty_zip(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    header_only = _zip_csv(
-        "open_time,open,high,low,close,volume,close_time,quote_volume,count,tb,tbq,ignore\n"
-    )
+    header_only = _zip_csv("open_time,open,high,low,close,volume,close_time,quote_volume,count,tb,tbq,ignore\n")
     monkeypatch.setattr(bv.urllib.request, "urlopen", lambda *a, **k: _Resp(header_only))
     monkeypatch.setattr(bv, "_fetch_expected_sha256", lambda *a, **k: None)
 
     out = bv.fetch_month_klines("AAAUSDT", "2024-01")
-    assert out == []          # valid-but-empty success, NOT None
+    assert out == []  # valid-but-empty success, NOT None
     assert out is not None
 
 
@@ -342,11 +387,20 @@ def test_normal_input_unchanged_happy_path(tmp_path, monkeypatch):
     _patch_listing(monkeypatch, {"AAAUSDT": ["2024-01"], "BBBUSDT": ["2024-01"]})
 
     def _fake_fetch(symbol, ym):
-        return [{
-            "ts_ms": jan01 + i * MS_PER_HOUR, "symbol": symbol,
-            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
-            "volume_base": 1.0, "turnover_quote": 1.0, "source": "test",
-        } for i in range(24)]
+        return [
+            {
+                "ts_ms": jan01 + i * MS_PER_HOUR,
+                "symbol": symbol,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume_base": 1.0,
+                "turnover_quote": 1.0,
+                "source": "test",
+            }
+            for i in range(24)
+        ]
 
     monkeypatch.setattr(bv, "fetch_month_klines", _fake_fetch)
     summary = bv.build_binance_oos(root, end_date="2024-02-01", max_failure_ratio=0.0)
@@ -356,11 +410,16 @@ def test_normal_input_unchanged_happy_path(tmp_path, monkeypatch):
     klines = read_dataset(root, "klines_1h")
     assert klines.height == 48
     assert set(klines["symbol"].unique().to_list()) == {"AAAUSDT", "BBBUSDT"}
+    manifest = read_dataset(root, "archive_trade_manifest")
+    assert manifest["source"].unique().to_list() == ["binance_vision_archive"]
+    assert manifest["membership_source"].unique().to_list() == ["binance_vision_archive"]
+    assert manifest["membership_inferred"].unique().to_list() == [False]
 
 
 # --------------------------------------------------------------------------
 # audit2b: document the CURRENT _verify_download contract.
 # --------------------------------------------------------------------------
+
 
 def test_verify_download_no_checksum_no_length_requires_valid_zip():
     """audit2c (operator-approved) SUPERSEDES the earlier audit2b 'flagged-not-fixed'
@@ -381,6 +440,7 @@ def test_verify_download_no_checksum_no_length_requires_valid_zip():
 # --------------------------------------------------------------------------
 # audit2c (binance_floor): _verify_download both-absent fail-closed contract.
 # --------------------------------------------------------------------------
+
 
 def _valid_zip_bytes() -> bytes:
     buf = io.BytesIO()
@@ -574,11 +634,20 @@ def test_build_binance_oos_clean_rewrite_drops_stale_partitions(tmp_path, monkey
     monkeypatch.setattr(bv, "discover", lambda **k: {"AAAUSDT": ["2024-01"]})
 
     def _fake_fetch(symbol, ym):
-        return [{
-            "ts_ms": jan01 + i * MS_PER_HOUR, "symbol": symbol,
-            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
-            "volume_base": 1.0, "turnover_quote": 1.0, "source": "test",
-        } for i in range(24)]
+        return [
+            {
+                "ts_ms": jan01 + i * MS_PER_HOUR,
+                "symbol": symbol,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume_base": 1.0,
+                "turnover_quote": 1.0,
+                "source": "test",
+            }
+            for i in range(24)
+        ]
 
     monkeypatch.setattr(bv, "fetch_month_klines", _fake_fetch)
     bv.build_binance_oos(root, end_date="2024-02-01", allow_degraded=True)

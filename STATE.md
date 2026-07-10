@@ -2,7 +2,8 @@
 
 Last updated: 2026-07-10.
 
-This is the live operating page. Durable research decisions are in
+This is a descriptive live operating page, not research policy. Durable
+research decisions are in
 `docs/research_summary.md`; dated experiment anchors are indexed in
 `docs/preregistration/INDEX.md`.
 
@@ -10,7 +11,7 @@ This is the live operating page. Durable research decisions are in
 
 | Sleeve | Mode | Current state |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | Base sleeve and safety release are live; sniper is retired; four TAC/SKL rows are 4/4 matched; hedge target reconciliation is five-minute |
+| `continuous_ensemble_v2` | Bybit demo + paper | Base sleeve and safety release are live; sniper is retired; five TAC/SKL/VELVET rows are 5/5 matched; hedge target reconciliation is five-minute |
 | `LongV11aDivWeekendVol` | Bybit demo + paper | On and currently flat; the earlier ADA pair remains historical execution-skew evidence |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
@@ -25,9 +26,13 @@ This is the live operating page. Durable research decisions are in
   one venue TP per net symbol (TAC `0.003647`, SKL `0.00469`), and durable
   24-hour exits at `2026-07-11T02:00:00Z` / `06:00:00Z`. No server-side stop
   is configured: that is deliberate but leaves gap/tail risk until a registered
-  sizing or adverse-state treatment earns deployment. Sniper remains absent.
-- Quick reconciliation is 4/4 paired with no unmatched, status, or exit-reason
-  divergence; mean adverse demo entry slippage is 129.80 bps (worst 170.73).
+  sizing or adverse-state treatment earns deployment. VELVETUSDT p3 subsequently
+  joined the same clock and is paired in the later 5/5 reconcile. Sniper remains
+  absent.
+- Quick reconciliation at `2026-07-10T11:46Z` is 5/5 paired with no unmatched,
+  status, or exit-reason divergence. VELVETUSDT p3 is the fifth row. Mean adverse
+  demo entry slippage is 72.13 bps, median 136.96 bps, and worst 170.73 bps; one
+  favorable VELVET fill makes the mean unrepresentative.
   TAC replays as D9. SKL is a visible D8 boundary warning on the later live
   snapshot, but the independent full-PIT plane confirms it and both planes show
   zero hard (D7-or-lower) drift.
@@ -141,10 +146,10 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
 The forensic window was archived as
 `data/_archive/ledger-reset-20260710T015456Z-tail-safety-20260710.tar.gz`
 (SHA-256 `a4c5bf5df0338f7f320004d51e16cc932d2ceac5867e8a7fe7c36b1670e2c076`).
-The immediate post-reset reconcile was 0/0 clean for both sleeves. The four
-TAC/SKL rows above then opened on the new clock; LONG remains 0/0 and
-CONTINUOUS is now 4/4 clean. The account is intentionally no longer flat while
-those tracked demo positions are open.
+The immediate post-reset reconcile was 0/0 clean for both sleeves. TAC/SKL then
+opened four rows on the new clock, followed by VELVETUSDT p3. LONG remains 0/0
+and CONTINUOUS is now 5/5 clean. The account is intentionally no longer flat
+while those tracked demo positions are open.
 
 ## Long v11a research read
 
@@ -182,6 +187,84 @@ small forward sample as execution evidence, not validation.
 - Forward Bybit depth/liquidation capture may inform later shadow diagnostics;
   it cannot fill historical treatment features.
 
+Strategy-overhaul status is still synthetic and outcome blind:
+
+- The CONTINUOUS raw population builder now validates a narrow OHLCV source
+  projection and restarts rolling history after any interior hourly gap. Its
+  diagnostic S02 wrapper emits the exact registry-typed 196-field projection,
+  requires separate exact warmup/source and retained signal-window key
+  inventories, and derives stable RMOM[D]'s causal-computability time as
+  `D - 1 day + 1 hour` from the frozen shift-3 target construction.
+  Provisional RMOM rows remain unavailable. This is an offline causality bound,
+  not a claim about historical publication, ingestion, or operational latency.
+  CONTINUOUS S03 and S04 are separate exact typed projections with anchor/parity
+  and path-completeness checks.
+- LONG now requires the exact runtime v11a config at every stage, canonicalizes
+  the signal key, validates global hourly keys and consumed OHLC geometry,
+  checks the daily close against the exact signal-hour close, reconstructs
+  stage-owned values before accepting downstream input, and refuses non-frozen
+  horizons on the registered S04 path. Its S02 wrapper validates supplied
+  population/age, recomputes rank metadata, and emits exactly 138 fields. A
+  separate outcome-blind builder now reconstructs availability, BTC/ETH regime,
+  and configured BTC-month sidecars from raw hourly OHLC, preserves unavailable
+  context as null, and parity-checks the production fallbacks. S03 emits exactly
+  30 fields; S04 consumes exact S02+S03 and emits exactly 71 fields after geometry
+  reconstruction.
+- A central schema projector enforces exact order, dtypes, non-null fields, and
+  unique registered keys. Registry v4 distinguishes
+  `builder`/`passthrough`/`adapter`/`projection`/`missing`/
+  `semantic_mismatch`; no current field remains marked missing or semantically
+  mismatched, while seven receipt/provenance blockers remain explicit. This is
+  structural software evidence, not a canonical child freeze.
+- Phase 0 now binds an internally replayable dirty source snapshot, a selected
+  observed-environment identity, mechanically derived config/scope/component
+  artifacts, normalized venue-local map rows, and actual file-byte hashes. Git
+  objects, import hooks/`sys.path`, unsigned provenance labels/receipts, and
+  external map review strings are not authenticated. Required-dataset source
+  labels now reject obvious venue/root swaps, identical or overlapping physical
+  venue roots are refused, external maps remain diagnostic/untrusted, and
+  `root_lineage.json` preserves the missing canonical-lineage blocker. The root snapshot is
+  explicitly `BYTE_SNAPSHOT_ONLY`: it does not prove registered scope, earliest
+  history, Phase-0 semantics, or S01 readiness. The diagnostic stage byte-binding
+  utility lets S00 bind only config/source/environment before S01 exists; S01
+  then adds root/PIT/map/population identities and starts the downstream run
+  identity. Artifact schema, row count, key hash, and outcome blindness remain
+  explicitly unverified caller declarations. Construction requires the config
+  identity to equal the exact repository-derived canonical object; later
+  archival byte verification intentionally does not reinterpret old declarations
+  through the mutable current schema registry or config factories. It does not
+  validate stage semantics or transitive provenance. These are diagnostic
+  primitives, not a canonical S00-S04 semantic chain; no real root has entered
+  that stage-receipt chain.
+- A full-window outcome-blind Phase-0 inventory ran on the local workstation
+  roots and wrote diagnostic bundle
+  `strategy-overhaul-phase0-bccefdfc38ae9fda3c17` (`receipt.json` SHA-256
+  `ed5fb3687280db691dcda5e32e00005a8dd48dd2fb403c2f48fe6cb69a81bb03`).
+  It exited 2 with `NOT_READY`; an immediate strict re-execution returned
+  successfully before the reporting wrapper failed to serialize immutable
+  mappings. The run read no OHLCV/RMOM numeric values or outcomes and authorized
+  no S01, outcome, deployment, or real-money action. Binance lacks the seven
+  daily manifest/kline partitions 2026-07-03 through 2026-07-09, all 471,321
+  Binance manifest pairs lack persisted observation provenance, and Binance RMOM
+  has no `is_provisional`. Bybit covers the registered window but 360 kline rows
+  have no source label. The run also exposed an overly narrow Bybit source-label
+  sanity registry: `bybit_public_trades` and `bybit_rest` are venue-compatible
+  production labels but were classified incompatible. That software defect is
+  prospective; it does not rewrite this receipt. Both roots lack canonical
+  authenticated root-lineage receipts, the auto map was therefore bundled but
+  not consumed, and S02 config parity was `UNWIRED` in this exact run. No real
+  S02 feature tape, S03 entry artifact, S04 path-label artifact, or outcome
+  analysis has run.
+- After that receipt was verified, the narrow canonical Binance daily-tail
+  builder repaired 2026-07-03..09 on the local root: 5,628 archive jobs,
+  129,088 appended hourly rows, 245 recorded 404s, zero hard failures, and a
+  coverage-derived 593,757-row manifest with non-null
+  `binance_vision_archive` source/membership provenance. A post-build key/schema
+  audit found all seven required date directories, zero duplicate
+  `(symbol,date,url)` keys, and zero null source labels. This intentionally
+  changed the root after the `NOT_READY` receipt; that receipt is historical and
+  a new Phase-0 identity is required for current-root evidence.
+
 ## Next actions
 
 1. Let both sleeves accrue a post-fix forward sample; reconcile after meaningful
@@ -191,6 +274,21 @@ small forward sample as execution evidence, not validation.
    review; it does not change the live profile.
 3. Build and audit granular datasets before running the adverse-state study.
    Do not infer missing sub-hour data from 1h bars.
+4. Preserve the verified local `NOT_READY` Phase-0 bundle above as diagnostic
+   evidence; do not overwrite or promote it. Correct the source-label registry
+   and S02 parity wiring prospectively, then use `scripts/ops.sh overhaul-plan`
+   for the shallow preflight and `scripts/ops.sh overhaul-phase0` for a new
+   content-addressed inventory after the roots are refreshed. The remaining
+   seven-day Binance gap is 2026-07-03..09. No big-PC Phase-0 bundle has run.
+   Big-PC location does not make a receipt authoritative; its artifacts must
+   pass the same internal re-execution checks, while upstream authenticity and
+   canonical root lineage remain separate evidence requirements.
+   Non-executable finite child templates and the proposed v4 six-artifact schema
+   registry exist, but the mismatch ledger above remains blocking, so canonical
+   child contracts/manifests remain absent. Refresh the roots and produce a
+   semantically verified S00 evidence bundle before binding the
+   population/config/RMOM-source
+   identities or running any real tape or label stage.
 
 ## Canonical references
 

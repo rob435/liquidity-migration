@@ -39,6 +39,7 @@ the look-ahead debt above; advancing `--end` only stops the table going stale).
 
 Dispatch: POLARS_MAX_THREADS=8 .venv/bin/python -u scripts/precompute_residual_momentum.py [--root PATH ...] [--start D] [--end D]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -76,6 +77,13 @@ DEFAULT_ROOTS = [SHARED / "bybit_full_pit", SHARED / "binance_full_pit"]
 # the module docstring; pinned by test_residual_momentum_is_causal_shift3.
 RMOM_WINDOW = 7
 RMOM_CAUSAL_SHIFT = 3
+# fit_factor_returns targets first-bar close[d+2] / first-bar close[d+1].
+# The newest residual used by RMOM[D] is d=D-shift, and its target is complete
+# at the first 1h bar close on d+2. These constants make the conservative A0
+# causal-computability timestamp mechanically derivable without pretending an
+# unrecorded historical cron publication time exists.
+RMOM_FORWARD_TARGET_COMPLETION_DAYS = 2
+RMOM_FIRST_BAR_CLOSE_OFFSET_HOURS = 1
 DEFAULT_APPEND_OVERLAP_DAYS = 14
 # Tables written before provenance existed can only be upgraded
 # conservatively. The provisional edge is bounded by the forward-target lag,
@@ -126,7 +134,8 @@ def _append_trailing_pad(resid: pl.DataFrame, *, end: str) -> pl.DataFrame:
     end_day = (_date_str_to_ms(end) // MS_PER_DAY) * MS_PER_DAY
     active_cutoff = end_day - 8 * MS_PER_DAY  # only pad symbols with data within a rolling window of `end`
     pad = (
-        resid.group_by("symbol").agg(pl.col("ts_ms").max().alias("_last"))
+        resid.group_by("symbol")
+        .agg(pl.col("ts_ms").max().alias("_last"))
         .filter(pl.col("_last") >= active_cutoff)
         .with_columns(pl.int_ranges(pl.col("_last") + MS_PER_DAY, end_day + MS_PER_DAY, MS_PER_DAY).alias("ts_ms"))
         .explode("ts_ms")
@@ -145,12 +154,14 @@ def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | N
     panel = build_factor_panel(root, start=start, end=end, klines_dataset=kname)
     if panel.is_empty():
         print(f"[{root.name}] EMPTY panel -- skip")
-        return pl.DataFrame(schema={
-            "symbol": pl.String,
-            "ts_ms": pl.Int64,
-            "residual_momentum": pl.Float64,
-            "is_provisional": pl.Boolean,
-        })
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.String,
+                "ts_ms": pl.Int64,
+                "residual_momentum": pl.Float64,
+                "is_provisional": pl.Boolean,
+            }
+        )
     _fr, resid = fit_factor_returns(panel, factor_cols=COMMON4)  # symbol, ts_ms, residual_return
     resid = resid.sort(["symbol", "ts_ms"]).select("symbol", "ts_ms", "residual_return")
     # The LIVE join floors `now` to TODAY's day_ts and exact-matches residual_momentum[day_ts]; but
@@ -177,10 +188,7 @@ def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | N
         .join(last_real, on="symbol", how="left")
         .with_columns(residual_momentum_expr())
         .with_columns(
-            (
-                (pl.col("ts_ms") - RMOM_CAUSAL_SHIFT * MS_PER_DAY)
-                > pl.col("_last_real_ts_ms")
-            )
+            ((pl.col("ts_ms") - RMOM_CAUSAL_SHIFT * MS_PER_DAY) > pl.col("_last_real_ts_ms"))
             .fill_null(True)
             .alias("is_provisional")
         )
@@ -218,10 +226,9 @@ def _with_provisional_provenance(sig: pl.DataFrame) -> pl.DataFrame:
     return (
         sig.with_columns(pl.col("ts_ms").max().over("symbol").alias("_legacy_symbol_max"))
         .with_columns(
-            (
-                pl.col("ts_ms")
-                >= pl.col("_legacy_symbol_max") - LEGACY_PROVISIONAL_TAIL_DAYS * MS_PER_DAY
-            ).alias("is_provisional")
+            (pl.col("ts_ms") >= pl.col("_legacy_symbol_max") - LEGACY_PROVISIONAL_TAIL_DAYS * MS_PER_DAY).alias(
+                "is_provisional"
+            )
         )
         .drop("_legacy_symbol_max")
     )
@@ -244,12 +251,14 @@ def _assert_append_overlap_matches(
     )
     new = (
         rebuilt.filter((pl.col("ts_ms") >= overlap_start_ms) & (pl.col("ts_ms") <= overlap_end_ms))
-        .select([
-            "symbol",
-            "ts_ms",
-            pl.col("residual_momentum").alias("new_residual_momentum"),
-            pl.col("is_provisional").alias("new_is_provisional"),
-        ])
+        .select(
+            [
+                "symbol",
+                "ts_ms",
+                pl.col("residual_momentum").alias("new_residual_momentum"),
+                pl.col("is_provisional").alias("new_is_provisional"),
+            ]
+        )
         .sort(["symbol", "ts_ms"])
     )
     if old.is_empty():
@@ -262,13 +271,14 @@ def _assert_append_overlap_matches(
         )
     if joined["new_is_provisional"].any():
         raise RuntimeError(
-            "residual_momentum append would demote stable overlap rows to provisional; "
-            "source coverage regressed"
+            "residual_momentum append would demote stable overlap rows to provisional; source coverage regressed"
         )
     old_vals = joined["old_residual_momentum"].to_numpy()
     new_vals = joined["new_residual_momentum"].to_numpy()
     if not np.array_equal(np.isnan(old_vals), np.isnan(new_vals)):
-        raise RuntimeError("residual_momentum append overlap NaN positions changed; use --full-rewrite after inspection")
+        raise RuntimeError(
+            "residual_momentum append overlap NaN positions changed; use --full-rewrite after inspection"
+        )
     finite = ~np.isnan(old_vals)
     if finite.any() and not np.allclose(old_vals[finite], new_vals[finite], rtol=rtol, atol=atol):
         diffs = np.abs(old_vals[finite] - new_vals[finite])
@@ -291,9 +301,11 @@ def _append_signal(
     if append_overlap_days < 1:
         raise ValueError("append_overlap_days must be positive")
     _validate_rmom_schema(existing, path=out_path)
-    existing = _with_provisional_provenance(existing).select(
-        ["symbol", "ts_ms", "residual_momentum", "is_provisional"]
-    ).sort(["symbol", "ts_ms"])
+    existing = (
+        _with_provisional_provenance(existing)
+        .select(["symbol", "ts_ms", "residual_momentum", "is_provisional"])
+        .sort(["symbol", "ts_ms"])
+    )
     if existing.is_empty():
         sig = _compute_signal(root, start=START, end=end, klines_dataset=klines_dataset)
         _write_signal_atomic(out_path, sig.sort(["symbol", "ts_ms"]))
@@ -371,8 +383,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", action="append", default=None, help="data root(s); default both full-PIT roots")
     ap.add_argument("--start", default=START, help="inclusive panel start date (YYYY-MM-DD)")
-    ap.add_argument("--end", default=None, help="exclusive end date (YYYY-MM-DD); default = tomorrow UTC (keeps the live table fresh)")
-    ap.add_argument("--klines-dataset", default=None, help="kline store name; default = sniff (klines_1h, else event_demo_klines_1h for live roots)")
+    ap.add_argument(
+        "--end",
+        default=None,
+        help="exclusive end date (YYYY-MM-DD); default = tomorrow UTC (keeps the live table fresh)",
+    )
+    ap.add_argument(
+        "--klines-dataset",
+        default=None,
+        help="kline store name; default = sniff (klines_1h, else event_demo_klines_1h for live roots)",
+    )
     ap.add_argument(
         "--full-rewrite",
         action="store_true",

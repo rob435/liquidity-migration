@@ -7,19 +7,27 @@ dated experiment contracts are indexed in `docs/preregistration/INDEX.md`.
 
 ## Evidence model
 
-- Forward demo/paper decides execution behavior.
-- Two-venue, full-PIT research can reject mechanisms and nominate a new shadow
-  test; it does not silently change the deployed object.
-- PIT membership, causal availability, survivorship control, costs/funding,
-  reconstructable ledgers, frozen configs, and immutable receipts are part of
-  the result—not optional reporting.
-- Mainnet is outside the current operating mode.
+- This file is a decision log, not policy. Apply `docs/governance.md` to each
+  claim and inspect the underlying artifacts.
+- Forward demo/paper is strongest for execution behavior and is prospective
+  performance evidence only within an unspent, frozen evaluation epoch.
+- Venue count, metrics, and thresholds follow the claim and its registered
+  contract. Cross-venue agreement is useful robustness evidence, not automatic
+  independence or a universal gate.
+- PIT membership, causal availability, survivorship control, material
+  costs/funding, reconstructable artifacts, and data/code/config identity are
+  part of any claim for which they matter.
+- Historical `rejected` or `closed` decisions are current evidence states, not
+  permanent bans. Revisit only with a new mechanism, new data, or a corrected
+  defect—and record the new exposure.
+- Mainnet is outside the current operating mode and requires separate owner
+  authorization.
 
 ## Active objects
 
 | Object | Role | Current read |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit continuous fade demo/paper | Base stays on; sniper retired; post-fix TAC/SKL book is 4/4 matched with zero hard signal drift |
+| `continuous_ensemble_v2` | Bybit continuous fade demo/paper | Base stays on; sniper retired; post-fix TAC/SKL/VELVET book is 5/5 matched with zero hard signal drift |
 | `LongV11aDivWeekendVol` | Bybit long demo/paper | Strong internal cross-venue object; TP-tail dependent; currently flat after a tiny skewed forward sample |
 
 Binance is a research/replay venue, not a live execution venue.
@@ -168,10 +176,13 @@ failure to learn from, not strategy validation.
   timing/exit skew above.
 - Venue independently confirmed flat/no-orders immediately after the incident.
   As of `2026-07-10T08:48Z`, the new clock holds TACUSDT p3 plus SKLUSDT p3,
-  p4p3, and p4p5: four demo rows and four paper rows, no sniper.
-- Current execution reconcile is 4/4 paired, zero paper/demo-only, zero status
-  or exit-reason divergence, and 129.80 bps mean adverse demo entry slippage
-  (170.73 bps worst). TAC is D9 on the replayed live plane. SKL is D8 on that
+  p4p3, and p4p5: four demo rows and four paper rows, no sniper. VELVETUSDT p3
+  subsequently opened and is included in the 5/5 reconcile below.
+- Current execution reconcile at `2026-07-10T11:46Z` is 5/5 paired, zero
+  paper/demo-only, zero status or exit-reason divergence, and 72.13 bps mean,
+  136.96 bps median, and 170.73 bps worst adverse demo entry slippage. The
+  favorable VELVET row drags down the mean. TAC is D9 on the replayed live plane.
+  SKL is D8 on that
   later snapshot (soft boundary noise), while the fresh independent full-PIT
   plane confirms it; neither plane reports a hard D7-or-lower miss.
 - The current-tail PIT manifest and 1h bars cover the latest fully closed signal
@@ -206,11 +217,46 @@ failure to learn from, not strategy validation.
   and checked deploy requires explicit `--execute`.
 - Safety release `77bf04304` is deployed. The pre-fix ledgers were archived with
   verified SHA-256. The immediate post-reset reconciliation was 0/0 clean; the
-  current TAC/SKL book is 4/4 demo-paper matched with no hard model drift. Each
+  current TAC/SKL/VELVET book is 5/5 demo-paper matched with no hard model drift. Each
   net venue symbol has a TP and every component has a durable 24-hour deadline.
   Server stops remain off because the tested fixed-stop arms were negative;
   this leaves tail risk and is why the registered loss-budget and granular
   adverse-state studies remain the next evidence path.
+
+## Strategy-overhaul scout status
+
+The current claim is only that the proposed population/label plumbing can be
+made fail-closed and outcome blind before touching the real roots. Validity is
+limited to focused synthetic software checks; study mode is exploratory, no
+population outcome has been inspected, and deployment/authorization are
+unchanged.
+
+| Surface | Synthetic hardening now present | Unresolved boundary |
+| --- | --- | --- |
+| CONTINUOUS raw/S02 | Gap-safe raw-history segments; exact 196-field S02 diagnostic projection; independent source/warmup and retained signal-window key inventories; stable RMOM causal-computability time derived as `D - 1 day + 1 hour`; provisional rows unavailable | RMOM source-day/provisional-state and root/population identities are not yet receipt-bound; actual historical publication, ingestion, and operational latency are not claimed |
+| CONTINUOUS S03/S04 | Separate exact typed entry-anchor and minimal path projections; anchor tamper/parity and gap/completeness checks | No real entry or label artifact has run |
+| LONG S02 | Exact 138-field projection; exact runtime v11a config; canonical key; independently supplied population/age; mechanically reconstructed causal availability/regime/month sidecars; PIT/map checks; reconstructed rank metadata; post-signal invariance | Root/population/PIT/map and sidecar receipts are not yet threaded into a real S02 run |
+| LONG S03/S04 | Separate exact 30-field entry and 71-field label projections; finite dependencies; geometry reconstruction; frozen horizons; future-bar invariance | No real entry or label artifact has run |
+| Shared contracts | Central exact order/dtype/non-null/key projector; proposed registry v4; mechanically derived config bundle; internally replayable source/selected-environment identity; venue-swap and physical-root-alias refusal; non-authoritative `BYTE_SNAPSHOT_ONLY` root precursor; diagnostic tamper-evident stage byte bindings with S00 config/source/environment separated from S01 root/PIT/map/population freeze; exact repository-derived config equality enforced at binding | Internal replay is not source/environment authentication; source labels and unsigned root receipts remain untrusted lineage inputs; external-map review/product/multiplier claims cannot establish canonical or portable identity; root snapshots do not prove registered scope/earliest history/S01 readiness; stage bindings do not validate transitive provenance; no canonical S00-S04 semantic chain exists; seven blockers remain |
+
+The blocking debts are receipt-bound RMOM source-day/provisional-state and
+root-content provenance; a complete independently inventoried population;
+config verification inside every stage wrapper; stage-specific semantic
+validation; and transitive binding of the root, PIT/map, population, and
+mechanically derived LONG-sidecar artifacts into one canonical chain. The
+existing root/stage receipt utilities are diagnostics and cannot clear these
+debts by themselves. One outcome-blind Phase-0 inventory has now run on the
+local workstation roots: bundle
+`strategy-overhaul-phase0-bccefdfc38ae9fda3c17`, receipt SHA-256
+`ed5fb3687280db691dcda5e32e00005a8dd48dd2fb403c2f48fe6cb69a81bb03`,
+status `NOT_READY`. Strict internal re-execution returned successfully; this
+proves internal reconstruction under the captured source/environment limits,
+not source authenticity, full environment identity, root completeness, or
+canonical lineage. The run read no OHLCV/RMOM numeric values or outcomes and
+authorized no downstream action. No real S02 feature tape, S03 entry artifact,
+S04 label artifact, return, MFE/MAE, PnL, or other outcome analysis has run.
+This diagnostic therefore supports no gate, alpha, promotion, sizing, or
+deployment conclusion.
 
 ## Current research direction
 
@@ -221,5 +267,19 @@ failure to learn from, not strategy validation.
    boundary and full-PIT receipts are ready.
 3. Build/audit granular roots before the adverse-state experiment. Missing 5m
    data stays missing; never synthesize it from hourly bars.
-4. Reopen a closed arc only with a new falsifiable mechanism or genuinely new
-   data, not another broad parameter grid.
+4. Use the local `NOT_READY` Phase-0 bundle only to repair readiness. It found
+   Binance missing 2026-07-03..09 manifest/kline partitions, 471,321
+   provenance-unknown Binance membership pairs, absent Binance RMOM
+   `is_provisional`, 360 Bybit kline rows without a source label, no canonical
+   root-lineage receipts, incomplete auto-map consumption, and `UNWIRED` S02
+   config parity. It also exposed a prospective code defect: two legitimate
+   Bybit kline source labels were omitted from the venue sanity registry. Fix
+   code and roots, produce a new big-PC Phase-0 identity, and resolve the
+   semantic provenance debts before instantiating canonical children.
+   Conditional association still cannot justify removing a gate.
+   The local Binance daily tail has since been repaired and provenance-enriched,
+   which intentionally makes the historical receipt stale for the current local
+   root; a new Phase-0 identity must confirm the repair.
+5. Treat closed arcs as priors against repeating the same search. Reopen a
+   precise claim only with new data, a corrected defect, or a genuinely new
+   falsifiable mechanism, and register the new search surface.

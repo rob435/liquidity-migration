@@ -7,16 +7,19 @@ vs. forward OOS). Whether a root is currently built/present is live state — se
 
 The per-venue full-PIT roots (`~/SHARED_DATA/bybit_full_pit`,
 `~/SHARED_DATA/binance_full_pit`) are data, not code — not committed. If a root is
-ever lost, the rebuild scripts below are the recovery path. (The canonical Binance
-funding dataset is `binance_full_pit/binance_usdm_funding` — rebuilt full-coverage
-2026-06-09; the old `binance_full_pit_strategy` side-root no longer exists on this
-box.)
+ever lost, the rebuild scripts below are the recovery path. The canonical Binance
+funding dataset is `binance_full_pit/binance_usdm_funding`; verify its current
+window coverage from the run/audit rather than a historical rebuild claim. The old
+`binance_full_pit_strategy` side-root no longer exists on this box.
 
 ## Per-venue full-PIT working datasets (intended state)
 
-Two clean per-venue roots are the working surface — no internal OOS/IS
-split. Side-by-side venue comparison is the validation: agreement = robust
-signal, disagreement = regime/microstructure artefact.
+The two per-venue roots are storage surfaces, not statistical splits. A study
+may reserve temporal holdouts, use walk-forward evaluation, or use only the
+target venue. Cross-venue comparison is valuable when portability is part of
+the claim, but agreement between correlated crypto venues is not independent
+OOS proof and disagreement is evidence to explain, not automatically an
+artefact.
 
 ```text
 ~/SHARED_DATA/bybit_full_pit       Bybit USDT linear perpetuals, ~2021-01..today
@@ -47,16 +50,18 @@ bash scripts/verify_full_pit_rebuild.sh
 
 These roots are **not committed** (data, not code).
 
-## Pristine out-of-sample = forward only
+## Evaluation surfaces and data exposure
 
-When the per-venue roots span their full available histories there is no
-clean internal OOS window left in either venue. **Pristine OOS henceforth is
-the forward demo + paper ledgers, ticking from each sleeve's latest
-forward-clock restart (see STATE.md for the current clock).**
+A root spanning full available history does not mean every row must be used for
+design. Historical windows can be held out prospectively for a genuinely new
+claim. For the current strategies, much of both histories has already influenced
+research, so new paper/demo epochs are often the cleanest remaining prospective
+surface.
 
-When a candidate parameter set is promoted, the forward ledgers accumulate
-clean OOS PnL that no backtest sweep can touch. Cite forward returns as the
-OOS evidence; cite either per-venue root as working-dataset evidence.
+Forward data stays untouched only until it is inspected or used to change the
+profile, threshold, stopping decision, or clock. Preserve immutable epochs and
+all reset/change points. A new clock does not erase the evidentiary exposure of
+earlier ledgers. See `docs/governance.md`.
 
 ## Live demo + paper roots
 
@@ -92,8 +97,7 @@ Run `bash scripts/reconcile.sh` (skill: `pit-reconcile`) — the single reconcil
 entrypoint (full demo↔backtest↔paper by default; `--quick` for the fast
 demo↔paper-only check). Do not hand-assemble the `reconcile-*` calls.
 
-Do not use ad hoc current-universe or temporary recent roots for promotion
-evidence. Current-universe research is biased by construction unless
-membership is point-in-time. A live `exchangeInfo` snapshot is never an
-acceptable cross-venue PIT source — see
-`docs/backtesting_errors_we_never_repeat.md`.
+Do not use ad hoc current-universe or temporary recent roots for a historical
+universe claim. They remain useful for explicitly scoped diagnostics. A live
+`exchangeInfo` snapshot is not a historical membership source; see
+`docs/pit_gate.md` and `docs/governance.md`.

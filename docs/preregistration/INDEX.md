@@ -1,36 +1,40 @@
 # Preregistration Index
 
-This folder is not a receipt archive. Exact historical receipt text lives in
-git history and local run artifacts. Keep only:
-
-- `_template.md` for the next serious run.
-- This index for active anchors and closed-arc verdicts.
+This folder is a compact contract and decision index, not a raw command-log
+archive. Keep active preregistrations and any compact completed receipt needed
+to reconstruct a decision. Store large artifacts with the run and record their
+content identity here. Git history is a backup, not the only evidence registry.
 
 The live decision log is `docs/research_summary.md`; operational state is
 `STATE.md`.
 
 ## Rule
 
-Serious parameter work needs a dated hypothesis, data roots, decision rule, and
-artifact path before the expensive run. Mark throwaway work `exploratory`; do
-not use it as acceptance evidence.
+Decision-influencing work follows `docs/parameter_pre_registration.md`: register
+the claim, exposure boundary, comparison, decision/stopping rule, tested set,
+and artifacts before inspecting the affected result. Exploration is allowed but
+does not become confirmatory retroactively.
 
 ## Active Anchors
 
 | Area | Anchor | Status |
 | --- | --- | --- |
 | Continuous v2 | Baseline starts `2026-06-18T19:54:00Z`; three components, inverse-vol sizing, BTC/ETH hedge, BTC-vol regime | Control for future A/B work |
-| Continuous live target | TP12, daily rebalance disabled, no daemon/server stop, `CTRL_BTC_RISK_70_90_35` sizing overlay | First material forward loss observed; sniper retired and safety release pending deploy |
+| Continuous live target | TP12, daily rebalance disabled, no daemon/server stop, `CTRL_BTC_RISK_70_90_35` sizing overlay | Safety release deployed; sniper retired; post-reset TAC/SKL rows reconcile demo↔paper |
 | Continuous validation baseline | `continuous_ensemble_v2_baseline_current` under `research/continuous_fade/runs/` | Timestamped baseline plus expanded diagnostics complete; exploratory only |
-| Continuous forward readiness | `reports/continuous_forward_readiness/` | Older zero-trade report is stale; 2026-07-10 pre-reset reconcile has 7 paired base rows, 5 paper-only, 2 demo-only, 4 sniper-only, and one exit-reason divergence |
-| Lookback robustness | `docs/lookback_audit.md` | Repo-wide classification of lifecycle, feature, risk-memory, reporting, and operational lookbacks; use before adding time windows |
+| Continuous forward readiness | `reports/continuous_forward_readiness/` | Current post-reset TAC/SKL/VELVET book is 5/5 paper↔demo paired with no unmatched/status/exit divergence and no hard model drift; pre-reset discrepancies are historical |
 | BTC month-regime lookbacks | `btc-month-regime-2026-07-04.md` | Proposed preregistration: continuous hourly confirmed 30d/month/smart BTC gate plus comparable long month-regime gate; defaults unchanged |
 | Continuous tail survival | `continuous-tail-survival-2026-07-10.md` | Registered, not run: causally valid budget-only matrix (control plus 0.10%/0.15%/0.25% +100%-loss caps), signals through 2026-07-09 and strict exit-path data through 2026-07-11 on both venues; heat/exit arcs deferred |
 | Granular adverse-risk | `continuous-granular-adverse-risk-2026-07-10.md` | Registered, not run: causal sub-hour entry/exit mechanism study; current canonical roots fail granular readiness and must be built/audited first |
+| Strategy overhaul scout | `strategy-overhaul-scout-2026-07-10.md` | Local full-window outcome-blind Phase 0 `strategy-overhaul-phase0-bccefdfc38ae9fda3c17` is internally re-executable but `NOT_READY`; it found a seven-day Binance root/provenance gap that was repaired prospectively afterward, both roots still lack canonical lineage, no big-PC bundle or canonical child exists, and no population/outcome stage was inspected |
 | Long v11a | FC-only long sleeve with v11a sniper entry, vol parity, ATR exits | Best current internal positive object; tiny ADA forward sample has timing/exit mismatch |
-| Reconciliation | `scripts/reconcile.sh` | 2026-07-10 run flagged both sleeves; venue independently confirmed flat; incident reconstruction is `docs/incidents/2026-07-10-1000tag.md` |
+| Reconciliation | `scripts/reconcile.sh` | Current quick reconcile is 5/5 clean for CONTINUOUS and 0/0 for LONG; the account is intentionally non-flat with tracked TAC/SKL/VELVET demo positions; incident reconstruction is `docs/incidents/2026-07-10-1000tag.md` |
 
 ## Closed Continuous Arcs
+
+“Closed” records the current read and discourages repeating an identical search.
+It is not an administrative ban. Distinguish empirically contradicted,
+inconclusive, abandoned, and superseded claims when reopening work.
 
 | Arc | Verdict |
 | --- | --- |
@@ -61,4 +65,6 @@ not use it as acceptance evidence.
 
 Do not rebuild the deleted markdown pile. A new receipt should summarize the
 decision and point at durable artifacts, not paste command logs or repeat global
-policy boilerplate.
+policy boilerplate. Do not delete a future decision-influencing contract after
+its result is seen; compact or supersede it while retaining its identity and
+outcome.

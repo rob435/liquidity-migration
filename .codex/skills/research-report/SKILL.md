@@ -1,59 +1,57 @@
 ---
 name: research-report
-description: "Read, interpret, and label research and backtest reports in this quant repo. Use when extracting run metrics like return, drawdown, OOS and split stability, comparing runs, or assigning a run label. Read report files and artifacts directly."
+description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the evidence card and claim-scoped validity policy in docs/governance.md rather than a fixed metric checklist or historical promotion gate.
 ---
 
-# Research reports
+# Interpret research reports
 
-Reports live under `<DATA_ROOT>/reports/...`. The main kinds:
+Read `docs/governance.md`, then inspect the report and its referenced raw
+artifacts directly. A helper summary or attractive chart is not a substitute for
+the ledger, event rows, config, or data identity behind the claim.
 
-- `long_native_research_report.md` — a long-native v11a strategy run.
-- continuous report files — the continuous fade book's runs/forward reports.
+## Establish context
 
-## Report discovery
+- Identify the exact claim, intended decision, study mode, and preregistration.
+- Locate Markdown/JSON summaries, ledgers/event rows, equity/accounting outputs,
+  configs, receipts, and logs under the run root.
+- Record venue, population, window, scale, data exposure, and every variant that
+  influenced selection.
+- Check that compared runs use compatible windows, populations, capital, costs,
+  leverage, and metric definitions.
 
-Locate reports with shell search and read the Markdown/JSON directly. Always
-sanity-check headline metrics against the report body; unusual formatting can
-hide or mislabel evidence.
+## Validate before interpreting
 
-## Metrics every strategy report should carry
+- Recompute or cross-check headline metrics from raw artifacts where practical.
+- Inspect run labels and data-quality flags, but verify their underlying facts.
+- Check causality, PIT provenance, fills/costs/capacity, accounting, sample unit,
+  multiplicity, and OOS exposure as relevant to the claim.
+- Investigate missing cells, non-finite metrics, duplicate rows, unexplained
+  synchronization, and report/body disagreement.
+- Treat incomplete funding or PIT as a scoped limitation; do not rely on root
+  names or stale status docs to infer coverage.
 
-- trades (and candidate events)
-- total return
-- max drawdown
-- max no-new-high stretch (days)
-- worst 90d return
-- worst split return (a.k.a. minimum split)
-- average split Sharpe-like
-- OOS return
-- pre-registered train / validation / oos window returns
-- promotion gate: pass / fail
+## Choose metrics from the question
 
-A report missing the trade ledger, config/data identity, split report, or run
-record is "a screenshot", not evidence (error #23).
+For performance work, usually report return, drawdown/tail loss, turnover/cost,
+trade or event count, concentration, relevant risk-adjusted measures, and
+uncertainty. For execution work, emphasize agreement, fills, slippage, latency,
+fees/funding, misses, lifecycle, and reconciliation. Do not require irrelevant
+metrics merely because an older template listed them.
 
-## Promotion gate vs. the decision rule
+## Write the conclusion
 
-- `promotion gate: pass` is a within-report check — necessary, not sufficient.
-- The binding verdict is the three-tier demo-arbiter rule (STATE.md), computed
-  from per-cell ledgers by `scripts/r1_robustness.py` (Tier-2 demo-candidate
-  verdict + fragility diagnostics) with `scripts/apply_decision_rule.py` as the
-  strict Sharpe reference bar. A within-report `pass` is never real-money proof:
-  the Tier-3 gate is the forward demo (see STATE.md / the research-phase-runner
-  skill).
+Produce the evidence card from `docs/governance.md`:
 
-## Assigning a run label
+- claim;
+- validity: valid, limited, or invalid;
+- study mode and result;
+- scope and non-generalizable boundaries;
+- deployment and authorization state;
+- effect sizes, uncertainty, concentration, and material caveats;
+- artifact/identity references;
+- justified action and explicit non-conclusions.
 
-Every report gets exactly one of: `invalid`, `exploratory`,
-`biased_benchmark`, `candidate`, `paper_ready` — see the **backtest-integrity**
-skill for definitions. Default to the *lowest* label the evidence supports.
-Funding-missing data, OOS-window reuse, or partial PIT each cap the label
-below `candidate`.
-
-## Writing a report
-
-Include: config/param hash, data-root identity, all metrics above, a trade
-ledger reference, equity curve, a split table, the run label, and a
-research-log entry. State known gaps explicitly (e.g. "funding-missing,
-fee/slippage stressed"). Honest negative results are valuable — record what
-would make the edge disappear, not just the headline return.
+Report compatibility labels exactly as emitted, but do not treat `candidate`,
+`paper_ready`, `promoted`, or a within-report gate as real-money proof or as a
+replacement for the evidence card. Preserve honest negative and inconclusive
+results.

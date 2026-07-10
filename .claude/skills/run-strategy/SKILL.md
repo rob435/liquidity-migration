@@ -1,100 +1,68 @@
 ---
 name: run-strategy
-description: "Correct command invocations for the liquidity_migration CLI: data builders, audits, and the long/continuous forward runners. Use whenever running or constructing a 'python -m liquidity_migration' command, so the right data root, end-date boundary, and point-in-time flags are applied."
+description: Construct and run current liquidity_migration CLI, data, audit, and forward commands safely. Use whenever invoking python -m liquidity_migration or scripts/ops.sh so the correct operational surface, data root, end-exclusive boundary, profile, PIT mode, and demo or paper safety checks are derived from current help and the active experiment contract. Never assume today's date, a dry run, cross-venue scope, or mainnet authority.
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
+# Run repository commands safely
 
-# Running the liquidity_migration CLI
-
-Entry point: `python -m liquidity_migration [--config ...] [--data-root ...] <subcommand>`.
-
-Always check `--help` before constructing a run — the parsers are large and
-change often:
+Prefer the highest-level current surface that owns the task:
 
 ```bash
+scripts/ops.sh --help
 python -m liquidity_migration --help
-python -m liquidity_migration <subcommand> --help
+python -m liquidity_migration SUBCOMMAND --help
 ```
 
-## Data root — pick the right one (critical)
+Treat `--help`, the selected experiment contract, and current code as
+authoritative. Do not maintain or invent a static subcommand list.
 
-- **Bybit working dataset** → `~/SHARED_DATA/bybit_full_pit`. The default
-  config resolves `DATA_ROOT` here. Use `--end` set to today's date in UTC
-  (end-exclusive) so the run captures the full history available.
-- **Binance working dataset** → `~/SHARED_DATA/binance_full_pit`. Same shape
-  as the Bybit root. Use it for side-by-side venue validation; agreement
-  across both venues is the robustness signal, disagreement flags a regime
-  or microstructure artefact.
-- **Live demo ledgers** → `data/bybit-continuous-demo-event` +
-  `data/bybit-long-demo-event` (`data/bybit-demo-event` is the erased short
-  sleeve's inert legacy root). NEVER point a research run at a live ledger
-  root, and never point demo ledgers at the research root.
-- **Paper-shadow ledgers** → `data/bybit-long-paper-event` +
-  `data/bybit-continuous-paper-event` (`data/bybit-paper-event` is the erased
-  short sleeve's inert root). Reconciliation is fully scripted — run
-  `bash scripts/reconcile.sh` (skill: `pit-reconcile`): full demo↔backtest↔paper
-  by default, `--quick` for the fast paper↔demo check. Do not hand-assemble
-  `reconcile-*` calls.
-- **Pristine OOS** → forward demo / paper ledgers only. There is no internal
-  OOS surface; both per-venue roots span their full available history. Cite
-  the forward ledger as the OOS evidence.
-- Pass `--data-root` only when intentionally running a non-default audited
-  root. See `docs/data_roots.md` and verify the chosen root directly.
+## Select the root and boundary
 
-## Canonical commands
+- Use `~/SHARED_DATA/bybit_full_pit` and
+  `~/SHARED_DATA/binance_full_pit` as the normal research storage roots.
+- Use a venue because the claim or contract requires it. A second venue is a
+  robustness probe or portability test, not a universal gate.
+- Keep research roots separate from demo/paper ledger roots under `data/` or the
+  VPS. Never point an order-writing runtime at a research root.
+- Derive `--start` and end-exclusive `--end` from the active contract or task.
+  Do not silently substitute today's date for a frozen boundary.
+- Inspect current PIT and dataset coverage directly; root names do not prove
+  completeness.
 
-Research sweeps: use a small dated dispatcher for the specific pre-registered
-cells and call the relevant package runner directly per cell. Do not revive
-deleted generic sweep helpers. The erased
-`volume_events_cell.sh` single-cell path has NO replacement — the daily-short
-engine it drove is gone.
+## Use canonical wrappers
 
-Build/verify the per-venue full-PIT data roots (archives old roots, builds both
-roots — manifest + klines — and validates coverage; see `docs/data_roots.md`):
+- Reconciliation: `scripts/ops.sh reconcile quick|full` or
+  `bash scripts/reconcile.sh`; apply the `pit-reconcile` skill.
+- Equity curves: `scripts/ops.sh equity` or `scripts/equity_curves.sh`; apply
+  the `equity-curve` skill.
+- Current registered tail experiment: `scripts/ops.sh tail-plan` before
+  `tail-run`.
+- Data build/audit, reset, deploy, status, and tests: use the named
+  `scripts/ops.sh` command and preserve its explicit mutation handshake.
 
-```bash
-bash scripts/build_full_pit_roots.sh        # full pipeline (bybit + binance)
-bash scripts/verify_full_pit_rebuild.sh     # standalone coverage / data-layer-audit gates
-```
+For a custom research run, use the preregistered dispatcher when one exists.
+Otherwise call the package runner with a saved config and reconstructable
+command; label ad hoc work exploratory.
 
-Demo forward, one dry cycle (the live roots are `data/bybit-continuous-demo-event`
-and `data/bybit-long-demo-event`):
+## Verify order behavior
 
-```bash
-python -m liquidity_migration --data-root data/bybit-continuous-demo-event \
-  --config configs/volume_alpha.default.yaml continuous-event-demo-cycle
-python -m liquidity_migration --data-root data/bybit-long-demo-event \
-  --config configs/volume_alpha.default.yaml long-native-event-demo-cycle
-```
+Never call a cycle “dry” merely because it targets demo. Before any forward
+command, inspect environment and flags controlling `SUBMIT_ORDERS`, confirmation,
+paper mode, profile, credentials, and `REAL_MONEY`. Use a true dry-run/plan mode
+when the command provides one.
 
-## Subcommands
+Demo submission still changes an external demo account and requires task scope
+that includes running it. Mainnet is categorically separate: never set
+`REAL_MONEY`, select mainnet credentials, or infer permission from broad project
+authority.
 
-Run `python -m liquidity_migration --help` for the current, authoritative
-subcommand list — do not maintain a copy here.
+## Apply evidence discipline
 
-## Guardrails
-
-- Every backtest engine requires full PIT by default; partial-PIT runs (config
-  `require_full_pit_universe=False` / `require_pit_membership=False` — the old
-  `--allow-partial-pit` flag was erased with the volume-events CLI) are only for
-  explicitly biased diagnostics, and that run must be labelled biased.
-- Demo order submission requires `SUBMIT_ORDERS=1` + `CONFIRM_DEMO_ORDERS=1`
-  and a known `STRATEGY_PROFILE`; the DEPLOYED profile is pinned by the
-  deploy/verify scripts, not refused at runtime — check STATE.md > What Is
-  Running / Wired before changing it. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle
-  (`bybit.resolve_private_credentials`), which defaults to demo; keep it on demo
-  without explicit owner instruction.
-- Continuous and LONG have separate lifecycles; do not transfer assumptions
-  between them. Legacy fixed-day rebalance grids and erased short-sleeve paths
-  are retired evidence only.
-- What is deployed vs. research-gated is tracked in STATE.md and
-  `docs/research_summary.md` — defer to them.
-- Every serious run must leave enough report output to audit the decision.
-- Before constructing a run, apply the **backtest-integrity** skill. After a
-  run, read the output with the **research-report** skill before calling it a
-  result.
+- Use full PIT when a historical-universe claim requires it; a partial/current
+  universe can support only its declared narrower scope.
+- Include material funding and costs for net-performance claims; omit them only
+  when the claim does not depend on PnL and say so.
+- Apply `backtest-integrity` before a decision-influencing run and
+  `research-report` before interpreting the output.
+- Preserve exact commands, configs, hashes, logs, failures, and artifacts needed
+  by the claim.

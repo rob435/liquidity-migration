@@ -1,5 +1,10 @@
 """R1 robustness analyzer — sub-period stability + concentration + bootstrap.
 
+The cross-venue Tier-2 verdict printed by this script is a historical preset,
+not repository-wide policy. Use it as binding only when an active experiment
+contract explicitly names the preset; otherwise treat the diagnostics and
+verdict as exploratory under ``docs/governance.md``.
+
 Reads the per-cell ledgers a sweep dropped under
 ``~/SHARED_DATA/{venue}_full_pit/reports/<sweep_tag>/<cell>/`` and, for every
 non-control cell vs the ``00_baseline`` control, reports:
@@ -467,8 +472,9 @@ def main() -> int:
                   f"p50={boot['mar_delta_p50']:+.2f}  p95={boot['mar_delta_p95']:+.2f}  "
                   f"P(Δ>0)={boot['mar_delta_p_gt0']:.0%}")
 
-    # ── Cross-venue Tier 2 Demo-candidate verdict ──
-    print(f"\n{'=' * 78}\nTIER 2 — DEMO-CANDIDATE VERDICT (pooled MAR Δ > +0.1, positive both venues,\n"
+    # ── Historical cross-venue Tier-2 preset ──
+    print(f"\n{'=' * 78}\nLEGACY TIER-2 PRESET — DEMO-CANDIDATE VERDICT "
+          f"(pooled MAR Δ > +0.1, positive both venues,\n"
           f"  neither venue worse than -0.5 MAR, ≥30 by / ≥20 bn trades).\n"
           f"  INVALID unless cell AND control ran FULL-PIT on both venues "
           f"(partial-PIT = survivorship-biased).\n{'=' * 78}")
@@ -493,9 +499,11 @@ def main() -> int:
                                  full_pit=full_pit)
         print(f"  {cell:<26}{by['mar_d']:>+9.2f}{bn['mar_d']:>+9.2f}{pooled:>+9.2f}"
               f"{by['ret']:>6.1f}x/{bn['ret']:<6.1f}x{by['trades']:>5}/{bn['trades']:<5}  {verdict}")
-    print("\n  NOTE: fragility diagnostics above are REPORTED, non-blocking at Tier 2 —"
-          "\n  they set demo order. The strict bootstrap p5 ≥ 0 + residual-Sharpe gates"
-          "\n  apply only at Tier 3 (real money).")
+    print("\n  POLICY NOTE: this numeric verdict is binding only for an experiment contract"
+          "\n  that explicitly names the legacy Tier-2 preset (docs/governance.md)."
+          "\n  Fragility diagnostics above are REPORTED, non-blocking in this preset."
+          "\n  Historical bootstrap/residual-Sharpe diagnostics do not establish mainnet"
+          "\n  readiness or authorization; see docs/governance.md.")
     return 0
 
 

@@ -1,117 +1,74 @@
 ---
 name: research-phase-runner
-description: "Execution workflow for running a pre-registered research experiment in this quant repo. Current open experiments are tracked in STATE.md ('Current Status' / 'Current Research Direction') + docs/research_summary.md; the per-arc forward plans were consolidated there. Use any time you are about to run, conditionally-run, or write up an experiment — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), the verdict receipt, STATE.md update, and the commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
+description: Route, execute, and write up a registered research experiment in this quant repository. Use before running, conditionally running, monitoring, or interpreting an experiment. Read current state and the exact experiment contract, enforce its data boundary and decision rule, preserve artifacts and deviations, and apply docs/governance.md. Do not impose the historical three-tier MAR scripts, both-venue rule, commits, or pushes unless the active contract or user request requires them.
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
+# Run a research experiment
 
-# Running a research experiment
+Use the selected experiment contract as the procedural authority for that
+experiment. Use `docs/governance.md` to judge evidence. Do not reconstruct an old
+program from stale receipts.
 
-Use this every time you run, conditionally-run, or write up an experiment. **The current
-open experiments live in STATE.md ("Current Status" / "Current Research Direction") and `docs/research_summary.md`** — the
-per-arc forward plans (intraday kernel, continuous-fade) concluded and were consolidated into
-the summary (git history has the originals). Always read **STATE.md** first — it tells you
-what's done, what's pending, and the current binding decision rules.
+## Resolve the active contract
 
-## The program you are working (post-erasure, 2026-06-11)
+1. Read `STATE.md`, `docs/research_summary.md`, and
+   `docs/preregistration/INDEX.md` for current context.
+2. Read the exact preregistration named for the experiment in full.
+3. Inspect the dispatcher or runner and its current `--help`.
+4. Confirm whether the request is exploratory or decision-influencing.
 
-Two research lines survive: the **CONTINUOUS fade book** (the live demo/paper book,
-research-stage, promoted-in-code only by operator override) and the
-**long-native v11a sleeve** (demo/paper enabled in current deploy state). The daily SHORT selection program was ERASED 2026-06-11 by operator
-order — do not propose short work or re-mine its window. As of 2026-06-12 the
-window is open again only for pre-registered, tightly scoped research; closed
-families in `docs/research_summary.md` stay closed. The active queue and decision
-rules live in STATE.md plus `docs/research_summary.md`.
+If a decision-influencing run lacks a prospective contract, create or amend one
+before inspecting the affected outcomes. If the work is exploratory, label it
+and keep it out of confirmatory claims.
 
-## The decision framework — three-tier, demo-arbiter
+## Preflight
 
-Ordered by how expensive a false positive is. **The exact thresholds are owned by
-STATE.md ("Decision Rules (three-tier demo-arbiter)") — read them there; do not copy the
-numbers here (that is how they drift).**
+Confirm and record:
 
-1. **Investigation** — keep studying? Loose (MAR-Δ direction + trade minimums).
-2. **Demo-candidate** (→ forward demo) — LOOSE: positive return both venues + a
-   small positive pooled-MAR-Δ bar + a per-venue floor + trade minimums. Fragility
-   diagnostics (bootstrap p5, leave-one-month-out, sub-period thirds, residual
-   Sharpe) are **reported, NOT blocking** — they set demo order.
-3. **Real-money** (demo → mainnet) — STRICT, NOT loosened: forward-demo OOS pass
-   + bootstrap pooled MAR-Δ left-tail ≥ 0 + positive factor-residual Sharpe +
-   stress + capacity. There is no internal pre-2023 OOS root — pristine OOS is the
-   forward demo/paper ledgers (`docs/data_roots.md`).
+- claim, comparator, allowed cells, and intended action;
+- data roots, venue/population scope, end-exclusive boundary, and prior exposure;
+- effective sample unit, horizon/stopping rule, and multiplicity treatment;
+- primary decision rule, guardrails, and inconclusive outcome;
+- PIT/timing/fill/cost/funding/capacity requirements relevant to the claim;
+- code/config/data identities and expected artifact/receipt locations;
+- machine resources, checkpoint/resume behavior, and safe concurrency;
+- relevant worktree state without disturbing unrelated changes.
 
-Principle: permissive where being wrong is free (backtest→demo is paper), strict where
-it costs real money. The forward demo is both the multiple-testing arbiter and the OOS
-surface — uncapped. MAR-primary (pooled), Sharpe secondary.
+Do not substitute “both venues”, MAR, Sharpe, or a fixed trade count for this
+design. Use them when the contract and claim justify them.
 
-## Workflow (apply per experiment)
+## Dispatch
 
-1. **Pre-check.** Read STATE.md. Confirm the experiment's gate is met (where one phase gates
-   the next, the earlier phase must have passed first). Confirm required code is merged.
-   Confirm data roots present (`~/SHARED_DATA/{bybit,binance}_full_pit`).
+- Prefer the experiment's named dispatcher. For the active tail study, use the
+  `scripts/ops.sh tail-plan` and `tail-run` surface described by its contract.
+- Run the plan/readiness mode first when provided.
+- Use current `--help`; never infer today's end date when the contract freezes a
+  boundary.
+- Preserve command, stdout/stderr, partial cells, failures, hashes, and receipts.
+- Report meaningful progress and any deviation while a long run is active.
+- Stop or relabel when a validity gate fails; do not silently relax it.
 
-2. **Plan the arms/cells.** Re-read the experiment's section in the plan. Do NOT add
-   off-menu cells without a dated amendment (a new pre-registration receipt) first.
+## Decide and write up
 
-3. **Dispatch.** (`volume_events_cell.sh` was erased with the short engine —
-   single-cell runs now go through a dispatcher too.) For a serious sweep, write
-   a small dated dispatcher for the specific pre-registered cells and call the
-   relevant package runner directly. Do not revive deleted generic sweep scripts.
-   Preserve the old sweep discipline:
-   predeclare worker/thread counts for memory-heavy cells because
-   over-parallelizing OOMs the box. Always run **both venues**.
+Apply the contract's registered decision and stopping rule. Run
+`scripts/r1_robustness.py` or `scripts/apply_decision_rule.py` only when the
+contract names that historical preset or when using it as a labelled diagnostic.
 
-4. **Apply the decision rule.**
-   ```bash
-   python scripts/r1_robustness.py --sweep-tag <SWEEP_TAG>
-   ```
-   emits the pooled-MAR-Δ Tier-2 verdict (engine-DD MAR) + bootstrap p5,
-   leave-one-month-out, and sub-period thirds from the per-cell ledgers.
-   `scripts/apply_decision_rule.py` is the **legacy strict (Sharpe) bar** —
-   reference only, not the promotion gate (run with `--help` for args).
-   Do not move thresholds downward to rescue a cell (see non-negotiables).
+Append results without rewriting the prospective section:
 
-5. **Write the verdict.** Dated receipt under `docs/preregistration/<exp>-<YYYY-MM-DD>.md`
-   with: experiment, full per-arm/cell metrics, the Tier-2 verdict + fragility, the
-   verdict paragraph (incl. the falsifier outcome — a negative result is first-class),
-   the forward pointer, AND a one-paragraph roll-up into `docs/research_summary.md`.
+- every completed, failed, skipped, and aborted cell;
+- effect sizes, uncertainty, concentration, and robustness diagnostics;
+- deviations and their impact on data exposure;
+- validity, result, scope, and explicit non-conclusions;
+- artifact paths/hashes and reconstruction identities;
+- the precise next action or reason to stop.
 
-6. **Update STATE.md.** Move the experiment to its terminal state; add new helpers /
-   open questions. Keep STATE.md tight — one page of signal, not a changelog
-   (~200 lines is the practical ceiling).
+Update `docs/research_summary.md`, `STATE.md`, or the preregistration index only
+when the run changes their stated facts. A request to run research does not by
+itself authorize a commit, push, deploy, or profile change.
 
-7. **Commit + propose push to operator.** Pre-push gate
-   (`.venv/bin/python -m ruff check liquidity_migration tests scripts` +
-   `.venv/bin/python -m pytest -q`) MUST pass. NEVER push without operator confirmation.
+## Preserve negative evidence
 
-## Pre-committed behaviours (non-negotiable)
-
-- **No FURTHER loosening.** The framework was loosened ONCE, on principle,
-  pre-registered. Do not loosen again to rescue a near-miss; the Tier-3 real-money
-  gate stays strict. A cell short of the Tier-2 bar is descriptive, not a candidate.
-- **No off-menu cells.** New cells need a dated pre-registration amendment first.
-- **Gates are real.** A failed gate (E1 says selection-only; E2 doesn't clear Tier-2;
-  E3 doesn't beat the 1h squeeze) means file a one-paragraph negative-trigger note and
-  stop — don't look for excuses to run the gated phase. **Failure is a first-class
-  outcome**; the strategy stays frozen. There is no "ship something" obligation.
-- **Both venues.** Cross-venue agreement is the robustness bar; a single-venue edge
-  does not clear Tier-2.
-
-## State and report reads
-
-Read `STATE.md`, `docs/data_roots.md`, and report files directly.
-`scripts/apply_decision_rule.py` is the legacy-bar verdict (reference only);
-the Tier-2 verdict is `scripts/r1_robustness.py`.
-
-## Communication style during an experiment
-
-Report after each experiment ends with: a 2-line headline (what ran, what verdict);
-the Tier-2 verdict + fragility output (~10 lines); the verdict file path; the next
-experiment to trigger (or "gate failed — stop"). Do NOT report mid-run progress unless
-something fails — let sweeps run to completion.
-
-Operator is learning quant fundamentals — explain in plain language, and surface
-inconsistencies BEFORE running.
+A failed contract rejects only its precise claim under its conditions. Retain it.
+Reopen with a new contract only for new data, a corrected defect, or a genuinely
+different mechanism—not an undisclosed rescue sweep.

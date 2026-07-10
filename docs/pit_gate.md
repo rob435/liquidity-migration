@@ -4,8 +4,9 @@ This is the operator + maintainer reference for the point-in-time (PIT) universe
 membership gate — the thing that decides whether a backtest signal is allowed to
 trade, and the thing that broke the backtest↔paper reconciliation on 2026-05-30.
 
-TL;DR: the gate is correct now (the off-by-one is fixed), and the plumbing is
-self-checking. There is ONE command for the whole reconciliation — it refreshes
+TL;DR: the known signal-day off-by-one is fixed and the plumbing has coverage
+checks. The manifest still has explicit provenance limits described below.
+There is one command for the whole reconciliation — it refreshes
 PIT data, pulls the live ledgers, runs each sleeve's backtest over the forward
 window, and reconciles the model against demo + paper, all in a single run:
 
@@ -16,19 +17,28 @@ bash scripts/reconcile.sh --quick      # fast paper<->demo execution check only
 
 ## What the gate is
 
-A backtest may only trade a symbol that was genuinely a tradable member of the
-venue at the decision time (no survivorship / look-ahead — see
-`docs/backtesting_errors_we_never_repeat.md`, rules 1 and 12). Membership comes
-from the **archive trade manifest**: for each `(symbol, date)` the symbol had
-public trades on that UTC calendar day.
+A historical-universe backtest may trade only symbols supported by the declared
+membership source at the decision time. The **archive trade manifest** contains
+two different kinds of rows, distinguished by `source`:
+
+1. Archive-observed rows: a public trade-archive file existed for that symbol/day.
+2. V5-derived rows: a symbol is currently `Trading` and the builder fills missing
+   days from its reported launch date through the build boundary.
+
+The second kind closes current archive gaps and lag, but it is an inference. It
+does not observe historical suspensions, every day of actual trading, or delisted
+symbols absent from the archive. “Full PIT” in this repository therefore means
+coverage under this manifest contract, not perfect knowledge of historical venue
+status. Claims must retain that limitation under `docs/governance.md`.
 
 - On disk: `{data_root}/archive_trade_manifest/date=YYYY-MM-DD/symbol=SYMBOL/part.parquet`
   (columns `symbol, date, url, source`).
 - Built by: `python -m liquidity_migration --data-root <root> archive-manifest`
   (a full rebuild, `append=False`). It merges two sources: the
   `public.bybit.com/trading` archive scrape (deep history) **and** the Bybit v5
-  `instruments-info` listing (currently-Trading perps), the latter filling both
-  the archive's symbol-coverage gaps and its ~24h publishing lag.
+  `instruments-info` listing (currently-Trading perps), the latter synthesizing
+  missing dates from reported launch through the build boundary and filling the
+  archive's ~24h publishing lag.
 - Consumed by: `liquidity_migration/volume_events_pit.py` for PIT membership
   and full-PIT universe validation, plus the active engines' membership attach
   paths (`long_native.py`, with shared frame helpers from `trade_lifecycle.py`);
@@ -66,8 +76,10 @@ works as soon as today's manifest refresh runs. No residual extra lag.
 ## The ~1-day archive lag (structural, handled)
 
 `public.bybit.com/trading` publishes day *D*'s CSV ~24h after close. The manifest
-build's v5-listing supplement fills the tail for currently-Trading symbols up to
-the build day, so building with `--end <today+2>` covers the latest trading day.
+build's v5-listing supplement infers tail membership for currently-Trading
+symbols up to the build day, so building with `--end <today+2>` covers the latest
+day under the repository contract. It does not turn that inferred row into an
+archive observation.
 `download-data` refreshes klines/funding but **never** touches the manifest — that
 asymmetry is the original trap. Two guards now exist:
 
@@ -83,19 +95,20 @@ asymmetry is the original trap. Two guards now exist:
 
 The active knob is a run-config field.
 
-The gate is `require_full_pit_universe` (default `True`): the run aborts
-unless every archive-manifest `(trading-day, symbol)` within each symbol's traded
-lifespan is covered by klines — the no-survivorship / no-look-ahead
-universe-completeness check enforced in `volume_events_pit.py`.
+The gate is `require_full_pit_universe` (field default `True`): when enabled, the
+run aborts unless every required archive-manifest `(trading-day, symbol)` within
+the modeled lifespan is covered by klines. Individual runtime profiles can and
+do override the field, so inspect the actual config and run label.
 
 | mode | config | meaning | use for |
 | --- | --- | --- | --- |
-| strict (default) | `require_full_pit_universe=True` | abort unless the full PIT universe is covered | all evidence / promotion |
-| biased diagnostic | `require_full_pit_universe=False` | skip the completeness abort; run on whatever klines exist | a clearly-labelled same-day diagnostic — **never** promotion evidence |
+| strict | `require_full_pit_universe=True` | abort unless the manifest-defined universe is covered | historical-universe performance claims |
+| partial diagnostic | `require_full_pit_universe=False` | skip the completeness abort; run on available klines | explicitly scoped diagnostics or current-universe claims |
 
-`require_full_pit_universe=False` runs are labelled `biased_benchmark` /
-`current_universe_biased` — never promotion evidence (it is exactly the
-survivorship surface the methodology doc forbids for real decisions).
+`require_full_pit_universe=False` cannot support a historical-universe claim.
+It may still support a narrower diagnostic when the missing population is not
+part of the proposition. Report the run label and scope rather than treating the
+flag as either harmless or universally useless.
 
 Note (pit-data-1, 2026-06-14): the former per-trade `require_pit_membership`
 flag was REMOVED — it was inert (read by no enforcement path) and advertised a
@@ -105,32 +118,32 @@ gating without an actual enforcement path.
 
 ## The one-command workflow
 
-`scripts/reconcile.sh` is the single front door. By **default** it runs the full
+`scripts/reconcile.sh` is the single front door. By default it runs the full
 demo ↔ backtest ↔ paper three-way for BOTH sleeves (see the next section). The
-`--quick` flag routes to the FAST two-way (paper ↔ demo execution only, driver
-`scripts/reconcile.py`, no PIT download / no backtest) — use it for a quick
-"is the live executor matching the model?" pass once the root is already current:
+`--quick` flag routes to the fast two-way (paper ↔ demo execution only, driver
+`scripts/reconcile.py`, no PIT download / no backtest). It tests execution-plane
+agreement, not agreement with the backtest model:
 
 ```bash
-bash scripts/reconcile.sh --quick              # LONG paper<->demo (quick default)
-bash scripts/reconcile.sh --quick --sleeves long,continuous
+bash scripts/reconcile.sh --quick              # both active sleeves
+bash scripts/reconcile.sh --quick --sleeves long
 ```
 
 The `--quick` path, in order:
 
 1. **pull** — rsync every selected sleeve's demo + paper ledgers from the VPS
-   (long `long_native_{demo,paper}_*`; when explicitly selected, continuous
+   (long `long_native_{demo,paper}_*`; continuous
    `continuous_fade_{demo,paper}_*` + the continuous rmom panel + WS kline
    store), read-only. Skip with `--no-pull`.
-2. **rmom** — when continuous is selected, auto-recompute `residual_momentum.parquet`
-   (the continuous gate) on the research root. Skip with `--no-rmom`.
+2. **optional RMOM maintenance** — quick mode does not rebuild research RMOM by
+   default. Request it explicitly with `--refresh-rmom`.
 3. **reconcile** — per sleeve: LONG `reconcile-long-paper-demo` (paper ↔ demo),
    and, only when selected, CONTINUOUS `continuous-forward-readiness --paper-only`
    + a signal-consistency replay.
 4. **summary** — one unified headline across selected sleeves.
 
 `--quick` flags: `--sleeves long,continuous`, `--dry-run`, `--no-pull`,
-`--no-rmom`, `--bybit-root PATH`, `--config PATH`, `--vps HOST`. The matching
+`--refresh-rmom`, `--bybit-root PATH`, `--config PATH`, `--vps HOST`. The matching
 skills are `.claude/skills/pit-reconcile` / `.codex/skills/pit-reconcile`.
 
 Refreshing the manifest on its own is the manual command above
@@ -189,22 +202,16 @@ uses the backtest `entry_price`; CONTINUOUS prices the model at the PIT kline cl
 and notional-weights paper's per-component legs into one symbol fill to match
 demo's netted position.
 
-- **Step 1b — rmom recompute (default ON for continuous):** `precompute_residual_momentum.py`
-  refreshes the research-root `residual_momentum.parquet` so the independent-PIT
-  plane runs on a fresh panel. Skip with `--no-rmom`; `--with-rmom` is a deprecated
-  no-op.
-- **Two planes:** the continuous backtest-match recomputes on the **live signal
-  plane** (the demo root's current klines+rmom — verifies every entry NOW, this is
-  the gate) and, on the **independent-PIT research plane** (freshly-downloaded
-  `klines_1h` + recomputed rmom). The PIT plane is informational and **lags the live
-  window** — but that is a DATA-FRESHNESS gap, not a horizon: rmom itself is causal
-  (a ~2-3d completion lag, `rolling_sum(7).shift(3)`). `build_feature_panel` also reads
-  `open_interest`/`premium`, and the **default** three-way refresh updates only the
-  manifest + klines (not those derivative metrics), so on the research root they go stale
-  (here OI ~05-26, premium ~05-30), truncating the factor panel — and via rmom's `shift(3)`
-  its coverage — to ~06-02. Pass `--with-funding` (which refreshes funding + OI + mark +
-  index + premium) to advance the plane. Until then recent continuous entries are reported
-  `pending_rmom`, never failures.
+- **Step 1b — RMOM recompute (default ON for full continuous):**
+  `precompute_residual_momentum.py` refreshes research-root
+  `residual_momentum.parquet`. Skip with `--no-rmom`; `--with-rmom` is a
+  deprecated no-op. The current COMMON4 RMOM spine is kline-based and is not
+  truncated by funding/OI/premium coverage. `--with-funding` is for costed PnL,
+  not an RMOM repair switch.
+- **Research vs live plane:** the normal full path uses the independently
+  refreshed research root. When data/RMOM refresh is explicitly skipped it can
+  fall back to the live signal plane, which is current but not an independent
+  data recompute. Read the printed plane and coverage rather than assuming either.
 
 Why the asymmetry: LONG entries pair 1:1 to the backtest trade ledger by
 `(symbol, side, signal-day)`. CONTINUOUS is a path-dependent ensemble book — the
@@ -212,9 +219,9 @@ live engine caps entries (MAX_ACTIVE / max-new-per-cycle / cooldown / held-state
 so a backtest can't reproduce the exact entry SET; the recompute therefore yields
 the UNCAPPED per-component candidate set and the check is directional (every live
 entry must be a candidate; a candidate not taken live is expected capacity). The
-backtest leg is agreement/execution evidence — never alpha proof and never a
-promotion gate (`docs/backtesting_errors_we_never_repeat.md`). Matching skill:
-`.claude/skills/pit-reconcile`.
+backtest leg is agreement/execution evidence. It does not itself support alpha
+or authorize deployment (`docs/governance.md`). Matching skill:
+`.codex/skills/pit-reconcile`.
 
 ## When a reconcile shows `paper-only` / `pit_membership_fail`
 
@@ -224,8 +231,8 @@ promotion gate (`docs/backtesting_errors_we_never_repeat.md`). Matching skill:
 2. If a single very-recent signal is still `paper-only`, the trading-day archive
    has not published yet — wait for the next day (a current-universe diagnostic
    backtest is possible but is biased and must be labelled as such).
-3. `paper↔demo` measures execution slippage and is independent of all of the
-   above; if it is clean the live executor matches the model.
+3. `paper↔demo` measures execution-plane agreement and slippage independently of
+   the model leg. A clean quick result does not establish model agreement.
 
 ## Design receipt
 

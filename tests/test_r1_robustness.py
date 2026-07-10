@@ -11,6 +11,8 @@ Audit 2026-05-29 found two gate-integrity holes:
 from __future__ import annotations
 
 import csv
+import ast
+import hashlib
 import importlib.util
 import math
 import random
@@ -30,6 +32,24 @@ def _load():
 
 
 MOD = _load()
+
+
+def test_active_granular_contract_pins_legacy_tier2_source() -> None:
+    script = (REPO / "scripts" / "r1_robustness.py").read_text(encoding="utf-8")
+    tree = ast.parse(script)
+    node = next(
+        item
+        for item in tree.body
+        if isinstance(item, ast.FunctionDef) and item.name == "_tier2_verdict"
+    )
+    function_source = ast.get_source_segment(script, node)
+    assert function_source is not None
+    digest = hashlib.sha256(function_source.encode()).hexdigest()
+
+    contract = (
+        REPO / "docs" / "preregistration" / "continuous-granular-adverse-risk-2026-07-10.md"
+    ).read_text(encoding="utf-8")
+    assert digest in contract
 
 
 def test_block_bootstrap_indices_never_straddle_the_boundary() -> None:

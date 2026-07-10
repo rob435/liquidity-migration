@@ -759,7 +759,8 @@ def test_legacy_rule_rejects_zero_trade_binance_cell() -> None:
     """decision-rule-2: with `--rule legacy`, min_trades_binance defaults to 0, so the
     soft floor (`0 < 0`) never fires and a 0-trade Binance cell was rubber-stamped a
     candidate on the Bybit numbers alone. The fix blocks any venue with 0 executed
-    trades regardless of preset (STATE.md non-negotiable #3: both venues matter)."""
+    trades regardless of preset because the historical presets explicitly require
+    two populated venues."""
     def _m(*, sharpe: float, dd: float, ret: float, trades: int) -> "MOD.CellMetrics":
         return MOD.CellMetrics(
             cell_id="c", venue="x", sharpe_like=sharpe, max_drawdown=dd,

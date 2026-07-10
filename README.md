@@ -10,6 +10,8 @@ owner action and a fresh evidence pack.
 
 ## Read First
 
+- [docs/governance.md](docs/governance.md) - evidence policy, claim scoping,
+  validation discipline, and authorization boundaries.
 - [STATE.md](STATE.md) - live state and immediate next work.
 - [docs/research_summary.md](docs/research_summary.md) - compact decision log.
 - [docs/promoted_trading_logic.md](docs/promoted_trading_logic.md) - active
@@ -26,7 +28,7 @@ owner action and a fresh evidence pack.
 - `scripts/` - deploy, reconcile, data, equity, and active research tools.
 - `tests/` - pytest suite.
 - `docs/` - methodology, data-root contracts, and compact research state.
-- `.codex/skills/` - Codex project workflows.
-- `.claude/` - Claude memory and project workflows.
+- `.codex/skills/` - canonical project workflows.
+- `.claude/skills/` - mechanical mirrors for Claude.
 
 Python 3.11+.

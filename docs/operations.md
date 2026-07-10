@@ -14,6 +14,8 @@ scripts/ops.sh reconcile quick
 scripts/ops.sh reconcile full
 scripts/ops.sh equity --sleeves long,continuous
 scripts/ops.sh data-audit --venue both
+scripts/ops.sh overhaul-plan
+scripts/ops.sh overhaul-phase0
 scripts/ops.sh test -q
 ```
 
@@ -28,8 +30,8 @@ scripts/ops.sh test -q
 - `deploy` refuses unless the first argument after the command is exactly
   `--execute`. The checked deploy script retains its own commit, test, config,
   credential, and service gates.
-- A tail experiment produces research artifacts only. No command here promotes
-  a strategy, changes a decision rule, or authorizes real money.
+- Research commands produce research artifacts only. No command here promotes a
+  strategy, changes a decision rule, or authorizes real money.
 - `data-build` refuses unless its first argument is `--execute`; the underlying
   tool also requires explicit datasets, window, symbol authority, and a new
   immutable receipt outside both data roots.
@@ -47,6 +49,8 @@ scripts/ops.sh test -q
 | `data-build --execute` | `scripts/granular_data_surface.py --execute` | Explicit resume-safe granular backfill; refused without the handshake and immutable receipt path. |
 | `tail-plan` | `continuous_tail_survival_2026_07_10.py --plan` | Checks the frozen preregistration, worktree, roots, partitions, and both-venue readiness without running cells. |
 | `tail-run` | `continuous_tail_survival_2026_07_10.py` | Runs only the preregistered cells and preserves the dispatcher's integrity/refusal gates. |
+| `overhaul-plan` | `strategy_overhaul_scout_2026_07_10.py --plan` | Shallow outcome-blind partition/source/config preflight; does not write the real S00 inventory. |
+| `overhaul-phase0` | `strategy_overhaul_scout_2026_07_10.py --phase0-inventory` | Writes a content-addressed, outcome-blind schema/key/provenance/resource diagnostic bundle. It neither establishes S01 readiness nor creates a canonical root/stage receipt. Exit 2 can preserve a useful `PARTIAL` bundle. |
 | `test` | `python -m pytest` | Runs all tests, or only the forwarded pytest selection. |
 | `deploy --execute` | `scripts/deploy_vps_live.sh` | Checked demo/paper VPS deploy. Refused without the explicit handshake. |
 
@@ -135,6 +139,38 @@ matching full-PIT verification receipt, and a clean relevant worktree. Missing
 or stale root receipts force diagnostic-only output; diagnostic overrides
 cannot become a positive registered verdict.
 
+## Strategy-overhaul Phase 0
+
+Use the shallow route for a quick partition and source preflight:
+
+```bash
+scripts/ops.sh overhaul-plan
+```
+
+Use the inventory route for the outcome-blind S00 diagnostic bundle:
+
+```bash
+scripts/ops.sh overhaul-phase0
+```
+
+The inventory decodes Parquet schemas/footers and selected identity/provenance
+columns. It does not calculate or inspect features, ranks, gates, entries,
+returns, MFE/MAE, or PnL. Outcome-blind does not mean that every opaque byte used
+for source or file identity is outcome-free: a byte snapshot can hash a file
+without decoding its numeric contents. Exit 2 is not necessarily lost work;
+inspect the printed content-addressed bundle, whose `PARTIAL` or `NOT_READY`
+state identifies the exact venue, map, schema, or prospective S01 blocker.
+
+The Phase-0 bundle re-executes its internal derivations under the current
+checkout and selected environment manifest; it does not authenticate Git
+objects, import hooks/`sys.path`, persisted source labels, unsigned root
+receipts, or external-map review claims, and it does not prove full registered
+semantics, scope, earliest-history coverage, or transitive provenance. A
+`BYTE_SNAPSHOT_ONLY` root snapshot is a diagnostic precursor, and the generic
+stage-receipt utility binds bytes and declared metadata only. Neither is a
+canonical semantic receipt or a `READY` result. Neither route authorizes S01, a
+population stage, or an outcome run.
+
 ## Deploy
 
 Deploy is intentionally awkward enough to avoid an accidental keystroke:
@@ -174,5 +210,5 @@ PYTHON=/path/to/python scripts/ops.sh test -q tests/test_runtime_scripts.py
 
 - `SSH_TARGET` defaults to `root@116.202.15.128`.
 - `REPO_DIR` defaults to `/opt/liquidity-migration`.
-- `PYTHON` applies to `tail-plan`, `tail-run`, and `test`. When unset, the
+- `PYTHON` applies to data, tail, overhaul, and test commands. When unset, the
   wrapper prefers the repository virtual environment, then `python3`.

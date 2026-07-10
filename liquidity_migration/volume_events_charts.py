@@ -13,9 +13,10 @@ import polars as pl
 
 
 
-# Splits live exclusively on VolumeEventResearchConfig.splits now (default ()).
-# Whole-period reporting is the post-rebuild norm; pristine OOS is the forward
-# demo/paper ledger, not a backtest window.
+# Splits live exclusively on VolumeEventResearchConfig.splits (default ()).
+# The default therefore has no internal validation split. OOS status depends on
+# exposure history, not on whether data is historical or forward
+# (docs/governance.md).
 
 from ._common import _float_or_nan, _parse_day
 from .trade_lifecycle import _has_columns

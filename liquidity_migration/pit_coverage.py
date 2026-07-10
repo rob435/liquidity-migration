@@ -302,7 +302,7 @@ def format_coverage(status: CoverageStatus) -> str:
         )
         lines.append(
             "           or set require_full_pit_universe=False in the run config for a clearly "
-            "biased same-day diagnostic (never promotion evidence)."
+            "current-universe diagnostic that cannot support a historical-universe claim."
         )
     if status.manifest_lag_vs_klines_days is not None and status.manifest_lag_vs_klines_days > 0:
         lines.append(

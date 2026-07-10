@@ -258,12 +258,29 @@ Required artifacts, separately for each venue and cell:
   from `scripts/apply_decision_rule.py`;
 - one final verdict receipt with exactly one allowed run label.
 
+### Prospective governance amendment (2026-07-10; no treatment run executed)
+
+The original text dynamically inherited the “current” Tier-2 thresholds from a
+script at execution time. That did not actually freeze the decision rule. Before
+any treatment result was produced, this amendment replaced the dynamic reference
+with the exact `legacy-tier2-mar-v1` preset below.
+
+The registered `_tier2_verdict` function source SHA-256 is
+`91b7908799314334ca97433d02246db69fe2c00bda9941ada7c7b408e7dcb6ae`.
+The contract remains the numeric rule below if unrelated script text changes; a
+change to the function hash requires a prospective amendment before execution.
+
 ## Decision rule
 
 The primary cell passes investigation only if all conditions hold:
 
-1. `scripts/r1_robustness.py` clears the current, unmodified Tier-2 rule; thresholds
-   are read from the canonical tool at run time and are not copied or lowered here.
+1. `scripts/r1_robustness.py` returns `DEMO-ELIGIBLE` under the frozen
+   `legacy-tier2-mar-v1` preset: cell and control are full-PIT on both venues;
+   Bybit, Binance, and pooled MAR deltas are finite; both venue returns are
+   positive; neither venue drawdown is worse than -70%; pooled MAR delta (the
+   unweighted mean of venue deltas) is strictly greater than +0.10; the weaker
+   venue MAR delta is at least -0.50; and trade counts are at least 30 Bybit / 20
+   Binance. The thresholds may not be inherited from a later script version.
 2. C0 and all treatment cells have identical signal population, common entry submit
    and fill timestamps/prices, and pre-treatment notional inputs; only C1/C3's
    registered half-size action may alter entry notional. Any timing/population drift
@@ -285,7 +302,9 @@ The primary cell passes investigation only if all conditions hold:
 Failure of any condition rejects this exact mechanism. A pass permits only a
 separately reviewed demo/paper **shadow** that emits hypothetical exit/size decisions
 without orders. It is not `candidate`, `paper_ready`, mainnet evidence, or permission
-to change the deployed profile. Tier-3 real-money requirements remain unchanged.
+to change the deployed profile. No legacy Tier-3 diagnostic is mainnet evidence
+or authorization; any mainnet proposal is governed separately by
+`docs/governance.md`.
 
 ## Checkpoints and resume contract
 

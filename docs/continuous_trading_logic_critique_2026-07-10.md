@@ -602,7 +602,8 @@ Current artifacts used:
 - `data/bybit-continuous-demo-event/reports/continuous_paper_demo_reconciliation/`
 - `deploy/hedge_warmstart/bybit_warmstart.csv`
 - `docs/research_summary.md`
-- `docs/lookback_audit.md`
+- `docs/governance.md`
+- `docs/parameter_pre_registration.md`
 - `docs/preregistration/continuous-time-symbol-risk-2026-07-04.md`
 - `docs/preregistration/continuous-tail-survival-2026-07-10.md`
 

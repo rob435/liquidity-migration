@@ -814,8 +814,8 @@ def write_continuous_equity_report(
                 "promotion split study."
             ),
             (
-                "OOS window: none for this run. Continuous remains demo/paper research-stage; forward demo/paper "
-                "is the decision surface."
+                "OOS window: none for this run. Forward demo/paper epochs are prospective only while their "
+                "profile, clock, and stopping rule remain frozen and unspent (docs/governance.md)."
             ),
             "",
             "## Components",

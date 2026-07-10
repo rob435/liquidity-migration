@@ -1,122 +1,88 @@
 ---
 name: backtest-integrity
-description: "Mandatory methodology gate for any backtest, research run, strategy or feature change, or result interpretation in this Bybit quant repo. Use before running a backtest, when designing a research run, when reviewing results, and before calling a result alpha, edge, candidate, or promotion evidence. Enforces the non-negotiable gates and run labels from docs/backtesting_errors_we_never_repeat.md."
+description: Assess methodology integrity for backtests, research runs, strategy or feature changes, and result interpretation in this quant repository. Use before designing or running decision-influencing research, when judging a report, or before making an alpha, robustness, candidate, deployment, or real-money claim. Apply the claim-scoped validity policy in docs/governance.md and the failure taxonomy in docs/backtesting_errors_we_never_repeat.md; do not universalize legacy thresholds or venue rules.
 ---
 
-> **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
-> ERASED from the system — `volume-events` backtest, `event-demo-cycle`,
-> `event_demo_daemon`, `short_profile`, `volume_events_cell.sh`, short deploy
-> units and short reconcile commands NO LONGER EXIST. Ignore any instruction
-> below that references them; long + continuous guidance still applies.
+# Assess backtest integrity
 
-# Backtest integrity gate
+Read `docs/governance.md` and the relevant parts of
+`docs/backtesting_errors_we_never_repeat.md` before acting. Treat the active
+experiment contract, raw artifacts, code, and data provenance as evidence;
+never treat a label or prior verdict as authority.
 
-`docs/backtesting_errors_we_never_repeat.md` is a **mandatory standard** for
-every serious research run in this repo. A backtest is evidence only when
-every decision is reconstructable from data, state, and venue rules that
-existed at decision time, and every fill is executable under an explicit cost
-and execution model. Anything else is a bug report, not alpha.
+## Start with the claim
 
-## Use this skill when
+State:
 
-- About to run or design any backtest.
-- Interpreting a research report or judging whether a result is trustworthy.
-- Tempted to call a result "edge", "candidate", or "promotion evidence".
-- Changing strategy gates, features, data ingestion, or fill/cost logic.
+- the exact proposition and intended decision;
+- venue, population, period, mechanism, and operating scale;
+- study mode: exploratory, confirmatory, or forward execution;
+- which outcomes have already been inspected.
 
-## Non-negotiable gates — if any fails, the run is `invalid` or `exploratory`
+Apply only checks relevant to that claim. A feature-timestamp audit, an
+entry-agreement reconciliation, and a net-performance backtest need different
+artifacts and cost assumptions.
 
-- [ ] Declares `decision_ts`, `data_available_ts`, `order_submit_ts`,
-      `fill_window`, `exit_activation_ts`, `state_initialization_ts`.
-- [ ] Every feature is causal at `decision_ts`. Test a latency-delayed copy
-      when data availability is uncertain.
-- [ ] Universe is full point-in-time, including delisted / renamed / migrated /
-      prelisted symbols. `current_universe_biased` is throwaway scouting only —
-      never merged into a report or comparison. A live `exchangeInfo` is NOT a
-      PIT source.
-- [ ] Cost model includes venue fees, aggressive/passive mix, funding/carry,
-      spread/slippage, and capacity limits.
-- [ ] Every adaptive exit, trailing stop, basket stop, cooldown, and kill
-      state starts from the state a live executor would have at activation
-      (warm-start bug — the warm-started-state error in the standard).
-- [ ] Output has a trade ledger, equity curve, split metrics, drawdown,
-      worst-day loss, config/param hash, data-root identity, research-log entry.
-- [ ] Expensive grids checkpoint or stage — no multi-hour all-or-nothing runs.
-- [ ] Any strange synchronization (e.g. mass same-minute exits) is stop-work
-      until explained by code and market data.
+## Check hard validity
 
-## The error taxonomy — fast scan
+- **Causality:** verify decision, availability, order, fill, exit-activation,
+  and state-initialization times. Stress uncertain latency.
+- **Population:** require PIT membership when historical universe selection
+  matters. Inspect manifest provenance; a current-listing-derived row is not an
+  archive observation.
+- **Execution:** model feasible orders, fills, venue mechanics, capacity, and
+  material costs for performance claims.
+- **State:** initialize adaptive exits, cooldowns, baskets, hedges, and risk
+  memory when the forward system could first know them.
+- **Accounting:** reconcile positions, cash/equity, fees, funding, netting,
+  flips, and lifecycle events at the granularity the claim needs.
+- **Reconstruction:** retain data/code/config identity, tested variants,
+  effective sample unit, exposure history, and source artifacts.
+- **Anomalies:** stop relying on affected output until impossible prices,
+  synchronization, missing rows, or forward drift are explained.
 
-The recurring failure modes by theme: **look-ahead** (future universe / future
-info / non-PIT or revised data / timestamp & resampling leakage / impossible
-intrabar path), **cost & capacity** (fees / slippage / market impact / borrow &
-funding / capacity), **venue reality** (trading bans / instrument lifecycle /
-venue mechanics), **state & lifecycle** (warm-started state / backtest ≠ forward
-lifecycle), and **inference** (parameter mining / OOS reuse / multiple-testing /
-bad accounting / hidden common risk / pretty-report bias / unreconciled live
-drift / all-or-nothing compute). The canonical, **numbered** list is the single
-source of truth — `docs/backtesting_errors_we_never_repeat.md`. Read it; do not
-reproduce the count or numbering here.
+Classify the affected claim as `valid`, `limited`, or `invalid`. Keep useful
+diagnostics even when they cannot support the larger claim.
 
-## Run labels — always attach exactly one
+## Check inference
 
-- `invalid` — known bug, leakage, impossible fill, missing cost, broken
-  accounting.
-- `exploratory` — useful sketch, missing one or more proof gates.
-- `biased_benchmark` — intentionally biased benchmark kept for comparison,
-  never for promotion.
-- `candidate` — point-in-time, costed, split-stable, ledger-backed, and NOT
-  tuned on the promotion window.
-- `paper_ready` — `candidate` plus a demo/paper plan matching the backtest
-  lifecycle.
+- Compare against a declared control or counterfactual.
+- Disclose the full tested set, repeated peeks, dependence, and effective trials.
+- Track which windows are spent; do not relabel reused data OOS.
+- Use holdouts, walk-forward, purging/embargo, cross-venue tests, or forward
+  epochs only when they fit the claim.
+- Treat a second correlated venue as robustness evidence, not automatic
+  independence. Require it when portability or the experiment contract does.
+- Report effect sizes, uncertainty, concentration, fragility, and practical
+  scale—not only a threshold verdict.
+- Keep the preregistered rule after viewing outcomes. Any revised rule is
+  prospective or exploratory on the spent data.
 
-Default to the *lowest* label the evidence supports.
+Legacy analyzers such as `scripts/r1_robustness.py` and
+`scripts/apply_decision_rule.py` implement historical policies. Use them as a
+binding verdict only when the selected experiment explicitly names that preset.
 
-## Before trusting any backtest — answer all 8
+## Report an evidence card
 
-1. What exact data existed at `decision_ts`?
-2. Which assets were tradable then, and how do we know?
-3. What order would have been submitted, when, and at what size?
-4. What fill model was used, and how was it costed?
-5. What state existed before each exit condition became active?
-6. What would make this result disappear?
-7. Which untouched window or forward evidence is still clean?
-8. Where is the trade ledger and the run record?
+Return or write:
 
-If any answer is weak, the backtest is not ready to influence real-money work.
+- claim;
+- validity and reasons;
+- study mode;
+- result: supports, contradicts, or inconclusive;
+- scope and non-generalizable boundaries;
+- deployment mode and authorization state;
+- effect size/uncertainty and material debts;
+- artifact and identity references;
+- justified next action and explicit non-conclusions.
 
-## Repo specifics
+Compatibility run labels (`invalid`, `exploratory`, `biased_benchmark`,
+`candidate`, `paper_ready`) may still appear in artifacts. Report them verbatim,
+but do not let one label collapse the evidence card or authorize deployment.
 
-- **Progressive system, not a frozen baseline.** These gates are about *methodology and
-  evidence* (causality, PIT, costs, OOS, run labels) — NOT about reproducing a prior
-  run's output byte-for-byte. A performance/refactor change is held to **numerical
-  equivalence** (`np.allclose`, NaN positions matching), not bit-identical output;
-  last-bit float-order differences are not an integrity violation. The strict bars that
-  remain are the real-money promotion gate and the correctness gates below (look-ahead,
-  survivorship, accounting). Do not invoke "preserve the exact old numbers" to block an
-  improvement.
-- Signal features use only data known at the **decision timestamp**. For LONG
-  daily FC signals, the daily close is not an executable fill and the configured
-  delayed/provisional lifecycle must be honored. For continuous rolling-window
-  signals, the decision timestamp is the causal trailing-window bar close; any
-  zero-delay entry must be justified by that causal construction and remains
-  research-gated.
-- Run sweeps via a dated dispatcher script, not hand-assembled engine flags.
-  The old volume-events dispatcher and generic alpha sweep scripts were erased
-  with the research scrub. For new serious work, write a small pre-registered
-  dispatcher that calls the relevant package runner directly per cell. The Tier-2 verdict comes from
-  `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
-  `scripts/apply_decision_rule.py`. Every engine requires full PIT by default;
-  partial-PIT runs (config `require_full_pit_universe=False` — the old
-  `--allow-partial-pit` flag was erased with the volume-events CLI) are for
-  explicitly biased diagnostics only, labelled biased.
-- Funding is a known gap on roots without a funding dataset — mark such runs
-  fee/slippage stressed but funding-missing.
-- Legacy fixed-day rebalance-grid benchmarks and erased short-sleeve results are
-  retired evidence. Do not cite them as evidence for the surviving continuous or
-  LONG systems.
-- Demo/forward execution is execution evidence only, never alpha proof.
+## Preserve the safety boundary
 
-Inspect the report directory directly for artifact completeness against this
-standard. Artifact presence is necessary, not sufficient; the PIT, causal, and
-OOS-hygiene gates still require judgement.
+Never infer mainnet authority from a research result or broad repository
+permission. Real-money work needs the exact evidence, controls, code/config,
+limits, expiry, and separate owner authorization required by
+`docs/governance.md`.

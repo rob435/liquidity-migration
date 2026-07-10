@@ -80,9 +80,10 @@ BTC_MONTH_REGIME_MODES = (
 BTC_EXACT_MONTH_DAYS = 365.25 / 12.0
 
 
-# Splits are now exclusively a per-run config: see LongNativeConfig.splits.
-# Default is `()` (whole-period reporting), which is the post-rebuild norm.
-# Pristine OOS lives on the forward demo/paper ledger, not in a backtest split.
+# Splits are exclusively a per-run config: see LongNativeConfig.splits.
+# Default `()` means this run has no internal validation split. Whether a
+# historical or forward surface is untouched depends on its exposure history;
+# storage layout alone does not make it OOS (docs/governance.md).
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,11 +393,10 @@ class LongNativeConfig:
     require_full_pit_universe: bool = True
 
     # --- reporting ---
-    # Whole-period only by default. There is no honest internal OOS surface;
-    # both per-venue datasets span their full available history and pristine
-    # OOS is the forward demo/paper ledger. Pass an explicit `splits` tuple
-    # only when you specifically want per-window reporting and have a
-    # pre-registered reason for that choice (see docs/parameter_pre_registration.md).
+    # Whole-period only by default, so the default run has no internal validation
+    # split. A full-history storage root can still be partitioned prospectively;
+    # whether a window is untouched depends on exposure history. Pass explicit
+    # `splits` when the claim/design requires them (docs/governance.md).
     splits: tuple[tuple[str, str, str], ...] = ()
 
 
@@ -2708,13 +2708,13 @@ def _cal_roll(
 
 
 def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass) -> dict[str, Any]:
-    """Whole-period promotion gate. Splits are diagnostic only.
+    """Evaluate the legacy whole-period compatibility gate.
 
-    Pristine OOS lives on the forward demo/paper ledger, not in any internal
-    backtest split. The gate evaluates whole-period honest Sharpe, max DD and
-    funding-mode against the universe-pass precondition. When splits are
-    supplied, an additional all-positive check fires, but the threshold logic
-    remains whole-period.
+    The function evaluates whole-period Sharpe, max DD, funding mode, and the
+    universe-pass precondition. Supplied splits add an all-positive check, but
+    the threshold logic remains whole-period. This compatibility result is not
+    an OOS designation or deployment authorization; judge data exposure and the
+    claim under docs/governance.md.
     """
     whole_sharpe = float(summary.get("sharpe_like", 0.0))
     max_dd = float(summary.get("max_drawdown", 0.0))
@@ -2910,7 +2910,7 @@ def format_long_native_report(metadata: dict[str, Any]) -> str:
     else:
         lines += [
             "## Splits",
-            "_None configured — whole-period reporting only. Pristine OOS = forward demo/paper._",
+            "_None configured — whole-period reporting only; this run has no internal validation split._",
             "",
         ]
     return "\n".join(lines)

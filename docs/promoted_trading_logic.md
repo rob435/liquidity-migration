@@ -1,26 +1,37 @@
 # Active Trading Logic
 
-Last verified against code and deploy files: 2026-06-30.
+Last manually reconciled with code and deploy files: 2026-07-10. Verify the
+current sources below before acting.
 
 This file describes the active profile lifecycle. It is not a research diary.
 Historical receipts are in git history and summarized in
 `docs/preregistration/INDEX.md`.
 
+The module name `promoted.py` is a compatibility/runtime registry name. It does
+not imply that a profile passed a research gate, is paper-ready, or is authorized
+for mainnet. Evidence is judged under `docs/governance.md`; runtime state is
+descriptive.
+
 ## Source Order
 
 When files disagree, fix them in one change. Read in this order:
 
-1. `deploy/sleeves.env` for enabled sleeves.
-2. `liquidity_migration/promoted.py` for registry objects.
-3. `liquidity_migration/continuous_demo.py` and
+1. The read-only VPS verifier plus
+   `/etc/liquidity-migration/sleeves.resolved.env` and systemd state for what is
+   effectively running.
+2. `deploy/sleeves.env` for the repository deployment ceiling/default; host
+   overrides may narrow an `on` sleeve to `off`.
+3. `liquidity_migration/promoted.py` for registry objects.
+4. `liquidity_migration/continuous_demo.py` and
    `liquidity_migration/continuous_forward_replay.py` for continuous runtime and
    replay config.
-4. `liquidity_migration/long_native_event_demo.py` for long v11a runtime config.
-5. `deploy/systemd/*.service` for live env overrides.
+5. `liquidity_migration/long_native_event_demo.py` for long v11a runtime config.
+6. `deploy/systemd/*.service` for repository service env; compare it with the
+   effective VPS unit state.
 
 ## Running Surface
 
-`deploy/sleeves.env` currently wires:
+The repository ceiling in `deploy/sleeves.env` currently requests:
 
 | Sleeve | Toggle | Runtime |
 | --- | --- | --- |
@@ -143,6 +154,11 @@ fraction below the prior healthy cycle high-water mark blocks new entries.
 Wallet/private snapshot errors block separately and are not treated as drawdown
 evidence from fallback equity.
 
+Those parity choices describe a demo/paper research object only. They are not a
+mainnet precedent: capital-preservation limits must be chosen from explicit
+ruin/exposure constraints and need not improve an alpha metric or preserve
+backtest parity (`docs/governance.md`).
+
 ### Continuous Exit Logic
 
 Active exits:
@@ -150,6 +166,9 @@ Active exits:
 - Component venue take-profit at 12%.
 - `max_hold` force cover after 24 hours.
 - `STOP_LOSS_PCT=0`; no venue/server disaster stop.
+
+The stopless state is accepted only within the current demo/paper authorization.
+It is not evidence that stopless mainnet risk is acceptable.
 
 Disabled daemon exits that must not be silently reintroduced:
 

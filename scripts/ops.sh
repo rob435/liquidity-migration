@@ -36,6 +36,8 @@ Safe operator commands:
   data-build --execute [...]   explicit granular-data download/backfill
   tail-plan [ARGS...]          validate and print the preregistered tail-run plan
   tail-run [ARGS...]           run the preregistered tail-survival experiment
+  overhaul-plan [ARGS...]      strategy-overhaul shallow readiness plan
+  overhaul-phase0 [ARGS...]    outcome-blind strategy-overhaul inventory
   test [PYTEST_ARGS...]        run pytest
   deploy --execute [ARGS...]   checked VPS deploy; explicit handshake required
   help                         show this help and do nothing else
@@ -43,7 +45,7 @@ Safe operator commands:
 Environment overrides:
   SSH_TARGET   VPS SSH destination (default: root@116.202.15.128)
   REPO_DIR     repository path on the VPS (default: /opt/liquidity-migration)
-  PYTHON       one Python executable/path for data, tail, and test commands
+  PYTHON       one Python executable/path for data, tail, overhaul, and test commands
 
 Safety contract:
   * This interface never enables REAL_MONEY or mainnet trading.
@@ -145,6 +147,12 @@ case "$command" in
     ;;
   tail-run)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/continuous_tail_survival_2026_07_10.py" "$@"
+    ;;
+  overhaul-plan)
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/strategy_overhaul_scout_2026_07_10.py" --plan "$@"
+    ;;
+  overhaul-phase0)
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/strategy_overhaul_scout_2026_07_10.py" --phase0-inventory "$@"
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest "$@"

@@ -1,11 +1,15 @@
-"""Apply a decision rule to a sweep summary CSV.
+"""Apply a named historical decision preset to a sweep summary CSV.
+
+These presets reproduce earlier experiment contracts. They are not current
+repository-wide policy. Use one as a binding verdict only when the active
+experiment explicitly names it; otherwise label the output exploratory under
+``docs/governance.md``.
 
 Two rules are supported:
 
 - ``--rule manifesto`` (default; the Round 1 / R10-R11 Promotion bar):
   Sharpe Δ ≥ +0.5 BOTH venues + DD Δ ≤ -5pp BOTH + return ≥ 0 BOTH +
-  ≥ 50 by / ≥ 30 bn trades. Pre-registered in
-  ``docs/research_summary.md``.
+  ≥ 50 by / ≥ 30 bn trades. Retained for historical compatibility.
 
 - ``--rule investigation`` (Round 2's R1-R8 sub-phase tier, MAR-based):
   A cell is **investigation-positive** if MAR Δ > 0 on majority of
@@ -14,8 +18,7 @@ Two rules are supported:
   Falsifier: MAR Δ ≤ -1.0 on either venue OR return goes negative on
   a venue that was positive in control OR DD > 70% on either OR
   trades < 30 on either (≈ 10 / sub-period at 3-thirds windows).
-  Pre-registered in
-  ``docs/research_summary.md``.
+  Retained for historical compatibility.
 
 MAR is computed as ``annualized_return / |max_drawdown|`` where
 ``annualized_return = (1 + total_return) ** (365.25 / window_days) - 1``.
@@ -348,8 +351,8 @@ def evaluate_cell(
     if binance_trades < min_trades_binance:
         cand_reasons.append(f"binance trades {binance_trades} < {min_trades_binance}")
     # decision-rule-2: a venue that EXECUTED ZERO trades has no statistical content,
-    # so it can never satisfy "both venues matter" (STATE.md non-negotiable #3). Block
-    # it regardless of the preset's min_trades floor — the archived `legacy` preset
+    # so it cannot satisfy this preset's explicit two-venue contract. Block it
+    # regardless of the preset's min_trades floor — the archived `legacy` preset
     # defaults min_trades_binance=0, so `0 < 0` is False and a 0-trade Binance cell
     # would otherwise be rubber-stamped a candidate on the Bybit numbers alone. This
     # is independent of the soft floor above (which `legacy` sets to 0) and a present

@@ -19,9 +19,9 @@ This module replaces that with a flat list of :class:`RunWarning`s. Each carries
 
 ``tainted`` (any ``tainted``-severity warning) is the machine flag meaning
 "this result is survivorship / look-ahead biased — do NOT cite it as clean."
-That is the non-negotiable methodology gate from
-``docs/backtesting_errors_we_never_repeat.md`` — here it is surfaced loudly
-rather than hidden, never removed. Data-gap warnings (funding, clipped window)
+That implements the claim-validity policy in ``docs/governance.md``; the
+failure taxonomy lives in ``docs/backtesting_errors_we_never_repeat.md``.
+Here it is surfaced loudly rather than hidden. Data-gap warnings (funding, clipped window)
 are ``warn``/``info``: the run is still produced, the gap is named, and you can
 backfill it yourself.
 
@@ -70,7 +70,7 @@ def diagnose(
     """
     warnings: list[RunWarning] = []
 
-    # --- correctness / tainting (methodology gate, never silently dropped) ---
+    # --- correctness / tainting (claim-validity gate, never silently dropped) ---
     if archive_manifest_empty:
         warnings.append(
             RunWarning(

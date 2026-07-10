@@ -28,11 +28,10 @@ Per sleeve it builds three keyed entry-price maps and joins them on a shared key
     demo  = ``continuous_fade_demo_trades`` entry_price
     paper = ``continuous_fade_paper_trades`` notional-weighted entry_price
 
-    The recompute runs on TWO planes (``fills_continuous``): the LIVE signal plane (current
-    data — gates every entry now) and, when a research root is given, the INDEPENDENT-PIT
-    plane (freshly-downloaded klines + recomputed rmom; confirms entries only as far as the
-    research root's rmom coverage reaches — currently gated ~2 weeks back by that root's stale
-    factor-panel inputs, so recent ones sit in pending_rmom).
+    The recompute can use the LIVE signal plane (current, but not an independent data
+    recompute) or, when a refreshed research root is given, the INDEPENDENT-PIT plane
+    (klines plus kline-based COMMON4 rmom). Read the printed plane and coverage rather
+    than assuming currentness.
 
 For every key it reports the pairwise price delta in bps (signed: positive = the first
 book filled HIGHER than the reference) and writes a per-entry CSV next to the agreement
@@ -41,8 +40,8 @@ keys. The summary prints paired / only counts AND the bps distribution per pair.
 Standalone:  ``python scripts/reconcile_fills.py --sleeve continuous``
 Wired into:  ``scripts/reconcile_three_way.py`` (runs automatically in the full three-way).
 
-Honest: execution-agreement evidence, NOT alpha proof and NOT a promotion gate
-(docs/backtesting_errors_we_never_repeat.md). The continuous "model" price is a clean
+Honest: execution-agreement evidence; it does not itself support alpha or authorize
+deployment (docs/governance.md). The continuous "model" price is a clean
 PIT bar close, not a costed ensemble re-simulation — that portfolio-return object lives
 in ``liquidity_migration.continuous_forward_replay`` and is a different granularity.
 """
@@ -702,7 +701,10 @@ def main() -> int:
                                        paper_strategy_id=args.paper_strategy_id)
 
     print("\n" + summary, flush=True)
-    print("\n(execution-agreement evidence; NOT alpha proof / NOT a promotion gate.)", flush=True)
+    print(
+        "\n(execution-agreement evidence; does not itself support alpha or authorize deployment.)",
+        flush=True,
+    )
     return 0 if ok else 1
 
 

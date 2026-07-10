@@ -16,6 +16,7 @@ CLI:
     python -m liquidity_migration.binance_vision filter-manifest \\
         --data-root ~/SHARED_DATA/bybit_full_pit        # generic coverage filter
 """
+
 from __future__ import annotations
 
 import argparse
@@ -52,6 +53,7 @@ MIN_HOURLY_BARS = 20
 # --------------------------------------------------------------------------
 # Discovery
 # --------------------------------------------------------------------------
+
 
 def _s3_common_prefixes(prefix: str) -> list[str]:
     """One-level subdirectory names under an S3 prefix (paginated)."""
@@ -157,7 +159,9 @@ def discover(
             if months:
                 result[sym] = months
     _assert_download_completeness(
-        failed_listings, len(symbols), max_failure_ratio=max_listing_failure_ratio,
+        failed_listings,
+        len(symbols),
+        max_failure_ratio=max_listing_failure_ratio,
     )
     return result
 
@@ -165,6 +169,7 @@ def discover(
 # --------------------------------------------------------------------------
 # Download
 # --------------------------------------------------------------------------
+
 
 def parse_month_csv(symbol: str, raw: bytes) -> list[dict]:
     """Parse a Binance Vision monthly 1h kline zip payload into kline rows.
@@ -182,17 +187,19 @@ def parse_month_csv(symbol: str, raw: bytes) -> list[dict]:
                 if len(parts) < 8 or not parts[0].lstrip("-").isdigit():
                     continue  # header or malformed
                 try:
-                    rows.append({
-                        "ts_ms": int(parts[0]),
-                        "symbol": symbol,
-                        "open": float(parts[1]),
-                        "high": float(parts[2]),
-                        "low": float(parts[3]),
-                        "close": float(parts[4]),
-                        "volume_base": float(parts[5]),
-                        "turnover_quote": float(parts[7]),
-                        "source": "binance_vision_um_1h",
-                    })
+                    rows.append(
+                        {
+                            "ts_ms": int(parts[0]),
+                            "symbol": symbol,
+                            "open": float(parts[1]),
+                            "high": float(parts[2]),
+                            "low": float(parts[3]),
+                            "close": float(parts[4]),
+                            "volume_base": float(parts[5]),
+                            "turnover_quote": float(parts[7]),
+                            "source": "binance_vision_um_1h",
+                        }
+                    )
                 except ValueError:
                     continue
     return rows
@@ -231,15 +238,10 @@ def _verify_download(raw: bytes, expected_sha256: str | None, content_length: in
     if expected_sha256 is not None:
         actual = hashlib.sha256(raw).hexdigest()
         if actual != expected_sha256:
-            raise ValueError(
-                f"sha256 mismatch: expected {expected_sha256}, got {actual} "
-                f"({len(raw)} bytes)"
-            )
+            raise ValueError(f"sha256 mismatch: expected {expected_sha256}, got {actual} ({len(raw)} bytes)")
         return
     if content_length is not None and content_length != len(raw):
-        raise ValueError(
-            f"Content-Length mismatch: header {content_length} != body {len(raw)} bytes"
-        )
+        raise ValueError(f"Content-Length mismatch: header {content_length} != body {len(raw)} bytes")
     # audit2c: with neither a .CHECKSUM nor a Content-Length, the only remaining
     # signal is the body itself — an empty or non-zip body is corrupt and must NOT
     # pass the gate (the previous no-op let a truncated/garbage body into the PIT
@@ -351,13 +353,12 @@ def topup_binance_daily_klines(
         raise RuntimeError(f"empty Binance daily top-up window: start={start!r} end={end!r}")
 
     print(
-        f"[binance_vision] daily top-up {len(selected)} symbols x {len(days)} days "
-        f"({start} -> {end} exclusive)",
+        f"[binance_vision] daily top-up {len(selected)} symbols x {len(days)} days ({start} -> {end} exclusive)",
         file=sys.stderr,
     )
     all_rows: list[dict] = []
     failed_jobs: list[tuple[str, str]] = []
-    missing_files = 0
+    missing_jobs: list[tuple[str, str]] = []
     done = 0
     worker_count = max(1, min(workers, len(jobs)))
     with ThreadPoolExecutor(max_workers=worker_count) as ex:
@@ -370,14 +371,25 @@ def topup_binance_daily_klines(
             elif rows:
                 all_rows.extend(rows)
             else:
-                missing_files += 1
+                missing_jobs.append((symbol, day))
             done += 1
             if done % 500 == 0 or done == len(jobs):
                 print(
                     f"[binance_vision]  {done}/{len(jobs)} daily files, "
-                    f"{len(all_rows):,} rows, {missing_files} 404, {len(failed_jobs)} failed",
+                    f"{len(all_rows):,} rows, {len(missing_jobs)} 404, {len(failed_jobs)} failed",
                     file=sys.stderr,
                 )
+
+    missing_jobs_artifact = root / "binance_vision_daily_missing_jobs.json"
+    missing_jobs_artifact.parent.mkdir(parents=True, exist_ok=True)
+    missing_jobs_artifact.write_text(
+        json.dumps(
+            [{"symbol": symbol, "date": day} for symbol, day in sorted(missing_jobs)],
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     _assert_download_completeness(
         failed_jobs,
@@ -400,7 +412,10 @@ def topup_binance_daily_klines(
         if written_rows:
             write_dataset(df, root, "klines_1h", partition_by=("date", "symbol"), append=True)
 
-    manifest_rows = rewrite_manifest_to_coverage(root)
+    manifest_rows = rewrite_manifest_to_coverage(
+        root,
+        archive_membership_source="binance_vision_archive",
+    )
     return {
         "data_root": str(root),
         "start": start,
@@ -409,7 +424,8 @@ def topup_binance_daily_klines(
         "days": len(days),
         "jobs": len(jobs),
         "kline_rows": written_rows,
-        "missing_files": missing_files,
+        "missing_files": len(missing_jobs),
+        "missing_jobs_artifact": str(missing_jobs_artifact),
         "failed_files": len(failed_jobs),
         "manifest_rows": manifest_rows,
     }
@@ -419,14 +435,30 @@ def topup_binance_daily_klines(
 # Manifest coverage filter (generic — also used for the Bybit OOS root)
 # --------------------------------------------------------------------------
 
-def rewrite_manifest_to_coverage(data_root: str | Path, *, min_hourly_bars: int = MIN_HOURLY_BARS) -> int:
+
+def rewrite_manifest_to_coverage(
+    data_root: str | Path,
+    *,
+    min_hourly_bars: int = MIN_HOURLY_BARS,
+    archive_membership_source: str | None = None,
+) -> int:
     """Rewrite ``archive_trade_manifest`` so it lists only (symbol, date) pairs
     that actually have >= min_hourly_bars hourly klines.
 
     The strategy's full-PIT check requires every manifest symbol/date to be
     covered by klines; raw archive manifests can list partial days. Returns the
     surviving row count. Reusable for any Bybit-shaped data root.
+
+    ``archive_membership_source`` is required when the caller itself obtained
+    the bars from a known archive and wants to make that observation provenance
+    explicit.  It stamps the covered rows as archive-observed and is deliberately
+    omitted by the generic ``filter-manifest`` CLI path, which cannot infer where
+    an arbitrary root came from.
     """
+    if archive_membership_source is not None:
+        archive_membership_source = archive_membership_source.strip()
+        if not archive_membership_source:
+            raise ValueError("archive_membership_source must be non-blank when supplied")
     root = Path(data_root).expanduser()
     klines = read_dataset(root, "klines_1h")
     if klines.is_empty():
@@ -442,8 +474,9 @@ def rewrite_manifest_to_coverage(data_root: str | Path, *, min_hourly_bars: int 
         .select(["date", "symbol"])
     )
     existing = read_dataset(root, "archive_trade_manifest")
+    synthetic_url = archive_membership_source or "kline_coverage"
     if existing.is_empty():
-        manifest = covered.with_columns(pl.lit("kline_coverage").alias("url"))
+        manifest = covered.with_columns(pl.lit(synthetic_url).alias("url"))
     else:
         covered_pairs = covered.select(["date", "symbol"]).unique()
         kept_existing = existing.join(covered_pairs, on=["date", "symbol"], how="inner")
@@ -455,11 +488,33 @@ def rewrite_manifest_to_coverage(data_root: str | Path, *, min_hourly_bars: int 
         if new_pairs.is_empty():
             manifest = kept_existing
         else:
-            synthesized = new_pairs.with_columns(pl.lit("kline_coverage").alias("url"))
+            synthesized = new_pairs.with_columns(pl.lit(synthetic_url).alias("url"))
             for col in existing.columns:
                 if col not in synthesized.columns:
                     synthesized = synthesized.with_columns(pl.lit(None).alias(col))
             manifest = pl.concat([kept_existing, synthesized.select(existing.columns)], how="diagonal_relaxed")
+
+    if archive_membership_source is not None:
+        first_observed = covered.group_by("symbol").agg(
+            pl.col("date").min().alias("__derived_first_archive_observed_date")
+        )
+        manifest = manifest.join(first_observed, on="symbol", how="left", validate="m:1")
+        for column in ("source", "membership_source"):
+            manifest = manifest.with_columns(pl.lit(archive_membership_source, dtype=pl.String).alias(column))
+        manifest = manifest.with_columns(pl.lit(False, dtype=pl.Boolean).alias("membership_inferred"))
+        first_column = "first_archive_observed_date"
+        derived = pl.col("__derived_first_archive_observed_date")
+        if first_column not in manifest.columns:
+            manifest = manifest.with_columns(derived.alias(first_column))
+        else:
+            target_dtype = manifest.schema[first_column]
+            manifest = manifest.with_columns(
+                pl.when(pl.col(first_column).is_null() | (pl.col(first_column).cast(pl.String).str.strip_chars() == ""))
+                .then(derived.cast(target_dtype))
+                .otherwise(pl.col(first_column))
+                .alias(first_column)
+            )
+        manifest = manifest.drop("__derived_first_archive_observed_date")
     manifest = manifest.sort(["date", "symbol"])
 
     dst = root / "archive_trade_manifest"
@@ -494,9 +549,7 @@ def _assert_download_completeness(
     the discovery (listing) and download phases."""
     if artifact_path is not None:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        artifact_path.write_text(
-            json.dumps([{"symbol": s, "month": m} for s, m in failed_jobs], indent=2)
-        )
+        artifact_path.write_text(json.dumps([{"symbol": s, "month": m} for s, m in failed_jobs], indent=2))
     if total_jobs <= 0:
         return
     ratio = len(failed_jobs) / total_jobs
@@ -563,8 +616,7 @@ def build_binance_oos(
     print(f"[binance_vision] discovering symbols/months <= {max_month} ...", file=sys.stderr)
     inventory = discover(max_month=max_month, workers=min(workers, 16))
     jobs = [(sym, ym) for sym, months in inventory.items() for ym in months]
-    print(f"[binance_vision] {len(inventory)} symbols, {len(jobs)} monthly files to fetch",
-          file=sys.stderr)
+    print(f"[binance_vision] {len(inventory)} symbols, {len(jobs)} monthly files to fetch", file=sys.stderr)
 
     # Universe-shrink gate: a rerun that discovers symbols NOT covering a prior
     # wider build would leave that build's now-absent symbols stranded on disk.
@@ -597,13 +649,16 @@ def build_binance_oos(
                 all_rows.extend(rows)
             done += 1
             if done % 500 == 0:
-                print(f"[binance_vision]  {done}/{len(jobs)} files, {len(all_rows):,} rows, "
-                      f"{len(failed_jobs)} failed", file=sys.stderr)
+                print(
+                    f"[binance_vision]  {done}/{len(jobs)} files, {len(all_rows):,} rows, {len(failed_jobs)} failed",
+                    file=sys.stderr,
+                )
 
     failed = len(failed_jobs)
     # Persist the failed-jobs list and refuse to write a holey root (M5).
     _assert_download_completeness(
-        failed_jobs, len(jobs),
+        failed_jobs,
+        len(jobs),
         max_failure_ratio=max_failure_ratio,
         artifact_path=root / FAILED_JOBS_ARTIFACT,
     )
@@ -616,8 +671,7 @@ def build_binance_oos(
         .unique(subset=["ts_ms", "symbol"], keep="last")
         .sort(["symbol", "ts_ms"])
     )
-    print(f"[binance_vision] writing klines_1h: {df.height:,} rows, "
-          f"{df['symbol'].n_unique()} symbols", file=sys.stderr)
+    print(f"[binance_vision] writing klines_1h: {df.height:,} rows, {df['symbol'].n_unique()} symbols", file=sys.stderr)
     # Clean rewrite: clear any prior klines_1h so stale symbol/date partitions from
     # a previous (wider) build cannot survive into the new universe. append=False
     # alone would only overwrite partitions present in df; a removed symbol's
@@ -627,9 +681,11 @@ def build_binance_oos(
         shutil.rmtree(kdst)
     write_dataset(df, root, "klines_1h", partition_by=("date", "symbol"), append=False)
 
-    manifest_rows = rewrite_manifest_to_coverage(root)
-    print(f"[binance_vision] archive_trade_manifest: {manifest_rows:,} covered symbol-days",
-          file=sys.stderr)
+    manifest_rows = rewrite_manifest_to_coverage(
+        root,
+        archive_membership_source="binance_vision_archive",
+    )
+    print(f"[binance_vision] archive_trade_manifest: {manifest_rows:,} covered symbol-days", file=sys.stderr)
     return {
         "data_root": str(root),
         "symbols": df["symbol"].n_unique(),
@@ -642,6 +698,7 @@ def build_binance_oos(
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Binance Vision PIT OOS data acquisition.")
@@ -675,7 +732,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.mode == "build-binance-oos":
         summary = build_binance_oos(
-            args.data_root, end_date=args.end, workers=args.workers,
+            args.data_root,
+            end_date=args.end,
+            workers=args.workers,
             allow_degraded=args.allow_degraded,
         )
         print(summary)
