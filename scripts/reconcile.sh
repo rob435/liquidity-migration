@@ -34,10 +34,23 @@ fi
 
 export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
 
-# --quick / --two-way  -> the fast paper<->demo execution check.
-if [ "${1:-}" = "--quick" ] || [ "${1:-}" = "--two-way" ]; then
-  shift
-  exec "$PY" "$HERE/scripts/reconcile.py" "$@"
+# --quick / --two-way -> the fast paper<->demo execution check. Parse the mode
+# flag independent of position so ordinary argparse-style option ordering works
+# (for example, `--dry-run --quick`). Do not forward the dispatcher-only flag.
+mode="full"
+forward_args=()
+for arg in "$@"; do
+  case "$arg" in
+    --quick|--two-way)
+      mode="quick"
+      ;;
+    *)
+      forward_args+=("$arg")
+      ;;
+  esac
+done
+if [ "$mode" = "quick" ]; then
+  exec "$PY" "$HERE/scripts/reconcile.py" "${forward_args[@]}"
 fi
 
 # Default: the full demo<->backtest<->paper three-way (the whole reconciliation).

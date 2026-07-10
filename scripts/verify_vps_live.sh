@@ -29,9 +29,19 @@ if [ -n "$(git status --short)" ]; then
 fi
 
 actual_commit="$(git rev-parse HEAD)"
-if [ -n "$EXPECTED_COMMIT" ] && [ "$actual_commit" != "$EXPECTED_COMMIT" ]; then
-  echo "Verification failed: expected commit $EXPECTED_COMMIT but VPS has $actual_commit" >&2
-  exit 1
+if [ -n "$EXPECTED_COMMIT" ]; then
+  if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    echo "Verification failed: EXPECTED_COMMIT must be a 7-40 character hexadecimal commit id" >&2
+    exit 1
+  fi
+  if ! expected_commit_full="$(git rev-parse --verify "${EXPECTED_COMMIT}^{commit}" 2>/dev/null)"; then
+    echo "Verification failed: expected commit prefix $EXPECTED_COMMIT is missing or ambiguous" >&2
+    exit 1
+  fi
+  if [ "$actual_commit" != "$expected_commit_full" ]; then
+    echo "Verification failed: expected commit $expected_commit_full but VPS has $actual_commit" >&2
+    exit 1
+  fi
 fi
 
 if [ -x .venv/bin/python ]; then

@@ -12,6 +12,20 @@ EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
 SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-15}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
+# Local deploys of the private GitHub repository should work through the same
+# checked path as Actions.  Reuse an authenticated gh keyring token when the
+# caller did not explicitly provide one; never print it, persist it, or place it
+# in argv. Public/non-GitHub remotes continue to work without gh.
+if [ -z "$GITHUB_TOKEN" ] && [[ "$REPO_URL" == https://github.com/* ]] \
+  && command -v gh >/dev/null 2>&1; then
+  _local_github_token="$(gh auth token --hostname github.com 2>/dev/null || true)"
+  if [ -n "$_local_github_token" ]; then
+    GITHUB_TOKEN="$_local_github_token"
+    echo "deploy auth: using the authenticated local gh credential for the remote fetch"
+  fi
+  unset _local_github_token
+fi
+
 # shellcheck disable=SC2086
 {
   printf 'REPO_URL=%q\n' "$REPO_URL"
@@ -56,14 +70,22 @@ unset GITHUB_TOKEN
 # whether the dependency manifests changed and the venv needs a pip refresh.
 previous_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
 if [ -n "$EXPECTED_COMMIT" ]; then
+  if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    echo "Refusing deploy: EXPECTED_COMMIT must be a 7-40 character hexadecimal commit id" >&2
+    exit 1
+  fi
+  if ! expected_commit_full="$(git rev-parse --verify "${EXPECTED_COMMIT}^{commit}" 2>/dev/null)"; then
+    echo "Refusing deploy: expected commit prefix $EXPECTED_COMMIT is missing or ambiguous" >&2
+    exit 1
+  fi
   # Deploy exactly the commit that triggered this run. A queued newer run can
   # move the box forward later; this run must not silently checkout a different
   # branch head during the trigger->fetch window.
-  if ! git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH"; then
-    echo "Refusing deploy: expected commit $EXPECTED_COMMIT is not on $REMOTE/$BRANCH" >&2
+  if ! git merge-base --is-ancestor "$expected_commit_full" "$REMOTE/$BRANCH"; then
+    echo "Refusing deploy: expected commit $expected_commit_full is not on $REMOTE/$BRANCH" >&2
     exit 1
   fi
-  git checkout -B "$BRANCH" "$EXPECTED_COMMIT"
+  git checkout -B "$BRANCH" "$expected_commit_full"
 else
   git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 fi
@@ -249,38 +271,79 @@ apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # --now schedules them immediately; subsequent deploys are idempotent.
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
-# Daily refresh of the continuous-fade rmom gate + the gate seed run when either the
-# continuous demo sleeve or its no-order paper evidence collector is on.
+# Daily refresh of the continuous-fade rmom gate + a conditional gate seed when
+# either continuous sleeve is on. Healthy, current gates are retained unless
+# their build/validation code changed; unconditional rebuilds made every deploy
+# spend minutes and large memory recomputing identical state.
 if continuous_rmom_refresh_on; then
 apply_timer_enable on $CONTINUOUS_SLEEVE_TIMERS
-# Seed the rmom gate NOW rather than waiting for the 00:20 UTC timer. Without this a
-# fresh deploy starts the continuous daemon into an EMPTY gate -> the live decile drops
-# every symbol (silent zero-signal blackout - the 2026-06-02 incident). The refresh is a
-# oneshot, so this blocks until the parquet is (re)built from the sleeve's kline store.
-# best-effort + fail-safe: a FIRST deploy (klines still bootstrapping) yields no rows ->
-# WARN, not fail (no rmom => no entries, never WRONG entries; the daily timer + the
-# rmom-staleness watchdog cover the gap; re-run the service once klines are up).
-echo "Seeding continuous rmom gate (residual_momentum.parquet) ..."
-systemctl start liquidity-migration-continuous-rmom-refresh.service \
-  || echo "WARN: rmom seed service failed; the 00:20 timer + rmom watchdog will cover it." >&2
 _check_rmom_root() {
   _rmom_label="$1"
   _rmom_root="$2"
   if _rmom_status="$("$PYTHON" scripts/check_residual_momentum_gate.py --path "$_rmom_root" 2>&1)"; then
-    echo "continuous ${_rmom_label} rmom gate seeded: ${_rmom_status}"
+    echo "continuous ${_rmom_label} rmom gate ok: ${_rmom_status}"
     return 0
   fi
   if [ "${ALLOW_EMPTY_RMOM_GATE:-0}" = "1" ]; then
-    echo "WARN: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after seed: ${_rmom_status}. ALLOW_EMPTY_RMOM_GATE=1" \
+    echo "WARN: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after deploy gate check: ${_rmom_status}. ALLOW_EMPTY_RMOM_GATE=1" \
          "lets deploy continue, but that sleeve may emit NO entries until rmom is rebuilt." >&2
   else
-    echo "ERROR: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after seed: ${_rmom_status}. Re-run" \
+    echo "ERROR: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after deploy gate check: ${_rmom_status}. Re-run" \
          "'systemctl start liquidity-migration-continuous-rmom-refresh.service' once the" \
          "daemon has bootstrapped klines, or set ALLOW_EMPTY_RMOM_GATE=1 for an explicit" \
          "first-boot/no-entry override." >&2
     return 1
   fi
 }
+_rmom_needs_seed=0
+_rmom_seed_reason=""
+_add_rmom_seed_reason() {
+  if [ -n "$_rmom_seed_reason" ]; then
+    _rmom_seed_reason="${_rmom_seed_reason}, $1"
+  else
+    _rmom_seed_reason="$1"
+  fi
+  _rmom_needs_seed=1
+}
+if [ -z "$previous_commit" ] || ! git diff --quiet "$previous_commit" HEAD -- \
+  pyproject.toml \
+  requirements.lock \
+  deploy/systemd/liquidity-migration-continuous-rmom-refresh.service \
+  scripts/run_continuous_rmom_refresh.sh \
+  scripts/precompute_residual_momentum.py \
+  scripts/check_residual_momentum_gate.py \
+  liquidity_migration/_common.py \
+  liquidity_migration/risk_model.py \
+  liquidity_migration/daily_feature_panel.py \
+  liquidity_migration/storage.py; then
+  _add_rmom_seed_reason "rmom build/validation code changed"
+fi
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  if _rmom_status="$("$PYTHON" scripts/check_residual_momentum_gate.py \
+      --path data/bybit-continuous-demo-event/residual_momentum.parquet 2>&1)"; then
+    echo "continuous demo rmom gate already current: ${_rmom_status}"
+  else
+    _add_rmom_seed_reason "demo gate missing/stale"
+  fi
+fi
+if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
+  if _rmom_status="$("$PYTHON" scripts/check_residual_momentum_gate.py \
+      --path data/bybit-continuous-paper-event/residual_momentum.parquet 2>&1)"; then
+    echo "continuous paper rmom gate already current: ${_rmom_status}"
+  else
+    _add_rmom_seed_reason "paper gate missing/stale"
+  fi
+fi
+if [ "$_rmom_needs_seed" -eq 1 ]; then
+  # Seed NOW rather than waiting for the 00:20 UTC timer. An empty gate causes
+  # a safe but silent zero-signal blackout. The oneshot blocks until both roots
+  # are rebuilt from their respective kline stores.
+  echo "Seeding continuous rmom gate (${_rmom_seed_reason}) ..."
+  systemctl start liquidity-migration-continuous-rmom-refresh.service \
+    || echo "WARN: rmom seed service failed; the 00:20 timer + rmom watchdog will cover it." >&2
+else
+  echo "continuous rmom gates are current and build code is unchanged; skipping seed"
+fi
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   _check_rmom_root "demo" "data/bybit-continuous-demo-event/residual_momentum.parquet"
 fi

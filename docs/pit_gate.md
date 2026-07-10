@@ -174,10 +174,10 @@ irrelevant to the entry agreement and a full-universe funding backfill is slow.
   `_entry_event_expr` to reproduce the per-bar predicate `decile==9 & turnover≥liq
   & component-trigger` (the uncapped form of `select_continuous_entries`), then
   asks: is every live entry a genuine engine candidate? A live entry that is **not**
-  a candidate is the tripwire — classified `hard` (off-decile → look-ahead/drift)
+  a candidate is the tripwire — classified `hard` (D7 or below → look-ahead/drift)
   vs soft (`near_decile ≥D8` boundary flip, or `no_panel_row` snapshot gap). Only
-  `hard` fails. (This supersedes the older decile-membership-only check, which
-  remains as a complementary signal-consistency leg.)
+  `hard` fails. The older decile-membership-only check remains as a complementary
+  signal-consistency leg and uses the same D8-soft/D7-hard boundary.
 
 ### Fill-level cross-check + the two recompute planes (2026-06-18)
 

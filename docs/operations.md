@@ -157,6 +157,13 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" \
 scripts/ops.sh deploy --execute
 ```
 
+`EXPECTED_COMMIT` may be a unique 7-40 character hexadecimal prefix; the
+checked deploy and verifier both resolve it to the same full commit. For a
+private GitHub HTTPS remote, local deploys automatically reuse the credential
+from `gh auth` when `GITHUB_TOKEN` is unset. An explicit `GITHUB_TOKEN` still
+takes precedence. The credential is passed to the VPS over SSH stdin for the
+fetch only and is neither logged nor persisted.
+
 ## Overrides
 
 ```bash

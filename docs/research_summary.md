@@ -19,8 +19,8 @@ dated experiment contracts are indexed in `docs/preregistration/INDEX.md`.
 
 | Object | Role | Current read |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit continuous fade demo/paper | Base stays on; sniper retired after first material forward loss; clean post-fix clock pending |
-| `LongV11aDivWeekendVol` | Bybit long demo/paper | Strong internal cross-venue object; TP-tail dependent; tiny forward sample has execution skew |
+| `continuous_ensemble_v2` | Bybit continuous fade demo/paper | Base stays on; sniper retired; post-fix TAC/SKL book is 4/4 matched with zero hard signal drift |
+| `LongV11aDivWeekendVol` | Bybit long demo/paper | Strong internal cross-venue object; TP-tail dependent; currently flat after a tiny skewed forward sample |
 
 Binance is a research/replay venue, not a live execution venue.
 
@@ -152,7 +152,18 @@ failure to learn from, not strategy validation.
   demo-only 2, sniper-only 4, open sniper 0, one exit-reason divergence.
 - Latest pre-reset LONG: one paired ADA entry and no unmatched entries, with the
   timing/exit skew above.
-- Venue independently confirmed flat/no-orders after the incident.
+- Venue independently confirmed flat/no-orders immediately after the incident.
+  As of `2026-07-10T08:48Z`, the new clock holds TACUSDT p3 plus SKLUSDT p3,
+  p4p3, and p4p5: four demo rows and four paper rows, no sniper.
+- Current execution reconcile is 4/4 paired, zero paper/demo-only, zero status
+  or exit-reason divergence, and 129.80 bps mean adverse demo entry slippage
+  (170.73 bps worst). TAC is D9 on the replayed live plane. SKL is D8 on that
+  later snapshot (soft boundary noise), while the fresh independent full-PIT
+  plane confirms it; neither plane reports a hard D7-or-lower miss.
+- The current-tail PIT manifest and 1h bars cover the latest fully closed signal
+  day. The LONG agreement replay is `exploratory`: full-PIT passed, but funding
+  is partial and the single model entry has no live counterpart; there are no
+  live entries outside the model.
 - Reconciliation now separates component legs, local price PnL, recorded fees,
   venue Closed-PnL allocations, and unavailable funding. Unknown/failed PIT is
   a failed LONG model leg.
@@ -172,10 +183,11 @@ failure to learn from, not strategy validation.
   and checked deploy requires explicit `--execute`.
 - Safety release `77bf04304` is deployed. The pre-fix ledgers were archived with
   verified SHA-256. The immediate post-reset reconciliation was 0/0 clean; the
-  first new-clock TAC p3 short then opened 1/1 demo-paper matched and
-  D9-confirmed, with 65.15 bps adverse demo entry slippage and no unmatched or
-  lifecycle/reason failure. Its venue TP and durable 24-hour deadline are live;
-  sniper remains absent.
+  current TAC/SKL book is 4/4 demo-paper matched with no hard model drift. Each
+  net venue symbol has a TP and every component has a durable 24-hour deadline.
+  Server stops remain off because the tested fixed-stop arms were negative;
+  this leaves tail risk and is why the registered loss-budget and granular
+  adverse-state studies remain the next evidence path.
 
 ## Current research direction
 

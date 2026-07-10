@@ -38,6 +38,13 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 ```
 
+`EXPECTED_COMMIT` accepts a unique 7-40 character hexadecimal prefix or a full
+commit ID; deploy and verify resolve it to the same full object before checking
+the checkout. For private GitHub HTTPS remotes, a local deploy automatically
+uses the authenticated `gh` credential when `GITHUB_TOKEN` is unset. Explicit
+`GITHUB_TOKEN` remains supported and takes precedence. The credential travels
+over SSH stdin for the fetch only and is not printed or persisted on the VPS.
+
 The script refuses a dirty VPS checkout, forces the configured remote URL,
 resets the deploy branch to `origin/main`, runs focused runtime tests, checks
 the promoted strategy constants, backs up `/etc/liquidity-migration/bybit-demo.env`,
@@ -48,6 +55,11 @@ and prints active systemd state plus non-secret entry-profile settings. The veri
 script is read-only and checks the same commit, strategy constants, Telegram chat ID,
 systemd unit settings, and sleeve active/enabled state without
 pulling or restarting.
+When a continuous sleeve is enabled, deploy validates its residual-momentum
+gate before restart. It runs the refresh oneshot only when a gate is
+missing/stale or the gate build/validation code changed; healthy current gates
+are retained. Validation still fails closed unless the explicit
+`ALLOW_EMPTY_RMOM_GATE=1` first-boot override is set.
 Both scripts wait briefly before checking service activity so a process that
 dies immediately after startup does not produce a false pass. Override with
 `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.

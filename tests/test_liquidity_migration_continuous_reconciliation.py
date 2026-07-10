@@ -229,9 +229,17 @@ def test_continuous_forward_readiness_paper_only_skips_demo_gate(tmp_path: Path)
     assert payload["summary"]["demo_rebalance_ok"] is None
     assert payload["summary"]["paper_operational_ok"] is True
     assert payload["summary"]["demo_operational_ok"] is None
+    assert payload["summary"]["paired"] is None
+    assert payload["summary"]["paper_only"] is None
+    assert payload["summary"]["demo_only"] is None
+    assert payload["summary"]["sample_warning"] is None
     assert payload["demo_rebalance"] is None
     assert payload["demo_operational"] is None
     assert payload["paper_demo"] is None
+    assert "demo rebalance ok: `n/a`" in payload["report"]
+    assert "demo operational ok: `n/a`" in payload["report"]
+    assert "paired trades: `n/a`" in payload["report"]
+    assert "sample warning: `n/a`" in payload["report"]
     assert "skipped: `paper_only_mode`" in payload["report"]
 
 

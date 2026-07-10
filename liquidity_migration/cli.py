@@ -919,18 +919,28 @@ def _cmd_continuous_forward_readiness(args: argparse.Namespace, config: Research
             demo_strategy_id=args.demo_strategy_id,
         )
         summary = payload["summary"]
+        paired = summary["paired"] if summary["paired"] is not None else "n/a"
+        paper_only = summary["paper_only"] if summary["paper_only"] is not None else "n/a"
+        demo_only = summary["demo_only"] if summary["demo_only"] is not None else "n/a"
+        sample_warning = summary["sample_warning"] if summary["sample_warning"] is not None else "n/a"
+        demo_rebalance_ok = (
+            summary["demo_rebalance_ok"] if summary["demo_rebalance_ok"] is not None else "n/a"
+        )
+        demo_operational_ok = (
+            summary["demo_operational_ok"] if summary["demo_operational_ok"] is not None else "n/a"
+        )
         print(
             "continuous forward readiness "
             f"ok={payload['ok']} "
             f"paper_only_mode={summary['paper_only_mode']} "
             f"paper_rebalance_ok={summary['paper_rebalance_ok']} "
-            f"demo_rebalance_ok={summary['demo_rebalance_ok']} "
+            f"demo_rebalance_ok={demo_rebalance_ok} "
             f"paper_operational_ok={summary['paper_operational_ok']} "
-            f"demo_operational_ok={summary['demo_operational_ok']} "
-            f"paired={summary['paired']} "
-            f"paper_only={summary['paper_only']} "
-            f"demo_only={summary['demo_only']} "
-            f"sample_warning={summary['sample_warning']} "
+            f"demo_operational_ok={demo_operational_ok} "
+            f"paired={paired} "
+            f"paper_only={paper_only} "
+            f"demo_only={demo_only} "
+            f"sample_warning={sample_warning} "
             f"start_ts_ms={summary.get('start_ts_ms') or '-'} "
             f"strategy_profile={summary.get('strategy_profile') or '-'} "
             f"paper_strategy_id={summary.get('paper_strategy_id') or '-'} "

@@ -1576,6 +1576,9 @@ def run_continuous_rebalance_cycle_audit(
 
 
 def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
+    def display_optional(value: Any) -> str:
+        return "n/a" if value is None else str(value)
+
     summary = payload["summary"]
     paper_summary = payload["paper_rebalance"]["result"]["summary"]
     demo_rebalance = payload.get("demo_rebalance")
@@ -1604,13 +1607,13 @@ def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
         "",
         f"- paper-only mode: `{summary['paper_only_mode']}`",
         f"- paper rebalance ok: `{summary['paper_rebalance_ok']}`",
-        f"- demo rebalance ok: `{summary['demo_rebalance_ok']}`",
+        f"- demo rebalance ok: `{display_optional(summary['demo_rebalance_ok'])}`",
         f"- paper operational ok: `{summary['paper_operational_ok']}`",
-        f"- demo operational ok: `{summary['demo_operational_ok']}`",
-        f"- paired trades: `{summary['paired']}`",
-        f"- sample warning: `{summary['sample_warning']}`",
-        f"- paper-only trades: `{summary['paper_only']}`",
-        f"- demo-only trades: `{summary['demo_only']}`",
+        f"- demo operational ok: `{display_optional(summary['demo_operational_ok'])}`",
+        f"- paired trades: `{display_optional(summary['paired'])}`",
+        f"- sample warning: `{display_optional(summary['sample_warning'])}`",
+        f"- paper-only trades: `{display_optional(summary['paper_only'])}`",
+        f"- demo-only trades: `{display_optional(summary['demo_only'])}`",
         f"- no unmatched required: `{summary['require_no_unmatched']}`",
         f"- start_ts_ms: `{summary.get('start_ts_ms') or ''}`",
         f"- start_utc: `{summary.get('start_utc') or ''}`",
@@ -1768,10 +1771,10 @@ def run_continuous_forward_readiness(
     demo_operational = None
     paper_demo = None
     rec_summary: dict[str, Any] = {
-        "paired": 0,
-        "paper_only": 0,
-        "demo_only": 0,
-        "sample_warning": False,
+        "paired": None,
+        "paper_only": None,
+        "demo_only": None,
+        "sample_warning": None,
         "min_pairs_warning_threshold": min_pairs_warning,
     }
     if require_demo:
@@ -1845,10 +1848,10 @@ def run_continuous_forward_readiness(
         "demo_rebalance_ok": demo_rebalance_ok,
         "paper_operational_ok": bool(paper_operational["result"]["ok"]),
         "demo_operational_ok": demo_operational_ok,
-        "paired": int(rec_summary["paired"]),
-        "paper_only": int(rec_summary["paper_only"]),
-        "demo_only": int(rec_summary["demo_only"]),
-        "sample_warning": bool(rec_summary.get("sample_warning")),
+        "paired": int(rec_summary["paired"]) if require_demo else None,
+        "paper_only": int(rec_summary["paper_only"]) if require_demo else None,
+        "demo_only": int(rec_summary["demo_only"]) if require_demo else None,
+        "sample_warning": bool(rec_summary.get("sample_warning")) if require_demo else None,
         "min_pairs_warning_threshold": int(rec_summary.get("min_pairs_warning_threshold", min_pairs_warning)),
         "require_no_unmatched": bool(require_no_unmatched),
         "start_ts_ms": start_ts_ms,

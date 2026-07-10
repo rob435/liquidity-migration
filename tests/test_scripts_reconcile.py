@@ -9,7 +9,9 @@ Findings covered:
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -26,6 +28,37 @@ def _load(name: str, rel: str):
 
 reconcile = _load("reconcile_b15", "scripts/reconcile.py")
 continuous_signal_check = _load("continuous_signal_check_b15", "scripts/continuous_demo_signal_check.py")
+
+
+def test_reconcile_shell_accepts_quick_flag_in_any_position(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    venv_bin = repo / ".venv" / "bin"
+    scripts.mkdir(parents=True)
+    venv_bin.mkdir(parents=True)
+    wrapper = scripts / "reconcile.sh"
+    wrapper.write_text((REPO / "scripts" / "reconcile.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    fake_python = venv_bin / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" >\"$CAPTURE\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    capture = tmp_path / "args"
+
+    subprocess.run(
+        ["bash", str(wrapper), "--dry-run", "--quick", "--sleeves", "long"],
+        env={**os.environ, "CAPTURE": str(capture)},
+        check=True,
+        timeout=10,
+    )
+
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        str(scripts / "reconcile.py"),
+        "--dry-run",
+        "--sleeves",
+        "long",
+    ]
 
 
 def test_summarize_leg_passes_only_on_clean_leg() -> None:
@@ -60,25 +93,31 @@ def test_summarize_leg_flags_missing_summary_as_failed_not_no_output() -> None:
 def test_continuous_signal_check_exits_nonzero_on_hard_miss() -> None:
     assert continuous_signal_check._signal_check_exit_code(
         checked=3,
-        off_decile=1,
+        hard_off_decile=1,
         no_panel=0,
     ) == 1
     assert continuous_signal_check._signal_check_exit_code(
         checked=3,
-        off_decile=0,
+        hard_off_decile=0,
         no_panel=1,
-    ) == 1
+    ) == 0
+
+
+def test_continuous_signal_check_treats_d8_as_soft_boundary() -> None:
+    assert continuous_signal_check._classify_decile(9) == "hit"
+    assert continuous_signal_check._classify_decile(8) == "near"
+    assert continuous_signal_check._classify_decile(7) == "hard"
 
 
 def test_continuous_signal_check_allows_empty_or_clean_windows() -> None:
     assert continuous_signal_check._signal_check_exit_code(
         checked=0,
-        off_decile=0,
+        hard_off_decile=0,
         no_panel=0,
     ) == 0
     assert continuous_signal_check._signal_check_exit_code(
         checked=3,
-        off_decile=0,
+        hard_off_decile=0,
         no_panel=0,
     ) == 0
 
@@ -154,7 +193,10 @@ def test_reconcile_continuous_runs_paper_demo_gate() -> None:
             if "reconcile-continuous-paper-demo" in joined:
                 return 1, "continuous paper-demo reconciliation paper_only=1 hard_failures=paper_only=1\n"
             if "continuous_demo_signal_check.py" in joined:
-                return 0, "SUMMARY: 0/0 confirmed D9 at signal bar; 0 off-decile; 0 no-panel-row.\n"
+                return 0, (
+                    "SUMMARY: 0/0 confirmed D9 at signal bar; 0 near-decile (≥D8); "
+                    "0 hard off-decile (≤D7); 0 no-panel-row.\n"
+                )
             raise AssertionError(f"unexpected command: {cmd}")
 
     step = FakeStep()

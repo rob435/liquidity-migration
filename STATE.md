@@ -10,20 +10,27 @@ This is the live operating page. Durable research decisions are in
 
 | Sleeve | Mode | Current state |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | Base sleeve stays on; sniper is retired; safety release is pending deploy |
-| `LongV11aDivWeekendVol` | Bybit demo + paper | On; one small ADA forward pair exposed timing/exit skew |
+| `continuous_ensemble_v2` | Bybit demo + paper | Base sleeve and safety release are live; sniper is retired; four TAC/SKL rows are 4/4 matched |
+| `LongV11aDivWeekendVol` | Bybit demo + paper | On and currently flat; the earlier ADA pair remains historical execution-skew evidence |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
-- Direct Bybit checks after the 1000TAGUSDT incident found zero positions and
-  zero open orders.
+- Direct Bybit snapshot at `2026-07-10T08:48Z`: two open shorts, `$161.13`
+  venue exposure and `-$6.78` uPnL. SKLUSDT is 23,136 units at `-$6.97`;
+  TACUSDT is 8,000 units at `+$0.18`. LONG and the hedge ledger are flat.
 - The safety runtime release rooted at `77bf04304` is deployed and independently
   verified; follow-up operator-only changes do not alter the trading object.
-- First clean-window entry: TACUSDT p3 short opened at
-  `2026-07-10T02:00:00Z`, 8,000 units at 0.004117. It has a paper twin, venue
-  TP at 0.003647, and durable planned exit at `2026-07-11T02:00:00Z`. Quick
-  reconciliation is 1/1 paired, D9-confirmed, with 65.15 bps adverse demo entry
-  slippage and no unmatched/status/reason failure. Sniper remains absent.
+- Post-reset book: TACUSDT p3 opened at `2026-07-10T02:00:00Z`; SKLUSDT p3,
+  p4p3, and p4p5 opened at `2026-07-10T06:00:00Z`. All four have paper twins,
+  one venue TP per net symbol (TAC `0.003647`, SKL `0.00469`), and durable
+  24-hour exits at `2026-07-11T02:00:00Z` / `06:00:00Z`. No server-side stop
+  is configured: that is deliberate but leaves gap/tail risk until a registered
+  sizing or adverse-state treatment earns deployment. Sniper remains absent.
+- Quick reconciliation is 4/4 paired with no unmatched, status, or exit-reason
+  divergence; mean adverse demo entry slippage is 129.80 bps (worst 170.73).
+  TAC replays as D9. SKL is a visible D8 boundary warning on the later live
+  snapshot, but the independent full-PIT plane confirms it and both planes show
+  zero hard (D7-or-lower) drift.
 - The Bybit depth and liquidation collectors are active and fresh. They are
   forward context/shadow data, not historical alpha evidence.
 - An external liveness dead-man URL is still not provisioned. The on-box timer
@@ -100,10 +107,10 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
 The forensic window was archived as
 `data/_archive/ledger-reset-20260710T015456Z-tail-safety-20260710.tar.gz`
 (SHA-256 `a4c5bf5df0338f7f320004d51e16cc932d2ceac5867e8a7fe7c36b1670e2c076`).
-The immediate post-reset reconcile was 0/0 clean for both sleeves. The TAC p3
-pair above then opened on the new clock; LONG remains 0/0 and CONTINUOUS is now
-1/1 clean. The account is intentionally no longer flat while that tracked demo
-position is open.
+The immediate post-reset reconcile was 0/0 clean for both sleeves. The four
+TAC/SKL rows above then opened on the new clock; LONG remains 0/0 and
+CONTINUOUS is now 4/4 clean. The account is intentionally no longer flat while
+those tracked demo positions are open.
 
 ## Long v11a research read
 

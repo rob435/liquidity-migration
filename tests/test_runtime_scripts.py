@@ -98,6 +98,118 @@ def test_verify_vps_serializes_remote_values_without_shell_injection(tmp_path: P
     assert [part.decode() for part in decoded] == list(values.values())
 
 
+def test_deploy_uses_local_gh_token_without_exposing_it(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "ssh-stdin"
+    gh_args = tmp_path / "gh-args"
+    sentinel = tmp_path / "injected"
+    token = f"ghp_test token;$(touch {sentinel})'"
+
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\ncat >\"$CAPTURE\"\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$*\" >\"$GH_ARGS_CAPTURE\"\n"
+        "printf '%s\\n' \"$GH_TOKEN_SENTINEL\"\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CAPTURE": str(capture),
+        "GH_ARGS_CAPTURE": str(gh_args),
+        "GH_TOKEN_SENTINEL": token,
+    }
+    env.pop("GITHUB_TOKEN", None)
+
+    result = subprocess.run(
+        ["bash", str(DEPLOY_SH)],
+        env=env,
+        check=True,
+        timeout=10,
+        capture_output=True,
+        text=True,
+    )
+
+    assert gh_args.read_text(encoding="utf-8").strip() == "auth token --hostname github.com"
+    assert "authenticated local gh credential" in result.stdout
+    assert token not in result.stdout
+    assert token not in result.stderr
+    assert not sentinel.exists()
+
+    prelude = tmp_path / "prelude.sh"
+    prelude.write_text("\n".join(capture.read_text().splitlines()[:8]) + "\n")
+    decoded = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail; source "$1"; printf "%s" "$GITHUB_TOKEN"',
+            "_",
+            str(prelude),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert decoded == token
+    assert not sentinel.exists()
+
+
+def test_verify_vps_accepts_unique_abbreviated_commit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", "test"], cwd=repo, check=True)
+    full_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "ssh-stdin"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\ncat >\"$CAPTURE\"\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CAPTURE": str(capture),
+        "REPO_DIR": str(repo),
+        "EXPECTED_COMMIT": full_sha[:8],
+        "SYSTEMD_SETTLE_SECONDS": "0",
+    }
+    subprocess.run(["bash", str(VERIFY_SH)], env=env, check=True, timeout=10)
+
+    remote_lines = capture.read_text(encoding="utf-8").splitlines()
+    python_marker = remote_lines.index("if [ -x .venv/bin/python ]; then")
+    commit_check = "\n".join(remote_lines[:python_marker]) + "\n"
+    result = subprocess.run(
+        ["bash"],
+        input=commit_check,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_reconcile_shell_exports_utf8_python_io() -> None:
     text = (REPO_ROOT / "scripts" / "reconcile.sh").read_text(encoding="utf-8")
 
@@ -203,6 +315,45 @@ def test_continuous_forward_readiness_parser_defaults() -> None:
     assert args2.strategy_profile == "continuous_ensemble_v2"
     assert args2.paper_strategy_id == "continuous_fade_v2_paper"
     assert args2.demo_strategy_id == "continuous_fade_v2"
+
+
+def test_continuous_forward_readiness_cli_prints_na_for_skipped_demo(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    from liquidity_migration import cli
+
+    args = cli.build_parser().parse_args(["continuous-forward-readiness", "--paper-only"])
+    payload = {
+        "ok": True,
+        "summary": {
+            "paper_only_mode": True,
+            "paper_rebalance_ok": True,
+            "demo_rebalance_ok": None,
+            "paper_operational_ok": True,
+            "demo_operational_ok": None,
+            "paired": None,
+            "paper_only": None,
+            "demo_only": None,
+            "sample_warning": None,
+            "start_ts_ms": None,
+            "strategy_profile": "",
+            "paper_strategy_id": "",
+            "demo_strategy_id": "",
+        },
+        "report_path": str(tmp_path / "report.md"),
+    }
+    monkeypatch.setattr(cli, "run_continuous_forward_readiness", lambda *args, **kwargs: payload)
+
+    assert cli._cmd_continuous_forward_readiness(args, None, tmp_path) == 0  # type: ignore[arg-type]
+    output = capsys.readouterr().out
+    assert "demo_rebalance_ok=n/a" in output
+    assert "demo_operational_ok=n/a" in output
+    assert "paired=n/a" in output
+    assert "paper_only=n/a" in output
+    assert "demo_only=n/a" in output
+    assert "sample_warning=n/a" in output
 
 
 def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
@@ -748,17 +899,32 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "cont.entry_btc_risk_tail_mult == 0.35" in text
     assert "c[0]: c[3] for c in cont.ensemble_components" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_LOSS_PCT=0'" in text
-    # The deploy must SEED the rmom gate (start the oneshot service), not just enable the
-    # daily timer — else a fresh deploy starts the continuous daemon into an empty gate and
-    # blacks out until 00:20 UTC (the 2026-06-02 incident). Seed must run BEFORE the
-    # continuous daemon restart so the parquet exists when it starts; empty-gate WARN is fail-safe.
+    # Deploy must seed missing/stale gates (or rebuild after relevant code changes),
+    # but must not spend minutes rebuilding identical healthy state on every deploy.
+    # Any required seed still runs before the continuous daemons restart.
     assert "systemctl start liquidity-migration-continuous-rmom-refresh.service" in text
+    assert 'git diff --quiet "$previous_commit" HEAD --' in text
+    assert 'if [ "$_rmom_needs_seed" -eq 1 ]; then' in text
+    assert "skipping seed" in text
+    for rmom_dependency in (
+        "pyproject.toml",
+        "requirements.lock",
+        "deploy/systemd/liquidity-migration-continuous-rmom-refresh.service",
+        "scripts/run_continuous_rmom_refresh.sh",
+        "scripts/precompute_residual_momentum.py",
+        "scripts/check_residual_momentum_gate.py",
+        "liquidity_migration/_common.py",
+        "liquidity_migration/risk_model.py",
+        "liquidity_migration/daily_feature_panel.py",
+        "liquidity_migration/storage.py",
+    ):
+        assert rmom_dependency in text
     first_continuous_restart = min(
         text.index("systemctl restart liquidity-migration-bybit-continuous-demo.service"),
         text.index("systemctl restart liquidity-migration-bybit-continuous-paper.service"),
     )
     assert text.index("systemctl start liquidity-migration-continuous-rmom-refresh.service") < first_continuous_restart
-    assert "rmom gate is EMPTY, provisional-only, or stale after seed" in text
+    assert "rmom gate is EMPTY, provisional-only, or stale after deploy gate check" in text
     assert "scripts/check_residual_momentum_gate.py" in text
     assert "ALLOW_EMPTY_RMOM_GATE" in text
     # Reboot-safety invariant (audit 2026-06-02 #51): the risk service (the single
