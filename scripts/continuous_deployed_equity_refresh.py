@@ -346,6 +346,7 @@ def instrument_inputs(
     panel: pl.DataFrame,
     *,
     data_root: Path | None = None,
+    strict_coverage: bool = False,
 ) -> tuple[dict[int, float], dict[int, float]]:
     p = (
         panel.filter(pl.col("symbol") == symbol).sort("d")
@@ -373,7 +374,55 @@ def instrument_inputs(
     if missing:
         print(f"[{venue}] {symbol} funding coverage: {len(days) - missing}/{len(days)} days; "
               f"{missing} defaulted to zero", flush=True)
+    if strict_coverage:
+        missing_returns = sorted(set(int(day) for day in days) - set(rets))
+        missing_funding = sorted(set(int(day) for day in days) - set(fund))
+        if missing_returns or missing_funding:
+            def _sample(values: list[int]) -> list[str]:
+                return [
+                    dt.datetime.fromtimestamp(value / 1000, tz=dt.timezone.utc).date().isoformat()
+                    for value in values[:5]
+                ]
+
+            raise RuntimeError(
+                f"strict {venue} {symbol} hedge coverage failed: "
+                f"missing_return_days={len(missing_returns)} sample={_sample(missing_returns)}; "
+                f"missing_funding_days={len(missing_funding)} sample={_sample(missing_funding)}"
+            )
     return rets, fund
+
+
+def _assert_size_lookup_complete(
+    *,
+    trades_path: Path,
+    size_mult_lookup: dict[tuple[str, int], float],
+) -> None:
+    """Refuse the research-only BTC-risk path when any executed key defaulted to 1.
+
+    The underlying engine deliberately keeps a backwards-compatible ``1.0``
+    default for general callers. Registered experiments need a stricter contract:
+    every executed treatment row must have been scored by its own endogenous
+    decision tape.
+    """
+    if not trades_path.exists():
+        raise FileNotFoundError(f"strict BTC-risk lookup check needs {trades_path}")
+    trades = pl.read_csv(trades_path)
+    if trades.is_empty():
+        return
+    required = {"symbol", "entry_signal_ts_ms"}
+    if not required.issubset(trades.columns):
+        raise RuntimeError(f"strict BTC-risk lookup check missing columns {required - set(trades.columns)}")
+    missing = sorted(
+        {
+            (str(symbol), int(signal_ts))
+            for symbol, signal_ts in trades.select("symbol", "entry_signal_ts_ms").iter_rows()
+            if (str(symbol), int(signal_ts)) not in size_mult_lookup
+        }
+    )
+    if missing:
+        raise RuntimeError(
+            f"strict BTC-risk lookup missing {len(missing)} executed decision key(s); sample={missing[:5]}"
+        )
 
 
 def component_report_matches_window(
@@ -637,6 +686,7 @@ def write_continuous_equity_report(
     component_take_profit_pct: float | None,
     btc_risk_sizing: bool,
     backtest_leverage: float,
+    market_data_end_date: str | None = None,
 ) -> None:
     payloads = _component_report_payloads(output_root, venue)
     component_rows = _component_report_rows(payloads)
@@ -658,6 +708,7 @@ def write_continuous_equity_report(
         "output_dir": str(out_dir),
         "start_date": start_date,
         "end_date": end_date,
+        "market_data_end_date": market_data_end_date or end_date,
         "window": stats_1x.get("window"),
         "component_take_profit_pct": inferred_tp,
         "btc_trend_gate": btc_trend_gate,
@@ -722,6 +773,7 @@ def write_continuous_equity_report(
             f"Data root: {data_root}",
             f"Window: {stats_1x.get('window')}",
             f"End date: {end_date}",
+            f"Market/exit data end date: {market_data_end_date or end_date}",
             "",
             "## Method",
             "",
@@ -796,6 +848,7 @@ def run_components(
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
     config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
     write_candidate_tape: bool = False,
+    strict_size_lookup: bool = False,
 ) -> dict[str, Any]:
     data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
@@ -844,6 +897,13 @@ def run_components(
                 candidate_tape_path=candidate_tape_path,
             )
             resumed = False
+        if strict_size_lookup:
+            if size_mult_lookup is None:
+                raise ValueError("strict_size_lookup requires size_mult_lookup")
+            _assert_size_lookup_complete(
+                trades_path=cell_dir / "continuous_trades.csv",
+                size_mult_lookup=size_mult_lookup,
+            )
         meta[component] = {
             "config_hash": payload["config_hash"],
             "n_trades": payload["n_trades"],
@@ -950,9 +1010,23 @@ def run_venue(
     config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
     write_candidate_tape: bool = False,
     btc_risk_lookup_root: Path | None = None,
+    exit_data_end_date: str | None = None,
+    strict_hedge_coverage: bool = False,
+    strict_btc_risk_lookup: bool = False,
+    isolate_research_state: bool = False,
 ) -> dict[str, Any]:
     out_dir = output_root / venue
     out_dir.mkdir(parents=True, exist_ok=True)
+    if exit_data_end_date is not None and exit_data_end_date < end_date:
+        raise ValueError("exit_data_end_date must be >= the signal end_date")
+    market_data_end_date = exit_data_end_date or end_date
+    if isolate_research_state:
+        # This process-local cache is keyed by config/root path, not root content.
+        # Registered runs fingerprint roots externally and clear it between every
+        # cell/venue so an in-place root refresh cannot reuse stale prepared inputs.
+        from liquidity_migration import continuous_events as _continuous_events
+
+        _continuous_events._RESEARCH_INPUT_CACHE.clear()
     effective_config_transform = _combined_config_transform(config_transform, btc_trend_gate=btc_trend_gate)
     if render_only:
         if btc_trend_gate is not None:
@@ -961,7 +1035,7 @@ def run_venue(
         if not csv_path.exists():
             raise FileNotFoundError(f"--render-only needs an existing {csv_path}")
         df = pl.read_csv(csv_path).select(["ts_ms", "basket_return", "equity"])
-        panel = load_extended_panel(venue, end_date=end_date, root=data_root)
+        panel = load_extended_panel(venue, end_date=market_data_end_date, root=data_root)
         venue_summary: dict[str, Any] = {}
     else:
         size_lookup = None
@@ -1001,6 +1075,7 @@ def run_venue(
             size_mult_lookup=size_lookup,
             config_transform=effective_config_transform,
             write_candidate_tape=write_candidate_tape,
+            strict_size_lookup=strict_btc_risk_lookup,
         )
         pieces = {}
         for component in WINNER_WEIGHTS:
@@ -1009,9 +1084,15 @@ def run_venue(
             comp, _n, _cfg = load_continuous_component_source(refreshed, venue)
             pieces[component] = comp
         combined = combine_continuous_components(pieces, WINNER_WEIGHTS)
-        panel = load_extended_panel(venue, end_date=end_date, root=data_root)
-        btc_ret, btc_fund = instrument_inputs(venue, combined.days, "BTCUSDT", panel, data_root=data_root)
-        eth_ret, eth_fund = instrument_inputs(venue, combined.days, "ETHUSDT", panel, data_root=data_root)
+        panel = load_extended_panel(venue, end_date=market_data_end_date, root=data_root)
+        btc_ret, btc_fund = instrument_inputs(
+            venue, combined.days, "BTCUSDT", panel,
+            data_root=data_root, strict_coverage=strict_hedge_coverage,
+        )
+        eth_ret, eth_fund = instrument_inputs(
+            venue, combined.days, "ETHUSDT", panel,
+            data_root=data_root, strict_coverage=strict_hedge_coverage,
+        )
         df = apply_rebalance_rule(
             combined, winner_rule(), ContinuousHedgeRule(90, 60, 2.0 * float(backtest_leverage), 5.0),
             btc_ret, btc_fund, eth_ret, eth_fund,
@@ -1024,6 +1105,10 @@ def run_venue(
             "component_take_profit_pct": component_take_profit_pct,
             "btc_risk_sizing": btc_risk_meta,
             "backtest_leverage": backtest_leverage,
+            "signal_end_date": end_date,
+            "market_data_end_date": market_data_end_date,
+            "strict_hedge_coverage": strict_hedge_coverage,
+            "strict_btc_risk_lookup": strict_btc_risk_lookup,
         }
     raw_klines = (
         panel.filter(pl.col("symbol") == "BTCUSDT")
@@ -1035,7 +1120,7 @@ def run_venue(
     )
     render_curves(
         venue, out_dir=out_dir, df=df, raw_klines=raw_klines,
-        end_date=end_date, venue_summary=venue_summary,
+        end_date=market_data_end_date, venue_summary=venue_summary,
         monthly_trades=monthly_trade_counts(output_root=output_root, venue=venue),
         leverage=chart_leverage,
         backtest_leverage=backtest_leverage,
@@ -1055,6 +1140,7 @@ def run_venue(
         component_take_profit_pct=component_take_profit_pct,
         btc_risk_sizing=btc_risk_sizing,
         backtest_leverage=backtest_leverage,
+        market_data_end_date=market_data_end_date,
     )
     return venue_summary
 

@@ -143,6 +143,74 @@ def test_component_report_match_checks_tp_and_gross_exposure() -> None:
     )
 
 
+def test_strict_btc_risk_lookup_refuses_executed_default(tmp_path: Path) -> None:
+    path = tmp_path / "continuous_trades.csv"
+    pl.DataFrame(
+        {"symbol": ["AAAUSDT"], "entry_signal_ts_ms": [1_700_000_000_000]}
+    ).write_csv(path)
+
+    with pytest.raises(RuntimeError, match="missing 1 executed decision key"):
+        refresh._assert_size_lookup_complete(trades_path=path, size_mult_lookup={})
+
+
+def test_strict_hedge_inputs_refuse_missing_returns_and_funding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    day = 86_400_000
+    days = [1_700_006_400_000, 1_700_006_400_000 + day]
+    panel = pl.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "d": [pl.Series(["2023-11-14"]).str.to_date()[0]],
+            "close": [35_000.0],
+        }
+    )
+    monkeypatch.setattr(refresh, "funding_root", lambda venue, data_root=None: tmp_path / "funding")
+
+    with pytest.raises(RuntimeError, match="strict bybit BTCUSDT hedge coverage failed"):
+        refresh.instrument_inputs(
+            "bybit", days, "BTCUSDT", panel,
+            data_root=tmp_path, strict_coverage=True,
+        )
+
+
+def test_run_venue_isolation_clears_process_research_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from liquidity_migration import continuous_events
+
+    continuous_events._RESEARCH_INPUT_CACHE[("stale", "hash", "fcfs", 1)] = {"stale": True}
+    out = tmp_path / "out"
+    venue_dir = out / "bybit"
+    venue_dir.mkdir(parents=True)
+    pl.DataFrame(
+        {"ts_ms": [1_700_000_000_000], "basket_return": [0.0], "equity": [1.0]}
+    ).write_csv(venue_dir / "continuous_equity.csv")
+    panel = pl.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "date": ["2023-11-14"],
+            "d": [pl.Series(["2023-11-14"]).str.to_date()[0]],
+            "close": [35_000.0],
+            "turnover_quote": [1_000_000.0],
+        }
+    )
+    monkeypatch.setattr(refresh, "load_extended_panel", lambda *args, **kwargs: panel)
+    monkeypatch.setattr(refresh, "render_curves", lambda *args, **kwargs: None)
+    monkeypatch.setattr(refresh, "write_continuous_equity_report", lambda *args, **kwargs: None)
+
+    refresh.run_venue(
+        "bybit",
+        output_root=out,
+        end_date="2023-11-15",
+        render_only=True,
+        isolate_research_state=True,
+        chart_leverage=1.0,
+    )
+
+    assert not continuous_events._RESEARCH_INPUT_CACHE
+
+
 def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path) -> None:
     output_root = tmp_path / "continuous"
     out_dir = output_root / "bybit"

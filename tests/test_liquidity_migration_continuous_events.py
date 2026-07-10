@@ -68,6 +68,7 @@ def test_panel_cache_path_is_keyed_by_feature_set(tmp_path) -> None:
     a = ContinuousEventConfig(rmom_quantile=0.33, feature_set=("rv_168h", "max_ret168"))
     b = ContinuousEventConfig(rmom_quantile=0.33, feature_set=("rv_168h", "vov"))
     assert _panel_cache_path(tmp_path, a, end_ms=0) != _panel_cache_path(tmp_path, b, end_ms=0)
+    assert "_continuous_engine_panel_v4_" in _panel_cache_path(tmp_path, a, end_ms=0).name
 
 
 def test_panel_cache_path_is_keyed_by_date_window(tmp_path) -> None:
@@ -426,6 +427,72 @@ def test_run_trades_can_skip_external_size_multiplier_before_capacity_consumptio
     assert tape[0]["selected"] is False
     assert tape[0]["reason"] == "external_size_multiplier"
     assert tape[0]["external_size_multiplier"] == pytest.approx(0.35)
+
+
+def test_run_trades_disaster_budget_caps_ex_ante_notional() -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 40))
+    entries = pl.DataFrame({
+        "symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]
+    })
+    cfg = ContinuousEventConfig(
+        max_active=5,
+        hold_hours=10,
+        entry_delay_hours=1,
+        use_funding=False,
+        gross_exposure=0.5,
+        entry_disaster_loss_budget_frac=0.001,
+        entry_disaster_shock_frac=1.0,
+    )
+    tape: list[dict[str, object]] = []
+    trades, skips = _run_trades(entries, bars, None, cfg, candidate_sink=tape)
+
+    assert trades.height == 1
+    assert trades["pre_risk_notional_weight"][0] == pytest.approx(0.1)  # .5 / max_active=5
+    assert trades["notional_weight"][0] == pytest.approx(0.001)
+    assert trades["entry_risk_size_clamped"][0] is True
+    assert skips["skipped_portfolio_heat"] == 0
+    assert tape[0]["disaster_notional_cap"] == pytest.approx(0.001)
+    assert tape[0]["risk_size_clamped"] is True
+
+
+def test_run_trades_portfolio_heat_partially_sizes_then_blocks() -> None:
+    syms = ["A", "B", "C"]
+    bars = _indexed_price_bars_by_symbol(_grid_klines(syms, 40))
+    entries = pl.DataFrame({
+        "symbol": syms,
+        "ts_ms": [0, 0, 0],
+        "composite": [0.9, 0.8, 0.7],
+        "turnover_quote": [1e6, 1e6, 1e6],
+    })
+    cfg = ContinuousEventConfig(
+        max_active=25,
+        hold_hours=10,
+        entry_delay_hours=1,
+        use_funding=False,
+        gross_exposure=0.5,
+        entry_portfolio_heat_cap_frac=0.03,
+        entry_disaster_shock_frac=1.0,
+    )
+    tape: list[dict[str, object]] = []
+    trades, skips = _run_trades(entries, bars, None, cfg, candidate_sink=tape)
+
+    assert trades.height == 2
+    assert trades["notional_weight"].sum() == pytest.approx(0.03)
+    assert trades["notional_weight"].to_list() == pytest.approx([0.02, 0.01])
+    assert skips["skipped_portfolio_heat"] == 1
+    assert [row["reason"] for row in tape] == ["selected", "selected", "portfolio_heat"]
+    assert tape[1]["portfolio_heat_after_frac"] == pytest.approx(0.03)
+
+
+def test_run_trades_default_risk_budget_is_schema_and_value_noop() -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 40))
+    entries = pl.DataFrame({
+        "symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]
+    })
+    cfg = ContinuousEventConfig(max_active=25, hold_hours=10, entry_delay_hours=1, use_funding=False)
+    trades, _ = _run_trades(entries, bars, None, cfg)
+    assert trades["notional_weight"][0] == pytest.approx(cfg.notional_weight)
+    assert "entry_risk_size_clamped" not in trades.columns
 
 
 def test_run_trades_adverse_limit_fills_after_submit_bar_only() -> None:
@@ -944,7 +1011,8 @@ def _build_synthetic_root(tmp_path, *, n_symbols: int = 26, n_bars: int = 500, i
     # residual_momentum: one row per (symbol, daily-floored ts). Spread values so the rmom-low
     # half is well-defined within each day.
     days = sorted({(start + i * MS_PER_HOUR) // MS_PER_DAY * MS_PER_DAY for i in range(n_bars)})
-    rmom_rows = [{"symbol": f"S{s:02d}", "ts_ms": d, "residual_momentum": (s % 13) * 0.001 - 0.006}
+    rmom_rows = [{"symbol": f"S{s:02d}", "ts_ms": d, "residual_momentum": (s % 13) * 0.001 - 0.006,
+                  "is_provisional": False}
                  for d in days for s in range(n_symbols)]
     pl.DataFrame(rmom_rows).write_parquet(root / "residual_momentum.parquet")
     return root, start, n_bars
@@ -1161,7 +1229,8 @@ def _build_root(tmp_path, *, n_symbols: int = 26, n_bars: int = 720, funding_8h:
 
     days = sorted({(start + i * MS_PER_HOUR) // MS_PER_DAY * MS_PER_DAY for i in range(n_bars)})
     rmom_rows = [
-        {"symbol": f"S{s:02d}", "ts_ms": d, "residual_momentum": (s % 13) * 0.001 - 0.006}
+        {"symbol": f"S{s:02d}", "ts_ms": d, "residual_momentum": (s % 13) * 0.001 - 0.006,
+         "is_provisional": False}
         for d in days
         for s in range(n_symbols)
     ]
@@ -1241,6 +1310,19 @@ def test_build_continuous_panel_raises_on_stale_rmom(tmp_path) -> None:
     )
 
     with pytest.raises(RuntimeError, match="STALE"):
+        build_continuous_panel(root, cfg, cache=False)
+
+
+def test_build_continuous_panel_rejects_legacy_rmom_without_provenance(tmp_path) -> None:
+    root, start, _ = _build_root(tmp_path, n_symbols=8, n_bars=240)
+    path = root / "residual_momentum.parquet"
+    pl.read_parquet(path).drop("is_provisional").write_parquet(path)
+    cfg = ContinuousEventConfig(
+        start_date=_iso(start + 4 * MS_PER_DAY),
+        end_date=_iso(start + 9 * MS_PER_DAY),
+    )
+
+    with pytest.raises(RuntimeError, match="is_provisional provenance"):
         build_continuous_panel(root, cfg, cache=False)
 
 

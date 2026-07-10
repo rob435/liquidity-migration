@@ -47,6 +47,7 @@ from .continuous_events import (
     _btc_trend_lookback_duration_ms,
     _entry_event_expr,
     per_symbol_timeseries_features,
+    validated_stable_residual_momentum,
 )
 from .continuous_btc_risk import (
     BTC_RISK_MIN_PRIOR,
@@ -81,6 +82,7 @@ CONTINUOUS_DEMO_PROFILES = (
 )
 CONTINUOUS_RISK_EVENTS_FILE = "continuous_risk_events.jsonl"
 CONTINUOUS_LIFECYCLE_EVENTS_FILE = "continuous_lifecycle_events.jsonl"
+CONTINUOUS_EQUITY_STATE_FILE = "continuous_account_equity_state.json"
 CONTINUOUS_LIFECYCLE_STATES = (
     "SIGNAL_CREATED",
     "ENTRY_APPROVED",
@@ -944,6 +946,10 @@ def _execute_sniper_placements(
             _stop_price_for_entry(entry_price=limit_price, side="short", stop_loss_pct=demo.stop_loss_pct, tick_size=tick)
             if demo.stop_loss_pct > 0.0 else 0.0
         )
+        planned_exit_ts_ms = (
+            now_ms + exact_duration_ms(hours=demo.max_hold_hours)
+            if demo.max_hold_hours > 0 else 0
+        )
         # sniper-8: plan_continuous_sniper_orders only emits plans with a positive
         # signal_ts (it skips the unrecoverable 0 case), so the link's encoded ts always
         # matches the base trade_id's. A defensive skip (not a now_ms default that would
@@ -979,6 +985,7 @@ def _execute_sniper_placements(
                     "reduce_only": False, "submit_mode": "preflight", "status": "submitted",
                     "trade_side": "short", "sleeve": continuous_sleeve_name(demo),
                     "signal_ts_ms": signal_ts, "stop_price": stop_price, "reason": SNIPER_REASON,
+                    "planned_exit_ts_ms": planned_exit_ts_ms,
                     "base_trade_id": str(plan.get("base_trade_id", "")),
                 })
             try:
@@ -1006,6 +1013,7 @@ def _execute_sniper_placements(
             "trade_side": "short", "signal_ts_ms": signal_ts, "tick_size": tick,
             "qty_step": _float(plan.get("qty_step")), "stop_price": stop_price,
             "stop_loss_pct": demo.stop_loss_pct, "error": error,
+            "planned_exit_ts_ms": planned_exit_ts_ms,
             "sleeve": continuous_sleeve_name(demo), "reason": SNIPER_REASON,
             "limit_price": limit_price, "base_trade_id": str(plan.get("base_trade_id", "")),
         })
@@ -1076,10 +1084,13 @@ def reconcile_continuous_snipes(
     1. FILLS: a resting snipe no longer on the venue's open-order book is resolved via
        order history — executed qty becomes an OPEN short trade row (first-class: the
        normal exit machinery manages it from here), else a terminal cancel marker.
-    2. CANCELS: a still-resting snipe whose BASE trade is no longer open is cancelled
-       (the wick window died with the base thesis).
-    3. BASE-EXIT: an open snipe TRADE whose base trade closed is planned for exit
+    2. CANCELS: a still-resting snipe is cancelled when its BASE trade is no longer
+       open (the wick window died with the base thesis), or whenever sniper placement
+       has been disabled (an operational rollback must remove old adverse-add risk).
+    3. EXITS: an open snipe TRADE whose base trade closed is planned for exit
        (reason ``base_exited``) — the research form's exit-with-base semantics.
+       Disabling sniper exposure instead plans every open or newly discovered
+       filled snipe for immediate exit (reason ``sniper_disabled``).
     Dry-run mode does the bookkeeping without client calls.
     """
     open_base_ids: set[str] = set()
@@ -1123,8 +1134,9 @@ def reconcile_continuous_snipes(
         base_id = str(row.get("base_trade_id", ""))
         trade_id = str(row.get("trade_id", "")) or _sniper_trade_id(base_id)
         base_open = base_id in open_base_ids
+        cancel_needed = (not base_open) or (not demo.sniper_enabled)
         if str(row.get("submit_mode")) != "submitted" or trading_client is None:
-            if not base_open:  # dry-run bookkeeping: retire the planned snipe with its base
+            if cancel_needed:  # dry-run bookkeeping mirrors the live rollback/base-exit rule
                 update_rows.append({**row, "ts_ms": now_ms, "updated_at_ms": now_ms,
                                     "status": "cancelled", "submit_mode": "dry_run"})
             continue
@@ -1134,7 +1146,7 @@ def reconcile_continuous_snipes(
             continue
         still_open = any(str(o.get("orderLinkId", "")) == link for o in open_orders)
         if still_open:
-            if not base_open:
+            if cancel_needed:
                 try:
                     trading_client.cancel_order(symbol=symbol, order_link_id=link)
                     # Do NOT terminalize on our own cancel ack: a PostOnly wick
@@ -1184,6 +1196,18 @@ def reconcile_continuous_snipes(
                 "symbol": symbol, "side": "short", "sleeve": continuous_sleeve_name(demo),
                 "status": "open", "ts_ms": exec_ts, "entry_ts_ms": exec_ts, "opened_at_ms": exec_ts,
                 "updated_at_ms": now_ms, "signal_ts_ms": int(_float(row.get("signal_ts_ms")) or exec_ts),
+                # A snipe exits with its BASE, so inherit the durable deadline
+                # stamped when the base/limit was created. Starting a fresh 24h
+                # clock at a late wick fill would knowingly outlive the thesis.
+                # Legacy order rows lacked the field; only those fall back to a
+                # fill-relative cap.
+                "planned_exit_ts_ms": (
+                    int(_float(row.get("planned_exit_ts_ms")))
+                    or (
+                        exec_ts + exact_duration_ms(hours=demo.max_hold_hours)
+                        if demo.max_hold_hours > 0 else 0
+                    )
+                ),
                 "entry_price": avg_price, "qty": _decimal_text(Decimal(str(exec_qty))),
                 "notional_usdt": abs(avg_price * exec_qty),
                 "equity_usdt": equity_by_trade_id.get(base_id) or fallback_equity,
@@ -1211,11 +1235,23 @@ def reconcile_continuous_snipes(
         # Leave the row as-is and re-resolve next cycle; never terminalize without
         # evidence. known_trade_ids dedup makes the eventual terminal booking idempotent.
 
-    snipe_exit_plans = [
-        {**t, "exit_reason": "base_exited", "exit_trigger_ts_ms": now_ms}
-        for t in open_snipe_trades
-        if str(t.get("base_trade_id", "")) not in open_base_ids
-    ]
+    snipe_exit_plans: list[dict[str, Any]] = []
+    for t in open_snipe_trades:
+        base_closed = str(t.get("base_trade_id", "")) not in open_base_ids
+        if not demo.sniper_enabled or base_closed:
+            snipe_exit_plans.append({
+                **t,
+                "exit_reason": "sniper_disabled" if not demo.sniper_enabled else "base_exited",
+                "exit_trigger_ts_ms": now_ms,
+            })
+    # A fill can become terminal between the open-order and history reads in
+    # this same OFF cycle. Book it and unwind it now instead of knowingly
+    # carrying the just-discovered adverse add for another daemon interval.
+    if not demo.sniper_enabled:
+        snipe_exit_plans.extend(
+            {**t, "exit_reason": "sniper_disabled", "exit_trigger_ts_ms": now_ms}
+            for t in fill_rows
+        )
     return fill_rows, update_rows, snipe_exit_plans
 
 
@@ -1988,18 +2024,26 @@ def _continuous_account_drawdown_fields(
     current_equity_usdt: float,
     config: ContinuousDemoCycleConfig,
     current_snapshot_ok: bool,
+    prior_high_water_usdt: float = 0.0,
 ) -> dict[str, Any]:
     threshold = max(float(config.entry_account_drawdown_kill_switch_frac or 0.0), 0.0)
-    high_water = 0.0
+    high_water = max(float(prior_high_water_usdt or 0.0), 0.0)
     if not cycles.is_empty() and "equity_usdt" in cycles.columns:
         frame = cycles.filter(pl.col("equity_usdt").is_not_null() & (pl.col("equity_usdt") > 0.0))
         if "wallet_error" in frame.columns:
             frame = frame.filter(pl.col("wallet_error").fill_null("") == "")
         if not frame.is_empty():
-            high_water = float(frame["equity_usdt"].max() or 0.0)
+            high_water = max(high_water, float(frame["equity_usdt"].max() or 0.0))
+    if current_snapshot_ok and current_equity_usdt > 0.0:
+        high_water = max(high_water, float(current_equity_usdt))
+    has_drawdown_values = high_water > 0.0 and current_equity_usdt > 0.0
+    # A fallback/cached equity can still provide a useful diagnostic fraction,
+    # but it is not a newly observed account drawdown. Dashboards must not
+    # certify stale fallback values during a wallet outage as healthy evidence.
+    observed = current_snapshot_ok and has_drawdown_values
     drawdown_frac = (
         (float(current_equity_usdt) / high_water) - 1.0
-        if high_water > 0.0 and current_equity_usdt > 0.0
+        if has_drawdown_values
         else 0.0
     )
     tripped = (
@@ -2013,8 +2057,45 @@ def _continuous_account_drawdown_fields(
         "entry_account_drawdown_kill_switch_frac": threshold,
         "entry_account_equity_high_water_usdt": high_water,
         "entry_account_drawdown_frac": drawdown_frac,
+        "entry_account_drawdown_observed": observed,
         "entry_account_drawdown_kill_switch_tripped": tripped,
     }
+
+
+def _read_continuous_equity_high_water(root: Path) -> float:
+    path = root / CONTINUOUS_EQUITY_STATE_FILE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return 0.0
+    return max(float(finite_float(payload.get("high_water_usdt"), default=0.0) or 0.0), 0.0)
+
+
+def _write_continuous_equity_high_water(
+    root: Path,
+    *,
+    high_water_usdt: float,
+    current_equity_usdt: float,
+    now_ms: int,
+) -> None:
+    """Persist a one-row equity state so DD telemetry does not require scanning
+    hundreds of thousands of minute-cycle rows on every pass."""
+    if high_water_usdt <= 0.0 or current_equity_usdt <= 0.0:
+        return
+    path = root / CONTINUOUS_EQUITY_STATE_FILE
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "high_water_usdt": float(high_water_usdt),
+                "current_equity_usdt": float(current_equity_usdt),
+                "updated_at_ms": int(now_ms),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
 
 
 def _continuous_entry_risk_health(
@@ -2498,6 +2579,11 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         failed_fade_loss_pct=0.0,
         failed_fade_min_mfe_pct=0.0,
         breakeven_arm_pct=0.0,
+        # The live-only adverse-add experiment is retired after its first
+        # material forward loss. Pin it OFF in the frozen profile itself so an
+        # alternate launcher or stale environment flag cannot re-arm exposure;
+        # any future test belongs in a distinct research profile.
+        sniper_enabled=False,
         # Component take-profit target: 12%. Bybit liked the wider TP; Binance
         # drawdown/MAR rejected it as broad proof, so keep the caveat in the
         # decision log.
@@ -3659,6 +3745,10 @@ def _execute_continuous_entries(
                 float(Decimal(str(round(raw_tp / tick_size))) * Decimal(str(tick_size))) if tick_size > 0 else raw_tp
             )
         signal_ts_ms = int(cand.get("signal_ts_ms") or now_ms)
+        planned_exit_ts_ms = (
+            now_ms + exact_duration_ms(hours=demo.max_hold_hours)
+            if demo.max_hold_hours > 0 else 0
+        )
         reentry_seq = int(cand.get("reentry_seq") or 0)
         trade_id = _continuous_trade_id(strategy_id, symbol, signal_ts_ms, reentry_seq)
         link_prefix = _continuous_entry_link_prefix(demo)
@@ -3690,6 +3780,7 @@ def _execute_continuous_entries(
                                       "sleeve": continuous_sleeve_name(demo),
                                       "component": component, "component_weight": component_weight,
                                       "equity_usdt": equity_usdt,
+                                      "planned_exit_ts_ms": planned_exit_ts_ms,
                                       "btc_risk_arm_id": cand.get("btc_risk_arm_id", ""),
                                       "btc_risk_score": cand.get("btc_risk_score"),
                                       "btc_risk_stack_mult": btc_risk_multiplier,
@@ -3737,6 +3828,7 @@ def _execute_continuous_entries(
                 "trade_id": trade_id, "strategy_id": strategy_id, "symbol": symbol, "side": "short",
                 "sleeve": continuous_sleeve_name(demo),
                 "status": "open", "ts_ms": now_ms, "entry_ts_ms": now_ms, "opened_at_ms": now_ms, "updated_at_ms": now_ms,
+                "planned_exit_ts_ms": planned_exit_ts_ms,
                 "signal_ts_ms": signal_ts_ms, "entry_price": entry_price, "qty": entry_qty or qty,
                 "notional_usdt": filled_notional if demo.submit_orders else actual_notional, "equity_usdt": equity_usdt,
                 "entry_leverage": demo.entry_leverage, "tick_size": tick_size, "qty_step": qty_step,
@@ -3766,6 +3858,7 @@ def _execute_continuous_entries(
             "avg_price": entry_price if filled_qty > 0 else 0.0, "fee_usdt": entry_fee, "exec_time_ms": entry_exec_time_ms,
             "notional_usdt": filled_notional, "status": order_status, "trade_side": "short", "signal_ts_ms": signal_ts_ms,
             "equity_usdt": equity_usdt, "tick_size": tick_size, "qty_step": qty_step, "stop_price": stop_price,
+            "planned_exit_ts_ms": planned_exit_ts_ms,
             "stop_loss_pct": stop_loss_pct, "error": error, "sleeve": continuous_sleeve_name(demo),
             # component/component_weight ride the ORDER row so the pending-fill
             # reconciler's recovered trade keeps its ensemble sizing — a recovered
@@ -3811,7 +3904,9 @@ def _load_rmom_table(root: Path) -> pl.DataFrame | None:
     if not path.exists():
         return None
     try:
-        return pl.read_parquet(path).rename({"ts_ms": "day_ts"})
+        table = pl.read_parquet(path)
+        table = validated_stable_residual_momentum(table, source=path)
+        return table.rename({"ts_ms": "day_ts"})
     except Exception as exc:  # noqa: BLE001 - a corrupt rmom file must DEGRADE, not crash the cycle
         # A partially-written/corrupt parquet (mid-write crash, disk issue) or a
         # schema drift (missing ts_ms) would otherwise raise out of the cycle,
@@ -4285,7 +4380,15 @@ def run_continuous_demo_cycle(
         # cover that, and the legacy pre-bucket monolith is included by
         # read_ledger_window until it ages out. A full-history read here grew
         # without bound (~525k rows/yr) inside the cycle's hot path.
-        needs_cycle_window = demo.daily_rebalance_enabled or demo.entry_account_drawdown_kill_switch_frac > 0.0
+        prior_equity_high_water = _read_continuous_equity_high_water(root)
+        # Seed the O(1) high-water state from existing cycle history once. After
+        # that, the disabled DD gate still reports truthful drawdown telemetry
+        # without turning every minute into an eight-month ledger scan.
+        needs_cycle_window = (
+            demo.daily_rebalance_enabled
+            or demo.entry_account_drawdown_kill_switch_frac > 0.0
+            or prior_equity_high_water <= 0.0
+        )
         all_cycles = (
             read_ledger_window(root, cycles_dataset, months_back=8)
             if needs_cycle_window
@@ -4311,12 +4414,27 @@ def run_continuous_demo_cycle(
             snapshot.get(name)
             for name in ("wallet_error", "open_order_error", "position_error")
         )
+        # Equity high-water is sourced solely from the wallet endpoint. A
+        # simultaneous open-order/position probe failure must still block new
+        # entries, but it must not discard a healthy new wallet peak and thereby
+        # understate future account drawdown.
+        wallet_snapshot_ok = not bool(snapshot.get("wallet_error"))
         account_drawdown_fields = _continuous_account_drawdown_fields(
             all_cycles,
             current_equity_usdt=equity_usdt,
             config=demo,
-            current_snapshot_ok=snapshot_ok,
+            current_snapshot_ok=wallet_snapshot_ok,
+            prior_high_water_usdt=prior_equity_high_water,
         )
+        if wallet_snapshot_ok:
+            _write_continuous_equity_high_water(
+                root,
+                high_water_usdt=float(
+                    account_drawdown_fields["entry_account_equity_high_water_usdt"] or 0.0
+                ),
+                current_equity_usdt=equity_usdt,
+                now_ms=cycle_now_ms,
+            )
         entry_risk_health = _continuous_entry_risk_health(
             config=demo,
             snapshot=snapshot,
@@ -4430,28 +4548,33 @@ def run_continuous_demo_cycle(
         snipe_exits: list[dict[str, Any]] = []
         snipe_exit_orders: list[dict[str, Any]] = []
         sniper_orders: list[dict[str, Any]] = []
-        if demo.sniper_enabled:
-            snipe_fills, snipe_updates, snipe_exit_plans = reconcile_continuous_snipes(
-                all_trades, all_orders, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms,
-                account_equity_usdt=equity_usdt)
-            if snipe_fills:
-                all_trades = _upsert_rows(all_trades, snipe_fills, key="trade_id")
+        # Always manage orders/trades created while sniper was previously armed.
+        # `sniper_enabled=False` means "place no NEW adverse adds"; it must not
+        # orphan a resting PostOnly order or an already-filled snipe. The old
+        # caller gate disabled both creation and cleanup, so an operational
+        # rollback could leave venue risk unmanaged until the order happened to
+        # fill or expire (sniper-disable-1, 2026-07-10).
+        snipe_fills, snipe_updates, snipe_exit_plans = reconcile_continuous_snipes(
+            all_trades, all_orders, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms,
+            account_equity_usdt=equity_usdt)
+        if snipe_fills:
+            all_trades = _upsert_rows(all_trades, snipe_fills, key="trade_id")
+            if demo.submit_orders or demo.record_dry_run:
+                cycle_trade_rows.extend(snipe_fills)
+            held_symbols |= {str(r["symbol"]) for r in snipe_fills}
+        if snipe_updates and (demo.submit_orders or demo.record_dry_run):
+            cycle_order_rows.extend(snipe_updates)
+        if snipe_exit_plans:
+            snipe_exits, snipe_exit_orders = _execute_continuous_exits(
+                snipe_exit_plans, all_trades, trading_client=trading_client, demo=demo,
+                now_ms=cycle_now_ms, execution_event_router=execution_event_router,
+                record_preflight=preflight_cb, price_by_symbol=price_by_symbol)
+            if snipe_exits:
+                all_trades = _upsert_rows(all_trades, snipe_exits, key="trade_id")
                 if demo.submit_orders or demo.record_dry_run:
-                    cycle_trade_rows.extend(snipe_fills)
-                held_symbols |= {str(r["symbol"]) for r in snipe_fills}
-            if snipe_updates and (demo.submit_orders or demo.record_dry_run):
-                cycle_order_rows.extend(snipe_updates)
-            if snipe_exit_plans:
-                snipe_exits, snipe_exit_orders = _execute_continuous_exits(
-                    snipe_exit_plans, all_trades, trading_client=trading_client, demo=demo,
-                    now_ms=cycle_now_ms, execution_event_router=execution_event_router,
-                    record_preflight=preflight_cb, price_by_symbol=price_by_symbol)
-                if snipe_exits:
-                    all_trades = _upsert_rows(all_trades, snipe_exits, key="trade_id")
-                    if demo.submit_orders or demo.record_dry_run:
-                        cycle_trade_rows.extend(snipe_exits)
-                if snipe_exit_orders and (demo.submit_orders or demo.record_dry_run):
-                    cycle_order_rows.extend(snipe_exit_orders)
+                    cycle_trade_rows.extend(snipe_exits)
+            if snipe_exit_orders and (demo.submit_orders or demo.record_dry_run):
+                cycle_order_rows.extend(snipe_exit_orders)
 
         # Entries: fresh D9 shorts (not held, not in a live position/order, not in re-entry cooldown),
         # age-eligible, capacity-bounded.

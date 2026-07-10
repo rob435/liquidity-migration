@@ -14,6 +14,8 @@ owner action and a fresh evidence pack.
 - [docs/research_summary.md](docs/research_summary.md) - compact decision log.
 - [docs/promoted_trading_logic.md](docs/promoted_trading_logic.md) - active
   profile lifecycle and runtime env boundary.
+- [docs/operations.md](docs/operations.md) - one safe entry point for VPS,
+  reconciliation, equity, research, tests, reset, and deploy operations.
 - [docs/preregistration/INDEX.md](docs/preregistration/INDEX.md) - active
   anchors and closed research arcs.
 

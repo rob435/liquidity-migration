@@ -53,10 +53,57 @@ def test_deploy_verify_require_unit_env_matches_unit_files() -> None:
             )
 
 
+def test_verify_vps_serializes_remote_values_without_shell_injection(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "ssh-stdin"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\ncat >\"$CAPTURE\"\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    sentinel = tmp_path / "injected"
+    values = {
+        "REPO_DIR": f"/tmp/o'hare; touch {sentinel}; #",
+        "EXPECTED_COMMIT": f"abc$(touch {sentinel})'def",
+        "EXPECTED_TELEGRAM_CHAT_ID": "id with spaces;false",
+        "SYSTEMD_SETTLE_SECONDS": "0",
+    }
+    env = {
+        **os.environ,
+        **values,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CAPTURE": str(capture),
+    }
+
+    subprocess.run(["bash", str(VERIFY_SH)], env=env, check=True, timeout=10)
+
+    assert not sentinel.exists()
+    prelude = tmp_path / "prelude.sh"
+    prelude.write_text("\n".join(capture.read_text().splitlines()[:4]) + "\n")
+    decoded = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail; source "$1"; printf "%s\\0%s\\0%s\\0%s" '
+            '"$REPO_DIR" "$EXPECTED_COMMIT" "$EXPECTED_TELEGRAM_CHAT_ID" '
+            '"$SYSTEMD_SETTLE_SECONDS"',
+            "_",
+            str(prelude),
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout.split(b"\0")
+    assert [part.decode() for part in decoded] == list(values.values())
+
+
 def test_reconcile_shell_exports_utf8_python_io() -> None:
     text = (REPO_ROOT / "scripts" / "reconcile.sh").read_text(encoding="utf-8")
 
     assert 'PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"' in text
+    quick = (REPO_ROOT / "scripts" / "reconcile.py").read_text(encoding="utf-8")
+    assert 'p.add_argument("--sleeves", default="long,continuous"' in quick
 
 
 def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
@@ -244,6 +291,7 @@ def test_reconcile_continuous_uses_forward_readiness_gate() -> None:
     assert '"--demo-strategy-id", demo_strategy_id' in text
     assert '"--min-pairs-warning", "0"' in text
     assert '"--root", paper' in text
+    assert '"--market-root", demo' in text
     assert '"--trades-dataset", "continuous_fade_paper_trades"' in text
 
 
@@ -277,9 +325,10 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
         assert "CTRL_BTC_RISK_70_90_35" in text
     demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service").read_text(encoding="utf-8")
     paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service").read_text(encoding="utf-8")
-    # sniper armed on the DEMO unit only (paper is a no-order shadow)
-    assert "Environment=CONTINUOUS_SNIPER=1" in demo_text
-    assert "CONTINUOUS_SNIPER=1" not in paper_text
+    # 2026-07-10 risk rollback: demo-only adverse adds are explicitly off on
+    # both units until new two-venue + forward evidence earns reactivation.
+    assert "Environment=CONTINUOUS_SNIPER=0" in demo_text
+    assert "Environment=CONTINUOUS_SNIPER=0" in paper_text
     # 2f hedge submit armed (demo-only; runner enforces demo credentials + confirm flag)
     hedge_text = (repo / "deploy" / "systemd" / "liquidity-migration-continuous-hedge.service").read_text(encoding="utf-8")
     assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in hedge_text
@@ -709,7 +758,8 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
         text.index("systemctl restart liquidity-migration-bybit-continuous-paper.service"),
     )
     assert text.index("systemctl start liquidity-migration-continuous-rmom-refresh.service") < first_continuous_restart
-    assert "rmom gate is EMPTY after seed" in text
+    assert "rmom gate is EMPTY, provisional-only, or stale after seed" in text
+    assert "scripts/check_residual_momentum_gate.py" in text
     assert "ALLOW_EMPTY_RMOM_GATE" in text
     # Reboot-safety invariant (audit 2026-06-02 #51): the risk service (the single
     # reconcile authority that tracks the continuous sleeve's positions) must come
@@ -1174,111 +1224,631 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "--property=Environment --value" in text
 
 
-def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Path) -> None:
-    """scripts/reset_demo_paper_ledgers.sh must (a) preview without touching
-    anything under --dry-run, and (b) archive-then-wipe ONLY the trade/order/
-    cycle ledgers while preserving the WS kline stores (wiping those would force
-    a slow multi-day re-bootstrap)."""
-    import shutil
-    import subprocess
+_LEDGER_RESET_ACTIVE_UNITS = (
+    "liquidity-migration-bybit-risk.service",
+    "liquidity-migration-bybit-long-demo.service",
+    "liquidity-migration-bybit-long-paper.service",
+    "liquidity-migration-bybit-continuous-demo.service",
+    "liquidity-migration-bybit-continuous-paper.service",
+    "liquidity-migration-continuous-rmom-refresh.timer",
+    "liquidity-migration-continuous-hedge.timer",
+    "liquidity-migration-combined-book-report.timer",
+    "liquidity-migration-demo-liveness.timer",
+)
 
-    if shutil.which("bash") is None:
-        pytest.skip("bash unavailable")
 
-    repo = Path(__file__).resolve().parents[1]
-    script = repo / "scripts" / "reset_demo_paper_ledgers.sh"
+def _ledger_reset_harness(
+    tmp_path: Path,
+    *,
+    real_money: str = "false",
+    account_guard_rc: int = 0,
+    active_units: tuple[str, ...] = _LEDGER_RESET_ACTIVE_UNITS,
+) -> tuple[Path, Path, dict[str, str], Path]:
+    """Create deterministic systemctl/account guards around the VPS-only script."""
+    (tmp_path / "liquidity_migration").mkdir(exist_ok=True)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    state = tmp_path / "systemctl.state"
+    state.write_text("".join(f"{unit}\n" for unit in active_units), encoding="utf-8")
+    log = tmp_path / "systemctl.log"
 
-    # Synthetic repo root: the safety check requires liquidity_migration/ + data/.
-    (tmp_path / "liquidity_migration").mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        """#!/usr/bin/env bash
+cmd="$1"
+shift
+printf '%s %s\\n' "$cmd" "$*" >> "$SYSTEMCTL_LOG"
+case "$cmd" in
+  show)
+    unit="$1"
+    if [[ "$*" == *"--property=EnvironmentFiles"* ]]; then
+      env_file="$FAKE_SYSTEMD_ENV_FILE"
+      if [[ "${FAKE_SYSTEMD_ENV_MISMATCH_UNIT:-}" == "$unit" ]]; then
+        env_file="$FAKE_SYSTEMD_ENV_MISMATCH_FILE"
+      fi
+      printf '%s (ignore_errors=no)\n' "$env_file"
+      if [[ "${FAKE_SYSTEMD_EXTRA_ENV_UNIT:-}" == "$unit" ]]; then
+        printf '%s (ignore_errors=no)\n' "$FAKE_SYSTEMD_EXTRA_ENV_FILE"
+      fi
+    elif [[ "$*" == *"--property=Environment"* ]]; then
+      printf '%s\n' "${FAKE_SYSTEMD_DIRECT_ENVIRONMENT:-}"
+    else
+      echo loaded
+    fi
+    ;;
+  is-active)
+    [[ "${1:-}" == "--quiet" ]] && shift
+    grep -Fqx "$1" "$SYSTEMCTL_STATE"
+    ;;
+  stop)
+    for unit in "$@"; do
+      grep -Fxv "$unit" "$SYSTEMCTL_STATE" > "$SYSTEMCTL_STATE.tmp" || true
+      mv "$SYSTEMCTL_STATE.tmp" "$SYSTEMCTL_STATE"
+    done
+    ;;
+  start)
+    for unit in "$@"; do
+      if [[ -n "${FAKE_START_WAIT_FILE:-}" && \
+            "${FAKE_START_WAIT_UNIT:-}" == "$unit" ]]; then
+        while [[ ! -e "$FAKE_START_WAIT_FILE" ]]; do
+          sleep 0.02
+        done
+      fi
+      grep -Fqx "$unit" "$SYSTEMCTL_STATE" || echo "$unit" >> "$SYSTEMCTL_STATE"
+    done
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    # The production script runs an embedded Python demo-account flat check.
+    # A fake interpreter keeps this unit test offline while preserving the
+    # subprocess ordering and failure/recovery behaviour.
+    python = fake_bin / "python3"
+    python.write_text(
+        """#!/usr/bin/env bash
+if [[ "${1:-}" == "-c" ]]; then
+  exec "$REAL_PYTHON" "$@"
+fi
+cat >/dev/null
+if [[ "${FAKE_ACCOUNT_GUARD_RC:-0}" == "0" ]]; then
+  echo "  demo-account-flat-ok positions=0 open_orders=0"
+  exit 0
+fi
+echo "ERROR: synthetic demo account is not flat" >&2
+exit "$FAKE_ACCOUNT_GUARD_RC"
+""",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+
+    env_file = tmp_path / "bybit-demo.env"
+    env_file.write_text(
+        f"DEMO=true\nREAL_MONEY={real_money}\n"
+        "BYBIT_DEMO_API_KEY=fake\nBYBIT_DEMO_API_SECRET=fake\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("REAL_MONEY", None)
+    env.update(
+        {
+            "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+            "SYSTEMCTL_BIN": str(systemctl),
+            "SYSTEMCTL_STATE": str(state),
+            "SYSTEMCTL_LOG": str(log),
+            "FAKE_ACCOUNT_GUARD_RC": str(account_guard_rc),
+            "FAKE_SYSTEMD_ENV_FILE": str(env_file),
+            "REAL_PYTHON": sys.executable,
+            "LEDGER_RESET_LOCK_FILE": str(tmp_path / "ledger-reset.lock"),
+            "LEDGER_RESET_SETTLE_SECONDS": "0",
+        }
+    )
+    script = REPO_ROOT / "scripts" / "reset_demo_paper_ledgers.sh"
+    return script, env_file, env, log
+
+
+def test_reset_demo_paper_ledgers_is_dry_run_by_default_and_execute_is_archival(
+    tmp_path: Path,
+) -> None:
+    import tarfile
+
+    script, env_file, env, log = _ledger_reset_harness(tmp_path)
     ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
     cycles = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_cycles"
-    klines = tmp_path / "data" / "bybit-long-demo-event" / "event_demo_klines_1h"  # must survive
-    for d in (ledger, cycles, klines):
-        d.mkdir(parents=True)
-        (d / "part.parquet").write_bytes(b"x")
+    klines = tmp_path / "data" / "bybit-long-demo-event" / "event_demo_klines_1h"
+    cache = tmp_path / "data" / "bybit-long-demo-event" / ".cache"
+    reports = tmp_path / "data" / "bybit-long-demo-event" / "reports"
+    for directory in (ledger, cycles, klines, cache, reports):
+        directory.mkdir(parents=True)
+        (directory / "part.parquet").write_bytes(b"x")
 
-    # --dry-run touches nothing.
-    dry = subprocess.run(
-        ["bash", str(script), "--dry-run"], cwd=tmp_path, capture_output=True, text=True, timeout=10
-    )
-    assert dry.returncode == 0, dry.stderr
-    assert "long_native_demo_trades" in dry.stdout
-    assert ledger.exists() and cycles.exists() and klines.exists()
-    assert not (tmp_path / "data" / "_archive").exists()
-
-    # Real run: archive created, ledgers gone, kline store preserved.
-    real = subprocess.run(
-        ["bash", str(script)], cwd=tmp_path, capture_output=True, text=True, timeout=10
-    )
-    assert real.returncode == 0, real.stderr
-    assert not ledger.exists(), "trade ledger must be wiped"
-    assert not cycles.exists(), "cycle ledger must be wiped"
-    assert klines.exists(), "WS kline store must be preserved"
-    archives = list((tmp_path / "data" / "_archive").glob("ledger-reset-*.tar.gz"))
-    assert len(archives) == 1, f"expected one archive tarball, got {archives}"
-
-
-def test_reset_demo_paper_ledgers_covers_continuous_sleeve(tmp_path: Path) -> None:
-    """The continuous-fade sleeve is still covered by the reset —
-    omitting it would leave stale continuous trades that contaminate the clean pre/post
-    forward-demo split on a strategy overhaul (audit 2026-06-02 #10)."""
-    import shutil
-    import subprocess
-
-    if shutil.which("bash") is None:
-        pytest.skip("bash unavailable")
-
-    repo = Path(__file__).resolve().parents[1]
-    script = repo / "scripts" / "reset_demo_paper_ledgers.sh"
-
-    (tmp_path / "liquidity_migration").mkdir()
-    cont = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_trades"
-    cont_klines = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_klines_1h"
-    for d in (cont, cont_klines):
-        d.mkdir(parents=True)
-        (d / "part.parquet").write_bytes(b"x")
-
-    real = subprocess.run(["bash", str(script)], cwd=tmp_path, capture_output=True, text=True, timeout=10)
-    assert real.returncode == 0, real.stderr
-    assert not cont.exists(), "continuous trade ledger must be wiped"
-    assert cont_klines.exists(), "continuous WS kline store must be preserved"
-
-
-def test_reset_demo_paper_ledgers_can_reset_continuous_only(tmp_path: Path) -> None:
-    import shutil
-    import subprocess
-
-    if shutil.which("bash") is None:
-        pytest.skip("bash unavailable")
-
-    repo = Path(__file__).resolve().parents[1]
-    script = repo / "scripts" / "reset_demo_paper_ledgers.sh"
-
-    (tmp_path / "liquidity_migration").mkdir()
-    long_ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
-    long_paper_ledger = tmp_path / "data" / "bybit-long-paper-event" / "long_native_paper_trades"
-    cont_ledger = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_trades"
-    cont_paper_ledger = tmp_path / "data" / "bybit-continuous-paper-event" / "continuous_fade_paper_trades"
-    cont_klines = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_klines_1h"
-    cont_paper_klines = tmp_path / "data" / "bybit-continuous-paper-event" / "continuous_fade_paper_klines_1h"
-    for d in (long_ledger, long_paper_ledger, cont_ledger, cont_paper_ledger, cont_klines, cont_paper_klines):
-        d.mkdir(parents=True)
-        (d / "part.parquet").write_bytes(b"x")
-
-    real = subprocess.run(
-        ["bash", str(script), "--sleeves", "continuous"],
+    preview = subprocess.run(
+        ["bash", str(script), "--sleeves", "long"],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
         timeout=10,
     )
-    assert real.returncode == 0, real.stderr
-    assert long_ledger.exists(), "continuous-only reset must not wipe long ledgers"
-    assert long_paper_ledger.exists(), "continuous-only reset must not wipe long paper ledgers"
-    assert not cont_ledger.exists(), "continuous ledger must be wiped"
-    assert not cont_paper_ledger.exists(), "continuous paper ledger must be wiped"
-    assert cont_klines.exists(), "continuous WS kline store must be preserved"
-    assert cont_paper_klines.exists(), "continuous paper WS kline store must be preserved"
+    assert preview.returncode == 0, preview.stderr
+    assert "mode: dry-run" in preview.stdout.lower()
+    assert "no services or files were changed" in preview.stdout
+    assert ledger.exists() and cycles.exists() and klines.exists()
+    assert cache.exists() and reports.exists()
+    assert not log.exists(), "dry-run must not even query or stop systemd units"
+    assert not (tmp_path / "data" / "_archive").exists()
+
+    # systemd may expose the canonical path while an operator supplies a safe
+    # symlink alias. The account-binding guard compares resolved paths.
+    env_alias = tmp_path / "bybit-demo-alias.env"
+    env_alias.symlink_to(env_file)
+
+    executed = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--execute",
+            "--sleeves",
+            "long",
+            "--env-file",
+            str(env_alias),
+            "--label",
+            "exit-overhaul",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert executed.returncode == 0, executed.stderr
+    assert not ledger.exists() and not cycles.exists()
+    assert klines.exists(), "root-level market data must be preserved"
+    assert cache.exists(), "cache removal requires --include-caches"
+    assert reports.exists(), "report removal requires --include-reports"
+    archives = list((tmp_path / "data" / "_archive").glob("ledger-reset-*-exit-overhaul.tar.gz"))
+    assert len(archives) == 1
+    digest = archives[0].with_name(archives[0].name + ".sha256")
+    assert digest.exists()
+    assert archives[0].name in digest.read_text(encoding="utf-8")
+    with tarfile.open(archives[0]) as archive:
+        names = archive.getnames()
+    assert "ledger-reset-manifest.txt" in names
+    assert any(name.startswith("data/bybit-long-demo-event/long_native_demo_trades") for name in names)
+
+    systemctl_log = log.read_text(encoding="utf-8")
+    assert "stop liquidity-migration-bybit-long-demo.service" in systemctl_log
+    assert "stop liquidity-migration-bybit-continuous-demo.service" in systemctl_log
+    assert "stop liquidity-migration-bybit-risk.service" in systemctl_log
+    assert "start liquidity-migration-bybit-risk.service" in systemctl_log
+    assert "is-active --quiet liquidity-migration-bybit-risk.service" in systemctl_log
+    assert "service state: restored" in executed.stdout
+
+
+@pytest.mark.parametrize("via_symlink", [False, True])
+def test_reset_demo_paper_ledgers_refuses_archive_inside_reset_target_after_canonicalization(
+    tmp_path: Path,
+    via_symlink: bool,
+) -> None:
+    script, _env_file, env, log = _ledger_reset_harness(tmp_path)
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+    if via_symlink:
+        alias = tmp_path / "archive-alias"
+        alias.symlink_to(ledger, target_is_directory=True)
+        archive_dir = alias / "_archive"
+    else:
+        archive_dir = Path(
+            "data/bybit-long-demo-event/./long_native_demo_trades/_archive"
+        )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--sleeves",
+            "long",
+            "--archive-dir",
+            str(archive_dir),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "--archive-dir must be outside reset targets" in result.stderr
+    assert ledger.exists()
+    assert not log.exists(), "containment refusal must precede all systemd access"
+
+
+def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_is_opt_in(
+    tmp_path: Path,
+) -> None:
+    import tarfile
+
+    script, env_file, env, _ = _ledger_reset_harness(tmp_path)
+    long_ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    continuous_ledger = (
+        tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_trades"
+    )
+    paper_ledger = (
+        tmp_path / "data" / "bybit-continuous-paper-event" / "continuous_fade_paper_trades"
+    )
+    hedge_ledger = (
+        tmp_path / "data" / "bybit-continuous-hedge-event" / "continuous_fade_demo_trades"
+    )
+    cache = tmp_path / "data" / "bybit-continuous-demo-event" / ".cache"
+    demo_equity_state = (
+        tmp_path
+        / "data"
+        / "bybit-continuous-demo-event"
+        / "continuous_account_equity_state.json"
+    )
+    paper_equity_state = (
+        tmp_path
+        / "data"
+        / "bybit-continuous-paper-event"
+        / "continuous_account_equity_state.json"
+    )
+    demo_risk_events = continuous_ledger.parent / "continuous_risk_events.jsonl"
+    demo_lifecycle_events = continuous_ledger.parent / "continuous_lifecycle_events.jsonl"
+    demo_dynexit_shadow = continuous_ledger.parent / "continuous_dynexit_shadow.jsonl"
+    paper_risk_events = paper_ledger.parent / "continuous_risk_events.jsonl"
+    paper_lifecycle_events = paper_ledger.parent / "continuous_lifecycle_events.jsonl"
+    paper_dynexit_shadow = paper_ledger.parent / "continuous_dynexit_shadow.jsonl"
+    for directory in (long_ledger, continuous_ledger, paper_ledger, hedge_ledger, cache):
+        directory.mkdir(parents=True)
+        (directory / "part.parquet").write_bytes(b"x")
+    for events in (
+        demo_risk_events,
+        demo_lifecycle_events,
+        demo_dynexit_shadow,
+        paper_risk_events,
+        paper_lifecycle_events,
+        paper_dynexit_shadow,
+    ):
+        events.write_text('{"event":"old-forward-window"}\n', encoding="utf-8")
+    for state in (demo_equity_state, paper_equity_state):
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text('{"high_water_usdt":10039.68}', encoding="utf-8")
+
+    executed = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--execute",
+            "--sleeves",
+            "continuous",
+            "--env-file",
+            str(env_file),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert executed.returncode == 0, executed.stderr
+    assert long_ledger.exists(), "continuous-only reset must preserve long ledgers"
+    assert not continuous_ledger.exists() and not paper_ledger.exists()
+    assert not hedge_ledger.exists(), "continuous selection must include its submit-armed hedge ledger"
+    assert not demo_risk_events.exists() and not demo_lifecycle_events.exists()
+    assert not paper_risk_events.exists() and not paper_lifecycle_events.exists(), (
+        "old operational failures must not contaminate the post-reset forward window"
+    )
+    assert not demo_dynexit_shadow.exists() and not paper_dynexit_shadow.exists(), (
+        "pre-reset dynamic-exit shadow evidence must not leak into the new forward window"
+    )
+    assert cache.exists(), "cache is preserved unless explicitly selected"
+    assert demo_equity_state.exists() and paper_equity_state.exists(), (
+        "a ledger reset must not erase the account drawdown high-water risk memory"
+    )
+    archives = list((tmp_path / "data" / "_archive").glob("ledger-reset-*.tar.gz"))
+    assert len(archives) == 1
+    with tarfile.open(archives[0]) as archive:
+        names = archive.getnames()
+        manifest = archive.extractfile("ledger-reset-manifest.txt")
+        assert manifest is not None
+        manifest_text = manifest.read().decode("utf-8")
+    assert str(demo_equity_state.relative_to(tmp_path)) in names
+    assert str(paper_equity_state.relative_to(tmp_path)) in names
+    assert str(demo_risk_events.relative_to(tmp_path)) in names
+    assert str(paper_lifecycle_events.relative_to(tmp_path)) in names
+    assert str(demo_dynexit_shadow.relative_to(tmp_path)) in names
+    assert str(paper_dynexit_shadow.relative_to(tmp_path)) in names
+    assert f"preserved_risk_state={demo_equity_state.relative_to(tmp_path)}" in manifest_text
+
+    cache_reset = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--execute",
+            "--sleeves",
+            "continuous",
+            "--include-caches",
+            "--env-file",
+            str(env_file),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert cache_reset.returncode == 0, cache_reset.stderr
+    assert not cache.exists()
+    assert demo_equity_state.exists() and paper_equity_state.exists()
+
+
+def test_reset_demo_paper_ledgers_all_includes_shared_risk_compatibility_ledger(
+    tmp_path: Path,
+) -> None:
+    script, env_file, env, _ = _ledger_reset_harness(tmp_path)
+    shared_trade = tmp_path / "data" / "bybit-demo-event" / "event_demo_trades"
+    shared_order = tmp_path / "data" / "bybit-demo-event" / "event_demo_orders"
+    shared_state = tmp_path / "data" / "bybit-demo-event" / "cross_sleeve_account_state"
+    for directory in (shared_trade, shared_order, shared_state):
+        directory.mkdir(parents=True)
+        (directory / "part.parquet").write_bytes(b"x")
+
+    result = subprocess.run(
+        ["bash", str(script), "--execute", "--sleeves", "all", "--env-file", str(env_file)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not shared_trade.exists() and not shared_order.exists()
+    assert shared_state.exists(), "derived account state is not a trade ledger and stays preserved"
+    assert "shared-compat" in result.stdout
+
+
+def test_reset_demo_paper_ledgers_refuses_real_money_before_service_mutation(tmp_path: Path) -> None:
+    script, env_file, env, log = _ledger_reset_harness(tmp_path, real_money="true")
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+
+    result = subprocess.run(
+        ["bash", str(script), "--execute", "--sleeves", "long", "--env-file", str(env_file)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "REAL_MONEY='true'" in result.stderr
+    assert "demo/paper only" in result.stderr
+    assert ledger.exists()
+    assert not log.exists(), "mainnet refusal must happen before any systemd mutation"
+
+
+def test_reset_demo_paper_ledgers_refuses_concurrent_execute_before_systemd_query(
+    tmp_path: Path,
+) -> None:
+    import fcntl
+
+    script, env_file, env, log = _ledger_reset_harness(tmp_path)
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+
+    lock_path = Path(env["LEDGER_RESET_LOCK_FILE"])
+    with lock_path.open("w", encoding="utf-8") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            [
+                "bash",
+                str(script),
+                "--execute",
+                "--sleeves",
+                "long",
+                "--env-file",
+                str(env_file),
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    assert result.returncode != 0
+    assert "another demo/paper ledger reset is already executing" in result.stderr
+    assert ledger.exists()
+    assert not log.exists(), "lock contention must refuse before querying or mutating systemd"
+
+
+def test_reset_demo_paper_ledgers_refuses_systemd_env_mismatch_before_service_mutation(
+    tmp_path: Path,
+) -> None:
+    script, env_file, env, log = _ledger_reset_harness(tmp_path)
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+    other_env = tmp_path / "different-demo-account.env"
+    other_env.write_text(
+        "DEMO=true\nREAL_MONEY=false\n"
+        "BYBIT_DEMO_API_KEY=other\nBYBIT_DEMO_API_SECRET=other\n",
+        encoding="utf-8",
+    )
+    mismatch_unit = "liquidity-migration-bybit-continuous-demo.service"
+    env["FAKE_SYSTEMD_ENV_MISMATCH_UNIT"] = mismatch_unit
+    env["FAKE_SYSTEMD_ENV_MISMATCH_FILE"] = str(other_env)
+
+    result = subprocess.run(
+        ["bash", str(script), "--execute", "--sleeves", "long", "--env-file", str(env_file)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert mismatch_unit in result.stderr
+    assert "ambiguous credential environment" in result.stderr
+    assert "refusing before stopping services" in result.stderr
+    assert ledger.exists()
+    systemctl_log = log.read_text(encoding="utf-8")
+    assert f"show {mismatch_unit} --property=EnvironmentFiles --value" in systemctl_log
+    assert not any(
+        line.startswith(("stop ", "start ")) for line in systemctl_log.splitlines()
+    ), "credential-file mismatch must refuse before service mutation"
+
+
+@pytest.mark.parametrize("override_kind", ["later_file", "direct"])
+def test_reset_demo_paper_ledgers_refuses_later_credential_override(
+    tmp_path: Path,
+    override_kind: str,
+) -> None:
+    script, env_file, env, log = _ledger_reset_harness(tmp_path)
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+    unit = "liquidity-migration-bybit-long-demo.service"
+    if override_kind == "later_file":
+        override = tmp_path / "later-credentials.env"
+        override.write_text(
+            "BYBIT_DEMO_API_KEY=different\nREAL_MONEY=false\n",
+            encoding="utf-8",
+        )
+        env["FAKE_SYSTEMD_EXTRA_ENV_UNIT"] = unit
+        env["FAKE_SYSTEMD_EXTRA_ENV_FILE"] = str(override)
+    else:
+        env["FAKE_SYSTEMD_DIRECT_ENVIRONMENT"] = "BYBIT_DEMO_API_KEY=different"
+
+    result = subprocess.run(
+        ["bash", str(script), "--execute", "--sleeves", "long", "--env-file", str(env_file)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "ambiguous credential environment" in result.stderr
+    assert ledger.exists()
+    systemctl_log = log.read_text(encoding="utf-8")
+    assert not any(
+        line.startswith(("stop ", "start ")) for line in systemctl_log.splitlines()
+    )
+
+
+def test_reset_demo_paper_ledgers_lock_stays_held_during_failure_recovery_restart(
+    tmp_path: Path,
+) -> None:
+    import time
+
+    risk_unit = "liquidity-migration-bybit-risk.service"
+    script, env_file, env, log = _ledger_reset_harness(
+        tmp_path,
+        account_guard_rc=7,
+        active_units=(risk_unit,),
+    )
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+    release_restart = tmp_path / "release-restart"
+    env["FAKE_START_WAIT_FILE"] = str(release_restart)
+    env["FAKE_START_WAIT_UNIT"] = risk_unit
+
+    first = subprocess.Popen(
+        ["bash", str(script), "--execute", "--sleeves", "long", "--env-file", str(env_file)],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if log.exists() and f"start {risk_unit}" in log.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("first reset never reached its failure-recovery restart")
+
+        overlapping = subprocess.run(
+            [
+                "bash",
+                str(script),
+                "--execute",
+                "--sleeves",
+                "long",
+                "--env-file",
+                str(env_file),
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert overlapping.returncode != 0
+        assert "another demo/paper ledger reset is already executing" in overlapping.stderr
+    finally:
+        release_restart.touch()
+        first_stdout, first_stderr = first.communicate(timeout=10)
+
+    assert first.returncode != 0, first_stdout
+    assert "synthetic demo account is not flat" in first_stderr
+    assert ledger.exists()
+
+
+def test_reset_demo_paper_ledgers_flat_check_failure_restores_services_without_deleting(
+    tmp_path: Path,
+) -> None:
+    active = (
+        "liquidity-migration-bybit-risk.service",
+        "liquidity-migration-bybit-continuous-demo.service",
+    )
+    script, env_file, env, log = _ledger_reset_harness(
+        tmp_path, account_guard_rc=7, active_units=active
+    )
+    ledger = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--execute",
+            "--sleeves",
+            "continuous",
+            "--env-file",
+            str(env_file),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "synthetic demo account is not flat" in result.stderr
+    assert ledger.exists(), "flat-account guard must run before archive/removal"
+    assert not (tmp_path / "data" / "_archive").exists()
+    systemctl_log = log.read_text(encoding="utf-8")
+    assert "stop liquidity-migration-bybit-risk.service" in systemctl_log
+    assert "start liquidity-migration-bybit-risk.service" in systemctl_log
+    assert "start liquidity-migration-bybit-continuous-demo.service" in systemctl_log
 
 
 def test_unit_execstart_args_parse_against_their_script_parsers() -> None:
@@ -2205,6 +2775,7 @@ def test_paper_unit_load_bearing_paper_knobs_intact() -> None:
         ("RECORD_DRY_RUN", "1"),
         ("PAPER_MODE", "1"),
         ("STRATEGY_PROFILE", "continuous_ensemble_v2"),
+        ("CONTINUOUS_SNIPER", "0"),
         ("LEFT_DECILE_EXIT_ENABLED", "0"),
         ("STOP_APPROACH_FRAC", "0"),
         ("FAILED_FADE_HOURS", "0"),

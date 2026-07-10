@@ -34,6 +34,8 @@ from liquidity_migration.continuous_demo import (
     _continuous_entry_candidates_with_signal_metadata,
     _continuous_entry_risk_health,
     _continuous_account_drawdown_fields,
+    _read_continuous_equity_high_water,
+    _write_continuous_equity_high_water,
     _append_continuous_risk_event,
     _enforce_continuous_lifecycle_transitions,
     _continuous_lifecycle_state,
@@ -429,6 +431,8 @@ def test_execute_entries_dry_run_builds_short_rows() -> None:
     assert abs(r["notional_usdt"] - 200.0) < 1e-6        # 2% of 10k
     assert r["status"] == "open" and o["reduce_only"] is False
     assert r["sleeve"] == "continuous"                   # self-identifying for ws_risk routing
+    assert r["planned_exit_ts_ms"] == 1_700_000_000_000 + cfg.max_hold_hours * MS_PER_HOUR
+    assert o["planned_exit_ts_ms"] == r["planned_exit_ts_ms"]
     assert o["updated_at_ms"] == 1_700_000_000_000
 
 
@@ -1358,6 +1362,70 @@ def test_load_rmom_table_degrades_to_none_on_corrupt_file(tmp_path) -> None:
     assert _load_rmom_table(tmp_path) is None  # absent file unchanged
 
 
+def test_load_rmom_table_excludes_provisional_tail(tmp_path) -> None:
+    from liquidity_migration.continuous_demo import _load_rmom_table
+
+    pl.DataFrame([
+        {"symbol": "AAA", "ts_ms": MS_PER_DAY, "residual_momentum": -0.1, "is_provisional": False},
+        {"symbol": "AAA", "ts_ms": 2 * MS_PER_DAY, "residual_momentum": -0.2, "is_provisional": True},
+    ]).write_parquet(tmp_path / "residual_momentum.parquet")
+    loaded = _load_rmom_table(tmp_path)
+    assert loaded is not None
+    assert loaded.select(["symbol", "day_ts", "residual_momentum"]).to_dicts() == [
+        {"symbol": "AAA", "day_ts": MS_PER_DAY, "residual_momentum": -0.1}
+    ]
+
+
+def test_load_rmom_table_rejects_legacy_provenance(tmp_path) -> None:
+    from liquidity_migration.continuous_demo import _load_rmom_table
+
+    pl.DataFrame([
+        {"symbol": "AAA", "ts_ms": 1, "residual_momentum": -0.1},
+    ]).write_parquet(tmp_path / "residual_momentum.parquet")
+
+    assert _load_rmom_table(tmp_path) is None
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+def test_load_rmom_table_rejects_nonfinite_values(tmp_path, bad_value: float) -> None:
+    from liquidity_migration.continuous_demo import _load_rmom_table
+
+    pl.DataFrame([{
+        "symbol": "AAA",
+        "ts_ms": MS_PER_DAY,
+        "residual_momentum": bad_value,
+        "is_provisional": False,
+    }]).write_parquet(tmp_path / "residual_momentum.parquet")
+
+    assert _load_rmom_table(tmp_path) is None
+
+
+def test_load_rmom_table_rejects_duplicate_keys(tmp_path) -> None:
+    from liquidity_migration.continuous_demo import _load_rmom_table
+
+    pl.DataFrame({
+        "symbol": ["AAA", "AAA"],
+        "ts_ms": [MS_PER_DAY, MS_PER_DAY],
+        "residual_momentum": [-0.1, -0.2],
+        "is_provisional": [False, False],
+    }).write_parquet(tmp_path / "residual_momentum.parquet")
+
+    assert _load_rmom_table(tmp_path) is None
+
+
+def test_load_rmom_table_rejects_non_daily_key(tmp_path) -> None:
+    from liquidity_migration.continuous_demo import _load_rmom_table
+
+    pl.DataFrame([{
+        "symbol": "AAA",
+        "ts_ms": MS_PER_DAY + 1,
+        "residual_momentum": -0.1,
+        "is_provisional": False,
+    }]).write_parquet(tmp_path / "residual_momentum.parquet")
+
+    assert _load_rmom_table(tmp_path) is None
+
+
 def test_dataset_names_separate_from_other_sleeves() -> None:
     demo = continuous_dataset_names(ContinuousDemoCycleConfig())
     paper = continuous_dataset_names(ContinuousDemoCycleConfig(paper_mode=True))
@@ -1383,6 +1451,16 @@ def test_live_v2_ships_without_server_stop_demo_paper_only() -> None:
         execution_event_router=None)
     assert rows[0]["stop_price"] == 0.0
     assert rows[0]["stop_loss_pct"] == cfg.stop_loss_pct
+
+
+def test_live_v2_profile_cannot_rearm_retired_sniper() -> None:
+    cfg = apply_continuous_demo_profile(
+        ContinuousDemoCycleConfig(
+            strategy_profile="continuous_ensemble_v2",
+            sniper_enabled=True,
+        )
+    )
+    assert cfg.sniper_enabled is False
 
 
 def test_cycle_refreshes_btc_trend_gate_input_outside_tradable_universe(
@@ -2643,6 +2721,116 @@ def test_continuous_cycle_feeds_confirmed_entry_state_to_the_exit_planner() -> N
     assert "plan_continuous_exits(" in src
     assert "open_trades.to_dicts(), entry_state" in src, "exit planner must receive the confirmed entry_state"
     assert "open_trades.to_dicts(), live_state" not in src, "exit planner must NOT receive the live decile"
+
+
+def test_continuous_cycle_manages_old_snipes_when_new_placement_is_disabled() -> None:
+    """The cycle must always run the legacy sniper lifecycle sweep. Only the
+    placement branch may be gated by ``sniper_enabled``; otherwise a config
+    rollback can orphan resting venue orders and filled child positions."""
+    import inspect
+
+    from liquidity_migration import continuous_demo as cd
+
+    src = inspect.getsource(cd.run_continuous_demo_cycle)
+    reconcile_at = src.index("reconcile_continuous_snipes(")
+    placement_at = src.index("if demo.sniper_enabled and exec_entries:")
+
+    assert reconcile_at < placement_at
+    lifecycle_prefix = src[max(0, reconcile_at - 160):reconcile_at]
+    assert "if demo.sniper_enabled" not in lifecycle_prefix
+
+
+def test_disabled_cycle_retires_preexisting_dry_run_snipe(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime pin for sniper-disable-1: a cycle launched after the arm flag is
+    turned off still retires a pre-existing dry-run snipe whose base has closed.
+    This catches the old caller-level ``if demo.sniper_enabled`` gate; testing
+    ``reconcile_continuous_snipes`` directly would not."""
+    import liquidity_migration.continuous_demo as cd
+    from liquidity_migration.config import ResearchConfig
+    from liquidity_migration.storage import read_dataset, write_dataset
+
+    cfg = ContinuousDemoCycleConfig(
+        submit_orders=False,
+        record_dry_run=True,
+        sniper_enabled=False,
+        btc_trend_gate="off",
+    )
+    root = tmp_path / "continuous-sniper-disabled-cleanup"
+    trades_ds, orders_ds, _cycles_ds = continuous_dataset_names(cfg)
+    now = 1_700_000_000_000
+    write_dataset(
+        pl.DataFrame(
+            [{
+                "trade_id": "t1",
+                "strategy_id": continuous_strategy_id(cfg),
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "closed",
+                "entry_ts_ms": now - 2 * MS_PER_HOUR,
+                "exit_ts_ms": now - MS_PER_HOUR,
+                "entry_price": 100.0,
+                "exit_price": 95.0,
+                "qty": "1",
+                "notional_usdt": 100.0,
+                "equity_usdt": 10_000.0,
+            }],
+            infer_schema_length=None,
+        ),
+        root,
+        trades_ds,
+        partition_by=(),
+    )
+    write_dataset(
+        pl.DataFrame(
+            [{
+                "order_link_id": "lm-en-cs-AAA-old",
+                "trade_id": "t1-snipe",
+                "base_trade_id": "t1",
+                "strategy_id": continuous_strategy_id(cfg),
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "status": "resting",
+                "submit_mode": "dry_run",
+                "reason": SNIPER_REASON,
+                "ts_ms": now - 2 * MS_PER_HOUR,
+                "updated_at_ms": now - 2 * MS_PER_HOUR,
+                "signal_ts_ms": now - 3 * MS_PER_HOUR,
+                "qty": "0.25",
+                "limit_price": 108.0,
+            }],
+            infer_schema_length=None,
+        ),
+        root,
+        orders_ds,
+        partition_by=(),
+    )
+
+    monkeypatch.setattr(
+        cd,
+        "_resolve_cycle_universe",
+        lambda **_kwargs: (pl.DataFrame(), [], pl.DataFrame(), "test"),
+    )
+    monkeypatch.setattr(
+        cd,
+        "_download_recent_1h_klines",
+        lambda *_args, **_kwargs: (pl.DataFrame(), {"store_rows": 0}),
+    )
+
+    payload = cd.run_continuous_demo_cycle(
+        root,
+        config=ResearchConfig(),
+        demo_config=cfg,
+        now_ms=now,
+    )
+
+    orders = read_dataset(root, orders_ds)
+    latest = orders.filter(pl.col("order_link_id") == "lm-en-cs-AAA-old").sort("updated_at_ms").tail(1)
+    assert latest["status"][0] == "cancelled"
+    assert payload["sniper_fills"] == 0
+    assert payload["sniper_exits"] == 0
 
 
 def test_circuit_breaker_counts_fee_negative_covers_as_adverse() -> None:
@@ -4279,7 +4467,44 @@ def test_continuous_account_drawdown_kill_switch_ignores_unhealthy_current_snaps
     )
 
     assert got["entry_account_drawdown_frac"] == pytest.approx((10_000.0 / 11_000.0) - 1.0)
+    assert got["entry_account_drawdown_observed"] is False
     assert got["entry_account_drawdown_kill_switch_tripped"] is False
+
+
+def test_continuous_drawdown_telemetry_stays_observed_when_gate_is_off(tmp_path) -> None:
+    cfg = ContinuousDemoCycleConfig(
+        submit_orders=True,
+        entry_account_drawdown_kill_switch_frac=0.0,
+    )
+    _write_continuous_equity_high_water(
+        tmp_path,
+        high_water_usdt=10_039.68,
+        current_equity_usdt=10_039.68,
+        now_ms=1,
+    )
+    prior = _read_continuous_equity_high_water(tmp_path)
+    got = _continuous_account_drawdown_fields(
+        pl.DataFrame(),
+        current_equity_usdt=9_871.32,
+        config=cfg,
+        current_snapshot_ok=True,
+        prior_high_water_usdt=prior,
+    )
+    assert got["entry_account_drawdown_observed"] is True
+    assert got["entry_account_equity_high_water_usdt"] == pytest.approx(10_039.68)
+    assert got["entry_account_drawdown_frac"] == pytest.approx((9_871.32 / 10_039.68) - 1.0)
+    assert got["entry_account_drawdown_kill_switch_tripped"] is False
+
+
+def test_cycle_persists_healthy_wallet_peak_despite_other_private_probe_error() -> None:
+    import inspect
+
+    from liquidity_migration.continuous_demo import run_continuous_demo_cycle
+
+    source = inspect.getsource(run_continuous_demo_cycle)
+    assert 'wallet_snapshot_ok = not bool(snapshot.get("wallet_error"))' in source
+    assert "current_snapshot_ok=wallet_snapshot_ok" in source
+    assert "if wallet_snapshot_ok:" in source
 
 
 def test_continuous_entry_risk_health_blocks_submit_on_attributed_exchange_only_position() -> None:

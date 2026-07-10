@@ -1,7 +1,7 @@
 # Pre-Registration: Continuous Tail-Budget Control
 
 Date: 2026-07-03
-Stage: closed: rejected (2026-07-05)
+Stage: superseded, unexecuted; conceptual rejection withdrawn 2026-07-10
 Run label until proven otherwise: exploratory
 
 ## Change
@@ -237,8 +237,11 @@ Expected files:
 
 ## Result
 
-Rejected by owner review on 2026-07-05: loss-at-disaster sizing behaves as a
-fixed stop with extra steps, which the existing 20%/40%/80% fixed-stop
-falsifiers already rejected. The dispatcher was never implemented and the run
-never executed. Preregistration retained as the falsifier record; do not rerun
-without a new dated hypothesis.
+Never run. Owner review on 2026-07-05 rejected the plan by calling
+loss-at-disaster sizing a fixed stop with extra steps. That equivalence is
+methodologically wrong: an ex-ante notional cap prevents exposure before entry,
+whereas a stop exits after an adverse move and assumes a fill. Fixed-stop
+falsifiers therefore do not empirically reject ex-ante sizing. The conceptual
+rejection was withdrawn on 2026-07-10. This broad 19-cell plan remains closed
+and is superseded by the narrower, implemented
+`continuous-tail-survival-2026-07-10.md`; it is not itself a positive result.

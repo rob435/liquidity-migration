@@ -186,6 +186,16 @@ def build_adopted_trade_row(
                         "component": component_tag,
                         "component_weight": component_weight,
                     }
+        if decoded_sleeve == "continuous":
+            # The venue-position recovery path used the generic compatibility
+            # adoption hold (days), silently weakening the deployed continuous
+            # book's 24h cap after a ledger loss/rebuild. Recover the sleeve's
+            # frozen lifecycle instead so ws_risk remains an independent
+            # max-hold authority even if the continuous daemon is unavailable.
+            from .continuous_demo import ContinuousDemoCycleConfig, apply_continuous_demo_profile
+
+            continuous = apply_continuous_demo_profile(ContinuousDemoCycleConfig())
+            planned_exit_ts_ms = opened_ms + exact_duration_ms(hours=continuous.max_hold_hours)
 
         return AdoptedTradeBuildResult(
             row={

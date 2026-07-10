@@ -777,14 +777,14 @@ class BybitPrivateClient:
         no exit price and no PnL — accurate that the position is gone, but the
         ledger loses the trade outcome.
 
-        Bybit caps closed-PnL at <=200 rows/page; a symbol re-entered several
+        Bybit caps closed-PnL at <=100 rows/page; a symbol re-entered several
         times over the reconciliation lookback can exceed one page, so follow
         ``nextPageCursor`` to the end (mirrors get_funding_settlements). Without
         this the backfill could miss the actual closing record for a re-entered
         symbol (audit pass2 #6). Returns the result.list rows (empty on a missing
         endpoint); ``max_pages`` bounds the loop defensively.
         """
-        base_params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 200))}
+        base_params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 100))}
         if symbol:
             base_params["symbol"] = symbol
         if start_time_ms is not None:

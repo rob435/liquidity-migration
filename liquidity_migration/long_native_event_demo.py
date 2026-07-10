@@ -108,6 +108,8 @@ _logger = logging.getLogger("liquidity_migration.long_native_event_demo")
 LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID = "long_native_v11a_div_weekend_vol"
 LONG_DEMO_STRATEGY_PROFILES = ("LongV11aDivWeekendVol",)
 LONG_DEMO_STRATEGY_PROFILE_CHOICES = LONG_DEMO_STRATEGY_PROFILES
+LONG_REJECTION_TELEGRAM_COOLDOWN_MS = exact_duration_ms(hours=6)
+LONG_REJECTION_TELEGRAM_STATE_FILE = "long_entry_rejection_telegram_state.json"
 
 # Dataset names for the long-side ledger. Distinct from short's
 # event_demo_trades / event_demo_orders so the two sleeves don't collide.
@@ -815,7 +817,22 @@ def run_long_native_demo_cycle(
             "feature_rows": features.height if not features.is_empty() else 0,
             "latest_feature_ts_ms": _max_int(features, "ts_ms") if not features.is_empty() else 0,
             "entry_candidates": len(candidates),
+            # One durable order row is emitted for every candidate that reached
+            # the execution boundary, including local price/sizing rejections.
+            # Reservation skips never attempted an order and are reported
+            # separately below.
+            "entry_attempts": len(entry_order_rows),
             "entries_executed": len(executed_entries),
+            "entry_rejections": sum(
+                1 for row in entry_order_rows if str(row.get("status") or "") == "rejected"
+            ),
+            "entry_rejection_reasons": ",".join(
+                sorted({
+                    str(row.get("error") or "")
+                    for row in entry_order_rows
+                    if str(row.get("status") or "") == "rejected" and str(row.get("error") or "")
+                })
+            ),
             # audit2b: report the ACTUAL worker count. _execute_long_entries runs the
             # entry burst SEQUENTIALLY (max_workers/private_client_factory are reserved
             # for future parallelism, not used), so the real concurrency is always 1 —
@@ -1743,7 +1760,13 @@ def _execute_single_long_entry(
     price = price_by_symbol.get(symbol, _float(candidate.get("live_price")))
     contract = contract_by_symbol.get(symbol, {})
     if price <= 0.0:
-        return None, None
+        return None, _long_entry_rejection_order_row(
+            candidate,
+            now_ms=now_ms,
+            strategy_id=strategy_id,
+            reason="price_unavailable",
+            price=price,
+        )
     tick_size = _float(contract.get("tick_size")) or 0.0001
     qty_step = _float(contract.get("qty_step")) or 0.001
     capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity * _float(candidate.get("position_weight") or 1.0)
@@ -1778,7 +1801,18 @@ def _execute_single_long_entry(
             _float(contract.get("min_notional_value")) or "-",
             max_qty or "-",
         )
-        return None, None
+        return None, _long_entry_rejection_order_row(
+            candidate,
+            now_ms=now_ms,
+            strategy_id=strategy_id,
+            reason=(
+                "sizing_rejected:"
+                f"notional={capped_notional:.8g},price={price:.8g},qty_step={qty_step:.8g},"
+                f"min_qty={_float(contract.get('min_order_qty')):.8g},"
+                f"min_notional={_float(contract.get('min_notional_value')):.8g},max_qty={max_qty:.8g}"
+            ),
+            price=price,
+        )
     qty, actual_notional = quantity
     initial_margin_usdt = actual_notional / demo.entry_leverage
     stop_loss_pct = _float(candidate.get("stop_loss_pct"))
@@ -1791,6 +1825,10 @@ def _execute_single_long_entry(
     )
     entry_link = _long_order_link_id(
         LONG_ENTRY_LINK_PREFIX, symbol=symbol, signal_ts_ms=int(candidate["signal_ts_ms"])
+    )
+    planned_exit_ts_ms = int(
+        candidate.get("planned_exit_ts_ms")
+        or (now_ms + exact_duration_ms(days=candidate.get("max_hold_days") or 3))
     )
 
     order_result: dict[str, Any] = {}
@@ -1854,6 +1892,7 @@ def _execute_single_long_entry(
                         take_profit_price=take_profit_price,
                         stop_loss_pct=stop_loss_pct,
                         take_profit_pct=take_profit_pct,
+                        planned_exit_ts_ms=planned_exit_ts_ms,
                     )
                 )
             try:
@@ -1926,11 +1965,6 @@ def _execute_single_long_entry(
 
     entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
     filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
-    planned_exit_ts_ms = int(
-        candidate.get("planned_exit_ts_ms")
-        or (now_ms + exact_duration_ms(days=candidate.get("max_hold_days") or 3))
-    )
-
     trade_row: dict[str, Any] | None = None
     if not demo.submit_orders or filled_qty > 0.0:
         trade_row = {
@@ -2013,6 +2047,7 @@ def _execute_single_long_entry(
         "take_profit_price": take_profit_price,
         "stop_loss_pct": stop_loss_pct,
         "take_profit_pct": take_profit_pct,
+        "planned_exit_ts_ms": planned_exit_ts_ms,
         "entry_stop_update_status": protection_update_status,
         "entry_stop_update_error": protection_update_error,
         "error": error,
@@ -2026,6 +2061,44 @@ def _execute_single_long_entry(
         "target_qty": qty,
     }
     return trade_row, order_row
+
+
+def _long_entry_rejection_order_row(
+    candidate: dict[str, Any],
+    *,
+    now_ms: int,
+    strategy_id: str,
+    reason: str,
+    price: float,
+) -> dict[str, Any]:
+    """Durable attempt row for a selected candidate that never reached Bybit."""
+    symbol = str(candidate.get("symbol") or "")
+    signal_ts_ms = int(candidate.get("signal_ts_ms") or now_ms)
+    return {
+        "order_link_id": _long_order_link_id(
+            LONG_ENTRY_LINK_PREFIX, symbol=symbol, signal_ts_ms=signal_ts_ms
+        ),
+        "ts_ms": now_ms,
+        "updated_at_ms": now_ms,
+        "trade_id": str(candidate.get("trade_id") or ""),
+        "strategy_id": strategy_id,
+        "sleeve": "long",
+        "symbol": symbol,
+        "side": "Buy",
+        "trade_side": "long",
+        "order_type": "Market",
+        "qty": "",
+        "reduce_only": False,
+        "submit_mode": "not_submitted",
+        "status": "rejected",
+        "signal_ts_ms": signal_ts_ms,
+        "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or now_ms),
+        "avg_price": float(price or 0.0),
+        "notional_usdt": 0.0,
+        "filled_qty": "",
+        "target_qty": "",
+        "error": reason[:500],
+    }
 
 
 def _preflight_long_entry_order_row(
@@ -2047,6 +2120,7 @@ def _preflight_long_entry_order_row(
     take_profit_price: float,
     stop_loss_pct: float,
     take_profit_pct: float,
+    planned_exit_ts_ms: int,
 ) -> dict[str, Any]:
     return {
         "order_link_id": entry_link,
@@ -2075,6 +2149,7 @@ def _preflight_long_entry_order_row(
         "take_profit_price": take_profit_price,
         "stop_loss_pct": stop_loss_pct,
         "take_profit_pct": take_profit_pct,
+        "planned_exit_ts_ms": planned_exit_ts_ms,
         "sleeve": "long",
     }
 
@@ -2099,6 +2174,28 @@ def _maybe_long_notify(
         reason = _long_telegram_reason(payload)
         if not reason:
             return False, "quiet_no_material_event"
+        rejection_alert_state: tuple[Path, dict[str, int], set[str], int] | None = None
+        if reason == "long_entry_error" and not _has_non_rejection_long_entry_error(payload):
+            rejection_signatures = _long_rejection_alert_signatures(payload)
+            report_dir_text = str(payload.get("report_dir") or "")
+            if rejection_signatures and report_dir_text:
+                state_path = Path(report_dir_text) / LONG_REJECTION_TELEGRAM_STATE_FILE
+                sent_at_by_signature = _read_long_rejection_alert_state(state_path)
+                now_ms = int(payload.get("cycle", {}).get("ts_ms") or _utc_now_ms())
+                eligible = {
+                    signature
+                    for signature in rejection_signatures
+                    if now_ms - int(sent_at_by_signature.get(signature, 0))
+                    >= LONG_REJECTION_TELEGRAM_COOLDOWN_MS
+                }
+                if not eligible:
+                    return False, "quiet_duplicate_long_entry_rejection"
+                rejection_alert_state = (
+                    state_path,
+                    sent_at_by_signature,
+                    eligible,
+                    now_ms,
+                )
         if portfolio_overview_factory is not None and not payload.get("portfolio_overview"):
             payload = {**payload, "portfolio_overview": portfolio_overview_factory()}
         text = format_long_telegram_status_message(payload, reason=reason)
@@ -2107,7 +2204,103 @@ def _maybe_long_notify(
         return False, str(exc)[:500]
     if not sent:
         return False, "telegram env missing or Telegram API returned false"
+    if rejection_alert_state is not None:
+        state_path, sent_at_by_signature, eligible, now_ms = rejection_alert_state
+        for signature in eligible:
+            sent_at_by_signature[signature] = now_ms
+        try:
+            _write_long_rejection_alert_state(
+                state_path,
+                sent_at_by_signature,
+                now_ms=now_ms,
+            )
+        except Exception as exc:  # noqa: BLE001 - notification already succeeded
+            _logger.warning("failed to persist LONG rejection Telegram cooldown: %s", exc)
     return True, ""
+
+
+def _has_non_rejection_long_entry_error(payload: dict[str, Any]) -> bool:
+    """True when an entry failure still deserves an immediate page.
+
+    Only deterministic local rejections are cooldown-deduped. Venue/API
+    failures remain immediate because their recovery state can change between
+    cycles even when an order link is reused.
+    """
+    return any(
+        str(row.get("submit_mode") or "") == "error"
+        or str(row.get("status") or "") == "failed"
+        for row in payload.get("entry_orders", [])
+    )
+
+
+def _long_rejection_alert_signatures(payload: dict[str, Any]) -> set[str]:
+    """Restart-stable identities for deterministic local entry rejections."""
+    signatures: set[str] = set()
+    for row in payload.get("entry_orders", []):
+        if str(row.get("status") or "") != "rejected":
+            continue
+        link = str(row.get("order_link_id") or "")
+        if not link:
+            continue
+        signatures.add(
+            json.dumps(
+                [link, _long_rejection_reason_code(row.get("error"))],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        )
+    return signatures
+
+
+def _long_rejection_reason_code(error: Any) -> str:
+    """Stable rejection class, excluding volatile price/notional diagnostics."""
+    text = str(error or "").strip()
+    prefix = text.split(":", 1)[0].strip().lower()
+    if prefix in {"price_unavailable", "sizing_rejected"}:
+        return prefix
+    return text
+
+
+def _read_long_rejection_alert_state(path: Path) -> dict[str, int]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    output: dict[str, int] = {}
+    for signature, sent_at_ms in raw.items():
+        try:
+            output[str(signature)] = int(sent_at_ms)
+        except (TypeError, ValueError):
+            continue
+    return output
+
+
+def _write_long_rejection_alert_state(
+    path: Path,
+    sent_at_by_signature: dict[str, int],
+    *,
+    now_ms: int,
+) -> None:
+    # Bound the restart-safe state file while retaining several cooldown
+    # windows for clock skew and temporarily dormant signals.
+    keep_after_ms = now_ms - max(
+        exact_duration_ms(days=30),
+        LONG_REJECTION_TELEGRAM_COOLDOWN_MS * 4,
+    )
+    retained = {
+        signature: sent_at_ms
+        for signature, sent_at_ms in sent_at_by_signature.items()
+        if int(sent_at_ms) >= keep_after_ms
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(
+        json.dumps(retained, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
 
 
 def _long_telegram_reason(payload: dict[str, Any]) -> str:
@@ -2115,7 +2308,8 @@ def _long_telegram_reason(payload: dict[str, Any]) -> str:
     if cycle.get("position_report_error"):
         return "position_report_error"
     if any(
-        str(row.get("submit_mode", "")) == "error" or str(row.get("status", "")) == "failed"
+        str(row.get("submit_mode", "")) == "error"
+        or str(row.get("status", "")) in {"failed", "rejected"}
         for row in payload.get("entry_orders", [])
     ):
         return "long_entry_error"

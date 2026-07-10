@@ -77,6 +77,11 @@ DEFAULT_ROOTS = [SHARED / "bybit_full_pit", SHARED / "binance_full_pit"]
 RMOM_WINDOW = 7
 RMOM_CAUSAL_SHIFT = 3
 DEFAULT_APPEND_OVERLAP_DAYS = 14
+# Tables written before provenance existed can only be upgraded
+# conservatively. The provisional edge is bounded by the forward-target lag,
+# causal shift, and one preseeded day; treating the final five days per symbol
+# as mutable is intentionally wider than the observed one-day maturation.
+LEGACY_PROVISIONAL_TAIL_DAYS = RMOM_CAUSAL_SHIFT + 2
 
 
 def residual_momentum_expr() -> "pl.Expr":
@@ -140,7 +145,12 @@ def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | N
     panel = build_factor_panel(root, start=start, end=end, klines_dataset=kname)
     if panel.is_empty():
         print(f"[{root.name}] EMPTY panel -- skip")
-        return pl.DataFrame(schema={"symbol": pl.String, "ts_ms": pl.Int64, "residual_momentum": pl.Float64})
+        return pl.DataFrame(schema={
+            "symbol": pl.String,
+            "ts_ms": pl.Int64,
+            "residual_momentum": pl.Float64,
+            "is_provisional": pl.Boolean,
+        })
     _fr, resid = fit_factor_returns(panel, factor_cols=COMMON4)  # symbol, ts_ms, residual_return
     resid = resid.sort(["symbol", "ts_ms"]).select("symbol", "ts_ms", "residual_return")
     # The LIVE join floors `now` to TODAY's day_ts and exact-matches residual_momentum[day_ts]; but
@@ -151,15 +161,30 @@ def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | N
     # (D-1) 01:00 < D 00:00), so for any symbol still trading at the trailing edge we append
     # null-residual rows from its last residual day through `end` (= tomorrow UTC) and let the SAME
     # rolling_sum(7)+shift(3) carry the trailing real-residual sum onto today's (and tomorrow's,
-    # covering the 00:00->00:20 daily-refresh rollover) row. polars rolling_sum ignores in-window
-    # nulls and counts only non-null obs against min_samples, so the sum stays correct. APPEND-ONLY:
-    # every existing residual row keeps a byte-identical residual_momentum (a later row can't change
-    # an earlier rolling window); this only ADDS the trailing-edge rows the old table silently dropped.
+    # covering the 00:00->00:20 daily-refresh rollover) row. Polars rolling_sum ignores in-window
+    # nulls and counts only non-null obs against min_samples. A padded row whose newest required
+    # residual is not yet present is explicitly PROVISIONAL: its value is causal but can mature when
+    # that delayed residual arrives. Stable history remains immutable; provisional tail keys may be
+    # refreshed by the append path.
+    last_real = (
+        resid.filter(pl.col("residual_return").is_not_null())
+        .group_by("symbol")
+        .agg(pl.col("ts_ms").max().alias("_last_real_ts_ms"))
+    )
     resid = _append_trailing_pad(resid, end=end)
     return (
         resid.sort(["symbol", "ts_ms"])
+        .join(last_real, on="symbol", how="left")
         .with_columns(residual_momentum_expr())
-        .select("symbol", "ts_ms", "residual_momentum")
+        .with_columns(
+            (
+                (pl.col("ts_ms") - RMOM_CAUSAL_SHIFT * MS_PER_DAY)
+                > pl.col("_last_real_ts_ms")
+            )
+            .fill_null(True)
+            .alias("is_provisional")
+        )
+        .select("symbol", "ts_ms", "residual_momentum", "is_provisional")
         .drop_nulls("residual_momentum")
     )
 
@@ -182,6 +207,24 @@ def _validate_rmom_schema(sig: pl.DataFrame, *, path: Path) -> None:
     dupes = sig.group_by(["symbol", "ts_ms"]).len().filter(pl.col("len") > 1)
     if not dupes.is_empty():
         raise RuntimeError(f"{path} has duplicate residual_momentum keys; refusing append: {dupes.head(5).to_dicts()}")
+    if "is_provisional" in sig.columns and sig.schema["is_provisional"] != pl.Boolean:
+        raise RuntimeError(f"{path} is_provisional must be boolean")
+
+
+def _with_provisional_provenance(sig: pl.DataFrame) -> pl.DataFrame:
+    """Normalize provenance, conservatively upgrading a legacy three-column table."""
+    if "is_provisional" in sig.columns:
+        return sig.with_columns(pl.col("is_provisional").cast(pl.Boolean).fill_null(True))
+    return (
+        sig.with_columns(pl.col("ts_ms").max().over("symbol").alias("_legacy_symbol_max"))
+        .with_columns(
+            (
+                pl.col("ts_ms")
+                >= pl.col("_legacy_symbol_max") - LEGACY_PROVISIONAL_TAIL_DAYS * MS_PER_DAY
+            ).alias("is_provisional")
+        )
+        .drop("_legacy_symbol_max")
+    )
 
 
 def _assert_append_overlap_matches(
@@ -195,21 +238,32 @@ def _assert_append_overlap_matches(
 ) -> int:
     old = (
         existing.filter((pl.col("ts_ms") >= overlap_start_ms) & (pl.col("ts_ms") <= overlap_end_ms))
+        .filter(~pl.col("is_provisional"))
         .select(["symbol", "ts_ms", pl.col("residual_momentum").alias("old_residual_momentum")])
         .sort(["symbol", "ts_ms"])
     )
     new = (
         rebuilt.filter((pl.col("ts_ms") >= overlap_start_ms) & (pl.col("ts_ms") <= overlap_end_ms))
-        .select(["symbol", "ts_ms", pl.col("residual_momentum").alias("new_residual_momentum")])
+        .select([
+            "symbol",
+            "ts_ms",
+            pl.col("residual_momentum").alias("new_residual_momentum"),
+            pl.col("is_provisional").alias("new_is_provisional"),
+        ])
         .sort(["symbol", "ts_ms"])
     )
     if old.is_empty():
-        raise RuntimeError("residual_momentum append cannot verify overlap: existing overlap is empty")
+        raise RuntimeError("residual_momentum append cannot verify overlap: stable existing overlap is empty")
     joined = old.join(new, on=["symbol", "ts_ms"], how="inner")
     if joined.height != old.height:
         raise RuntimeError(
             "residual_momentum append overlap key mismatch: "
             f"existing={old.height} rebuilt={new.height} matched={joined.height}; use --full-rewrite after inspection"
+        )
+    if joined["new_is_provisional"].any():
+        raise RuntimeError(
+            "residual_momentum append would demote stable overlap rows to provisional; "
+            "source coverage regressed"
         )
     old_vals = joined["old_residual_momentum"].to_numpy()
     new_vals = joined["new_residual_momentum"].to_numpy()
@@ -237,7 +291,9 @@ def _append_signal(
     if append_overlap_days < 1:
         raise ValueError("append_overlap_days must be positive")
     _validate_rmom_schema(existing, path=out_path)
-    existing = existing.select(["symbol", "ts_ms", "residual_momentum"]).sort(["symbol", "ts_ms"])
+    existing = _with_provisional_provenance(existing).select(
+        ["symbol", "ts_ms", "residual_momentum", "is_provisional"]
+    ).sort(["symbol", "ts_ms"])
     if existing.is_empty():
         sig = _compute_signal(root, start=START, end=end, klines_dataset=klines_dataset)
         _write_signal_atomic(out_path, sig.sort(["symbol", "ts_ms"]))
@@ -262,7 +318,9 @@ def _append_signal(
     matched = _assert_append_overlap_matches(
         existing, rebuilt, overlap_start_ms=overlap_start_ms, overlap_end_ms=existing_max
     )
-    refreshed = rebuilt.filter(pl.col("ts_ms") >= overlap_start_ms).select(["symbol", "ts_ms", "residual_momentum"])
+    refreshed = rebuilt.filter(pl.col("ts_ms") >= overlap_start_ms).select(
+        ["symbol", "ts_ms", "residual_momentum", "is_provisional"]
+    )
     if refreshed.is_empty():
         print(f"[{root.name}] overlap ok ({matched} rows); no new residual_momentum rows to append", flush=True)
         return 0
@@ -275,7 +333,7 @@ def _append_signal(
     tail_rows = refreshed.filter(pl.col("ts_ms") > existing_max).height
     overlap_rows = refreshed.height - tail_rows
     print(
-        f"[{root.name}] overlap ok ({matched} rows); refreshed {overlap_rows} overlap rows "
+        f"[{root.name}] stable overlap ok ({matched} rows); refreshed {overlap_rows} overlap rows "
         f"and appended {tail_rows} tail rows (net {rows_added:+d}) "
         f"through {_ms_to_date_str(int(combined['ts_ms'].max()))} -> {out_path}",
         flush=True,

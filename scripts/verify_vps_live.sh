@@ -8,9 +8,16 @@ EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
 SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-5}"
 
+# Serialize caller-controlled values as shell literals on stdin. Interpolating
+# them into a single-quoted remote command breaks on apostrophes and permits
+# metacharacter injection (for example, a custom REPO_DIR).
 # shellcheck disable=SC2086
-ssh $SSH_OPTS "$SSH_TARGET" \
-  "REPO_DIR='$REPO_DIR' EXPECTED_COMMIT='$EXPECTED_COMMIT' EXPECTED_TELEGRAM_CHAT_ID='$EXPECTED_TELEGRAM_CHAT_ID' SYSTEMD_SETTLE_SECONDS='$SYSTEMD_SETTLE_SECONDS' bash -s" <<'REMOTE_SCRIPT'
+{
+  printf 'REPO_DIR=%q\n' "$REPO_DIR"
+  printf 'EXPECTED_COMMIT=%q\n' "$EXPECTED_COMMIT"
+  printf 'EXPECTED_TELEGRAM_CHAT_ID=%q\n' "$EXPECTED_TELEGRAM_CHAT_ID"
+  printf 'SYSTEMD_SETTLE_SECONDS=%q\n' "$SYSTEMD_SETTLE_SECONDS"
+  cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 cd "$REPO_DIR"
@@ -180,23 +187,14 @@ if continuous_rmom_refresh_on; then
   _verify_rmom_root() {
     _rmom_label="$1"
     _rmom_root="$2"
-    _rmom_rows="$(RMOM_ROOT="$_rmom_root" "$PYTHON" - <<'PY' 2>/dev/null || echo 0
-import os
-import pathlib, polars as pl
-p = pathlib.Path(os.environ["RMOM_ROOT"])
-print(pl.read_parquet(p).height if p.exists() else 0)
-PY
-)"
-    if [ "${_rmom_rows:-0}" -le 0 ]; then
-      if [ "${ALLOW_EMPTY_RMOM_GATE:-0}" = "1" ]; then
-        echo "WARN: continuous ${_rmom_label} rmom gate is EMPTY. ALLOW_EMPTY_RMOM_GATE=1" \
-             "lets verify continue, but that sleeve emits NO entries until rmom is built." >&2
-      else
-        echo "verify failed: continuous ${_rmom_label} rmom gate is EMPTY at ${_rmom_root}" >&2
-        return 1
-      fi
+    if _rmom_status="$("$PYTHON" scripts/check_residual_momentum_gate.py --path "$_rmom_root" 2>&1)"; then
+      echo "continuous ${_rmom_label} rmom gate ok: ${_rmom_status}"
+    elif [ "${ALLOW_EMPTY_RMOM_GATE:-0}" = "1" ]; then
+      echo "WARN: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale: ${_rmom_status}. ALLOW_EMPTY_RMOM_GATE=1" \
+           "lets verify continue, but that sleeve may emit NO entries until rmom is rebuilt." >&2
     else
-      echo "continuous ${_rmom_label} rmom gate ok: ${_rmom_rows} rows."
+      echo "verify failed: continuous ${_rmom_label} rmom gate is unusable at ${_rmom_root}: ${_rmom_status}" >&2
+      return 1
     fi
   }
   if sleeve_on "$CONTINUOUS_SLEEVE"; then
@@ -260,6 +258,7 @@ if sleeve_on "$CONTINUOUS_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'STRATEGY_PROFILE=continuous_ensemble_v2'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'
+  require_unit_env liquidity-migration-bybit-continuous-demo.service 'CONTINUOUS_SNIPER=0'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'MAX_HOLD_HOURS=24'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'
@@ -287,6 +286,7 @@ require_unit_env liquidity-migration-bybit-continuous-paper.service 'SUBMIT_ORDE
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'STRATEGY_PROFILE=continuous_ensemble_v2'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'FEATURE_SET=max_ret168'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'ENTRY_EVENT_TRIGGER=none'
+require_unit_env liquidity-migration-bybit-continuous-paper.service 'CONTINUOUS_SNIPER=0'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'BTC_TREND_GATE=uptrend'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'MAX_HOLD_HOURS=24'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'SIZING_MODE=inverse_vol'
@@ -316,3 +316,4 @@ systemctl show liquidity-migration-bybit-risk.service \
 
 echo "verify-ok commit=$(git rev-parse --short HEAD)"
 REMOTE_SCRIPT
+} | ssh $SSH_OPTS "$SSH_TARGET" bash -s

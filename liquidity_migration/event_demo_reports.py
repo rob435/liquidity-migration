@@ -268,6 +268,8 @@ def _telegram_notification_reason(payload: dict[str, Any]) -> str:
         return "wallet_error"
     if payload.get("reconciliations"):
         return "position_reconciled"
+    if payload.get("pending_orphan_positions"):
+        return "position_close_pending_pnl"
     if any(
         str(row.get("submit_mode", "")) == "error" or str(row.get("status", "")) == "failed"
         for row in payload.get("entry_orders", [])

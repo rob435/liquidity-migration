@@ -244,6 +244,81 @@ def test_precompute_append_refreshes_overlap_when_output_already_current(
     _assert_existing_keys_allclose(original, updated)
 
 
+def test_precompute_append_allows_provisional_tail_to_mature(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Forward targets arrive late: a padded tail value may legitimately
+    change once its newest causal residual appears, while stable history must
+    remain numerically identical."""
+    def fake_build_factor_panel(
+        root: Path, *, start: str, end: str, klines_dataset: str | None = None
+    ) -> pl.DataFrame:
+        del root, klines_dataset
+        start_ms = MOD._date_str_to_ms(start)
+        # Simulate the real fwd-return lag: the newest three daily rows are not
+        # available to the residual fit yet.
+        available_end_ms = MOD._date_str_to_ms(end) - 3 * DAY_MS
+        rows = []
+        for ts_ms in range(start_ms, available_end_ms, DAY_MS):
+            day = ts_ms // DAY_MS
+            rows.extend([
+                {"symbol": "AAA", "ts_ms": ts_ms, "residual_return": day * 0.001},
+                {"symbol": "BBB", "ts_ms": ts_ms, "residual_return": day * -0.001},
+            ])
+        return pl.DataFrame(rows)
+
+    def fake_fit_factor_returns(
+        panel: pl.DataFrame, *, factor_cols: list[str] | None = None
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        del factor_cols
+        return pl.DataFrame(), panel.select(["symbol", "ts_ms", "residual_return"])
+
+    monkeypatch.setattr(MOD, "build_factor_panel", fake_build_factor_panel)
+    monkeypatch.setattr(MOD, "fit_factor_returns", fake_fit_factor_returns)
+    MOD.precompute(
+        tmp_path, start="2025-01-01", end="2025-02-01",
+        klines_dataset="klines_1h", append=True, append_overlap_days=10,
+    )
+    original = pl.read_parquet(tmp_path / "residual_momentum.parquet").sort(["symbol", "ts_ms"])
+    edge_ts = int(original["ts_ms"].max())
+    old_edge = original.filter(pl.col("ts_ms") == edge_ts)
+    assert old_edge["is_provisional"].all()
+
+    MOD.precompute(
+        tmp_path, start="2025-01-01", end="2025-02-06",
+        klines_dataset="klines_1h", append=True, append_overlap_days=10,
+    )
+    updated = pl.read_parquet(tmp_path / "residual_momentum.parquet").sort(["symbol", "ts_ms"])
+    new_edge = updated.filter(pl.col("ts_ms") == edge_ts)
+    assert (~new_edge["is_provisional"]).all()
+    assert not np.allclose(
+        old_edge["residual_momentum"].to_numpy(),
+        new_edge["residual_momentum"].to_numpy(),
+    )
+    stable_original = original.filter(~pl.col("is_provisional"))
+    _assert_existing_keys_allclose(stable_original, updated)
+
+
+def test_precompute_append_conservatively_upgrades_legacy_table(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_residual_inputs(monkeypatch)
+    MOD.precompute(
+        tmp_path, start="2025-01-01", end="2025-02-01",
+        klines_dataset="klines_1h", append=True, append_overlap_days=10,
+    )
+    path = tmp_path / "residual_momentum.parquet"
+    pl.read_parquet(path).drop("is_provisional").write_parquet(path)
+
+    MOD.precompute(
+        tmp_path, start="2025-01-01", end="2025-02-06",
+        klines_dataset="klines_1h", append=True, append_overlap_days=10,
+    )
+    upgraded = pl.read_parquet(path)
+    assert upgraded.schema["is_provisional"] == pl.Boolean
+    assert upgraded.filter(~pl.col("is_provisional")).height > 0
+
+
 def test_precompute_append_refuses_overlap_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _patch_residual_inputs(monkeypatch)
     MOD.precompute(

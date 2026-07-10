@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -73,6 +74,30 @@ def test_backtest_keys_reads_entry_signal_column(tmp_path):
     assert keys == {("BTCUSDT", "long", "2026-06-10")}
 
 
+def test_continuous_paper_signal_leg_reads_demo_market_plane():
+    class FakeStep:
+        def __init__(self) -> None:
+            self.commands: list[list[str]] = []
+
+        def banner(self, _title: str) -> None:
+            return None
+
+        def run_capture(self, command: list[str]) -> tuple[int, str]:
+            self.commands.append(command)
+            return 0, "SUMMARY: 1/1 confirmed D9 at signal bar; 0 off-decile; 0 no-panel-row.\n"
+
+    step = FakeStep()
+    summary, ok = tw.continuous_signal_leg(
+        step,
+        demo_root="demo-root",
+        paper_root="paper-root",
+    )
+
+    assert ok is True and "demo:" in summary and "paper:" in summary
+    paper_command = next(command for command in step.commands if "paper-root" in command)
+    assert paper_command[paper_command.index("--market-root") + 1] == "demo-root"
+
+
 def test_long_cadence_stats_classifies_near_p95_gap(tmp_path):
     csv = tmp_path / "long_v11a_bybit_refreshed_2026-06-24" / "long" / "long_native_trades.csv"
     csv.parent.mkdir(parents=True)
@@ -118,3 +143,34 @@ def test_format_long_cadence_diagnostic_summarizes_references(tmp_path):
     assert line.startswith("LONG cadence diagnostic [above_historical_max]:")
     assert "binance: gap=11d" in line
     assert "trades_since_forward_start=0" in line
+
+
+@pytest.mark.parametrize("pit_status", [None, False])
+def test_long_three_way_cannot_pass_with_unknown_or_failed_pit(
+    tmp_path, monkeypatch, pit_status
+):
+    class FakeStep:
+        def banner(self, _title: str) -> None:
+            return None
+
+    keys = {("AAAUSDT", "long", "2026-07-01")}
+    monkeypatch.setattr(tw, "REPO", tmp_path)
+    monkeypatch.setattr(tw, "_backtest_keys", lambda *_args: keys)
+    monkeypatch.setattr(tw, "_live_keys", lambda *_args: keys)
+    monkeypatch.setattr(tw, "_long_cadence_reference_paths", lambda: [])
+
+    _summary, ok = tw.reconcile_long_three_way(
+        FakeStep(),
+        trades_csv=tmp_path / "unused.csv",
+        run_integrity={
+            "run_label": "unknown",
+            "methodology_run_label": "exploratory",
+            "full_pit_universe_pass": pit_status,
+        },
+        demo_root="demo",
+        paper_root="paper",
+        start=dt.date(2026, 7, 1),
+        end=dt.date(2026, 7, 2),
+    )
+
+    assert ok is False

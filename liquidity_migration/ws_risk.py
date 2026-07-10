@@ -71,6 +71,7 @@ from .order_execution import (
 )
 from .telegram import send_telegram_message, telegram_configured
 from .ws_risk_adoption import (
+    RecoveredEntryLinkMetadata,
     adopt_strategy_id_for_sleeve,
     build_adopted_trade_row,
     first_price as _first_price,
@@ -238,11 +239,40 @@ class WebSocketRiskState:
     all_trades: pl.DataFrame = field(default_factory=pl.DataFrame)
     open_trades: pl.DataFrame = field(default_factory=_empty_trades)
     positions_by_symbol: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Consumer-thread timestamp of the newest private-WS position event for a
+    # symbol. The background REST prefetch may have started before that event;
+    # in that case its same-symbol row (including an opposite-side pre-flip row)
+    # must not overwrite the newer WS state.
+    position_ws_updated_monotonic_by_symbol: dict[str, float] = field(default_factory=dict)
     price_by_symbol: dict[str, float] = field(default_factory=dict)
+    # Pending entry intent is a position leg, not a symbol. A stale short entry
+    # must not block adopting/protecting a live long on the shared one-way
+    # account. ``pending_entry_symbols`` remains derived compatibility telemetry.
+    pending_entry_legs: set[tuple[str, str]] = field(default_factory=set)
     pending_entry_symbols: set[str] = field(default_factory=set)
+    # Ledger trades whose matching (symbol, side) venue leg vanished but whose
+    # closed-PnL record has not arrived yet. Identity MUST remain trade/side
+    # aware: after a venue side flip, an old SHORT awaiting Closed-PnL and a new
+    # live LONG are two different risk objects even though Bybit nets them under
+    # one symbol. ``pending_orphan_symbols`` is retained as derived compatibility
+    # telemetry only; no safety decision may key on it.
+    pending_orphan_trade_ids: set[str] = field(default_factory=set)
+    pending_orphan_legs: set[tuple[str, str]] = field(default_factory=set)
+    pending_orphan_symbols: set[str] = field(default_factory=set)
+    # Positive private-WS flat evidence is scoped to the vanished leg. A Sell
+    # size=0 update must not disarm retries or remove a simultaneously-live Buy
+    # position on the same symbol.
+    explicit_flat_position_legs: set[tuple[str, str]] = field(default_factory=set)
     submitted_symbols: set[str] = field(default_factory=set)
     live_entry_order_symbols: set[str] = field(default_factory=set)
+    live_entry_order_legs: set[tuple[str, str]] = field(default_factory=set)
+    live_entry_order_unknown_side_symbols: set[str] = field(default_factory=set)
+    live_entry_order_links: set[str] = field(default_factory=set)
     live_exit_order_symbols: set[str] = field(default_factory=set)
+    # Side-aware view of authoritative open reduce-only orders. The tuple side
+    # is the POSITION side being reduced (Buy order -> short; Sell -> long).
+    live_exit_order_legs: set[tuple[str, str]] = field(default_factory=set)
+    live_exit_order_unknown_side_symbols: set[str] = field(default_factory=set)
     submitted_symbol_ts_ms: dict[str, int] = field(default_factory=dict)
     untracked_first_seen_ms: dict[str, int] = field(default_factory=dict)
     submitted_link_to_trade_id: dict[str, str] = field(default_factory=dict)
@@ -880,6 +910,7 @@ class EventWebSocketRiskEngine:
         client = _build_private_client(self.config)
         interval = max(1.0, self.risk.rest_reconcile_seconds / 3.0)
         while not self._reconcile_prefetch_stop.wait(timeout=interval):
+            started_monotonic = time.monotonic()
             try:
                 positions, pos_err = _safe_raw_positions(client, settle_coin=self.risk.settle_coin)
                 open_orders, oo_err = _safe_open_orders(client, settle_coin=self.risk.settle_coin)
@@ -890,6 +921,7 @@ class EventWebSocketRiskEngine:
             self._reconcile_prefetch = {
                 "positions": positions, "positions_error": pos_err,
                 "open_orders": open_orders, "open_orders_error": oo_err,
+                "started_monotonic": started_monotonic,
                 "monotonic": time.monotonic(),
             }
 
@@ -1141,18 +1173,56 @@ class EventWebSocketRiskEngine:
     def on_position_message(self, message: dict[str, Any]) -> None:
         self._assert_consumer_thread()
         changed_symbols: set[str] = set()
-        for row in _message_rows(message):
+        rows = _message_rows(message)
+        batch_monotonic = time.monotonic()
+        # Position batches can contain both the active one-way leg and a zero
+        # placeholder (occasionally with blank side). Give every positive row
+        # precedence independent of row order; a trailing ambiguous zero must
+        # never pop the live position we just observed in the same batch.
+        positive_sides_by_symbol: dict[str, set[str]] = {}
+        for row in rows:
+            symbol = str(row.get("symbol") or "")
+            if symbol and _float(row.get("size")) > 0.0:
+                positive_sides_by_symbol.setdefault(symbol, set()).add(
+                    _normalized_side(row.get("side"))
+                )
+        for row in rows:
             symbol = str(row.get("symbol", ""))
             if not symbol:
                 continue
             changed_symbols.add(symbol)
+            self.state.position_ws_updated_monotonic_by_symbol[symbol] = batch_monotonic
+            side = _normalized_side(row.get("side"))
+            leg = (symbol, side)
             if _float(row.get("size")) > 0.0:
+                if side:
+                    self.state.explicit_flat_position_legs.discard(leg)
+                    self.state.explicit_flat_position_legs.discard((symbol, ""))
+                else:
+                    self.state.explicit_flat_position_legs = {
+                        candidate
+                        for candidate in self.state.explicit_flat_position_legs
+                        if candidate[0] != symbol
+                    }
                 self.state.positions_by_symbol[symbol] = row
                 price = _position_price(row)
                 if price > 0.0:
                     self.state.price_by_symbol[symbol] = price
             else:
-                self.state.positions_by_symbol.pop(symbol, None)
+                positive_sides = positive_sides_by_symbol.get(symbol, set())
+                if positive_sides and (not side or side in positive_sides):
+                    continue
+                # A private-stream size=0 update is positive evidence that a
+                # reduce-only retry for THIS SIDE would be futile while
+                # closed-PnL history catches up. Do not infer this from REST
+                # absence: a transient false-empty snapshot must never disarm
+                # protective exits. Crucially, a Sell=0 event must not remove a
+                # live Buy position that arrived in the same side-flip update.
+                self.state.explicit_flat_position_legs.add(leg)
+                current = self.state.positions_by_symbol.get(symbol) or {}
+                current_side = _normalized_side(current.get("side"))
+                if not side or not current_side or current_side == side:
+                    self.state.positions_by_symbol.pop(symbol, None)
         self.subscribe_tickers(changed_symbols)
         reconcile_rows = self.reconcile_positions(write=True)
         if reconcile_rows:
@@ -1409,8 +1479,6 @@ class EventWebSocketRiskEngine:
                 }
             )
             self.state.exits.append(trade)
-            self.clear_submitted_symbol(str(trade.get("symbol", "")))
-            self.state.positions_by_symbol.pop(str(trade.get("symbol", "")), None)
             report_reason = f"ws_{source}_fill"
         else:
             # ws-risk-6: persist the closed chunk's realized return on the
@@ -1459,6 +1527,31 @@ class EventWebSocketRiskEngine:
         )
         if order_updates:
             self._write_order_rows_routed(order_updates)
+        symbol = str(trade.get("symbol", ""))
+        closed_side = _normalized_side(trade.get("side"))
+        current = self.state.positions_by_symbol.get(symbol) or {}
+        current_side = _normalized_side(current.get("side"))
+        matching_leg_still_open = any(
+            str(row.get("symbol") or "") == symbol
+            and _normalized_side(row.get("side")) == current_side
+            for row in self.state.open_trades.to_dicts()
+        )
+        # A single Bybit position can contain several continuous component
+        # trades (and sibling sleeves). Closing one ledger leg is not evidence
+        # that the netted venue position is flat. Keep the authoritative
+        # position snapshot until every owned leg is closed; the position WS /
+        # REST reconcile will then confirm flatness. A stale short closing after
+        # a side flip is also not evidence that the live long vanished.
+        if (
+            current
+            and current_side == closed_side
+            and not matching_leg_still_open
+        ):
+            self.state.positions_by_symbol.pop(symbol, None)
+        if self._has_pending_exit_order_for_symbol(symbol):
+            self.mark_submitted_symbol(symbol)
+        else:
+            self.clear_submitted_symbol(symbol)
         self.write_report(reason=report_reason)
 
     def _record_orders(self, orders: list[dict[str, Any]]) -> None:
@@ -1502,9 +1595,20 @@ class EventWebSocketRiskEngine:
         for order in order_updates:
             symbol = str(order.get("symbol", ""))
             if str(order.get("status", "")) == "filled":
-                self.clear_submitted_symbol(symbol)
+                if self._has_pending_exit_order_for_symbol(symbol):
+                    self.mark_submitted_symbol(symbol)
+                else:
+                    self.clear_submitted_symbol(symbol)
                 if str(order.get("exit_reason", "")) == "untracked_position":
-                    self.state.positions_by_symbol.pop(symbol, None)
+                    current = self.state.positions_by_symbol.get(symbol) or {}
+                    current_side = _normalized_side(current.get("side"))
+                    target_side = _position_side_reduced_by_order(order.get("side"))
+                    # An old Buy-reduce fill proves an old short changed; it says
+                    # nothing about a replacement long that arrived before this
+                    # delayed order event. Only remove the cached venue leg when
+                    # the fill targets that exact current side.
+                    if target_side and current_side == target_side:
+                        self.state.positions_by_symbol.pop(symbol, None)
             elif str(order.get("status", "")) in PENDING_ORDER_STATUSES:
                 self.mark_submitted_symbol(symbol)
 
@@ -1540,8 +1644,49 @@ class EventWebSocketRiskEngine:
         symbol = str(row.get("symbol") or order.get("symbol") or "")
         order["status"] = normalized_status
         order["error"] = str(row.get("rejectReason") or row.get("cancelType") or row.get("orderStatus") or "")[:500]
-        self.clear_submitted_symbol(symbol)
+        if self._has_pending_exit_order_for_symbol(symbol):
+            self.mark_submitted_symbol(symbol)
+        else:
+            self.clear_submitted_symbol(symbol)
         return [order]
+
+    def _has_pending_exit_order_for_symbol(self, symbol: str) -> bool:
+        now_ms = _now_ms()
+        max_age_ms = max(self.risk.pending_exit_guard_seconds, 0.0) * 1000.0
+        for order in self.state.orders_by_link.values():
+            if (
+                str(order.get("symbol") or "") != symbol
+                or not _bool(order.get("reduce_only"))
+                or str(order.get("status") or "") not in PENDING_ORDER_STATUSES
+            ):
+                continue
+            ts_ms = _int(order.get("updated_at_ms") or order.get("ts_ms"))
+            if max_age_ms > 0.0 and ts_ms > 0 and now_ms - ts_ms > max_age_ms:
+                continue
+            return True
+        return False
+
+    def _trade_exit_submission_active(self, trade_id: str) -> bool:
+        """Whether this exact ledger leg already has an in-flight exit.
+
+        The venue position is netted by symbol, but continuous ensemble legs are
+        separate ledger trades. A symbol-only guard serialized three simultaneous
+        max-hold exits and could leave two components alive after the first fill.
+        """
+        if not trade_id:
+            return False
+        now_ms = _now_ms()
+        max_age_ms = max(self.risk.pending_exit_guard_seconds, 0.0) * 1000.0
+        for link, mapped_trade_id in self.state.submitted_link_to_trade_id.items():
+            if mapped_trade_id != trade_id:
+                continue
+            order = self.state.orders_by_link.get(link)
+            if order is not None and str(order.get("status") or "") in PENDING_ORDER_STATUSES:
+                ts_ms = _int(order.get("updated_at_ms") or order.get("ts_ms"))
+                if max_age_ms > 0.0 and ts_ms > 0 and now_ms - ts_ms > max_age_ms:
+                    continue
+                return True
+        return False
 
     def evaluate_symbols(self, symbols: set[str]) -> None:
         """Plan + submit intrabar safety exits for the given symbols.
@@ -1562,6 +1707,11 @@ class EventWebSocketRiskEngine:
             return
         self.expire_stale_submitted_symbols()
         trades = self.state.open_trades.filter(pl.col("symbol").is_in(sorted(symbols)))
+        # Filter exact orphan trade IDs/legs, not symbols. A private Sell=0
+        # event (or a live opposite-side Buy position) suppresses the vanished
+        # short's futile Buy retry while the new long remains fully managed.
+        # A merely empty REST snapshot remains retry-armed via ledger quantity.
+        trades = self._risk_managed_trade_rows(trades)
         if trades.is_empty():
             return
         exits = plan_risk_exits(
@@ -1577,9 +1727,17 @@ class EventWebSocketRiskEngine:
             # sibling config silently lost cross-sleeve isolation.
             cap_qty_to_trade=len(self._sleeve_routes(trades=True)) > 1,
         )
-        for exit_plan in exits:
+        link_attempt_by_symbol: dict[str, int] = {}
+        for raw_exit_plan in exits:
+            exit_plan = dict(raw_exit_plan)
             symbol = str(exit_plan.get("symbol", ""))
-            if symbol and not self.exit_submission_active(symbol):
+            trade_id = str(exit_plan.get("trade_id", ""))
+            if symbol and not self._trade_exit_submission_active(trade_id):
+                exit_plan["order_link_attempt"] = link_attempt_by_symbol.get(symbol, 0)
+                link_attempt_by_symbol[symbol] = int(exit_plan["order_link_attempt"]) + 1
+                # submit_exit retains the unknown/external live-order guard. Once
+                # this engine owns an in-flight leg, distinct trade_ids on the
+                # same netted symbol may submit their own reduce-only quantities.
                 self.submit_exit(exit_plan)
 
     def submit_exit(self, exit_plan: dict[str, Any]) -> None:
@@ -1599,7 +1757,10 @@ class EventWebSocketRiskEngine:
         if (
             self.risk.submit_orders
             and not self.state.all_trades.is_empty()
-            and symbol in self.state.live_exit_order_symbols
+            and self.exit_submission_active_for_position(
+                symbol,
+                _normalized_side(exit_plan.get("side")),
+            )
             and symbol not in self.state.submitted_symbols
         ):
             _logger.info(
@@ -1643,9 +1804,6 @@ class EventWebSocketRiskEngine:
             self.state.open_trades = _open_trades(self.state.all_trades)
             self._write_trade_rows_routed(rows)
             self.state.exits.extend(rows)
-            for row in rows:
-                if str(row.get("status", "")) == "closed":
-                    self.state.positions_by_symbol.pop(str(row.get("symbol", "")), None)
         if orders:
             for order in orders:
                 link = str(order.get("order_link_id") or "")
@@ -1655,9 +1813,25 @@ class EventWebSocketRiskEngine:
                     self.state.submitted_link_submit_mode[link] = str(order.get("submit_mode") or "submitted")
             self._write_order_rows_routed(orders)
             self._record_orders(orders)
-        open_symbols = set(_column_values(self.state.open_trades, "symbol"))
-        has_pending_order = any(str(order.get("status", "")) in PENDING_ORDER_STATUSES for order in orders)
-        if symbol in open_symbols and has_pending_order:
+        current = self.state.positions_by_symbol.get(symbol) or {}
+        current_side = _normalized_side(current.get("side"))
+        closed_sides = {
+            _normalized_side(row.get("side"))
+            for row in rows
+            if str(row.get("status") or "") == "closed"
+        }
+        matching_leg_still_open = any(
+            str(row.get("symbol") or "") == symbol
+            and _normalized_side(row.get("side")) == current_side
+            for row in self.state.open_trades.to_dicts()
+        )
+        if (
+            current
+            and current_side in closed_sides
+            and not matching_leg_still_open
+        ):
+            self.state.positions_by_symbol.pop(symbol, None)
+        if self._has_pending_exit_order_for_symbol(symbol):
             self.mark_submitted_symbol(symbol)
         else:
             self.clear_submitted_symbol(symbol)
@@ -1698,6 +1872,7 @@ class EventWebSocketRiskEngine:
             "exit_reason": str(order.get("exit_reason") or "ws_order_ack_failed"),
             "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or _now_ms(),
             "planned_exit_price": self.state.price_by_symbol.get(symbol, _float(order.get("avg_price"))),
+            "order_link_attempt": _int(order.get("order_link_attempt")),
         }
 
     def ws_exit(self, exit_plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1718,7 +1893,12 @@ class EventWebSocketRiskEngine:
         # WS exits land in the short ledger and the long sleeve's reconciliation
         # never sees them.
         sleeve = str(trade.get("sleeve") or ("long" if side == "long" else "short"))
-        base_link = _risk_order_link_id("wx", symbol=symbol, ts_ms=_now_ms(), attempt=0)
+        base_link = _risk_order_link_id(
+            "wx",
+            symbol=symbol,
+            ts_ms=_now_ms(),
+            attempt=int(exit_plan.get("order_link_attempt") or 0),
+        )
 
         # Same split rationale as the main cycle's _execute_exits: a single
         # reduce-only market order > maxMktOrderQty is rejected outright.
@@ -1790,6 +1970,7 @@ class EventWebSocketRiskEngine:
                     "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                     "target_qty": sub_qty_str,
                     "filled_qty": "",
+                    "order_link_attempt": int(exit_plan.get("order_link_attempt") or 0),
                 }
             )
         return [], order_rows
@@ -1823,10 +2004,35 @@ class EventWebSocketRiskEngine:
     def repair_exchange_stops(self) -> None:
         if not self.risk.repair_stops:
             return
+        trades = self._risk_managed_trade_rows(self.state.open_trades)
+        if not trades.is_empty():
+            # Trading-stop state belongs to the one live venue side. Never
+            # stamp an orphan short's stop/TP onto a replacement long.
+            matching_ids: list[str] = []
+            for trade in trades.to_dicts():
+                symbol = str(trade.get("symbol") or "")
+                trade_side = _normalized_side(trade.get("side"))
+                position = self.state.positions_by_symbol.get(symbol) or {}
+                position_side = _normalized_side(position.get("side"))
+                if (
+                    _float(position.get("size")) > 0.0
+                    and trade_side
+                    and position_side == trade_side
+                ):
+                    matching_ids.append(str(trade.get("trade_id") or ""))
+            trades = trades.filter(pl.col("trade_id").cast(pl.String).is_in(matching_ids))
+        active_exit_symbols = {
+            symbol
+            for symbol, position in self.state.positions_by_symbol.items()
+            if self.exit_submission_active_for_position(
+                symbol,
+                _normalized_side(position.get("side")),
+            )
+        }
         repairs = plan_stop_repairs(
-            self.state.open_trades,
+            trades,
             position_by_symbol=self.state.positions_by_symbol,
-            skip_symbols=self.state.submitted_symbols | self.state.live_exit_order_symbols,
+            skip_symbols=active_exit_symbols,
             tolerance_bps=self.risk.stop_tolerance_bps,
         )
         if not repairs:
@@ -1890,7 +2096,147 @@ class EventWebSocketRiskEngine:
             except Exception:  # noqa: BLE001 - audit cannot stop repair routing
                 _logger.exception("ws_risk stop repair audit append failed")
 
-    def reconcile_positions(self, *, write: bool, require_evidence: bool = False) -> list[dict[str, Any]]:
+    def _refresh_pending_orphan_state(self) -> None:
+        """Rebuild the side-aware ledger-orphan index.
+
+        A row is pending when its own ``(symbol, side)`` leg is absent. An
+        opposite-side live position is authoritative even if the last REST
+        snapshot had an error; a completely absent symbol is classified only
+        after a healthy snapshot or an explicit private-WS flat event. This
+        preserves the false-empty fail-closed behavior while still handling a
+        real one-way-mode side flip immediately.
+        """
+        previous_ids = set(self.state.pending_orphan_trade_ids)
+        pending_ids: set[str] = set()
+        pending_legs: set[tuple[str, str]] = set()
+        for trade in self.state.open_trades.to_dicts():
+            trade_id = str(trade.get("trade_id") or "")
+            symbol = str(trade.get("symbol") or "")
+            side = _normalized_side(trade.get("side"))
+            if not symbol:
+                continue
+            current = self.state.positions_by_symbol.get(symbol) or {}
+            current_side = _normalized_side(current.get("side"))
+            current_size = _float(current.get("size"))
+            matching_live_leg = current_size > 0.0 and (
+                not side or not current_side or current_side == side
+            )
+            if matching_live_leg:
+                continue
+            explicit_flat = (
+                (symbol, side) in self.state.explicit_flat_position_legs
+                or (symbol, "") in self.state.explicit_flat_position_legs
+            )
+            opposite_side_live = (
+                current_size > 0.0
+                and bool(side)
+                and bool(current_side)
+                and current_side != side
+            )
+            snapshot_can_classify_absence = not self.state.last_position_error
+            if not (
+                explicit_flat
+                or opposite_side_live
+                or snapshot_can_classify_absence
+                or (trade_id and trade_id in previous_ids)
+            ):
+                continue
+            if trade_id:
+                pending_ids.add(trade_id)
+            pending_legs.add((symbol, side))
+
+        self.state.pending_orphan_trade_ids = pending_ids
+        self.state.pending_orphan_legs = pending_legs
+        self.state.pending_orphan_symbols = {symbol for symbol, _side in pending_legs}
+        # Retain flat evidence while any component on that exact side is still
+        # pending. This is what keeps a three-component flat leg suppressed until
+        # every row receives uniquely-attributed Closed-PnL evidence.
+        self.state.explicit_flat_position_legs = {
+            leg
+            for leg in self.state.explicit_flat_position_legs
+            if leg in pending_legs or (not leg[1] and leg[0] in self.state.pending_orphan_symbols)
+        }
+
+    def _confirmed_flat_symbols_for_reconcile(self) -> set[str]:
+        """Adapt side-aware WS evidence to the reconciler's symbol API safely.
+
+        A symbol is passed only when *every* currently-missing parseable side for
+        that symbol has explicit private-WS flat evidence. This prevents a flat
+        SHORT event from becoming attribution evidence for an unrelated LONG.
+        """
+        missing_sides: dict[str, set[str]] = {}
+        for trade in self.state.open_trades.to_dicts():
+            symbol = str(trade.get("symbol") or "")
+            side = _normalized_side(trade.get("side"))
+            if not symbol or not side:
+                continue
+            current = self.state.positions_by_symbol.get(symbol) or {}
+            current_side = _normalized_side(current.get("side"))
+            if _float(current.get("size")) > 0.0 and current_side == side:
+                continue
+            missing_sides.setdefault(symbol, set()).add(side)
+        return {
+            symbol
+            for symbol, sides in missing_sides.items()
+            if sides
+            and all(
+                (symbol, side) in self.state.explicit_flat_position_legs
+                or (symbol, "") in self.state.explicit_flat_position_legs
+                or (
+                    _float((self.state.positions_by_symbol.get(symbol) or {}).get("size")) > 0.0
+                    and bool(_normalized_side((self.state.positions_by_symbol.get(symbol) or {}).get("side")))
+                    and _normalized_side((self.state.positions_by_symbol.get(symbol) or {}).get("side")) != side
+                )
+                for side in sides
+            )
+        }
+
+    def _orphan_retry_suppressed(self, trade: dict[str, Any]) -> bool:
+        """Whether retrying this exact missing leg cannot protect exposure.
+
+        REST absence alone deliberately returns False: the ledger quantity is
+        still sent reduce-only in case the snapshot was false-empty. Explicit
+        flat evidence or a live opposite-side position returns True because the
+        old leg is definitely gone and an order using its close side would be
+        futile or target the wrong direction.
+        """
+        trade_id = str(trade.get("trade_id") or "")
+        symbol = str(trade.get("symbol") or "")
+        side = _normalized_side(trade.get("side"))
+        is_pending = (
+            (trade_id and trade_id in self.state.pending_orphan_trade_ids)
+            or (symbol, side) in self.state.pending_orphan_legs
+        )
+        if not is_pending:
+            return False
+        if (
+            (symbol, side) in self.state.explicit_flat_position_legs
+            or (symbol, "") in self.state.explicit_flat_position_legs
+        ):
+            return True
+        current = self.state.positions_by_symbol.get(symbol) or {}
+        current_side = _normalized_side(current.get("side"))
+        return (
+            _float(current.get("size")) > 0.0
+            and bool(side)
+            and bool(current_side)
+            and current_side != side
+        )
+
+    def _risk_managed_trade_rows(self, trades: pl.DataFrame) -> pl.DataFrame:
+        """Exclude only proven-gone orphan legs, never their whole symbol."""
+        if trades.is_empty():
+            return trades
+        keep_ids = [
+            str(trade.get("trade_id") or "")
+            for trade in trades.to_dicts()
+            if not self._orphan_retry_suppressed(trade)
+        ]
+        if "trade_id" not in trades.columns:
+            return trades
+        return trades.filter(pl.col("trade_id").cast(pl.String).is_in(keep_ids))
+
+    def reconcile_positions(self, *, write: bool, require_evidence: bool = True) -> list[dict[str, Any]]:
         # ``trading_client`` enables the B3 closed-PnL backfill: when an orphan
         # is detected, the reconciler calls ``get_closed_pnl`` to fill in
         # ``exit_price`` / ``gross_trade_return`` / ``net_return`` /
@@ -1905,8 +2251,10 @@ class EventWebSocketRiskEngine:
         # ``require_evidence`` is set by the bulk REST snapshot callers
         # (rest_reconcile / bootstrap): a successful-but-empty or partial snapshot
         # must not zero-PnL-close a trade that ``get_closed_pnl`` can't confirm.
-        # The WS ``on_position_message`` path leaves it False (a WS size=0 is the
-        # close evidence for that symbol).
+        # A WS size=0 proves the position vanished, but does NOT carry the exit
+        # price/PnL needed for a reconstructable ledger. Every path therefore
+        # requires closed-PnL evidence; while Bybit's record lags, the open row
+        # deliberately blocks re-entry instead of becoming a zero-PnL close.
         reconciled, rows = _risk_reconcile_missing_positions(
             self.state.open_trades,
             position_by_symbol=self.state.positions_by_symbol,
@@ -1915,13 +2263,19 @@ class EventWebSocketRiskEngine:
             position_error=self.state.last_position_error,
             trading_client=self.private_client,
             require_evidence=require_evidence,
+            confirmed_flat_symbols=self._confirmed_flat_symbols_for_reconcile(),
         )
         self.state.open_trades = reconciled
+        self._refresh_pending_orphan_state()
         if rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, rows, key="trade_id")
             self.state.reconciliations.extend(rows)
             for row in rows:
-                self.clear_submitted_symbol(str(row.get("symbol", "")))
+                symbol = str(row.get("symbol", ""))
+                if self._has_pending_exit_order_for_symbol(symbol):
+                    self.mark_submitted_symbol(symbol)
+                else:
+                    self.clear_submitted_symbol(symbol)
             if write:
                 self._write_trade_rows_routed(rows)
         return rows
@@ -1958,12 +2312,27 @@ class EventWebSocketRiskEngine:
         self.state.last_position_error = ""
         snapshot_positions = _active_position_by_symbol(raw_positions)
         if fresh_prefetch is not None:
-            # UNION with the WS-maintained positions: a position the WS added since
-            # the (slightly older) prefetch snapshot is never dropped — so no stop
-            # goes unchecked. Orphan-close then only fires for a symbol absent from
-            # BOTH the snapshot and the live WS state (conservative; it may delay a
-            # close by a cycle in a rare WS-over-report drift, never miss a stop).
-            self.state.positions_by_symbol = {**self.state.positions_by_symbol, **snapshot_positions}
+            # The REST request can start before a private-WS side flip and finish
+            # afterwards. A plain dict union with the snapshot last let that older
+            # short row overwrite the newer live long, after which adoption/stop
+            # repair could stamp short protection onto the real long. Start from
+            # REST, then replay every symbol whose WS event happened after the
+            # request began. A newer WS zero event is represented by the timestamp
+            # plus absence from ``positions_by_symbol`` and removes the stale REST
+            # row as well.
+            prefetch_started = float(
+                fresh_prefetch.get("started_monotonic", fresh_prefetch["monotonic"])
+            )
+            merged_positions = dict(snapshot_positions)
+            for symbol, updated_monotonic in self.state.position_ws_updated_monotonic_by_symbol.items():
+                if updated_monotonic <= prefetch_started:
+                    continue
+                current = self.state.positions_by_symbol.get(symbol)
+                if current is None or _float(current.get("size")) <= 0.0:
+                    merged_positions.pop(symbol, None)
+                else:
+                    merged_positions[symbol] = current
+            self.state.positions_by_symbol = merged_positions
         else:
             self.state.positions_by_symbol = snapshot_positions
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
@@ -2014,7 +2383,11 @@ class EventWebSocketRiskEngine:
             )
             return
         self.expire_stale_submitted_symbols()
-        open_symbols = set(_column_values(self.state.open_trades, "symbol"))
+        tracked_legs = {
+            (str(trade.get("symbol") or ""), _normalized_side(trade.get("side")))
+            for trade in self.state.open_trades.to_dicts()
+            if str(trade.get("trade_id") or "") not in self.state.pending_orphan_trade_ids
+        }
         now_ms = _now_ms()
         grace_ms = int(max(self.risk.untracked_position_grace_seconds, 0.0) * 1000.0)
         adopted: list[dict[str, Any]] = []
@@ -2024,10 +2397,12 @@ class EventWebSocketRiskEngine:
             if not symbol or _float(position.get("size")) <= 0.0:
                 continue
             active_position_symbols.add(symbol)
+            position_side = _normalized_side(position.get("side"))
+            position_leg = (symbol, position_side)
             if (
-                symbol in open_symbols
-                or symbol in self.state.pending_entry_symbols
-                or self.exit_submission_active(symbol)
+                position_leg in tracked_legs
+                or self.pending_entry_active_for_position(symbol, position_side)
+                or self.exit_submission_active_for_position(symbol, position_side)
             ):
                 self.state.untracked_first_seen_ms.pop(symbol, None)
                 continue
@@ -2045,7 +2420,7 @@ class EventWebSocketRiskEngine:
                 )
                 continue
             adopted.append(trade)
-            open_symbols.add(symbol)
+            tracked_legs.add(position_leg)
             self.state.untracked_first_seen_ms.pop(symbol, None)
         for stale_symbol in [s for s in self.state.untracked_first_seen_ms if s not in active_position_symbols]:
             self.state.untracked_first_seen_ms.pop(stale_symbol, None)
@@ -2098,7 +2473,7 @@ class EventWebSocketRiskEngine:
 
     def _recover_entry_link_metadata(
         self, *, symbol: str, side: str,
-    ) -> tuple[str, str, int, str, int, str] | None:  # (link, strategy_id, signal_ts_ms, sleeve, reentry_seq, component_tag)
+    ) -> RecoveredEntryLinkMetadata | None:
         """Find the original bot-placed entry order for ``symbol`` and decode
         its orderLinkId into (link, strategy_id, signal_ts_ms, sleeve, seq, component_tag).
         Returns None when the symbol has no bot-generated entry in the recent
@@ -2141,7 +2516,11 @@ class EventWebSocketRiskEngine:
             )
             return
         self.expire_stale_submitted_symbols()
-        open_symbols = set(_column_values(self.state.open_trades, "symbol"))
+        tracked_legs = {
+            (str(trade.get("symbol") or ""), _normalized_side(trade.get("side")))
+            for trade in self.state.open_trades.to_dicts()
+            if str(trade.get("trade_id") or "") not in self.state.pending_orphan_trade_ids
+        }
         now_ms = _now_ms()
         grace_ms = int(max(self.risk.untracked_position_grace_seconds, 0.0) * 1000.0)
         rows: list[dict[str, Any]] = []
@@ -2152,10 +2531,11 @@ class EventWebSocketRiskEngine:
             if not symbol or _float(qty) <= 0.0:
                 continue
             active_position_symbols.add(symbol)
+            position_side = _normalized_side(position.get("side"))
             if (
-                symbol in open_symbols
-                or symbol in self.state.pending_entry_symbols
-                or self.exit_submission_active(symbol)
+                (symbol, position_side) in tracked_legs
+                or self.pending_entry_active_for_position(symbol, position_side)
+                or self.exit_submission_active_for_position(symbol, position_side)
             ):
                 self.state.untracked_first_seen_ms.pop(symbol, None)
                 continue
@@ -2300,7 +2680,10 @@ class EventWebSocketRiskEngine:
             order["notional_usdt"] = abs(avg_price * filled_qty) if avg_price > 0.0 else 0.0
             updates.append(dict(order))
             if order["status"] == "filled":
-                self.clear_submitted_symbol(symbol)
+                if self._has_pending_exit_order_for_symbol(symbol):
+                    self.mark_submitted_symbol(symbol)
+                else:
+                    self.clear_submitted_symbol(symbol)
             else:
                 self.mark_submitted_symbol(symbol)
         if updates:
@@ -2309,7 +2692,6 @@ class EventWebSocketRiskEngine:
     def reconcile_flat_pending_exit_orders(self, orders: pl.DataFrame) -> None:
         if orders.is_empty():
             return
-        active_symbols = set(self.state.positions_by_symbol)
         trade_lookup = {str(row["trade_id"]): row for row in self.state.open_trades.to_dicts()}
         now_ms = _now_ms()
         order_updates: list[dict[str, Any]] = []
@@ -2325,7 +2707,31 @@ class EventWebSocketRiskEngine:
             link = str(order.get("order_link_id") or "")
             if not symbol or not link:
                 continue
-            if symbol in active_symbols or symbol in self.state.live_exit_order_symbols:
+            trade_id = str(order.get("trade_id") or "")
+            trade = dict(trade_lookup.get(trade_id, {}))
+            target_side = (
+                _position_side_reduced_by_order(order.get("side"))
+                or _normalized_side(trade.get("side"))
+            )
+            current = self.state.positions_by_symbol.get(symbol) or {}
+            current_side = _normalized_side(current.get("side"))
+            matching_position_live = (
+                _float(current.get("size")) > 0.0
+                and (
+                    not target_side
+                    or not current_side
+                    or current_side == target_side
+                )
+            )
+            matching_exit_order_live = (
+                symbol in self.state.live_exit_order_unknown_side_symbols
+                or (target_side and (symbol, target_side) in self.state.live_exit_order_legs)
+                or (
+                    not target_side
+                    and symbol in self.state.live_exit_order_symbols
+                )
+            )
+            if matching_position_live or matching_exit_order_live:
                 continue
             target_qty = str(order.get("target_qty") or order.get("qty") or "")
             filled_qty = target_qty if _float(target_qty) > 0.0 else str(order.get("filled_qty") or "")
@@ -2343,15 +2749,16 @@ class EventWebSocketRiskEngine:
             if not str(order_update.get("error") or ""):
                 order_update["error"] = "filled inferred from flat Bybit position"
             order_updates.append(order_update)
-            self.clear_submitted_symbol(symbol)
             existing = self.state.orders_by_link.get(link)
             if existing is not None:
                 existing.update(order_update)
             else:
                 self._record_orders([order_update])
+            if self._has_pending_exit_order_for_symbol(symbol):
+                self.mark_submitted_symbol(symbol)
+            else:
+                self.clear_submitted_symbol(symbol)
 
-            trade_id = str(order.get("trade_id") or "")
-            trade = dict(trade_lookup.get(trade_id, {}))
             if not trade:
                 continue
             close_exit_price = avg_price
@@ -2406,6 +2813,14 @@ class EventWebSocketRiskEngine:
                         "rebalance_realized_weight": final_weight,
                         "rebalance_exit_fee_usdt": final_fee,
                     }
+                    for forensic_key in (
+                        "exit_price_source",
+                        "venue_open_fee_allocated_usdt",
+                        "venue_closed_pnl_allocated_usdt",
+                        "orphan_close_legs",
+                    ):
+                        if forensic_key in backfill:
+                            pnl_fields[forensic_key] = backfill[forensic_key]
             if not pnl_fields and close_exit_price > 0.0:
                 # No backfill ran (the recovered order carried a usable
                 # avg_price): book PnL from it directly — a closed trade must
@@ -2468,10 +2883,86 @@ class EventWebSocketRiskEngine:
         self.state.last_open_order_error = ""
         self.state.live_entry_order_symbols = _live_open_order_symbols(open_orders, reduce_only=False)
         self.state.live_exit_order_symbols = _live_open_order_symbols(open_orders, reduce_only=True)
+        live_entry_legs: set[tuple[str, str]] = set()
+        unknown_entry_side_symbols: set[str] = set()
+        live_entry_links: set[str] = set()
+        live_exit_legs: set[tuple[str, str]] = set()
+        unknown_side_symbols: set[str] = set()
+        for order in open_orders:
+            symbol = str(order.get("symbol") or "")
+            if not symbol:
+                continue
+            if symbol in self.state.live_entry_order_symbols and not _bool(order.get("reduceOnly") or order.get("reduce_only")):
+                entry_side = _normalized_side(order.get("side"))
+                if entry_side:
+                    live_entry_legs.add((symbol, entry_side))
+                else:
+                    unknown_entry_side_symbols.add(symbol)
+                link = str(order.get("orderLinkId") or order.get("order_link_id") or "")
+                if link:
+                    live_entry_links.add(link)
+            if symbol not in self.state.live_exit_order_symbols:
+                continue
+            target_side = _position_side_reduced_by_order(order.get("side"))
+            if target_side:
+                live_exit_legs.add((symbol, target_side))
+            else:
+                unknown_side_symbols.add(symbol)
+        self.state.live_entry_order_legs = live_entry_legs
+        self.state.live_entry_order_unknown_side_symbols = unknown_entry_side_symbols
+        self.state.live_entry_order_links = live_entry_links
+        self.state.live_exit_order_legs = live_exit_legs
+        self.state.live_exit_order_unknown_side_symbols = unknown_side_symbols
         return True
 
     def exit_submission_active(self, symbol: str) -> bool:
         return symbol in self.state.submitted_symbols or symbol in self.state.live_exit_order_symbols
+
+    def exit_submission_active_for_position(self, symbol: str, position_side: str) -> bool:
+        """Side-aware reduce-only guard for adoption and live-leg management.
+
+        A pending Buy reduce-only closes a short; it must not block adopting or
+        protecting a newly-live long on the same symbol. Rows without a usable
+        side remain conservatively symbol-blocking.
+        """
+        normalized_side = _normalized_side(position_side)
+        pending_for_symbol: list[dict[str, Any]] = []
+        now_ms = _now_ms()
+        max_age_ms = max(self.risk.pending_exit_guard_seconds, 0.0) * 1000.0
+        for order in self.state.orders_by_link.values():
+            if (
+                str(order.get("symbol") or "") == symbol
+                and _bool(order.get("reduce_only"))
+                and str(order.get("status") or "") in PENDING_ORDER_STATUSES
+            ):
+                ts_ms = _int(order.get("updated_at_ms") or order.get("ts_ms"))
+                if max_age_ms > 0.0 and ts_ms > 0 and now_ms - ts_ms > max_age_ms:
+                    continue
+                pending_for_symbol.append(order)
+        if symbol in self.state.submitted_symbols:
+            for order in pending_for_symbol:
+                target_side = _position_side_reduced_by_order(order.get("side"))
+                if not target_side or not normalized_side or target_side == normalized_side:
+                    return True
+
+        if symbol in self.state.live_exit_order_unknown_side_symbols:
+            return True
+        if (symbol, normalized_side) in self.state.live_exit_order_legs:
+            return True
+        if symbol in self.state.live_exit_order_symbols:
+            known_sides = {
+                side for candidate_symbol, side in self.state.live_exit_order_legs
+                if candidate_symbol == symbol
+            }
+            if not known_sides:
+                return True
+
+        # A submitted latch with no indexed pending order is still an unknown
+        # in-flight action (for example, a preflight row not loaded yet). Keep
+        # the conservative symbol guard until its normal expiry.
+        if symbol in self.state.submitted_symbols and not pending_for_symbol:
+            return True
+        return False
 
     def reconcile_pending_order_fills(self, orders: pl.DataFrame) -> None:
         if orders.is_empty() or self.private_client is None:
@@ -2487,6 +2978,7 @@ class EventWebSocketRiskEngine:
             now_ms=_now_ms(),
             live_position_symbols=set(self.state.positions_by_symbol),
             live_open_order_symbols=self.state.live_entry_order_symbols | self.state.live_exit_order_symbols,
+            live_position_by_symbol=self.state.positions_by_symbol,
         )
         if trade_rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, trade_rows, key="trade_id")
@@ -2506,18 +2998,36 @@ class EventWebSocketRiskEngine:
     def terminalize_stale_pending_entry_orders(self, orders: pl.DataFrame) -> None:
         if orders.is_empty():
             return
+        live_position_legs = {
+            (symbol, _normalized_side(position.get("side")))
+            for symbol, position in self.state.positions_by_symbol.items()
+            if _float(position.get("size")) > 0.0
+        }
+        live_position_unknown_side_symbols = {
+            symbol
+            for symbol, side in live_position_legs
+            if not side
+        }
         order_rows = _terminalize_stale_pending_entry_orders(
             orders,
             live_position_symbols=set(self.state.positions_by_symbol),
             live_open_entry_order_symbols=self.state.live_entry_order_symbols,
             now_ms=_now_ms(),
+            live_position_legs=live_position_legs,
+            live_open_entry_order_legs=self.state.live_entry_order_legs,
+            live_open_entry_order_links=self.state.live_entry_order_links,
+            live_position_unknown_side_symbols=live_position_unknown_side_symbols,
+            live_open_entry_order_unknown_side_symbols=(
+                self.state.live_entry_order_unknown_side_symbols
+            ),
         )
         if not order_rows:
             return
+        updates_by_link = {
+            str(update.get("order_link_id") or ""): update
+            for update in order_rows
+        }
         for update in order_rows:
-            symbol = str(update.get("symbol") or "")
-            if symbol:
-                self.state.pending_entry_symbols.discard(symbol)
             link = str(update.get("order_link_id") or "")
             if not link:
                 continue
@@ -2525,6 +3035,15 @@ class EventWebSocketRiskEngine:
             if order is not None:
                 order.update(update)
         self._write_order_rows_routed(order_rows)
+        refreshed_orders = [
+            dict(updates_by_link.get(str(row.get("order_link_id") or ""), row))
+            for row in orders.to_dicts()
+        ]
+        self.load_pending_entry_orders(
+            pl.DataFrame(refreshed_orders, infer_schema_length=None)
+            if refreshed_orders
+            else pl.DataFrame()
+        )
 
     def on_idle(self) -> None:
         now = time.monotonic()
@@ -2617,16 +3136,22 @@ class EventWebSocketRiskEngine:
                 loaded_order_links.add(link)
 
     def load_pending_entry_orders(self, orders: pl.DataFrame) -> None:
+        self.state.pending_entry_legs.clear()
         self.state.pending_entry_symbols.clear()
         if orders.is_empty():
             return
-        open_symbols = set(_column_values(self.state.open_trades, "symbol"))
+        open_legs = {
+            (str(row.get("symbol") or ""), _normalized_side(row.get("side")))
+            for row in self.state.open_trades.to_dicts()
+        }
         now_ms = _now_ms()
         for row in orders.to_dicts():
             symbol = str(row.get("symbol") or "")
             link = str(row.get("order_link_id") or "")
             trade_id = str(row.get("trade_id") or "")
-            if not symbol or not link or not trade_id or symbol in open_symbols:
+            entry_side = _normalized_side(row.get("trade_side") or row.get("side"))
+            entry_leg = (symbol, entry_side)
+            if not symbol or not link or not trade_id or entry_leg in open_legs:
                 continue
             if _bool(row.get("reduce_only")):
                 continue
@@ -2635,7 +3160,28 @@ class EventWebSocketRiskEngine:
             ts_ms = _int(row.get("ts_ms"))
             if ts_ms > 0 and now_ms - ts_ms > PENDING_ORDER_GUARD_MS:
                 continue
-            self.state.pending_entry_symbols.add(symbol)
+            self.state.pending_entry_legs.add(entry_leg)
+        self.state.pending_entry_symbols = {
+            symbol for symbol, _side in self.state.pending_entry_legs
+        }
+
+    def pending_entry_active_for_position(self, symbol: str, position_side: str) -> bool:
+        """Whether a pending/live entry can account for this exact venue leg."""
+        normalized_side = _normalized_side(position_side)
+        has_scoped_pending_leg = any(
+            candidate_symbol == symbol
+            for candidate_symbol, _candidate_side in self.state.pending_entry_legs
+        )
+        legacy_unknown_pending = (
+            symbol in self.state.pending_entry_symbols and not has_scoped_pending_leg
+        )
+        return (
+            (symbol, normalized_side) in self.state.pending_entry_legs
+            or (symbol, "") in self.state.pending_entry_legs
+            or legacy_unknown_pending
+            or (symbol, normalized_side) in self.state.live_entry_order_legs
+            or symbol in self.state.live_entry_order_unknown_side_symbols
+        )
 
     def mark_submitted_symbol(self, symbol: str, *, now_ms: int | None = None) -> None:
         if not symbol:
@@ -2734,15 +3280,20 @@ class EventWebSocketRiskEngine:
         now_ms = _now_ms()
         position_snapshot = build_position_pnl_snapshot(list(self.state.positions_by_symbol.values()))
         bybit_summary = summarize_position_pnl(position_snapshot)
+        risk_managed_trades = self._risk_managed_trade_rows(self.state.open_trades)
         # P1-3 alignment: prefer position-level markPrice over ticker mark for
         # ledger uPnL so it matches Bybit's own position uPnL by construction.
         ledger_positions = build_ledger_position_pnl_snapshot(
-            self.state.open_trades,
+            risk_managed_trades,
             self.state.price_by_symbol,
             position_by_symbol=self.state.positions_by_symbol,
         )
         ledger_summary = summarize_position_pnl(ledger_positions)
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
+        open_legs = {
+            (str(row.get("symbol") or ""), _normalized_side(row.get("side")))
+            for row in self.state.open_trades.to_dicts()
+        }
         pending_entry_fills = sum(
             1
             for row in self.state.pending_fill_reconciliations
@@ -2756,15 +3307,43 @@ class EventWebSocketRiskEngine:
         pending_entry_positions = [
             row
             for row in position_snapshot
-            if str(row.get("symbol", "")) and str(row.get("symbol", "")) in self.state.pending_entry_symbols
-            and str(row.get("symbol", "")) not in open_symbols
+            if str(row.get("symbol", ""))
+            and self.pending_entry_active_for_position(
+                str(row.get("symbol", "")),
+                _normalized_side(row.get("side")),
+            )
+            and (
+                str(row.get("symbol", "")),
+                _normalized_side(row.get("side")),
+            ) not in open_legs
         ]
+        pending_orphan_positions = [
+            row
+            for row in self.state.open_trades.to_dicts()
+            if (
+                str(row.get("trade_id") or "") in self.state.pending_orphan_trade_ids
+                or (
+                    str(row.get("symbol") or ""),
+                    _normalized_side(row.get("side")),
+                ) in self.state.pending_orphan_legs
+            )
+        ]
+        tracked_legs = {
+            (str(row.get("symbol") or ""), _normalized_side(row.get("side")))
+            for row in risk_managed_trades.to_dicts()
+        }
         untracked_positions = [
             row
             for row in position_snapshot
             if str(row.get("symbol", ""))
-            and str(row.get("symbol", "")) not in open_symbols
-            and str(row.get("symbol", "")) not in self.state.pending_entry_symbols
+            and (
+                str(row.get("symbol", "")),
+                _normalized_side(row.get("side")),
+            ) not in tracked_legs
+            and not self.pending_entry_active_for_position(
+                str(row.get("symbol", "")),
+                _normalized_side(row.get("side")),
+            )
         ]
         position_report_error = self._current_position_report_error()
         cycle = {
@@ -2779,6 +3358,9 @@ class EventWebSocketRiskEngine:
             "exits_executed": len(self.state.exits) + self.state.exits_evicted,
             "stop_repairs": len(self.state.repairs) + self.state.repairs_evicted,
             "pending_entry_positions": len(pending_entry_positions),
+            "pending_orphan_positions": len(pending_orphan_positions),
+            "pending_orphan_symbols": ",".join(sorted(self.state.pending_orphan_symbols)),
+            "pending_orphan_trade_ids": ",".join(sorted(self.state.pending_orphan_trade_ids)),
             "pending_fills_reconciled": len(self.state.pending_fill_reconciliations) + self.state.pending_fill_reconciliations_evicted,
             "pending_order_fills_reconciled": len(self.state.pending_fill_reconciliations) + self.state.pending_fill_reconciliations_evicted,
             "pending_entry_fills_reconciled": pending_entry_fills,
@@ -2816,6 +3398,7 @@ class EventWebSocketRiskEngine:
             "reconciliations": self.state.reconciliations[-20:],
             "pending_fill_reconciliations": self.state.pending_fill_reconciliations[-20:],
             "pending_entry_positions": pending_entry_positions,
+            "pending_orphan_positions": pending_orphan_positions,
             "untracked_positions": untracked_positions,
             "bybit_positions": position_snapshot,
             "bybit_position_summary": bybit_summary,
@@ -3194,6 +3777,25 @@ def _ack_order_link(message: dict[str, Any]) -> str:
 
 def _position_price(row: dict[str, Any]) -> float:
     return _first_price(row, ("markPrice", "mark_price", "lastPrice", "indexPrice", "avgPrice"))
+
+
+def _normalized_side(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"sell", "short"}:
+        return "short"
+    if text in {"buy", "long"}:
+        return "long"
+    return text
+
+
+def _position_side_reduced_by_order(order_side: Any) -> str:
+    """Return the position side targeted by a reduce-only order side."""
+    side = _normalized_side(order_side)
+    if side == "long":  # Bybit Buy reduces a short.
+        return "short"
+    if side == "short":  # Bybit Sell reduces a long.
+        return "long"
+    return ""
 
 
 def _int(value: Any) -> int:

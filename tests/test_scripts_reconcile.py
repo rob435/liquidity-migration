@@ -245,7 +245,9 @@ def test_pull_sleeve_clears_local_mirror_when_remote_dataset_empty(monkeypatch, 
     assert not stale.exists(), "empty remote ledger must clear stale local mirror"
 
 
-def test_pull_sleeve_clears_continuous_paper_mirror_when_remote_absent(monkeypatch, tmp_path) -> None:
+def test_pull_sleeve_clears_continuous_mirrors_before_required_plane_refusal(
+    monkeypatch, tmp_path
+) -> None:
     class FakeStep:
         dry_run = False
 
@@ -266,6 +268,49 @@ def test_pull_sleeve_clears_continuous_paper_mirror_when_remote_absent(monkeypat
     stale.mkdir(parents=True)
     (stale / "old.parquet").write_bytes(b"stale")
 
-    reconcile.pull_sleeve(FakeStep(), "root@example", "continuous")
+    with pytest.raises(SystemExit, match="required remote continuous market-plane file is absent"):
+        reconcile.pull_sleeve(FakeStep(), "root@example", "continuous")
 
     assert not stale.exists(), "absent remote continuous paper ledger must clear stale local mirror"
+
+
+def test_scp_pull_refuses_and_clears_stale_market_plane_when_remote_file_absent(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class FakeStep:
+        dry_run = False
+
+        def banner(self, title: str) -> None:
+            self.title = title
+
+        def run(self, cmd: list[str], **kwargs) -> int:
+            raise AssertionError(f"copy should not run for absent remote file: {cmd}")
+
+    monkeypatch.setattr(reconcile, "REPO", tmp_path)
+    monkeypatch.setattr(reconcile, "_have_rsync", lambda: False)
+    monkeypatch.setattr(reconcile, "_have_scp", lambda: True)
+    monkeypatch.setattr(reconcile, "_scp_ssh_options", lambda: [])
+    monkeypatch.setattr(
+        reconcile,
+        "_remote_dir_state",
+        lambda step, host, path, ssh_options: "empty",
+    )
+    monkeypatch.setattr(
+        reconcile,
+        "_remote_file_exists",
+        lambda step, host, path, ssh_options: False,
+    )
+    stale = (
+        tmp_path
+        / "data"
+        / "bybit-continuous-demo-event"
+        / "residual_momentum.parquet"
+    )
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"stale")
+
+    with pytest.raises(SystemExit, match="market-plane file is absent"):
+        reconcile.pull_sleeve(FakeStep(), "root@example", "continuous")
+
+    assert not stale.exists()

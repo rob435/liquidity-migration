@@ -114,6 +114,19 @@ fi
 "$RUFF_BIN" check liquidity_migration tests
 
 echo
+echo "[receipt] bind successful verification to the exact registered roots"
+NEW_BYBIT="$NEW_BYBIT" NEW_BINANCE="$NEW_BINANCE" "$PYTHON_BIN" - <<'PY'
+import os
+from pathlib import Path
+
+from scripts.continuous_tail_survival_2026_07_10 import write_root_build_receipt
+
+for venue, env_name in (("bybit", "NEW_BYBIT"), ("binance", "NEW_BINANCE")):
+    path = write_root_build_receipt(venue, Path(os.environ[env_name]).expanduser())
+    print(f"  {venue}: {path}")
+PY
+
+echo
 echo "=============================================================="
 echo "All gates PASSED. Safe to delete old roots."
 echo "=============================================================="

@@ -259,7 +259,9 @@ def test_rmom_parquet_is_read_from_the_followed_root(tmp_path: Path) -> None:
     own.mkdir()
     pl.DataFrame(
         {"ts_ms": [0], "symbol": ["AAAUSDT"], "residual_momentum": [0.1]}
-    ).write_parquet(leader / "residual_momentum.parquet")
+    ).with_columns(pl.lit(False).alias("is_provisional")).write_parquet(
+        leader / "residual_momentum.parquet"
+    )
 
     demo = ContinuousDemoCycleConfig(klines_follow_root=str(leader))
     table = _load_rmom_table(_signal_source_root(demo, own))

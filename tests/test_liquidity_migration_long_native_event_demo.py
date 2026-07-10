@@ -26,6 +26,8 @@ import pytest
 import liquidity_migration.long_native_event_demo as lnd
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
 from liquidity_migration.config import ResearchConfig
+from liquidity_migration.event_demo import EventDemoCycleConfig
+from liquidity_migration.event_demo_exits import _reconcile_pending_order_fills
 from liquidity_migration.long_native_event_demo import (
     FC_VOLUME_RANK_TELEMETRY_MARGIN,
     LONG_DEMO_STRATEGY_PROFILES,
@@ -637,8 +639,85 @@ def test_telegram_notify_reason_classification() -> None:
     assert _long_telegram_reason({"cycle": {**cycle, "entries_executed": 1}, "entry_orders": [], "exit_orders": []}) == "long_entry_executed"
     # Entry error
     assert _long_telegram_reason({"cycle": cycle, "entry_orders": [{"submit_mode": "error"}], "exit_orders": []}) == "long_entry_error"
+    assert _long_telegram_reason({"cycle": cycle, "entry_orders": [{"status": "rejected", "submit_mode": "not_submitted"}], "exit_orders": []}) == "long_entry_error"
     # Position report error
     assert _long_telegram_reason({"cycle": {**cycle, "position_report_error": "rest down"}, "entry_orders": [], "exit_orders": []}) == "position_report_error"
+
+
+def test_deterministic_long_entry_rejection_telegram_is_restart_safe_rate_limited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[str] = []
+    monkeypatch.setattr(
+        lnd,
+        "send_telegram_message",
+        lambda text, *, enabled: sent.append(text) or True,
+    )
+    rejection = {
+        "order_link_id": "lm-en-l-NOPRICE-abc",
+        "status": "rejected",
+        "submit_mode": "not_submitted",
+        "error": "price_unavailable",
+    }
+
+    def payload(ts_ms: int, *, error: str = "price_unavailable") -> dict[str, Any]:
+        return {
+            "cycle": {
+                "ts_ms": ts_ms,
+                "mode": "submit",
+                "equity_usdt": 10_000.0,
+                "entries_executed": 0,
+                "exits_executed": 0,
+                "entry_candidates": 1,
+                "exit_candidates": 0,
+                "open_long_positions_after": 0,
+                "order_notional_pct_equity": 0.1,
+                "entry_leverage": 10.0,
+                "notional_multiplier": 1.0,
+            },
+            "entry_orders": [{**rejection, "error": error}],
+            "exit_orders": [],
+            "entries": [],
+            "exits": [],
+            "ledger_position_summary": {},
+            "report_dir": str(tmp_path),
+        }
+
+    first_ts = 1_700_000_000_000
+    assert _maybe_long_notify(payload(first_ts), enabled=True) == (True, "")
+    assert _maybe_long_notify(payload(first_ts + 60_000), enabled=True) == (
+        False,
+        "quiet_duplicate_long_entry_rejection",
+    )
+    assert len(sent) == 1
+
+    # The persisted state simulates a daemon restart. A materially different
+    # deterministic rejection on the same order link pages immediately.
+    assert _maybe_long_notify(
+        payload(first_ts + 120_000, error="sizing_rejected:min_qty=10"),
+        enabled=True,
+    ) == (True, "")
+    assert len(sent) == 2
+
+    # Numeric sizing diagnostics move with price/equity every cycle; they are
+    # one root rejection class and must not bypass the cooldown.
+    assert _maybe_long_notify(
+        payload(
+            first_ts + 180_000,
+            error="sizing_rejected:notional=999,price=1.23,min_qty=11",
+        ),
+        enabled=True,
+    ) == (False, "quiet_duplicate_long_entry_rejection")
+    assert len(sent) == 2
+
+    # A still-identical rejection is allowed to remind the operator only after
+    # the bounded cooldown, never once per 60-second cycle.
+    assert _maybe_long_notify(
+        payload(first_ts + lnd.LONG_REJECTION_TELEGRAM_COOLDOWN_MS + 1),
+        enabled=True,
+    ) == (True, "")
+    assert len(sent) == 3
 
 
 def test_format_long_telegram_message_contains_essentials() -> None:
@@ -1309,6 +1388,111 @@ def test_execute_long_entries_runs_on_single_thread_despite_max_workers() -> Non
     # placements is itself proof the burst was not short-circuited.
     assert len(client.place_threads) == 3
     assert set(client.place_threads) == {threading.get_ident()}
+
+
+def test_long_selected_candidate_rejection_writes_durable_attempt_reason() -> None:
+    demo = LongNativeDemoCycleConfig(submit_orders=False, record_dry_run=True)
+    rows, orders, skipped = _execute_long_entries(
+        [{**_candidate("NOPRICEUSDT"), "live_price": 0.0}],
+        trading_client=None,
+        demo=demo,
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.1,
+        price_by_symbol={},
+        contract_by_symbol={},
+        now_ms=1_700_000_300_000,
+        strategy_id="s",
+        record_preflight=None,
+        private_client_factory=None,
+        execution_event_router=None,
+        max_workers=1,
+    )
+    assert rows == [] and skipped == 0
+    assert len(orders) == 1
+    assert orders[0]["status"] == "rejected"
+    assert orders[0]["submit_mode"] == "not_submitted"
+    assert orders[0]["error"] == "price_unavailable"
+
+
+def test_long_pending_entry_fill_recovery_inherits_intent_max_hold_deadline() -> None:
+    candidate = _candidate("AAAUSDT")
+    planned = int(candidate["planned_exit_ts_ms"])
+    preflight_rows: list[dict[str, Any]] = []
+
+    class _PendingThenFilledClient(_ThreadRecordingClient):
+        fill_visible = False
+
+        def get_trade_history(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            if not self.fill_visible:
+                return []
+            return [{
+                "execQty": "10.101",
+                "execPrice": "99",
+                "execValue": "999.999",
+                "execFee": "0.55",
+                "execTime": "1700000360000",
+            }]
+
+    client = _PendingThenFilledClient()
+    rows, orders, skipped = _execute_long_entries(
+        [candidate],
+        trading_client=client,
+        demo=LongNativeDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            entry_leverage=10.0,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.1,
+        price_by_symbol={"AAAUSDT": 99.0},
+        contract_by_symbol={
+            "AAAUSDT": {
+                "tick_size": 0.01,
+                "qty_step": 0.001,
+                "min_order_qty": 0.0,
+                "min_notional_value": 0.0,
+                "max_order_qty": 1e9,
+            }
+        },
+        now_ms=1_700_000_300_000,
+        strategy_id="s",
+        record_preflight=preflight_rows.append,
+        private_client_factory=None,
+        execution_event_router=None,
+        max_workers=1,
+    )
+
+    assert skipped == 0
+    assert rows == []
+    assert orders[0]["status"] == "submitted_unconfirmed"
+    assert preflight_rows[0]["planned_exit_ts_ms"] == planned
+    assert orders[0]["planned_exit_ts_ms"] == planned
+
+    # Simulate the producer crashing after the durable preflight write. The
+    # independent risk daemon later sees the venue fill and reconstructs the
+    # missing LONG trade through the production pending-fill reconciler.
+    client.fill_visible = True
+    recovered_trades, recovered_orders = _reconcile_pending_order_fills(
+        pl.DataFrame(preflight_rows, infer_schema_length=None),
+        pl.DataFrame(),
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            entry_leverage=10.0,
+        ),
+        now_ms=1_700_000_360_000,
+        live_position_symbols={"AAAUSDT"},
+    )
+
+    assert len(recovered_trades) == len(recovered_orders) == 1
+    recovered = recovered_trades[0]
+    assert recovered["trade_id"] == candidate["trade_id"]
+    assert recovered["sleeve"] == "long"
+    assert recovered["side"] == "long"
+    assert recovered["status"] == "open"
+    assert recovered["planned_exit_ts_ms"] == planned
 
 
 # ---------------------------------------------------------------------------

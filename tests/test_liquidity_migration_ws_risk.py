@@ -167,6 +167,192 @@ class FakePrivateClient:
         return rows[:limit]
 
 
+def test_component_max_hold_closes_every_leg_and_full_netted_position(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single symbol guard must not strand two legs of the three-component
+    continuous ensemble when their shared 24h deadline fires."""
+    now_ms = 1_800_000_000_000
+    symbol = "TAGUSDT"
+    continuous_root = tmp_path / "continuous"
+
+    class NettedFillClient(FakePrivateClient):
+        def place_order(self, **params):
+            result = super().place_order(**params)
+            assert params["reduceOnly"] is True
+            remaining = max(float(self.positions[0]["size"]) - float(params["qty"]), 0.0)
+            self.positions[0]["size"] = str(remaining)
+            return result
+
+    client = NettedFillClient(
+        positions=[{
+            "symbol": symbol,
+            "side": "Sell",
+            "size": "3",
+            "avgPrice": "100",
+            "markPrice": "113",
+            "positionValue": "339",
+            "unrealisedPnl": "-39",
+        }]
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path / "short",
+        config=ResearchConfig(data_root=tmp_path / "short"),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            continuous_data_root=str(continuous_root),
+        ),
+        private_client=client,
+    )
+    trades = pl.DataFrame([
+        {
+            "trade_id": f"continuous-{component}",
+            "strategy_id": "continuous_fade_v2",
+            "sleeve": "continuous",
+            "component": component,
+            "symbol": symbol,
+            "side": "short",
+            "status": "open",
+            "qty": "1",
+            "entry_price": 100.0,
+            "notional_usdt": 100.0,
+            "equity_usdt": 10_000.0,
+            "entry_ts_ms": now_ms - 24 * 60 * 60 * 1000,
+            "planned_exit_ts_ms": now_ms - 1,
+            "stop_price": 0.0,
+            "take_profit_price": 0.0,
+        }
+        for component in ("p3", "p4p3", "p4p5")
+    ], infer_schema_length=None)
+    engine.state.all_trades = trades
+    engine.state.open_trades = trades
+    engine.state.positions_by_symbol = {symbol: dict(client.positions[0])}
+    engine.state.price_by_symbol = {symbol: 113.0}
+    monkeypatch.setattr(ws_risk, "_now_ms", lambda: now_ms)
+
+    engine.evaluate_symbols({symbol})
+
+    assert len(client.orders) == 3
+    assert len({str(order["orderLinkId"]) for order in client.orders}) == 3
+    assert sum(float(order["qty"]) for order in client.orders) == pytest.approx(3.0)
+    assert float(client.positions[0]["size"]) == 0.0
+    assert engine.state.open_trades.is_empty()
+    stored = read_dataset(continuous_root, "continuous_fade_demo_trades")
+    assert stored.height == 3
+    assert set(stored["status"].to_list()) == {"closed"}
+    assert set(stored["exit_reason"].to_list()) == {"max_hold"}
+
+
+def test_stale_component_exit_order_does_not_block_max_hold_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_800_000_000_000
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(pending_exit_guard_seconds=1.0),
+    )
+    link = "lm-ux-c-TAG-old"
+    engine.state.submitted_link_to_trade_id[link] = "continuous-p3"
+    engine.state.orders_by_link[link] = {
+        "order_link_id": link,
+        "trade_id": "continuous-p3",
+        "status": "submitted_unconfirmed",
+        "ts_ms": now_ms - 2_000,
+    }
+    monkeypatch.setattr(ws_risk, "_now_ms", lambda: now_ms)
+
+    assert engine._trade_exit_submission_active("continuous-p3") is False
+    engine.state.orders_by_link[link]["updated_at_ms"] = now_ms
+    assert engine._trade_exit_submission_active("continuous-p3") is True
+
+
+def test_ws_ack_fallback_preserves_component_link_attempt(tmp_path: Path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(),
+    )
+    engine.state.open_trades = pl.DataFrame([
+        {
+            "trade_id": "continuous-p4p5",
+            "symbol": "TAGUSDT",
+            "side": "short",
+            "status": "open",
+            "qty": "1",
+        }
+    ])
+    plan = engine.exit_plan_from_order({
+        "trade_id": "continuous-p4p5",
+        "symbol": "TAGUSDT",
+        "side": "Buy",
+        "qty": "1",
+        "exit_reason": "max_hold",
+        "exit_trigger_ts_ms": 123,
+        "order_link_attempt": 2,
+    })
+
+    assert plan is not None
+    assert plan["order_link_attempt"] == 2
+
+
+def test_false_empty_rest_snapshot_keeps_reduce_only_protection_armed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REST absence is not proof-flat; only an explicit WS size=0 suppresses retries."""
+    now_ms = 1_800_000_000_000
+    continuous_root = tmp_path / "continuous"
+    client = FakePrivateClient(confirm_fills=False, positions=[])
+    engine = EventWebSocketRiskEngine(
+        tmp_path / "short",
+        config=ResearchConfig(data_root=tmp_path / "short"),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            continuous_data_root=str(continuous_root),
+        ),
+        private_client=client,
+    )
+    trades = pl.DataFrame([{
+        "trade_id": "continuous-p3",
+        "strategy_id": "continuous_fade_v2",
+        "sleeve": "continuous",
+        "component": "p3",
+        "symbol": "TAGUSDT",
+        "side": "short",
+        "status": "open",
+        "qty": "1",
+        "entry_price": 100.0,
+        "notional_usdt": 100.0,
+        "equity_usdt": 10_000.0,
+        "planned_exit_ts_ms": now_ms - 1,
+        "stop_price": 0.0,
+        "take_profit_price": 0.0,
+    }], infer_schema_length=None)
+    engine.state.all_trades = trades
+    engine.state.open_trades = trades
+    engine.state.positions_by_symbol = {}
+    engine.state.price_by_symbol = {"TAGUSDT": 113.0}
+    engine.reconcile_positions(write=False)
+    monkeypatch.setattr(ws_risk, "_now_ms", lambda: now_ms)
+
+    assert "TAGUSDT" in engine.state.pending_orphan_symbols
+    assert ("TAGUSDT", "short") not in engine.state.explicit_flat_position_legs
+    engine.evaluate_symbols({"TAGUSDT"})
+    assert len(client.orders) == 1
+    assert client.orders[0]["reduceOnly"] is True
+
+
 class FakePrivateStream:
     def __init__(self) -> None:
         self.subscriptions: list[str] = []
@@ -1364,6 +1550,10 @@ def test_ws_risk_reconcile_flat_pending_exit_backfills_exit_price_from_closed_pn
                     "symbol": "AAAUSDT",
                     "side": "Buy",
                     "avgExitPrice": "112.5",
+                    "closedSize": "1",
+                    "openFee": "0.04",
+                    "closeFee": "0.06",
+                    "closedPnl": "-12.60",
                     "createdTime": "1700000060000",
                     "orderId": "closed-pnl-1",
                 }
@@ -1405,6 +1595,9 @@ def test_ws_risk_reconcile_flat_pending_exit_backfills_exit_price_from_closed_pn
     # too — they were previously extracted for price/time only and discarded.
     assert float(closed.select("gross_trade_return").item()) == pytest.approx((100.0 - 112.5) / 100.0)
     assert closed.select("net_return").item() is not None
+    assert closed.select("exit_price_source").item() == "bybit_closed_pnl_avg_exit_cost_adjusted"
+    assert float(closed.select("venue_open_fee_allocated_usdt").item()) == pytest.approx(0.04)
+    assert float(closed.select("venue_closed_pnl_allocated_usdt").item()) == pytest.approx(-12.60)
 
 
 def test_ws_risk_reconcile_flat_pending_exit_preserves_prior_partial_realized_pnl(tmp_path: Path) -> None:
@@ -1489,6 +1682,88 @@ def test_ws_risk_reconcile_flat_pending_exit_preserves_prior_partial_realized_pn
     assert float(closed["rebalance_realized_return"]) == pytest.approx(-0.0017)
     assert float(closed["gross_trade_return"]) == pytest.approx((-0.0005 - 0.0012) / 0.015)
     assert float(closed["exit_fee_usdt"]) == pytest.approx(0.03)
+
+
+def test_flat_pending_old_side_resolves_without_touching_opposite_live_leg(tmp_path: Path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(),
+    )
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "old-short",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+                "notional_usdt": 100.0,
+                "equity_usdt": 10_000.0,
+            },
+            {
+                "trade_id": "new-long",
+                "symbol": "AAAUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+                "notional_usdt": 100.0,
+                "equity_usdt": 10_000.0,
+            },
+        ],
+        infer_schema_length=None,
+    )
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "old-short-exit",
+                "trade_id": "old-short",
+                "symbol": "AAAUSDT",
+                "side": "Buy",
+                "qty": "1",
+                "target_qty": "1",
+                "reduce_only": True,
+                "status": "submitted_unconfirmed",
+                "exit_reason": "stop_loss",
+                "avg_price": 101.0,
+            },
+            {
+                "order_link_id": "new-long-exit",
+                "trade_id": "new-long",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "qty": "1",
+                "target_qty": "1",
+                "reduce_only": True,
+                "status": "submitted_unconfirmed",
+                "exit_reason": "stop_loss",
+                "avg_price": 99.0,
+            },
+        ],
+        infer_schema_length=None,
+    )
+    engine.state.all_trades = trades
+    engine.state.open_trades = trades
+    engine.state.positions_by_symbol = {
+        "AAAUSDT": {"symbol": "AAAUSDT", "side": "Buy", "size": "1"}
+    }
+    engine._record_orders(orders.to_dicts())
+    engine.state.live_exit_order_symbols = {"AAAUSDT"}
+    engine.state.live_exit_order_legs = {("AAAUSDT", "long")}
+    engine.mark_submitted_symbol("AAAUSDT")
+
+    engine.reconcile_flat_pending_exit_orders(orders)
+
+    statuses = {
+        row["trade_id"]: row["status"] for row in engine.state.all_trades.to_dicts()
+    }
+    assert statuses == {"old-short": "closed", "new-long": "open"}
+    assert engine.state.orders_by_link["old-short-exit"]["status"] == "filled"
+    assert engine.state.orders_by_link["new-long-exit"]["status"] == "submitted_unconfirmed"
+    assert engine.state.submitted_symbols == {"AAAUSDT"}
+    assert engine.state.positions_by_symbol["AAAUSDT"]["side"] == "Buy"
 
 
 def _submit_exit_engine(tmp_path: Path, trade_client: "FakeTradeClient") -> "EventWebSocketRiskEngine":
@@ -1856,6 +2131,56 @@ def test_ws_risk_pending_entry_position_is_not_flattened_before_entry_reconcile(
     assert engine.state.pending_entry_symbols == {"AAAUSDT"}
     assert payload["cycle"]["pending_entry_positions"] == 1
     assert payload["cycle"]["untracked_positions"] == 0
+
+
+def test_opposite_pending_entry_does_not_block_live_leg_adoption_or_stop(tmp_path: Path) -> None:
+    """A pending SHORT intent cannot account for or suppress a venue LONG."""
+    short_root = tmp_path / "short"
+    long_root = tmp_path / "long"
+    _write_pending_entry_order(
+        short_root,
+        status="submitted_unconfirmed",
+        ts_ms=ws_risk._now_ms(),
+    )
+    private_client = FakePrivateClient(
+        confirm_fills=False,
+        positions=[{
+            "symbol": "AAAUSDT",
+            "side": "Buy",
+            "size": "1",
+            "avgPrice": "100",
+            "markPrice": "100",
+            "positionValue": "100",
+            "unrealisedPnl": "0",
+            "stopLoss": "",
+            "takeProfit": "",
+        }],
+    )
+    engine = EventWebSocketRiskEngine(
+        short_root,
+        config=ResearchConfig(data_root=short_root),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=True,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            long_data_root=str(long_root),
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    assert engine.state.pending_entry_legs == {("AAAUSDT", "short")}
+    adopted = read_dataset(long_root, "long_native_demo_trades").to_dicts()
+    assert [(row["side"], row["status"]) for row in adopted] == [("long", "open")]
+    assert private_client.stop_updates == [
+        {"symbol": "AAAUSDT", "stop_loss": "88", "take_profit": "121"}
+    ]
 
 
 def test_ws_risk_reconciles_pending_entry_fill_before_untracked_guard(tmp_path: Path) -> None:
@@ -2271,6 +2596,42 @@ def test_ws_risk_stale_untracked_exit_is_filled_when_exchange_is_flat(tmp_path: 
     assert order["status"] == "filled"
     assert order["filled_qty"] == "1"
     assert "filled inferred from flat Bybit position" in order["error"]
+
+
+def test_delayed_untracked_old_side_fill_does_not_pop_opposite_live_position(tmp_path: Path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(),
+    )
+    engine.state.positions_by_symbol = {
+        "AAAUSDT": {"symbol": "AAAUSDT", "side": "Buy", "size": "1"}
+    }
+    engine._record_orders(
+        [{
+            "order_link_id": "old-untracked-short-exit",
+            "symbol": "AAAUSDT",
+            "side": "Buy",  # reduce-only Buy targeted the vanished short
+            "qty": "1",
+            "target_qty": "1",
+            "reduce_only": True,
+            "status": "submitted_unconfirmed",
+            "exit_reason": "untracked_position",
+        }]
+    )
+
+    engine.on_order_message(
+        {"data": [{
+            "orderLinkId": "old-untracked-short-exit",
+            "symbol": "AAAUSDT",
+            "orderStatus": "Filled",
+            "cumExecQty": "1",
+            "avgPrice": "101",
+        }]}
+    )
+
+    assert engine.state.orders_by_link["old-untracked-short-exit"]["status"] == "filled"
+    assert engine.state.positions_by_symbol["AAAUSDT"]["side"] == "Buy"
 
 
 def test_ws_risk_stale_exit_stays_pending_when_open_order_snapshot_fails(tmp_path: Path) -> None:
@@ -2850,9 +3211,18 @@ def test_ws_risk_material_heartbeat_keeps_timestamped_audit_copy(tmp_path: Path)
     assert history_path.with_suffix(".json").exists()
 
 
-def test_ws_risk_position_stream_zero_closes_missing_ledger_position(tmp_path: Path) -> None:
+def test_ws_risk_position_stream_zero_waits_for_closed_pnl_before_closing(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
-    private_client = FakePrivateClient()
+
+    class DelayedClosedPnlClient(FakePrivateClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed_records: list[dict[str, str]] = []
+
+        def get_closed_pnl(self, **_kwargs):
+            return list(self.closed_records)
+
+    private_client = DelayedClosedPnlClient()
     engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -2875,10 +3245,174 @@ def test_ws_risk_position_stream_zero_closes_missing_ledger_position(tmp_path: P
     engine.on_position_message({"data": {"symbol": "AAAUSDT", "side": "Sell", "size": "0", "markPrice": "113"}})
 
     stored = read_dataset(tmp_path, "event_demo_trades")
-    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
-    assert stored.filter(pl.col("trade_id") == "t1").select("exit_reason").item() == "bybit_position_missing"
-    assert "AAAUSDT" not in engine.state.submitted_symbols
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "open"
+    assert "AAAUSDT" in engine.state.pending_orphan_symbols
+    assert engine.state.reconciliations == []
+    # A ticker while closure evidence is pending must not submit a futile
+    # reduce-only order against the already-flat venue position.
+    before_orders = len(private_client.orders)
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    assert len(private_client.orders) == before_orders
+
+    private_client.closed_records = [{
+        "symbol": "AAAUSDT",
+        "side": "Buy",
+        "avgExitPrice": "112.5",
+        "closedSize": "1",
+        "createdTime": "1700000060000",
+        "orderId": "closed-pnl-delayed",
+    }]
+    engine.reconcile_positions(write=True)
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    closed = stored.filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    assert closed["status"] == "closed"
+    assert closed["exit_reason"] == "bybit_position_missing"
+    assert closed["exit_price"] == pytest.approx(112.5)
+    assert "AAAUSDT" not in engine.state.pending_orphan_symbols
     assert engine.state.reconciliations[0]["trade_id"] == "t1"
+
+
+def test_side_flip_keeps_old_short_orphan_and_protects_adopted_long(tmp_path: Path) -> None:
+    """A delayed Closed-PnL record must not make a stale short own the live long.
+
+    This is the production side-flip shape: the short ledger row remains open
+    under ``require_evidence=True``, while Bybit already reports a Buy position
+    on the same symbol. The long must be adopted and receive its own stop/exit;
+    neither the old short's retry nor its stop repair may target the live leg.
+    """
+    short_root = tmp_path / "short"
+    long_root = tmp_path / "long"
+    write_dataset(
+        pl.DataFrame([{
+            "trade_id": "old-short",
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "status": "open",
+            "qty": "1",
+            "entry_price": 100.0,
+            # Deliberately crossed at the bootstrap mark. If orphan filtering
+            # regresses this emits a misdirected Buy reduce-only order.
+            "stop_price": 95.0,
+            "take_profit_price": 80.0,
+            "planned_exit_ts_ms": 9_999_999_999_999,
+        }], infer_schema_length=None),
+        short_root,
+        "event_demo_trades",
+        partition_by=(),
+    )
+
+    class SideFlipClient(FakePrivateClient):
+        closed_records: list[dict[str, str]] = []
+
+        def get_closed_pnl(self, **_kwargs):
+            return list(self.closed_records)
+
+    private_client = SideFlipClient(
+        confirm_fills=False,
+        positions=[{
+            "symbol": "AAAUSDT",
+            "side": "Buy",
+            "size": "1",
+            "avgPrice": "100",
+            "markPrice": "100",
+            "positionValue": "100",
+            "unrealisedPnl": "0",
+            "stopLoss": "",
+            "takeProfit": "",
+        }],
+        # A live Buy-reduce order belongs to the vanished short. It must not
+        # block the replacement long's Sell-reduce protection.
+        open_orders=[{
+            "symbol": "AAAUSDT",
+            "side": "Buy",
+            "reduceOnly": True,
+            "orderStatus": "New",
+            "orderLinkId": "lm-ux-AAA-old-0",
+        }],
+    )
+    engine = EventWebSocketRiskEngine(
+        short_root,
+        config=ResearchConfig(data_root=short_root),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=True,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            long_data_root=str(long_root),
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()  # reconcile_positions uses require_evidence=True
+
+    short_trades = read_dataset(short_root, "event_demo_trades")
+    assert short_trades.filter(pl.col("trade_id") == "old-short").select("status").item() == "open"
+    assert engine.state.pending_orphan_trade_ids == {"old-short"}
+    assert engine.state.pending_orphan_legs == {("AAAUSDT", "short")}
+    assert engine.state.live_exit_order_legs == {("AAAUSDT", "short")}
+    assert private_client.orders == []
+    # Only the adopted LONG stop may be repaired; the stale short's crossed
+    # stop=95 must never be stamped onto the replacement position.
+    assert len(private_client.stop_updates) == 1
+    assert float(private_client.stop_updates[0]["stop_loss"]) == pytest.approx(88.0)
+
+    long_trades = read_dataset(long_root, "long_native_demo_trades")
+    assert long_trades.height == 1
+    adopted = long_trades.to_dicts()[0]
+    assert adopted["side"] == "long"
+    assert adopted["status"] == "open"
+
+    # Bybit can emit the old side's zero and the replacement side together.
+    # The short-flat evidence must remain scoped to the short and must not pop
+    # or disarm the live long.
+    engine.on_position_message({"data": [
+        {"symbol": "AAAUSDT", "side": "Buy", "size": "1", "avgPrice": "100", "markPrice": "100"},
+        {"symbol": "AAAUSDT", "side": "Sell", "size": "0", "markPrice": "100"},
+        # Ambiguous zero placeholders exist in real batches. Positive size in
+        # the same batch wins even when this row is last.
+        {"symbol": "AAAUSDT", "side": "", "size": "0", "markPrice": "100"},
+    ]})
+    assert engine.state.positions_by_symbol["AAAUSDT"]["side"] == "Buy"
+    assert ("AAAUSDT", "short") in engine.state.explicit_flat_position_legs
+    assert ("AAAUSDT", "long") not in engine.state.explicit_flat_position_legs
+    assert engine.state.pending_orphan_trade_ids == {"old-short"}
+
+    # Cross the adopted long's stop. Exactly one Sell-reduce order must target
+    # the live long; no Buy retry may be emitted for the pending old short.
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "87"}})
+    assert len(private_client.orders) == 1
+    assert private_client.orders[0]["side"] == "Sell"
+    assert private_client.orders[0]["reduceOnly"] is True
+    exit_orders = [row for row in engine.state.orders if row.get("exit_reason") == "stop_loss"]
+    assert len(exit_orders) == 1
+    assert exit_orders[0]["trade_id"] == adopted["trade_id"]
+
+    report = engine.write_report(reason="side_flip_regression")
+    assert report["cycle"]["pending_orphan_trade_ids"] == "old-short"
+    assert [row["trade_id"] for row in report["pending_orphan_positions"]] == ["old-short"]
+
+    # Once the complete sized evidence arrives, close ONLY the old short. The
+    # adopted long and its pending Sell-reduce protection remain intact.
+    private_client.closed_records = [{
+        "symbol": "AAAUSDT",
+        "side": "Buy",
+        "avgExitPrice": "101",
+        "closedSize": "1",
+        "createdTime": "1800000000000",
+        "orderId": "old-short-close",
+    }]
+    engine.reconcile_positions(write=True, require_evidence=True)
+    short_trades = read_dataset(short_root, "event_demo_trades")
+    assert short_trades.filter(pl.col("trade_id") == "old-short").select("status").item() == "closed"
+    long_trades = read_dataset(long_root, "long_native_demo_trades")
+    assert long_trades.filter(pl.col("trade_id") == adopted["trade_id"]).select("status").item() == "open"
+    assert engine.state.positions_by_symbol["AAAUSDT"]["side"] == "Buy"
+    assert "old-short" not in engine.state.pending_orphan_trade_ids
 
 
 def test_ws_risk_stale_stream_forces_rest_reconcile(tmp_path: Path) -> None:
@@ -3195,6 +3729,7 @@ def test_adoption_rebuilds_component_tagged_trade_id(tmp_path: Path) -> None:
     # the 2026-06-18 component-set freeze.
     assert row["component"] == "p3"
     assert float(row["component_weight"]) == pytest.approx(0.3333333333333333)
+    assert row["planned_exit_ts_ms"] == int(row["entry_ts_ms"]) + 24 * 60 * 60 * 1000
 
 
 def test_ws_risk_falls_back_to_adopted_when_order_history_has_no_bot_link(tmp_path: Path) -> None:
@@ -3814,15 +4349,69 @@ def test_rest_reconcile_prefetch_union_never_drops_a_ws_position(tmp_path: Path)
         trade_client=FakeTradeClient(),
     )
     engine.bootstrap()
-    # A position the WS just added (in positions_by_symbol), absent from the snapshot.
+    snapshot_started = _time.monotonic()
+    # A position the WS added after the REST request began, absent from its snapshot.
     engine.state.positions_by_symbol = {"WSFRESH": {"symbol": "WSFRESH", "side": "short", "size": 1.0}}
+    engine.state.position_ws_updated_monotonic_by_symbol = {
+        "WSFRESH": _time.monotonic()
+    }
     engine._reconcile_prefetch = {
         "positions": [_raw_pos("SNAPONLY")], "positions_error": "",
-        "open_orders": [], "open_orders_error": "", "monotonic": _time.monotonic(),
+        "open_orders": [], "open_orders_error": "",
+        "started_monotonic": snapshot_started,
+        "monotonic": _time.monotonic(),
     }
     engine.rest_reconcile()
     assert "WSFRESH" in engine.state.positions_by_symbol, "WS-added position dropped -> missed-stop risk"
     assert "SNAPONLY" in engine.state.positions_by_symbol  # snapshot applied too
+
+
+def test_rest_reconcile_prefetch_cannot_overwrite_newer_ws_opposite_side(tmp_path: Path) -> None:
+    import time as _time
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            reconcile_prefetch_enabled=True,
+            rest_reconcile_seconds=30.0,
+            heartbeat_seconds=0.0,
+            adopt_untracked_positions=False,
+            exit_untracked_positions=False,
+        ),
+        private_client=FakePrivateClient(positions=[]),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=FakeTradeClient(),
+    )
+    engine.bootstrap()
+    snapshot_started = _time.monotonic()
+    engine.state.positions_by_symbol = {
+        "AAAUSDT": {"symbol": "AAAUSDT", "side": "Buy", "size": "1"}
+    }
+    engine.state.position_ws_updated_monotonic_by_symbol = {
+        "AAAUSDT": _time.monotonic()
+    }
+    engine._reconcile_prefetch = {
+        "positions": [{
+            "symbol": "AAAUSDT",
+            "side": "Sell",
+            "size": "1",
+            "avgPrice": "100",
+            "markPrice": "100",
+        }],
+        "positions_error": "",
+        "open_orders": [],
+        "open_orders_error": "",
+        "started_monotonic": snapshot_started,
+        "monotonic": _time.monotonic(),
+    }
+
+    engine.rest_reconcile()
+
+    assert engine.state.positions_by_symbol["AAAUSDT"]["side"] == "Buy"
 
 
 def test_rest_reconcile_prefetch_stale_falls_back_to_inline(tmp_path: Path) -> None:
@@ -4055,7 +4644,7 @@ def test_ws_risk_reconciles_vanished_continuous_position_into_continuous_ledger(
     class _ClosedPnlClient(FakePrivateClient):
         def get_closed_pnl(self, *, symbol: str | None = None, start_time_ms: int | None = None, limit: int = 50):
             return [{"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "90.0",
-                     "createdTime": "1700000060000", "orderId": "cont-closed-1"}]
+                     "closedSize": "1", "createdTime": "1700000060000", "orderId": "cont-closed-1"}]
 
     # Position vanished at the venue (stop fired) -> orphan.
     private_client = _ClosedPnlClient(positions=[], confirm_fills=False)
@@ -4079,6 +4668,12 @@ def test_ws_risk_reconciles_vanished_continuous_position_into_continuous_ledger(
     )
 
     engine.bootstrap()
+    # REST absence alone is intentionally insufficient on the shared netted
+    # account. The private position stream positively confirms this side flat,
+    # after which the sized Closed-PnL row is attributable to the orphan.
+    engine.on_position_message({"data": {
+        "symbol": "AAAUSDT", "side": "Sell", "size": "0", "markPrice": "90",
+    }})
     engine.rest_reconcile()
 
     # Closed in the CONTINUOUS ledger with the backfilled venue exit price.

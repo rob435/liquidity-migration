@@ -508,6 +508,72 @@ def test_snipe_exclusion_does_not_drop_real_demo_only() -> None:
     assert summary["snipe_demo_only"] == 1  # XRP snipe reported apart
 
 
+def test_reconcile_pairs_continuous_legs_by_component() -> None:
+    signal_ts = 1_700_000_000_000
+    paper_rows = []
+    demo_rows = []
+    for idx, component in enumerate(("p3", "p4p3", "p4p5")):
+        paper_rows.append({
+            **_recon_trade(f"paper-{component}", symbol="TAGUSDT", entry_ts_ms=signal_ts + 1_000),
+            "signal_ts_ms": signal_ts,
+            "component": component,
+            "entry_price": 100.0 + idx,
+        })
+    for idx, component in enumerate(reversed(("p3", "p4p3", "p4p5"))):
+        demo_rows.append({
+            **_recon_trade(f"demo-{component}", symbol="TAGUSDT", entry_ts_ms=signal_ts + 2_000),
+            "signal_ts_ms": signal_ts,
+            "component": component,
+            "entry_price": 200.0 + idx,
+        })
+
+    result = reconcile_paper_demo(pl.DataFrame(paper_rows), pl.DataFrame(demo_rows))
+    assert result["summary"]["paired"] == 3
+    by_component = {pair["component"]: pair for pair in result["pairs"]}
+    assert by_component["p3"]["paper_entry_price"] == 100.0
+    assert by_component["p4p3"]["paper_entry_price"] == 101.0
+    assert by_component["p4p5"]["paper_entry_price"] == 102.0
+
+
+def test_reconcile_canonicalizes_max_hold_exit_alias() -> None:
+    paper = {**_recon_trade("paper", symbol="AAAUSDT", entry_ts_ms=1_000_000), "exit_reason": "time_stop"}
+    demo = {**_recon_trade("demo", symbol="AAAUSDT", entry_ts_ms=1_000_000), "exit_reason": "max_hold"}
+    result = reconcile_paper_demo(pl.DataFrame([paper]), pl.DataFrame([demo]))
+    assert result["summary"]["exit_reason_divergent"] == 0
+    assert result["pairs"][0]["exit_reason_match"] is True
+
+
+def test_reconcile_surfaces_snipe_pnl_and_open_lifecycle_failure() -> None:
+    paper = pl.DataFrame([_recon_trade("BTC-1", symbol="BTCUSDT", entry_ts_ms=1_000_000)])
+    base = _recon_trade("BTC-1", symbol="BTCUSDT", entry_ts_ms=1_000_000)
+    snipe = {
+        **_recon_trade("TAG-1" + SNIPER_TRADE_SUFFIX, symbol="TAGUSDT", entry_ts_ms=2_000_000),
+        "status": "open",
+        "exit_price": 0.0,
+        "notional_usdt": 25.0,
+        "equity_usdt": 10_000.0,
+        "net_return": -0.001515,
+        "entry_fee_usdt": 0.02,
+        "exit_fee_usdt": 0.03,
+        "venue_closed_pnl_allocated_usdt": -15.20,
+    }
+    result = reconcile_paper_demo(paper, pl.DataFrame([base, snipe]))
+    summary = result["summary"]
+    assert summary["snipe_demo_open"] == 1
+    assert summary["snipe_demo_open_notional_usdt"] == pytest.approx(25.0)
+    assert summary["snipe_demo_historical_entry_notional_usdt"] == pytest.approx(25.0)
+    assert summary["snipe_demo_gross_price_pnl_usdt"] == pytest.approx(-15.15)
+    assert summary["snipe_demo_trading_fees_usdt"] == pytest.approx(0.05)
+    assert summary["snipe_demo_fee_rows_recorded"] == 1
+    assert summary["snipe_demo_venue_closed_pnl_allocated_usdt"] == pytest.approx(-15.20)
+    assert summary["snipe_demo_venue_closed_pnl_rows_recorded"] == 1
+    report = format_reconciliation_report(result)
+    assert "snipe open exposure: $25.00" in report
+    assert "not venue authority" in report
+    assert "funding: unavailable" in report
+    assert paper_demo_reconciliation_failures(summary) == ["snipe_demo_open=1"]
+
+
 
 def test_fee_adjusted_return_skips_undirected_row_instead_of_assuming_short() -> None:
     """audit-iter1 archive-recon-2: the price-fallback branch (no net_return /

@@ -473,6 +473,42 @@ def test_continuous_operational_metrics_audit_flags_drawdown_kill_switch_without
     assert {issue["kind"] for issue in payload["result"]["issues"]} == {"account_drawdown_kill_switch"}
 
 
+def test_paper_operational_audit_does_not_treat_demo_position_parity_as_internal_failure(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    write_dataset(
+        pl.DataFrame([{
+            "ts_ms": 1_800_000_000_000,
+            "strategy_profile": CONTINUOUS_V2_PROFILE,
+            "strategy_id": CONTINUOUS_V2_PAPER_STRATEGY_ID,
+            "entry_risk_health_ok": True,
+            "entry_risk_health_reasons": "",
+            "entry_risk_health_ledger_missing_positions": "SCRTUSDT",
+            "entry_risk_health_exchange_only_positions": "",
+        }], infer_schema_length=None),
+        root,
+        "continuous_fade_paper_cycles",
+        partition_by=(),
+    )
+    payload = run_continuous_operational_metrics_audit(
+        root,
+        cycles_dataset="continuous_fade_paper_cycles",
+        orders_dataset="continuous_fade_paper_orders",
+        trades_dataset="continuous_fade_paper_trades",
+        output_dir=tmp_path / "paper-op",
+        strategy_profile=CONTINUOUS_V2_PROFILE,
+        strategy_id=CONTINUOUS_V2_PAPER_STRATEGY_ID,
+        role="paper",
+    )
+    assert payload["result"]["summary"]["ledger_mismatch_cycles"] == 1
+    assert payload["result"]["ok"] is True
+    assert not any(
+        issue["kind"] == "ledger_mismatch_cycles"
+        for issue in payload["result"]["issues"]
+    )
+
+
 def test_continuous_forward_readiness_fails_on_account_drawdown_kill_switch_only(
     tmp_path: Path,
 ) -> None:

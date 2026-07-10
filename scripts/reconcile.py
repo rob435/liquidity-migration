@@ -5,9 +5,9 @@ Pulls the live ledgers and reconciles each selected sleeve:
 
     LONG   (v11a)        : paper <-> demo
 
-CONTINUOUS (fade) is research-stage demo/paper only. This quick path defaults to
-LONG; pass `--sleeves long,continuous` when the execution-only check should cover
-both active sleeves.
+CONTINUOUS (fade) is research-stage demo/paper only. The quick path covers both
+active sleeves by default; use `--sleeves long` only for an explicitly narrowed
+diagnostic.
 
 Pipeline:
     1. pull        — rsync the live demo+paper ledgers for every selected sleeve  [--no-pull]
@@ -21,8 +21,8 @@ the quick path; refresh the PIT manifest manually when needed:
 
 Safe by default: read-only against the VPS, demo only, never real money.
 
-    bash scripts/reconcile.sh --quick                         # LONG only
-    bash scripts/reconcile.sh --quick --sleeves long,continuous
+    bash scripts/reconcile.sh --quick                         # both sleeves
+    bash scripts/reconcile.sh --quick --sleeves long          # explicit narrow check
     bash scripts/reconcile.sh --dry-run             # print every command, run nothing
     bash scripts/reconcile.sh --help                # all options
 
@@ -290,8 +290,12 @@ def pull_sleeve(step: Step, host: str, sleeve: str) -> None:
             step.run(["rsync", "-azq", remote, str(dest)], check=True)
         else:
             if not _remote_file_exists(step, host, remote_path, scp_options):
-                print(f"  remote file absent: {remote_path} — skipping")
-                continue
+                if not step.dry_run and (dest.exists() or dest.is_symlink()):
+                    dest.unlink()
+                raise SystemExit(
+                    f"required remote continuous market-plane file is absent: {remote_path}; "
+                    "stale local mirror cleared and reconciliation refused"
+                )
             step.run(
                 ["scp", "-q", *scp_options, remote, str(dest)],
                 check=True,
@@ -356,6 +360,7 @@ def reconcile_continuous(
         _script(
             "continuous_demo_signal_check.py",
             "--root", paper,
+            "--market-root", demo,
             "--trades-dataset", "continuous_fade_paper_trades",
             "--start-ts-ms", str(start_ts_ms),
             "--strategy-id", paper_strategy_id,
@@ -391,9 +396,8 @@ def main() -> int:
         description="Fast paper<->demo execution reconciliation for selected sleeves.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--sleeves", default="long",
-                   help="Comma list of sleeves to reconcile; quick mode defaults to long. "
-                        "Add continuous for the demo/paper research-stage book.")
+    p.add_argument("--sleeves", default="long,continuous",
+                   help="Comma list of sleeves to reconcile; quick mode defaults to both active sleeves.")
     p.add_argument("--bybit-root", default=DEFAULT_BYBIT_ROOT, help="Research root for the backtest + provisioning.")
     p.add_argument("--config", default=DEFAULT_CONFIG, help="Strategy config (the promoted profile).")
     p.add_argument("--vps", default=VPS_HOST, help="VPS ssh target for the ledger pull.")

@@ -72,6 +72,11 @@ def _terminalize_stale_pending_entry_orders(
     live_position_symbols: set[str],
     live_open_entry_order_symbols: set[str],
     now_ms: int,
+    live_position_legs: set[tuple[str, str]] | None = None,
+    live_open_entry_order_legs: set[tuple[str, str]] | None = None,
+    live_open_entry_order_links: set[str] | None = None,
+    live_position_unknown_side_symbols: set[str] | None = None,
+    live_open_entry_order_unknown_side_symbols: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     if orders.is_empty():
         return []
@@ -89,7 +94,26 @@ def _terminalize_stale_pending_entry_orders(
         ts_ms = int(order.get("ts_ms") or 0)
         if ts_ms <= 0 or now_ms - ts_ms <= PENDING_ORDER_GUARD_MS:
             continue
-        if symbol in live_position_symbols or symbol in live_open_entry_order_symbols:
+        entry_side = _normalized_position_side(order.get("trade_side") or order.get("side"))
+        entry_leg = (symbol, entry_side)
+        if live_position_legs is None:
+            matching_live_position = symbol in live_position_symbols
+        else:
+            matching_live_position = (
+                entry_leg in live_position_legs
+                or (symbol, "") in live_position_legs
+                or symbol in (live_position_unknown_side_symbols or set())
+            )
+        if live_open_entry_order_legs is None and live_open_entry_order_links is None:
+            matching_live_order = symbol in live_open_entry_order_symbols
+        else:
+            matching_live_order = (
+                link in (live_open_entry_order_links or set())
+                or entry_leg in (live_open_entry_order_legs or set())
+                or (symbol, "") in (live_open_entry_order_legs or set())
+                or symbol in (live_open_entry_order_unknown_side_symbols or set())
+            )
+        if matching_live_position or matching_live_order:
             continue
         order_update = dict(order)
         order_update.update(
@@ -450,6 +474,7 @@ def _reconcile_pending_order_fills(
     now_ms: int,
     live_position_symbols: set[str] | None = None,
     live_open_order_symbols: set[str] | None = None,
+    live_position_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if orders.is_empty() or trading_client is None or not demo.submit_orders:
         return [], []
@@ -505,6 +530,26 @@ def _reconcile_pending_order_fills(
         entry_stop_update_error = str(order.get("entry_stop_update_error") or "")
         if not _bool(order.get("reduce_only")) and avg_price > 0.0:
             trade_side = str(order.get("trade_side") or ("short" if str(order.get("side", "")) == "Sell" else "long"))
+            normalized_trade_side = _normalized_position_side(trade_side)
+            current_position = (
+                (live_position_by_symbol or {}).get(symbol, {})
+                if live_position_by_symbol is not None
+                else {}
+            )
+            current_position_side = _normalized_position_side(current_position.get("side"))
+            current_position_size = _float(current_position.get("size"))
+            # Execution history is still recovered for the historical ledger,
+            # even after a one-way account has flipped sides. But trading-stop
+            # mutates the CURRENT net venue position, so old short protection
+            # must never be applied to a replacement long (or vice versa).
+            protection_matches_live_leg = (
+                live_position_by_symbol is None
+                or (
+                    current_position_size > 0.0
+                    and bool(normalized_trade_side)
+                    and current_position_side == normalized_trade_side
+                )
+            )
             tick_size = _float(order.get("tick_size")) or 0.0001
             stop_loss_pct = _float(order.get("stop_loss_pct"))
             take_profit_pct = _float(order.get("take_profit_pct"))
@@ -523,13 +568,14 @@ def _reconcile_pending_order_fills(
                 if take_profit_pct > 0.0
                 else entry_take_profit_price
             )
-            if (stop_loss_pct > 0.0 or take_profit_pct > 0.0) and (
+            protection_changed = (stop_loss_pct > 0.0 or take_profit_pct > 0.0) and (
                 not _prices_close(entry_stop_price, recalculated_stop_price, tolerance_bps=0.0)
                 or (
                     recalculated_take_profit_price > 0.0
                     and not _prices_close(entry_take_profit_price, recalculated_take_profit_price, tolerance_bps=0.0)
                 )
-            ):
+            )
+            if protection_changed and protection_matches_live_leg:
                 try:
                     trading_client.set_trading_stop(
                         symbol=symbol,
@@ -545,6 +591,12 @@ def _reconcile_pending_order_fills(
                 except Exception as exc:  # noqa: BLE001 - venue repair daemon will retry from ledger state
                     entry_stop_update_status = "failed"
                     entry_stop_update_error = str(exc)[:500]
+            elif protection_changed and live_position_by_symbol is not None:
+                entry_stop_update_status = "skipped_opposite_or_absent_live_side"
+                entry_stop_update_error = (
+                    f"recovered {normalized_trade_side or 'unknown'} entry while live position side is "
+                    f"{current_position_side or 'flat/unknown'}; venue protection not mutated"
+                )[:500]
             entry_stop_price = recalculated_stop_price
             entry_take_profit_price = recalculated_take_profit_price
         order_update = dict(order)
@@ -731,6 +783,11 @@ def _reconcile_pending_order_fills(
                 "entry_order_id": order.get("order_id", ""),
                 "submit_mode": "execution_reconciled",
                 "opened_at_ms": opened_at_ms,
+                # Order-producing sleeves stamp their own lifecycle deadline on
+                # the durable intent row. Preserve it when ws_risk reconstructs
+                # a fill after the producer crashed; otherwise the independent
+                # max-hold authority sees an immortal recovered position.
+                "planned_exit_ts_ms": int(order.get("planned_exit_ts_ms") or 0),
                 "updated_at_ms": now_ms,
             }
         )
@@ -773,6 +830,7 @@ def _execute_risk_exits(
             tagged["trade_id"] = _trade_id
             tagged["exit_reason"] = str(_exit_plan.get("exit_reason") or "")
             tagged["exit_trigger_ts_ms"] = int(_exit_plan.get("exit_trigger_ts_ms") or now_ms)
+            tagged["order_link_attempt"] = int(_exit_plan.get("order_link_attempt") or 0)
             record_preflight(tagged)
         try:
             submit = _submit_reduce_only_exit(
@@ -790,10 +848,16 @@ def _execute_risk_exits(
                 # _split_qty_for_max_order_size, preserving prior behaviour.
                 max_qty_per_order=_float(trade.get("max_market_order_qty")),
                 qty_step=_float(trade.get("qty_step")),
+                link_attempt=int(exit_plan.get("order_link_attempt") or 0),
                 record_preflight=_record_with_context if record_preflight is not None else None,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced in order telemetry so the loop can continue
-            link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
+            link = _risk_order_link_id(
+                "rx",
+                symbol=symbol,
+                ts_ms=now_ms,
+                attempt=int(exit_plan.get("order_link_attempt") or 0),
+            )
             failed_order = _risk_order_row(
                 link=link,
                 ts_ms=now_ms,
@@ -814,6 +878,7 @@ def _execute_risk_exits(
                     "target_qty": qty,
                     "filled_qty": "",
                     "notional_usdt": 0.0,
+                    "order_link_attempt": int(exit_plan.get("order_link_attempt") or 0),
                 }
             )
             orders.append(failed_order)
@@ -851,6 +916,7 @@ def _execute_risk_exits(
                     "filled_qty": _decimal_text(Decimal(str(row_filled_qty))) if row_filled_qty > 0.0 else "",
                     "target_qty": row_target_qty,
                     "notional_usdt": abs(row_avg_price * notional_qty) if row_avg_price > 0.0 else 0.0,
+                    "order_link_attempt": int(exit_plan.get("order_link_attempt") or 0),
                 }
             )
             orders.append(order_row)
@@ -1010,10 +1076,11 @@ def _submit_reduce_only_exit(
     tick_size: float,
     max_qty_per_order: float = 0.0,
     qty_step: float = 0.0,
+    link_attempt: int = 0,
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if not risk.submit_orders:
-        link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
+        link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=link_attempt)
         return {
             "order_link_id": link,
             "order_id": "",
@@ -1034,7 +1101,7 @@ def _submit_reduce_only_exit(
         }
     assert trading_client is not None
     if risk.exit_order_mode == "market":
-        base_link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
+        base_link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=link_attempt)
         # Symmetric to the entry-side split: a reduce-only close that
         # exceeds Bybit's per-order ``maxMktOrderQty`` is rejected outright,
         # so split the close into N sub-orders each ≤ cap. Without max_qty
@@ -1207,6 +1274,7 @@ def _submit_reduce_only_exit(
         now_ms=now_ms,
         reference_price=reference_price,
         tick_size=tick_size,
+        link_attempt=link_attempt,
         record_preflight=record_preflight,
     )
 
@@ -1220,6 +1288,7 @@ def _submit_limit_chase_exit(
     now_ms: int,
     reference_price: float,
     tick_size: float,
+    link_attempt: int = 0,
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     target_qty = _float(qty)
@@ -1233,7 +1302,9 @@ def _submit_limit_chase_exit(
         remaining_qty = max(target_qty - filled_qty, 0.0)
         if remaining_qty_within_tolerance(target_qty=target_qty, remaining_qty=remaining_qty):
             break
-        link = _risk_order_link_id("lc", symbol=symbol, ts_ms=now_ms, attempt=attempt)
+        link = _risk_order_link_id(
+            "lc", symbol=symbol, ts_ms=now_ms, attempt=link_attempt * 100 + attempt
+        )
         last_link = link
         bps = min(risk.limit_chase_max_bps, risk.limit_chase_initial_bps + attempt * risk.limit_chase_step_bps)
         limit_price = _limit_chase_price(bybit_side=bybit_side, reference_price=reference_price, bps=bps, tick_size=tick_size)
@@ -1328,7 +1399,9 @@ def _submit_limit_chase_exit(
         not remaining_qty_within_tolerance(target_qty=target_qty, remaining_qty=remaining_qty)
         and risk.limit_chase_fallback_market
     ):
-        link = _risk_order_link_id("lm", symbol=symbol, ts_ms=now_ms, attempt=attempts)
+        link = _risk_order_link_id(
+            "lm", symbol=symbol, ts_ms=now_ms, attempt=link_attempt * 100 + attempts
+        )
         last_link = link
         remaining_qty_text = _quantity_text(remaining_qty)
         if record_preflight is not None:
@@ -1443,13 +1516,25 @@ def _reconcile_open_trades(
         if trade_side and size_by_symbol_side.get((symbol, trade_side), 0.0) > 0.0:
             kept.append(trade)
             continue
-        # reconcile-core-4: a symbol absent from a SUCCESSFUL account-wide fetch means
-        # "no closure for it yet" -> pass [] (the matcher returns {} -> require_evidence
-        # keeps it open), NOT None. None is reserved for a FAILED/absent batch, which
-        # alone falls back to the legacy per-symbol fetch. Using .get(symbol) without the
-        # [] default would re-fire a per-orphan REST call for every not-yet-closed orphan
-        # — exactly the synchronized-mass-close stall this fix removes.
-        symbol_records = closed_pnl_by_symbol.get(symbol, []) if closed_pnl_by_symbol is not None else None
+        # A healthy batch provides a symbol slice; an absent/failed batch stays
+        # pending under evidence mode. We deliberately do not fall back to an
+        # unattributed per-symbol feed on the shared account.
+        source_records = closed_pnl_by_symbol.get(symbol, []) if closed_pnl_by_symbol is not None else None
+        if require_evidence:
+            # A REST position omission plus an account-wide same-symbol close is
+            # ambiguous on the shared netted account, even when quantity matches.
+            # The cycle path has no private-WS flat event, so only a venue order ID
+            # already recorded on this exact trade is attributable enough. A
+            # failed account-wide fetch stays pending; falling back to an
+            # unfiltered per-symbol fetch would reopen the same attribution bug.
+            exit_order_id = str(trade.get("exit_order_id") or "")
+            symbol_records = [
+                record
+                for record in (source_records or [])
+                if exit_order_id and str(record.get("orderId") or "") == exit_order_id
+            ]
+        else:
+            symbol_records = source_records
         row = _orphan_close_trade_row(
             trade, now_ms=now_ms, trading_client=trading_client, require_evidence=require_evidence,
             closed_pnl_records=symbol_records,
@@ -1476,6 +1561,7 @@ def _risk_reconcile_missing_positions(
     position_error: str = "",
     trading_client: Any | None = None,
     require_evidence: bool = False,
+    confirmed_flat_symbols: set[str] | None = None,
 ) -> tuple[pl.DataFrame, list[dict[str, Any]]]:
     """Close ledger rows whose Bybit position has vanished.
 
@@ -1492,13 +1578,14 @@ def _risk_reconcile_missing_positions(
     close since entry; absent that record the trade is kept OPEN (a possibly-live
     position is never wiped to a zero-PnL ``bybit_position_missing`` row). The bulk
     REST-snapshot callers (``rest_reconcile`` / ``bootstrap`` / the cycle runner)
-    pass ``True``; the WS ``on_position_message`` path keeps ``False`` because a WS
-    ``size=0`` IS the positive close evidence for that symbol, so its (possibly
-    last-position-emptying) close stays prompt.
+    pass ``True``. A private-WS ``size=0`` marks the symbol independently flat and
+    suppresses futile reduce-only retries, but the ledger row still waits for
+    attributable Closed-PnL legs covering its full quantity so price and fees remain
+    reconstructable.
 
-    When a ``trading_client`` is provided, queries ``get_closed_pnl`` per orphan
-    symbol to backfill ``exit_price`` / ``gross_trade_return`` / ``net_return``
-    / ``exit_order_id`` / ``exit_ts_ms`` from the actual close.
+    When a ``trading_client`` is provided, account Closed-PnL is fetched in bounded
+    batches and used to backfill ``exit_price`` / ``gross_trade_return`` /
+    ``net_return`` / ``exit_order_id`` / ``exit_ts_ms`` from the actual close.
     """
     if open_trades.is_empty() or not enabled:
         return open_trades, []
@@ -1529,6 +1616,16 @@ def _risk_reconcile_missing_positions(
         if not keep_open:
             orphans.append(trade)
     closed_pnl_by_symbol = _fetch_account_closed_pnl(trading_client, orphans, now_ms=now_ms)
+    confirmed_flat_symbols = confirmed_flat_symbols or set()
+    orphan_group_counts: dict[tuple[str, str], int] = {}
+    for trade in orphans:
+        key = (str(trade.get("symbol") or ""), _normalized_position_side(trade.get("side")))
+        orphan_group_counts[key] = orphan_group_counts.get(key, 0) + 1
+    allocated_records = (
+        _allocate_group_closed_pnl_records(orphans, closed_pnl_by_symbol)
+        if closed_pnl_by_symbol is not None
+        else {}
+    )
     for trade in trade_dicts:
         symbol = str(trade.get("symbol", ""))
         trade_side = _normalized_position_side(trade.get("side"))
@@ -1549,7 +1646,34 @@ def _risk_reconcile_missing_positions(
         # alone falls back to the legacy per-symbol fetch. Using .get(symbol) without the
         # [] default would re-fire a per-orphan REST call for every not-yet-closed orphan
         # — exactly the synchronized-mass-close stall this fix removes.
-        symbol_records = closed_pnl_by_symbol.get(symbol, []) if closed_pnl_by_symbol is not None else None
+        group_key = (symbol, trade_side)
+        if require_evidence:
+            if symbol in confirmed_flat_symbols:
+                if orphan_group_counts.get(group_key, 0) > 1:
+                    # A private-WS size=0 event proves the net position is gone.
+                    # Allocate account-level closedSize/fee across component rows
+                    # once; if the aggregate record qty is insufficient, keep the
+                    # whole group open instead of reusing one partial close N times.
+                    symbol_records = allocated_records.get(str(trade.get("trade_id") or ""), [])
+                else:
+                    symbol_records = (
+                        closed_pnl_by_symbol.get(symbol, [])
+                        if closed_pnl_by_symbol is not None
+                        else None
+                    )
+            else:
+                # A REST-absent netted position can be false-empty. Account-wide
+                # same-symbol Closed-PnL is also not sleeve-attributable, even for
+                # a single row. Only an order ID already recorded on this exact
+                # trade is uniquely attributable enough to close it.
+                exit_order_id = str(trade.get("exit_order_id") or "")
+                source_records = closed_pnl_by_symbol.get(symbol, []) if closed_pnl_by_symbol is not None else []
+                symbol_records = [
+                    record for record in source_records
+                    if exit_order_id and str(record.get("orderId") or "") == exit_order_id
+                ]
+        else:
+            symbol_records = closed_pnl_by_symbol.get(symbol, []) if closed_pnl_by_symbol is not None else None
         row = _orphan_close_trade_row(
             trade, now_ms=now_ms, trading_client=trading_client, require_evidence=require_evidence,
             closed_pnl_records=symbol_records,
@@ -1568,6 +1692,86 @@ def _risk_reconcile_missing_positions(
             continue
         updates.append(row)
     return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates
+
+
+def _allocate_group_closed_pnl_records(
+    orphans: list[dict[str, Any]],
+    records_by_symbol: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Allocate account-level close legs across same-symbol ledger components.
+
+    One netted reduce-only order can legitimately close several component rows,
+    so a record may be split by ``closedSize``. Its fee is prorated with the
+    allocated quantity. Allocation is all-or-nothing per symbol+side group: a
+    partial/sibling close can never be reused to evidence-close every row.
+    """
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for trade in orphans:
+        symbol = str(trade.get("symbol") or "")
+        side = _normalized_position_side(trade.get("side"))
+        groups.setdefault((symbol, side), []).append(trade)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for (symbol, side), trades in groups.items():
+        if len(trades) <= 1:
+            continue
+        expected_close_side = "Buy" if side == "short" else "Sell"
+        pool: list[dict[str, Any]] = []
+        for record in records_by_symbol.get(symbol, []):
+            size = max(_float(record.get("closedSize")), 0.0)
+            if str(record.get("side") or "") != expected_close_side or size <= 0.0:
+                continue
+            pool.append({
+                "record": record,
+                "remaining": size,
+                "original_size": size,
+                "created_ts": int(_float(record.get("createdTime") or record.get("updatedTime") or 0)),
+            })
+        pool.sort(key=lambda item: int(item["created_ts"]), reverse=True)
+        group_allocations: dict[str, list[dict[str, Any]]] = {}
+        complete = True
+        # Latest-open trades receive latest eligible closes first. This preserves
+        # the entry-time lower bound while keeping each source record's quantity
+        # and fee single-use across the group.
+        for trade in sorted(
+            trades,
+            key=lambda row: (int(row.get("entry_ts_ms") or 0), str(row.get("trade_id") or "")),
+            reverse=True,
+        ):
+            trade_id = str(trade.get("trade_id") or "")
+            need = max(_float(trade.get("qty")), 0.0)
+            if not trade_id or need <= 0.0:
+                complete = False
+                break
+            entry_ts_ms = int(trade.get("entry_ts_ms") or 0)
+            allocated: list[dict[str, Any]] = []
+            tolerance = max(need * 1e-8, 1e-12)
+            for item in pool:
+                if need <= tolerance:
+                    break
+                if float(item["remaining"]) <= 0.0:
+                    continue
+                created_ts = int(item["created_ts"])
+                if entry_ts_ms > 0 and created_ts > 0 and created_ts < entry_ts_ms:
+                    continue
+                take = min(need, float(item["remaining"]))
+                source = dict(item["record"])
+                source["closedSize"] = _quantity_text(take)
+                original_size = float(item["original_size"])
+                for value_key in ("openFee", "closeFee", "closedPnl"):
+                    if source.get(value_key) not in (None, ""):
+                        source[value_key] = _float(source.get(value_key)) * take / original_size
+                if source.get("closeFee") in (None, "") and source.get("execFee") not in (None, ""):
+                    source["execFee"] = _float(source.get("execFee")) * take / original_size
+                allocated.append(source)
+                item["remaining"] = float(item["remaining"]) - take
+                need -= take
+            if need > tolerance:
+                complete = False
+                break
+            group_allocations[trade_id] = allocated
+        if complete and len(group_allocations) == len(trades):
+            out.update(group_allocations)
+    return out
 
 def _orphan_close_trade_row(
     trade: dict[str, Any],
@@ -1588,7 +1792,11 @@ def _orphan_close_trade_row(
     (zero-PnL close when no record is found).
     """
     backfill = _orphan_close_pnl_backfill(
-        trade, now_ms=now_ms, trading_client=trading_client, closed_pnl_records=closed_pnl_records,
+        trade,
+        now_ms=now_ms,
+        trading_client=trading_client,
+        closed_pnl_records=closed_pnl_records,
+        require_quantity_coverage=require_evidence,
     )
     if require_evidence and not backfill:
         return None
@@ -1659,7 +1867,7 @@ def _fetch_account_closed_pnl(
             # time bound either -> matches legacy. Each window is still < 7d (within the clamp).
             window_end = window_start + CLOSED_PNL_MAX_WINDOW_MS - 1
             records = get_closed_pnl(
-                symbol=None, start_time_ms=window_start, end_time_ms=window_end, limit=200,
+                symbol=None, start_time_ms=window_start, end_time_ms=window_end, limit=100,
             )
             for record in records or []:
                 sym = str(record.get("symbol") or "")
@@ -1688,6 +1896,7 @@ def _orphan_close_pnl_backfill(
     now_ms: int,
     trading_client: Any | None,
     closed_pnl_records: list[dict[str, Any]] | None = None,
+    require_quantity_coverage: bool = False,
 ) -> dict[str, Any]:
     """Query Bybit closed-PnL for an orphan trade and return backfill fields.
 
@@ -1700,7 +1909,12 @@ def _orphan_close_pnl_backfill(
     pre-existing single-call caller is byte-for-byte unchanged.
     """
     if closed_pnl_records is not None:
-        return _orphan_close_pnl_from_records(trade, now_ms=now_ms, records=closed_pnl_records)
+        return _orphan_close_pnl_from_records(
+            trade,
+            now_ms=now_ms,
+            records=closed_pnl_records,
+            require_quantity_coverage=require_quantity_coverage,
+        )
     if trading_client is None:
         return {}
     symbol = str(trade.get("symbol", ""))
@@ -1718,7 +1932,12 @@ def _orphan_close_pnl_backfill(
         records = get_closed_pnl(symbol=symbol, start_time_ms=start_time_ms, limit=50)
     except Exception:  # noqa: BLE001 - reconciler must close the row even when backfill fails
         return {}
-    return _orphan_close_pnl_from_records(trade, now_ms=now_ms, records=records)
+    return _orphan_close_pnl_from_records(
+        trade,
+        now_ms=now_ms,
+        records=records,
+        require_quantity_coverage=require_quantity_coverage,
+    )
 
 
 def _orphan_close_pnl_from_records(
@@ -1726,6 +1945,7 @@ def _orphan_close_pnl_from_records(
     *,
     now_ms: int,
     records: list[dict[str, Any]] | None,
+    require_quantity_coverage: bool = False,
 ) -> dict[str, Any]:
     """Pure matcher: given already-fetched closed-PnL ``records`` for this trade's
     symbol, return the backfill fields (or {} when no record evidences a close since
@@ -1821,6 +2041,18 @@ def _orphan_close_pnl_from_records(
                     # Restore ascending order so legs[-1] is the latest (close-completion) leg.
                     capped_legs.sort(key=lambda r: int(_float(r.get("createdTime") or r.get("updatedTime") or 0)))
                     legs = capped_legs
+    # A Closed-PnL row proves only the quantity in ``closedSize``. A successful
+    # but false-empty REST position snapshot plus a qty=1 sibling close must not
+    # close a qty=3 ledger row. Require the selected close legs to cover the
+    # ledger quantity whenever this matcher is the positive orphan evidence.
+    # A private-WS size=0 event proves the venue is flat and suppresses retrying
+    # a reduce-only exit, but it does not make a partial price/fee record
+    # reconstructable. Keep the ledger row pending until all close legs arrive.
+    if require_quantity_coverage and trade_qty > 0.0:
+        selected_size = sum(max(_float(leg.get("closedSize")), 0.0) for leg in legs)
+        qty_tolerance = max(trade_qty * 1e-8, 1e-12)
+        if selected_size + qty_tolerance < trade_qty:
+            return {}
     priced = [
         (_float(r.get("closedSize")), _float(r.get("avgExitPrice")))
         for r in legs
@@ -1833,7 +2065,20 @@ def _orphan_close_pnl_from_records(
         exit_price = _float(legs[-1].get("avgExitPrice"))
     if exit_price <= 0.0:
         return {}
-    exit_fee_usdt = sum(_float(r.get("execFee")) for r in legs)
+    # The V5 Closed-PnL schema calls the exit fee ``closeFee``. ``execFee`` is
+    # retained only as a compatibility fallback for historical/test fixtures.
+    exit_fee_usdt = sum(
+        _float(r.get("closeFee"))
+        if r.get("closeFee") not in (None, "")
+        else _float(r.get("execFee"))
+        for r in legs
+    )
+    venue_open_fee_usdt = sum(_float(r.get("openFee")) for r in legs)
+    venue_closed_pnl_rows = [
+        _float(r.get("closedPnl"))
+        for r in legs
+        if r.get("closedPnl") not in (None, "")
+    ]
     last_leg = legs[-1]
     # Bybit's createdTime IS the venue execution time; the close completes at
     # the last leg.
@@ -1844,7 +2089,12 @@ def _orphan_close_pnl_from_records(
     notional_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
     backfill: dict[str, Any] = {
         "exit_price": exit_price,
+        # Bybit documents Closed-PnL avgExitPrice as cost-influenced rather than
+        # a raw execution VWAP. Keep the source explicit; execution history or
+        # aggregate venue Closed-PnL is the forensic authority when available.
+        "exit_price_source": "bybit_closed_pnl_avg_exit_cost_adjusted",
         "exit_fee_usdt": exit_fee_usdt,
+        "venue_open_fee_allocated_usdt": venue_open_fee_usdt,
         "exit_exec_time_ms": closed_at_ms,
         "gross_trade_return": gross_trade_return,
         "net_return": gross_trade_return * notional_weight,
@@ -1853,6 +2103,12 @@ def _orphan_close_pnl_from_records(
         "closed_at_ms": closed_at_ms,
         "submit_mode": "orphan_reconciled",
     }
+    if venue_closed_pnl_rows:
+        # Preserve Bybit's net Closed-PnL value beside the ledger's strategy-
+        # return convention instead of silently conflating the two. On a netted
+        # same-symbol component group this is a quantity-prorated allocation;
+        # only the conserved group sum is authoritative component-agnostic truth.
+        backfill["venue_closed_pnl_allocated_usdt"] = sum(venue_closed_pnl_rows)
     if len(legs) > 1:
         backfill["orphan_close_legs"] = len(legs)
     exit_order_id = str(last_leg.get("orderId") or "")

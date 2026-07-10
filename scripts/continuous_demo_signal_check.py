@@ -2,12 +2,14 @@
 """Continuous-sleeve reconcile: confirm each live demo entry was a genuine engine
 signal (top fade decile D9, rmom-low third, liquid) at its signal bar.
 
-The continuous sleeve is demo-only (no paper shadow) and brand-new, so a clean
-research-root backtest of TODAY's trades is impossible: the research rmom panel
-lags ~6 days and today's bars are incomplete. The faithful check instead replays
+The continuous sleeve has demo and no-order paper ledgers, but a clean
+research-root backtest of today's trades can lag the live residual-momentum
+plane. The faithful execution check instead replays
 the SHARED `compute_continuous_decile_panel` (the same pipeline the live daemon
-uses -- the bit-identical claim) over the LIVE continuous root's own WS klines +
-rmom panel, and asks: at each entry's signal bar, was the symbol in D9?
+uses -- the bit-identical claim) over the LIVE continuous signal plane's WS
+klines + rmom panel, and asks: at each entry's signal bar, was the symbol in D9?
+`--root` owns the trade ledger; `--market-root` may point paper entries at the
+demo signal plane.
 
 This is a SIGNAL-CONSISTENCY check (live selection == engine selection on the
 live data), NOT promotion/OOS evidence.
@@ -25,7 +27,10 @@ sys.path.insert(0, str(REPO))
 
 import polars as pl  # noqa: E402
 
-from liquidity_migration.continuous_events import compute_continuous_decile_panel  # noqa: E402
+from liquidity_migration.continuous_events import (  # noqa: E402
+    compute_continuous_decile_panel,
+    validated_stable_residual_momentum,
+)
 
 DEFAULT_ROOT = "data/bybit-continuous-demo-event"
 # Must MATCH the deployed continuous_ensemble_v2 entry engine, else this "consistency"
@@ -77,7 +82,12 @@ def load_klines(root: str) -> pl.DataFrame:
 def load_rmom(root: str) -> pl.DataFrame:
     # The engine renames the day-floored ts_ms -> day_ts before the panel join
     # (continuous_events.build_continuous_panel line ~167). Mirror it exactly.
-    return pl.read_parquet(f"{root}/residual_momentum.parquet").rename({"ts_ms": "day_ts"})
+    table = pl.read_parquet(f"{root}/residual_momentum.parquet")
+    table = validated_stable_residual_momentum(
+        table,
+        source=f"{root}/residual_momentum.parquet",
+    )
+    return table.rename({"ts_ms": "day_ts"})
 
 
 def _filter_entries(df: pl.DataFrame, *, start_ts_ms: int | None, strategy_id: str | None) -> pl.DataFrame:
@@ -104,6 +114,11 @@ def load_entries(root: str, *, trades_dataset: str, start_ts_ms: int | None = No
 def main() -> int:
     ap = argparse.ArgumentParser(description="Continuous demo signal-consistency check.")
     ap.add_argument("--root", default=DEFAULT_ROOT, help="Continuous demo data root.")
+    ap.add_argument(
+        "--market-root",
+        default=None,
+        help="Optional root for WS klines and residual momentum; defaults to --root.",
+    )
     ap.add_argument("--trades-dataset", default="continuous_fade_demo_trades",
                     help="Trades dataset to check under --root.")
     ap.add_argument("--start-ts-ms", type=int, default=None,
@@ -115,6 +130,7 @@ def main() -> int:
                     help="Comma list of engine features (must match the deployed profile).")
     args = ap.parse_args()
     root = args.root
+    market_root = args.market_root or root
     rmom_quantile = float(args.rmom_quantile)
     feature_set = tuple(f.strip() for f in args.feature_set.split(",") if f.strip())
 
@@ -132,8 +148,8 @@ def main() -> int:
         print("SUMMARY: 0/0 confirmed D9 at signal bar; 0 off-decile; 0 no-panel-row.")
         return 0
 
-    k = load_klines(root)
-    rmom = load_rmom(root)
+    k = load_klines(market_root)
+    rmom = load_rmom(market_root)
     print(f"klines: {k.height} rows {_ts(k['ts_ms'].min())}->{_ts(k['ts_ms'].max())}; "
           f"rmom: {rmom.height} rows; symbols(klines)={k['symbol'].n_unique()}")
 

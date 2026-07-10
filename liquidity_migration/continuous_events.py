@@ -124,6 +124,15 @@ class ContinuousEventConfig:
     sizing_mode: str = "flat"             # "flat" (2% each) | "inverse_vol" (size by target_vol/rv, clamped)
     target_vol_per_name: float = 0.02     # inverse_vol: per-name hourly-vol target
     vol_weight_clamp: float = 3.0         # inverse_vol: clamp weight multiplier to [1/clamp, clamp]
+    # Risk-objective entry sizing. A 0.001 budget with shock=1.0 caps one
+    # symbol's loss under a +100% adverse gap at 0.10% of equity. This changes
+    # exposure before entry; it is not a stop or an assumed exit fill.
+    entry_disaster_loss_budget_frac: float = 0.0  # 0=off
+    entry_disaster_shock_frac: float = 1.0
+    # Aggregate live-notional shock budget. Applied independently to each
+    # component before ensemble weighting; with component weights summing to 1,
+    # the combined book inherits the same cap.
+    entry_portfolio_heat_cap_frac: float = 0.0  # 0=off
     age_days_min: int = 0                 # skip symbols younger than this (fresh-listing squeezers)
     entry_max_ret168_max: float = 10.0    # skip entries with trailing 168h max 1h return above this; 10=off
     entry_decel_lookback_h: int = 0       # 0=off; require close[t]/close[t-lookback]-1 <= entry_decel_max_ret
@@ -264,7 +273,9 @@ def _panel_cache_path(root: Path, config: ContinuousEventConfig, *, end_ms: int)
     # a distinct, correct key.
     excl_part = "" if not config.exclude_symbols else f"_excl{_exclude_tag(config.exclude_symbols)}"
     return root / (
-        f"_continuous_engine_panel_v3_rmom{int(round(config.rmom_quantile * 100))}"
+        # v4 invalidates panels built before provisional residual-momentum rows
+        # were excluded from live/research consumers.
+        f"_continuous_engine_panel_v4_rmom{int(round(config.rmom_quantile * 100))}"
         f"_feat{_feature_tag(config.feature_set)}{excl_part}_{window_tag}.parquet"
     )
 
@@ -275,6 +286,54 @@ def _panel_cache_path(root: Path, config: ContinuousEventConfig, *, end_ms: int)
 # table is STALE and the left-join+null-filter would SILENTLY drop the newest dates from the panel
 # (the documented 2026-06-03 truncation). Matches the live watchdog's --max-rmom-stale-days default.
 RMOM_COVERAGE_TOLERANCE_DAYS = 2
+
+
+def validated_stable_residual_momentum(
+    table: pl.DataFrame,
+    *,
+    source: str | Path,
+) -> pl.DataFrame:
+    """Validate RMOM provenance/keys/values, then return stable rows only.
+
+    Duplicate keys multiply panel rows and NaN/Inf values can corrupt ranks. A
+    legacy table without provenance can expose its mutable tail. All three are
+    wrong-signal failures, so live callers degrade the raised error to no signal
+    while research and reconciliation fail loudly.
+    """
+    required = {"symbol", "ts_ms", "residual_momentum", "is_provisional"}
+    missing = sorted(required - set(table.columns))
+    if missing:
+        if "is_provisional" in missing:
+            raise RuntimeError(f"{source} lacks boolean is_provisional provenance")
+        raise RuntimeError(f"{source} missing residual-momentum columns: {missing}")
+    if table.schema["is_provisional"] != pl.Boolean:
+        raise RuntimeError(f"{source} lacks boolean is_provisional provenance")
+    if table.schema["symbol"] != pl.String:
+        raise RuntimeError(f"{source} symbol must be String")
+    if table.schema["ts_ms"] != pl.Int64:
+        raise RuntimeError(f"{source} ts_ms must be Int64")
+    if table.schema["residual_momentum"] not in (pl.Float32, pl.Float64):
+        raise RuntimeError(f"{source} residual_momentum must be floating point")
+    if table["is_provisional"].null_count() > 0:
+        raise RuntimeError(f"{source} contains null is_provisional provenance")
+    invalid_keys = table.filter(
+        pl.col("symbol").is_null()
+        | (pl.col("symbol").str.strip_chars() == "")
+        | pl.col("ts_ms").is_null()
+        | ((pl.col("ts_ms") % MS_PER_DAY) != 0)
+    )
+    if not invalid_keys.is_empty():
+        raise RuntimeError(f"{source} contains null, blank, or non-daily residual-momentum keys")
+    duplicates = table.group_by(["symbol", "ts_ms"]).len().filter(pl.col("len") > 1)
+    if not duplicates.is_empty():
+        raise RuntimeError(f"{source} has duplicate (symbol,ts_ms) residual-momentum keys")
+    invalid = table.filter(
+        pl.col("residual_momentum").is_null()
+        | (~pl.col("residual_momentum").is_finite())
+    )
+    if not invalid.is_empty():
+        raise RuntimeError(f"{source} contains null or non-finite residual_momentum")
+    return table.filter(~pl.col("is_provisional"))
 
 
 def _assert_rmom_covers_window(
@@ -333,7 +392,13 @@ def build_continuous_panel(
             f"{rmom_path} missing -- build it first: "
             f"POLARS_MAX_THREADS=8 python scripts/precompute_residual_momentum.py --root {root}"
         )
-    rmom = pl.read_parquet(rmom_path).rename({"ts_ms": "day_ts"})
+    rmom = pl.read_parquet(rmom_path)
+    # Provisional padded values are causal but can mature when a delayed
+    # forward-target residual arrives. They are append telemetry, not an
+    # approved trading signal; block them so live and research use only the
+    # registered stable shift-3 series.
+    rmom = validated_stable_residual_momentum(rmom, source=rmom_path)
+    rmom = rmom.rename({"ts_ms": "day_ts"})
     _assert_rmom_covers_window(rmom, k, start_ms=start_ms, root=root)
     panel = compute_continuous_decile_panel(
         k,
@@ -1107,6 +1172,15 @@ def _run_trades(
             f"got {external_size_skip_lte}"
         )
     external_size_skip_on = external_size_skip_lte > 0.0 and size_mult_lookup is not None
+    disaster_budget = float(config.entry_disaster_loss_budget_frac)
+    disaster_shock = float(config.entry_disaster_shock_frac)
+    portfolio_heat_cap = float(config.entry_portfolio_heat_cap_frac)
+    if disaster_budget < 0.0 or portfolio_heat_cap < 0.0 or disaster_shock < 0.0:
+        raise ValueError("disaster budget, portfolio heat cap, and shock fraction must be non-negative")
+    if (disaster_budget > 0.0 or portfolio_heat_cap > 0.0) and disaster_shock <= 0.0:
+        raise ValueError("entry_disaster_shock_frac must be positive when a risk budget is enabled")
+    disaster_budget_on = disaster_budget > 0.0
+    portfolio_heat_on = portfolio_heat_cap > 0.0
     signal_counts: dict[int, int] = {}
     if crowding_on:
         for ts in entries["ts_ms"].to_list():
@@ -1134,6 +1208,7 @@ def _run_trades(
     skipped_crowding = 0
     skipped_external_size_multiplier = 0
     skipped_entry_limit_unfilled = 0
+    skipped_portfolio_heat = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
@@ -1161,6 +1236,11 @@ def _run_trades(
         entry_volatility: float | None = None,
         inverse_vol_multiplier: float | None = None,
         external_size_multiplier: float | None = None,
+        pre_risk_notional_weight: float | None = None,
+        disaster_notional_cap: float | None = None,
+        portfolio_heat_before_frac: float | None = None,
+        portfolio_heat_after_frac: float | None = None,
+        risk_size_clamped: bool | None = None,
         exit_ts_ms: int | None = None,
         order_submit_ts_ms: int | None = None,
         fill_window_start_ts_ms: int | None = None,
@@ -1245,6 +1325,11 @@ def _run_trades(
                 "entry_volatility": entry_volatility,
                 "inverse_vol_multiplier": inverse_vol_multiplier,
                 "external_size_multiplier": external_size_multiplier,
+                "pre_risk_notional_weight": pre_risk_notional_weight,
+                "disaster_notional_cap": disaster_notional_cap,
+                "portfolio_heat_before_frac": portfolio_heat_before_frac,
+                "portfolio_heat_after_frac": portfolio_heat_after_frac,
+                "risk_size_clamped": risk_size_clamped,
                 "notional_weight": notional_weight,
                 "exit_ts_ms": exit_ts_ms,
                 "selected": reason == "selected",
@@ -1407,6 +1492,43 @@ def _run_trades(
         # recomputed at the new size by _round_trip_bps below. trade_stop is independent of nw,
         # so applying the multiplier after _compute_size_and_stop is numerically identical.
         nw *= external_size_multiplier
+        pre_risk_nw = nw
+        disaster_notional_cap: float | None = None
+        risk_size_clamped = False
+        if disaster_budget_on:
+            disaster_notional_cap = disaster_budget / disaster_shock
+            if nw > disaster_notional_cap:
+                nw = disaster_notional_cap
+                risk_size_clamped = True
+        portfolio_heat_before_frac: float | None = None
+        portfolio_heat_after_frac: float | None = None
+        if portfolio_heat_on:
+            active_notional_weight = sum(weight for _exit, weight in active_notional)
+            portfolio_heat_before_frac = active_notional_weight * disaster_shock
+            remaining_notional_weight = max(
+                (portfolio_heat_cap / disaster_shock) - active_notional_weight,
+                0.0,
+            )
+            if remaining_notional_weight <= 1e-15:
+                _emit(
+                    "portfolio_heat",
+                    order_submit_ts_ms=order_submit_ts,
+                    active_count=len(active),
+                    regime_trend=cand_trend,
+                    regime_size_mult=regime_size_mult,
+                    external_size_multiplier=external_size_multiplier,
+                    pre_risk_notional_weight=pre_risk_nw,
+                    disaster_notional_cap=disaster_notional_cap,
+                    portfolio_heat_before_frac=portfolio_heat_before_frac,
+                    portfolio_heat_after_frac=portfolio_heat_before_frac,
+                    risk_size_clamped=risk_size_clamped,
+                )
+                skipped_portfolio_heat += 1
+                continue
+            if nw > remaining_notional_weight:
+                nw = remaining_notional_weight
+                risk_size_clamped = True
+            portfolio_heat_after_frac = (active_notional_weight + nw) * disaster_shock
         planned_exit = _plan_exit(
             state_mode=state_mode, spell_end=int(spell_end), entry_bar_end=entry_bar_end,
             delay_ms=delay_ms, max_hold_ms=max_hold_ms, hold_ms=hold_ms,
@@ -1447,6 +1569,15 @@ def _run_trades(
             and int(trade.get("exit_ts_ms") or 0) == int(planned_exit)
         ):
             trade["exit_reason"] = "left_decile"
+        if disaster_budget_on or portfolio_heat_on:
+            trade.update({
+                "pre_risk_notional_weight": pre_risk_nw,
+                "entry_disaster_notional_cap": disaster_notional_cap,
+                "entry_disaster_shock_frac": disaster_shock,
+                "entry_portfolio_heat_before_frac": portfolio_heat_before_frac,
+                "entry_portfolio_heat_after_frac": portfolio_heat_after_frac,
+                "entry_risk_size_clamped": risk_size_clamped,
+            })
         rows.append(trade)
         exit_ts = int(trade["exit_ts_ms"])
         _emit(
@@ -1462,6 +1593,11 @@ def _run_trades(
             entry_volatility=entry_volatility,
             inverse_vol_multiplier=inverse_vol_multiplier,
             external_size_multiplier=external_size_multiplier,
+            pre_risk_notional_weight=pre_risk_nw,
+            disaster_notional_cap=disaster_notional_cap,
+            portfolio_heat_before_frac=portfolio_heat_before_frac,
+            portfolio_heat_after_frac=portfolio_heat_after_frac,
+            risk_size_clamped=risk_size_clamped,
             entry_reference_price=fill.get("entry_reference_price"),
             entry_limit_price=fill.get("entry_limit_price"),
             entry_fill_mode=fill.get("entry_fill_mode"),
@@ -1485,6 +1621,7 @@ def _run_trades(
         "skipped_admission": skipped_admission,
         "skipped_external_size_multiplier": skipped_external_size_multiplier,
         "skipped_entry_limit_unfilled": skipped_entry_limit_unfilled,
+        "skipped_portfolio_heat": skipped_portfolio_heat,
     }
     if not rows:
         return _empty_trades(), skips
@@ -1939,6 +2076,11 @@ def run_continuous_event_research(
             "entry_volatility": pl.Float64,
             "inverse_vol_multiplier": pl.Float64,
             "external_size_multiplier": pl.Float64,
+            "pre_risk_notional_weight": pl.Float64,
+            "disaster_notional_cap": pl.Float64,
+            "portfolio_heat_before_frac": pl.Float64,
+            "portfolio_heat_after_frac": pl.Float64,
+            "risk_size_clamped": pl.Boolean,
             "notional_weight": pl.Float64,
             "exit_ts_ms": pl.Int64,
             "selected": pl.Boolean,

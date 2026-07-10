@@ -345,9 +345,9 @@ def _print_coverage(root: str) -> None:
 
 
 # ----------------------------------------------------------------------------- step 2: LONG backtest leg
-def run_long_backtest(step: rc.Step, root: str, start: dt.date, end: dt.date) -> tuple[Path, str]:
+def run_long_backtest(step: rc.Step, root: str, start: dt.date, end: dt.date) -> tuple[Path, dict[str, object]]:
     """Run the v11a long backtest over the forward window on the fresh root.
-    Returns (trades_csv_path, run_label)."""
+    Returns the trades path plus structured integrity metadata from the report."""
     step.banner(f"LONG backtest (v11a) over {start} .. {end} on {root}")
     step.run(rc._script(
         "long_native_sweep_fc_min_day.py",
@@ -360,14 +360,33 @@ def run_long_backtest(step: rc.Step, root: str, start: dt.date, end: dt.date) ->
     ))
     run_dir = Path(root).expanduser() / "reports" / LONG_REPORT_SUBDIR / f"fc_min_day_{_fc_tag(LONG_FC_VALUE)}"
     trades_csv = run_dir / "long_native_trades.csv"
-    label = "unknown"
+    integrity: dict[str, object] = {
+        "run_label": "unknown",
+        "methodology_run_label": "exploratory",
+        "full_pit_universe_pass": None,
+        "funding_warning_codes": (),
+        "funding_modeled_fraction": None,
+    }
     report_json = run_dir / "long_native_research_report.json"
     if report_json.exists():
         try:
-            label = json.loads(report_json.read_text()).get("run_label", "unknown")
+            report = json.loads(report_json.read_text())
+            warnings = report.get("warnings") or []
+            summary = report.get("summary") or {}
+            integrity = {
+                "run_label": report.get("run_label", "unknown"),
+                "methodology_run_label": report.get("methodology_run_label", "exploratory"),
+                "full_pit_universe_pass": (report.get("pit_manifest") or {}).get("full_pit_universe_pass"),
+                "funding_warning_codes": tuple(
+                    str(row.get("code") or "")
+                    for row in warnings
+                    if isinstance(row, dict) and str(row.get("code") or "").startswith("FUNDING_")
+                ),
+                "funding_modeled_fraction": summary.get("funding_modeled_fraction"),
+            }
         except Exception:
             pass
-    return trades_csv, label
+    return trades_csv, integrity
 
 
 def _fc_tag(value: float) -> str:
@@ -507,7 +526,7 @@ def _long_cadence_reference_paths() -> list[Path]:
     return sorted(REPO.glob(LONG_CADENCE_REFERENCE_GLOB))
 
 
-def reconcile_long_three_way(step: rc.Step, *, trades_csv: Path, run_label: str,
+def reconcile_long_three_way(step: rc.Step, *, trades_csv: Path, run_integrity: dict[str, object],
                              demo_root: str, paper_root: str,
                              start: dt.date, end: dt.date) -> tuple[str, bool]:
     """Pair backtest / demo / paper LONG entries by (symbol, side, signal-day)."""
@@ -535,17 +554,42 @@ def reconcile_long_three_way(step: rc.Step, *, trades_csv: Path, run_label: str,
         rows.append(f"{sym},{side},{day},{int(key in model)},{int(key in demo)},{int(key in paper)}")
     csv_path.write_text("\n".join(rows) + "\n")
 
+    run_label = str(run_integrity.get("run_label") or "unknown")
+    methodology = str(run_integrity.get("methodology_run_label") or "exploratory")
+    full_pit_pass = run_integrity.get("full_pit_universe_pass")
+    funding_warnings = tuple(run_integrity.get("funding_warning_codes") or ())
+    funding_fraction_raw = run_integrity.get("funding_modeled_fraction")
+    funding_fraction = (
+        float(funding_fraction_raw) if funding_fraction_raw is not None else None
+    )
+    funding_low = (
+        bool(funding_warnings)
+        or "funding_coverage_low" in run_label
+        or (funding_fraction is not None and funding_fraction < 0.95)
+    )
     label_flag = ""
-    if run_label not in ("full_pit_universe", "full_pit_universe_funding_partial",
-                         "full_pit_universe_funding_missing"):
-        label_flag = f"  ⚠️ backtest run_label={run_label} (NOT clean full-PIT — treat as biased diagnostic)"
+    if full_pit_pass is False:
+        label_flag = "  ⚠️ PIT universe gate FAILED — survivorship/coverage-biased diagnostic"
+    elif full_pit_pass is True and funding_low:
+        funding_detail = ",".join(map(str, funding_warnings)) or (
+            f"modeled_fraction={funding_fraction:.3f}"
+            if funding_fraction is not None
+            else "run_label=funding_coverage_low"
+        )
+        label_flag = (
+            "  ⚠️ full-PIT universe PASS; funding coverage incomplete "
+            f"({funding_detail}) — cost result is optimistic/{methodology}"
+        )
+    elif full_pit_pass is not True:
+        label_flag = f"  ⚠️ full-PIT universe status unknown — {methodology} diagnostic"
 
     summary = (
         f"long three-way: backtest={len(model)} demo={len(demo)} paper={len(paper)} | "
         f"confirmed(all3)={len(confirmed)} model∩demo={len(model_demo)} model∩paper={len(model_paper)} "
         f"demo∩paper={len(demo_paper)} | model_only={len(model_only)} "
         f"demo_not_in_model={len(demo_not_in_model)} paper_not_in_model={len(paper_not_in_model)} "
-        f"| backtest_run_label={run_label} window={start}..{end} keys_csv={csv_path}{label_flag}"
+        f"| backtest_run_label={run_label} methodology={methodology} "
+        f"full_pit_universe_pass={full_pit_pass} window={start}..{end} keys_csv={csv_path}{label_flag}"
     )
     cadence_summary = _format_long_cadence_diagnostic(
         _long_cadence_reference_paths(),
@@ -565,7 +609,15 @@ def reconcile_long_three_way(step: rc.Step, *, trades_csv: Path, run_label: str,
     # A leg "passes" the agreement gate only when no LIVE entry lacks a model
     # justification. model_only is expected (sleeve off / just enabled), so it is
     # NOT a failure.
-    ok = (len(demo_not_in_model) == 0 and len(paper_not_in_model) == 0)
+    # Entry agreement is not evidence when the model leg cannot prove its PIT
+    # universe.  Previously failed/unknown PIT status only changed report text,
+    # allowing the unified command to exit success on a methodologically invalid
+    # backtest leg.
+    ok = (
+        len(demo_not_in_model) == 0
+        and len(paper_not_in_model) == 0
+        and full_pit_pass is True
+    )
     return summary, ok
 
 
@@ -594,6 +646,7 @@ def continuous_signal_leg(
         rc._script(
             "continuous_demo_signal_check.py",
             "--root", paper_root,
+            "--market-root", demo_root,
             "--trades-dataset", "continuous_fade_paper_trades",
             "--start-ts-ms", str(start_ts_ms),
             "--strategy-id", rc.CONTINUOUS_V2_PAPER_STRATEGY_ID,
@@ -669,10 +722,9 @@ def main() -> int:
     #     --no-rmom (use the on-disk panel) or --no-data-refresh (don't pair a heavy rmom
     #     recompute with a "skip the slow stuff" request). The independent-PIT check itself
     #     ALWAYS runs for continuous (it's cheap and informational); it just confirms fewer
-    #     entries when the research panel's coverage lags. That lag is the derivative-metric
-    #     inputs build_feature_panel reads (open_interest/premium): the default refresh updates
-    #     only manifest+klines, so they go stale and truncate rmom (here to ~06-02; --with-funding
-    #     tops them up). rmom itself is causal (~2-3d, shift(3)); those entries sit in pending_rmom.
+    #     entries when the research panel's coverage lags. rmom uses COMMON4 only;
+    #     funding/OI/premium do not truncate its kline spine. A pending plane here
+    #     means the rmom refresh itself failed or its stable causal edge is stale.
     do_rmom_recompute = ("continuous" in sleeves) and not args.no_rmom and not args.no_data_refresh
     if do_rmom_recompute:
         rc.refresh_rmom(step, root, today)
@@ -695,9 +747,9 @@ def main() -> int:
             print("$ (join entry_price across the 3 books; write long_three_way_fills.csv)")
             summary["long"], ok["long"] = "(dry-run)", True
         else:
-            trades_csv, label = run_long_backtest(step, root, bt_start, win_end)
+            trades_csv, run_integrity = run_long_backtest(step, root, bt_start, win_end)
             tw_summary, tw_ok = reconcile_long_three_way(
-                step, trades_csv=trades_csv, run_label=label,
+                step, trades_csv=trades_csv, run_integrity=run_integrity,
                 demo_root=ld, paper_root=lp, start=bt_start, end=win_end)
             step.banner("LONG fills: backtest <-> demo <-> paper (entry-price cross-check)")
             fills_summary, fills_ok = rf.fills_long(

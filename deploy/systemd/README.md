@@ -161,6 +161,48 @@ systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
 systemctl enable --now liquidity-migration-continuous-hedge.timer
 ```
 
+## Safe demo/paper ledger archive and reset
+
+Run the ledger reset command from `/opt/liquidity-migration`. Its default is a
+read-only plan; `--execute` is mandatory for any service or file change.
+
+```bash
+scripts/reset_demo_paper_ledgers.sh
+scripts/reset_demo_paper_ledgers.sh --sleeves continuous
+scripts/reset_demo_paper_ledgers.sh --execute --sleeves all --label exit-overhaul
+```
+
+Execution stops every shared-account writer (including the risk service and
+submit-armed hedge) plus maintenance timers, refuses `REAL_MONEY` or ambiguous
+account flags, and takes a nonblocking process lock at
+`/run/lock/liquidity-migration-ledger-reset.lock` so two execute runs cannot
+overlap. Before stopping anything, it verifies that systemd's resolved
+`EnvironmentFiles` for the risk, LONG demo, CONTINUOUS demo, and hedge units all
+include the same resolved file selected by `--env-file`; this prevents proving one
+account flat while quiescing writers for another. It then queries Bybit demo to
+prove there are no positions or open orders. The lock remains held through normal
+restart verification and failure-recovery restarts.
+
+After the flat proof, the command writes and verifies a timestamped archive with
+an audit manifest, persists an fsynced `.sha256` sidecar, and fsyncs the archive
+directory before removing only allowlisted trade/order/cycle datasets and
+the continuous risk, lifecycle, and `continuous_dynexit_shadow.jsonl` operational
+ledgers in both demo and paper roots. Clearing them prevents pre-reset risk-health,
+lifecycle, or shadow-exit evidence from contaminating the new forward window. The
+continuous selection includes the hedge ledger; `all` also includes the shared
+compatibility ledger. Initially inactive sleeve units remain inactive; initially
+active daemons and timers are restarted and verified.
+
+Configs, lock directories, residual-momentum signals, root-level market data,
+reports, and `.cache` directories are preserved by default. `--include-reports`
+and `--include-caches` are explicit opt-ins; the latter may require a slow market-
+data bootstrap. The continuous `continuous_account_equity_state.json` high-water
+state is snapshotted into the archive and retained live: wiping it would erase
+account-level drawdown memory and make the first post-reset cycle report a false
+zero drawdown. The command never flattens positions or cancels orders itself—do
+that through the normal demo workflow, then rerun the reset. Archives default to
+`data/_archive/ledger-reset-<UTC timestamp>[-label].tar.gz`.
+
 Required secrets live outside git in:
 
 ```text
@@ -199,7 +241,8 @@ continuous demo sleeve
 (`liquidity-migration-bybit-continuous-demo.service`, `SUBMIT_ORDERS=1`,
 `continuous_ensemble_v2`, inverse-vol component sizing with
 `TARGET_VOL_PER_NAME=0.01`/`VOL_WEIGHT_CLAMP=2`, daily vol-target rebalance
-disabled, `CTRL_BTC_RISK_70_90_35` BTC-risk entry sizing enabled, no
+disabled, `CTRL_BTC_RISK_70_90_35` BTC-risk entry sizing enabled,
+`CONTINUOUS_SNIPER=0`, no
 venue-side stop; demo/paper surface) and the daily BTC+ETH hedge timer
 (`liquidity-migration-continuous-hedge.timer`) — the hedge unit ships
 **`SUBMIT_HEDGE=1` + `CONFIRM_DEMO_ORDERS=1` (operator-armed 2026-06-10)**, so

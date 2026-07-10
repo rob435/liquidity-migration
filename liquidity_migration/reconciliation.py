@@ -68,6 +68,27 @@ def _is_snipe_trade(row: dict[str, Any]) -> bool:
     return str(row.get("trade_id") or "").endswith(SNIPER_TRADE_SUFFIX)
 
 
+def _pair_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    """Lifecycle pairing grain for ensemble books.
+
+    Component is load-bearing: three continuous legs share symbol, side, and
+    signal timestamp, so omitting it silently permutes p3/p4p3/p4p5 matches.
+    """
+    return (str(row.get("symbol") or ""), str(row.get("side") or ""), str(row.get("component") or ""))
+
+
+def _canonical_exit_reason(value: Any) -> str:
+    reason = str(value or "").strip().lower()
+    return {
+        "time_stop": "max_hold",
+        "max_hold": "max_hold",
+        "tp": "take_profit",
+        "take_profit": "take_profit",
+        "stop": "stop_loss",
+        "stop_loss": "stop_loss",
+    }.get(reason, reason)
+
+
 def _normalized_side(value: Any) -> str:
     text = str(value or "").lower()
     if text in {"sell", "short"}:
@@ -138,11 +159,13 @@ def _clean_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
                 "trade_id": str(row.get("trade_id") or ""),
                 "symbol": symbol,
                 "side": side,
+                "component": str(row.get("component") or ""),
                 "signal_ts_ms": _int(row.get("signal_ts_ms")),
                 "entry_ts_ms": _int(row.get("entry_ts_ms")),
                 "entry_exec_time_ms": _int(row.get("entry_exec_time_ms")),
                 "entry_price": entry_price,
                 "entry_fee_usdt": _float(row.get("entry_fee_usdt")),
+                "entry_fee_recorded": row.get("entry_fee_usdt") is not None,
                 "qty": qty,
                 "status": str(row.get("status") or ""),
                 "exit_price": _float(row.get("exit_price")),
@@ -150,6 +173,14 @@ def _clean_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
                 "exit_exec_time_ms": _int(row.get("exit_exec_time_ms")),
                 "exit_reason": str(row.get("exit_reason") or ""),
                 "exit_fee_usdt": _float(row.get("exit_fee_usdt")),
+                "exit_fee_recorded": row.get("exit_fee_usdt") is not None,
+                "notional_usdt": _float(row.get("notional_usdt")),
+                "equity_usdt": _float(row.get("equity_usdt")),
+                "net_return": _float(row.get("net_return")),
+                "venue_closed_pnl_allocated_usdt": _float(
+                    row.get("venue_closed_pnl_allocated_usdt")
+                ),
+                "venue_closed_pnl_recorded": row.get("venue_closed_pnl_allocated_usdt") is not None,
             }
         )
     return cleaned
@@ -231,25 +262,27 @@ def reconcile_paper_demo(
     """
     paper_all = _clean_trades(paper_trades)
     demo_all = _clean_trades(demo_trades)
-    # Snipe rows are demo-only by design (sniper-2): pull them OUT of the pairing
-    # population so they cannot inflate demo_only, and report them separately so an
-    # operator (or the decision rule) does not read by-design behavior as ledger drift.
+    # Snipe rows had no paper twin. Keep base execution pairing separate, but
+    # report the add-on exposure and PnL explicitly; count any still-open snipe
+    # as a hard lifecycle fault now that the arm is retired.
     paper = [t for t in paper_all if not _is_snipe_trade(t)]
     demo = [t for t in demo_all if not _is_snipe_trade(t)]
     snipe_paper_only = sum(1 for t in paper_all if _is_snipe_trade(t))
     snipe_demo_only = sum(1 for t in demo_all if _is_snipe_trade(t))
+    demo_snipes = [t for t in demo_all if _is_snipe_trade(t)]
+    paper_snipes = [t for t in paper_all if _is_snipe_trade(t)]
     tolerance = max(int(entry_tolerance_ms), 0)
     signal_tolerance = max(int(signal_tolerance_ms), 0)
 
-    paper_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    paper_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for trade in paper:
-        paper_by_key.setdefault((trade["symbol"], trade["side"]), []).append(trade)
+        paper_by_key.setdefault(_pair_key(trade), []).append(trade)
     for bucket in paper_by_key.values():
         bucket.sort(key=lambda item: item["entry_ts_ms"])
 
     # Index paper trades by trade_id within each bucket so trade-id pairing
     # and gap pairing both use the SAME (key, bucket_idx) addressing scheme.
-    paper_tid_in_bucket: dict[tuple[str, str], dict[str, int]] = {}
+    paper_tid_in_bucket: dict[tuple[str, str, str], dict[str, int]] = {}
     for key, bucket in paper_by_key.items():
         per_bucket: dict[str, int] = {}
         for paper_idx, paper_trade in enumerate(bucket):
@@ -266,12 +299,12 @@ def reconcile_paper_demo(
     # rows without a trade_id (legacy ledgers).
     candidates: list[tuple[int, int, int]] = []  # (gap, demo_idx, paper_bucket_idx)
     tid_matched_demo: set[int] = set()
-    tid_matched_paper: dict[tuple[str, str], set[int]] = {}
+    tid_matched_paper: dict[tuple[str, str, str], set[int]] = {}
     for demo_idx, demo_trade in enumerate(demo):
         tid = str(demo_trade.get("trade_id") or "")
         if not tid:
             continue
-        key = (demo_trade["symbol"], demo_trade["side"])
+        key = _pair_key(demo_trade)
         paper_idx_opt = paper_tid_in_bucket.get(key, {}).get(tid)
         if paper_idx_opt is None:
             continue
@@ -291,7 +324,7 @@ def reconcile_paper_demo(
     # in that case. We do this BEFORE the legacy entry_ts pass so a true
     # signal_ts match wins over a coincidental entry_ts proximity.
     signal_matched_demo: set[int] = set(tid_matched_demo)
-    signal_matched_paper: dict[tuple[str, str], set[int]] = {
+    signal_matched_paper: dict[tuple[str, str, str], set[int]] = {
         k: set(v) for k, v in tid_matched_paper.items()
     }
     signal_candidates: list[tuple[int, int, int]] = []
@@ -301,7 +334,7 @@ def reconcile_paper_demo(
         demo_signal = demo_trade.get("signal_ts_ms", 0)
         if not demo_signal:
             continue
-        key = (demo_trade["symbol"], demo_trade["side"])
+        key = _pair_key(demo_trade)
         bucket = paper_by_key.get(key, [])
         already_paired = tid_matched_paper.get(key, set())
         for paper_idx, paper_trade in enumerate(bucket):
@@ -321,7 +354,7 @@ def reconcile_paper_demo(
     for sig_gap, demo_idx, paper_idx in signal_candidates:
         if demo_idx in signal_matched_demo:
             continue
-        key = (demo[demo_idx]["symbol"], demo[demo_idx]["side"])
+        key = _pair_key(demo[demo_idx])
         paper_used = signal_matched_paper.setdefault(key, set())
         if paper_idx in paper_used:
             continue
@@ -343,7 +376,7 @@ def reconcile_paper_demo(
     for demo_idx, demo_trade in enumerate(demo):
         if demo_idx in signal_matched_demo:
             continue
-        key = (demo_trade["symbol"], demo_trade["side"])
+        key = _pair_key(demo_trade)
         bucket = paper_by_key.get(key, [])
         already_paired = signal_matched_paper.get(key, set())
         for paper_idx, paper_trade in enumerate(bucket):
@@ -359,12 +392,12 @@ def reconcile_paper_demo(
     # so the per-pair report stays chronological.
     matched_pairs: list[tuple[int, dict[str, Any]]] = []
     used_demo: set[int] = set()
-    used_paper: dict[tuple[str, str], set[int]] = {}
+    used_paper: dict[tuple[str, str, str], set[int]] = {}
     for _gap, demo_idx, paper_idx in candidates:
         if demo_idx in used_demo:
             continue
         demo_trade = demo[demo_idx]
-        key = (demo_trade["symbol"], demo_trade["side"])
+        key = _pair_key(demo_trade)
         paper_used = used_paper.setdefault(key, set())
         if paper_idx in paper_used:
             continue
@@ -409,7 +442,7 @@ def reconcile_paper_demo(
             paper_reason = paper_trade["exit_reason"]
             demo_reason = demo_trade["exit_reason"]
             if paper_reason or demo_reason:
-                exit_reason_match = paper_reason == demo_reason
+                exit_reason_match = _canonical_exit_reason(paper_reason) == _canonical_exit_reason(demo_reason)
             # Realized-fee residual — paper has 0 fees by construction; this is
             # the per-trade fee tax the demo path paid that paper did not.
             fee_gap_usdt = demo_trade["entry_fee_usdt"] + demo_trade["exit_fee_usdt"] - (
@@ -421,6 +454,7 @@ def reconcile_paper_demo(
                 {
                     "symbol": demo_trade["symbol"],
                     "side": side,
+                    "component": demo_trade["component"],
                     "paper_trade_id": paper_trade["trade_id"],
                     "demo_trade_id": demo_trade["trade_id"],
                     "paper_status": paper_trade["status"],
@@ -465,6 +499,39 @@ def reconcile_paper_demo(
         # surfaced separately so they are not mistaken for reconciliation drift.
         "snipe_demo_only": snipe_demo_only,
         "snipe_paper_only": snipe_paper_only,
+        "snipe_demo_open": sum(1 for trade in demo_snipes if trade["status"] == "open"),
+        "snipe_paper_open": sum(1 for trade in paper_snipes if trade["status"] == "open"),
+        # Keep current exposure, historical sizing, local price-PnL estimates,
+        # and venue-authoritative allocations distinct.  The legacy fields
+        # called historical notional "exposure" and ledger price return
+        # "realized PnL", which was materially false for closed snipes and for
+        # rows whose shared-symbol exit attribution was incomplete.
+        "snipe_demo_open_notional_usdt": sum(
+            trade["notional_usdt"] for trade in demo_snipes if trade["status"] == "open"
+        ),
+        "snipe_demo_historical_entry_notional_usdt": sum(
+            trade["notional_usdt"] for trade in demo_snipes
+        ),
+        "snipe_demo_gross_price_pnl_usdt": sum(
+            trade["net_return"] * trade["equity_usdt"] for trade in demo_snipes
+        ),
+        "snipe_demo_net_return_total": sum(trade["net_return"] for trade in demo_snipes),
+        "snipe_demo_trading_fees_usdt": sum(
+            trade["entry_fee_usdt"] + trade["exit_fee_usdt"] for trade in demo_snipes
+        ),
+        "snipe_demo_fee_rows_recorded": sum(
+            1
+            for trade in demo_snipes
+            if trade["entry_fee_recorded"] or trade["exit_fee_recorded"]
+        ),
+        "snipe_demo_venue_closed_pnl_allocated_usdt": sum(
+            trade["venue_closed_pnl_allocated_usdt"]
+            for trade in demo_snipes
+            if trade["venue_closed_pnl_recorded"]
+        ),
+        "snipe_demo_venue_closed_pnl_rows_recorded": sum(
+            1 for trade in demo_snipes if trade["venue_closed_pnl_recorded"]
+        ),
         "closed_pairs": len(exit_bps_list),
         "entry_tolerance_ms": tolerance,
         "entry_slippage_bps_mean": mean(entry_bps) if entry_bps else 0.0,
@@ -494,8 +561,23 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
         f"- paired: {summary['paired']}",
         f"- paper-only (demo did not take): {summary['paper_only']}",
         f"- demo-only (paper did not take): {summary['demo_only']}",
-        f"- snipe demo-only (no paper twin by design, excluded from pairing): "
+        f"- snipe demo-only (unshadowed add-on, excluded from base pairing): "
         f"{summary.get('snipe_demo_only', 0)}",
+        f"- snipe open on demo: {summary.get('snipe_demo_open', 0)}",
+        f"- snipe open exposure: ${summary.get('snipe_demo_open_notional_usdt', 0.0):,.2f}",
+        f"- snipe historical entry notional: "
+        f"${summary.get('snipe_demo_historical_entry_notional_usdt', 0.0):,.2f}",
+        f"- snipe ledger-estimated gross price PnL/MTM: "
+        f"${summary.get('snipe_demo_gross_price_pnl_usdt', 0.0):,.2f} "
+        f"({summary.get('snipe_demo_net_return_total', 0.0):.4%} equity-return sum; "
+        "not venue authority)",
+        f"- snipe recorded trading fees: "
+        f"${summary.get('snipe_demo_trading_fees_usdt', 0.0):,.2f} "
+        f"across {summary.get('snipe_demo_fee_rows_recorded', 0)} row(s)",
+        f"- snipe venue Closed-PnL allocation: "
+        f"${summary.get('snipe_demo_venue_closed_pnl_allocated_usdt', 0.0):,.2f} "
+        f"across {summary.get('snipe_demo_venue_closed_pnl_rows_recorded', 0)} row(s)",
+        "- snipe funding: unavailable in the local trade ledger; use venue transaction records",
         "",
         "## Entry slippage — demo fill vs idealized paper fill (bps, +adverse)",
         "",
@@ -529,10 +611,10 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
         lines.append("## Per-pair")
         lines.append("")
         lines.append(
-            "| symbol | side | paper entry | demo entry | entry slip bps | paper exit | demo exit | "
+            "| symbol | component | side | paper entry | demo entry | entry slip bps | paper exit | demo exit | "
             "exit slip bps | exit gap (s) | paper reason | demo reason | paper ret % | demo ret % | fee Δ USDT |"
         )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for pair in result["pairs"]:
             exit_bps = pair["exit_slippage_bps"]
             paper_ret = pair["paper_return_pct"]
@@ -540,7 +622,7 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
             exit_gap = pair["exit_gap_ms"]
             fee_gap = pair["fee_gap_usdt"]
             lines.append(
-                f"| {pair['symbol']} | {pair['side']} | "
+                f"| {pair['symbol']} | {pair.get('component') or '-'} | {pair['side']} | "
                 f"{_fmt_price(pair['paper_entry_price'])} | {_fmt_price(pair['demo_entry_price'])} | "
                 f"{pair['entry_slippage_bps']:.2f} | "
                 f"{_fmt_price(pair.get('paper_exit_price'))} | {_fmt_price(pair.get('demo_exit_price'))} | "
@@ -572,6 +654,8 @@ def paper_demo_reconciliation_failures(summary: dict[str, Any]) -> list[str]:
         failures.append(f"status_divergent={summary.get('status_divergent')}")
     if int(summary.get("exit_reason_divergent", 0) or 0) > 0:
         failures.append(f"exit_reason_divergent={summary.get('exit_reason_divergent')}")
+    if int(summary.get("snipe_demo_open", 0) or 0) > 0:
+        failures.append(f"snipe_demo_open={summary.get('snipe_demo_open')}")
     return failures
 
 
@@ -1037,7 +1121,9 @@ def _latencies_from_rows(
     return values
 
 
-def _continuous_operational_issues(summary: dict[str, Any]) -> list[dict[str, Any]]:
+def _continuous_operational_issues(
+    summary: dict[str, Any], *, role: str = "demo"
+) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     if summary["cycles"] <= 0:
         issues.append({"kind": "empty_cycles", "message": "no cycle rows"})
@@ -1053,7 +1139,10 @@ def _continuous_operational_issues(summary: dict[str, Any]) -> list[dict[str, An
                 "events": summary["risk_health_blocked_events"],
             }
         )
-    if summary["ledger_mismatch_cycles"] > 0:
+    # A paper shadow deliberately owns no exchange position. Comparing its
+    # hypothetical open ledger to the shared demo account is structurally
+    # expected drift; venue parity is audited only for the submitting demo role.
+    if role != "paper" and summary["ledger_mismatch_cycles"] > 0:
         issues.append({"kind": "ledger_mismatch_cycles", "count": summary["ledger_mismatch_cycles"]})
     if summary["unprotected_position_seconds_max"] and summary["unprotected_position_seconds_max"] > 0:
         issues.append(
@@ -1098,6 +1187,7 @@ def audit_continuous_operational_metrics(
     start_ts_ms: int | None = None,
     strategy_profile: str | None = None,
     strategy_id: str | tuple[str, ...] | None = None,
+    role: str = "demo",
 ) -> dict[str, Any]:
     """Audit Phase-13 live/paper telemetry that can be derived from ledgers.
 
@@ -1247,7 +1337,10 @@ def audit_continuous_operational_metrics(
     fill_latency_summary = _latency_summary(fill_latency)
     stop_placement_latency_summary = _latency_summary(stop_placement_latency)
     unprotected_max = max(unprotected_values) if unprotected_values else 0.0
+    if role not in {"demo", "paper"}:
+        raise ValueError("role must be 'demo' or 'paper'")
     summary = {
+        "role": role,
         "cycles": len(cycle_rows),
         "orders": len(order_rows),
         "trades": len(trade_rows),
@@ -1323,7 +1416,7 @@ def audit_continuous_operational_metrics(
         "invalid_jsonl_sources": ",".join(invalid_jsonl_lines[:25]),
         "metrics_unavailable": unavailable,
     }
-    issues = _continuous_operational_issues(summary)
+    issues = _continuous_operational_issues(summary, role=role)
     return {"ok": not issues, "summary": summary, "issues": issues}
 
 
@@ -1431,6 +1524,7 @@ def run_continuous_operational_metrics_audit(
     start_ts_ms: int | None = None,
     strategy_profile: str | None = None,
     strategy_id: str | tuple[str, ...] | None = None,
+    role: str = "demo",
 ) -> dict[str, Any]:
     root = Path(data_root).expanduser()
     payload = audit_continuous_operational_metrics(
@@ -1441,6 +1535,7 @@ def run_continuous_operational_metrics_audit(
         start_ts_ms=start_ts_ms,
         strategy_profile=strategy_profile,
         strategy_id=strategy_id,
+        role=role,
     )
     report = format_continuous_operational_metrics_report(payload)
     report_dir = Path(output_dir).expanduser() if output_dir else root / "reports" / "continuous_operational_metrics"
@@ -1667,6 +1762,7 @@ def run_continuous_forward_readiness(
         start_ts_ms=start_ts_ms,
         strategy_profile=strategy_profile,
         strategy_id=paper_strategy_id,
+        role="paper",
     )
     demo_rebalance = None
     demo_operational = None
@@ -1699,6 +1795,7 @@ def run_continuous_forward_readiness(
             start_ts_ms=start_ts_ms,
             strategy_profile=strategy_profile,
             strategy_id=demo_strategy_id,
+            role="demo",
         )
         paper_demo = run_continuous_paper_demo_reconciliation(
             paper_root_p,

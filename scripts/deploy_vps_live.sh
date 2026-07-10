@@ -126,6 +126,7 @@ assert cont.left_decile_exit_enabled is False, cont.left_decile_exit_enabled
 assert cont.stop_approach_frac == 0.0, cont.stop_approach_frac
 assert cont.failed_fade_hours == 0, cont.failed_fade_hours
 assert cont.breakeven_arm_pct == 0.0, cont.breakeven_arm_pct
+assert cont.sniper_enabled is False, cont.sniper_enabled
 assert cont.sizing_mode == "inverse_vol", cont.sizing_mode
 assert cont.target_vol_per_name == 0.01, cont.target_vol_per_name
 assert cont.vol_weight_clamp == 2.0, cont.vol_weight_clamp
@@ -265,27 +266,20 @@ systemctl start liquidity-migration-continuous-rmom-refresh.service \
 _check_rmom_root() {
   _rmom_label="$1"
   _rmom_root="$2"
-  _rmom_rows="$(RMOM_ROOT="$_rmom_root" "$PYTHON" - <<'PY' 2>/dev/null || echo 0
-import os
-import pathlib, polars as pl
-p = pathlib.Path(os.environ["RMOM_ROOT"])
-print(pl.read_parquet(p).height if p.exists() else 0)
-PY
-)"
-if [ "${_rmom_rows:-0}" -le 0 ]; then
+  if _rmom_status="$("$PYTHON" scripts/check_residual_momentum_gate.py --path "$_rmom_root" 2>&1)"; then
+    echo "continuous ${_rmom_label} rmom gate seeded: ${_rmom_status}"
+    return 0
+  fi
   if [ "${ALLOW_EMPTY_RMOM_GATE:-0}" = "1" ]; then
-    echo "WARN: continuous ${_rmom_label} rmom gate is EMPTY after seed. ALLOW_EMPTY_RMOM_GATE=1" \
-         "lets deploy continue, but that sleeve emits NO entries until rmom is built." >&2
+    echo "WARN: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after seed: ${_rmom_status}. ALLOW_EMPTY_RMOM_GATE=1" \
+         "lets deploy continue, but that sleeve may emit NO entries until rmom is rebuilt." >&2
   else
-    echo "ERROR: continuous ${_rmom_label} rmom gate is EMPTY after seed. Re-run" \
+    echo "ERROR: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after seed: ${_rmom_status}. Re-run" \
          "'systemctl start liquidity-migration-continuous-rmom-refresh.service' once the" \
          "daemon has bootstrapped klines, or set ALLOW_EMPTY_RMOM_GATE=1 for an explicit" \
          "first-boot/no-entry override." >&2
     return 1
   fi
-else
-  echo "continuous ${_rmom_label} rmom gate seeded: ${_rmom_rows} rows."
-fi
 }
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   _check_rmom_root "demo" "data/bybit-continuous-demo-event/residual_momentum.parquet"
@@ -445,6 +439,7 @@ if sleeve_on "$CONTINUOUS_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'STRATEGY_PROFILE=continuous_ensemble_v2'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'
+  require_unit_env liquidity-migration-bybit-continuous-demo.service 'CONTINUOUS_SNIPER=0'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'MAX_HOLD_HOURS=24'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'
@@ -474,6 +469,7 @@ require_unit_env liquidity-migration-bybit-continuous-paper.service 'DATA_ROOT=d
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'STRATEGY_PROFILE=continuous_ensemble_v2'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'FEATURE_SET=max_ret168'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'ENTRY_EVENT_TRIGGER=none'
+require_unit_env liquidity-migration-bybit-continuous-paper.service 'CONTINUOUS_SNIPER=0'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'BTC_TREND_GATE=uptrend'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'MAX_HOLD_HOURS=24'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'SIZING_MODE=inverse_vol'

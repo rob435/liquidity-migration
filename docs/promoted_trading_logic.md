@@ -172,8 +172,10 @@ The frozen object includes:
 - Hedge cap 2.0, hedge cost 5 bps.
 - BTC-vol regime overlay with `lam=0.5`, `vol_window=30`, `pct_window=250`.
 
-Sniper is armed in demo with `CONTINUOUS_SNIPER=1`: quarter-size PostOnly sell
-limit 8% above base entry. Treat it as execution watch, not frozen-ledger proof.
+Sniper is disabled in demo and paper with `CONTINUOUS_SNIPER=0`. The former
+quarter-size PostOnly sell at +8% was rolled back on 2026-07-10 after it added
+loss into the forward 1000TAGUSDT squeeze without paper/backtest parity. It may
+only return after a new preregistered two-venue replay and forward-paper plan.
 
 Dynamic exit remains no-order paper shadow.
 
@@ -183,8 +185,8 @@ The official local continuous replay target is `FROZEN_FORWARD_CONFIG`: three
 components, inverse-vol component sizing, 24h hold, 12% component TP, no stop,
 BTC+ETH hedge, and BTC-vol regime.
 
-The daemon adds live execution behavior, paper/demo state, sniper, and the
-BTC-risk sizing overlay. A frozen component-ledger backtest is therefore not a
+The daemon adds live execution behavior, paper/demo state, optional flag-off
+sniper plumbing, and the BTC-risk sizing overlay. A frozen component-ledger backtest is therefore not a
 literal daemon replay unless it explicitly implements those state machines.
 
 ## Long-Native v11a Sleeve

@@ -30,8 +30,11 @@ Environment=MAX_HOLD_HOURS=24
 Environment=STRATEGY_PROFILE=continuous_ensemble_v2
 Environment=FEATURE_SET=max_ret168
 Environment=ENTRY_EVENT_TRIGGER=none
-# Sniper ARMED by operator instruction 2026-06-10 (PostOnly +8% quarter-size adds).
-Environment=CONTINUOUS_SNIPER=1
+# Risk rollback 2026-07-10: the demo-only +8% adverse add amplified the
+# 1000TAGUSDT squeeze loss and has no paper/backtest parity. Keep it explicitly
+# OFF until a new preregistered two-venue replay plus forward paper evidence
+# earns reactivation.
+Environment=CONTINUOUS_SNIPER=0
 Environment=BTC_TREND_GATE=uptrend
 Environment=DAILY_REBALANCE_ENABLED=0
 Environment=DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90

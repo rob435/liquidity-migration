@@ -114,7 +114,12 @@ def test_get_closed_pnl_follows_pagination_cursor(monkeypatch) -> None:
 
     assert [row["orderId"] for row in rows] == ["c1", "c2", "c3"]
     assert len(client._client.calls) == 2
+    assert client._client.calls[0]["limit"] == 50
     assert client._client.calls[1]["cursor"] == "p2"
+
+    client._client.calls.clear()
+    client.get_closed_pnl(symbol="FOOUSDT", limit=200)
+    assert client._client.calls[0]["limit"] == 100
 
 
 def test_bybit_public_trade_stream_subscribes_symbols(monkeypatch) -> None:

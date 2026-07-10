@@ -96,6 +96,26 @@ def test_placement_disabled_returns_nothing() -> None:
                                       now_ms=1, strategy_id="s", price_by_symbol={}) == []
 
 
+def test_disabled_sniper_still_cancels_preexisting_resting_order() -> None:
+    """Disabling new placement must not disable cleanup of an order created
+    before the rollback. Even while its base remains open, the old adverse add
+    must be cancelled so the rollback takes effect atomically."""
+    client = FakeClient()
+    client.open_orders = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT"}]
+
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True),
+        _orders_df([_resting_order_row()]),
+        trading_client=client,
+        demo=_cfg(sniper_enabled=False),
+        now_ms=1_700_000_300_000,
+    )
+
+    assert fills == [] and exits == []
+    assert client.cancelled == [("AAAUSDT", "lnk1")]
+    assert updates and updates[0]["cancel_requested_ms"] == 1_700_000_300_000
+
+
 def _orders_df(rows):
     return pl.DataFrame(rows, infer_schema_length=None)
 
@@ -132,12 +152,30 @@ def test_reconcile_fill_creates_open_trade_row() -> None:
     f = fills[0]
     assert f["trade_id"] == "t1-snipe" and f["status"] == "open" and f["side"] == "short"
     assert f["entry_price"] == 108.0 and f["base_trade_id"] == "t1"
+    assert f["planned_exit_ts_ms"] == 1_700_000_200_000 + _cfg().max_hold_hours * 3_600_000
     # REGRESSION (audit 2026-06-12 round 3): snipe fill rows must inherit the
     # base trade's equity — a hardcoded 0.0 zeroed snipe net_return and blocked
     # the armed hedge's book-state resolution while any snipe was open.
     assert f["equity_usdt"] == 10_000.0
     assert any(u["status"] == "filled" for u in updates)
     assert exits == []
+
+
+def test_reconcile_late_snipe_fill_inherits_base_deadline() -> None:
+    client = FakeClient()
+    fill_ts = 1_700_003_000_000
+    base_deadline = 1_700_086_400_000
+    client.history = [{
+        "orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "2.5",
+        "avgPrice": "108.0", "updatedTime": str(fill_ts), "orderStatus": "Filled",
+    }]
+    order = {**_resting_order_row(), "planned_exit_ts_ms": base_deadline}
+    fills, _updates, _exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True), _orders_df([order]),
+        trading_client=client, demo=_cfg(), now_ms=fill_ts + 1_000)
+    assert len(fills) == 1
+    assert fills[0]["entry_ts_ms"] == fill_ts
+    assert fills[0]["planned_exit_ts_ms"] == base_deadline
 
 
 def test_reconcile_nonterminal_partial_fill_is_not_booked() -> None:
@@ -260,6 +298,40 @@ def test_reconcile_plans_base_exited_for_filled_snipe() -> None:
         trading_client=FakeClient(), demo=_cfg(), now_ms=3)
     assert len(exits) == 1
     assert exits[0]["exit_reason"] == "base_exited" and exits[0]["trade_id"] == "t1-snipe"
+
+
+def test_reconcile_disabled_plans_exit_for_filled_snipe_with_base_open() -> None:
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True, with_snipe=True),
+        _orders_df([{**_resting_order_row(), "status": "filled"}]),
+        trading_client=FakeClient(), demo=_cfg(sniper_enabled=False), now_ms=3)
+    assert fills == [] and updates == []
+    assert len(exits) == 1
+    assert exits[0]["exit_reason"] == "sniper_disabled" and exits[0]["trade_id"] == "t1-snipe"
+
+
+def test_reconcile_disabled_unwinds_fill_discovered_in_same_pass() -> None:
+    client = FakeClient()
+    client.history = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "1.0",
+                       "avgPrice": "108.0", "updatedTime": "1700000200000",
+                       "orderStatus": "PartiallyFilledCanceled"}]
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True), _orders_df([_resting_order_row()]),
+        trading_client=client, demo=_cfg(sniper_enabled=False), now_ms=4)
+    assert len(fills) == 1 and fills[0]["trade_id"] == "t1-snipe"
+    assert any(u["status"] == "filled" for u in updates)
+    assert len(exits) == 1
+    assert exits[0]["exit_reason"] == "sniper_disabled" and exits[0]["trade_id"] == "t1-snipe"
+
+
+def test_reconcile_disabled_retires_dry_run_snipe_with_base_open() -> None:
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True), _orders_df([_resting_order_row(submitted=False)]),
+        trading_client=None,
+        demo=_cfg(sniper_enabled=False, submit_orders=False, confirm_demo_orders=False),
+        now_ms=5)
+    assert fills == [] and exits == []
+    assert len(updates) == 1 and updates[0]["status"] == "cancelled"
 
 
 def test_reconcile_no_duplicate_fill_row() -> None:
