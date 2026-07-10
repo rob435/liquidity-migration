@@ -171,8 +171,11 @@ failure to learn from, not strategy validation.
 - Routine work goes through `scripts/ops.sh`; ledger reset is dry-run by default
   and checked deploy requires explicit `--execute`.
 - Safety release `77bf04304` is deployed. The pre-fix ledgers were archived with
-  verified SHA-256, the post-reset reconciliation is 0/0 clean for both sleeves,
-  and the demo account remains flat with no open orders.
+  verified SHA-256. The immediate post-reset reconciliation was 0/0 clean; the
+  first new-clock TAC p3 short then opened 1/1 demo-paper matched and
+  D9-confirmed, with 65.15 bps adverse demo entry slippage and no unmatched or
+  lifecycle/reason failure. Its venue TP and durable 24-hour deadline are live;
+  sniper remains absent.
 
 ## Current research direction
 

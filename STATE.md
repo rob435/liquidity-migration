@@ -17,8 +17,13 @@ This is the live operating page. Durable research decisions are in
   and new evidence.
 - Direct Bybit checks after the 1000TAGUSDT incident found zero positions and
   zero open orders.
-- Safety release `77bf04304ee7f8fd5377873484e11c3bc0b88753` is deployed and
-  independently verified on the VPS.
+- The safety runtime release rooted at `77bf04304` is deployed and independently
+  verified; follow-up operator-only changes do not alter the trading object.
+- First clean-window entry: TACUSDT p3 short opened at
+  `2026-07-10T02:00:00Z`, 8,000 units at 0.004117. It has a paper twin, venue
+  TP at 0.003647, and durable planned exit at `2026-07-11T02:00:00Z`. Quick
+  reconciliation is 1/1 paired, D9-confirmed, with 65.15 bps adverse demo entry
+  slippage and no unmatched/status/reason failure. Sniper remains absent.
 - The Bybit depth and liquidation collectors are active and fresh. They are
   forward context/shadow data, not historical alpha evidence.
 - An external liveness dead-man URL is still not provisioned. The on-box timer
@@ -95,9 +100,10 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
 The forensic window was archived as
 `data/_archive/ledger-reset-20260710T015456Z-tail-safety-20260710.tar.gz`
 (SHA-256 `a4c5bf5df0338f7f320004d51e16cc932d2ceac5867e8a7fe7c36b1670e2c076`).
-The post-reset quick reconcile is clean: both sleeves have 0 paper trades,
-0 demo trades, 0 unmatched rows, and no lifecycle/reason divergence. Venue is
-still flat with no open orders.
+The immediate post-reset reconcile was 0/0 clean for both sleeves. The TAC p3
+pair above then opened on the new clock; LONG remains 0/0 and CONTINUOUS is now
+1/1 clean. The account is intentionally no longer flat while that tracked demo
+position is open.
 
 ## Long v11a research read
 
