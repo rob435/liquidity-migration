@@ -618,6 +618,24 @@ def _count_symbol_days(
         if spec.constant_columns
         else pl.lit(0, dtype=pl.UInt32).alias("mixed_constant_groups")
     )
+    if spec.observations_per_timestamp is not None:
+        assert spec.observation_discriminator is not None
+        frame = frame.with_columns(
+            pl.col(spec.observation_discriminator)
+            .n_unique()
+            .over(["symbol", "date", "ts_ms"])
+            .alias("_observations_at_timestamp")
+        )
+        invalid_observations_per_timestamp = (
+            pl.col("ts_ms")
+            .filter(pl.col("_observations_at_timestamp") != spec.observations_per_timestamp)
+            .n_unique()
+            .alias("invalid_observations_per_timestamp")
+        )
+    else:
+        invalid_observations_per_timestamp = pl.lit(0, dtype=pl.UInt32).alias(
+            "invalid_observations_per_timestamp"
+        )
     daily = frame.group_by(["symbol", "date"]).agg(
         pl.len().alias("rows"),
         pl.struct(observation_columns).n_unique().alias("unique_observations"),
@@ -633,20 +651,8 @@ def _count_symbol_days(
         invalid_date_identity.sum().alias("invalid_date_identity_rows"),
         invalid_content.sum().alias("invalid_content_rows"),
         constant_mixed,
+        invalid_observations_per_timestamp,
     )
-    if spec.observations_per_timestamp is not None:
-        assert spec.observation_discriminator is not None
-        per_timestamp = frame.group_by(["symbol", "date", "ts_ms"]).agg(
-            pl.col(spec.observation_discriminator).n_unique().alias("observation_count")
-        )
-        timestamp_validity = per_timestamp.group_by(["symbol", "date"]).agg(
-            (pl.col("observation_count") != spec.observations_per_timestamp)
-            .sum()
-            .alias("invalid_observations_per_timestamp")
-        )
-        daily = daily.join(timestamp_validity, on=["symbol", "date"], how="left")
-    else:
-        daily = daily.with_columns(pl.lit(0, dtype=pl.UInt32).alias("invalid_observations_per_timestamp"))
     return daily.sort(["symbol", "date"]).collect()
 
 
