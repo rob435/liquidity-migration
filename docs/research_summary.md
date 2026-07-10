@@ -170,16 +170,18 @@ failure to learn from, not strategy validation.
   not backfill historical causal features.
 - Routine work goes through `scripts/ops.sh`; ledger reset is dry-run by default
   and checked deploy requires explicit `--execute`.
+- Safety release `77bf04304` is deployed. The pre-fix ledgers were archived with
+  verified SHA-256, the post-reset reconciliation is 0/0 clean for both sleeves,
+  and the demo account remains flat with no open orders.
 
 ## Current research direction
 
-1. Deploy the audited safety release, archive/reset only while venue-flat, and
-   start a clean post-fix demo/paper clock.
-2. Accumulate enough paired forward trades to measure fills, latency, fees,
+1. Accumulate enough paired forward trades on the clean post-fix clock to
+   measure fills, latency, fees,
    funding, and lifecycle—not just signal agreement.
-3. Run the frozen budget matrix on the larger machine only after the fixed data
+2. Run the frozen budget matrix on the larger machine only after the fixed data
    boundary and full-PIT receipts are ready.
-4. Build/audit granular roots before the adverse-state experiment. Missing 5m
+3. Build/audit granular roots before the adverse-state experiment. Missing 5m
    data stays missing; never synthesize it from hourly bars.
-5. Reopen a closed arc only with a new falsifiable mechanism or genuinely new
+4. Reopen a closed arc only with a new falsifiable mechanism or genuinely new
    data, not another broad parameter grid.

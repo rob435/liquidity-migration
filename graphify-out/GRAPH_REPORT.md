@@ -1,11 +1,11 @@
 # Graph Report - liquidity-migration  (2026-07-10)
 
 ## Corpus Check
-- 193 files · ~1,009,055 words
+- 193 files · ~1,009,161 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 8300 nodes · 24930 edges · 363 communities detected
+- 8308 nodes · 24931 edges · 370 communities detected
 - Extraction: 43% EXTRACTED · 57% INFERRED · 0% AMBIGUOUS · INFERRED: 14101 edges (avg confidence: 0.59)
 - Token cost: 0 input · 0 output
 
@@ -373,6 +373,13 @@
 - [[_COMMUNITY_Community 362|Community 362]]
 - [[_COMMUNITY_Community 363|Community 363]]
 - [[_COMMUNITY_Community 364|Community 364]]
+- [[_COMMUNITY_Community 365|Community 365]]
+- [[_COMMUNITY_Community 366|Community 366]]
+- [[_COMMUNITY_Community 367|Community 367]]
+- [[_COMMUNITY_Community 368|Community 368]]
+- [[_COMMUNITY_Community 369|Community 369]]
+- [[_COMMUNITY_Community 370|Community 370]]
+- [[_COMMUNITY_Community 371|Community 371]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `ResearchConfig` - 1434 edges
@@ -387,8 +394,8 @@
 10. `EventWebSocketRiskEngine` - 373 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `format_long_telegram_status_message()` --calls--> `test_format_long_telegram_message_contains_essentials()`  [INFERRED]
-  liquidity_migration/long_native_event_demo.py → tests/test_liquidity_migration_long_native_event_demo.py
+- `LongNativeDemoCycleConfig` --uses--> `Tests for B.4 long-side reconcile-paper-demo analyzer.`  [INFERRED]
+  liquidity_migration/long_native_event_demo.py → tests/test_liquidity_migration_long_reconciliation.py
 - `UniverseConfig` --uses--> `The deployed runner is 100%% taker; maker_fill_probability=0.0 must yield     th`  [INFERRED]
   liquidity_migration/config.py → tests/test_liquidity_migration_cli.py
 - `UniverseConfig` --uses--> `The --paper-mode flag must surface on the parsed args so the long-paper     serv`  [INFERRED]
@@ -402,71 +409,71 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.01
-Nodes (604): _cmd_continuous_event_demo_cycle(), _add_continuous_event_demo_cycle_parser(), CLI for the continuous-fade demo sleeve (sub-hourly, ticker-driven; separate led, ResearchConfig, active_primary_pnl_gate_allows_addon(), apply_continuous_demo_profile(), build_live_continuous_state(), _continuous_age_eligible_symbols() (+596 more)
+Nodes (605): _cmd_continuous_event_demo_cycle(), _add_continuous_event_demo_cycle_parser(), CLI for the continuous-fade demo sleeve (sub-hourly, ticker-driven; separate led, ResearchConfig, active_primary_pnl_gate_allows_addon(), apply_continuous_demo_profile(), build_live_continuous_state(), _continuous_age_eligible_symbols() (+597 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.01
-Nodes (561): main(), _resolve_data_root(), date_boundary_ms(), date_ms(), _date_range(), _date_symbol_set(), _exclude_symbols(), _iso_date() (+553 more)
+Nodes (576): main(), _resolve_data_root(), date_boundary_ms(), date_ms(), _date_range(), _date_symbol_set(), _exclude_symbols(), _iso_date() (+568 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.01
-Nodes (529): CLI for the continuous-fade demo sleeve (sub-hourly, ticker-driven; separate led, _cal_roll(), calendar_roll(), calendar_shift(), A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl, Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r, BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g, _additive_equity() (+521 more)
+Nodes (555): CLI for the continuous-fade demo sleeve (sub-hourly, ticker-driven; separate led, _cal_roll(), calendar_roll(), calendar_shift(), exact_duration_ms(), is_weekend_ms(), A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl, Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r (+547 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.01
-Nodes (448): _cmd_event_risk_ws(), _order_link_id(), _collect_ledger_files(), dataset_lock_path(), dataset_path(), exclusive_file_lock(), _lock_owner_is_dead(), _lock_payload_is_invalid() (+440 more)
+Nodes (476): BybitDataError, BybitPrivateClient, BybitRestRateLimiter, _is_duplicate_order_link(), _leverage_text(), True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur, Refuse a state-changing WS submission on a real-money account unless the, Thread-safe sliding-window rate limiter shared across BybitMarketData     instan (+468 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.01
-Nodes (362): build_ws_trade_client(), BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitPublicTradeStream, BybitTradeRouter, BybitWebSocketTradeClient, _close_ws_client(), _default_kline_websocket_factory() (+354 more)
+Nodes (358): api_key_allows_order_submit(), build_ws_trade_client(), BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitTradeRouter, BybitWebSocketTradeClient, _close_ws_client(), _env_flag() (+350 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.01
-Nodes (422): api_key_allows_order_submit(), BybitDataError, BybitPrivateClient, BybitRestRateLimiter, _is_duplicate_order_link(), _leverage_text(), True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur, Thread-safe sliding-window rate limiter shared across BybitMarketData     instan (+414 more)
+Nodes (350): _cmd_combined_book_telegram_report(), _cmd_event_risk_cycle(), _event_risk_payload_material(), exact_lookback_cutoff_ms(), finite_float(), Slugify `name` for use as a file or path component., Coerce `value` to a finite float, returning `default` if missing/invalid., _append_continuous_jsonl_event() (+342 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.01
-Nodes (409): component_source_paths(), ContinuousComponentSource, load_continuous_component_source(), Current frozen component source metadata for the continuous ensemble., build_full_ledger(), _config_path(), forward_readiness_summary(), ForwardUpdateResult (+401 more)
+Cohesion: 0.02
+Nodes (394): _cmd_event_risk_ws(), dataset_path(), Map a canonical dataset request to the variant actually present in ``root``., read_dataset(), resolve_dataset_name(), write_dataset(), _build_private_stream(), _call_with_timeout() (+386 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.01
-Nodes (394): HTMLParser, _archive_cache_is_complete(), ArchiveDownloadIncompleteError, ArchiveFileNotFoundError, _content_length(), download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive() (+386 more)
+Nodes (407): component_source_paths(), ContinuousComponentSource, load_continuous_component_source(), Current frozen component source metadata for the continuous ensemble., build_full_ledger(), _config_path(), forward_readiness_summary(), ForwardUpdateResult (+399 more)
 
 ### Community 8 - "Community 8"
+Cohesion: 0.01
+Nodes (388): HTMLParser, _archive_cache_is_complete(), ArchiveDownloadIncompleteError, ArchiveFileNotFoundError, _content_length(), download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive() (+380 more)
+
+### Community 9 - "Community 9"
 Cohesion: 0.02
 Nodes (361): BybitMarketData, btc_context_by_day(), BtcRiskLiveSizer, _daily_closes_by_day(), ExpandingBtcRiskState, _finite(), _log_returns(), mean_present() (+353 more)
 
-### Community 9 - "Community 9"
-Cohesion: 0.01
-Nodes (252): _cmd_combined_book_telegram_report(), _cmd_event_risk_cycle(), _cmd_long_native_event_demo_cycle(), finite_float(), Coerce `value` to a finite float, returning `default` if missing/invalid., _execute_continuous_exits(), continuous_order_link_id(), continuous_suborder_link_id() (+244 more)
-
 ### Community 10 - "Community 10"
 Cohesion: 0.02
-Nodes (299): _collect_private_snapshots(), _build_demo_universe(), _demo_kline_fetch_ranges(), _download_recent_1h_klines(), _prune_event_demo_kline_cache(), _empty_trades(), EventRiskCycleConfig, _execute_exits() (+291 more)
+Nodes (303): _build_demo_universe(), _bust_demo_instruments_cache(), _concat_recent_klines(), _dedupe_recent_klines(), _demo_feature_cache_fingerprint(), _demo_feature_cache_paths(), _demo_instruments(), _demo_instruments_cache_paths() (+295 more)
 
 ### Community 11 - "Community 11"
 Cohesion: 0.01
-Nodes (216): BybitKlineStreamPool, _close_state(), _is_already_subscribed_error(), _KlineConnectionState, True for pybit's "You have already subscribed to this topic" error.      pybit's, Per-connection bookkeeping for the pool., Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large, Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n (+208 more)
+Nodes (261): _assert_download_completeness(), build_binance_oos(), _days_between(), discover(), fetch_daily_klines(), _fetch_expected_sha256(), fetch_month_klines(), list_symbol_months() (+253 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.01
-Nodes (219): _follower_continuous_kline_stream_manager_factory(), FollowerKlineStreamManager, Read-only kline FOLLOWER — share one WS kline data plane across co-located sleev, Initial snapshot read + start the poll thread. Never blocks on a         bootstr, Warn ONCE per staleness episode when the leader snapshot stops moving —, Drop follower-side symbols that are no longer in the leader snapshot         (th, Re-read the leader snapshot iff its (mtime, size) changed. Returns         True, ``KlineStreamManager`` drop-in that follows another root's flushed snapshot. (+211 more)
+Nodes (226): _follower_continuous_kline_stream_manager_factory(), _utc_now_ms(), FollowerKlineStreamManager, Read-only kline FOLLOWER — share one WS kline data plane across co-located sleev, Initial snapshot read + start the poll thread. Never blocks on a         bootstr, Warn ONCE per staleness episode when the leader snapshot stops moving —, Drop follower-side symbols that are no longer in the leader snapshot         (th, Re-read the leader snapshot iff its (mtime, size) changed. Returns         True (+218 more)
 
 ### Community 13 - "Community 13"
 Cohesion: 0.01
-Nodes (234): _assert_download_completeness(), build_binance_oos(), _days_between(), discover(), fetch_daily_klines(), _fetch_expected_sha256(), fetch_month_klines(), list_symbol_months() (+226 more)
+Nodes (213): BybitKlineStreamPool, _close_state(), _is_already_subscribed_error(), _KlineConnectionState, True for pybit's "You have already subscribed to this topic" error.      pybit's, Per-connection bookkeeping for the pool., Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large, Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n (+205 more)
 
 ### Community 14 - "Community 14"
 Cohesion: 0.02
-Nodes (199): exact_duration_ms(), exact_lookback_cutoff_ms(), is_weekend_ms(), Return an exact integer millisecond duration.      Use this for timestamp lookba, Slugify `name` for use as a file or path component., True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day, _append_continuous_jsonl_event(), _append_continuous_lifecycle_event() (+191 more)
-
-### Community 15 - "Community 15"
-Cohesion: 0.02
 Nodes (171): build_parser(), _add_archive_download_klines_1h_api_parser(), _add_archive_download_klines_1h_parser(), _add_archive_download_klines_parser(), _add_archive_manifest_parser(), _add_combined_book_report_parser(), _add_continuous_addon_shadow_audit_parser(), _add_continuous_events_parser() (+163 more)
 
-### Community 16 - "Community 16"
+### Community 15 - "Community 15"
 Cohesion: 0.04
 Nodes (152): _active_trade_snapshots(), _aggregate_bars(), analyze(), _annualized_sharpe(), _append_forward_curve(), _atr_pct_before(), _bar_at_or_after(), _bars_dict_to_state_frame() (+144 more)
+
+### Community 16 - "Community 16"
+Cohesion: 0.03
+Nodes (141): account_key(), claim_symbol_reservation(), claim_symbols_reservation(), clamp_max_new_entries(), compute_im_used(), CrossSleeveAccountState, encode_control_row(), equal_split_budget() (+133 more)
 
 ### Community 17 - "Community 17"
 Cohesion: 0.04
@@ -474,35 +481,35 @@ Nodes (141): _cmd_continuous_addon_shadow_audit(), coerce_int(), Coerce `value` 
 
 ### Community 18 - "Community 18"
 Cohesion: 0.03
-Nodes (124): _cmd_continuous_forward_readiness(), _cmd_continuous_rebalance_cycle_audit(), _cmd_reconcile_continuous_paper_demo(), _cmd_reconcile_long_paper_demo(), audit_continuous_operational_metrics(), audit_continuous_rebalance_cycles(), _boolish(), _calendar_metrics() (+116 more)
+Nodes (131): _cmd_continuous_forward_readiness(), _cmd_continuous_rebalance_cycle_audit(), _cmd_reconcile_continuous_paper_demo(), _cmd_reconcile_long_paper_demo(), audit_continuous_operational_metrics(), audit_continuous_rebalance_cycles(), _boolish(), _calendar_metrics() (+123 more)
 
 ### Community 19 - "Community 19"
 Cohesion: 0.04
-Nodes (89): parse_month_csv(), Parse a Binance Vision monthly 1h kline zip payload into kline rows.      Vision, _rate_limit_retry_seconds(), Seconds to wait before the single 429 retry, or None when the error is     not a, True when the token + chat-id env vars are both present (a send can be     attem, send_telegram_message(), telegram_configured(), TelegramConfig (+81 more)
-
-### Community 20 - "Community 20"
-Cohesion: 0.05
-Nodes (84): account_key(), claim_symbol_reservation(), claim_symbols_reservation(), clamp_max_new_entries(), compute_im_used(), CrossSleeveAccountState, encode_control_row(), equal_split_budget() (+76 more)
-
-### Community 21 - "Community 21"
-Cohesion: 0.04
 Nodes (69): Pin the Strictness Manifesto decision-rule analyzer.  Specifically validates aga, Construct a cell that passes EVERY gate; verify it's labelled candidate., A near-miss is inconclusive (Bybit passes, Binance falls short on sharpe Δ)., M6: a status!=ok cell must be returned as an explicit exclusion (a     falsifier, The full_pit_universe_pass column is parsed into CellMetrics so the     analyzer, At window_days = 365.25 (one calendar year), annualized = total_return.     Sani, At window_days = 182.625 (half year), annualized = (1+r)^2 - 1., The actual Round 1 / Phase 0 / R1 baseline at 1125 days (Bybit):     total_retur (+61 more)
 
-### Community 22 - "Community 22"
+### Community 20 - "Community 20"
 Cohesion: 0.03
 Nodes (53): Unit tests for the fast liveness/safety watchdog's pure decision logic., The collector unit can never reach systemd 'failed' (RestartSec spaces starts, The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must, Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam, continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus, Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so, The watchdog skips an intentionally-off sleeve. Explicit env always wins; the, REGRESSION: with both sleeve roots skipped, the cooldown state file must land at (+45 more)
 
-### Community 23 - "Community 23"
-Cohesion: 0.05
-Nodes (68): _bust_demo_instruments_cache(), _concat_recent_klines(), _dedupe_recent_klines(), _demo_feature_cache_fingerprint(), _demo_feature_cache_paths(), _demo_instruments(), _demo_instruments_cache_paths(), _demo_kline_compact_cache_paths() (+60 more)
-
-### Community 24 - "Community 24"
+### Community 21 - "Community 21"
 Cohesion: 0.05
 Nodes (58): _download_manifest_staleness_lines(), coverage_status(), CoverageStatus, format_coverage(), _has_parquet(), latest_signal_trading_day(), _max_partition_date(), _per_symbol_manifest_lags() (+50 more)
 
-### Community 25 - "Community 25"
+### Community 22 - "Community 22"
+Cohesion: 0.09
+Nodes (49): format_age_ms(), format_pct(), format_utc_time_ms(), _rate_limit_retry_seconds(), Seconds to wait before the single 429 retry, or None when the error is     not a, True when the token + chat-id env vars are both present (a send can be     attem, send_telegram_message(), telegram_configured() (+41 more)
+
+### Community 23 - "Community 23"
 Cohesion: 0.05
 Nodes (50): band_notionals(), build_arg_parser(), collect_cycle(), enforce_retention(), _file_day(), free_disk_bytes(), _get_json(), iter_jsonl_rows() (+42 more)
+
+### Community 24 - "Community 24"
+Cohesion: 0.08
+Nodes (44): aggregate_continuous_prices(), assemble_candidates(), _bar(), classify_continuous_unmatched(), _close_index(), continuous_backtest_candidates(), continuous_live_prices(), _continuous_tripwire() (+36 more)
+
+### Community 25 - "Community 25"
+Cohesion: 0.17
+Nodes (36): reconcile_continuous_snipes(), _sniper_round_qty(), _cfg(), _entry_row(), FakeClient, _orders_df(), Sniper live-wiring tests (S1 Amendment 6 → demo cycle, 2026-06-10).  Covers: pla, Disabling new placement must not disable cleanup of an order created     before (+28 more)
 
 ### Community 26 - "Community 26"
 Cohesion: 0.07
@@ -553,16 +560,16 @@ Cohesion: 0.1
 Nodes (6): _FakeJsonResponse, _Headers, _kline_row(), test_paged_kline_raises_on_suspicious_mid_range_empty_page(), test_paged_kline_terminal_empty_page_after_partial_is_benign(), test_recent_history_start_clamps_to_latest_30_days()
 
 ### Community 38 - "Community 38"
-Cohesion: 0.17
-Nodes (14): Functional tests for the per-sleeve kill-switch (deploy/lib_sleeves.sh + sleeves, # NOTE: the `enable` branch deliberately matches real `systemctl enable` (withou, Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):     EV, _run(), test_continuous_paper_split_keeps_demo_orders_off_runs_paper(), test_hedge_lifecycle_off_stops_armed_service(), test_hedge_lifecycle_off_verify_fails_when_service_active(), test_lib_fallback_defaults_every_sleeve_off() (+6 more)
+Cohesion: 0.11
+Nodes (1): Regression tests for scripts/reconcile.py (audit bucket b15).  Findings covered:
 
 ### Community 39 - "Community 39"
 Cohesion: 0.17
-Nodes (15): _apply(), _assert_existing_keys_allclose(), _patch_residual_inputs(), Causality tests for the residual-momentum precompute (scripts/precompute_residua, Forward targets arrive late: a padded tail value may legitimately     change onc, residual_momentum[D] = sum residual_return[D-9 .. D-3] (rolling 7, shift 3)., Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d, test_precompute_append_allows_provisional_tail_to_mature() (+7 more)
+Nodes (14): Functional tests for the per-sleeve kill-switch (deploy/lib_sleeves.sh + sleeves, # NOTE: the `enable` branch deliberately matches real `systemctl enable` (withou, Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):     EV, _run(), test_continuous_paper_split_keeps_demo_orders_off_runs_paper(), test_hedge_lifecycle_off_stops_armed_service(), test_hedge_lifecycle_off_verify_fails_when_service_active(), test_lib_fallback_defaults_every_sleeve_off() (+6 more)
 
 ### Community 40 - "Community 40"
-Cohesion: 0.11
-Nodes (1): Regression tests for scripts/reconcile.py (audit bucket b15).  Findings covered:
+Cohesion: 0.17
+Nodes (15): _apply(), _assert_existing_keys_allclose(), _patch_residual_inputs(), Causality tests for the residual-momentum precompute (scripts/precompute_residua, Forward targets arrive late: a padded tail value may legitimately     change onc, residual_momentum[D] = sum residual_return[D-9 .. D-3] (rolling 7, shift 3)., Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d, test_precompute_append_allows_provisional_tail_to_mature() (+7 more)
 
 ### Community 41 - "Community 41"
 Cohesion: 0.11
@@ -638,1224 +645,1252 @@ Nodes (1): Extract (orderId, orderLinkId) — accept Bybit's camelCase or the   
 
 ### Community 61 - "Community 61"
 Cohesion: 1.0
-Nodes (1): # NOTE: _maybe_notify deliberately lives in event_demo.py (the hub), NOT here.
+Nodes (1): Load KEY=VALUE pairs from a .env file into os.environ (without overriding     an
 
 ### Community 62 - "Community 62"
 Cohesion: 1.0
-Nodes (1): realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')
+Nodes (1): Pretty, predictable step banners + command echo.
 
 ### Community 63 - "Community 63"
 Cohesion: 1.0
-Nodes (1): audit-iter1 archive-recon-2: the price-fallback branch (no net_return /     gros
+Nodes (1): Run a command, echo it, stream+capture stdout. Used for the per-sleeve         r
 
 ### Community 64 - "Community 64"
 Cohesion: 1.0
-Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
+Nodes (1): Return nonempty/empty/absent/error for a remote dataset directory.
 
 ### Community 65 - "Community 65"
 Cohesion: 1.0
-Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
+Nodes (1): Return signal_ts_ms values from a sleeve trade ledger (empty list if absent).
 
 ### Community 66 - "Community 66"
 Cohesion: 1.0
-Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
+Nodes (1): Recompute residual_momentum.parquet on the research root so the continuous     e
 
 ### Community 67 - "Community 67"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): One-line summary for a reconcile leg + whether it passed.      A leg passes only
 
 ### Community 68 - "Community 68"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra
+Nodes (1): # NOTE: _maybe_notify deliberately lives in event_demo.py (the hub), NOT here.
 
 ### Community 69 - "Community 69"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     reconc
+Nodes (1): realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')
 
 ### Community 70 - "Community 70"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env
+Nodes (1): audit-iter1 archive-recon-2: the price-fallback branch (no net_return /     gros
 
 ### Community 71 - "Community 71"
 Cohesion: 1.0
-Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
+Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
 
 ### Community 72 - "Community 72"
 Cohesion: 1.0
-Nodes (1): The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho
+Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
 
 ### Community 73 - "Community 73"
 Cohesion: 1.0
-Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
+Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
 
 ### Community 74 - "Community 74"
 Cohesion: 1.0
-Nodes (1): Create deterministic systemctl/account guards around the VPS-only script.
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 75 - "Community 75"
 Cohesion: 1.0
-Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra
 
 ### Community 76 - "Community 76"
 Cohesion: 1.0
-Nodes (1): Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     reconc
 
 ### Community 77 - "Community 77"
 Cohesion: 1.0
-Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env
 
 ### Community 78 - "Community 78"
 Cohesion: 1.0
-Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
+Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
 
 ### Community 79 - "Community 79"
 Cohesion: 1.0
-Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
+Nodes (1): The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho
 
 ### Community 80 - "Community 80"
 Cohesion: 1.0
-Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
+Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
 
 ### Community 81 - "Community 81"
 Cohesion: 1.0
-Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
+Nodes (1): Create deterministic systemctl/account guards around the VPS-only script.
 
 ### Community 82 - "Community 82"
 Cohesion: 1.0
-Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
+Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
 
 ### Community 83 - "Community 83"
 Cohesion: 1.0
-Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
+Nodes (1): Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed
 
 ### Community 84 - "Community 84"
 Cohesion: 1.0
-Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
+Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
 
 ### Community 85 - "Community 85"
 Cohesion: 1.0
-Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
+Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
 
 ### Community 86 - "Community 86"
 Cohesion: 1.0
-Nodes (1): Parity check: the collector is verified the SAME way as the risk service     (bo
+Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
 
 ### Community 87 - "Community 87"
 Cohesion: 1.0
-Nodes (1): Compatibility short roots must not appear in the live report ExecStart.
+Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
 
 ### Community 88 - "Community 88"
 Cohesion: 1.0
-Nodes (1): Long, continuous, paper, and hedge roots stay wired for the active books.
+Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
 
 ### Community 89 - "Community 89"
 Cohesion: 1.0
-Nodes (1): The multi-line ExecStart continuation must stay intact after the edit:     every
+Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
 
 ### Community 90 - "Community 90"
 Cohesion: 1.0
-Nodes (1): Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).
+Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
 
 ### Community 91 - "Community 91"
 Cohesion: 1.0
-Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
+Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
 
 ### Community 92 - "Community 92"
 Cohesion: 1.0
-Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
+Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
 
 ### Community 93 - "Community 93"
 Cohesion: 1.0
-Nodes (1): The paper sleeve must still write/read its own dataset root so reconcile can
+Nodes (1): Parity check: the collector is verified the SAME way as the risk service     (bo
 
 ### Community 94 - "Community 94"
 Cohesion: 1.0
-Nodes (1): Dropping the follow line must not disturb the knobs that make this a true     no
+Nodes (1): Compatibility short roots must not appear in the live report ExecStart.
 
 ### Community 95 - "Community 95"
 Cohesion: 1.0
-Nodes (1): The removal is documented in-unit (audit id + rationale) so an operator     re-a
+Nodes (1): Long, continuous, paper, and hedge roots stay wired for the active books.
 
 ### Community 96 - "Community 96"
 Cohesion: 1.0
-Nodes (1): Set of (symbol, side, signal-day) entries inside [start_ms, end_ms).
+Nodes (1): The multi-line ExecStart continuation must stay intact after the edit:     every
 
 ### Community 97 - "Community 97"
 Cohesion: 1.0
-Nodes (1): Sparse-cadence context for LONG zero-trade reconciles.
+Nodes (1): Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).
 
 ### Community 98 - "Community 98"
 Cohesion: 1.0
-Nodes (1): Pair backtest / demo / paper LONG entries by (symbol, side, signal-day).
+Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
 
 ### Community 99 - "Community 99"
 Cohesion: 1.0
-Nodes (1): Engine-decile signal-consistency of the live continuous entries — the     faithf
+Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
 
 ### Community 100 - "Community 100"
 Cohesion: 1.0
-Nodes (1): The (causal) residual-momentum polars expression. Factored out so the exact wind
+Nodes (1): The paper sleeve must still write/read its own dataset root so reconcile can
 
 ### Community 101 - "Community 101"
 Cohesion: 1.0
-Nodes (1): Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produc
+Nodes (1): Dropping the follow line must not disturb the knobs that make this a true     no
 
 ### Community 102 - "Community 102"
 Cohesion: 1.0
-Nodes (1): Which kline store this root actually holds. Research full-PIT roots use ``klines
+Nodes (1): The removal is documented in-unit (audit id + rationale) so an operator     re-a
 
 ### Community 103 - "Community 103"
 Cohesion: 1.0
-Nodes (1): Recompute residual_momentum.parquet on the research root so the continuous     e
+Nodes (1): Set of (symbol, side, signal-day) entries inside [start_ms, end_ms).
 
 ### Community 104 - "Community 104"
 Cohesion: 1.0
-Nodes (1): One-line summary for a reconcile leg + whether it passed.      A leg passes only
+Nodes (1): Sparse-cadence context for LONG zero-trade reconciles.
 
 ### Community 105 - "Community 105"
 Cohesion: 1.0
-Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
+Nodes (1): Pair backtest / demo / paper LONG entries by (symbol, side, signal-day).
 
 ### Community 106 - "Community 106"
 Cohesion: 1.0
-Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
+Nodes (1): Engine-decile signal-consistency of the live continuous entries — the     faithf
 
 ### Community 107 - "Community 107"
 Cohesion: 1.0
-Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
+Nodes (1): The (causal) residual-momentum polars expression. Factored out so the exact wind
 
 ### Community 108 - "Community 108"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produc
 
 ### Community 109 - "Community 109"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra
+Nodes (1): Which kline store this root actually holds. Research full-PIT roots use ``klines
 
 ### Community 110 - "Community 110"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     reconc
+Nodes (1): Recompute residual_momentum.parquet on the research root so the continuous     e
 
 ### Community 111 - "Community 111"
 Cohesion: 1.0
-Nodes (1): The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho
+Nodes (1): One-line summary for a reconcile leg + whether it passed.      A leg passes only
 
 ### Community 112 - "Community 112"
 Cohesion: 1.0
-Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
+Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
 
 ### Community 113 - "Community 113"
 Cohesion: 1.0
-Nodes (1): The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho
+Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
 
 ### Community 114 - "Community 114"
 Cohesion: 1.0
-Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
+Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
 
 ### Community 115 - "Community 115"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 116 - "Community 116"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve is still covered by the reset —     omitting it would
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra
 
 ### Community 117 - "Community 117"
 Cohesion: 1.0
-Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     reconc
 
 ### Community 118 - "Community 118"
 Cohesion: 1.0
-Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
+Nodes (1): The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho
 
 ### Community 119 - "Community 119"
 Cohesion: 1.0
-Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
+Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
 
 ### Community 120 - "Community 120"
 Cohesion: 1.0
-Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
+Nodes (1): The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho
 
 ### Community 121 - "Community 121"
 Cohesion: 1.0
-Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
+Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
 
 ### Community 122 - "Community 122"
 Cohesion: 1.0
-Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi
 
 ### Community 123 - "Community 123"
 Cohesion: 1.0
-Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
+Nodes (1): The continuous-fade sleeve is still covered by the reset —     omitting it would
 
 ### Community 124 - "Community 124"
 Cohesion: 1.0
-Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
+Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
 
 ### Community 125 - "Community 125"
 Cohesion: 1.0
-Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
+Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
 
 ### Community 126 - "Community 126"
 Cohesion: 1.0
-Nodes (1): The fail-closed arm must only match truthy spellings — demo / false /     unset
+Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
 
 ### Community 127 - "Community 127"
 Cohesion: 1.0
-Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
+Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
 
 ### Community 128 - "Community 128"
 Cohesion: 1.0
-Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
+Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
 
 ### Community 129 - "Community 129"
 Cohesion: 1.0
-Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
+Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
 
 ### Community 130 - "Community 130"
 Cohesion: 1.0
-Nodes (1): Compatibility short roots must not appear in the live report ExecStart.
+Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
 
 ### Community 131 - "Community 131"
 Cohesion: 1.0
-Nodes (1): Long, continuous, paper, and hedge roots stay wired for the active books.
+Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
 
 ### Community 132 - "Community 132"
 Cohesion: 1.0
-Nodes (1): The removal is documented in-unit (audit id + rationale) so an operator     re-a
+Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
 
 ### Community 133 - "Community 133"
 Cohesion: 1.0
-Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
+Nodes (1): The fail-closed arm must only match truthy spellings — demo / false /     unset
 
 ### Community 134 - "Community 134"
 Cohesion: 1.0
-Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
+Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
 
 ### Community 135 - "Community 135"
 Cohesion: 1.0
-Nodes (1): The paper sleeve must still write/read its own dataset root so reconcile can
+Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
 
 ### Community 136 - "Community 136"
 Cohesion: 1.0
-Nodes (1): Dropping the follow line must not disturb the knobs that make this a true     no
+Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
 
 ### Community 137 - "Community 137"
 Cohesion: 1.0
-Nodes (1): The removal is documented in-unit (audit id + rationale) so an operator     re-a
+Nodes (1): Compatibility short roots must not appear in the live report ExecStart.
 
 ### Community 138 - "Community 138"
 Cohesion: 1.0
-Nodes (1): Issue a WS call and block (with timeout) for the ack.          Returns the ack's
+Nodes (1): Long, continuous, paper, and hedge roots stay wired for the active books.
 
 ### Community 139 - "Community 139"
 Cohesion: 1.0
-Nodes (1): Look up an order by orderLinkId after a WS timeout. Returns a         place_orde
+Nodes (1): The removal is documented in-unit (audit id + rationale) so an operator     re-a
 
 ### Community 140 - "Community 140"
 Cohesion: 1.0
-Nodes (1): Internal signal that the WS submission failed — the router decides     whether t
+Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
 
 ### Community 141 - "Community 141"
 Cohesion: 1.0
-Nodes (1): Refuse a state-changing WS submission on a real-money account unless the
+Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
 
 ### Community 142 - "Community 142"
 Cohesion: 1.0
-Nodes (1): Build a WS trade client, retrying with jittered exponential backoff.      pybit'
+Nodes (1): The paper sleeve must still write/read its own dataset root so reconcile can
 
 ### Community 143 - "Community 143"
 Cohesion: 1.0
-Nodes (1): Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method
+Nodes (1): Dropping the follow line must not disturb the knobs that make this a true     no
 
 ### Community 144 - "Community 144"
 Cohesion: 1.0
-Nodes (1): Ensure pybit's ping timer is a daemon thread that does not block shutdown.
+Nodes (1): The removal is documented in-unit (audit id + rationale) so an operator     re-a
 
 ### Community 145 - "Community 145"
 Cohesion: 1.0
-Nodes (1): True for pybit's "You have already subscribed to this topic" error.      pybit's
+Nodes (1): Issue a WS call and block (with timeout) for the ack.          Returns the ack's
 
 ### Community 146 - "Community 146"
 Cohesion: 1.0
-Nodes (1): Create a fresh pybit WebSocket client tuned for kline streams.
+Nodes (1): Look up an order by orderLinkId after a WS timeout. Returns a         place_orde
 
 ### Community 147 - "Community 147"
 Cohesion: 1.0
-Nodes (1): Per-connection bookkeeping for the pool.
+Nodes (1): Internal signal that the WS submission failed — the router decides     whether t
 
 ### Community 148 - "Community 148"
 Cohesion: 1.0
-Nodes (1): Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large
+Nodes (1): Refuse a state-changing WS submission on a real-money account unless the
 
 ### Community 149 - "Community 149"
 Cohesion: 1.0
-Nodes (1): Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n
+Nodes (1): Build a WS trade client, retrying with jittered exponential backoff.      pybit'
 
 ### Community 150 - "Community 150"
 Cohesion: 1.0
-Nodes (1): Diff the current assignment against ``new_symbols``: subscribe to         adds,
+Nodes (1): Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method
 
 ### Community 151 - "Community 151"
 Cohesion: 1.0
-Nodes (1): Build a closure that parses pybit's kline message, marks the         connection
+Nodes (1): Ensure pybit's ping timer is a daemon thread that does not block shutdown.
 
 ### Community 152 - "Community 152"
 Cohesion: 1.0
-Nodes (1): Inspect every connection's ``last_message_monotonic``. Connections         idle
+Nodes (1): True for pybit's "You have already subscribed to this topic" error.      pybit's
 
 ### Community 153 - "Community 153"
 Cohesion: 1.0
-Nodes (1): Extract the symbol component from a kline topic ``kline.60.SYMBOL``.
+Nodes (1): Create a fresh pybit WebSocket client tuned for kline streams.
 
 ### Community 154 - "Community 154"
 Cohesion: 1.0
-Nodes (1): The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A
+Nodes (1): Per-connection bookkeeping for the pool.
 
 ### Community 155 - "Community 155"
 Cohesion: 1.0
-Nodes (1): BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g
+Nodes (1): Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large
 
 ### Community 156 - "Community 156"
 Cohesion: 1.0
-Nodes (1): Exact cutoff for timestamp lookbacks: ``anchor_ts_ms - duration``.      This int
+Nodes (1): Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n
 
 ### Community 157 - "Community 157"
 Cohesion: 1.0
-Nodes (1): True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day
+Nodes (1): Diff the current assignment against ``new_symbols``: subscribe to         adds,
 
 ### Community 158 - "Community 158"
 Cohesion: 1.0
-Nodes (1): Coerce `value` to a finite float, returning `default` if missing/invalid.
+Nodes (1): Build a closure that parses pybit's kline message, marks the         connection
 
 ### Community 159 - "Community 159"
 Cohesion: 1.0
-Nodes (1): Coerce `value` to an int, returning `default` (0) on a missing/invalid value.
+Nodes (1): Inspect every connection's ``last_message_monotonic``. Connections         idle
 
 ### Community 160 - "Community 160"
 Cohesion: 1.0
-Nodes (1): Format a fraction as a 2-decimal percentage, or `invalid` if not finite.
+Nodes (1): Extract the symbol component from a kline topic ``kline.60.SYMBOL``.
 
 ### Community 161 - "Community 161"
 Cohesion: 1.0
-Nodes (1): Slugify `name` for use as a file or path component.
+Nodes (1): The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A
 
 ### Community 162 - "Community 162"
 Cohesion: 1.0
-Nodes (1): Parse an ISO date/datetime string to a UTC `date`, or None if empty.
+Nodes (1): BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g
 
 ### Community 163 - "Community 163"
 Cohesion: 1.0
-Nodes (1): Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A
+Nodes (1): Exact cutoff for timestamp lookbacks: ``anchor_ts_ms - duration``.      This int
 
 ### Community 164 - "Community 164"
 Cohesion: 1.0
-Nodes (1): Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty.
+Nodes (1): True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day
 
 ### Community 165 - "Community 165"
 Cohesion: 1.0
-Nodes (1): A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl
+Nodes (1): Coerce `value` to a finite float, returning `default` if missing/invalid.
 
 ### Community 166 - "Community 166"
 Cohesion: 1.0
-Nodes (1): Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r
+Nodes (1): Coerce `value` to an int, returning `default` (0) on a missing/invalid value.
 
 ### Community 167 - "Community 167"
 Cohesion: 1.0
-Nodes (1): The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A
+Nodes (1): Format a fraction as a 2-decimal percentage, or `invalid` if not finite.
 
 ### Community 168 - "Community 168"
 Cohesion: 1.0
-Nodes (1): BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g
+Nodes (1): Slugify `name` for use as a file or path component.
 
 ### Community 169 - "Community 169"
 Cohesion: 1.0
-Nodes (1): Bybit v5 kline arrays ([startMs, o, h, l, c, ...], ascending) -> (opens, highs,
+Nodes (1): Parse an ISO date/datetime string to a UTC `date`, or None if empty.
 
 ### Community 170 - "Community 170"
 Cohesion: 1.0
-Nodes (1): Fetch trailing 1m klines and compute (upper_wick_mean, rv_30); None if unavailab
+Nodes (1): Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A
 
 ### Community 171 - "Community 171"
 Cohesion: 1.0
-Nodes (1): Per-symbol causal upper_wick history + multiplier for disabled audit plumbing.
+Nodes (1): Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty.
 
 ### Community 172 - "Community 172"
 Cohesion: 1.0
-Nodes (1): Warm-start: (symbol, signal_ts, upper_wick, rv). Idempotent on (symbol, signal_t
+Nodes (1): A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl
 
 ### Community 173 - "Community 173"
 Cohesion: 1.0
-Nodes (1): Causal multiplier from the symbol's STRICTLY-PRIOR history (does not record).
+Nodes (1): Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r
 
 ### Community 174 - "Community 174"
 Cohesion: 1.0
-Nodes (1): Append a FILLED entry to the symbol history (call after the order books).
+Nodes (1): The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A
 
 ### Community 175 - "Community 175"
 Cohesion: 1.0
-Nodes (1): Seconds to wait after a 429/418, from the Retry-After header.          Falls bac
+Nodes (1): BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g
 
 ### Community 176 - "Community 176"
 Cohesion: 1.0
-Nodes (1): Best-effort detail string from an HTTPError body (the Binance error JSON).
+Nodes (1): Bybit v5 kline arrays ([startMs, o, h, l, c, ...], ascending) -> (opens, highs,
 
 ### Community 177 - "Community 177"
 Cohesion: 1.0
-Nodes (1): Raise on a mid-range empty page that indicates silent truncation.      A page th
+Nodes (1): Fetch trailing 1m klines and compute (upper_wick_mean, rv_30); None if unavailab
 
 ### Community 178 - "Community 178"
 Cohesion: 1.0
-Nodes (1): Numerical-equivalence gate: the helper is byte-identical to the inline math
+Nodes (1): Per-symbol causal upper_wick history + multiplier for disabled audit plumbing.
 
 ### Community 179 - "Community 179"
 Cohesion: 1.0
-Nodes (1): The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must
+Nodes (1): Warm-start: (symbol, signal_ts, upper_wick, rv). Idempotent on (symbol, signal_t
 
 ### Community 180 - "Community 180"
 Cohesion: 1.0
-Nodes (1): Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam
+Nodes (1): Causal multiplier from the symbol's STRICTLY-PRIOR history (does not record).
 
 ### Community 181 - "Community 181"
 Cohesion: 1.0
-Nodes (1): continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus
+Nodes (1): Append a FILLED entry to the symbol history (call after the order books).
 
 ### Community 182 - "Community 182"
 Cohesion: 1.0
-Nodes (1): Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so
+Nodes (1): Seconds to wait after a 429/418, from the Retry-After header.          Falls bac
 
 ### Community 183 - "Community 183"
 Cohesion: 1.0
-Nodes (1): The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
+Nodes (1): Best-effort detail string from an HTTPError body (the Binance error JSON).
 
 ### Community 184 - "Community 184"
 Cohesion: 1.0
-Nodes (1): REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception
+Nodes (1): Raise on a mid-range empty page that indicates silent truncation.      A page th
 
 ### Community 185 - "Community 185"
 Cohesion: 1.0
-Nodes (1): Run main() with every root skipped and no explicit --state-file, so the     stat
+Nodes (1): Numerical-equivalence gate: the helper is byte-identical to the inline math
 
 ### Community 186 - "Community 186"
 Cohesion: 1.0
-Nodes (1): REGRESSION: with both sleeve roots skipped, the cooldown state file must land at
+Nodes (1): The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must
 
 ### Community 187 - "Community 187"
 Cohesion: 1.0
-Nodes (1): NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the
+Nodes (1): Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam
 
 ### Community 188 - "Community 188"
 Cohesion: 1.0
-Nodes (1): NORMAL PATH unchanged: when --continuous-root IS provided, the state file still
+Nodes (1): continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus
 
 ### Community 189 - "Community 189"
 Cohesion: 1.0
-Nodes (1): deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented
+Nodes (1): Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so
 
 ### Community 190 - "Community 190"
 Cohesion: 1.0
-Nodes (1): kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm
+Nodes (1): The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
 
 ### Community 191 - "Community 191"
 Cohesion: 1.0
-Nodes (1): The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on
+Nodes (1): REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception
 
 ### Community 192 - "Community 192"
 Cohesion: 1.0
-Nodes (1): kill-switch-4: a manual/cron invocation from another CWD must not silently     d
+Nodes (1): Run main() with every root skipped and no explicit --state-file, so the     stat
 
 ### Community 193 - "Community 193"
 Cohesion: 1.0
-Nodes (1): The deployed liquidation collector is Bybit-only; stale historical Binance     f
+Nodes (1): REGRESSION: with both sleeve roots skipped, the cooldown state file must land at
 
 ### Community 194 - "Community 194"
 Cohesion: 1.0
-Nodes (1): A fresh box that has not written Bybit liquidation rows yet emits no alert;
+Nodes (1): NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the
 
 ### Community 195 - "Community 195"
 Cohesion: 1.0
-Nodes (1): Only the deployed Bybit leg is monitored for liquidation freshness.
+Nodes (1): NORMAL PATH unchanged: when --continuous-root IS provided, the state file still
 
 ### Community 196 - "Community 196"
 Cohesion: 1.0
-Nodes (1): telegram-alert-1: the resolved-note retry is tracked under the ``resolved:``
+Nodes (1): deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented
 
 ### Community 197 - "Community 197"
 Cohesion: 1.0
-Nodes (1): The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside
+Nodes (1): kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm
 
 ### Community 198 - "Community 198"
 Cohesion: 1.0
-Nodes (1): telegram-alert-1: the resolved-note retry is tracked under the ``resolved:``
+Nodes (1): The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on
 
 ### Community 199 - "Community 199"
 Cohesion: 1.0
-Nodes (1): The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never
+Nodes (1): kill-switch-4: a manual/cron invocation from another CWD must not silently     d
 
 ### Community 200 - "Community 200"
 Cohesion: 1.0
-Nodes (1): End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the
+Nodes (1): The deployed liquidation collector is Bybit-only; stale historical Binance     f
 
 ### Community 201 - "Community 201"
 Cohesion: 1.0
-Nodes (1): A genuinely dead timer (not-active two consecutive runs) escalates from the
+Nodes (1): A fresh box that has not written Bybit liquidation rows yet emits no alert;
 
 ### Community 202 - "Community 202"
 Cohesion: 1.0
-Nodes (1): True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day
+Nodes (1): Only the deployed Bybit leg is monitored for liquidation freshness.
 
 ### Community 203 - "Community 203"
 Cohesion: 1.0
-Nodes (1): Coerce `value` to a finite float, returning `default` if missing/invalid.
+Nodes (1): telegram-alert-1: the resolved-note retry is tracked under the ``resolved:``
 
 ### Community 204 - "Community 204"
 Cohesion: 1.0
-Nodes (1): Coerce `value` to an int, returning `default` (0) on a missing/invalid value.
+Nodes (1): The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside
 
 ### Community 205 - "Community 205"
 Cohesion: 1.0
-Nodes (1): Format a fraction as a 2-decimal percentage, or `invalid` if not finite.
+Nodes (1): telegram-alert-1: the resolved-note retry is tracked under the ``resolved:``
 
 ### Community 206 - "Community 206"
 Cohesion: 1.0
-Nodes (1): Parse an ISO date/datetime string to a UTC `date`, or None if empty.
+Nodes (1): The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never
 
 ### Community 207 - "Community 207"
 Cohesion: 1.0
-Nodes (1): Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A
+Nodes (1): End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the
 
 ### Community 208 - "Community 208"
 Cohesion: 1.0
-Nodes (1): Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty.
+Nodes (1): A genuinely dead timer (not-active two consecutive runs) escalates from the
 
 ### Community 209 - "Community 209"
 Cohesion: 1.0
-Nodes (1): A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl
+Nodes (1): True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day
 
 ### Community 210 - "Community 210"
 Cohesion: 1.0
-Nodes (1): Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r
+Nodes (1): Coerce `value` to a finite float, returning `default` if missing/invalid.
 
 ### Community 211 - "Community 211"
 Cohesion: 1.0
-Nodes (1): The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A
+Nodes (1): Coerce `value` to an int, returning `default` (0) on a missing/invalid value.
 
 ### Community 212 - "Community 212"
 Cohesion: 1.0
-Nodes (1): BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g
+Nodes (1): Format a fraction as a 2-decimal percentage, or `invalid` if not finite.
 
 ### Community 213 - "Community 213"
 Cohesion: 1.0
-Nodes (1): calendar_shift is the gap-aware no-look-ahead primitive: it returns the     valu
+Nodes (1): Parse an ISO date/datetime string to a UTC `date`, or None if empty.
 
 ### Community 214 - "Community 214"
 Cohesion: 1.0
-Nodes (1): calendar_roll measures a TIME span, so a missing day shrinks the window     rath
+Nodes (1): Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A
 
 ### Community 215 - "Community 215"
 Cohesion: 1.0
-Nodes (1): Numerical-equivalence gate: the helper is byte-identical to the inline math
+Nodes (1): Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty.
 
 ### Community 216 - "Community 216"
 Cohesion: 1.0
-Nodes (1): Refuse a state-changing submission on a real-money account unless         the ca
+Nodes (1): A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl
 
 ### Community 217 - "Community 217"
 Cohesion: 1.0
-Nodes (1): Return a place_order-shaped dict for an order already at Bybit under         ``o
+Nodes (1): Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r
 
 ### Community 218 - "Community 218"
 Cohesion: 1.0
-Nodes (1): Closed-PnL records for the account.          Used by the orphan reconciler to ba
+Nodes (1): The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A
 
 ### Community 219 - "Community 219"
 Cohesion: 1.0
-Nodes (1): Funding-settlement rows from the account transaction log.          Used by the d
+Nodes (1): BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g
 
 ### Community 220 - "Community 220"
 Cohesion: 1.0
-Nodes (1): int(value) that returns 0 instead of raising on a non-numeric/None value.
+Nodes (1): calendar_shift is the gap-aware no-look-ahead primitive: it returns the     valu
 
 ### Community 221 - "Community 221"
 Cohesion: 1.0
-Nodes (1): True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur
+Nodes (1): calendar_roll measures a TIME span, so a missing day shrinks the window     rath
 
 ### Community 222 - "Community 222"
 Cohesion: 1.0
-Nodes (1): Subscribe to wallet balance pushes. Bybit pushes a per-account         snapshot
+Nodes (1): Numerical-equivalence gate: the helper is byte-identical to the inline math
 
 ### Community 223 - "Community 223"
 Cohesion: 1.0
-Nodes (1): Socket-level liveness of the private stream. pybit's WebSocket subclasses
+Nodes (1): Refuse a state-changing submission on a real-money account unless         the ca
 
 ### Community 224 - "Community 224"
 Cohesion: 1.0
-Nodes (1): Route order placement + cancellation through WS first, REST as fallback.      Ex
+Nodes (1): Return a place_order-shaped dict for an order already at Bybit under         ``o
 
 ### Community 225 - "Community 225"
 Cohesion: 1.0
-Nodes (1): Issue a WS call and block (with timeout) for the ack.          Returns the ack's
+Nodes (1): Closed-PnL records for the account.          Used by the orphan reconciler to ba
 
 ### Community 226 - "Community 226"
 Cohesion: 1.0
-Nodes (1): Look up an order by orderLinkId after a WS timeout. Returns a         place_orde
+Nodes (1): Funding-settlement rows from the account transaction log.          Used by the d
 
 ### Community 227 - "Community 227"
 Cohesion: 1.0
-Nodes (1): Internal signal that the WS submission failed — the router decides     whether t
+Nodes (1): int(value) that returns 0 instead of raising on a non-numeric/None value.
 
 ### Community 228 - "Community 228"
 Cohesion: 1.0
-Nodes (1): Refuse a state-changing WS submission on a real-money account unless the
+Nodes (1): True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur
 
 ### Community 229 - "Community 229"
 Cohesion: 1.0
-Nodes (1): Build a WS trade client, retrying with jittered exponential backoff.      pybit'
+Nodes (1): Subscribe to wallet balance pushes. Bybit pushes a per-account         snapshot
 
 ### Community 230 - "Community 230"
 Cohesion: 1.0
-Nodes (1): Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method
+Nodes (1): Socket-level liveness of the private stream. pybit's WebSocket subclasses
 
 ### Community 231 - "Community 231"
 Cohesion: 1.0
-Nodes (1): Ensure pybit's ping timer is a daemon thread that does not block shutdown.
+Nodes (1): Route order placement + cancellation through WS first, REST as fallback.      Ex
 
 ### Community 232 - "Community 232"
 Cohesion: 1.0
-Nodes (1): True for pybit's "You have already subscribed to this topic" error.      pybit's
+Nodes (1): Issue a WS call and block (with timeout) for the ack.          Returns the ack's
 
 ### Community 233 - "Community 233"
 Cohesion: 1.0
-Nodes (1): Create a fresh pybit WebSocket client tuned for kline streams.
+Nodes (1): Look up an order by orderLinkId after a WS timeout. Returns a         place_orde
 
 ### Community 234 - "Community 234"
 Cohesion: 1.0
-Nodes (1): Per-connection bookkeeping for the pool.
+Nodes (1): Internal signal that the WS submission failed — the router decides     whether t
 
 ### Community 235 - "Community 235"
 Cohesion: 1.0
-Nodes (1): Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large
+Nodes (1): Refuse a state-changing WS submission on a real-money account unless the
 
 ### Community 236 - "Community 236"
 Cohesion: 1.0
-Nodes (1): Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n
+Nodes (1): Build a WS trade client, retrying with jittered exponential backoff.      pybit'
 
 ### Community 237 - "Community 237"
 Cohesion: 1.0
-Nodes (1): Diff the current assignment against ``new_symbols``: subscribe to         adds,
+Nodes (1): Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method
 
 ### Community 238 - "Community 238"
 Cohesion: 1.0
-Nodes (1): Build a closure that parses pybit's kline message, marks the         connection
+Nodes (1): Ensure pybit's ping timer is a daemon thread that does not block shutdown.
 
 ### Community 239 - "Community 239"
 Cohesion: 1.0
-Nodes (1): Inspect every connection's ``last_message_monotonic``. Connections         idle
+Nodes (1): True for pybit's "You have already subscribed to this topic" error.      pybit's
 
 ### Community 240 - "Community 240"
 Cohesion: 1.0
-Nodes (1): Extract the symbol component from a kline topic ``kline.60.SYMBOL``.
+Nodes (1): Create a fresh pybit WebSocket client tuned for kline streams.
 
 ### Community 241 - "Community 241"
 Cohesion: 1.0
-Nodes (1): realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')
+Nodes (1): Per-connection bookkeeping for the pool.
 
 ### Community 242 - "Community 242"
 Cohesion: 1.0
-Nodes (1): The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must
+Nodes (1): Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large
 
 ### Community 243 - "Community 243"
 Cohesion: 1.0
-Nodes (1): Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam
+Nodes (1): Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n
 
 ### Community 244 - "Community 244"
 Cohesion: 1.0
-Nodes (1): continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus
+Nodes (1): Diff the current assignment against ``new_symbols``: subscribe to         adds,
 
 ### Community 245 - "Community 245"
 Cohesion: 1.0
-Nodes (1): Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so
+Nodes (1): Build a closure that parses pybit's kline message, marks the         connection
 
 ### Community 246 - "Community 246"
 Cohesion: 1.0
-Nodes (1): The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
+Nodes (1): Inspect every connection's ``last_message_monotonic``. Connections         idle
 
 ### Community 247 - "Community 247"
 Cohesion: 1.0
-Nodes (1): REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception
+Nodes (1): Extract the symbol component from a kline topic ``kline.60.SYMBOL``.
 
 ### Community 248 - "Community 248"
 Cohesion: 1.0
-Nodes (1): Run main() with every root skipped and no explicit --state-file, so the     stat
+Nodes (1): realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')
 
 ### Community 249 - "Community 249"
 Cohesion: 1.0
-Nodes (1): REGRESSION: with both sleeve roots skipped, the cooldown state file must land at
+Nodes (1): The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must
 
 ### Community 250 - "Community 250"
 Cohesion: 1.0
-Nodes (1): NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the
+Nodes (1): Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam
 
 ### Community 251 - "Community 251"
 Cohesion: 1.0
-Nodes (1): NORMAL PATH unchanged: when --continuous-root IS provided, the state file still
+Nodes (1): continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus
 
 ### Community 252 - "Community 252"
 Cohesion: 1.0
-Nodes (1): deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented
+Nodes (1): Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so
 
 ### Community 253 - "Community 253"
 Cohesion: 1.0
-Nodes (1): kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm
+Nodes (1): The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
 
 ### Community 254 - "Community 254"
 Cohesion: 1.0
-Nodes (1): The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on
+Nodes (1): REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception
 
 ### Community 255 - "Community 255"
 Cohesion: 1.0
-Nodes (1): kill-switch-4: a manual/cron invocation from another CWD must not silently     d
+Nodes (1): Run main() with every root skipped and no explicit --state-file, so the     stat
 
 ### Community 256 - "Community 256"
 Cohesion: 1.0
-Nodes (1): The deployed liquidation collector is Bybit-only; stale historical Binance     f
+Nodes (1): REGRESSION: with both sleeve roots skipped, the cooldown state file must land at
 
 ### Community 257 - "Community 257"
 Cohesion: 1.0
-Nodes (1): A fresh box that has not written Bybit liquidation rows yet emits no alert;
+Nodes (1): NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the
 
 ### Community 258 - "Community 258"
 Cohesion: 1.0
-Nodes (1): Only the deployed Bybit leg is monitored for liquidation freshness.
+Nodes (1): NORMAL PATH unchanged: when --continuous-root IS provided, the state file still
 
 ### Community 259 - "Community 259"
 Cohesion: 1.0
-Nodes (1): telegram-alert-5: a timer's FIRST not-active observation (no prior) is a WARNING
+Nodes (1): deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented
 
 ### Community 260 - "Community 260"
 Cohesion: 1.0
-Nodes (1): The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside
+Nodes (1): kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm
 
 ### Community 261 - "Community 261"
 Cohesion: 1.0
-Nodes (1): The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never
+Nodes (1): The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on
 
 ### Community 262 - "Community 262"
 Cohesion: 1.0
-Nodes (1): End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the
+Nodes (1): kill-switch-4: a manual/cron invocation from another CWD must not silently     d
 
 ### Community 263 - "Community 263"
 Cohesion: 1.0
-Nodes (1): A genuinely dead timer (not-active two consecutive runs) escalates from the
+Nodes (1): The deployed liquidation collector is Bybit-only; stale historical Binance     f
 
 ### Community 264 - "Community 264"
 Cohesion: 1.0
-Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
+Nodes (1): A fresh box that has not written Bybit liquidation rows yet emits no alert;
 
 ### Community 265 - "Community 265"
 Cohesion: 1.0
-Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
+Nodes (1): Only the deployed Bybit leg is monitored for liquidation freshness.
 
 ### Community 266 - "Community 266"
 Cohesion: 1.0
-Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
+Nodes (1): telegram-alert-5: a timer's FIRST not-active observation (no prior) is a WARNING
 
 ### Community 267 - "Community 267"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside
 
 ### Community 268 - "Community 268"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra
+Nodes (1): The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never
 
 ### Community 269 - "Community 269"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     reconc
+Nodes (1): End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the
 
 ### Community 270 - "Community 270"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env
+Nodes (1): A genuinely dead timer (not-active two consecutive runs) escalates from the
 
 ### Community 271 - "Community 271"
 Cohesion: 1.0
-Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
+Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
 
 ### Community 272 - "Community 272"
 Cohesion: 1.0
-Nodes (1): The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho
+Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
 
 ### Community 273 - "Community 273"
 Cohesion: 1.0
-Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
+Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
 
 ### Community 274 - "Community 274"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 275 - "Community 275"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve is still covered by the reset —     omitting it would
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra
 
 ### Community 276 - "Community 276"
 Cohesion: 1.0
-Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     reconc
 
 ### Community 277 - "Community 277"
 Cohesion: 1.0
-Nodes (1): Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env
 
 ### Community 278 - "Community 278"
 Cohesion: 1.0
-Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
+Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
 
 ### Community 279 - "Community 279"
 Cohesion: 1.0
-Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
+Nodes (1): The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho
 
 ### Community 280 - "Community 280"
 Cohesion: 1.0
-Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
+Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
 
 ### Community 281 - "Community 281"
 Cohesion: 1.0
-Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi
 
 ### Community 282 - "Community 282"
 Cohesion: 1.0
-Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
+Nodes (1): The continuous-fade sleeve is still covered by the reset —     omitting it would
 
 ### Community 283 - "Community 283"
 Cohesion: 1.0
-Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
+Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
 
 ### Community 284 - "Community 284"
 Cohesion: 1.0
-Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
+Nodes (1): Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed
 
 ### Community 285 - "Community 285"
 Cohesion: 1.0
-Nodes (1): The fail-closed arm must only match truthy spellings — demo / false /     unset
+Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
 
 ### Community 286 - "Community 286"
 Cohesion: 1.0
-Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
+Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
 
 ### Community 287 - "Community 287"
 Cohesion: 1.0
-Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
+Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
 
 ### Community 288 - "Community 288"
 Cohesion: 1.0
-Nodes (1): Parity check: the collector is verified the SAME way as the risk service     (bo
+Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
 
 ### Community 289 - "Community 289"
 Cohesion: 1.0
-Nodes (1): Compatibility short roots must not appear in the live report ExecStart.
+Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
 
 ### Community 290 - "Community 290"
 Cohesion: 1.0
-Nodes (1): Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).
+Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
 
 ### Community 291 - "Community 291"
 Cohesion: 1.0
-Nodes (1): The paper sleeve must still write/read its own dataset root so reconcile can
+Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
 
 ### Community 292 - "Community 292"
 Cohesion: 1.0
-Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
+Nodes (1): The fail-closed arm must only match truthy spellings — demo / false /     unset
 
 ### Community 293 - "Community 293"
 Cohesion: 1.0
-Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
+Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
 
 ### Community 294 - "Community 294"
 Cohesion: 1.0
-Nodes (1): The paper sleeve must still write/read its own dataset root so reconcile can
+Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
 
 ### Community 295 - "Community 295"
 Cohesion: 1.0
-Nodes (1): Dropping the follow line must not disturb the knobs that make this a true     no
+Nodes (1): Parity check: the collector is verified the SAME way as the risk service     (bo
 
 ### Community 296 - "Community 296"
 Cohesion: 1.0
-Nodes (1): Write the strategy-vs-BTC equity PNG. ``png_name`` lets active sleeves     (e.g.
+Nodes (1): Compatibility short roots must not appear in the live report ExecStart.
 
 ### Community 297 - "Community 297"
 Cohesion: 1.0
-Nodes (1): Each series' legend multiple, measured at the LAST DATE COMMON to all series.
+Nodes (1): Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).
 
 ### Community 298 - "Community 298"
 Cohesion: 1.0
-Nodes (1): Insert +0.00%/count-0 rows for months absent between the first and last row. A m
+Nodes (1): The paper sleeve must still write/read its own dataset root so reconcile can
 
 ### Community 299 - "Community 299"
 Cohesion: 1.0
-Nodes (1): Rows are {month, return, count}; `count` is real trades when `monthly` carries
+Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
 
 ### Community 300 - "Community 300"
 Cohesion: 1.0
-Nodes (1): Forward-fill an equity series to one point per calendar day so no-trade     gaps
+Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
 
 ### Community 301 - "Community 301"
 Cohesion: 1.0
-Nodes (1): One benchmark line to overlay on the official chart.      ``points`` is a normal
+Nodes (1): The paper sleeve must still write/read its own dataset root so reconcile can
 
 ### Community 302 - "Community 302"
 Cohesion: 1.0
-Nodes (1): Load a price CSV into a normalised overlay clipped to ``[start, end]``.      Rob
+Nodes (1): Dropping the follow line must not disturb the knobs that make this a true     no
 
 ### Community 303 - "Community 303"
 Cohesion: 1.0
-Nodes (1): Convert overlay specs to renderer series dicts, auto-coloring from the     palet
+Nodes (1): Write the strategy-vs-BTC equity PNG. ``png_name`` lets active sleeves     (e.g.
 
 ### Community 304 - "Community 304"
 Cohesion: 1.0
-Nodes (1): Fallback: plot a cumulative-equity curve from the engine's equity CSV.
+Nodes (1): Each series' legend multiple, measured at the LAST DATE COMMON to all series.
 
 ### Community 305 - "Community 305"
 Cohesion: 1.0
-Nodes (1): Count traded symbols absent from the last 30d of klines.      A value > 0 proves
+Nodes (1): Insert +0.00%/count-0 rows for months absent between the first and last row. A m
 
 ### Community 306 - "Community 306"
 Cohesion: 1.0
-Nodes (1): residual_momentum[D] = sum residual_return[D-9 .. D-3] (rolling 7, shift 3).
+Nodes (1): Rows are {month, return, count}; `count` is real trades when `monthly` carries
 
 ### Community 307 - "Community 307"
 Cohesion: 1.0
-Nodes (1): Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d
+Nodes (1): Forward-fill an equity series to one point per calendar day so no-trade     gaps
 
 ### Community 308 - "Community 308"
 Cohesion: 1.0
-Nodes (1): The (causal) residual-momentum polars expression. Factored out so the exact wind
+Nodes (1): One benchmark line to overlay on the official chart.      ``points`` is a normal
 
 ### Community 309 - "Community 309"
 Cohesion: 1.0
-Nodes (1): Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produc
+Nodes (1): Load a price CSV into a normalised overlay clipped to ``[start, end]``.      Rob
 
 ### Community 310 - "Community 310"
 Cohesion: 1.0
-Nodes (1): Which kline store this root actually holds. Research full-PIT roots use ``klines
+Nodes (1): Convert overlay specs to renderer series dicts, auto-coloring from the     palet
 
 ### Community 311 - "Community 311"
 Cohesion: 1.0
-Nodes (1): True when a WS connection opened at ``opened_monotonic`` has outlived     ``max_
+Nodes (1): Fallback: plot a cumulative-equity curve from the engine's equity CSV.
 
 ### Community 312 - "Community 312"
 Cohesion: 1.0
-Nodes (1): Rows from a Bybit v5 ``allLiquidation.*`` message (empty for non-liq frames).
+Nodes (1): Count traded symbols absent from the last 30d of klines.      A value > 0 proves
 
 ### Community 313 - "Community 313"
 Cohesion: 1.0
-Nodes (1): Rows from a Binance UM ``!forceOrder@arr`` message (single or list shape).
+Nodes (1): residual_momentum[D] = sum residual_return[D-9 .. D-3] (rolling 7, shift 3).
 
 ### Community 314 - "Community 314"
 Cohesion: 1.0
-Nodes (1): Thread-safe append-only writer, one file per venue per UTC day.
+Nodes (1): Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d
 
 ### Community 315 - "Community 315"
 Cohesion: 1.0
-Nodes (1): All currently trading linear symbols (cursor-paginated REST; public).
+Nodes (1): The (causal) residual-momentum polars expression. Factored out so the exact wind
 
 ### Community 316 - "Community 316"
 Cohesion: 1.0
-Nodes (1): The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must
+Nodes (1): Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produc
 
 ### Community 317 - "Community 317"
 Cohesion: 1.0
-Nodes (1): Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam
+Nodes (1): Which kline store this root actually holds. Research full-PIT roots use ``klines
 
 ### Community 318 - "Community 318"
 Cohesion: 1.0
-Nodes (1): continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus
+Nodes (1): True when a WS connection opened at ``opened_monotonic`` has outlived     ``max_
 
 ### Community 319 - "Community 319"
 Cohesion: 1.0
-Nodes (1): Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so
+Nodes (1): Rows from a Bybit v5 ``allLiquidation.*`` message (empty for non-liq frames).
 
 ### Community 320 - "Community 320"
 Cohesion: 1.0
-Nodes (1): The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
+Nodes (1): Rows from a Binance UM ``!forceOrder@arr`` message (single or list shape).
 
 ### Community 321 - "Community 321"
 Cohesion: 1.0
-Nodes (1): REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception
+Nodes (1): Thread-safe append-only writer, one file per venue per UTC day.
 
 ### Community 322 - "Community 322"
 Cohesion: 1.0
-Nodes (1): Run main() with every root skipped and no explicit --state-file, so the     stat
+Nodes (1): All currently trading linear symbols (cursor-paginated REST; public).
 
 ### Community 323 - "Community 323"
 Cohesion: 1.0
-Nodes (1): NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the
+Nodes (1): The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must
 
 ### Community 324 - "Community 324"
 Cohesion: 1.0
-Nodes (1): NORMAL PATH unchanged: when --continuous-root IS provided, the state file still
+Nodes (1): Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam
 
 ### Community 325 - "Community 325"
 Cohesion: 1.0
-Nodes (1): deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented
+Nodes (1): continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus
 
 ### Community 326 - "Community 326"
 Cohesion: 1.0
-Nodes (1): kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm
+Nodes (1): Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so
 
 ### Community 327 - "Community 327"
 Cohesion: 1.0
-Nodes (1): The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on
+Nodes (1): The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
 
 ### Community 328 - "Community 328"
 Cohesion: 1.0
-Nodes (1): kill-switch-4: a manual/cron invocation from another CWD must not silently     d
+Nodes (1): REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception
 
 ### Community 329 - "Community 329"
 Cohesion: 1.0
-Nodes (1): liquidation-collector-3: a binance leg that wrote before but went silent must
+Nodes (1): Run main() with every root skipped and no explicit --state-file, so the     stat
 
 ### Community 330 - "Community 330"
 Cohesion: 1.0
-Nodes (1): A venue that has NEVER written (region-blocked binance leg pending a     permitt
+Nodes (1): NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the
 
 ### Community 331 - "Community 331"
 Cohesion: 1.0
-Nodes (1): If every venue that wrote goes stale, each pages its own per-venue WARNING     (
+Nodes (1): NORMAL PATH unchanged: when --continuous-root IS provided, the state file still
 
 ### Community 332 - "Community 332"
 Cohesion: 1.0
-Nodes (1): telegram-alert-5: a timer's FIRST not-active observation (no prior) is a WARNING
+Nodes (1): deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented
 
 ### Community 333 - "Community 333"
 Cohesion: 1.0
-Nodes (1): The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside
+Nodes (1): kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm
 
 ### Community 334 - "Community 334"
 Cohesion: 1.0
-Nodes (1): telegram-alert-1: the resolved-note retry is tracked under the ``resolved:``
+Nodes (1): The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on
 
 ### Community 335 - "Community 335"
 Cohesion: 1.0
-Nodes (1): The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never
+Nodes (1): kill-switch-4: a manual/cron invocation from another CWD must not silently     d
 
 ### Community 336 - "Community 336"
 Cohesion: 1.0
-Nodes (1): End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the
+Nodes (1): liquidation-collector-3: a binance leg that wrote before but went silent must
 
 ### Community 337 - "Community 337"
 Cohesion: 1.0
-Nodes (1): A genuinely dead timer (not-active two consecutive runs) escalates from the
+Nodes (1): A venue that has NEVER written (region-blocked binance leg pending a     permitt
 
 ### Community 338 - "Community 338"
 Cohesion: 1.0
-Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
+Nodes (1): If every venue that wrote goes stale, each pages its own per-venue WARNING     (
 
 ### Community 339 - "Community 339"
 Cohesion: 1.0
-Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
+Nodes (1): telegram-alert-5: a timer's FIRST not-active observation (no prior) is a WARNING
 
 ### Community 340 - "Community 340"
 Cohesion: 1.0
-Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
+Nodes (1): The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside
 
 ### Community 341 - "Community 341"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): telegram-alert-1: the resolved-note retry is tracked under the ``resolved:``
 
 ### Community 342 - "Community 342"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     reconc
+Nodes (1): The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never
 
 ### Community 343 - "Community 343"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env
+Nodes (1): End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the
 
 ### Community 344 - "Community 344"
 Cohesion: 1.0
-Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
+Nodes (1): A genuinely dead timer (not-active two consecutive runs) escalates from the
 
 ### Community 345 - "Community 345"
 Cohesion: 1.0
-Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
+Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
 
 ### Community 346 - "Community 346"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi
+Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
 
 ### Community 347 - "Community 347"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve is still covered by the reset —     omitting it would
+Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
 
 ### Community 348 - "Community 348"
 Cohesion: 1.0
-Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 349 - "Community 349"
 Cohesion: 1.0
-Nodes (1): Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     reconc
 
 ### Community 350 - "Community 350"
 Cohesion: 1.0
-Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env
 
 ### Community 351 - "Community 351"
 Cohesion: 1.0
-Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
+Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
 
 ### Community 352 - "Community 352"
 Cohesion: 1.0
-Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
+Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
 
 ### Community 353 - "Community 353"
 Cohesion: 1.0
-Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi
 
 ### Community 354 - "Community 354"
 Cohesion: 1.0
-Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
+Nodes (1): The continuous-fade sleeve is still covered by the reset —     omitting it would
 
 ### Community 355 - "Community 355"
 Cohesion: 1.0
-Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
+Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
 
 ### Community 356 - "Community 356"
 Cohesion: 1.0
-Nodes (1): The fail-closed arm must only match truthy spellings — demo / false /     unset
+Nodes (1): Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed
 
 ### Community 357 - "Community 357"
 Cohesion: 1.0
-Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
+Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
 
 ### Community 358 - "Community 358"
 Cohesion: 1.0
-Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
+Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
 
 ### Community 359 - "Community 359"
 Cohesion: 1.0
-Nodes (1): Parity check: the collector is verified the SAME way as the risk service     (bo
+Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
 
 ### Community 360 - "Community 360"
 Cohesion: 1.0
-Nodes (1): Compatibility short roots must not appear in the live report ExecStart.
+Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
 
 ### Community 361 - "Community 361"
 Cohesion: 1.0
-Nodes (1): Long, continuous, paper, and hedge roots stay wired for the active books.
+Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
 
 ### Community 362 - "Community 362"
 Cohesion: 1.0
-Nodes (1): The multi-line ExecStart continuation must stay intact after the edit:     every
+Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
 
 ### Community 363 - "Community 363"
 Cohesion: 1.0
-Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
+Nodes (1): The fail-closed arm must only match truthy spellings — demo / false /     unset
 
 ### Community 364 - "Community 364"
+Cohesion: 1.0
+Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
+
+### Community 365 - "Community 365"
+Cohesion: 1.0
+Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
+
+### Community 366 - "Community 366"
+Cohesion: 1.0
+Nodes (1): Parity check: the collector is verified the SAME way as the risk service     (bo
+
+### Community 367 - "Community 367"
+Cohesion: 1.0
+Nodes (1): Compatibility short roots must not appear in the live report ExecStart.
+
+### Community 368 - "Community 368"
+Cohesion: 1.0
+Nodes (1): Long, continuous, paper, and hedge roots stay wired for the active books.
+
+### Community 369 - "Community 369"
+Cohesion: 1.0
+Nodes (1): The multi-line ExecStart continuation must stay intact after the edit:     every
+
+### Community 370 - "Community 370"
+Cohesion: 1.0
+Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
+
+### Community 371 - "Community 371"
 Cohesion: 1.0
 Nodes (1): Dropping the follow line must not disturb the knobs that make this a true     no
 
 ## Knowledge Gaps
-- **1344 isolated node(s):** `Causal BTC-risk entry-size overlay for the continuous demo book.  ``CTRL_BTC_RIS`, `Build V0 BTC-risk context keyed by signal day, using prior BTC closes only.`, `Causal expanding percentile state for the V0 BTC-risk score.`, `Persistent live state for ``CTRL_BTC_RISK_70_90_35``.`, `Score unique final candidate decisions and return lookup + cycle stats.` (+1339 more)
+- **1351 isolated node(s):** `Causal BTC-risk entry-size overlay for the continuous demo book.  ``CTRL_BTC_RIS`, `Build V0 BTC-risk context keyed by signal day, using prior BTC closes only.`, `Causal expanding percentile state for the V0 BTC-risk score.`, `Persistent live state for ``CTRL_BTC_RISK_70_90_35``.`, `Score unique final candidate decisions and return lookup + cycle stats.` (+1346 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 40`** (18 nodes): `_load()`, `test_scripts_reconcile.py`, `Regression tests for scripts/reconcile.py (audit bucket b15).  Findings covered:`, `test_continuous_signal_check_allows_empty_or_clean_windows()`, `test_continuous_signal_check_exits_nonzero_on_hard_miss()`, `test_pull_sleeve_clears_continuous_mirrors_before_required_plane_refusal()`, `test_pull_sleeve_clears_local_mirror_when_remote_dataset_empty()`, `test_pull_sleeve_refuses_stale_local_mirror_without_transfer_tool()`, `test_pull_sleeve_uses_rsync_delete_to_mirror_live_ledgers()`, `test_pull_sleeve_uses_scp_fallback_when_rsync_missing()`, `test_py_prefers_windows_venv_python()`, `test_reconcile_continuous_runs_paper_demo_gate()`, `test_reconcile_main_returns_nonzero_when_a_leg_fails()`, `test_reconcile_main_returns_zero_when_leg_clean()`, `test_scp_pull_refuses_and_clears_stale_market_plane_when_remote_file_absent()`, `test_summarize_leg_flags_missing_summary_as_failed_not_no_output()`, `test_summarize_leg_flags_nonzero_exit_as_failed()`, `test_summarize_leg_passes_only_on_clean_leg()`
+- **Thin community `Community 38`** (19 nodes): `_load()`, `test_scripts_reconcile.py`, `Regression tests for scripts/reconcile.py (audit bucket b15).  Findings covered:`, `test_continuous_signal_check_allows_empty_or_clean_windows()`, `test_continuous_signal_check_exits_nonzero_on_hard_miss()`, `test_pull_sleeve_clears_continuous_mirrors_before_required_plane_refusal()`, `test_pull_sleeve_clears_local_mirror_when_remote_dataset_empty()`, `test_pull_sleeve_refuses_stale_local_mirror_without_transfer_tool()`, `test_pull_sleeve_uses_rsync_delete_to_mirror_live_ledgers()`, `test_pull_sleeve_uses_scp_fallback_when_rsync_missing()`, `test_py_prefers_windows_venv_python()`, `test_quick_reconcile_skips_research_rmom_unless_explicit()`, `test_reconcile_continuous_runs_paper_demo_gate()`, `test_reconcile_main_returns_nonzero_when_a_leg_fails()`, `test_reconcile_main_returns_zero_when_leg_clean()`, `test_scp_pull_refuses_and_clears_stale_market_plane_when_remote_file_absent()`, `test_summarize_leg_flags_missing_summary_as_failed_not_no_output()`, `test_summarize_leg_flags_nonzero_exit_as_failed()`, `test_summarize_leg_passes_only_on_clean_leg()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 53`** (8 nodes): `test_promoted_profiles.py`, `Pin the active profile registry (liquidity_migration.promoted).  These assertion`, `test_continuous_profile_is_deployed_book_with_regime_hedge()`, `test_long_profile_is_v11a()`, `test_promoted_trading_logic_doc_exists_and_names_lifecycles()`, `test_registry_covers_long_and_continuous()`, `test_registry_does_not_export_research_candidate_manifests()`, `test_windowing_sets_dates_on_all_sleeves()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -1865,623 +1900,637 @@ Nodes (1): Dropping the follow line must not disturb the knobs that make this a 
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 59`** (1 nodes): `Extract (orderId, orderLinkId) — accept Bybit's camelCase or the         snake_c`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 61`** (1 nodes): `# NOTE: _maybe_notify deliberately lives in event_demo.py (the hub), NOT here.`
+- **Thin community `Community 61`** (1 nodes): `Load KEY=VALUE pairs from a .env file into os.environ (without overriding     an`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 62`** (1 nodes): `realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')`
+- **Thin community `Community 62`** (1 nodes): `Pretty, predictable step banners + command echo.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 63`** (1 nodes): `audit-iter1 archive-recon-2: the price-fallback branch (no net_return /     gros`
+- **Thin community `Community 63`** (1 nodes): `Run a command, echo it, stream+capture stdout. Used for the per-sleeve         r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 64`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
+- **Thin community `Community 64`** (1 nodes): `Return nonempty/empty/absent/error for a remote dataset directory.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 65`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
+- **Thin community `Community 65`** (1 nodes): `Return signal_ts_ms values from a sleeve trade ledger (empty list if absent).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 66`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
+- **Thin community `Community 66`** (1 nodes): `Recompute residual_momentum.parquet on the research root so the continuous     e`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 67`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 67`** (1 nodes): `One-line summary for a reconcile leg + whether it passed.      A leg passes only`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 68`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra`
+- **Thin community `Community 68`** (1 nodes): `# NOTE: _maybe_notify deliberately lives in event_demo.py (the hub), NOT here.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 69`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     reconc`
+- **Thin community `Community 69`** (1 nodes): `realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 70`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env`
+- **Thin community `Community 70`** (1 nodes): `audit-iter1 archive-recon-2: the price-fallback branch (no net_return /     gros`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 71`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
+- **Thin community `Community 71`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 72`** (1 nodes): `The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho`
+- **Thin community `Community 72`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 73`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
+- **Thin community `Community 73`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 74`** (1 nodes): `Create deterministic systemctl/account guards around the VPS-only script.`
+- **Thin community `Community 74`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 75`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
+- **Thin community `Community 75`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 76`** (1 nodes): `Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed`
+- **Thin community `Community 76`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     reconc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 77`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
+- **Thin community `Community 77`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 78`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
+- **Thin community `Community 78`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 79`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
+- **Thin community `Community 79`** (1 nodes): `The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 80`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
+- **Thin community `Community 80`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 81`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
+- **Thin community `Community 81`** (1 nodes): `Create deterministic systemctl/account guards around the VPS-only script.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 82`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
+- **Thin community `Community 82`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 83`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
+- **Thin community `Community 83`** (1 nodes): `Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 84`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
+- **Thin community `Community 84`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 85`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
+- **Thin community `Community 85`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 86`** (1 nodes): `Parity check: the collector is verified the SAME way as the risk service     (bo`
+- **Thin community `Community 86`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 87`** (1 nodes): `Compatibility short roots must not appear in the live report ExecStart.`
+- **Thin community `Community 87`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 88`** (1 nodes): `Long, continuous, paper, and hedge roots stay wired for the active books.`
+- **Thin community `Community 88`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 89`** (1 nodes): `The multi-line ExecStart continuation must stay intact after the edit:     every`
+- **Thin community `Community 89`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 90`** (1 nodes): `Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).`
+- **Thin community `Community 90`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 91`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
+- **Thin community `Community 91`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 92`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
+- **Thin community `Community 92`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 93`** (1 nodes): `The paper sleeve must still write/read its own dataset root so reconcile can`
+- **Thin community `Community 93`** (1 nodes): `Parity check: the collector is verified the SAME way as the risk service     (bo`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 94`** (1 nodes): `Dropping the follow line must not disturb the knobs that make this a true     no`
+- **Thin community `Community 94`** (1 nodes): `Compatibility short roots must not appear in the live report ExecStart.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 95`** (1 nodes): `The removal is documented in-unit (audit id + rationale) so an operator     re-a`
+- **Thin community `Community 95`** (1 nodes): `Long, continuous, paper, and hedge roots stay wired for the active books.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 96`** (1 nodes): `Set of (symbol, side, signal-day) entries inside [start_ms, end_ms).`
+- **Thin community `Community 96`** (1 nodes): `The multi-line ExecStart continuation must stay intact after the edit:     every`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 97`** (1 nodes): `Sparse-cadence context for LONG zero-trade reconciles.`
+- **Thin community `Community 97`** (1 nodes): `Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 98`** (1 nodes): `Pair backtest / demo / paper LONG entries by (symbol, side, signal-day).`
+- **Thin community `Community 98`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 99`** (1 nodes): `Engine-decile signal-consistency of the live continuous entries — the     faithf`
+- **Thin community `Community 99`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 100`** (1 nodes): `The (causal) residual-momentum polars expression. Factored out so the exact wind`
+- **Thin community `Community 100`** (1 nodes): `The paper sleeve must still write/read its own dataset root so reconcile can`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 101`** (1 nodes): `Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produc`
+- **Thin community `Community 101`** (1 nodes): `Dropping the follow line must not disturb the knobs that make this a true     no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 102`** (1 nodes): `Which kline store this root actually holds. Research full-PIT roots use ``klines`
+- **Thin community `Community 102`** (1 nodes): `The removal is documented in-unit (audit id + rationale) so an operator     re-a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 103`** (1 nodes): `Recompute residual_momentum.parquet on the research root so the continuous     e`
+- **Thin community `Community 103`** (1 nodes): `Set of (symbol, side, signal-day) entries inside [start_ms, end_ms).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 104`** (1 nodes): `One-line summary for a reconcile leg + whether it passed.      A leg passes only`
+- **Thin community `Community 104`** (1 nodes): `Sparse-cadence context for LONG zero-trade reconciles.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 105`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
+- **Thin community `Community 105`** (1 nodes): `Pair backtest / demo / paper LONG entries by (symbol, side, signal-day).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 106`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
+- **Thin community `Community 106`** (1 nodes): `Engine-decile signal-consistency of the live continuous entries — the     faithf`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 107`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
+- **Thin community `Community 107`** (1 nodes): `The (causal) residual-momentum polars expression. Factored out so the exact wind`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 108`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 108`** (1 nodes): `Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 109`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra`
+- **Thin community `Community 109`** (1 nodes): `Which kline store this root actually holds. Research full-PIT roots use ``klines`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 110`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     reconc`
+- **Thin community `Community 110`** (1 nodes): `Recompute residual_momentum.parquet on the research root so the continuous     e`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 111`** (1 nodes): `The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho`
+- **Thin community `Community 111`** (1 nodes): `One-line summary for a reconcile leg + whether it passed.      A leg passes only`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 112`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
+- **Thin community `Community 112`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 113`** (1 nodes): `The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho`
+- **Thin community `Community 113`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 114`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
+- **Thin community `Community 114`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 115`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi`
+- **Thin community `Community 115`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 116`** (1 nodes): `The continuous-fade sleeve is still covered by the reset —     omitting it would`
+- **Thin community `Community 116`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 117`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
+- **Thin community `Community 117`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     reconc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 118`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
+- **Thin community `Community 118`** (1 nodes): `The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 119`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
+- **Thin community `Community 119`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 120`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
+- **Thin community `Community 120`** (1 nodes): `The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 121`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
+- **Thin community `Community 121`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 122`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
+- **Thin community `Community 122`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 123`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
+- **Thin community `Community 123`** (1 nodes): `The continuous-fade sleeve is still covered by the reset —     omitting it would`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 124`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
+- **Thin community `Community 124`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 125`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
+- **Thin community `Community 125`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 126`** (1 nodes): `The fail-closed arm must only match truthy spellings — demo / false /     unset`
+- **Thin community `Community 126`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 127`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
+- **Thin community `Community 127`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 128`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
+- **Thin community `Community 128`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 129`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
+- **Thin community `Community 129`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 130`** (1 nodes): `Compatibility short roots must not appear in the live report ExecStart.`
+- **Thin community `Community 130`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 131`** (1 nodes): `Long, continuous, paper, and hedge roots stay wired for the active books.`
+- **Thin community `Community 131`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 132`** (1 nodes): `The removal is documented in-unit (audit id + rationale) so an operator     re-a`
+- **Thin community `Community 132`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 133`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
+- **Thin community `Community 133`** (1 nodes): `The fail-closed arm must only match truthy spellings — demo / false /     unset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 134`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
+- **Thin community `Community 134`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 135`** (1 nodes): `The paper sleeve must still write/read its own dataset root so reconcile can`
+- **Thin community `Community 135`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 136`** (1 nodes): `Dropping the follow line must not disturb the knobs that make this a true     no`
+- **Thin community `Community 136`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 137`** (1 nodes): `The removal is documented in-unit (audit id + rationale) so an operator     re-a`
+- **Thin community `Community 137`** (1 nodes): `Compatibility short roots must not appear in the live report ExecStart.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 138`** (1 nodes): `Issue a WS call and block (with timeout) for the ack.          Returns the ack's`
+- **Thin community `Community 138`** (1 nodes): `Long, continuous, paper, and hedge roots stay wired for the active books.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 139`** (1 nodes): `Look up an order by orderLinkId after a WS timeout. Returns a         place_orde`
+- **Thin community `Community 139`** (1 nodes): `The removal is documented in-unit (audit id + rationale) so an operator     re-a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 140`** (1 nodes): `Internal signal that the WS submission failed — the router decides     whether t`
+- **Thin community `Community 140`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 141`** (1 nodes): `Refuse a state-changing WS submission on a real-money account unless the`
+- **Thin community `Community 141`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 142`** (1 nodes): `Build a WS trade client, retrying with jittered exponential backoff.      pybit'`
+- **Thin community `Community 142`** (1 nodes): `The paper sleeve must still write/read its own dataset root so reconcile can`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 143`** (1 nodes): `Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method`
+- **Thin community `Community 143`** (1 nodes): `Dropping the follow line must not disturb the knobs that make this a true     no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 144`** (1 nodes): `Ensure pybit's ping timer is a daemon thread that does not block shutdown.`
+- **Thin community `Community 144`** (1 nodes): `The removal is documented in-unit (audit id + rationale) so an operator     re-a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 145`** (1 nodes): `True for pybit's "You have already subscribed to this topic" error.      pybit's`
+- **Thin community `Community 145`** (1 nodes): `Issue a WS call and block (with timeout) for the ack.          Returns the ack's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 146`** (1 nodes): `Create a fresh pybit WebSocket client tuned for kline streams.`
+- **Thin community `Community 146`** (1 nodes): `Look up an order by orderLinkId after a WS timeout. Returns a         place_orde`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 147`** (1 nodes): `Per-connection bookkeeping for the pool.`
+- **Thin community `Community 147`** (1 nodes): `Internal signal that the WS submission failed — the router decides     whether t`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 148`** (1 nodes): `Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large`
+- **Thin community `Community 148`** (1 nodes): `Refuse a state-changing WS submission on a real-money account unless the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 149`** (1 nodes): `Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n`
+- **Thin community `Community 149`** (1 nodes): `Build a WS trade client, retrying with jittered exponential backoff.      pybit'`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 150`** (1 nodes): `Diff the current assignment against ``new_symbols``: subscribe to         adds,`
+- **Thin community `Community 150`** (1 nodes): `Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 151`** (1 nodes): `Build a closure that parses pybit's kline message, marks the         connection`
+- **Thin community `Community 151`** (1 nodes): `Ensure pybit's ping timer is a daemon thread that does not block shutdown.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 152`** (1 nodes): `Inspect every connection's ``last_message_monotonic``. Connections         idle`
+- **Thin community `Community 152`** (1 nodes): `True for pybit's "You have already subscribed to this topic" error.      pybit's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 153`** (1 nodes): `Extract the symbol component from a kline topic ``kline.60.SYMBOL``.`
+- **Thin community `Community 153`** (1 nodes): `Create a fresh pybit WebSocket client tuned for kline streams.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 154`** (1 nodes): `The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A`
+- **Thin community `Community 154`** (1 nodes): `Per-connection bookkeeping for the pool.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 155`** (1 nodes): `BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g`
+- **Thin community `Community 155`** (1 nodes): `Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 156`** (1 nodes): `Exact cutoff for timestamp lookbacks: ``anchor_ts_ms - duration``.      This int`
+- **Thin community `Community 156`** (1 nodes): `Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 157`** (1 nodes): `True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day`
+- **Thin community `Community 157`** (1 nodes): `Diff the current assignment against ``new_symbols``: subscribe to         adds,`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 158`** (1 nodes): `Coerce `value` to a finite float, returning `default` if missing/invalid.`
+- **Thin community `Community 158`** (1 nodes): `Build a closure that parses pybit's kline message, marks the         connection`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 159`** (1 nodes): `Coerce `value` to an int, returning `default` (0) on a missing/invalid value.`
+- **Thin community `Community 159`** (1 nodes): `Inspect every connection's ``last_message_monotonic``. Connections         idle`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 160`** (1 nodes): `Format a fraction as a 2-decimal percentage, or `invalid` if not finite.`
+- **Thin community `Community 160`** (1 nodes): `Extract the symbol component from a kline topic ``kline.60.SYMBOL``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 161`** (1 nodes): `Slugify `name` for use as a file or path component.`
+- **Thin community `Community 161`** (1 nodes): `The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 162`** (1 nodes): `Parse an ISO date/datetime string to a UTC `date`, or None if empty.`
+- **Thin community `Community 162`** (1 nodes): `BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 163`** (1 nodes): `Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A`
+- **Thin community `Community 163`** (1 nodes): `Exact cutoff for timestamp lookbacks: ``anchor_ts_ms - duration``.      This int`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 164`** (1 nodes): `Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty.`
+- **Thin community `Community 164`** (1 nodes): `True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 165`** (1 nodes): `A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl`
+- **Thin community `Community 165`** (1 nodes): `Coerce `value` to a finite float, returning `default` if missing/invalid.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 166`** (1 nodes): `Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r`
+- **Thin community `Community 166`** (1 nodes): `Coerce `value` to an int, returning `default` (0) on a missing/invalid value.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 167`** (1 nodes): `The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A`
+- **Thin community `Community 167`** (1 nodes): `Format a fraction as a 2-decimal percentage, or `invalid` if not finite.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 168`** (1 nodes): `BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g`
+- **Thin community `Community 168`** (1 nodes): `Slugify `name` for use as a file or path component.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 169`** (1 nodes): `Bybit v5 kline arrays ([startMs, o, h, l, c, ...], ascending) -> (opens, highs,`
+- **Thin community `Community 169`** (1 nodes): `Parse an ISO date/datetime string to a UTC `date`, or None if empty.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 170`** (1 nodes): `Fetch trailing 1m klines and compute (upper_wick_mean, rv_30); None if unavailab`
+- **Thin community `Community 170`** (1 nodes): `Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 171`** (1 nodes): `Per-symbol causal upper_wick history + multiplier for disabled audit plumbing.`
+- **Thin community `Community 171`** (1 nodes): `Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 172`** (1 nodes): `Warm-start: (symbol, signal_ts, upper_wick, rv). Idempotent on (symbol, signal_t`
+- **Thin community `Community 172`** (1 nodes): `A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 173`** (1 nodes): `Causal multiplier from the symbol's STRICTLY-PRIOR history (does not record).`
+- **Thin community `Community 173`** (1 nodes): `Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 174`** (1 nodes): `Append a FILLED entry to the symbol history (call after the order books).`
+- **Thin community `Community 174`** (1 nodes): `The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 175`** (1 nodes): `Seconds to wait after a 429/418, from the Retry-After header.          Falls bac`
+- **Thin community `Community 175`** (1 nodes): `BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 176`** (1 nodes): `Best-effort detail string from an HTTPError body (the Binance error JSON).`
+- **Thin community `Community 176`** (1 nodes): `Bybit v5 kline arrays ([startMs, o, h, l, c, ...], ascending) -> (opens, highs,`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 177`** (1 nodes): `Raise on a mid-range empty page that indicates silent truncation.      A page th`
+- **Thin community `Community 177`** (1 nodes): `Fetch trailing 1m klines and compute (upper_wick_mean, rv_30); None if unavailab`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 178`** (1 nodes): `Numerical-equivalence gate: the helper is byte-identical to the inline math`
+- **Thin community `Community 178`** (1 nodes): `Per-symbol causal upper_wick history + multiplier for disabled audit plumbing.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 179`** (1 nodes): `The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must`
+- **Thin community `Community 179`** (1 nodes): `Warm-start: (symbol, signal_ts, upper_wick, rv). Idempotent on (symbol, signal_t`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 180`** (1 nodes): `Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam`
+- **Thin community `Community 180`** (1 nodes): `Causal multiplier from the symbol's STRICTLY-PRIOR history (does not record).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 181`** (1 nodes): `continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus`
+- **Thin community `Community 181`** (1 nodes): `Append a FILLED entry to the symbol history (call after the order books).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 182`** (1 nodes): `Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so`
+- **Thin community `Community 182`** (1 nodes): `Seconds to wait after a 429/418, from the Retry-After header.          Falls bac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 183`** (1 nodes): `The watchdog skips an intentionally-off sleeve. Explicit env always wins; the`
+- **Thin community `Community 183`** (1 nodes): `Best-effort detail string from an HTTPError body (the Binance error JSON).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 184`** (1 nodes): `REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception`
+- **Thin community `Community 184`** (1 nodes): `Raise on a mid-range empty page that indicates silent truncation.      A page th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 185`** (1 nodes): `Run main() with every root skipped and no explicit --state-file, so the     stat`
+- **Thin community `Community 185`** (1 nodes): `Numerical-equivalence gate: the helper is byte-identical to the inline math`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 186`** (1 nodes): `REGRESSION: with both sleeve roots skipped, the cooldown state file must land at`
+- **Thin community `Community 186`** (1 nodes): `The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 187`** (1 nodes): `NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the`
+- **Thin community `Community 187`** (1 nodes): `Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 188`** (1 nodes): `NORMAL PATH unchanged: when --continuous-root IS provided, the state file still`
+- **Thin community `Community 188`** (1 nodes): `continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 189`** (1 nodes): `deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented`
+- **Thin community `Community 189`** (1 nodes): `Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 190`** (1 nodes): `kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm`
+- **Thin community `Community 190`** (1 nodes): `The watchdog skips an intentionally-off sleeve. Explicit env always wins; the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 191`** (1 nodes): `The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on`
+- **Thin community `Community 191`** (1 nodes): `REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 192`** (1 nodes): `kill-switch-4: a manual/cron invocation from another CWD must not silently     d`
+- **Thin community `Community 192`** (1 nodes): `Run main() with every root skipped and no explicit --state-file, so the     stat`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 193`** (1 nodes): `The deployed liquidation collector is Bybit-only; stale historical Binance     f`
+- **Thin community `Community 193`** (1 nodes): `REGRESSION: with both sleeve roots skipped, the cooldown state file must land at`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 194`** (1 nodes): `A fresh box that has not written Bybit liquidation rows yet emits no alert;`
+- **Thin community `Community 194`** (1 nodes): `NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 195`** (1 nodes): `Only the deployed Bybit leg is monitored for liquidation freshness.`
+- **Thin community `Community 195`** (1 nodes): `NORMAL PATH unchanged: when --continuous-root IS provided, the state file still`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 196`** (1 nodes): `telegram-alert-1: the resolved-note retry is tracked under the ``resolved:```
+- **Thin community `Community 196`** (1 nodes): `deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 197`** (1 nodes): `The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside`
+- **Thin community `Community 197`** (1 nodes): `kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 198`** (1 nodes): `telegram-alert-1: the resolved-note retry is tracked under the ``resolved:```
+- **Thin community `Community 198`** (1 nodes): `The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 199`** (1 nodes): `The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never`
+- **Thin community `Community 199`** (1 nodes): `kill-switch-4: a manual/cron invocation from another CWD must not silently     d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 200`** (1 nodes): `End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the`
+- **Thin community `Community 200`** (1 nodes): `The deployed liquidation collector is Bybit-only; stale historical Binance     f`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 201`** (1 nodes): `A genuinely dead timer (not-active two consecutive runs) escalates from the`
+- **Thin community `Community 201`** (1 nodes): `A fresh box that has not written Bybit liquidation rows yet emits no alert;`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 202`** (1 nodes): `True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day`
+- **Thin community `Community 202`** (1 nodes): `Only the deployed Bybit leg is monitored for liquidation freshness.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 203`** (1 nodes): `Coerce `value` to a finite float, returning `default` if missing/invalid.`
+- **Thin community `Community 203`** (1 nodes): `telegram-alert-1: the resolved-note retry is tracked under the ``resolved:```
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 204`** (1 nodes): `Coerce `value` to an int, returning `default` (0) on a missing/invalid value.`
+- **Thin community `Community 204`** (1 nodes): `The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 205`** (1 nodes): `Format a fraction as a 2-decimal percentage, or `invalid` if not finite.`
+- **Thin community `Community 205`** (1 nodes): `telegram-alert-1: the resolved-note retry is tracked under the ``resolved:```
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 206`** (1 nodes): `Parse an ISO date/datetime string to a UTC `date`, or None if empty.`
+- **Thin community `Community 206`** (1 nodes): `The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 207`** (1 nodes): `Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A`
+- **Thin community `Community 207`** (1 nodes): `End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 208`** (1 nodes): `Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty.`
+- **Thin community `Community 208`** (1 nodes): `A genuinely dead timer (not-active two consecutive runs) escalates from the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 209`** (1 nodes): `A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl`
+- **Thin community `Community 209`** (1 nodes): `True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 210`** (1 nodes): `Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r`
+- **Thin community `Community 210`** (1 nodes): `Coerce `value` to a finite float, returning `default` if missing/invalid.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 211`** (1 nodes): `The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A`
+- **Thin community `Community 211`** (1 nodes): `Coerce `value` to an int, returning `default` (0) on a missing/invalid value.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 212`** (1 nodes): `BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g`
+- **Thin community `Community 212`** (1 nodes): `Format a fraction as a 2-decimal percentage, or `invalid` if not finite.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 213`** (1 nodes): `calendar_shift is the gap-aware no-look-ahead primitive: it returns the     valu`
+- **Thin community `Community 213`** (1 nodes): `Parse an ISO date/datetime string to a UTC `date`, or None if empty.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 214`** (1 nodes): `calendar_roll measures a TIME span, so a missing day shrinks the window     rath`
+- **Thin community `Community 214`** (1 nodes): `Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 215`** (1 nodes): `Numerical-equivalence gate: the helper is byte-identical to the inline math`
+- **Thin community `Community 215`** (1 nodes): `Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 216`** (1 nodes): `Refuse a state-changing submission on a real-money account unless         the ca`
+- **Thin community `Community 216`** (1 nodes): `A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 217`** (1 nodes): `Return a place_order-shaped dict for an order already at Bybit under         ``o`
+- **Thin community `Community 217`** (1 nodes): `Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 218`** (1 nodes): `Closed-PnL records for the account.          Used by the orphan reconciler to ba`
+- **Thin community `Community 218`** (1 nodes): `The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.      A`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 219`** (1 nodes): `Funding-settlement rows from the account transaction log.          Used by the d`
+- **Thin community `Community 219`** (1 nodes): `BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 220`** (1 nodes): `int(value) that returns 0 instead of raising on a non-numeric/None value.`
+- **Thin community `Community 220`** (1 nodes): `calendar_shift is the gap-aware no-look-ahead primitive: it returns the     valu`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 221`** (1 nodes): `True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur`
+- **Thin community `Community 221`** (1 nodes): `calendar_roll measures a TIME span, so a missing day shrinks the window     rath`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 222`** (1 nodes): `Subscribe to wallet balance pushes. Bybit pushes a per-account         snapshot`
+- **Thin community `Community 222`** (1 nodes): `Numerical-equivalence gate: the helper is byte-identical to the inline math`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 223`** (1 nodes): `Socket-level liveness of the private stream. pybit's WebSocket subclasses`
+- **Thin community `Community 223`** (1 nodes): `Refuse a state-changing submission on a real-money account unless         the ca`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 224`** (1 nodes): `Route order placement + cancellation through WS first, REST as fallback.      Ex`
+- **Thin community `Community 224`** (1 nodes): `Return a place_order-shaped dict for an order already at Bybit under         ``o`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 225`** (1 nodes): `Issue a WS call and block (with timeout) for the ack.          Returns the ack's`
+- **Thin community `Community 225`** (1 nodes): `Closed-PnL records for the account.          Used by the orphan reconciler to ba`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 226`** (1 nodes): `Look up an order by orderLinkId after a WS timeout. Returns a         place_orde`
+- **Thin community `Community 226`** (1 nodes): `Funding-settlement rows from the account transaction log.          Used by the d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 227`** (1 nodes): `Internal signal that the WS submission failed — the router decides     whether t`
+- **Thin community `Community 227`** (1 nodes): `int(value) that returns 0 instead of raising on a non-numeric/None value.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 228`** (1 nodes): `Refuse a state-changing WS submission on a real-money account unless the`
+- **Thin community `Community 228`** (1 nodes): `True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 229`** (1 nodes): `Build a WS trade client, retrying with jittered exponential backoff.      pybit'`
+- **Thin community `Community 229`** (1 nodes): `Subscribe to wallet balance pushes. Bybit pushes a per-account         snapshot`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 230`** (1 nodes): `Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method`
+- **Thin community `Community 230`** (1 nodes): `Socket-level liveness of the private stream. pybit's WebSocket subclasses`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 231`** (1 nodes): `Ensure pybit's ping timer is a daemon thread that does not block shutdown.`
+- **Thin community `Community 231`** (1 nodes): `Route order placement + cancellation through WS first, REST as fallback.      Ex`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 232`** (1 nodes): `True for pybit's "You have already subscribed to this topic" error.      pybit's`
+- **Thin community `Community 232`** (1 nodes): `Issue a WS call and block (with timeout) for the ack.          Returns the ack's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 233`** (1 nodes): `Create a fresh pybit WebSocket client tuned for kline streams.`
+- **Thin community `Community 233`** (1 nodes): `Look up an order by orderLinkId after a WS timeout. Returns a         place_orde`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 234`** (1 nodes): `Per-connection bookkeeping for the pool.`
+- **Thin community `Community 234`** (1 nodes): `Internal signal that the WS submission failed — the router decides     whether t`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 235`** (1 nodes): `Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large`
+- **Thin community `Community 235`** (1 nodes): `Refuse a state-changing WS submission on a real-money account unless the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 236`** (1 nodes): `Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n`
+- **Thin community `Community 236`** (1 nodes): `Build a WS trade client, retrying with jittered exponential backoff.      pybit'`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 237`** (1 nodes): `Diff the current assignment against ``new_symbols``: subscribe to         adds,`
+- **Thin community `Community 237`** (1 nodes): `Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 238`** (1 nodes): `Build a closure that parses pybit's kline message, marks the         connection`
+- **Thin community `Community 238`** (1 nodes): `Ensure pybit's ping timer is a daemon thread that does not block shutdown.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 239`** (1 nodes): `Inspect every connection's ``last_message_monotonic``. Connections         idle`
+- **Thin community `Community 239`** (1 nodes): `True for pybit's "You have already subscribed to this topic" error.      pybit's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 240`** (1 nodes): `Extract the symbol component from a kline topic ``kline.60.SYMBOL``.`
+- **Thin community `Community 240`** (1 nodes): `Create a fresh pybit WebSocket client tuned for kline streams.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 241`** (1 nodes): `realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')`
+- **Thin community `Community 241`** (1 nodes): `Per-connection bookkeeping for the pool.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 242`** (1 nodes): `The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must`
+- **Thin community `Community 242`** (1 nodes): `Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 243`** (1 nodes): `Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam`
+- **Thin community `Community 243`** (1 nodes): `Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 244`** (1 nodes): `continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus`
+- **Thin community `Community 244`** (1 nodes): `Diff the current assignment against ``new_symbols``: subscribe to         adds,`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 245`** (1 nodes): `Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so`
+- **Thin community `Community 245`** (1 nodes): `Build a closure that parses pybit's kline message, marks the         connection`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 246`** (1 nodes): `The watchdog skips an intentionally-off sleeve. Explicit env always wins; the`
+- **Thin community `Community 246`** (1 nodes): `Inspect every connection's ``last_message_monotonic``. Connections         idle`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 247`** (1 nodes): `REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception`
+- **Thin community `Community 247`** (1 nodes): `Extract the symbol component from a kline topic ``kline.60.SYMBOL``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 248`** (1 nodes): `Run main() with every root skipped and no explicit --state-file, so the     stat`
+- **Thin community `Community 248`** (1 nodes): `realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 249`** (1 nodes): `REGRESSION: with both sleeve roots skipped, the cooldown state file must land at`
+- **Thin community `Community 249`** (1 nodes): `The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 250`** (1 nodes): `NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the`
+- **Thin community `Community 250`** (1 nodes): `Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 251`** (1 nodes): `NORMAL PATH unchanged: when --continuous-root IS provided, the state file still`
+- **Thin community `Community 251`** (1 nodes): `continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 252`** (1 nodes): `deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented`
+- **Thin community `Community 252`** (1 nodes): `Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 253`** (1 nodes): `kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm`
+- **Thin community `Community 253`** (1 nodes): `The watchdog skips an intentionally-off sleeve. Explicit env always wins; the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 254`** (1 nodes): `The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on`
+- **Thin community `Community 254`** (1 nodes): `REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 255`** (1 nodes): `kill-switch-4: a manual/cron invocation from another CWD must not silently     d`
+- **Thin community `Community 255`** (1 nodes): `Run main() with every root skipped and no explicit --state-file, so the     stat`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 256`** (1 nodes): `The deployed liquidation collector is Bybit-only; stale historical Binance     f`
+- **Thin community `Community 256`** (1 nodes): `REGRESSION: with both sleeve roots skipped, the cooldown state file must land at`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 257`** (1 nodes): `A fresh box that has not written Bybit liquidation rows yet emits no alert;`
+- **Thin community `Community 257`** (1 nodes): `NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 258`** (1 nodes): `Only the deployed Bybit leg is monitored for liquidation freshness.`
+- **Thin community `Community 258`** (1 nodes): `NORMAL PATH unchanged: when --continuous-root IS provided, the state file still`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 259`** (1 nodes): `telegram-alert-5: a timer's FIRST not-active observation (no prior) is a WARNING`
+- **Thin community `Community 259`** (1 nodes): `deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 260`** (1 nodes): `The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside`
+- **Thin community `Community 260`** (1 nodes): `kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 261`** (1 nodes): `The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never`
+- **Thin community `Community 261`** (1 nodes): `The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 262`** (1 nodes): `End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the`
+- **Thin community `Community 262`** (1 nodes): `kill-switch-4: a manual/cron invocation from another CWD must not silently     d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 263`** (1 nodes): `A genuinely dead timer (not-active two consecutive runs) escalates from the`
+- **Thin community `Community 263`** (1 nodes): `The deployed liquidation collector is Bybit-only; stale historical Binance     f`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 264`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
+- **Thin community `Community 264`** (1 nodes): `A fresh box that has not written Bybit liquidation rows yet emits no alert;`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 265`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
+- **Thin community `Community 265`** (1 nodes): `Only the deployed Bybit leg is monitored for liquidation freshness.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 266`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
+- **Thin community `Community 266`** (1 nodes): `telegram-alert-5: a timer's FIRST not-active observation (no prior) is a WARNING`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 267`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 267`** (1 nodes): `The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 268`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra`
+- **Thin community `Community 268`** (1 nodes): `The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 269`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     reconc`
+- **Thin community `Community 269`** (1 nodes): `End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 270`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env`
+- **Thin community `Community 270`** (1 nodes): `A genuinely dead timer (not-active two consecutive runs) escalates from the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 271`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
+- **Thin community `Community 271`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 272`** (1 nodes): `The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho`
+- **Thin community `Community 272`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 273`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
+- **Thin community `Community 273`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 274`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi`
+- **Thin community `Community 274`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 275`** (1 nodes): `The continuous-fade sleeve is still covered by the reset —     omitting it would`
+- **Thin community `Community 275`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tra`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 276`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
+- **Thin community `Community 276`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     reconc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 277`** (1 nodes): `Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed`
+- **Thin community `Community 277`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 278`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
+- **Thin community `Community 278`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 279`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
+- **Thin community `Community 279`** (1 nodes): `The long bash runner must expose the WS_KLINES_* env vars as CLI args.     Witho`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 280`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
+- **Thin community `Community 280`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 281`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
+- **Thin community `Community 281`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 282`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
+- **Thin community `Community 282`** (1 nodes): `The continuous-fade sleeve is still covered by the reset —     omitting it would`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 283`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
+- **Thin community `Community 283`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 284`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
+- **Thin community `Community 284`** (1 nodes): `Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 285`** (1 nodes): `The fail-closed arm must only match truthy spellings — demo / false /     unset`
+- **Thin community `Community 285`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 286`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
+- **Thin community `Community 286`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 287`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
+- **Thin community `Community 287`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 288`** (1 nodes): `Parity check: the collector is verified the SAME way as the risk service     (bo`
+- **Thin community `Community 288`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 289`** (1 nodes): `Compatibility short roots must not appear in the live report ExecStart.`
+- **Thin community `Community 289`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 290`** (1 nodes): `Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).`
+- **Thin community `Community 290`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 291`** (1 nodes): `The paper sleeve must still write/read its own dataset root so reconcile can`
+- **Thin community `Community 291`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 292`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
+- **Thin community `Community 292`** (1 nodes): `The fail-closed arm must only match truthy spellings — demo / false /     unset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 293`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
+- **Thin community `Community 293`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 294`** (1 nodes): `The paper sleeve must still write/read its own dataset root so reconcile can`
+- **Thin community `Community 294`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 295`** (1 nodes): `Dropping the follow line must not disturb the knobs that make this a true     no`
+- **Thin community `Community 295`** (1 nodes): `Parity check: the collector is verified the SAME way as the risk service     (bo`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 296`** (1 nodes): `Write the strategy-vs-BTC equity PNG. ``png_name`` lets active sleeves     (e.g.`
+- **Thin community `Community 296`** (1 nodes): `Compatibility short roots must not appear in the live report ExecStart.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 297`** (1 nodes): `Each series' legend multiple, measured at the LAST DATE COMMON to all series.`
+- **Thin community `Community 297`** (1 nodes): `Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 298`** (1 nodes): `Insert +0.00%/count-0 rows for months absent between the first and last row. A m`
+- **Thin community `Community 298`** (1 nodes): `The paper sleeve must still write/read its own dataset root so reconcile can`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 299`** (1 nodes): `Rows are {month, return, count}; `count` is real trades when `monthly` carries`
+- **Thin community `Community 299`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 300`** (1 nodes): `Forward-fill an equity series to one point per calendar day so no-trade     gaps`
+- **Thin community `Community 300`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 301`** (1 nodes): `One benchmark line to overlay on the official chart.      ``points`` is a normal`
+- **Thin community `Community 301`** (1 nodes): `The paper sleeve must still write/read its own dataset root so reconcile can`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 302`** (1 nodes): `Load a price CSV into a normalised overlay clipped to ``[start, end]``.      Rob`
+- **Thin community `Community 302`** (1 nodes): `Dropping the follow line must not disturb the knobs that make this a true     no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 303`** (1 nodes): `Convert overlay specs to renderer series dicts, auto-coloring from the     palet`
+- **Thin community `Community 303`** (1 nodes): `Write the strategy-vs-BTC equity PNG. ``png_name`` lets active sleeves     (e.g.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 304`** (1 nodes): `Fallback: plot a cumulative-equity curve from the engine's equity CSV.`
+- **Thin community `Community 304`** (1 nodes): `Each series' legend multiple, measured at the LAST DATE COMMON to all series.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 305`** (1 nodes): `Count traded symbols absent from the last 30d of klines.      A value > 0 proves`
+- **Thin community `Community 305`** (1 nodes): `Insert +0.00%/count-0 rows for months absent between the first and last row. A m`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 306`** (1 nodes): `residual_momentum[D] = sum residual_return[D-9 .. D-3] (rolling 7, shift 3).`
+- **Thin community `Community 306`** (1 nodes): `Rows are {month, return, count}; `count` is real trades when `monthly` carries`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 307`** (1 nodes): `Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d`
+- **Thin community `Community 307`** (1 nodes): `Forward-fill an equity series to one point per calendar day so no-trade     gaps`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 308`** (1 nodes): `The (causal) residual-momentum polars expression. Factored out so the exact wind`
+- **Thin community `Community 308`** (1 nodes): `One benchmark line to overlay on the official chart.      ``points`` is a normal`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 309`** (1 nodes): `Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produc`
+- **Thin community `Community 309`** (1 nodes): `Load a price CSV into a normalised overlay clipped to ``[start, end]``.      Rob`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 310`** (1 nodes): `Which kline store this root actually holds. Research full-PIT roots use ``klines`
+- **Thin community `Community 310`** (1 nodes): `Convert overlay specs to renderer series dicts, auto-coloring from the     palet`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 311`** (1 nodes): `True when a WS connection opened at ``opened_monotonic`` has outlived     ``max_`
+- **Thin community `Community 311`** (1 nodes): `Fallback: plot a cumulative-equity curve from the engine's equity CSV.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 312`** (1 nodes): `Rows from a Bybit v5 ``allLiquidation.*`` message (empty for non-liq frames).`
+- **Thin community `Community 312`** (1 nodes): `Count traded symbols absent from the last 30d of klines.      A value > 0 proves`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 313`** (1 nodes): `Rows from a Binance UM ``!forceOrder@arr`` message (single or list shape).`
+- **Thin community `Community 313`** (1 nodes): `residual_momentum[D] = sum residual_return[D-9 .. D-3] (rolling 7, shift 3).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 314`** (1 nodes): `Thread-safe append-only writer, one file per venue per UTC day.`
+- **Thin community `Community 314`** (1 nodes): `Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 315`** (1 nodes): `All currently trading linear symbols (cursor-paginated REST; public).`
+- **Thin community `Community 315`** (1 nodes): `The (causal) residual-momentum polars expression. Factored out so the exact wind`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 316`** (1 nodes): `The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must`
+- **Thin community `Community 316`** (1 nodes): `Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 317`** (1 nodes): `Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam`
+- **Thin community `Community 317`** (1 nodes): `Which kline store this root actually holds. Research full-PIT roots use ``klines`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 318`** (1 nodes): `continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus`
+- **Thin community `Community 318`** (1 nodes): `True when a WS connection opened at ``opened_monotonic`` has outlived     ``max_`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 319`** (1 nodes): `Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so`
+- **Thin community `Community 319`** (1 nodes): `Rows from a Bybit v5 ``allLiquidation.*`` message (empty for non-liq frames).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 320`** (1 nodes): `The watchdog skips an intentionally-off sleeve. Explicit env always wins; the`
+- **Thin community `Community 320`** (1 nodes): `Rows from a Binance UM ``!forceOrder@arr`` message (single or list shape).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 321`** (1 nodes): `REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception`
+- **Thin community `Community 321`** (1 nodes): `Thread-safe append-only writer, one file per venue per UTC day.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 322`** (1 nodes): `Run main() with every root skipped and no explicit --state-file, so the     stat`
+- **Thin community `Community 322`** (1 nodes): `All currently trading linear symbols (cursor-paginated REST; public).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 323`** (1 nodes): `NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the`
+- **Thin community `Community 323`** (1 nodes): `The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 324`** (1 nodes): `NORMAL PATH unchanged: when --continuous-root IS provided, the state file still`
+- **Thin community `Community 324`** (1 nodes): `Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 325`** (1 nodes): `deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented`
+- **Thin community `Community 325`** (1 nodes): `continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness mus`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 326`** (1 nodes): `kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm`
+- **Thin community `Community 326`** (1 nodes): `Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 327`** (1 nodes): `The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on`
+- **Thin community `Community 327`** (1 nodes): `The watchdog skips an intentionally-off sleeve. Explicit env always wins; the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 328`** (1 nodes): `kill-switch-4: a manual/cron invocation from another CWD must not silently     d`
+- **Thin community `Community 328`** (1 nodes): `REGRESSION (audit 2026-06-12): send_telegram_message returns False (no exception`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 329`** (1 nodes): `liquidation-collector-3: a binance leg that wrote before but went silent must`
+- **Thin community `Community 329`** (1 nodes): `Run main() with every root skipped and no explicit --state-file, so the     stat`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 330`** (1 nodes): `A venue that has NEVER written (region-blocked binance leg pending a     permitt`
+- **Thin community `Community 330`** (1 nodes): `NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 331`** (1 nodes): `If every venue that wrote goes stale, each pages its own per-venue WARNING     (`
+- **Thin community `Community 331`** (1 nodes): `NORMAL PATH unchanged: when --continuous-root IS provided, the state file still`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 332`** (1 nodes): `telegram-alert-5: a timer's FIRST not-active observation (no prior) is a WARNING`
+- **Thin community `Community 332`** (1 nodes): `deploy-ci-1 / kill-switch-1: with BOTH continuous sleeves off (the documented`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 333`** (1 nodes): `The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside`
+- **Thin community `Community 333`** (1 nodes): `kill-switch-2: the deploy enables the rmom-refresh timer under     continuous_rm`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 334`** (1 nodes): `telegram-alert-1: the resolved-note retry is tracked under the ``resolved:```
+- **Thin community `Community 334`** (1 nodes): `The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 335`** (1 nodes): `The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never`
+- **Thin community `Community 335`** (1 nodes): `kill-switch-4: a manual/cron invocation from another CWD must not silently     d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 336`** (1 nodes): `End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the`
+- **Thin community `Community 336`** (1 nodes): `liquidation-collector-3: a binance leg that wrote before but went silent must`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 337`** (1 nodes): `A genuinely dead timer (not-active two consecutive runs) escalates from the`
+- **Thin community `Community 337`** (1 nodes): `A venue that has NEVER written (region-blocked binance leg pending a     permitt`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 338`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
+- **Thin community `Community 338`** (1 nodes): `If every venue that wrote goes stale, each pages its own per-venue WARNING     (`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 339`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
+- **Thin community `Community 339`** (1 nodes): `telegram-alert-5: a timer's FIRST not-active observation (no prior) is a WARNING`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 340`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
+- **Thin community `Community 340`** (1 nodes): `The debounced WARNING -> CRITICAL escalation must page IMMEDIATELY, even inside`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 341`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 341`** (1 nodes): `telegram-alert-1: the resolved-note retry is tracked under the ``resolved:```
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 342`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     reconc`
+- **Thin community `Community 342`** (1 nodes): `The reserved bookkeeping namespaces (resolved:/pending_timer:/sev:) must never`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 343`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env`
+- **Thin community `Community 343`** (1 nodes): `End-to-end: a timer momentarily inactive during a deploy pages a WARNING on the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 344`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
+- **Thin community `Community 344`** (1 nodes): `A genuinely dead timer (not-active two consecutive runs) escalates from the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 345`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
+- **Thin community `Community 345`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 346`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi`
+- **Thin community `Community 346`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 347`** (1 nodes): `The continuous-fade sleeve is still covered by the reset —     omitting it would`
+- **Thin community `Community 347`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 348`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
+- **Thin community `Community 348`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 349`** (1 nodes): `Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed`
+- **Thin community `Community 349`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     reconc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 350`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
+- **Thin community `Community 350`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE env`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 351`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
+- **Thin community `Community 351`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 352`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
+- **Thin community `Community 352`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 353`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
+- **Thin community `Community 353`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anythi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 354`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
+- **Thin community `Community 354`** (1 nodes): `The continuous-fade sleeve is still covered by the reset —     omitting it would`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 355`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
+- **Thin community `Community 355`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 356`** (1 nodes): `The fail-closed arm must only match truthy spellings — demo / false /     unset`
+- **Thin community `Community 356`** (1 nodes): `Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 357`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
+- **Thin community `Community 357`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 358`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
+- **Thin community `Community 358`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 359`** (1 nodes): `Parity check: the collector is verified the SAME way as the risk service     (bo`
+- **Thin community `Community 359`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 360`** (1 nodes): `Compatibility short roots must not appear in the live report ExecStart.`
+- **Thin community `Community 360`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 361`** (1 nodes): `Long, continuous, paper, and hedge roots stay wired for the active books.`
+- **Thin community `Community 361`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 362`** (1 nodes): `The multi-line ExecStart continuation must stay intact after the edit:     every`
+- **Thin community `Community 362`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 363`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
+- **Thin community `Community 363`** (1 nodes): `The fail-closed arm must only match truthy spellings — demo / false /     unset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 364`** (1 nodes): `Dropping the follow line must not disturb the knobs that make this a true     no`
+- **Thin community `Community 364`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 365`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 366`** (1 nodes): `Parity check: the collector is verified the SAME way as the risk service     (bo`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 367`** (1 nodes): `Compatibility short roots must not appear in the live report ExecStart.`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 368`** (1 nodes): `Long, continuous, paper, and hedge roots stay wired for the active books.`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 369`** (1 nodes): `The multi-line ExecStart continuation must stay intact after the edit:     every`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 370`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 371`** (1 nodes): `Dropping the follow line must not disturb the knobs that make this a true     no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `ResearchConfig` connect `Community 0` to `Community 1`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 23`?**
-  _High betweenness centrality (0.141) - this node is a cross-community bridge._
-- **Why does `ContinuousEventConfig` connect `Community 2` to `Community 0`, `Community 1`, `Community 32`, `Community 6`, `Community 7`, `Community 13`, `Community 15`, `Community 16`?**
-  _High betweenness centrality (0.096) - this node is a cross-community bridge._
-- **Why does `write_dataset()` connect `Community 3` to `Community 0`, `Community 2`, `Community 36`, `Community 5`, `Community 6`, `Community 7`, `Community 9`, `Community 10`, `Community 13`, `Community 14`, `Community 17`, `Community 18`, `Community 51`, `Community 20`, `Community 22`?**
+- **Why does `ResearchConfig` connect `Community 0` to `Community 1`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 8`, `Community 9`, `Community 10`?**
+  _High betweenness centrality (0.144) - this node is a cross-community bridge._
+- **Why does `ContinuousEventConfig` connect `Community 2` to `Community 0`, `Community 1`, `Community 32`, `Community 7`, `Community 8`, `Community 11`, `Community 14`, `Community 15`?**
+  _High betweenness centrality (0.097) - this node is a cross-community bridge._
+- **Why does `write_dataset()` connect `Community 6` to `Community 0`, `Community 2`, `Community 3`, `Community 36`, `Community 5`, `Community 7`, `Community 8`, `Community 10`, `Community 11`, `Community 16`, `Community 17`, `Community 18`, `Community 51`, `Community 20`?**
   _High betweenness centrality (0.079) - this node is a cross-community bridge._
 - **Are the 1432 inferred relationships involving `ResearchConfig` (e.g. with `LongNativeDemoDaemon` and `Long-side daemon for the v11a sleeve.  Keeps a single Python process up, subscri`) actually correct?**
   _`ResearchConfig` has 1432 INFERRED edges - model-reasoned connections that need verification._

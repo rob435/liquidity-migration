@@ -11,13 +11,15 @@ diagnostic.
 
 Pipeline:
     1. pull        — rsync the live demo+paper ledgers for every selected sleeve  [--no-pull]
-    2. rmom        — auto-recompute residual_momentum when continuous selected    [--no-rmom]
-    3. reconcile   — per-sleeve paper/demo (+ continuous signal check)            [--sleeves]
-    4. summary     — one consolidated headline across selected sleeves
+    2. reconcile   — per-sleeve paper/demo (+ continuous signal check)            [--sleeves]
+    3. summary     — one consolidated headline across selected sleeves
 
 Manifest refresh / kline-fill / coverage / backtest provisioning is not part of
 the quick path; refresh the PIT manifest manually when needed:
 `python -m liquidity_migration --data-root <root> archive-manifest`.
+An explicit `--refresh-rmom` is available for maintenance, but the quick signal
+check reads the freshly pulled live market plane and does not need a research-root
+rebuild.
 
 Safe by default: read-only against the VPS, demo only, never real money.
 
@@ -402,7 +404,16 @@ def main() -> int:
     p.add_argument("--config", default=DEFAULT_CONFIG, help="Strategy config (the promoted profile).")
     p.add_argument("--vps", default=VPS_HOST, help="VPS ssh target for the ledger pull.")
     p.add_argument("--no-pull", action="store_true", help="Skip the VPS ledger rsync; use local ledgers.")
-    p.add_argument("--no-rmom", action="store_true", help="Skip the automatic residual_momentum recompute.")
+    p.add_argument(
+        "--refresh-rmom",
+        action="store_true",
+        help="Explicitly rebuild research-root residual momentum before reconciliation (slow).",
+    )
+    p.add_argument(
+        "--no-rmom",
+        action="store_true",
+        help="Deprecated compatibility no-op; quick mode no longer refreshes RMOM by default.",
+    )
     p.add_argument("--dry-run", action="store_true", help="Print every command without running anything.")
     args = p.parse_args()
 
@@ -423,9 +434,10 @@ def main() -> int:
         for s in sleeves:
             pull_sleeve(step, args.vps, s)
 
-    # 2. Research-data provisioning: the quick path only needs the continuous
-    # signal-check's rmom refresh.
-    if "continuous" in sleeves and not args.no_rmom:
+    # Explicit maintenance only. The quick signal check reads the pulled live
+    # market plane, so rebuilding a multi-year research root here made a nominal
+    # execution-only reconciliation take minutes and consume large memory.
+    if "continuous" in sleeves and args.refresh_rmom and not args.no_rmom:
         refresh_rmom(step, root, today)
 
     # 3. Per-sleeve reconcile. (The continuous signal-check uses the pulled

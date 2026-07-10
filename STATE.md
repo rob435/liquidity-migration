@@ -17,9 +17,8 @@ This is the live operating page. Durable research decisions are in
   and new evidence.
 - Direct Bybit checks after the 1000TAGUSDT incident found zero positions and
   zero open orders.
-- The VPS was still on commit `0aa995c` at the start of this work. The local
-  safety release is not considered active until tests, commit, checked deploy,
-  verification, and the guarded clean-window reset all complete.
+- Safety release `77bf04304ee7f8fd5377873484e11c3bc0b88753` is deployed and
+  independently verified on the VPS.
 - The Bybit depth and liquidation collectors are active and fresh. They are
   forward context/shadow data, not historical alpha evidence.
 - An external liveness dead-man URL is still not provisioned. The on-box timer
@@ -63,7 +62,7 @@ loss budget, or reliable component attribution was unjustified.
 Sniper is pinned off in demo, paper, deploy, verify, and recovery. Cleanup still
 handles legacy or late sniper fills while new sniper entries remain disabled.
 
-## Safety release in the local tree
+## Deployed safety release
 
 - Side- and component-aware WS risk reconciliation, orphan adoption, side-flip
   handling, false-empty protection, quantity-conserving Closed-PnL allocation,
@@ -93,9 +92,12 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
 - Unknown or failed PIT status now makes the LONG three-way leg fail rather than
   returning a green headline.
 
-The guarded reset will archive this forensic window before starting clean
-post-fix demo/paper ledgers. It never closes positions or cancels orders; it
-only runs after the venue is already flat.
+The forensic window was archived as
+`data/_archive/ledger-reset-20260710T015456Z-tail-safety-20260710.tar.gz`
+(SHA-256 `a4c5bf5df0338f7f320004d51e16cc932d2ceac5867e8a7fe7c36b1670e2c076`).
+The post-reset quick reconcile is clean: both sleeves have 0 paper trades,
+0 demo trades, 0 unmatched rows, and no lifecycle/reason divergence. Venue is
+still flat with no open orders.
 
 ## Long v11a research read
 
@@ -135,16 +137,12 @@ small forward sample as execution evidence, not validation.
 
 ## Next actions
 
-1. Finish the full test/lint/graph audit, commit only repo-owned changes, deploy
-   the exact commit, and verify every demo/paper service with sniper off.
-2. Reconfirm venue flat/no-orders, execute the guarded all-sleeve reset, and run
-   a clean quick reconciliation.
-3. Let both sleeves accrue a post-fix forward sample; reconcile after meaningful
+1. Let both sleeves accrue a post-fix forward sample; reconcile after meaningful
    fills or any VPS/data change.
-4. On the larger machine after 2026-07-12, refresh/verify both full-PIT roots and
+2. On the larger machine after 2026-07-12, refresh/verify both full-PIT roots and
    run the frozen tail-survival matrix. A pass only authorizes a new shadow
    review; it does not change the live profile.
-5. Build and audit granular datasets before running the adverse-state study.
+3. Build and audit granular datasets before running the adverse-state study.
    Do not infer missing sub-hour data from 1h bars.
 
 ## Canonical references

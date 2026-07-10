@@ -102,6 +102,42 @@ def test_reconcile_main_returns_zero_when_leg_clean(monkeypatch) -> None:
     assert reconcile.main() == 0
 
 
+def test_quick_reconcile_skips_research_rmom_unless_explicit(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        reconcile,
+        "reconcile_continuous",
+        lambda *a, **k: ("continuous clean", True),
+    )
+    monkeypatch.setattr(
+        reconcile,
+        "refresh_rmom",
+        lambda *a, **k: calls.append("refresh"),
+    )
+
+    monkeypatch.setattr(
+        reconcile.sys,
+        "argv",
+        ["reconcile.py", "--sleeves", "continuous", "--no-pull"],
+    )
+    assert reconcile.main() == 0
+    assert calls == []
+
+    monkeypatch.setattr(
+        reconcile.sys,
+        "argv",
+        [
+            "reconcile.py",
+            "--sleeves",
+            "continuous",
+            "--no-pull",
+            "--refresh-rmom",
+        ],
+    )
+    assert reconcile.main() == 0
+    assert calls == ["refresh"]
+
+
 def test_reconcile_continuous_runs_paper_demo_gate() -> None:
     class FakeStep:
         def __init__(self) -> None:

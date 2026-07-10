@@ -39,7 +39,7 @@ scripts/ops.sh test -q
 | Command | Canonical route | Operational effect |
 |---|---|---|
 | `status` | `scripts/verify_vps_live.sh` | Read-only VPS checkout, config, credential, service, and liveness checks. |
-| `reconcile quick` | `scripts/reconcile.sh --quick` | Fast paper/demo execution reconciliation; reads VPS ledgers and writes local reports. |
+| `reconcile quick` | `scripts/reconcile.sh --quick` | Fast paper/demo execution reconciliation; reads VPS ledgers and writes local reports without rebuilding research RMOM. |
 | `reconcile full` | `scripts/reconcile.sh` | Full PIT refresh/backtest/demo/paper reconciliation. This can download data and is substantially slower. |
 | `equity` | `scripts/equity_curves.sh` | Official LONG/CONTINUOUS equity runner; forwards every option unchanged. |
 | `reset` | VPS `scripts/reset_demo_paper_ledgers.sh` | Dry-run preview by default; `--execute` is the only mutation opt-in. |
@@ -62,6 +62,9 @@ scripts/ops.sh status
 
 # Quick execution-plane comparison for both sleeves.
 scripts/ops.sh reconcile quick --sleeves long,continuous
+
+# Optional maintenance only; this is intentionally not part of quick mode.
+scripts/ops.sh reconcile quick --refresh-rmom
 
 # Full three-way PIT reconciliation, with the canonical dry-run option.
 scripts/ops.sh reconcile full --dry-run
