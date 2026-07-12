@@ -1,6 +1,6 @@
 # Research Program State
 
-Last updated: 2026-07-10.
+Last updated: 2026-07-12.
 
 This is a descriptive live operating page, not research policy. Durable
 research decisions are in
@@ -11,35 +11,29 @@ research decisions are in
 
 | Sleeve | Mode | Current state |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | Base sleeve and safety release are live; sniper is retired; five TAC/SKL/VELVET rows are 5/5 matched; hedge target reconciliation is five-minute |
-| `LongV11aDivWeekendVol` | Bybit demo + paper | On and currently flat; the earlier ADA pair remains historical execution-skew evidence |
+| `continuous_ensemble_v2` | Bybit demo + paper | On in a clean ledger epoch; hedge add/reduce is venue-smoke-verified and target reconciliation is five-minute |
+| `LongV11aDivWeekendVol` | Bybit demo + paper | On and flat in the clean ledger epoch; prior rows remain in reset archives |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
-- Direct Bybit snapshot at `2026-07-10T08:48Z`: two open shorts, `$161.13`
-  venue exposure and `-$6.78` uPnL. SKLUSDT is 23,136 units at `-$6.97`;
-  TACUSDT is 8,000 units at `+$0.18`. LONG and the hedge ledger are flat.
-- The safety runtime release rooted at `77bf04304` is deployed and independently
-  verified; follow-up operator-only changes do not alter the trading object.
-- Post-reset book: TACUSDT p3 opened at `2026-07-10T02:00:00Z`; SKLUSDT p3,
-  p4p3, and p4p5 opened at `2026-07-10T06:00:00Z`. All four have paper twins,
-  one venue TP per net symbol (TAC `0.003647`, SKL `0.00469`), and durable
-  24-hour exits at `2026-07-11T02:00:00Z` / `06:00:00Z`. No server-side stop
-  is configured: that is deliberate but leaves gap/tail risk until a registered
-  sizing or adverse-state treatment earns deployment. VELVETUSDT p3 subsequently
-  joined the same clock and is paired in the later 5/5 reconcile. Sniper remains
-  absent.
-- Quick reconciliation at `2026-07-10T11:46Z` is 5/5 paired with no unmatched,
-  status, or exit-reason divergence. VELVETUSDT p3 is the fifth row. Mean adverse
-  demo entry slippage is 72.13 bps, median 136.96 bps, and worst 170.73 bps; one
-  favorable VELVET fill makes the mean unrepresentative.
-  TAC replays as D9. SKL is a visible D8 boundary warning on the later live
-  snapshot, but the independent full-PIT plane confirms it and both planes show
-  zero hard (D7-or-lower) drift.
-- The refreshed funded three-way run reaches the same execution verdict: four
-  paper/demo pairs, no unmatched rows, no hard off-decile signal, and both
-  independent-PIT entries confirmed. This is agreement/execution evidence, not
-  alpha or exit-safety evidence.
+- Direct Bybit demo snapshot at `2026-07-12T20:44Z`: equity `$10,024.82`, zero
+  positions, zero open orders, and zero venue exposure. Demo, paper, and hedge
+  trade/order ledgers are empty; the continuous demo/paper cycle ledgers each
+  contain only the fresh verified-flat reset boundary.
+- Runtime commit `3db9932291aa179d9618f6ece96309f7ee72671a` is deployed and
+  independently verified. The full local gate is 2,744 passed / 1 skipped; the
+  deploy gate is 113 passed; the GitHub VPS Deploy run is green.
+- The final clean epoch is archived at
+  `data/_archive/ledger-reset-20260712T204249Z-clean-slate-hedge-verified.tar.gz`
+  (SHA-256 `e256e5b709ff6443b6b888c36bc53c873c731b63632593abb90de082ecd5cb01`).
+  The archive contains the bounded live hedge smoke evidence; no smoke row was
+  left in the forward ledgers.
+- The hourly operator report now renders one compact human-readable portfolio
+  snapshot. The post-reset print-only receipt says 0 positions, all four systems
+  on, no recent position changes, and no action needed. Telegram transport still
+  returned HTTP 429 during the two smoke adjustment notifications after the
+  earlier flood. There was no retry loop; successful live delivery remains
+  unverified until Telegram's server-side cooldown expires.
 - The Bybit depth and liquidation collectors are active and fresh. They are
   forward context/shadow data, not historical alpha evidence.
 - An external liveness dead-man URL is still not provisioned. The on-box timer
@@ -85,27 +79,33 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
 
 ## Hedge availability and limits
 
-- The shipped Bybit hedge warm-start had ended on `2026-05-23` and was 48 days
-  stale. The armed manager therefore could not safely increase protection once
-  a material resize appeared; because the current target was below the `$25`
-  per-leg order floor, the old daily unit still exited green.
-- The tape is now rebuilt from the exact live TP12 + BTC-risk-sizing object on
-  the stable-only RMOM engine, with modeled funding, 200 observations, and a
-  validated data boundary of `2026-07-09`. The official Bybit 1x receipt is
+- The tape is built from the exact live TP12 + BTC-risk-sizing object on the
+  stable-only RMOM engine, with modeled funding, 200 observations, and a
+  validated data boundary of `2026-07-09`. On `2026-07-12` it is three days old,
+  inside the armed manager's maximum age. The official Bybit 1x receipt remains
   `exploratory`: +24.36% return, -1.20% max drawdown, MAR 6.22. It is an
   operational beta input, not new alpha or promotion evidence.
-- This is a disclosed correctness migration, not numerical equivalence. The old
-  deployed TP10 overlap differed by at most 43.5 bps/day (5.46 bps mean). The
-  pre-stable-RMOM July 3 TP12 reference differed by at most 44.3 bps/day
-  (0.885 bps mean) because the stable-only fix changed historical membership.
-  At the current 1.55% gross book, the old target was `$3.12` BTC + `$0.88` ETH;
-  the corrected target is `$4.12` BTC + `$0.00` ETH. Both are below the floor,
-  so no hedge order is warranted now.
+- The three historical BUSDT shorts were not left unhedged by an inactive timer.
+  Their combined gross short fraction was only 1.02%; every five-minute manager
+  pass computed a `$2.73` BTC target and `$0.00` ETH target, below the deliberate
+  `$25` per-leg resize floor, so no order was warranted.
+- A bounded deployed-code smoke at `2026-07-12T20:41Z` proved the actual venue
+  lifecycle. The manager bought 0.001 BTC at Bybit's confirmed `64172.5` fill,
+  persisted it as `continuous_addon`, produced no transient untracked-position
+  alert, then sold the same 0.001 BTC reduce-only at `64169.9`. Bybit finished
+  with zero positions and zero open orders. This is demo execution evidence, not
+  evidence that the hedge improves returns.
 - The manager now reconciles the idempotent BTC/ETH target every five minutes,
   not only at 00:35 UTC. A stale non-flat book fails even when the desired order
   is below the floor, and liveness treats stale beta with open positions as
   critical. The CSV carries its validated data-through boundary and source
   summary SHA-256, so a quiet no-trade gap is not mistaken for stale data.
+- Hedge intent is durable before the venue mutation. Immediate execution-history
+  lag falls back to terminal Bybit order history; a genuinely unreadable fill is
+  labelled provisional and later venue reconciliation replaces rather than
+  double-adds it. The reset workflow writes a verified-flat boundary before the
+  hedge timer restarts, so a controlled clean slate no longer fails as unknown
+  ledger state.
 - This hedge covers portfolio beta only. It would not have protected the
   idiosyncratic 1000TAGUSDT squeeze and is not a substitute for the registered
   ex-ante loss-budget or granular adverse-state work.
@@ -122,7 +122,12 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
   snapshots, so a non-wallet snapshot defect cannot erase risk memory.
 - Guarded ledger reset: dry-run default, explicit execute, flat/no-orders check,
   REAL_MONEY refusal, writer quiescence, credential binding, lock, archive hash,
-  fsync, allowlist deletion, and retained high-water state.
+  fsync, allowlist deletion, retained high-water state, and a post-delete
+  verified-flat cycle boundary before hedge restart.
+- Hedge submissions persist intent before venue mutation, recover delayed fills
+  from order history, label unresolved fills provisionally, and reconcile them
+  without quantity double-counting. Untracked-position alerts honor the same
+  90-second grace already used by adoption/exit actions.
 - Reconciliation fails on stale remote market planes, separates open exposure
   from historical notional, and labels local price PnL/fees/venue allocations
   without pretending funding is present.
@@ -134,22 +139,22 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
   non-flat state; the source tape is self-describing and hash-bound to its
   official current-object summary.
 
-## Latest pre-reset reconciliation
+## Clean ledger boundary
 
-- CONTINUOUS: paper 12, demo base 9, paired 7, paper-only 5, demo-only 2,
-  sniper-only 4, open sniper 0, exit-reason divergences 1.
-- LONG: paper 1, demo 1, paired 1, no unmatched entries. The ADA pair has about
-  9.47 hours of entry skew and 34,091.786 seconds of exit skew.
-- Unknown or failed PIT status now makes the LONG three-way leg fail rather than
-  returning a green headline.
-
-The forensic window was archived as
-`data/_archive/ledger-reset-20260710T015456Z-tail-safety-20260710.tar.gz`
-(SHA-256 `a4c5bf5df0338f7f320004d51e16cc932d2ceac5867e8a7fe7c36b1670e2c076`).
-The immediate post-reset reconcile was 0/0 clean for both sleeves. TAC/SKL then
-opened four rows on the new clock, followed by VELVETUSDT p3. LONG remains 0/0
-and CONTINUOUS is now 5/5 clean. The account is intentionally no longer flat
-while those tracked demo positions are open.
+- The `2026-07-12T20:42:49Z` all-sleeve reset archived and removed every
+  allowlisted demo, paper, hedge, compatibility, cycle, and operational-event
+  ledger that existed. Reports, caches, configs, signals, and account-equity
+  high-water state were deliberately preserved by contract.
+- Current demo/paper/hedge trade and order counts are all zero. The continuous
+  demo and paper cycle ledgers each contain exactly one verified-flat reset
+  boundary; other daemons may add normal post-boundary heartbeat cycles as they
+  resume.
+- An immediate armed hedge run against that boundary exited successfully with a
+  known 0.0 gross short fraction and `submit_no_action`. The prior reset race,
+  where the timer briefly failed on missing trade+cycle datasets, is closed.
+- The earlier execution/reconciliation evidence remains recoverable from the
+  dated reset archives. A clean forward epoch does not erase or upgrade that
+  historical evidence.
 
 ## Long v11a research read
 
