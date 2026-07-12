@@ -76,7 +76,9 @@ class ContinuousHedgeConfig:
     # "btc" = the prior single-leg WP3 form (fallback; also used when the warm-start
     # has no eth_ret column or too few joint observations).
     hedge_mode: str = "2f"
-    min_resize_notional_usdt: float = 25.0
+    # No strategy-side dollar deadband.  The executor applies each leg's live
+    # qtyStep, minOrderQty and minNotionalValue immediately before submission.
+    min_resize_notional_usdt: float = 0.0
     max_hedge_equity_frac: float = 0.30  # hard sanity cap on TOTAL live hedge size
     fallback_equity_usdt: float = 10_000.0
     submit_orders: bool = False
@@ -438,4 +440,3 @@ def hedge_order_link_id(now_ms: int, symbol: str = HEDGE_SYMBOL) -> str:
     from .event_demo import _order_link_id
 
     return _order_link_id(HEDGE_LINK_PREFIX, symbol=symbol, signal_ts_ms=int(now_ms))
-

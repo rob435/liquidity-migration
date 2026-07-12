@@ -221,6 +221,19 @@ def test_plan_hedge_resize_floors_and_guards() -> None:
     assert plan is not None and plan.side == "Sell" and plan.reduce_only
 
 
+def test_plan_hedge_resize_default_has_no_strategy_side_dollar_floor() -> None:
+    plan = plan_continuous_hedge_resize(
+        hedge_symbol="XRPUSDT",
+        current_qty=0.0,
+        price=1.0,
+        equity_usdt=10_000.0,
+        hedge_ratio=0.0001,
+    )
+
+    assert plan is not None
+    assert plan.target_notional_usdt == 1.0
+
+
 def test_beta_extra_lag_changes_estimation_not_position_day() -> None:
     raw, h = _anti_correlated(40)
     comp = _components(raw)

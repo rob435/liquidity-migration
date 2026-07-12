@@ -82,19 +82,28 @@ Live order notional:
 equity
 * wallet_balance_fraction
 * (PER_POSITION_NOTIONAL_PCT_EQUITY / 100)
+* NOTIONAL_MULTIPLIER
 * rebalance_scale
 * component_weight
 * vol_weight_multiplier
 * btc_risk_stack_mult
 ```
 
-Runtime knobs:
+Registered/base-profile knobs:
 
 - `ENTRY_LEVERAGE=2`.
 - `PER_POSITION_NOTIONAL_PCT_EQUITY=2`.
+- `NOTIONAL_MULTIPLIER=1`.
 - `SIZING_MODE=inverse_vol`.
 - `TARGET_VOL_PER_NAME=0.01`.
 - `VOL_WEIGHT_CLAMP=2`.
+
+The Bybit demo and matching paper units currently override
+`ENTRY_LEVERAGE=10` and `NOTIONAL_MULTIPLIER=10` for an explicitly labelled
+forward execution/lifecycle stress epoch. Exchange leverage changes margin;
+the notional multiplier is what makes order quantities 10x the registered
+base. This operational scale change does not alter the registered 1x research
+object and its P&L cannot be presented as 1x validation.
 
 `vol_weight_multiplier = target_vol_per_name / rv_168h`, clamped to
 `[0.5, 2.0]`; missing or invalid `rv_168h` uses `1.0`.

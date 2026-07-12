@@ -1445,6 +1445,15 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument("--failed-fade-min-mfe-pct", type=float, default=d.failed_fade_min_mfe_pct)
     p.add_argument("--breakeven-arm-pct", type=float, default=d.breakeven_arm_pct)
     p.add_argument("--entry-leverage", type=float, default=d.entry_leverage)
+    p.add_argument(
+        "--notional-multiplier",
+        type=float,
+        default=d.notional_multiplier,
+        help=(
+            "Pure exposure multiplier applied to the base per-position notional. "
+            "Unlike --entry-leverage, this changes order quantity."
+        ),
+    )
     p.add_argument("--per-position-notional-pct-equity", type=float, default=d.per_position_notional_pct_equity)
     p.add_argument("--sizing-mode", default=d.sizing_mode, choices=["flat", "inverse_vol"])
     p.add_argument("--target-vol-per-name", type=float, default=d.target_vol_per_name)

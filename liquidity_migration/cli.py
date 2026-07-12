@@ -725,6 +725,7 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
             failed_fade_min_mfe_pct=args.failed_fade_min_mfe_pct,
             breakeven_arm_pct=args.breakeven_arm_pct,
             entry_leverage=args.entry_leverage,
+            notional_multiplier=args.notional_multiplier,
             per_position_notional_pct_equity=args.per_position_notional_pct_equity,
             sizing_mode=args.sizing_mode,
             target_vol_per_name=args.target_vol_per_name,

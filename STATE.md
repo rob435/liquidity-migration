@@ -11,18 +11,29 @@ research decisions are in
 
 | Sleeve | Mode | Current state |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | On in a clean ledger epoch; hedge add/reduce is venue-smoke-verified and target reconciliation is five-minute |
+| `continuous_ensemble_v2` | Bybit demo + paper | On and flat in a clean 10x execution-stress epoch; hedge add/reduce is venue-smoke-verified and target reconciliation is five-minute |
 | `LongV11aDivWeekendVol` | Bybit demo + paper | On and flat in the clean ledger epoch; prior rows remain in reset archives |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
-- Direct Bybit demo snapshot at `2026-07-12T20:44Z`: equity `$10,024.82`, zero
-  positions, zero open orders, and zero venue exposure. Demo, paper, and hedge
-  trade/order ledgers are empty; the continuous demo/paper cycle ledgers each
-  contain only the fresh verified-flat reset boundary.
-- Runtime commit `3db9932291aa179d9618f6ece96309f7ee72671a` is deployed and
-  independently verified. The full local gate is 2,744 passed / 1 skipped; the
-  deploy gate is 113 passed; the GitHub VPS Deploy run is green.
+- Direct Bybit demo snapshot at `2026-07-12T21:16:25Z`: equity and wallet balance
+  `$10,030.0961836`, zero positions, zero open orders, and zero venue exposure.
+  Continuous demo, paper, hedge, and LONG trade/order ledgers are empty; normal
+  post-reset heartbeat cycles continue to accumulate.
+- The demo-only 10x execution-stress release is deployed and independently
+  verified. The full local gate is 2,751 passed / 1 skipped; the checked deploy
+  gate passed. Mainnet remains categorically disabled.
+- CONTINUOUS demo and paper now make scale explicit: the registered 2%-of-equity
+  base is multiplied by `NOTIONAL_MULTIPLIER=10`, while
+  `ENTRY_LEVERAGE=10` supplies exchange margin. The first changes order quantity;
+  the second alone would not. This prospective epoch is for lifecycle, venue,
+  fill, hedge, and reporting stress. Its P&L is not 1x alpha validation.
+- A bounded XRPUSDT demo probe directly established the current small-order
+  boundary: 4.65 XRP (`$5.114535`) was rejected as off-grid, 4.5 XRP
+  (`$4.94955`) was rejected below the 5 USDT minimum, and 4.6 XRP filled and
+  reduce-only closed at `$5.05954` with 10x leverage. Total fees were
+  `$0.00556550`; the account and all services finished flat/healthy. Receipt:
+  `docs/bybit_demo_min_order_probe_2026-07-12.md`.
 - The final clean epoch is archived at
   `data/_archive/ledger-reset-20260712T204249Z-clean-slate-hedge-verified.tar.gz`
   (SHA-256 `e256e5b709ff6443b6b888c36bc53c873c731b63632593abb90de082ecd5cb01`).
@@ -87,8 +98,15 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
   operational beta input, not new alpha or promotion evidence.
 - The three historical BUSDT shorts were not left unhedged by an inactive timer.
   Their combined gross short fraction was only 1.02%; every five-minute manager
-  pass computed a `$2.73` BTC target and `$0.00` ETH target, below the deliberate
-  `$25` per-leg resize floor, so no order was warranted.
+  pass computed a `$2.73` BTC target and `$0.00` ETH target. The then-active $25
+  strategy floor suppressed it, but removing that floor would still not have
+  produced a BTC order: the contemporaneous 0.001 BTC quantity step required
+  roughly `$64.18` at the venue.
+- The arbitrary $25 hedge floor is now removed. Every nonzero desired target is
+  planned and the executor reports the desired/current delta plus the live
+  per-leg `qtyStep`, `minOrderQty`, `minNotionalValue`, and effective executable
+  minimum. The contemporaneous effective minimums were about `$64.18` BTC and
+  `$18.21` ETH; suitable alt contracts can execute close to `$5`.
 - A bounded deployed-code smoke at `2026-07-12T20:41Z` proved the actual venue
   lifecycle. The manager bought 0.001 BTC at Bybit's confirmed `64172.5` fill,
   persisted it as `continuous_addon`, produced no transient untracked-position
@@ -97,8 +115,8 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
   evidence that the hedge improves returns.
 - The manager now reconciles the idempotent BTC/ETH target every five minutes,
   not only at 00:35 UTC. A stale non-flat book fails even when the desired order
-  is below the floor, and liveness treats stale beta with open positions as
-  critical. The CSV carries its validated data-through boundary and source
+  is below the venue's executable filters, and liveness treats stale beta with
+  open positions as critical. The CSV carries its validated data-through boundary and source
   summary SHA-256, so a quiet no-trade gap is not mistaken for stale data.
 - Hedge intent is durable before the venue mutation. Immediate execution-history
   lag falls back to terminal Bybit order history; a genuinely unreadable fill is
@@ -145,10 +163,9 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
   allowlisted demo, paper, hedge, compatibility, cycle, and operational-event
   ledger that existed. Reports, caches, configs, signals, and account-equity
   high-water state were deliberately preserved by contract.
-- Current demo/paper/hedge trade and order counts are all zero. The continuous
-  demo and paper cycle ledgers each contain exactly one verified-flat reset
-  boundary; other daemons may add normal post-boundary heartbeat cycles as they
-  resume.
+- Current demo/paper/hedge/LONG trade and order counts are all zero. The
+  continuous demo and paper cycle ledgers retain the verified-flat reset
+  boundary plus normal post-boundary heartbeat cycles.
 - An immediate armed hedge run against that boundary exited successfully with a
   known 0.0 gross short fraction and `submit_no_action`. The prior reset race,
   where the timer briefly failed on missing trade+cycle datasets, is closed.

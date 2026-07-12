@@ -618,6 +618,9 @@ def test_submit_plan_skips_below_min_qty_without_submitting(monkeypatch, tmp_pat
 
     assert result["skipped"] == "below_min_qty"
     assert result["planned_qty"] == 0.0004
+    assert result["qty_step"] == 0.001
+    assert result["effective_min_qty"] == 0.001
+    assert result["effective_min_notional_usdt"] == pytest.approx(100.0)
     assert placed == []
     assert written == []
 
@@ -634,6 +637,9 @@ def test_submit_plan_skips_below_min_notional_for_risk_increasing_legs(monkeypat
     )
 
     assert result["skipped"] == "below_min_notional"
+    assert result["min_notional_value"] == 5.0
+    assert result["effective_min_qty"] == 0.005
+    assert result["effective_min_notional_usdt"] == pytest.approx(5.0)
     assert placed == []
     assert written == []
 

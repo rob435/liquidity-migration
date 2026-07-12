@@ -54,7 +54,10 @@ Environment=FAILED_FADE_HOURS=0
 Environment=FAILED_FADE_LOSS_PCT=0
 Environment=FAILED_FADE_MIN_MFE_PCT=0
 Environment=BREAKEVEN_ARM_PCT=0
-Environment=ENTRY_LEVERAGE=2
+# Exact sizing shadow of the demo stress epoch.  Exchange leverage changes
+# margin accounting; NOTIONAL_MULTIPLIER changes the simulated order quantity.
+Environment=ENTRY_LEVERAGE=10
+Environment=NOTIONAL_MULTIPLIER=10
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
 Environment=SIZING_MODE=inverse_vol
 Environment=TARGET_VOL_PER_NAME=0.01

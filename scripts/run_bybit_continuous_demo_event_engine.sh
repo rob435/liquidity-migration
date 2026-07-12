@@ -52,6 +52,7 @@ FAILED_FADE_LOSS_PCT="${FAILED_FADE_LOSS_PCT:-0}"
 FAILED_FADE_MIN_MFE_PCT="${FAILED_FADE_MIN_MFE_PCT:-0}"
 BREAKEVEN_ARM_PCT="${BREAKEVEN_ARM_PCT:-0}"
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-2}"
+NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"
 PER_POSITION_NOTIONAL_PCT_EQUITY="${PER_POSITION_NOTIONAL_PCT_EQUITY:-2}"
 SIZING_MODE="${SIZING_MODE:-inverse_vol}"
 TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"
@@ -123,7 +124,7 @@ else
     order_args+=(--left-decile-exit-enabled)
 fi
 
-echo "continuous-demo engine: data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} profile=$STRATEGY_PROFILE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
+echo "continuous-demo engine: data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} profile=$STRATEGY_PROFILE notional_x=$NOTIONAL_MULTIPLIER entry_leverage=$ENTRY_LEVERAGE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \
@@ -144,6 +145,7 @@ exec "$PYTHON_BIN" -m liquidity_migration \
     --failed-fade-min-mfe-pct "$FAILED_FADE_MIN_MFE_PCT" \
     --breakeven-arm-pct "$BREAKEVEN_ARM_PCT" \
     --entry-leverage "$ENTRY_LEVERAGE" \
+    --notional-multiplier "$NOTIONAL_MULTIPLIER" \
     --per-position-notional-pct-equity "$PER_POSITION_NOTIONAL_PCT_EQUITY" \
     --sizing-mode "$SIZING_MODE" \
     --target-vol-per-name "$TARGET_VOL_PER_NAME" \

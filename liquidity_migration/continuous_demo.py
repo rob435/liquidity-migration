@@ -281,7 +281,10 @@ class ContinuousDemoCycleConfig:
     entry_btc_risk_high: float = 0.90
     entry_btc_risk_tail_mult: float = 0.35
     entry_btc_risk_min_prior: int = BTC_RISK_MIN_PRIOR
-    notional_multiplier: float = 1.0                # read by the shared daemon scaffolding (logging only)
+    # Explicit deployment-scale multiplier.  Keep the registered/base profile at
+    # 1x and use this knob for demo/paper execution stress so the scale change is
+    # visible in configs and ledgers rather than hidden in the base 2% setting.
+    notional_multiplier: float = 1.0
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
     workers: int = 8
@@ -403,6 +406,16 @@ def continuous_dataset_names(config: ContinuousDemoCycleConfig) -> tuple[str, st
     if config.paper_mode:
         return ("continuous_fade_paper_trades", "continuous_fade_paper_orders", "continuous_fade_paper_cycles")
     return ("continuous_fade_demo_trades", "continuous_fade_demo_orders", "continuous_fade_demo_cycles")
+
+
+def _continuous_base_notional_pct_equity(config: ContinuousDemoCycleConfig) -> float:
+    """Effective pre-component entry notional as a percentage of equity.
+
+    ``notional_multiplier`` is pure exposure scale.  Exchange
+    ``entry_leverage`` only changes initial margin; it does not change order
+    quantity, so the two controls must remain explicit and independent.
+    """
+    return float(config.per_position_notional_pct_equity) * float(config.notional_multiplier)
 
 
 def build_live_continuous_state(
@@ -1998,7 +2011,7 @@ def _continuous_portfolio_heat_fields(
             if not _is_hedge_trade_row(row):
                 current_notional += _continuous_trade_notional_usdt(row)
     current_heat_frac = (current_notional * shock_frac / equity_usdt) if equity_usdt > 0.0 else 0.0
-    unit_notional_frac = max(float(config.per_position_notional_pct_equity or 0.0), 0.0) / 100.0
+    unit_notional_frac = max(_continuous_base_notional_pct_equity(config), 0.0) / 100.0
     if config.sizing_mode == "inverse_vol":
         unit_notional_frac *= max(float(config.vol_weight_clamp or 1.0), 1.0)
     entry_heat_unit_frac = unit_notional_frac * shock_frac
@@ -3939,6 +3952,12 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
     daemon subclasses the long daemon, whose `format_long_demo_cycle_summary` expects `payload['cycle']`;
     feeding it the flat continuous payload KeyError'd every cycle (audit 2026-06-02). This is the
     continuous-shaped override so the cycle summary prints (incl. the rmom-gate freshness)."""
+    sizing = ""
+    if payload.get("notional_multiplier") is not None or payload.get("entry_leverage") is not None:
+        sizing = (
+            f"sizing={_payload_float(payload.get('notional_multiplier')):g}x_notional/"
+            f"{_payload_float(payload.get('entry_leverage')):g}x_leverage "
+        )
     return (
         "continuous-fade demo cycle "
         f"id={payload.get('cycle_id', '')} mode={payload.get('mode')} "
@@ -3948,6 +3967,7 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"d9={payload.get('live_d9_symbols')} cand={payload.get('candidates')} "
         f"entries={payload.get('entries')} exits={payload.get('exits')} open={payload.get('open_positions')} "
         f"sniper={payload.get('sniper_fills', 0)}/{payload.get('sniper_exits', 0)}/{payload.get('sniper_errors', 0)} "
+        f"{sizing}"
         f"equity=${_payload_float(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')} "
         f"risk_health={'ok' if payload.get('entry_risk_health_ok', True) else payload.get('entry_risk_health_reasons')} "
         f"same_signal_reentry_skips={payload.get('skipped_same_signal_reentry', 0)} "
@@ -4274,6 +4294,15 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
         raise ValueError("btc_trend_lookback_days must be >= 1 when btc_trend_gate is active")
     if config.sizing_mode not in ("flat", "inverse_vol"):
         raise ValueError(f"sizing_mode must be 'flat' or 'inverse_vol'; got {config.sizing_mode!r}")
+    if not np.isfinite(config.notional_multiplier) or config.notional_multiplier <= 0.0:
+        raise ValueError("notional_multiplier must be positive")
+    if (
+        not np.isfinite(config.per_position_notional_pct_equity)
+        or config.per_position_notional_pct_equity <= 0.0
+    ):
+        raise ValueError("per_position_notional_pct_equity must be positive")
+    if not np.isfinite(config.entry_leverage) or config.entry_leverage <= 0.0:
+        raise ValueError("entry_leverage must be positive")
     if config.sizing_mode == "inverse_vol":
         if config.target_vol_per_name <= 0.0:
             raise ValueError("target_vol_per_name must be positive for inverse_vol sizing")
@@ -4825,7 +4854,7 @@ def run_continuous_demo_cycle(
             root=root,
             btc_klines=btc_gate_klines,
         )
-        order_notional_frac = demo.per_position_notional_pct_equity / 100.0
+        order_notional_frac = _continuous_base_notional_pct_equity(demo) / 100.0
         if demo.daily_rebalance_enabled:
             order_notional_frac *= rebalance_target_scale
         exec_entries, entry_orders = _execute_continuous_entries(
@@ -4923,7 +4952,7 @@ def run_continuous_demo_cycle(
                 _open_continuous_trades(post_trade_ledger, managed_strategy_ids).to_dicts(),
                 price_by_symbol=price_by_symbol,
                 equity_usdt=equity_usdt * demo.wallet_balance_fraction,
-                base_notional_pct_equity=demo.per_position_notional_pct_equity,
+                base_notional_pct_equity=_continuous_base_notional_pct_equity(demo),
                 target_scale=rebalance_target_scale,
                 exclude_trade_id_suffixes=(SNIPER_TRADE_SUFFIX,),
                 # Fail safe (round 4): never default a component-tagged row whose
@@ -5018,6 +5047,10 @@ def run_continuous_demo_cycle(
             "cycle_id": cycle_id, "ts_ms": cycle_now_ms, "strategy_id": strategy_id, "mode": "submit" if demo.submit_orders else "dry_run",
             "strategy_profile": demo.strategy_profile,
             "feature_set": ",".join(demo.feature_set),
+            "entry_leverage": demo.entry_leverage,
+            "per_position_notional_pct_equity": demo.per_position_notional_pct_equity,
+            "notional_multiplier": demo.notional_multiplier,
+            "effective_base_notional_pct_equity": _continuous_base_notional_pct_equity(demo),
             "universe_symbols": len(symbols), "ticker_source": ticker_source, "kline_store_rows": kline_stats.get("store_rows", 0),
             "live_d9_symbols": live_d9, "open_positions": open_count,
             # exec_entries are TRADE rows — appended only when an entry actually

@@ -32,7 +32,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -221,6 +221,8 @@ def _plan_json(plan) -> dict | None:
         return None
     return {"symbol": plan.symbol, "side": plan.side, "qty": round(plan.qty, 6),
             "reduce_only": plan.reduce_only, "reason": plan.reason,
+            "current_notional_usdt": round(plan.current_notional_usdt, 2),
+            "target_notional_usdt": round(plan.target_notional_usdt, 2),
             "delta_notional_usdt": round(plan.delta_notional_usdt, 2)}
 
 
@@ -352,8 +354,24 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root
     qty_dec = (Decimal(str(plan.qty)) // step) * step
     qty = float(qty_dec)
     price = abs(plan.delta_notional_usdt) / max(plan.qty, 1e-12)
+    min_order_qty_dec = Decimal(str(max(filters["min_order_qty"], 0.0)))
+    min_notional_dec = Decimal(str(max(filters["min_notional_value"], 0.0)))
+    effective_min_qty_dec = max(step, min_order_qty_dec)
+    if not plan.reduce_only and min_notional_dec > 0 and price > 0.0:
+        notional_qty_steps = (
+            min_notional_dec / Decimal(str(price)) / step
+        ).to_integral_value(rounding=ROUND_CEILING)
+        effective_min_qty_dec = max(effective_min_qty_dec, notional_qty_steps * step)
     skip_base = {"symbol": plan.symbol, "side": plan.side, "qty": qty,
-                 "planned_qty": plan.qty, "reduce_only": plan.reduce_only}
+                 "planned_qty": plan.qty, "reduce_only": plan.reduce_only,
+                 "current_notional_usdt": plan.current_notional_usdt,
+                 "target_notional_usdt": plan.target_notional_usdt,
+                 "delta_notional_usdt": plan.delta_notional_usdt,
+                 "qty_step": float(step),
+                 "min_order_qty": filters["min_order_qty"],
+                 "min_notional_value": filters["min_notional_value"],
+                 "effective_min_qty": float(effective_min_qty_dec),
+                 "effective_min_notional_usdt": float(effective_min_qty_dec) * price}
     if qty <= 0.0 or (filters["min_order_qty"] > 0.0 and qty < filters["min_order_qty"]):
         return {**skip_base, "skipped": "below_min_qty"}
     if (
@@ -475,9 +493,8 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root
             exit_price=max(book_price, 0.0), now_ms=now_ms,
             fill_confirmed=fill_confirmed,
         )
-    return {"symbol": plan.symbol, "side": plan.side, "qty": filled_qty,
-            "requested_qty": qty, "fill_source": fill_source,
-            "reduce_only": plan.reduce_only, "order_id": order_id, "link": link}
+    return {**skip_base, "qty": filled_qty, "requested_qty": qty,
+            "fill_source": fill_source, "order_id": order_id, "link": link}
 
 
 def _apply_hedge_reduce_to_trades(

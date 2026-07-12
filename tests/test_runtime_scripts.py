@@ -413,6 +413,8 @@ def test_continuous_runner_wires_rebalance_profile_env() -> None:
     assert "--stop-approach-frac \"$STOP_APPROACH_FRAC\"" in text
     assert "--failed-fade-hours \"$FAILED_FADE_HOURS\"" in text
     assert "--breakeven-arm-pct \"$BREAKEVEN_ARM_PCT\"" in text
+    assert 'NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"' in text
+    assert "--notional-multiplier \"$NOTIONAL_MULTIPLIER\"" in text
     assert 'SIZING_MODE="${SIZING_MODE:-inverse_vol}"' in text
     assert 'TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"' in text
     assert 'VOL_WEIGHT_CLAMP="${VOL_WEIGHT_CLAMP:-2}"' in text
@@ -484,6 +486,9 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
         assert "Environment=ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0" in text
         assert "Environment=ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1" in text
         assert "Environment=ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0" in text
+        assert "Environment=ENTRY_LEVERAGE=10" in text
+        assert "Environment=NOTIONAL_MULTIPLIER=10" in text
+        assert "Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2" in text
         assert "CTRL_BTC_RISK_70_90_35" in text
     demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service").read_text(encoding="utf-8")
     paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service").read_text(encoding="utf-8")
@@ -505,6 +510,9 @@ def test_continuous_live_overlay_defaults_are_pinned_for_demo_paper_parity() -> 
         "ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0",
         "ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1",
         "ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0",
+        "ENTRY_LEVERAGE=10",
+        "NOTIONAL_MULTIPLIER=10",
+        "PER_POSITION_NOTIONAL_PCT_EQUITY=2",
     )
     units = (
         "liquidity-migration-bybit-continuous-demo.service",

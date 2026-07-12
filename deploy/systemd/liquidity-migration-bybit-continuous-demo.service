@@ -52,7 +52,12 @@ Environment=FAILED_FADE_HOURS=0
 Environment=FAILED_FADE_LOSS_PCT=0
 Environment=FAILED_FADE_MIN_MFE_PCT=0
 Environment=BREAKEVEN_ARM_PCT=0
-Environment=ENTRY_LEVERAGE=2
+# Demo-only forward execution stress: 10x exchange leverage supplies margin and
+# NOTIONAL_MULTIPLIER=10 actually scales order quantity.  The registered 1x
+# research object remains unchanged; results from this epoch are execution and
+# lifecycle evidence at 10x scale, not 1x alpha validation.
+Environment=ENTRY_LEVERAGE=10
+Environment=NOTIONAL_MULTIPLIER=10
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
 Environment=SIZING_MODE=inverse_vol
 Environment=TARGET_VOL_PER_NAME=0.01

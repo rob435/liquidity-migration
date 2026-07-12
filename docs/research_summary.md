@@ -102,9 +102,11 @@ The replacement is intentionally non-equivalent to the old tape. Stable-only
 RMOM changed historical membership after the July 3 artifact: the pre-fix TP12
 overlap has 44.3 bps maximum / 0.885 bps mean daily unit-return drift, while the
 obsolete deployed TP10 overlap has 43.5 bps maximum / 5.46 bps mean drift. The
-live sizing impact is small at the present 1.55% gross book: `$3.12` BTC +
-`$0.88` ETH becomes `$4.12` BTC + `$0.00` ETH, still below the `$25` per-leg
-floor. The override is recorded as a correctness migration, not parity.
+live sizing impact was small at the then-current 1.55% gross book: `$3.12` BTC +
+`$0.88` ETH became `$4.12` BTC + `$0.00` ETH, below the then-active `$25`
+per-leg floor. On 2026-07-12 that arbitrary strategy-side floor was removed;
+current execution defers to the live symbol quantity and notional filters. The
+override is recorded as a correctness migration, not parity.
 
 ### Decisions retained from closed arcs
 

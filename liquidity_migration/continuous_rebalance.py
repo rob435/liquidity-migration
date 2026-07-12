@@ -524,7 +524,7 @@ def plan_continuous_hedge_resize(
     price: float,
     equity_usdt: float,
     hedge_ratio: float,
-    min_resize_notional_usdt: float = 5.0,
+    min_resize_notional_usdt: float = 0.0,
 ) -> ContinuousRebalanceResizePlan | None:
     """Plan the order that brings the LONG hedge leg to ``equity * hedge_ratio``.
 

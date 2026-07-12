@@ -22,6 +22,11 @@ follow-up has since:
 - distinguished validated data freshness from the most recent nonzero strategy
   observation.
 
+The 2026-07-12 follow-up then removed that fixed strategy-side floor. Current
+armed runs always compute the desired target and defer executability to each
+leg's live Bybit `qtyStep`, `minOrderQty`, and `minNotionalValue` filters. The
+historical `$25` references below remain the audited behavior at the time.
+
 The replacement is a disclosed non-equivalent correctness migration. It does
 not close the remaining hedge parity work: entry/exit-triggered reconciliation,
 target-versus-actual beta-dollar telemetry, event-time research replay, and a

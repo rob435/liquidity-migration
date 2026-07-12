@@ -28,6 +28,7 @@ from liquidity_migration.continuous_demo import (
     _btc_trend_gate_payload_fields,
     _build_continuous_rebalance_resize_rows,
     _continuous_age_eligible_symbols,
+    _continuous_base_notional_pct_equity,
     _continuous_rebalance_cycle_fields,
     _continuous_rebalance_mark_prices_json,
     _continuous_rebalance_resize_checked_today,
@@ -2577,6 +2578,26 @@ def test_validate_continuous_demo_config_allows_valid_demo_runs() -> None:
     )
 
 
+def test_continuous_notional_multiplier_scales_exposure_not_margin() -> None:
+    config = ContinuousDemoCycleConfig(
+        per_position_notional_pct_equity=2.0,
+        notional_multiplier=10.0,
+        entry_leverage=10.0,
+    )
+
+    assert _continuous_base_notional_pct_equity(config) == pytest.approx(20.0)
+
+
+@pytest.mark.parametrize("multiplier", [0.0, -1.0, float("nan"), float("inf")])
+def test_validate_continuous_demo_config_rejects_nonpositive_notional_multiplier(
+    multiplier: float,
+) -> None:
+    with pytest.raises(ValueError, match="notional_multiplier must be positive"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(notional_multiplier=multiplier)
+        )
+
+
 def test_continuous_live_config_golden_values() -> None:
     """Pin the resolved live-v2 values so a silent revert to retired exits is caught."""
     c = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile="continuous_ensemble_v2"))
@@ -2609,10 +2630,12 @@ def test_format_continuous_demo_cycle_summary_handles_flat_payload() -> None:
         "rmom_present": True, "max_rmom_day_ts": 1780444800000, "rmom_stale_days": 0,
         "live_d9_symbols": 17, "candidates": 2, "entries": 1, "exits": 0,
         "open_positions": 2, "equity_usdt": 12345.6,
+        "notional_multiplier": 10.0, "entry_leverage": 10.0,
     }
     s = format_continuous_demo_cycle_summary(payload)
     assert "continuous-fade demo cycle" in s
     assert "d9=17" in s and "open=2" in s and "rmom=present" in s
+    assert "sizing=10x_notional/10x_leverage" in s
     # robust to a missing/None equity and an empty payload (never raises)
     assert "$0.00" in format_continuous_demo_cycle_summary({"rmom_present": False})
 

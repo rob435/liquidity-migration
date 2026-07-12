@@ -268,11 +268,15 @@ continuous demo sleeve
 (`liquidity-migration-bybit-continuous-demo.service`, `SUBMIT_ORDERS=1`,
 `continuous_ensemble_v2`, inverse-vol component sizing with
 `TARGET_VOL_PER_NAME=0.01`/`VOL_WEIGHT_CLAMP=2`, daily vol-target rebalance
-disabled, `CTRL_BTC_RISK_70_90_35` BTC-risk entry sizing enabled,
+disabled, `CTRL_BTC_RISK_70_90_35` BTC-risk entry sizing enabled, and an
+explicit demo/paper execution-stress override of `ENTRY_LEVERAGE=10` plus
+`NOTIONAL_MULTIPLIER=10` (10x order notional versus the registered 1x base),
 `CONTINUOUS_SNIPER=0`, no
 venue-side stop; demo/paper surface) and the five-minute BTC+ETH hedge timer
 (`liquidity-migration-continuous-hedge.timer`) — the hedge unit ships
 **`SUBMIT_HEDGE=1` + `CONFIRM_DEMO_ORDERS=1` (operator-armed 2026-06-10)**, so
 it SUBMITS demo orders; runtime guards + staleness gates still apply. The
+hedge executor uses current per-leg `qtyStep`, `minOrderQty`, and
+`minNotionalValue` filters rather than a fixed strategy-side dollar floor. The
 continuous paper shadow is unconditionally `SUBMIT_ORDERS=0`/`PAPER_MODE=1`
 (verified fail-loud on every deploy). Everything is demo-account-only.

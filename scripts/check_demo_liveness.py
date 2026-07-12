@@ -307,7 +307,8 @@ def evaluate_hedge_warmstart_freshness(
 ) -> Alert | None:
     """Alert before a stale beta source reaches its first material hedge plan.
 
-    The hedge runner now fails a stale non-flat book even below its resize floor.
+    The hedge runner fails a stale non-flat book even when its desired target is
+    below the venue's executable quantity/notional filters.
     This independent check still matters while the book is flat: it surfaces the
     unavailable protection before the next entry turns the condition critical.
     """

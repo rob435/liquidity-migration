@@ -114,6 +114,7 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
     assert args.entry_private_ws_stale_seconds == 300.0
     assert args.feature_set == "max_ret168"
     assert args.max_hold_hours == 24
+    assert args.notional_multiplier == 1.0
     assert args.left_decile_exit_enabled is False
     assert args.stop_loss_pct == 0.0
     assert args.stop_approach_frac == 0.0
@@ -148,6 +149,20 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
     assert override.entry_portfolio_heat_cap_frac == 0.05
     assert override.entry_portfolio_heat_shock_frac == 1.25
     assert override.entry_account_drawdown_kill_switch_frac == 0.02
+
+
+def test_cli_continuous_demo_accepts_explicit_notional_multiplier(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "continuous-event-demo-cycle",
+            "--notional-multiplier",
+            "10",
+        ]
+    )
+
+    assert args.notional_multiplier == 10.0
 
 
 def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:
