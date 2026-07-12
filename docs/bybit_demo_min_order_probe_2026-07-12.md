@@ -15,8 +15,10 @@
 
 ## Safety boundary
 
-Before the probe, the demo account had equity `$10,030.1017491`, zero positions,
-and zero open orders. The continuous and long demo order writers, the hedge
+Before the probe, the demo account had a USDT coin balance of
+`10,030.1017491 USDT`, zero positions, and zero open orders. This receipt did
+not preserve the contemporaneous account-wide USD valuation, so it does not
+mislabel the coin balance as total equity. The continuous and long demo order writers, the hedge
 timer/service, and the risk reconciler were stopped for the bounded mutation.
 The probe asserted a globally flat account before sending anything. All
 previously active services were restored afterward.

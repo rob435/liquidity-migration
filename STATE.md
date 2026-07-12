@@ -16,8 +16,10 @@ research decisions are in
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
-- Direct Bybit demo snapshot at `2026-07-12T21:16:25Z`: equity and wallet balance
-  `$10,030.0961836`, zero positions, zero open orders, and zero venue exposure.
+- Direct Bybit demo snapshot at `2026-07-12T21:21Z`: account-wide USD equity
+  `$10,024.27872781` and USDT coin balance `10,030.0961836 USDT`, zero positions,
+  zero open orders, and zero venue exposure. The difference is Bybit's current
+  USDT-to-USD valuation; live sizing uses account-wide equity.
   Continuous demo, paper, hedge, and LONG trade/order ledgers are empty; normal
   post-reset heartbeat cycles continue to accumulate.
 - The demo-only 10x execution-stress release is deployed and independently
