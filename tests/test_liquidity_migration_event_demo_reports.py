@@ -11,7 +11,10 @@ from liquidity_migration.event_demo import (
     _telegram_notification_reason,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
+    format_position_loss_alert,
     format_telegram_status_message,
+    position_loss_alert_levels,
+    position_loss_alerts,
     summarize_position_pnl,
     wallet_equity_usdt,
 )
@@ -79,6 +82,9 @@ def test_bybit_position_snapshot_reports_unrealized_pnl() -> None:
             "unrealized_pnl_usdt": 50.0,
             "pnl_pct": 50.0 / 950.0,
             "leverage": 1.0,
+            "stop_price": 0.0,
+            "take_profit_price": 0.0,
+            "liquidation_price": 0.0,
         }
     ]
     assert summary["positions"] == 1
@@ -165,7 +171,7 @@ def test_ledger_position_snapshot_uses_weighted_average_entry_for_netted_rows() 
     assert positions[0]["unrealized_pnl_usdt"] == pytest.approx(6.0)
 
 
-def test_telegram_status_message_labels_ledger_positions_as_netted() -> None:
+def test_telegram_event_message_does_not_dump_component_ledger_rows() -> None:
     payload = {
         "cycle": {
             "ts_ms": 1_783_275_129_129,
@@ -219,9 +225,9 @@ def test_telegram_status_message_labels_ledger_positions_as_netted() -> None:
 
     text = format_telegram_status_message(payload)
 
-    assert "ledger_open=1 (net)" in text
-    assert "Ledger positions (net):" in text
-    assert "ICNTUSDT short qty=313" in text
+    assert "Account now: 1 open" in text
+    assert "exposure $56.18" in text
+    assert "Ledger positions" not in text
     assert "qty=188" not in text
     assert "qty=125" not in text
 
@@ -263,14 +269,108 @@ def test_telegram_status_message_includes_positions_and_pnl() -> None:
             "pnl_pct": 50.0 / 950.0,
         },
         "ledger_positions": [],
+        "entries": [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": 10.0,
+                "entry_price": 100.0,
+                "notional_usdt": 1_000.0,
+                "take_profit_price": 88.0,
+                "stop_price": 0.0,
+            }
+        ],
     }
 
     text = format_telegram_status_message(payload)
 
-    assert "bybit_positions=1" in text
-    assert "uPnL=$50.00" in text
-    assert "AAAUSDT short" in text
-    assert "reason=entry_executed" in text
+    assert "Position opened" in text
+    assert "AAAUSDT SHORT" in text
+    assert "Opened 10 @ $100" in text
+    assert "Account now: 1 open" in text
+    assert "uPnL +$50.00" in text
+
+
+def test_telegram_exit_message_names_take_profit_and_realized_pnl() -> None:
+    payload = {
+        "cycle": {
+            "ts_ms": 1_700_000_000_000,
+            "mode": "ws_risk_submit",
+            "entries_executed": 0,
+            "exits_executed": 1,
+            "entry_candidates": 0,
+            "exit_candidates": 1,
+            "position_report_error": "",
+        },
+        "exits": [
+            {
+                "trade_id": "bus-short-1",
+                "symbol": "BUSDT",
+                "side": "short",
+                "status": "closed",
+                "qty": 100.0,
+                "entry_price": 1.0,
+                "exit_price": 0.88,
+                "entry_fee_usdt": 0.02,
+                "exit_fee_usdt": 0.02,
+                "exit_reason": "take_profit",
+            }
+        ],
+        "bybit_position_summary": {
+            "positions": 0,
+            "position_value_usdt": 0.0,
+            "unrealized_pnl_usdt": 0.0,
+            "pnl_pct": 0.0,
+        },
+        "bybit_positions": [],
+    }
+
+    text = format_telegram_status_message(payload)
+
+    assert "Position closed" in text
+    assert "BUSDT SHORT · TAKE PROFIT" in text
+    assert "Realised P&L +$11.96 (+11.96% of entry exposure)" in text
+    assert "Account now: 0 open" in text
+
+
+def test_telegram_exit_message_discloses_price_inferred_tp_cause() -> None:
+    payload = {
+        "cycle": {
+            "ts_ms": 1_700_000_000_000,
+            "exits_executed": 0,
+            "pending_exit_fills_reconciled": 1,
+            "position_report_error": "",
+        },
+        "pending_fill_reconciliations": [
+            {
+                "trade_id": "tp-inferred",
+                "symbol": "BUSDT",
+                "side": "short",
+                "status": "closed",
+                "qty": 100.0,
+                "entry_price": 1.0,
+                "exit_price": 0.79,
+                "exit_reason": "take_profit_level_reached",
+                "exit_reason_source": "exit_price_vs_ledger_take_profit",
+                "venue_closed_pnl_allocated_usdt": 20.5,
+            }
+        ],
+        "bybit_position_summary": {
+            "positions": 0,
+            "position_value_usdt": 0.0,
+            "unrealized_pnl_usdt": 0.0,
+            "pnl_pct": 0.0,
+        },
+        "bybit_positions": [],
+    }
+
+    text = format_telegram_status_message(payload)
+
+    assert "TAKE-PROFIT LEVEL REACHED (ORDER TYPE UNCONFIRMED)" in text
+    assert "Realised P&L +$20.50" in text
+    assert "Close cause inferred from exit price; venue order type was unavailable." in text
 
 
 def test_telegram_notify_only_for_material_events(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,8 +547,9 @@ def test_wallet_error_tags_fallback_equity_and_is_surfaced() -> None:
     payload = _status_payload(wallet_error="wallet equity unavailable: timeout", equity=10_000.0)
     text = format_telegram_status_message(payload)
     # The fallback equity must NOT print as a clean read.
-    assert "FALLBACK" in text
-    assert "wallet_error=wallet equity unavailable: timeout" in text
+    assert "wallet check unavailable" in text
+    assert "Wallet could not be verified: wallet equity unavailable: timeout" in text
+    assert "Equity: $10,000.00" not in text
 
 
 def test_wallet_error_triggers_a_notification() -> None:
@@ -462,3 +563,52 @@ def test_clean_wallet_read_is_not_tagged_or_notified() -> None:
     assert "FALLBACK" not in text
     assert "wallet_error" not in text
     assert _telegram_notification_reason(payload) == ""
+
+
+def test_position_loss_alerts_use_deepest_crossed_band_per_position() -> None:
+    payload = {
+        "cycle": {"ts_ms": 1_700_000_000_000, "position_report_error": ""},
+        "bybit_positions": [
+            {
+                "symbol": "BUSDT",
+                "side": "short",
+                "qty": 100.0,
+                "avg_price": 1.0,
+                "mark_price": 1.12,
+                "position_value_usdt": 112.0,
+                "unrealized_pnl_usdt": -12.0,
+                "pnl_pct": -12.0 / 112.0,
+                "liquidation_price": 1.8,
+                "take_profit_price": 0.88,
+                "stop_price": 0.0,
+            }
+        ],
+    }
+
+    alerts = position_loss_alerts(payload, levels=(0.05, 0.10, 0.20))
+
+    assert len(alerts) == 1
+    assert alerts[0].threshold == pytest.approx(0.10)
+    assert alerts[0].next_threshold == pytest.approx(0.20)
+    text = format_position_loss_alert(alerts[0], now_ms=1_700_000_000_000)
+    assert "BUSDT SHORT" in text
+    assert "-$12.00" in text
+    assert "First alert past -10.00%" in text
+    assert "next only past -20.00%" in text
+    assert "Protection: TP $0.88 · no venue stop" in text
+
+
+def test_position_loss_configuration_fails_back_instead_of_disabling_alerts() -> None:
+    assert position_loss_alert_levels("garbage") == (0.05, 0.10, 0.20, 0.40)
+    assert position_loss_alert_levels("0.20,0.05,0.10") == (0.05, 0.10, 0.20)
+
+
+def test_position_loss_alerts_require_a_verified_position_snapshot() -> None:
+    payload = {
+        "cycle": {"position_report_error": "REST timeout"},
+        "bybit_positions": [
+            {"symbol": "BUSDT", "side": "short", "pnl_pct": -0.50},
+        ],
+    }
+
+    assert position_loss_alerts(payload) == []

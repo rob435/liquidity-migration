@@ -399,12 +399,12 @@ def _add_event_risk_ws_parser(subparsers) -> None:
 
 
 def _add_combined_book_report_parser(subparsers) -> None:
-    """Daily/weekly aggregate report covering the shared Bybit demo account.
+    """Hourly aggregate report covering the shared Bybit demo account.
 
     Reads the configured long, continuous demo, continuous paper, and hedge roots,
     computes realized + open PnL and live Bybit positions, and sends a single
     operator-readable Telegram message.
-    Schedule on cron / systemd timer for the daily/weekly cadence.
+    The deployed systemd timer runs at five minutes past every hour.
     """
     report = subparsers.add_parser(
         "combined-book-telegram-report",

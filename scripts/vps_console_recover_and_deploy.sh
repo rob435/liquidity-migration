@@ -279,6 +279,16 @@ esac
 for unit in deploy/systemd/liquidity-migration-*.service deploy/systemd/liquidity-migration-*.timer; do
     cp "$unit" "/etc/systemd/system/$(basename "$unit")"
 done
+# Clear the named emergency mutes once the deduplicated Telegram release is
+# installed. Do not remove any unrelated operator drop-ins.
+for _telegram_quiet_dir in \
+  /etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d \
+  /etc/systemd/system/liquidity-migration-combined-book-report.service.d \
+  /run/systemd/system/liquidity-migration-bybit-continuous-demo.service.d \
+  /run/systemd/system/liquidity-migration-combined-book-report.service.d; do
+    rm -f "$_telegram_quiet_dir/telegram-quiet.conf"
+    rmdir "$_telegram_quiet_dir" 2>/dev/null || true
+done
 systemctl daemon-reload
 # --- per-sleeve kill-switch (deploy/sleeves.env) - the SAME single source of truth as
 # scripts/deploy_vps_live.sh, so disaster recovery can NEVER resurrect an OFF sleeve.
@@ -313,7 +323,7 @@ apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # Timers must be enable --now: enable alone writes the symlink but doesn't
-# start the timer, so the liveness watchdog + daily combined-book report would
+# start the timer, so the liveness watchdog + hourly combined-book report would
 # sit dormant on a freshly-recovered VPS.
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer

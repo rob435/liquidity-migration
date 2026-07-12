@@ -232,9 +232,24 @@ console recovery, submit-armed wrappers, and the demo-liveness watchdog all
 probe `get_api_key_information()` and fail/page on read-only or missing mutation
 permissions. Recovery is to replace `/etc/liquidity-migration/bybit-demo.env`
 with a non-read-only demo key, never by setting `REAL_MONEY`.
-Telegram is enabled for material alerts only: entries, exits, position
-reconciliation, or position-report errors. Quiet no-trade cycles still write
-local reports but must not notify. The services submit demo orders only.
+Telegram separates an hourly account digest from material position events.
+The digest runs at `HH:05`, reads the Bybit position endpoint as the authority
+for current exposure, and labels disagreeing local rows as stale bookkeeping.
+Position alerts cover entries, exits (including take-profit reason and realised
+P&L), reconciliation/safety faults, and first crossings of the configured 5%,
+10%, 20%, and 40% loss bands. The shared `ws_risk` process is the sole producer
+for successful opens/closes after venue confirmation; sleeve daemons retain
+rate-limited order failures, so one fill cannot generate two success messages.
+Server-side close reasons are taken from Bybit order history (`stopOrderType` /
+`createType`); when that metadata is unavailable, a crossed ledger TP/SL is
+labelled explicitly as a price inference rather than a confirmed order type.
+Loss bands are restart-safe and deduplicated; an
+unchanged band can remind at most once per 24 hours. The hourly hedge-manager
+status comes from resolved `CONTINUOUS_HEDGE_TIMER` state, never from the
+continuous-sleeve toggle. The liveness watchdog
+reminds on an unchanged operational fault at most every six hours and sends a
+resolution message when it clears. Quiet no-trade cycles still write local
+reports but must not notify. The services submit demo orders only.
 The risk
 service does not open entries; it repairs exchange-native stop/TP state, listens to
 demo private WebSocket position/order/execution streams plus the mainnet public

@@ -18,6 +18,9 @@ Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=SUBMIT_ORDERS=1
 Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1
+# Per-position P&L loss bands (fraction of current position value). ws_risk
+# sends once on each newly crossed band, then at most one reminder after 24h.
+Environment=TELEGRAM_POSITION_LOSS_LEVELS=0.05,0.10,0.20,0.40
 Environment=ORDER_SUBMIT_MODE=ws_then_rest
 Environment=REST_FALLBACK=1
 Environment=PYTHONDONTWRITEBYTECODE=1

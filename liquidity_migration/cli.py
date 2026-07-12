@@ -544,7 +544,11 @@ def _cmd_event_risk_ws(args: argparse.Namespace, config: ResearchConfig, data_ro
 def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
         from liquidity_migration.long_native_event_demo import format_combined_book_summary
         from liquidity_migration.event_demo import _build_private_client, _safe_raw_positions, _utc_now_ms
-        from liquidity_migration.event_demo import build_position_pnl_snapshot, summarize_position_pnl
+        from liquidity_migration.event_demo import (
+            build_position_pnl_snapshot,
+            summarize_position_pnl,
+            wallet_equity_usdt,
+        )
         from liquidity_migration.telegram import send_telegram_message
         short_root = Path(args.short_data_root or config.data_root).expanduser()
         long_default = data_root.parent / "bybit-long-demo-event"
@@ -558,9 +562,13 @@ def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: Researc
         bybit_position_summary: dict[str, object] | None = None
         bybit_positions: list[dict[str, object]] | None = None
         live_positions_error: str | None = None
+        account_equity_usdt: float | None = None
+        wallet_error: str | None = None
         if args.include_live_positions:
             try:
                 client = _build_private_client(config)
+                if client is None:
+                    raise RuntimeError("Bybit private client unavailable; demo credentials are missing")
                 raw_positions, error = _safe_raw_positions(client, settle_coin="USDT")
                 if not error:
                     bybit_positions = build_position_pnl_snapshot(raw_positions)
@@ -571,8 +579,19 @@ def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: Researc
                     # read (audit 2026-06-12 round 3).
                     live_positions_error = str(error)
                     print(f"WARN: failed to fetch live Bybit positions: {error}", flush=True)
+                try:
+                    account_equity_usdt = wallet_equity_usdt(
+                        client.get_wallet_balance(account_type="UNIFIED", coin="USDT")
+                    )
+                    if account_equity_usdt <= 0.0:
+                        wallet_error = "wallet equity was zero or unavailable"
+                        account_equity_usdt = None
+                except Exception as exc:  # noqa: BLE001 - position report can still be authoritative
+                    wallet_error = f"{type(exc).__name__}: {exc}"
+                    print(f"WARN: failed to fetch Bybit wallet equity: {exc}", flush=True)
             except Exception as exc:  # noqa: BLE001 - aggregate roll-up must never fail on REST issues
                 live_positions_error = f"{type(exc).__name__}: {exc}"
+                wallet_error = live_positions_error
                 print(f"WARN: failed to fetch live Bybit positions: {exc}", flush=True)
         message = format_combined_book_summary(
             short_root=short_root,
@@ -584,6 +603,8 @@ def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: Researc
             bybit_position_summary=bybit_position_summary,
             bybit_positions=bybit_positions,
             live_positions_error=live_positions_error,
+            account_equity_usdt=account_equity_usdt,
+            wallet_error=wallet_error,
             sleeve_states={
                 # Compatibility short rows default off. LONG/PAPER unset-defaults
                 # are "off" too since round 3 — every reader
@@ -592,6 +613,13 @@ def _cmd_combined_book_telegram_report(args: argparse.Namespace, config: Researc
                 "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "off"),
                 "CONTINUOUS_SLEEVE": os.environ.get("CONTINUOUS_SLEEVE", "off"),
                 "CONTINUOUS_PAPER_SLEEVE": os.environ.get("CONTINUOUS_PAPER_SLEEVE", "off"),
+                # This is computed from actual deploy/ledger state and written
+                # to sleeves.resolved.env. Never infer hedge-manager activity
+                # from CONTINUOUS_SLEEVE: an off sleeve can retain the timer to
+                # manage an existing stopless hedge, and missing state is unknown.
+                "CONTINUOUS_HEDGE_TIMER": os.environ.get(
+                    "CONTINUOUS_HEDGE_TIMER", "unknown"
+                ),
             },
         )
         if args.print_only:

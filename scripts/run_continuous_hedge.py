@@ -689,17 +689,32 @@ def main() -> int:
     # isolated; the send can never change the exit code.
     if out.get("status") in {"submitted", "submit_partial"}:
         try:
-            from liquidity_migration.telegram import send_telegram_message
+            from liquidity_migration.telegram import format_utc_time_ms, send_telegram_message
 
-            legs = "; ".join(
-                f"{r.get('side')} {r.get('qty')} {r.get('symbol')}" for r in out.get("submitted") or []
-            )
+            submitted_rows = out.get("submitted") or []
             errors = out.get("submit_errors") or []
-            message = (
-                f"hedge {out['status']} ({out.get('hedge_mode')}): {legs or 'no legs'}"
-                f" | equity ${equity:,.0f} ({equity_source})"
-                + (f" | {len(errors)} leg error(s)" if errors else "")
+            lines = [
+                "\N{LARGE BLUE CIRCLE} Hedge position adjusted \N{MIDDLE DOT} Bybit demo",
+                format_utc_time_ms(now_ms),
+            ]
+            for row in submitted_rows:
+                lines.append(
+                    f"{str(row.get('symbol') or 'UNKNOWN')} "
+                    f"{str(row.get('side') or 'order').upper()} {row.get('qty')}"
+                )
+            lines.append(f"Account equity ${equity:,.2f} ({equity_source})")
+            if errors:
+                lines.append(
+                    f"\N{WARNING SIGN} {len(errors)} hedge leg(s) failed; "
+                    "the liveness alert carries the failure."
+                )
+            else:
+                lines.append("All planned hedge orders were accepted.")
+            lines.append(
+                "This reports submitted orders only; the hourly Bybit snapshot "
+                "confirms the resulting live hedge."
             )
+            message = "\n".join(lines)[:3900]
             send_telegram_message(message, enabled=True)
         except Exception as exc:  # noqa: BLE001 — notify must never mask the submit result
             print(f"hedge telegram notify failed: {exc}", file=sys.stderr)

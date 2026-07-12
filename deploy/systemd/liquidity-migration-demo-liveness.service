@@ -28,12 +28,14 @@ MemoryMax=512M
 # close or repair the unavailable protection. Continuous v2 is
 # intentionally no-stop demo/paper, so this unit does not pass
 # --continuous-stop-check. Exits 0 always (a watchdog must never crash-loop).
+# New/escalated faults still page immediately; the hourly digest carries
+# ongoing status, so an unchanged fault needs at most a six-hour reminder.
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/check_demo_liveness.py \
     --continuous-root /opt/liquidity-migration/data/bybit-continuous-demo-event \
     --continuous-paper-root /opt/liquidity-migration/data/bybit-continuous-paper-event \
     --long-root /opt/liquidity-migration/data/bybit-long-demo-event \
     --max-cycle-age-min 10 \
-    --cooldown-min 30 \
+    --cooldown-min 360 \
     --telegram
 SuccessExitStatus=0
 StandardOutput=journal

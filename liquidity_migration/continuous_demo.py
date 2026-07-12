@@ -83,6 +83,8 @@ CONTINUOUS_DEMO_PROFILES = (
 CONTINUOUS_RISK_EVENTS_FILE = "continuous_risk_events.jsonl"
 CONTINUOUS_LIFECYCLE_EVENTS_FILE = "continuous_lifecycle_events.jsonl"
 CONTINUOUS_EQUITY_STATE_FILE = "continuous_account_equity_state.json"
+CONTINUOUS_TELEGRAM_STATE_FILE = "continuous_telegram_alert_state.json"
+CONTINUOUS_TELEGRAM_ERROR_COOLDOWN_MS = exact_duration_ms(hours=6)
 CONTINUOUS_LIFECYCLE_STATES = (
     "SIGNAL_CREATED",
     "ENTRY_APPROVED",
@@ -2922,6 +2924,19 @@ def _submission_error_count(
     )
 
 
+def _submission_error_details(rows: list[dict[str, Any]]) -> str:
+    """Compact, stable order-failure details for telemetry and alert dedupe."""
+    details = {
+        f"{row.get('symbol') or 'UNKNOWN'}: "
+        f"{str(row.get('error') or row.get('status') or row.get('submit_mode') or 'order failed')[:180]}"
+        for row in rows
+        if str(row.get("submit_mode") or "") == "error"
+        or str(row.get("status") or "") in {"failed", "rejected"}
+        or bool(str(row.get("error") or ""))
+    }
+    return "; ".join(sorted(details))[:1000]
+
+
 def _payload_float(value: Any) -> float:
     try:
         return float(value)
@@ -3953,15 +3968,11 @@ def _continuous_telegram_reason(
 ) -> str:
     """Material-event filter for the continuous per-cycle telegram — quiet cycles send nothing.
     Mirrors long_native_event_demo._long_telegram_reason."""
-    # reports-charts-1: a wallet-read failure makes resolve_snapshot_equity hand back the
-    # fixed $10,000 fallback (never None), so every cycle would otherwise silently report a
-    # constant balance as if the wallet were read — masking a private-REST outage (auth expiry,
-    # rate-limit ban, network) on the operator's only at-a-glance health view. Page the operator
-    # on a pure wallet outage even when no order activity fired this cycle.
-    if payload.get("wallet_error"):
-        return "continuous_wallet_error"
-    if payload.get("entry_risk_health_ok") is False:
-        return "continuous_entry_risk_health_blocked"
+    # Wallet/snapshot/ledger health is intentionally NOT a per-cycle Telegram
+    # event.  The watchdog and hourly live-snapshot digest own operational
+    # health with durable cooldowns.  Classifying an unchanged health block as
+    # a trade event produced one near-identical page every cycle (hundreds per
+    # day) and repeatedly described stale ledger rows as live exposure.
     if int(payload.get("lifecycle_transition_violations") or 0) > 0:
         return "continuous_lifecycle_transition_violation"
     # Submit failures live on ORDER rows, surfaced via payload counts: a failed
@@ -3979,17 +3990,12 @@ def _continuous_telegram_reason(
     # both their failures and their executions must page (audit 2026-06-12 r3).
     if int(payload.get("resize_errors") or 0) > 0:
         return "continuous_resize_error"
-    # Sniper lifecycle (payload counts — the rows live in separate lists): a snipe fill
-    # is a NEW live short, an error is a stuck/ghost resting order. Until 2026-06-12
-    # the armed sniper was invisible to this filter entirely.
+    # Sniper failures remain operational pages. Successful fills/exits, like
+    # ordinary sleeve fills/exits, are owned by the shared ws_risk engine after
+    # venue confirmation. Letting both processes announce them produced two
+    # messages for one Bybit position update.
     if int(payload.get("sniper_errors") or 0) > 0:
         return "continuous_sniper_error"
-    if int(payload.get("sniper_fills") or 0) > 0:
-        return "continuous_sniper_fill"
-    if int(payload.get("entries") or 0) > 0:
-        return "continuous_entry_executed"
-    if int(payload.get("exits") or 0) > 0 or int(payload.get("sniper_exits") or 0) > 0:
-        return "continuous_exit_executed"
     if int(payload.get("rebalance_resizes") or 0) > 0:
         return "continuous_rebalance_resize"
     return ""
@@ -4002,77 +4008,34 @@ def format_continuous_telegram_status_message(
     *,
     reason: str,
 ) -> str:
-    # "NA" when the payload carries no equity (the fast protective loop is
-    # network-free and never reads the wallet) — printing $0.00 for a missing
-    # read misstates the account on an operator-facing message (audit r3).
-    equity = payload.get("equity_usdt")
-    equity_text = f"${_payload_float(equity):,.2f}" if equity is not None else "NA"
-    # reports-charts-1: on a wallet-read failure resolve_snapshot_equity returns the fixed
-    # $10,000 fallback (not None / not 0), so the equity print looks like a real successful
-    # read. Tag it as a fallback and surface the underlying error so the operator sees the
-    # outage instead of a falsely-steady balance (sizing also runs off this same fallback).
-    wallet_error = payload.get("wallet_error")
-    if wallet_error and equity is not None:
-        equity_text = f"{equity_text} (FALLBACK - wallet read failed)"
-    lines = [
-        "[Continuous sleeve] Bybit demo",
-        f"reason={reason}",
-        f"mode={payload.get('mode')} equity={equity_text}",
-        f"entries={payload.get('entries')} exits={payload.get('exits')} "
-        f"open={payload.get('open_positions')} cand={payload.get('candidates')}",
-    ]
-    if payload.get("fast_loop"):
-        # The fast protective loop never evaluates the rmom gate or entry pause —
-        # don't print a line it has no knowledge of.
-        lines.insert(2, "(fast protective-exit loop)")
-    else:
-        lines.append(
-            f"rmom={'present' if payload.get('rmom_present') else 'MISSING'} "
-            f"paused={payload.get('entry_paused')}"
-        )
-    if payload.get("entry_risk_health_ok") is False:
-        lines.append(
-            "entry_risk_health="
-            f"{payload.get('entry_risk_health_reasons') or 'blocked'} "
-            f"snapshot={payload.get('entry_risk_health_snapshot_source') or ''}"
-        )
-        if "private_ws_stale" in str(payload.get("entry_risk_health_reasons") or ""):
-            lines.append(
-                "private_ws="
-                f"health_ok={payload.get('entry_risk_health_private_ws_health_ok')} "
-                f"silence_s={_payload_float(payload.get('entry_risk_health_private_ws_silence_seconds')):g}"
-            )
-        missing = str(payload.get("entry_risk_health_ledger_missing_positions") or "")
-        if missing:
-            lines.append(f"ledger_missing_positions={missing[:200]}")
-        unprotected = str(payload.get("entry_risk_health_unprotected_positions") or "")
-        if unprotected:
-            lines.append(
-                "unprotected_positions="
-                f"{unprotected[:200]} max_age_s="
-                f"{_payload_float(payload.get('entry_risk_health_unprotected_max_age_seconds')):g}"
-            )
-            unprotected_ages = str(payload.get("entry_risk_health_unprotected_position_ages") or "")
-            if unprotected_ages:
-                lines.append(f"unprotected_position_ages={unprotected_ages[:200]}")
-        exchange_only = str(payload.get("entry_risk_health_exchange_only_positions") or "")
-        if exchange_only:
-            lines.append(f"exchange_only_positions={exchange_only[:200]}")
-        lifecycle_states = str(payload.get("entry_risk_health_lifecycle_states") or "")
-        if lifecycle_states:
-            lines.append(f"lifecycle_states={lifecycle_states[:200]}")
-        if payload.get("entry_account_drawdown_kill_switch_tripped"):
-            lines.append(
-                "account_drawdown="
-                f"{_payload_float(payload.get('entry_account_drawdown_frac')):.4f} "
-                f"high_water=${_payload_float(payload.get('entry_account_equity_high_water_usdt')):,.2f} "
-                f"limit={_payload_float(payload.get('entry_account_drawdown_kill_switch_frac')):.4f}"
-            )
+    from .event_demo_reports import (
+        aggregate_position_event_rows,
+        format_position_event_lines,
+    )
+    from .telegram import format_utc_time_ms
+
+    titles = {
+        "continuous_entry_executed": "\N{LARGE GREEN CIRCLE} Position opened",
+        "continuous_sniper_fill": "\N{LARGE GREEN CIRCLE} Position opened",
+        "continuous_exit_executed": "\N{WHITE HEAVY CHECK MARK} Position closed",
+        "continuous_entry_error": "\N{WARNING SIGN} Entry order failed",
+        "continuous_exit_error": "\N{WARNING SIGN} Exit order failed",
+        "continuous_resize_error": "\N{WARNING SIGN} Resize order failed",
+        "continuous_sniper_error": "\N{WARNING SIGN} Sniper order failed",
+        "continuous_rebalance_resize": "\N{INFORMATION SOURCE} Position resized",
+        "continuous_lifecycle_transition_violation": "\N{WARNING SIGN} Lifecycle update rejected",
+    }
+    title = titles.get(reason, "\N{INFORMATION SOURCE} Continuous update")
+    if entry_rows and exit_rows:
+        title = "\N{CLOCKWISE OPEN CIRCLE ARROW} Position updates"
+    lines = [f"{title} \N{MIDDLE DOT} Continuous demo"]
+    event_ts_ms = int(_payload_float(payload.get("ts_ms")))
+    if event_ts_ms > 0:
+        lines.append(format_utc_time_ms(event_ts_ms))
     if int(payload.get("lifecycle_transition_violations") or 0) > 0:
         lines.append(
-            "lifecycle_transition_violations="
-            f"{payload.get('lifecycle_transition_violations')} "
-            f"reasons={payload.get('lifecycle_transition_violation_reasons') or ''}"
+            f"{payload.get('lifecycle_transition_violations')} lifecycle transition(s) rejected: "
+            f"{payload.get('lifecycle_transition_violation_reasons') or 'unknown reason'}"
         )
     sniper_counts = (
         int(payload.get("sniper_fills") or 0),
@@ -4081,7 +4044,8 @@ def format_continuous_telegram_status_message(
     )
     if any(sniper_counts):
         lines.append(
-            f"sniper: fills={sniper_counts[0]} exits={sniper_counts[1]} errors={sniper_counts[2]}"
+            f"Sniper activity: {sniper_counts[0]} fill(s), {sniper_counts[1]} exit(s), "
+            f"{sniper_counts[2]} error(s)"
         )
     error_counts = (
         int(payload.get("entry_errors") or 0),
@@ -4090,34 +4054,145 @@ def format_continuous_telegram_status_message(
     )
     if any(error_counts):
         lines.append(
-            f"submit errors: entries={error_counts[0]} exits={error_counts[1]} resizes={error_counts[2]}"
+            f"Order errors: {error_counts[0]} entry, {error_counts[1]} exit, "
+            f"{error_counts[2]} resize"
         )
-    # reports-charts-1: surface the wallet-read error verbatim so the operator can tell a
-    # private-REST outage from a genuinely steady balance (the equity line above is the
-    # masked $10,000 fallback when this is set).
-    if wallet_error:
-        lines.append(f"wallet_error={str(wallet_error)[:200]}")
+    for key in (
+        "entry_error_details",
+        "exit_error_details",
+        "resize_error_details",
+        "sniper_error_details",
+    ):
+        details = str(payload.get(key) or "")
+        if details:
+            lines.append(details[:500])
     resizes = int(payload.get("rebalance_resizes") or 0)
     if resizes:
-        lines.append(f"rebalance resizes: {resizes}")
-    if entry_rows:
-        lines.append("Entries:")
-        for row in entry_rows[:6]:
-            lines.append(
-                f"- {row.get('symbol', '')} qty={_payload_float(row.get('qty')):g} "
-                f"@${_payload_float(row.get('entry_price')):.6g} status={row.get('status', '')}"
-            )
-    if exit_rows:
-        lines.append("Exits:")
-        for row in exit_rows[:6]:
-            lines.append(
-                f"- {row.get('symbol', '')} reason={row.get('exit_reason', '')} "
-                f"@${_payload_float(row.get('exit_price')):.6g} mode={row.get('submit_mode', '')}"
-            )
-    portfolio_overview = str(payload.get("portfolio_overview") or "").strip()
-    if portfolio_overview:
-        lines.extend(["", portfolio_overview[:1400]])
+        lines.append(f"Positions resized: {resizes}")
+    displayed = 0
+    for raw_rows, closing in ((entry_rows, False), (exit_rows, True)):
+        for row in aggregate_position_event_rows(
+            raw_rows,
+            closing=closing,
+            default_side="short",
+        ):
+            if displayed >= 6:
+                break
+            if displayed or len(lines) > 1:
+                lines.append("")
+            lines.extend(format_position_event_lines(row, closing=closing))
+            displayed += 1
     return "\n".join(lines)[:3900]
+
+
+def _continuous_telegram_dedupe_signature(
+    reason: str,
+    payload: dict[str, Any],
+    entry_rows: list[dict[str, Any]],
+    exit_rows: list[dict[str, Any]],
+) -> str:
+    """Stable signature for repeating operational/order failures only."""
+    if reason not in {
+        "continuous_lifecycle_transition_violation",
+        "continuous_entry_error",
+        "continuous_exit_error",
+        "continuous_resize_error",
+        "continuous_sniper_error",
+    }:
+        return ""
+    row_signatures = sorted(
+        "|".join(
+            [
+                str(row.get("symbol") or ""),
+                str(row.get("status") or ""),
+                str(row.get("submit_mode") or ""),
+                str(row.get("error") or "")[:160],
+            ]
+        )
+        for row in entry_rows + exit_rows
+    )
+    return json.dumps(
+        {
+            "reason": reason,
+            "entry_errors": int(payload.get("entry_errors") or 0),
+            "exit_errors": int(payload.get("exit_errors") or 0),
+            "resize_errors": int(payload.get("resize_errors") or 0),
+            "sniper_errors": int(payload.get("sniper_errors") or 0),
+            "lifecycle": str(payload.get("lifecycle_transition_violation_reasons") or ""),
+            "entry_error_details": str(payload.get("entry_error_details") or ""),
+            "exit_error_details": str(payload.get("exit_error_details") or ""),
+            "resize_error_details": str(payload.get("resize_error_details") or ""),
+            "sniper_error_details": str(payload.get("sniper_error_details") or ""),
+            "rows": row_signatures,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _read_continuous_telegram_state(path: Path) -> dict[str, int]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    state: dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            state[str(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return state
+
+
+def _write_continuous_telegram_state(path: Path, state: dict[str, int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _claim_continuous_telegram_signature(
+    path: Path,
+    signature: str,
+    *,
+    now_ms: int,
+) -> bool:
+    if not signature:
+        return True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with exclusive_file_lock(lock_path, stale_seconds=60, poll_seconds=0.001):
+        state = _read_continuous_telegram_state(path)
+        last_sent = int(state.get(signature, 0))
+        if last_sent and now_ms - last_sent < CONTINUOUS_TELEGRAM_ERROR_COOLDOWN_MS:
+            return False
+        keep_after = now_ms - exact_duration_ms(days=7)
+        state = {key: value for key, value in state.items() if value >= keep_after}
+        state[signature] = now_ms
+        _write_continuous_telegram_state(path, state)
+    return True
+
+
+def _release_continuous_telegram_signature(
+    path: Path,
+    signature: str,
+    *,
+    claimed_at_ms: int,
+) -> None:
+    if not signature:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with exclusive_file_lock(lock_path, stale_seconds=60, poll_seconds=0.001):
+        state = _read_continuous_telegram_state(path)
+        if int(state.get(signature, 0)) == claimed_at_ms:
+            state.pop(signature, None)
+            _write_continuous_telegram_state(path, state)
 
 
 def _maybe_continuous_notify(
@@ -4126,20 +4201,35 @@ def _maybe_continuous_notify(
     exit_rows: list[dict[str, Any]],
     *,
     enabled: bool,
-    portfolio_overview_factory: Callable[[], str] | None = None,
+    notification_state_path: Path | None = None,
+    now_ms: int | None = None,
 ) -> tuple[bool, str]:
-    """Per-cycle telegram for the LIVE order-submitting continuous sleeve. Until 2026-06-11
-    this sleeve sent NO trade notifications at all despite TELEGRAM_ENABLED=1 in its unit
-    (only ws_risk's exit-class alerts fired). Fully exception-isolated — the formatter runs
-    INSIDE the try so a malformed payload can never break the order path (EVE-2 pattern)."""
+    """Send a rate-limited operational failure or an explicit resize update.
+
+    Health snapshots remain in cycle telemetry and the cooldown watchdog; they
+    are deliberately not re-sent on every continuous cycle. Successful opens
+    and closes are announced once by ws_risk after venue confirmation. Fully
+    exception-isolated so a notification fault can never break the order path.
+    """
     if not enabled:
         return False, "disabled"
+    signature = ""
+    claimed_at_ms = int(now_ms or _utc_now_ms())
     try:
         reason = _continuous_telegram_reason(payload, entry_rows, exit_rows)
         if not reason:
             return False, "quiet_no_material_event"
-        if portfolio_overview_factory is not None and not payload.get("portfolio_overview"):
-            payload = {**payload, "portfolio_overview": portfolio_overview_factory()}
+        signature = _continuous_telegram_dedupe_signature(
+            reason, payload, entry_rows, exit_rows
+        )
+        if (
+            notification_state_path is not None
+            and signature
+            and not _claim_continuous_telegram_signature(
+                notification_state_path, signature, now_ms=claimed_at_ms
+            )
+        ):
+            return False, "quiet_duplicate_operational_event"
         text = format_continuous_telegram_status_message(
             payload, entry_rows, exit_rows, reason=reason
         )
@@ -4147,27 +4237,18 @@ def _maybe_continuous_notify(
 
         sent = send_telegram_message(text, enabled=True)
     except Exception as exc:  # noqa: BLE001 — telegram must never break the cycle
+        if notification_state_path is not None:
+            _release_continuous_telegram_signature(
+                notification_state_path, signature, claimed_at_ms=claimed_at_ms
+            )
         return False, str(exc)[:500]
     if not sent:
+        if notification_state_path is not None:
+            _release_continuous_telegram_signature(
+                notification_state_path, signature, claimed_at_ms=claimed_at_ms
+            )
         return False, "telegram env missing or Telegram API returned false"
     return True, ""
-
-
-def _continuous_portfolio_alert_overview(root: Path, *, now_ms: int) -> str:
-    data_parent = root.parent
-    try:
-        from .long_native_event_demo import safe_portfolio_alert_overview
-
-        return safe_portfolio_alert_overview(
-            short_root=data_parent / "bybit-demo-event",
-            long_root=data_parent / "bybit-long-demo-event",
-            continuous_root=root,
-            continuous_paper_root=data_parent / "bybit-continuous-paper-event",
-            continuous_hedge_root=data_parent / "bybit-continuous-hedge-event",
-            now_ms=now_ms,
-        )
-    except Exception as exc:  # noqa: BLE001 - Telegram context must never break trading
-        return f"Portfolio overview unavailable: {type(exc).__name__}: {str(exc)[:200]}"
 
 
 def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
@@ -4967,6 +5048,12 @@ def run_continuous_demo_cycle(
             "exit_errors": _submission_error_count(exit_orders + snipe_exit_orders),
             "rebalance_resizes": len(resize_orders),
             "resize_errors": _submission_error_count(resize_orders),
+            "entry_error_details": _submission_error_details(entry_orders),
+            "exit_error_details": _submission_error_details(exit_orders + snipe_exit_orders),
+            "resize_error_details": _submission_error_details(resize_orders),
+            "sniper_error_details": _submission_error_details(
+                sniper_orders + snipe_updates + snipe_exit_orders
+            ),
             "lifecycle_events_written": lifecycle_events_written,
             "lifecycle_snapshot_updates": len(lifecycle_snapshot_rows),
             "lifecycle_transition_violations": len(lifecycle_transition_violations),
@@ -5089,9 +5176,8 @@ def run_continuous_demo_cycle(
         exec_entries,
         exec_exits + snipe_exits,
         enabled=demo.telegram,
-        portfolio_overview_factory=lambda: _continuous_portfolio_alert_overview(
-            root, now_ms=cycle_now_ms
-        ),
+        notification_state_path=root / ".cache" / CONTINUOUS_TELEGRAM_STATE_FILE,
+        now_ms=cycle_now_ms,
     )
     payload["telegram_sent"] = telegram_sent
     if telegram_error:
@@ -5212,11 +5298,13 @@ def run_continuous_protective_exit_cycle(
             "reasons": sorted({str(p.get("exit_reason")) for p in exit_plans}),
         }
         notify_payload = {
+            "ts_ms": now,
             "mode": "submit" if demo.submit_orders else "dry_run",
             "fast_loop": True,
             "entries": 0,
             "exits": len(exec_exits),
             "exit_errors": _submission_error_count(exit_orders),
+            "exit_error_details": _submission_error_details(exit_orders),
             "open_positions": len(held),
         }
     # Per-event telegram AFTER the ledger writes, exception-isolated, and OUTSIDE
@@ -5232,9 +5320,8 @@ def run_continuous_protective_exit_cycle(
         [],
         exec_exits,
         enabled=demo.telegram,
-        portfolio_overview_factory=lambda: _continuous_portfolio_alert_overview(
-            root, now_ms=now
-        ),
+        notification_state_path=root / ".cache" / CONTINUOUS_TELEGRAM_STATE_FILE,
+        now_ms=now,
     )
     result["telegram_sent"] = telegram_sent
     if telegram_error:

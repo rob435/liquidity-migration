@@ -3032,9 +3032,150 @@ def test_ws_risk_telegram_material_events_are_deduped(tmp_path: Path, monkeypatc
 
     assert first["cycle"]["telegram_sent"] is True
     assert second["cycle"]["telegram_sent"] is False
-    assert second["cycle"]["telegram_error"] == "duplicate_material_event"
+    assert second["cycle"]["telegram_error"] == "quiet_no_material_event"
     assert heartbeat["cycle"]["telegram_error"] == "quiet_no_material_event"
     assert len(sent) == 1
+
+
+def test_reconciled_closes_have_per_trade_telegram_identities() -> None:
+    first = {
+        "cycle": {},
+        "reconciliations": [
+            {"trade_id": "bus-p3", "symbol": "BUSDT", "status": "closed"},
+        ],
+    }
+    second = {
+        "cycle": {},
+        "reconciliations": [
+            {"trade_id": "eth-p3", "symbol": "ETHUSDT", "status": "closed"},
+        ],
+    }
+
+    first_key = ws_risk._telegram_dedupe_key("position_reconciled", first)
+    second_key = ws_risk._telegram_dedupe_key("position_reconciled", second)
+
+    assert first_key != second_key
+    assert "bus-p3" in first_key
+    assert "eth-p3" in second_key
+
+
+def test_ws_risk_loss_alerts_are_per_position_and_per_new_band(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sent: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool) -> bool:
+        sent.append(text)
+        return enabled
+
+    monkeypatch.setattr("liquidity_migration.ws_risk.send_telegram_message", fake_send)
+    monkeypatch.setenv("TELEGRAM_POSITION_LOSS_LEVELS", "0.05,0.10,0.20,0.40")
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(telegram=True, heartbeat_seconds=0.0),
+    )
+
+    def payload(pnl_pct: float) -> dict:
+        value = 100.0
+        return {
+            "cycle": {
+                "ts_ms": 1_700_000_000_000,
+                "position_report_error": "",
+                "entries_executed": 0,
+                "exits_executed": 0,
+            },
+            "bybit_positions": [
+                {
+                    "symbol": "BUSDT",
+                    "side": "short",
+                    "qty": 100.0,
+                    "avg_price": 1.0,
+                    "mark_price": 1.0 - pnl_pct,
+                    "position_value_usdt": value,
+                    "unrealized_pnl_usdt": value * pnl_pct,
+                    "pnl_pct": pnl_pct,
+                    "liquidation_price": 1.8,
+                }
+            ],
+            "bybit_position_summary": {
+                "positions": 1,
+                "position_value_usdt": value,
+                "unrealized_pnl_usdt": value * pnl_pct,
+                "pnl_pct": pnl_pct,
+            },
+        }
+
+    assert engine.maybe_notify(payload(-0.06)) == (True, "enqueued")
+    assert engine.maybe_notify(payload(-0.07)) == (False, "duplicate_material_event")
+    assert engine.maybe_notify(payload(-0.12)) == (True, "enqueued")
+    # Recovering above -10% must not generate a late/lower -5% alert.
+    assert engine.maybe_notify(payload(-0.07)) == (False, "duplicate_material_event")
+    engine.close()
+
+    assert len(sent) == 2
+    assert all("BUSDT SHORT" in message for message in sent)
+    assert "First alert past -5.00%" in sent[0]
+    assert "First alert past -10.00%" in sent[1]
+
+
+def test_ws_risk_expired_loss_band_is_labelled_as_daily_reminder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sent: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool) -> bool:
+        sent.append(text)
+        return enabled
+
+    monkeypatch.setattr("liquidity_migration.ws_risk.send_telegram_message", fake_send)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(telegram=True, heartbeat_seconds=0.0),
+    )
+    dedupe_path = engine.report_dir / "telegram_dedupe_keys.json"
+    dedupe_path.write_text(
+        json.dumps(
+            {
+                "position_loss|BUSDT|short|0.05": (
+                    time.time() - ws_risk.TELEGRAM_DEDUPE_RETENTION_SECONDS - 1.0
+                )
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        "cycle": {"ts_ms": 1_700_000_000_000, "position_report_error": ""},
+        "bybit_positions": [
+            {
+                "symbol": "BUSDT",
+                "side": "short",
+                "qty": 100.0,
+                "avg_price": 1.0,
+                "mark_price": 1.07,
+                "position_value_usdt": 107.0,
+                "unrealized_pnl_usdt": -7.0,
+                "pnl_pct": -7.0 / 107.0,
+                "take_profit_price": 0.88,
+                "stop_price": 0.0,
+            }
+        ],
+        "bybit_position_summary": {
+            "positions": 1,
+            "position_value_usdt": 107.0,
+            "unrealized_pnl_usdt": -7.0,
+            "pnl_pct": -7.0 / 107.0,
+        },
+    }
+
+    assert engine.maybe_notify(payload) == (True, "enqueued")
+    assert engine.maybe_notify(payload) == (False, "duplicate_material_event")
+    engine.close()
+
+    assert len(sent) == 1
+    assert "24-hour reminder: this position is still past -5.00%." in sent[0]
+    assert "First alert" not in sent[0]
 
 
 def test_ws_risk_pending_fill_notification_is_deduped_across_heartbeats(tmp_path: Path, monkeypatch) -> None:
@@ -3069,8 +3210,64 @@ def test_ws_risk_pending_fill_notification_is_deduped_across_heartbeats(tmp_path
     assert first["cycle"]["pending_entry_fills_reconciled"] == 1
     assert first["cycle"]["telegram_sent"] is True
     assert second["cycle"]["telegram_sent"] is False
-    assert second["cycle"]["telegram_error"] == "duplicate_material_event"
+    assert second["cycle"]["telegram_error"] == "quiet_no_material_event"
     assert len(sent) == 1
+
+
+def test_ws_risk_sends_one_complete_update_per_net_position(tmp_path: Path, monkeypatch) -> None:
+    sent: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool) -> bool:
+        sent.append(text)
+        return enabled
+
+    monkeypatch.setattr("liquidity_migration.ws_risk.send_telegram_message", fake_send)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(telegram=True, heartbeat_seconds=0.0),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    engine.state.pending_fill_reconciliations.extend(
+        [
+            {
+                "trade_id": f"aaa-{component}",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": qty,
+                "entry_price": 1.0,
+                "entry_order_link_id": f"entry-aaa-{component}",
+            }
+            for component, qty in (("p3", 1.0), ("p4p3", 2.0), ("p4p5", 3.0))
+        ]
+        + [
+            {
+                "trade_id": "bbb-p3",
+                "symbol": "BBBUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": 4.0,
+                "entry_price": 2.0,
+                "entry_order_link_id": "entry-bbb-p3",
+            }
+        ]
+    )
+
+    report = engine.write_report(reason="heartbeat")
+    engine.close()
+
+    assert report["cycle"]["telegram_sent"] is True
+    assert len(sent) == 2
+    aaa = next(message for message in sent if "AAAUSDT SHORT" in message)
+    bbb = next(message for message in sent if "BBBUSDT SHORT" in message)
+    assert "Opened 6 @ $1" in aaa
+    assert "3 strategy legs netted into this one Bybit position" in aaa
+    assert "BBBUSDT" not in aaa
+    assert "Opened 4 @ $2" in bbb
+    assert "AAAUSDT" not in bbb
 
 
 def test_ws_risk_telegram_dedupe_survives_restart(tmp_path: Path, monkeypatch) -> None:
@@ -3266,7 +3463,8 @@ def test_ws_risk_position_stream_zero_waits_for_closed_pnl_before_closing(tmp_pa
     stored = read_dataset(tmp_path, "event_demo_trades")
     closed = stored.filter(pl.col("trade_id") == "t1").to_dicts()[0]
     assert closed["status"] == "closed"
-    assert closed["exit_reason"] == "bybit_position_missing"
+    assert closed["exit_reason"] == "stop_loss_level_reached"
+    assert closed["exit_reason_source"] == "exit_price_vs_ledger_stop"
     assert closed["exit_price"] == pytest.approx(112.5)
     assert "AAAUSDT" not in engine.state.pending_orphan_symbols
     assert engine.state.reconciliations[0]["trade_id"] == "t1"

@@ -1,13 +1,13 @@
 [Unit]
-Description=Daily combined-book aggregate Telegram report (08:00 UTC)
+Description=Hourly Bybit portfolio Telegram report (:05 UTC)
 # NO Requires=<service> here: it makes every deploy's `systemctl enable --now <timer>`
-# also START the service -> duplicate daily Telegram reports on every push (observed live).
+# also START the service -> duplicate Telegram reports on every push (observed live).
 
 [Timer]
-# Fires daily at 08:00 UTC. Use OnCalendar=Mon *-*-* 08:00:00 for a
-# weekly-only schedule. Persistent=true runs a missed firing on next
-# boot, so a box down over 08:00 UTC doesn't silently skip a day.
-OnCalendar=*-*-* 08:00:00 UTC
+# Run just after the hourly strategy boundary so the digest sees the latest
+# cycle, while avoiding the entry burst at exactly HH:00. Persistent=true runs
+# one missed report after downtime; it does not replay every missed hour.
+OnCalendar=*-*-* *:05:00 UTC
 AccuracySec=1m
 Persistent=true
 Unit=liquidity-migration-combined-book-report.service

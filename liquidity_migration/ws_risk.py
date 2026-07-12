@@ -64,6 +64,13 @@ from .event_demo import (
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
 from . import cross_sleeve as _cross_sleeve
 from .event_demo import wallet_equity_usdt
+from .event_demo_reports import (
+    PositionLossAlert,
+    format_position_event_messages,
+    format_position_loss_alert,
+    position_loss_alert_levels,
+    position_loss_alerts,
+)
 from .order_execution import (
     order_fill_status,
     order_fully_filled,
@@ -3521,6 +3528,29 @@ class EventWebSocketRiskEngine:
             fresh = max(total - self._reason_high_water.get(key, 0), 0)
             self._reason_high_water[key] = total
             view[key] = rows[-fresh:] if fresh > 0 else []
+        # Cycle counters are cumulative since process start too.  Leaving them
+        # untouched meant an old exit/pending fill kept deriving a material
+        # reason on every later heartbeat even after its fresh rows were gone.
+        cycle = dict(payload.get("cycle", {}))
+        cycle["exits_executed"] = len(view.get("exits", []))
+        fresh_pending = view.get("pending_fill_reconciliations", []) or []
+        cycle["pending_entry_fills_reconciled"] = sum(
+            1
+            for row in fresh_pending
+            if str(row.get("status") or "") != "closed"
+            and bool(row.get("entry_order_link_id") or not row.get("exit_order_link_id"))
+        )
+        cycle["pending_exit_fills_reconciled"] = sum(
+            1
+            for row in fresh_pending
+            if str(row.get("status") or "") == "closed" or bool(row.get("exit_order_link_id"))
+        )
+        if (
+            str(cycle.get("reason") or "") == "untracked_exit_submitted"
+            and not view.get("exit_orders")
+        ):
+            cycle["reason"] = "heartbeat"
+        view["cycle"] = cycle
         return view
 
     def _drain_failed_telegram_keys(self) -> None:
@@ -3548,33 +3578,109 @@ class EventWebSocketRiskEngine:
         # audit2c: un-record any keys whose background send failed (handed back by the
         # sender thread) before the dedupe check below, so a failed alert can re-fire.
         self._drain_failed_telegram_keys()
-        reason = _telegram_notification_reason(self._reason_payload_view(payload))
-        if not reason:
-            return False, "quiet_no_material_event"
-        key = _telegram_dedupe_key(reason, payload)
-        if key in self.state.telegram_keys_sent:
-            return False, "duplicate_material_event"
-        # Render the message NOW, on the consumer thread, where the payload and its
-        # shared order/position row-dicts are stable for this cycle — then enqueue only
-        # the frozen string. The background sender thus never reads dicts the consumer
-        # mutates in place on the next event (WS-R-001). Guard the render: now that it
-        # runs on the consumer/reconcile thread, a formatting fault must be telemetry,
-        # never an exception into the reconcile loop (same intent as EVE-2).
-        try:
-            text = format_telegram_status_message(payload)
-        except Exception as exc:  # noqa: BLE001 - a telegram-format fault must not break reconcile
-            return False, f"format_failed: {str(exc)[:200]}"
-        # Optimistic dedupe + offload the blocking HTTP send: record the dedupe key on
-        # the consumer thread and hand the network round-trip to the background sender,
-        # returning immediately so a slow Telegram RTT can't stall stop-enforcement. A
-        # failed send is logged, not retried — a notification, not an order.
-        self.state.telegram_keys_sent.add(key)
-        _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
-        # Bound the in-memory dedupe set to the same 24h window the on-disk file keeps
-        # (the write above just pruned it), so a long-lived daemon's set can't grow
-        # without bound (WSR-5).
+        # Expiry must apply to the in-memory set as well as the file reader.
+        # Without this refresh, a quiet long-lived daemon retained a 24h key
+        # forever and the documented daily reminder never became eligible.
         self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
-        self._enqueue_telegram(key, text)
+        # Use the same fresh-row view for both reason selection and rendering.
+        # Rendering the cumulative since-start arrays made old reconciliations
+        # repeatedly appear to be the current event and hid the position that had
+        # actually just opened/closed.
+        event_payload = self._reason_payload_view(payload)
+        reason = _telegram_notification_reason(event_payload)
+        pending: list[tuple[str, str]] = []
+        saw_duplicate = False
+
+        # Successful position events have one owner (this venue-confirming
+        # engine) and one message per net Bybit position. Component rows are
+        # collapsed by the formatter, while unrelated symbols retain separate
+        # dedupe identities and can never be silently omitted by a display cap.
+        position_messages = format_position_event_messages(event_payload)
+        for event_identity, text in position_messages:
+            key = f"position_event|{event_identity}"
+            if key in self.state.telegram_keys_sent:
+                saw_duplicate = True
+            else:
+                pending.append((key, text))
+
+        position_only_reasons = {
+            "entry_executed",
+            "entry_fill_reconciled",
+            "exit_executed",
+            "exit_fill_reconciled",
+            "position_reconciled",
+        }
+        # Render non-position safety/operational context independently. When a
+        # confirmed position event shares the pass, strip its rows from this
+        # second message so the same close/open is not repeated under a warning
+        # header. Whole-portfolio state remains owned by the hourly digest.
+        if reason and (not position_messages or reason not in position_only_reasons):
+            # Keep the key on the full payload so a cumulative cycle counter
+            # (for example pending fills) retains its stable order-link identity
+            # after the fresh-row view has advanced its high-water mark.
+            key = _telegram_dedupe_key(reason, payload)
+            if key in self.state.telegram_keys_sent:
+                saw_duplicate = True
+            else:
+                try:
+                    ordinary_payload = event_payload
+                    if position_messages:
+                        ordinary_payload = dict(event_payload)
+                        for event_key in (
+                            "entries",
+                            "exits",
+                            "reconciliations",
+                            "pending_fill_trades",
+                            "pending_fill_reconciliations",
+                        ):
+                            ordinary_payload[event_key] = []
+                    pending.append((key, format_telegram_status_message(ordinary_payload)))
+                except Exception as exc:  # noqa: BLE001 - formatting cannot break reconcile
+                    return False, f"format_failed: {str(exc)[:200]}"
+
+        # Independently emit one message per live position that crosses a new
+        # configured loss band.  A harder already-sent band suppresses a lower
+        # band after recovery, so a -12% -> -7% bounce cannot generate a bogus
+        # first -5% warning.  Keys expire after 24h with the existing dedupe
+        # store, allowing one daily reminder for a position that remains badly
+        # underwater without hourly/heartbeat spam.
+        levels = position_loss_alert_levels()
+        historical_dedupe = _read_telegram_dedupe_key_payload(self.report_dir)
+        for alert in position_loss_alerts(payload, levels=levels):
+            harder_keys = {
+                _telegram_position_loss_key(alert, threshold=level)
+                for level in levels
+                if level >= alert.threshold
+            }
+            if harder_keys & self.state.telegram_keys_sent:
+                saw_duplicate = True
+                continue
+            loss_key = _telegram_position_loss_key(alert, threshold=alert.threshold)
+            reminder = any(key in historical_dedupe for key in harder_keys)
+            try:
+                loss_text = format_position_loss_alert(
+                    alert,
+                    now_ms=int(payload.get("cycle", {}).get("ts_ms") or 0) or None,
+                    reminder=reminder,
+                )
+            except Exception as exc:  # noqa: BLE001 - formatting cannot break reconcile
+                return False, f"format_failed: {str(exc)[:200]}"
+            pending.append((loss_key, loss_text))
+
+        if not pending:
+            if saw_duplicate:
+                return False, "duplicate_material_event"
+            return False, "quiet_no_material_event"
+
+        # Rendered messages are frozen on the consumer thread before any state
+        # mutation; persist every key atomically, then enqueue the strings.
+        # A failed background send hands its exact key back for un-recording.
+        for key, _text in pending:
+            self.state.telegram_keys_sent.add(key)
+        _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
+        self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
+        for key, text in pending:
+            self._enqueue_telegram(key, text)
         return True, "enqueued"
 
     def close(self) -> None:
@@ -3804,20 +3910,53 @@ def _int(value: Any) -> int:
     return coerce_int(value)
 
 
+def _telegram_position_loss_key(
+    alert: PositionLossAlert,
+    *,
+    threshold: float,
+) -> str:
+    """Restart-stable loss-band identity for one net Bybit position."""
+    return "|".join(
+        [
+            "position_loss",
+            alert.symbol,
+            alert.side,
+            f"{float(threshold):.8g}",
+        ]
+    )
+
+
 def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:
     cycle = payload.get("cycle", {})
+    position_events = (
+        (payload.get("exits", []) or [])
+        + (payload.get("reconciliations", []) or [])
+        + (payload.get("pending_fill_reconciliations", []) or [])
+    )
     order_links = sorted(
         str(row.get("order_link_id") or "")
-        for row in payload.get("exit_orders", [])
+        for row in (payload.get("entry_orders", []) or []) + (payload.get("exit_orders", []) or [])
         if str(row.get("order_link_id") or "")
     ) + sorted(
         str(row.get("entry_order_link_id") or row.get("exit_order_link_id") or row.get("order_link_id") or "")
-        for row in payload.get("pending_fill_reconciliations", [])
+        for row in position_events
         if str(row.get("entry_order_link_id") or row.get("exit_order_link_id") or row.get("order_link_id") or "")
+    )
+    trade_ids = sorted(
+        str(row.get("trade_id") or "")
+        for row in position_events
+        if str(row.get("trade_id") or "")
     )
     symbols = sorted(
         str(row.get("symbol") or "")
-        for row in payload.get("untracked_positions", []) + payload.get("bybit_positions", [])
+        for row in (
+            (payload.get("untracked_positions", []) or [])
+            + (payload.get("pending_orphan_positions", []) or [])
+            + (payload.get("bybit_positions", []) or [])
+            + (payload.get("entry_orders", []) or [])
+            + (payload.get("exit_orders", []) or [])
+            + position_events
+        )
         if str(row.get("symbol") or "")
     )
     repairs = sorted(
@@ -3834,11 +3973,14 @@ def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:
         for row in payload.get("stop_repairs", [])
         if str(row.get("symbol") or "")
     )
-    error = str(cycle.get("position_report_error") or "")[:160]
+    error = str(cycle.get("position_report_error") or cycle.get("wallet_error") or "")[:160]
+    if reason in {"position_report_error", "wallet_error"}:
+        return "|".join([reason, error])
     return "|".join(
         [
             reason,
             ",".join(order_links[-8:]),
+            ",".join(trade_ids[-8:]),
             ",".join(repairs[-8:]),
             ",".join(symbols),
             error,
@@ -3863,11 +4005,18 @@ def _read_telegram_dedupe_keys(report_dir: Path, *, now: float | None = None) ->
 def _write_telegram_dedupe_keys(report_dir: Path, keys: set[str], *, now: float | None = None) -> None:
     current = time.time() if now is None else now
     existing = _read_telegram_dedupe_key_payload(report_dir)
-    output = {
-        key: float(existing.get(key, current))
-        for key in sorted(keys)
-        if current - float(existing.get(key, current)) <= TELEGRAM_DEDUPE_RETENTION_SECONDS
-    }
+    output: dict[str, float] = {}
+    for key in sorted(keys):
+        prior = float(existing.get(key, 0.0))
+        # A key that just became eligible after 24h is a NEW reminder. Reusing
+        # its expired timestamp made the writer immediately discard it, so the
+        # same underwater position re-alerted every 10-second heartbeat. Stamp
+        # the current send; preserve only still-live keys' original timestamps.
+        output[key] = (
+            prior
+            if prior > 0.0 and current - prior <= TELEGRAM_DEDUPE_RETENTION_SECONDS
+            else current
+        )
     path = _telegram_dedupe_path(report_dir)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:

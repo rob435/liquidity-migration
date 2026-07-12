@@ -1507,6 +1507,15 @@ def _reconcile_open_trades(
         )
     ]
     closed_pnl_by_symbol = _fetch_account_closed_pnl(trading_client, cycle_orphans, now_ms=now_ms)
+    closed_pnl_by_symbol = _attach_closed_order_metadata(
+        closed_pnl_by_symbol,
+        _fetch_closed_order_metadata(
+            trading_client,
+            closed_pnl_by_symbol,
+            cycle_orphans,
+            now_ms=now_ms,
+        ),
+    )
     for trade in trade_dicts:
         symbol = str(trade["symbol"])
         # Normalize through the same helper so "short" / "Sell" both land
@@ -1616,6 +1625,15 @@ def _risk_reconcile_missing_positions(
         if not keep_open:
             orphans.append(trade)
     closed_pnl_by_symbol = _fetch_account_closed_pnl(trading_client, orphans, now_ms=now_ms)
+    closed_pnl_by_symbol = _attach_closed_order_metadata(
+        closed_pnl_by_symbol,
+        _fetch_closed_order_metadata(
+            trading_client,
+            closed_pnl_by_symbol,
+            orphans,
+            now_ms=now_ms,
+        ),
+    )
     confirmed_flat_symbols = confirmed_flat_symbols or set()
     orphan_group_counts: dict[tuple[str, str], int] = {}
     for trade in orphans:
@@ -1813,6 +1831,10 @@ def _orphan_close_trade_row(
     )
     if backfill:
         updated.update(backfill)
+        close_reason, reason_source = _classify_orphan_close_reason(trade, backfill)
+        if close_reason:
+            updated["exit_reason"] = close_reason
+            updated["exit_reason_source"] = reason_source
     return updated
 
 def _fetch_account_closed_pnl(
@@ -1888,6 +1910,166 @@ def _fetch_account_closed_pnl(
     except Exception:  # noqa: BLE001 - degrade to per-orphan fetch; never crash reconcile
         return None
     return by_symbol
+
+
+def _fetch_closed_order_metadata(
+    trading_client: Any | None,
+    records_by_symbol: dict[str, list[dict[str, Any]]] | None,
+    orphans: list[dict[str, Any]],
+    *,
+    now_ms: int,
+) -> dict[str, dict[str, Any]]:
+    """Fetch Bybit's actual close-order type for orphan Closed-PnL rows.
+
+    Closed-PnL proves price, quantity, fees, and account P&L, but it does not
+    say whether the venue order was TP, SL, liquidation, or a manual close.
+    Order history does. Fetch it account-wide in the same bounded seven-day
+    windows used for Closed-PnL so a synchronized multi-position close remains
+    O(time windows), never one blocking REST request per ledger component.
+    """
+    if trading_client is None or not records_by_symbol or not orphans:
+        return {}
+    get_order_history = getattr(trading_client, "get_order_history", None)
+    if not callable(get_order_history):
+        return {}
+
+    expected_close_legs = {
+        (
+            str(trade.get("symbol") or ""),
+            "Buy" if _normalized_position_side(trade.get("side")) == "short" else "Sell",
+        )
+        for trade in orphans
+        if str(trade.get("symbol") or "")
+        and _normalized_position_side(trade.get("side")) in {"short", "long"}
+    }
+    target_ids: set[str] = set()
+    target_times: list[int] = []
+    for symbol, records in records_by_symbol.items():
+        for record in records:
+            if (symbol, str(record.get("side") or "")) not in expected_close_legs:
+                continue
+            order_id = str(record.get("orderId") or "")
+            if not order_id:
+                continue
+            target_ids.add(order_id)
+            created_ms = int(_float(record.get("createdTime") or record.get("updatedTime") or 0))
+            if created_ms > 0:
+                target_times.append(created_ms)
+    if not target_ids or not target_times:
+        return {}
+
+    window_start = max(min(target_times) - MS_PER_HOUR, 0)
+    last_target_ms = max(max(target_times), int(now_ms))
+    metadata: dict[str, dict[str, Any]] = {}
+    try:
+        while window_start <= last_target_ms and target_ids - metadata.keys():
+            window_end = min(
+                window_start + CLOSED_PNL_MAX_WINDOW_MS - 1,
+                last_target_ms,
+            )
+            history = get_order_history(
+                settle_coin="USDT",
+                start_time_ms=window_start,
+                end_time_ms=window_end,
+                limit=50,
+                max_pages=100,
+            )
+            for row in history or []:
+                order_id = str(row.get("orderId") or row.get("order_id") or "")
+                if order_id not in target_ids:
+                    continue
+                candidate = {
+                    "stop_order_type": str(
+                        row.get("stopOrderType") or row.get("stop_order_type") or ""
+                    ),
+                    "create_type": str(row.get("createType") or row.get("create_type") or ""),
+                    "order_link_id": str(
+                        row.get("orderLinkId") or row.get("order_link_id") or ""
+                    ),
+                    "order_status": str(row.get("orderStatus") or row.get("order_status") or ""),
+                }
+                previous = metadata.get(order_id, {})
+                previous_score = sum(bool(previous.get(key)) for key in previous)
+                candidate_score = sum(bool(candidate.get(key)) for key in candidate)
+                if candidate_score >= previous_score:
+                    metadata[order_id] = candidate
+            window_start = window_end + 1
+    except Exception as exc:  # noqa: BLE001 - close still has Closed-PnL evidence
+        _logger.warning(
+            "close-order metadata unavailable; venue close cause will remain conservative: %s",
+            exc,
+        )
+        return {}
+    return metadata
+
+
+def _attach_closed_order_metadata(
+    records_by_symbol: dict[str, list[dict[str, Any]]] | None,
+    metadata_by_order_id: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]] | None:
+    if records_by_symbol is None or not metadata_by_order_id:
+        return records_by_symbol
+    output: dict[str, list[dict[str, Any]]] = {}
+    for symbol, records in records_by_symbol.items():
+        output[symbol] = []
+        for record in records:
+            enriched = dict(record)
+            metadata = metadata_by_order_id.get(str(record.get("orderId") or ""), {})
+            for key, value in metadata.items():
+                if value:
+                    enriched[f"_venue_{key}"] = value
+            output[symbol].append(enriched)
+    return output
+
+
+def _classify_orphan_close_reason(
+    trade: dict[str, Any],
+    backfill: dict[str, Any],
+) -> tuple[str, str]:
+    """Return a truthful close label plus the evidence that supports it."""
+    metadata_causes: set[str] = set()
+    stop_types = str(backfill.get("venue_stop_order_type") or "").split(",")
+    create_types = str(backfill.get("venue_create_type") or "").split(",")
+    for raw in stop_types + create_types:
+        normalized = "".join(character for character in raw.lower() if character.isalnum())
+        if not normalized or normalized in {"unknown", "stop"}:
+            continue
+        if "partialtakeprofit" in normalized or "takeprofit" in normalized:
+            metadata_causes.add("take_profit")
+        elif "partialstoploss" in normalized or "stoploss" in normalized:
+            metadata_causes.add("stop_loss")
+        elif "trailingprofit" in normalized:
+            metadata_causes.add("trailing_take_profit")
+        elif "trailingstop" in normalized:
+            metadata_causes.add("trailing_stop")
+        elif "takeover" in normalized or normalized.endswith("liq"):
+            metadata_causes.add("liquidation")
+        elif "adl" in normalized:
+            metadata_causes.add("auto_deleveraging")
+        elif "settle" in normalized or "delivery" in normalized:
+            metadata_causes.add("settlement")
+        elif "createbyclosing" in normalized or "mmrateclose" in normalized:
+            metadata_causes.add("manual_close")
+    if len(metadata_causes) == 1:
+        return next(iter(metadata_causes)), "bybit_order_history"
+    if len(metadata_causes) > 1:
+        return "mixed_venue_close", "bybit_order_history_mixed"
+
+    exit_price = _float(backfill.get("exit_price"))
+    take_profit = _float(trade.get("take_profit_price") or trade.get("takeProfit"))
+    stop = _float(trade.get("stop_price") or trade.get("stopLoss"))
+    side = _normalized_position_side(trade.get("side"))
+    if exit_price > 0.0 and take_profit > 0.0 and (
+        (side == "short" and exit_price <= take_profit)
+        or (side == "long" and exit_price >= take_profit)
+    ):
+        return "take_profit_level_reached", "exit_price_vs_ledger_take_profit"
+    if exit_price > 0.0 and stop > 0.0 and (
+        (side == "short" and exit_price >= stop)
+        or (side == "long" and exit_price <= stop)
+    ):
+        return "stop_loss_level_reached", "exit_price_vs_ledger_stop"
+    return "", ""
 
 
 def _orphan_close_pnl_backfill(
@@ -2103,6 +2285,22 @@ def _orphan_close_pnl_from_records(
         "closed_at_ms": closed_at_ms,
         "submit_mode": "orphan_reconciled",
     }
+    metadata_fields = {
+        "venue_stop_order_type": "_venue_stop_order_type",
+        "venue_create_type": "_venue_create_type",
+        "venue_order_link_id": "_venue_order_link_id",
+        "venue_order_status": "_venue_order_status",
+    }
+    for output_key, source_key in metadata_fields.items():
+        values = sorted(
+            {
+                str(leg.get(source_key) or "")
+                for leg in legs
+                if str(leg.get(source_key) or "")
+            }
+        )
+        if values:
+            backfill[output_key] = ",".join(values)
     if venue_closed_pnl_rows:
         # Preserve Bybit's net Closed-PnL value beside the ledger's strategy-
         # return convention instead of silently conflating the two. On a netted

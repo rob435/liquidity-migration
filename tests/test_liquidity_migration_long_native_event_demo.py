@@ -635,13 +635,15 @@ def test_telegram_notify_reason_classification() -> None:
              "entries_executed": 0, "exits_executed": 0,
              "entry_candidates": 0, "exit_candidates": 0,
              "order_notional_pct_equity": 0.0, "entry_leverage": 0.0}
-    # Entry executed
-    assert _long_telegram_reason({"cycle": {**cycle, "entries_executed": 1}, "entry_orders": [], "exit_orders": []}) == "long_entry_executed"
+    # Successful fills are announced once by the shared ws_risk engine after
+    # venue confirmation, never again by the sleeve cycle.
+    assert _long_telegram_reason({"cycle": {**cycle, "entries_executed": 1}, "entry_orders": [], "exit_orders": []}) == ""
     # Entry error
     assert _long_telegram_reason({"cycle": cycle, "entry_orders": [{"submit_mode": "error"}], "exit_orders": []}) == "long_entry_error"
     assert _long_telegram_reason({"cycle": cycle, "entry_orders": [{"status": "rejected", "submit_mode": "not_submitted"}], "exit_orders": []}) == "long_entry_error"
-    # Position report error
-    assert _long_telegram_reason({"cycle": {**cycle, "position_report_error": "rest down"}, "entry_orders": [], "exit_orders": []}) == "position_report_error"
+    # Operational snapshot faults are handled by the deduplicated risk/watchdog
+    # path, not repeated once per long cycle.
+    assert _long_telegram_reason({"cycle": {**cycle, "position_report_error": "rest down"}, "entry_orders": [], "exit_orders": []}) == ""
 
 
 def test_deterministic_long_entry_rejection_telegram_is_restart_safe_rate_limited(
@@ -720,6 +722,50 @@ def test_deterministic_long_entry_rejection_telegram_is_restart_safe_rate_limite
     assert len(sent) == 3
 
 
+def test_long_venue_error_is_rate_limited_by_stable_order_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[str] = []
+    monkeypatch.setattr(
+        lnd,
+        "send_telegram_message",
+        lambda text, *, enabled: sent.append(text) or True,
+    )
+
+    def payload(ts_ms: int, error: str) -> dict[str, Any]:
+        return {
+            "cycle": {
+                "ts_ms": ts_ms,
+                "entries_executed": 0,
+                "exits_executed": 0,
+            },
+            "entry_orders": [
+                {
+                    "order_link_id": "lm-en-l-AAA-abc",
+                    "symbol": "AAAUSDT",
+                    "submit_mode": "error",
+                    "status": "failed",
+                    "error": error,
+                }
+            ],
+            "exit_orders": [],
+            "entries": [],
+            "exits": [],
+            "report_dir": str(tmp_path),
+        }
+
+    now = 1_700_000_000_000
+    assert _maybe_long_notify(payload(now, "place_order failed: timeout"), enabled=True) == (True, "")
+    assert _maybe_long_notify(
+        payload(now + 60_000, "place_order failed: timeout"), enabled=True
+    ) == (False, "quiet_duplicate_long_operational_error")
+    # A different failure class is actionable and pages immediately.
+    assert _maybe_long_notify(
+        payload(now + 120_000, "place_order failed: permission denied"), enabled=True
+    ) == (True, "")
+    assert len(sent) == 2
+
+
 def test_format_long_telegram_message_contains_essentials() -> None:
     payload = {
         "cycle": {
@@ -739,12 +785,12 @@ def test_format_long_telegram_message_contains_essentials() -> None:
         "portfolio_overview": "Portfolio overview\n- Long (ON): 1 open [ADAUSDT long $591.83]",
     }
     text = format_long_telegram_status_message(payload, reason="long_entry_executed")
-    assert "LongV11aDivWeekendVol" in text
-    assert "BTCUSDT" in text
-    assert "sniper_retrace" in text
-    assert "10×" in text or "10x" in text or "x10" in text or "x" in text  # multiplier marker present
-    assert "Portfolio overview" in text
-    assert "ADAUSDT long" in text
+    assert "Position opened · Long demo" in text
+    assert "BTCUSDT LONG" in text
+    assert "Opened 0.001 @ $50000" in text
+    assert "TP $60000 · SL $47500" in text
+    assert "Portfolio overview" not in text
+    assert "ADAUSDT" not in text
 
 
 def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
@@ -796,28 +842,48 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
         continuous_paper_root=continuous_paper_root,
         continuous_hedge_root=hedge_root,
         now_ms=1_700_000_000_000,
+        bybit_position_summary={
+            "positions": 2,
+            "position_value_usdt": 4_050.0,
+            "unrealized_pnl_usdt": 50.0,
+            "pnl_pct": 50.0 / 4_050.0,
+        },
+        bybit_positions=[
+            {
+                "symbol": "BTCUSDT", "side": "long", "qty": 0.001,
+                "avg_price": 50_000.0, "mark_price": 50_100.0,
+                "position_value_usdt": 50.0, "unrealized_pnl_usdt": 0.10,
+                "pnl_pct": 0.002, "stop_price": 47_500.0,
+                "take_profit_price": 60_000.0,
+            },
+            {
+                "symbol": "ETHUSDT", "side": "short", "qty": 2.0,
+                "avg_price": 2_000.0, "mark_price": 1_975.0,
+                "position_value_usdt": 4_000.0, "unrealized_pnl_usdt": 49.90,
+                "pnl_pct": 49.90 / 4_000.0, "stop_price": 0.0,
+                "take_profit_price": 1_760.0,
+            },
+        ],
+        account_equity_usdt=10_050.0,
         sleeve_states={
             "SHORT_SLEEVE": "off",
             "LONG_SLEEVE": "off",
             "CONTINUOUS_SLEEVE": "on",
             "CONTINUOUS_PAPER_SLEEVE": "on",
+            "CONTINUOUS_HEDGE_TIMER": "off",
         },
     )
-    assert "Combined book" in text
-    assert "Live sleeves" in text
-    assert "Continuous demo (ON)" in text
-    # The compatibility short line renders only while residual OPEN rows remain;
-    # a closed-only ledger shows no line, but realized PnL still counts below.
-    assert "Short (compatibility)" not in text
-    assert "Long (OFF)" in text
-    # The hedge label rides the continuous toggle — never a hardcoded "DRY-RUN"
-    # (the live unit ships SUBMIT_HEDGE=1; a hardcoded dry-run label misstated it).
-    assert "BTC hedge (ON)" in text
-    assert "Continuous paper (ON)" in text
-    assert "BTCUSDT long" in text
-    assert "ETHUSDT short" in text
-    assert "no SL" in text
-    assert "Action: Continuous short exposure is open while the hedge ledger is flat" in text
+    assert "Hourly portfolio" in text
+    assert "Equity: $10,050.00" in text
+    assert "Open positions: 2" in text
+    assert "Continuous ON" in text
+    assert "Long OFF" in text
+    assert "Hedge manager OFF · live hedge none" in text
+    assert "Paper shadow ON" in text
+    assert "BTCUSDT LONG" in text
+    assert "ETHUSDT SHORT" in text
+    assert "no venue stop" in text
+    assert "live hedge none · target need is not inferred" in text
     # Short realized PnL: (100 - 90) * 1 = 10
     assert "$10.00" in text
     # Long open notional: 0.001 * 50_000 = 50
@@ -837,17 +903,17 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
             "LONG_SLEEVE": "on",
             "CONTINUOUS_SLEEVE": "on",
             "CONTINUOUS_PAPER_SLEEVE": "on",
+            "CONTINUOUS_HEDGE_TIMER": "off",
         },
     )
-    assert "Portfolio overview" in alert_text
-    assert "tracked live: 2 open" in alert_text
+    assert "Local ledger overview (not venue-verified)" in alert_text
+    assert "open ledger rows: 2" in alert_text
     assert "BTCUSDT long" in alert_text
     assert "ETHUSDT short" in alert_text
-    assert "hedge ledger is flat" in alert_text
+    assert "hedge ledger is flat" not in alert_text
 
 
-def test_combined_book_summary_shows_compatibility_short_only_while_residual_open(tmp_path: Path) -> None:
-    """Compatibility short rows surface only while residual OPEN rows exist."""
+def test_combined_book_summary_does_not_present_unverified_compatibility_row_as_live(tmp_path: Path) -> None:
     short_root = tmp_path / "short"
     write_dataset(
         pl.DataFrame([{
@@ -860,7 +926,214 @@ def test_combined_book_summary_shows_compatibility_short_only_while_residual_ope
         short_root=short_root, long_root=None,
         now_ms=1_700_000_000_000, sleeve_states={"SHORT_SLEEVE": "off"},
     )
-    assert "Short (compatibility) (OFF)" in text  # residual open row: compatibility view stays
+    assert "Open positions: not checked" in text
+    assert "Local ledgers contain 1 open row(s); live exposure is unknown." in text
+    assert "AAAUSDT SHORT" not in text
+
+
+def test_hourly_summary_uses_flat_bybit_snapshot_over_stale_open_ledger_rows(
+    tmp_path: Path,
+) -> None:
+    continuous_root = tmp_path / "continuous"
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": f"bus-{component}",
+                    "symbol": "BUSDT",
+                    "side": "short",
+                    "status": "open",
+                    "qty": qty,
+                    "entry_price": 0.12564,
+                    "component": component,
+                }
+                for component, qty in (("p3", 100.0), ("p4p3", 200.0), ("p4p5", 300.0))
+            ]
+        ),
+        continuous_root,
+        "continuous_fade_demo_trades",
+        partition_by=(),
+    )
+
+    text = format_combined_book_summary(
+        short_root=None,
+        long_root=None,
+        continuous_root=continuous_root,
+        now_ms=1_700_000_000_000,
+        bybit_position_summary={
+            "positions": 0,
+            "position_value_usdt": 0.0,
+            "unrealized_pnl_usdt": 0.0,
+            "pnl_pct": 0.0,
+        },
+        bybit_positions=[],
+        sleeve_states={"CONTINUOUS_SLEEVE": "on"},
+    )
+
+    assert "Open positions: 0" in text
+    assert "No open positions on Bybit." in text
+    assert "3 local open row(s) (BUSDT x3) do not exist on Bybit" in text
+    assert "excluded from live totals" in text
+    assert "Continuous exposure is live" not in text
+
+
+def test_hourly_summary_never_calls_failed_bybit_check_flat() -> None:
+    text = format_combined_book_summary(
+        short_root=None,
+        long_root=None,
+        now_ms=1_700_000_000_000,
+        bybit_position_summary=None,
+        bybit_positions=None,
+        live_positions_error="REST timeout",
+    )
+
+    assert "Open positions: UNKNOWN" in text
+    assert "Bybit position check failed: REST timeout" in text
+    assert "No open positions on Bybit" not in text
+
+
+def test_hourly_summary_highlights_bad_loss_and_open_position_past_tp() -> None:
+    rows = [
+        {
+            "symbol": "LOSSUSDT", "side": "short", "qty": 100.0,
+            "avg_price": 1.0, "mark_price": 1.10,
+            "position_value_usdt": 110.0, "unrealized_pnl_usdt": -10.0,
+            "pnl_pct": -10.0 / 110.0, "take_profit_price": 0.88,
+            "stop_price": 0.0,
+        },
+        {
+            "symbol": "TPUSDT", "side": "short", "qty": 100.0,
+            "avg_price": 1.0, "mark_price": 0.85,
+            "position_value_usdt": 85.0, "unrealized_pnl_usdt": 15.0,
+            "pnl_pct": 15.0 / 85.0, "take_profit_price": 0.88,
+            "stop_price": 0.0,
+        },
+    ]
+    text = format_combined_book_summary(
+        short_root=None,
+        long_root=None,
+        now_ms=1_700_000_000_000,
+        bybit_position_summary={
+            "positions": 2,
+            "position_value_usdt": 195.0,
+            "unrealized_pnl_usdt": 5.0,
+            "pnl_pct": 5.0 / 195.0,
+        },
+        bybit_positions=rows,
+    )
+
+    assert "LOSSUSDT SHORT" in text
+    assert "LOSS WARNING" in text
+    assert "TP $0.88 (20.00% away)" in text
+    assert "TP $0.88 REACHED — still open" in text
+    assert "TPUSDT has crossed its venue TP but Bybit still reports it open" in text
+
+
+def test_hourly_summary_uses_resolved_hedge_manager_state(tmp_path: Path) -> None:
+    hedge_root = tmp_path / "hedge"
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": "hedge-btc",
+                    "symbol": "BTCUSDT",
+                    "side": "long",
+                    "sleeve": "continuous_addon",
+                    "status": "open",
+                    "qty": 0.001,
+                    "entry_price": 50_000.0,
+                }
+            ]
+        ),
+        hedge_root,
+        "continuous_fade_demo_trades",
+        partition_by=(),
+    )
+
+    text = format_combined_book_summary(
+        short_root=None,
+        long_root=None,
+        continuous_hedge_root=hedge_root,
+        now_ms=1_700_000_000_000,
+        bybit_position_summary={
+            "positions": 1,
+            "position_value_usdt": 50.0,
+            "unrealized_pnl_usdt": 0.0,
+            "pnl_pct": 0.0,
+        },
+        bybit_positions=[
+            {
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "qty": 0.001,
+                "avg_price": 50_000.0,
+                "mark_price": 50_000.0,
+                "position_value_usdt": 50.0,
+                "unrealized_pnl_usdt": 0.0,
+                "pnl_pct": 0.0,
+                "take_profit_price": 0.0,
+                "stop_price": 0.0,
+            }
+        ],
+        sleeve_states={
+            "CONTINUOUS_SLEEVE": "on",
+            "CONTINUOUS_HEDGE_TIMER": "off",
+        },
+    )
+
+    assert "Hedge manager OFF · live hedge present" in text
+    assert "A live hedge exists while its manager is OFF" in text
+
+
+def test_hourly_summary_nets_recent_component_activity_by_position(tmp_path: Path) -> None:
+    now = 1_700_000_000_000
+    continuous_root = tmp_path / "continuous"
+    rows = [
+        {
+            "trade_id": f"bus-{component}", "symbol": "BUSDT", "side": "short",
+            "status": "closed", "qty": qty, "entry_price": 1.0, "exit_price": 0.90,
+            "entry_ts_ms": now - 2 * MS_PER_HOUR, "exit_ts_ms": now - 10 * 60_000,
+            "exit_reason": "take_profit", "entry_fee_usdt": 0.0, "exit_fee_usdt": 0.0,
+        }
+        for component, qty in (("p3", 10.0), ("p4p3", 20.0), ("p4p5", 30.0))
+    ]
+    rows.append(
+        {
+            "trade_id": "new-1", "symbol": "NEWUSDT", "side": "short",
+            "status": "open", "qty": 10.0, "entry_price": 2.0,
+            "entry_ts_ms": now - 20 * 60_000,
+        }
+    )
+    write_dataset(
+        pl.DataFrame(rows),
+        continuous_root,
+        "continuous_fade_demo_trades",
+        partition_by=(),
+    )
+
+    text = format_combined_book_summary(
+        short_root=None,
+        long_root=None,
+        continuous_root=continuous_root,
+        now_ms=now,
+        bybit_position_summary={
+            "positions": 1,
+            "position_value_usdt": 20.0,
+            "unrealized_pnl_usdt": 0.0,
+            "pnl_pct": 0.0,
+        },
+        bybit_positions=[
+            {
+                "symbol": "NEWUSDT", "side": "short", "qty": 10.0,
+                "avg_price": 2.0, "mark_price": 2.0,
+                "position_value_usdt": 20.0, "unrealized_pnl_usdt": 0.0,
+                "pnl_pct": 0.0, "take_profit_price": 1.76, "stop_price": 0.0,
+            }
+        ],
+    )
+
+    assert "1 opened · 1 closed · realised +$6.00" in text
+    assert "BUSDT TAKE PROFIT +$6.00" in text
 
 
 def test_combined_book_summary_fails_open_on_missing_roots(tmp_path: Path) -> None:
@@ -874,9 +1147,9 @@ def test_combined_book_summary_fails_open_on_missing_roots(tmp_path: Path) -> No
         continuous_hedge_root=tmp_path / "no-such-hedge",
         now_ms=1_700_000_000_000,
     )
-    assert "Combined book" in text
-    assert "no ledger yet" in text
-    assert "Action:" in text
+    assert "Hourly portfolio" in text
+    assert "Local ledgers contain 0 open row(s); live exposure is unknown." in text
+    assert "No action needed." in text
 
 
 def test_long_demo_cycle_summary_includes_key_fields() -> None:

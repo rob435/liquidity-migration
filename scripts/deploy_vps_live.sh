@@ -220,6 +220,19 @@ esac
 for unit in deploy/systemd/liquidity-migration-*.service deploy/systemd/liquidity-migration-*.timer; do
     cp "$unit" "/etc/systemd/system/$(basename "$unit")"
 done
+# Emergency 2026-07-12 runtime mitigation: the pre-overhaul continuous daemon
+# was muted after it emitted a stale-ledger health page every ~82 seconds. The
+# checked release owns dedupe correctly, so remove only those named drop-ins
+# before restarting; leaving it behind would also suppress genuine rate-limited
+# order failures after this code is deployed.
+for _telegram_quiet_dir in \
+  /etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d \
+  /etc/systemd/system/liquidity-migration-combined-book-report.service.d \
+  /run/systemd/system/liquidity-migration-bybit-continuous-demo.service.d \
+  /run/systemd/system/liquidity-migration-combined-book-report.service.d; do
+    rm -f "$_telegram_quiet_dir/telegram-quiet.conf"
+    rmdir "$_telegram_quiet_dir" 2>/dev/null || true
+done
 systemctl daemon-reload
 
 # --- per-sleeve kill-switch (deploy/sleeves.env) ----------------------------------------
@@ -266,7 +279,7 @@ apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # Timers must be enabled --now: enable alone writes the symlink but does not
-# start the timer, so on a fresh VPS the demo-liveness watchdog + daily combined-
+# start the timer, so on a fresh VPS the demo-liveness watchdog + hourly combined-
 # book Telegram report would sit dormant until someone ran systemctl by hand.
 # --now schedules them immediately; subsequent deploys are idempotent.
 systemctl enable --now liquidity-migration-demo-liveness.timer
@@ -456,7 +469,7 @@ fi
 verify_hedge_timer_enable "$_hedge_timer_state"
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
-# so deploys can't silently leave the watchdog or daily report off.
+# so deploys can't silently leave the watchdog or hourly report off.
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer

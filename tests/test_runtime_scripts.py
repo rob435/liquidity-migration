@@ -845,13 +845,16 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "CONTINUOUS_PAPER_SLEEVE=on" in sleeves
     # Timers ship with the unit files but `systemctl enable` is required to
     # actually schedule them. Pin both timers so a deploy can't silently leave
-    # the demo-health watchdog or daily combined-book report inactive.
+    # the demo-health watchdog or hourly combined-book report inactive.
     assert "systemctl enable --now liquidity-migration-demo-liveness.timer" in text
     assert "systemctl enable --now liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
+    assert "telegram-quiet.conf" in text
+    assert "/etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d" in text
+    assert "liquidity-migration-combined-book-report.service.d" in text
     assert "require_unit_env()" in text
     assert "systemctl cat" not in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'" in text
@@ -1039,6 +1042,9 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
+    assert "emergency Telegram mute still installed" in text
+    assert "/etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d" in text
+    assert "liquidity-migration-combined-book-report.service.d" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): its daily rmom-refresh timer is
     # verified only when the sleeve is on (guarded by sleeve_on); the daemon's own
     # active+enabled state is covered by the verify_sleeve loop above. The risk service
@@ -1347,6 +1353,9 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "continuous_rmom_refresh_on" in text
     assert "require_unit_env()" in text
     assert "systemctl cat" not in text
+    assert "telegram-quiet.conf" in text
+    assert "/etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d" in text
+    assert "liquidity-migration-combined-book-report.service.d" in text
     assert "require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
@@ -2824,10 +2833,23 @@ _REPORT_UNIT = (
     / "systemd"
     / "liquidity-migration-combined-book-report.service"
 )
+_REPORT_TIMER = _REPORT_UNIT.with_suffix(".timer")
+_LIVENESS_UNIT = _REPORT_UNIT.with_name("liquidity-migration-demo-liveness.service")
+_RISK_UNIT = _REPORT_UNIT.with_name("liquidity-migration-bybit-risk.service")
 
 
 def _report_unit_text() -> str:
     return _REPORT_UNIT.read_text(encoding="utf-8")
+
+
+def test_telegram_report_is_hourly_and_operational_repeats_are_bounded() -> None:
+    timer = _REPORT_TIMER.read_text(encoding="utf-8")
+    liveness = _LIVENESS_UNIT.read_text(encoding="utf-8")
+    risk = _RISK_UNIT.read_text(encoding="utf-8")
+
+    assert "OnCalendar=*-*-* *:05:00 UTC" in timer
+    assert "--cooldown-min 360" in liveness
+    assert "TELEGRAM_POSITION_LOSS_LEVELS=0.05,0.10,0.20,0.40" in risk
 
 
 def test_report_unit_no_longer_wires_compatibility_short_data_root() -> None:

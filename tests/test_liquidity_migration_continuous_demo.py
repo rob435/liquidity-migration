@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import json
 import math
+from pathlib import Path
 import zlib
 
 import numpy as np
@@ -2117,11 +2118,10 @@ def test_protective_exit_cycle_covers_max_hold_dry_run(tmp_path) -> None:
     assert closed["exit_reason"].to_list() == ["max_hold"]
 
 
-def test_protective_exit_cycle_sends_telegram(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """REGRESSION (audit 2026-06-12 round 3): the fast loop runs at ~2s vs the main
-    cycle's 60s, so it wins the race for most protective exits — those covers (and
-    their submit errors) were invisible to every notify path. The fast cycle must
-    notify after its ledger writes; the price comes from the live ticker, not entry."""
+def test_protective_exit_success_is_announced_only_by_ws_risk(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fast sleeve loop records the exit; ws_risk owns its venue-confirmed alert."""
     from liquidity_migration.config import ResearchConfig
     from liquidity_migration.continuous_demo import continuous_strategy_id
     from liquidity_migration.storage import write_dataset
@@ -2150,13 +2150,9 @@ def test_protective_exit_cycle_sends_telegram(tmp_path, monkeypatch: pytest.Monk
         root, config=ResearchConfig(), demo_config=cfg, trading_client=None,
         kline_store=None, ticker_cache=tc, private_state_cache=None, now_ms=now)
     assert payload["exits"] == 1
-    assert payload["telegram_sent"] is True
-    assert len(sent) == 1
-    assert "reason=continuous_exit_executed" in sent[0]
-    assert "(fast protective-exit loop)" in sent[0]
-    assert "max_hold" in sent[0]
-    # paper marks at the live ticker price, not entry (round-3 exit-price fix)
-    assert "@$101" in sent[0]
+    assert payload["telegram_sent"] is False
+    assert payload["telegram_error"] == "quiet_no_material_event"
+    assert sent == []
 
 
 def test_continuous_same_window_reentry_both_rows_survive(tmp_path) -> None:
@@ -2884,7 +2880,9 @@ def test_continuous_telegram_quiet_cycle_sends_nothing(monkeypatch: pytest.Monke
     assert not ok and why == "disabled"
 
 
-def test_continuous_telegram_entry_and_error_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_continuous_telegram_success_is_owned_by_ws_risk_and_errors_still_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import liquidity_migration.continuous_demo as cd
 
     sent: list[str] = []
@@ -2896,25 +2894,54 @@ def test_continuous_telegram_entry_and_error_reasons(monkeypatch: pytest.MonkeyP
     payload = {"entries": 1, "exits": 0, "mode": "submit", "equity_usdt": 10_000.0,
                "open_positions": 1, "candidates": 3, "rmom_present": True, "entry_paused": False}
     ok, why = cd._maybe_continuous_notify(payload, [entry], [], enabled=True)
-    assert ok and why == ""
-    assert len(sent) == 1
-    assert "[Continuous sleeve]" in sent[0]
-    assert "AAAUSDT" in sent[0]
-    assert "reason=continuous_entry_executed" in sent[0]
-    # an errored entry row outranks the executed-count reason
+    assert not ok and why == "quiet_no_material_event"
+    assert sent == []
+    # The shared ws_risk engine announces the confirmed fill once. The sleeve
+    # still owns an order failure that may never produce a venue position.
     bad = dict(entry, submit_mode="error")
     assert cd._continuous_telegram_reason(payload, [bad], []) == "continuous_entry_error"
+    ok, why = cd._maybe_continuous_notify(payload, [bad], [], enabled=True)
+    assert ok and why == ""
+    assert len(sent) == 1
+    assert "Entry order failed" in sent[0]
+
+
+def test_continuous_telegram_nets_component_rows_into_one_position_update() -> None:
+    import liquidity_migration.continuous_demo as cd
+
+    entries = [
+        {
+            "symbol": "BUSDT",
+            "side": "short",
+            "qty": qty,
+            "entry_price": 0.12564,
+            "notional_usdt": qty * 0.12564,
+            "take_profit_price": 0.11056,
+            "stop_price": 0.0,
+            "component": component,
+        }
+        for component, qty in (("p3", 100.0), ("p4p3", 200.0), ("p4p5", 300.0))
+    ]
+
+    text = cd.format_continuous_telegram_status_message(
+        {"entries": 3, "exits": 0},
+        entries,
+        [],
+        reason="continuous_entry_executed",
+    )
+
+    assert text.count("BUSDT SHORT") == 1
+    assert "Opened 600 @ $0.12564" in text
+    assert "3 strategy legs netted into this one Bybit position" in text
 
 
 def test_continuous_telegram_sniper_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
-    """REGRESSION (audit 2026-06-12): the ARMED sniper's fills/exits/errors were invisible
-    to the notify plane — a snipe fill is a NEW live short and an error a stuck resting
-    order; both must page. Counts ride the payload; errors outrank fills."""
+    """Sniper success belongs to ws_risk; sleeve-only failures still page."""
     import liquidity_migration.continuous_demo as cd
 
     base = {"entries": 0, "exits": 0, "mode": "submit", "equity_usdt": 10_000.0}
-    assert cd._continuous_telegram_reason({**base, "sniper_fills": 1}, [], []) == "continuous_sniper_fill"
-    assert cd._continuous_telegram_reason({**base, "sniper_exits": 2}, [], []) == "continuous_exit_executed"
+    assert cd._continuous_telegram_reason({**base, "sniper_fills": 1}, [], []) == ""
+    assert cd._continuous_telegram_reason({**base, "sniper_exits": 2}, [], []) == ""
     assert (
         cd._continuous_telegram_reason({**base, "sniper_fills": 1, "sniper_errors": 1}, [], [])
         == "continuous_sniper_error"
@@ -2924,9 +2951,11 @@ def test_continuous_telegram_sniper_reasons(monkeypatch: pytest.MonkeyPatch) -> 
         "liquidity_migration.telegram.send_telegram_message",
         lambda text, enabled=True: sent.append(text) or True,
     )
-    ok, why = cd._maybe_continuous_notify({**base, "sniper_fills": 1, "sniper_exits": 1}, [], [], enabled=True)
-    assert ok and why == ""
-    assert "sniper: fills=1 exits=1" in sent[0]
+    ok, why = cd._maybe_continuous_notify(
+        {**base, "sniper_fills": 1, "sniper_exits": 1}, [], [], enabled=True
+    )
+    assert not ok and why == "quiet_no_material_event"
+    assert sent == []
     # the journald cycle line carries the sniper counts and the telegram OUTCOME
     line = cd.format_continuous_demo_cycle_summary(
         {**base, "sniper_fills": 1, "sniper_exits": 0, "sniper_errors": 0, "telegram_sent": True}
@@ -2959,8 +2988,51 @@ def test_continuous_telegram_order_row_errors_reach_reason_via_payload() -> None
         {**base, "entry_errors": 1, "exit_errors": 0, "resize_errors": 2, "rebalance_resizes": 2},
         [], [], reason="continuous_resize_error",
     )
-    assert "submit errors: entries=1 exits=0 resizes=2" in msg
-    assert "rebalance resizes: 2" in msg
+    assert "Order errors: 1 entry, 0 exit, 2 resize" in msg
+    assert "Positions resized: 2" in msg
+
+
+def test_continuous_operational_telegram_errors_are_restart_safe_rate_limited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import liquidity_migration.continuous_demo as cd
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "liquidity_migration.telegram.send_telegram_message",
+        lambda text, enabled=True: sent.append(text) or True,
+    )
+    payload = {
+        "entries": 0,
+        "exits": 0,
+        "entry_errors": 1,
+        "exit_errors": 0,
+        "resize_errors": 0,
+        "mode": "submit",
+    }
+    state_path = tmp_path / ".cache" / cd.CONTINUOUS_TELEGRAM_STATE_FILE
+    now = 1_700_000_000_000
+
+    assert cd._maybe_continuous_notify(
+        payload, [], [], enabled=True,
+        notification_state_path=state_path, now_ms=now,
+    ) == (True, "")
+    # Simulates the next cycle and a process restart: disk state is authority.
+    assert cd._maybe_continuous_notify(
+        payload, [], [], enabled=True,
+        notification_state_path=state_path, now_ms=now + 60_000,
+    ) == (False, "quiet_duplicate_operational_event")
+    assert cd._maybe_continuous_notify(
+        {**payload, "entry_error_details": "AAAUSDT: permission denied"},
+        [], [], enabled=True,
+        notification_state_path=state_path, now_ms=now + 120_000,
+    ) == (True, "")
+    assert cd._maybe_continuous_notify(
+        payload, [], [], enabled=True,
+        notification_state_path=state_path,
+        now_ms=now + cd.CONTINUOUS_TELEGRAM_ERROR_COOLDOWN_MS,
+    ) == (True, "")
+    assert len(sent) == 3
 
 
 def test_submission_error_count_preserves_continuous_notification_modes() -> None:
@@ -2985,7 +3057,7 @@ def test_continuous_telegram_failure_is_isolated(monkeypatch: pytest.MonkeyPatch
         raise RuntimeError("telegram down")
 
     monkeypatch.setattr("liquidity_migration.telegram.send_telegram_message", _boom)
-    payload = {"entries": 1, "exits": 0}
+    payload = {"entries": 0, "exits": 0, "entry_errors": 1}
     ok, why = cd._maybe_continuous_notify(payload, [], [], enabled=True)
     assert not ok and "telegram down" in why
 
@@ -3103,16 +3175,11 @@ def test_suborder_link_uniquifies_and_still_decodes() -> None:
     assert decode_entry_order_link_id(snipe_place) == ("continuous", expected_ts, 0, "s")
 
 
-def test_cycle_counts_entries_notifies_and_sends_outside_lock(
+def test_cycle_counts_entries_and_operational_notify_sends_outside_lock(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ROUND 4 triple pin. (1) payload["entries"] counted TRADE rows with the
-    ORDER-row status vocabulary ("filled"/"partial"/"planned") that no trade
-    row ever carries — it was permanently 0, so (2) the
-    continuous_entry_executed telegram could never fire for a successful live
-    entry. (3) The send must run OUTSIDE the cycle file lock (lock-held-I/O
-    contract): the lock file must be released by the time the transport runs."""
+    """Entry counts stay correct; a simultaneous order fault pages outside the lock."""
     import liquidity_migration.continuous_demo as cd
     import liquidity_migration.telegram as tg
     from liquidity_migration.config import ResearchConfig
@@ -3153,9 +3220,10 @@ def test_cycle_counts_entries_notifies_and_sends_outside_lock(
         "order_link_id": "lm-en-cp3-ABC-1", "ts_ms": now,
         "trade_id": entry_trade_row["trade_id"], "strategy_id": "continuous_fade_v2",
         "symbol": "ABCUSDT", "side": "Sell", "qty": "1", "reduce_only": False,
-        "submit_mode": "dry_run", "status": "planned", "trade_side": "short",
+        "submit_mode": "error", "status": "failed", "trade_side": "short",
         "sleeve": "continuous", "signal_ts_ms": now - 3_600_000,
         "equity_usdt": 10_000.0, "component": "p3", "component_weight": 0.30,
+        "error": "venue rejected sibling component",
     }
 
     def fake_execute_entries(*_args: object, **_kwargs: object):
@@ -3179,10 +3247,11 @@ def test_cycle_counts_entries_notifies_and_sends_outside_lock(
 
     # (1) the entry is counted.
     assert payload["entries"] == 1
-    # (2) the material-event filter fires for it and the send goes out.
+    # The operational failure, not the successful fill, is the sleeve-owned alert.
     assert payload["telegram_sent"] is True
     assert sends, "telegram send was never attempted"
-    # (3) the cycle lock was already released when the transport ran.
+    assert "Entry order failed" in sends[0][0]
+    # The cycle lock was already released when the transport ran.
     assert sends[0][1] is False, "telegram send ran while the cycle file lock was held"
 
 
@@ -4591,7 +4660,7 @@ def test_continuous_entry_risk_health_does_not_block_unattributed_exchange_only_
     assert got["entry_risk_health_exchange_only_positions"] == ""
 
 
-def test_continuous_entry_risk_health_pages_and_formats_reason() -> None:
+def test_continuous_entry_risk_health_stays_in_telemetry_without_cycle_spam() -> None:
     payload = {
         "mode": "submit",
         "equity_usdt": 10_000.0,
@@ -4620,26 +4689,9 @@ def test_continuous_entry_risk_health_pages_and_formats_reason() -> None:
         "portfolio_overview": "Portfolio overview\n- Long (ON): 1 open [ADAUSDT long $591.83]",
     }
 
-    assert _continuous_telegram_reason(payload, [], []) == "continuous_entry_risk_health_blocked"
-    msg = format_continuous_telegram_status_message(
-        payload,
-        [],
-        [],
-        reason="continuous_entry_risk_health_blocked",
-    )
-
-    assert (
-        "entry_risk_health=private_ws_stale,ledger_position_mismatch,unprotected_non_hedge_position,"
-        "exchange_position_without_ledger,account_drawdown_kill_switch snapshot=rest"
-    ) in msg
-    assert "ledger_missing_positions=AAAUSDT" in msg
-    assert "unprotected_positions=CCCUSDT max_age_s=900" in msg
-    assert "unprotected_position_ages=CCCUSDT:900" in msg
-    assert "exchange_only_positions=BBBUSDT" in msg
-    assert "lifecycle_states=PROTECTION_PENDING:1,ORPHAN:1" in msg
-    assert "account_drawdown=-0.0312 high_water=$16,000.00 limit=0.0200" in msg
-    assert "Portfolio overview" in msg
-    assert "ADAUSDT long" in msg
+    # The unchanged block is persisted and visible in journald/hourly health,
+    # but is no longer classified as a fresh trade event every cycle.
+    assert _continuous_telegram_reason(payload, [], []) == ""
     assert (
         "risk_health=private_ws_stale,ledger_position_mismatch,unprotected_non_hedge_position,"
         "exchange_position_without_ledger,account_drawdown_kill_switch"
@@ -4766,27 +4818,19 @@ def _wallet_outage_payload() -> dict:
     }
 
 
-def test_reportscharts1_wallet_error_pages_the_operator() -> None:
+def test_wallet_error_is_not_a_repeating_per_cycle_trade_event() -> None:
     payload = _wallet_outage_payload()
-    # Pre-fix: a wallet-only outage produced "" (quiet) -> no page.
-    assert _continuous_telegram_reason(payload, [], []) == "continuous_wallet_error"
+    # ws_risk/watchdog owns the deduplicated operational page; the continuous
+    # cycle must not emit this same fault once per minute.
+    assert _continuous_telegram_reason(payload, [], []) == ""
 
 
-def test_reportscharts1_message_tags_fallback_and_surfaces_error() -> None:
-    payload = _wallet_outage_payload()
-    msg = format_continuous_telegram_status_message(payload, [], [], reason="continuous_wallet_error")
-    assert "(FALLBACK - wallet read failed)" in msg  # the $10,000 print is no longer trusted
-    assert "wallet_error=wallet equity unavailable: 401 rate-limited" in msg
-
-
-def test_reportscharts1_healthy_read_is_quiet_and_untagged() -> None:
+def test_healthy_read_is_quiet_and_position_event_omits_cycle_dump() -> None:
     payload = _wallet_outage_payload()
     payload["wallet_error"] = ""  # event_demo returns "" on a healthy read
     assert _continuous_telegram_reason(payload, [], []) == ""  # quiet, no spurious page
     msg = format_continuous_telegram_status_message(payload, [], [], reason="continuous_entry_executed")
-    assert "FALLBACK" not in msg
-    assert "wallet_error=" not in msg
-    assert "equity=$10,000.00" in msg
+    assert msg == "🟢 Position opened · Continuous demo"
 
 
 # code-quality-5 — _finite_or_none delegates to _common.finite_float

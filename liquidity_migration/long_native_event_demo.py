@@ -85,7 +85,9 @@ from .event_demo import (
     _yyyymmddhhmmss,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
+    human_exit_reason,
     order_quantity_for_notional,
+    position_loss_alert_levels,
     summarize_position_pnl,
 )
 from .order_execution import order_fill_status
@@ -936,18 +938,9 @@ def run_long_native_demo_cycle(
 
     # Per-cycle telegram AFTER the ledger writes and OUTSIDE the cycle file lock
     # (round 4); exception-isolated inside _maybe_long_notify.
-    data_parent = root.parent
     telegram_sent, telegram_error = _maybe_long_notify(
         payload,
         enabled=demo.telegram,
-        portfolio_overview_factory=lambda: safe_portfolio_alert_overview(
-            short_root=data_parent / "bybit-demo-event",
-            long_root=root,
-            continuous_root=data_parent / "bybit-continuous-demo-event",
-            continuous_paper_root=data_parent / "bybit-continuous-paper-event",
-            continuous_hedge_root=data_parent / "bybit-continuous-hedge-event",
-            now_ms=cycle_now_ms,
-        ),
     )
     cycle_row["telegram_sent"] = telegram_sent
     if telegram_error:
@@ -2163,7 +2156,6 @@ def _maybe_long_notify(
     payload: dict[str, Any],
     *,
     enabled: bool,
-    portfolio_overview_factory: Callable[[], str] | None = None,
 ) -> tuple[bool, str]:
     if not enabled:
         return False, "disabled"
@@ -2174,38 +2166,46 @@ def _maybe_long_notify(
         reason = _long_telegram_reason(payload)
         if not reason:
             return False, "quiet_no_material_event"
-        rejection_alert_state: tuple[Path, dict[str, int], set[str], int] | None = None
-        if reason == "long_entry_error" and not _has_non_rejection_long_entry_error(payload):
-            rejection_signatures = _long_rejection_alert_signatures(payload)
+        alert_state: tuple[Path, dict[str, int], set[str], int] | None = None
+        if reason in {
+            "long_entry_error",
+            "long_exit_error",
+            "long_entry_stop_update_failed",
+        }:
+            alert_signatures = _long_operational_alert_signatures(payload, reason=reason)
             report_dir_text = str(payload.get("report_dir") or "")
-            if rejection_signatures and report_dir_text:
+            if alert_signatures and report_dir_text:
                 state_path = Path(report_dir_text) / LONG_REJECTION_TELEGRAM_STATE_FILE
                 sent_at_by_signature = _read_long_rejection_alert_state(state_path)
                 now_ms = int(payload.get("cycle", {}).get("ts_ms") or _utc_now_ms())
                 eligible = {
                     signature
-                    for signature in rejection_signatures
+                    for signature in alert_signatures
                     if now_ms - int(sent_at_by_signature.get(signature, 0))
                     >= LONG_REJECTION_TELEGRAM_COOLDOWN_MS
                 }
                 if not eligible:
-                    return False, "quiet_duplicate_long_entry_rejection"
-                rejection_alert_state = (
+                    duplicate_reason = (
+                        "quiet_duplicate_long_entry_rejection"
+                        if reason == "long_entry_error"
+                        and not _has_non_rejection_long_entry_error(payload)
+                        else "quiet_duplicate_long_operational_error"
+                    )
+                    return False, duplicate_reason
+                alert_state = (
                     state_path,
                     sent_at_by_signature,
                     eligible,
                     now_ms,
                 )
-        if portfolio_overview_factory is not None and not payload.get("portfolio_overview"):
-            payload = {**payload, "portfolio_overview": portfolio_overview_factory()}
         text = format_long_telegram_status_message(payload, reason=reason)
         sent = send_telegram_message(text, enabled=True)
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)[:500]
     if not sent:
         return False, "telegram env missing or Telegram API returned false"
-    if rejection_alert_state is not None:
-        state_path, sent_at_by_signature, eligible, now_ms = rejection_alert_state
+    if alert_state is not None:
+        state_path, sent_at_by_signature, eligible, now_ms = alert_state
         for signature in eligible:
             sent_at_by_signature[signature] = now_ms
         try:
@@ -2245,6 +2245,41 @@ def _long_rejection_alert_signatures(payload: dict[str, Any]) -> set[str]:
         signatures.add(
             json.dumps(
                 [link, _long_rejection_reason_code(row.get("error"))],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        )
+    return signatures
+
+
+def _long_operational_alert_signatures(payload: dict[str, Any], *, reason: str) -> set[str]:
+    """Stable identities for repeatable long-sleeve order/protection faults."""
+    if reason == "long_entry_error" and not _has_non_rejection_long_entry_error(payload):
+        return _long_rejection_alert_signatures(payload)
+    rows: list[dict[str, Any]] = []
+    if reason == "long_entry_error":
+        rows.extend(payload.get("entry_orders", []) or [])
+    elif reason == "long_exit_error":
+        rows.extend(payload.get("exit_orders", []) or [])
+    else:
+        rows.extend(payload.get("entries", []) or [])
+        rows.extend(payload.get("entry_orders", []) or [])
+    signatures: set[str] = set()
+    for row in rows:
+        symbol = str(row.get("symbol") or "")
+        link = str(row.get("order_link_id") or row.get("entry_order_link_id") or "")
+        error = str(
+            row.get("error")
+            or row.get("entry_stop_update_error")
+            or row.get("status")
+            or row.get("entry_stop_update_status")
+            or ""
+        )[:240]
+        if not (symbol or link or error):
+            continue
+        signatures.add(
+            json.dumps(
+                [reason, link, symbol, error],
                 ensure_ascii=True,
                 separators=(",", ":"),
             )
@@ -2304,9 +2339,9 @@ def _write_long_rejection_alert_state(
 
 
 def _long_telegram_reason(payload: dict[str, Any]) -> str:
-    cycle = payload.get("cycle", {})
-    if cycle.get("position_report_error"):
-        return "position_report_error"
+    # Snapshot/wallet health is owned by ws_risk + the cooldown watchdog and
+    # the hourly digest.  Treating an unchanged connection fault as a per-cycle
+    # trade event caused repeated Telegram pages.
     if any(
         str(row.get("submit_mode", "")) == "error"
         or str(row.get("status", "")) in {"failed", "rejected"}
@@ -2315,56 +2350,83 @@ def _long_telegram_reason(payload: dict[str, Any]) -> str:
         return "long_entry_error"
     if any(str(row.get("submit_mode", "")) == "error" for row in payload.get("exit_orders", [])):
         return "long_exit_error"
-    if int(cycle.get("entries_executed") or 0) > 0:
-        return "long_entry_executed"
-    if int(cycle.get("exits_executed") or 0) > 0:
-        return "long_exit_executed"
     if any(
         str(row.get("entry_stop_update_status", "")) == "failed"
         for row in (payload.get("entries") or []) + (payload.get("entry_orders") or [])
     ):
         return "long_entry_stop_update_failed"
+    # The shared ws_risk engine owns successful open/close notifications after
+    # venue confirmation. The sleeve retains only operational failures; two
+    # independent success producers otherwise announce one fill twice.
     return ""
 
 
 def format_long_telegram_status_message(payload: dict[str, Any], *, reason: str) -> str:
     cycle = payload["cycle"]
-    ledger_summary = payload.get("ledger_position_summary", {})
-    lines = [
-        "[Long sleeve / LongV11aDivWeekendVol] Bybit demo",
-        f"time={_iso_dt(cycle['ts_ms'])}",
-        f"reason={reason}",
-        f"mode={cycle['mode']} equity=${_float(cycle['equity_usdt']):,.2f}",
-        f"per-pos notional={_float(cycle['order_notional_pct_equity']):.1%} × equity "
-        f"(x{_float(cycle.get('notional_multiplier', 1.0)):.0f} multiplier, lev {_float(cycle['entry_leverage']):.0f}x)",
-        f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} "
-        f"exits={cycle['exits_executed']}/{cycle['exit_candidates']}",
-        f"open_long_positions={cycle.get('open_long_positions_after', 0)}",
-        f"ledger uPnL=${_float(ledger_summary.get('unrealized_pnl_usdt')):,.2f} "
-        f"({_float(ledger_summary.get('pnl_pct')):.2%})",
-    ]
-    if cycle.get("position_report_error"):
-        lines.append(f"position_error={cycle['position_report_error']}")
+    titles = {
+        "long_entry_executed": "\N{LARGE GREEN CIRCLE} Position opened",
+        "long_exit_executed": "\N{WHITE HEAVY CHECK MARK} Position closed",
+        "long_entry_error": "\N{WARNING SIGN} Entry order failed",
+        "long_exit_error": "\N{WARNING SIGN} Exit order failed",
+        "long_entry_stop_update_failed": "\N{WARNING SIGN} Position protection failed",
+    }
+    title = titles.get(reason, "\N{INFORMATION SOURCE} Long update")
+    if (payload.get("entries") or []) and (payload.get("exits") or []):
+        title = "\N{CLOCKWISE OPEN CIRCLE ARROW} Position updates"
+    lines = [f"{title} \N{MIDDLE DOT} Long demo", _iso_dt(cycle.get("ts_ms"))]
     entries = payload.get("entries", []) or []
     if entries:
-        lines.append("New entries:")
-        for entry in entries[:6]:
-            lines.append(
-                f"- {entry.get('symbol', '')} qty={_float(entry.get('qty')):g} "
-                f"@${_float(entry.get('entry_price')):.6g} reason={entry.get('entry_reason', '')} "
-                f"stop={_float(entry.get('stop_price')):.6g} tp={_float(entry.get('take_profit_price')):.6g}"
+        for index, entry in enumerate(entries[:6]):
+            if index:
+                lines.append("")
+            symbol = str(entry.get("symbol") or "UNKNOWN")
+            qty = abs(_float(entry.get("qty")))
+            price = _float(entry.get("entry_price"))
+            notional = _float(entry.get("notional_usdt")) or price * qty
+            lines.extend(
+                [
+                    f"{symbol} LONG",
+                    f"Opened {qty:g} @ ${price:.8g} \N{MIDDLE DOT} exposure {format_usd(notional)}",
+                    f"TP ${_float(entry.get('take_profit_price')):.8g} \N{MIDDLE DOT} "
+                    f"SL ${_float(entry.get('stop_price')):.8g}",
+                ]
             )
     exits = payload.get("exits", []) or []
     if exits:
-        lines.append("Exits:")
-        for ex in exits[:6]:
+        for index, ex in enumerate(exits[:6]):
+            if index or entries:
+                lines.append("")
+            symbol = str(ex.get("symbol") or "UNKNOWN")
+            raw_reason = str(ex.get("exit_reason") or "closed").lower()
+            if "take_profit" in raw_reason or raw_reason == "tp":
+                reason_text = "TAKE PROFIT"
+            elif "stop" in raw_reason:
+                reason_text = "STOP LOSS"
+            elif raw_reason in {"time_stop", "max_hold"}:
+                reason_text = "MAX HOLD / TIME EXIT"
+            else:
+                reason_text = raw_reason.replace("_", " ").upper()
+            qty = abs(_float(ex.get("qty")))
+            entry = _float(ex.get("entry_price"))
+            exit_price = _float(ex.get("exit_price"))
+            lines.extend([f"{symbol} LONG \N{MIDDLE DOT} {reason_text}", f"Closed {qty:g} @ ${exit_price:.8g}"])
+            if entry > 0.0 and exit_price > 0.0 and qty > 0.0:
+                gross = (exit_price - entry) * qty
+                fees = _float(ex.get("entry_fee_usdt")) + _float(ex.get("exit_fee_usdt"))
+                lines.append(
+                    f"Realised P&L {format_usd(gross - fees, signed=True)} "
+                    f"({format_pct((exit_price - entry) / entry, signed=True)} before leverage)"
+                )
+    if not entries and not exits:
+        rejected = [
+            row for row in payload.get("entry_orders", [])
+            if str(row.get("status") or "") in {"failed", "rejected"}
+            or str(row.get("submit_mode") or "") == "error"
+        ]
+        for row in rejected[:4]:
             lines.append(
-                f"- {ex.get('symbol', '')} reason={ex.get('exit_reason', '')} "
-                f"@${_float(ex.get('exit_price')):.6g}"
+                f"{row.get('symbol', 'UNKNOWN')}: {str(row.get('error') or row.get('status') or 'order failed')[:240]}"
             )
-    portfolio_overview = str(payload.get("portfolio_overview") or "").strip()
-    if portfolio_overview:
-        lines.extend(["", portfolio_overview[:1400]])
     return "\n".join(lines)[:3900]
 
 
@@ -2381,6 +2443,15 @@ class _LedgerSummary:
     realized_pnl_usdt: float = 0.0
     open_notional_usdt: float = 0.0
     open_positions: tuple[str, ...] = ()
+    # One entry per net (symbol, side) plus the number of component/trade
+    # rows behind it.  A venue position may legitimately map to several
+    # component rows, so raw row count must never be called live positions.
+    open_leg_counts: tuple[tuple[str, str, int], ...] = ()
+    recent_opened_count: int = 0
+    recent_closed_count: int = 0
+    recent_realized_pnl_usdt: float = 0.0
+    recent_realized_complete: bool = True
+    recent_closes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2403,116 +2474,256 @@ def format_combined_book_summary(
     bybit_positions: list[dict[str, Any]] | None = None,
     sleeve_states: dict[str, str] | None = None,
     live_positions_error: str | None = None,
+    account_equity_usdt: float | None = None,
+    wallet_error: str | None = None,
 ) -> str:
-    """Build a human daily aggregate message across every demo/paper sleeve.
+    """Build the hourly operator digest, with Bybit as live-position authority.
 
-    Reads ledgers from disk so the message stays consistent even when called
-    from a sleeve other than the one that owned the trade. Missing roots fail
-    open and render as "no ledger yet"; the report timer must never crash just
-    because a retired sleeve has no files.
+    Local ledgers provide attribution and accounting context only.  Whenever a
+    successful Bybit snapshot disagrees, the message calls out stale rows and
+    excludes them from the live exposure headline.
     """
     states = {k: str(v).strip().lower() for k, v in (sleeve_states or {}).items()}
-    short = _ledger_summary(short_root, "event_demo_trades")
-    long = _ledger_summary(long_root, LONG_DEMO_TRADES_DATASET)
-    continuous = _ledger_summary(continuous_root, CONTINUOUS_DEMO_TRADES_DATASET)
-    continuous_paper = _ledger_summary(continuous_paper_root, CONTINUOUS_PAPER_TRADES_DATASET)
-    hedge = _ledger_summary(continuous_hedge_root, CONTINUOUS_DEMO_TRADES_DATASET)
+    short = _ledger_summary(short_root, "event_demo_trades", now_ms=now_ms)
+    long = _ledger_summary(long_root, LONG_DEMO_TRADES_DATASET, now_ms=now_ms)
+    continuous = _ledger_summary(continuous_root, CONTINUOUS_DEMO_TRADES_DATASET, now_ms=now_ms)
+    continuous_paper = _ledger_summary(
+        continuous_paper_root, CONTINUOUS_PAPER_TRADES_DATASET, now_ms=now_ms
+    )
+    hedge = _ledger_summary(
+        continuous_hedge_root, CONTINUOUS_DEMO_TRADES_DATASET, now_ms=now_ms
+    )
     continuous_cycles = _cycle_summary(continuous_root, CONTINUOUS_DEMO_CYCLES_DATASET, now_ms=now_ms)
+    long_cycles = _cycle_summary(long_root, "long_native_demo_cycles", now_ms=now_ms)
     continuous_paper_cycles = _cycle_summary(
         continuous_paper_root, CONTINUOUS_PAPER_CYCLES_DATASET, now_ms=now_ms,
     )
 
     live_summaries = [short, long, continuous, hedge]
     tracked_open_count = sum(s.open_count for s in live_summaries)
-    tracked_open_value = sum(s.open_notional_usdt for s in live_summaries)
     tracked_realized = sum(s.realized_pnl_usdt for s in live_summaries)
     live_positions = int((bybit_position_summary or {}).get("positions") or 0)
+    snapshot_consistency_error = ""
+    if bybit_position_summary is not None and (
+        bybit_positions is None or live_positions != len(bybit_positions)
+    ):
+        snapshot_consistency_error = (
+            f"Bybit snapshot count mismatch: summary={live_positions}, "
+            f"detail_rows={len(bybit_positions or [])}"
+        )
+    venue_verified = (
+        bybit_position_summary is not None
+        and bybit_positions is not None
+        and not live_positions_error
+        and not snapshot_consistency_error
+    )
     live_value = _float((bybit_position_summary or {}).get("position_value_usdt"))
     live_upnl = _float((bybit_position_summary or {}).get("unrealized_pnl_usdt"))
     live_pnl_pct = _float((bybit_position_summary or {}).get("pnl_pct"))
-
-    if live_positions_error:
-        # A failed venue read must never be presented as "flat" — the daily
-        # heartbeat asserted an unverified claim as fact (audit 2026-06-12 r3).
-        status = (
-            f"live position check UNAVAILABLE ({str(live_positions_error)[:120]}); "
-            f"ledger shows {tracked_open_count} tracked open trade(s)."
-        )
-    elif live_positions == 0 and tracked_open_count == 0:
-        status = "flat: no open Bybit positions and no open tracked live-sleeve trades."
-    elif live_positions > 0:
-        status = (
-            f"{live_positions} live Bybit position(s), {format_usd(live_value)} exposure, "
-            f"uPnL {format_usd(live_upnl, signed=True)} ({format_pct(live_pnl_pct, signed=True)})."
-        )
-    else:
-        status = f"{tracked_open_count} tracked open trade(s), {format_usd(tracked_open_value)} ledger open value."
-
-    lines = [
-        "Combined book - Bybit demo",
-        format_utc_time_ms(now_ms),
-        "",
-        f"Status: {status}",
-        f"Tracked live sleeves: realized {format_usd(tracked_realized, signed=True)}, "
-        f"open value {format_usd(tracked_open_value)}.",
+    live_keys = {
+        (str(row.get("symbol") or ""), str(row.get("side") or "").lower())
+        for row in (bybit_positions or [])
+        if str(row.get("symbol") or "")
+    }
+    tracked_leg_rows = [
+        leg
+        for summary in (short, long, continuous, hedge)
+        for leg in summary.open_leg_counts
     ]
+    stale_legs = [leg for leg in tracked_leg_rows if (leg[0], leg[1]) not in live_keys]
+    stale_rows = sum(leg[2] for leg in stale_legs) if venue_verified else 0
+    tracked_keys = {(symbol, side) for symbol, side, _count in tracked_leg_rows}
+    venue_only = sorted(live_keys - tracked_keys) if venue_verified else []
+    continuous_live = live_keys & {
+        (symbol, side) for symbol, side, _count in continuous.open_leg_counts
+    }
+    hedge_live = live_keys & {
+        (symbol, side) for symbol, side, _count in hedge.open_leg_counts
+    }
+    hedge_manager_state = _state_label(
+        states.get("CONTINUOUS_HEDGE_TIMER"),
+        default="unknown",
+    )
 
-    lines.extend([
-        "",
-        "Live sleeves",
-        _format_book_line(
-            "Continuous demo",
-            _state_label(states.get("CONTINUOUS_SLEEVE"), default="off"),
-            continuous,
-            continuous_cycles,
-            now_ms=now_ms,
-        ),
-    ])
-    # Compatibility ledger line: render it only while open compatibility rows remain.
-    # The ledger still counts toward the tracked totals above either way.
-    if short.open_count > 0:
-        lines.append(
-            _format_book_line(
-                "Short (compatibility)", _state_label(states.get("SHORT_SLEEVE"), default="off"), short, None, now_ms=now_ms
-            )
+    lines = ["\N{BAR CHART} Hourly portfolio \N{MIDDLE DOT} Bybit demo", format_utc_time_ms(now_ms)]
+    position_warnings: list[str] = []
+    loss_alert_floor = position_loss_alert_levels()[0]
+    if wallet_error:
+        lines.append(f"Equity: unavailable ({str(wallet_error)[:120]})")
+    elif account_equity_usdt is not None and account_equity_usdt > 0.0:
+        lines.append(f"Equity: {format_usd(account_equity_usdt)}")
+
+    effective_position_error = str(live_positions_error or snapshot_consistency_error)
+    if effective_position_error:
+        lines.extend(
+            [
+                "",
+                "\N{WARNING SIGN} Open positions: UNKNOWN",
+                f"Bybit position check failed: {effective_position_error[:180]}",
+                f"Local ledgers contain {tracked_open_count} open row(s), but they are not proof of live exposure.",
+            ]
         )
-    lines.extend([
-        _format_book_line("Long", _state_label(states.get("LONG_SLEEVE"), default="off"), long, None, now_ms=now_ms),
-        # The hedge timer rides the continuous toggle (deploy: apply_timer_enable
-        # "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS). Never hardcode a mode label:
-        # "DRY-RUN" misstated the SUBMIT_HEDGE=1-armed hedge (operator-armed 2026-06-10).
-        _format_book_line("BTC hedge", _state_label(states.get("CONTINUOUS_SLEEVE"), default="off"), hedge, None, now_ms=now_ms),
-        "",
-        "Evidence collectors",
-        _format_book_line(
-            "Continuous paper",
-            _state_label(states.get("CONTINUOUS_PAPER_SLEEVE"), default="off"),
-            continuous_paper,
-            continuous_paper_cycles,
-            now_ms=now_ms,
-        ),
-    ])
-
-    if bybit_positions:
-        lines.extend(["", "Open Bybit positions"])
-        for row in bybit_positions[:12]:
+    elif venue_verified and live_positions == 0:
+        lines.extend(["", "Open positions: 0", "No open positions on Bybit."])
+    elif venue_verified:
+        lines.extend(
+            [
+                "",
+                f"Open positions: {live_positions} \N{MIDDLE DOT} exposure {format_usd(live_value)}",
+                f"Unrealised P&L: {format_usd(live_upnl, signed=True)} ({format_pct(live_pnl_pct, signed=True)})",
+            ]
+        )
+        for row in (bybit_positions or [])[:12]:
+            row_pnl_pct = _float(row.get("pnl_pct"))
+            loss_warning = row_pnl_pct <= -loss_alert_floor
+            marker = "\N{WARNING SIGN}" if loss_warning else "\N{BULLET}"
+            loss_label = " \N{MIDDLE DOT} LOSS WARNING" if loss_warning else ""
+            leverage = _float(row.get("leverage"))
+            leverage_label = f" \N{MIDDLE DOT} {leverage:g}x" if leverage > 0.0 else ""
             lines.append(
-                f"- {row['symbol']} {row['side']} { _float(row['qty']):g} "
-                f"uPnL {format_usd(row.get('unrealized_pnl_usdt'), signed=True)} "
-                f"({format_pct(row.get('pnl_pct'), signed=True)})"
+                f"{marker} {row.get('symbol', 'UNKNOWN')} {str(row.get('side') or '').upper()} \N{MIDDLE DOT} "
+                f"{format_usd(row.get('position_value_usdt'))}{leverage_label} \N{MIDDLE DOT} "
+                f"P&L {format_usd(row.get('unrealized_pnl_usdt'), signed=True)} "
+                f"({format_pct(row_pnl_pct, signed=True)}){loss_label}"
             )
-
-    action = "No action needed."
-    if live_positions > 0 and tracked_open_count == 0:
-        action = "Check ledger mapping: Bybit has live positions but tracked live ledgers show flat."
-    elif _cycle_stale(continuous_cycles, now_ms=now_ms, stale_minutes=20.0) and states.get("CONTINUOUS_SLEEVE", "off") != "off":
-        action = "Continuous demo cycle is stale; check the continuous daemon and liveness journal."
-    elif continuous.open_count > 0 and hedge.open_count == 0:
-        action = (
-            "Continuous short exposure is open while the hedge ledger is flat; "
-            "verify hedge sizing/timer if exposure is material."
+            avg_price = _float(row.get("avg_price"))
+            mark_price = _float(row.get("mark_price"))
+            if avg_price > 0.0 and mark_price > 0.0:
+                protection = []
+                stop = _float(row.get("stop_price"))
+                take_profit = _float(row.get("take_profit_price"))
+                side = str(row.get("side") or "").lower()
+                tp_reached = take_profit > 0.0 and (
+                    (side == "short" and mark_price <= take_profit)
+                    or (side == "long" and mark_price >= take_profit)
+                )
+                if tp_reached:
+                    protection.append(f"TP ${take_profit:.8g} REACHED — still open")
+                    position_warnings.append(
+                        f"{row.get('symbol', 'UNKNOWN')} has crossed its venue TP but Bybit still reports it open."
+                    )
+                elif take_profit > 0.0:
+                    tp_distance = (
+                        (mark_price - take_profit) / mark_price
+                        if side == "short"
+                        else (take_profit - mark_price) / mark_price
+                    )
+                    protection.append(
+                        f"TP ${take_profit:.8g} ({format_pct(max(tp_distance, 0.0))} away)"
+                    )
+                else:
+                    protection.append("no venue TP")
+                protection.append(f"SL ${stop:.8g}" if stop > 0.0 else "no venue stop")
+                lines.append(
+                    f"  entry ${avg_price:.8g} \N{RIGHTWARDS ARROW} mark ${mark_price:.8g} \N{MIDDLE DOT} "
+                    + " \N{MIDDLE DOT} ".join(protection)
+                )
+        if live_positions > 12:
+            lines.append(f"… {live_positions - 12} more open position(s) omitted from this digest.")
+    else:
+        lines.extend(
+            [
+                "",
+                "Open positions: not checked",
+                f"Local ledgers contain {tracked_open_count} open row(s); live exposure is unknown.",
+            ]
         )
-    lines.extend(["", f"Action: {action}"])
+
+    recent_opened = sum(
+        summary.recent_opened_count for summary in (short, long, continuous, hedge)
+    )
+    recent_closed = sum(
+        summary.recent_closed_count for summary in (short, long, continuous, hedge)
+    )
+    recent_realized = sum(
+        summary.recent_realized_pnl_usdt for summary in (short, long, continuous, hedge)
+    )
+    recent_realized_complete = all(
+        summary.recent_realized_complete
+        for summary in (short, long, continuous, hedge)
+        if summary.recent_closed_count
+    )
+    recent_closes = [
+        close
+        for summary in (short, long, continuous, hedge)
+        for close in summary.recent_closes
+    ]
+    lines.extend(["", "Last 60 minutes"])
+    if recent_opened or recent_closed:
+        realized_text = (
+            f"realised {format_usd(recent_realized, signed=True)}"
+            if recent_realized_complete
+            else f"realised P&L incomplete (known {format_usd(recent_realized, signed=True)})"
+        )
+        lines.append(
+            f"{recent_opened} opened \N{MIDDLE DOT} {recent_closed} closed \N{MIDDLE DOT} "
+            f"{realized_text}"
+        )
+        lines.extend(f"\N{BULLET} {close}" for close in recent_closes[:6])
+    else:
+        lines.append("No position changes.")
+
+    lines.extend(
+        [
+            "",
+            "Systems",
+            f"\N{BULLET} Continuous {_state_label(states.get('CONTINUOUS_SLEEVE'), default='off')} \N{MIDDLE DOT} "
+            f"last cycle {format_age_ms(now_ms=now_ms, then_ms=continuous_cycles.latest_ts_ms)}",
+            f"\N{BULLET} Long {_state_label(states.get('LONG_SLEEVE'), default='off')} \N{MIDDLE DOT} "
+            f"last cycle {format_age_ms(now_ms=now_ms, then_ms=long_cycles.latest_ts_ms)}",
+            f"\N{BULLET} Hedge manager {hedge_manager_state} \N{MIDDLE DOT} "
+            f"live hedge {'present' if hedge_live else 'none'}"
+            + (
+                " \N{MIDDLE DOT} target need is not inferred"
+                if continuous_live and not hedge_live
+                else ""
+            ),
+            f"\N{BULLET} Paper shadow {_state_label(states.get('CONTINUOUS_PAPER_SLEEVE'), default='off')} \N{MIDDLE DOT} "
+            f"{continuous_paper.open_count} simulated open row(s) \N{MIDDLE DOT} "
+            f"last cycle {format_age_ms(now_ms=now_ms, then_ms=continuous_paper_cycles.latest_ts_ms)}",
+            f"Ledger realised P&L (all time): {format_usd(tracked_realized, signed=True)}",
+        ]
+    )
+
+    warnings: list[str] = list(position_warnings)
+    if hedge_live and hedge_manager_state == "UNKNOWN":
+        warnings.append(
+            "A live hedge exists but hedge-manager state is unavailable; activity is not being inferred from the continuous sleeve."
+        )
+    elif hedge_live and hedge_manager_state != "ON":
+        warnings.append(
+            "A live hedge exists while its manager is OFF; this stopless position is unmanaged."
+        )
+    if stale_rows:
+        stale_symbols = ", ".join(
+            f"{symbol} x{count}" if count > 1 else symbol
+            for symbol, _side, count in stale_legs[:8]
+        )
+        warnings.append(
+            f"Bybit and local ledgers disagree: {stale_rows} local open row(s) ({stale_symbols}) "
+            "do not exist on Bybit. They are excluded from live totals and need reconciliation."
+        )
+    if venue_only:
+        warnings.append(
+            "Bybit has position(s) with no owning live ledger: "
+            + ", ".join(f"{symbol} {side}" for symbol, side in venue_only[:8])
+            + "."
+        )
+    if (
+        _cycle_stale(continuous_cycles, now_ms=now_ms, stale_minutes=20.0)
+        and states.get("CONTINUOUS_SLEEVE", "off") != "off"
+    ):
+        warnings.append("Continuous demo cycle is stale; inspect the daemon/liveness journal.")
+    if (
+        _cycle_stale(long_cycles, now_ms=now_ms, stale_minutes=20.0)
+        and states.get("LONG_SLEEVE", "off") != "off"
+    ):
+        warnings.append("Long demo cycle is stale; inspect the daemon/liveness journal.")
+    if warnings:
+        lines.extend(["", "Needs attention"])
+        lines.extend(f"\N{WARNING SIGN} {warning}" for warning in warnings)
+    else:
+        lines.extend(["", "No action needed."])
     return "\n".join(lines)[:3900]
 
 
@@ -2564,12 +2775,18 @@ def format_portfolio_alert_overview(
     now_ms: int,
     sleeve_states: dict[str, str] | None = None,
 ) -> str:
-    """Compact multi-sleeve context for material per-sleeve Telegram alerts."""
+    """Compact local-ledger context; never claim this is current venue state.
+
+    Runtime Telegram events no longer append this block.  It remains as a
+    diagnostic compatibility helper for callers that explicitly want ledger
+    context without a Bybit snapshot.
+    """
     states = {
         "SHORT_SLEEVE": os.environ.get("SHORT_SLEEVE", "off"),
         "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "off"),
         "CONTINUOUS_SLEEVE": os.environ.get("CONTINUOUS_SLEEVE", "off"),
         "CONTINUOUS_PAPER_SLEEVE": os.environ.get("CONTINUOUS_PAPER_SLEEVE", "off"),
+        "CONTINUOUS_HEDGE_TIMER": os.environ.get("CONTINUOUS_HEDGE_TIMER", "unknown"),
     }
     if sleeve_states:
         states.update(sleeve_states)
@@ -2588,8 +2805,8 @@ def format_portfolio_alert_overview(
     tracked_realized = sum(s.realized_pnl_usdt for s in live_summaries)
 
     lines = [
-        "Portfolio overview",
-        f"- tracked live: {tracked_open_count} open, {format_usd(tracked_open_value)} value, "
+        "Local ledger overview (not venue-verified)",
+        f"- open ledger rows: {tracked_open_count}, {format_usd(tracked_open_value)} recorded value, "
         f"realized {format_usd(tracked_realized, signed=True)}",
         _format_book_line(
             "Continuous demo",
@@ -2607,7 +2824,7 @@ def format_portfolio_alert_overview(
         ),
         _format_book_line(
             "BTC/ETH hedge",
-            _state_label(states.get("CONTINUOUS_SLEEVE"), default="off"),
+            _state_label(states.get("CONTINUOUS_HEDGE_TIMER"), default="unknown"),
             hedge,
             None,
             now_ms=now_ms,
@@ -2620,11 +2837,6 @@ def format_portfolio_alert_overview(
             now_ms=now_ms,
         ),
     ]
-    if continuous.open_count > 0 and hedge.open_count == 0:
-        lines.append(
-            "Action: continuous short exposure is open while the hedge ledger is flat; "
-            "verify hedge sizing/timer if exposure is material."
-        )
     return "\n".join(lines)[:1400]
 
 
@@ -2647,7 +2859,7 @@ def safe_portfolio_alert_overview(
             now_ms=now_ms,
         )
     except Exception as exc:  # noqa: BLE001 - Telegram context must never break trading
-        return f"Portfolio overview unavailable: {type(exc).__name__}: {str(exc)[:200]}"
+        return f"Local ledger overview unavailable: {type(exc).__name__}: {str(exc)[:200]}"
 
 
 def _cycle_stale(cycles: _CycleSummary, *, now_ms: int, stale_minutes: float) -> bool:
@@ -2672,7 +2884,12 @@ def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
     return summary.trade_count, summary.realized_pnl_usdt, summary.open_notional_usdt
 
 
-def _ledger_summary(root: Path | None, dataset: str) -> _LedgerSummary:
+def _ledger_summary(
+    root: Path | None,
+    dataset: str,
+    *,
+    now_ms: int | None = None,
+) -> _LedgerSummary:
     if root is None:
         return _LedgerSummary(available=False)
     if not root.exists():
@@ -2688,26 +2905,94 @@ def _ledger_summary(root: Path | None, dataset: str) -> _LedgerSummary:
     open_notional = 0.0
     open_count = 0
     open_positions: list[str] = []
+    open_leg_counts: dict[tuple[str, str], int] = {}
+    recent_open_legs: set[tuple[str, str]] = set()
+    recent_close_buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    recent_cutoff_ms = int(now_ms) - exact_duration_ms(hours=1) if now_ms is not None else None
     if "status" not in trades.columns:
         return _LedgerSummary(available=True, trade_count=trade_count)
     has_entry_fee = "entry_fee_usdt" in trades.columns
     has_exit_fee = "exit_fee_usdt" in trades.columns
-    if {"entry_price", "exit_price", "qty"}.issubset(trades.columns):
-        closed = trades.filter(pl.col("status") == "closed")
-        if not closed.is_empty():
-            for row in closed.to_dicts():
-                entry = _float(row.get("entry_price"))
-                exit_price = _float(row.get("exit_price"))
-                qty = _float(row.get("qty"))
-                side = str(row.get("side", "")).lower()
-                if entry <= 0.0 or exit_price <= 0.0 or qty <= 0.0:
-                    continue
-                gross = (entry - exit_price) * qty if side == "short" else (exit_price - entry) * qty
+    closed = trades.filter(pl.col("status") == "closed")
+    if not closed.is_empty():
+        for row in closed.to_dicts():
+            entry = _float(row.get("entry_price"))
+            exit_price = _float(row.get("exit_price"))
+            qty = _float(row.get("qty"))
+            symbol = str(row.get("symbol") or "UNKNOWN")
+            raw_side = str(row.get("side") or row.get("trade_side") or "position").lower()
+            side = (
+                "short" if raw_side in {"short", "sell"}
+                else "long" if raw_side in {"long", "buy"}
+                else raw_side
+            )
+            exit_ts = int(
+                _float(
+                    row.get("exit_ts_ms")
+                    or row.get("closed_at_ms")
+                    or row.get("updated_at_ms")
+                )
+            )
+            is_recent = recent_cutoff_ms is not None and exit_ts >= recent_cutoff_ms
+            bucket: dict[str, Any] | None = None
+            if is_recent:
+                bucket = recent_close_buckets.setdefault(
+                    (symbol, side),
+                    {"pnl": 0.0, "pnl_known": True, "reasons": set()},
+                )
+                bucket["reasons"].add(
+                    human_exit_reason(row.get("exit_reason"))
+                )
+
+            # Prefer the account's allocated Closed-PnL, then an explicitly
+            # stored realised-PnL value. Only reconstruct from prices and fees
+            # when neither stronger value exists. This keeps the hourly dollar
+            # total consistent with the venue-confirmed close notification.
+            venue_pnl_raw = row.get("venue_closed_pnl_allocated_usdt")
+            realized_pnl_raw = row.get("realized_pnl_usdt")
+            row_realized: float | None
+            if venue_pnl_raw not in (None, ""):
+                row_realized = _float(venue_pnl_raw)
+            elif realized_pnl_raw not in (None, ""):
+                row_realized = _float(realized_pnl_raw)
+            elif entry > 0.0 and exit_price > 0.0 and qty > 0.0:
+                gross = (
+                    (entry - exit_price) * qty
+                    if side == "short"
+                    else (exit_price - entry) * qty
+                )
                 fee = (
                     (_float(row.get("entry_fee_usdt")) if has_entry_fee else 0.0)
                     + (_float(row.get("exit_fee_usdt")) if has_exit_fee else 0.0)
                 )
-                realized += gross - fee
+                row_realized = gross - fee
+            else:
+                row_realized = None
+            if row_realized is None:
+                if bucket is not None:
+                    bucket["pnl_known"] = False
+                continue
+            realized += row_realized
+            if bucket is not None:
+                bucket["pnl"] = _float(bucket.get("pnl")) + row_realized
+    if recent_cutoff_ms is not None:
+        for row in trades.to_dicts():
+            entry_ts = int(
+                _float(
+                    row.get("entry_ts_ms")
+                    or row.get("opened_at_ms")
+                    or row.get("ts_ms")
+                )
+            )
+            if entry_ts >= recent_cutoff_ms:
+                symbol = str(row.get("symbol") or "UNKNOWN")
+                raw_side = str(row.get("side") or row.get("trade_side") or "position").lower()
+                side = (
+                    "short" if raw_side in {"short", "sell"}
+                    else "long" if raw_side in {"long", "buy"}
+                    else raw_side
+                )
+                recent_open_legs.add((symbol, side))
     if {"entry_price", "qty"}.issubset(trades.columns):
         open_trades = trades.filter(pl.col("status") == "open")
         open_count = open_trades.height
@@ -2715,6 +3000,16 @@ def _ledger_summary(root: Path | None, dataset: str) -> _LedgerSummary:
             for row in open_trades.to_dicts():
                 qty = _float(row.get("qty"))
                 entry = _float(row.get("entry_price"))
+                symbol = str(row.get("symbol") or "")
+                raw_side = str(row.get("side") or row.get("trade_side") or "").lower()
+                side = (
+                    "short" if raw_side in {"short", "sell"}
+                    else "long" if raw_side in {"long", "buy"}
+                    else raw_side
+                )
+                if symbol and side:
+                    key = (symbol, side)
+                    open_leg_counts[key] = open_leg_counts.get(key, 0) + 1
                 if qty > 0.0 and entry > 0.0:
                     notional = qty * entry
                     open_notional += notional
@@ -2726,6 +3021,27 @@ def _ledger_summary(root: Path | None, dataset: str) -> _LedgerSummary:
         realized_pnl_usdt=realized,
         open_notional_usdt=open_notional,
         open_positions=tuple(open_positions),
+        open_leg_counts=tuple(
+            (symbol, side, count)
+            for (symbol, side), count in sorted(open_leg_counts.items())
+        ),
+        recent_opened_count=len(recent_open_legs),
+        recent_closed_count=len(recent_close_buckets),
+        recent_realized_pnl_usdt=sum(
+            _float(bucket.get("pnl")) for bucket in recent_close_buckets.values()
+        ),
+        recent_realized_complete=all(
+            bool(bucket.get("pnl_known")) for bucket in recent_close_buckets.values()
+        ),
+        recent_closes=tuple(
+            f"{symbol} {' / '.join(sorted(bucket['reasons']))} "
+            + (
+                format_usd(bucket.get("pnl"), signed=True)
+                if bucket.get("pnl_known")
+                else "P&L unavailable"
+            )
+            for (symbol, _side), bucket in sorted(recent_close_buckets.items())
+        ),
     )
 
 

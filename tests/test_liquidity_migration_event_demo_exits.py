@@ -1333,6 +1333,84 @@ def test_reconcile_open_trades_closes_when_position_vanished_with_evidence() -> 
     assert updates[0]["exit_reason"] == "bybit_position_missing"
 
 
+def test_reconcile_open_trades_attributes_venue_take_profit_from_order_history() -> None:
+    class CloseCauseClient(_ClosedPnlClient):
+        def __init__(self) -> None:
+            super().__init__(records=[_SHORT_CLOSURE])
+            self.history_calls: list[dict[str, Any]] = []
+
+        def get_order_history(self, **kwargs: Any) -> list[dict[str, Any]]:
+            self.history_calls.append(kwargs)
+            return [
+                {
+                    "orderId": "x-1",
+                    "orderStatus": "Filled",
+                    "stopOrderType": "TakeProfit",
+                    "createType": "CreateByTakeProfit",
+                }
+            ]
+
+    client = CloseCauseClient()
+    open_trades = pl.DataFrame(
+        [
+            _open_trade_row(
+                side="short",
+                exit_order_id="x-1",
+                take_profit_price=90.0,
+                stop_price=110.0,
+            )
+        ],
+        infer_schema_length=None,
+    )
+
+    kept, updates, error = _reconcile_open_trades(
+        open_trades,
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True),
+        now_ms=1_700_000_100_000,
+        raw_positions=[],
+    )
+
+    assert error == ""
+    assert kept.is_empty()
+    assert len(client.history_calls) == 1
+    assert client.history_calls[0]["settle_coin"] == "USDT"
+    assert updates[0]["exit_reason"] == "take_profit"
+    assert updates[0]["exit_reason_source"] == "bybit_order_history"
+    assert updates[0]["venue_stop_order_type"] == "TakeProfit"
+
+
+def test_reconcile_open_trades_labels_tp_level_without_claiming_order_type() -> None:
+    closure = {
+        **_SHORT_CLOSURE,
+        "avgExitPrice": "79.0",
+    }
+    open_trades = pl.DataFrame(
+        [
+            _open_trade_row(
+                side="short",
+                exit_order_id="x-1",
+                take_profit_price=80.0,
+                stop_price=112.0,
+            )
+        ],
+        infer_schema_length=None,
+    )
+
+    kept, updates, error = _reconcile_open_trades(
+        open_trades,
+        trading_client=_ClosedPnlClient(records=[closure]),
+        demo=EventDemoCycleConfig(submit_orders=True),
+        now_ms=1_700_000_100_000,
+        raw_positions=[],
+    )
+
+    assert error == ""
+    assert kept.is_empty()
+    assert updates[0]["exit_reason"] == "take_profit_level_reached"
+    assert updates[0]["exit_reason_source"] == "exit_price_vs_ledger_take_profit"
+
+
 def test_reconcile_open_trades_keeps_open_when_no_closure_evidence() -> None:
     """FAIL-CLOSED invariant: position absent but NO closure record → the trade
     stays OPEN, not orphan-closed. A transient/empty positions read must never

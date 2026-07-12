@@ -499,6 +499,15 @@ def build_position_pnl_snapshot(positions: list[dict[str, Any]]) -> list[dict[st
                 "unrealized_pnl_usdt": unrealized_pnl if have_mark else None,
                 "pnl_pct": pnl_pct if have_mark else None,
                 "leverage": _first_float(position, ("leverage",)),
+                # Preserve the venue's actual protection state for operator
+                # reporting.  A local ledger target is not proof that Bybit has
+                # the order attached, and the two have diverged in production.
+                # These fields therefore come only from the position snapshot.
+                "stop_price": _first_float(position, ("stopLoss", "stop_price")),
+                "take_profit_price": _first_float(
+                    position, ("takeProfit", "take_profit_price")
+                ),
+                "liquidation_price": _first_float(position, ("liqPrice", "liquidation_price")),
             }
         )
     # audit2c: null uPnL (no genuine mark) sorts last via 0.0, never a TypeError.
@@ -1560,11 +1569,20 @@ from .event_demo_data import (  # noqa: E402, F401
 
 # --- re-export extracted module (see top-of-file note) ---
 from .event_demo_reports import (  # noqa: E402, F401
+    DEFAULT_POSITION_LOSS_ALERT_LEVELS,
+    PositionLossAlert,
     _position_markdown_row,
     _telegram_notification_reason,
+    aggregate_position_event_rows,
     format_event_demo_cycle_report,
     format_event_risk_cycle_report,
+    format_position_event_lines,
+    format_position_event_messages,
+    format_position_loss_alert,
     format_telegram_status_message,
+    human_exit_reason,
+    position_loss_alert_levels,
+    position_loss_alerts,
 )
 
 

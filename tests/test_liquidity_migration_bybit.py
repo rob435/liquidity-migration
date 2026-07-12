@@ -341,6 +341,46 @@ def test_bybit_private_client_wraps_order_and_trade_history(monkeypatch) -> None
     ]
 
 
+def test_bybit_private_client_pages_account_order_history(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **_kwargs):
+            self.calls: list[dict] = []
+
+        def get_order_history(self, **params):
+            self.calls.append(params)
+            if "cursor" not in params:
+                return {
+                    "retCode": 0,
+                    "result": {
+                        "list": [{"orderId": "close-1"}],
+                        "nextPageCursor": "next",
+                    },
+                }
+            return {
+                "retCode": 0,
+                "result": {"list": [{"orderId": "close-2"}], "nextPageCursor": ""},
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    rows = client.get_order_history(
+        settle_coin="USDT",
+        start_time_ms=1_700_000_000_000,
+        end_time_ms=1_700_000_100_000,
+    )
+
+    assert [row["orderId"] for row in rows] == ["close-1", "close-2"]
+    assert client._client.calls[0] == {
+        "category": "linear",
+        "limit": 50,
+        "settleCoin": "USDT",
+        "startTime": 1_700_000_000_000,
+        "endTime": 1_700_000_100_000,
+    }
+    assert client._client.calls[1]["cursor"] == "next"
+
+
 def test_bybit_private_client_wraps_cancel_all_and_positions_by_settle(monkeypatch) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):

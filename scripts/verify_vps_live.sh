@@ -215,12 +215,25 @@ if continuous_rmom_refresh_on; then
   fi
 fi
 # Timer parity - read-only verify must catch a deploy that forgot to enable
-# (or someone manually disabled) the liveness watchdog or daily combined-book
+# (or someone manually disabled) the liveness watchdog or hourly combined-book
 # report. Both fail loud if missing.
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
+# A completed Telegram-overhaul deploy must remove every named emergency mute
+# so genuine rate-limited order failures are not silently disabled alongside
+# the former health-cycle spam.
+for _telegram_quiet_dropin in \
+  /etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d/telegram-quiet.conf \
+  /etc/systemd/system/liquidity-migration-combined-book-report.service.d/telegram-quiet.conf \
+  /run/systemd/system/liquidity-migration-bybit-continuous-demo.service.d/telegram-quiet.conf \
+  /run/systemd/system/liquidity-migration-combined-book-report.service.d/telegram-quiet.conf; do
+    if [ -e "$_telegram_quiet_dropin" ]; then
+      echo "Verification failed: emergency Telegram mute still installed: $_telegram_quiet_dropin" >&2
+      exit 1
+    fi
+done
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"

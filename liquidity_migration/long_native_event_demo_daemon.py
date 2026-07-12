@@ -464,8 +464,9 @@ class LongNativeDemoDaemon:
     # logged; only the telegram is deduped. The continuous sleeve cycles every 60s —
     # a wedged cycle (schema error, corrupt parquet) otherwise paged ~1440x/day,
     # guaranteed Telegram 429s drowning real alerts (audit 2026-06-12). The watchdog's
-    # 30-min alert cooldown is the precedent.
-    _CYCLE_FAILURE_TELEGRAM_COOLDOWN_SECONDS = 30 * 60
+    # watchdog now uses the same six-hour reminder ceiling; the first/new
+    # signature still pages immediately and every failure remains in journald.
+    _CYCLE_FAILURE_TELEGRAM_COOLDOWN_SECONDS = 6 * 60 * 60
 
     def _maybe_send_cycle_failure_telegram(self, exc: Exception) -> None:
         """Send the cycle-failure page, deduped by (exception type, message head) with a

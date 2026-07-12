@@ -702,16 +702,45 @@ class BybitPrivateClient:
         self,
         *,
         symbol: str | None = None,
+        settle_coin: str | None = None,
+        order_id: str | None = None,
         order_link_id: str | None = None,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
         limit: int = 50,
+        max_pages: int = 20,
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"category": self.category, "limit": limit}
+        params: dict[str, Any] = {
+            "category": self.category,
+            "limit": max(1, min(int(limit), 50)),
+        }
         if symbol:
             params["symbol"] = symbol
+        elif settle_coin:
+            params["settleCoin"] = settle_coin
+        if order_id:
+            params["orderId"] = order_id
         if order_link_id:
             params["orderLinkId"] = order_link_id
-        payload = self._call_optional(("get_order_history",), **params)
-        return payload.get("result", {}).get("list", []) if payload else []
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
+        rows: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(max(1, int(max_pages))):
+            page_params = dict(params)
+            if cursor:
+                page_params["cursor"] = cursor
+            payload = self._call_optional(("get_order_history",), **page_params)
+            if not payload:
+                break
+            result = payload.get("result", {})
+            rows.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor") or None
+            if not cursor:
+                break
+        return rows
 
     def get_trade_history(
         self,
