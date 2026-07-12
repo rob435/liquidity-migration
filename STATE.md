@@ -11,20 +11,35 @@ research decisions are in
 
 | Sleeve | Mode | Current state |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | On and flat in a clean 10x execution-stress epoch; hedge add/reduce is venue-smoke-verified and target reconciliation is five-minute |
-| `LongV11aDivWeekendVol` | Bybit demo + paper | On and flat in the clean ledger epoch; prior rows remain in reset archives |
+| `continuous_ensemble_v2` | Bybit demo + paper | On and flat after the canonical-journal migration boundary; the migrated TUSDT demo row is closed and the paper row is retained as non-open history |
+| `LongV11aDivWeekendVol` | Bybit demo + paper | On and flat after the canonical-journal migration boundary |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
-- Direct Bybit demo snapshot at `2026-07-12T21:21Z`: account-wide USD equity
-  `$10,024.27872781` and USDT coin balance `10,030.0961836 USDT`, zero positions,
-  zero open orders, and zero venue exposure. The difference is Bybit's current
-  USDT-to-USD valuation; live sizing uses account-wide equity.
-  Continuous demo, paper, hedge, and LONG trade/order ledgers are empty; normal
-  post-reset heartbeat cycles continue to accumulate.
-- The demo-only 10x execution-stress release is deployed and independently
-  verified. The full local gate is 2,751 passed / 1 skipped; the checked deploy
-  gate passed. Mainnet remains categorically disabled.
+- Direct Bybit demo snapshot at `2026-07-12T22:48Z`: account-wide equity
+  `$10,027.35`, zero positions, zero open orders, and zero venue exposure. The
+  hourly report preview independently agrees: no open Bybit positions, one
+  TUSDT open/close change in the last hour, and `+$3.15` realized.
+- Canonical execution-journal release `6f2bde773` is deployed and checked. The
+  local and GitHub full gates each passed `2,768` tests with one skip; the
+  exact-commit VPS verifier passed after the migration reset. Mainnet remains
+  categorically disabled.
+- Execution history is now the hash-chained, append-only
+  `canonical_journal/events.jsonl`. Trade/order Parquet, TCA, Telegram, and
+  reconciliation state are replayable projections. The lifecycle reducer is
+  shared by historical, paper, and demo modes, and venue executions retain
+  per-fill ID, quantity, price, fee, venue time, latency, and deferred
+  1/5/30-minute markouts.
+- The `2026-07-12T22:47:28Z` migration boundary archived the old generated views
+  at
+  `data/_archive/ledger-reset-20260712T224728Z-canonical-journal-migration.tar.gz`
+  (SHA-256
+  `2dfc39ef6262007cd42cb5f0bf401ba208dcf32472636a5368f706d1fc6cd748`).
+  It retained the journals, appended verified-flat facts, rebuilt projections,
+  and restored all nine previously active units.
+- The demo-only 10x execution-stress release remains deployed and independently
+  verified. This is execution-stress evidence, not permission or evidence for
+  mainnet use.
 - CONTINUOUS demo and paper now make scale explicit: the registered 2%-of-equity
   base is multiplied by `NOTIONAL_MULTIPLIER=10`, while
   `ENTRY_LEVERAGE=10` supplies exchange margin. The first changes order quantity;
@@ -161,19 +176,21 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
 
 ## Clean ledger boundary
 
-- The `2026-07-12T20:42:49Z` all-sleeve reset archived and removed every
-  allowlisted demo, paper, hedge, compatibility, cycle, and operational-event
-  ledger that existed. Reports, caches, configs, signals, and account-equity
-  high-water state were deliberately preserved by contract.
-- Current demo/paper/hedge/LONG trade and order counts are all zero. The
-  continuous demo and paper cycle ledgers retain the verified-flat reset
-  boundary plus normal post-boundary heartbeat cycles.
-- An immediate armed hedge run against that boundary exited successfully with a
-  known 0.0 gross short fraction and `submit_no_action`. The prior reset race,
-  where the timer briefly failed on missing trade+cycle datasets, is closed.
-- The earlier execution/reconciliation evidence remains recoverable from the
-  dated reset archives. A clean forward epoch does not erase or upgrade that
-  historical evidence.
+- The `2026-07-12T22:47:28Z` all-sleeve reset is the canonical migration
+  boundary. It first refused while a real TUSDT demo short and its TP order were
+  still open. The position was then closed through an idempotent reduce-only
+  demo order, Bybit was re-proven flat, and the guarded reset completed.
+- Reset no longer deletes lifecycle authority. It bootstraps legacy rows into
+  the journal, records the verified-flat venue boundary, archives generated
+  views, removes only allowlisted projections/epoch telemetry, then rebuilds
+  trade/order/TCA views by replay.
+- Continuous demo replay contains one closed TUSDT row, 16 verified journal
+  events, and two TCA rows (entry and close). Continuous paper retains its
+  pre-boundary simulated row as `awaiting_pnl`, which is excluded from exposure
+  and new close attempts. LONG, hedge, and shared compatibility roots are flat.
+- The earlier execution/reconciliation evidence remains recoverable from both
+  the journal and dated archives. A clean forward boundary does not erase or
+  upgrade that historical evidence.
 
 ## Long v11a research read
 
