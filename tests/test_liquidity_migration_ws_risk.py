@@ -353,6 +353,120 @@ def test_false_empty_rest_snapshot_keeps_reduce_only_protection_armed(
     assert client.orders[0]["reduceOnly"] is True
 
 
+def test_zero_position_reduce_only_rejection_stops_component_retry_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bybit 110017 with an explicit zero-position explanation is stronger
+    evidence than a merely empty REST snapshot. One side-specific probe is
+    allowed; after the venue confirms flat, sibling component plans and later
+    ticker passes must not keep submitting the same impossible close."""
+    now_ms = 1_800_000_000_000
+    symbol = "BUSDT"
+    continuous_root = tmp_path / "continuous"
+
+    class ZeroPositionClient(FakePrivateClient):
+        closed_records: list[dict[str, object]] = []
+
+        def place_order(self, **params):
+            self.orders.append(params)
+            raise RuntimeError(
+                "current position is zero, cannot fix reduce-only order qty "
+                "(ErrCode: 110017)"
+            )
+
+        def get_closed_pnl(self, **_kwargs):
+            return list(self.closed_records)
+
+        def get_order_history(self, **_kwargs):
+            return [{
+                "symbol": symbol,
+                "side": "Buy",
+                "orderId": "tp-order",
+                "orderStatus": "Filled",
+                "stopOrderType": "TakeProfit",
+                "createType": "CreateByTakeProfit",
+                "createdTime": str(now_ms - 1_000),
+            }]
+
+    client = ZeroPositionClient(confirm_fills=False, positions=[])
+    engine = EventWebSocketRiskEngine(
+        tmp_path / "short",
+        config=ResearchConfig(data_root=tmp_path / "short"),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            continuous_data_root=str(continuous_root),
+        ),
+        private_client=client,
+    )
+    trades = pl.DataFrame([
+        {
+            "trade_id": f"continuous-{component}",
+            "strategy_id": "continuous_fade_v2",
+            "sleeve": "continuous",
+            "component": component,
+            "symbol": symbol,
+            "side": "short",
+            "status": "open",
+            "qty": "1",
+            "entry_price": 100.0,
+            "notional_usdt": 100.0,
+            "equity_usdt": 10_000.0,
+            "entry_ts_ms": now_ms - 24 * 60 * 60 * 1000,
+            "planned_exit_ts_ms": now_ms - 1,
+            "stop_price": 0.0,
+            "take_profit_price": 80.0,
+        }
+        for component in ("p3", "p4p3", "p4p5")
+    ], infer_schema_length=None)
+    engine.state.all_trades = trades
+    engine.state.open_trades = trades
+    engine.state.positions_by_symbol = {}
+    engine.state.price_by_symbol = {symbol: 113.0}
+    engine.reconcile_positions(write=False)
+    monkeypatch.setattr(ws_risk, "_now_ms", lambda: now_ms)
+
+    engine.evaluate_symbols({symbol})
+
+    assert len(client.orders) == 1
+    assert client.orders[0]["side"] == "Buy"
+    assert client.orders[0]["reduceOnly"] is True
+    assert (symbol, "short") in engine.state.explicit_flat_position_legs
+    assert engine.state.pending_orphan_trade_ids == {
+        "continuous-p3", "continuous-p4p3", "continuous-p4p5",
+    }
+    # Accounting remains fail-closed until Closed-PnL supplies price/fees/P&L.
+    assert engine.state.open_trades.height == 3
+
+    engine.evaluate_symbols({symbol})
+    assert len(client.orders) == 1
+
+    # Once attributable venue evidence is available, reconcile all component
+    # rows with the real TP cause and P&L rather than a synthetic max-hold close.
+    client.closed_records = [{
+        "symbol": symbol,
+        "side": "Buy",
+        "avgExitPrice": "79",
+        "closedSize": "3",
+        "openFee": "0.1",
+        "closeFee": "0.3",
+        "closedPnl": "63",
+        "orderId": "tp-order",
+        "createdTime": str(now_ms - 1_000),
+    }]
+    reconciled = engine.reconcile_positions(write=False)
+    assert len(reconciled) == 3
+    assert engine.state.open_trades.is_empty()
+    assert {row["exit_reason"] for row in reconciled} == {"take_profit"}
+    assert {row["exit_reason_source"] for row in reconciled} == {
+        "bybit_order_history"
+    }
+    assert {float(row["exit_price"]) for row in reconciled} == {79.0}
+
+
 class FakePrivateStream:
     def __init__(self) -> None:
         self.subscriptions: list[str] = []
@@ -1169,6 +1283,49 @@ def test_ws_then_rest_falls_back_after_failed_ws_order_ack(tmp_path: Path) -> No
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == trigger_ts_ms
     assert "AAAUSDT" not in engine.state.submitted_symbols
     assert any("websocket order ack failed" in error for error in engine.state.errors)
+
+
+def test_ws_zero_position_ack_suppresses_rest_fallback_and_marks_leg_flat(
+    tmp_path: Path,
+) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient()
+    trade_client = FakeTradeClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="ws_then_rest",
+            rest_fallback=True,
+            exit_untracked_positions=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=trade_client,
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    ws_link = str(engine.state.orders[0]["order_link_id"])
+    engine.on_ws_order_ack({
+        "retCode": 110017,
+        "retMsg": "current position is zero, cannot fix reduce-only order qty",
+        "_lm_order_link_id": ws_link,
+    })
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert len(trade_client.orders) == 1
+    assert private_client.orders == []
+    assert stored_orders.filter(pl.col("order_link_id") == ws_link).select("status").item() == "rejected"
+    assert ("AAAUSDT", "short") in engine.state.explicit_flat_position_legs
+    assert engine.state.pending_orphan_trade_ids == {"t1"}
 
 
 def test_ws_ack_rest_fallback_failure_keeps_trade_open_with_context(tmp_path: Path) -> None:
@@ -4435,14 +4592,13 @@ def test_maybe_notify_offloads_send_off_consumer_thread(tmp_path: Path, monkeypa
     assert len(calls) == 1
 
 
-def test_failed_background_send_unrecords_dedupe_key(tmp_path: Path, monkeypatch) -> None:
-    """REGRESSION (audit 2026-06-12): the optimistic dedupe wrote the key BEFORE the HTTP
-    round-trip and a failed send was only logged — a single timeout/429 on an
-    UNPROTECTED/stop_repair_failed alert silently suppressed that exact alert for 24h.
-    The sender loop now un-records the key (disk + memory) so the next material cycle
-    re-fires it. Round 3: the un-record happens only for a CONFIGURED transport —
-    creds present + False return = transport failure worth retrying; a missing env
-    is permanent, so keeping the key avoids per-cycle dedupe-file churn."""
+def test_failed_background_send_obeys_retry_backoff(tmp_path: Path, monkeypatch) -> None:
+    """A configured transport failure must not immediately un-record the key.
+
+    Immediate re-fire turned Telegram 429 into a heartbeat/ticker-rate feedback
+    loop. The same material state stays deduped until the bounded retry cooldown;
+    once due it can make one new attempt.
+    """
     import threading as _threading
 
     attempted = _threading.Event()
@@ -4464,18 +4620,104 @@ def test_failed_background_send_unrecords_dedupe_key(tmp_path: Path, monkeypatch
     ok, status = engine.maybe_notify({"cycle": {}})
     assert (ok, status) == (True, "enqueued")
     assert attempted.wait(2.0), "background telegram sender did not run"
-    # audit2c: the sender thread no longer un-records the key off-thread (that mutated
-    # consumer-only state and raced the dedupe file). It hands the failed key back via a
-    # queue; the NEXT maybe_notify drains it (un-record on the consumer thread) THEN
-    # re-fires. Wait for the hand-back, then assert the alert re-fires — the (True,
-    # "enqueued") return proves the dedupe key was un-recorded (else it would be a dup).
+    # Wait for the sender-to-consumer hand-back, then prove the next material
+    # pass is still suppressed instead of retrying immediately.
     import time as _time
     for _ in range(200):
         if not engine._telegram_failed_keys.empty():
             break
         _time.sleep(0.01)
+    assert engine.maybe_notify({"cycle": {}}) == (False, "duplicate_material_event")
+    assert "k-fail" in engine.state.telegram_keys_sent
+
+    # Make the recorded cooldown due; the same persistent event gets one retry.
+    engine._telegram_retry_not_before["k-fail"] = 0.0
     assert engine.maybe_notify({"cycle": {}}) == (True, "enqueued")
     engine.close()
+
+
+def test_pending_close_dedupe_ignores_rolling_retry_order_ids() -> None:
+    pending = [
+        {
+            "trade_id": f"continuous-{component}",
+            "symbol": "BUSDT",
+            "side": "short",
+            "qty": "1",
+            "entry_price": 1.0,
+        }
+        for component in ("p3", "p4p3", "p4p5")
+    ]
+
+    def payload(link: str) -> dict:
+        return {
+            "cycle": {},
+            "pending_orphan_positions": pending,
+            "exit_orders": [{
+                "order_link_id": link,
+                "trade_id": "continuous-p3",
+                "symbol": "BUSDT",
+                "side": "Buy",
+                "reduce_only": True,
+                "status": "failed",
+            }],
+        }
+
+    first = ws_risk._telegram_dedupe_key(
+        "position_close_pending_pnl", payload("lm-rx-B-first")
+    )
+    second = ws_risk._telegram_dedupe_key(
+        "position_close_pending_pnl", payload("lm-rx-B-second")
+    )
+
+    assert first == second
+    assert "lm-rx" not in first
+    assert all(
+        f"continuous-{component}" in first
+        for component in ("p3", "p4p3", "p4p5")
+    )
+
+
+def test_pending_close_message_collapses_components_and_humanizes_flat_rejection() -> None:
+    payload = {
+        "cycle": {
+            "ts_ms": 1_800_000_000_000,
+            "position_report_error": "",
+            "wallet_error": "",
+        },
+        "pending_orphan_positions": [
+            {
+                "trade_id": f"continuous-{component}",
+                "symbol": "BUSDT",
+                "side": "short",
+                "qty": "1",
+                "entry_price": 1.0,
+            }
+            for component in ("p3", "p4p3", "p4p5")
+        ],
+        "exit_orders": [{
+            "symbol": "BUSDT",
+            "side": "Buy",
+            "reduce_only": True,
+            "submit_mode": "error",
+            "status": "failed",
+            "error": (
+                "Bybit place_order failed: current position is zero, cannot fix "
+                "reduce-only order qty (ErrCode: 110017). Request -> POST /v5/order/create"
+            ),
+        }],
+        "bybit_position_summary": {
+            "positions": 0,
+            "position_value_usdt": 0.0,
+            "unrealized_pnl_usdt": 0.0,
+        },
+    }
+
+    text = ws_risk.format_telegram_status_message(payload)
+
+    assert text.count("BUSDT: Bybit confirmed this position was already flat") == 1
+    assert text.count("BUSDT SHORT: Bybit is flat") == 1
+    assert "3 local component rows await confirmed close P&L" in text
+    assert "Request -> POST" not in text
 
 
 def test_unconfigured_telegram_keeps_dedupe_key(tmp_path: Path, monkeypatch) -> None:
@@ -5340,15 +5582,22 @@ def test_adoption_treats_eth_hedge_leg_as_externally_managed(tmp_path: Path) -> 
     assert row["submit_mode"] == "adopted_recovered"
 
 
-def test_drain_failed_telegram_keys_unrecords_on_consumer_thread(tmp_path) -> None:
+def test_drain_failed_telegram_keys_waits_for_consumer_backoff(tmp_path) -> None:
     engine = EventWebSocketRiskEngine(
         tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
     )
     try:
         engine.state.telegram_keys_sent.add("k-x")
         ws_risk._write_telegram_dedupe_keys(engine.report_dir, engine.state.telegram_keys_sent)
-        # Sender thread hands a failed key back; consumer drains + un-records it.
+        # Sender hands a failed key back; the consumer retains the key during
+        # cooldown instead of creating an immediate retry loop.
         engine._telegram_failed_keys.put("k-x")
+        engine._drain_failed_telegram_keys()
+        assert "k-x" in engine.state.telegram_keys_sent
+        assert "k-x" in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))
+        assert engine._telegram_retry_not_before["k-x"] > 0.0
+
+        engine._telegram_retry_not_before["k-x"] = 0.0
         engine._drain_failed_telegram_keys()
         assert "k-x" not in engine.state.telegram_keys_sent
         assert "k-x" not in set(ws_risk._read_telegram_dedupe_keys(engine.report_dir))

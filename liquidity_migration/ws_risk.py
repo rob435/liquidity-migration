@@ -448,8 +448,10 @@ class EventWebSocketRiskEngine:
         # audit2c: the sender thread MUST NOT mutate self.state.telegram_keys_sent or
         # write the dedupe file (consumer-thread-only invariant + a file-write race
         # against maybe_notify). On a failed send it hands the key back here; the
-        # consumer un-records it (drain in maybe_notify) so the alert can re-fire.
+        # consumer makes it retry-eligible only after a bounded cooldown. Immediate
+        # un-recording caused a Telegram-429 feedback loop at heartbeat/ticker cadence.
         self._telegram_failed_keys: queue.Queue[str] = queue.Queue()
+        self._telegram_retry_not_before: dict[str, float] = {}
         # Background reconcile-prefetcher (opt-in via reconcile_prefetch_enabled).
         # Holds the latest positions + open-orders REST snapshot so rest_reconcile
         # reads it non-blocking. Written by the prefetcher via atomic reference
@@ -1329,7 +1331,14 @@ class EventWebSocketRiskEngine:
             row={"symbol": order.get("symbol", ""), "rejectReason": ret_msg},
         )
         if updates:
+            self._record_zero_position_rejection_evidence(updates)
             self._write_order_rows_routed(updates)
+        if any(_is_zero_position_reduce_only_rejection(update) for update in updates):
+            # The WS venue ack already proved this exact reduce-only side flat.
+            # A REST fallback would only repeat the impossible close and create
+            # a second rejection/order ID for the same state transition.
+            self.write_report(reason="ws_order_ack_position_flat")
+            return
         if (
             was_pending
             and self.risk.submit_orders
@@ -1749,6 +1758,20 @@ class EventWebSocketRiskEngine:
 
     def submit_exit(self, exit_plan: dict[str, Any]) -> None:
         symbol = str(exit_plan["symbol"])
+        trade_id = str(exit_plan.get("trade_id") or "")
+        if trade_id and not self.state.open_trades.is_empty():
+            match = self.state.open_trades.filter(
+                pl.col("trade_id").cast(pl.String) == trade_id
+            )
+            if not match.is_empty() and self._orphan_retry_suppressed(
+                dict(match.to_dicts()[0])
+            ):
+                _logger.info(
+                    "submit_exit skipped: venue already confirmed flat for %s trade_id=%s",
+                    symbol,
+                    trade_id,
+                )
+                return
         # Cross-process double-submit guard (P1-2, 2026-05-27), now from in-memory
         # state — NO synchronous parquet read on the stop-submission hot path. The
         # demo cycle and this ws_risk daemon both submit reduce-only exits;
@@ -1806,6 +1829,7 @@ class EventWebSocketRiskEngine:
         # so _write_*_rows_routed sends them to the correct ledger. Without
         # this, every long-sleeve exit/repair lands in the short ledger.
         self._tag_sleeve_from_trades(rows, orders, fallback_symbol=symbol)
+        self._record_zero_position_rejection_evidence(orders)
         if rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, rows, key="trade_id")
             self.state.open_trades = _open_trades(self.state.all_trades)
@@ -1842,6 +1866,48 @@ class EventWebSocketRiskEngine:
             self.mark_submitted_symbol(symbol)
         else:
             self.clear_submitted_symbol(symbol)
+
+    def _record_zero_position_rejection_evidence(
+        self,
+        orders: list[dict[str, Any]],
+    ) -> None:
+        """Treat Bybit's exact zero-position reduce-only rejection as flat proof.
+
+        A successful-but-empty REST positions snapshot remains insufficient on its
+        own: it can be a transient false-empty response. In contrast, Bybit error
+        110017 with the explicit ``current position is zero`` explanation is the
+        venue's response to a side-specific reduce-only order. It proves that exact
+        leg is already gone, so retrying the same close cannot protect exposure.
+        The ledger still stays open until attributable Closed-PnL evidence supplies
+        the real exit price, fees, and P&L.
+        """
+        changed = False
+        for order in orders:
+            if not _is_zero_position_reduce_only_rejection(order):
+                continue
+            symbol = str(order.get("symbol") or "")
+            side = _position_side_reduced_by_order(order.get("side"))
+            if not symbol or not side:
+                continue
+            leg = (symbol, side)
+            if leg not in self.state.explicit_flat_position_legs:
+                _logger.warning(
+                    "Bybit confirmed zero position for reduce-only retry; "
+                    "suppressing further closes symbol=%s side=%s",
+                    symbol,
+                    side,
+                )
+                self.state.explicit_flat_position_legs.add(leg)
+                changed = True
+            current = self.state.positions_by_symbol.get(symbol) or {}
+            if (
+                _float(current.get("size")) > 0.0
+                and _normalized_side(current.get("side")) == side
+            ):
+                self.state.positions_by_symbol.pop(symbol, None)
+                changed = True
+        if changed:
+            self._refresh_pending_orphan_state()
 
     def _tag_sleeve_from_trades(
         self,
@@ -3465,13 +3531,11 @@ class EventWebSocketRiskEngine:
         """Background daemon: drain (dedupe_key, pre-rendered text) pairs and do the
         blocking HTTP send. A None item is the shutdown sentinel. The string is frozen
         on the consumer thread (WS-R-001), so this thread touches no shared mutable
-        payload state. On a FAILED send the dedupe key is un-recorded (disk + memory):
-        the optimistic dedupe wrote the key before the HTTP round-trip, so a single
-        timeout/429 on an UNPROTECTED/stop_repair_failed alert silently suppressed
-        that exact alert for 24h (audit 2026-06-12). Un-recording lets the next
-        material cycle re-fire it. The disk file is the authority (atomic tempfile
-        helpers); a racing consumer re-add at worst restores today's suppress-once
-        behavior — never a crash, never a spam loop."""
+        payload state. A failed send is handed to the consumer, which retains the
+        optimistic dedupe key for ``TELEGRAM_SEND_RETRY_BACKOFF_SECONDS`` before
+        making the still-material event eligible again. Immediate un-recording was
+        unsafe operationally: a Telegram 429 plus changing order IDs generated a
+        retry storm. The hourly digest remains the bounded backstop."""
         while True:
             item = self._telegram_queue.get()
             if item is None:
@@ -3492,10 +3556,14 @@ class EventWebSocketRiskEngine:
                 # the next NEW material event notifies normally.
                 _logger.warning("telegram not configured (TELEGRAM_* env missing); keeping dedupe key: %s", key)
                 continue
-            # audit2c: hand the failed key back to the CONSUMER thread to un-record
-            # (discard from the set + rewrite the dedupe file) rather than mutating
-            # consumer-only state and racing the dedupe file from this sender thread.
-            _logger.warning("telegram send failed; handing dedupe key to the consumer to un-record so it can re-fire: %s", key)
+            # Hand the failed key back to the consumer thread. It owns the dedupe
+            # file and applies the retry cooldown; the sender never mutates shared
+            # state or turns a transport outage into heartbeat-rate retries.
+            _logger.warning(
+                "telegram send failed; retry suppressed for %.0f seconds: %s",
+                TELEGRAM_SEND_RETRY_BACKOFF_SECONDS,
+                key,
+            )
             self._telegram_failed_keys.put(key)
 
     def _enqueue_telegram(self, key: str, text: str) -> None:
@@ -3554,29 +3622,35 @@ class EventWebSocketRiskEngine:
         return view
 
     def _drain_failed_telegram_keys(self) -> None:
-        """Consumer-thread un-record of keys whose background send failed. The sender
-        thread hands failed keys back via a thread-safe queue (it must not mutate
-        consumer-only state or race the dedupe file); we discard them from the set and
-        rewrite the dedupe file HERE, on the consumer thread, so the alert can re-fire."""
-        drained = False
+        """Apply bounded, consumer-owned retry eligibility after send failures."""
+        now = time.monotonic()
         while True:
             try:
                 key = self._telegram_failed_keys.get_nowait()
             except queue.Empty:
                 break
-            self.state.telegram_keys_sent.discard(key)
-            drained = True
-        if drained:
+            self._telegram_retry_not_before[key] = max(
+                self._telegram_retry_not_before.get(key, 0.0),
+                now + TELEGRAM_SEND_RETRY_BACKOFF_SECONDS,
+            )
+        due = {
+            key
+            for key, retry_at in self._telegram_retry_not_before.items()
+            if now >= retry_at
+        }
+        if due:
+            self.state.telegram_keys_sent.difference_update(due)
             try:
                 _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
             except Exception as exc:  # noqa: BLE001 - dedupe repair is best-effort telemetry
                 _logger.warning("telegram dedupe un-record (consumer) failed: %s", exc)
+            for key in due:
+                self._telegram_retry_not_before.pop(key, None)
 
     def maybe_notify(self, payload: dict[str, Any]) -> tuple[bool, str]:
         if not self.risk.telegram:
             return False, "disabled"
-        # audit2c: un-record any keys whose background send failed (handed back by the
-        # sender thread) before the dedupe check below, so a failed alert can re-fire.
+        # A failed alert becomes eligible again only after the bounded cooldown.
         self._drain_failed_telegram_keys()
         # Expiry must apply to the in-memory set as well as the file reader.
         # Without this refresh, a quiet long-lived daemon retained a 24h key
@@ -3858,6 +3932,7 @@ _DEMO_WS_TRADE_UNAVAILABLE = (
     "Bybit demo WebSocket Trade order entry is unavailable; using REST fallback for demo reduce-only exits."
 )
 TELEGRAM_DEDUPE_RETENTION_SECONDS = 24 * 60 * 60
+TELEGRAM_SEND_RETRY_BACKOFF_SECONDS = 30 * 60
 
 
 def _message_rows(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3904,6 +3979,16 @@ def _position_side_reduced_by_order(order_side: Any) -> str:
     return ""
 
 
+def _is_zero_position_reduce_only_rejection(order: dict[str, Any]) -> bool:
+    """True only for Bybit's explicit side-specific zero-position rejection."""
+    if not _bool(order.get("reduce_only")):
+        return False
+    if str(order.get("status") or "").lower() not in {"failed", "rejected"}:
+        return False
+    error = str(order.get("error") or "").lower()
+    return "current position is zero" in error
+
+
 def _int(value: Any) -> int:
     # Thin alias over the shared _common.coerce_int (quality-dup-9); kept as a
     # name so the many module-internal call sites stay untouched.
@@ -3928,6 +4013,23 @@ def _telegram_position_loss_key(
 
 def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:
     cycle = payload.get("cycle", {})
+    if reason == "position_close_pending_pnl":
+        # This is a persistent ledger state, not a new event on every close retry.
+        # Key it only by the rows waiting for P&L. Rolling lm-rx order IDs made the
+        # same three flat BUSDT rows look unique tens of thousands of times.
+        pending_identities = sorted(
+            {
+                str(row.get("trade_id") or "")
+                or "|".join(
+                    [
+                        str(row.get("symbol") or "UNKNOWN"),
+                        _normalized_side(row.get("side")) or "position",
+                    ]
+                )
+                for row in (payload.get("pending_orphan_positions", []) or [])
+            }
+        )
+        return "|".join([reason, ",".join(pending_identities)])
     position_events = (
         (payload.get("exits", []) or [])
         + (payload.get("reconciliations", []) or [])

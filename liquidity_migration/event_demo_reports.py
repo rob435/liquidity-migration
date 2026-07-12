@@ -583,6 +583,10 @@ def _account_now_line(payload: dict[str, Any]) -> str:
     )
 
 
+def _zero_position_reduce_only_error(value: Any) -> bool:
+    return "current position is zero" in str(value or "").lower()
+
+
 def format_position_event_messages(payload: dict[str, Any]) -> list[tuple[str, str]]:
     """Return one venue-position update per opened/closed net position.
 
@@ -665,15 +669,26 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
     if wallet_error:
         lines.append(f"Wallet could not be verified: {wallet_error[:240]}")
 
+    flat_rejection_symbols: set[str] = set()
     for row in (payload.get("entry_orders", []) or []) + (payload.get("exit_orders", []) or []):
         if (
             str(row.get("submit_mode") or "") != "error"
             and str(row.get("status") or "") not in {"failed", "rejected", "submitted_unconfirmed", "partial"}
         ):
             continue
+        symbol = str(row.get("symbol") or "UNKNOWN")
+        error = str(row.get("error") or "")
+        if _zero_position_reduce_only_error(error):
+            if symbol not in flat_rejection_symbols:
+                lines.append(
+                    f"{symbol}: Bybit confirmed this position was already flat; "
+                    "further close retries are suppressed."
+                )
+                flat_rejection_symbols.add(symbol)
+            continue
         lines.append(
-            f"{row.get('symbol', 'UNKNOWN')}: "
-            f"{str(row.get('error') or row.get('status') or 'order not confirmed')[:240]}"
+            f"{symbol}: "
+            f"{str(error or row.get('status') or 'order not confirmed')[:240]}"
         )
 
     for row in (payload.get("stop_repairs", []) or [])[:4]:
@@ -687,9 +702,16 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
             f"{row.get('symbol', 'UNKNOWN')} {str(row.get('side') or '').upper()} "
             f"qty {_float(row.get('qty')):g} exists on Bybit but has no owning ledger row."
         )
-    for row in (payload.get("pending_orphan_positions", []) or [])[:4]:
+    pending_positions = aggregate_position_event_rows(
+        payload.get("pending_orphan_positions", []) or [],
+        closing=False,
+    )
+    for row in pending_positions[:4]:
+        leg_count = int(row.get("leg_count") or 1)
+        row_label = "row" if leg_count == 1 else "component rows"
         lines.append(
-            f"{row.get('symbol', 'UNKNOWN')}: venue is flat; local close is waiting for confirmed P&L."
+            f"{row.get('symbol', 'UNKNOWN')} {str(row.get('side') or 'position').upper()}: "
+            f"Bybit is flat; {leg_count} local {row_label} await confirmed close P&L."
         )
 
     if not position_error:
