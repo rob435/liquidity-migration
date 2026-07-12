@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from liquidity_migration.storage import read_dataset
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SH = REPO_ROOT / "scripts" / "deploy_vps_live.sh"
 VERIFY_SH = REPO_ROOT / "scripts" / "verify_vps_live.sh"
@@ -1500,6 +1502,9 @@ esac
 if [[ "${1:-}" == "-c" ]]; then
   exec "$REAL_PYTHON" "$@"
 fi
+if [[ "${1:-}" == "-" && "${2:-}" == "--write-reset-boundary" ]]; then
+  exec "$REAL_PYTHON" "$@"
+fi
 cat >/dev/null
 if [[ "${FAKE_ACCOUNT_GUARD_RC:-0}" == "0" ]]; then
   echo "  demo-account-flat-ok positions=0 open_orders=0"
@@ -1529,6 +1534,9 @@ exit "$FAKE_ACCOUNT_GUARD_RC"
             "FAKE_ACCOUNT_GUARD_RC": str(account_guard_rc),
             "FAKE_SYSTEMD_ENV_FILE": str(env_file),
             "REAL_PYTHON": sys.executable,
+            "PYTHONPATH": (
+                f"{REPO_ROOT}{os.pathsep}{env.get('PYTHONPATH', '')}"
+            ),
             "LEDGER_RESET_LOCK_FILE": str(tmp_path / "ledger-reset.lock"),
             "LEDGER_RESET_SETTLE_SECONDS": "0",
         }
@@ -1733,6 +1741,18 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     assert not demo_dynexit_shadow.exists() and not paper_dynexit_shadow.exists(), (
         "pre-reset dynamic-exit shadow evidence must not leak into the new forward window"
     )
+    assert "reset-boundary-heartbeats-ok" in executed.stdout
+    demo_boundary = read_dataset(
+        continuous_ledger.parent,
+        "continuous_fade_demo_cycles",
+    )
+    paper_boundary = read_dataset(
+        paper_ledger.parent,
+        "continuous_fade_paper_cycles",
+    )
+    assert demo_boundary.height == 1 and paper_boundary.height == 1
+    assert demo_boundary.select("reason").item() == "verified_flat_ledger_reset"
+    assert paper_boundary.select("account_flat_verified").item() is True
     assert cache.exists(), "cache is preserved unless explicitly selected"
     assert demo_equity_state.exists() and paper_equity_state.exists(), (
         "a ledger reset must not erase the account drawdown high-water risk memory"

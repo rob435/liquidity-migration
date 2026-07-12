@@ -270,27 +270,56 @@ def _read_actual_fill(
     against a same-symbol fade short on the shared one-way account (audit
     2026-06-14, hedge-2/hedge-3).
 
-    Returns ``(filled_qty, avg_price, source)``. On a read failure or an empty
-    venue view, falls back CONSERVATIVELY to ``(requested_qty, 0.0, "read_failed")``:
-    the order was accepted (we hold an orderId), so we must keep tracking the
-    position we asked for rather than silently drop it — but ``source`` flags that
-    the fill is unverified so the operator can see it.
+    Returns ``(filled_qty, avg_price, source)``. Execution history can lag a
+    just-filled demo market order, so an empty/failed execution poll falls back to
+    Bybit order history and reads ``cumExecQty``/``avgPrice`` from the terminal
+    order row. Only when BOTH views are unavailable do we conservatively return
+    ``(requested_qty, 0.0, "read_failed")``: the venue accepted the order, so the
+    requested position remains provisionally tracked rather than silently dropped,
+    but the caller must label that booking unconfirmed.
     """
     from liquidity_migration.event_demo import _float as _ed_float
     from liquidity_migration.event_demo import _wait_for_execution_summary
 
+    summary: dict[str, object] = {}
     try:
         summary = _wait_for_execution_summary(
             client, symbol=symbol, order_link_id=order_link_id,
             poll_seconds=3.0, poll_interval_seconds=0.2, target_qty=requested_qty,
         )
-    except Exception:  # noqa: BLE001 — a transport fault must not drop the position
-        return requested_qty, 0.0, "read_failed"
+    except Exception:  # noqa: BLE001 — order-history fallback below is authoritative too
+        summary = {}
     filled = _ed_float(summary.get("qty"))
     avg_price = _ed_float(summary.get("avg_price"))
-    if filled <= 0.0:
-        return requested_qty, 0.0, "read_failed"
-    return filled, avg_price, "venue"
+    if filled > 0.0:
+        return filled, avg_price, "venue"
+
+    try:
+        history = client.get_order_history(
+            symbol=symbol,
+            order_link_id=order_link_id,
+            limit=10,
+        )
+    except Exception:  # noqa: BLE001 — retain the conservative accepted-order fallback
+        history = []
+    for row in history or []:
+        if str(row.get("orderLinkId") or row.get("order_link_id") or "") != order_link_id:
+            continue
+        history_filled = _ed_float(
+            row.get("cumExecQty")
+            or row.get("cum_exec_qty")
+            or row.get("executedQty")
+            or row.get("execQty")
+        )
+        if history_filled <= 0.0:
+            continue
+        history_avg = _ed_float(
+            row.get("avgPrice")
+            or row.get("avg_price")
+            or row.get("execPrice")
+        )
+        return history_filled, history_avg, "order_history"
+    return requested_qty, 0.0, "read_failed"
 
 
 def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root: Path, now_ms: int) -> dict:
@@ -336,10 +365,60 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root
     client = BybitPrivateClient(category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret)
     link = hedge_order_link_id(now_ms, symbol=plan.symbol)
     qty_text = _decimal_text(qty_dec)
-    result = client.place_order(**_order_params(
-        symbol=plan.symbol, side=plan.side, qty=qty_text, order_type="Market",
-        order_link_id=link, reduce_only=plan.reduce_only,
-    ))
+    # Persist the durable intent BEFORE the venue mutation. The shared ws_risk
+    # process can otherwise receive Bybit's position event while this process is
+    # still polling execution history and briefly classify our own hedge as an
+    # untracked/manual position. If this process dies after venue acceptance, the
+    # pending-fill reconciler still has the exact link, side, qty, and sleeve needed
+    # to recover the fill.
+    preflight_order_row = {
+        "order_link_id": link,
+        "ts_ms": now_ms,
+        "updated_at_ms": now_ms,
+        "trade_id": f"hedge-{link}",
+        "strategy_id": cfg.strategy_id,
+        "symbol": plan.symbol,
+        "side": plan.side,
+        "order_type": "Market",
+        "qty": qty,
+        "reduce_only": plan.reduce_only,
+        "order_id": "",
+        "submit_mode": "submitted",
+        "status": "submitted_unconfirmed",
+        "filled_qty": 0.0,
+        "target_qty": qty,
+        "trade_side": "long",
+        "sleeve": "continuous_addon",
+        "notional_usdt": abs(qty * price),
+        "reason": plan.reason,
+        "fill_source": "preflight",
+    }
+    write_dataset(
+        pl.DataFrame([preflight_order_row]),
+        data_root,
+        cfg.orders_dataset,
+        append=True,
+    )
+    try:
+        result = client.place_order(**_order_params(
+            symbol=plan.symbol, side=plan.side, qty=qty_text, order_type="Market",
+            order_link_id=link, reduce_only=plan.reduce_only,
+        ))
+    except Exception as exc:
+        failed_order_row = dict(preflight_order_row)
+        failed_order_row.update({
+            "status": "failed",
+            "submit_mode": "error",
+            "error": str(exc)[:500],
+            "fill_source": "venue_rejected_or_unavailable",
+        })
+        write_dataset(
+            pl.DataFrame([failed_order_row]),
+            data_root,
+            cfg.orders_dataset,
+            append=True,
+        )
+        raise
     order_id = str(result.get("orderId", ""))
     # Read the realized fill instead of assuming requested_qty filled at the
     # implied price. filled_qty drives the trade-row qty / reduce booking; the
@@ -357,29 +436,44 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root
     # terminal "filled" row with the full qty made it re-add the whole fill, every
     # armed BUY double-booked, audit 2026-06-11; booking the ACTUAL filled_qty here
     # keeps that delta honest for a partial too).
-    fully_filled = filled_qty + 1e-12 >= qty
-    order_row = {
-        "order_link_id": link, "ts_ms": now_ms, "trade_id": f"hedge-{link}",
-        "strategy_id": cfg.strategy_id, "symbol": plan.symbol, "side": plan.side,
-        "order_type": "Market", "qty": qty, "reduce_only": plan.reduce_only,
-        "order_id": order_id, "submit_mode": "submitted",
-        "status": "filled" if fully_filled else "partial",
-        "filled_qty": filled_qty, "target_qty": qty,
-        "trade_side": "long", "sleeve": "continuous_addon",
-        "notional_usdt": abs(filled_qty * book_price), "reason": plan.reason,
-        "updated_at_ms": now_ms,
-    }
+    fill_confirmed = fill_source in {"venue", "order_history"}
+    fully_filled = fill_confirmed and filled_qty + 1e-12 >= qty
+    order_row = dict(preflight_order_row)
+    order_row.update({
+        "order_id": order_id,
+        "status": (
+            "filled"
+            if fully_filled
+            else "partial"
+            if fill_confirmed
+            else "submitted_unconfirmed"
+        ),
+        # A read-failed fallback is a provisional tracking quantity, NOT a
+        # confirmed venue fill. Keep the confirmed-fill field truthful; the
+        # requested qty remains in qty/target_qty and the trade row below is
+        # explicitly labelled provisional.
+        "filled_qty": filled_qty if fill_confirmed else 0.0,
+        "notional_usdt": abs((filled_qty if fill_confirmed else qty) * book_price),
+        "fill_source": fill_source,
+        "error": "" if fill_confirmed else "venue fill confirmation pending",
+    })
     write_dataset(pl.DataFrame([order_row]), data_root, cfg.orders_dataset, append=True)
     if plan.side == "Buy" and not plan.reduce_only and filled_qty > 0.0:
         trade_row = build_hedge_trade_row(
             cfg, qty=filled_qty, entry_price=max(book_price, 0.0), now_ms=now_ms,
             order_link_id=link, order_id=order_id, symbol=plan.symbol,
         )
+        trade_row.update({
+            "entry_price_source": "venue" if fill_confirmed else "planned_fallback",
+            "provisional_entry_fill": not fill_confirmed,
+            "submit_mode": "submitted" if fill_confirmed else "submitted_unconfirmed",
+        })
         write_dataset(pl.DataFrame([trade_row]), data_root, cfg.trades_dataset, append=True)
     elif plan.side == "Sell" and plan.reduce_only and filled_qty > 0.0:
         _apply_hedge_reduce_to_trades(
             data_root, cfg, symbol=plan.symbol, sold_qty=filled_qty,
             exit_price=max(book_price, 0.0), now_ms=now_ms,
+            fill_confirmed=fill_confirmed,
         )
     return {"symbol": plan.symbol, "side": plan.side, "qty": filled_qty,
             "requested_qty": qty, "fill_source": fill_source,
@@ -388,7 +482,7 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root
 
 def _apply_hedge_reduce_to_trades(
     data_root: Path, cfg: ContinuousHedgeConfig, *, symbol: str,
-    sold_qty: float, exit_price: float, now_ms: int,
+    sold_qty: float, exit_price: float, now_ms: int, fill_confirmed: bool = True,
 ) -> None:
     """Book a reduce-only Sell against the open hedge trade rows, oldest-first.
 
@@ -426,6 +520,8 @@ def _apply_hedge_reduce_to_trades(
             upd.update({
                 "status": "closed", "exit_price": float(exit_price),
                 "exit_ts_ms": now_ms, "exit_reason": "hedge_reduce",
+                "exit_price_source": "venue" if fill_confirmed else "planned_fallback",
+                "provisional_exit_fill": not fill_confirmed,
             })
         else:
             upd["qty"] = row_qty - take
@@ -668,7 +764,11 @@ def main() -> int:
                 else "submit_blocked_stale_warmstart"
             )
         elif submitted:
-            out["status"] = "submitted"
+            out["status"] = (
+                "submitted_pending_confirmation"
+                if any(row.get("fill_source") == "read_failed" for row in submitted)
+                else "submitted"
+            )
         else:
             # Every leg fell below the venue's qty-step/min filters: no order was
             # warranted at this size — a no-action run, not a failure.
@@ -687,7 +787,11 @@ def main() -> int:
     # on the demo account) were silent — the first-ever hedge submission is
     # exactly the event the operator needs to see. Best-effort and exception-
     # isolated; the send can never change the exit code.
-    if out.get("status") in {"submitted", "submit_partial"}:
+    if out.get("status") in {
+        "submitted",
+        "submitted_pending_confirmation",
+        "submit_partial",
+    }:
         try:
             from liquidity_migration.telegram import format_utc_time_ms, send_telegram_message
 
@@ -698,9 +802,12 @@ def main() -> int:
                 format_utc_time_ms(now_ms),
             ]
             for row in submitted_rows:
+                pending_fill = row.get("fill_source") == "read_failed"
+                shown_qty = row.get("requested_qty") if pending_fill else row.get("qty")
                 lines.append(
                     f"{str(row.get('symbol') or 'UNKNOWN')} "
-                    f"{str(row.get('side') or 'order').upper()} {row.get('qty')}"
+                    f"{str(row.get('side') or 'order').upper()} {shown_qty}"
+                    + (" (fill confirmation pending)" if pending_fill else "")
                 )
             lines.append(f"Account equity ${equity:,.2f} ({equity_source})")
             if errors:

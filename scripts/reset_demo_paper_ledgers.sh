@@ -43,6 +43,10 @@ Options:
   --settle-seconds N        wait before restart verification (default: 3; max: 60)
   -h, --help                show this help
 
+After a continuous reset it writes one fresh demo + paper cycle heartbeat recording
+the verified-flat reset boundary, so the hedge timer can distinguish the controlled
+empty epoch from a corrupt/missing ledger before the first normal cycle.
+
 The command never removes configs, .locks, residual_momentum.parquet, root-level
 market-data datasets, or continuous_account_equity_state.json. The equity state is
 snapshotted into the archive but retained live so a ledger reset cannot erase the
@@ -741,6 +745,60 @@ for target in "${EXISTING_TARGETS[@]}"; do
   [[ ! -e "$target" && ! -L "$target" ]] || die "failed to remove target: $target"
   echo "  removed $target"
 done
+
+# A continuous reset deliberately removes both the trades and cycles datasets.
+# The hedge manager treats that exact shape as UNKNOWN (correct for an arbitrary
+# missing ledger) and its already-enabled OnBootSec timer can fire before the
+# restarted continuous daemon writes its first cycle, producing a false failed
+# hedge run immediately after a reset that just proved the account flat. Record a
+# new-epoch boundary heartbeat while every writer is still quiesced. This is not
+# restored trading history: it is the durable post-reset fact established by the
+# flat-account guard above, and it lets the hedge manager distinguish a controlled
+# flat reset from corrupt/missing state without weakening its fail-closed default.
+if (( SELECT_CONTINUOUS )); then
+  echo
+  echo "Writing post-reset flat boundary heartbeats ..."
+  "$PYTHON" - --write-reset-boundary "$STAMP" "$ARCHIVE_PATH" <<'PY'
+import datetime as dt
+import sys
+from pathlib import Path
+
+import polars as pl
+
+from liquidity_migration.storage import write_dataset
+
+
+stamp = sys.argv[2]
+archive_path = sys.argv[3]
+now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+for root, dataset, mode in (
+    (
+        Path("data/bybit-continuous-demo-event"),
+        "continuous_fade_demo_cycles",
+        "demo",
+    ),
+    (
+        Path("data/bybit-continuous-paper-event"),
+        "continuous_fade_paper_cycles",
+        "paper",
+    ),
+):
+    row = {
+        "cycle_id": f"ledger-reset-{stamp}-{mode}",
+        "ts_ms": now_ms,
+        "mode": "ledger_reset_boundary",
+        "reason": "verified_flat_ledger_reset",
+        "entries_executed": 0,
+        "exits_executed": 0,
+        "open_trades_before": 0,
+        "open_trades_after": 0,
+        "account_flat_verified": True,
+        "reset_archive": archive_path,
+    }
+    write_dataset(pl.DataFrame([row]), root, dataset, append=True)
+print("  reset-boundary-heartbeats-ok demo=1 paper=1 flat=true")
+PY
+fi
 
 restart_previously_active "normal completion"
 if (( SETTLE_SECONDS > 0 )); then

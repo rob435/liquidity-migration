@@ -5,6 +5,7 @@ import sys
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 
 import scripts.run_continuous_hedge as hedge_runner
 from liquidity_migration.continuous_hedge_manager import HedgeDecision, HedgeDecision2F
@@ -562,6 +563,15 @@ def _wire_submit_seams(monkeypatch, *, filters: dict[str, float]):
 
     monkeypatch.setattr(bybit_mod, "resolve_private_credentials", lambda: ("k", "s", True))
     monkeypatch.setattr(bybit_mod, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(
+        hedge_runner,
+        "_read_actual_fill",
+        lambda client, *, symbol, order_link_id, requested_qty: (
+            requested_qty,
+            100_000.0,
+            "venue",
+        ),
+    )
     monkeypatch.setattr(hedge_runner, "_instrument_filters", lambda symbol, root: dict(filters))
     monkeypatch.setattr(
         hedge_runner, "write_dataset",
@@ -763,7 +773,13 @@ def test_warmstart_freshness_prefers_validated_data_boundary(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _wire_submit_seams_b07(monkeypatch, *, executions: list[dict], filters: dict | None = None):
+def _wire_submit_seams_b07(
+    monkeypatch,
+    *,
+    executions: list[dict],
+    order_history: list[dict] | None = None,
+    filters: dict | None = None,
+):
     """Stub the credentials/client/instrument-filters/ledger writes around
     _submit_plan.
 
@@ -787,6 +803,9 @@ def _wire_submit_seams_b07(monkeypatch, *, executions: list[dict], filters: dict
         def place_order(self, **params):
             placed.append(params)
             return {"orderId": "oid-1"}
+
+        def get_order_history(self, **_params):
+            return list(order_history or [])
 
     monkeypatch.setattr(bybit_mod, "resolve_private_credentials", lambda: ("k", "s", True))
     monkeypatch.setattr(bybit_mod, "BybitPrivateClient", FakeClient)
@@ -878,6 +897,8 @@ def test_submit_plan_full_fill_is_terminal_filled(monkeypatch, tmp_path) -> None
     )
     assert result["fill_source"] == "venue"
     cfg = hedge_runner.ContinuousHedgeConfig()
+    assert written[0][0] == cfg.orders_dataset
+    assert written[0][1].to_dicts()[0]["status"] == "submitted_unconfirmed"
     order_row = {dataset: df.to_dicts()[0] for dataset, df in written}[cfg.orders_dataset]
     assert order_row["status"] == "filled"
     assert abs(order_row["filled_qty"] - 0.5) < 1e-9
@@ -895,6 +916,58 @@ def test_submit_plan_falls_back_when_fill_unreadable(monkeypatch, tmp_path) -> N
     )
     assert result["fill_source"] == "read_failed"
     assert abs(result["qty"] - 0.5) < 1e-9  # tracks the requested qty, not dropped
+    cfg = hedge_runner.ContinuousHedgeConfig()
+    rows = [df.to_dicts()[0] for dataset, df in written if dataset == cfg.orders_dataset]
+    assert [row["status"] for row in rows] == ["submitted_unconfirmed", "submitted_unconfirmed"]
+    assert rows[-1]["filled_qty"] == 0.0
+    trade = [df.to_dicts()[0] for dataset, df in written if dataset == cfg.trades_dataset][-1]
+    assert trade["provisional_entry_fill"] is True
+    assert trade["entry_price_source"] == "planned_fallback"
+
+
+def test_submit_plan_recovers_fill_from_order_history_when_execution_stream_lags(
+    monkeypatch, tmp_path
+) -> None:
+    """The live demo can expose a terminal order row before get_executions.
+
+    That is still authoritative venue fill evidence and must beat the provisional
+    requested-qty/implied-price fallback.
+    """
+    _placed, written, _ = _wire_submit_seams_b07(
+        monkeypatch,
+        executions=[],
+        order_history=[
+            {
+                "orderLinkId": "lm-en-ca-BTC-s44we8",
+                "orderStatus": "Filled",
+                "cumExecQty": "0.5",
+                "avgPrice": "101250",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        hedge_runner,
+        "hedge_order_link_id",
+        lambda now_ms, symbol="BTCUSDT": "lm-en-ca-BTC-s44we8",
+    )
+
+    result = hedge_runner._submit_plan(
+        _resize_plan(qty=0.5, delta_notional=50_000.0),
+        hedge_runner.ContinuousHedgeConfig(),
+        tmp_path,
+        tmp_path,
+        now_ms=1_700_000_000_000,
+    )
+
+    assert result["fill_source"] == "order_history"
+    assert result["qty"] == pytest.approx(0.5)
+    cfg = hedge_runner.ContinuousHedgeConfig()
+    order = [df.to_dicts()[0] for dataset, df in written if dataset == cfg.orders_dataset][-1]
+    trade = [df.to_dicts()[0] for dataset, df in written if dataset == cfg.trades_dataset][-1]
+    assert order["status"] == "filled"
+    assert order["fill_source"] == "order_history"
+    assert trade["entry_price"] == pytest.approx(101_250.0)
+    assert trade["provisional_entry_fill"] is False
 
 
 # ---------------------------------------------------------------------------

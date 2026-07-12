@@ -616,6 +616,8 @@ def _reconcile_pending_order_fills(
                 "take_profit_price": entry_take_profit_price,
                 "entry_stop_update_status": entry_stop_update_status,
                 "entry_stop_update_error": entry_stop_update_error,
+                "fill_source": "venue_reconciled",
+                "error": "",
                 "updated_at_ms": now_ms,
             }
         )
@@ -675,6 +677,48 @@ def _reconcile_pending_order_fills(
             continue
         existing_trade = dict(trade_lookup.get(trade_id, {}))
         if existing_trade:
+            # The hedge manager may provisionally track the REQUESTED qty at an
+            # implied price when both immediate execution history and order
+            # history are unavailable after Bybit accepted the order. Its order
+            # row remains submitted_unconfirmed with filled_qty=0, so this later
+            # authoritative execution read must REPLACE that provisional trade,
+            # not delta-add the venue qty on top of it (which would double the
+            # hedge). Other producers never set provisional_entry_fill and keep
+            # the normal cumulative-delta path below.
+            if (
+                _bool(existing_trade.get("provisional_entry_fill"))
+                and str(existing_trade.get("status")) != "closed"
+                and filled_qty > 0.0
+            ):
+                leverage = (
+                    _float(existing_trade.get("entry_leverage"))
+                    or _float(order.get("entry_leverage"))
+                    or demo.entry_leverage
+                )
+                resolved_entry = avg_price or _float(existing_trade.get("entry_price"))
+                notional = abs(resolved_entry * filled_qty) if resolved_entry > 0.0 else 0.0
+                equity = _float(existing_trade.get("equity_usdt"))
+                existing_trade.update(
+                    {
+                        "entry_price": resolved_entry,
+                        "entry_price_source": "venue_reconciled",
+                        "provisional_entry_fill": False,
+                        "qty": _decimal_text(Decimal(str(filled_qty))),
+                        "notional_usdt": notional,
+                        "initial_margin_usdt": notional / leverage if leverage > 0.0 else 0.0,
+                        "initial_margin_pct_equity": (
+                            notional / leverage / equity
+                            if leverage > 0.0 and equity > 0.0
+                            else 0.0
+                        ),
+                        "entry_fee_usdt": fee_usdt,
+                        "entry_exec_time_ms": exec_time_ms,
+                        "submit_mode": "execution_reconciled",
+                        "updated_at_ms": now_ms,
+                    }
+                )
+                trade_rows.append(existing_trade)
+                continue
             # ADD this order's NEW fill (delta since last reconcile) to the open
             # trade, never overwrite-when-greater. A cap-binding entry splits into
             # sub-orders that share a trade_id; if a non-first sub is recovered

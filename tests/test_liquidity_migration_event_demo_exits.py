@@ -991,6 +991,77 @@ def test_pending_entry_additional_fill_updates_open_trade_qty() -> None:
     assert order_updates[0]["filled_qty"] == "0.7"
 
 
+def test_pending_hedge_fill_replaces_provisional_tracking_qty() -> None:
+    """A read-failed hedge booking tracks requested risk provisionally.
+
+    When venue execution history becomes available, reconciliation must replace
+    that provisional qty/price rather than delta-adding the fill and doubling the
+    live hedge in the ledger.
+    """
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "lm-en-ca-BTC-pending",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "hedge-lm-en-ca-BTC-pending",
+                "strategy_id": "continuous_btc_hedge_v2",
+                "sleeve": "continuous_addon",
+                "symbol": "BTCUSDT",
+                "side": "Buy",
+                "trade_side": "long",
+                "order_type": "Market",
+                "qty": "1",
+                "target_qty": "1",
+                "filled_qty": "0",
+                "reduce_only": False,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "status": "submitted_unconfirmed",
+                "fill_source": "read_failed",
+            }
+        ]
+    )
+    trades_df = pl.DataFrame(
+        [
+            {
+                "trade_id": "hedge-lm-en-ca-BTC-pending",
+                "strategy_id": "continuous_btc_hedge_v2",
+                "sleeve": "continuous_addon",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+                "entry_price_source": "planned_fallback",
+                "provisional_entry_fill": True,
+                "notional_usdt": 100.0,
+            }
+        ]
+    )
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("lm-en-ca-",),
+        fill_qty="0.7",
+    )
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        trades_df,
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert trades[0]["qty"] == "0.7"
+    assert trades[0]["entry_price"] == 100.5
+    assert trades[0]["notional_usdt"] == pytest.approx(70.35)
+    assert trades[0]["provisional_entry_fill"] is False
+    assert trades[0]["entry_price_source"] == "venue_reconciled"
+    assert order_updates[0]["filled_qty"] == "0.7"
+    assert order_updates[0]["fill_source"] == "venue_reconciled"
+    assert order_updates[0]["error"] == ""
+
+
 def test_risk_exit_does_not_close_until_submitted_fill_confirmed() -> None:
     all_trades = pl.DataFrame(
         [

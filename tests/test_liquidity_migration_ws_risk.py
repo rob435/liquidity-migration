@@ -4204,6 +4204,47 @@ def test_ws_risk_adoption_respects_grace_period(tmp_path: Path) -> None:
     assert "AAAUSDT" in engine.state.untracked_first_seen_ms
 
 
+def test_ws_risk_untracked_alert_respects_the_action_grace_period(tmp_path: Path) -> None:
+    """A sibling writer may lag Bybit's position event by milliseconds.
+
+    The report/Telegram path must honor the same grace as adoption/exit instead
+    of paging immediately for a normal durable-ledger hand-off.
+    """
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            telegram=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            adopt_untracked_positions=False,
+            untracked_position_grace_seconds=90.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    position = dict(private_client.positions[0])
+    engine.state.positions_by_symbol = {"AAAUSDT": position}
+
+    first = engine.write_report(reason="position_stream_reconcile")
+
+    assert first["cycle"]["untracked_positions"] == 0
+    assert first["untracked_positions"] == []
+    assert "AAAUSDT" in engine.state.untracked_first_seen_ms
+
+    engine.state.untracked_first_seen_ms["AAAUSDT"] = (
+        int(first["cycle"]["ts_ms"]) - 91_000
+    )
+    after_grace = engine.write_report(reason="heartbeat")
+
+    assert after_grace["cycle"]["untracked_positions"] == 1
+    assert [row["symbol"] for row in after_grace["untracked_positions"]] == ["AAAUSDT"]
+
+
 def test_ws_risk_adopt_config_rejects_negative_pct(tmp_path: Path) -> None:
     raised = ""
     try:

@@ -3405,19 +3405,35 @@ class EventWebSocketRiskEngine:
             (str(row.get("symbol") or ""), _normalized_side(row.get("side")))
             for row in risk_managed_trades.to_dicts()
         }
-        untracked_positions = [
-            row
-            for row in position_snapshot
-            if str(row.get("symbol", ""))
-            and (
-                str(row.get("symbol", "")),
-                _normalized_side(row.get("side")),
-            ) not in tracked_legs
-            and not self.pending_entry_active_for_position(
-                str(row.get("symbol", "")),
-                _normalized_side(row.get("side")),
-            )
-        ]
+        # Apply the SAME grace window to operator alerts that adoption/forced
+        # exit already applies to actions. Sibling producers persist their own
+        # trade rows in another process; Bybit's position event can reach this
+        # consumer a few milliseconds before the next ledger refresh. Reporting
+        # that normal hand-off as an immediately material "untracked position"
+        # created false Telegram warnings for real hedge entries. A genuinely
+        # untracked position still appears after the configured grace, while a
+        # producer row or pending intent clears the first-seen latch quietly.
+        grace_ms = int(max(self.risk.untracked_position_grace_seconds, 0.0) * 1000.0)
+        untracked_positions: list[dict[str, Any]] = []
+        current_untracked_symbols: set[str] = set()
+        for row in position_snapshot:
+            symbol = str(row.get("symbol", ""))
+            side = _normalized_side(row.get("side"))
+            if (
+                not symbol
+                or (symbol, side) in tracked_legs
+                or self.pending_entry_active_for_position(symbol, side)
+            ):
+                if symbol:
+                    self.state.untracked_first_seen_ms.pop(symbol, None)
+                continue
+            current_untracked_symbols.add(symbol)
+            first_seen = self.state.untracked_first_seen_ms.setdefault(symbol, now_ms)
+            if now_ms - first_seen >= grace_ms:
+                untracked_positions.append(row)
+        for symbol in list(self.state.untracked_first_seen_ms):
+            if symbol not in current_untracked_symbols:
+                self.state.untracked_first_seen_ms.pop(symbol, None)
         position_report_error = self._current_position_report_error()
         cycle = {
             "cycle_id": f"ws-risk-{now_ms}",

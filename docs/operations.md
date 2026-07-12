@@ -96,7 +96,11 @@ scripts/ops.sh reset --execute --sleeves all --label new-forward-window
 The remote checkout defaults to `/opt/liquidity-migration`. Reset archives the
 selected ledgers before removal and preserves the continuous account-equity
 high-water state. It does not cancel orders or close positions; it refuses until
-the demo account is already flat with no open orders.
+the demo account is already flat with no open orders. A continuous reset then
+writes one fresh demo and paper cycle heartbeat carrying the verified-flat reset
+boundary. That boundary is new-epoch provenance, not restored trade history; it
+prevents the hedge timer from mistaking the deliberate empty ledger for unknown
+or corrupt exposure before the first normal continuous cycle arrives.
 
 ## Granular data
 
