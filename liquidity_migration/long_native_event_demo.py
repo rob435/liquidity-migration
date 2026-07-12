@@ -91,6 +91,8 @@ from .event_demo import (
     summarize_position_pnl,
 )
 from .order_execution import order_fill_status
+from .canonical_journal import record_due_markouts
+from .lifecycle_bridge import record_ledger_rows
 from .cross_sleeve import (
     claim_symbol_reservation,
     clamp_max_new_entries,
@@ -615,9 +617,14 @@ def run_long_native_demo_cycle(
         # in the ledger for ws_risk's next-cycle pending-fill reconciliation.
         if demo.submit_orders or demo.record_dry_run:
             def _record_preflight(row: dict[str, Any]) -> None:
-                write_dataset(
-                    pl.DataFrame([row], infer_schema_length=None),
-                    root, orders_dataset, partition_by=(),
+                record_ledger_rows(
+                    root,
+                    order_rows=[row],
+                    trade_dataset=trades_dataset,
+                    order_dataset=orders_dataset,
+                    mode="demo" if demo.submit_orders else "paper",
+                    sleeve="long",
+                    now_ms=cycle_now_ms,
                 )
             preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight
         else:
@@ -754,21 +761,23 @@ def run_long_native_demo_cycle(
                 cycle_order_rows.extend(entry_order_rows)
         mark_stage("entries")
 
-        # Orders BEFORE trades: a crash between the two writes must leave the
-        # order ledger ahead of the trade ledger so the next-cycle pending-fill
-        # reconciler (ws_risk) can adopt the order and re-apply the trade close.
-        # The reverse ordering would leave the trade marked closed with the
-        # order detail (fill price, order_id) permanently missing.
-        if cycle_order_rows:
-            write_dataset(
-                pl.DataFrame(cycle_order_rows, infer_schema_length=None),
-                root, orders_dataset, partition_by=(),
+        # The journal commits order and trade facts under one sequence. Mutable
+        # Parquet ledgers are rebuilt projections, eliminating the old two-write
+        # crash window and its order-vs-trade authority ambiguity.
+        if cycle_order_rows or cycle_trade_rows:
+            record_ledger_rows(
+                root,
+                order_rows=cycle_order_rows,
+                trade_rows=cycle_trade_rows,
+                trade_dataset=trades_dataset,
+                order_dataset=orders_dataset,
+                mode="demo" if demo.submit_orders else "paper",
+                sleeve="long",
+                now_ms=cycle_now_ms,
             )
-        if cycle_trade_rows:
-            write_dataset(
-                pl.DataFrame(cycle_trade_rows, infer_schema_length=None),
-                root, trades_dataset, partition_by=(),
-            )
+        # Markouts mature with wall-clock time, including otherwise quiet
+        # cycles that produce no new ledger rows.
+        record_due_markouts(root, now_ms=cycle_now_ms, prices=price_by_symbol)
         mark_stage("ledger_flush")
 
         # Refresh after submissions so the report reflects post-state
@@ -1638,6 +1647,9 @@ def _execute_long_exits(
             "order_id": order_result.get("orderId", ""),
             "submit_mode": submit_mode,
             "avg_price": order_exit_price,
+            "decision_price": _float((price_by_symbol or {}).get(symbol)) or _float(trade.get("entry_price")),
+            "submission_price": _float((price_by_symbol or {}).get(symbol)) or _float(trade.get("entry_price")),
+            "submitted_at_ms": now_ms,
             "fee_usdt": exit_fee_usdt,
             "exec_time_ms": exit_exec_time_ms,
             "notional_usdt": abs(order_exit_price * order_exit_qty) if order_exit_price > 0.0 else 0.0,
@@ -1646,6 +1658,7 @@ def _execute_long_exits(
             "exit_reason": str(plan.get("exit_reason", "time_stop")),
             "target_qty": qty,
             "filled_qty": str(filled_qty) if filled_qty > 0.0 else "",
+            "canonical_fill_details": exec_summary.get("fill_details", []),
             "error": error,
             "sleeve": "long",
         })
@@ -2020,6 +2033,9 @@ def _execute_single_long_entry(
         "order_id": order_result.get("orderId", ""),
         "submit_mode": submit_mode,
         "avg_price": entry_price,
+        "decision_price": price,
+        "submission_price": price,
+        "submitted_at_ms": now_ms,
         "fee_usdt": entry_fee_usdt,
         "exec_time_ms": entry_exec_time_ms,
         "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
@@ -2052,6 +2068,7 @@ def _execute_single_long_entry(
         # amount on a partial, which made fully_filled misread the order as done.
         "filled_qty": entry_qty,
         "target_qty": qty,
+        "canonical_fill_details": exec_summary.get("fill_details", []),
     }
     return trade_row, order_row
 
@@ -2443,6 +2460,8 @@ class _LedgerSummary:
     realized_pnl_usdt: float = 0.0
     open_notional_usdt: float = 0.0
     open_positions: tuple[str, ...] = ()
+    awaiting_pnl_count: int = 0
+    awaiting_pnl_symbols: tuple[str, ...] = ()
     # One entry per net (symbol, side) plus the number of component/trade
     # rows behind it.  A venue position may legitimately map to several
     # component rows, so raw row count must never be called live positions.
@@ -2648,6 +2667,16 @@ def format_combined_book_summary(
         for summary in (short, long, continuous, hedge)
         for close in summary.recent_closes
     ]
+    awaiting_pnl_count = sum(
+        summary.awaiting_pnl_count for summary in (short, long, continuous, hedge)
+    )
+    awaiting_pnl_symbols = sorted(
+        {
+            symbol
+            for summary in (short, long, continuous, hedge)
+            for symbol in summary.awaiting_pnl_symbols
+        }
+    )
     lines.extend(["", "Last 60 minutes"])
     if recent_opened or recent_closed:
         realized_text = (
@@ -2662,6 +2691,12 @@ def format_combined_book_summary(
         lines.extend(f"\N{BULLET} {close}" for close in recent_closes[:6])
     else:
         lines.append("No position changes.")
+    if awaiting_pnl_count:
+        lines.append(
+            f"P&L confirmation pending for {awaiting_pnl_count} local trade row(s)"
+            + (f" ({', '.join(awaiting_pnl_symbols[:8])})" if awaiting_pnl_symbols else "")
+            + "; Bybit reports no matching open exposure."
+        )
 
     lines.extend(
         [
@@ -2756,6 +2791,8 @@ def _format_book_line(
     else:
         base = "flat"
     parts = [f"- {name} ({state}): {base}", f"realized {format_usd(ledger.realized_pnl_usdt, signed=True)}"]
+    if ledger.awaiting_pnl_count:
+        parts.append(f"{ledger.awaiting_pnl_count} awaiting P&L confirmation")
     if ledger.available:
         parts.append(f"{ledger.trade_count} trade row(s)")
     if cycles is not None and cycles.available:
@@ -2906,6 +2943,7 @@ def _ledger_summary(
     open_count = 0
     open_positions: list[str] = []
     open_leg_counts: dict[tuple[str, str], int] = {}
+    awaiting_pnl_symbols: set[str] = set()
     recent_open_legs: set[tuple[str, str]] = set()
     recent_close_buckets: dict[tuple[str, str], dict[str, Any]] = {}
     recent_cutoff_ms = int(now_ms) - exact_duration_ms(hours=1) if now_ms is not None else None
@@ -3014,6 +3052,11 @@ def _ledger_summary(
                     notional = qty * entry
                     open_notional += notional
                     open_positions.append(_open_position_label(row, notional_usdt=notional))
+    awaiting_pnl = trades.filter(pl.col("status") == "awaiting_pnl")
+    if not awaiting_pnl.is_empty() and "symbol" in awaiting_pnl.columns:
+        awaiting_pnl_symbols = {
+            str(symbol) for symbol in awaiting_pnl["symbol"].to_list() if str(symbol)
+        }
     return _LedgerSummary(
         available=True,
         trade_count=trade_count,
@@ -3021,6 +3064,8 @@ def _ledger_summary(
         realized_pnl_usdt=realized,
         open_notional_usdt=open_notional,
         open_positions=tuple(open_positions),
+        awaiting_pnl_count=awaiting_pnl.height,
+        awaiting_pnl_symbols=tuple(sorted(awaiting_pnl_symbols)),
         open_leg_counts=tuple(
             (symbol, side, count)
             for (symbol, side), count in sorted(open_leg_counts.items())

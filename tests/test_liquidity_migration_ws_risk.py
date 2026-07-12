@@ -1324,8 +1324,10 @@ def test_ws_zero_position_ack_suppresses_rest_fallback_and_marks_leg_flat(
     assert len(trade_client.orders) == 1
     assert private_client.orders == []
     assert stored_orders.filter(pl.col("order_link_id") == ws_link).select("status").item() == "rejected"
-    assert ("AAAUSDT", "short") in engine.state.explicit_flat_position_legs
-    assert engine.state.pending_orphan_trade_ids == {"t1"}
+    # The durable awaiting_pnl projection replaces the transient in-memory flat
+    # latch once the fact is journaled.
+    assert ("AAAUSDT", "short") not in engine.state.explicit_flat_position_legs
+    assert engine.state.pending_orphan_trade_ids == set()
 
 
 def test_ws_ack_rest_fallback_failure_keeps_trade_open_with_context(tmp_path: Path) -> None:
@@ -3565,7 +3567,7 @@ def test_ws_risk_material_heartbeat_keeps_timestamped_audit_copy(tmp_path: Path)
     assert history_path.with_suffix(".json").exists()
 
 
-def test_ws_risk_position_stream_zero_waits_for_closed_pnl_before_closing(tmp_path: Path) -> None:
+def test_ws_risk_position_stream_zero_projects_awaiting_pnl_without_retry_spam(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
 
     class DelayedClosedPnlClient(FakePrivateClient):
@@ -3599,8 +3601,8 @@ def test_ws_risk_position_stream_zero_waits_for_closed_pnl_before_closing(tmp_pa
     engine.on_position_message({"data": {"symbol": "AAAUSDT", "side": "Sell", "size": "0", "markPrice": "113"}})
 
     stored = read_dataset(tmp_path, "event_demo_trades")
-    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "open"
-    assert "AAAUSDT" in engine.state.pending_orphan_symbols
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "awaiting_pnl"
+    assert "AAAUSDT" not in engine.state.pending_orphan_symbols
     assert engine.state.reconciliations == []
     # A ticker while closure evidence is pending must not submit a futile
     # reduce-only order against the already-flat venue position.
@@ -3706,9 +3708,9 @@ def test_side_flip_keeps_old_short_orphan_and_protects_adopted_long(tmp_path: Pa
     engine.bootstrap()  # reconcile_positions uses require_evidence=True
 
     short_trades = read_dataset(short_root, "event_demo_trades")
-    assert short_trades.filter(pl.col("trade_id") == "old-short").select("status").item() == "open"
-    assert engine.state.pending_orphan_trade_ids == {"old-short"}
-    assert engine.state.pending_orphan_legs == {("AAAUSDT", "short")}
+    assert short_trades.filter(pl.col("trade_id") == "old-short").select("status").item() == "awaiting_pnl"
+    assert engine.state.pending_orphan_trade_ids == set()
+    assert engine.state.pending_orphan_legs == set()
     assert engine.state.live_exit_order_legs == {("AAAUSDT", "short")}
     assert private_client.orders == []
     # Only the adopted LONG stop may be repaired; the stale short's crossed
@@ -3733,9 +3735,9 @@ def test_side_flip_keeps_old_short_orphan_and_protects_adopted_long(tmp_path: Pa
         {"symbol": "AAAUSDT", "side": "", "size": "0", "markPrice": "100"},
     ]})
     assert engine.state.positions_by_symbol["AAAUSDT"]["side"] == "Buy"
-    assert ("AAAUSDT", "short") in engine.state.explicit_flat_position_legs
+    assert ("AAAUSDT", "short") not in engine.state.explicit_flat_position_legs
     assert ("AAAUSDT", "long") not in engine.state.explicit_flat_position_legs
-    assert engine.state.pending_orphan_trade_ids == {"old-short"}
+    assert engine.state.pending_orphan_trade_ids == set()
 
     # Cross the adopted long's stop. Exactly one Sell-reduce order must target
     # the live long; no Buy retry may be emitted for the pending old short.
@@ -3748,8 +3750,8 @@ def test_side_flip_keeps_old_short_orphan_and_protects_adopted_long(tmp_path: Pa
     assert exit_orders[0]["trade_id"] == adopted["trade_id"]
 
     report = engine.write_report(reason="side_flip_regression")
-    assert report["cycle"]["pending_orphan_trade_ids"] == "old-short"
-    assert [row["trade_id"] for row in report["pending_orphan_positions"]] == ["old-short"]
+    assert report["cycle"]["pending_orphan_trade_ids"] == ""
+    assert report["pending_orphan_positions"] == []
 
     # Once the complete sized evidence arrives, close ONLY the old short. The
     # adopted long and its pending Sell-reduce protection remain intact.

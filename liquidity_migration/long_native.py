@@ -26,6 +26,7 @@ This is heuristic trader-style technical analysis, NOT factor research.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import math
 from bisect import bisect_right
@@ -60,6 +61,8 @@ from .trade_lifecycle import (
     summarize_baskets,
     summarize_trade_backtest,
 )
+from .canonical_journal import verify_journal
+from .lifecycle_bridge import record_historical_trades
 from ._common import _date_range, _exclude_symbols, _iso_date, _iso_month
 from .volume_events_charts import _write_equity_benchmark_chart
 from .volume_events_pit import (
@@ -874,6 +877,28 @@ def run_long_native_research(
                                     funding_mode=funding_mode,
                                     full_pit_universe_pass=full_pit_universe_pass)
 
+    lifecycle_config_hash = hashlib.sha256(
+        json.dumps(
+            {"config": asdict(cfg), "costs": asdict(costs)},
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    lifecycle_root = output_dir / "canonical_execution"
+    lifecycle_result = record_historical_trades(
+        lifecycle_root,
+        trades,
+        sleeve="long",
+        strategy_id=f"long_native_{lifecycle_config_hash}",
+        now_ms=(
+            int(trades["exit_ts_ms"].max())
+            if not trades.is_empty() and "exit_ts_ms" in trades.columns
+            else 1
+        ),
+    )
+    lifecycle_receipt = verify_journal(lifecycle_root)
+    lifecycle_receipt["events_appended_this_run"] = lifecycle_result["events_appended"]
+
     if not trades.is_empty():
         trades.write_csv(output_dir / "long_native_trades.csv")
     if not baskets.is_empty():
@@ -958,6 +983,7 @@ def run_long_native_research(
         "tainted": is_tainted(warnings),
         "equity_chart": chart_metadata,
         "equity_mtm": mtm_metadata,
+        "canonical_journal": lifecycle_receipt,
     }
     (output_dir / "long_native_research_report.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     (output_dir / "long_native_research_report.md").write_text(format_long_native_report(metadata), encoding="utf-8")

@@ -195,15 +195,17 @@ account flat while quiescing writers for another. It then queries Bybit demo to
 prove there are no positions or open orders. The lock remains held through normal
 restart verification and failure-recovery restarts.
 
-After the flat proof, the command writes and verifies a timestamped archive with
-an audit manifest, persists an fsynced `.sha256` sidecar, and fsyncs the archive
-directory before removing only allowlisted trade/order/cycle datasets and
-the continuous risk, lifecycle, and `continuous_dynexit_shadow.jsonl` operational
-ledgers in both demo and paper roots. Clearing them prevents pre-reset risk-health,
-lifecycle, or shadow-exit evidence from contaminating the new forward window. The
+After the flat proof, the command first imports any pre-journal ledger rows,
+appends a verified-flat venue fact, writes and verifies a timestamped archive
+with an audit manifest, persists an fsynced `.sha256` sidecar, and fsyncs the
+archive directory. It then removes only allowlisted generated
+trade/order/cycle views and obsolete operational telemetry. The append-only
+`canonical_journal/events.jsonl` remains live and the trade/order/TCA views are
+rebuilt from it. A reset therefore creates a new verified-flat boundary; it
+does not delete execution history to make the ledgers appear flat. The
 continuous selection includes the hedge ledger; `all` also includes the shared
-compatibility ledger. Initially inactive sleeve units remain inactive; initially
-active daemons and timers are restarted and verified.
+compatibility ledger. Initially inactive sleeve units remain inactive;
+initially active daemons and timers are restarted and verified.
 
 Configs, lock directories, residual-momentum signals, root-level market data,
 reports, and `.cache` directories are preserved by default. `--include-reports`

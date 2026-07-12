@@ -137,9 +137,10 @@ Rejected rows are written to `continuous_risk_events.jsonl` and page as
 lifecycle-transition violations. Healthy submitted cycles also persist
 `PROTECTED` promotions from the private position snapshot onto full copied trade
 rows for stop-required profiles; missing stops never demote ledger state.
-Submitted live cycles also append
-`continuous_lifecycle_events.jsonl` rows for crash-safe preflight/order-prepared
-events, final order events, and accepted trade-row state writes.
+Submitted live, paper and historical execution now use the shared canonical
+journal and reducer described in `docs/canonical_execution_journal.md`. The old
+continuous-only lifecycle JSONL is read solely as a compatibility fallback for
+archived pre-migration roots; it is no longer written or authoritative.
 Dry-run and paper evidence cycles keep running and record the same fields
 without suppressing candidates. Blocked submit cycles append
 `continuous_risk_events.jsonl` with `event=entry_risk_health_blocked`.

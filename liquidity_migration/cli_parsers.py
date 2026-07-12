@@ -16,6 +16,19 @@ from .event_demo import EventRiskCycleConfig
 from .ws_risk import EventWebSocketRiskConfig
 
 
+def _add_canonical_journal_parser(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "canonical-journal",
+        help="Verify the immutable execution journal, rebuild ledger projections, or run incident simulations.",
+    )
+    parser.add_argument("action", choices=("verify", "rebuild", "simulate-incidents"))
+    parser.add_argument("--trade-dataset", default="", help="Optional explicit compatibility trade dataset.")
+    parser.add_argument("--order-dataset", default="", help="Optional explicit compatibility order dataset.")
+    parser.add_argument("--mode", choices=("historical", "paper", "demo", "shadow"), default="demo")
+    parser.add_argument("--sleeve", default="", help="Sleeve label used only when bootstrapping legacy ledgers.")
+    parser.add_argument("--output-dir", default="", help="Incident-simulation output root.")
+
+
 def _add_download_data_parser(subparsers) -> None:
     download = subparsers.add_parser("download-data", help="Download or create research datasets.")
     download.add_argument("--fixture", action="store_true", help="Create deterministic tiny fixture data instead of calling Bybit.")

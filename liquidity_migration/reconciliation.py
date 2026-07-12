@@ -1211,6 +1211,7 @@ def audit_continuous_operational_metrics(
     trade_rows = trades.to_dicts() if not trades.is_empty() else []
     risk_events: list[dict[str, Any]] = []
     lifecycle_events: list[dict[str, Any]] = []
+    canonical_tca_rows: list[dict[str, Any]] = []
     stop_repair_events: list[dict[str, Any]] = []
     invalid_jsonl_lines: list[str] = []
     if data_root is not None:
@@ -1221,12 +1222,45 @@ def audit_continuous_operational_metrics(
             strategy_id=strategy_id,
             invalid_lines=invalid_jsonl_lines,
         )
-        lifecycle_events = _filtered_jsonl_events(
-            root / "continuous_lifecycle_events.jsonl",
-            start_ts_ms=start_ts_ms,
-            strategy_id=strategy_id,
-            invalid_lines=invalid_jsonl_lines,
-        )
+        canonical_path = root / "canonical_journal" / "events.jsonl"
+        if canonical_path.exists():
+            try:
+                from .canonical_journal import read_journal, replay_journal
+
+                allowed_ids = None
+                if strategy_id is not None:
+                    allowed_ids = {strategy_id} if isinstance(strategy_id, str) else set(strategy_id)
+                    allowed_ids = {str(value) for value in allowed_ids if str(value)}
+                lifecycle_events = [
+                    {
+                        **event.to_dict(),
+                        "ts_ms": event.local_ts_ms,
+                        "lifecycle_state": event.event_type,
+                    }
+                    for event in read_journal(root, verify=True)
+                    if (start_ts_ms is None or event.local_ts_ms >= int(start_ts_ms))
+                    and (allowed_ids is None or not event.strategy_id or event.strategy_id in allowed_ids)
+                ]
+                canonical_tca_rows = [
+                    row
+                    for row in replay_journal(root).tca_rows()
+                    if (start_ts_ms is None or int(row.get("local_ts_ms") or 0) >= int(start_ts_ms))
+                    and (
+                        allowed_ids is None
+                        or not str(row.get("strategy_id") or "")
+                        or str(row.get("strategy_id") or "") in allowed_ids
+                    )
+                ]
+            except Exception as exc:  # noqa: BLE001 - integrity issue belongs in audit output
+                invalid_jsonl_lines.append(f"{canonical_path}:integrity:{type(exc).__name__}:{exc}")
+        else:
+            # Backward-compatible read for archived/pre-migration roots only.
+            lifecycle_events = _filtered_jsonl_events(
+                root / "continuous_lifecycle_events.jsonl",
+                start_ts_ms=start_ts_ms,
+                strategy_id=strategy_id,
+                invalid_lines=invalid_jsonl_lines,
+            )
         for stop_path in (
             root / "reports" / "event-risk-ws" / "stop_audit_events.jsonl",
             root / "stop_audit_events.jsonl",
@@ -1410,6 +1444,16 @@ def audit_continuous_operational_metrics(
         "lifecycle_status_counts": lifecycle_status_counts,
         "lifecycle_status_counts_text": _compact_counts(lifecycle_status_counts),
         "lifecycle_transition_rejected_events": lifecycle_transition_rejected_events,
+        "canonical_tca_fills": len(canonical_tca_rows),
+        "canonical_tca_markout_1m_observed": sum(
+            1 for row in canonical_tca_rows if row.get("markout_1m_status") == "observed"
+        ),
+        "canonical_tca_markout_5m_observed": sum(
+            1 for row in canonical_tca_rows if row.get("markout_5m_status") == "observed"
+        ),
+        "canonical_tca_markout_30m_observed": sum(
+            1 for row in canonical_tca_rows if row.get("markout_30m_status") == "observed"
+        ),
         "stop_repair_events": len(stop_repair_events),
         "stop_repair_error_count": stop_repair_error_count,
         "invalid_jsonl_lines": len(invalid_jsonl_lines),

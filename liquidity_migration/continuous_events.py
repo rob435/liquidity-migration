@@ -36,6 +36,7 @@ import bisect
 import hashlib
 import heapq
 import json
+import tempfile
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -59,6 +60,8 @@ from .trade_lifecycle import (
     derive_funding_interval_min,
     funding_cadence_stats,
 )
+from .canonical_journal import verify_journal
+from .lifecycle_bridge import record_historical_trades
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
 BTC_TREND_MODE_DAILY_PRIOR = "daily_prior"
@@ -2020,6 +2023,38 @@ def run_continuous_event_research(
         "metrics": splits,                 # realized-PnL-at-exit (additive, fixed-capital)
         "metrics_mtm": mtm,                # portfolio mark-to-market (correlated-DD aware)
     }
+
+    # Historical execution is replayed through the same canonical lifecycle
+    # reducer as paper/demo. Citable runs retain the journal; ad-hoc runs use a
+    # temporary root so the data root remains immutable while parity is still
+    # validated on every invocation.
+    lifecycle_strategy_id = f"continuous_events_{config.config_hash()}"
+    if report_dir is not None:
+        lifecycle_root = Path(str(report_dir)).expanduser() / "canonical_execution"
+        lifecycle_root.mkdir(parents=True, exist_ok=True)
+        lifecycle_result = record_historical_trades(
+            lifecycle_root,
+            trades,
+            sleeve="continuous",
+            strategy_id=lifecycle_strategy_id,
+            now_ms=max(end_ms, 1),
+            deploy_capital_usd=config.deploy_capital_usd,
+        )
+        payload["canonical_journal"] = verify_journal(lifecycle_root)
+        payload["canonical_journal"]["events_appended_this_run"] = lifecycle_result["events_appended"]
+    else:
+        with tempfile.TemporaryDirectory(prefix="liqmig-continuous-lifecycle-") as lifecycle_tmp:
+            record_historical_trades(
+                lifecycle_tmp,
+                trades,
+                sleeve="continuous",
+                strategy_id=lifecycle_strategy_id,
+                now_ms=max(end_ms, 1),
+                deploy_capital_usd=config.deploy_capital_usd,
+            )
+            lifecycle_receipt = verify_journal(lifecycle_tmp)
+        payload["canonical_lifecycle_validated"] = True
+        payload["canonical_lifecycle_events"] = lifecycle_receipt["events"]
 
     if candidate_tape_path is not None:
         tape_path = Path(str(candidate_tape_path)).expanduser()

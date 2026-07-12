@@ -81,7 +81,6 @@ CONTINUOUS_DEMO_PROFILES = (
     "continuous_ensemble_v2",   # 2026-06-18 demo/paper lifecycle: inv-vol + rebalance off + TP/24h, no stop
 )
 CONTINUOUS_RISK_EVENTS_FILE = "continuous_risk_events.jsonl"
-CONTINUOUS_LIFECYCLE_EVENTS_FILE = "continuous_lifecycle_events.jsonl"
 CONTINUOUS_EQUITY_STATE_FILE = "continuous_account_equity_state.json"
 CONTINUOUS_TELEGRAM_STATE_FILE = "continuous_telegram_alert_state.json"
 CONTINUOUS_TELEGRAM_ERROR_COOLDOWN_MS = exact_duration_ms(hours=6)
@@ -2235,97 +2234,6 @@ def _append_continuous_risk_event(root: Path, event: dict[str, Any]) -> Path:
     return _append_continuous_jsonl_event(root, CONTINUOUS_RISK_EVENTS_FILE, event)
 
 
-def _append_continuous_lifecycle_event(root: Path, event: dict[str, Any]) -> Path:
-    return _append_continuous_jsonl_event(root, CONTINUOUS_LIFECYCLE_EVENTS_FILE, event)
-
-
-def _continuous_lifecycle_state_from_order_row(row: dict[str, Any]) -> str:
-    status = str(row.get("status") or row.get("orderStatus") or row.get("order_status") or "").strip().lower()
-    submit_mode = str(row.get("submit_mode") or "").strip().lower()
-    reduce_only = _truthy_order_flag(row.get("reduce_only"))
-    if submit_mode == "preflight":
-        return "ORDER_PREPARED"
-    if submit_mode == "error" or status in {"failed", "rejected", "cancelled", "canceled", "expired"}:
-        return "FAILED"
-    if reduce_only:
-        if status == "partial":
-            return "EXIT_PARTIAL"
-        if status in {"filled", "closed"}:
-            return "CLOSED"
-        if submit_mode == "submitted" or status in {"submitted", "submitted_unconfirmed", "new", "partiallyfilled"}:
-            return "EXIT_ORDER_SUBMITTED"
-        return "EXIT_SIGNALLED"
-    if status == "partial":
-        return "PARTIAL_FILL"
-    if status in {"filled", "closed"}:
-        return "FILLED"
-    if submit_mode == "submitted" or status in {"submitted", "submitted_unconfirmed", "new", "partiallyfilled"}:
-        return "ORDER_SUBMITTED"
-    return "SIGNAL_CREATED"
-
-
-def _continuous_lifecycle_event_from_order_row(
-    row: dict[str, Any],
-    *,
-    cycle_id: str,
-    source: str,
-    now_ms: int,
-) -> dict[str, Any]:
-    lifecycle_state = _continuous_lifecycle_state_from_order_row(row)
-    order_link_id = str(row.get("order_link_id") or row.get("orderLinkId") or "")
-    trade_id = str(row.get("trade_id") or "")
-    ts_ms = int(finite_float(row.get("updated_at_ms") or row.get("ts_ms"), default=0.0) or now_ms)
-    return {
-        "event": "lifecycle_state_transition",
-        "event_key": f"{cycle_id}:{source}:{trade_id}:{order_link_id}:{lifecycle_state}",
-        "cycle_id": cycle_id,
-        "ts_ms": ts_ms,
-        "strategy_id": str(row.get("strategy_id") or ""),
-        "trade_id": trade_id,
-        "symbol": str(row.get("symbol") or ""),
-        "order_link_id": order_link_id,
-        "reduce_only": _truthy_order_flag(row.get("reduce_only")),
-        "submit_mode": str(row.get("submit_mode") or ""),
-        "order_status": str(row.get("status") or row.get("orderStatus") or row.get("order_status") or ""),
-        "lifecycle_state": lifecycle_state,
-        "lifecycle_state_source": source,
-        "side": str(row.get("side") or ""),
-        "sleeve": str(row.get("sleeve") or ""),
-    }
-
-
-def _continuous_lifecycle_event_from_trade_row(
-    row: dict[str, Any],
-    *,
-    cycle_id: str,
-    source: str,
-    now_ms: int,
-) -> dict[str, Any]:
-    lifecycle_state = _known_continuous_lifecycle_state(
-        row.get("lifecycle_state")
-    ) or _continuous_trade_row_lifecycle_state(row)
-    trade_id = str(row.get("trade_id") or "")
-    ts_ms = int(finite_float(row.get("updated_at_ms") or row.get("ts_ms"), default=0.0) or now_ms)
-    source_value = str(row.get("lifecycle_state_source") or source)
-    return {
-        "event": "lifecycle_state_transition",
-        "event_key": f"{cycle_id}:{source_value}:{trade_id}:{lifecycle_state}",
-        "cycle_id": cycle_id,
-        "ts_ms": ts_ms,
-        "strategy_id": str(row.get("strategy_id") or ""),
-        "trade_id": trade_id,
-        "symbol": str(row.get("symbol") or ""),
-        "status": str(row.get("status") or ""),
-        "submit_mode": str(row.get("submit_mode") or ""),
-        "lifecycle_state": lifecycle_state,
-        "lifecycle_state_source": source_value,
-        "side": str(row.get("side") or ""),
-        "sleeve": str(row.get("sleeve") or ""),
-        "entry_order_link_id": str(row.get("entry_order_link_id") or ""),
-        "exit_order_link_id": str(row.get("exit_order_link_id") or ""),
-    }
-
-
 def _continuous_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, reentry_seq: int = 0) -> str:
     """lm-{en-c|ux-c}-{base}-{ts36}[-{seq}] — the distinct continuous sleeve (ws_risk routing).
     Delegates to the single canonical builder so the format has ONE source of truth; the int() cast
@@ -3072,6 +2980,8 @@ from .event_demo import (  # noqa: E402
 from .event_demo_data import _download_recent_1h_klines  # noqa: E402
 from .event_demo_exits import _partial_exit_trade_update  # noqa: E402
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset  # noqa: E402
+from .canonical_journal import record_due_markouts  # noqa: E402
+from .lifecycle_bridge import record_ledger_rows  # noqa: E402
 from . import cross_sleeve as _cross_sleeve  # noqa: E402
 
 _logger = logging.getLogger(__name__)
@@ -3390,6 +3300,7 @@ def _execute_continuous_exits(
             trade_id=str(trade.get("trade_id") or plan.get("trade_id") or symbol),
         )
         order_result: dict[str, Any] = {}
+        summ: dict[str, Any] = {}
         submit_mode, status, error = "dry_run", "planned", ""
         exit_price = exit_fee = 0.0
         exit_exec_time_ms = 0
@@ -3484,9 +3395,13 @@ def _execute_continuous_exits(
                            "symbol": symbol, "side": "Buy", "order_type": demo.exit_order_type, "qty": qty,
                            "reduce_only": True, "order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
                            "avg_price": exit_price, "fee_usdt": exit_fee, "exec_time_ms": exit_exec_time_ms,
+                           "decision_price": _float((price_by_symbol or {}).get(symbol)) or _float(trade.get("entry_price")),
+                           "submission_price": _float((price_by_symbol or {}).get(symbol)) or _float(trade.get("entry_price")),
+                           "submitted_at_ms": now_ms,
                            "status": status, "trade_side": "short", "exit_reason": str(plan.get("exit_reason", "left_decile")),
                            "exit_trigger_ts_ms": int(_float(plan.get("exit_trigger_ts_ms")) or now_ms),
                            "target_qty": qty, "filled_qty": str(filled_qty) if filled_qty > 0 else "", "error": error,
+                           "canonical_fill_details": summ.get("fill_details", []),
                            "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo))})
     return rows, order_rows
 
@@ -3604,6 +3519,7 @@ def _execute_continuous_rebalance_resizes(
         avg_price = price
         fee_usdt = 0.0
         exec_time_ms = 0
+        summ: dict[str, Any] = {}
         try:
             order_result = trading_client.place_order(
                 **_order_params(
@@ -3654,6 +3570,7 @@ def _execute_continuous_rebalance_resizes(
             "submit_mode": submit_mode,
             "status": status,
             "error": error,
+            "canonical_fill_details": summ.get("fill_details", []),
         }
         if filled_qty > 0.0:
             execution_by_trade_id[str(plan.trade_id)] = execution_row
@@ -3787,6 +3704,7 @@ def _execute_continuous_entries(
             link_prefix, symbol=symbol, signal_ts_ms=signal_ts_ms, reentry_seq=reentry_seq
         )
         order_result: dict[str, Any] = {}
+        summ: dict[str, Any] = {}
         submit_mode, order_status, error = "dry_run", "planned", ""
         filled_qty = _float(qty)
         entry_price = price
@@ -3884,6 +3802,7 @@ def _execute_continuous_entries(
             "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "order_type": demo.entry_order_type,
             "qty": qty, "reduce_only": False, "order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
             "avg_price": entry_price if filled_qty > 0 else 0.0, "fee_usdt": entry_fee, "exec_time_ms": entry_exec_time_ms,
+            "decision_price": price, "submission_price": price, "submitted_at_ms": now_ms,
             "notional_usdt": filled_notional, "status": order_status, "trade_side": "short", "signal_ts_ms": signal_ts_ms,
             "equity_usdt": equity_usdt, "tick_size": tick_size, "qty_step": qty_step, "stop_price": stop_price,
             "planned_exit_ts_ms": planned_exit_ts_ms,
@@ -3910,6 +3829,7 @@ def _execute_continuous_entries(
             # (venue cumulative − filled_qty); without filled_qty a "partial" entry's
             # already-booked leg double-added on the next reconcile (audit 2026-06-11).
             "filled_qty": str(filled_qty) if filled_qty > 0 else "", "target_qty": qty,
+            "canonical_fill_details": summ.get("fill_details", []),
         })
     if upperwick_sizer is not None:
         upperwick_sizer.save()  # persist the per-symbol history appended this cycle
@@ -4574,15 +4494,6 @@ def run_continuous_demo_cycle(
         cycle_order_rows: list[dict[str, Any]] = []
         lifecycle_events_written = 0
 
-        def _record_lifecycle_event(event: dict[str, Any]) -> None:
-            nonlocal lifecycle_events_written
-            try:
-                _append_continuous_lifecycle_event(root, event)
-            except Exception:  # noqa: BLE001 - ledger rows remain authoritative
-                _logger.exception("continuous lifecycle event append failed")
-            else:
-                lifecycle_events_written += 1
-
         lifecycle_snapshot_rows = (
             _continuous_lifecycle_snapshot_update_rows(
                 open_trades,
@@ -4596,16 +4507,17 @@ def run_continuous_demo_cycle(
             cycle_trade_rows.extend(lifecycle_snapshot_rows)
         if demo.submit_orders or demo.record_dry_run:
             def _record_preflight(row: dict[str, Any]) -> None:
-                write_dataset(pl.DataFrame([row], infer_schema_length=None), root, orders_dataset, partition_by=())
-                if demo.submit_orders:
-                    _record_lifecycle_event(
-                        _continuous_lifecycle_event_from_order_row(
-                            row,
-                            cycle_id=cycle_id,
-                            source="order_preflight",
-                            now_ms=cycle_now_ms,
-                        )
-                    )
+                nonlocal lifecycle_events_written
+                result = record_ledger_rows(
+                    root,
+                    order_rows=[row],
+                    trade_dataset=trades_dataset,
+                    order_dataset=orders_dataset,
+                    mode="demo" if demo.submit_orders else "paper",
+                    sleeve="continuous",
+                    now_ms=cycle_now_ms,
+                )
+                lifecycle_events_written += int(result["events_appended"])
             preflight_cb: Callable[[dict[str, Any]], None] | None = _record_preflight
         else:
             preflight_cb = None
@@ -4894,9 +4806,16 @@ def run_continuous_demo_cycle(
                 # cancelled with the base) and never resolved by the pending
                 # reconciler while the base position kept the symbol live. The
                 # crash window spans the dynexit sweep + rebalance + cycle write.
-                write_dataset(
-                    pl.DataFrame(sniper_orders, infer_schema_length=None), root, orders_dataset, partition_by=()
+                result = record_ledger_rows(
+                    root,
+                    order_rows=sniper_orders,
+                    trade_dataset=trades_dataset,
+                    order_dataset=orders_dataset,
+                    mode="demo" if demo.submit_orders else "paper",
+                    sleeve="continuous",
+                    now_ms=cycle_now_ms,
                 )
+                lifecycle_events_written += int(result["events_appended"])
         sniper_errors = _submission_error_count(
             sniper_orders + snipe_updates + snipe_exit_orders,
             include_failed_status=False,
@@ -5001,7 +4920,9 @@ def run_continuous_demo_cycle(
                 }
             )
 
-        # Ledger flush: orders first, then trades (crash-durability ordering).
+        # Canonical lifecycle validation remains as an input guard; accepted
+        # rows then enter one sequenced journal and Parquet is regenerated as a
+        # projection. There is no longer an orders-vs-trades write authority.
         lifecycle_transition_violations: list[dict[str, Any]] = []
         if cycle_trade_rows:
             cycle_trade_rows, lifecycle_transition_violations = _enforce_continuous_lifecycle_transitions(
@@ -5015,29 +4936,23 @@ def run_continuous_demo_cycle(
                     len(lifecycle_transition_violations),
                     ",".join(sorted({str(v.get("reason") or "") for v in lifecycle_transition_violations})),
                 )
-        if cycle_order_rows:
-            write_dataset(pl.DataFrame(cycle_order_rows, infer_schema_length=None), root, orders_dataset, partition_by=())
-        if cycle_trade_rows:
-            write_dataset(pl.DataFrame(cycle_trade_rows, infer_schema_length=None), root, trades_dataset, partition_by=())
-        if demo.submit_orders:
-            for row in cycle_order_rows:
-                _record_lifecycle_event(
-                    _continuous_lifecycle_event_from_order_row(
-                        row,
-                        cycle_id=cycle_id,
-                        source="order_final",
-                        now_ms=cycle_now_ms,
-                    )
-                )
-            for row in cycle_trade_rows:
-                _record_lifecycle_event(
-                    _continuous_lifecycle_event_from_trade_row(
-                        row,
-                        cycle_id=cycle_id,
-                        source="trade_ledger",
-                        now_ms=cycle_now_ms,
-                    )
-                )
+        if cycle_order_rows or cycle_trade_rows:
+            journal_result = record_ledger_rows(
+                root,
+                order_rows=cycle_order_rows,
+                trade_rows=cycle_trade_rows,
+                trade_dataset=trades_dataset,
+                order_dataset=orders_dataset,
+                mode="demo" if demo.submit_orders else "paper",
+                sleeve="continuous",
+                now_ms=cycle_now_ms,
+            )
+            lifecycle_events_written += int(journal_result["events_appended"])
+        # Markouts mature with wall-clock time, including otherwise quiet
+        # cycles that produce no new ledger rows.
+        lifecycle_events_written += len(
+            record_due_markouts(root, now_ms=cycle_now_ms, prices=price_by_symbol)
+        )
 
         live_d9 = int(live_state.filter(pl.col("decile") == demo.decile).height) if not live_state.is_empty() else 0
         # Surface the rmom FRESHNESS (not just file-existence): a stale table silently empties the
@@ -5315,17 +5230,32 @@ def run_continuous_protective_exit_cycle(
             return {"exits": 0, "open_positions": len(held)}
 
         def _record_preflight(row: dict[str, Any]) -> None:
-            write_dataset(pl.DataFrame([row], infer_schema_length=None), root, orders_dataset, partition_by=())
+            record_ledger_rows(
+                root,
+                order_rows=[row],
+                trade_dataset=trades_dataset,
+                order_dataset=orders_dataset,
+                mode="demo" if demo.submit_orders else "paper",
+                sleeve="continuous",
+                now_ms=now,
+            )
 
         exec_exits, exit_orders = _execute_continuous_exits(
             exit_plans, all_trades, trading_client=trading_client, demo=demo, now_ms=now,
             execution_event_router=execution_event_router, record_preflight=_record_preflight,
             price_by_symbol=price_by_symbol)
-        # orders first, then trades (crash-durability ordering, same as the main cycle)
-        if exit_orders:
-            write_dataset(pl.DataFrame(exit_orders, infer_schema_length=None), root, orders_dataset, partition_by=())
-        if exec_exits:
-            write_dataset(pl.DataFrame(exec_exits, infer_schema_length=None), root, trades_dataset, partition_by=())
+        if exit_orders or exec_exits:
+            record_ledger_rows(
+                root,
+                order_rows=exit_orders,
+                trade_rows=exec_exits,
+                trade_dataset=trades_dataset,
+                order_dataset=orders_dataset,
+                mode="demo" if demo.submit_orders else "paper",
+                sleeve="continuous",
+                now_ms=now,
+            )
+        record_due_markouts(root, now_ms=now, prices=price_by_symbol)
         result = {
             "exits": len(exec_exits), "open_positions": len(held),
             "reasons": sorted({str(p.get("exit_reason")) for p in exit_plans}),

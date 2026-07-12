@@ -346,12 +346,16 @@ def _execute_exits(
                     "order_id": sub_order_result.get("orderId", ""),
                     "submit_mode": sub_submit_mode,
                     "avg_price": sub_avg_price,
+                    "decision_price": _float(exit_plan.get("planned_exit_price")) or _float(trade.get("entry_price")),
+                    "submission_price": _float(exit_plan.get("planned_exit_price")) or _float(trade.get("entry_price")),
+                    "submitted_at_ms": now_ms,
                     "notional_usdt": sub_notional,
                     "status": sub_status if demo.submit_orders else "planned",
                     "exit_reason": str(exit_plan["exit_reason"]),
                     "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                     "target_qty": sub_qty_str,
                     "filled_qty": sub_filled_str,
+                    "canonical_fill_details": sub_exec_summary.get("fill_details", []),
                     "error": sub_error,
                 }
             )
@@ -617,6 +621,7 @@ def _reconcile_pending_order_fills(
                 "entry_stop_update_status": entry_stop_update_status,
                 "entry_stop_update_error": entry_stop_update_error,
                 "fill_source": "venue_reconciled",
+                "canonical_fill_details": summary.get("fill_details", []),
                 "error": "",
                 "updated_at_ms": now_ms,
             }
@@ -875,6 +880,9 @@ def _execute_risk_exits(
             tagged["exit_reason"] = str(_exit_plan.get("exit_reason") or "")
             tagged["exit_trigger_ts_ms"] = int(_exit_plan.get("exit_trigger_ts_ms") or now_ms)
             tagged["order_link_attempt"] = int(_exit_plan.get("order_link_attempt") or 0)
+            tagged["decision_price"] = planned_price
+            tagged["submission_price"] = planned_price
+            tagged["submitted_at_ms"] = now_ms
             record_preflight(tagged)
         try:
             submit = _submit_reduce_only_exit(
@@ -955,6 +963,9 @@ def _execute_risk_exits(
                     "exit_reason": str(exit_plan["exit_reason"]),
                     "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                     "avg_price": row_avg_price,
+                    "decision_price": planned_price,
+                    "submission_price": planned_price,
+                    "submitted_at_ms": now_ms,
                     "fee_usdt": row_fee,
                     "exec_time_ms": row_exec_time_ms,
                     "filled_qty": _decimal_text(Decimal(str(row_filled_qty))) if row_filled_qty > 0.0 else "",
@@ -1279,9 +1290,13 @@ def _submit_reduce_only_exit(
                     "target_qty": sub_qty_str,
                     "filled_qty": _decimal_text(Decimal(str(sub_filled_qty))) if sub_filled_qty > 0.0 else "",
                     "avg_price": sub_avg_price,
+                    "decision_price": reference_price,
+                    "submission_price": reference_price,
+                    "submitted_at_ms": now_ms,
                     "fee_usdt": sub_fee,
                     "exec_time_ms": sub_exec_time_ms,
                     "notional_usdt": abs(sub_avg_price * sub_filled_qty) if sub_avg_price > 0.0 else 0.0,
+                    "canonical_fill_details": sub_exec_summary.get("fill_details", []),
                 }
             )
             order_rows.append(sub_row)
@@ -1434,7 +1449,11 @@ def _submit_limit_chase_exit(
                 "target_qty": remaining_qty_text,
                 "filled_qty": _decimal_text(Decimal(str(order_filled_qty))) if order_filled_qty > 0.0 else "",
                 "avg_price": order_avg_price,
+                "decision_price": reference_price,
+                "submission_price": limit_price,
+                "submitted_at_ms": now_ms,
                 "notional_usdt": abs(order_avg_price * order_filled_qty) if order_avg_price > 0.0 else 0.0,
+                "canonical_fill_details": summary.get("fill_details", []),
             }
         )
         order_rows.append(row)
@@ -1505,7 +1524,11 @@ def _submit_limit_chase_exit(
                 "target_qty": remaining_qty_text,
                 "filled_qty": _decimal_text(Decimal(str(order_filled_qty))) if order_filled_qty > 0.0 else "",
                 "avg_price": order_avg_price,
+                "decision_price": reference_price,
+                "submission_price": reference_price,
+                "submitted_at_ms": now_ms,
                 "notional_usdt": abs(order_avg_price * order_filled_qty) if order_avg_price > 0.0 else 0.0,
+                "canonical_fill_details": summary.get("fill_details", []),
             }
         )
         order_rows.append(row)

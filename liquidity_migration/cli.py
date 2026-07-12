@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 
 from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
@@ -54,6 +56,7 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
     _add_archive_download_klines_1h_parser,
     _add_archive_download_klines_parser,
     _add_archive_manifest_parser,
+    _add_canonical_journal_parser,
     _add_combined_book_report_parser,
     _add_continuous_addon_shadow_audit_parser,
     _add_continuous_forward_readiness_parser,
@@ -182,6 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_continuous_rebalance_cycle_audit_parser(subparsers)
     _add_continuous_forward_readiness_parser(subparsers)
     _add_continuous_addon_shadow_audit_parser(subparsers)
+    _add_canonical_journal_parser(subparsers)
 
     return parser
 
@@ -1190,6 +1194,63 @@ def _cmd_continuous_addon_shadow_audit(args: argparse.Namespace, config: Researc
         return 1 if args.fail_on_threshold_breach and not gate["passed"] else 0
 
 
+def _cmd_canonical_journal(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
+    from .canonical_journal import rebuild_all_registered_projections, verify_journal
+    from .incident_simulation import run_all_incident_scenarios
+    from .lifecycle_bridge import bootstrap_legacy_ledgers, infer_sleeve
+
+    if args.action == "verify":
+        print(json.dumps(verify_journal(data_root), indent=2, sort_keys=True))
+        return 0
+    if args.action == "simulate-incidents":
+        output = (
+            Path(args.output_dir).expanduser()
+            if args.output_dir
+            else data_root / "reports" / "canonical_incidents"
+        )
+        results = run_all_incident_scenarios(output)
+        print(
+            json.dumps(
+                {name: asdict(result) for name, result in results.items()},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    explicit_pair = bool(args.trade_dataset or args.order_dataset)
+    pairs: list[tuple[str, str]] = []
+    if explicit_pair:
+        if not args.trade_dataset or not args.order_dataset:
+            raise RuntimeError("--trade-dataset and --order-dataset must be supplied together")
+        pairs.append((args.trade_dataset, args.order_dataset))
+    else:
+        known_pairs = (
+            ("event_demo_trades", "event_demo_orders"),
+            ("long_native_demo_trades", "long_native_demo_orders"),
+            ("long_native_paper_trades", "long_native_paper_orders"),
+            ("continuous_fade_demo_trades", "continuous_fade_demo_orders"),
+            ("continuous_fade_paper_trades", "continuous_fade_paper_orders"),
+        )
+        pairs.extend(
+            (trades, orders)
+            for trades, orders in known_pairs
+            if (data_root / trades).exists() or (data_root / orders).exists()
+        )
+    for trades, orders in pairs:
+        bootstrap_legacy_ledgers(
+            data_root,
+            trade_dataset=trades,
+            order_dataset=orders,
+            mode=args.mode,
+            sleeve=args.sleeve or infer_sleeve(dataset=trades),
+            now_ms=int(time.time() * 1000),
+        )
+    counts = rebuild_all_registered_projections(data_root)
+    print(json.dumps({"journal": verify_journal(data_root), "projection_rows": counts}, indent=2, sort_keys=True))
+    return 0
+
+
 _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Path], int]] = {
     "download-data": _cmd_download_data,
     "download-binance-proxy": _cmd_download_binance_proxy,
@@ -1210,6 +1271,7 @@ _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Pat
     "continuous-rebalance-cycle-audit": _cmd_continuous_rebalance_cycle_audit,
     "continuous-forward-readiness": _cmd_continuous_forward_readiness,
     "continuous-addon-shadow-audit": _cmd_continuous_addon_shadow_audit,
+    "canonical-journal": _cmd_canonical_journal,
 }
 
 

@@ -23,6 +23,8 @@ from ._common import PENDING_ORDER_STATUSES  # noqa: F401  re-exported: tests + 
 # existing `from .event_demo import _order_link_id` callers (3 sleeves, ws_risk, tests) are unaffected.
 from .order_link_id import _base36, _order_link_id, _risk_order_link_id, _split_order_link_id, decode_entry_order_link_id, is_exit_link  # noqa: F401
 from .order_execution import filled_qty_reaches_target_or_unknown
+from .canonical_journal import record_due_markouts
+from .lifecycle_bridge import record_ledger_rows
 
 
 _logger = logging.getLogger("liquidity_migration.event_demo")
@@ -306,7 +308,7 @@ def run_event_risk_cycle(
         # wsrisk cycle / event-demo cycle's pending-fill reconciler to adopt.
         if risk.submit_orders:
             def _record_risk_preflight(row: dict[str, Any]) -> None:
-                _write_order_rows(root, pl.DataFrame([row], infer_schema_length=None))
+                _write_order_rows(root, pl.DataFrame([row], infer_schema_length=None), mode="demo")
             risk_preflight_callback: Callable[[dict[str, Any]], None] | None = _record_risk_preflight
         else:
             risk_preflight_callback = None
@@ -329,11 +331,23 @@ def run_event_risk_cycle(
             if risk.submit_orders or risk.record_dry_run:
                 cycle_order_rows.extend(exit_order_rows)
 
-        # Orders before trades — see event-demo cycle for the rationale.
-        if cycle_order_rows:
-            _write_order_rows(root, pl.DataFrame(cycle_order_rows, infer_schema_length=None))
-        if cycle_trade_rows:
-            _write_trade_rows(root, pl.DataFrame(cycle_trade_rows, infer_schema_length=None))
+        # One journal append owns both row types. Parquet ledgers are regenerated
+        # compatibility projections, so crash ordering no longer creates two
+        # independent authorities.
+        if cycle_order_rows or cycle_trade_rows:
+            record_ledger_rows(
+                root,
+                order_rows=cycle_order_rows,
+                trade_rows=cycle_trade_rows,
+                trade_dataset="event_demo_trades",
+                order_dataset="event_demo_orders",
+                mode="demo" if risk.submit_orders else "paper",
+                sleeve="event",
+                now_ms=cycle_now_ms,
+            )
+        # Markouts mature with wall-clock time, including otherwise quiet
+        # cycles that produce no new ledger rows.
+        record_due_markouts(root, now_ms=cycle_now_ms, prices=price_by_symbol)
 
         pending_exit_symbols = {
             str(row.get("symbol", ""))
@@ -1126,22 +1140,38 @@ def _execution_summary(executions: list[dict[str, Any]]) -> dict[str, Any]:
     # daemon noticed (now_ms), which the reconciliation needs to measure
     # true fill-time skew between paper and demo (and between demo and Bybit).
     exec_time_ms = 0
+    fill_details: list[dict[str, Any]] = []
     for execution in executions:
         exec_qty = _float(execution.get("execQty"))
         exec_price = _float(execution.get("execPrice"))
         exec_value = _float(execution.get("execValue"))
+        exec_fee = _float(execution.get("execFee"))
+        exec_id = str(execution.get("execId") or execution.get("exec_id") or "")
         qty += exec_qty
         value += exec_value if exec_value > 0.0 else exec_qty * exec_price
-        fee += _float(execution.get("execFee"))
+        fee += exec_fee
         ts_candidate = int(_float(execution.get("execTime") or 0))
         if ts_candidate > exec_time_ms:
             exec_time_ms = ts_candidate
+        if exec_qty > 0.0:
+            fill_details.append({
+                "exec_id": exec_id,
+                "qty": exec_qty,
+                "price": exec_price,
+                "value": exec_value if exec_value > 0.0 else exec_qty * exec_price,
+                "fee": exec_fee,
+                "venue_ts_ms": ts_candidate,
+            })
     return {
         "qty": _decimal_text(Decimal(str(qty))) if qty > 0.0 else "",
         "avg_price": value / qty if qty > 0.0 else 0.0,
         "fee": fee,
         "exec_time_ms": exec_time_ms,
         "executions": len(executions),
+        # Internal hand-off to the canonical journal. Callers attach this to an
+        # order row as ``canonical_fill_details``; the lifecycle bridge consumes
+        # it and deliberately omits it from the mutable Parquet projection.
+        "fill_details": fill_details,
     }
 
 
@@ -1312,14 +1342,30 @@ def _upsert_rows(existing: pl.DataFrame, rows: list[dict[str, Any]], *, key: str
     return pl.concat([existing, incoming], how="diagonal_relaxed").unique(subset=[key], keep="last")
 
 
-def _write_trade_rows(root: Path, rows: pl.DataFrame) -> None:
+def _write_trade_rows(root: Path, rows: pl.DataFrame, *, mode: str = "demo") -> None:
     if not rows.is_empty():
-        write_dataset(rows, root, "event_demo_trades", partition_by=())
+        record_ledger_rows(
+            root,
+            trade_rows=rows,
+            trade_dataset="event_demo_trades",
+            order_dataset="event_demo_orders",
+            mode=mode,
+            sleeve="event",
+            now_ms=_max_int(rows, "updated_at_ms") or _max_int(rows, "ts_ms") or _utc_now_ms(),
+        )
 
 
-def _write_order_rows(root: Path, rows: pl.DataFrame) -> None:
+def _write_order_rows(root: Path, rows: pl.DataFrame, *, mode: str = "demo") -> None:
     if not rows.is_empty():
-        write_dataset(rows, root, "event_demo_orders", partition_by=())
+        record_ledger_rows(
+            root,
+            order_rows=rows,
+            trade_dataset="event_demo_trades",
+            order_dataset="event_demo_orders",
+            mode=mode,
+            sleeve="event",
+            now_ms=_max_int(rows, "updated_at_ms") or _max_int(rows, "ts_ms") or _utc_now_ms(),
+        )
 
 
 def _price_lookup_from_tickers_and_klines(tickers: pl.DataFrame, klines: pl.DataFrame) -> dict[str, float]:

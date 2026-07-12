@@ -62,6 +62,8 @@ from .event_demo import (
     summarize_position_pnl,
 )
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
+from .canonical_journal import rebuild_all_registered_projections, record_verified_flat_snapshot
+from .lifecycle_bridge import bootstrap_legacy_ledgers, record_ledger_rows
 from . import cross_sleeve as _cross_sleeve
 from .event_demo import wallet_equity_usdt
 from .event_demo_reports import (
@@ -780,15 +782,42 @@ class EventWebSocketRiskEngine:
         if not rows:
             return
         routes = self._sleeve_routes(trades=trades)
+        trade_routes = self._sleeve_routes(trades=True)
+        order_routes = self._sleeve_routes(trades=False)
         by_sleeve: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             by_sleeve.setdefault(self._sleeve_of(row), []).append(row)
         for sleeve, sleeve_rows in by_sleeve.items():
             root, dataset = routes[sleeve]
-            # All sleeves write uniformly: _sleeve_routes already maps short ->
-            # event_demo_trades/_orders, so the short path needs no special-case
-            # (its event_demo wrappers were just write_dataset(..., partition_by=())).
-            write_dataset(pl.DataFrame(sleeve_rows, infer_schema_length=None), root, dataset, partition_by=())
+            trade_root, trade_dataset = trade_routes[sleeve]
+            order_root, order_dataset = order_routes[sleeve]
+            if root != trade_root or root != order_root:
+                raise RuntimeError(
+                    f"ws_risk sleeve {sleeve} trade/order roots diverged: "
+                    f"selected={root} trades={trade_root} orders={order_root}"
+                )
+            # The private WS/reconcile engine emits venue facts into the same
+            # per-sleeve journal as the cycle daemon. Legacy Parquet names are
+            # regenerated from that journal and never mutated independently.
+            record_ledger_rows(
+                root,
+                trade_rows=sleeve_rows if trades else None,
+                order_rows=sleeve_rows if not trades else None,
+                trade_dataset=trade_dataset,
+                order_dataset=order_dataset,
+                mode="demo",
+                sleeve=sleeve,
+                now_ms=max(
+                    [
+                        coerce_int(
+                            row.get("updated_at_ms") or row.get("ts_ms"),
+                            default=0,
+                        )
+                        for row in sleeve_rows
+                    ]
+                    + [int(time.time() * 1000)]
+                ),
+            )
 
     def _write_trade_rows_routed(self, rows: list[dict[str, Any]]) -> None:
         self._write_rows_routed(rows, trades=True)
@@ -1337,6 +1366,7 @@ class EventWebSocketRiskEngine:
             # The WS venue ack already proved this exact reduce-only side flat.
             # A REST fallback would only repeat the impossible close and create
             # a second rejection/order ID for the same state transition.
+            self._project_proven_flat_rows()
             self.write_report(reason="ws_order_ack_position_flat")
             return
         if (
@@ -1368,6 +1398,7 @@ class EventWebSocketRiskEngine:
             filled_qty = agg["filled_qty"]
             value = agg["value"]
             exit_price = value / filled_qty if filled_qty > 0.0 else 0.0
+            fill_details = _execution_summary([row]).get("fill_details", [])
             if link in self.state.submitted_link_to_trade_id:
                 self.record_tracked_exit_stream_fill(
                     order_link_id=link,
@@ -1375,12 +1406,14 @@ class EventWebSocketRiskEngine:
                     exit_price=exit_price,
                     source="execution",
                     fee_usdt=agg.get("fee", 0.0),
+                    fill_details=fill_details,
                 )
             else:
                 order_updates = self.mark_order_filled_from_execution(
                     order_link_id=link,
                     filled_qty=filled_qty,
                     exit_price=exit_price,
+                    fill_details=fill_details,
                 )
                 self.update_stream_order_guards(order_updates)
                 if order_updates:
@@ -1394,6 +1427,7 @@ class EventWebSocketRiskEngine:
         exit_price: float,
         source: str,
         fee_usdt: float = 0.0,
+        fill_details: list[dict[str, Any]] | None = None,
     ) -> None:
         trade_id = self.state.submitted_link_to_trade_id.get(order_link_id, "")
         if not trade_id or self.state.all_trades.is_empty():
@@ -1535,14 +1569,18 @@ class EventWebSocketRiskEngine:
             report_reason = f"ws_{source}_partial_fill"
         self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
-        self._write_trade_rows_routed([trade])
+        # Venue execution must reach the journal before the final trade row can
+        # advance close_fill -> pnl_confirmed. Otherwise a multi-fill close is
+        # collapsed by the compatibility projection before TCA sees the fill.
         order_updates = self.mark_order_filled_from_execution(
             order_link_id=order_link_id,
             filled_qty=filled_qty,
             exit_price=exit_price,
+            fill_details=fill_details,
         )
         if order_updates:
             self._write_order_rows_routed(order_updates)
+        self._write_trade_rows_routed([trade])
         symbol = str(trade.get("symbol", ""))
         closed_side = _normalized_side(trade.get("side"))
         current = self.state.positions_by_symbol.get(symbol) or {}
@@ -1592,7 +1630,14 @@ class EventWebSocketRiskEngine:
             if link:
                 index[link] = order
 
-    def mark_order_filled_from_execution(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> list[dict[str, Any]]:
+    def mark_order_filled_from_execution(
+        self,
+        *,
+        order_link_id: str,
+        filled_qty: float,
+        exit_price: float,
+        fill_details: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         order = self.state.orders_by_link.get(order_link_id)
         if order is None:
             return []
@@ -1605,6 +1650,8 @@ class EventWebSocketRiskEngine:
         order["filled_qty"] = _quantity_text(filled_qty) if filled_qty > 0.0 else ""
         order["avg_price"] = exit_price
         order["notional_usdt"] = abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0
+        if fill_details:
+            order["canonical_fill_details"] = list(fill_details)
         return [order]
 
     def update_stream_order_guards(self, order_updates: list[dict[str, Any]]) -> None:
@@ -1833,8 +1880,11 @@ class EventWebSocketRiskEngine:
         if rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, rows, key="trade_id")
             self.state.open_trades = _open_trades(self.state.all_trades)
-            self._write_trade_rows_routed(rows)
+            self._refresh_pending_orphan_state()
             self.state.exits.extend(rows)
+        # Journal venue order/fill facts before the final trade projection can
+        # advance close_fill -> pnl_confirmed. This preserves one TCA row per
+        # execution instead of collapsing a multi-fill exit into the trade row.
         if orders:
             for order in orders:
                 link = str(order.get("order_link_id") or "")
@@ -1844,6 +1894,10 @@ class EventWebSocketRiskEngine:
                     self.state.submitted_link_submit_mode[link] = str(order.get("submit_mode") or "submitted")
             self._write_order_rows_routed(orders)
             self._record_orders(orders)
+            if any(_is_zero_position_reduce_only_rejection(order) for order in orders):
+                self._project_proven_flat_rows()
+        if rows:
+            self._write_trade_rows_routed(rows)
         current = self.state.positions_by_symbol.get(symbol) or {}
         current_side = _normalized_side(current.get("side"))
         closed_sides = {
@@ -2328,20 +2382,40 @@ class EventWebSocketRiskEngine:
         # price/PnL needed for a reconstructable ledger. Every path therefore
         # requires closed-PnL evidence; while Bybit's record lags, the open row
         # deliberately blocks re-entry instead of becoming a zero-PnL close.
-        reconciled, rows = _risk_reconcile_missing_positions(
-            self.state.open_trades,
+        awaiting_pnl = (
+            self.state.all_trades.filter(pl.col("status") == "awaiting_pnl")
+            if not self.state.all_trades.is_empty() and "status" in self.state.all_trades.columns
+            else pl.DataFrame()
+        )
+        reconcile_candidates = self.state.open_trades
+        if not awaiting_pnl.is_empty():
+            reconcile_candidates = pl.concat(
+                [reconcile_candidates, awaiting_pnl], how="diagonal_relaxed"
+            ).unique(subset=["trade_id"], keep="last")
+        confirmed_flat_symbols = self._confirmed_flat_symbols_for_reconcile()
+        if not awaiting_pnl.is_empty() and "symbol" in awaiting_pnl.columns:
+            confirmed_flat_symbols |= {
+                str(symbol) for symbol in awaiting_pnl["symbol"].to_list() if str(symbol)
+            }
+        _reconciled, rows = _risk_reconcile_missing_positions(
+            reconcile_candidates,
             position_by_symbol=self.state.positions_by_symbol,
             now_ms=_now_ms(),
             enabled=self.risk.submit_orders and self.private_client is not None,
             position_error=self.state.last_position_error,
             trading_client=self.private_client,
             require_evidence=require_evidence,
-            confirmed_flat_symbols=self._confirmed_flat_symbols_for_reconcile(),
+            confirmed_flat_symbols=confirmed_flat_symbols,
         )
-        self.state.open_trades = reconciled
+        # ``reconciled`` may retain awaiting_pnl rows while Bybit's Closed-PnL
+        # feed lags. They remain reconciliation candidates but are not exposure,
+        # are not eligible for another reduce-only order, and must not page on
+        # every report cycle.
+        self.state.open_trades = _open_trades(self.state.all_trades)
         self._refresh_pending_orphan_state()
         if rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, rows, key="trade_id")
+            self.state.open_trades = _open_trades(self.state.all_trades)
             self.state.reconciliations.extend(rows)
             for row in rows:
                 symbol = str(row.get("symbol", ""))
@@ -2351,7 +2425,61 @@ class EventWebSocketRiskEngine:
                     self.clear_submitted_symbol(symbol)
             if write:
                 self._write_trade_rows_routed(rows)
+        if write:
+            self._project_proven_flat_rows()
         return rows
+
+    def _project_proven_flat_rows(self) -> None:
+        """Move explicitly-flat local rows to awaiting_pnl in their journal.
+
+        REST absence alone is intentionally insufficient. A private-WS zero,
+        an opposite-side live position, or Bybit's zero-position reduce-only
+        rejection is the positive evidence consumed by
+        ``_orphan_retry_suppressed``.
+        """
+        proven: dict[str, set[str]] = {}
+        for trade in self.state.open_trades.to_dicts():
+            if not self._orphan_retry_suppressed(trade):
+                continue
+            trade_id = str(trade.get("trade_id") or "")
+            if trade_id:
+                proven.setdefault(self._sleeve_of(trade), set()).add(trade_id)
+        if not proven:
+            return
+        trade_routes = self._sleeve_routes(trades=True)
+        order_routes = self._sleeve_routes(trades=False)
+        projected = False
+        for sleeve, trade_ids in proven.items():
+            root, trade_dataset = trade_routes[sleeve]
+            order_root, order_dataset = order_routes[sleeve]
+            if order_root != root:
+                raise RuntimeError(f"ws_risk sleeve {sleeve} journal roots diverged")
+            now_ms = _now_ms()
+            bootstrap_legacy_ledgers(
+                root,
+                trade_dataset=trade_dataset,
+                order_dataset=order_dataset,
+                mode="demo",
+                sleeve=sleeve,
+                now_ms=now_ms,
+            )
+            appended = record_verified_flat_snapshot(
+                root,
+                now_ms=now_ms,
+                verification_id=f"ws-flat-{now_ms}-{sleeve}",
+                source="private_ws_flat_or_side_flip",
+                trade_ids=trade_ids,
+            )
+            if appended:
+                rebuild_all_registered_projections(root)
+                projected = True
+        # A synthetic/in-memory row has no durable projection to reload. Keep
+        # its explicit-flat latch intact; production ledger-backed rows take the
+        # durable awaiting_pnl path and are then reloaded from that projection.
+        if projected:
+            self.state.all_trades = self._read_trades_combined()
+            self.state.open_trades = _open_trades(self.state.all_trades)
+            self._refresh_pending_orphan_state()
 
     def rest_reconcile(self) -> None:
         # When the prefetcher is enabled and has a fresh snapshot, read positions +
@@ -2693,6 +2821,7 @@ class EventWebSocketRiskEngine:
                     "exit_reason": "untracked_position",
                     "target_qty": qty,
                     "filled_qty": str(filled_qty) if filled_qty > 0.0 else "",
+                    "canonical_fill_details": exec_summary.get("fill_details", []),
                     "error": error,
                 }
             )
@@ -2751,6 +2880,7 @@ class EventWebSocketRiskEngine:
             order["filled_qty"] = str(filled_qty)
             order["avg_price"] = avg_price
             order["notional_usdt"] = abs(avg_price * filled_qty) if avg_price > 0.0 else 0.0
+            order["canonical_fill_details"] = summary.get("fill_details", [])
             updates.append(dict(order))
             if order["status"] == "filled":
                 if self._has_pending_exit_order_for_symbol(symbol):
@@ -3057,7 +3187,6 @@ class EventWebSocketRiskEngine:
             self.state.all_trades = _upsert_rows(self.state.all_trades, trade_rows, key="trade_id")
             self.state.open_trades = _open_trades(self.state.all_trades)
             self.state.pending_fill_reconciliations.extend(trade_rows)
-            self._write_trade_rows_routed(trade_rows)
         if order_rows:
             for update in order_rows:
                 link = str(update.get("order_link_id") or "")
@@ -3067,6 +3196,8 @@ class EventWebSocketRiskEngine:
                 if order is not None:
                     order.update(update)
             self._write_order_rows_routed(order_rows)
+        if trade_rows:
+            self._write_trade_rows_routed(trade_rows)
 
     def terminalize_stale_pending_entry_orders(self, orders: pl.DataFrame) -> None:
         if orders.is_empty():

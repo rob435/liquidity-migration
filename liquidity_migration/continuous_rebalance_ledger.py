@@ -266,6 +266,9 @@ def build_rebalance_resize_rows(
                 "order_id": order_id,
                 "submit_mode": submit_mode,
                 "avg_price": price,
+                "decision_price": price,
+                "submission_price": price,
+                "submitted_at_ms": now_ms,
                 "fee_usdt": fee_usdt,
                 "exec_time_ms": exec_time_ms,
                 "notional_usdt": order_notional,
@@ -279,6 +282,7 @@ def build_rebalance_resize_rows(
                 "current_notional_usdt": plan.current_notional_usdt,
                 "delta_notional_usdt": plan.delta_notional_usdt,
                 "filled_qty": order_qty_text,
+                "canonical_fill_details": execution.get("canonical_fill_details", []),
                 "error": error,
                 "sleeve": sleeve,
             }

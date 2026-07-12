@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Archive and reset demo/paper trading ledgers on the VPS.
+# Archive and rebuild demo/paper ledger projections on the VPS.
 #
 # Safe defaults:
 #   * no flag means DRY RUN (no service or file mutation)
-#   * --execute is required to stop services, archive, and remove ledgers
+#   * --execute is required to stop services, archive, and rebuild projections
 #   * concurrent execute attempts are refused by a nonblocking process lock
 #   * REAL_MONEY/mainnet configuration is refused
 #   * submit-armed systemd units must load the same resolved demo env file
@@ -27,11 +27,12 @@ usage() {
   cat <<'EOF'
 Usage: scripts/reset_demo_paper_ledgers.sh [options]
 
-Archive/reset demo + paper trade, order, cycle, and operational-event ledgers.
+Archive and rebuild demo + paper trade/order projections. Cycle and deprecated
+operational streams begin a new epoch; the canonical journal is never removed.
 Default mode is a read-only preview. Mutation requires --execute.
 
 Options:
-  --execute                 stop writers, verify demo account flat, archive, reset,
+  --execute                 stop writers, verify demo account flat, archive, rebuild,
                             restart previously-active units, and verify them
   --dry-run                 explicit preview (the default)
   --sleeves LIST            all (default), long, continuous, or comma-separated list
@@ -47,7 +48,12 @@ After a continuous reset it writes one fresh demo + paper cycle heartbeat record
 the verified-flat reset boundary, so the hedge timer can distinguish the controlled
 empty epoch from a corrupt/missing ledger before the first normal cycle.
 
-The command never removes configs, .locks, residual_momentum.parquet, root-level
+Trade/order ledgers are rebuildable projections of canonical_journal/events.jsonl.
+Execute bootstraps any pre-journal rows, records the proven-flat account snapshot,
+archives the old projections, deletes only generated views, then replays the
+journal. It never deletes execution history merely to clear an operational view.
+
+The command never removes configs, .locks, canonical_journal/, residual_momentum.parquet, root-level
 market-data datasets, or continuous_account_equity_state.json. The equity state is
 snapshotted into the archive but retained live so a ledger reset cannot erase the
 account drawdown high-water. It never cancels orders or closes positions: execute
@@ -210,9 +216,8 @@ SELECTED_SLEEVES=()
 (( SELECT_CONTINUOUS )) && SELECTED_SLEEVES+=("continuous")
 (( SELECT_SHARED )) && SELECTED_SLEEVES+=("shared-compat")
 
-# Static allowlist of removable paths. Dataset names mirror storage.py and the
-# deployed unit roots; the continuous JSONLs are append-only operational
-# ledgers consumed by reconciliation. No caller-supplied path reaches rm -rf.
+# Static allowlist of generated projections/epoch telemetry. The canonical
+# journal is intentionally absent: no caller-supplied path can delete it.
 LONG_LEDGER_TARGETS=(
   data/bybit-long-demo-event/long_native_demo_trades
   data/bybit-long-demo-event/long_native_demo_orders
@@ -249,6 +254,25 @@ CONTINUOUS_ROOTS=(
   data/bybit-continuous-hedge-event
 )
 SHARED_ROOTS=(data/bybit-demo-event)
+CANONICAL_SPECS=()
+if (( SELECT_LONG )); then
+  CANONICAL_SPECS+=(
+    "data/bybit-long-demo-event|long_native_demo_trades|long_native_demo_orders|demo|long"
+    "data/bybit-long-paper-event|long_native_paper_trades|long_native_paper_orders|paper|long"
+  )
+fi
+if (( SELECT_CONTINUOUS )); then
+  CANONICAL_SPECS+=(
+    "data/bybit-continuous-demo-event|continuous_fade_demo_trades|continuous_fade_demo_orders|demo|continuous"
+    "data/bybit-continuous-paper-event|continuous_fade_paper_trades|continuous_fade_paper_orders|paper|continuous"
+    "data/bybit-continuous-hedge-event|continuous_fade_demo_trades|continuous_fade_demo_orders|demo|continuous_addon"
+  )
+fi
+if (( SELECT_SHARED )); then
+  CANONICAL_SPECS+=(
+    "data/bybit-demo-event|event_demo_trades|event_demo_orders|demo|short"
+  )
+fi
 CONTINUOUS_PRESERVED_AUDIT_TARGETS=(
   data/bybit-continuous-demo-event/continuous_account_equity_state.json
   data/bybit-continuous-paper-event/continuous_account_equity_state.json
@@ -394,7 +418,7 @@ for target in "${PRESERVED_AUDIT_TARGETS[@]}"; do
   echo "    - $target (archived, retained live)"
 done
 
-echo "  preserved by default: configs/, .locks/, reports/, .cache/, residual_momentum.parquet, root-level market data, account-equity high-water state"
+echo "  preserved by default: canonical_journal/, configs/, .locks/, reports/, .cache/, residual_momentum.parquet, root-level market data, account-equity high-water state"
 (( INCLUDE_REPORTS )) && echo "  selected exception: reports/ will be archived and reset"
 (( INCLUDE_CACHES )) && echo "  selected exception: .cache/ will be archived and reset; expect market-data bootstrap"
 echo "  quiesced units: ${#STOP_UNITS[@]} (all shared-account writers plus maintenance readers/timers)"
@@ -665,6 +689,60 @@ print("  demo-account-flat-ok positions=0 open_orders=0")
 PY
 )
 
+# Import any pre-journal rows before touching projections, then record the
+# account-level fact proven immediately above. Open/submitted rows become
+# awaiting_pnl (not fabricated closed rows), so they stop triggering orders and
+# pages while closed-PnL evidence can still complete them later.
+echo
+echo "Bootstrapping and verifying canonical journals ..."
+"$PYTHON" - --prepare-canonical-flat "${CANONICAL_SPECS[@]}" <<'PY'
+import datetime as dt
+import sys
+from pathlib import Path
+
+from liquidity_migration.canonical_journal import (
+    journal_path,
+    rebuild_all_registered_projections,
+    record_verified_flat_snapshot,
+    verify_journal,
+)
+from liquidity_migration.lifecycle_bridge import bootstrap_legacy_ledgers
+
+
+now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+verification_id = f"ledger-rebuild-flat-{now_ms}"
+for raw in sys.argv[2:]:
+    root_raw, trades, orders, mode, sleeve = raw.split("|", 4)
+    root = Path(root_raw)
+    root.mkdir(parents=True, exist_ok=True)
+    bootstrap_legacy_ledgers(
+        root,
+        trade_dataset=trades,
+        order_dataset=orders,
+        mode=mode,
+        sleeve=sleeve,
+        now_ms=now_ms,
+    )
+    record_verified_flat_snapshot(
+        root,
+        now_ms=now_ms,
+        verification_id=verification_id,
+        source="reset_workflow_positions_and_open_orders_flat",
+    )
+    rebuild_all_registered_projections(root)
+    receipt = verify_journal(root)
+    print(
+        f"  canonical-ok root={root} events={receipt['events']} "
+        f"trades={receipt['trades']} path={journal_path(root)}"
+    )
+PY
+
+# Snapshot each now-existing journal in the archive while retaining it live.
+for root in "${SELECTED_ROOTS[@]}"; do
+  canonical="$root/canonical_journal"
+  [[ -e "$canonical" ]] && PRESERVED_AUDIT_TARGETS+=("$canonical")
+done
+
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 suffix=""
 [[ -z "$LABEL" ]] || suffix="-$LABEL"
@@ -739,12 +817,32 @@ echo "  sha256: $archive_sha"
 echo "  digest sidecar: $SHA_PATH"
 
 echo
-echo "Removing only the archived allowlisted ledger targets ..."
+echo "Removing only archived generated projections and epoch telemetry ..."
 for target in "${EXISTING_TARGETS[@]}"; do
   rm -rf -- "$target"
   [[ ! -e "$target" && ! -L "$target" ]] || die "failed to remove target: $target"
   echo "  removed $target"
 done
+
+echo
+echo "Rebuilding trade/order projections from canonical journals ..."
+"$PYTHON" - --rebuild-canonical-projections "${CANONICAL_SPECS[@]}" <<'PY'
+import sys
+from pathlib import Path
+
+from liquidity_migration.canonical_journal import rebuild_all_registered_projections, verify_journal
+
+
+seen: set[Path] = set()
+for raw in sys.argv[2:]:
+    root = Path(raw.split("|", 1)[0])
+    if root in seen:
+        continue
+    seen.add(root)
+    counts = rebuild_all_registered_projections(root)
+    receipt = verify_journal(root)
+    print(f"  projection-rebuild-ok root={root} events={receipt['events']} rows={counts}")
+PY
 
 # A continuous reset deliberately removes both the trades and cycles datasets.
 # The hedge manager treats that exact shape as UNKNOWN (correct for an arbitrary
@@ -819,6 +917,7 @@ echo "Ledger reset complete."
 echo "  archive: $ARCHIVE_PATH"
 echo "  archive sha256: $archive_sha"
 echo "  archive digest: $SHA_PATH"
-echo "  removed targets: ${#EXISTING_TARGETS[@]}"
+echo "  archived/reset targets: ${#EXISTING_TARGETS[@]}"
+echo "  canonical journals: preserved; trade/order projections rebuilt by replay"
 echo "  service state: restored to the pre-reset active set and verified"
 echo "  preserved: configs, locks, signal files, account-equity high-water state, and unselected caches/reports"

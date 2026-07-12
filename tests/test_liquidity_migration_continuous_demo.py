@@ -19,7 +19,6 @@ import pytest
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, finite_float
 from liquidity_migration.continuous_demo import (
     CONTINUOUS_ENTRY_LINK_PREFIX,
-    CONTINUOUS_LIFECYCLE_EVENTS_FILE,
     CONTINUOUS_RISK_EVENTS_FILE,
     SNIPER_REASON,
     ContinuousDemoCycleConfig,
@@ -41,9 +40,6 @@ from liquidity_migration.continuous_demo import (
     _append_continuous_risk_event,
     _enforce_continuous_lifecycle_transitions,
     _continuous_lifecycle_state,
-    _append_continuous_lifecycle_event,
-    _continuous_lifecycle_event_from_order_row,
-    _continuous_lifecycle_event_from_trade_row,
     _continuous_lifecycle_snapshot_update_rows,
     _continuous_portfolio_heat_fields,
     _continuous_sniper_link_prefix,
@@ -4737,99 +4733,6 @@ def test_append_continuous_risk_event_writes_jsonl(tmp_path) -> None:
         {"event": "entry_risk_health_blocked", "reasons": "private_ws_stale", "ts_ms": 1},
         {"event": "entry_risk_health_blocked", "reasons": "ledger_position_mismatch", "ts_ms": 2},
     ]
-
-
-def test_append_continuous_lifecycle_event_writes_jsonl(tmp_path) -> None:
-    path = _append_continuous_lifecycle_event(
-        tmp_path,
-        {
-            "event": "lifecycle_state_transition",
-            "cycle_id": "c1",
-            "trade_id": "t1",
-            "lifecycle_state": "ORDER_PREPARED",
-        },
-    )
-
-    assert path == tmp_path / CONTINUOUS_LIFECYCLE_EVENTS_FILE
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert rows == [
-        {
-            "cycle_id": "c1",
-            "event": "lifecycle_state_transition",
-            "lifecycle_state": "ORDER_PREPARED",
-            "trade_id": "t1",
-        }
-    ]
-
-
-def test_continuous_lifecycle_order_event_classifies_preflight_entry() -> None:
-    event = _continuous_lifecycle_event_from_order_row(
-        {
-            "order_link_id": "lm-en-c-AAA-abc",
-            "trade_id": "t1",
-            "strategy_id": _STRATEGY,
-            "symbol": "AAAUSDT",
-            "side": "Sell",
-            "reduce_only": False,
-            "submit_mode": "preflight",
-            "status": "submitted",
-            "updated_at_ms": 123,
-        },
-        cycle_id="cycle-1",
-        source="order_preflight",
-        now_ms=999,
-    )
-
-    assert event["event"] == "lifecycle_state_transition"
-    assert event["event_key"] == "cycle-1:order_preflight:t1:lm-en-c-AAA-abc:ORDER_PREPARED"
-    assert event["lifecycle_state"] == "ORDER_PREPARED"
-    assert event["lifecycle_state_source"] == "order_preflight"
-    assert event["ts_ms"] == 123
-
-
-def test_continuous_lifecycle_order_event_classifies_reduce_only_fill_as_closed() -> None:
-    event = _continuous_lifecycle_event_from_order_row(
-        {
-            "order_link_id": "lm-ux-c-AAA-abc",
-            "trade_id": "t1",
-            "strategy_id": _STRATEGY,
-            "symbol": "AAAUSDT",
-            "side": "Buy",
-            "reduce_only": True,
-            "submit_mode": "submitted",
-            "status": "filled",
-        },
-        cycle_id="cycle-1",
-        source="order_final",
-        now_ms=999,
-    )
-
-    assert event["lifecycle_state"] == "CLOSED"
-    assert event["lifecycle_state_source"] == "order_final"
-    assert event["ts_ms"] == 999
-
-
-def test_continuous_lifecycle_trade_event_uses_persisted_protection_source() -> None:
-    event = _continuous_lifecycle_event_from_trade_row(
-        {
-            "trade_id": "t1",
-            "strategy_id": _STRATEGY,
-            "symbol": "AAAUSDT",
-            "status": "open",
-            "side": "short",
-            "lifecycle_state": "PROTECTED",
-            "lifecycle_state_source": "private_position_snapshot",
-            "updated_at_ms": 123,
-        },
-        cycle_id="cycle-1",
-        source="trade_ledger",
-        now_ms=999,
-    )
-
-    assert event["event_key"] == "cycle-1:private_position_snapshot:t1:PROTECTED"
-    assert event["lifecycle_state"] == "PROTECTED"
-    assert event["lifecycle_state_source"] == "private_position_snapshot"
-    assert event["ts_ms"] == 123
 
 
 def _wallet_outage_payload() -> dict:

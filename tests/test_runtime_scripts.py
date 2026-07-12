@@ -7,9 +7,10 @@ import sys
 import textwrap
 from pathlib import Path
 
+import polars as pl
 import pytest
 
-from liquidity_migration.storage import read_dataset
+from liquidity_migration.storage import read_dataset, write_dataset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SH = REPO_ROOT / "scripts" / "deploy_vps_live.sh"
@@ -1513,6 +1514,12 @@ fi
 if [[ "${1:-}" == "-" && "${2:-}" == "--write-reset-boundary" ]]; then
   exec "$REAL_PYTHON" "$@"
 fi
+if [[ "${1:-}" == "-" && "${2:-}" == "--prepare-canonical-flat" ]]; then
+  exec "$REAL_PYTHON" "$@"
+fi
+if [[ "${1:-}" == "-" && "${2:-}" == "--rebuild-canonical-projections" ]]; then
+  exec "$REAL_PYTHON" "$@"
+fi
 cat >/dev/null
 if [[ "${FAKE_ACCOUNT_GUARD_RC:-0}" == "0" ]]; then
   echo "  demo-account-flat-ok positions=0 open_orders=0"
@@ -1564,9 +1571,24 @@ def test_reset_demo_paper_ledgers_is_dry_run_by_default_and_execute_is_archival(
     klines = tmp_path / "data" / "bybit-long-demo-event" / "event_demo_klines_1h"
     cache = tmp_path / "data" / "bybit-long-demo-event" / ".cache"
     reports = tmp_path / "data" / "bybit-long-demo-event" / "reports"
-    for directory in (ledger, cycles, klines, cache, reports):
+    for directory in (cycles, klines, cache, reports):
         directory.mkdir(parents=True)
         (directory / "part.parquet").write_bytes(b"x")
+    write_dataset(
+        pl.DataFrame([{
+            "trade_id": "long-reset-row",
+            "strategy_id": "long_native_v11a_div_weekend_vol",
+            "symbol": "AAAUSDT",
+            "side": "long",
+            "status": "open",
+            "entry_ts_ms": 1_700_000_000_000,
+            "entry_price": 10.0,
+            "qty": "1",
+        }]),
+        tmp_path / "data" / "bybit-long-demo-event",
+        "long_native_demo_trades",
+        partition_by=(),
+    )
 
     preview = subprocess.run(
         ["bash", str(script), "--sleeves", "long"],
@@ -1608,7 +1630,10 @@ def test_reset_demo_paper_ledgers_is_dry_run_by_default_and_execute_is_archival(
         timeout=10,
     )
     assert executed.returncode == 0, executed.stderr
-    assert not ledger.exists() and not cycles.exists()
+    assert ledger.exists() and not cycles.exists()
+    rebuilt = read_dataset(ledger.parent, "long_native_demo_trades")
+    assert rebuilt.select("status").item() == "awaiting_pnl"
+    assert (ledger.parent / "canonical_journal" / "events.jsonl").exists()
     assert klines.exists(), "root-level market data must be preserved"
     assert cache.exists(), "cache removal requires --include-caches"
     assert reports.exists(), "report removal requires --include-reports"
@@ -1706,9 +1731,30 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     paper_risk_events = paper_ledger.parent / "continuous_risk_events.jsonl"
     paper_lifecycle_events = paper_ledger.parent / "continuous_lifecycle_events.jsonl"
     paper_dynexit_shadow = paper_ledger.parent / "continuous_dynexit_shadow.jsonl"
-    for directory in (long_ledger, continuous_ledger, paper_ledger, hedge_ledger, cache):
-        directory.mkdir(parents=True)
-        (directory / "part.parquet").write_bytes(b"x")
+    long_ledger.mkdir(parents=True)
+    (long_ledger / "part.parquet").write_bytes(b"x")
+    cache.mkdir(parents=True)
+    (cache / "part.parquet").write_bytes(b"x")
+    for root, dataset, trade_id in (
+        (continuous_ledger.parent, "continuous_fade_demo_trades", "continuous-demo-reset"),
+        (paper_ledger.parent, "continuous_fade_paper_trades", "continuous-paper-reset"),
+        (hedge_ledger.parent, "continuous_fade_demo_trades", "continuous-hedge-reset"),
+    ):
+        write_dataset(
+            pl.DataFrame([{
+                "trade_id": trade_id,
+                "strategy_id": "continuous_fade_v2",
+                "symbol": "BUSDT",
+                "side": "short",
+                "status": "open",
+                "entry_ts_ms": 1_700_000_000_000,
+                "entry_price": 0.125,
+                "qty": "10",
+            }]),
+            root,
+            dataset,
+            partition_by=(),
+        )
     for events in (
         demo_risk_events,
         demo_lifecycle_events,
@@ -1740,8 +1786,9 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     )
     assert executed.returncode == 0, executed.stderr
     assert long_ledger.exists(), "continuous-only reset must preserve long ledgers"
-    assert not continuous_ledger.exists() and not paper_ledger.exists()
-    assert not hedge_ledger.exists(), "continuous selection must include its submit-armed hedge ledger"
+    assert continuous_ledger.exists() and paper_ledger.exists()
+    assert hedge_ledger.exists(), "continuous hedge projection must be rebuilt from its journal"
+    assert read_dataset(continuous_ledger.parent, "continuous_fade_demo_trades").select("status").item() == "awaiting_pnl"
     assert not demo_risk_events.exists() and not demo_lifecycle_events.exists()
     assert not paper_risk_events.exists() and not paper_lifecycle_events.exists(), (
         "old operational failures must not contaminate the post-reset forward window"
@@ -1809,9 +1856,23 @@ def test_reset_demo_paper_ledgers_all_includes_shared_risk_compatibility_ledger(
     shared_trade = tmp_path / "data" / "bybit-demo-event" / "event_demo_trades"
     shared_order = tmp_path / "data" / "bybit-demo-event" / "event_demo_orders"
     shared_state = tmp_path / "data" / "bybit-demo-event" / "cross_sleeve_account_state"
-    for directory in (shared_trade, shared_order, shared_state):
-        directory.mkdir(parents=True)
-        (directory / "part.parquet").write_bytes(b"x")
+    shared_state.mkdir(parents=True)
+    (shared_state / "part.parquet").write_bytes(b"x")
+    write_dataset(
+        pl.DataFrame([{
+            "trade_id": "shared-reset",
+            "strategy_id": "compatibility_short",
+            "symbol": "BUSDT",
+            "side": "short",
+            "status": "open",
+            "entry_ts_ms": 1_700_000_000_000,
+            "entry_price": 0.125,
+            "qty": "10",
+        }]),
+        shared_trade.parent,
+        "event_demo_trades",
+        partition_by=(),
+    )
 
     result = subprocess.run(
         ["bash", str(script), "--execute", "--sleeves", "all", "--env-file", str(env_file)],
@@ -1822,7 +1883,10 @@ def test_reset_demo_paper_ledgers_all_includes_shared_risk_compatibility_ledger(
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert not shared_trade.exists() and not shared_order.exists()
+    assert shared_trade.exists()
+    assert read_dataset(shared_trade.parent, "event_demo_trades").select("status").item() == "awaiting_pnl"
+    assert shared_order.exists(), "registered empty order projection should be materialized"
+    assert read_dataset(shared_order.parent, "event_demo_orders").is_empty()
     assert shared_state.exists(), "derived account state is not a trade ledger and stays preserved"
     assert "shared-compat" in result.stdout
 
