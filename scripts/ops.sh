@@ -37,6 +37,8 @@ Safe operator commands:
   overhaul-plan [ARGS...]      strategy-overhaul shallow readiness plan
   overhaul-phase0 [ARGS...]    outcome-blind strategy-overhaul inventory
   account-parity [ARGS...]     compare historical/paper/demo account journals
+  clock-offset --execute [...] capture VPS-vs-Bybit public clock evidence
+  demo-calibration --execute   publish bounded target-only demo calibration tape
   twin-calibrate [ARGS...]     calibrate the execution twin from demo tapes
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
   cutover-authority [ARGS...]  review/issue/verify evidence-bound deploy authority
@@ -52,6 +54,7 @@ Environment overrides:
 Safety contract:
   * This interface never enables REAL_MONEY or mainnet trading.
   * reset is a remote dry-run unless --execute reaches the guarded reset script.
+  * clock-offset/demo-calibration require --execute and run on the VPS clock.
   * deploy refuses unless its first argument is exactly --execute.
   * Research runs remain research artifacts and are never auto-promoted.
 
@@ -101,6 +104,27 @@ REMOTE_SCRIPT
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }
 
+remote_python_script() {
+  local script_path="$1"
+  shift
+  local -a script_args=("$@")
+  local arg
+  {
+    printf 'REPO_DIR=%q\n' "$REPO_DIR"
+    printf 'SCRIPT_PATH=%q\n' "$script_path"
+    printf 'SCRIPT_ARGS=('
+    for arg in "${script_args[@]}"; do
+      printf ' %q' "$arg"
+    done
+    printf ' )\n'
+    cat <<'REMOTE_SCRIPT'
+set -euo pipefail
+cd "$REPO_DIR"
+exec .venv/bin/python "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
+REMOTE_SCRIPT
+  } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
+}
+
 command="${1:-help}"
 if [[ "$#" -gt 0 ]]; then
   shift
@@ -142,6 +166,19 @@ case "$command" in
     ;;
   account-parity)
     exec "$PYTHON_BIN" -m liquidity_migration.kernel_parity "$@"
+    ;;
+  clock-offset)
+    [[ "${1:-}" == "--execute" ]] \
+      || die_usage "clock-offset writes a VPS-bound receipt; its first argument must be --execute"
+    shift
+    remote_python_script scripts/capture_bybit_clock_offset.py "$@"
+    ;;
+  demo-calibration)
+    [[ "${1:-}" == "--execute" ]] \
+      || die_usage "demo-calibration emits demo orders; its first argument must be --execute"
+    shift
+    remote_python_script scripts/run_demo_execution_calibration.py \
+      --confirm-demo-calibration "$@"
     ;;
   twin-calibrate)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/calibrate_execution_twin.py" "$@"

@@ -11,25 +11,27 @@ research decisions are in
 
 | Sleeve | Mode | Current state |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | Legacy sleeve units active on the VPS; account-owner cutover not installed |
-| `LongV11aDivWeekendVol` | Bybit demo + paper | Legacy sleeve units active on the VPS; account-owner cutover not installed |
-| Shared account execution | demo + paper | Owner units and route files absent; no current cutover tape |
+| `continuous_ensemble_v2` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
+| `LongV11aDivWeekendVol` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
+| Shared account execution | demo + paper | Owner units installed but inactive; route files and evidence gates still absent |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
-- Read-only VPS audit on 2026-07-13: clean checkout `5f6d9986d935`; all four
-  legacy demo/paper sleeve services and `liquidity-migration-bybit-risk.service`
-  are active. Both account-owner units are `not-found`. The two owner route
-  files, demo-rule receipt, capture marker, and deploy-ready receipt are absent.
-  The demo-key permission probe passes. A later read-only query in the same
-  audit observed zero active demo positions, zero regular open orders, and zero
-  conditional open orders. That is a transient precondition, not cutover
-  evidence: the five legacy services remain active and can change it.
-- The remote all-sleeve reset dry-run was repeated after the flatness query. It
-  still found 12 legacy generated targets, would quiesce 13 units, and made no
-  changes. Do not execute that deployed pre-cutover reset: it cannot create or
-  validate the six account-owner roots.
-- A local, unreleased account-execution overhaul now has one append-only account
+- Flat maintenance began at `2026-07-13T22:53:17Z`. Immediately before the
+  stop, the VPS was clean at `5f6d9986d935`, the demo key was order-capable,
+  and Bybit reported zero active positions, regular orders, and conditional
+  orders. Every `liquidity-migration-*` unit was then stopped. The post-stop
+  venue query was still flat, and the before/after unit inventories plus
+  checksums are retained under
+  `/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z`.
+- Staged topology installation from branch
+  `codex/account-execution-cutover` at commit `27428d462b1a` passed 142 Linux
+  smoke tests. It installed the two owner units and removed the retired Bybit
+  risk and combined-book reporter units without starting any unit or creating
+  a capture/deploy marker. This is maintenance staging, not an accepted full
+  deployment. The owner route files, demo-rule receipt, and fresh six-root
+  reset still do not exist.
+- The committed account-execution overhaul has one append-only account
   kernel, atomic cross-sleeve target aggregation/risk, deterministic scheduling
   and fault injection, sequence-aware L2 capture, a market-order execution twin,
   target-only LONG/CONTINUOUS/hedge/risk adapters, and fail-closed paper/demo
@@ -42,7 +44,10 @@ research decisions are in
   are deleted. The demo owner also recovers strict Bybit funding-settlement rows,
   and a new owner-serialized read-only receipt can reconcile stopped-journal
   target/order/fill lineage, fees, closed P&L, funding, and pre/post flatness.
-  This code is not deployed and the local checkout is uncommitted.
+  Commit `27428d462b1a` is published and staged on the stopped VPS. A prospective
+  bounded calibration driver and independent public clock-offset receipt are a
+  follow-up local change under validation; neither has run and no calibration
+  outcome has been viewed.
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now

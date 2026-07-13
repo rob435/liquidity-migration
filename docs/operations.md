@@ -14,6 +14,8 @@ scripts/ops.sh data-audit --venue both
 scripts/ops.sh overhaul-plan
 scripts/ops.sh overhaul-phase0
 scripts/ops.sh account-parity --help
+scripts/ops.sh clock-offset --execute --output /absolute/vps/path/clock-offset.json
+scripts/ops.sh demo-calibration --execute --help
 scripts/ops.sh venue-accounting --help
 scripts/ops.sh cutover-authority --help
 scripts/ops.sh test -q
@@ -27,6 +29,9 @@ scripts/ops.sh test -q
   The reset script still independently refuses mainnet credentials, concurrent
   resets, non-flat positions, open orders, and mismatched systemd credential
   files before it removes anything.
+- `clock-offset` and `demo-calibration` run on the VPS and require `--execute`.
+  The first writes a public-time receipt; the second publishes demo targets but
+  receives no API credentials and cannot bypass the account owner.
 - `deploy` refuses unless the first argument after the command is exactly
   `--execute`. The checked deploy script retains its own commit, test, config,
   credential, and service gates.
@@ -42,6 +47,8 @@ scripts/ops.sh test -q
 |---|---|---|
 | `status` | `scripts/verify_vps_live.sh` | Read-only VPS checkout, config, credential, service, and liveness checks. |
 | `account-parity` | `python -m liquidity_migration.kernel_parity` | Structural historical/paper/demo account-journal comparison with non-empty and hash checks; not full captured-tape acceptance. |
+| `clock-offset --execute` | VPS `scripts/capture_bybit_clock_offset.py` | Writes a self-hashed, NTP-gated VPS-vs-Bybit public clock receipt. |
+| `demo-calibration --execute` | VPS `scripts/run_demo_execution_calibration.py` | Emits the preregistered tiny target-only demo sequence through the account inbox; never direct venue execution. |
 | `twin-calibrate` | `scripts/calibrate_execution_twin.py` | Self-hashed market-order twin calibration from verified demo account/L2 tapes; exits nonzero until registered sample gates pass. |
 | `venue-accounting` | `scripts/reconcile_bybit_demo_accounting.py` | Owner-serialized, venue-read-only demo TRADE/closed-PnL/SETTLEMENT and flatness reconciliation against the stopped canonical journal. |
 | `cutover-authority` | `scripts/account_execution_cutover_authority.py` | Creates reviewed-evidence wrappers, an open assessment template, or the short-lived host/commit/evidence-bound deploy authorization. It never decides a non-machine-verifiable gate by itself. |
@@ -94,6 +101,9 @@ Calibrate only from a fresh demo epoch after actual target/order/ack/fill/P&L
 and raw L2 capture exist:
 
 ```bash
+scripts/ops.sh clock-offset --execute \
+  --output /absolute/vps/path/clock-offset.json
+
 scripts/ops.sh twin-calibrate \
   --account-root /path/to/demo-account-root \
   --market-capture-root /path/to/demo-capture-root \
@@ -104,6 +114,11 @@ scripts/ops.sh twin-calibrate \
 
 Paper startup consumes only a self-hashed receipt whose registered sample gate
 passed. The receipt does not authorize deployment.
+
+The optional bounded sample generator is separately preregistered in
+`docs/preregistration/account_execution_calibration_2026_07_13.md`. It supplies
+execution-twin observations efficiently but does not replace actual
+LONG/CONTINUOUS strategy-tape comparison.
 
 After the demo target set and venue are flat, stop producers, let the owner
 complete its final strict funding/position pass, write fresh health, and stop

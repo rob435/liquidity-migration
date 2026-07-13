@@ -206,7 +206,9 @@ def test_calibration_recovers_latency_fill_slippage_and_fee(tmp_path: Path) -> N
     assert receipt["queue_assumption"]["passive_queue_calibrated"] is False
 
     config = execution_twin_config_from_calibration(
-        receipt, max_decision_age_ns=250_000_000
+        receipt,
+        max_decision_age_ns=250_000_000,
+        require_registered_requirements=False,
     )
     assert config.latency.order_entry_ns == 2_000_000
     assert config.allow_partial_fills is True
@@ -268,7 +270,9 @@ def test_missing_clock_receipt_preserves_rtt_but_blocks_calibration_gate(
     assert receipt["execution_twin_gate_passed"] is False
     with pytest.raises(ValueError, match="sample gate"):
         execution_twin_config_from_calibration(
-            receipt, max_decision_age_ns=250_000_000
+            receipt,
+            max_decision_age_ns=250_000_000,
+            require_registered_requirements=False,
         )
 
 
@@ -371,6 +375,22 @@ def test_rehashed_receipt_cannot_override_failed_sample_gate(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="aggregate gate is inconsistent"):
         verify_calibration_receipt(forged)
+
+
+def test_rehashed_receipt_cannot_weaken_registered_requirements(tmp_path: Path) -> None:
+    account_root, capture_root = _build_demo_tapes(tmp_path)
+    receipt = calibrate_execution_twin(
+        account_root=account_root,
+        market_capture_root=capture_root,
+        expected_account_id=ACCOUNT_ID,
+        observed_ts_ns=2_000_000_000,
+        local_minus_exchange_ns=OFFSET_NS,
+        clock_offset_receipt_sha256="9" * 64,
+        requirements=_requirements(),
+    )
+
+    with pytest.raises(ValueError, match="weaken registered floors"):
+        verify_calibration_receipt(receipt, require_registered_requirements=True)
 
 
 def test_duplicate_capture_identity_is_rejected_before_linkage(tmp_path: Path) -> None:

@@ -10,9 +10,11 @@ import sys
 import time
 from pathlib import Path
 
+from liquidity_migration.clock_offset_receipt import verify_clock_offset_receipt
 from liquidity_migration.execution_twin_calibration import (
     CalibrationRequirements,
     calibrate_execution_twin,
+    require_decision_grade_calibration_requirements,
     write_calibration_receipt,
 )
 
@@ -25,14 +27,11 @@ def _clock_offset(path: str, *, now_ns: int, max_age_hours: float) -> tuple[int 
     value = json.loads(data)
     if not isinstance(value, dict):
         raise ValueError("clock-offset receipt must be a JSON object")
-    if not str(value.get("source") or "").strip():
-        raise ValueError("clock-offset receipt requires a source")
-    observed_ns = int(value.get("observed_ts_ns") or 0)
-    if observed_ns <= 0 or observed_ns > now_ns:
-        raise ValueError("clock-offset receipt has an invalid observation time")
-    if now_ns - observed_ns > max_age_hours * 3_600_000_000_000:
-        raise ValueError("clock-offset receipt is stale")
-    correction = int(value["local_minus_exchange_ns"])
+    correction = verify_clock_offset_receipt(
+        value,
+        now_ns=now_ns,
+        max_age_hours=max_age_hours,
+    )
     return correction, hashlib.sha256(data).hexdigest()
 
 
@@ -79,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             min_symbols=args.min_symbols,
             min_context_link_ratio=args.min_context_link_ratio,
         )
+        require_decision_grade_calibration_requirements(requirements)
         receipt = calibrate_execution_twin(
             account_root=args.account_root,
             market_capture_root=args.market_capture_root,

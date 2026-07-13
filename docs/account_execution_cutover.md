@@ -28,26 +28,20 @@ state and venue mutations are separately serialized by one reentrant manager
 lock. These are concurrency invariants under automated fault tests, not proof
 of host or venue behavior.
 
-The 2026-07-13 read-only VPS audit is materially worse than the prior narrative:
+The 2026-07-13 audit first found the old fleet active at clean commit
+`5f6d9986d935`, with both account owners absent. The demo key permission check
+passed and a read-only venue query was flat. Flat maintenance then began at
+`2026-07-13T22:53:17Z`: every project unit was stopped, a second venue query
+confirmed zero positions and zero regular/conditional orders, and the unit plus
+flatness evidence was retained under the host's mode-restricted cutover-evidence
+directory.
 
-- the host is clean at commit `5f6d9986d935` and its demo-key permission check
-  passes;
-- all four legacy demo/paper sleeve services and the retired Bybit risk mutator
-  are active;
-- both account-owner units are absent, as are both owner route files, the
-  capture/deploy gates, and a demo-rule receipt;
-- the remote reset dry-run inventoried 12 legacy generated targets and changed
-  nothing.
-
-A later read-only query during the same audit observed zero active demo
-positions, zero regular open orders, and zero conditional open orders. This is
-only a momentary maintenance precondition: five legacy services remain active
-and can change the venue after the observation. It does not satisfy the fresh
-post-reset or final-flatness gates.
-
-Do not execute that deployed reset: it is the pre-cutover script and cannot
-create the six new account roots. The current local checkout is uncommitted, so
-it is not a legitimate staged-install source.
+Staged topology installation of clean commit `27428d462b1a` passed 142 Linux
+smoke tests, installed both inactive owner units, and removed the retired risk
+and combined-book reporter units. It did not start a process or create either
+cutover marker. Both owner route files, the six fresh roots, demo-rule receipt,
+and all captured-tape gates remain absent. Therefore this is a valid stopped
+staging boundary, not deployment readiness or final-flatness evidence.
 
 The full acceptance gate remains open, and no deploy-authorization assessment
 or receipt has been issued:
@@ -290,6 +284,29 @@ The switch must be one maintenance transaction, not a rolling overlap:
     sample, calibrate the twin, and install the self-hashed passing calibration
     receipt in the paper route. Stop on a failed sample gate; do not lower a
     threshold after inspecting the result.
+
+    Natural LONG/CONTINUOUS events remain required for their strategy-parity
+    comparison, but they need not be abused to manufacture the execution-twin
+    sample count. The prospective bounded driver in
+    `docs/preregistration/account_execution_calibration_2026_07_13.md` publishes
+    one tiny target at a time through the same owner and event clock, holds no
+    credentials, and explicitly cannot satisfy LONG/CONTINUOUS parity:
+
+    ```bash
+    scripts/ops.sh demo-calibration --execute \
+      --account-root /opt/liquidity-migration/data/bybit-account-execution \
+      --inbox-root /opt/liquidity-migration/data/bybit-account-intents \
+      --demo-rules-file /etc/liquidity-migration/account-execution/demo-rules.json \
+      --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-events.jsonl \
+      --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-run.json \
+      --expected-commit "$(git rev-parse HEAD)" \
+      --plan-id demo-calibration-20260713-v1
+    ```
+
+    Add the preregistered `--funding-symbol BTCUSDT` and an explicit future
+    `--funding-close-not-before-ms` only when that timestamp was recorded from
+    the venue before the hold opened. Never improvise it after inspecting the
+    funding result.
 11. Start the paper owner first, verify fresh bound owner health, then start the
     corresponding paper producers. Collect paper tapes and construct the
     historical replay from the same recorded event clock and declared market
@@ -406,6 +423,9 @@ After the demo owner has captured actual data, create the receipt with a fresh,
 independently sourced clock-offset receipt:
 
 ```bash
+scripts/ops.sh clock-offset --execute \
+  --output /var/lib/liquidity-migration/cutover-evidence/clock-offset.json
+
 scripts/ops.sh twin-calibrate \
   --account-root /opt/liquidity-migration/data/bybit-account-execution \
   --market-capture-root /opt/liquidity-migration/data/bybit-account-market-capture \
@@ -438,6 +458,12 @@ the calibration gate cannot pass. Duplicate-link recovery lookups are excluded
 from latency samples: they prove idempotent venue ownership, not create-request
 timing. The response-envelope timestamp is an API-server boundary, not proof of
 matching-engine entry time.
+
+The clock receipt samples Bybit's unauthenticated `GET /v5/market/time` endpoint
+from the VPS and combines it with a required NTP-synchronized local clock. It
+selects the five lowest-RTT observations from 21 and refuses an estimated error
+above 50 ms or selected RTT above 250 ms. This bounds, but does not eliminate,
+the symmetric-path assumption in one-way latency estimates.
 
 Bybit depth is market-by-price, not market-by-order. It cannot identify passive
 queue position. The receipt therefore leaves passive queue calibration false

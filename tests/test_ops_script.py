@@ -58,6 +58,8 @@ def test_ops_help_is_read_only(help_args: list[str], tmp_path: Path) -> None:
     assert "never enables REAL_MONEY" in result.stdout
     assert "never auto-promoted" in result.stdout
     assert "account-parity" in result.stdout
+    assert "clock-offset" in result.stdout
+    assert "demo-calibration" in result.stdout
     assert "venue-accounting" in result.stdout
     assert "cutover-authority" in result.stdout
     assert not call_log.exists()
@@ -370,6 +372,65 @@ def test_ops_deploy_requires_first_argument_execute_and_routes_after_handshake(
     assert env_log.read_text(encoding="utf-8").splitlines() == [
         "deploy@example.test",
         "/opt/custom repo",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "script", "injected"),
+    [
+        (
+            "clock-offset",
+            "scripts/capture_bybit_clock_offset.py",
+            [],
+        ),
+        (
+            "demo-calibration",
+            "scripts/run_demo_execution_calibration.py",
+            ["--confirm-demo-calibration"],
+        ),
+    ],
+)
+def test_ops_remote_calibration_routes_require_execute_and_preserve_arguments(
+    command: str,
+    script: str,
+    injected: list[str],
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ssh = fake_bin / "ssh"
+    ssh.write_text("#!/bin/sh\nexec /bin/bash -s\n", encoding="utf-8")
+    ssh.chmod(0o755)
+    remote = tmp_path / "remote repo"
+    python = remote / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    _write_capture_command(python)
+    call_log = tmp_path / "call.bin"
+    env_log = tmp_path / "env.txt"
+    env = {
+        "PATH": f"{fake_bin}{os.pathsep}/usr/bin:/bin",
+        "SSH_TARGET": "operator@example.test",
+        "REPO_DIR": str(remote),
+        "CALL_LOG": str(call_log),
+        "ENV_LOG": str(env_log),
+    }
+
+    refused = _run_ops([command, "--output", "x"], env=env)
+    assert refused.returncode == 2
+    assert "first argument must be --execute" in refused.stderr
+    assert not call_log.exists()
+
+    executed = _run_ops(
+        [command, "--execute", "--output", "receipt with spaces"],
+        env=env,
+    )
+
+    assert executed.returncode == 0, executed.stderr
+    assert _read_nul_args(call_log) == [
+        script,
+        *injected,
+        "--output",
+        "receipt with spaces",
     ]
 
 

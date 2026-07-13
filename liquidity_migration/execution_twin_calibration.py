@@ -63,6 +63,134 @@ class CalibrationRequirements:
             raise ValueError("max_reference_error_bps must be finite and non-negative")
 
 
+DECISION_GRADE_CALIBRATION_REQUIREMENTS = CalibrationRequirements()
+_COUNT_REQUIREMENT_FIELDS = (
+    "min_feed_samples",
+    "min_target_events",
+    "min_order_commands",
+    "min_request_ack_samples",
+    "min_filled_orders",
+    "min_pnl_events",
+    "min_symbols",
+)
+
+
+def require_decision_grade_calibration_requirements(
+    requirements: CalibrationRequirements,
+) -> None:
+    """Require a contract at least as strong as the registered cutover floors."""
+
+    baseline = DECISION_GRADE_CALIBRATION_REQUIREMENTS
+    weakened = [
+        field_name
+        for field_name in _COUNT_REQUIREMENT_FIELDS
+        if getattr(requirements, field_name) < getattr(baseline, field_name)
+    ]
+    if requirements.min_context_link_ratio < baseline.min_context_link_ratio:
+        weakened.append("min_context_link_ratio")
+    if requirements.min_reference_match_ratio < baseline.min_reference_match_ratio:
+        weakened.append("min_reference_match_ratio")
+    if requirements.max_reference_error_bps > baseline.max_reference_error_bps:
+        weakened.append("max_reference_error_bps")
+    if weakened:
+        raise ValueError(
+            "execution-twin requirements weaken registered floors: " + ",".join(weakened)
+        )
+
+
+def _requirements_from_receipt(payload: Mapping[str, Any]) -> CalibrationRequirements:
+    raw = payload.get("requirements")
+    expected_fields = set(asdict(DECISION_GRADE_CALIBRATION_REQUIREMENTS))
+    if not isinstance(raw, Mapping) or set(raw) != expected_fields:
+        raise ValueError("execution-twin calibration requirements are malformed")
+    if any(type(raw.get(field_name)) is not int for field_name in _COUNT_REQUIREMENT_FIELDS):
+        raise ValueError("execution-twin calibration count requirements must be integers")
+    numeric_fields = expected_fields - set(_COUNT_REQUIREMENT_FIELDS)
+    if any(
+        isinstance(raw.get(field_name), bool)
+        or not isinstance(raw.get(field_name), (int, float))
+        for field_name in numeric_fields
+    ):
+        raise ValueError("execution-twin calibration ratio/error requirements must be numeric")
+    return CalibrationRequirements(**dict(raw))
+
+
+def _recomputed_sample_gate(
+    payload: Mapping[str, Any], requirements: CalibrationRequirements
+) -> dict[str, bool]:
+    counts = payload.get("sample_counts")
+    latency = payload.get("latency_ns")
+    inputs = payload.get("inputs")
+    if not isinstance(counts, Mapping) or not isinstance(latency, Mapping) or not isinstance(inputs, Mapping):
+        raise ValueError("execution-twin calibration gate inputs are malformed")
+
+    def count(mapping: Mapping[str, Any], key: str) -> int:
+        value = mapping.get(key)
+        if type(value) is not int or value < 0:
+            raise ValueError(f"execution-twin calibration count {key!r} is invalid")
+        return value
+
+    def distribution_count(key: str) -> int:
+        distribution = latency.get(key)
+        if not isinstance(distribution, Mapping):
+            raise ValueError(f"execution-twin calibration distribution {key!r} is invalid")
+        return count(distribution, "count")
+
+    def ratio(key: str) -> float:
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"execution-twin calibration ratio {key!r} is invalid")
+        normalized = float(value)
+        if not math.isfinite(normalized) or not 0.0 <= normalized <= 1.0:
+            raise ValueError(f"execution-twin calibration ratio {key!r} is invalid")
+        return normalized
+
+    clock_correction = inputs.get("local_minus_exchange_ns")
+    clock_hash = inputs.get("clock_offset_receipt_sha256")
+    has_clock_receipt = (
+        type(clock_correction) is int
+        and isinstance(clock_hash, str)
+        and len(clock_hash) == 64
+        and all(character in "0123456789abcdef" for character in clock_hash)
+    )
+    return {
+        "feed_samples": count(counts, "feed_latency") >= requirements.min_feed_samples,
+        "target_events": count(counts, "target_events") >= requirements.min_target_events,
+        "order_commands": count(counts, "order_commands") >= requirements.min_order_commands,
+        "request_ack_samples": (
+            count(counts, "request_ack_rtt") >= requirements.min_request_ack_samples
+        ),
+        "order_entry_samples": (
+            distribution_count("order_entry_clock_adjusted")
+            >= requirements.min_request_ack_samples
+        ),
+        "order_response_samples": (
+            distribution_count("order_response_clock_adjusted")
+            >= requirements.min_request_ack_samples
+        ),
+        "filled_orders": count(counts, "filled_orders") >= requirements.min_filled_orders,
+        "pnl_events": count(counts, "pnl_events") >= requirements.min_pnl_events,
+        "symbols": count(counts, "symbols") >= requirements.min_symbols,
+        "context_link_ratio": ratio("context_link_ratio") >= requirements.min_context_link_ratio,
+        "reference_match_ratio": (
+            ratio("reference_match_ratio") >= requirements.min_reference_match_ratio
+        ),
+        "slippage_samples": (
+            count(counts, "slippage_orders") >= requirements.min_filled_orders
+        ),
+        "clock_offset_receipt": has_clock_receipt,
+        "nonnegative_adjusted_feed_latency": (
+            ratio("negative_adjusted_feed_latency_ratio") <= 0.01
+        ),
+        "nonnegative_adjusted_order_entry_latency": (
+            ratio("negative_adjusted_order_entry_latency_ratio") <= 0.01
+        ),
+        "nonnegative_adjusted_order_response_latency": (
+            ratio("negative_adjusted_order_response_latency_ratio") <= 0.01
+        ),
+    }
+
+
 def _number(value: Any) -> float | None:
     try:
         output = float(value)
@@ -691,7 +819,11 @@ def calibrate_execution_twin(
     return receipt
 
 
-def verify_calibration_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
+def verify_calibration_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    require_registered_requirements: bool = False,
+) -> dict[str, Any]:
     payload = dict(receipt)
     if int(payload.get("schema_version", 0)) != CALIBRATION_SCHEMA_VERSION:
         raise ValueError("unknown execution-twin calibration schema")
@@ -703,12 +835,18 @@ def verify_calibration_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     ).hexdigest()
     if observed != expected:
         raise ValueError("execution-twin calibration receipt hash mismatch")
+    requirements = _requirements_from_receipt(payload)
+    if require_registered_requirements:
+        require_decision_grade_calibration_requirements(requirements)
     sample_gate = payload.get("sample_gate")
     if not isinstance(sample_gate, Mapping) or not sample_gate:
         raise ValueError("execution-twin calibration sample gate is missing")
     if any(value is not True and value is not False for value in sample_gate.values()):
         raise ValueError("execution-twin calibration sample gate values must be booleans")
-    gate_passed = all(value is True for value in sample_gate.values())
+    expected_gate = _recomputed_sample_gate(payload, requirements)
+    if dict(sample_gate) != expected_gate:
+        raise ValueError("execution-twin calibration sample gate does not reproduce")
+    gate_passed = all(value is True for value in expected_gate.values())
     if payload.get("execution_twin_gate_passed") is not gate_passed:
         raise ValueError("execution-twin calibration aggregate gate is inconsistent")
     return payload
@@ -741,11 +879,18 @@ def write_calibration_receipt(path: str | Path, receipt: Mapping[str, Any]) -> P
     return resolved
 
 
-def load_calibration_receipt(path: str | Path) -> dict[str, Any]:
+def load_calibration_receipt(
+    path: str | Path,
+    *,
+    require_registered_requirements: bool = True,
+) -> dict[str, Any]:
     value = json.loads(Path(path).expanduser().read_bytes())
     if not isinstance(value, dict):
         raise ValueError("execution-twin calibration receipt must be an object")
-    return verify_calibration_receipt(value)
+    return verify_calibration_receipt(
+        value,
+        require_registered_requirements=require_registered_requirements,
+    )
 
 
 def execution_twin_config_from_calibration(
@@ -755,10 +900,14 @@ def execution_twin_config_from_calibration(
     latency_quantile: str = "p50",
     slippage_quantile: str = "p50",
     require_gate: bool = True,
+    require_registered_requirements: bool = True,
 ) -> ExecutionTwinConfig:
     """Construct the twin config while keeping stress quantiles explicit."""
 
-    payload = verify_calibration_receipt(receipt)
+    payload = verify_calibration_receipt(
+        receipt,
+        require_registered_requirements=require_registered_requirements,
+    )
     if require_gate and payload.get("execution_twin_gate_passed") is not True:
         raise ValueError("execution-twin calibration sample gate has not passed")
     if latency_quantile not in {"p50", "p75", "p95", "p99"}:
