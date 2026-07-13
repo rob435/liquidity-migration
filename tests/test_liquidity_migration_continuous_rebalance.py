@@ -287,10 +287,9 @@ def test_plan_rebalance_resizes_preserves_inverse_vol_multiplier() -> None:
     assert plans[0].delta_notional_usdt == pytest.approx(40.0)
 
 
-def test_plan_rebalance_resizes_never_touches_snipe_rows() -> None:
-    # Regression (audit 2026-06-12 round 3): sniper fills are deliberately
-    # quarter-size and lifecycle-managed by the sniper — the daily rebalance
-    # must never upsize them to base notional.
+def test_plan_rebalance_resizes_excludes_archived_snipe_rows() -> None:
+    # Historical adverse-limit children remain readable but must never be
+    # pulled into generic rebalance sizing after their runtime was removed.
     plans = plan_continuous_rebalance_resizes(
         [{"trade_id": "lm-en-x-ABCUSDT-1-snipe", "symbol": "ABCUSDT", "qty": "0.5"}],
         price_by_symbol={"ABCUSDT": 100.0},

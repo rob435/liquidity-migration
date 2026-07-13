@@ -48,15 +48,17 @@ on:
       - "scripts/vps_restore_ssh_access.sh"
       - "scripts/vps_rescue_restore_ssh_access.sh"
       - "scripts/wait_for_vps_recovery_and_deploy.sh"
-      - "scripts/run_bybit_demo_ws_risk_engine.sh"
       - "scripts/run_bybit_long_demo_event_engine.sh"
       - "scripts/run_bybit_continuous_demo_event_engine.sh"
+      - "scripts/run_account_execution_service.sh"
+      - "scripts/run_account_paper_execution_service.sh"
       - "scripts/run_continuous_hedge.sh"
       - "scripts/run_continuous_hedge.py"
       - "scripts/check_bybit_order_permissions.py"
       - "scripts/check_demo_liveness.py"
       - "scripts/run_continuous_rmom_refresh.sh"
       - "scripts/precompute_residual_momentum.py"
+      - "scripts/check_residual_momentum_gate.py"
       # The checked deploy runs this smoke-test subset on the VPS before it
       # restarts services. Test-only fixes to that gate must trigger a redeploy.
       - "tests/test_runtime_scripts.py"
@@ -71,12 +73,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Run checked deployment or read-only verification.
+        description: Run checked deployment, safe install preflight, or read-only verification.
         required: true
         default: verify
         type: choice
         options:
           - verify
+          - install-preflight
           - deploy
           - wait-deploy
       wait_timeout_seconds:
@@ -172,6 +175,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          EXPECTED_COMMIT="$GITHUB_SHA" \
+          EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
+          SSH_TARGET="$VPS_USER@$VPS_HOST" \
+          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
+          scripts/deploy_vps_live.sh
+
+      - name: Install current topology without authorization or startup
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'install-preflight'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          INSTALL_PREFLIGHT_ONLY=1 \
           EXPECTED_COMMIT="$GITHUB_SHA" \
           EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
           SSH_TARGET="$VPS_USER@$VPS_HOST" \

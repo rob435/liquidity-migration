@@ -47,7 +47,11 @@ def recover_snipe_trade_id_from_link(
     max_seq: int = 3,
     logger: logging.Logger | None = None,
 ) -> str | None:
-    """Recover the exact live snipe trade id from a hashed snipe orderLinkId."""
+    """Decode archived adverse-limit links for read-only ledger attribution.
+
+    The future runtime does not create these orders. Both historical hash widths
+    remain supported so old fills can still be reconciled after a rebuild.
+    """
     match = re.search(r"-x([0-9a-z]{3,4})$", str(link))
     if not match:
         return None

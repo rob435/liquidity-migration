@@ -27,7 +27,7 @@ The store guarantees:
   WS pool starts catching up.
 
 The output schema of ``get_klines`` is intentionally identical to the schema
-``_download_recent_1h_klines`` returns (``_empty_klines`` in event_demo.py):
+``_download_recent_1h_klines`` returns (``_empty_klines`` in event_demo_data.py):
 columns ``ts_ms``, ``symbol``, ``open``, ``high``, ``low``, ``close``,
 ``volume_base``, ``turnover_quote``, ``source``. The integration in
 ``_download_recent_1h_klines`` is then a drop-in: hit the store for covered

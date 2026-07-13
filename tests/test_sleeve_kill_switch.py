@@ -172,7 +172,7 @@ def test_hedge_lifecycle_off_verify_fails_when_service_active(tmp_path: Path) ->
 
 def test_unknown_liquidity_migration_unit_is_cleaned_and_verified(tmp_path: Path) -> None:
     rc, calls, err = _run(tmp_path, """
-        systemctl enable --now liquidity-migration-bybit-risk.service
+        systemctl enable --now liquidity-migration-account-execution.service
         lm_verify_no_unknown_liqmig_units
         systemctl enable --now liquidity-migration-stale-alpha.service
         if lm_verify_no_unknown_liqmig_units; then

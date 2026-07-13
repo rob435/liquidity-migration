@@ -1,6 +1,6 @@
 # Research Program State
 
-Last updated: 2026-07-12.
+Last updated: 2026-07-13.
 
 This is a descriptive live operating page, not research policy. Durable
 research decisions are in
@@ -11,59 +11,60 @@ research decisions are in
 
 | Sleeve | Mode | Current state |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | On and flat after the canonical-journal migration boundary; the migrated TUSDT demo row is closed and the paper row is retained as non-open history |
-| `LongV11aDivWeekendVol` | Bybit demo + paper | On and flat after the canonical-journal migration boundary |
+| `continuous_ensemble_v2` | Bybit demo + paper | Legacy sleeve units active on the VPS; account-owner cutover not installed |
+| `LongV11aDivWeekendVol` | Bybit demo + paper | Legacy sleeve units active on the VPS; account-owner cutover not installed |
+| Shared account execution | demo + paper | Owner units and route files absent; no current cutover tape |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
-- Direct Bybit demo snapshot at `2026-07-12T22:48Z`: account-wide equity
-  `$10,027.35`, zero positions, zero open orders, and zero venue exposure. The
-  hourly report preview independently agrees: no open Bybit positions, one
-  TUSDT open/close change in the last hour, and `+$3.15` realized.
-- Canonical execution-journal release `6f2bde773` is deployed and checked. The
-  local and GitHub full gates each passed `2,768` tests with one skip; the
-  exact-commit VPS verifier passed after the migration reset. Mainnet remains
-  categorically disabled.
-- Execution history is now the hash-chained, append-only
-  `canonical_journal/events.jsonl`. Trade/order Parquet, TCA, Telegram, and
-  reconciliation state are replayable projections. The lifecycle reducer is
-  shared by historical, paper, and demo modes, and venue executions retain
-  per-fill ID, quantity, price, fee, venue time, latency, and deferred
-  1/5/30-minute markouts.
-- The `2026-07-12T22:47:28Z` migration boundary archived the old generated views
-  at
-  `data/_archive/ledger-reset-20260712T224728Z-canonical-journal-migration.tar.gz`
-  (SHA-256
-  `2dfc39ef6262007cd42cb5f0bf401ba208dcf32472636a5368f706d1fc6cd748`).
-  It retained the journals, appended verified-flat facts, rebuilt projections,
-  and restored all nine previously active units.
-- The demo-only 10x execution-stress release remains deployed and independently
-  verified. This is execution-stress evidence, not permission or evidence for
-  mainnet use.
-- CONTINUOUS demo and paper now make scale explicit: the registered 2%-of-equity
-  base is multiplied by `NOTIONAL_MULTIPLIER=10`, while
-  `ENTRY_LEVERAGE=10` supplies exchange margin. The first changes order quantity;
-  the second alone would not. This prospective epoch is for lifecycle, venue,
-  fill, hedge, and reporting stress. Its P&L is not 1x alpha validation.
-- A bounded XRPUSDT demo probe directly established the current small-order
-  boundary: 4.65 XRP (`$5.114535`) was rejected as off-grid, 4.5 XRP
-  (`$4.94955`) was rejected below the 5 USDT minimum, and 4.6 XRP filled and
-  reduce-only closed at `$5.05954` with 10x leverage. Total fees were
-  `$0.00556550`; the account and all services finished flat/healthy. Receipt:
-  `docs/bybit_demo_min_order_probe_2026-07-12.md`.
-- The final clean epoch is archived at
-  `data/_archive/ledger-reset-20260712T204249Z-clean-slate-hedge-verified.tar.gz`
-  (SHA-256 `e256e5b709ff6443b6b888c36bc53c873c731b63632593abb90de082ecd5cb01`).
-  The archive contains the bounded live hedge smoke evidence; no smoke row was
-  left in the forward ledgers.
-- The hourly operator report now renders one compact human-readable portfolio
-  snapshot. The post-reset print-only receipt says 0 positions, all four systems
-  on, no recent position changes, and no action needed. Telegram transport still
-  returned HTTP 429 during the two smoke adjustment notifications after the
-  earlier flood. There was no retry loop; successful live delivery remains
-  unverified until Telegram's server-side cooldown expires.
-- The Bybit depth and liquidation collectors are active and fresh. They are
-  forward context/shadow data, not historical alpha evidence.
+- Read-only VPS audit on 2026-07-13: clean checkout `5f6d9986d935`; all four
+  legacy demo/paper sleeve services and `liquidity-migration-bybit-risk.service`
+  are active. Both account-owner units are `not-found`. The two owner route
+  files, demo-rule receipt, capture marker, and deploy-ready receipt are absent.
+  The demo-key permission probe passes. A later read-only query in the same
+  audit observed zero active demo positions, zero regular open orders, and zero
+  conditional open orders. That is a transient precondition, not cutover
+  evidence: the five legacy services remain active and can change it.
+- The remote all-sleeve reset dry-run was repeated after the flatness query. It
+  still found 12 legacy generated targets, would quiesce 13 units, and made no
+  changes. Do not execute that deployed pre-cutover reset: it cannot create or
+  validate the six account-owner roots.
+- A local, unreleased account-execution overhaul now has one append-only account
+  kernel, atomic cross-sleeve target aggregation/risk, deterministic scheduling
+  and fault injection, sequence-aware L2 capture, a market-order execution twin,
+  target-only LONG/CONTINUOUS/hedge/risk adapters, and fail-closed paper/demo
+  owner launchers. Component lifecycle clocks and protection now start from
+  attributable confirmed fills, not accepted targets or decision prices;
+  account/symbol reduction P&L is counted once per canonical batch. Telegram
+  separates venue position truth from local reconstruction and labels
+  L2-midpoint P&L as an estimate. The runtime now requires one explicit
+  `demo|paper` environment, and the unreachable sleeve-direct execution modules
+  are deleted. The demo owner also recovers strict Bybit funding-settlement rows,
+  and a new owner-serialized read-only receipt can reconcile stopped-journal
+  target/order/fill lineage, fees, closed P&L, funding, and pre/post flatness.
+  This code is not deployed and the local checkout is uncommitted.
+- Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
+  provisional triggers now consume risk/execution feedback through a persistent
+  common-kernel session before later decisions. Historical, paper, and demo now
+  share an ordered hash-chained event-clock boundary and callback time. Their
+  arrival/selection adapters are not yet full strategy parity. CONTINUOUS
+  adverse-limit mode and LONG waits beyond 24 hours remain post-run replay.
+- The cutover acceptance gate is open: no fresh cutover-specific demo-rule
+  receipt, fresh demo/paper account roots, actual target/order/fill/P&L tape,
+  clock-offset receipt, passing execution-twin calibration, venue-accounting
+  receipt, or full historical/paper/demo comparison exists. The paper owner refuses startup
+  without a passing calibration. Full deploy now requires a short-lived,
+  mode-`0600` `account-execution-deploy-ready` authorization receipt and
+  verifies its self-hash, host, exact clean commit, registered gate set, and
+  evidence bindings before checkout. No such receipt has been issued.
+- The owner reports that the Strategy Overhaul master plan is currently running
+  on the big PC for alpha research. That workload is separate from this
+  execution cutover; no big-PC result or artifact has been ingested or judged in
+  this workspace, and it grants no deployment authority.
+- The 2026-07-12 flatness snapshots, reset archives, XRP minimum-order probe,
+  hedge smoke, and commit `6f2bde773` statements below are historical receipts.
+  They do not describe the currently audited VPS checkout or satisfy this new
+  account-owner cutover.
 - An external liveness dead-man URL is still not provisioned. The on-box timer
   works, but an off-box heartbeat should be added before any mainnet discussion.
 
@@ -99,11 +100,20 @@ loss budget, or reliable component attribution was unjustified.
 - Portfolio: max 25 active shorts, max 5 new per cycle, BTC+ETH hedge, BTC-vol
   regime, daily rebalance off.
 - Exit: component TP12 and durable 24-hour max hold.
-- Disabled: sniper, fixed/server stop, left-decile, stop-approach, failed-fade,
-  breakeven, re-entry cooldown, portfolio heat overlay, account drawdown overlay.
+- Removed from the future runtime: the demo-only adverse-limit add-on. Disabled:
+  fixed/server stop, left-decile, stop-approach, failed-fade, breakeven,
+  re-entry cooldown, portfolio heat overlay, account drawdown overlay.
 
-Sniper is pinned off in demo, paper, deploy, verify, and recovery. Cleanup still
-handles legacy or late sniper fills while new sniper entries remain disabled.
+The adverse-limit config, placement, cleanup, notification, CLI, launcher and
+unit wiring are absent from the future target-only runtime. Historical links and
+ledger rows remain readable for attribution. This cleanup deletion is safe only
+behind the account-owner startup gates: a new journal requires venue-flat
+positions and zero regular or conditional orders; restarts accept only exact
+journal-owned working orders or verified journal-backed native protection.
+The TP12 and max-hold runtime now anchor to confirmed fill VWAP/time. This is an
+intentional forward-runtime semantic correction, not a byte-parity refactor;
+deployment requires a new archived/reset demo-paper epoch and fresh acceptance
+evidence.
 
 ## Hedge availability and limits
 
@@ -145,7 +155,7 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
   idiosyncratic 1000TAGUSDT squeeze and is not a substitute for the registered
   ex-ante loss-budget or granular adverse-state work.
 
-## Deployed safety release
+## Historical deployed safety release
 
 - Side- and component-aware WS risk reconciliation, orphan adoption, side-flip
   handling, false-empty protection, quantity-conserving Closed-PnL allocation,
@@ -168,13 +178,15 @@ handles legacy or late sniper fills while new sniper entries remain disabled.
   without pretending funding is present.
 - LONG selected-entry rejections are durable; deterministic alerts are
   restart-safe and rate-limited by stable rejection class.
-- `scripts/ops.sh` is the one operator surface for status, reconcile, equity,
-  reset, research plans, tests, and checked deploy.
+- The current local `scripts/ops.sh` surface covers status, structural
+  account-journal parity, equity, reset, research plans, tests, and checked
+  deploy. Its obsolete sleeve-projection reconcile routes are removed; the
+  deployed release remains unchanged until an authorized cutover.
 - Continuous hedge target reconciliation is five-minute and fail-loud on stale
   non-flat state; the source tape is self-describing and hash-bound to its
   official current-object summary.
 
-## Clean ledger boundary
+## Historical clean ledger boundary
 
 - The `2026-07-12T22:47:28Z` all-sleeve reset is the canonical migration
   boundary. It first refused while a real TUSDT demo short and its TP order were
@@ -323,11 +335,15 @@ Strategy-overhaul status is still synthetic and outcome blind:
 
 ## Next actions
 
-1. Let both sleeves accrue a post-fix forward sample; reconcile after meaningful
-   fills or any VPS/data change.
-2. On the larger machine after 2026-07-12, refresh/verify both full-PIT roots and
-   run the frozen tail-survival matrix. A pass only authorizes a new shadow
-   review; it does not change the live profile.
+1. After an authorized account-owner cutover, capture actual historical, paper,
+   and demo target/account journals through meaningful decisions and fills.
+   Run structural account parity and the separate venue-rule, captured-tape,
+   scheduler, and immutable P&L checks in the cutover runbook; do not substitute
+   the retired sleeve-projection reconciler.
+2. Let the owner-run Strategy Overhaul master plan continue on the big PC without
+   coupling it to this VPS cutover. Ingest its immutable receipts only after the
+   run finishes; a positive research result still does not change the live
+   profile or authorize deployment.
 3. Build and audit granular datasets before running the adverse-state study.
    Do not infer missing sub-hour data from 1h bars.
 4. Preserve the verified local `NOT_READY` Phase-0 bundle above as diagnostic
@@ -336,8 +352,8 @@ Strategy-overhaul status is still synthetic and outcome blind:
    `scripts/ops.sh overhaul-plan`
    for the shallow preflight and `scripts/ops.sh overhaul-phase0` for a new
    content-addressed inventory after the roots are refreshed. The remaining
-   seven-day Binance gap is 2026-07-03..09. No big-PC Phase-0 bundle has run.
-   Big-PC location does not make a receipt authoritative; its artifacts must
+   seven-day Binance gap is 2026-07-03..09. No new big-PC result has been
+   ingested here. Big-PC location does not make a receipt authoritative; its artifacts must
    pass the same internal re-execution checks, while upstream authenticity and
    canonical root lineage remain separate evidence requirements.
    Non-executable finite child templates and the proposed v4 six-artifact schema

@@ -1,26 +1,23 @@
 """Periodic target-hedge runner for the continuous demo book — BTC+ETH two-factor form.
 
-Computes the current two-leg hedge target (parity-tested live twin of the Stage-B
-engine leg, receipts continuous-hedge-{upgrade,2f-engine}-2026-06-10.md) from the
-warm-start series + realized live book days, and either logs it (dry-run, default)
-or submits the per-leg resizes through the REST private client into the
-continuous-addon ledger root (adopted by the risk service).
+Computes the current two-leg hedge target from the warm-start series and the
+canonical account state. Dry-run prints the decision; ``--submit`` publishes an
+absolute target batch to the single account owner. This process never calls the
+venue private API and never writes a compatibility trade ledger.
 
-Demo only. Dry-run is the safe default; --submit requires CONFIRM_DEMO_ORDERS=1 and
-demo credentials (the central order-submit guard hard-refuses REAL_MONEY=true), and
-is additionally blocked from ADDING hedge exposure while the warm-start is stale
-(all-reduce-only resizes still proceed — trimming a hedge is risk-reducing).
+Demo only. Dry-run is the safe default. Publishing is blocked from increasing
+hedge exposure while the warm-start is stale; risk-reducing targets still proceed.
 HEDGE_MODE=btc falls back to the single-leg WP3 form.
 
-Exit-code contract (paging): an ARMED (--submit) run that is blocked or fails —
-any submit_blocked_* status, submit_failed, or submit_partial — exits NONZERO, so
+Exit-code contract (paging): an ARMED (``--submit``) run that is blocked or whose
+target publication fails exits NONZERO, so
 the systemd oneshot lands in `failed` and the liveness watchdog pages the
 operator. Dry-run statuses and genuine no-action runs always exit 0. (Before
 2026-06-12 a blocked armed run exited 0 and the book sat unhedged silently.)
 
 Usage:
     .venv/bin/python scripts/run_continuous_hedge.py --venue bybit            # dry-run
-    SUBMIT_HEDGE=1 CONFIRM_DEMO_ORDERS=1 .venv/bin/python scripts/run_continuous_hedge.py --venue bybit --submit
+    SUBMIT_HEDGE=1 .venv/bin/python scripts/run_continuous_hedge.py --venue bybit --submit
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -40,144 +36,227 @@ sys.path.insert(0, str(REPO))
 
 import polars as pl  # noqa: E402
 
-from liquidity_migration.bybit import validate_order_submit_allowed  # noqa: E402
+from liquidity_migration.account_intent_client import (  # noqa: E402
+    AccountTargetPublisher,
+    component_target_key,
+    publish_exit_first_target_requests,
+    requested_target,
+)
+from liquidity_migration.account_service import SleeveAdapterKind  # noqa: E402
+from liquidity_migration.account_route import AccountRoute, require_account_route  # noqa: E402
+from liquidity_migration.account_owner_health import (  # noqa: E402
+    require_recent_account_owner_health,
+)
+from liquidity_migration.account_strategy_state import (  # noqa: E402
+    canonical_strategy_trade_rows,
+    target_reservation_rows,
+)
 from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
     HEDGE_SYMBOL,
     HEDGE_SYMBOL_2,
     ContinuousHedgeConfig,
     HedgeDecision2F,
-    build_hedge_trade_row,
     compute_hedge_decision,
     compute_hedge_decision_2f,
-    extend_with_live_days,
-    hedge_order_link_id,
     load_warmstart_2f,
 )
-from liquidity_migration.storage import read_dataset, write_dataset  # noqa: E402
 
-PRIMARY_STRATEGY_ID = "continuous_fade_v2"
 MAX_WARMSTART_STALE_DAYS = 3
 
 
 @dataclass(frozen=True, slots=True)
 class LiveBookState:
-    live_unit_by_day: dict[str, float]
     gross_short_frac: float
     gross_short_frac_known: bool
     gross_short_frac_source: str
 
 
-def _utc(ts_ms: int) -> str:
-    return datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc).date().isoformat()
+@dataclass(frozen=True, slots=True)
+class HedgeDesiredTarget:
+    """Absolute account-kernel target; never an order-side instruction."""
+
+    symbol: str
+    target_notional_usdt: float
+    reason: str
+    plan: object | None = None
+
+
+def _publish_hedge_target_batch(
+    targets: list[HedgeDesiredTarget],
+    *,
+    cfg: ContinuousHedgeConfig,
+    route: AccountRoute,
+    now_ms: int,
+    leverage: float,
+) -> dict[str, object]:
+    """Publish all hedge legs atomically to the single account owner."""
+
+    batch_id = f"hedge-target/{cfg.strategy_id}/{now_ms}"
+    intents = []
+    queued_targets: list[dict[str, object]] = []
+    for target in sorted(targets, key=lambda item: item.symbol):
+        symbol = target.symbol.upper()
+        component_id = symbol.removesuffix("USDT").lower()
+        target_key = component_target_key(
+            sleeve=SleeveAdapterKind.HEDGE,
+            strategy_id=cfg.strategy_id,
+            component_id=component_id,
+            symbol=symbol,
+        )
+        plan = target.plan
+        metadata = {
+            "source": "continuous_hedge_target_runner",
+            "target_notional_usdt": float(target.target_notional_usdt),
+        }
+        if plan is not None:
+            metadata.update(
+                {
+                    "planner_side": str(getattr(plan, "side", "")),
+                    "planner_reduce_only": bool(getattr(plan, "reduce_only", False)),
+                    "planner_delta_notional_usdt": float(getattr(plan, "delta_notional_usdt", 0.0)),
+                }
+            )
+        intents.append(
+            requested_target(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                decision_key=f"{batch_id}/{symbol}",
+                target_key=target_key,
+                strategy_id=cfg.strategy_id,
+                component_id=component_id,
+                symbol=symbol,
+                signed_notional_usdt=max(float(target.target_notional_usdt), 0.0),
+                leverage=leverage,
+                reason=target.reason,
+                metadata=metadata,
+            )
+        )
+        queued_targets.append(
+            {
+                "symbol": symbol,
+                "target_notional_usdt": max(float(target.target_notional_usdt), 0.0),
+                "target_key": target_key,
+            }
+        )
+    publisher = AccountTargetPublisher(route)
+    exits = [
+        intent
+        for intent in intents
+        if float(intent.intent.signed_notional_usdt) == 0.0
+    ]
+    nonzero = [
+        intent
+        for intent in intents
+        if float(intent.intent.signed_notional_usdt) != 0.0
+    ]
+    publication = publish_exit_first_target_requests(
+        publisher,
+        batch_prefix=batch_id,
+        exit_intents=exits,
+        entry_intents=nonzero,
+        created_ts_ns=now_ms * 1_000_000,
+    )
+    if publication.errors:
+        details = "; ".join(
+            f"{item.stage}:{item.target_key}:{item.error_type}:{item.message}"
+            for item in publication.errors
+        )
+        raise OSError(f"hedge target publication failed: {details}")
+    request_ids = [*publication.exit_request_ids]
+    if publication.entry_request_id:
+        request_ids.append(publication.entry_request_id)
+    if not request_ids:
+        raise RuntimeError("hedge target publication produced no durable request")
+    return {
+        "request_id": request_ids[-1],
+        "request_ids": request_ids,
+        "batch_id": batch_id,
+        "target_count": len(intents),
+        "targets": queued_targets,
+    }
 
 
 def _float(value: object, default: float = 0.0) -> float:
     try:
-        out = float(value)
+        out = float(str(value))
     except (TypeError, ValueError):
         return default
     return out if out == out and out not in (float("inf"), float("-inf")) else default
 
 
-def _is_short_trade(row: dict[str, object]) -> bool:
-    side = str(row.get("side") or row.get("trade_side") or "").strip().lower()
-    if side in {"long", "buy"}:
-        return False
-    return side in {"", "short", "sell"}
+def _current_account_hedge_qty(
+    account_root: Path,
+    *,
+    strategy_id: str,
+    symbol: str = HEDGE_SYMBOL,
+) -> float:
+    """Read the accepted hedge target, never a sleeve compatibility ledger."""
 
-
-def _is_long_hedge_trade(row: dict[str, object]) -> bool:
-    side = str(row.get("side") or row.get("trade_side") or "").strip().lower()
-    return side in {"long", "buy"}
-
-
-def _live_book_state(
-    primary_root: Path, primary_dataset: str, cycles_dataset: str | None = None
-) -> LiveBookState:
-    """Return live unit returns and current gross short exposure from the live ledger.
-
-    Conservative when the live book is empty (fresh deploy): no live days, gross_short
-    falls back to the 0.5 reference only when exposure is unknown. A present ledger
-    with no open rows is a known flat book and sizes the hedge to zero.
-
-    A trades dataset with NO rows ever is disambiguated via the sibling cycles
-    dataset: a sleeve that writes cycle heartbeats but has never traded is
-    demonstrably alive AND flat (gross_short=0.0, known). Without this, a
-    rebuilt/never-traded book read as "unknown" 0.5 and the armed hedge would BUY
-    against a flat book the day it unblocked (audit 2026-06-12).
-    """
-    if cycles_dataset is None:
-        cycles_dataset = primary_dataset.replace("_trades", "_cycles")
-    try:
-        trades = read_dataset(primary_root, primary_dataset)
-    except (FileNotFoundError, OSError):
-        return LiveBookState({}, 0.5, False, "ledger_unavailable")
-    if trades.is_empty() or "status" not in trades.columns:
-        try:
-            cycles = read_dataset(primary_root, cycles_dataset)
-        except (FileNotFoundError, OSError):
-            cycles = None
-        if cycles is not None and not cycles.is_empty():
-            return LiveBookState({}, 0.0, True, "ledger_present_no_rows")
-        return LiveBookState({}, 0.5, False, "ledger_empty_or_missing_status")
-    open_now = trades.filter(pl.col("status") == "open")
-    if open_now.is_empty():
-        return LiveBookState({}, 0.0, True, "flat")
-    rows = [row for row in open_now.to_dicts() if _is_short_trade(row)]
-    if not rows:
-        return LiveBookState({}, 0.0, True, "no_open_shorts")
-    if "notional_weight" in open_now.columns:
-        gross = sum(abs(_float(row.get("notional_weight"))) for row in rows)
-        if gross > 0.0:
-            return LiveBookState({}, gross, True, "notional_weight")
-    if "notional_usdt" in open_now.columns and "equity_usdt" in open_now.columns:
-        # Every row's equity_usdt is a snapshot of the SAME netted account at
-        # entry, so a row missing it (legacy snipe fills / adopted rows written
-        # before the round-3 stamping fixes) borrows the median of the known
-        # ones — ONE un-stamped row previously flipped the whole book state to
-        # unknown and blocked the armed hedge (solo sweep 2026-06-12 hardening;
-        # rows with unknown NOTIONAL still block, that exposure is truly
-        # unmeasured).
-        known_equities = sorted(
-            eq for eq in (_float(row.get("equity_usdt")) for row in rows) if eq > 0.0
-        )
-        fallback_equity = known_equities[len(known_equities) // 2] if known_equities else 0.0
-        gross = 0.0
-        valid = 0
-        for row in rows:
-            notional = abs(_float(row.get("notional_usdt")))
-            equity = _float(row.get("equity_usdt")) or fallback_equity
-            if notional <= 0.0 or equity <= 0.0:
-                continue
-            gross += notional / equity
-            valid += 1
-        if valid == len(rows):
-            return LiveBookState({}, gross, True, "notional_over_equity")
-        if valid > 0:
-            return LiveBookState({}, 0.5, False, "partial_notional_over_equity")
-    gross_short_frac = 0.5
-    # Live realized per-unit book days are not reconstructed here (the daily-MTM
-    # ledger is the rmom/forward job's domain); the warm-start carries the beta
-    # window. Live-day extension is wired for when a daily book-return feed exists.
-    return LiveBookState({}, gross_short_frac, False, "unknown")
-
-
-def _current_hedge_qty(data_root: Path, trades_dataset: str, symbol: str = HEDGE_SYMBOL) -> float:
-    try:
-        trades = read_dataset(data_root, trades_dataset)
-    except (FileNotFoundError, OSError):
-        return 0.0
-    if trades.is_empty() or "status" not in trades.columns or "symbol" not in trades.columns:
-        return 0.0
-    open_rows = trades.filter(
-        (pl.col("status") == "open")
-        & (pl.col("symbol") == symbol)
+    rows = canonical_strategy_trade_rows(
+        account_root,
+        sleeve=SleeveAdapterKind.HEDGE.value,
+        strategy_ids=(strategy_id,),
     )
+    reserved = target_reservation_rows(rows)
+    if reserved.is_empty():
+        return 0.0
     qty = 0.0
-    for row in open_rows.to_dicts():
-        if _is_long_hedge_trade(row):
-            qty += abs(_float(row.get("qty")))
+    for row in reserved.filter(pl.col("symbol") == symbol).to_dicts():
+        qty += max(_float(row.get("signed_qty")), 0.0)
     return qty
+
+
+def _pending_account_hedge_symbols(
+    account_root: Path,
+    *,
+    strategy_id: str,
+) -> set[str]:
+    """Accepted hedge targets that must not receive an unchanged refresh."""
+
+    rows = canonical_strategy_trade_rows(
+        account_root,
+        sleeve=SleeveAdapterKind.HEDGE.value,
+        strategy_ids=(strategy_id,),
+    )
+    if rows.is_empty() or "status" not in rows.columns or "symbol" not in rows.columns:
+        return set()
+    return {
+        str(symbol).upper()
+        for symbol in rows.filter(pl.col("status") == "target_pending")["symbol"].to_list()
+    }
+
+
+def _account_continuous_book_state(
+    account_root: Path,
+    *,
+    equity_usdt: float,
+) -> LiveBookState:
+    """Size hedge exposure from canonical CONTINUOUS targets.
+
+    Realized daily return extension remains a research-data concern, but open
+    gross cannot come from the disabled sleeve ledger during account cutover.
+    """
+
+    rows = canonical_strategy_trade_rows(
+        account_root,
+        sleeve=SleeveAdapterKind.CONTINUOUS.value,
+    )
+    reserved = target_reservation_rows(rows)
+    short_targets = (
+        reserved.filter(pl.col("side") == "short")
+        if not reserved.is_empty()
+        else reserved
+    )
+    gross_notional = sum(
+        abs(_float(row.get("notional_usdt")))
+        for row in short_targets.to_dicts()
+    )
+    if equity_usdt <= 0.0:
+        return LiveBookState(0.0, False, "account_target_equity_unavailable")
+    return LiveBookState(
+        gross_notional / equity_usdt,
+        True,
+        "account_kernel_desired_targets",
+    )
 
 
 def _warmstart_last_date(path: Path) -> date | None:
@@ -219,376 +298,84 @@ def _latest_close(primary_root: Path, symbol: str) -> float:
 def _plan_json(plan) -> dict | None:
     if plan is None:
         return None
-    return {"symbol": plan.symbol, "side": plan.side, "qty": round(plan.qty, 6),
-            "reduce_only": plan.reduce_only, "reason": plan.reason,
-            "current_notional_usdt": round(plan.current_notional_usdt, 2),
-            "target_notional_usdt": round(plan.target_notional_usdt, 2),
-            "delta_notional_usdt": round(plan.delta_notional_usdt, 2)}
-
-
-# Per-run instrument-filter memo (at most 2 symbols/run; the daily oneshot exits
-# after one pass, so this never goes stale).
-_INSTRUMENT_FILTERS_CACHE: dict[str, dict[str, float]] = {}
-
-
-def _instrument_filters(symbol: str, cache_root: Path) -> dict[str, float]:
-    """qtyStep / minOrderQty / minNotionalValue for one symbol.
-
-    Reuses the demo engine's cached instruments fetch (``_demo_instruments``:
-    normalised Bybit get_instruments_info behind a 1h parquet TTL at
-    ``cache_root/.cache/event_demo_instruments``). The continuous demo daemon keeps
-    that cache warm at the primary root, so this is usually a local parquet read.
-    """
-    cached = _INSTRUMENT_FILTERS_CACHE.get(symbol)
-    if cached is not None:
-        return cached
-    from liquidity_migration.bybit import BybitMarketData
-    from liquidity_migration.event_demo_data import _demo_instruments
-
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    instruments = _demo_instruments(BybitMarketData(), cache_root=cache_root, now_ms=now_ms)
-    rows = instruments.filter(pl.col("symbol") == symbol).to_dicts()
-    row = rows[0] if rows else {}
-    out = {
-        "qty_step": _float(row.get("qty_step")),
-        "min_order_qty": _float(row.get("min_order_qty")),
-        "min_notional_value": _float(row.get("min_notional_value")),
-    }
-    _INSTRUMENT_FILTERS_CACHE[symbol] = out
-    return out
-
-
-def _read_actual_fill(
-    client, *, symbol: str, order_link_id: str, requested_qty: float,
-) -> tuple[float, float, str]:
-    """Read the realized (filled_qty, avg_price) for a just-submitted market order.
-
-    Mirrors the demo engine's pending-fill reconciler: poll the venue's execution
-    history for this orderLinkId and sum the actual fills (``_execution_summary``
-    over ``get_trade_history``). ``place_order`` returns only the create ack
-    (orderId), NOT the fill — booking ``filled_qty=requested_qty`` at the planner's
-    implied price recorded a fictional fill whenever the market slipped, partially
-    filled, or (for a reduce-only Sell) was venue-capped by cross-sleeve netting
-    against a same-symbol fade short on the shared one-way account (audit
-    2026-06-14, hedge-2/hedge-3).
-
-    Returns ``(filled_qty, avg_price, source)``. Execution history can lag a
-    just-filled demo market order, so an empty/failed execution poll falls back to
-    Bybit order history and reads ``cumExecQty``/``avgPrice`` from the terminal
-    order row. Only when BOTH views are unavailable do we conservatively return
-    ``(requested_qty, 0.0, "read_failed")``: the venue accepted the order, so the
-    requested position remains provisionally tracked rather than silently dropped,
-    but the caller must label that booking unconfirmed.
-    """
-    from liquidity_migration.event_demo import _float as _ed_float
-    from liquidity_migration.event_demo import _wait_for_execution_summary
-
-    summary: dict[str, object] = {}
-    try:
-        summary = _wait_for_execution_summary(
-            client, symbol=symbol, order_link_id=order_link_id,
-            poll_seconds=3.0, poll_interval_seconds=0.2, target_qty=requested_qty,
-        )
-    except Exception:  # noqa: BLE001 — order-history fallback below is authoritative too
-        summary = {}
-    filled = _ed_float(summary.get("qty"))
-    avg_price = _ed_float(summary.get("avg_price"))
-    if filled > 0.0:
-        return filled, avg_price, "venue"
-
-    try:
-        history = client.get_order_history(
-            symbol=symbol,
-            order_link_id=order_link_id,
-            limit=10,
-        )
-    except Exception:  # noqa: BLE001 — retain the conservative accepted-order fallback
-        history = []
-    for row in history or []:
-        if str(row.get("orderLinkId") or row.get("order_link_id") or "") != order_link_id:
-            continue
-        history_filled = _ed_float(
-            row.get("cumExecQty")
-            or row.get("cum_exec_qty")
-            or row.get("executedQty")
-            or row.get("execQty")
-        )
-        if history_filled <= 0.0:
-            continue
-        history_avg = _ed_float(
-            row.get("avgPrice")
-            or row.get("avg_price")
-            or row.get("execPrice")
-        )
-        return history_filled, history_avg, "order_history"
-    return requested_qty, 0.0, "read_failed"
-
-
-def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, primary_root: Path, now_ms: int) -> dict:
-    """Submit one leg's resize as a Market order and append the ledger rows.
-
-    The central guard (``validate_order_submit_allowed``) has already passed by the
-    time this runs; demo credentials are re-asserted here regardless.
-
-    The planner emits a raw notional/price qty; the venue rejects anything off the
-    qtyStep grid (planned 0.003348 BTC vs qtyStep 0.001 — audit 2026-06-12), so the
-    qty is floored to the symbol's qtyStep first. A floored qty below minOrderQty —
-    or, for non-reduce-only legs, a floored notional below minNotionalValue — is
-    returned as a ``skipped`` leg instead of a guaranteed venue reject (reduce-only
-    legs are exempt from minNotional per Bybit semantics).
-
-    After submit the ACTUAL fill (qty + average price) is read back from the venue
-    and booked, not the planner's implied price/requested qty (audit 2026-06-14,
-    hedge-2/hedge-3): a slipped/partial/venue-capped fill must size the ledger off
-    what really happened so the next day's resize is computed against the true
-    hedge, not a fictional one.
-    """
-    from liquidity_migration.bybit import BybitPrivateClient, resolve_private_credentials
-    from liquidity_migration.event_demo import _decimal_text, _order_params
-
-    api_key, api_secret, demo_flag = resolve_private_credentials()
-    if not api_key or not api_secret or not demo_flag:
-        raise RuntimeError("hedge submit requires DEMO Bybit credentials in env")
-    filters = _instrument_filters(plan.symbol, primary_root)
-    step = Decimal(str(filters["qty_step"] if filters["qty_step"] > 0.0 else 0.001))
-    qty_dec = (Decimal(str(plan.qty)) // step) * step
-    qty = float(qty_dec)
-    price = abs(plan.delta_notional_usdt) / max(plan.qty, 1e-12)
-    min_order_qty_dec = Decimal(str(max(filters["min_order_qty"], 0.0)))
-    min_notional_dec = Decimal(str(max(filters["min_notional_value"], 0.0)))
-    effective_min_qty_dec = max(step, min_order_qty_dec)
-    if not plan.reduce_only and min_notional_dec > 0 and price > 0.0:
-        notional_qty_steps = (
-            min_notional_dec / Decimal(str(price)) / step
-        ).to_integral_value(rounding=ROUND_CEILING)
-        effective_min_qty_dec = max(effective_min_qty_dec, notional_qty_steps * step)
-    skip_base = {"symbol": plan.symbol, "side": plan.side, "qty": qty,
-                 "planned_qty": plan.qty, "reduce_only": plan.reduce_only,
-                 "current_notional_usdt": plan.current_notional_usdt,
-                 "target_notional_usdt": plan.target_notional_usdt,
-                 "delta_notional_usdt": plan.delta_notional_usdt,
-                 "qty_step": float(step),
-                 "min_order_qty": filters["min_order_qty"],
-                 "min_notional_value": filters["min_notional_value"],
-                 "effective_min_qty": float(effective_min_qty_dec),
-                 "effective_min_notional_usdt": float(effective_min_qty_dec) * price}
-    if qty <= 0.0 or (filters["min_order_qty"] > 0.0 and qty < filters["min_order_qty"]):
-        return {**skip_base, "skipped": "below_min_qty"}
-    if (
-        not plan.reduce_only
-        and filters["min_notional_value"] > 0.0
-        and qty * price < filters["min_notional_value"]
-    ):
-        return {**skip_base, "skipped": "below_min_notional"}
-    client = BybitPrivateClient(category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret)
-    link = hedge_order_link_id(now_ms, symbol=plan.symbol)
-    qty_text = _decimal_text(qty_dec)
-    # Persist the durable intent BEFORE the venue mutation. The shared ws_risk
-    # process can otherwise receive Bybit's position event while this process is
-    # still polling execution history and briefly classify our own hedge as an
-    # untracked/manual position. If this process dies after venue acceptance, the
-    # pending-fill reconciler still has the exact link, side, qty, and sleeve needed
-    # to recover the fill.
-    preflight_order_row = {
-        "order_link_id": link,
-        "ts_ms": now_ms,
-        "updated_at_ms": now_ms,
-        "trade_id": f"hedge-{link}",
-        "strategy_id": cfg.strategy_id,
+    return {
         "symbol": plan.symbol,
         "side": plan.side,
-        "order_type": "Market",
-        "qty": qty,
+        "qty": round(plan.qty, 6),
         "reduce_only": plan.reduce_only,
-        "order_id": "",
-        "submit_mode": "submitted",
-        "status": "submitted_unconfirmed",
-        "filled_qty": 0.0,
-        "target_qty": qty,
-        "trade_side": "long",
-        "sleeve": "continuous_addon",
-        "notional_usdt": abs(qty * price),
         "reason": plan.reason,
-        "fill_source": "preflight",
+        "current_notional_usdt": round(plan.current_notional_usdt, 2),
+        "target_notional_usdt": round(plan.target_notional_usdt, 2),
+        "delta_notional_usdt": round(plan.delta_notional_usdt, 2),
     }
-    write_dataset(
-        pl.DataFrame([preflight_order_row]),
-        data_root,
-        cfg.orders_dataset,
-        append=True,
-    )
-    try:
-        result = client.place_order(**_order_params(
-            symbol=plan.symbol, side=plan.side, qty=qty_text, order_type="Market",
-            order_link_id=link, reduce_only=plan.reduce_only,
-        ))
-    except Exception as exc:
-        failed_order_row = dict(preflight_order_row)
-        failed_order_row.update({
-            "status": "failed",
-            "submit_mode": "error",
-            "error": str(exc)[:500],
-            "fill_source": "venue_rejected_or_unavailable",
-        })
-        write_dataset(
-            pl.DataFrame([failed_order_row]),
-            data_root,
-            cfg.orders_dataset,
-            append=True,
-        )
-        raise
-    order_id = str(result.get("orderId", ""))
-    # Read the realized fill instead of assuming requested_qty filled at the
-    # implied price. filled_qty drives the trade-row qty / reduce booking; the
-    # avg fill price drives entry/exit price. A short fill (slippage-rejected,
-    # partial, or venue-capped by cross-sleeve netting) is booked as what truly
-    # filled, so the ledger never overstates the hedge.
-    filled_qty, fill_price, fill_source = _read_actual_fill(
-        client, symbol=plan.symbol, order_link_id=link, requested_qty=qty,
-    )
-    # Implied price is the fallback when the venue did not report an avg price.
-    book_price = fill_price if fill_price > 0.0 else price
-    # status "filled" only when the venue confirmed the full requested qty;
-    # otherwise "partial" so ws_risk's pending-fill reconciler can later delta-add
-    # any remainder (it adds venue_cumulative − filled_qty onto the trade row — a
-    # terminal "filled" row with the full qty made it re-add the whole fill, every
-    # armed BUY double-booked, audit 2026-06-11; booking the ACTUAL filled_qty here
-    # keeps that delta honest for a partial too).
-    fill_confirmed = fill_source in {"venue", "order_history"}
-    fully_filled = fill_confirmed and filled_qty + 1e-12 >= qty
-    order_row = dict(preflight_order_row)
-    order_row.update({
-        "order_id": order_id,
-        "status": (
-            "filled"
-            if fully_filled
-            else "partial"
-            if fill_confirmed
-            else "submitted_unconfirmed"
-        ),
-        # A read-failed fallback is a provisional tracking quantity, NOT a
-        # confirmed venue fill. Keep the confirmed-fill field truthful; the
-        # requested qty remains in qty/target_qty and the trade row below is
-        # explicitly labelled provisional.
-        "filled_qty": filled_qty if fill_confirmed else 0.0,
-        "notional_usdt": abs((filled_qty if fill_confirmed else qty) * book_price),
-        "fill_source": fill_source,
-        "error": "" if fill_confirmed else "venue fill confirmation pending",
-    })
-    write_dataset(pl.DataFrame([order_row]), data_root, cfg.orders_dataset, append=True)
-    if plan.side == "Buy" and not plan.reduce_only and filled_qty > 0.0:
-        trade_row = build_hedge_trade_row(
-            cfg, qty=filled_qty, entry_price=max(book_price, 0.0), now_ms=now_ms,
-            order_link_id=link, order_id=order_id, symbol=plan.symbol,
-        )
-        trade_row.update({
-            "entry_price_source": "venue" if fill_confirmed else "planned_fallback",
-            "provisional_entry_fill": not fill_confirmed,
-            "submit_mode": "submitted" if fill_confirmed else "submitted_unconfirmed",
-        })
-        write_dataset(pl.DataFrame([trade_row]), data_root, cfg.trades_dataset, append=True)
-    elif plan.side == "Sell" and plan.reduce_only and filled_qty > 0.0:
-        _apply_hedge_reduce_to_trades(
-            data_root, cfg, symbol=plan.symbol, sold_qty=filled_qty,
-            exit_price=max(book_price, 0.0), now_ms=now_ms,
-            fill_confirmed=fill_confirmed,
-        )
-    return {**skip_base, "qty": filled_qty, "requested_qty": qty,
-            "fill_source": fill_source, "order_id": order_id, "link": link}
-
-
-def _apply_hedge_reduce_to_trades(
-    data_root: Path, cfg: ContinuousHedgeConfig, *, symbol: str,
-    sold_qty: float, exit_price: float, now_ms: int, fill_confirmed: bool = True,
-) -> None:
-    """Book a reduce-only Sell against the open hedge trade rows, oldest-first.
-
-    Until 2026-06-11 reduces never touched the trade rows at all (the Sell's order
-    row keys trade_id 'hedge-{sell-link}', matching no trade row, so ws_risk's
-    reduce branch no-ops): _current_hedge_qty then overstated the live hedge and
-    the planner re-sold the phantom excess daily until the venue went flat —
-    leaving the book unhedged while the ledger showed an open hedge."""
-    try:
-        trades = read_dataset(data_root, cfg.trades_dataset)
-    except (FileNotFoundError, OSError):
-        return
-    if trades.is_empty() or "status" not in trades.columns or "symbol" not in trades.columns:
-        return
-    open_rows = [
-        row
-        for row in (
-            trades.filter((pl.col("status") == "open") & (pl.col("symbol") == symbol))
-            .sort("entry_ts_ms")
-            .to_dicts()
-        )
-        if _is_long_hedge_trade(row)
-    ]
-    remaining = float(sold_qty)
-    updates: list[dict] = []
-    for row in open_rows:
-        if remaining <= 1e-12:
-            break
-        row_qty = abs(_float(row.get("qty")))
-        take = min(row_qty, remaining)
-        remaining -= take
-        upd = dict(row)
-        upd["updated_at_ms"] = now_ms
-        if take >= row_qty - 1e-12:
-            upd.update({
-                "status": "closed", "exit_price": float(exit_price),
-                "exit_ts_ms": now_ms, "exit_reason": "hedge_reduce",
-                "exit_price_source": "venue" if fill_confirmed else "planned_fallback",
-                "provisional_exit_fill": not fill_confirmed,
-            })
-        else:
-            upd["qty"] = row_qty - take
-        updates.append(upd)
-    if remaining > 1e-9:
-        print(f"WARN: hedge reduce sold {sold_qty:.6f} {symbol} but the ledger held "
-              f"only {sold_qty - remaining:.6f} open — venue/ledger drift, inspect the addon ledger.")
-    if updates:
-        write_dataset(pl.DataFrame(updates, infer_schema_length=None), data_root, cfg.trades_dataset, append=True)
-
-
-def _live_wallet_equity_usdt() -> float:
-    """Live demo wallet equity for ARMED sizing (round 4). The hedge previously
-    sized every armed leg off the $10k ``fallback_equity_usdt`` constant — as the
-    demo account drifts from $10k the armed hedge silently under/over-hedges.
-    Raises on any credential/transport failure; the caller blocks the armed run
-    with ``submit_blocked_equity_unavailable`` (nonzero exit -> watchdog pages)."""
-    from liquidity_migration.bybit import BybitPrivateClient, resolve_private_credentials
-    from liquidity_migration.event_demo import wallet_equity_usdt
-
-    api_key, api_secret, demo_flag = resolve_private_credentials()
-    if not api_key or not api_secret or not demo_flag:
-        raise RuntimeError("hedge equity read requires DEMO Bybit credentials in env")
-    client = BybitPrivateClient(category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret)
-    return wallet_equity_usdt(client.get_wallet_balance())
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--venue", default="bybit", choices=["bybit", "binance"])
-    ap.add_argument("--data-root", default="data/bybit-continuous-hedge-event")
     ap.add_argument("--primary-root", default="data/bybit-continuous-demo-event")
     ap.add_argument("--warmstart", default="")
     ap.add_argument("--btc-price", type=float, default=0.0, help="override; else read from kline store")
     ap.add_argument("--eth-price", type=float, default=0.0, help="override; else read from kline store")
-    ap.add_argument("--equity-usdt", type=float, default=0.0, help="override; else fallback")
+    ap.add_argument(
+        "--equity-usdt",
+        type=float,
+        default=0.0,
+        help="explicit override; otherwise use the latest canonical account observation",
+    )
     ap.add_argument("--submit", action="store_true")
+    ap.add_argument(
+        "--account-inbox-root",
+        default=os.environ.get("ACCOUNT_INTENT_INBOX_ROOT", ""),
+        help="canonical account-owner target inbox",
+    )
+    ap.add_argument(
+        "--account-root",
+        default=os.environ.get("ACCOUNT_EXECUTION_ROOT", ""),
+        help="canonical account journal used for hedge and primary-book planning state",
+    )
+    ap.add_argument(
+        "--account-health-max-age-seconds",
+        type=float,
+        default=30.0,
+        help="maximum age of the demo account owner's healthy capital observation",
+    )
     args = ap.parse_args()
+
+    if args.account_health_max_age_seconds <= 0.0:
+        ap.error("--account-health-max-age-seconds must be positive")
+
+    if not args.account_root or not args.account_inbox_root:
+        print(
+            json.dumps(
+                {
+                    "status": "account_route_config_missing",
+                    "error": "--account-root and --account-inbox-root are required",
+                }
+            )
+        )
+        return 1
 
     warmstart = args.warmstart or f"deploy/hedge_warmstart/{args.venue}_warmstart.csv"
     hedge_mode = os.environ.get("HEDGE_MODE", "2f")
     cfg = ContinuousHedgeConfig(
-        data_root=args.data_root,
         warmstart_csv=warmstart,
         hedge_mode=hedge_mode,
-        submit_orders=bool(args.submit),
-        confirm_demo_orders=os.environ.get("CONFIRM_DEMO_ORDERS") == "1",
     )
-    data_root = REPO / args.data_root
     primary_root = REPO / args.primary_root
+    account_root = Path(args.account_root).expanduser()
+    if not account_root.is_absolute():
+        account_root = REPO / account_root
+    inbox_root = Path(args.account_inbox_root).expanduser()
+    if not inbox_root.is_absolute():
+        inbox_root = REPO / inbox_root
+    account_route = require_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=account_root,
+        inbox_root=inbox_root,
+    )
+    account_root = account_route.account_path
 
     warmstart_path = REPO / warmstart if not Path(warmstart).is_absolute() else Path(warmstart)
     # Single loader for all three columns: unit/btc/eth rows are skipped together
@@ -604,43 +391,38 @@ def main() -> int:
     warmstart_age_days = None if warmstart_last is None else (datetime.now(timezone.utc).date() - warmstart_last).days
     warmstart_stale = warmstart_age_days is None or warmstart_age_days > MAX_WARMSTART_STALE_DAYS
 
-    primary_trades_dataset = "continuous_fade_demo_trades"
-    live_book = _live_book_state(
-        primary_root, primary_trades_dataset, primary_trades_dataset.replace("_trades", "_cycles")
-    )
-    unit, btc = extend_with_live_days(warm_unit, warm_btc, live_book.live_unit_by_day, {})
+    unit = list(warm_unit)
+    btc = list(warm_btc)
     eth: list[float | None] = list(warm_eth) + [None] * max(0, len(unit) - len(warm_eth))
     eth = eth[: len(unit)]
 
     btc_price = args.btc_price or _latest_close(primary_root, HEDGE_SYMBOL)
     eth_price = args.eth_price or _latest_close(primary_root, HEDGE_SYMBOL_2)
-    # Sizing equity: explicit override > live wallet (ARMED runs only) > the
-    # $10k fallback constant (dry-run reference). An armed run must never size
-    # real legs off the constant (round 4) — a failed wallet read blocks below.
-    equity = args.equity_usdt if args.equity_usdt > 0.0 else cfg.fallback_equity_usdt
-    equity_source = "override" if args.equity_usdt > 0.0 else "fallback"
-    equity_error = ""
-    if args.submit and args.equity_usdt <= 0.0:
-        try:
-            live_equity = _live_wallet_equity_usdt()
-        except Exception as exc:  # noqa: BLE001 — surfaced as a blocked status below
-            equity_error = f"wallet equity read failed: {exc}"[:300]
-        else:
-            if live_equity > 0.0:
-                equity, equity_source = live_equity, "wallet"
-            else:
-                equity_error = "wallet equity read returned <= 0"
+    # Only the account owner may observe private wallet state. The publisher
+    # consumes that durable observation; it never opens a second private client.
+    health_error = ""
+    try:
+        owner_health = require_recent_account_owner_health(
+            account_root,
+            environment="demo",
+            max_age_ns=int(args.account_health_max_age_seconds * 1_000_000_000),
+            expected_account_id=account_route.account_id,
+        )
+    except (RuntimeError, ValueError) as exc:
+        account_equity = 0.0
+        health_error = str(exc)[:300]
+    else:
+        account_equity = owner_health.equity_usdt
+    equity = args.equity_usdt if args.equity_usdt > 0.0 else account_equity
+    equity_source = (
+        "override" if args.equity_usdt > 0.0 else "account_owner_health" if account_equity > 0.0 else "unavailable"
+    )
+    live_book = _account_continuous_book_state(account_root, equity_usdt=equity)
+    pending_hedge_symbols = _pending_account_hedge_symbols(
+        account_root,
+        strategy_id=cfg.strategy_id,
+    )
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    submit_guard_error = ""
-    if args.submit:
-        try:
-            validate_order_submit_allowed(
-                submit_orders=True,
-                confirm_demo_orders=cfg.confirm_demo_orders,
-            )
-        except RuntimeError as exc:
-            submit_guard_error = str(exc)
 
     n_eth = sum(1 for e in warm_eth if e is not None)
     use_2f = hedge_mode == "2f" and n_eth >= 60
@@ -648,12 +430,15 @@ def main() -> int:
         "ts": datetime.now(timezone.utc).isoformat(),
         "venue": args.venue,
         "hedge_mode": "2f" if use_2f else "btc",
-        "mode": "submit" if args.submit else "dry_run",
-        "btc_price": btc_price, "eth_price": eth_price, "equity_usdt": equity,
+        "mode": "publish" if args.submit else "dry_run",
+        "btc_price": btc_price,
+        "eth_price": eth_price,
+        "equity_usdt": equity,
         "equity_source": equity_source,
         "gross_short_frac": round(live_book.gross_short_frac, 4),
         "gross_short_frac_known": live_book.gross_short_frac_known,
         "gross_short_frac_source": live_book.gross_short_frac_source,
+        "pending_hedge_symbols": sorted(pending_hedge_symbols),
         "warmstart_last_date": None if warmstart_last is None else warmstart_last.isoformat(),
         "warmstart_data_through_date": None if warmstart_last is None else warmstart_last.isoformat(),
         "warmstart_age_days": warmstart_age_days,
@@ -661,21 +446,40 @@ def main() -> int:
         "history_days": len(unit),
     }
     plans = []
+    desired_targets: list[HedgeDesiredTarget] = []
+
+    def read_current_hedge_qty(symbol: str = HEDGE_SYMBOL) -> float:
+        return _current_account_hedge_qty(
+            account_root,
+            strategy_id=cfg.strategy_id,
+            symbol=symbol,
+        )
+
     if use_2f:
         decision: HedgeDecision2F = compute_hedge_decision_2f(
-            cfg, unit_returns=unit, btc_returns=btc, eth_returns=eth,
-            live_gross_short_frac=live_book.gross_short_frac, btc_price=btc_price, eth_price=eth_price,
-            current_btc_qty=_current_hedge_qty(data_root, cfg.trades_dataset),
-            current_eth_qty=_current_hedge_qty(data_root, cfg.trades_dataset, HEDGE_SYMBOL_2),
+            cfg,
+            unit_returns=unit,
+            btc_returns=btc,
+            eth_returns=eth,
+            live_gross_short_frac=live_book.gross_short_frac,
+            btc_price=btc_price,
+            eth_price=eth_price,
+            current_btc_qty=read_current_hedge_qty(),
+            current_eth_qty=read_current_hedge_qty(HEDGE_SYMBOL_2),
             equity_usdt=equity,
         )
-        out.update({
-            "ratio_btc": round(decision.ratio_btc, 5), "ratio_eth": round(decision.ratio_eth, 5),
-            "target_btc_usdt": round(decision.target_btc_usdt, 2),
-            "target_eth_usdt": round(decision.target_eth_usdt, 2),
-            "n_obs_joint": decision.n_obs_joint, "fell_back_to_btc": decision.fell_back_to_btc,
-            "plan_btc": _plan_json(decision.plan_btc), "plan_eth": _plan_json(decision.plan_eth),
-        })
+        out.update(
+            {
+                "ratio_btc": round(decision.ratio_btc, 5),
+                "ratio_eth": round(decision.ratio_eth, 5),
+                "target_btc_usdt": round(decision.target_btc_usdt, 2),
+                "target_eth_usdt": round(decision.target_eth_usdt, 2),
+                "n_obs_joint": decision.n_obs_joint,
+                "fell_back_to_btc": decision.fell_back_to_btc,
+                "plan_btc": _plan_json(decision.plan_btc),
+                "plan_eth": _plan_json(decision.plan_eth),
+            }
+        )
         # audit2c: report the EFFECTIVE hedge mode. The use_2f gate is a coarse
         # full-series ETH pre-filter; the engine measures joint obs over the trailing
         # beta window and falls back to a single-leg BTC hedge when that window is
@@ -684,42 +488,71 @@ def main() -> int:
         if decision.fell_back_to_btc:
             out["hedge_mode"] = "btc"
         plans = [p for p in (decision.plan_btc, decision.plan_eth) if p is not None]
+        desired_targets = [
+            HedgeDesiredTarget(
+                symbol=HEDGE_SYMBOL,
+                target_notional_usdt=decision.target_btc_usdt,
+                reason="scheduled_hedge_target_refresh",
+                plan=decision.plan_btc,
+            ),
+            HedgeDesiredTarget(
+                symbol=HEDGE_SYMBOL_2,
+                target_notional_usdt=decision.target_eth_usdt,
+                reason="scheduled_hedge_target_refresh",
+                plan=decision.plan_eth,
+            ),
+        ]
     else:
-        current_hedge_qty = _current_hedge_qty(data_root, cfg.trades_dataset)
+        current_hedge_qty = read_current_hedge_qty()
         single = compute_hedge_decision(
-            cfg, unit_returns=unit, btc_returns=btc, live_gross_short_frac=live_book.gross_short_frac,
-            btc_price=btc_price, current_hedge_qty=current_hedge_qty, equity_usdt=equity,
+            cfg,
+            unit_returns=unit,
+            btc_returns=btc,
+            live_gross_short_frac=live_book.gross_short_frac,
+            btc_price=btc_price,
+            current_hedge_qty=current_hedge_qty,
+            equity_usdt=equity,
         )
-        # Single-leg mode never plans for the ETH leg — an ETH hedge position
-        # opened by prior 2f runs would ride unmanaged forever after a mode flip
-        # to HEDGE_MODE=btc (audit 2026-06-12 round 3). Surface it; an armed run
-        # blocks below until the operator closes/transfers the leg.
-        unmanaged_eth_qty = _current_hedge_qty(data_root, cfg.trades_dataset, HEDGE_SYMBOL_2)
-        out.update({
-            "hedge_ratio_equity_frac": round(single.hedge_ratio_equity_frac, 5),
-            "target_notional_usdt": round(single.target_notional_usdt, 2),
-            "current_hedge_qty": round(current_hedge_qty, 8),
-            "current_notional_usdt": round(single.current_notional_usdt, 2),
-            "n_obs": single.n_obs, "plan": _plan_json(single.plan),
-            "unmanaged_eth_qty": round(unmanaged_eth_qty, 8),
-        })
+        # A mode flip to BTC-only explicitly targets ETH to zero. The account
+        # owner performs the close and attributes its confirmed fill.
+        unmanaged_eth_qty = read_current_hedge_qty(HEDGE_SYMBOL_2)
+        out.update(
+            {
+                "hedge_ratio_equity_frac": round(single.hedge_ratio_equity_frac, 5),
+                "target_notional_usdt": round(single.target_notional_usdt, 2),
+                "current_hedge_qty": round(current_hedge_qty, 8),
+                "current_notional_usdt": round(single.current_notional_usdt, 2),
+                "n_obs": single.n_obs,
+                "plan": _plan_json(single.plan),
+                "unmanaged_eth_qty": round(unmanaged_eth_qty, 8),
+            }
+        )
         plans = [single.plan] if single.plan is not None else []
+        desired_targets = [
+            HedgeDesiredTarget(
+                symbol=HEDGE_SYMBOL,
+                target_notional_usdt=single.target_notional_usdt,
+                reason="scheduled_hedge_target_refresh",
+                plan=single.plan,
+            ),
+            HedgeDesiredTarget(
+                symbol=HEDGE_SYMBOL_2,
+                target_notional_usdt=0.0,
+                reason="btc_only_mode_close_eth",
+            ),
+        ]
 
-    if submit_guard_error:
-        out["status"] = "submit_blocked_order_submit_guard"
-        out["error"] = submit_guard_error
-    elif args.submit and equity_source == "fallback":
-        # The wallet read failed and no override was passed: leg targets would be
-        # sized off the $10k constant against a wallet of unknown size (round 4).
-        out["status"] = "submit_blocked_equity_unavailable"
-        out["error"] = equity_error or "live wallet equity unavailable"
+    if health_error:
+        out["status"] = "submit_blocked_account_owner_unhealthy" if args.submit else "dry_run_account_owner_unhealthy"
+        out["error"] = health_error
+    elif equity_source == "unavailable":
+        out["status"] = "submit_blocked_equity_unavailable" if args.submit else "dry_run_equity_unavailable"
+        out["error"] = "canonical account equity is unavailable"
     elif btc_price <= 0.0:
         # No BTC price (kline store missing/unreadable and no --btc-price): the plan
         # is necessarily None. Without an explicit status this read as a healthy
         # "dry_run_ok"/"submit_no_action" no-op — silently masking a dead input.
-        out["status"] = (
-            "submit_blocked_btc_price_unavailable" if args.submit else "dry_run_btc_price_unavailable"
-        )
+        out["status"] = "submit_blocked_btc_price_unavailable" if args.submit else "dry_run_btc_price_unavailable"
     elif args.submit and not live_book.gross_short_frac_known:
         # The 0.5 gross-short default is a sizing REFERENCE, not an observation —
         # never submit orders sized off it (it would buy a hedge against a book
@@ -729,69 +562,63 @@ def main() -> int:
         # In 2f mode a dead ETH price silently drops the ETH leg; an armed run must
         # surface it instead of part-hedging.
         out["status"] = "submit_blocked_eth_price_unavailable"
-    elif args.submit and not use_2f and float(out.get("unmanaged_eth_qty") or 0.0) > 0.0:
-        # Mode flipped 2f -> single-leg while an ETH hedge leg is still open: the
-        # single-leg path would never reduce/close it (round 3). Block + page.
-        out["status"] = "submit_blocked_unmanaged_eth_leg"
-    elif args.submit and warmstart_stale and not plans and live_book.gross_short_frac > 0.0:
-        # The resize floor used to hide an unavailable hedge: a non-flat book
-        # whose stale beta happened to produce <$25/leg plans exited green even
-        # though any later risk-increasing resize would be refused.  A manager
-        # cannot claim healthy protection merely because the current defect is
-        # below the venue order floor.  Flat books remain a safe no-op, and the
-        # branch below still permits stale-state reduce-only trims.
-        out["status"] = "submit_blocked_stale_warmstart"
-    elif args.submit and plans:
-        # A stale beta window blocks only risk-INCREASING legs; trimming/closing a
-        # hedge is risk-reducing and ALWAYS proceeds — even when a sibling leg in
-        # the SAME run wants to add (audit 2026-06-14: the old terminal block
-        # rejected the whole run, so a risk-reducing reduce-only trim was held
-        # hostage by an add leg, leaving an over-hedged leg un-trimmed longer than
-        # necessary). Partition: submit the reduce-only set, block only the adds.
+    elif args.submit:
+        # Kernel route: publish absolute targets, including no-change targets, so
+        # convergence never depends on the sleeve's compatibility ledger. Do
+        # not refresh a target that is already pending when the planner sees no
+        # quantity change: accepting that duplicate would advance the desire
+        # revision and restart the owner's convergence generation/age. A stale
+        # beta estimate may only lower exposure: omit target legs whose local
+        # plan would increase risk, while still atomically publishing any
+        # risk-reducing siblings.
+        plan_by_symbol = {plan.symbol.upper(): plan for plan in plans}
+        pending_unchanged_targets = [
+            target
+            for target in desired_targets
+            if target.symbol.upper() in pending_hedge_symbols
+            and target.plan is None
+        ]
+        refreshable_targets = [
+            target
+            for target in desired_targets
+            if target not in pending_unchanged_targets
+        ]
+        if pending_unchanged_targets:
+            out["pending_target_refresh_skips"] = sorted(
+                target.symbol.upper() for target in pending_unchanged_targets
+            )
         if warmstart_stale:
-            blocked_add_legs = [p for p in plans if not p.reduce_only]
-            submittable = [p for p in plans if p.reduce_only]
+            blocked_add_legs = [plan for plan in plans if not plan.reduce_only]
+            submittable_targets = [
+                target
+                for target in refreshable_targets
+                if not ((plan := plan_by_symbol.get(target.symbol.upper())) is not None and not plan.reduce_only)
+            ]
         else:
             blocked_add_legs = []
-            submittable = list(plans)
-        submitted = []
-        skipped = []
-        errors = []
-        for plan in submittable:
-            try:
-                result = _submit_plan(plan, cfg, data_root, primary_root, now_ms)
-            except Exception as exc:  # noqa: BLE001 — one leg failing must not kill the other's report
-                errors.append({"symbol": plan.symbol, "error": str(exc)[:300]})
-                continue
-            (skipped if result.get("skipped") else submitted).append(result)
-        out["submitted"] = submitted
-        out["skipped"] = skipped
-        out["submit_errors"] = errors
+            submittable_targets = list(refreshable_targets)
         if blocked_add_legs:
-            out["blocked_legs"] = [_plan_json(p) for p in blocked_add_legs]
-        if errors:
-            out["status"] = "submit_partial" if submitted else "submit_failed"
-        elif blocked_add_legs:
-            # Add legs were blocked by the stale beta window. The status must page
-            # (the book sits un-added) regardless of whether the reduce-only legs
-            # submitted — a partial-block variant when a trim went through, the
-            # all-blocked variant otherwise.
-            out["status"] = (
-                "submit_partial_blocked_stale_warmstart" if submitted
-                else "submit_blocked_stale_warmstart"
-            )
-        elif submitted:
-            out["status"] = (
-                "submitted_pending_confirmation"
-                if any(row.get("fill_source") == "read_failed" for row in submitted)
-                else "submitted"
-            )
+            out["blocked_legs"] = [_plan_json(plan) for plan in blocked_add_legs]
+        if submittable_targets:
+            leverage = float(os.environ.get("HEDGE_ENTRY_LEVERAGE") or os.environ.get("ENTRY_LEVERAGE") or 10.0)
+            try:
+                queued = _publish_hedge_target_batch(
+                    submittable_targets,
+                    cfg=cfg,
+                    route=account_route,
+                    now_ms=now_ms,
+                    leverage=leverage,
+                )
+            except Exception as exc:  # noqa: BLE001 - durable queue failure must page
+                out["status"] = "target_publish_failed"
+                out["publish_error"] = str(exc)[:300]
+            else:
+                out["queued"] = queued
+                out["status"] = "target_queued_partial_blocked_stale_warmstart" if blocked_add_legs else "target_queued"
         else:
-            # Every leg fell below the venue's qty-step/min filters: no order was
-            # warranted at this size — a no-action run, not a failure.
-            out["status"] = "submit_no_action"
-    elif args.submit:
-        out["status"] = "submit_no_action"
+            out["status"] = (
+                "submit_blocked_stale_warmstart" if blocked_add_legs or warmstart_stale else "submit_no_action"
+            )
     elif use_2f and eth_price <= 0.0:
         out["status"] = "dry_run_eth_price_unavailable"
     elif warmstart_stale:
@@ -799,62 +626,16 @@ def main() -> int:
     else:
         out["status"] = "dry_run_ok"
     print(json.dumps(out))
-    # SUCCESS notify (round 4): blocks/failures already page via the nonzero-exit
-    # watchdog contract below, but real submitted hedge legs (live Market orders
-    # on the demo account) were silent — the first-ever hedge submission is
-    # exactly the event the operator needs to see. Best-effort and exception-
-    # isolated; the send can never change the exit code.
-    if out.get("status") in {
-        "submitted",
-        "submitted_pending_confirmation",
-        "submit_partial",
-    }:
-        try:
-            from liquidity_migration.telegram import format_utc_time_ms, send_telegram_message
-
-            submitted_rows = out.get("submitted") or []
-            errors = out.get("submit_errors") or []
-            lines = [
-                "\N{LARGE BLUE CIRCLE} Hedge position adjusted \N{MIDDLE DOT} Bybit demo",
-                format_utc_time_ms(now_ms),
-            ]
-            for row in submitted_rows:
-                pending_fill = row.get("fill_source") == "read_failed"
-                shown_qty = row.get("requested_qty") if pending_fill else row.get("qty")
-                lines.append(
-                    f"{str(row.get('symbol') or 'UNKNOWN')} "
-                    f"{str(row.get('side') or 'order').upper()} {shown_qty}"
-                    + (" (fill confirmation pending)" if pending_fill else "")
-                )
-            lines.append(f"Account equity ${equity:,.2f} ({equity_source})")
-            if errors:
-                lines.append(
-                    f"\N{WARNING SIGN} {len(errors)} hedge leg(s) failed; "
-                    "the liveness alert carries the failure."
-                )
-            else:
-                lines.append("All planned hedge orders were accepted.")
-            lines.append(
-                "This reports submitted orders only; the hourly Bybit snapshot "
-                "confirms the resulting live hedge."
-            )
-            message = "\n".join(lines)[:3900]
-            send_telegram_message(message, enabled=True)
-        except Exception as exc:  # noqa: BLE001 — notify must never mask the submit result
-            print(f"hedge telegram notify failed: {exc}", file=sys.stderr)
-    # Paging contract: a blocked or failed ARMED run exits nonzero so the systemd
-    # oneshot lands `failed` and the liveness watchdog pages (see module docstring).
+    # A blocked or failed publish makes the oneshot fail so liveness can page.
     failing_statuses = {
-        "submit_blocked_order_submit_guard",
         "submit_blocked_equity_unavailable",
+        "submit_blocked_account_owner_unhealthy",
         "submit_blocked_btc_price_unavailable",
         "submit_blocked_book_state_unknown",
         "submit_blocked_eth_price_unavailable",
-        "submit_blocked_unmanaged_eth_leg",
         "submit_blocked_stale_warmstart",
-        "submit_partial_blocked_stale_warmstart",
-        "submit_failed",
-        "submit_partial",
+        "target_queued_partial_blocked_stale_warmstart",
+        "target_publish_failed",
     }
     return 1 if args.submit and out["status"] in failing_statuses else 0
 

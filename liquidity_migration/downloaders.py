@@ -5,7 +5,7 @@ import math  # audit2b: guard non-finite taker volumes before the imbalance rati
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, TypeGuard
 from urllib.parse import urlparse
 
 import polars as pl
@@ -991,7 +991,7 @@ def _float_or_none(value) -> float | None:
     return float(value) if value not in (None, "") else None
 
 
-def _is_valid_volume(value: float | None) -> bool:
+def _is_valid_volume(value: float | None) -> TypeGuard[float]:
     # audit2b: a taker volume is usable only if it is present, finite, and non-negative.
     return value is not None and math.isfinite(value) and value >= 0.0
 

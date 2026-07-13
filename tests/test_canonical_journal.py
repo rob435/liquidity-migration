@@ -16,13 +16,13 @@ from liquidity_migration.canonical_journal import (
     journal_path,
     read_journal,
     rebuild_all_registered_projections,
-    record_verified_flat_snapshot,
+    record_archived_paper_epoch_reset,
     record_due_markouts,
+    record_verified_flat_snapshot,
     replay_journal,
     verify_journal,
 )
 from liquidity_migration.lifecycle_bridge import record_ledger_rows
-from liquidity_migration.event_demo import _execution_summary
 from liquidity_migration.storage import read_dataset, write_dataset
 
 
@@ -235,6 +235,49 @@ def test_verified_flat_snapshot_stops_open_projection_without_fabricating_pnl(tm
     assert not any(event.event_type == "close_fill" for event in read_journal(tmp_path))
 
 
+def test_archived_paper_epoch_reset_is_not_a_venue_flat_fact(tmp_path) -> None:
+    dataset = "continuous_fade_paper_trades"
+    record_ledger_rows(
+        tmp_path,
+        trade_rows=[
+            {
+                "trade_id": "paper-open",
+                "strategy_id": "continuous_fade_v2",
+                "symbol": "BUSDT",
+                "side": "short",
+                "status": "open",
+                "entry_ts_ms": 1_700_000_000_000,
+                "entry_price": 0.125,
+                "qty": 10.0,
+            }
+        ],
+        trade_dataset=dataset,
+        mode="paper",
+        sleeve="continuous",
+        now_ms=1_700_000_000_000,
+    )
+
+    record_archived_paper_epoch_reset(
+        tmp_path,
+        now_ms=1_700_000_060_000,
+        reset_id="paper-reset-1",
+        source="guarded_account_epoch_archive",
+    )
+    rebuild_all_registered_projections(tmp_path)
+
+    row = read_dataset(tmp_path, dataset).to_dicts()[0]
+    assert row["status"] == "archived"
+    assert row["canonical_reconciliation_state"] == "paper_epoch_archived"
+    assert "canonical_flat_verified_at_ms" not in row
+    state = replay_journal(tmp_path).trades["paper-open"]
+    assert state.lifecycle_state == "protection_active"
+    assert state.closed_qty == 0.0
+    reset_event = read_journal(tmp_path)[-1]
+    assert reset_event.event_type == "projection_patch"
+    assert reset_event.metadata["venue_flat_verified"] is False
+    assert not any(event.event_type == "venue_snapshot" for event in read_journal(tmp_path))
+
+
 def test_tca_records_fill_inputs_and_due_markouts(tmp_path) -> None:
     for index, event_type in enumerate(LIFECYCLE_SEQUENCE[:5]):
         append_events(tmp_path, [_spec(event_type, sequence_index=index)])
@@ -292,24 +335,31 @@ def test_tca_records_fill_inputs_and_due_markouts(tmp_path) -> None:
 
 
 def test_each_venue_execution_becomes_its_own_fill_and_tca_row(tmp_path) -> None:
-    summary = _execution_summary([
-        {
-            "execId": "exec-a",
-            "execQty": "1",
-            "execPrice": "0.125",
-            "execValue": "0.125",
-            "execFee": "0.0001",
-            "execTime": "1700000000010",
-        },
-        {
-            "execId": "exec-b",
-            "execQty": "2",
-            "execPrice": "0.126",
-            "execValue": "0.252",
-            "execFee": "0.0002",
-            "execTime": "1700000000020",
-        },
-    ])
+    # The lifecycle bridge accepts one canonical detail per venue execution;
+    # constructing that public row contract directly avoids retaining the
+    # deleted direct-execution summarizer merely as a test helper.
+    summary = {
+        "avg_price": (0.125 + 2 * 0.126) / 3,
+        "exec_time_ms": 1_700_000_000_020,
+        "fill_details": [
+            {
+                "exec_id": "exec-a",
+                "qty": 1.0,
+                "price": 0.125,
+                "value": 0.125,
+                "fee": 0.0001,
+                "venue_ts_ms": 1_700_000_000_010,
+            },
+            {
+                "exec_id": "exec-b",
+                "qty": 2.0,
+                "price": 0.126,
+                "value": 0.252,
+                "fee": 0.0002,
+                "venue_ts_ms": 1_700_000_000_020,
+            },
+        ],
+    }
     order = {
         "trade_id": "multi-fill",
         "strategy_id": "continuous_fade_v2",

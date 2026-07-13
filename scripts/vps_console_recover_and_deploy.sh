@@ -12,10 +12,47 @@ GITHUB_ACTIONS_SSH_PUBLIC_KEY="${GITHUB_ACTIONS_SSH_PUBLIC_KEY:-ssh-ed25519 AAAA
 CLEAN_DIRTY_CHECKOUT="${CLEAN_DIRTY_CHECKOUT:-0}"
 SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-15}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+INSTALL_PREFLIGHT_ONLY="${INSTALL_PREFLIGHT_ONLY:-0}"
+
+case "$INSTALL_PREFLIGHT_ONLY" in
+  0|1) ;;
+  *)
+    echo "Refusing recovery deploy: INSTALL_PREFLIGHT_ONLY must be 0 or 1." >&2
+    exit 1
+    ;;
+esac
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this from the VPS provider console as root." >&2
   exit 1
+fi
+
+if [ "$INSTALL_PREFLIGHT_ONLY" = "0" ]; then
+  if [ -e /etc/liquidity-migration/account-execution-ready ]; then
+    echo "Refusing recovery deploy: retired ambiguous account-execution-ready marker exists." >&2
+    exit 1
+  fi
+  if [ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]; then
+    echo "Refusing recovery deploy: missing account-execution-capture-enabled marker." >&2
+    exit 1
+  fi
+  if [ -z "$EXPECTED_COMMIT" ]; then
+    echo "Refusing recovery deploy before checkout: full recovery requires EXPECTED_COMMIT bound to the cutover evidence." >&2
+    exit 1
+  fi
+  authority_python="$REPO_DIR/.venv/bin/python"
+  authority_script="$REPO_DIR/scripts/account_execution_cutover_authority.py"
+  if [ ! -x "$authority_python" ] || [ ! -f "$authority_script" ]; then
+    echo "Refusing recovery deploy before checkout: staged cutover authority verifier is unavailable; run install-preflight first." >&2
+    exit 1
+  fi
+  if ! "$authority_python" "$authority_script" verify \
+    --receipt /etc/liquidity-migration/account-execution-deploy-ready \
+    --expected-commit "$EXPECTED_COMMIT" \
+    --repo-root "$REPO_DIR"; then
+    echo "Refusing recovery deploy before checkout: deploy-ready authorization is missing, stale, altered, or not bound to this host/commit." >&2
+    exit 1
+  fi
 fi
 
 missing_prereqs=()
@@ -105,6 +142,26 @@ git_with_optional_github_token() {
   fi
 }
 
+require_install_preflight_quiescence() {
+  [ "$INSTALL_PREFLIGHT_ONLY" = "1" ] || return 0
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "Refusing recovery install preflight: systemctl is unavailable, so fleet quiescence cannot be proved." >&2
+    exit 1
+  fi
+  if ! _preflight_units="$(systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager --plain 2>/dev/null)"; then
+    echo "Refusing recovery install preflight: failed to inspect liquidity-migration unit state." >&2
+    exit 1
+  fi
+  _preflight_running="$(printf '%s\n' "$_preflight_units" | awk '$3 != "inactive" && $3 != "failed" {print $1 " (" $3 ")"}')"
+  if [ -n "$_preflight_running" ]; then
+    echo "Refusing recovery install preflight: quiesce every liquidity-migration unit before checkout:" >&2
+    printf '%s\n' "$_preflight_running" >&2
+    exit 1
+  fi
+}
+
+require_install_preflight_quiescence
+
 if [ -e "$REPO_DIR" ] && [ ! -d "$REPO_DIR/.git" ]; then
   backup_dir="/root/liquidity-migration-deploy-backups"
   mkdir -p "$backup_dir"
@@ -173,6 +230,46 @@ fi
 .venv/bin/python -m pip install -e ".[dev]"
 PYTHON=.venv/bin/python
 
+validate_account_execution_roots() {
+  _root_context="$1"
+  shift
+  "$PYTHON" - "$_root_context" "$@" <<'PY'
+import sys
+from itertools import combinations
+from pathlib import Path
+
+context, *fields = sys.argv[1:]
+if len(fields) != 12 or len(fields) % 2:
+    print(f"{context}: internal error while validating account execution roots.", file=sys.stderr)
+    raise SystemExit(1)
+
+roots: list[tuple[str, str, Path]] = []
+invalid = False
+for label, value in zip(fields[::2], fields[1::2], strict=True):
+    if not value:
+        print(f"{context}: {label} is required.", file=sys.stderr)
+        invalid = True
+        continue
+    path = Path(value)
+    if not path.is_absolute():
+        print(f"{context}: {label} must be absolute, got {value!r}.", file=sys.stderr)
+        invalid = True
+        continue
+    roots.append((label, value, path.resolve(strict=False)))
+
+for (left_label, left_value, left), (right_label, right_value, right) in combinations(roots, 2):
+    if left == right or left in right.parents or right in left.parents:
+        print(
+            f"{context}: account execution roots must be pairwise disjoint; "
+            f"{left_label}={left_value!r} overlaps {right_label}={right_value!r}.",
+            file=sys.stderr,
+        )
+        invalid = True
+
+raise SystemExit(1 if invalid else 0)
+PY
+}
+
 "$PYTHON" -m pytest \
   tests/test_runtime_scripts.py \
   tests/test_promoted_profiles.py
@@ -204,24 +301,9 @@ assert {c[0]: c[4] for c in cont.ensemble_components} == {
 }
 assert cont.entry_pause_after_adverse_exits == 8, cont.entry_pause_after_adverse_exits
 assert cont.entry_pause_window_minutes == 1440, cont.entry_pause_window_minutes
-assert cont.stop_loss_pct == 0.0, cont.stop_loss_pct
-assert cont.left_decile_exit_enabled is False, cont.left_decile_exit_enabled
-assert cont.stop_approach_frac == 0.0, cont.stop_approach_frac
-assert cont.failed_fade_hours == 0, cont.failed_fade_hours
-assert cont.breakeven_arm_pct == 0.0, cont.breakeven_arm_pct
-assert cont.sniper_enabled is False, cont.sniper_enabled
 assert cont.sizing_mode == "inverse_vol", cont.sizing_mode
 assert cont.target_vol_per_name == 0.01, cont.target_vol_per_name
 assert cont.vol_weight_clamp == 2.0, cont.vol_weight_clamp
-assert cont.daily_rebalance_enabled is False, cont.daily_rebalance_enabled
-assert cont.daily_rebalance_realized_vol_window_days == 90, cont.daily_rebalance_realized_vol_window_days
-assert cont.daily_rebalance_target_daily_vol == 0.045, cont.daily_rebalance_target_daily_vol
-assert cont.daily_rebalance_max_scale == 4.0, cont.daily_rebalance_max_scale
-assert cont.daily_rebalance_drawdown_half_threshold == -0.04, cont.daily_rebalance_drawdown_half_threshold
-assert cont.daily_rebalance_resize_cost_bps == 10.0, cont.daily_rebalance_resize_cost_bps
-assert cont.daily_rebalance_strategy_momentum_window_days == 0, cont.daily_rebalance_strategy_momentum_window_days
-assert cont.daily_rebalance_strategy_momentum_min_return == 0.0, cont.daily_rebalance_strategy_momentum_min_return
-assert cont.daily_rebalance_strategy_momentum_scale_when_below == 0.0, cont.daily_rebalance_strategy_momentum_scale_when_below
 assert cont.btc_trend_gate == "uptrend", cont.btc_trend_gate
 assert cont.entry_btc_risk_sizing_enabled is True, cont.entry_btc_risk_sizing_enabled
 assert cont.entry_btc_risk_arm_id == "CTRL_BTC_RISK_70_90_35", cont.entry_btc_risk_arm_id
@@ -230,6 +312,17 @@ assert cont.entry_btc_risk_high == 0.90, cont.entry_btc_risk_high
 assert cont.entry_btc_risk_tail_mult == 0.35, cont.entry_btc_risk_tail_mult
 print("strategy-settings-ok")
 PY
+
+# The install-only recovery phase deliberately ends before secrets, account
+# roots, or either cutover marker are inspected. It installs the exact checked-
+# out scripts/config and current unit manifest, and removes unknown historical
+# units, but never enables, starts, or restarts a current owner/producer.
+. deploy/lib_sleeves.sh
+if [ "$INSTALL_PREFLIGHT_ONLY" = "1" ]; then
+  lm_install_current_systemd_units
+  echo "install-preflight-ok commit=$(git rev-parse --short HEAD) current_units_installed=1 current_units_started=0 cutover_markers_untouched=1"
+  exit 0
+fi
 
 if [ ! -f /etc/liquidity-migration/bybit-demo.env ]; then
   echo "Missing /etc/liquidity-migration/bybit-demo.env; restore secrets before starting services." >&2
@@ -253,62 +346,108 @@ if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
 fi
 
 # DEFENSE-IN-DEPTH on the highest-stakes toggle (deploy-ci-6): this recovery path
-# enables+restarts order-submitting demo units (continuous-demo, long-demo, risk)
-# against the account this env file defines; demo-only operation otherwise depends
-# solely on the per-process runtime guard validate_order_submit_allowed(). Make the
-# RECOVERY itself fail-closed - parity with scripts/deploy_vps_live.sh - so a
+# enables+restarts the demo account owner and target producers
+# against the account this env file defines. Make recovery fail closed, in parity
+# with scripts/deploy_vps_live.sh, so a
 # mis-edited bybit-demo.env that ever set REAL_MONEY truthy refuses the deploy
-# rather than restarting live order-submitting daemons against a real-money
+# rather than restarting the demo account owner against a real-money
 # account. The strategy is NOT validated for real money; promotion is
 # operator-gated, never a deploy side effect.
 case "${REAL_MONEY:-}" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On)
     echo "Refusing deploy: REAL_MONEY='${REAL_MONEY}' in /etc/liquidity-migration/bybit-demo.env." \
-         "This box deploys order-submitting demo units; real money is not validated and must not be" \
+         "This box deploys a demo account owner; real money is not validated and must not be" \
          "enabled by a deploy. Fix the env file to demo (unset/false REAL_MONEY) and redeploy." >&2
     exit 1
     ;;
 esac
 "$PYTHON" scripts/check_bybit_order_permissions.py --context recovery-deploy
 
-# Sync every .service / .timer in deploy/systemd/ so disaster recovery brings
-# up the same unit set scripts/deploy_vps_live.sh does - paper, both long
-# sleeves, and the demo-health + combined-book-report timers. Hand-listing
-# fell behind every time a new unit landed and left recovered VPSes
-# partially configured.
-for unit in deploy/systemd/liquidity-migration-*.service deploy/systemd/liquidity-migration-*.timer; do
-    cp "$unit" "/etc/systemd/system/$(basename "$unit")"
-done
-# Clear the named emergency mutes once the deduplicated Telegram release is
-# installed. Do not remove any unrelated operator drop-ins.
-for _telegram_quiet_dir in \
-  /etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d \
-  /etc/systemd/system/liquidity-migration-combined-book-report.service.d \
-  /run/systemd/system/liquidity-migration-bybit-continuous-demo.service.d \
-  /run/systemd/system/liquidity-migration-combined-book-report.service.d; do
-    rm -f "$_telegram_quiet_dir/telegram-quiet.conf"
-    rmdir "$_telegram_quiet_dir" 2>/dev/null || true
-done
-systemctl daemon-reload
+if [ -e /etc/liquidity-migration/account-execution-ready ]; then
+  echo "Refusing recovery deploy: retired ambiguous account-execution-ready marker exists." >&2
+  exit 1
+fi
+if [ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]; then
+  echo "Refusing recovery deploy: missing account-execution-capture-enabled marker." >&2
+  exit 1
+fi
+if ! "$PYTHON" scripts/account_execution_cutover_authority.py verify \
+  --receipt /etc/liquidity-migration/account-execution-deploy-ready \
+  --expected-commit "$EXPECTED_COMMIT" \
+  --repo-root "$REPO_DIR"; then
+  echo "Refusing recovery deploy: deploy-ready authorization failed after checkout." >&2
+  exit 1
+fi
+if [ ! -s /etc/liquidity-migration/account-execution.env ]; then
+  echo "Refusing recovery deploy: account-execution.env is missing or empty." >&2
+  exit 1
+fi
+set -a
+. /etc/liquidity-migration/account-execution.env
+set +a
+if [ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]; then
+  echo "Refusing recovery deploy: ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required." >&2
+  exit 1
+fi
+DEMO_ACCOUNT_EXECUTION_KERNEL_REQUIRED="$ACCOUNT_EXECUTION_KERNEL_REQUIRED"
+DEMO_ACCOUNT_EXECUTION_ROOT="${ACCOUNT_EXECUTION_ROOT:-}"
+DEMO_ACCOUNT_INTENT_INBOX_ROOT="${ACCOUNT_INTENT_INBOX_ROOT:-}"
+DEMO_ACCOUNT_CAPTURE_ROOT="${ACCOUNT_CAPTURE_ROOT:-}"
+if [ ! -s /etc/liquidity-migration/account-paper-execution.env ]; then
+  echo "Refusing recovery deploy: account-paper-execution.env is missing or empty." >&2
+  exit 1
+fi
+unset ACCOUNT_EXECUTION_KERNEL_REQUIRED ACCOUNT_PAPER_KERNEL_REQUIRED \
+  ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT ACCOUNT_CAPTURE_ROOT ACCOUNT_PAPER_CAPTURE_ROOT
+set -a
+. /etc/liquidity-migration/account-paper-execution.env
+set +a
+PAPER_ACCOUNT_KERNEL_REQUIRED="${ACCOUNT_PAPER_KERNEL_REQUIRED:-}"
+PAPER_ACCOUNT_EXECUTION_ROOT="${ACCOUNT_EXECUTION_ROOT:-}"
+PAPER_ACCOUNT_INTENT_INBOX_ROOT="${ACCOUNT_INTENT_INBOX_ROOT:-}"
+PAPER_ACCOUNT_CAPTURE_ROOT="${ACCOUNT_PAPER_CAPTURE_ROOT:-}"
+PAPER_ACCOUNT_TWIN_CALIBRATION_FILE="${ACCOUNT_TWIN_CALIBRATION_FILE:-}"
+export ACCOUNT_EXECUTION_KERNEL_REQUIRED="$DEMO_ACCOUNT_EXECUTION_KERNEL_REQUIRED"
+export ACCOUNT_EXECUTION_ROOT="$DEMO_ACCOUNT_EXECUTION_ROOT"
+export ACCOUNT_INTENT_INBOX_ROOT="$DEMO_ACCOUNT_INTENT_INBOX_ROOT"
+export ACCOUNT_CAPTURE_ROOT="$DEMO_ACCOUNT_CAPTURE_ROOT"
+unset ACCOUNT_PAPER_KERNEL_REQUIRED ACCOUNT_PAPER_CAPTURE_ROOT
+if [ "$PAPER_ACCOUNT_KERNEL_REQUIRED" != "1" ]; then
+  echo "Refusing recovery deploy: ACCOUNT_PAPER_KERNEL_REQUIRED=1 is required." >&2
+  exit 1
+fi
+if [ ! -s "$PAPER_ACCOUNT_TWIN_CALIBRATION_FILE" ]; then
+  echo "Refusing recovery deploy: ACCOUNT_TWIN_CALIBRATION_FILE is missing or empty." >&2
+  exit 1
+fi
+"$PYTHON" -c 'from liquidity_migration.execution_twin_calibration import load_calibration_receipt; import sys; receipt = load_calibration_receipt(sys.argv[1]); raise SystemExit(0 if receipt["execution_twin_gate_passed"] is True else 1)' "$PAPER_ACCOUNT_TWIN_CALIBRATION_FILE" || {
+  echo "Refusing recovery deploy: execution-twin calibration gate has not passed." >&2
+  exit 1
+}
+if ! validate_account_execution_roots \
+  "Refusing recovery deploy" \
+  "demo account root" "$DEMO_ACCOUNT_EXECUTION_ROOT" \
+  "demo intent inbox root" "$DEMO_ACCOUNT_INTENT_INBOX_ROOT" \
+  "demo capture root" "$DEMO_ACCOUNT_CAPTURE_ROOT" \
+  "paper account root" "$PAPER_ACCOUNT_EXECUTION_ROOT" \
+  "paper intent inbox root" "$PAPER_ACCOUNT_INTENT_INBOX_ROOT" \
+  "paper capture root" "$PAPER_ACCOUNT_CAPTURE_ROOT"; then
+  exit 1
+fi
+
 # --- per-sleeve kill-switch (deploy/sleeves.env) - the SAME single source of truth as
 # scripts/deploy_vps_live.sh, so disaster recovery can NEVER resurrect an OFF sleeve.
-. deploy/lib_sleeves.sh
+lm_install_current_systemd_units
 lm_load_sleeve_toggles
 lm_write_resolved_sleeve_toggles
 lm_verify_resolved_sleeve_toggles
 echo "sleeves: LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
-# Host cleanup: a recovered older host may still have retired units installed/enabled.
-for _retired in $RETIRED_SLEEVE_UNITS liquidity-migration-demo-health.timer liquidity-migration-demo-health.service; do
-    systemctl disable --now "$_retired" 2>/dev/null || true
-    rm -f "/etc/systemd/system/$_retired"
-done
-lm_cleanup_unknown_liqmig_units
-# Reload AFTER removing retired unit files (deploy_vps_live.sh parity) so stale
-# unit definitions don't linger in systemd memory on a recovered host.
-systemctl daemon-reload
-systemctl enable liquidity-migration-bybit-risk.service
+systemctl enable liquidity-migration-account-execution.service
+systemctl enable liquidity-migration-account-paper-execution.service
+systemctl restart liquidity-migration-account-execution.service
+systemctl restart liquidity-migration-account-paper-execution.service
 # Forward-only data collection - parity with scripts/deploy_vps_live.sh: liquidation
-# history is unbuyable, so the collector runs always-on like the risk service.
+# history is unbuyable, so the collector runs always-on like the account owner.
 # RESTART (not just enable --now, which is a no-op on a running unit) so recovered
 # collector code actually takes effect - append-only JSONL, no order path.
 systemctl enable liquidity-migration-liquidation-collector.service
@@ -323,10 +462,8 @@ apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # Timers must be enable --now: enable alone writes the symlink but doesn't
-# start the timer, so the liveness watchdog + hourly combined-book report would
-# sit dormant on a freshly-recovered VPS.
+# start the liveness watchdog on a freshly-recovered VPS.
 systemctl enable --now liquidity-migration-demo-liveness.timer
-systemctl enable --now liquidity-migration-combined-book-report.timer
 # The continuous rmom-refresh timer is required if either continuous demo or
 # paper evidence collection is enabled.
 if continuous_rmom_refresh_on; then
@@ -334,20 +471,24 @@ if continuous_rmom_refresh_on; then
 else
   apply_timer_enable off $CONTINUOUS_SLEEVE_TIMERS
 fi
-# Mirror deploy_vps_live.sh hedge fail-safe: when the continuous sleeve is off,
-# an open stopless hedge leg keeps the hedge timer enabled until it is flat.
+# Mirror deploy_vps_live.sh: keep the publisher alive until canonical hedge
+# targets are flat when the continuous sleeve is switched off.
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   _hedge_timer_state=on
 else
-  _hedge_open="$(HEDGE_ROOT="data/bybit-continuous-hedge-event" "$PYTHON" - <<'PY' 2>/dev/null || echo unknown
+  _hedge_open="$(ACCOUNT_ROOT="$ACCOUNT_EXECUTION_ROOT" "$PYTHON" - <<'PY' 2>/dev/null || echo unknown
 import os
-from liquidity_migration.storage import read_dataset
+from pathlib import Path
+
+from liquidity_migration.account_service import SleeveAdapterKind
+from liquidity_migration.account_strategy_state import canonical_strategy_trade_rows
+
 try:
-    t = read_dataset(os.environ["HEDGE_ROOT"], "continuous_fade_demo_trades")
-    if t.is_empty() or "status" not in t.columns:
-        print(0)
-    else:
-        print(int(t.filter(t["status"] == "open").height))
+    root = Path(os.environ["ACCOUNT_ROOT"]).expanduser()
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    rows = canonical_strategy_trade_rows(root, sleeve=SleeveAdapterKind.HEDGE.value)
+    print(0 if rows.is_empty() else int(rows.filter(rows["status"] == "open").height))
 except Exception:
     print("unknown")
 PY
@@ -394,10 +535,7 @@ if continuous_rmom_refresh_on; then
     _check_rmom_root "paper" "data/bybit-continuous-paper-event/residual_momentum.parquet"
   fi
 fi
-# Restart: risk ALWAYS + FIRST (the shared multi-sleeve tracker reading every *_DATA_ROOT
-# must be up before any sleeve restarts); then only the ON sleeves (off ones were
-# disable --now'd above).
-systemctl restart liquidity-migration-bybit-risk.service
+# Owners are already restarted; now restart only ON target producers.
 if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
 if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service; fi
 if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-paper.service; fi
@@ -406,12 +544,13 @@ if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
 fi
 
-# Risk always runs; each sleeve is verified per its toggle (on => active+enabled,
-# off => NOT active) - identical to deploy_vps_live.sh.
-systemctl is-active --quiet liquidity-migration-bybit-risk.service
-systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
+# Both account owners are mandatory independently of sleeve toggles.
+systemctl is-active --quiet liquidity-migration-account-execution.service
+systemctl is-enabled --quiet liquidity-migration-account-execution.service
+systemctl is-active --quiet liquidity-migration-account-paper-execution.service
+systemctl is-enabled --quiet liquidity-migration-account-paper-execution.service
 # The liquidation collector is always-on (enabled+restarted above). Verify it the
-# SAME way as the risk service so a recovered code change that crashes the collector
+# SAME way as the account owners so a recovered code change that crashes the collector
 # on startup FAILS the recovery loud - otherwise a broken collector still reaches
 # 'deploy-verify-ok' and the data loss (unbuyable forward liquidation history) is
 # only caught out-of-band by the ~3-minute watchdog (deploy-ci-3). is-active catches
@@ -427,6 +566,7 @@ fi
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
+lm_verify_no_unknown_liqmig_units
 if continuous_rmom_refresh_on; then
   verify_timer on $CONTINUOUS_SLEEVE_TIMERS
 else
@@ -435,11 +575,9 @@ fi
 verify_hedge_timer_enable "$_hedge_timer_state"
 # Timer parity - recovery must catch a missed enable just like deploy does.
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
-systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
-systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
-systemctl show liquidity-migration-bybit-risk.service \
+systemctl show liquidity-migration-account-execution.service \
   --property=ActiveState \
   --property=SubState \
   --property=MainPID \
@@ -455,29 +593,28 @@ require_unit_env() {
   fi
 }
 
-require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'
-# SHARED-ACCOUNT SAFETY: a recovered VPS must keep the single risk service wired to
-# read EVERY sleeve's ledger root, else a sibling sleeve's live positions get flattened.
-require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'
-require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
-require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'
+require_unit_env liquidity-migration-account-execution.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'
+require_unit_env liquidity-migration-account-execution.service 'CONFIRM_DEMO_ORDERS=1'
+require_unit_env liquidity-migration-account-execution.service 'TELEGRAM_ENABLED=1'
+require_unit_env liquidity-migration-account-paper-execution.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'
 # Long sleeve assertions: recovery restarts the long demo/paper units, so it
 # must prove the same profile and paper/no-order boundaries as deploy/verify.
 if sleeve_on "$LONG_SLEEVE"; then
-  require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'
+  require_unit_env liquidity-migration-bybit-long-demo.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'
+  require_unit_env liquidity-migration-bybit-long-demo.service 'EXECUTION_ENVIRONMENT=demo'
   require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'
-  require_unit_env liquidity-migration-bybit-long-paper.service 'SUBMIT_ORDERS=0'
-  require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'
+  require_unit_env liquidity-migration-bybit-long-paper.service 'EXECUTION_ENVIRONMENT=paper'
+  require_unit_env liquidity-migration-bybit-long-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'
   require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'
 fi
 # Order-submitting continuous config asserts only when the sleeve is toggled ON.
 # Disabled unit file content must not be an unconditional recovery gate.
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'
+  require_unit_env liquidity-migration-bybit-continuous-demo.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'
+  require_unit_env liquidity-migration-bybit-continuous-demo.service 'EXECUTION_ENVIRONMENT=demo'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'STRATEGY_PROFILE=continuous_ensemble_v2'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'CONTINUOUS_SNIPER=0'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'MAX_HOLD_HOURS=24'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_LEVERAGE=10'
@@ -486,29 +623,15 @@ if sleeve_on "$CONTINUOUS_SLEEVE"; then
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'
   require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_ENABLED=0'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_RESIZE_COST_BPS=10'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN=0'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW=0'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_LOSS_PCT=0'
-  require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_APPROACH_FRAC=0'
 fi
 # MONEY-SAFETY parity with deploy_vps_live.sh (audit 2026-06-12 round 3): the
 # continuous PAPER shadow must NEVER submit orders - UNCONDITIONAL regardless of
 # toggle. A mis-edited paper unit previously passed this script.
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'SUBMIT_ORDERS=0'
+require_unit_env liquidity-migration-bybit-continuous-paper.service 'EXECUTION_ENVIRONMENT=paper'
+require_unit_env liquidity-migration-bybit-continuous-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'STRATEGY_PROFILE=continuous_ensemble_v2'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'FEATURE_SET=max_ret168'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'ENTRY_EVENT_TRIGGER=none'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'CONTINUOUS_SNIPER=0'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'BTC_TREND_GATE=uptrend'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'MAX_HOLD_HOURS=24'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'ENTRY_LEVERAGE=10'
@@ -517,19 +640,6 @@ require_unit_env liquidity-migration-bybit-continuous-paper.service 'PER_POSITIO
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'SIZING_MODE=inverse_vol'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'TARGET_VOL_PER_NAME=0.01'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'VOL_WEIGHT_CLAMP=2'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_ENABLED=0'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_MAX_SCALE=4'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_RESIZE_COST_BPS=10'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN=0'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW=0'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'PAPER_MODE=1'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'DATA_ROOT=data/bybit-continuous-paper-event'
 
 echo "deploy-verify-ok commit=$(git rev-parse --short HEAD)"

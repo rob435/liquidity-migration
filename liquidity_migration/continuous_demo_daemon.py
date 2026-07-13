@@ -1,27 +1,30 @@
-"""Continuous-fade demo daemon — a SEPARATE sub-hourly sleeve reusing the live WS architecture.
+"""Continuous-fade account-target producer.
 
-Thin subclass of LongNativeDemoDaemon: it reuses ALL of the shared WS plumbing (private execution
-stream + ExecutionEventRouter, PrivateStateCache, TickerCache, KlineStreamManager, BybitTradeRouter,
-reconcile loop, graceful shutdown, telegram) and only swaps in:
+Thin subclass of :class:`LongNativeDemoDaemon`: it reuses public ticker/kline
+streaming, cache refresh, lifecycle, and graceful-shutdown plumbing, and swaps in:
   - the continuous cycle runner (`run_continuous_demo_cycle`), and
   - a memory-bounded broad-universe kline factory (the cross-sectional decile needs many names, but
     the FULL ~570-symbol store blew the long sleeve's 1G cap, so scope to the top-N by 24h turnover —
     which covers the liquid names the strategy actually trades).
 
-The live entry profile uses confirmed-bar +1h selection. The daemon still wakes every 60s so
-protective exits, state reconciliation, and any newly eligible confirmed-bar entries are handled
-promptly, but entry membership is not the intra-hour decile-cross mode.
+Startup is target-only: demo and paper routes publish to the canonical account
+owner and never construct a sleeve-private execution stream, router, or cache.
 
-Separate ledger root (`data/bybit-continuous-demo-event`) + `lm-en-c-`/`lm-ux-c-` orderLinkId prefix
-keep it fully isolated from other sleeve ledgers. Demo-only.
+The live entry profile uses confirmed-bar +1h selection. One normal planner
+cycle runs on the 60-second cadence (plus the inherited confirmed-kline wake),
+covering exits and newly eligible entries together. There is no protective
+worker thread, ticker-batch wake, or private-fill nudge.
+
+Separate producer roots and the continuous order-link namespace preserve strategy
+attribution. The account owner, rather than this producer ledger, owns combined
+account positions, orders, fills, and protection state.
 """
+
 from __future__ import annotations
 
 import logging
-import threading
-import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from .bybit import BybitMarketData
 from .config import ResearchConfig
@@ -31,12 +34,11 @@ from .continuous_demo import (
     apply_continuous_demo_profile,
     format_continuous_demo_cycle_summary,
     run_continuous_demo_cycle,
-    run_continuous_protective_exit_cycle,
 )
+from .execution_environment import execution_environment
 from .kline_follower import FollowerKlineStreamManager
 from .kline_stream_manager import KlineStreamManager
 from .long_native_event_demo_daemon import LongNativeDemoDaemon
-from .order_link_id import decode_entry_order_link_id
 
 if TYPE_CHECKING:
     # Only referenced in the cast annotations below (the base daemon's config type); the continuous
@@ -46,36 +48,6 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-def _message_row_count(message: Mapping[str, Any]) -> int:
-    """Number of per-symbol rows in a Bybit WS message envelope (Tier-3 batch-wake counter)."""
-    data = message.get("data", message)
-    if isinstance(data, list):
-        return len(data)
-    return 1
-
-
-def _continuous_links_in_message(message: Mapping[str, Any]) -> bool:
-    """True if any execution row in the message belongs to the continuous family.
-    Used by Tier 4 to nudge a state refresh only on OUR fills, not sibling sleeves'.
-
-    Entry links are DECODED, not prefix-matched: the deployed ensemble profiles emit
-    component-tagged links (lm-en-cp3-…, sniper lm-en-cs-…) which a literal
-    "lm-en-c-" prefix never matched — entry/snipe fills (exactly the between-cycle sniper
-    window Tier 4 exists for) fell through to the 60s heartbeat (audit 2026-06-12). Exits
-    keep the prefix match ("lm-ux-c" covers the plain book and the ca addon family)."""
-    data = message.get("data", message)
-    rows = data if isinstance(data, list) else [data]
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
-        if link.startswith("lm-ux-c"):
-            return True
-        decoded = decode_entry_order_link_id(link)
-        if decoded is not None and decoded[0] in ("continuous", "continuous_addon"):
-            return True
-    return False
-
 # Broad enough for a meaningful cross-section, bounded enough to stay under the systemd memory cap.
 # The strategy only trades liquid names (>=$500k/h), which sit in the top-by-turnover band, so the
 # top-N decile boundaries closely track the full-universe ones. Tunable via the config / env.
@@ -83,7 +55,9 @@ _CONTINUOUS_KLINE_UNIVERSE_SIZE = 250
 
 
 def _build_continuous_kline_universe(
-    market: BybitMarketData, *, top_n: int = _CONTINUOUS_KLINE_UNIVERSE_SIZE,
+    market: BybitMarketData,
+    *,
+    top_n: int = _CONTINUOUS_KLINE_UNIVERSE_SIZE,
 ) -> list[str]:
     """Top-N active linear USDT-perps by 24h turnover (the liquid cross-section the fade trades)."""
     try:
@@ -177,31 +151,37 @@ def _default_continuous_kline_stream_manager_factory(
     )
 
 
-class ContinuousDemoDaemon(LongNativeDemoDaemon):
-    """Continuous-fade sleeve daemon. Reuses the long daemon's WS scaffolding verbatim; the cycle
-    runner + kline-universe factory differ (see module docstring), and it adds four reactivity tiers:
+def _validate_continuous_daemon_startup(
+    config: ContinuousDemoCycleConfig,
+) -> None:
+    """Fail before shared resources unless CONT has one account-owner route."""
 
-      * Tier 1 — a fast PROTECTIVE-EXIT monitor thread that reacts to breakeven / failed-fade /
-        stop-approach on held names on every ticker tick (no panel recompute), serialised with the
-        main cycle by `_cycle_mutex` and bounded by `protective_exit_min_interval_seconds`.
-      * Tier 2 — a `LivePanelCache` injected into the cycle: the heavy trailing-window features are
-        computed once per bar close, only the live-price term is refreshed per wake.
-      * Tier 3 — an opt-in debounced ticker-batch wake: after `ticker_batch_wake_threshold` ticker
-        rows accumulate, request a full cycle (entries re-evaluated), still floored by the
-        min-cycle-interval. OFF by default (entry latency is likely noise for a multi-hour fade).
-      * Tier 4 — execution-event-driven state refresh: a continuous-sleeve fill nudges both the fast
-        loop and a prompt cycle so held-set/capacity update immediately, not at the next 60s tick.
+    execution_environment(config.execution_environment)
+    has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
+    has_account_execution_root = bool(str(config.account_execution_root or "").strip())
+    if has_account_inbox != has_account_execution_root:
+        raise ValueError(
+            "account_intent_inbox_root and account_execution_root must be "
+            "configured together"
+        )
+    if not has_account_inbox or not has_account_execution_root:
+        raise ValueError(
+            "CONTINUOUS daemon startup is target-only and requires "
+            "account_intent_inbox_root and account_execution_root"
+        )
+    if bool(getattr(config, "telegram", False)):
+        raise ValueError(
+            "account target route delegates Telegram exclusively to the account owner"
+        )
+
+
+class ContinuousDemoDaemon(LongNativeDemoDaemon):
+    """Target-only CONT producer built on the long daemon scaffolding.
+
+    The only CONT-specific runtime state is the optional LivePanelCache.
+    Public kline managers and the ordinary planner loop remain inherited.
     """
 
-    # The continuous sleeve has its OWN config type (NOT a subclass of the long sleeve's) yet reuses
-    # the long daemon's scaffolding, so self.demo_config is genuinely a ContinuousDemoCycleConfig here.
-    # The base stores it via an untyped assignment as LongNativeDemoCycleConfig; narrow it for the
-    # checker. (mypy surfaced this real divergence — see the deferred BaseDemoDaemon note.)
-    demo_config: ContinuousDemoCycleConfig
-
-    # Operator-facing telegram identity — without these the inherited failure/startup
-    # text says "long sleeve", misattributing a LIVE continuous crash to a toggled-off
-    # sleeve (same bug class as the inherited cycle-summary formatter, audit 2026-06-02).
     _sleeve_label = "continuous"
     _daemon_label = "continuous-fade"
 
@@ -217,26 +197,27 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         event_driven_cycle: bool = True,
         **kwargs: Any,
     ) -> None:
-        demo_config = apply_continuous_demo_profile(demo_config or ContinuousDemoCycleConfig())
-        # The continuous sleeve genuinely uses ContinuousDemoCycleConfig (not a subclass of the long
-        # sleeve's config) but reuses the long daemon's scaffolding, which only touches the common
-        # config fields. The class-level `demo_config` annotation re-narrows it for this subclass; the
-        # casts below satisfy the base __init__ signature without changing any runtime value.
+        demo_config = apply_continuous_demo_profile(
+            demo_config or ContinuousDemoCycleConfig()
+        )
+        _validate_continuous_daemon_startup(demo_config)
+        # The base only accesses fields shared by the LONG and CONT configs.
         super().__init__(
             data_root,
             config=config,
-            demo_config=cast("LongNativeDemoCycleConfig", demo_config),  # only common fields used
+            demo_config=cast("LongNativeDemoCycleConfig", demo_config),
             interval_seconds=interval_seconds,
             cycle_runner=cycle_runner,
             kline_stream_manager_factory=cast(
                 "Callable[[ResearchConfig, LongNativeDemoCycleConfig, Path], Any] | None",
-                _select_kline_stream_manager_factory(demo_config, kline_stream_manager_factory),
-            ),  # only common config fields used
+                _select_kline_stream_manager_factory(
+                    demo_config,
+                    kline_stream_manager_factory,
+                ),
+            ),
             event_driven_cycle=event_driven_cycle,
             **kwargs,
         )
-        # Tier 2: a persistent live-panel cache (heavy features once per bar close, cheap re-rank
-        # per wake). Disabled -> the cycle full-recomputes every wake (the always-available path).
         self._panel_cache: LivePanelCache | None = (
             LivePanelCache(
                 rmom_quantile=demo_config.rmom_quantile,
@@ -246,207 +227,18 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
             if demo_config.live_panel_cache_enabled
             else None
         )
-        # Tier 1/4: fast-loop trigger + main/fast serialisation.
-        self._tick_event = threading.Event()
-        self._cycle_mutex = threading.Lock()
-        self._protective_exit_thread: threading.Thread | None = None
-        self._protective_exits_total = 0
-        self._protective_exit_errors = 0
-        self._protective_exit_checks = 0
-        self._protective_exit_last_check_ms = 0   # wall-clock ms of the last fast check (telemetry)
-        # Tier 3: ticker-batch wake counter. Tier 4: fill-nudge counter.
-        self._ticker_update_count = 0
-        self._ticker_batch_wakes = 0
-        self._fill_nudges = 0
-        self._fill_nudge_errors = 0
-
-    # -- Tier 2: inject the panel cache into the cycle runner ----------
-
-    def _extra_cycle_kwargs(self) -> dict[str, Any]:
-        return {
-            "panel_cache": self._panel_cache,
-            "private_ws_health_ok": self._private_state_ws_health_ok(),
-            "reactivity_stats": self._reactivity_snapshot(),
-        }
-
-    def _reactivity_snapshot(self) -> dict[str, Any]:
-        """Fast-loop health for the cycle telemetry (persisted as rx_* so the watchdog sees a dead loop)."""
-        thread = self._protective_exit_thread
-        last_age_ms = (
-            max(0, int(time.time() * 1000) - self._protective_exit_last_check_ms)
-            if self._protective_exit_last_check_ms else None
-        )
-        return {
-            "protective_enabled": bool(self.demo_config.protective_exit_enabled),
-            "protective_alive": bool(thread is not None and thread.is_alive()),
-            "protective_checks": self._protective_exit_checks,
-            "protective_exits_total": self._protective_exits_total,
-            "protective_errors": self._protective_exit_errors,
-            "protective_last_check_age_ms": last_age_ms,
-            "ticker_batch_wakes": self._ticker_batch_wakes,
-            "fill_nudges": self._fill_nudges,
-            "fill_nudge_errors": self._fill_nudge_errors,
-        }
-
-    # -- main/fast serialisation: the main cycle holds the mutex for its whole duration so the
-    # fast protective-exit loop (non-blocking acquire) defers to it and never double-submits. ----
-
-    def _run_one_cycle(self) -> None:
-        with self._cycle_mutex:
-            super()._run_one_cycle()
-
-    def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
-        # The continuous cycle payload is a flat dict (no `cycle` key), so the inherited long-shaped
-        # formatter KeyError'd every cycle (audit 2026-06-02). Format the continuous shape instead.
-        return format_continuous_demo_cycle_summary(payload)
-
-    # -- lifecycle: start/stop the Tier-1 monitor around the base run loop --------------------
 
     def run(self) -> dict[str, Any]:
-        self._start_protective_exit_monitor()
-        try:
-            return super().run()
-        finally:
-            # Idempotent backstop; the primary stop is _pre_resource_teardown(),
-            # which the base run() invokes BEFORE closing WS/kline/trade resources.
-            self._stop_protective_exit_monitor()
+        # Defense in depth if a caller replaces demo_config after construction.
+        if not isinstance(self.demo_config, ContinuousDemoCycleConfig):
+            raise TypeError("CONTINUOUS daemon config changed to an incompatible type")
+        _validate_continuous_daemon_startup(self.demo_config)
+        return super().run()
 
-    def _pre_resource_teardown(self) -> None:
-        # Stop + join the fast protective-exit thread BEFORE the base closes the
-        # WS/kline/trade clients it submits through, so a draining protective cycle
-        # never touches a closed client (ws-daemonloops-1).
-        self._stop_protective_exit_monitor()
+    def _extra_cycle_kwargs(self) -> dict[str, Any]:
+        return {"panel_cache": self._panel_cache}
 
-    def request_shutdown(self) -> None:
-        super().request_shutdown()
-        # Wake the fast loop so SIGTERM drains it promptly (it otherwise waits up to a heartbeat).
-        self._tick_event.set()
-
-    # -- Tier 1: tick-driven protective-exit monitor ------------------
-
-    def _start_protective_exit_monitor(self) -> None:
-        if not self.demo_config.protective_exit_enabled:
-            _logger.info("continuous protective-exit monitor disabled (protective_exit_enabled=False)")
-            return
-        if self._protective_exit_thread is not None:
-            return
-        self._protective_exit_thread = threading.Thread(
-            target=self._protective_exit_loop, name="continuous-protective-exit", daemon=True,
-        )
-        self._protective_exit_thread.start()
-        _logger.info(
-            "continuous protective-exit monitor started (min_interval=%.1fs heartbeat=%.1fs stop_approach_frac=%.2f)",
-            self.demo_config.protective_exit_min_interval_seconds,
-            self.demo_config.protective_exit_heartbeat_seconds,
-            self.demo_config.stop_approach_frac,
-        )
-
-    def _stop_protective_exit_monitor(self) -> None:
-        thread = self._protective_exit_thread
-        self._protective_exit_thread = None
-        if thread is None:
-            return
-        self._shutdown.set()
-        self._tick_event.set()
-        # A protective cycle can be mid order-submit (acquires the file lock and
-        # places a reduce-only exit); a 5s join could return while that submit is
-        # still in flight and the daemon=True thread then gets hard-killed. Join with
-        # a budget that covers an order submit + fill-confirm (ws-daemonloops-2).
-        join_budget = max(15.0, float(getattr(self.demo_config, "order_fill_confirm_seconds", 0.0)) + 5.0)
-        thread.join(timeout=join_budget)
-
-    def _protective_exit_loop(self) -> None:
-        cfg = self.demo_config
-        heartbeat = max(1.0, float(cfg.protective_exit_heartbeat_seconds))
-        min_interval = max(0.0, float(cfg.protective_exit_min_interval_seconds))
-        last_check = 0.0
-        while not self._shutdown.is_set():
-            # Wake on a ticker/fill nudge, else fall through on the heartbeat (so a quiet ticker WS
-            # still gets the held book checked — e.g. max-hold / a stale-price squeeze).
-            self._tick_event.wait(timeout=heartbeat)
-            if self._shutdown.is_set():
-                break
-            # Debounce floor: never check more often than min_interval (the 2s floor).
-            elapsed = time.monotonic() - last_check
-            if elapsed < min_interval:
-                if self._shutdown.wait(timeout=min_interval - elapsed):
-                    break
-            # Consume the nudge IMMEDIATELY BEFORE the check (not right after wait): a tick that lands
-            # during the check then re-arms _tick_event, so the next iteration runs again — no dropped
-            # wake. And because the check reads the LIVE ticker cache, even a nudge coalesced away here
-            # never loses the underlying price (the very next check sees it).
-            self._tick_event.clear()
-            try:
-                self._run_protective_exit_check()
-            except Exception as exc:  # noqa: BLE001 — the loop must survive a bad tick
-                self._protective_exit_errors += 1
-                _logger.exception("continuous protective-exit check failed: %s", exc)
-            last_check = time.monotonic()
-
-    def _run_protective_exit_check(self) -> None:
-        cfg = self.demo_config
-        if not (cfg.submit_orders or cfg.record_dry_run):
-            return
-        # Defer to the main cycle if it is running — it covers exits itself, and the mutex prevents a
-        # torn ledger write / double-submit. Non-blocking so a long cycle never stalls the fast loop.
-        if not self._cycle_mutex.acquire(blocking=False):
-            return
-        try:
-            self._protective_exit_checks += 1
-            self._protective_exit_last_check_ms = int(time.time() * 1000)
-            kline_store = (
-                self._kline_stream_manager.store() if self._kline_stream_manager is not None else None
-            )
-            trade_router = self._ensure_trade_router() if cfg.submit_orders else None
-            if cfg.submit_orders and trade_router is None:
-                return  # no client yet (still booting / no creds) — the main cycle will cover
-            payload = run_continuous_protective_exit_cycle(
-                self.data_root,
-                config=self.config,
-                demo_config=cfg,
-                trading_client=trade_router,
-                kline_store=kline_store,
-                ticker_cache=self._ticker_cache,
-                private_state_cache=self._private_state_cache,
-                execution_event_router=self.router,
-            )
-        finally:
-            self._cycle_mutex.release()
-        exits = int(payload.get("exits", 0) or 0)
-        if exits:
-            self._protective_exits_total += exits
-            _logger.info("continuous fast protective-exit covered %d: %s", exits, payload.get("reasons"))
-
-    # -- Tier 1 trigger + Tier 3 entry wake: ticker callback ----------
-
-    def _handle_ticker_message(self, message: dict[str, Any]) -> None:
-        super()._handle_ticker_message(message)            # update the ticker cache (base behaviour)
-        # Tier 1: a held name's price just moved — wake the fast protective-exit loop.
-        self._tick_event.set()
-        # Tier 3 (opt-in): accumulate ticker rows and request a full cycle once the batch is large
-        # enough. The min-cycle-interval floor in the base run loop throttles how often this fires.
-        threshold = self.demo_config.ticker_batch_wake_threshold
-        if threshold > 0:
-            self._ticker_update_count += _message_row_count(message)
-            if self._ticker_update_count >= threshold:
-                self._ticker_update_count = 0
-                self._ticker_batch_wakes += 1
-                self._bar_event.set()
-
-    # -- Tier 4: execution-event-driven state refresh -----------------
-
-    def _handle_execution_message(self, message: dict[str, Any]) -> None:
-        super()._handle_execution_message(message)         # router records the fill (base behaviour)
-        try:
-            if _continuous_links_in_message(message):
-                self._fill_nudges += 1
-                # Immediate protective re-check for the freshly-changed position, plus a prompt full
-                # cycle so held-set/capacity refresh now rather than at the next scheduled tick.
-                self._tick_event.set()
-                self._bar_event.set()
-        except Exception as exc:  # noqa: BLE001 — never let telemetry wiring break the WS callback
-            # The wake events are also set by the main loop so a dropped nudge is
-            # bounded, but a RECURRING parse failure silently stops the fast
-            # protective-exit nudge -- count + log it so it is diagnosable.
-            self._fill_nudge_errors += 1
-            _logger.warning("continuous: fill-nudge wiring failed on execution message: %s", exc)
+    def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
+        # CONT cycle payloads are flat; the inherited LONG formatter expects
+        # a nested cycle object.
+        return format_continuous_demo_cycle_summary(payload)

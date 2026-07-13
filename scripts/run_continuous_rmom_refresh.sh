@@ -11,14 +11,10 @@ if [ ! -x "$PYTHON_BIN" ]; then
     PYTHON_BIN=python3
 fi
 
-# audit2 (deploy-env-timers-3 follow-up): the paper shadow USED to follow the demo
-# root's kline store + rmom gate (KLINES_FOLLOW_ROOT in the paper unit). Commit
-# 7d39d61 DROPPED that follow override so the paper shadow streams its OWN kline pool
-# and stays live even when the demo (leader) sleeve is off. But this refresh script was
-# left only rebuilding the demo root's gate, so the paper daemon now reads a gate from
-# its own root that nothing ever builds -> rmom q25 never resolves -> the paper book
-# emits ZERO entries forever and the paper<->demo cost/slippage reconcile has nothing to
-# pair. Fix: refresh EACH on sleeve's OWN root from its own kline store.
+# Demo and deterministic-paper target producers keep independent kline/RMOM
+# roots so one dead feed cannot be hidden by the other. Refresh every enabled
+# producer's gate from its own current store; otherwise q25 never resolves and
+# that producer silently emits no targets.
 refreshed=0
 if sleeve_on "${CONTINUOUS_SLEEVE:-off}"; then
     # Live event_demo_klines_1h roots are rolling operational stores, not stable

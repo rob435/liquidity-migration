@@ -1,9 +1,8 @@
-"""Extracted from event_demo.py — see that module's docstring.
+"""Public market-data plane shared by demo and paper target producers.
 
-This sibling holds a cohesive slice of the event-demo machinery. It
-imports shared helpers/configs from event_demo.py (the hub); the hub
-re-imports this module's public names at the bottom so external callers
-(`from liquidity_migration.event_demo import X`) keep working unchanged.
+This module has no private credentials, account snapshots, order methods, fill
+recovery, or venue-mutation imports.  LONG and CONTINUOUS use these helpers in
+both environments; the selected account owner is a separate route.
 """
 
 from __future__ import annotations
@@ -14,27 +13,169 @@ import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import polars as pl
 
 from .bybit import BybitMarketData, BybitRestRateLimiter
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
-from .downloaders import _normalize_instruments, _normalize_klines
+from .downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
 from .storage import dataset_path, read_dataset, write_dataset
 from .universe import build_current_universe_table
-from ._common import MS_PER_DAY, MS_PER_HOUR
-
-
-from .event_demo import (  # noqa: F401  (shared hub helpers)
-    _DEMO_INSTRUMENTS_CACHE_TTL_MS,
-    EventDemoCycleConfig,
-    _empty_klines,
-)
+from ._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms, finite_float
 
 _logger = logging.getLogger(__name__)
+
+_DEMO_INSTRUMENTS_CACHE_TTL_MS = 60 * 60 * 1000
+_MATCH_BACKTEST_UNIVERSE_FLOOR = 300
+
+
+class MarketUniverseConfig(Protocol):
+    """Structural public-data config implemented by both strategy configs."""
+
+    @property
+    def universe_rank_end(self) -> int: ...
+
+    @property
+    def universe_max_symbols(self) -> int: ...
+
+    @property
+    def universe_min_turnover_24h(self) -> float: ...
+
+    @property
+    def lookback_days(self) -> int: ...
+
+
+def _float(value: Any) -> float:
+    return finite_float(value, default=0.0) or 0.0
+
+
+def _empty_klines() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "ts_ms": pl.Series([], dtype=pl.Int64),
+            "symbol": pl.Series([], dtype=pl.String),
+            "open": pl.Series([], dtype=pl.Float64),
+            "high": pl.Series([], dtype=pl.Float64),
+            "low": pl.Series([], dtype=pl.Float64),
+            "close": pl.Series([], dtype=pl.Float64),
+            "volume_base": pl.Series([], dtype=pl.Float64),
+            "turnover_quote": pl.Series([], dtype=pl.Float64),
+            "source": pl.Series([], dtype=pl.String),
+        }
+    )
+
+
+def _floor_hour_ms(ts_ms: int) -> int:
+    return ts_ms - (ts_ms % MS_PER_HOUR)
+
+
+def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
+    end_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
+    return end_ms - exact_duration_ms(days=lookback_days), end_ms
+
+
+def _utc_now_ms() -> int:
+    return int(datetime.now(tz=UTC).timestamp() * 1000)
+
+
+def _yyyymmddhhmmss(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).strftime("%Y%m%d%H%M%S")
+
+
+def _column_values(frame: pl.DataFrame, column: str) -> list[str]:
+    if frame.is_empty() or column not in frame.columns:
+        return []
+    return [str(item) for item in frame[column].to_list()]
+
+
+def _max_int(frame: pl.DataFrame, column: str) -> int:
+    if frame.is_empty() or column not in frame.columns:
+        return 0
+    value = frame[column].max()
+    return int(value) if value is not None else 0  # type: ignore[arg-type]
+
+
+def _price_lookup_from_tickers_and_klines(
+    tickers: pl.DataFrame,
+    klines: pl.DataFrame,
+) -> dict[str, float]:
+    output: dict[str, float] = {}
+    if not klines.is_empty():
+        for row in klines.sort(["symbol", "ts_ms"]).group_by("symbol").tail(1).to_dicts():
+            price = _float(row.get("close"))
+            if price > 0.0:
+                output[str(row["symbol"])] = price
+    if not tickers.is_empty():
+        for row in tickers.to_dicts():
+            symbol = str(row.get("symbol", ""))
+            price = _float(row.get("mark_price")) or _float(row.get("last_price"))
+            if symbol and price > 0.0:
+                output[symbol] = price
+    return output
+
+
+def _resolve_ticker_snapshot(
+    public: Any,
+    *,
+    ticker_cache: Any | None,
+    state_cache_stale_seconds: float,
+) -> tuple[list[dict[str, Any]], str]:
+    """Read fresh public tickers from the cache, falling back to public REST."""
+
+    if ticker_cache is not None:
+        try:
+            if ticker_cache.is_seeded() and not ticker_cache.is_stale(
+                stale_seconds=state_cache_stale_seconds,
+            ):
+                rows = ticker_cache.snapshot_list(
+                    max_age_seconds=state_cache_stale_seconds
+                )
+                if rows:
+                    return rows, "ws_cache"
+        except Exception as exc:  # noqa: BLE001 - public REST is the safe fallback
+            _logger.warning("ticker cache snapshot failed; REST fallback: %s", exc)
+    return public.get_tickers(), "rest"
+
+
+def _universe_shrink_floor(config: MarketUniverseConfig) -> int:
+    requested = config.universe_max_symbols or config.universe_rank_end
+    return int(requested * 0.75) if requested > 0 else _MATCH_BACKTEST_UNIVERSE_FLOOR
+
+
+def _prune_cycle_reports(
+    report_dir: Path,
+    *,
+    prefix: str,
+    keep_days: int,
+    now_ms: int,
+    extensions: tuple[str, ...] = ("json",),
+) -> None:
+    """Best-effort bounded retention for per-cycle public planning reports."""
+
+    if keep_days <= 0:
+        return
+    sentinel = report_dir / f".{prefix}prune_sentinel"
+    try:
+        sentinel_mtime_ms = int(sentinel.stat().st_mtime * 1000)
+    except OSError:
+        sentinel_mtime_ms = 0
+    if sentinel_mtime_ms > 0 and now_ms - sentinel_mtime_ms < 3_600_000:
+        return
+    cutoff_ts = (now_ms / 1000.0) - keep_days * 86400.0
+    try:
+        for extension in extensions:
+            for path in report_dir.glob(f"{prefix}*.{extension}"):
+                try:
+                    if path.stat().st_mtime < cutoff_ts:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    continue
+        sentinel.touch()
+    except OSError:
+        return
 
 
 def _demo_instruments_cache_paths(cache_root: Path) -> tuple[Path, Path]:
@@ -107,7 +248,7 @@ def _build_demo_universe(
     instruments: pl.DataFrame,
     tickers: pl.DataFrame,
     *,
-    config: EventDemoCycleConfig,
+    config: MarketUniverseConfig,
     snapshot_ts_ms: int,
 ) -> pl.DataFrame:
     # In the unlimited-universe mode (universe_rank_end == universe_max_symbols
@@ -139,6 +280,64 @@ def _build_demo_universe(
         universe_config=universe_config,
         snapshot_ts_ms=snapshot_ts_ms,
     )
+
+
+def _resolve_cycle_universe(
+    *,
+    public: Any,
+    demo: MarketUniverseConfig,
+    config: ResearchConfig,
+    root: Path,
+    cycle_now_ms: int,
+    ticker_cache: Any | None,
+    state_cache_stale_seconds: float,
+) -> tuple[pl.DataFrame, list[str], pl.DataFrame, str]:
+    """Resolve one fresh, public-only strategy universe."""
+
+    _ = config  # venue normalization is owned by the supplied public adapter
+    instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
+    raw_tickers, ticker_source = _resolve_ticker_snapshot(
+        public,
+        ticker_cache=ticker_cache,
+        state_cache_stale_seconds=state_cache_stale_seconds,
+    )
+    tickers = _normalize_tickers(raw_tickers)
+    universe = _build_demo_universe(
+        instruments,
+        tickers,
+        config=demo,
+        snapshot_ts_ms=cycle_now_ms,
+    )
+    shrink_floor = _universe_shrink_floor(demo)
+    if universe.height < shrink_floor:
+        _logger.warning(
+            "universe shrink detected: got %d symbols (floor %d); "
+            "busting instruments cache and retrying",
+            universe.height,
+            shrink_floor,
+        )
+        _bust_demo_instruments_cache(root)
+        instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
+        tickers = _normalize_tickers(public.get_tickers())
+        universe = _build_demo_universe(
+            instruments,
+            tickers,
+            config=demo,
+            snapshot_ts_ms=cycle_now_ms,
+        )
+        if universe.height < shrink_floor:
+            _logger.error(
+                "universe shrink persists after cache bust: %d symbols "
+                "(floor %d, instruments=%d, tickers=%d)",
+                universe.height,
+                shrink_floor,
+                instruments.height,
+                tickers.height,
+            )
+    symbols = universe["symbol"].to_list() if not universe.is_empty() else []
+    if not symbols:
+        raise RuntimeError("public market-data cycle found no tradable symbols")
+    return universe, symbols, tickers, ticker_source
 
 def _download_recent_1h_klines(
     symbols: list[str],
@@ -328,9 +527,9 @@ def _read_demo_kline_cache(
     return output
 
 _KLINE_CACHE_PRUNE_SAFETY_MARGIN_DAYS = 3
-# The cycle only ever reads the trailing lookback window (EventDemoCycleConfig
-# default); date= partitions older than that are dead weight on disk.
-_KLINE_CACHE_PRUNE_LOOKBACK_DAYS = EventDemoCycleConfig().lookback_days
+# Producers normally read a trailing 45-day public window; older date
+# partitions are dead weight on the operational root.
+_KLINE_CACHE_PRUNE_LOOKBACK_DAYS = 45
 # UTC date of the last prune attempt per dataset dir: the prune is invoked on
 # every REST write (~once per ~60s cycle) but only needs to do work when the
 # date rolls, so anything else is a single dict lookup.
@@ -583,20 +782,6 @@ def _demo_rest_rate_limit_per_second() -> int:
     except ValueError:
         return 18
     return value if value > 0 else 18
-
-def _demo_private_rest_rate_limit_per_second() -> int:
-    """Bybit per-account private REST budget for place_order et al is roughly
-    20 req/s sustained. We default to 15 to leave headroom for risk-engine
-    private calls hitting the same account from a separate process.
-    """
-    raw = os.environ.get("BYBIT_PRIVATE_REST_RATE_LIMIT_PER_SECOND", "").strip()
-    if not raw:
-        return 15
-    try:
-        value = int(raw)
-    except ValueError:
-        return 15
-    return value if value > 0 else 15
 
 def _dedupe_recent_klines(klines: pl.DataFrame) -> pl.DataFrame:
     if klines.is_empty():

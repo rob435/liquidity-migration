@@ -1,0 +1,609 @@
+"""Raw, sequence-aware Bybit L2 and public-trade capture.
+
+Pybit deliberately converts every orderbook callback into a reconstructed
+``snapshot`` and discards the raw delta type.  That is convenient for display,
+but insufficient for sequence-gap and latency evidence.  This module therefore
+accepts raw V5 messages and persists the original snapshot/delta payload before
+maintaining its own reconstructable book.
+
+Bybit's documented semantics used here:
+
+* a new snapshot replaces the book;
+* size zero deletes a level, otherwise insert/update;
+* update id ``u=1`` is a service-restart snapshot and replaces the book;
+* ``cts`` is matching-engine time and public-trade ``T`` can be correlated to it;
+* ``seq`` is ordered, but the public contract does not promise that every depth
+  stream receives every integer.  Jumps are recorded; regressions are gaps.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import logging
+import os
+import shutil
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Mapping
+
+from .deterministic_serialization import canonical_json, json_safe
+from .deterministic_runtime import Clock, SystemClock
+from .execution_adapters import BookLevel, L2BookSnapshot
+
+_logger = logging.getLogger(__name__)
+
+MAINNET_PUBLIC_LINEAR_WS = "wss://stream.bybit.com/v5/public/linear"
+TESTNET_PUBLIC_LINEAR_WS = "wss://stream-testnet.bybit.com/v5/public/linear"
+
+
+class MarketCaptureError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class MarketCaptureConfig:
+    depth: int = 50
+    segment_max_bytes: int = 128 * 1024 * 1024
+    fsync_every_records: int = 250
+    min_free_disk_bytes: int = 2 * 1024 * 1024 * 1024
+    ring_records_per_symbol: int = 10_000
+    strict_contiguous_update_ids: bool = False
+
+    def __post_init__(self) -> None:
+        if self.depth not in {1, 50, 200, 1000}:
+            raise ValueError("linear orderbook depth must be one of 1, 50, 200, 1000")
+        if min(
+            self.segment_max_bytes,
+            self.fsync_every_records,
+            self.min_free_disk_bytes,
+            self.ring_records_per_symbol,
+        ) <= 0:
+            raise ValueError("capture storage limits must be positive")
+
+
+@dataclass(slots=True)
+class _Segment:
+    day: str
+    index: int
+    path: Path
+    file: Any
+    bytes_written: int = 0
+    records_since_sync: int = 0
+
+
+class SegmentedCaptureStore:
+    """Bounded-segment JSONL store with periodic fsync and disk fail-closed."""
+
+    def __init__(self, root: str | Path, *, config: MarketCaptureConfig) -> None:
+        self.root = Path(root).expanduser()
+        self.config = config
+        self._segments: dict[str, _Segment] = {}
+        self._lock = threading.RLock()
+
+    def _free_disk_bytes(self) -> int:
+        probe = self.root
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        return shutil.disk_usage(probe).free
+
+    def _segment(self, *, symbol: str, local_receive_ts_ns: int) -> _Segment:
+        day = datetime.fromtimestamp(local_receive_ts_ns / 1_000_000_000, tz=timezone.utc).strftime("%Y-%m-%d")
+        key = symbol.upper() or "ACCOUNT"
+        current = self._segments.get(key)
+        if current is not None and current.day == day and current.bytes_written < self.config.segment_max_bytes:
+            return current
+        if current is not None:
+            current.file.flush()
+            os.fsync(current.file.fileno())
+            current.file.close()
+        directory = self.root / day / key
+        directory.mkdir(parents=True, exist_ok=True)
+        indices: list[int] = []
+        for path in directory.glob("segment-*.jsonl"):
+            try:
+                indices.append(int(path.stem.split("-")[-1]))
+            except ValueError:
+                continue
+        index = max(indices, default=-1) + 1
+        path = directory / f"segment-{index:06d}.jsonl"
+        file = open(path, "ab", buffering=0)
+        segment = _Segment(day=day, index=index, path=path, file=file, bytes_written=path.stat().st_size)
+        self._segments[key] = segment
+        return segment
+
+    def append(self, record: Mapping[str, Any]) -> Path:
+        local_ns = int(record.get("local_receive_ts_ns") or 0)
+        if local_ns <= 0:
+            raise MarketCaptureError("capture record requires local_receive_ts_ns")
+        symbol = str(record.get("symbol") or "ACCOUNT").upper()
+        payload = canonical_json(record) + b"\n"
+        with self._lock:
+            if self._free_disk_bytes() < self.config.min_free_disk_bytes:
+                raise MarketCaptureError("market capture stopped: free disk below configured floor")
+            segment = self._segment(symbol=symbol, local_receive_ts_ns=local_ns)
+            if segment.bytes_written and segment.bytes_written + len(payload) > self.config.segment_max_bytes:
+                segment.bytes_written = self.config.segment_max_bytes
+                segment = self._segment(symbol=symbol, local_receive_ts_ns=local_ns)
+            written = segment.file.write(payload)
+            if written != len(payload):
+                raise OSError("short market-capture write")
+            segment.bytes_written += written
+            segment.records_since_sync += 1
+            if segment.records_since_sync >= self.config.fsync_every_records:
+                os.fsync(segment.file.fileno())
+                segment.records_since_sync = 0
+            return segment.path
+
+    def close(self) -> None:
+        with self._lock:
+            for segment in self._segments.values():
+                segment.file.flush()
+                os.fsync(segment.file.fileno())
+                segment.file.close()
+            self._segments.clear()
+
+
+@dataclass(slots=True)
+class BookReconstruction:
+    symbol: str
+    bids: dict[float, float] = field(default_factory=dict)
+    asks: dict[float, float] = field(default_factory=dict)
+    update_id: int = 0
+    cross_sequence: int = 0
+    exchange_system_ts_ns: int = 0
+    exchange_engine_ts_ns: int = 0
+    local_receive_ts_ns: int = 0
+    has_snapshot: bool = False
+    healthy: bool = False
+    last_gap_reason: str = ""
+
+    def snapshot(self, *, depth: int) -> L2BookSnapshot:
+        bids = tuple(BookLevel(price, qty) for price, qty in sorted(self.bids.items(), reverse=True)[:depth])
+        asks = tuple(BookLevel(price, qty) for price, qty in sorted(self.asks.items())[:depth])
+        return L2BookSnapshot(
+            symbol=self.symbol,
+            sequence=self.cross_sequence,
+            previous_sequence=None,
+            exchange_ts_ns=self.exchange_engine_ts_ns or self.exchange_system_ts_ns,
+            local_receive_ts_ns=self.local_receive_ts_ns,
+            bids=bids,
+            asks=asks,
+            sequence_gap=not self.healthy,
+            clock_offset_estimate_ns=(
+                self.local_receive_ts_ns - (self.exchange_engine_ts_ns or self.exchange_system_ts_ns)
+                if (self.exchange_engine_ts_ns or self.exchange_system_ts_ns)
+                else None
+            ),
+        )
+
+
+def _levels(value: Any) -> list[tuple[float, float]]:
+    output: list[tuple[float, float]] = []
+    if not isinstance(value, (list, tuple)):
+        return output
+    for row in value:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        try:
+            price, qty = float(row[0]), float(row[1])
+        except (TypeError, ValueError):
+            continue
+        if price > 0.0 and qty >= 0.0:
+            output.append((price, qty))
+    return output
+
+
+def _apply_levels(book: dict[float, float], updates: Iterable[tuple[float, float]]) -> None:
+    for price, qty in updates:
+        if qty == 0.0:
+            book.pop(price, None)
+        else:
+            book[price] = qty
+
+
+def capture_record_id(record: Mapping[str, Any]) -> str:
+    """Return the stable identity used by raw-capture and decision-context rows.
+
+    The identity names an arrival; the segment SHA-256 in downstream receipts
+    binds the complete payload, including prices and sizes.
+    """
+
+    material = {
+        key: record.get(key)
+        for key in (
+            "kind",
+            "symbol",
+            "local_receive_ts_ns",
+            "update_id",
+            "cross_sequence",
+            "trade_ids",
+        )
+    }
+    return hashlib.sha256(canonical_json(material)).hexdigest()[:24]
+
+
+class SequenceAwareMarketRecorder:
+    """Parse raw Bybit public messages, persist them, and reconstruct L2."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        config: MarketCaptureConfig | None = None,
+        clock: Clock | None = None,
+    ) -> None:
+        self.config = config or MarketCaptureConfig()
+        self.clock = clock or SystemClock()
+        self.store = SegmentedCaptureStore(root, config=self.config)
+        self.books: dict[str, BookReconstruction] = {}
+        self.rings: dict[str, deque[dict[str, Any]]] = {}
+        self._lock = threading.RLock()
+
+    def _persist(self, record: dict[str, Any]) -> dict[str, Any]:
+        record["schema_version"] = 1
+        record["record_id"] = capture_record_id(record)
+        safe = json_safe(record)
+        self.store.append(safe)
+        symbol = str(record.get("symbol") or "ACCOUNT")
+        ring = self.rings.setdefault(symbol, deque(maxlen=self.config.ring_records_per_symbol))
+        ring.append(dict(safe))
+        return dict(safe)
+
+    def on_message(self, message: Mapping[str, Any], *, local_receive_ts_ns: int | None = None) -> list[dict[str, Any]]:
+        local_ns = int(local_receive_ts_ns or self.clock.wall_time_ns())
+        topic = str(message.get("topic") or "")
+        with self._lock:
+            if topic.startswith("orderbook."):
+                return [self._on_orderbook(message, local_ns=local_ns)]
+            if topic.startswith("publicTrade."):
+                return self._on_trades(message, local_ns=local_ns)
+            return []
+
+    def _on_orderbook(self, message: Mapping[str, Any], *, local_ns: int) -> dict[str, Any]:
+        data = message.get("data") or {}
+        if not isinstance(data, Mapping):
+            raise MarketCaptureError("orderbook message data must be an object")
+        symbol = str(data.get("s") or str(message.get("topic") or "").split(".")[-1]).upper()
+        message_type = str(message.get("type") or "").lower()
+        update_id = int(data.get("u") or 0)
+        cross_sequence = int(data.get("seq") or 0)
+        system_ns = int(message.get("ts") or 0) * 1_000_000
+        engine_ns = int(message.get("cts") or 0) * 1_000_000
+        state = self.books.setdefault(symbol, BookReconstruction(symbol=symbol))
+        previous_update_id = state.update_id
+        previous_cross_sequence = state.cross_sequence
+        restart_snapshot = update_id == 1
+        is_snapshot = message_type == "snapshot" or restart_snapshot
+        gap_reason = ""
+        if not is_snapshot:
+            if not state.has_snapshot:
+                gap_reason = "delta_before_snapshot"
+            elif update_id <= previous_update_id:
+                gap_reason = "update_id_not_increasing"
+            elif cross_sequence < previous_cross_sequence:
+                gap_reason = "cross_sequence_regression"
+            elif self.config.strict_contiguous_update_ids and update_id != previous_update_id + 1:
+                gap_reason = "update_id_jump"
+
+        bids = _levels(data.get("b"))
+        asks = _levels(data.get("a"))
+        if is_snapshot:
+            state.bids.clear()
+            state.asks.clear()
+            _apply_levels(state.bids, bids)
+            _apply_levels(state.asks, asks)
+            state.has_snapshot = True
+            state.healthy = True
+            state.last_gap_reason = ""
+        elif not gap_reason:
+            _apply_levels(state.bids, bids)
+            _apply_levels(state.asks, asks)
+        else:
+            # Once a gap is observed, do not pretend later deltas repair it.
+            # Keep capturing but wait for the next exchange snapshot.
+            state.healthy = False
+            state.last_gap_reason = gap_reason
+        state.update_id = update_id
+        state.cross_sequence = cross_sequence
+        state.exchange_system_ts_ns = system_ns
+        state.exchange_engine_ts_ns = engine_ns
+        state.local_receive_ts_ns = local_ns
+        record = {
+            "kind": "orderbook_snapshot" if is_snapshot else "orderbook_delta",
+            "symbol": symbol,
+            "topic": str(message.get("topic") or ""),
+            "message_type": message_type,
+            "local_receive_ts_ns": local_ns,
+            "exchange_system_ts_ns": system_ns,
+            "exchange_engine_ts_ns": engine_ns,
+            "system_clock_offset_ns": local_ns - system_ns if system_ns else None,
+            "engine_clock_offset_ns": local_ns - engine_ns if engine_ns else None,
+            "update_id": update_id,
+            "previous_update_id": previous_update_id,
+            "update_id_jump": update_id - previous_update_id if previous_update_id else None,
+            "cross_sequence": cross_sequence,
+            "previous_cross_sequence": previous_cross_sequence,
+            "sequence_gap": bool(gap_reason),
+            "sequence_gap_reason": gap_reason,
+            "restart_snapshot": restart_snapshot,
+            "bids": bids,
+            "asks": asks,
+        }
+        return self._persist(record)
+
+    def _on_trades(self, message: Mapping[str, Any], *, local_ns: int) -> list[dict[str, Any]]:
+        raw_rows = message.get("data") or []
+        if not isinstance(raw_rows, (list, tuple)):
+            raise MarketCaptureError("public trade data must be a list")
+        system_ns = int(message.get("ts") or 0) * 1_000_000
+        records: list[dict[str, Any]] = []
+        for row in raw_rows:
+            if not isinstance(row, Mapping):
+                continue
+            symbol = str(row.get("s") or str(message.get("topic") or "").split(".")[-1]).upper()
+            trade_ns = int(row.get("T") or 0) * 1_000_000
+            records.append(self._persist({
+                "kind": "public_trade",
+                "symbol": symbol,
+                "topic": str(message.get("topic") or ""),
+                "local_receive_ts_ns": local_ns,
+                "exchange_system_ts_ns": system_ns,
+                "exchange_trade_ts_ns": trade_ns,
+                "system_clock_offset_ns": local_ns - system_ns if system_ns else None,
+                "trade_clock_offset_ns": local_ns - trade_ns if trade_ns else None,
+                "cross_sequence": int(row.get("seq") or 0),
+                "trade_ids": [str(row.get("i") or "")],
+                "trade_id": str(row.get("i") or ""),
+                "side": str(row.get("S") or ""),
+                "price": float(row.get("p") or 0.0),
+                "qty": float(row.get("v") or 0.0),
+                "tick_direction": str(row.get("L") or ""),
+                "block_trade": bool(row.get("BT")),
+                "rpi_trade": bool(row.get("RPI")),
+            }))
+        return records
+
+    def capture_context(
+        self,
+        *,
+        symbol: str,
+        context_kind: str,
+        reference_key: str,
+        depth: int | None = None,
+    ) -> tuple[dict[str, Any], L2BookSnapshot]:
+        """Persist an exact reconstructed book at a decision/risk/send/fill boundary."""
+
+        symbol = symbol.upper()
+        with self._lock:
+            state = self.books.get(symbol)
+            if state is None or not state.has_snapshot:
+                raise MarketCaptureError(f"no reconstructed book for {symbol}")
+            snapshot = state.snapshot(depth=depth or self.config.depth)
+            record = self._persist({
+                "kind": "book_context",
+                "context_kind": context_kind,
+                "reference_key": reference_key,
+                "symbol": symbol,
+                "local_receive_ts_ns": self.clock.wall_time_ns(),
+                "book_local_receive_ts_ns": state.local_receive_ts_ns,
+                "exchange_system_ts_ns": state.exchange_system_ts_ns,
+                "exchange_engine_ts_ns": state.exchange_engine_ts_ns,
+                "update_id": state.update_id,
+                "cross_sequence": state.cross_sequence,
+                "sequence_gap": not state.healthy,
+                "sequence_gap_reason": state.last_gap_reason,
+                "bids": [(level.price, level.qty) for level in snapshot.bids],
+                "asks": [(level.price, level.qty) for level in snapshot.asks],
+            })
+            return record, snapshot
+
+    def recent(self, symbol: str) -> tuple[dict[str, Any], ...]:
+        with self._lock:
+            return tuple(dict(row) for row in self.rings.get(symbol.upper(), ()))
+
+    def current_book(self, symbol: str, *, depth: int | None = None) -> L2BookSnapshot | None:
+        with self._lock:
+            state = self.books.get(symbol.upper())
+            if state is None or not state.has_snapshot:
+                return None
+            return state.snapshot(depth=depth or self.config.depth)
+
+    def close(self) -> None:
+        self.store.close()
+
+
+class BybitRawPublicMarketStream:
+    """Raw WebSocket client for orderbook deltas plus public trades.
+
+    The factory is injectable for tests.  Production uses ``websocket-client``
+    (already a pybit dependency) and reconnects in a daemon thread until closed.
+    """
+
+    def __init__(
+        self,
+        *,
+        testnet: bool = False,
+        depth: int = 50,
+        on_message: Callable[[Mapping[str, Any]], Any],
+        websocket_factory: Callable[..., Any] | None = None,
+        reconnect_seconds: float = 2.0,
+    ) -> None:
+        self.url = TESTNET_PUBLIC_LINEAR_WS if testnet else MAINNET_PUBLIC_LINEAR_WS
+        self.depth = depth
+        self.on_market_message = on_message
+        self.reconnect_seconds = reconnect_seconds
+        self._symbols: set[str] = set()
+        self._socket: Any | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.RLock()
+        if websocket_factory is None:
+            from websocket import WebSocketApp
+
+            websocket_factory = WebSocketApp
+        self._factory = websocket_factory
+
+    def _topics(self, symbols: Iterable[str]) -> list[str]:
+        topics: list[str] = []
+        for symbol in sorted({value.upper() for value in symbols if value}):
+            topics.extend((f"orderbook.{self.depth}.{symbol}", f"publicTrade.{symbol}"))
+        return topics
+
+    def _send(self, operation: str, symbols: Iterable[str]) -> None:
+        topics = self._topics(symbols)
+        socket = self._socket
+        if not topics or socket is None:
+            return
+        for index in range(0, len(topics), 10):
+            socket.send(json.dumps({"op": operation, "args": topics[index : index + 10]}))
+
+    def update_symbols(self, symbols: Iterable[str]) -> None:
+        desired = {symbol.upper() for symbol in symbols if symbol}
+        with self._lock:
+            adds = desired - self._symbols
+            removes = self._symbols - desired
+            self._send("unsubscribe", removes)
+            self._send("subscribe", adds)
+            self._symbols = desired
+
+    def _on_open(self, socket: Any) -> None:
+        with self._lock:
+            self._socket = socket
+            self._send("subscribe", self._symbols)
+
+    def _on_message(self, _socket: Any, raw: str | bytes) -> None:
+        local_ns = time.time_ns()
+        try:
+            message = json.loads(raw)
+            if isinstance(message, Mapping) and message.get("topic"):
+                # Capture receive time before parsing/storage work.
+                self.on_market_message({**message, "_local_receive_ts_ns": local_ns})
+        except Exception:  # noqa: BLE001 - malformed public frames must not kill reconnect loop
+            _logger.exception("raw Bybit public message handling failed")
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            socket = self._factory(
+                self.url,
+                on_open=self._on_open,
+                on_message=self._on_message,
+            )
+            with self._lock:
+                self._socket = socket
+            try:
+                socket.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception:  # noqa: BLE001
+                _logger.exception("raw Bybit public stream failed")
+            finally:
+                with self._lock:
+                    if self._socket is socket:
+                        self._socket = None
+            self._stop.wait(self.reconnect_seconds)
+
+    def start(self, symbols: Iterable[str]) -> None:
+        self.update_symbols(symbols)
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="bybit-raw-market", daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        with self._lock:
+            socket = self._socket
+        if socket is not None:
+            close = getattr(socket, "close", None)
+            if callable(close):
+                close()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+
+def recorder_callback(recorder: SequenceAwareMarketRecorder) -> Callable[[Mapping[str, Any]], Any]:
+    """Bridge raw-stream receive stamps into the recorder."""
+
+    def callback(message: Mapping[str, Any]) -> Any:
+        return recorder.on_message(
+            message,
+            local_receive_ts_ns=int(message.get("_local_receive_ts_ns") or 0) or None,
+        )
+
+    return callback
+
+
+def symbols_from_file(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    text = path.read_text().strip()
+    if not text:
+        return set()
+    if text.startswith("[") or text.startswith("{"):
+        value = json.loads(text)
+        if isinstance(value, Mapping):
+            value = value.get("symbols") or []
+        if not isinstance(value, list):
+            raise ValueError("symbol JSON must be a list or {'symbols': [...]} object")
+        return {str(symbol).upper() for symbol in value if symbol}
+    return {
+        token.upper()
+        for line in text.splitlines()
+        for token in line.replace(",", " ").split()
+        if token
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Capture raw Bybit L2 deltas and public trades")
+    parser.add_argument("--root", required=True, help="Capture output root")
+    parser.add_argument("--symbols", nargs="*", default=(), help="Initial candidate/held symbols")
+    parser.add_argument("--symbols-file", default="", help="Optional watched JSON/newline symbol file")
+    parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
+    parser.add_argument("--depth", type=int, default=50, choices=(1, 50, 200, 1000))
+    parser.add_argument("--testnet", action="store_true")
+    parser.add_argument("--min-free-disk-gb", type=float, default=2.0)
+    args = parser.parse_args(argv)
+
+    recorder = SequenceAwareMarketRecorder(
+        args.root,
+        config=MarketCaptureConfig(
+            depth=args.depth,
+            min_free_disk_bytes=max(int(args.min_free_disk_gb * 1024**3), 1),
+        ),
+    )
+    stream = BybitRawPublicMarketStream(
+        testnet=args.testnet,
+        depth=args.depth,
+        on_message=recorder_callback(recorder),
+    )
+    symbol_file = Path(args.symbols_file).expanduser() if args.symbols_file else None
+    symbols = {str(symbol).upper() for symbol in args.symbols if symbol}
+    if symbol_file is not None:
+        symbols.update(symbols_from_file(symbol_file))
+    if not symbols:
+        parser.error("at least one --symbols entry or a non-empty --symbols-file is required")
+    stream.start(symbols)
+    try:
+        while True:
+            time.sleep(max(args.symbol_refresh_seconds, 0.25))
+            if symbol_file is not None:
+                desired = {str(symbol).upper() for symbol in args.symbols if symbol}
+                desired.update(symbols_from_file(symbol_file))
+                if desired:
+                    stream.update_symbols(desired)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        stream.close()
+        recorder.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,4 +1,5 @@
 """Unit tests for the fast liveness/safety watchdog's pure decision logic."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -24,9 +25,21 @@ HOUR = 3_600_000
 MIN = 60_000
 
 
+def _stub_account_authority(monkeypatch) -> None:
+    """Keep unrelated main-loop tests focused on cooldown/timer behavior."""
+
+    monkeypatch.setattr(M, "evaluate_required_account_owner_states", lambda _states: [])
+    monkeypatch.setattr(M, "gather_account_capture_alerts", lambda **_kwargs: [])
+    monkeypatch.setattr(M, "gather_account_health_alerts", lambda **_kwargs: [])
+    monkeypatch.setattr(M, "gather_account_owner_health_alerts", lambda **_kwargs: [])
+
+
 def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
     now = 1_000 * HOUR
-    assert M.evaluate_cycle_liveness(latest_cycle_ts_ms=now - 2 * MIN, now_ms=now, max_age_minutes=10, label="demo") is None
+    assert (
+        M.evaluate_cycle_liveness(latest_cycle_ts_ms=now - 2 * MIN, now_ms=now, max_age_minutes=10, label="demo")
+        is None
+    )
     stale = M.evaluate_cycle_liveness(latest_cycle_ts_ms=now - 30 * MIN, now_ms=now, max_age_minutes=10, label="demo")
     assert stale is not None and stale.severity == M.CRITICAL and "DOWN" in stale.message
     missing = M.evaluate_cycle_liveness(latest_cycle_ts_ms=None, now_ms=now, max_age_minutes=10, label="demo")
@@ -78,34 +91,23 @@ def test_unit_states_timers_alert_on_not_active() -> None:
     assert "never fire" in alerts["unit:stopped.timer"].message
 
 
-def test_gather_risk_alerts_pages_on_stale_or_missing_heartbeat(tmp_path) -> None:
-    """A stopped or hung risk engine must page from heartbeat age."""
-    import argparse
-
-    import polars as pl
-
-    now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10)
-    root = tmp_path / "bybit-demo-event"
-
-    # Root missing entirely -> dev-box convention: no alert (other gathers match).
-    assert M.gather_risk_alerts(risk_root=root, now_ms=now, args=args) == []
-
-    # Root exists but no cycles ever written -> CRITICAL (never started).
-    root.mkdir(parents=True)
-    alerts = M.gather_risk_alerts(risk_root=root, now_ms=now, args=args)
-    assert [a.key for a in alerts] == ["liveness:ws_risk"]
+def test_required_account_owners_must_be_active() -> None:
+    states = {
+        M._DEMO_ACCOUNT_OWNER_UNIT: "active",
+        M._PAPER_ACCOUNT_OWNER_UNIT: "inactive",
+    }
+    alerts = M.evaluate_required_account_owner_states(states)
+    assert [alert.key for alert in alerts] == [f"unit:{M._PAPER_ACCOUNT_OWNER_UNIT}"]
     assert alerts[0].severity == M.CRITICAL
-
-    # Fresh heartbeat -> clean; stale heartbeat -> CRITICAL.
-    cyc_dir = root / "event_demo_cycles" / "date=2024-01-01"
-    cyc_dir.mkdir(parents=True)
-    pl.DataFrame([{"ts_ms": now - 2 * MIN}]).write_parquet(cyc_dir / "part.parquet")
-    assert M.gather_risk_alerts(risk_root=root, now_ms=now, args=args) == []
-    pl.DataFrame([{"ts_ms": now - 45 * MIN}]).write_parquet(cyc_dir / "part.parquet")
-    alerts = M.gather_risk_alerts(risk_root=root, now_ms=now, args=args)
-    assert [a.key for a in alerts] == ["liveness:ws_risk"]
-    assert "DOWN/HUNG" in alerts[0].message
+    assert (
+        M.evaluate_required_account_owner_states(
+            {
+                M._DEMO_ACCOUNT_OWNER_UNIT: "active",
+                M._PAPER_ACCOUNT_OWNER_UNIT: "active",
+            }
+        )
+        == []
+    )
 
 
 def test_gather_liquidation_capture_alerts_freshness(tmp_path) -> None:
@@ -134,97 +136,6 @@ def test_gather_liquidation_capture_alerts_freshness(tmp_path) -> None:
     assert alerts[0].severity == M.WARNING
 
 
-def test_stop_protection_flags_missing_and_wrong_and_mismatch() -> None:
-    open_trades = [
-        {"symbol": "OKUSDT", "stop_price": 100.0},
-        {"symbol": "NOSTOPUSDT", "stop_price": 50.0},
-        {"symbol": "WRONGUSDT", "stop_price": 10.0},
-        {"symbol": "GONEUSDT", "stop_price": 5.0},
-    ]
-    venue = {
-        "OKUSDT": {"size": "1", "stopLoss": "100.05"},     # within 2% -> protected
-        "NOSTOPUSDT": {"size": "2", "stopLoss": ""},        # no server-side stop -> CRITICAL
-        "WRONGUSDT": {"size": "3", "stopLoss": "13.0"},     # 30% off -> CRITICAL
-        "GONEUSDT": {"size": "0", "stopLoss": ""},          # venue flat but ledger open -> WARNING
-    }
-    alerts = {a.key: a for a in M.evaluate_stop_protection(open_trades=open_trades, venue_positions=venue)}
-    assert "unprotected:OKUSDT" not in alerts
-    assert alerts["unprotected:NOSTOPUSDT"].severity == M.CRITICAL
-    assert alerts["unprotected:WRONGUSDT"].severity == M.CRITICAL
-    assert alerts["mismatch:GONEUSDT"].severity == M.WARNING
-    assert "CLOSE THE POSITION MANUALLY" in alerts["unprotected:NOSTOPUSDT"].message
-
-
-def test_order_permission_alerts_confirmed_denied_vs_unknown() -> None:
-    denied = M.evaluate_order_permission(allowed=False, reason="Bybit API key metadata reports readOnly=1")
-    assert denied is not None
-    assert denied.key == "bybit_order_permissions"
-    assert denied.severity == M.CRITICAL
-    assert "readOnly=1" in denied.message
-
-    unknown = M.evaluate_order_permission(allowed=None, reason="TimeoutError: Bybit down")
-    assert unknown is not None
-    assert unknown.key == "bybit_order_permissions_unknown"
-    assert unknown.severity == M.WARNING
-
-    assert M.evaluate_order_permission(allowed=True, reason="") is None
-
-
-def test_gather_order_permission_alerts_only_when_submit_unit_active(monkeypatch) -> None:
-    calls = {"n": 0}
-
-    def fake_status():
-        calls["n"] += 1
-        return False, "Bybit API key metadata reports readOnly=1"
-
-    monkeypatch.setattr(M, "_bybit_order_permission_status", fake_status)
-
-    assert M.gather_order_permission_alerts({"liquidity-migration-bybit-risk.service": "inactive"}) == []
-    assert calls["n"] == 0
-
-    alerts = M.gather_order_permission_alerts({"liquidity-migration-bybit-risk.service": "active"})
-    assert [alert.key for alert in alerts] == ["bybit_order_permissions"]
-    assert calls["n"] == 1
-
-    alerts = M.gather_order_permission_alerts({"liquidity-migration-continuous-hedge.service": "active"})
-    assert [alert.key for alert in alerts] == ["bybit_order_permissions"]
-    assert calls["n"] == 2
-
-
-def test_orphan_hedge_pages_only_when_timer_off_with_open_leg() -> None:
-    # Timer enabled -> the daily hedge run manages the leg; never page.
-    assert M.evaluate_orphan_hedge(
-        hedge_timer_enabled=True,
-        open_hedge_trades=[{"symbol": "BTCUSDT", "status": "open"}],
-    ) is None
-    # Timer disabled but nothing open -> nothing to orphan.
-    assert M.evaluate_orphan_hedge(hedge_timer_enabled=False, open_hedge_trades=[]) is None
-    assert M.evaluate_orphan_hedge(
-        hedge_timer_enabled=False,
-        open_hedge_trades=[{"symbol": "BTCUSDT", "status": "closed"}],
-    ) is None
-    # Timer disabled WITH an open leg -> CRITICAL orphan page (the money risk).
-    a = M.evaluate_orphan_hedge(
-        hedge_timer_enabled=False,
-        open_hedge_trades=[
-            {"symbol": "BTCUSDT", "status": "open"},
-            {"symbol": "ETHUSDT", "status": "open"},
-        ],
-    )
-    assert a is not None and a.severity == M.CRITICAL
-    assert "ORPHANED HEDGE" in a.message and "BTCUSDT" in a.message and "ETHUSDT" in a.message
-
-
-def test_orphan_hedge_pages_when_timer_enabled_but_inactive() -> None:
-    # The caller passes hedge_timer_enabled only when systemd says enabled AND
-    # active. Enabled-but-inactive means the daily job will not fire.
-    a = M.evaluate_orphan_hedge(
-        hedge_timer_enabled=False,
-        open_hedge_trades=[{"symbol": "BTCUSDT", "status": "open"}],
-    )
-    assert a is not None and a.severity == M.CRITICAL
-
-
 def test_hedge_warmstart_freshness_warns_before_first_blocked_plan(tmp_path) -> None:
     from datetime import date
 
@@ -247,44 +158,28 @@ def test_hedge_warmstart_freshness_warns_before_first_blocked_plan(tmp_path) -> 
     )
     assert critical is not None and critical.severity == M.CRITICAL
 
-    assert M.evaluate_hedge_warmstart_freshness(
-        last_date=date(2026, 7, 8),
-        now_date=date(2026, 7, 10),
-        max_age_days=3,
-    ) is None
+    assert (
+        M.evaluate_hedge_warmstart_freshness(
+            last_date=date(2026, 7, 8),
+            now_date=date(2026, 7, 10),
+            max_age_days=3,
+        )
+        is None
+    )
 
     csv_path = tmp_path / "warmstart.csv"
     csv_path.write_text(
-        "date,unit_ret,btc_ret,eth_ret\n"
-        "2026-07-08,0,0,0\n"
-        "2026-07-09,0,0,0\n",
+        "date,unit_ret,btc_ret,eth_ret\n2026-07-08,0,0,0\n2026-07-09,0,0,0\n",
         encoding="utf-8",
     )
     assert M._warmstart_last_date(csv_path) == date(2026, 7, 9)
 
     receipt_csv = tmp_path / "warmstart-with-boundary.csv"
     receipt_csv.write_text(
-        "date,unit_ret,btc_ret,eth_ret,data_through_date,source_summary_sha256\n"
-        "2026-06-01,0,0,0,2026-07-09,abc\n",
+        "date,unit_ret,btc_ret,eth_ret,data_through_date,source_summary_sha256\n2026-06-01,0,0,0,2026-07-09,abc\n",
         encoding="utf-8",
     )
     assert M._warmstart_last_date(receipt_csv) == date(2026, 7, 9)
-
-
-def test_continuous_book_nonflat_reads_open_demo_rows(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        M,
-        "read_dataset",
-        lambda root, dataset: M.pl.DataFrame([{"status": "closed"}, {"status": "open"}]),
-    )
-    assert M._continuous_book_nonflat(tmp_path) is True
-
-    monkeypatch.setattr(
-        M,
-        "read_dataset",
-        lambda root, dataset: M.pl.DataFrame([{"status": "closed"}]),
-    )
-    assert M._continuous_book_nonflat(tmp_path) is False
 
 
 def test_ws_staleness_threshold() -> None:
@@ -304,7 +199,9 @@ def test_cooldown_sends_new_suppresses_persisting_then_reresends_and_resolves() 
     assert state == {"liveness:demo": now, f"{M._SEV_PREFIX}liveness:demo": M._SEVERITY_RANK[M.CRITICAL]}
 
     # Persisting within cooldown -> suppressed.
-    to_send, resolved, state = M.select_alerts_to_send(active=[a], state=state, now_ms=now + 5 * MIN, cooldown_minutes=30)
+    to_send, resolved, state = M.select_alerts_to_send(
+        active=[a], state=state, now_ms=now + 5 * MIN, cooldown_minutes=30
+    )
     assert to_send == [] and resolved == []
 
     # Persisting past cooldown -> re-sent.
@@ -341,10 +238,8 @@ def test_alert_cooldown_uses_exact_millisecond_boundary() -> None:
     assert state["liveness:demo"] == now + 30 * MIN
 
 
-def test_gather_long_alerts_covers_cycle_age_and_stop_protection(tmp_path, monkeypatch) -> None:
-    """The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must catch a
-    hung/down cycle (the systemd-failed check can't, under Restart=always) and an unprotected or
-    unverified open position -- previously the long sleeve had NO liveness/stop coverage at all."""
+def test_gather_long_alerts_covers_cycle_and_input_freshness(tmp_path) -> None:
+    """LONG liveness is strategy-only; account health owns positions/protection."""
     import argparse
 
     import polars as pl
@@ -352,39 +247,164 @@ def test_gather_long_alerts_covers_cycle_age_and_stop_protection(tmp_path, monke
     from liquidity_migration.storage import write_dataset
 
     now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10, settle_coin="USDT", max_ws_lag_hours=6)
+    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
     long_root = tmp_path / "bybit-long-demo-event"
     long_root.mkdir()
-    # Last cycle 60 min ago (threshold 10) -> hung-daemon liveness alert.
-    write_dataset(pl.DataFrame([{"cycle_id": "c1", "ts_ms": now - 60 * MIN}]),
-                  long_root, "long_native_demo_cycles", partition_by=())
-    write_dataset(pl.DataFrame([{"trade_id": "l1", "symbol": "BTCUSDT", "status": "open", "stop_price": 100.0}]),
-                  long_root, "long_native_demo_trades", partition_by=())
-
-    # (a) venue reachable, position has NO server-side stop -> unprotected + hung-cycle caught.
-    monkeypatch.setattr(M, "_venue_positions",
-                        lambda settle_coin="USDT": ({"BTCUSDT": {"size": "1", "stopLoss": ""}}, None))
-    keys_a = {a.key for a in M.gather_long_alerts(long_root=long_root, now_ms=now, args=args)}
-    assert "liveness:bybit-long-demo-event" in keys_a
-    assert "unprotected:BTCUSDT" in keys_a
-
-    # (b) venue probe failed -> long-specific unverified warning, NO false 'protected'.
-    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": ({}, "RuntimeError: api down"))
-    keys_b = {a.key for a in M.gather_long_alerts(long_root=long_root, now_ms=now, args=args)}
-    assert "stop_verify_unavailable_long" in keys_b
-    assert not any(k.startswith("unprotected:") for k in keys_b)
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "c1",
+                    "ts_ms": now - 60 * MIN,
+                    "kline_store_max_ts_ms": now - 8 * HOUR,
+                }
+            ]
+        ),
+        long_root,
+        "long_native_demo_cycles",
+        partition_by=(),
+    )
+    keys = {a.key for a in M.gather_long_alerts(long_root=long_root, now_ms=now, args=args)}
+    assert keys == {
+        "liveness:bybit-long-demo-event",
+        "ws_stale:bybit-long-demo-event",
+    }
 
 
 def test_gather_long_alerts_skips_when_root_absent(tmp_path) -> None:
     import argparse
-    args = argparse.Namespace(max_cycle_age_min=10, settle_coin="USDT", max_ws_lag_hours=6)
+
+    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
     assert M.gather_long_alerts(long_root=tmp_path / "absent", now_ms=1_000 * HOUR, args=args) == []
 
 
-def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tmp_path, monkeypatch) -> None:
-    """Continuous-sleeve diagnosability: a zero universe / empty kline store is the same
-    silent-zero-signal failure as a stale rmom gate (different upstream cause), and a venue-probe
-    failure must not leave continuous open positions silently unverified."""
+def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
+    capture = tmp_path / "capture"
+    missing = M.gather_account_capture_alerts(capture_root=capture, now_ms=1_000 * HOUR, max_age_minutes=3)
+    assert [alert.key for alert in missing] == ["account_capture_missing"]
+
+    segment = capture / "2026-07-13" / "BTCUSDT" / "segment-000000.jsonl"
+    segment.parent.mkdir(parents=True)
+    segment.write_text("{}\n")
+    mtime_ms = int(segment.stat().st_mtime * 1000)
+    assert M.gather_account_capture_alerts(capture_root=capture, now_ms=mtime_ms + 2 * MIN, max_age_minutes=3) == []
+    stale = M.gather_account_capture_alerts(capture_root=capture, now_ms=mtime_ms + 4 * MIN, max_age_minutes=3)
+    assert [alert.key for alert in stale] == ["account_capture_stale"]
+    paper = M.gather_account_capture_alerts(
+        capture_root=tmp_path / "paper-missing",
+        now_ms=mtime_ms,
+        max_age_minutes=3,
+        label="paper",
+    )
+    assert [alert.key for alert in paper] == ["account_capture_missing_paper"]
+    assert "paper account execution" in paper[0].message
+
+
+def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> None:
+    from liquidity_migration.account_kernel import AccountExecutionKernel
+
+    now_ms = 1_000 * HOUR
+    missing = M.gather_account_health_alerts(
+        account_root=tmp_path / "missing",
+        now_ms=now_ms,
+        max_age_minutes=1,
+    )
+    assert [alert.key for alert in missing] == ["account_health_missing"]
+
+    healthy_root = tmp_path / "healthy"
+    kernel = AccountExecutionKernel(healthy_root, account_id="demo")
+    kernel.record_venue_snapshot(
+        snapshot_key="healthy",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=(),
+        exchange_ts_ns=0,
+        local_receive_ts_ns=(now_ms - 30_000) * 1_000_000,
+    )
+    assert (
+        M.gather_account_health_alerts(
+            account_root=healthy_root,
+            now_ms=now_ms,
+            max_age_minutes=1,
+        )
+        == []
+    )
+
+    stale = M.gather_account_health_alerts(
+        account_root=healthy_root,
+        now_ms=now_ms + 2 * MIN,
+        max_age_minutes=1,
+    )
+    assert [alert.key for alert in stale] == ["account_health_stale"]
+
+    kernel.record_venue_snapshot(
+        snapshot_key="unhealthy",
+        venue_positions={"BTCUSDT": 1.0},
+        reconstructed_positions={},
+        mismatches=("BTCUSDT:venue=1:reconstructed=0",),
+        exchange_ts_ns=0,
+        local_receive_ts_ns=now_ms * 1_000_000,
+    )
+    unhealthy = M.gather_account_health_alerts(
+        account_root=healthy_root,
+        now_ms=now_ms,
+        max_age_minutes=1,
+    )
+    assert [alert.key for alert in unhealthy] == ["account_health_unhealthy"]
+    assert "BTCUSDT" in unhealthy[0].message
+
+
+def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_path) -> None:
+    from liquidity_migration.account_owner_health import (
+        AccountOwnerHealth,
+        write_account_owner_health,
+    )
+
+    now_ms = 1_000 * HOUR
+    demo_root = tmp_path / "demo"
+    health = AccountOwnerHealth(
+        owner="account_execution",
+        environment="demo",
+        account_id="demo",
+        status="healthy",
+        observed_ts_ns=(now_ms - 30_000) * 1_000_000,
+        loop_sequence=1,
+        journal_sequence=0,
+        journal_state_hash="0" * 64,
+        equity_usdt=10_000.0,
+        available_margin_usdt=9_000.0,
+        requested_symbols_ready=True,
+    )
+    write_account_owner_health(demo_root, health)
+    assert (
+        M.gather_account_owner_health_alerts(
+            account_root=demo_root,
+            environment="demo",
+            now_ms=now_ms,
+            max_age_minutes=1,
+        )
+        == []
+    )
+
+    stale = M.gather_account_owner_health_alerts(
+        account_root=demo_root,
+        environment="demo",
+        now_ms=now_ms + 2 * MIN,
+        max_age_minutes=1,
+    )
+    assert [alert.key for alert in stale] == ["account_owner_health:demo"]
+
+    wrong_environment = M.gather_account_owner_health_alerts(
+        account_root=demo_root,
+        environment="paper",
+        now_ms=now_ms,
+        max_age_minutes=1,
+    )
+    assert [alert.key for alert in wrong_environment] == ["account_owner_health:paper"]
+
+
+def test_gather_continuous_alerts_warns_on_empty_inputs(tmp_path) -> None:
+    """A zero universe/store remains a strategy-input failure."""
     import argparse
 
     import polars as pl
@@ -392,43 +412,37 @@ def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tm
     from liquidity_migration.storage import write_dataset
 
     now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10, settle_coin="USDT", max_ws_lag_hours=6, max_rmom_stale_days=2.0)
+    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6, max_rmom_stale_days=2.0)
     root = tmp_path / "bybit-continuous-demo-event"
     root.mkdir()
     # Fresh cycle + fresh rmom, but EMPTY universe and EMPTY kline store -> silent-zero-signal.
-    write_dataset(pl.DataFrame([{"cycle_id": "c1", "ts_ms": now, "max_rmom_day_ts": now,
-                                 "universe_symbols": 0, "kline_store_rows": 0}]),
-                  root, "continuous_fade_demo_cycles", partition_by=())
-    write_dataset(pl.DataFrame([{"trade_id": "k1", "symbol": "WIFUSDT", "status": "open", "stop_price": 1.0}]),
-                  root, "continuous_fade_demo_trades", partition_by=())
-    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": ({}, "RuntimeError: api down"))
-    keys = {
-        a.key
-        for a in M.gather_continuous_alerts(
-            continuous_root=root, now_ms=now, args=args, check_stops=True
-        )
-    }
+    write_dataset(
+        pl.DataFrame(
+            [{"cycle_id": "c1", "ts_ms": now, "max_rmom_day_ts": now, "universe_symbols": 0, "kline_store_rows": 0}]
+        ),
+        root,
+        "continuous_fade_demo_cycles",
+        partition_by=(),
+    )
+    keys = {a.key for a in M.gather_continuous_alerts(continuous_root=root, now_ms=now, args=args)}
     assert "continuous_universe_empty:bybit-continuous-demo-event" in keys
     assert "continuous_kline_store_empty:bybit-continuous-demo-event" in keys
-    assert "stop_verify_unavailable_continuous" in keys
 
-    # Sleeve toggled OFF (cycle_checks=False): daemon-liveness/rmom/universe checks
-    # skip — an off daemon is intentional — but the stop/mismatch check on the
-    # residual open row STILL runs, because "off" does not flatten (round 3).
-    keys_off = {
-        a.key
-        for a in M.gather_continuous_alerts(
-            continuous_root=root, now_ms=now, args=args, cycle_checks=False, check_stops=True
+    assert (
+        M.gather_continuous_alerts(
+            continuous_root=root,
+            now_ms=now,
+            args=args,
+            cycle_checks=False,
         )
-    }
-    assert keys_off == {"stop_verify_unavailable_continuous"}
+        == []
+    )
 
 
-def test_gather_continuous_v2_default_skips_stop_check(tmp_path, monkeypatch) -> None:
-    """continuous_ensemble_v2 is intentionally no-stop demo/paper; default liveness must not page."""
+def test_gather_continuous_healthy_inputs_are_clean(tmp_path) -> None:
     import polars as pl
 
-    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2, settle_coin="USDT")
+    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2)
     now = 10_000_000
     root = tmp_path / "bybit-continuous-demo-event"
     root.mkdir()
@@ -436,37 +450,29 @@ def test_gather_continuous_v2_default_skips_stop_check(tmp_path, monkeypatch) ->
     from liquidity_migration.storage import write_dataset
 
     write_dataset(
-        pl.DataFrame([
-            {
-                "cycle_id": "c1",
-                "ts_ms": now,
-                "max_rmom_day_ts": now,
-                "universe_symbols": 10,
-                "kline_store_rows": 100,
-            }
-        ]),
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "c1",
+                    "ts_ms": now,
+                    "max_rmom_day_ts": now,
+                    "universe_symbols": 10,
+                    "kline_store_rows": 100,
+                }
+            ]
+        ),
         root,
         "continuous_fade_demo_cycles",
         partition_by=(),
     )
-    write_dataset(
-        pl.DataFrame([{"trade_id": "k1", "symbol": "WIFUSDT", "status": "open", "stop_price": 0.0}]),
-        root,
-        "continuous_fade_demo_trades",
-        partition_by=(),
-    )
-    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": (_ for _ in ()).throw(AssertionError))
-
     alerts = M.gather_continuous_alerts(continuous_root=root, now_ms=now, args=args)
     assert alerts == []
 
 
-def test_gather_continuous_paper_alerts_uses_paper_datasets_without_stop_check(tmp_path, monkeypatch) -> None:
-    """Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so the
-    liveness watchdog must read the paper cycle ledger but skip venue stop verification."""
+def test_gather_continuous_paper_alerts_uses_paper_cycle_dataset(tmp_path) -> None:
     import polars as pl
 
-    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2, settle_coin="USDT")
+    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2)
     now = 10_000_000
     root = tmp_path / "bybit-continuous-paper-event"
     root.mkdir()
@@ -474,26 +480,20 @@ def test_gather_continuous_paper_alerts_uses_paper_datasets_without_stop_check(t
     from liquidity_migration.storage import write_dataset
 
     write_dataset(
-        pl.DataFrame([
-            {
-                "ts_ms": now - 60 * 60_000,
-                "max_rmom_day_ts": 0,
-                "universe_symbols": 0,
-                "kline_store_rows": 0,
-            }
-        ]),
+        pl.DataFrame(
+            [
+                {
+                    "ts_ms": now - 60 * 60_000,
+                    "max_rmom_day_ts": 0,
+                    "universe_symbols": 0,
+                    "kline_store_rows": 0,
+                }
+            ]
+        ),
         root,
         "continuous_fade_paper_cycles",
         partition_by=(),
     )
-    write_dataset(
-        pl.DataFrame([{"trade_id": "paper1", "symbol": "WIFUSDT", "status": "open"}]),
-        root,
-        "continuous_fade_paper_trades",
-        partition_by=(),
-    )
-    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": (_ for _ in ()).throw(AssertionError))
-
     keys = {
         a.key
         for a in M.gather_continuous_alerts(
@@ -501,8 +501,6 @@ def test_gather_continuous_paper_alerts_uses_paper_datasets_without_stop_check(t
             now_ms=now,
             args=args,
             cycles_dataset="continuous_fade_paper_cycles",
-            trades_dataset="continuous_fade_paper_trades",
-            check_stops=False,
         )
     }
 
@@ -513,7 +511,6 @@ def test_gather_continuous_paper_alerts_uses_paper_datasets_without_stop_check(t
     # other's alert.
     assert "continuous_universe_empty:bybit-continuous-paper-event" in keys
     assert "continuous_kline_store_empty:bybit-continuous-paper-event" in keys
-    assert "stop_verify_unavailable_continuous" not in keys
 
 
 def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
@@ -545,7 +542,11 @@ def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
 
     units = M._default_units_for_toggles()
 
-    assert "liquidity-migration-bybit-risk.service" in units
+    assert M._DEMO_ACCOUNT_OWNER_UNIT in units
+    assert M._PAPER_ACCOUNT_OWNER_UNIT in units
+    assert "liquidity-migration-bybit-risk.service" not in units
+    assert "liquidity-migration-combined-book-report.service" not in units
+    assert "liquidity-migration-combined-book-report.timer" not in units
     assert "liquidity-migration-bybit-demo.service" not in units
     assert "liquidity-migration-bybit-paper.service" not in units
     assert "liquidity-migration-bybit-long-demo.service" in units
@@ -554,6 +555,23 @@ def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     assert "liquidity-migration-continuous-hedge.timer" in units
     assert "liquidity-migration-continuous-hedge.service" in units
     assert "liquidity-migration-bybit-continuous-paper.service" not in units
+
+
+def test_default_unit_monitoring_is_always_account_kernel_only(monkeypatch) -> None:
+    monkeypatch.delenv("ACCOUNT_EXECUTION_KERNEL_REQUIRED", raising=False)
+    monkeypatch.setenv("LONG_SLEEVE", "on")
+    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
+    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
+
+    units = M._default_units_for_toggles()
+
+    assert M._DEMO_ACCOUNT_OWNER_UNIT in units
+    assert M._PAPER_ACCOUNT_OWNER_UNIT in units
+    assert "liquidity-migration-bybit-risk.service" not in units
+    assert "liquidity-migration-combined-book-report.service" not in units
+    assert "liquidity-migration-combined-book-report.timer" not in units
+    assert "liquidity-migration-bybit-long-demo.service" in units
+    assert "liquidity-migration-bybit-continuous-demo.service" in units
 
 
 def test_hedge_lifecycle_monitored_during_continuous_off_winddown(monkeypatch) -> None:
@@ -577,6 +595,7 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
     retries) and the False outcome must be visible in the journal."""
     state_file = tmp_path / "state.json"
     alert = M.Alert(key="unit:fake.service", severity=M.CRITICAL, message="fake unit failed")
+    _stub_account_authority(monkeypatch)
 
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["fake.service"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"fake.service": "failed"})
@@ -586,10 +605,22 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
     monkeypatch.setattr(M, "send_telegram_message", lambda line: False)
     monkeypatch.setattr(
         "sys.argv",
-        ["check_demo_liveness.py", "--telegram",
-         "--continuous-root", "", "--continuous-paper-root", "", "--long-root", "",
-         "--risk-root", "", "--liquidations-root", "",
-         "--state-file", str(state_file)],
+        [
+            "check_demo_liveness.py",
+            "--telegram",
+            "--continuous-root",
+            "",
+            "--continuous-paper-root",
+            "",
+            "--long-root",
+            "",
+            "--liquidations-root",
+            "",
+            "--depth-root",
+            "",
+            "--state-file",
+            str(state_file),
+        ],
     )
     assert M.main() == 0
     out = capsys.readouterr().out
@@ -607,20 +638,24 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
 def _run_both_roots_skipped(monkeypatch) -> None:
     """Run main() with every root skipped and no explicit --state-file, so the
     state-file path comes purely from the _state_root fallback under audit."""
-    # No units / no roots: nothing pages, main() still computes + persists state.
+    # No optional units / roots: main() still computes + persists state.
+    _stub_account_authority(monkeypatch)
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
     monkeypatch.setattr(
         "sys.argv",
         [
             "check_demo_liveness.py",
-            "--continuous-root", "",
-            "--continuous-paper-root", "",
-            "--long-root", "",
-            "--risk-root", "",
-            "--liquidations-root", "",
-            "--depth-root", "",
-            "--hedge-root", "",
+            "--continuous-root",
+            "",
+            "--continuous-paper-root",
+            "",
+            "--long-root",
+            "",
+            "--liquidations-root",
+            "",
+            "--depth-root",
+            "",
         ],
     )
     assert M.main() == 0
@@ -654,20 +689,25 @@ def test_explicit_state_file_unchanged(tmp_path, monkeypatch) -> None:
     """NORMAL PATH unchanged: an explicit --state-file is honored verbatim and the
     fallback is never consulted (the fix only touches the both-roots-skipped fallback)."""
     explicit = tmp_path / "custom" / "state.json"
+    _stub_account_authority(monkeypatch)
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
     monkeypatch.setattr(
         "sys.argv",
         [
             "check_demo_liveness.py",
-            "--continuous-root", "",
-            "--continuous-paper-root", "",
-            "--long-root", "",
-            "--risk-root", "",
-            "--liquidations-root", "",
-            "--depth-root", "",
-            "--hedge-root", "",
-            "--state-file", str(explicit),
+            "--continuous-root",
+            "",
+            "--continuous-paper-root",
+            "",
+            "--long-root",
+            "",
+            "--liquidations-root",
+            "",
+            "--depth-root",
+            "",
+            "--state-file",
+            str(explicit),
         ],
     )
     assert M.main() == 0
@@ -680,19 +720,23 @@ def test_continuous_root_still_drives_default_state_dir(tmp_path, monkeypatch) -
     repo-anchoring change must not perturb the populated-root case."""
     croot = tmp_path / "bybit-continuous-demo-event"
     croot.mkdir()
+    _stub_account_authority(monkeypatch)
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
     monkeypatch.setattr(
         "sys.argv",
         [
             "check_demo_liveness.py",
-            "--continuous-root", str(croot),
-            "--continuous-paper-root", "",
-            "--long-root", "",
-            "--risk-root", "",
-            "--liquidations-root", "",
-            "--depth-root", "",
-            "--hedge-root", "",
+            "--continuous-root",
+            str(croot),
+            "--continuous-paper-root",
+            "",
+            "--long-root",
+            "",
+            "--liquidations-root",
+            "",
+            "--depth-root",
+            "",
         ],
     )
     assert M.main() == 0
@@ -721,8 +765,9 @@ def test_rmom_timer_not_monitored_when_continuous_off(monkeypatch) -> None:
         "liquidity-migration-continuous-rmom-refresh.timer",
     ):
         assert u not in units, u
-    # The unconditional combined-book-report timer (deploy always enables it) stays.
-    assert "liquidity-migration-combined-book-report.timer" in units
+    assert "liquidity-migration-combined-book-report.timer" not in units
+    assert M._DEMO_ACCOUNT_OWNER_UNIT in units
+    assert M._PAPER_ACCOUNT_OWNER_UNIT in units
     # Long sleeve units still present.
     assert "liquidity-migration-bybit-long-demo.service" in units
 
@@ -773,9 +818,17 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
     (absolute), not the relative working directory."""
     parser = M.build_arg_parser()
     args = parser.parse_args([])
-    for attr in ("risk_root", "liquidations_root", "depth_root",
-                 "continuous_root", "continuous_paper_root", "long_root", "hedge_root",
-                 "hedge_warmstart"):
+    for attr in (
+        "liquidations_root",
+        "depth_root",
+        "continuous_root",
+        "continuous_paper_root",
+        "long_root",
+        "hedge_warmstart",
+        "account_root",
+        "account_capture_root",
+        "account_paper_capture_root",
+    ):
         value = Path(getattr(args, attr))
         assert value.is_absolute(), f"{attr} default must be absolute, got {value}"
         assert value.is_relative_to(REPO_ROOT), f"{attr} must be under the repo dir, got {value}"
@@ -879,8 +932,7 @@ def test_stale_bybit_pages_even_if_binance_exists(tmp_path) -> None:
         f.write_text("{}\n")
         os.utime(f, (stale_s, stale_s))
 
-    keys = {a.key for a in M.gather_liquidation_capture_alerts(
-        liquidations_root=root, now_ms=now_ms, max_age_hours=3)}
+    keys = {a.key for a in M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3)}
     assert keys == {"liquidation_capture_stale:bybit"}
 
 
@@ -908,14 +960,14 @@ def test_timer_warning_to_critical_escalation_sends_inside_cooldown() -> None:
     crit = M.Alert(key="unit:x.timer", severity=M.CRITICAL, message="crit")
 
     # Run 1: WARNING sent, severity marker stamped.
-    to_send, _resolved, state = M.select_alerts_to_send(
-        active=[warn], state={}, now_ms=now, cooldown_minutes=30)
+    to_send, _resolved, state = M.select_alerts_to_send(active=[warn], state={}, now_ms=now, cooldown_minutes=30)
     assert [a.severity for a in to_send] == [M.WARNING]
 
     # Run 2 a few minutes later (WELL inside cooldown): same condition now CRITICAL ->
     # must still send because the severity escalated.
     to_send2, _r2, state2 = M.select_alerts_to_send(
-        active=[crit], state=state, now_ms=now + 2 * MIN, cooldown_minutes=30)
+        active=[crit], state=state, now_ms=now + 2 * MIN, cooldown_minutes=30
+    )
     assert [a.severity for a in to_send2] == [M.CRITICAL]
     assert state2[f"{M._SEV_PREFIX}unit:x.timer"] == M._SEVERITY_RANK[M.CRITICAL]
 
@@ -934,8 +986,7 @@ def test_dropped_resolved_note_does_not_suppress_genuine_refire() -> None:
 
     # (2) condition clears -> resolved; the bare cooldown key is dropped. Simulate the
     # main()-side dropped resolved-note retry by re-adding ONLY the resolved: marker.
-    _ts2, resolved2, state2 = M.select_alerts_to_send(
-        active=[], state=state, now_ms=now + 5 * MIN, cooldown_minutes=30)
+    _ts2, resolved2, state2 = M.select_alerts_to_send(active=[], state=state, now_ms=now + 5 * MIN, cooldown_minutes=30)
     assert resolved2 == ["unprotected:BTCUSDT"]
     assert "unprotected:BTCUSDT" not in state2  # bare cooldown key cleared
     state2[f"{M._RESOLVED_PREFIX}unprotected:BTCUSDT"] = now + 5 * MIN  # pending retry marker
@@ -943,8 +994,7 @@ def test_dropped_resolved_note_does_not_suppress_genuine_refire() -> None:
     # (3) condition RE-FIRES well within the original cooldown window -> must send,
     # because the resolved: marker is in a reserved namespace that never arms the
     # alert-side cooldown.
-    to_send3, _r3, _s3 = M.select_alerts_to_send(
-        active=[a], state=state2, now_ms=now + 10 * MIN, cooldown_minutes=30)
+    to_send3, _r3, _s3 = M.select_alerts_to_send(active=[a], state=state2, now_ms=now + 10 * MIN, cooldown_minutes=30)
     assert [x.key for x in to_send3] == ["unprotected:BTCUSDT"]
 
 
@@ -956,8 +1006,7 @@ def test_reserved_namespaces_never_treated_as_active_alert_to_resolve() -> None:
         f"{M._PENDING_TIMER_PREFIX}x.timer": now,
         f"{M._SEV_PREFIX}unit:x.timer": 1,
     }
-    to_send, resolved, _new = M.select_alerts_to_send(
-        active=[], state=state, now_ms=now + MIN, cooldown_minutes=30)
+    to_send, resolved, _new = M.select_alerts_to_send(active=[], state=state, now_ms=now + MIN, cooldown_minutes=30)
     assert to_send == [] and resolved == []
 
 
@@ -967,15 +1016,26 @@ def test_main_deploy_window_timer_blip_warns_then_self_resolves(tmp_path, monkey
     it never escalates to a false CRITICAL."""
     state_file = tmp_path / "state.json"
     sent: list[str] = []
+    _stub_account_authority(monkeypatch)
 
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["blip.timer"])
     monkeypatch.setattr(M, "send_telegram_message", lambda line: sent.append(line) or True)
 
     common_argv = [
-        "check_demo_liveness.py", "--telegram",
-        "--continuous-root", "", "--continuous-paper-root", "", "--long-root", "",
-        "--risk-root", "", "--liquidations-root", "", "--depth-root", "", "--hedge-root", "",
-        "--state-file", str(state_file),
+        "check_demo_liveness.py",
+        "--telegram",
+        "--continuous-root",
+        "",
+        "--continuous-paper-root",
+        "",
+        "--long-root",
+        "",
+        "--liquidations-root",
+        "",
+        "--depth-root",
+        "",
+        "--state-file",
+        str(state_file),
     ]
 
     # Run 1: timer inactive (deploy window) -> WARNING, NOT CRITICAL.
@@ -999,16 +1059,27 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
     """A genuinely dead timer (not-active two consecutive runs) escalates from the
     debounced WARNING to a CRITICAL on the second run."""
     state_file = tmp_path / "state.json"
+    _stub_account_authority(monkeypatch)
 
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["dead.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"dead.timer": "inactive"})
     monkeypatch.setattr(M, "send_telegram_message", lambda line: True)
 
     common_argv = [
-        "check_demo_liveness.py", "--telegram",
-        "--continuous-root", "", "--continuous-paper-root", "", "--long-root", "",
-        "--risk-root", "", "--liquidations-root", "", "--depth-root", "", "--hedge-root", "",
-        "--state-file", str(state_file),
+        "check_demo_liveness.py",
+        "--telegram",
+        "--continuous-root",
+        "",
+        "--continuous-paper-root",
+        "",
+        "--long-root",
+        "",
+        "--liquidations-root",
+        "",
+        "--depth-root",
+        "",
+        "--state-file",
+        str(state_file),
     ]
 
     monkeypatch.setattr("sys.argv", common_argv)

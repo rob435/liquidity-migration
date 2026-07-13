@@ -1,18 +1,23 @@
 [Unit]
-Description=liquidity-migration fast liveness + position-safety watchdog
+Description=liquidity-migration account-kernel and strategy-input liveness watchdog
 Wants=network-online.target
-After=network-online.target
+Requires=liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service
+After=network-online.target liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service
+ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
 
 [Service]
 Type=oneshot
 User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
-EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 # Per-sleeve kill-switch toggles resolved by deploy/lib_sleeves.sh. Host overrides
 # can only turn a repo-on sleeve off; stale host "on" values cannot resurrect a
 # repo-disabled sleeve.
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
+EnvironmentFile=/etc/liquidity-migration/account-execution.env
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
+Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 # Hardening + memory-cap parity with the sibling units (round 4): handles
 # credentials and pings external URLs as root.
@@ -22,18 +27,20 @@ ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
 MemoryMax=512M
-# Alerts on daemon-down/hung, an UNPROTECTED stop-required open position
-# (no/wrong venue stopLoss), ledger<->venue mismatch, WS feed stall, and
-# exchange errors and a stale hedge beta warm-start so the operator can manually
-# close or repair the unavailable protection. Continuous v2 is
-# intentionally no-stop demo/paper, so this unit does not pass
-# --continuous-stop-check. Exits 0 always (a watchdog must never crash-loop).
-# New/escalated faults still page immediately; the hourly digest carries
-# ongoing status, so an unchanged fault needs at most a six-hour reminder.
+# Requires both account owners, fresh independent demo/paper L2 capture, and
+# fresh healthy owner artifacts under both canonical account roots. Strategy
+# cycle/input checks remain; retired sleeve-ledger, ws_risk, and combined-report
+# checks do not. Exits 0 always (a watchdog must never crash-loop).
+# New/resolved faults are Telegram-deduplicated; the six-hour cooldown prevents
+# repeated spam. Bybit credentials are removed from this process environment.
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/check_demo_liveness.py \
     --continuous-root /opt/liquidity-migration/data/bybit-continuous-demo-event \
     --continuous-paper-root /opt/liquidity-migration/data/bybit-continuous-paper-event \
     --long-root /opt/liquidity-migration/data/bybit-long-demo-event \
+    --account-root /opt/liquidity-migration/data/bybit-account-execution \
+    --account-paper-root /opt/liquidity-migration/data/bybit-account-paper \
+    --account-capture-root /opt/liquidity-migration/data/bybit-account-market-capture \
+    --account-paper-capture-root /opt/liquidity-migration/data/bybit-account-paper-market-capture \
     --max-cycle-age-min 10 \
     --cooldown-min 360 \
     --telegram

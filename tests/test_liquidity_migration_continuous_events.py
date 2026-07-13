@@ -12,6 +12,7 @@ import polars as pl
 import pytest
 
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
+from liquidity_migration.account_kernel import AccountRiskPolicy
 from liquidity_migration.continuous_events import (
     BTC_EXACT_MONTH_DAYS,
     BTC_TREND_MODE_HOURLY_30D,
@@ -41,6 +42,11 @@ from liquidity_migration.continuous_events import (
     run_continuous_event_research,
 )
 from liquidity_migration.storage import write_dataset
+from liquidity_migration.execution_adapters import ExecutionTwinConfig, LatencyProfile
+from liquidity_migration.historical_account_replay import (
+    HistoricalAccountSession,
+    synthetic_historical_rules_for_symbols,
+)
 from liquidity_migration.trade_lifecycle import _indexed_price_bars_by_symbol
 
 
@@ -363,6 +369,136 @@ def test_run_trades_respects_max_active_cap() -> None:
     trades, skips = _run_trades(entries, bars, None, cfg)
     assert trades.height == 2
     assert skips["skipped_capacity"] == 4
+
+
+def test_run_trades_keeps_execution_leverage_separate_from_notional_weight() -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 40))
+    entries = pl.DataFrame(
+        {"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]}
+    )
+    decisions = []
+    cfg = ContinuousEventConfig(
+        execution_strategy_id="continuous-parity-test",
+        execution_leverage=10.0,
+        gross_exposure=0.5,
+        max_active=1,
+        hold_hours=10,
+        entry_delay_hours=1,
+        use_funding=False,
+    )
+    trades, _ = _run_trades(entries, bars, None, cfg, kernel_decision_sink=decisions)
+    assert trades.height == 1
+    assert len(decisions) == 2
+    entry = decisions[0].intent.intent
+    assert entry.strategy_id == "continuous-parity-test"
+    assert entry.leverage == 10.0
+    assert entry.signed_notional_usdt == pytest.approx(-0.5 * cfg.deploy_capital_usd)
+    assert decisions[1].intent.intent.leverage == 10.0
+
+
+def test_run_trades_does_not_invent_position_after_account_kernel_rejection(tmp_path) -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 40))
+    entries = pl.DataFrame(
+        {"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]}
+    )
+    config = ContinuousEventConfig(
+        execution_strategy_id="continuous-feedback-test",
+        execution_leverage=10.0,
+        gross_exposure=0.5,
+        max_active=1,
+        hold_hours=10,
+        entry_delay_hours=1,
+        use_funding=False,
+    )
+    session = HistoricalAccountSession(
+        tmp_path / "account",
+        account_id="continuous-feedback-test",
+        risk_policy=AccountRiskPolicy(100.0, 100.0, 100.0, 100.0, 10.0),
+        instrument_rules=synthetic_historical_rules_for_symbols(
+            ["A"], max_leverage=10.0, observed_ts_ns=1
+        ),
+        execution_config=ExecutionTwinConfig(
+            fee_bps=0.0,
+            latency=LatencyProfile(0, 0, 0),
+            max_decision_age_ns=0,
+        ),
+        id_seed="continuous-feedback-test",
+    )
+    decisions = []
+    tape = []
+    trades, skips = _run_trades(
+        entries,
+        bars,
+        None,
+        config,
+        candidate_sink=tape,
+        kernel_decision_sink=decisions,
+        kernel_session=session,
+    )
+    assert trades.is_empty()
+    assert skips["skipped_account_kernel"] == 1
+    assert [row["reason"] for row in tape] == ["account_kernel_rejection"]
+    assert any("component_gross_limit" in key for key in tape[0]["account_rejection_keys"])
+    assert len(decisions) == 1
+    assert session.kernel is not None
+    assert session.kernel.state().positions == {}
+
+
+def test_run_trades_neutralizes_target_after_execution_rejection(tmp_path) -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 40))
+    entries = pl.DataFrame(
+        {"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]}
+    )
+    config = ContinuousEventConfig(
+        execution_strategy_id="continuous-execution-reject-test",
+        execution_leverage=10.0,
+        gross_exposure=0.5,
+        max_active=1,
+        hold_hours=10,
+        entry_delay_hours=1,
+        use_funding=False,
+    )
+    session = HistoricalAccountSession(
+        tmp_path / "account",
+        account_id="continuous-execution-reject-test",
+        risk_policy=AccountRiskPolicy(1e12, 1e12, 1e12, 1e12, 10.0),
+        instrument_rules=synthetic_historical_rules_for_symbols(
+            ["A"], max_leverage=10.0, observed_ts_ns=1
+        ),
+        execution_config=ExecutionTwinConfig(
+            fee_bps=0.0,
+            latency=LatencyProfile(1, 0, 0),
+            max_decision_age_ns=0,
+        ),
+        id_seed="continuous-execution-reject-test",
+    )
+    decisions = []
+    tape = []
+
+    trades, skips = _run_trades(
+        entries,
+        bars,
+        None,
+        config,
+        candidate_sink=tape,
+        kernel_decision_sink=decisions,
+        kernel_session=session,
+    )
+
+    assert trades.is_empty()
+    assert skips["skipped_account_kernel"] == 1
+    assert [row["reason"] for row in tape] == ["account_kernel_rejection"]
+    assert any(
+        "stale_decision" in key for key in tape[0]["account_rejection_keys"]
+    ), tape[0]["account_rejection_keys"]
+    # Entry target plus an explicit zero replacement: the venue rejection
+    # cannot leave a stale desired target that reopens on an unrelated cycle.
+    assert len(decisions) == 2
+    assert decisions[-1].intent.intent.signed_notional_usdt == 0.0
+    assert session.kernel is not None
+    state = session.kernel.state()
+    assert state.component_targets == {}
+    assert state.positions == {}
 
 
 def test_run_trades_optional_admission_lookup_blocks_entries() -> None:
@@ -1048,7 +1184,7 @@ def test_end_to_end_run_produces_trades_equity_and_artifacts(tmp_path) -> None:
     cfg = ContinuousEventConfig(
         start_date=_iso(start + 4 * MS_PER_DAY),     # past feature warm-up, well inside the data
         end_date=_iso(start + 28 * MS_PER_DAY),
-        hold_hours=6, entry_delay_hours=1, max_active=10, use_funding=True,
+        hold_hours=6, cooldown_hours=24, entry_delay_hours=1, max_active=10, use_funding=True,
         split_date=_iso(start + 16 * MS_PER_DAY),
     )
     payload = run_continuous_event_research(root, config=cfg, report_dir=tmp_path / "rep")
@@ -1056,6 +1192,19 @@ def test_end_to_end_run_produces_trades_equity_and_artifacts(tmp_path) -> None:
     assert payload["config_hash"]
     # The synthetic cross-section should yield a populated D9 and some fresh trades.
     assert payload["n_trades"] >= 1
+    assert "canonical_journal" not in payload
+    assert payload["canonical_common_kernel_parity"] is True
+    assert payload["cross_environment_strategy_parity"] is False
+    assert payload["account_journal"]["strategy_targets"] == payload["n_trades"] * 2
+    assert payload["account_journal"]["evidence_label"] == (
+        "chronological_strategy_targets_through_live_common_account_kernel"
+    )
+    assert payload["account_journal"]["historical_strategy_runtime_is_sequential"] is True
+    assert payload["account_journal"]["account_kernel_feedback_online"] is True
+    assert payload["account_journal"]["same_timestamp_strategy_batching"] is True
+    assert payload["account_journal"]["events"] > 0
+    assert payload["account_journal"]["fills"] == payload["n_trades"] * 2
+    assert payload["account_journal"]["strategy_runtime_shared_across_environments"] is False
     assert "full" in payload["metrics"]
     full = payload["metrics"]["full"]
     assert {"total_return", "max_drawdown", "sharpe_like", "mar"} <= set(full)
@@ -1075,6 +1224,7 @@ def test_end_to_end_btc_trend_gate_passes_computed_trend_to_trade_walker(tmp_pat
         start_date=_iso(start + 36 * MS_PER_DAY),
         end_date=_iso(start + 45 * MS_PER_DAY),
         hold_hours=6,
+        cooldown_hours=24,
         entry_delay_hours=1,
         max_active=10,
         use_funding=False,
@@ -1106,6 +1256,7 @@ def test_end_to_end_age_gate_loads_enough_history_for_age_test(tmp_path) -> None
         start_date=_iso(start + 70 * MS_PER_DAY),
         end_date=_iso(start + 82 * MS_PER_DAY),
         hold_hours=6,
+        cooldown_hours=24,
         entry_delay_hours=1,
         max_active=10,
         use_funding=False,
@@ -1466,7 +1617,7 @@ def test_candidate_tape_selected_rows_match_executed_trades(tmp_path) -> None:
     root, start, n_bars = _build_root(tmp_path, n_symbols=26, n_bars=720)
     cfg = ContinuousEventConfig(
         start_date=_iso(start + 4 * MS_PER_DAY), end_date=_iso(start + 28 * MS_PER_DAY),
-        hold_hours=6, entry_delay_hours=1, max_active=10, use_funding=False,
+        hold_hours=6, cooldown_hours=24, entry_delay_hours=1, max_active=10, use_funding=False,
     )
     tape_path = tmp_path / "tape.parquet"
     payload = run_continuous_event_research(root, config=cfg, candidate_tape_path=tape_path)
@@ -1522,7 +1673,7 @@ def test_candidate_tape_none_path_is_additive(tmp_path) -> None:
     root, start, n_bars = _build_root(tmp_path, n_symbols=26, n_bars=720)
     cfg = ContinuousEventConfig(
         start_date=_iso(start + 4 * MS_PER_DAY), end_date=_iso(start + 28 * MS_PER_DAY),
-        hold_hours=6, entry_delay_hours=1, max_active=10, use_funding=False,
+        hold_hours=6, cooldown_hours=24, entry_delay_hours=1, max_active=10, use_funding=False,
     )
     no_tape = run_continuous_event_research(root, config=cfg)
     tape_path = tmp_path / "t.parquet"
@@ -1537,7 +1688,8 @@ def test_entry_order_composite_preserves_trade_set_when_capacity_non_binding(tmp
     root, start, n_bars = _build_root(tmp_path, n_symbols=26, n_bars=720)
     common = dict(
         start_date=_iso(start + 4 * MS_PER_DAY), end_date=_iso(start + 28 * MS_PER_DAY),
-        hold_hours=6, entry_delay_hours=1, max_active=10_000, use_funding=False,  # capacity non-binding
+        hold_hours=6, cooldown_hours=24, entry_delay_hours=1, max_active=10_000,
+        use_funding=False,  # capacity non-binding
     )
     fcfs = run_continuous_event_research(root, config=ContinuousEventConfig(**common), entry_order="fcfs")
     comp = run_continuous_event_research(root, config=ContinuousEventConfig(**common), entry_order="composite")
@@ -1605,7 +1757,7 @@ def test_funding_research_run_self_corrects_snapshot_root(tmp_path) -> None:
     root, start, n_bars = _build_root(tmp_path, n_symbols=26, n_bars=720, funding_8h=False)
     cfg = ContinuousEventConfig(
         start_date=_iso(start + 4 * MS_PER_DAY), end_date=_iso(start + 20 * MS_PER_DAY),
-        hold_hours=6, entry_delay_hours=1, max_active=10, use_funding=True,
+        hold_hours=6, cooldown_hours=24, entry_delay_hours=1, max_active=10, use_funding=True,
     )
     result = run_continuous_event_research(root, config=cfg)  # completes, self-corrected
     assert result is not None

@@ -16,7 +16,7 @@ _CONSUMED_TOP_LEVEL_KEYS = frozenset({"exchange", "universe", "cost_model", "dat
 try:
     import yaml
 except ModuleNotFoundError:  # pragma: no cover - exercised only in missing dependency envs
-    yaml = None  # type: ignore[assignment]  # optional-dep fallback (mypy: Module vs None)
+    yaml = None
 
 
 DEFAULT_STABLECOIN_SYMBOLS = (

@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # Long-sleeve (LongV11aDivWeekendVol, v11a uni50 sniper retrace 1%/6h fall-through)
-# forward-testing engine. Runs on the same Bybit demo account as the other
-# sleeves but with order-link prefix lm-en-l-* so the extended ws_risk routes
-# fills back to the long ledger.
+# forward-testing target producer. The shared account owner exclusively handles
+# venue credentials, order placement, fills, reconciliation, and Telegram.
 #
-# Hard gates:
-# - SUBMIT_ORDERS=1 requires STRATEGY_PROFILE=LongV11aDivWeekendVol + CONFIRM_DEMO_ORDERS=1
-# - TELEGRAM_ENABLED=1 requires BOT_TOKEN + CHAT_ID + Bybit API key/secret
+# Hard gates: EXECUTION_ENVIRONMENT is explicit and requires its account-owner
+# route. Demo additionally requires an allowlisted strategy profile.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,6 +14,60 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="$(command -v python3 || command -v python)"
+fi
+
+case "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-0}" in
+    1|true|TRUE|yes|YES|on|ON) kernel_required=1 ;;
+    0|false|FALSE|no|NO|off|OFF|"") kernel_required=0 ;;
+    *) echo "Invalid ACCOUNT_EXECUTION_KERNEL_REQUIRED value." >&2; exit 2 ;;
+esac
+if [[ "$kernel_required" == "1" ]]; then
+    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
+        echo "Kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
+        exit 2
+    fi
+    if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
+        echo "Kernel latch is set but account-execution-capture-enabled is absent." >&2
+        exit 2
+    fi
+fi
+case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
+    1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
+    0|false|FALSE|no|NO|off|OFF|"") paper_kernel_required=0 ;;
+    *) echo "Invalid ACCOUNT_PAPER_KERNEL_REQUIRED value." >&2; exit 2 ;;
+esac
+if [[ "$paper_kernel_required" == "1" ]]; then
+    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
+        echo "Paper kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
+        exit 2
+    fi
+    if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
+        echo "Paper kernel latch is set but account-execution-capture-enabled is absent." >&2
+        exit 2
+    fi
+fi
+
+case "${EXECUTION_ENVIRONMENT:-}" in
+    demo)
+        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
+            echo "EXECUTION_ENVIRONMENT=demo requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
+            exit 2
+        fi
+        ;;
+    paper)
+        if [[ "$paper_kernel_required" != "1" || "$kernel_required" != "0" ]]; then
+            echo "EXECUTION_ENVIRONMENT=paper requires only ACCOUNT_PAPER_KERNEL_REQUIRED=1." >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or paper." >&2
+        exit 2
+        ;;
+esac
+if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
+    echo "EXECUTION_ENVIRONMENT requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
+    exit 2
 fi
 
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
@@ -36,12 +88,9 @@ ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-10}"
 MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY="${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY:-0.5}"
 MAX_ORDER_NOTIONAL_PCT_EQUITY="${MAX_ORDER_NOTIONAL_PCT_EQUITY:-0}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
-ORDER_FILL_CONFIRM_SECONDS="${ORDER_FILL_CONFIRM_SECONDS:-2}"
-ORDER_FILL_POLL_INTERVAL_SECONDS="${ORDER_FILL_POLL_INTERVAL_SECONDS:-0.2}"
-FALLBACK_EQUITY_USDT="${FALLBACK_EQUITY_USDT:-10000}"
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
 WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
-WS_KLINES_LOOKBACK_DAYS="${WS_KLINES_LOOKBACK_DAYS:-90}"
+WS_KLINES_LOOKBACK_DAYS="${WS_KLINES_LOOKBACK_DAYS:-100}"
 WS_KLINES_UNIVERSE_REFRESH_SECONDS="${WS_KLINES_UNIVERSE_REFRESH_SECONDS:-3600}"
 WS_KLINES_TOPICS_PER_CONNECTION="${WS_KLINES_TOPICS_PER_CONNECTION:-180}"
 WS_KLINES_STALE_WARNING_SECONDS="${WS_KLINES_STALE_WARNING_SECONDS:-60}"
@@ -60,21 +109,17 @@ ws_klines_args+=(--ws-klines-topics-per-connection "$WS_KLINES_TOPICS_PER_CONNEC
 ws_klines_args+=(--ws-klines-stale-warning-seconds "$WS_KLINES_STALE_WARNING_SECONDS")
 ws_klines_args+=(--ws-klines-stale-reconnect-seconds "$WS_KLINES_STALE_RECONNECT_SECONDS")
 
-telegram_args=()
-if [[ "${TELEGRAM_ENABLED:-1}" == "1" ]]; then
-    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-        echo "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID when TELEGRAM_ENABLED=1." >&2
-        exit 2
-    fi
-    if [[ -z "${BYBIT_DEMO_API_KEY:-}" || -z "${BYBIT_DEMO_API_SECRET:-}" ]]; then
-        echo "Set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET so Telegram can report positions and PnL." >&2
-        exit 2
-    fi
-    telegram_args+=(--telegram)
+if [[ "${TELEGRAM_ENABLED:-0}" != "0" ]]; then
+    echo "Sleeve Telegram is retired; the account execution owner owns notifications." >&2
+    exit 2
 fi
 
-order_args=()
-if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
+order_args=(
+    --execution-environment "$EXECUTION_ENVIRONMENT"
+    --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
+    --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
+)
+if [[ "$EXECUTION_ENVIRONMENT" == "demo" ]]; then
     # Configurable space-separated allowlist (was a hard-coded single profile).
     # Default keeps the safe long-sleeve value; extend ALLOWED_SUBMIT_PROFILES
     # to enable others without editing this script. Safe-by-default.
@@ -83,41 +128,19 @@ if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
         echo "STRATEGY_PROFILE=$STRATEGY_PROFILE not in ALLOWED_SUBMIT_PROFILES='$ALLOWED_SUBMIT_PROFILES'; refusing to submit." >&2
         exit 2
     fi
-    if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then
-        echo "Set CONFIRM_DEMO_ORDERS=1 with SUBMIT_ORDERS=1 to submit Bybit demo orders." >&2
-        exit 2
-    fi
-    "$PYTHON_BIN" scripts/check_bybit_order_permissions.py --context long-demo
-    order_args+=(--submit-orders --confirm-demo-orders)
-fi
-# RECORD_DRY_RUN=1 persists planned orders/trades to the long_native_demo_*
-# ledgers so the paper long sleeve has data to reconcile against the live
-# long demo. Found 2026-05-24: long-paper service had only kline cache, no
-# trades/orders/cycles, blocking any long-side slippage analysis.
-if [[ "${RECORD_DRY_RUN:-0}" == "1" ]]; then
-    order_args+=(--record-dry-run)
-fi
-# PAPER_MODE=1 routes writes to long_native_paper_* datasets so the long-paper
-# service's output can be paired against the live long-demo ledger by
-# reconcile-long-paper-demo. Without this the paper service writes to the
-# same dataset name as live demo (long_native_demo_*), and the reconciler
-# finds nothing in the expected paper dataset → paired=0 silently.
-if [[ "${PAPER_MODE:-0}" == "1" ]]; then
-    order_args+=(--paper-mode)
 fi
 
 echo "long-native demo engine starting"
 echo "repo=$REPO_ROOT"
 echo "strategy_profile=$STRATEGY_PROFILE"
-echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} use_daemon=${USE_DAEMON:-1}"
+echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1}"
 echo "per-position notional_multiplier=${NOTIONAL_MULTIPLIER}x entry_leverage=${ENTRY_LEVERAGE}x max_projected_im=${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY} universe_size=${UNIVERSE_SIZE}"
 
 mkdir -p "$DATA_ROOT/.locks"
 
-# USE_DAEMON=1 (default): long-running Python process with WS execution
-# router. Each cycle reuses the same execution event router so fill
-# confirmations arrive in <30ms instead of REST-polling. SIGTERM drains the
-# current cycle and exits cleanly (systemctl stop is safe).
+# USE_DAEMON=1 (default): long-running target producer with a reused public
+# market-data plane. The account owner handles every private execution event.
+# SIGTERM drains the current cycle and exits cleanly (systemctl stop is safe).
 if [[ "${USE_DAEMON:-1}" == "1" ]]; then
     echo "long-native demo engine: daemon mode"
     exec "$PYTHON_BIN" -m liquidity_migration \
@@ -132,12 +155,8 @@ if [[ "${USE_DAEMON:-1}" == "1" ]]; then
         --max-projected-initial-margin-pct-equity "$MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY" \
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
-        --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \
-        --order-fill-poll-interval-seconds "$ORDER_FILL_POLL_INTERVAL_SECONDS" \
-        --fallback-equity-usdt "$FALLBACK_EQUITY_USDT" \
         --strategy-profile "$STRATEGY_PROFILE" \
         --daemon --interval-seconds "$INTERVAL_SECONDS" \
-        "${telegram_args[@]}" \
         "${order_args[@]}" \
         "${ws_klines_args[@]}"
 fi
@@ -158,11 +177,7 @@ while true; do
         --max-projected-initial-margin-pct-equity "$MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY" \
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
-        --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \
-        --order-fill-poll-interval-seconds "$ORDER_FILL_POLL_INTERVAL_SECONDS" \
-        --fallback-equity-usdt "$FALLBACK_EQUITY_USDT" \
         --strategy-profile "$STRATEGY_PROFILE" \
-        "${telegram_args[@]}" \
         "${order_args[@]}" \
         "${ws_klines_args[@]}"
     status=$?

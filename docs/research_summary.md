@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated: 2026-07-10.
+Updated: 2026-07-13.
 
 This is the durable decision log. Live operational state is in `STATE.md`;
 dated experiment contracts are indexed in `docs/preregistration/INDEX.md`.
@@ -27,7 +27,7 @@ dated experiment contracts are indexed in `docs/preregistration/INDEX.md`.
 
 | Object | Role | Current read |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit continuous fade demo/paper | Base stays on; sniper retired; post-fix TAC/SKL/VELVET book is 5/5 matched with zero hard signal drift |
+| `continuous_ensemble_v2` | Bybit continuous fade demo/paper | Base stays on; sniper retired. The 5/5 TAC/SKL/VELVET result is a dated sleeve-projection receipt, not account-owner acceptance. |
 | `LongV11aDivWeekendVol` | Bybit long demo/paper | Strong internal cross-venue object; TP-tail dependent; currently flat after a tiny skewed forward sample |
 
 Binance is a research/replay venue, not a live execution venue.
@@ -43,8 +43,9 @@ Binance is a research/replay venue, not a live execution venue.
 - Capacity: 25 active shorts, 5 new entries per cycle.
 - Portfolio: BTC+ETH hedge and BTC-vol regime; daily rebalance off.
 - Exit: component TP12 plus 24-hour max hold.
-- Off: sniper, fixed/server stop, left-decile, stop-approach, failed-fade,
-  breakeven, re-entry cooldown, heat and account-drawdown overlays.
+- Removed from the future runtime: the adverse-limit add-on. Off: fixed/server
+  stop, left-decile, stop-approach, failed-fade, breakeven, re-entry cooldown,
+  heat and account-drawdown overlays.
 
 The profile hash remains
 `c4eb2eed1658697aa1239afd847e0de9d04f87ffe98080d4607ea6c1fd86a4f6`.
@@ -66,10 +67,14 @@ The base/sniper split is execution-attributed; funding is account/symbol-level.
 The old local sniper price-PnL is not authoritative because shared exit
 attribution was wrong. See `docs/incidents/2026-07-10-1000tag.md`.
 
-Decision: retire sniper and keep legacy cleanup active. Do not infer that a
-fixed stop is now positive: 20%/40%/80% fixed-stop portfolio replays reduced
-MAR on both venues. The justified research response is ex-ante loss budgeting
-plus a separately executable, granular adverse-state study.
+Decision at the incident date: retire sniper and keep legacy cleanup active.
+For the 2026-07-13 target-only cutover, that cleanup was removed only after the
+new account owner gained a code-level startup gate for venue-flat positions and
+zero regular/conditional orders on an empty journal. Historical decoding and
+ledger attribution remain. Do not infer that a fixed stop is now positive:
+20%/40%/80% fixed-stop portfolio replays reduced MAR on both venues. The
+justified research response is ex-ante loss budgeting plus a separately
+executable, granular adverse-state study.
 
 ### Main baseline
 
@@ -118,9 +123,9 @@ override is recorded as a correctness migration, not parity.
 | Daily volatility rebalance | Keep off; it mostly saturated leverage and worsened the registered risk metrics. |
 | BTC gate off / non-30d retunes | Rejected; the 30d prior-day control remains the comparison object. |
 | BTC-risk 35% tail hard skip | Rejected by the two-venue rule: Binance improved, Bybit MAR/DD worsened. |
-| Conditional scale-in | Raised return but worsened MAR/DD on both full overlays; no live add-on. |
+| Conditional scale-in | Raised return but worsened MAR/DD on both full overlays; no live add-on. Runtime/shadow implementation removed 2026-07-13; this decision record remains. |
 | Signal-invalidation exits | Negative or zero-hit on sparse state; no deployed exit. |
-| Upper-wick sizing | Retracted after duplicate-counting/parity audit. |
+| Upper-wick sizing | Retracted after duplicate-counting/parity audit. Flag-off runtime plumbing removed 2026-07-13; this decision record remains. |
 | Symbol/time blacklist plan | Rejected; no deployable common arm. |
 
 Synthetic squeeze, outage, and cluster-bootstrap diagnostics say the sampled
@@ -172,6 +177,11 @@ failure to learn from, not strategy validation.
 
 ## Data, reconciliation, and operations
 
+The paper/demo counts below are historical receipts from the retired
+sleeve-local reconciliation surface. They remain useful for reconstructing the
+2026-07-10 decisions, but they do not validate the target-only account owner and
+must not be presented as current runtime readiness.
+
 - Latest pre-reset CONTINUOUS: paper 12, demo base 9, paired 7, paper-only 5,
   demo-only 2, sniper-only 4, open sniper 0, one exit-reason divergence.
 - Latest pre-reset LONG: one paired ADA entry and no unmatched entries, with the
@@ -180,7 +190,7 @@ failure to learn from, not strategy validation.
   As of `2026-07-10T08:48Z`, the new clock holds TACUSDT p3 plus SKLUSDT p3,
   p4p3, and p4p5: four demo rows and four paper rows, no sniper. VELVETUSDT p3
   subsequently opened and is included in the 5/5 reconcile below.
-- Current execution reconcile at `2026-07-10T11:46Z` is 5/5 paired, zero
+- The dated execution compatibility report at `2026-07-10T11:46Z` was 5/5 paired, zero
   paper/demo-only, zero status or exit-reason divergence, and 72.13 bps mean,
   136.96 bps median, and 170.73 bps worst adverse demo entry slippage. The
   favorable VELVET row drags down the mean. TAC is D9 on the replayed live plane.
@@ -191,9 +201,10 @@ failure to learn from, not strategy validation.
   day. The LONG agreement replay is `exploratory`: full-PIT passed, but funding
   is partial and the single model entry has no live counterpart; there are no
   live entries outside the model.
-- Reconciliation now separates component legs, local price PnL, recorded fees,
-  venue Closed-PnL allocations, and unavailable funding. Unknown/failed PIT is
-  a failed LONG model leg.
+- The retired report separated component legs, local price PnL, recorded fees,
+  venue Closed-PnL allocations, and unavailable funding. Its compatibility
+  projections are not authoritative position/P&L state under the account-owner
+  design. Unknown/failed PIT remains invalid for a LONG model claim.
 - Stable residual momentum now has explicit provisional provenance and exact
   schema/duplicate/non-finite gates; consumers use stable rows only.
 - Current roots are not granular-ready. Bybit lacks canonical current-root 5m;
@@ -217,10 +228,12 @@ failure to learn from, not strategy validation.
   requirement for the registered loss-budget/granular evidence.
 - Routine work goes through `scripts/ops.sh`; ledger reset is dry-run by default
   and checked deploy requires explicit `--execute`.
-- Safety release `77bf04304` is deployed. The pre-fix ledgers were archived with
-  verified SHA-256. The immediate post-reset reconciliation was 0/0 clean; the
-  current TAC/SKL/VELVET book is 5/5 demo-paper matched with no hard model drift. Each
-  net venue symbol has a TP and every component has a durable 24-hour deadline.
+- Safety release `77bf04304` produced the dated receipt summarized above. The
+  pre-fix ledgers were archived with verified SHA-256; the immediate post-reset
+  compatibility report was 0/0 and the later TAC/SKL/VELVET report was 5/5 with
+  no hard model drift. Current deployed state belongs in `STATE.md`; neither
+  receipt is account-owner acceptance. Each net venue symbol in that release had
+  a TP and every component had a durable 24-hour deadline.
   Server stops remain off because the tested fixed-stop arms were negative;
   this leaves tail risk and is why the registered loss-budget and granular
   adverse-state studies remain the next evidence path.

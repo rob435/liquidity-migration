@@ -18,8 +18,9 @@ Start from the source that owns the question:
 - Data/PIT: `storage.py`, `data_layer.py`, `ingestion.py`,
   `archive_manifest.py`, `volume_events_pit.py`, `docs/data_roots.md`, and
   `docs/pit_gate.md`.
-- Execution lifecycle: continuous/long event daemons, `event_demo.py`,
-  `event_demo_exits.py`, `trade_lifecycle.py`, `ws_risk.py`, and their tests.
+- Execution lifecycle: continuous/long target producers,
+  `account_service.py`, `account_kernel.py`, `account_reconcile.py`,
+  `trade_lifecycle.py`, the demo/paper account-owner launchers, and their tests.
 
 Use `rg --files` and `rg` for direct discovery.
 

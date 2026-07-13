@@ -1,284 +1,245 @@
 # VPS systemd deployment
 
-The deployable VPS units are:
+This directory defines one execution topology for demo and deterministic paper:
+strategy sleeves publish absolute targets, while one owner per account is the
+only process allowed to mutate or reconcile account state.
 
-- `liquidity-migration-bybit-long-demo.service` and
-  `liquidity-migration-bybit-long-paper.service`: long-native v11a demo/paper pair.
-- `liquidity-migration-bybit-risk.service`: shared fast exit-only risk runner for every
-  configured ledger root; it has no sleeve toggle.
-- `liquidity-migration-bybit-continuous-demo.service`: continuous-fade demo runner.
-- `liquidity-migration-bybit-continuous-paper.service`: no-order continuous evidence
-  collector.
-- `liquidity-migration-liquidation-collector.service`: always-on live Bybit
-  liquidation collector (`allLiquidation`; append-only JSONL, no order path).
-  Enabled by the deploy.
-- `liquidity-migration-depth-collector.service`: Bybit forward order-book depth
-  collector (hourly band snapshots; public REST, append-only JSONL, no order path).
-  Built but **NOT auto-enabled** — operator-gated (`systemctl enable --now
-  liquidity-migration-depth-collector.service`); the deploy installs the unit and
-  restarts it only if already enabled. Once enabled, deploy/verify/recovery fail
-  loud unless the unit is both enabled and active, because Bybit depth history is
-  unbuyable after a capture gap.
-- Timers include the demo-liveness watchdog, combined-book report, continuous rmom
-  refresh, and the five-minute continuous BTC+ETH target hedge (submit-armed; see below).
+This is not real-money authorization. The current cutover evidence and open
+acceptance conditions are recorded in `docs/account_execution_cutover.md`.
 
-Which sleeve units actually run is governed by `deploy/sleeves.env` plus the
-optional host override `/etc/liquidity-migration/sleeves.env`. The host override
-can only narrow a repo-on sleeve to off; repo-side off is a hard ceiling. Deploy
-writes the final values to `/etc/liquidity-migration/sleeves.resolved.env`, which
-systemd units consume.
-As of 2026-06-30 the live set is long demo/paper, continuous demo, and
-continuous paper (`LONG_SLEEVE=on`, `CONTINUOUS_SLEEVE=on`,
-`CONTINUOUS_PAPER_SLEEVE=on`). All are demo/paper only.
+## Execution ownership
 
-Install or refresh it on the VPS from a trusted local checkout:
+- `liquidity-migration-account-execution.service` owns Bybit demo credentials,
+  orders, fills, positions, native protection, position and funding
+  reconciliation, the canonical demo account journal, desired-vs-executed
+  convergence, and operational Telegram messages.
+- `liquidity-migration-account-paper-execution.service` owns the deterministic
+  paper account journal and consumes its separate target inbox and L2 capture.
+- LONG and CONTINUOUS demo/paper services are target producers. Their unit
+  environments remove Bybit private keys and Telegram credentials even though
+  they retain the shared public configuration file.
+- `liquidity-migration-continuous-hedge.service` publishes a BTC+ETH hedge target;
+  `SUBMIT_HEDGE=1` arms publication to the owner inbox, not direct venue orders.
+- `liquidity-migration-demo-liveness.service` reads canonical account journals
+  and captures. It does not load the private credential environment.
+
+The retired `liquidity-migration-bybit-risk.service`, combined-book report
+service/timer, and `run_bybit_demo_ws_risk_engine.sh` must not be reintroduced.
+Historical archives and incident receipts remain evidence; they are not live
+runtime inputs.
+
+Accepted targets are not reported as positions until canonical fills converge.
+Terminal rejects/cancels are recovered by the owner with bounded deterministic
+retries, and overdue/exhausted convergence blocks the owner health consumed by
+producers and liveness. Telegram emits one hourly account summary plus confirmed
+lifecycle/loss-threshold events; a venue/local mismatch is shown explicitly and
+untrusted exposure/estimated-uPnL alerts are suppressed. Valuation is labelled
+as captured L2 midpoint—not Bybit `markPrice` or venue uPnL—and missing fresh
+midpoints render valuation unavailable rather than substituting entry price.
+Demo exits retain their unrelated-risk exemption but still require fresh
+same-symbol venue truth.
+
+The inbox assigns a locked durable arrival sequence, coalesces collective later
+component replacements, and carries a per-component creation revision so a
+delayed pre-flat entry cannot reopen after a newer safety transition. Demo and
+paper account, inbox and capture roots must be absolute and pairwise disjoint;
+deploy, recovery and verification reject equal, nested or canonical aliases.
+
+The liquidation collector remains always on. The depth collector is still an
+explicit operator opt-in because a missed forward capture cannot be bought back.
+
+## Safe staged installation
+
+The account-owner cutover can install its current software and units before the
+deploy gate exists:
+
+```bash
+INSTALL_PREFLIGHT_ONLY=1 \
+  EXPECTED_COMMIT="$(git rev-parse HEAD)" \
+  scripts/deploy_vps_live.sh
+```
+
+The provider-console recovery script accepts the same
+`INSTALL_PREFLIGHT_ONLY=1` setting, and GitHub Actions exposes a manual
+`install-preflight` mode. The phase checks out the exact commit, installs the
+current scripts/config and systemd manifest, and disables/removes unknown
+historical `liquidity-migration-*` units and drop-ins. It deliberately does not
+read or modify either cutover marker, load the Bybit or owner route
+environments, or enable/start/restart any current `liquidity-migration` unit.
+Already-running current units are left running, so enter the maintenance window
+and stop the installed fleet before invoking this phase; otherwise the checkout
+would change scripts/config beneath active processes.
+
+A successful `install-preflight-ok` is an installation receipt only. It does not
+authorize startup and does not make the open evidence in
+`docs/account_execution_cutover.md` pass.
+
+## Capture authority versus deploy authorization
+
+Owners and producers fail closed unless the bounded evidence-collection marker
+exists; only the safe staged installation above is exempt:
+
+```text
+/etc/liquidity-migration/account-execution-capture-enabled
+```
+
+This marker authorizes demo/paper tape collection only. It is not evidence of
+parity, calibration, P&L agreement, or deployment readiness. Full deployment,
+verification, and full recovery additionally require a mode-`0600` JSON
+authorization receipt at:
+
+```text
+/etc/liquidity-migration/account-execution-deploy-ready
+```
+
+They verify the capture marker and the deploy receipt before checkout and refuse
+the retired ambiguous `account-execution-ready` filename. The receipt is
+self-hashed, expires within 24 hours, and binds the reviewed evidence to this
+host and exact clean staged commit. Do not `touch` this path. Issue it through
+`scripts/ops.sh cutover-authority` only after the gates in
+`docs/account_execution_cutover.md` actually pass. This integrity check does
+not turn operator judgment into a signature or an automatic evidence verdict.
+
+The demo owner route is configured in
+`/etc/liquidity-migration/account-execution.env`:
+
+```bash
+ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
+ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-execution
+ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-intents
+ACCOUNT_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-market-capture
+ACCOUNT_SYMBOLS_FILE=/etc/liquidity-migration/account-execution/symbols.txt
+ACCOUNT_DEMO_RULES_FILE=/etc/liquidity-migration/account-execution/demo-rules.json
+ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-execution/risk-policy.json
+DISASTER_STOP_FRACTION=<explicit-owner-choice>
+```
+
+The paper owner has a distinct route in
+`/etc/liquidity-migration/account-paper-execution.env`:
+
+```bash
+ACCOUNT_PAPER_KERNEL_REQUIRED=1
+ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-paper
+ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-paper-intents
+ACCOUNT_PAPER_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-paper-market-capture
+ACCOUNT_SYMBOLS_FILE=/etc/liquidity-migration/account-paper-execution/symbols.txt
+ACCOUNT_DEMO_RULES_FILE=/etc/liquidity-migration/account-execution/demo-rules.json
+ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-paper-execution/risk-policy.json
+ACCOUNT_TWIN_CALIBRATION_FILE=/etc/liquidity-migration/account-paper-execution/execution-twin-calibration.json
+ACCOUNT_TWIN_LATENCY_QUANTILE=p50
+ACCOUNT_TWIN_SLIPPAGE_QUANTILE=p50
+PAPER_EQUITY_USDT=10000
+```
+
+Bybit demo and Telegram secrets remain in
+`/etc/liquidity-migration/bybit-demo.env`. The demo account owner loads both.
+The liveness watchdog loads Telegram only and explicitly removes every Bybit
+credential plus `REAL_MONEY` before execution. Target producers explicitly
+unset private API and Telegram variables. `REAL_MONEY` is refused throughout
+this workflow.
+
+## Checked deploy and verification
+
+From a trusted checkout:
 
 ```bash
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 ```
 
-`EXPECTED_COMMIT` accepts a unique 7-40 character hexadecimal prefix or a full
-commit ID; deploy and verify resolve it to the same full object before checking
-the checkout. For private GitHub HTTPS remotes, a local deploy automatically
-uses the authenticated `gh` credential when `GITHUB_TOKEN` is unset. Explicit
-`GITHUB_TOKEN` remains supported and takes precedence. The credential travels
-over SSH stdin for the fetch only and is not printed or persisted on the VPS.
+The deploy refuses missing owner routes/capture authority, a missing, stale,
+altered, cross-host, or wrong-commit deploy authorization, a dirty remote checkout,
+unexpected commit, real-money configuration, failed demo-key permission probe,
+invalid strategy constants, stale required rmom gates, unknown legacy units, or
+an owner/producer that does not become active. It starts both account owners
+before enabled target producers. Verification is read-only and checks the same
+topology and unit environment latches.
 
-The script refuses a dirty VPS checkout, forces the configured remote URL,
-resets the deploy branch to `origin/main`, runs focused runtime tests, checks
-the promoted strategy constants, backs up `/etc/liquidity-migration/bybit-demo.env`,
-enforces the expected Telegram chat ID, syncs all
-`deploy/systemd/liquidity-migration-*` service/timer files, applies the sleeve
-kill-switches, restarts the shared risk service and only the enabled sleeve units,
-and prints active systemd state plus non-secret entry-profile settings. The verify
-script is read-only and checks the same commit, strategy constants, Telegram chat ID,
-systemd unit settings, and sleeve active/enabled state without
-pulling or restarting.
-When a continuous sleeve is enabled, deploy validates its residual-momentum
-gate before restart. It runs the refresh oneshot only when a gate is
-missing/stale or the gate build/validation code changed; healthy current gates
-are retained. Validation still fails closed unless the explicit
-`ALLOW_EMPTY_RMOM_GATE=1` first-boot override is set.
-Both scripts wait briefly before checking service activity so a process that
-dies immediately after startup does not produce a false pass. Override with
-`SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
+Sleeve enablement comes from `deploy/sleeves.env`, narrowed only by
+`/etc/liquidity-migration/sleeves.env`. The resolved values are written to
+`/etc/liquidity-migration/sleeves.resolved.env`. Turning a sleeve off stops new
+targets; it does not disable either account owner.
 
-GitHub Actions can also run the same checked path from
-`.github/workflows/vps-deploy.yml`. Repository secret `VPS_SSH_PRIVATE_KEY`
-holds the dedicated GitHub Actions deploy key; the console recovery script adds
-the matching public key to `/root/.ssh/authorized_keys`. The workflow derives
-the secret's public key and checks its fingerprint before SSH, so a rotated or
-mis-pasted secret fails before deployment. Run the `VPS Deploy` workflow
-manually in `verify`, `deploy`, or `wait-deploy` mode, or let guarded `main`
-pushes to live-code/deploy paths trigger deployment. `wait-deploy` is the mode
-to start before or during provider-console recovery: it verifies the deploy key
-and host key, waits until public-key SSH starts working, then runs the same
-checked deploy plus read-only verifier against the pinned GitHub SHA. Optional
-repository variables: `VPS_HOST`, `VPS_USER`, `VPS_ED25519_FINGERPRINT`, and
-`EXPECTED_TELEGRAM_CHAT_ID`.
-
-If the VPS was rebuilt and SSH rejects the local key, add this public key back
-to the VPS through the provider console before running the deploy script. The
-recovery script also installs the GitHub Actions public deploy key shown below.
-
-```text
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv liquidity-migration-github-actions-20260609
-```
-
-On the VPS, the target file is normally `/root/.ssh/authorized_keys` for the
-default `SSH_TARGET=root@116.202.15.128`.
-
-The current VPS address is `116.202.15.128`. If SSH is unavailable but the
-Hetzner Cloud web console opens the installed OS as root, run the recovery deploy
-directly on the VPS:
+GitHub Actions uses `.github/workflows/vps-deploy.yml`. Console and SSH recovery
+must use the checked scripts rather than hand-starting a partial fleet:
 
 ```bash
-scripts/print_vps_recovery_command.sh
 scripts/print_vps_recovery_command.sh --recommended-only
-scripts/print_vps_recovery_command.sh --rescue-only
-
-EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
-EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
-EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/wait_for_vps_recovery_and_deploy.sh
+EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/vps_console_recover_and_deploy.sh
 ```
 
-Prefer the generated pinned command from `scripts/print_vps_recovery_command.sh`
-when possible; use `scripts/print_vps_recovery_command.sh --recommended-only`
-when you want only the full installed-OS command to paste into the Hetzner Cloud
-console, or `scripts/print_vps_recovery_command.sh --rescue-only` when you want
-only the Hetzner Rescue SSH-key restore command. If the installed OS console is
-unavailable, enable Hetzner Rescue for the server, boot into rescue root, run
-the rescue command, reboot back to the installed OS, and let the existing
-`wait-deploy` job or `scripts/wait_for_vps_recovery_and_deploy.sh` finish the
-checked deploy. Do not paste a raw `main` branch `raw.githubusercontent.com`
-recovery URL unless you intentionally want a moving-target deploy; the generated
-command pins the exact commit and passes `EXPECTED_COMMIT` so the VPS refuses
-stale or unexpected code.
-`scripts/vps_restore_ssh_access.sh` only restores root public-key SSH access,
-prints the restored authorized-key fingerprints, and exits, which is useful
-when you want this local checkout or GitHub Actions to run the checked deploy
-after access is fixed. `scripts/vps_rescue_restore_ssh_access.sh` is the
-Hetzner Rescue fallback: run it as rescue root when the installed OS console is
-unavailable, then reboot back to local disk and run the checked deploy from this
-checkout. `scripts/wait_for_vps_recovery_and_deploy.sh` can be left running
-locally while you perform the console or Rescue step; it waits until public-key
-SSH works, then calls the checked deploy and read-only verifier with the pinned
-commit. The GitHub `VPS Deploy` workflow's `wait-deploy` mode wraps the same
-helper for cases where you want Actions to keep waiting instead of a local
-terminal. The full console recovery restores the same SSH access, prints the
-same fingerprints, clones or repairs `/opt/liquidity-migration`,
-forces the configured remote URL, resets the deploy branch to `origin/main`,
-builds the local venv if needed, installs missing Ubuntu deploy prerequisites,
-writes an sshd recovery override for root public-key login, prints the effective
-sshd root-login settings, validates the promoted strategy constants, refreshes
-systemd, applies the same sleeve kill-switches as the normal deploy, restarts the
-shared risk service and enabled sleeves, and prints non-secret service state. It
-prints `deploy-verify-ok` only after it has also verified enabled sleeves are
-active/enabled, disabled sleeves are down, the demo service has the expected
-one-minute `promoted` settings, and the risk service uses
-`ORDER_SUBMIT_MODE=ws_then_rest`. Set
-`EXPECTED_COMMIT=<full sha>` before `bash` if you want the console deploy to
-refuse anything except one pinned commit.
-The console script also waits before checking active service state; override
-with `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
+## Evidence-window startup and inspection
 
-The generated full recovery command sets `CLEAN_DIRTY_CHECKOUT=1` by default.
-If the existing `/opt/liquidity-migration` checkout is dirty, the script saves tracked
-diffs, status, and a tarball/list of untracked non-ignored files under
-`/root/liquidity-migration-deploy-backups` before running `git reset --hard` and
-`git clean -fd`. Ignored live data is not removed by that clean command. The
-generated strict command omits
-`CLEAN_DIRTY_CHECKOUT=1` and refuses a dirty checkout.
-
-Manual install or refresh on the VPS, if you are deliberately bypassing the checked
-deploy scripts:
+After staged installation, the flat reset, fresh demo rules, and explicit
+capture authorization, start the demo account owner alone. Verify fresh bound
+owner health before starting any demo producer. Calibrate from the resulting
+demo tape before starting the paper owner; verify it before paper producers.
+This sequence is an evidence window, not a full deploy. Useful checks are:
 
 ```bash
-cp deploy/systemd/liquidity-migration-*.service /etc/systemd/system/
-cp deploy/systemd/liquidity-migration-*.timer /etc/systemd/system/
-systemctl daemon-reload
-# Enable only the units whose toggle is on in deploy/sleeves.env, plus the always-on
-# risk service and support timers. As of 2026-06-30:
-systemctl enable --now liquidity-migration-bybit-risk.service
-systemctl enable --now liquidity-migration-bybit-long-demo.service
-systemctl enable --now liquidity-migration-bybit-long-paper.service
-systemctl enable --now liquidity-migration-bybit-continuous-demo.service
-systemctl enable --now liquidity-migration-bybit-continuous-paper.service
-systemctl enable --now liquidity-migration-liquidation-collector.service
-systemctl enable --now liquidity-migration-demo-liveness.timer
-systemctl enable --now liquidity-migration-combined-book-report.timer
-systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
-systemctl enable --now liquidity-migration-continuous-hedge.timer
+install -m 0600 /dev/null /etc/liquidity-migration/account-execution-capture-enabled
+systemctl start liquidity-migration-account-execution.service
+systemctl status liquidity-migration-account-execution.service
+python3 -c 'from liquidity_migration.account_owner_health import require_recent_account_owner_health; require_recent_account_owner_health("/opt/liquidity-migration/data/bybit-account-execution", environment="demo", expected_account_id="bybit-demo-unified", max_age_ns=30_000_000_000)'
+# Only after that command passes:
+systemctl start liquidity-migration-bybit-long-demo.service
+systemctl start liquidity-migration-bybit-continuous-demo.service
+systemctl status liquidity-migration-account-paper-execution.service
+systemctl status liquidity-migration-demo-liveness.timer
+systemctl list-units 'liquidity-migration-*'
+journalctl -u liquidity-migration-account-execution.service -n 200 --no-pager
 ```
 
-## Safe demo/paper ledger archive and reset
-
-Run the ledger reset command from `/opt/liquidity-migration`. Its default is a
-read-only plan; `--execute` is mandatory for any service or file change.
+Do not start the paper owner until its passing calibration receipt is installed.
+Do not issue `account-execution-deploy-ready` during live evidence collection.
+After targets and the venue are flat, stop producers, let both owners write
+final fresh health, and stop the owners. The owner-serialized read-only final
+capture is:
 
 ```bash
-scripts/reset_demo_paper_ledgers.sh
-scripts/reset_demo_paper_ledgers.sh --sleeves continuous
-scripts/reset_demo_paper_ledgers.sh --execute --sleeves all --label exit-overhaul
+scripts/ops.sh venue-accounting \
+  --account-root /opt/liquidity-migration/data/bybit-account-execution \
+  --account-id bybit-demo-unified \
+  --start-time-ms FRESH_ACCOUNT_EPOCH_START_MS \
+  --output /etc/liquidity-migration/account-execution/venue-accounting.json
 ```
 
-Execution stops every shared-account writer (including the risk service and
-submit-armed hedge) plus maintenance timers, refuses `REAL_MONEY` or ambiguous
-account flags, and takes a nonblocking process lock at
-`/run/lock/liquidity-migration-ledger-reset.lock` so two execute runs cannot
-overlap. Before stopping anything, it verifies that systemd's resolved
-`EnvironmentFiles` for the risk, LONG demo, CONTINUOUS demo, and hedge units all
-include the same resolved file selected by `--env-file`; this prevents proving one
-account flat while quiescing writers for another. It then queries Bybit demo to
-prove there are no positions or open orders. The lock remains held through normal
-restart verification and failure-recovery restarts.
+It machine-checks exact target/order/fill lineage, TRADE and closed-PnL totals,
+funding settlements, and pre/post local/venue flatness. The default sample
+requires two trades, one closed-PnL row, and one funding row over an epoch no
+longer than seven days. Prepare the open assessment beforehand and issue the
+authorization within five minutes of the stopped owners' final health files;
+the venue-accounting and flatness roles point directly to this receipt.
 
-After the flat proof, the command first imports any pre-journal ledger rows,
-appends a verified-flat venue fact, writes and verifies a timestamped archive
-with an audit manifest, persists an fsynced `.sha256` sidecar, and fsyncs the
-archive directory. It then removes only allowlisted generated
-trade/order/cycle views and obsolete operational telemetry. The append-only
-`canonical_journal/events.jsonl` remains live and the trade/order/TCA views are
-rebuilt from it. A reset therefore creates a new verified-flat boundary; it
-does not delete execution history to make the ledgers appear flat. The
-continuous selection includes the hedge ledger; `all` also includes the shared
-compatibility ledger. Initially inactive sleeve units remain inactive;
-initially active daemons and timers are restarted and verified.
+## Flat-account archive and reset
 
-Configs, lock directories, residual-momentum signals, root-level market data,
-reports, and `.cache` directories are preserved by default. `--include-reports`
-and `--include-caches` are explicit opt-ins; the latter may require a slow market-
-data bootstrap. The continuous `continuous_account_equity_state.json` high-water
-state is snapshotted into the archive and retained live: wiping it would erase
-account-level drawdown memory and make the first post-reset cycle report a false
-zero drawdown. The command never flattens positions or cancels orders itself—do
-that through the normal demo workflow, then rerun the reset. Archives default to
-`data/_archive/ledger-reset-<UTC timestamp>[-label].tar.gz`.
+`scripts/reset_demo_paper_ledgers.sh` is dry-run by default. Execute only after
+reviewing the plan. On a pre-cutover host, stop the installed fleet and complete
+the safe staged installation first; the reset verifies the new owner units and
+their route environments before mutating any ledger:
 
-Required secrets live outside git in:
-
-```text
-/etc/liquidity-migration/bybit-demo.env
+```bash
+scripts/reset_demo_paper_ledgers.sh --sleeves all
+scripts/reset_demo_paper_ledgers.sh --execute --sleeves all --label account-cutover
 ```
 
-That environment file must define the Bybit demo API credentials and Telegram
-credentials. Deploy/recovery backs it up and sets only `TELEGRAM_CHAT_ID` to the
-expected target, preserving the API secrets and bot token. The Bybit key must be
-non-read-only and include `ContractTrade` `Order` and `Position` permissions.
-Bybit can still list those granular permissions while reporting `readOnly=1`;
-that key can read wallet/position state but fails later at
-`set_leverage`/`place_order` with `ErrCode: 10005`. Checked deploy, verify,
-console recovery, submit-armed wrappers, and the demo-liveness watchdog all
-probe `get_api_key_information()` and fail/page on read-only or missing mutation
-permissions. Recovery is to replace `/etc/liquidity-migration/bybit-demo.env`
-with a non-read-only demo key, never by setting `REAL_MONEY`.
-Telegram separates an hourly account digest from material position events.
-The digest runs at `HH:05`, reads the Bybit position endpoint as the authority
-for current exposure, and labels disagreeing local rows as stale bookkeeping.
-Position alerts cover entries, exits (including take-profit reason and realised
-P&L), reconciliation/safety faults, and first crossings of the configured 5%,
-10%, 20%, and 40% loss bands. The shared `ws_risk` process is the sole producer
-for successful opens/closes after venue confirmation; sleeve daemons retain
-rate-limited order failures, so one fill cannot generate two success messages.
-Server-side close reasons are taken from Bybit order history (`stopOrderType` /
-`createType`); when that metadata is unavailable, a crossed ledger TP/SL is
-labelled explicitly as a price inference rather than a confirmed order type.
-Loss bands are restart-safe and deduplicated; an
-unchanged band can remind at most once per 24 hours. The hourly hedge-manager
-status comes from resolved `CONTINUOUS_HEDGE_TIMER` state, never from the
-continuous-sleeve toggle. The liveness watchdog
-reminds on an unchanged operational fault at most every six hours and sends a
-resolution message when it clears. Quiet no-trade cycles still write local
-reports but must not notify. The services submit demo orders only.
-The risk
-service does not open entries; it repairs exchange-native stop/TP state, listens to
-demo private WebSocket position/order/execution streams plus the mainnet public
-ticker stream, and submits reduce-only exits. On the demo account, WebSocket
-decides exits while REST remains the order-submit fallback because Bybit
-WebSocket Trade does not currently support demo trading. The demo socket uses
-the normal private execution stream; `execution.fast` is disabled because the
-demo private socket rejects that topic.
-`STREAM_START_TIMEOUT_SECONDS` bounds private/public WebSocket startup so a
-blocked subscription is reported while REST reconciliation and exchange-native
-stops keep covering open risk.
+Execution acquires a nonblocking process lock, verifies the selected credential
+and route environments belong to the expected owners without later overrides,
+stops all target producers and both account owners, and then proves Bybit demo
+has zero positions and open orders. It
+then writes and fsyncs a timestamped archive plus SHA-256 sidecar before any
+removal.
 
-Single-submitter safety: the order-submitting units are the long demo sleeve
-(`liquidity-migration-bybit-long-demo.service`, `SUBMIT_ORDERS=1`), the
-continuous demo sleeve
-(`liquidity-migration-bybit-continuous-demo.service`, `SUBMIT_ORDERS=1`,
-`continuous_ensemble_v2`, inverse-vol component sizing with
-`TARGET_VOL_PER_NAME=0.01`/`VOL_WEIGHT_CLAMP=2`, daily vol-target rebalance
-disabled, `CTRL_BTC_RISK_70_90_35` BTC-risk entry sizing enabled, and an
-explicit demo/paper execution-stress override of `ENTRY_LEVERAGE=10` plus
-`NOTIONAL_MULTIPLIER=10` (10x order notional versus the registered 1x base),
-`CONTINUOUS_SNIPER=0`, no
-venue-side stop; demo/paper surface) and the five-minute BTC+ETH hedge timer
-(`liquidity-migration-continuous-hedge.timer`) — the hedge unit ships
-**`SUBMIT_HEDGE=1` + `CONFIRM_DEMO_ORDERS=1` (operator-armed 2026-06-10)**, so
-it SUBMITS demo orders; runtime guards + staleness gates still apply. The
-hedge executor uses current per-leg `qtyStep`, `minOrderQty`, and
-`minNotionalValue` filters rather than a fixed strategy-side dollar floor. The
-continuous paper shadow is unconditionally `SUBMIT_ORDERS=0`/`PAPER_MODE=1`
-(verified fail-loud on every deploy). Everything is demo-account-only.
+The reset archives and recreates the configured demo/paper account roots,
+intent inboxes, and capture roots as empty directories. Strategy journals stay
+live while their compatibility trade/order projections are rebuilt. Demo rows
+receive the proven venue-flat boundary; prior active paper rows are explicitly
+marked as belonging to an archived deterministic epoch, never as venue-verified
+flat. The retired
+hedge-ledger and shared-risk compatibility roots are archived and removed, not
+recreated. Previously active owners restart before previously active target
+producers and all restarted units are verified.
+
+The reset never closes positions, cancels orders, enables real money, or deletes
+an audit archive. Reports and strategy market-data caches remain opt-in reset
+targets through `--include-reports` and `--include-caches`.

@@ -1,60 +1,77 @@
-"""Long-side daemon for the v11a sleeve.
+"""Long-running strategy/target producer for the v11a sleeve.
 
-Keeps a single Python process up, subscribes once to the Bybit private
-execution WebSocket, and routes WS-pushed fill events through an
-ExecutionEventRouter so the cycle's _wait_for_execution_summary returns
-in <30ms instead of REST-polling get_trade_history. REST polling remains the
-safety net (always active); SIGTERM drains the current cycle and exits clean.
-
-The long daemon keeps one private WS stream and relies on REST as the safety
-net. It does not run an independent kline cache warmer because the long
-universe is small (<=10 symbols), so the in-cycle kline pull is already fast.
+Demo and paper routes publish desired targets to the account owner, which is the
+sole execution and account-state authority. The daemon consumes only public
+market data. SIGTERM drains the current cycle and exits cleanly.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .bybit import (
-    BybitMarketData,
-    BybitPrivateClient,
-    BybitPrivateWebSocketStream,
-    BybitPublicTickerStream,
-    BybitTradeRouter,
-    build_ws_trade_client,
-    resolve_private_credentials,
-)
+from .bybit import BybitMarketData, BybitPublicTickerStream
 from .config import ResearchConfig
-from .execution_router import ExecutionEventRouter
+from .deterministic_runtime import Clock, SystemClock
 from .kline_stream_manager import KlineStreamManager
 from .long_native_event_demo import (
     LongNativeDemoCycleConfig,
+    _validate_long_demo_config,
     format_long_demo_cycle_summary,
     run_long_native_demo_cycle,
 )
-from .ws_state_cache import PrivateStateCache, TickerCache
+from .ws_state_cache import TickerCache
+from .strategy_event_clock import (
+    DeterministicEventClock,
+    JsonlStrategyEventTape,
+    StrategyEvent,
+    StrategyEventRecorder,
+)
 
 
 _logger = logging.getLogger("liquidity_migration.long_native_event_demo_daemon")
 
 
+def _ensure_default_log_handler() -> None:
+    """Attach a package stderr handler when the process has no logging setup."""
+    package_logger = logging.getLogger("liquidity_migration")
+    if package_logger.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    package_logger.addHandler(handler)
+    level_name = os.environ.get("LIQMIG_LOG_LEVEL", "INFO").upper()
+    package_logger.setLevel(getattr(logging, level_name, logging.INFO))
+
+
+def _validate_long_daemon_startup(config: LongNativeDemoCycleConfig) -> None:
+    """Fail before resources unless LONG has one complete account-target route."""
+
+    _validate_long_demo_config(config)
+    has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
+    has_account_execution_root = bool(str(config.account_execution_root or "").strip())
+    if not has_account_inbox or not has_account_execution_root:
+        raise ValueError(
+            "LONG daemon startup is target-only and requires account_intent_inbox_root "
+            "and account_execution_root"
+        )
+
+
 class LongNativeDemoDaemon:
     """Long-running cycle loop for the v11a long sleeve.
 
-    Also the scaffolding base for ContinuousDemoDaemon — subclasses must
-    override the sleeve labels below or their telegrams misattribute the
-    sleeve (audit 2026-06-11: a continuous cycle crash paged "long sleeve
-    cycle failed" while the long sleeve was toggled off).
+    Also the public-market and scheduling base for ``ContinuousDemoDaemon``.
+    Subclasses may override the sleeve label, cycle kwargs, summary formatter,
+    and pre-teardown hook without acquiring execution authority.
     """
 
-    # Sleeve identity used in operator-facing telegram text. Subclasses override.
+    # Sleeve identity used in cycle-failure logs. Subclasses override.
     _sleeve_label = "long"
-    _daemon_label = "long-native LongV11aDivWeekendVol"
 
     def __init__(
         self,
@@ -63,49 +80,53 @@ class LongNativeDemoDaemon:
         config: ResearchConfig,
         demo_config: LongNativeDemoCycleConfig | None = None,
         interval_seconds: float = 60.0,
-        ws_gap_threshold_seconds: float = 120.0,
-        ws_stream_factory: Callable[[ResearchConfig], Any] | None = None,
         cycle_runner: Callable[..., dict[str, Any]] = run_long_native_demo_cycle,
-        telegram_sender: Callable[[str], bool] | None = None,
         kline_stream_manager: Any | None = None,
         kline_stream_manager_factory: Callable[[ResearchConfig, LongNativeDemoCycleConfig, Path], Any] | None = None,
-        private_state_cache: PrivateStateCache | None = None,
         ticker_cache: TickerCache | None = None,
         ticker_stream_factory: Callable[[ResearchConfig], Any] | None = None,
-        state_cache_seeder: Callable[..., None] | None = None,
-        # Reconcile must be < stale threshold so the cache stays fresh on a
-        # quiet account (Bybit private WS only emits on state changes).
         ticker_reconcile_interval_seconds: float = 60.0,
         state_cache_stale_seconds: float = 120.0,
-        # Both default OFF — see EventDemoDaemon for the full rationale.
-        # The "deploy succeeded" signal lives in deploy_vps_live.sh's
-        # post-verify confirmation telegram so a single deploy fires one
-        # message regardless of how many daemons restarted.
-        startup_telegram: bool = False,
-        shutdown_telegram: bool = False,
-        # Order-submission routing. See EventDemoDaemon for the full
-        # rationale. Default ws_then_rest: WS first, REST fallback. On
-        # demo this transparently REST-falls-back; on REAL_MONEY the WS
-        # path starts succeeding and saves ~150-200ms per order.
-        order_submit_mode: str = "ws_then_rest",
-        ws_trade_timeout_seconds: float = 5.0,
-        trade_router: Any | None = None,
-        trade_router_factory: Callable[..., Any] | None = None,
         event_driven_cycle: bool = True,
         min_cycle_interval_seconds: float = 2.0,
+        clock: Clock | None = None,
+        strategy_event_recorder: StrategyEventRecorder | None = None,
     ) -> None:
+        resolved_demo_config = demo_config or LongNativeDemoCycleConfig()
+        long_target_producer = isinstance(resolved_demo_config, LongNativeDemoCycleConfig)
+        if long_target_producer:
+            # This must precede every cache, manager, or thread construction.
+            # The cycle runner also validates, but it catches cycle exceptions;
+            # startup-boundary failures must instead terminate the process.
+            _validate_long_daemon_startup(resolved_demo_config)
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
-        if ws_gap_threshold_seconds <= 0.0:
-            raise ValueError("ws_gap_threshold_seconds must be positive")
         self.data_root = Path(data_root).expanduser()
         self.config = config
-        self.demo_config = demo_config or LongNativeDemoCycleConfig()
+        self.demo_config = resolved_demo_config
+        self._long_target_producer = long_target_producer
         self.interval_seconds = float(interval_seconds)
-        self._ws_stream_factory = ws_stream_factory or _build_private_ws_stream
         self._cycle_runner = cycle_runner
-        self._telegram_sender = telegram_sender
-        self.router = ExecutionEventRouter()
+        self._clock = clock or SystemClock()
+        recorder = strategy_event_recorder or JsonlStrategyEventTape(
+            self.data_root / "strategy_event_tape.jsonl"
+        )
+        self._event_clock: DeterministicEventClock[None] = DeterministicEventClock(
+            clock=self._clock,
+            recorder=recorder,
+        )
+        self._strategy_event_source = (
+            f"{self._sleeve_label}:{self.demo_config.execution_environment}"
+        )
+        self._cycle_event_sequence = max(
+            (
+                event.source_sequence
+                for event in recorder.prior_events
+                if event.source == self._strategy_event_source
+            ),
+            default=0,
+        )
+        self._pending_cycle_kind = "startup"
         self._shutdown = threading.Event()
         # WS-event-driven cycle: fire on a new confirmed bar boundary, with a
         # safety heartbeat + debounce.
@@ -115,15 +136,8 @@ class LongNativeDemoDaemon:
         self._max_idle_seconds = self.interval_seconds if self.interval_seconds > 0.0 else 60.0
         self._cycles_kline_triggered = 0
         self._cycles_timer_triggered = 0
-        self._ws_stream: Any | None = None
         self._cycles_run = 0
         self._cycle_errors = 0
-        # cycle-failure telegram dedupe: signature -> last-sent monotonic time
-        self._cycle_failure_telegram_sent: dict[str, float] = {}
-        self._ws_gap_threshold_seconds = float(ws_gap_threshold_seconds)
-        self._last_ws_event_monotonic: float | None = None
-        self._ws_gap_count = 0
-        self._ws_max_gap_seconds = 0.0
         self._cycle_overruns = 0
         self._max_cycle_seconds = 0.0
         self._next_cycle_at = 0.0
@@ -132,38 +146,18 @@ class LongNativeDemoDaemon:
         # operator model and the 90-day lookback bootstrap is worth doing once
         # at startup rather than re-paying it.
         self._kline_stream_manager: Any | None = kline_stream_manager
-        self._kline_stream_manager_factory = (
-            kline_stream_manager_factory or _default_long_kline_stream_manager_factory
-        )
+        self._kline_stream_manager_factory = kline_stream_manager_factory or _default_long_kline_stream_manager_factory
         self._kline_stream_manager_failed = False
-        # Private state + ticker caches. Both are seeded with one REST snapshot
-        # at startup, then maintained by WS pushes. The cycle reads cached
-        # snapshots in lieu of REST when the caches are fresh; if a cache goes
-        # stale (no WS events for state_cache_stale_seconds), the cycle falls
-        # back to REST automatically.
-        self._private_state_cache: PrivateStateCache = (
-            private_state_cache
-            if private_state_cache is not None
-            else PrivateStateCache(
-                settle_coin=self.demo_config.settle_coin,
-                fallback_equity_usdt=self.demo_config.fallback_equity_usdt,
-            )
-        )
         self._ticker_cache: TickerCache = ticker_cache if ticker_cache is not None else TickerCache()
         self._ticker_stream: Any | None = None
-        self._private_state_ws_subscriptions_ok = False
         # Serializes _ticker_stream open/close across the seed/reconcile/watchdog threads
         # so a race can't leak a second ticker WS (DAEM-002; see EventDemoDaemon).
         self._ticker_stream_lock = threading.Lock()
         self._ticker_stream_factory = ticker_stream_factory or _default_long_ticker_stream_factory
-        self._state_cache_seeder = state_cache_seeder or _default_long_state_cache_seeder
-        # See EventDemoDaemon for rationale: caching the seeder's REST
-        # clients across reconciles avoids the per-minute session churn
-        # that was leaking CLOSE_WAIT sockets.
+        # Cache the public REST client across refreshes to avoid per-minute
+        # session churn.
         self._seed_market_client: Any | None = None
-        self._seed_private_client: Any | None = None
-        # Serializes the seeder's lazy client construction across the seed + reconcile
-        # threads so neither builds a duplicate leaked client (DAEM-001).
+        # Serialize lazy client construction across seed and reconcile threads.
         self._seed_client_lock = threading.Lock()
         self._ticker_reconcile_interval_seconds = float(ticker_reconcile_interval_seconds)
         self._state_cache_stale_seconds = float(state_cache_stale_seconds)
@@ -172,30 +166,11 @@ class LongNativeDemoDaemon:
         self._reconcile_stop = threading.Event()
         self._reconciles_total = 0
         self._reconcile_errors = 0
-        # WS health watchdog. Logs one-shot warnings when private/ticker WS goes
-        # silent past the stale threshold; the cycle's REST fallback keeps the
-        # system alive but a silently-dead WS otherwise hides from telemetry.
+        # Public ticker liveness watchdog. The cycle's REST fallback keeps the
+        # planner alive, while this counter keeps a silent stream visible.
         self._ws_stale_warning_seconds = float(state_cache_stale_seconds)
-        # Private WS socket-level force-reconnect (see EventDemoDaemon for the rationale):
-        # reconnect off pybit's is_connected() (true liveness, not data-silence — the
-        # private stream only pushes on changes), only after CONTINUOUS disconnection past
-        # this bound (pybit's own auto-reconnect first) + a cooldown (auth-limit safety).
-        self._private_stale_reconnect_seconds = 3.0 * float(state_cache_stale_seconds)
-        self._ws_private_disconnected_since: float | None = None
-        self._last_private_reconnect_monotonic = 0.0
-        self._ws_private_reconnects = 0
-        self._ws_private_stale_warned = False
         self._ws_ticker_stale_warned = False
-        self._ws_private_stale_ticks = 0
         self._ws_ticker_stale_ticks = 0
-        self._startup_telegram = bool(startup_telegram)
-        self._shutdown_telegram = bool(shutdown_telegram)
-        if order_submit_mode not in {"ws", "ws_then_rest", "rest"}:
-            raise ValueError("order_submit_mode must be ws, ws_then_rest, or rest")
-        self._order_submit_mode = order_submit_mode
-        self._ws_trade_timeout_seconds = float(ws_trade_timeout_seconds)
-        self._trade_router: Any | None = trade_router
-        self._trade_router_factory = trade_router_factory or _default_long_trade_router_factory
 
     def install_signal_handlers(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.request_shutdown())
@@ -208,144 +183,6 @@ class LongNativeDemoDaemon:
         # Wake the event-driven wait so SIGTERM drains promptly.
         self._bar_event.set()
 
-    def _send_telegram(self, text: str) -> bool:
-        """Returns True only on a confirmed delivery. A False return from the
-        transport (TELEGRAM_* env missing / API non-2xx) was previously swallowed
-        with no log line at all — a missing token suppressed every daemon page
-        forever with zero trace (audit 2026-06-12 round 3)."""
-        if not self.demo_config.telegram:
-            return False
-        sender = self._telegram_sender
-        if sender is None:
-            try:
-                from .telegram import send_telegram_message
-            except Exception:  # noqa: BLE001
-                return False
-            def sender(t):
-                return send_telegram_message(t, enabled=True)
-        try:
-            delivered = bool(sender(text))
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("telegram send failed: %s", exc)
-            return False
-        if not delivered:
-            _logger.warning(
-                "telegram send returned False (TELEGRAM_* env missing or API non-2xx); message dropped: %s",
-                text[:120],
-            )
-        return delivered
-
-    def _open_ws(self) -> None:
-        self._private_state_ws_subscriptions_ok = False
-        try:
-            self._ws_stream = self._ws_stream_factory(self.config)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("execution WS stream failed to open; running on REST only: %s", exc)
-            self._ws_stream = None
-            return
-        try:
-            self._ws_stream.subscribe_executions(self._handle_execution_message)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("execution WS subscribe failed; running on REST only: %s", exc)
-            self._close_ws()
-            return
-        # Subscribe the additional private streams that feed the state cache.
-        # An individual subscription failure degrades that one signal to REST
-        # via the cache's stale fallback path; we never tear down the whole
-        # WS connection because positions or wallet subscribes failed.
-        private_subscriptions_ok = True
-        for subscribe_name, handler in (
-            ("subscribe_positions", self._handle_position_message),
-            ("subscribe_orders", self._handle_order_message),
-            ("subscribe_wallet", self._handle_wallet_message),
-        ):
-            subscribe = getattr(self._ws_stream, subscribe_name, None)
-            if not callable(subscribe):
-                private_subscriptions_ok = False
-                _logger.warning(
-                    "long private WS %s missing; that signal will REST-fallback",
-                    subscribe_name,
-                )
-                continue
-            try:
-                subscribe(handler)
-            except Exception as exc:  # noqa: BLE001 - one bad sub must not break the rest
-                private_subscriptions_ok = False
-                _logger.warning(
-                    "long private WS %s failed; that signal will REST-fallback: %s",
-                    subscribe_name, exc,
-                )
-        self._private_state_ws_subscriptions_ok = private_subscriptions_ok
-
-    def _close_ws(self) -> None:
-        stream = self._ws_stream
-        self._ws_stream = None
-        self._private_state_ws_subscriptions_ok = False
-        self.router.clear_all()
-        if stream is None:
-            return
-        # See EventDemoDaemon._close_ws — wrap the pybit close in a
-        # threaded timeout so a stuck close doesn't stall shutdown.
-        def _run_close() -> None:
-            for closer in ("close", "exit"):
-                close = getattr(stream, closer, None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return
-
-        thread = threading.Thread(target=_run_close, name="long-exec-ws-close", daemon=True)
-        thread.start()
-        thread.join(timeout=3.0)
-        if thread.is_alive():
-            _logger.warning(
-                "long execution WS close did not return within 3s; abandoning thread"
-            )
-
-    def _record_ws_event(self, now: float) -> None:
-        last = self._last_ws_event_monotonic
-        self._last_ws_event_monotonic = now
-        if last is None:
-            return
-        gap = now - last
-        if gap > self._ws_gap_threshold_seconds:
-            self._ws_gap_count += 1
-            self._ws_max_gap_seconds = max(self._ws_max_gap_seconds, gap)
-            _logger.warning(
-                "long execution WS gap: %.1fs since previous event (threshold %.0fs, gap #%d)",
-                gap, self._ws_gap_threshold_seconds, self._ws_gap_count,
-            )
-
-    def _handle_execution_message(self, message: dict[str, Any]) -> None:
-        self._record_ws_event(time.monotonic())
-        try:
-            self.router.on_execution_event(message)
-        except Exception as exc:  # noqa: BLE001
-            _logger.exception("execution router crashed on event: %s", exc)
-
-    def _handle_position_message(self, message: dict[str, Any]) -> None:
-        self._record_ws_event(time.monotonic())
-        try:
-            self._private_state_cache.on_position_event(message)
-        except Exception as exc:  # noqa: BLE001
-            _logger.exception("long position cache crashed on event: %s", exc)
-
-    def _handle_order_message(self, message: dict[str, Any]) -> None:
-        self._record_ws_event(time.monotonic())
-        try:
-            self._private_state_cache.on_order_event(message)
-        except Exception as exc:  # noqa: BLE001
-            _logger.exception("long order cache crashed on event: %s", exc)
-
-    def _handle_wallet_message(self, message: dict[str, Any]) -> None:
-        self._record_ws_event(time.monotonic())
-        try:
-            self._private_state_cache.on_wallet_event(message)
-        except Exception as exc:  # noqa: BLE001
-            _logger.exception("long wallet cache crashed on event: %s", exc)
-
     def _handle_ticker_message(self, message: dict[str, Any]) -> None:
         try:
             self._ticker_cache.on_ticker_event(message)
@@ -353,30 +190,33 @@ class LongNativeDemoDaemon:
             _logger.exception("long ticker cache crashed on event: %s", exc)
 
     def _pre_resource_teardown(self) -> None:
-        """Hook run at the START of run()'s teardown, BEFORE the shared WS/kline/
-        trade resources are closed. Subclasses that spawn worker threads using those
-        resources (e.g. the continuous protective-exit monitor) override this to stop
-        and join them here, so a draining worker never touches a closed client
-        (ws-daemonloops-1). Base: no-op."""
+        """Hook run before shared public ticker and kline resources close.
+
+        Subclasses with their own workers may override this hook. Base: no-op.
+        """
 
     def run(self) -> dict[str, Any]:
+        if self._long_target_producer:
+            # Defense in depth if a caller replaces ``demo_config`` after
+            # construction. Keep this outside the cycle try/except and before
+            # logging, streams, cache seeders, managers, or worker threads.
+            if not isinstance(self.demo_config, LongNativeDemoCycleConfig):
+                raise TypeError("LONG daemon config changed to an incompatible type")
+            _validate_long_daemon_startup(self.demo_config)
         # Same reasoning as EventDemoDaemon.run: attach the package stderr
         # handler before bootstrap so the operator can see progress.
-        from .ws_risk import _ensure_default_log_handler
         _ensure_default_log_handler()
         _logger.info(
             "long_native_event_demo_daemon starting data_root=%s interval_seconds=%.1f "
-            "submit_orders=%s profile=%s notional_x=%.1f leverage=%.1f",
-            self.data_root, self.interval_seconds,
-            self.demo_config.submit_orders, self.demo_config.strategy_profile,
-            self.demo_config.notional_multiplier, self.demo_config.entry_leverage,
+            "execution_environment=%s profile=%s notional_x=%.1f leverage=%.1f",
+            self.data_root,
+            self.interval_seconds,
+            self.demo_config.execution_environment,
+            self.demo_config.strategy_profile,
+            self.demo_config.notional_multiplier,
+            self.demo_config.entry_leverage,
         )
-        self._open_ws()
-        ws_status = "ok" if self._ws_stream is not None else "unavailable (REST fallback)"
         self._start_kline_stream_manager()
-        kline_status = "on" if self._kline_stream_manager is not None else (
-            "disabled" if not self.demo_config.ws_klines_enabled else "failed"
-        )
         # Wire the WS bar signal so the run loop fires on fresh data; if there's
         # no kline manager, fall back to the timer grid (no bar events arrive).
         if self._kline_stream_manager is not None:
@@ -384,23 +224,14 @@ class LongNativeDemoDaemon:
                 self._kline_stream_manager.set_cycle_wake_event(self._bar_event)
         elif self._event_driven_cycle:
             self._event_driven_cycle = False
-            _logger.info("no kline stream manager; long event-driven cycle disabled, using %.0fs timer", self.interval_seconds)
-        # Seed state caches in a background thread (non-blocking) — the
-        # seed thread also opens the public ticker WS once the symbol set
-        # is populated. The reconcile thread handles subsequent refreshes.
-        self._seed_state_caches()
-        self._start_reconcile_thread()
-        cache_status = (
-            "on" if self._private_state_cache.is_seeded() and self._ticker_cache.is_seeded()
-            else "partial"
-        )
-        if self._startup_telegram:
-            self._send_telegram(
-                f"\U0001f7e2 {self._daemon_label} daemon started "
-                f"interval={self.interval_seconds:.0f}s "
-                f"submit_orders={'on' if self.demo_config.submit_orders else 'off'} "
-                f"ws={ws_status} ws_klines={kline_status} ws_state={cache_status}"
+            _logger.info(
+                "no kline stream manager; long event-driven cycle disabled, using %.0fs timer", self.interval_seconds
             )
+        # Seed public tickers in a background thread (non-blocking). The seed
+        # thread opens the public ticker WS after the symbol set is populated;
+        # the reconcile thread handles subsequent REST refreshes.
+        self._seed_public_ticker_cache()
+        self._start_reconcile_thread()
         try:
             self._next_cycle_at = time.monotonic()
             while not self._shutdown.is_set():
@@ -419,29 +250,26 @@ class LongNativeDemoDaemon:
             self._seed_thread = None
             if seed is not None:
                 seed.join(timeout=5.0)
-            # Stop subclass-owned worker threads BEFORE tearing down the shared
-            # WS/kline/trade resources they use (ws-daemonloops-1).
+            # Let subclasses quiesce before shared public resources close.
             self._pre_resource_teardown()
             self._stop_reconcile_thread()
             self._close_ticker_stream()
             self._stop_kline_stream_manager()
-            self._close_ws()
-        router_stats = self.router.stats()
         _logger.info(
             "long_native_event_demo_daemon stopped cycles_run=%d cycle_errors=%d "
             "cycle_overruns=%d max_cycle_seconds=%.1f cycles_kline_triggered=%d "
-            "cycles_timer_triggered=%d ws_gaps=%d ws_max_gap_seconds=%.1f router_stats=%s",
-            self._cycles_run, self._cycle_errors, self._cycle_overruns,
-            self._max_cycle_seconds, self._cycles_kline_triggered, self._cycles_timer_triggered,
-            self._ws_gap_count, self._ws_max_gap_seconds, router_stats,
+            "cycles_timer_triggered=%d reconciles_total=%d reconcile_errors=%d "
+            "ws_ticker_stale_ticks=%d",
+            self._cycles_run,
+            self._cycle_errors,
+            self._cycle_overruns,
+            self._max_cycle_seconds,
+            self._cycles_kline_triggered,
+            self._cycles_timer_triggered,
+            self._reconciles_total,
+            self._reconcile_errors,
+            self._ws_ticker_stale_ticks,
         )
-        if self._shutdown_telegram:
-            self._send_telegram(
-                f"\U0001f6d1 {self._daemon_label} daemon stopped "
-                f"cycles={self._cycles_run} errors={self._cycle_errors} "
-                f"ws_events={router_stats['events_received']} "
-                f"ws_satisfied={router_stats['waits_satisfied_by_ws']}"
-            )
         return {
             "cycles_run": self._cycles_run,
             "cycle_errors": self._cycle_errors,
@@ -449,9 +277,9 @@ class LongNativeDemoDaemon:
             "max_cycle_seconds": self._max_cycle_seconds,
             "cycles_kline_triggered": self._cycles_kline_triggered,
             "cycles_timer_triggered": self._cycles_timer_triggered,
-            "ws_gap_count": self._ws_gap_count,
-            "ws_max_gap_seconds": self._ws_max_gap_seconds,
-            "router_stats": router_stats,
+            "reconciles_total": self._reconciles_total,
+            "reconcile_errors": self._reconcile_errors,
+            "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
         }
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
@@ -460,67 +288,49 @@ class LongNativeDemoDaemon:
         a subclass need not duplicate the whole telemetry-laden ``_run_one_cycle`` to add one kwarg."""
         return {}
 
-    # Re-page a PERSISTENT cycle failure at most this often. Every failure is still
-    # logged; only the telegram is deduped. The continuous sleeve cycles every 60s —
-    # a wedged cycle (schema error, corrupt parquet) otherwise paged ~1440x/day,
-    # guaranteed Telegram 429s drowning real alerts (audit 2026-06-12). The watchdog's
-    # watchdog now uses the same six-hour reminder ceiling; the first/new
-    # signature still pages immediately and every failure remains in journald.
-    _CYCLE_FAILURE_TELEGRAM_COOLDOWN_SECONDS = 6 * 60 * 60
-
-    def _maybe_send_cycle_failure_telegram(self, exc: Exception) -> None:
-        """Send the cycle-failure page, deduped by (exception type, message head) with a
-        cooldown. A NEW failure signature pages immediately; the SAME wedge re-pages at
-        most every cooldown window."""
-        key = f"{type(exc).__name__}:{str(exc)[:100]}"
-        now = time.monotonic()
-        last = self._cycle_failure_telegram_sent.get(key)
-        if last is not None and now - last < self._CYCLE_FAILURE_TELEGRAM_COOLDOWN_SECONDS:
-            return
-        delivered = self._send_telegram(
-            f"❌ liquidity-migration | {self._sleeve_label} sleeve cycle failed: {str(exc)[:200]}"
-        )
-        if not delivered:
-            # Cooldown advances ONLY on confirmed delivery: recording it before the
-            # send meant a transient Telegram outage at the FIRST failure suppressed
-            # the page for the whole window, and a missing token suppressed it
-            # forever (audit 2026-06-12 round 3). The next failure retries.
-            return
-        self._cycle_failure_telegram_sent[key] = now
-        # Bound the signature map — a daemon cycling through many distinct failure
-        # messages (e.g. a timestamp inside the message) must not grow it unbounded.
-        if len(self._cycle_failure_telegram_sent) > 64:
-            oldest = sorted(self._cycle_failure_telegram_sent.items(), key=lambda kv: kv[1])
-            for stale_key, _ in oldest[: len(oldest) - 32]:
-                self._cycle_failure_telegram_sent.pop(stale_key, None)
-
     def _run_one_cycle(self) -> None:
+        """Dispatch a live arrival through the shared replay/event-clock path."""
+
+        event_ts_ns = self._clock.wall_time_ns()
+        self._cycle_event_sequence += 1
+        event = StrategyEvent(
+            event_ts_ns=event_ts_ns,
+            ingest_ts_ns=event_ts_ns,
+            source=self._strategy_event_source,
+            source_sequence=self._cycle_event_sequence,
+            kind=self._pending_cycle_kind,
+            payload={
+                "execution_environment": self.demo_config.execution_environment,
+                "strategy_profile": self.demo_config.strategy_profile,
+            },
+        )
+        self._event_clock.dispatch(event, self._execute_cycle_event)
+
+    def _execute_cycle_event(self, event: StrategyEvent) -> None:
         cycle_started = time.monotonic()
         payload: dict[str, Any] | None = None
-        kline_store = (
-            self._kline_stream_manager.store()
-            if self._kline_stream_manager is not None
-            else None
-        )
-        trade_router = self._ensure_trade_router()
+        kline_store = self._kline_stream_manager.store() if self._kline_stream_manager is not None else None
+        cycle_kwargs: dict[str, Any] = {
+            "kline_store": kline_store,
+            "ticker_cache": self._ticker_cache,
+            "state_cache_stale_seconds": self._state_cache_stale_seconds,
+            # Strategy time is the recorded scheduling input, never a second
+            # ambient wall-clock read inside the callback. This is what makes
+            # the live callback replayable under a VirtualClock.
+            "now_ms": event.event_ts_ns // 1_000_000,
+        }
         try:
             payload = self._cycle_runner(
                 self.data_root,
                 config=self.config,
                 demo_config=self.demo_config,
-                execution_event_router=self.router,
-                kline_store=kline_store,
-                private_state_cache=self._private_state_cache,
-                ticker_cache=self._ticker_cache,
-                state_cache_stale_seconds=self._state_cache_stale_seconds,
-                private_client=trade_router,
+                **cycle_kwargs,
                 **self._extra_cycle_kwargs(),
             )
             self._cycles_run += 1
         except Exception as exc:  # noqa: BLE001
             self._cycle_errors += 1
             _logger.exception("%s cycle failed: %s", self._sleeve_label, exc)
-            self._maybe_send_cycle_failure_telegram(exc)
         elapsed = time.monotonic() - cycle_started
         self._max_cycle_seconds = max(self._max_cycle_seconds, elapsed)
         if payload is not None and self._kline_stream_manager is not None:
@@ -530,19 +340,11 @@ class LongNativeDemoDaemon:
                 _logger.debug("kline_stream_manager stats fetch failed: %s", exc)
         if payload is not None:
             payload.setdefault("ws_state", {
-                "private_cache": self._private_state_cache.stats(),
                 "ticker_cache": self._ticker_cache.stats(),
                 "reconciles_total": self._reconciles_total,
                 "reconcile_errors": self._reconcile_errors,
-                "ws_private_stale_ticks": self._ws_private_stale_ticks,
                 "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
-                "ws_private_reconnects": self._ws_private_reconnects,
             })
-        if payload is not None and self._trade_router is not None:
-            try:
-                payload.setdefault("ws_trade", self._trade_router.stats())
-            except Exception as exc:  # noqa: BLE001
-                _logger.debug("long trade_router stats fetch failed: %s", exc)
         if payload is not None:
             try:
                 print(self._format_cycle_summary(payload), flush=True)
@@ -550,68 +352,33 @@ class LongNativeDemoDaemon:
                 _logger.exception("failed to format cycle summary")
         _logger.debug("long cycle complete elapsed=%.2fs", elapsed)
 
-    def _private_state_ws_health_ok(self) -> bool | None:
-        """True only when the private state subscriptions are installed and the
-        underlying pybit socket is confirmed connected. False means known down or
-        incomplete; None means the stream object cannot report socket liveness."""
-        stream = self._ws_stream
-        if stream is None or not self._private_state_ws_subscriptions_ok:
-            return False
-        is_connected = getattr(stream, "is_connected", None)
-        if not callable(is_connected):
-            return None
-        try:
-            return bool(is_connected())
-        except Exception as exc:  # noqa: BLE001 - health telemetry must not break cycles
-            _logger.warning("long private WS is_connected probe failed: %s", exc)
-            return None
-
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
         """Pretty cycle line for stdout/journald. Overridable: a subclass whose cycle payload has a
         different shape (e.g. the continuous sleeve's flat dict, which has no ``cycle`` key) supplies
         its own formatter so the summary prints instead of KeyError'ing every cycle."""
         return format_long_demo_cycle_summary(payload)
 
-    # -- trade router (WS-first / REST-fallback order submission) ----
+    # -- public ticker cache lifecycle --------------------------------
 
-    def _ensure_trade_router(self) -> Any | None:
-        """Lazily build the BybitTradeRouter on first cycle."""
-        if self._trade_router is not None:
-            return self._trade_router
-        try:
-            router = self._trade_router_factory(
-                self.config,
-                self.demo_config,
-                order_submit_mode=self._order_submit_mode,
-                ws_timeout_seconds=self._ws_trade_timeout_seconds,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("long trade router construction failed; cycle REST: %s", exc)
-            return None
-        self._trade_router = router
-        return router
-
-    # -- state cache lifecycle ----------------------------------------
-
-    def _seed_state_caches(self) -> None:
-        """Kick off a one-shot REST seed in the background.
+    def _seed_public_ticker_cache(self) -> None:
+        """Kick off a one-shot public REST ticker seed in the background.
 
         Non-blocking startup keeps a slow Bybit response from wedging the cycle
         loop. The seed thread also opens the public ticker WS once the cache has
         a symbol set."""
         self._seed_thread = threading.Thread(
-            target=self._run_state_cache_seed,
-            name="long-state-cache-seed",
+            target=self._run_public_ticker_seed,
+            name="long-public-ticker-seed",
             daemon=True,
         )
         self._seed_thread.start()
 
-    def _run_state_cache_seed(self) -> None:
+    def _run_public_ticker_seed(self) -> None:
         # Reconcile loop is the SINGLE writer of the counters (DAEM-004; see EventDemoDaemon).
         try:
-            self._invoke_state_cache_seeder()
+            self._refresh_public_ticker_cache()
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("long state cache seed failed (cycle falls back to REST): %s", exc)
+            _logger.warning("long public ticker seed failed (cycle falls back to REST): %s", exc)
             return
         # Bail before opening the ticker WS if shutdown was requested while
         # the seed was running.
@@ -673,8 +440,7 @@ class LongNativeDemoDaemon:
         when available — that keeps ticker + kline subscriptions in sync
         across the same set of symbols the long sleeve actually trades.
         Falls back to the full ticker cache when the kline manager is
-        disabled (legacy REST path) so the behavior matches the old
-        all-symbols subscription."""
+        disabled so the REST-on-cycle path retains broad universe coverage."""
         manager = self._kline_stream_manager
         if manager is not None:
             try:
@@ -684,9 +450,7 @@ class LongNativeDemoDaemon:
                 scoped = []
             if scoped:
                 return scoped
-        return sorted({
-            str(row.get("symbol", "")) for row in self._ticker_cache.snapshot_list()
-        } - {""})
+        return sorted({str(row.get("symbol", "")) for row in self._ticker_cache.snapshot_list()} - {""})
 
     def _close_ticker_stream(self) -> None:
         with self._ticker_stream_lock:
@@ -708,7 +472,7 @@ class LongNativeDemoDaemon:
         self._reconcile_stop.clear()
         self._reconcile_thread = threading.Thread(
             target=self._reconcile_loop,
-            name="long-state-reconcile",
+            name="long-ticker-reconcile",
             daemon=True,
         )
         self._reconcile_thread.start()
@@ -724,11 +488,11 @@ class LongNativeDemoDaemon:
     def _reconcile_loop(self) -> None:
         while not self._reconcile_stop.wait(timeout=self._ticker_reconcile_interval_seconds):
             try:
-                self._invoke_state_cache_seeder()
+                self._refresh_public_ticker_cache()
                 self._reconciles_total += 1
             except Exception as exc:  # noqa: BLE001
                 self._reconcile_errors += 1
-                _logger.warning("long state cache reconcile failed: %s", exc)
+                _logger.warning("long public ticker reconcile failed: %s", exc)
                 continue
             # Recover from a startup ticker-stream skip. Without this retry, a
             # single REST seed failure at startup would permanently disable the
@@ -741,128 +505,42 @@ class LongNativeDemoDaemon:
             self._check_ws_health()
 
     def _check_ws_health(self) -> None:
-        """Watchdog: log one-shot warnings when the private or ticker WS
-        streams go silent past the stale threshold."""
+        """Log one-shot public ticker silence and recovery telemetry."""
         threshold = self._ws_stale_warning_seconds
-        if threshold <= 0.0:
+        if threshold <= 0.0 or not self._ticker_cache.is_seeded():
             return
-        # Socket-level liveness (TRUE connection via pybit is_connected(), independent of
-        # data flow): the private stream only pushes on position/order changes, so a quiet
-        # account is SILENT BUT HEALTHY. Computed once and used to gate BOTH the
-        # data-silence warning and the force-reconnect below. None = unprobeable (older
-        # pybit) -> stay conservative.
-        priv_connected = (
-            self._ws_stream.is_connected()
-            if (self._ws_stream is not None and hasattr(self._ws_stream, "is_connected"))
-            else None
-        )
-        if self._private_state_cache.is_seeded():
-            # WS-only clock so the REST-reconcile re-seed can't mask a dead stream
-            # (audit 2026-06-02 #2); inf = no WS push yet = no-signal, not silence.
-            priv_silence = self._private_state_cache.seconds_since_last_ws_event()
-            if priv_silence != float("inf") and priv_silence > threshold:
-                self._ws_private_stale_ticks += 1
-                # Only ALARM when the socket is not confirmed alive. is_connected() True =>
-                # the silence is just a quiet account (no position/order pushes, e.g. an
-                # idle / toggled-off LONG sleeve), NOT a dead WS — warning there is a false
-                # "investigate" page. False/None (down or unprobeable) keeps the heads-up;
-                # the is_connected()-driven force-reconnect below handles a real dead socket.
-                if priv_connected is True:
-                    if self._ws_private_stale_warned:
-                        _logger.info(
-                            "long private WS quiet but socket healthy (silence=%.1fs)",
-                            priv_silence,
-                        )
-                        self._ws_private_stale_warned = False
-                elif not self._ws_private_stale_warned:
-                    _logger.warning(
-                        "long private WS silent for %.0fs (threshold %.0fs) and socket not "
-                        "confirmed alive; REST reconcile keeps state fresh but pybit "
-                        "auto-reconnect may have failed — investigate",
-                        priv_silence, threshold,
-                    )
-                    self._ws_private_stale_warned = True
-            elif self._ws_private_stale_warned:
-                _logger.info("long private WS resumed (silence=%.1fs)", priv_silence)
-                self._ws_private_stale_warned = False
-        # Socket-level private-WS force-reconnect (TRUE liveness via pybit is_connected,
-        # not data-silence — a quiet account is silent but healthy). Rebuild only after a
-        # genuinely DOWN socket past the bound (pybit auto-reconnect first) + a cooldown
-        # (auth-limit safety). REST reconcile covers the gap; never blocks a cycle.
-        if self._ws_stream is not None and not self._shutdown.is_set():
-            connected = priv_connected
-            if connected is False:
-                mono = time.monotonic()
-                if self._ws_private_disconnected_since is None:
-                    self._ws_private_disconnected_since = mono
-                down_for = mono - self._ws_private_disconnected_since
-                cooldown_elapsed = (
-                    mono - self._last_private_reconnect_monotonic > self._private_stale_reconnect_seconds
+        ticker_silence = self._ticker_cache.seconds_since_last_ws_event()
+        if ticker_silence != float("inf") and ticker_silence > threshold:
+            self._ws_ticker_stale_ticks += 1
+            if not self._ws_ticker_stale_warned:
+                _logger.warning(
+                    "long ticker WS silent for %.0fs (threshold %.0fs); "
+                    "cycle falls back to REST tickers",
+                    ticker_silence,
+                    threshold,
                 )
-                if down_for > self._private_stale_reconnect_seconds and cooldown_elapsed:
-                    self._ws_private_reconnects += 1
-                    self._last_private_reconnect_monotonic = mono
-                    self._ws_private_disconnected_since = None
-                    _logger.warning(
-                        "long private WS socket down %.0fs > reconnect bound %.0fs; forcing stream rebuild",
-                        down_for, self._private_stale_reconnect_seconds,
-                    )
-                    self._close_ws()
-                    try:
-                        self._open_ws()
-                    except Exception as exc:  # noqa: BLE001 - rebuild best-effort; REST reconcile covers the gap
-                        _logger.warning("long private WS forced reconnect failed: %s", exc)
-            elif connected is True:
-                self._ws_private_disconnected_since = None
-        if self._ticker_cache.is_seeded():
-            ticker_silence = self._ticker_cache.seconds_since_last_ws_event()
-            if ticker_silence != float("inf") and ticker_silence > threshold:
-                self._ws_ticker_stale_ticks += 1
-                if not self._ws_ticker_stale_warned:
-                    _logger.warning(
-                        "long ticker WS silent for %.0fs (threshold %.0fs); "
-                        "cycle falls back to REST tickers",
-                        ticker_silence, threshold,
-                    )
-                    self._ws_ticker_stale_warned = True
-            elif self._ws_ticker_stale_warned:
-                _logger.info("long ticker WS resumed (silence=%.1fs)", ticker_silence)
-                self._ws_ticker_stale_warned = False
+                self._ws_ticker_stale_warned = True
+        elif self._ws_ticker_stale_warned:
+            _logger.info("long ticker WS resumed (silence=%.1fs)", ticker_silence)
+            self._ws_ticker_stale_warned = False
 
-    def _invoke_state_cache_seeder(self) -> None:
-        """See EventDemoDaemon._invoke_state_cache_seeder for rationale. The check-then-
-        construct runs under _seed_client_lock (DAEM-001) so the seed + reconcile threads
-        can't both build a leaked client; the lock is NOT held across the REST seed."""
+    def _refresh_public_ticker_cache(self) -> None:
+        """Refresh public tickers using one lazily constructed REST client."""
         with self._seed_client_lock:
             if self._seed_market_client is None:
                 self._seed_market_client = BybitMarketData(
                     category=self.config.exchange.category,
                     testnet=self.config.exchange.testnet,
                 )
-            if self._seed_private_client is None:
-                api_key, api_secret, demo = resolve_private_credentials()
-                if api_key and api_secret:
-                    self._seed_private_client = BybitPrivateClient(
-                        category=self.config.exchange.category,
-                        testnet=self.config.exchange.testnet,
-                        demo=demo,
-                        api_key=api_key,
-                        api_secret=api_secret,
-                    )
             market_client = self._seed_market_client
-            private_client = self._seed_private_client
-        self._state_cache_seeder(
-            config=self.config,
-            demo_config=self.demo_config,
-            private_state_cache=self._private_state_cache,
-            ticker_cache=self._ticker_cache,
+        _seed_long_public_ticker_cache(
             market_client=market_client,
-            private_client=private_client,
+            ticker_cache=self._ticker_cache,
         )
 
     def _start_kline_stream_manager(self) -> None:
         if not self.demo_config.ws_klines_enabled:
-            _logger.info("ws_klines_enabled=False; long daemon stays on legacy REST kline path")
+            _logger.info("ws_klines_enabled=False; long daemon stays on REST-on-cycle kline fallback")
             return
         if self._kline_stream_manager is not None:
             try:
@@ -874,7 +552,9 @@ class LongNativeDemoDaemon:
             return
         try:
             manager = self._kline_stream_manager_factory(
-                self.config, self.demo_config, self.data_root,
+                self.config,
+                self.demo_config,
+                self.data_root,
             )
         except Exception as exc:  # noqa: BLE001
             _logger.exception("long kline_stream_manager factory failed; degrading: %s", exc)
@@ -924,14 +604,16 @@ class LongNativeDemoDaemon:
             if self.interval_seconds > 0.0:
                 self._cycle_overruns += 1
                 _logger.warning(
-                    "long cycle overran the %.0fs interval by %.1fs; next cycle "
-                    "starts immediately (overrun #%d)",
-                    self.interval_seconds, -sleep_for, self._cycle_overruns,
+                    "long cycle overran the %.0fs interval by %.1fs; next cycle starts immediately (overrun #%d)",
+                    self.interval_seconds,
+                    -sleep_for,
+                    self._cycle_overruns,
                 )
             self._next_cycle_at = time.monotonic()
             sleep_for = 0.0
         self._cycles_timer_triggered += 1
         self._sleep_interruptible(sleep_for)
+        self._pending_cycle_kind = "timer"
 
     def _wait_for_next_cycle_event(self) -> None:
         """WS-event-driven wait: wake on a new confirmed-bar boundary, the
@@ -946,19 +628,10 @@ class LongNativeDemoDaemon:
             return
         if woke:
             self._cycles_kline_triggered += 1
+            self._pending_cycle_kind = "confirmed_bar"
         else:
             self._cycles_timer_triggered += 1
-
-
-def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStream:
-    api_key, api_secret, demo = resolve_private_credentials()
-    return BybitPrivateWebSocketStream(
-        category=config.exchange.category,
-        testnet=config.exchange.testnet,
-        demo=demo,
-        api_key=api_key,
-        api_secret=api_secret,
-    )
+            self._pending_cycle_kind = "timer"
 
 
 # The long sleeve actually trades the top-10 USDT-perps by 24h turnover
@@ -972,7 +645,9 @@ _LONG_KLINE_UNIVERSE_SIZE = 120  # ls-4: store must cover the 120-name median-ra
 
 
 def _build_long_kline_universe(
-    market: BybitMarketData, *, top_n: int = _LONG_KLINE_UNIVERSE_SIZE,
+    market: BybitMarketData,
+    *,
+    top_n: int = _LONG_KLINE_UNIVERSE_SIZE,
 ) -> list[str]:
     """Top-N active linear USDT-perps by 24h turnover.
 
@@ -1008,12 +683,15 @@ def _default_long_kline_stream_manager_factory(
     cache_root: Path,
 ) -> KlineStreamManager:
     market = BybitMarketData(
-        category=config.exchange.category, testnet=config.exchange.testnet,
+        category=config.exchange.category,
+        testnet=config.exchange.testnet,
     )
+
     # Nested def (mypy can't infer a lambda with a default-arg capture);
     # `m` defaults to `market` at def time, matching the prior lambda exactly.
     def universe_fetcher(m: BybitMarketData = market) -> list[str]:
         return _build_long_kline_universe(m)
+
     return KlineStreamManager(
         market_data=market,
         cache_root=cache_root,
@@ -1029,8 +707,8 @@ def _default_long_kline_stream_manager_factory(
 
 def _default_long_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTickerStream:
     """Public ticker stream tuned for the long sleeve. Demo flag is False
-    here because the public ticker endpoint is the same for demo + real
-    money; the demo wallet only affects private endpoints."""
+    because the public ticker endpoint is shared by demo and real-money
+    environments."""
     return BybitPublicTickerStream(
         category=config.exchange.category,
         testnet=config.exchange.testnet,
@@ -1038,122 +716,6 @@ def _default_long_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTi
     )
 
 
-def _default_long_trade_router_factory(
-    config: ResearchConfig,
-    demo_config: LongNativeDemoCycleConfig,
-    *,
-    order_submit_mode: str = "ws_then_rest",
-    ws_timeout_seconds: float = 5.0,
-) -> Any | None:
-    """Build a BybitTradeRouter for the long sleeve.
-
-    Bybit's WS trade endpoint is shared across sleeves; the cycle-specific
-    differences are the data root and ledger paths.
-    """
-    api_key, api_secret, demo = resolve_private_credentials()
-    if not api_key or not api_secret:
-        _logger.info("long trade router skipped: no private credentials configured")
-        return None
-    rest_client = BybitPrivateClient(
-        category=config.exchange.category,
-        testnet=config.exchange.testnet,
-        demo=demo,
-        api_key=api_key,
-        api_secret=api_secret,
-    )
-    ws_client: Any | None = None
-    if order_submit_mode in {"ws", "ws_then_rest"}:
-        try:
-            # Jittered retry de-syncs the multi-daemon demo connect storm; see
-            # build_ws_trade_client. Falls through to REST on genuine failure.
-            ws_client = build_ws_trade_client(
-                category=config.exchange.category,
-                testnet=config.exchange.testnet,
-                demo=demo,
-                api_key=api_key,
-                api_secret=api_secret,
-            )
-        except Exception as exc:  # noqa: BLE001
-            # See EventDemoDaemon for the demote-on-demo rationale.
-            level = logging.INFO if demo else logging.WARNING
-            _logger.log(
-                level,
-                "long WS trade client construction failed; router REST-only "
-                "(%s): %s",
-                "expected on demo" if demo else "REAL_MONEY",
-                exc,
-            )
-            ws_client = None
-    return BybitTradeRouter(
-        rest_client=rest_client,
-        ws_client=ws_client,
-        order_submit_mode=order_submit_mode,
-        rest_fallback=(order_submit_mode != "ws"),
-        ws_timeout_seconds=ws_timeout_seconds,
-    )
-
-
-def _default_long_state_cache_seeder(
-    *,
-    config: ResearchConfig,
-    demo_config: LongNativeDemoCycleConfig,
-    private_state_cache: PrivateStateCache,
-    ticker_cache: TickerCache,
-    market_client: Any | None = None,
-    private_client: Any | None = None,
-) -> None:
-    """One-shot REST snapshot to seed both caches.
-
-    Run at daemon startup before WS pushes begin, and again periodically by
-    the reconcile thread to recover any events the WS missed. Reuses the
-    cycle's existing `_collect_private_snapshots` so the contract stays
-    identical between cache and REST paths.
-
-    ``market_client`` and ``private_client`` are optional caller-cached
-    clients reused across reconciles (the daemon passes them) so we don't
-    spin up a fresh HTTP session every minute.
-    """
-    from .event_demo import _collect_private_snapshots  # late import: dep cycle
-
-    public = market_client or BybitMarketData(
-        category=config.exchange.category, testnet=config.exchange.testnet,
-    )
-    tickers = public.get_tickers()
-    ticker_cache.replace_with_rest_snapshot(tickers)
-    if private_client is not None:
-        snapshot_started = time.monotonic()
-        snap = _collect_private_snapshots(private_client, demo_config)
-        private_state_cache.replace_with_rest_snapshot(
-            equity_usdt=snap["equity_usdt"],
-            wallet_error=snap.get("wallet_error", ""),
-            positions=snap["raw_positions"],
-            open_orders=snap["raw_open_orders"],
-            position_error=snap.get("position_error", ""),
-            open_order_error=snap.get("open_order_error", ""),
-            snapshot_started_monotonic=snapshot_started,
-        )
-        return
-    api_key, api_secret, demo = resolve_private_credentials()
-    if api_key and api_secret:
-        private = BybitPrivateClient(
-            category=config.exchange.category,
-            testnet=config.exchange.testnet,
-            demo=demo,
-            api_key=api_key,
-            api_secret=api_secret,
-        )
-        snapshot_started = time.monotonic()
-        snap = _collect_private_snapshots(private, demo_config)
-        private_state_cache.replace_with_rest_snapshot(
-            equity_usdt=snap["equity_usdt"],
-            wallet_error=snap.get("wallet_error", ""),
-            positions=snap["raw_positions"],
-            open_orders=snap["raw_open_orders"],
-            position_error=snap.get("position_error", ""),
-            open_order_error=snap.get("open_order_error", ""),
-            snapshot_started_monotonic=snapshot_started,
-        )
-    else:
-        # No private credentials configured: nothing to seed from. Cache
-        # serves the fallback equity.
-        private_state_cache.replace_with_rest_snapshot()
+def _seed_long_public_ticker_cache(*, market_client: Any, ticker_cache: TickerCache) -> None:
+    """Refresh the public ticker cache without touching credentials or account state."""
+    ticker_cache.replace_with_rest_snapshot(market_client.get_tickers())

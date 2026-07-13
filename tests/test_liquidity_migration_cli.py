@@ -11,7 +11,6 @@ from liquidity_migration.cli import (
     _KNOWN_BINANCE_PROXY_DATASETS,
     _KNOWN_BYBIT_DATASETS,
     _parse_symbols,
-    _print_event_risk_summary,
     _resolve_data_root,
     _universe_config_from_args,
     _validate_datasets,
@@ -32,14 +31,7 @@ def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Pat
     with pytest.raises(FileNotFoundError):  # research command -> strict guard
         _resolve_data_root("continuous-events", tmp_path / "absent_research_root")
     noop = tmp_path / "noop_root"  # no-data-root command -> untouched
-    assert _resolve_data_root("reconcile-long-paper-demo", noop) == noop and not noop.exists()
-
-
-def test_reconcile_long_paper_demo_defaults_to_long_roots() -> None:
-    args = build_parser().parse_args(["reconcile-long-paper-demo"])
-
-    assert args.paper_data_root == "data/bybit-long-paper-event"
-    assert args.demo_data_root == "data/bybit-long-demo-event"
+    assert _resolve_data_root("download-data", noop) == noop and not noop.exists()
 
 
 def test_cli_continuous_demo_rejects_retired_strategy_profile(tmp_path: Path) -> None:
@@ -49,31 +41,24 @@ def test_cli_continuous_demo_rejects_retired_strategy_profile(tmp_path: Path) ->
                 "--data-root",
                 str(tmp_path),
                 "continuous-event-demo-cycle",
+                "--execution-environment",
+                "demo",
                 "--strategy-profile",
                 "retired_continuous_profile",
             ]
         )
 
 
-def test_cli_continuous_demo_exit_redesign_parser(tmp_path: Path) -> None:
+def test_cli_continuous_demo_target_only_parser(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
             "--data-root",
             str(tmp_path),
             "continuous-event-demo-cycle",
+            "--execution-environment",
+            "demo",
             "--strategy-profile",
             "continuous_ensemble_v2",
-            "--no-left-decile-exit-enabled",
-            "--stop-approach-frac",
-            "0",
-            "--failed-fade-hours",
-            "0",
-            "--failed-fade-loss-pct",
-            "0",
-            "--failed-fade-min-mfe-pct",
-            "0",
-            "--breakeven-arm-pct",
-            "0",
             "--sizing-mode",
             "inverse_vol",
             "--target-vol-per-name",
@@ -84,12 +69,6 @@ def test_cli_continuous_demo_exit_redesign_parser(tmp_path: Path) -> None:
     )
 
     assert args.strategy_profile == "continuous_ensemble_v2"
-    assert args.left_decile_exit_enabled is False
-    assert args.stop_approach_frac == 0
-    assert args.failed_fade_hours == 0
-    assert args.failed_fade_loss_pct == 0
-    assert args.failed_fade_min_mfe_pct == 0
-    assert args.breakeven_arm_pct == 0
     assert args.sizing_mode == "inverse_vol"
     assert args.target_vol_per_name == 0.01
     assert args.vol_weight_clamp == 2
@@ -101,6 +80,8 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
             "--data-root",
             str(tmp_path),
             "continuous-event-demo-cycle",
+            "--execution-environment",
+            "demo",
             "--strategy-profile",
             "continuous_ensemble_v2",
         ]
@@ -111,44 +92,75 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
     assert args.btc_trend_lookback_days == 30
     assert args.btc_trend_month_days == 365.25 / 12
     assert args.btc_trend_smart_tolerance == 0.01
-    assert args.entry_private_ws_stale_seconds == 300.0
     assert args.feature_set == "max_ret168"
     assert args.max_hold_hours == 24
     assert args.notional_multiplier == 1.0
-    assert args.left_decile_exit_enabled is False
-    assert args.stop_loss_pct == 0.0
-    assert args.stop_approach_frac == 0.0
-    assert args.failed_fade_hours == 0
-    assert args.failed_fade_loss_pct == 0.0
-    assert args.failed_fade_min_mfe_pct == 0.0
-    assert args.breakeven_arm_pct == 0.0
     assert args.sizing_mode == "inverse_vol"
     assert args.target_vol_per_name == 0.01
     assert args.vol_weight_clamp == 2.0
-    assert args.entry_portfolio_heat_cap_frac == 0.0
-    assert args.entry_portfolio_heat_shock_frac == 1.0
-    assert args.entry_account_drawdown_kill_switch_frac == 0.0
     assert args.workers == 4
 
-    override = build_parser().parse_args(
+
+def test_cli_continuous_demo_has_no_retired_execution_controls(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
         [
             "--data-root",
             str(tmp_path),
             "continuous-event-demo-cycle",
-            "--entry-private-ws-stale-seconds",
-            "180",
-            "--entry-portfolio-heat-cap-frac",
-            "0.05",
-            "--entry-portfolio-heat-shock-frac",
-            "1.25",
-            "--entry-account-drawdown-kill-switch-frac",
-            "0.02",
+            "--execution-environment",
+            "demo",
         ]
     )
-    assert override.entry_private_ws_stale_seconds == 180.0
-    assert override.entry_portfolio_heat_cap_frac == 0.05
-    assert override.entry_portfolio_heat_shock_frac == 1.25
-    assert override.entry_account_drawdown_kill_switch_frac == 0.02
+    for retired in (
+        "left_decile_exit_enabled",
+        "stop_loss_pct",
+        "stop_approach_frac",
+        "failed_fade_hours",
+        "failed_fade_loss_pct",
+        "failed_fade_min_mfe_pct",
+        "breakeven_arm_pct",
+        "fallback_equity_usdt",
+        "entry_order_type",
+        "exit_order_type",
+        "entry_private_ws_stale_seconds",
+        "entry_portfolio_heat_cap_frac",
+        "entry_portfolio_heat_shock_frac",
+        "entry_account_drawdown_kill_switch_frac",
+        "telegram",
+        "record_dry_run",
+        "daily_rebalance_enabled",
+    ):
+        assert not hasattr(args, retired)
+
+
+@pytest.mark.parametrize(
+    "retired_args",
+    [
+        ["--left-decile-exit-enabled"],
+        ["--stop-loss-pct", "0"],
+        ["--failed-fade-hours", "0"],
+        ["--fallback-equity-usdt", "10000"],
+        ["--entry-private-ws-stale-seconds", "300"],
+        ["--entry-portfolio-heat-cap-frac", "0"],
+        ["--telegram"],
+        ["--record-dry-run"],
+        ["--daily-rebalance-enabled"],
+    ],
+)
+def test_cli_continuous_demo_rejects_retired_execution_controls(
+    tmp_path: Path, retired_args: list[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "--data-root",
+                str(tmp_path),
+                "continuous-event-demo-cycle",
+                "--execution-environment",
+                "demo",
+                *retired_args,
+            ]
+        )
 
 
 def test_cli_continuous_demo_accepts_explicit_notional_multiplier(tmp_path: Path) -> None:
@@ -157,6 +169,8 @@ def test_cli_continuous_demo_accepts_explicit_notional_multiplier(tmp_path: Path
             "--data-root",
             str(tmp_path),
             "continuous-event-demo-cycle",
+            "--execution-environment",
+            "demo",
             "--notional-multiplier",
             "10",
         ]
@@ -167,8 +181,14 @@ def test_cli_continuous_demo_accepts_explicit_notional_multiplier(tmp_path: Path
 
 def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:
     parser = build_parser()
-    continuous = parser.parse_args(["--data-root", str(tmp_path), "continuous-event-demo-cycle"])
-    long = parser.parse_args(["--data-root", str(tmp_path), "long-native-event-demo-cycle"])
+    continuous = parser.parse_args([
+        "--data-root", str(tmp_path), "continuous-event-demo-cycle",
+        "--execution-environment", "demo",
+    ])
+    long = parser.parse_args([
+        "--data-root", str(tmp_path), "long-native-event-demo-cycle",
+        "--execution-environment", "demo",
+    ])
 
     assert continuous.workers == 4
     assert long.workers == 4
@@ -364,66 +384,26 @@ def test_cli_data_layer_audit_parses_options(tmp_path: Path) -> None:
     assert args.name == "coverage"
     assert args.symbols == "BTCUSDT,ETHUSDT"
     assert args.min_full_coverage == 0.9
-def test_cli_event_ws_risk_exposes_stream_start_timeout(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "event-risk-ws",
-            "--stream-start-timeout-seconds",
-            "0.25",
-        ]
-    )
-
-    assert args.command == "event-risk-ws"
-    assert args.stream_start_timeout_seconds == 0.25
 
 
-def test_cli_event_ws_risk_summary_points_to_ws_report(tmp_path: Path, capsys) -> None:
-    _print_event_risk_summary(
-        {
-            "cycle": {
-                "mode": "ws_risk_submit",
-                "exits_executed": 0,
-                "exit_candidates": 0,
-                "stop_repairs": 0,
-                "open_trades_after": 0,
-                "untracked_positions": 0,
-            },
-            "report_dir": str(tmp_path / "reports" / "event-risk-ws"),
-        }
-    )
-
-    assert "latest_event_ws_risk_cycle.md" in capsys.readouterr().out
-
-
-def test_cli_long_native_paper_mode_flag_propagates_to_config(tmp_path: Path) -> None:
-    """The --paper-mode flag must surface on the parsed args so the long-paper
-    service writes to long_native_paper_* datasets. The bash runner gates this
-    behind PAPER_MODE=1 → --paper-mode; this test pins the CLI surface that
-    gate depends on."""
+def test_cli_long_native_explicit_paper_environment_propagates(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
             "--data-root",
             str(tmp_path),
             "long-native-event-demo-cycle",
-            "--paper-mode",
+            "--execution-environment",
+            "paper",
         ]
     )
-    assert args.paper_mode is True
+    assert args.execution_environment == "paper"
 
 
-def test_cli_long_native_paper_mode_defaults_off(tmp_path: Path) -> None:
-    """Live long-demo defaults to paper_mode=False so its writes land in the
-    long_native_demo_* family the reconciler treats as the ground truth."""
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "long-native-event-demo-cycle",
-        ]
-    )
-    assert args.paper_mode is False
+def test_cli_long_native_requires_explicit_environment(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["--data-root", str(tmp_path), "long-native-event-demo-cycle"]
+        )
 
 
 def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
@@ -432,10 +412,51 @@ def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
             "--data-root",
             str(tmp_path),
             "long-native-event-demo-cycle",
+            "--execution-environment",
+            "demo",
         ]
     )
     assert args.notional_multiplier == 1.0
     assert args.max_projected_initial_margin_pct_equity == 0.5
+    for retired in (
+        "fallback_equity_usdt",
+        "entry_order_type",
+        "exit_order_type",
+        "order_fill_confirm_seconds",
+        "order_fill_poll_interval_seconds",
+        "telegram",
+        "record_dry_run",
+    ):
+        assert not hasattr(args, retired)
+
+
+@pytest.mark.parametrize(
+    "retired_args",
+    [
+        ["--fallback-equity-usdt", "10000"],
+        ["--entry-order-type", "Market"],
+        ["--exit-order-type", "Market"],
+        ["--order-fill-confirm-seconds", "2"],
+        ["--order-fill-poll-interval-seconds", "0.2"],
+        ["--telegram"],
+        ["--record-dry-run"],
+    ],
+)
+def test_cli_long_native_rejects_retired_direct_execution_flags(
+    tmp_path: Path,
+    retired_args: list[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "--data-root",
+                str(tmp_path),
+                "long-native-event-demo-cycle",
+                "--execution-environment",
+                "demo",
+                *retired_args,
+            ]
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -473,9 +494,7 @@ def _patch_archive(monkeypatch, func_name: str) -> None:
 
 
 # audit2b: discover-universe
-def test_discover_universe_prints_slugged_path_for_nontrivial_name(
-    monkeypatch, capsys, tmp_path: Path
-) -> None:
+def test_discover_universe_prints_slugged_path_for_nontrivial_name(monkeypatch, capsys, tmp_path: Path) -> None:
     _patch_universe(monkeypatch)
     out = _run(monkeypatch, capsys, tmp_path, ["discover-universe", "--name", "My Universe"])
     # The slug the writer actually uses on disk:
@@ -495,9 +514,7 @@ def test_discover_universe_normal_name_path_unchanged(monkeypatch, capsys, tmp_p
 
 
 # audit2b: archive-manifest
-def test_archive_manifest_prints_slugged_path_for_nontrivial_name(
-    monkeypatch, capsys, tmp_path: Path
-) -> None:
+def test_archive_manifest_prints_slugged_path_for_nontrivial_name(monkeypatch, capsys, tmp_path: Path) -> None:
     _patch_archive(monkeypatch, "run_archive_manifest")
     out = _run(monkeypatch, capsys, tmp_path, ["archive-manifest", "--name", "Q3 run/A"])
     expected_file = f"archive_manifest_{_archive_safe_name('Q3 run/A')}.md"
@@ -509,9 +526,7 @@ def test_archive_manifest_prints_slugged_path_for_nontrivial_name(
 # audit2b: archive-manifest
 def test_archive_manifest_normal_name_path_unchanged(monkeypatch, capsys, tmp_path: Path) -> None:
     _patch_archive(monkeypatch, "run_archive_manifest")
-    out = _run(
-        monkeypatch, capsys, tmp_path, ["archive-manifest", "--name", "bybit-public-trading"]
-    )
+    out = _run(monkeypatch, capsys, tmp_path, ["archive-manifest", "--name", "bybit-public-trading"])
     assert str(tmp_path / "reports" / "archive_manifest_bybit-public-trading.md") in out
 
 
@@ -569,19 +584,16 @@ def test_binance_proxy_end_help_documents_exclusive_boundary() -> None:
     assert "not included" in help_by_dest["end"].lower()
 
 
-# test-gaps-5: order-submission safety defaults (store_true => off) are pinned
+# The target route is explicit; no order-submission compatibility flags remain.
 @pytest.mark.parametrize(
     "subcommand",
-    ["event-risk-cycle", "event-risk-ws", "long-native-event-demo-cycle", "continuous-event-demo-cycle"],
+    ["long-native-event-demo-cycle", "continuous-event-demo-cycle"],
 )
-def test_order_submission_flags_default_off(subcommand: str) -> None:
-    """The never-arm-by-default contract: every order-submitting daemon parser must default
-    submit_orders and confirm_demo_orders to False. A store_true->default=True regression would
-    silently arm live order submission and otherwise go unnoticed."""
+def test_target_environment_replaces_order_submission_flags(subcommand: str) -> None:
     parser = build_parser()
-    args = parser.parse_args([subcommand])
-    assert args.submit_orders is False, f"{subcommand} must NOT submit orders by default"
-    assert args.confirm_demo_orders is False, f"{subcommand} must NOT confirm demo orders by default"
+    args = parser.parse_args([subcommand, "--execution-environment", "demo"])
+    assert args.execution_environment == "demo"
+    assert not hasattr(args, "confirm_demo_orders")
 
 
 # ---------------------------------------------------------------------------
@@ -589,44 +601,6 @@ def test_order_submission_flags_default_off(subcommand: str) -> None:
 # cli-config-3 / cli-config-4 / cli-config-7 / code-quality-9 dataset+universe
 # argument validation and symbol parsing.
 # ---------------------------------------------------------------------------
-# cli-config-3: event-risk-cycle --loop must fail fast on order-safety misconfig.
-def test_event_risk_cycle_loop_validates_before_spinning(monkeypatch, tmp_path: Path) -> None:
-    # --submit-orders without --confirm-demo-orders is a fatal misconfig. In
-    # --loop mode it previously got swallowed by the per-cycle broad except and
-    # spun forever. It must now raise BEFORE the loop and never build a client or
-    # run a cycle.
-    built_client = {"count": 0}
-    ran_cycle = {"count": 0}
-
-    def fake_build_client(config, risk_config):  # pragma: no cover - must not run
-        built_client["count"] += 1
-        return object()
-
-    def fake_run_cycle(*args, **kwargs):  # pragma: no cover - must not run
-        ran_cycle["count"] += 1
-        return {}
-
-    monkeypatch.setattr(cli, "build_event_risk_private_client", fake_build_client)
-    monkeypatch.setattr(cli, "run_event_risk_cycle", fake_run_cycle)
-
-    argv = [
-        "--data-root",
-        str(tmp_path),
-        "event-risk-cycle",
-        "--loop",
-        "--submit-orders",
-        "--max-cycles",
-        "0",
-        "--interval-seconds",
-        "0.0",
-    ]
-    with pytest.raises(RuntimeError, match="confirm-demo-orders"):
-        cli.main(argv)
-    # The fatal config error must surface before the loop arms anything.
-    assert built_client["count"] == 0
-    assert ran_cycle["count"] == 0
-
-
 # cli-config-4: unknown/typo'd --datasets must fail loud, not silently no-op.
 def test_validate_datasets_rejects_unknown_bybit_dataset() -> None:
     with pytest.raises(RuntimeError, match="funidng"):
@@ -639,9 +613,9 @@ def test_validate_datasets_rejects_unknown_bybit_dataset() -> None:
 def test_validate_datasets_accepts_binance_alias_and_canonical_names() -> None:
     # Aliases (map keys) and already-resolved binance_usdm_* names both pass.
     assert _validate_datasets({"funding"}, _KNOWN_BINANCE_PROXY_DATASETS, venue="Binance proxy") == {"funding"}
-    assert _validate_datasets(
-        {"binance_usdm_funding"}, _KNOWN_BINANCE_PROXY_DATASETS, venue="Binance proxy"
-    ) == {"binance_usdm_funding"}
+    assert _validate_datasets({"binance_usdm_funding"}, _KNOWN_BINANCE_PROXY_DATASETS, venue="Binance proxy") == {
+        "binance_usdm_funding"
+    }
     with pytest.raises(RuntimeError, match="klines_1hr"):
         _validate_datasets({"klines_1hr"}, _KNOWN_BINANCE_PROXY_DATASETS, venue="Binance proxy")
 
@@ -651,8 +625,7 @@ def test_download_command_defaults_are_known_datasets() -> None:
     bybit_default = {item.strip() for item in "instruments,klines_1h".split(",")}
     assert not (bybit_default - _KNOWN_BYBIT_DATASETS)
     proxy_default = {
-        item.strip()
-        for item in "klines_1h,funding,mark_price_1h,index_price_1h,premium_index_1h".split(",")
+        item.strip() for item in "klines_1h,funding,mark_price_1h,index_price_1h,premium_index_1h".split(",")
     }
     assert not (proxy_default - _KNOWN_BINANCE_PROXY_DATASETS)
 
@@ -791,9 +764,7 @@ def test_exclusion_flags_are_in_a_mutually_exclusive_group() -> None:
         "--include-majors",
     }
     for group in discover_subparser._mutually_exclusive_groups:
-        group_options = {
-            opt for action in group._group_actions for opt in action.option_strings
-        }
+        group_options = {opt for action in group._group_actions for opt in action.option_strings}
         if target_options <= group_options:
             assert isinstance(group, argparse._MutuallyExclusiveGroup)
             break

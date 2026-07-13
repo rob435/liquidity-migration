@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
-# Daily BTC-beta hedge run for the continuous demo book (WP3 live wiring).
-# Dry-run by default; set SUBMIT_HEDGE=1 (and CONFIRM_DEMO_ORDERS=1) to arm the
-# gated submit path. Demo only — never with REAL_MONEY=true.
+# Periodic BTC+ETH hedge target for the continuous demo book.
+# Dry-run by default; SUBMIT_HEDGE=1 arms publication to the mandatory account
+# owner inbox. This launcher has no venue credentials or order authority.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python)"
+
+if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
+    echo "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required for the hedge target publisher." >&2
+    exit 2
+fi
+if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
+    echo "ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT are required." >&2
+    exit 2
+fi
+if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
+    echo "account-execution-capture-enabled is required for the hedge target publisher." >&2
+    exit 2
+fi
 VENUE="${HEDGE_VENUE:-bybit}"
 PRIMARY_ROOT="${PRIMARY_ROOT:-data/bybit-continuous-demo-event}"
-DATA_ROOT="${HEDGE_DATA_ROOT:-data/bybit-continuous-hedge-event}"
 case "${CONTINUOUS_HEDGE_TIMER:-off}" in
     on|ON|On|1|true|TRUE|yes|YES) ;;
     *)
@@ -17,13 +29,12 @@ case "${CONTINUOUS_HEDGE_TIMER:-off}" in
         exit 0
         ;;
 esac
-args=(--venue "$VENUE" --data-root "$DATA_ROOT" --primary-root "$PRIMARY_ROOT")
+args=(--venue "$VENUE" --primary-root "$PRIMARY_ROOT")
 if [[ "${SUBMIT_HEDGE:-0}" == "1" ]]; then
-    if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then
-        echo "Set CONFIRM_DEMO_ORDERS=1 with SUBMIT_HEDGE=1 to submit Bybit demo hedge orders." >&2
-        exit 2
-    fi
-    "$PYTHON_BIN" scripts/check_bybit_order_permissions.py --context continuous-hedge
     args+=(--submit)
 fi
+args+=(
+    --account-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
+    --account-root "$ACCOUNT_EXECUTION_ROOT"
+)
 exec "$PYTHON_BIN" scripts/run_continuous_hedge.py "${args[@]}"

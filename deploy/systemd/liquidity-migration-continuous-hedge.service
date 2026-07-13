@@ -1,28 +1,28 @@
 [Unit]
 Description=Periodic BTC+ETH 2f target hedge for the continuous demo book (demo-only)
-After=network-online.target
 Wants=network-online.target
+Requires=liquidity-migration-account-execution.service
+After=network-online.target liquidity-migration-account-execution.service
+ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
 
 [Service]
 Type=oneshot
 User=root
 WorkingDirectory=/opt/liquidity-migration
-EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
+EnvironmentFile=/etc/liquidity-migration/account-execution.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
+Environment=TELEGRAM_ENABLED=0
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=HEDGE_VENUE=bybit
 Environment=PRIMARY_ROOT=data/bybit-continuous-demo-event
-Environment=HEDGE_DATA_ROOT=data/bybit-continuous-hedge-event
 # Banked BTC+ETH two-factor form (receipts continuous-hedge-{upgrade,2f-engine}-2026-06-10).
 Environment=HEDGE_MODE=2f
-# Submit ARMED by operator instruction 2026-06-10 (demo account only; the runner
-# refuses without demo credentials and CONFIRM_DEMO_ORDERS=1, and hard-refuses
-# REAL_MONEY=true). Set SUBMIT_HEDGE=0 to fall back to dry-run logging.
+# Publish-target arm. The account execution owner is the only process allowed to
+# turn this target into a venue order.
 Environment=SUBMIT_HEDGE=1
-Environment=CONFIRM_DEMO_ORDERS=1
-# Hardening + memory-cap parity with the sibling units (round 4): this submits
-# live demo orders and parses venue JSON as root — it must not be the one
-# unconfined unit in the fleet.
+# Hardening + memory-cap parity with the sibling units.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

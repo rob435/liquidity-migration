@@ -57,6 +57,9 @@ def test_ops_help_is_read_only(help_args: list[str], tmp_path: Path) -> None:
     assert "Usage: scripts/ops.sh" in result.stdout
     assert "never enables REAL_MONEY" in result.stdout
     assert "never auto-promoted" in result.stdout
+    assert "account-parity" in result.stdout
+    assert "venue-accounting" in result.stdout
+    assert "cutover-authority" in result.stdout
     assert not call_log.exists()
 
 
@@ -66,24 +69,6 @@ def test_ops_help_is_read_only(help_args: list[str], tmp_path: Path) -> None:
         (
             ["status", "--probe", "value with spaces"],
             [str(REPO_ROOT / "scripts" / "verify_vps_live.sh"), "--probe", "value with spaces"],
-        ),
-        (
-            ["reconcile", "quick", "--sleeves", "long,continuous"],
-            [
-                str(REPO_ROOT / "scripts" / "reconcile.sh"),
-                "--quick",
-                "--sleeves",
-                "long,continuous",
-            ],
-        ),
-        (
-            ["reconcile", "full", "--no-data-refresh", "--backtest-start", "2026-06-01"],
-            [
-                str(REPO_ROOT / "scripts" / "reconcile.sh"),
-                "--no-data-refresh",
-                "--backtest-start",
-                "2026-06-01",
-            ],
         ),
         (
             ["equity", "--sleeves", "long,continuous", "--output", "path with spaces"],
@@ -153,6 +138,18 @@ def test_ops_routes_canonical_shell_commands_with_exact_arguments(
                 "--phase0-inventory",
             ],
         ),
+        (
+            ["account-parity", "--environment", "historical=root with spaces"],
+            ["-m", "liquidity_migration.kernel_parity"],
+        ),
+        (
+            ["venue-accounting", "--output", "receipt with spaces"],
+            [str(REPO_ROOT / "scripts" / "reconcile_bybit_demo_accounting.py")],
+        ),
+        (
+            ["cutover-authority", "verify", "--receipt", "receipt with spaces"],
+            [str(REPO_ROOT / "scripts" / "account_execution_cutover_authority.py")],
+        ),
         (["test", "-q", "tests/a file.py"], ["-m", "pytest"]),
     ],
 )
@@ -190,6 +187,25 @@ def test_ops_python_override_and_argument_forwarding(
         assert routed == [*expected_prefix, "--binance-root", "root with spaces"]
     elif args[0] == "overhaul-phase0":
         assert routed == [*expected_prefix, "--output-root", "root with spaces"]
+    elif args[0] == "account-parity":
+        assert routed == [
+            *expected_prefix,
+            "--environment",
+            "historical=root with spaces",
+        ]
+    elif args[0] == "venue-accounting":
+        assert routed == [
+            *expected_prefix,
+            "--output",
+            "receipt with spaces",
+        ]
+    elif args[0] == "cutover-authority":
+        assert routed == [
+            *expected_prefix,
+            "verify",
+            "--receipt",
+            "receipt with spaces",
+        ]
     else:
         assert routed == [*expected_prefix, "-q", "tests/a file.py"]
 

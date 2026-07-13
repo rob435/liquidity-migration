@@ -2,20 +2,20 @@
 
 Use `scripts/ops.sh` as the single human-facing entry point for routine
 demo/paper operations. It is a thin router: the existing canonical scripts
-still own all strategy, reconciliation, research-integrity, reset, and deploy
-logic.
+still own strategy, research-integrity, reset, and deploy logic.
 
 Running it with no arguments, `help`, `-h`, or `--help` only prints help.
 
 ```bash
 scripts/ops.sh
 scripts/ops.sh status
-scripts/ops.sh reconcile quick
-scripts/ops.sh reconcile full
 scripts/ops.sh equity --sleeves long,continuous
 scripts/ops.sh data-audit --venue both
 scripts/ops.sh overhaul-plan
 scripts/ops.sh overhaul-phase0
+scripts/ops.sh account-parity --help
+scripts/ops.sh venue-accounting --help
+scripts/ops.sh cutover-authority --help
 scripts/ops.sh test -q
 ```
 
@@ -41,8 +41,10 @@ scripts/ops.sh test -q
 | Command | Canonical route | Operational effect |
 |---|---|---|
 | `status` | `scripts/verify_vps_live.sh` | Read-only VPS checkout, config, credential, service, and liveness checks. |
-| `reconcile quick` | `scripts/reconcile.sh --quick` | Fast paper/demo execution reconciliation; reads VPS ledgers and writes local reports without rebuilding research RMOM. |
-| `reconcile full` | `scripts/reconcile.sh` | Full PIT refresh/backtest/demo/paper reconciliation. This can download data and is substantially slower. |
+| `account-parity` | `python -m liquidity_migration.kernel_parity` | Structural historical/paper/demo account-journal comparison with non-empty and hash checks; not full captured-tape acceptance. |
+| `twin-calibrate` | `scripts/calibrate_execution_twin.py` | Self-hashed market-order twin calibration from verified demo account/L2 tapes; exits nonzero until registered sample gates pass. |
+| `venue-accounting` | `scripts/reconcile_bybit_demo_accounting.py` | Owner-serialized, venue-read-only demo TRADE/closed-PnL/SETTLEMENT and flatness reconciliation against the stopped canonical journal. |
+| `cutover-authority` | `scripts/account_execution_cutover_authority.py` | Creates reviewed-evidence wrappers, an open assessment template, or the short-lived host/commit/evidence-bound deploy authorization. It never decides a non-machine-verifiable gate by itself. |
 | `equity` | `scripts/equity_curves.sh` | Official LONG/CONTINUOUS equity runner; forwards every option unchanged. |
 | `reset` | VPS `scripts/reset_demo_paper_ledgers.sh` | Dry-run preview by default; `--execute` is the only mutation opt-in. |
 | `data-audit` | `scripts/granular_data_surface.py` | Read-only PIT-manifest-anchored granular/alternative-data coverage and schema audit. |
@@ -54,30 +56,128 @@ scripts/ops.sh test -q
 | `test` | `python -m pytest` | Runs all tests, or only the forwarded pytest selection. |
 | `deploy --execute` | `scripts/deploy_vps_live.sh` | Checked demo/paper VPS deploy. Refused without the explicit handshake. |
 
-Every argument after the command (and, for reconciliation, after `quick` or
-`full`) is forwarded as its own argument. Do not put a Python command plus
-flags into `PYTHON`; it must name one executable or executable path.
+Every argument after the command is forwarded as its own argument. Do not put a
+Python command plus flags into `PYTHON`; it must name one executable or
+executable path.
 
-## VPS status and reconciliation
+## VPS status and account-journal parity
 
 ```bash
 # Read-only production verification.
 scripts/ops.sh status
 
-# Quick execution-plane comparison for both sleeves.
-scripts/ops.sh reconcile quick --sleeves long,continuous
-
-# Optional maintenance only; this is intentionally not part of quick mode.
-scripts/ops.sh reconcile quick --refresh-rmom
-
-# Full three-way PIT reconciliation, with the canonical dry-run option.
-scripts/ops.sh reconcile full --dry-run
-scripts/ops.sh reconcile full --with-funding
+# Structural account-journal comparison; supply all three roots.
+scripts/ops.sh account-parity \
+  --environment historical=/path/to/historical-account-root \
+  --environment paper=/path/to/paper-account-root \
+  --environment demo=/path/to/demo-account-root \
+  --output /path/to/account-kernel-parity.json
 ```
 
-Quick reconciliation is not alpha evidence. Full reconciliation is an
-execution/data-integrity check and does not promote CONTINUOUS or authorize
-mainnet trading.
+The old `reconcile quick` and `reconcile full` routes were removed on
+2026-07-13. They compared sleeve-local idealized-fill projections that the
+target-only paper/demo architecture no longer treats as authoritative. Keeping
+them would make a green report easier to produce without validating the account
+owner.
+
+`account-parity` refuses empty journals and compares decision keys, rejection
+keys, target quantities, event-type sequence, and replayed account-state hashes.
+It proves only those structural claims for the supplied journal bytes. It does
+not establish captured market-tape provenance, full strategy parity, fresh
+venue rules, credentialed demo execution, fill/P&L agreement, alpha, or
+deployment readiness. Those acceptance gates remain open in
+`docs/account_execution_cutover.md`; the cutover-authority command binds an
+explicit operator assessment after review, but is intentionally not a
+one-command automatic green verdict.
+
+Calibrate only from a fresh demo epoch after actual target/order/ack/fill/P&L
+and raw L2 capture exist:
+
+```bash
+scripts/ops.sh twin-calibrate \
+  --account-root /path/to/demo-account-root \
+  --market-capture-root /path/to/demo-capture-root \
+  --account-id bybit-demo-unified \
+  --clock-offset-receipt /path/to/clock-offset.json \
+  --output /path/to/execution-twin-calibration.json
+```
+
+Paper startup consumes only a self-hashed receipt whose registered sample gate
+passed. The receipt does not authorize deployment.
+
+After the demo target set and venue are flat, stop producers, let the owner
+complete its final strict funding/position pass, write fresh health, and stop
+the owner. Then capture the exact fresh-ledger epoch (at most seven days):
+
+```bash
+scripts/ops.sh venue-accounting \
+  --account-root /path/to/demo-account-root \
+  --account-id bybit-demo-unified \
+  --start-time-ms FRESH_EPOCH_START_MS \
+  --output /path/to/venue-accounting.json
+```
+
+The default floors—registered before the venue result is viewed—are two trade
+rows, one closed-PnL row, and one funding settlement. The command acquires the
+owner lease, submits no orders, binds raw Bybit rows and pre/post position/open
+order snapshots, replays the journal, and exits nonzero on identity, fee, P&L,
+funding, lineage, or flatness disagreement. It does not allocate account-netted
+P&L to components or authorize deployment.
+
+## Evidence-bound cutover authorization
+
+`account-execution-deploy-ready` is a JSON authorization receipt, not an empty
+marker. Start from an intentionally open assessment on the staged, clean VPS
+checkout:
+
+```bash
+COMMIT="$(git rev-parse HEAD)"
+scripts/ops.sh cutover-authority template \
+  --authorized-commit "$COMMIT" \
+  --authorized-by OWNER_REVIEW_ID \
+  --output /etc/liquidity-migration/account-execution-cutover-assessment.json
+```
+
+The demo-rule, fresh demo/paper owner-health, execution-twin calibration,
+kernel-parity, venue-accounting, and final-flatness roles are parsed and
+semantically checked by the issuer. The accounting and flatness roles may point
+to the same self-hashed venue receipt. Owner health must be no older than five
+minutes and bound to the current journal head at issuance; prepare the open
+assessment before stopping the owners. For the remaining claim-scoped gates,
+snapshot the exact reviewed source files into self-hashed evidence wrappers;
+this records human judgment and source hashes without pretending the judgment
+was automated:
+
+```bash
+scripts/ops.sh cutover-authority review-evidence \
+  --role demo_owner_start_sequence \
+  --claim 'OWNER_ACTIVE_AND_HEALTHY_BEFORE_ANY_DEMO_PRODUCER_START' \
+  --reviewed-by OWNER_REVIEW_ID \
+  --source /absolute/path/to/demo-systemd-start-order.log \
+  --output /absolute/path/to/demo-owner-start-evidence.json
+```
+
+Populate every template path and decision, and change a gate from `open` to
+`passed` only after its registered decision rule actually passes. Then issue
+the receipt on the same host and exact clean commit:
+
+```bash
+scripts/ops.sh cutover-authority issue \
+  --assessment /etc/liquidity-migration/account-execution-cutover-assessment.json \
+  --repo-root /opt/liquidity-migration \
+  --output /etc/liquidity-migration/account-execution-deploy-ready
+
+scripts/ops.sh cutover-authority verify \
+  --receipt /etc/liquidity-migration/account-execution-deploy-ready \
+  --expected-commit "$COMMIT" \
+  --repo-root /opt/liquidity-migration
+```
+
+The mode-`0600` receipt expires within 24 hours and is bound to the host's
+machine-id fingerprint, full commit, assessment bytes, and every evidence
+artifact hash. Its self-hash is corruption/tamper evidence, not a signature;
+root can still replace it, so operator identity and substantive review remain
+real responsibilities.
 
 ## Safe ledger reset
 
@@ -93,14 +193,17 @@ Only after reviewing that preview, request the guarded mutation explicitly:
 scripts/ops.sh reset --execute --sleeves all --label new-forward-window
 ```
 
-The remote checkout defaults to `/opt/liquidity-migration`. Reset archives the
-selected ledgers before removal and preserves the continuous account-equity
-high-water state. It does not cancel orders or close positions; it refuses until
-the demo account is already flat with no open orders. A continuous reset then
-writes one fresh demo and paper cycle heartbeat carrying the verified-flat reset
-boundary. That boundary is new-epoch provenance, not restored trade history; it
-prevents the hedge timer from mistaking the deliberate empty ledger for unknown
-or corrupt exposure before the first normal continuous cycle arrives.
+The remote checkout defaults to `/opt/liquidity-migration`. Reset archives and
+verifies the selected sleeve projections plus the demo/paper account roots,
+inboxes and raw captures before creating fresh account epochs. Prior canonical
+account journals remain in the durable archive; they are not rewritten to make
+the system look flat. The demo strategy boundary records the independently
+proven Bybit flat state. The old deterministic-paper epoch is instead labelled
+archived/not carried forward; demo venue truth is never borrowed as paper
+evidence. The reset preserves the continuous high-water state and writes fresh
+sleeve cycle heartbeats for liveness. It does not cancel orders or close
+positions: execution refuses until Bybit demo is already flat with no open
+orders.
 
 ## Granular data
 
@@ -183,7 +286,7 @@ Deploy is intentionally awkward enough to avoid an accidental keystroke:
 # Refused:
 scripts/ops.sh deploy
 
-# Explicit checked deploy:
+# Explicit checked deploy (still refused without a valid cutover receipt):
 scripts/ops.sh deploy --execute
 ```
 
@@ -197,8 +300,10 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" \
 scripts/ops.sh deploy --execute
 ```
 
-`EXPECTED_COMMIT` may be a unique 7-40 character hexadecimal prefix; the
-checked deploy and verifier both resolve it to the same full commit. For a
+Full deploy requires `EXPECTED_COMMIT`; it may be a unique 7-40 character
+hexadecimal prefix of the full commit recorded in the authorization. The
+already-staged checkout must itself be clean and at that full commit before the
+deploy is allowed to fetch or check out anything. For a
 private GitHub HTTPS remote, local deploys automatically reuse the credential
 from `gh auth` when `GITHUB_TOKEN` is unset. An explicit `GITHUB_TOKEN` still
 takes precedence. The credential is passed to the VPS over SSH stdin for the

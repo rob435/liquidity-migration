@@ -71,6 +71,32 @@ def _float(value: Any) -> float:
     return finite_float(value, default=0.0) or 0.0
 
 
+def wallet_equity_usdt(wallet_payload: Mapping[str, Any]) -> float:
+    """Normalize one Bybit wallet snapshot without importing a strategy hub."""
+
+    rows = wallet_payload.get("list") or []
+    if not rows:
+        return 0.0
+    first = rows[0]
+    if not isinstance(first, Mapping):
+        return 0.0
+    total_equity = _float(first.get("totalEquity"))
+    if total_equity > 0.0:
+        return total_equity
+    for coin in first.get("coin") or []:
+        if not isinstance(coin, Mapping) or str(coin.get("coin", "")).upper() != "USDT":
+            continue
+        for key in ("equity", "walletBalance", "usdValue"):
+            value = _float(coin.get(key))
+            if value > 0.0:
+                return value
+    for key in ("totalWalletBalance", "totalEquity"):
+        value = _float(first.get(key))
+        if value > 0.0:
+            return value
+    return 0.0
+
+
 def _message_rows(message: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Normalize pybit's WS message envelope to ``list[dict]``.
 
@@ -612,12 +638,9 @@ class PrivateStateCache:
     def _apply_wallet_update_locked(self, row: Mapping[str, Any]) -> None:
         # Bybit V5 wallet WS row has the same shape as one element of the
         # REST get_wallet_balance().result.list array — totalEquity at the
-        # top, per-coin breakdown under "coin". Defer to wallet_equity_usdt
-        # so cache + REST agree on every fallback (walletBalance, usdValue,
-        # totalWalletBalance). Late import avoids a hard cycle with
-        # event_demo.py while keeping the contract in one place.
-        from .event_demo import wallet_equity_usdt
-
+        # top, per-coin breakdown under "coin". Use the local venue-state
+        # normalizer so market-data caching cannot import a retired strategy
+        # execution module.
         equity = wallet_equity_usdt({"list": [dict(row)]})
         if equity > 0.0:
             self._equity_usdt = equity

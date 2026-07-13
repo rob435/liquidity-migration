@@ -1,10 +1,9 @@
-"""Long-side execution module - live counterpart to long_native.run_long_native_research.
+"""LONG strategy target producer - forward counterpart to long_native research.
 
 Mirrors event_demo.py for the v11a long sleeve (uni50 FC sniper retrace 1%/6h
-fall-through). `event_demo.py` remains shared execution infrastructure. This module
-runs alongside the continuous book on the same Bybit demo account with order-link prefix
-`lm-en-l-*` for entries and `lm-ux-l-*` for exits so the existing ws_risk
-service can route fill events per sleeve.
+fall-through). It publishes desired component targets to the single account owner;
+it has no credentials, private account snapshot, order submission, fill recovery,
+or sleeve-local Telegram path.
 
 Human-readable source of truth for the full promoted/demo lifecycle, including
 where long differs from continuous, is ``docs/promoted_trading_logic.md``. Keep
@@ -20,116 +19,81 @@ Operating model
   signal_close * (1 - 0.01), OR at the first cycle after the deadline expires
   (fc_sniper_skip_on_no_retrace=false, fall-through). Signals older than 24h
   are dropped as stale.
-- Each entry is submitted with venue-managed stop_loss + take_profit (Bybit
-  enforces at sub-ms venue speed). Stop/TP are ATR-derived (fc_atr_stop_mult=1.5,
-  fc_atr_tp_mult=4.0 of ATR_14d).
+- Each entry target carries ATR-derived stop/TP intent (fc_atr_stop_mult=1.5,
+  fc_atr_tp_mult=4.0 of ATR_14d); the account owner owns executable quantity,
+  venue protection, orders, fills, and P&L.
 - Per-position notional defaults to the 1x research sizing. Levered demo sizing
   is explicit opt-in and is rejected if projected full-book initial margin
   exceeds the configured safety ceiling.
-- Time-stop at 3 days is closed by the cycle (reduce-only market).
-- Ledger writes to `long_native_demo_trades` / `long_native_demo_orders` in
-  the long-side data root. ws_risk reads both ledgers and routes by prefix.
+- At 3 days the cycle publishes a zero component target for the time-stop.
+- Planning reads the canonical account projection plus terminal legacy rows only
+  so historical cooldowns survive the cutover.
 """
+
 from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, PENDING_ORDER_STATUSES, exact_duration_ms, is_weekend_ms
-from .bybit import BybitMarketData, BybitPrivateClient, BybitRestRateLimiter
+from ._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms, is_weekend_ms
+from .account_intent_client import (
+    ENTRY_ATTEMPT_METADATA_KEY,
+    AccountTargetPublisher,
+    publish_exit_first_target_requests,
+    unresolved_target_snapshot,
+)
+from .account_owner_health import (
+    TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+    require_recent_account_owner_health,
+)
+from .account_route import require_account_route
+from .account_service import RequestedIntent, SleeveAdapterKind
+from .account_strategy_state import (
+    canonical_strategy_trade_rows,
+    replace_legacy_open_rows,
+    target_reservation_rows,
+    terminal_entry_attempt_keys,
+)
+from .bybit import BybitMarketData
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_tickers
-from .event_demo import (
-    _active_position_by_symbol,
-    _bool,
-    _build_private_client,
+from .event_demo_data import (
     _column_values,
-    _combine_errors,
-    _contract_lookup,
-    _decimal_text,
     _demo_instruments,
-    _demo_private_rest_rate_limit_per_second,
     _download_recent_1h_klines,
     _float,
     _floor_hour_ms,
-    _iso_dt,
-    _live_open_order_symbols,
     _max_int,
-    _order_params,
-    _order_link_id,
-    _prices_close,
     _prune_cycle_reports,
     _price_lookup_from_tickers_and_klines,
-    _private_credentials_present,
-    _refresh_positions_and_orders,
-    _resolve_private_snapshot,
-    resolve_snapshot_equity,
-    _risk_order_link_id,
     _resolve_ticker_snapshot,
-    _ratio_or_zero,
-    _stop_price_for_entry,
-    _take_profit_price_for_entry,
-    _trade_return,
-    _upsert_rows,
     _utc_now_ms,
-    _wait_for_execution_summary,
     _yyyymmddhhmmss,
-    build_ledger_position_pnl_snapshot,
-    build_position_pnl_snapshot,
-    human_exit_reason,
-    order_quantity_for_notional,
-    position_loss_alert_levels,
-    summarize_position_pnl,
 )
-from .order_execution import order_fill_status
-from .canonical_journal import record_due_markouts
-from .lifecycle_bridge import record_ledger_rows
-from .cross_sleeve import (
-    claim_symbol_reservation,
-    clamp_max_new_entries,
-    read_account_state,
-    release_symbol_reservation,
-    shared_account_root,
+from .execution_environment import (
+    ExecutionEnvironment,
+    account_id_for_environment,
+    execution_environment,
 )
 from .long_native import LongNativeConfig, _classify_entry, _fc_atr_available, _vol_target_scale, build_long_features
 from .storage import exclusive_file_lock, read_dataset, write_dataset
-from .telegram import format_age_ms, format_pct, format_usd, format_utc_time_ms, send_telegram_message
+from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID, long_trade_id
+from .strategy_targets import component_target_intent
 from .universe import build_current_universe_table
 
 
 _logger = logging.getLogger("liquidity_migration.long_native_event_demo")
 
 # The single promoted live profile. Per owner: profile name is `LongV11aDivWeekendVol`.
-LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID = "long_native_v11a_div_weekend_vol"
 LONG_DEMO_STRATEGY_PROFILES = ("LongV11aDivWeekendVol",)
 LONG_DEMO_STRATEGY_PROFILE_CHOICES = LONG_DEMO_STRATEGY_PROFILES
-LONG_REJECTION_TELEGRAM_COOLDOWN_MS = exact_duration_ms(hours=6)
-LONG_REJECTION_TELEGRAM_STATE_FILE = "long_entry_rejection_telegram_state.json"
-
-# Dataset names for the long-side ledger. Distinct from short's
-# event_demo_trades / event_demo_orders so the two sleeves don't collide.
-LONG_DEMO_TRADES_DATASET = "long_native_demo_trades"
-CONTINUOUS_DEMO_TRADES_DATASET = "continuous_fade_demo_trades"
-CONTINUOUS_DEMO_CYCLES_DATASET = "continuous_fade_demo_cycles"
-CONTINUOUS_PAPER_TRADES_DATASET = "continuous_fade_paper_trades"
-CONTINUOUS_PAPER_CYCLES_DATASET = "continuous_fade_paper_cycles"
-
-# Order-link prefixes for the long sleeve. ws_risk routes fills to the long
-# ledger by these prefixes. The base helper `_long_order_link_id` builds
-# `lm-en-l-<base>-<ts>`.
-LONG_ENTRY_LINK_PREFIX = "en-l"
-LONG_EXIT_LINK_PREFIX = "ux-l"
-
-PENDING_ORDER_GUARD_MS = exact_duration_ms(minutes=15)
 
 # Signals older than this aren't acted on. Without this bound a missed-cycle
 # event would later trigger a stale fill long after the retrace window closed.
@@ -165,28 +129,19 @@ class LongNativeDemoCycleConfig:
     max_order_notional_pct_equity: float = 0.0  # 0 = derive from notional_multiplier
     max_projected_initial_margin_pct_equity: float = 0.50
     wallet_balance_fraction: float = 1.0
-    fallback_equity_usdt: float = 10_000.0
     max_new_entries_per_cycle: int = 5
-    max_concurrent_entries: int = 4
-    entry_order_type: str = "Market"
-    exit_order_type: str = "Market"
-    order_fill_confirm_seconds: float = 2.0
-    order_fill_poll_interval_seconds: float = 0.2
-    order_fill_fast_poll_interval_seconds: float = 0.05
-    order_fill_fast_poll_seconds: float = 0.5
-    submit_orders: bool = False
-    confirm_demo_orders: bool = False
-    telegram: bool = False
-    record_dry_run: bool = False
-    account_type: str = "UNIFIED"
-    settle_coin: str = "USDT"
+    # No default is intentional: runtime callers must select exactly one
+    # target owner. This producer has no order-submission capability.
+    execution_environment: str = ""
+    # Demo and paper publish targets to the selected account owner; this sleeve
+    # never receives credentials or execution authority.
+    account_intent_inbox_root: str | None = None
+    # Canonical journal read model paired with the inbox above.  Both are
+    # required together so planning cannot mix account targets with stale
+    # sleeve-owned open rows.
+    account_execution_root: str | None = None
     data_name: str = "long-native-event-demo"
     strategy_profile: str = "LongV11aDivWeekendVol"
-    # long-sleeve-5/-6: path to the shared cross-sleeve control root (= the short/account
-    # root, owned by ws_risk). None => auto-resolve from this sleeve's data_root via the
-    # sibling convention (cross_sleeve.shared_account_root). Read-only here; the whole
-    # feature is a NO-OP until ws_risk writes the row AND the operator sets a budget split.
-    cross_sleeve_account_root: str | None = None
     # Daemon constructs a KlineStreamManager to feed an in-memory store. The
     # long sleeve's small universe makes this less critical than continuous, but
     # consistency simplifies operator mental model and lookback_days=90 makes
@@ -198,32 +153,18 @@ class LongNativeDemoCycleConfig:
     ws_klines_topics_per_connection: int = 180
     ws_klines_stale_warning_seconds: float = 60.0
     ws_klines_stale_reconnect_seconds: float = 180.0
-    # B.4: paper-shadow mode. When True the cycle writes to the
-    # long_native_paper_* dataset family, force-disables order submission,
-    # and force-enables dry-run recording so the runner pencils in an
-    # idealised fill at signal price. The reconcile-long-paper-demo CLI
-    # then pairs the paper ledger against the demo ledger to surface the
-    # demo execution slippage cost that the long-only sleeve pays.
-    paper_mode: bool = False
 
 
-def _long_demo_dataset_names(config: "LongNativeDemoCycleConfig") -> tuple[str, str, str]:
-    """Return (trades, orders, cycles) dataset names for this cycle config.
+def _long_demo_dataset_names(config: "LongNativeDemoCycleConfig") -> tuple[str, str]:
+    """Return the legacy terminal-history and cycle dataset names.
 
-    Paper-mode writes to a distinct family so demo and paper ledgers never
-    collide on disk. Both families share the same schema.
+    The account owner is the only order/fill authority. The producer still reads
+    terminal rows from the old sleeve dataset so cooldown history survives the
+    cutover; it never creates new local trade or order rows.
     """
-    if config.paper_mode:
-        return (
-            "long_native_paper_trades",
-            "long_native_paper_orders",
-            "long_native_paper_cycles",
-        )
-    return (
-        "long_native_demo_trades",
-        "long_native_demo_orders",
-        "long_native_demo_cycles",
-    )
+    if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER:
+        return "long_native_paper_trades", "long_native_paper_cycles"
+    return "long_native_demo_trades", "long_native_demo_cycles"
 
 
 def _v11a_long_native_config() -> LongNativeConfig:
@@ -239,6 +180,8 @@ def _v11a_long_native_config() -> LongNativeConfig:
     risk-engineering, not a new signal; FC remains the alpha ceiling.
     """
     return LongNativeConfig(
+        execution_strategy_id=LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
+        execution_leverage=10.0,
         universe_size=50,  # div (was 10): wider book diversifies idiosyncratic risk
         universe_volume_window_days=90,
         min_listing_history_days=30,
@@ -305,8 +248,7 @@ def _v11a_long_native_config() -> LongNativeConfig:
 def _long_demo_event_config(profile: str) -> LongNativeConfig:
     if profile not in LONG_DEMO_STRATEGY_PROFILES:
         raise ValueError(
-            f"Unknown long-native demo profile: {profile}. "
-            f"Choices: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}"
+            f"Unknown long-native demo profile: {profile}. Choices: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}"
         )
     if profile == "LongV11aDivWeekendVol":
         return _v11a_long_native_config()
@@ -319,27 +261,13 @@ def _long_demo_strategy_id(profile: str) -> str:
     raise ValueError(f"Unknown long-native demo profile: {profile}")
 
 
-def _long_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int) -> str:
-    """Long-sleeve entry/exit orderLinkId (prefix 'en-l' / 'ux-l'). Delegates to the single
-    canonical builder so the lm-{prefix}-{base}-{ts36} format has ONE source of truth (this was a
-    byte-for-byte copy of event_demo._order_link_id; the decoder is likewise single-sourced)."""
-    return _order_link_id(prefix, symbol=symbol, signal_ts_ms=signal_ts_ms)
-
-
-def _long_risk_order_link_id(prefix: str, *, symbol: str, ts_ms: int, attempt: int) -> str:
-    """Long-sleeve risk-exit orderLinkId. Delegates to the single canonical risk builder."""
-    return _risk_order_link_id(prefix, symbol=symbol, ts_ms=ts_ms, attempt=attempt)
-
-
 def _validate_long_demo_config(
     config: LongNativeDemoCycleConfig,
     strategy_config: LongNativeConfig | None = None,
 ) -> None:
     strategy = strategy_config or _long_demo_event_config(config.strategy_profile)
     if config.strategy_profile not in LONG_DEMO_STRATEGY_PROFILES:
-        raise ValueError(
-            f"strategy_profile must be one of: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}"
-        )
+        raise ValueError(f"strategy_profile must be one of: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}")
     if config.lookback_days < 95:
         raise ValueError(
             "lookback_days must be at least 95 so turnover_median_90d "
@@ -361,10 +289,7 @@ def _validate_long_demo_config(
         raise ValueError("entry_leverage must be positive")
     if not 0.0 < config.max_projected_initial_margin_pct_equity <= 1.0:
         raise ValueError("max_projected_initial_margin_pct_equity must be in (0, 1]")
-    if (
-        abs(float(strategy.max_per_symbol_weight) - float(strategy.max_position_weight))
-        > 1e-12
-    ):
+    if abs(float(strategy.max_per_symbol_weight) - float(strategy.max_position_weight)) > 1e-12:
         raise ValueError(
             "long demo live sizing requires strategy.max_per_symbol_weight == "
             "strategy.max_position_weight until the live order path explicitly "
@@ -387,19 +312,16 @@ def _validate_long_demo_config(
             f"{config.max_projected_initial_margin_pct_equity:.2%}; lower notional_multiplier, "
             "lower vol_target_max_scale/max_concurrent_positions, or explicitly choose a safe cap"
         )
-    # B.4: paper-shadow mode is a no-submit ledger writer. Refuse the
-    # paper_mode + submit_orders combo loudly so a misconfigured paper unit
-    # cannot fire real orders.
-    if config.paper_mode and config.submit_orders:
-        raise ValueError("paper_mode=True is incompatible with submit_orders=True")
-    if config.paper_mode and not config.record_dry_run:
-        raise ValueError("paper_mode=True requires record_dry_run=True so the paper ledger is written")
-    from .bybit import validate_order_submit_allowed
-
-    validate_order_submit_allowed(
-        submit_orders=config.submit_orders,
-        confirm_demo_orders=config.confirm_demo_orders,
-    )
+    execution_environment(config.execution_environment)
+    has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
+    has_account_execution_root = bool(str(config.account_execution_root or "").strip())
+    if has_account_inbox != has_account_execution_root:
+        raise ValueError("account_intent_inbox_root and account_execution_root must be configured together")
+    if not has_account_inbox:
+        raise ValueError(
+            "operational demo/paper mode requires account_intent_inbox_root and "
+            "account_execution_root; direct sleeve order authority is retired"
+        )
 
 
 def target_long_order_notional_pct_equity(
@@ -422,11 +344,7 @@ def projected_long_initial_margin_pct_equity(
     strategy_config: LongNativeConfig,
 ) -> dict[str, float]:
     per_order_notional_pct = target_long_order_notional_pct_equity(demo_config, strategy_config)
-    worst_case_vol_scale = (
-        float(strategy_config.vol_target_max_scale)
-        if strategy_config.enable_vol_target
-        else 1.0
-    )
+    worst_case_vol_scale = float(strategy_config.vol_target_max_scale) if strategy_config.enable_vol_target else 1.0
     # audit2c: the LIVE per-position notional also multiplies by weekend_size_mult
     # (1.5 on weekend entries) and the vol-parity position_weight (max 1.0 given the
     # vol floor). Model both so the guard captures the true worst-case book IM
@@ -434,10 +352,7 @@ def projected_long_initial_margin_pct_equity(
     worst_case_weekend_mult = max(1.0, float(strategy_config.weekend_size_mult))
     worst_case_position_weight = 1.0  # audit2c: vol-parity weight is bounded by 1.0 (vol floor)
     worst_case_order_notional_pct = (
-        per_order_notional_pct
-        * worst_case_vol_scale
-        * worst_case_weekend_mult
-        * worst_case_position_weight
+        per_order_notional_pct * worst_case_vol_scale * worst_case_weekend_mult * worst_case_position_weight
     )
     full_book_positions = max(int(strategy_config.max_concurrent_positions), 0)
     cycle_entries = min(max(int(demo_config.max_new_entries_per_cycle), 0), full_book_positions)
@@ -487,11 +402,8 @@ def run_long_native_demo_cycle(
     demo_config: LongNativeDemoCycleConfig | None = None,
     strategy_config: LongNativeConfig | None = None,
     market_client: Any | None = None,
-    private_client: Any | None = None,
     now_ms: int | None = None,
-    execution_event_router: Any | None = None,
     kline_store: Any | None = None,
-    private_state_cache: Any | None = None,
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
 ) -> dict[str, Any]:
@@ -499,7 +411,20 @@ def run_long_native_demo_cycle(
     strategy = strategy_config or _long_demo_event_config(demo.strategy_profile)
     strategy_id = _long_demo_strategy_id(demo.strategy_profile)
     _validate_long_demo_config(demo, strategy)
-    trades_dataset, orders_dataset, cycles_dataset = _long_demo_dataset_names(demo)
+    kernel_target_route = bool(str(demo.account_intent_inbox_root or "").strip())
+    if not kernel_target_route:
+        raise ValueError(
+            "LONG forward cycles are target-only and require account_intent_inbox_root "
+            "and account_execution_root; local dry-run fills and direct venue execution are retired"
+        )
+    owner_environment = execution_environment(demo.execution_environment).value
+    route = require_account_route(
+        account_id=account_id_for_environment(owner_environment),
+        environment=owner_environment,
+        account_root=Path(str(demo.account_execution_root)).expanduser(),
+        inbox_root=Path(str(demo.account_intent_inbox_root)).expanduser(),
+    )
+    trades_dataset, cycles_dataset = _long_demo_dataset_names(demo)
 
     root = Path(data_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -534,30 +459,22 @@ def run_long_native_demo_cycle(
             raise RuntimeError("long-native demo cycle found no current tradable symbols after universe filters")
         mark_stage("universe")
 
-        trading_client = private_client
-        if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
-            trading_client = _build_private_client(config)
-
-        # Private snapshot: prefer the WS-fed cache when fresh, else REST.
-        # _resolve_private_snapshot falls back to _collect_private_snapshots
-        # which reads .account_type / .settle_coin / .fallback_equity_usdt
-        # — all present on LongNativeDemoCycleConfig.
-        snapshot, private_snapshot_source = _resolve_private_snapshot(
-            trading_client,
-            demo,
-            private_state_cache=private_state_cache,
-            state_cache_stale_seconds=state_cache_stale_seconds,
-        )
-        equity_usdt = resolve_snapshot_equity(snapshot, fallback_equity_usdt=demo.fallback_equity_usdt)
-        wallet_error = snapshot.get("wallet_error", "")
-        raw_open_orders = snapshot.get("raw_open_orders", [])
-        bybit_open_order_error = snapshot.get("open_order_error", "")
-        raw_positions = snapshot.get("raw_positions", [])
-        bybit_position_error = snapshot.get("position_error", "")
-        live_exit_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=True)
-        live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
-        live_position_symbols = set(_active_position_by_symbol(raw_positions))
-        mark_stage("private_snapshots")
+        account_owner_health_error = ""
+        try:
+            owner_health = require_recent_account_owner_health(
+                route.account_path,
+                environment=owner_environment,
+                max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+                now_ns=cycle_now_ms * 1_000_000,
+                expected_account_id=route.account_id,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            account_owner_health_error = f"{type(exc).__name__}: {exc}"[:500]
+            equity_usdt = 0.0
+        else:
+            equity_usdt = owner_health.equity_usdt
+        account_state_source = f"account_owner_health:{owner_environment}"
+        mark_stage("account_health")
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
         klines, kline_cache_stats = _download_recent_1h_klines(
@@ -581,7 +498,9 @@ def run_long_native_demo_cycle(
                 pl.from_epoch(
                     pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY),
                     time_unit="ms",
-                ).dt.strftime("%Y-%m-%d").alias("date")
+                )
+                .dt.strftime("%Y-%m-%d")
+                .alias("date")
             )
         features = build_long_features(klines, funding=None, config=strategy)
         # ls-4: re-select in_universe on the latest bar to the top-N by 90d-MEDIAN turnover
@@ -594,85 +513,56 @@ def run_long_native_demo_cycle(
         )
         mark_stage("features")
 
-        all_trades = read_dataset(root, trades_dataset)
-        all_orders = read_dataset(root, orders_dataset)
+        target_publisher = AccountTargetPublisher(route)
+        unresolved_targets = unresolved_target_snapshot(
+            target_publisher.inbox,
+            sleeve=SleeveAdapterKind.LONG,
+        )
+        legacy_trades = read_dataset(root, trades_dataset)
+        account_root = route.account_path
+        canonical_trades = canonical_strategy_trade_rows(
+            account_root,
+            sleeve=SleeveAdapterKind.LONG.value,
+            strategy_ids=(strategy_id,),
+        )
+        terminal_entry_attempts = terminal_entry_attempt_keys(
+            account_root,
+            sleeve=SleeveAdapterKind.LONG.value,
+            strategy_ids=(strategy_id,),
+            inbox=target_publisher.inbox,
+        )
+        # Preserve only terminal local history for cooldowns. Accepted account
+        # targets are the sole active/pending planning state.
+        all_trades = replace_legacy_open_rows(legacy_trades, canonical_trades)
         margin_projection = projected_long_initial_margin_pct_equity(demo, strategy)
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
-            demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms)
-
-        cycle_trade_rows: list[dict[str, Any]] = []
-        cycle_order_rows: list[dict[str, Any]] = []
-
-        # Time-stop exits first: any open position past planned_exit_ts_ms
-        # is closed reduce-only this cycle. Stop/TP are venue-managed and
-        # fire instantly; the cycle only handles time-stops.
-        exit_plans = _plan_time_stop_exits(
-            all_trades,
-            now_ms=cycle_now_ms,
-            live_exit_order_symbols=live_exit_order_symbols,
+            demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
         )
-        # Shared preflight callback used by BOTH exits and entries: a row is
-        # flushed to the orders parquet BEFORE place_order so a crash between
-        # submission and the cycle's end-of-cycle flush leaves the order_link_id
-        # in the ledger for ws_risk's next-cycle pending-fill reconciliation.
-        if demo.submit_orders or demo.record_dry_run:
-            def _record_preflight(row: dict[str, Any]) -> None:
-                record_ledger_rows(
-                    root,
-                    order_rows=[row],
-                    trade_dataset=trades_dataset,
-                    order_dataset=orders_dataset,
-                    mode="demo" if demo.submit_orders else "paper",
-                    sleeve="long",
-                    now_ms=cycle_now_ms,
-                )
-            preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight
-        else:
-            preflight_callback = None
-        # long-sleeve-2: compute price_by_symbol BEFORE exits so a paper/dry-run close marks to
-        # the live ticker price (real forward PnL) instead of a FLAT 0% at entry. It is a pure
-        # function of tickers+klines (both resolved above), so the earlier compute is
-        # side-effect-free; the entry path below reuses the same lookup.
+
+        exit_plans = _plan_time_stop_exits(all_trades, now_ms=cycle_now_ms)
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
-        executed_exits, exit_order_rows = _execute_long_exits(
+        exit_target_intents = _long_exit_target_intents(
             exit_plans,
             all_trades,
-            trading_client=trading_client,
-            demo=demo,
+            strategy_id=strategy_id,
             now_ms=cycle_now_ms,
-            price_by_symbol=price_by_symbol,
-            execution_event_router=execution_event_router,
-            record_preflight=preflight_callback,
+            default_leverage=demo.entry_leverage,
         )
-        if executed_exits:
-            all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
-            if demo.submit_orders or demo.record_dry_run:
-                cycle_trade_rows.extend(executed_exits)
-        if exit_order_rows:
-            all_orders = _upsert_rows(all_orders, exit_order_rows, key="order_link_id")
-            if demo.submit_orders or demo.record_dry_run:
-                cycle_order_rows.extend(exit_order_rows)
-        mark_stage("exits")
+        unresolved_exit_suppressions = sum(
+            intent.intent.target_key in unresolved_targets.target_keys
+            for intent in exit_target_intents
+        )
+        exit_target_intents = [
+            intent
+            for intent in exit_target_intents
+            if intent.intent.target_key not in unresolved_targets.target_keys
+        ]
+        mark_stage("exit_targets")
 
         # Entry detection: derive FC candidates from the latest closed daily
         # bar per symbol, then check sniper retrace condition against live 1h
-        # bars. Each candidate carries enough state to enter at-market this
-        # cycle if conditions are met or the deadline has expired.
-        contract_by_symbol = _contract_lookup(universe)
-        # long-sleeve-5: read the shared cross-sleeve control row (read-only, swallow
-        # errors -> neutral NO-OP) and SHRINK this cycle's new-entry budget if the long
-        # sleeve is at/over its pre-registered IM ceiling. Null/absent split => unchanged
-        # legacy behavior. Long first -- it is the worst margin offender (10% IM x 10 slots).
-        cross_sleeve_root = (
-            Path(demo.cross_sleeve_account_root).expanduser()
-            if demo.cross_sleeve_account_root is not None
-            else shared_account_root(root)
-        )
-        cross_sleeve_state = read_account_state(cross_sleeve_root)
-        effective_max_new_entries, long_margin_clamped = clamp_max_new_entries(
-            demo.max_new_entries_per_cycle, sleeve="long", state=cross_sleeve_state
-        )
-        skipped_long_margin_budget = demo.max_new_entries_per_cycle if long_margin_clamped else 0
+        # bars. Each candidate carries enough state to publish a desired
+        # component notional without touching venue quantity/order state.
         candidates, skip_counts = _select_long_entry_candidates(
             features=features,
             klines=klines,
@@ -680,137 +570,87 @@ def run_long_native_demo_cycle(
             now_ms=cycle_now_ms,
             strategy=strategy,
             price_by_symbol=price_by_symbol,
-            max_new_entries=effective_max_new_entries,
+            max_new_entries=demo.max_new_entries_per_cycle,
         )
-
-        # Apply cooldown / capacity / liveness filters
-        free_slots = max(strategy.max_concurrent_positions - _count_open_long_positions(all_trades), 0)
+        free_slots = max(
+            strategy.max_concurrent_positions - _count_long_target_reservations(all_trades),
+            0,
+        )
         candidates = candidates[:free_slots]
-        candidates, pending_skips = _filter_pending_long_entries(candidates, all_orders, now_ms=cycle_now_ms)
-        live_pos_skips = 0
-        live_open_skips = 0
-        if _combine_errors(bybit_position_error, wallet_error, bybit_open_order_error):
-            if demo.submit_orders:
-                position_error_skips = len(candidates)
-                candidates = []
-            else:
-                position_error_skips = 0
-        else:
-            position_error_skips = 0
-            candidates, live_pos_skips = _filter_by_symbol_set(candidates, live_position_symbols)
-            candidates, live_open_skips = _filter_by_symbol_set(candidates, live_entry_order_symbols)
+        entry_candidates = len(candidates)
+        skipped_account_owner_health = 0
+        if account_owner_health_error:
+            skipped_account_owner_health = len(candidates)
+            candidates = []
 
-        # Parallel entry submission. Each worker owns its own private REST
-        # client; within this long-entry burst they share ONE limiter so the
-        # burst stays within budget. NOTE (ratelimit-rest-4): this limiter is
-        # per-purpose, NOT a process-wide per-IP budget — the continuous cycle
-        # fetch (event_demo_data) and the kline bootstrap (kline_stream_manager)
-        # each construct their own independent limiters with separate windows,
-        # so they do not compose into a single per-IP allowance. The long
-        # private budget is sized conservatively (see
-        # _long_demo_private_rest_rate_limit_per_second) to leave headroom under
-        # Bybit's per-account/per-IP caps; cross-purpose coordination would need
-        # a single hoisted limiter injected into all REST clients.
-        private_factory: Callable[[], Any] | None
-        # audit2b: `requested_entry_workers` is the configured parallelism the caller
-        # PASSES to _execute_long_entries as max_workers; it is NOT what executes.
-        # _execute_long_entries discards max_workers/private_client_factory and runs the
-        # entry burst sequentially (one place_order at a time), so the truthful worker
-        # count for telemetry is always 1 (see `entries_parallel_workers` below).
-        requested_entry_workers = 1
-        if demo.submit_orders and demo.max_concurrent_entries > 1 and len(candidates) > 1:
-            shared_limiter = BybitRestRateLimiter(
-                max_requests=_long_demo_private_rest_rate_limit_per_second(),
-                per_seconds=1.0,
-            )
-
-            def _build_worker_client() -> BybitPrivateClient:
-                client = _build_private_client(config)
-                client.rate_limiter = shared_limiter
-                return client
-
-            private_factory = _build_worker_client
-            requested_entry_workers = min(demo.max_concurrent_entries, len(candidates))
-        else:
-            private_factory = None
-
-        executed_entries, entry_order_rows, skipped_long_reservation = _execute_long_entries(
+        entry_target_intents = _long_entry_target_intents(
             candidates,
-            trading_client=trading_client,
             demo=demo,
             equity_usdt=equity_usdt,
             order_notional_pct_equity=order_notional_pct_equity,
             price_by_symbol=price_by_symbol,
-            contract_by_symbol=contract_by_symbol,
             now_ms=cycle_now_ms,
             strategy_id=strategy_id,
-            record_preflight=preflight_callback,
-            private_client_factory=private_factory,
-            execution_event_router=execution_event_router,
-            max_workers=requested_entry_workers,
-            cross_sleeve_account_root=str(cross_sleeve_root),
-            live_position_symbols=live_position_symbols,
         )
-        if executed_entries:
-            all_trades = _upsert_rows(all_trades, executed_entries, key="trade_id")
-            if demo.submit_orders or demo.record_dry_run:
-                cycle_trade_rows.extend(executed_entries)
-        if entry_order_rows:
-            all_orders = _upsert_rows(all_orders, entry_order_rows, key="order_link_id")
-            if demo.submit_orders or demo.record_dry_run:
-                cycle_order_rows.extend(entry_order_rows)
-        mark_stage("entries")
-
-        # The journal commits order and trade facts under one sequence. Mutable
-        # Parquet ledgers are rebuilt projections, eliminating the old two-write
-        # crash window and its order-vs-trade authority ambiguity.
-        if cycle_order_rows or cycle_trade_rows:
-            record_ledger_rows(
-                root,
-                order_rows=cycle_order_rows,
-                trade_rows=cycle_trade_rows,
-                trade_dataset=trades_dataset,
-                order_dataset=orders_dataset,
-                mode="demo" if demo.submit_orders else "paper",
-                sleeve="long",
-                now_ms=cycle_now_ms,
-            )
-        # Markouts mature with wall-clock time, including otherwise quiet
-        # cycles that produce no new ledger rows.
-        record_due_markouts(root, now_ms=cycle_now_ms, prices=price_by_symbol)
-        mark_stage("ledger_flush")
-
-        # Refresh after submissions so the report reflects post-state
-        if trading_client is not None and (exit_order_rows or entry_order_rows):
-            (
-                (refreshed_raw_positions, refreshed_position_error),
-                (refreshed_open_orders, refreshed_open_order_error),
-            ) = _refresh_positions_and_orders(trading_client, settle_coin=demo.settle_coin)
-            if not refreshed_position_error:
-                raw_positions = refreshed_raw_positions
-                bybit_position_error = ""
-            if not refreshed_open_order_error:
-                raw_open_orders = refreshed_open_orders
-
-        bybit_positions = build_position_pnl_snapshot(raw_positions)
-        bybit_position_summary = summarize_position_pnl(bybit_positions)
-        ledger_open_trades = _open_long_trades(all_trades)
-        # P1-3 alignment: prefer position-level markPrice over ticker mark for
-        # ledger uPnL so it matches Bybit's own position uPnL by construction.
-        ledger_positions = build_ledger_position_pnl_snapshot(
-            ledger_open_trades,
-            price_by_symbol,
-            position_by_symbol=_active_position_by_symbol(raw_positions),
+        unresolved_entry_suppressions = sum(
+            intent.intent.target_key in unresolved_targets.target_keys
+            for intent in entry_target_intents
         )
-        ledger_position_summary = summarize_position_pnl(ledger_positions)
-        position_report_error = _combine_errors(bybit_position_error, bybit_open_order_error, wallet_error)
-        mark_stage("summaries")
+        terminal_entry_suppressions = sum(
+            str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
+            in terminal_entry_attempts
+            for intent in entry_target_intents
+            if intent.intent.target_key not in unresolved_targets.target_keys
+        )
+        exit_target_keys = {intent.intent.target_key for intent in exit_target_intents}
+        entry_target_intents = [
+            intent
+            for intent in entry_target_intents
+            if intent.intent.target_key not in unresolved_targets.target_keys
+            and str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
+            not in terminal_entry_attempts
+            and intent.intent.target_key not in exit_target_keys
+        ]
+        publication = publish_exit_first_target_requests(
+            target_publisher,
+            batch_prefix=f"long-target/{strategy_id}/{cycle_now_ms}",
+            exit_intents=exit_target_intents,
+            entry_intents=entry_target_intents,
+            created_ts_ns=cycle_now_ms * 1_000_000,
+        )
+        published_exit_intents = len(publication.exit_requests)
+        published_entry_intents = (
+            len(entry_target_intents) if publication.entry_request is not None else 0
+        )
+        account_target_requests = {
+            "exit_request_ids": list(publication.exit_request_ids),
+            "exit_requests": [
+                {
+                    "request_id": item.request.request_id,
+                    "batch_id": item.request.batch_id,
+                    "target_key": item.request.intents[0].intent.target_key,
+                }
+                for item in publication.exit_requests
+            ],
+            "entry_request_id": publication.entry_request_id,
+            "entry_request": (
+                {}
+                if publication.entry_request is None
+                else {
+                    "request_id": publication.entry_request.request.request_id,
+                    "batch_id": publication.entry_request.request.batch_id,
+                    "intent_count": len(publication.entry_request.request.intents),
+                }
+            ),
+            "publication_errors": [asdict(error) for error in publication.errors],
+        }
+        mark_stage("target_publish")
 
         cycle_row = {
             "cycle_id": cycle_id,
             "ts_ms": cycle_now_ms,
             "sleeve": "long",
-            "mode": "submit" if demo.submit_orders else "dry_run",
+            "mode": f"{owner_environment}_target",
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
             "symbols": len(symbols),
@@ -824,36 +664,26 @@ def run_long_native_demo_cycle(
             # WS-vs-REST telemetry with the same cache-vs-fallback contract
             # used by the active demo daemons.
             "ticker_source": ticker_source,
-            "private_snapshot_source": private_snapshot_source,
+            "account_state_source": account_state_source,
             "feature_rows": features.height if not features.is_empty() else 0,
             "latest_feature_ts_ms": _max_int(features, "ts_ms") if not features.is_empty() else 0,
-            "entry_candidates": len(candidates),
-            # One durable order row is emitted for every candidate that reached
-            # the execution boundary, including local price/sizing rejections.
-            # Reservation skips never attempted an order and are reported
-            # separately below.
-            "entry_attempts": len(entry_order_rows),
-            "entries_executed": len(executed_entries),
-            "entry_rejections": sum(
-                1 for row in entry_order_rows if str(row.get("status") or "") == "rejected"
-            ),
-            "entry_rejection_reasons": ",".join(
-                sorted({
-                    str(row.get("error") or "")
-                    for row in entry_order_rows
-                    if str(row.get("status") or "") == "rejected" and str(row.get("error") or "")
-                })
-            ),
-            # audit2b: report the ACTUAL worker count. _execute_long_entries runs the
-            # entry burst SEQUENTIALLY (max_workers/private_client_factory are reserved
-            # for future parallelism, not used), so the real concurrency is always 1 —
-            # the prior `requested_entry_workers` value (≤ max_concurrent_entries) was
-            # the configured request, never what executed. Telemetry-only; no change to
-            # sizing/selection/order submission.
-            "entries_parallel_workers": 1,
+            "entry_candidates": entry_candidates,
+            "entry_targets_queued": published_entry_intents,
             "exit_candidates": len(exit_plans),
-            "exits_executed": len(executed_exits),
-            "open_long_positions_after": _count_open_long_positions(all_trades),
+            "exit_targets_queued": published_exit_intents,
+            "target_intents_queued": published_exit_intents + published_entry_intents,
+            "account_target_route": True,
+            "account_target_exit_request_ids": list(publication.exit_request_ids),
+            "account_target_entry_request_id": publication.entry_request_id,
+            # Compatibility alias: it now names only the entry/follow-on
+            # publication; exit request IDs are always represented separately.
+            "account_target_request_id": publication.entry_request_id,
+            "account_target_publication_error_count": len(publication.errors),
+            "unresolved_exit_target_suppressions": unresolved_exit_suppressions,
+            "unresolved_entry_target_suppressions": unresolved_entry_suppressions,
+            "terminal_entry_attempt_suppressions": terminal_entry_suppressions,
+            "account_owner_health_error": account_owner_health_error,
+            "open_long_components": _count_open_long_positions(all_trades),
             "equity_usdt": equity_usdt,
             "order_notional_pct_equity": order_notional_pct_equity,
             "projected_full_book_initial_margin_pct_equity": margin_projection["full_book_initial_margin_pct_equity"],
@@ -861,25 +691,8 @@ def run_long_native_demo_cycle(
             "max_projected_initial_margin_pct_equity": demo.max_projected_initial_margin_pct_equity,
             "entry_leverage": demo.entry_leverage,
             "notional_multiplier": demo.notional_multiplier,
-            "bybit_positions": bybit_position_summary["positions"],
-            "bybit_position_value_usdt": bybit_position_summary["position_value_usdt"],
-            "bybit_unrealized_pnl_usdt": bybit_position_summary["unrealized_pnl_usdt"],
-            "bybit_position_pnl_pct": bybit_position_summary["pnl_pct"],
-            "bybit_open_orders": len(raw_open_orders),
-            "ledger_positions": ledger_position_summary["positions"],
-            "ledger_position_value_usdt": ledger_position_summary["position_value_usdt"],
-            "ledger_unrealized_pnl_usdt": ledger_position_summary["unrealized_pnl_usdt"],
-            "ledger_position_pnl_pct": ledger_position_summary["pnl_pct"],
-            "position_report_error": position_report_error,
-            "telegram_sent": False,
-            "telegram_error": "",
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
-            "skipped_long_margin_budget": skipped_long_margin_budget,  # ls-5: cross-sleeve IM clamp
-            "skipped_long_reservation": skipped_long_reservation,  # ls-6: symbol taken by a sibling
-            "skipped_pending_entry_order": pending_skips,
-            "skipped_live_position_entry": live_pos_skips,
-            "skipped_live_open_entry_order": live_open_skips,
-            "skipped_position_snapshot_error": position_error_skips,
+            "skipped_account_owner_health": skipped_account_owner_health,
             **stage_timings_ms,
             "cycle_elapsed_pre_persist_ms": round((time.perf_counter() - cycle_perf_start) * 1000.0, 3),
         }
@@ -888,31 +701,15 @@ def run_long_native_demo_cycle(
             "cycle": cycle_row,
             "config": asdict(demo),
             "strategy_config": asdict(strategy),
-            "entries": executed_entries,
-            "exits": executed_exits,
-            "entry_orders": entry_order_rows,
-            "exit_orders": exit_order_rows,
+            "account_target_requests": account_target_requests,
             "candidates": candidates,
-            "bybit_positions": bybit_positions,
-            "bybit_open_orders": raw_open_orders[:20],
-            "bybit_position_summary": bybit_position_summary,
-            "ledger_positions": ledger_positions,
-            "ledger_position_summary": ledger_position_summary,
+            "planned_exits": exit_plans,
             "data_sources": {
                 "ticker_source": ticker_source,
-                "private_snapshot_source": private_snapshot_source,
+                "account_state_source": account_state_source,
             },
             "report_dir": str(report_dir),
         }
-
-        # Telegram moves OUTSIDE the cycle file lock (round 4 — the same
-        # lock-held-I/O contract the continuous sleeve adopted in the solo
-        # sweep): the send can stall up to its 10s timeout and must never hold
-        # the cycle lock through it. The persisted cycle row below keeps its
-        # schema with quiet defaults; the live outcome rides on the returned
-        # payload.
-        cycle_row["telegram_sent"] = False
-        cycle_row["telegram_error"] = ""
 
         # Persist cycle telemetry using the standard partitioned cycle path.
         # Without this the long sleeve has zero observability: no cycle history,
@@ -925,7 +722,9 @@ def run_long_native_demo_cycle(
         persist_perf_start = time.perf_counter()
         write_dataset(
             pl.DataFrame([cycle_row_with_date], infer_schema_length=None),
-            root, cycles_dataset, partition_by=("date",),
+            root,
+            cycles_dataset,
+            partition_by=("date",),
         )
         report_path = report_dir / f"long_native_cycle_{cycle_id}.json"
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
@@ -939,21 +738,14 @@ def run_long_native_demo_cycle(
         # the snapshots would otherwise grow to half a million per year. Use an
         # hourly sentinel so we don't stat thousands of files every 60s.
         _prune_cycle_reports(
-            report_dir, prefix="long_native_cycle_", keep_days=7, now_ms=cycle_now_ms,
+            report_dir,
+            prefix="long_native_cycle_",
+            keep_days=7,
+            now_ms=cycle_now_ms,
         )
         cycle_row["timing_persist_ms"] = round((time.perf_counter() - persist_perf_start) * 1000.0, 3)
         cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row
-
-    # Per-cycle telegram AFTER the ledger writes and OUTSIDE the cycle file lock
-    # (round 4); exception-isolated inside _maybe_long_notify.
-    telegram_sent, telegram_error = _maybe_long_notify(
-        payload,
-        enabled=demo.telegram,
-    )
-    cycle_row["telegram_sent"] = telegram_sent
-    if telegram_error:
-        cycle_row["telegram_error"] = telegram_error
     return payload
 
 
@@ -1035,33 +827,34 @@ def _build_long_universe(
     )
 
 
-def _long_demo_private_rest_rate_limit_per_second() -> int:
-    """Conservative per-purpose REST budget for the long private-entry burst.
-
-    ratelimit-rest-4: this returns ~1/3 of the base private budget
-    (``_demo_private_rest_rate_limit_per_second`` ~= 15 -> ~5 here). It is a
-    per-purpose limiter, NOT a per-IP coordinator: the continuous cycle fetch and
-    the kline bootstrap run their own independent limiters, so the budgets do not
-    compose into one per-IP allowance. The downsizing keeps the long burst well
-    under the per-account/per-IP caps with headroom for the other purposes."""
-    base = max(int(_demo_private_rest_rate_limit_per_second() / 3), 3)
-    return base
-
-
 def _open_long_trades(trades: pl.DataFrame) -> pl.DataFrame:
     if trades.is_empty() or "status" not in trades.columns:
         return trades
-    # Long-sleeve trade rows only ever carry status "open" (entry) or "closed" (exit) —
-    # never "submitted" (that's an ORDER-row status, not a trade-row status). The
-    # "submitted" branch was dead/misleading (LON-4 fix 1). An in-flight unconfirmed
-    # entry has no trade row at all; it's gated separately by _filter_pending_long_entries
-    # (PENDING_ORDER_GUARD_MS) + the live-position/open-order filters.
+    # Direct-route trade rows carry open/closed. The canonical account read model
+    # also carries target_pending, which is deliberately excluded here: accepted
+    # desire is not reconstructed fill evidence. Admission reserves those rows via
+    # _long_target_reservations instead. "submitted" remains an ORDER-row status.
     open_only = trades.filter(pl.col("status") == "open")
     if open_only.is_empty():
         return open_only
     if "side" in open_only.columns:
         return open_only.filter(pl.col("side") == "long")
     return open_only
+
+
+def _long_target_reservations(trades: pl.DataFrame) -> pl.DataFrame:
+    """Long rows that reserve admission without asserting a confirmed fill."""
+
+    reserved = target_reservation_rows(trades)
+    if reserved.is_empty():
+        return reserved
+    if "side" in reserved.columns:
+        return reserved.filter(pl.col("side") == "long")
+    return reserved
+
+
+def _count_long_target_reservations(trades: pl.DataFrame) -> int:
+    return int(_long_target_reservations(trades).height)
 
 
 def _count_open_long_positions(trades: pl.DataFrame) -> int:
@@ -1082,10 +875,7 @@ def _cooldown_until_long(trades: pl.DataFrame, *, cooldown_days: int) -> dict[st
         .agg(pl.col("exit_ts_ms").max().alias("last_exit_ts_ms"))
         .with_columns((pl.col("last_exit_ts_ms") + cooldown_ms).alias("cooldown_until_ms"))
     )
-    return {
-        str(row["symbol"]): int(row["cooldown_until_ms"])
-        for row in grouped.to_dicts()
-    }
+    return {str(row["symbol"]): int(row["cooldown_until_ms"]) for row in grouped.to_dicts()}
 
 
 def _select_long_entry_candidates(
@@ -1120,7 +910,10 @@ def _select_long_entry_candidates(
         skips["no_features"] = 1
         return [], skips
 
-    open_symbols = set(_column_values(_open_long_trades(all_trades), "symbol"))
+    # An accepted target that is still converging reserves its symbol just like
+    # a confirmed position for admission purposes.  It is deliberately not fed
+    # to the exit/P&L helpers, which continue to consume _open_long_trades only.
+    open_symbols = set(_column_values(_long_target_reservations(all_trades), "symbol"))
     cooldown_until = _cooldown_until_long(all_trades, cooldown_days=strategy.cooldown_days)
 
     # Look at the last 2 closed daily bars so we catch a signal that fired
@@ -1130,16 +923,9 @@ def _select_long_entry_candidates(
     # bar is look-ahead vs the backtest's closed-bar signal (a no-look-ahead correctness gate).
     # Count stale drops only for actual recent FC signals. Old historical feature
     # rows without FC should not make a flat cycle look stale-signal blocked.
-    closed_ts = sorted(
-        int(ts)
-        for ts in features["ts_ms"].unique().to_list()
-        if ts is not None and int(ts) <= now_ms
-    )
+    closed_ts = sorted(int(ts) for ts in features["ts_ms"].unique().to_list() if ts is not None and int(ts) <= now_ms)
     recent_closed_ts = closed_ts[-2:]
-    rows_by_ts = {
-        ts: features.filter(pl.col("ts_ms") == ts).to_dicts()
-        for ts in recent_closed_ts
-    }
+    rows_by_ts = {ts: features.filter(pl.col("ts_ms") == ts).to_dicts() for ts in recent_closed_ts}
     eligible_ts = []
     for ts in recent_closed_ts:
         fc_signal_count = 0
@@ -1250,7 +1036,6 @@ def _select_long_entry_candidates(
                 "stop_loss_pct": float(stop_pct),
                 "take_profit_pct": float(tp_pct),
                 "max_hold_days": int(hold_days),
-                "planned_exit_ts_ms": now_ms + exact_duration_ms(days=hold_days),
                 "atr_14d_pct": atr_pct,
                 "realized_vol": realized_vol,
                 "position_weight": position_weight,
@@ -1304,9 +1089,7 @@ def _fc_rank_is_near_boundary(
     return rank >= cutoff - float(margin)
 
 
-def _log_fc_rank_boundary(
-    *, symbol: str, today_volume_rank: float, fc_top_volume_rank_max: int
-) -> None:
+def _log_fc_rank_boundary(*, symbol: str, today_volume_rank: float, fc_top_volume_rank_max: int) -> None:
     """long-sleeve-2: emit a cycle-telemetry line when a fired FC candidate's live
     volume rank is within FC_VOLUME_RANK_TELEMETRY_MARGIN of the cutoff, so
     live-vs-backtest rank-boundary divergence is auditable. Observability ONLY —
@@ -1338,69 +1121,18 @@ def _vol_parity_weight(
 
 
 def _long_trade_id(*, symbol: str, signal_ts_ms: int) -> str:
-    return f"long-{symbol}-{signal_ts_ms}"
-
-
-def _filter_pending_long_entries(
-    candidates: list[dict[str, Any]],
-    orders: pl.DataFrame,
-    *,
-    now_ms: int,
-) -> tuple[list[dict[str, Any]], int]:
-    if not candidates or orders.is_empty():
-        return candidates, 0
-    pending_trade_ids: set[str] = set()
-    pending_symbols: set[str] = set()
-    for row in orders.to_dicts():
-        if _bool(row.get("reduce_only")):
-            continue
-        if str(row.get("status", "")) not in PENDING_ORDER_STATUSES:
-            continue
-        ts_ms = int(row.get("ts_ms") or 0)
-        if ts_ms > 0 and now_ms - ts_ms > PENDING_ORDER_GUARD_MS:
-            continue
-        tid = str(row.get("trade_id", ""))
-        sym = str(row.get("symbol", ""))
-        if tid:
-            pending_trade_ids.add(tid)
-        if sym:
-            pending_symbols.add(sym)
-    kept: list[dict[str, Any]] = []
-    skipped = 0
-    for cand in candidates:
-        if str(cand.get("trade_id", "")) in pending_trade_ids or str(cand.get("symbol", "")) in pending_symbols:
-            skipped += 1
-            continue
-        kept.append(cand)
-    return kept, skipped
-
-
-def _filter_by_symbol_set(
-    candidates: list[dict[str, Any]],
-    skip_symbols: set[str],
-) -> tuple[list[dict[str, Any]], int]:
-    if not candidates or not skip_symbols:
-        return candidates, 0
-    kept: list[dict[str, Any]] = []
-    skipped = 0
-    for cand in candidates:
-        if str(cand.get("symbol", "")) in skip_symbols:
-            skipped += 1
-            continue
-        kept.append(cand)
-    return kept, skipped
+    return long_trade_id(symbol=symbol, signal_ts_ms=signal_ts_ms)
 
 
 def _plan_time_stop_exits(
     all_trades: pl.DataFrame,
     *,
     now_ms: int,
-    live_exit_order_symbols: set[str],
 ) -> list[dict[str, Any]]:
-    """Long positions past planned_exit_ts_ms get reduce-only market exits.
+    """Return filled LONG components whose time-stop target is due.
 
-    Venue-managed stop_loss/take_profit handle the fast-exit paths inside
-    Bybit; this only handles time-stop fall-through (3 days for v11a).
+    The producer publishes a zero component target. Working-order suppression,
+    retries, and venue mutation belong to the account owner.
     """
     if all_trades.is_empty():
         return []
@@ -1410,7 +1142,7 @@ def _plan_time_stop_exits(
     plans: list[dict[str, Any]] = []
     for trade in open_long.to_dicts():
         symbol = str(trade.get("symbol", ""))
-        if not symbol or symbol in live_exit_order_symbols:
+        if not symbol:
             continue
         planned = int(trade.get("planned_exit_ts_ms") or 0)
         if planned <= 0 or now_ms < planned:
@@ -1431,1721 +1163,136 @@ def _plan_time_stop_exits(
     return plans
 
 
-def _preflight_long_exit_order_row(
-    *,
-    exit_link: str,
-    now_ms: int,
-    trade_id: str,
-    symbol: str,
-    order_type: str,
-    qty: str,
-    plan: dict[str, Any],
-) -> dict[str, Any]:
-    """Crash-durability preflight row for a long-side exit submission.
-
-    A row with ``status='submitted'`` and ``submit_mode='preflight'`` is flushed
-    to the orders parquet BEFORE place_order so a crash between submission and
-    the cycle's end-of-cycle flush still leaves the order_link_id discoverable
-    for ws_risk pending-fill reconciliation.
-    """
-    return {
-        "order_link_id": exit_link,
-        "ts_ms": now_ms,
-        "trade_id": trade_id,
-        "symbol": symbol,
-        "side": "Sell",
-        "order_type": order_type,
-        "qty": qty,
-        "reduce_only": True,
-        "order_id": "",
-        "submit_mode": "preflight",
-        "avg_price": 0.0,
-        "notional_usdt": 0.0,
-        "status": "submitted",
-        "trade_side": "long",
-        "exit_reason": str(plan.get("exit_reason", "time_stop")),
-        "target_qty": qty,
-        "filled_qty": "",
-        "error": "",
-        "sleeve": "long",
-    }
-
-
-def _execute_long_exits(
+def _long_exit_target_intents(
     exits: list[dict[str, Any]],
     all_trades: pl.DataFrame,
     *,
-    trading_client: Any | None,
-    demo: LongNativeDemoCycleConfig,
+    strategy_id: str,
     now_ms: int,
-    price_by_symbol: dict[str, float] | None = None,
-    execution_event_router: Any | None = None,
-    record_preflight: Callable[[dict[str, Any]], None] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if not exits:
-        return [], []
-    trade_lookup = {str(row["trade_id"]): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
-    rows: list[dict[str, Any]] = []
-    order_rows: list[dict[str, Any]] = []
+    default_leverage: float,
+) -> list[RequestedIntent]:
+    """Translate strategy exits to replacement zero targets without venue I/O."""
+
+    lookup = {str(row.get("trade_id") or ""): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
+    intents: list[RequestedIntent] = []
     for plan in exits:
-        trade_id = str(plan["trade_id"])
-        trade = dict(trade_lookup.get(trade_id, {}))
+        trade_id = str(plan.get("trade_id") or "")
+        trade = lookup.get(trade_id)
         if not trade:
             continue
-        symbol = str(plan["symbol"])
-        qty = str(plan["qty"])
-        # Long exit is a Sell reduce-only
-        exit_link = _long_risk_order_link_id(LONG_EXIT_LINK_PREFIX, symbol=symbol, ts_ms=now_ms, attempt=0)
-        order_result: dict[str, Any] = {}
-        exec_summary: dict[str, Any] = {}
-        submit_mode = "dry_run"
-        status = "planned"
-        error = ""
-        exit_price = 0.0
-        # Pre-declare so the dry-run and place-order-failure branches both
-        # leave the trade-update / order-row writers able to read them.
-        exit_fee_usdt = 0.0
-        exit_exec_time_ms = 0
-        filled_qty = _float(qty)
-        if demo.submit_orders:
-            assert trading_client is not None
-            if record_preflight is not None:
-                record_preflight(
-                    _preflight_long_exit_order_row(
-                        exit_link=exit_link,
-                        now_ms=now_ms,
-                        trade_id=trade_id,
-                        symbol=symbol,
-                        order_type=demo.exit_order_type,
-                        qty=qty,
-                        plan=plan,
-                    )
-                )
-            try:
-                order_params = _order_params(
-                    symbol=symbol,
-                    side="Sell",
-                    qty=qty,
-                    order_type=demo.exit_order_type,
-                    order_link_id=exit_link,
-                    reduce_only=True,
-                )
-                order_result = trading_client.place_order(**order_params)
-                submit_mode = "submitted"
-            except Exception as exc:  # noqa: BLE001 - failed exit must be ledgered for retry
-                submit_mode = "error"
-                status = "failed"
-                error = f"place_order failed: {exc}"[:500]
-                filled_qty = 0.0
-            if submit_mode == "submitted":
-                try:
-                    exec_summary = _wait_for_execution_summary(
-                        trading_client,
-                        symbol=symbol,
-                        order_link_id=exit_link,
-                        poll_seconds=demo.order_fill_confirm_seconds,
-                        poll_interval_seconds=demo.order_fill_poll_interval_seconds,
-                        fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
-                        fast_poll_seconds=demo.order_fill_fast_poll_seconds,
-                        execution_event_router=execution_event_router,
-                        # EXEC-6: without target_qty the first WS leg of a multi-fill
-                        # (book-walk) market order returns immediately and books 'partial'.
-                        target_qty=_float(qty),
-                    )
-                except Exception as exc:  # noqa: BLE001 - ws_risk will reconcile
-                    status = "submitted_unconfirmed"
-                    error = f"fill confirmation failed: {exc}"[:500]
-                    filled_qty = 0.0
-                    exit_fee_usdt = 0.0
-                    exit_exec_time_ms = 0
-                else:
-                    filled_qty = _float(exec_summary.get("qty"))
-                    exit_price = _float(exec_summary.get("avg_price"))
-                    exit_fee_usdt = _float(exec_summary.get("fee"))
-                    exit_exec_time_ms = int(_float(exec_summary.get("exec_time_ms") or 0))
-                    status = order_fill_status(target_qty=qty, filled_qty=filled_qty)
-                finally:
-                    # Router contract: drop the reconciled link's WS buffer.
-                    if execution_event_router is not None:
-                        execution_event_router.clear(exit_link)
-        # Ledger update for the trade
-        if not demo.submit_orders or filled_qty > 0.0 or status == "submitted_unconfirmed":
-            trade_update = dict(trade)
-            if status == "filled" or (not demo.submit_orders):
-                # Close rows must carry realized PnL + venue fee +
-                # venue execTime must land on the close so the ledger carries
-                # the full audit trail without needing the orphan reconciler.
-                # long-sleeve-2: a paper/dry-run close marks to the LIVE ticker price so the
-                # forward shadow records real PnL, not a FLAT 0% at entry. Falls back to the
-                # entry price only when no live price is available.
-                final_exit_price = (
-                    exit_price
-                    or _float((price_by_symbol or {}).get(symbol))
-                    or _float(trade.get("entry_price"))
-                )
-                trade_side = str(trade.get("side") or "long")
-                entry_price_for_return = _float(trade.get("entry_price"))
-                gross_trade_return = _trade_return(
-                    entry_price_for_return, final_exit_price, side=trade_side
-                )
-                notional_weight = _ratio_or_zero(
-                    trade.get("notional_usdt"), trade.get("equity_usdt")
-                )
-                # long-sleeve-3: net_return must be NET of venue fees to match the
-                # backtest's _finalize_trade (gross + cost + funding) and the
-                # authoritative live ledger roll-up (_ledger_summary nets entry+exit
-                # fees). Previously this column was gross-of-cost yet named net_return,
-                # a parity-implying label that would mislead any reconcile/diagnostic
-                # comparing it against the backtest net_return. Funding is not modeled
-                # per-trade on the live path, so (like the authoritative roll-up) only
-                # fees are subtracted here. Fees are an equity-fraction cost.
-                fee_return = _ratio_or_zero(
-                    _float(trade.get("entry_fee_usdt")) + _float(exit_fee_usdt),
-                    trade.get("equity_usdt"),
-                )
-                trade_update.update({
-                    "status": "closed",
-                    "exit_ts_ms": now_ms,
-                    "exit_price": final_exit_price,
-                    "exit_fee_usdt": exit_fee_usdt,
-                    "exit_exec_time_ms": exit_exec_time_ms,
-                    "gross_trade_return": gross_trade_return,
-                    "net_return": gross_trade_return * notional_weight - fee_return,
-                    "exit_reason": str(plan.get("exit_reason", "time_stop")),
-                    "exit_order_link_id": exit_link,
-                    "exit_order_id": order_result.get("orderId", ""),
-                    "submit_mode": submit_mode,
-                    "closed_at_ms": now_ms,
-                    "updated_at_ms": now_ms,
-                })
-            else:
-                trade_update.update({
-                    "exit_order_link_id": exit_link,
-                    "submit_mode": submit_mode,
-                    "updated_at_ms": now_ms,
-                })
-            rows.append(trade_update)
-        # Mark the exit ORDER leg to the same price the trade leg uses: in dry-run/paper
-        # the venue exit_price is 0 (no real fill), so the order row recorded avg_price/
-        # notional=0 while the trade row marked to the live price — mirror the entry-row
-        # convention (audit-iter3 backlog). Submit mode keeps the real venue exec price.
-        order_exit_price = exit_price if demo.submit_orders else (
-            exit_price
-            or _float((price_by_symbol or {}).get(symbol))
-            or _float(trade.get("entry_price"))
+        symbol = str(plan.get("symbol") or trade.get("symbol") or "").upper()
+        intents.append(
+            component_target_intent(
+                adapter_kind=SleeveAdapterKind.LONG,
+                action="exit",
+                decision_ts_ms=now_ms,
+                strategy_id=strategy_id,
+                component_id=trade_id,
+                symbol=symbol,
+                signed_notional_usdt=0.0,
+                leverage=_float(trade.get("entry_leverage")) or default_leverage,
+                reason=str(plan.get("exit_reason") or "time_stop"),
+                metadata={
+                    "source": "long_native_target_adapter",
+                    "owner_sleeve": "long",
+                    "prior_trade_id": trade_id,
+                    "planned_exit_ts_ms": int(_float(trade.get("planned_exit_ts_ms"))),
+                },
+            )
         )
-        order_exit_qty = filled_qty if demo.submit_orders else _float(qty)
-        order_rows.append({
-            "order_link_id": exit_link,
-            "ts_ms": now_ms,
-            "trade_id": trade_id,
-            "symbol": symbol,
-            "side": "Sell",
-            "order_type": demo.exit_order_type,
-            "qty": qty,
-            "reduce_only": True,
-            "order_id": order_result.get("orderId", ""),
-            "submit_mode": submit_mode,
-            "avg_price": order_exit_price,
-            "decision_price": _float((price_by_symbol or {}).get(symbol)) or _float(trade.get("entry_price")),
-            "submission_price": _float((price_by_symbol or {}).get(symbol)) or _float(trade.get("entry_price")),
-            "submitted_at_ms": now_ms,
-            "fee_usdt": exit_fee_usdt,
-            "exec_time_ms": exit_exec_time_ms,
-            "notional_usdt": abs(order_exit_price * order_exit_qty) if order_exit_price > 0.0 else 0.0,
-            "status": status,
-            "trade_side": "long",
-            "exit_reason": str(plan.get("exit_reason", "time_stop")),
-            "target_qty": qty,
-            "filled_qty": str(filled_qty) if filled_qty > 0.0 else "",
-            "canonical_fill_details": exec_summary.get("fill_details", []),
-            "error": error,
-            "sleeve": "long",
-        })
-    return rows, order_rows
+    return intents
 
 
-def _execute_long_entries(
+def _long_entry_target_intents(
     candidates: list[dict[str, Any]],
     *,
-    trading_client: Any | None,
     demo: LongNativeDemoCycleConfig,
     equity_usdt: float,
     order_notional_pct_equity: float,
     price_by_symbol: dict[str, float],
-    contract_by_symbol: dict[str, dict[str, Any]],
     now_ms: int,
     strategy_id: str,
-    record_preflight: Callable[[dict[str, Any]], None] | None,
-    private_client_factory: Callable[[], Any] | None,
-    execution_event_router: Any | None,
-    max_workers: int,
-    cross_sleeve_account_root: str | None = None,
-    live_position_symbols: set[str] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    if not candidates:
-        return [], [], 0
-    # Parallel path is a simplified version of event_demo._execute_entries:
-    # candidate count for the long sleeve is small (≤5), and the cycle is
-    # signal-sparse, so we do the simpler sequential path. If it becomes a
-    # bottleneck the thread-pool pattern from event_demo can be lifted in.
-    _ = max_workers, private_client_factory  # reserved for future parallelism
-    rows: list[dict[str, Any]] = []
-    order_rows: list[dict[str, Any]] = []
-    skipped_reservation = 0
-    for cand in candidates:
-        # long-sleeve-6: on a REAL submit, atomically claim the symbol through the shared
-        # control row BEFORE building/placing the order — the claim takes the control-row
-        # dataset lock and rejects iff another sleeve holds an active reservation OR a live
-        # venue position exists, closing the same-minute cross-process race the lagging
-        # venue snapshot misses. Dry-run/paper never reserves (no real order races);
-        # fail-open if no writer/control row yet.
-        claimed_reservation = False
-        if demo.submit_orders and cross_sleeve_account_root is not None:
-            _symbol = str(cand.get("symbol", ""))
-            if not claim_symbol_reservation(
-                cross_sleeve_account_root,
-                symbol=_symbol,
-                sleeve="long",
-                trade_id=str(cand.get("trade_id", "")),
-                now_ms=now_ms,
-                live_position_symbols=live_position_symbols,
-            ):
-                _logger.info("long entry skipped: symbol %s taken by another sleeve (reservation)", _symbol)
-                skipped_reservation += 1
-                continue
-            claimed_reservation = True
-        row, order = _execute_single_long_entry(
-            cand,
-            trading_client=trading_client,
-            demo=demo,
-            equity_usdt=equity_usdt,
-            order_notional_pct_equity=order_notional_pct_equity,
-            price_by_symbol=price_by_symbol,
-            contract_by_symbol=contract_by_symbol,
-            now_ms=now_ms,
-            strategy_id=strategy_id,
-            record_preflight=record_preflight,
-            execution_event_router=execution_event_router,
-        )
-        if row is not None:
-            rows.append(row)
-        elif claimed_reservation and cross_sleeve_account_root is not None:
-            # LON-9: the entry did NOT open a confirmed position (place failed / fill
-            # unconfirmed -> no trade row), so release the reservation now rather than
-            # blocking siblings from this symbol for the full TTL. Fail-open; the TTL +
-            # closed_trade_ids GC remain the backstop. A confirmed (row is not None) entry
-            # keeps its reservation until ws_risk GCs it on the trade's close.
-            release_symbol_reservation(
-                cross_sleeve_account_root,
-                symbol=str(cand.get("symbol", "")),
-                sleeve="long",
-                trade_id=str(cand.get("trade_id", "")),
-                now_ms=now_ms,
-            )
-        if order is not None:
-            order_rows.append(order)
-    return rows, order_rows, skipped_reservation
+) -> list[RequestedIntent]:
+    """Translate entry decisions to fill-anchored component targets.
 
+    Venue quantity steps and minimum notionals intentionally remain the account
+    kernel's responsibility. Protection percentages and hold duration remain
+    strategy decisions, while executable prices and lifecycle clocks are
+    derived by the account owner only after confirmed fills.
+    """
 
-def _execute_single_long_entry(
-    candidate: dict[str, Any],
-    *,
-    trading_client: Any | None,
-    demo: LongNativeDemoCycleConfig,
-    equity_usdt: float,
-    order_notional_pct_equity: float,
-    price_by_symbol: dict[str, float],
-    contract_by_symbol: dict[str, dict[str, Any]],
-    now_ms: int,
-    strategy_id: str,
-    record_preflight: Callable[[dict[str, Any]], None] | None,
-    execution_event_router: Any | None,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    symbol = str(candidate["symbol"])
-    price = price_by_symbol.get(symbol, _float(candidate.get("live_price")))
-    contract = contract_by_symbol.get(symbol, {})
-    if price <= 0.0:
-        return None, _long_entry_rejection_order_row(
-            candidate,
-            now_ms=now_ms,
-            strategy_id=strategy_id,
-            reason="price_unavailable",
-            price=price,
+    intents: list[RequestedIntent] = []
+    for candidate in candidates:
+        trade_id = str(candidate.get("trade_id") or "")
+        symbol = str(candidate.get("symbol") or "").upper()
+        price = price_by_symbol.get(symbol, _float(candidate.get("live_price")))
+        if not trade_id or not symbol or price <= 0.0:
+            continue
+        target_notional = (
+            equity_usdt
+            * demo.wallet_balance_fraction
+            * order_notional_pct_equity
+            * _float(candidate.get("position_weight") or 1.0)
         )
-    tick_size = _float(contract.get("tick_size")) or 0.0001
-    qty_step = _float(contract.get("qty_step")) or 0.001
-    capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity * _float(candidate.get("position_weight") or 1.0)
-    # See event_demo._execute_single_entry for the max-qty rationale —
-    # same bug class would bite the long sleeve on a high-notional ×
-    # low-price candidate if we didn't cap.
-    max_qty = (
-        _float(contract.get("max_market_order_qty"))
-        or _float(contract.get("max_order_qty"))
-    )
-    quantity = order_quantity_for_notional(
-        notional_usdt=capped_notional,
-        price=price,
-        qty_step=qty_step,
-        min_order_qty=_float(contract.get("min_order_qty")),
-        min_notional_value=_float(contract.get("min_notional_value")),
-        max_order_qty=max_qty,
-    )
-    if quantity is None:
-        # Mirrors event_demo._execute_single_entry's INFO log so the long
-        # sleeve's entries=0/candidates=N pattern is diagnosable. Most likely
-        # cause: max-qty cap drops the candidate when the cap-floored qty
-        # lands below min_order_qty.
-        _logger.info(
-            "long entry sizing rejected symbol=%s notional=%.2f price=%.6g "
-            "qty_step=%s min_qty=%s min_notional=%s max_qty=%s",
-            symbol,
-            capped_notional,
-            price,
-            qty_step,
-            _float(contract.get("min_order_qty")) or "-",
-            _float(contract.get("min_notional_value")) or "-",
-            max_qty or "-",
+        stop_loss_pct = _float(candidate.get("stop_loss_pct"))
+        take_profit_pct = _float(candidate.get("take_profit_pct"))
+        max_hold_days = _float(candidate.get("max_hold_days") or 3.0)
+        max_hold_duration_ms = exact_duration_ms(
+            days=max_hold_days,
         )
-        return None, _long_entry_rejection_order_row(
-            candidate,
-            now_ms=now_ms,
-            strategy_id=strategy_id,
-            reason=(
-                "sizing_rejected:"
-                f"notional={capped_notional:.8g},price={price:.8g},qty_step={qty_step:.8g},"
-                f"min_qty={_float(contract.get('min_order_qty')):.8g},"
-                f"min_notional={_float(contract.get('min_notional_value')):.8g},max_qty={max_qty:.8g}"
-            ),
-            price=price,
-        )
-    qty, actual_notional = quantity
-    initial_margin_usdt = actual_notional / demo.entry_leverage
-    stop_loss_pct = _float(candidate.get("stop_loss_pct"))
-    take_profit_pct = _float(candidate.get("take_profit_pct"))
-    stop_price = _stop_price_for_entry(
-        entry_price=price, side="long", stop_loss_pct=stop_loss_pct, tick_size=tick_size
-    )
-    take_profit_price = _take_profit_price_for_entry(
-        entry_price=price, side="long", take_profit_pct=take_profit_pct, tick_size=tick_size
-    )
-    entry_link = _long_order_link_id(
-        LONG_ENTRY_LINK_PREFIX, symbol=symbol, signal_ts_ms=int(candidate["signal_ts_ms"])
-    )
-    planned_exit_ts_ms = int(
-        candidate.get("planned_exit_ts_ms")
-        or (now_ms + exact_duration_ms(days=candidate.get("max_hold_days") or 3))
-    )
-
-    order_result: dict[str, Any] = {}
-    exec_summary: dict[str, Any] = {}
-    protection_update_status = ""
-    protection_update_error = ""
-    submit_mode = "dry_run"
-    order_status = "planned"
-    error = ""
-    filled_qty = _float(qty)
-    entry_price = price
-    filled_notional = actual_notional
-    # Pre-declare so paths that bypass the venue (dry-run, set_leverage failure)
-    # still leave the trade-row / order-row writers able to read them as zero
-    # rather than NameError.
-    entry_fee_usdt = 0.0
-    entry_exec_time_ms = 0
-
-    if demo.submit_orders:
-        assert trading_client is not None
-        try:
-            trading_client.set_leverage(
+        intents.append(
+            component_target_intent(
+                adapter_kind=SleeveAdapterKind.LONG,
+                action="entry",
+                decision_ts_ms=now_ms,
+                strategy_id=strategy_id,
+                component_id=trade_id,
                 symbol=symbol,
-                buy_leverage=demo.entry_leverage,
-                sell_leverage=demo.entry_leverage,
-            )
-        except Exception as exc:  # noqa: BLE001
-            submit_mode = "error"
-            order_status = "failed"
-            error = f"set_leverage failed: {exc}"[:500]
-            filled_qty = 0.0
-            filled_notional = 0.0
-        if not error:
-            order_params = _order_params(
-                symbol=symbol,
-                side="Buy",
-                qty=qty,
-                order_type=demo.entry_order_type,
-                order_link_id=entry_link,
-                reduce_only=False,
-                stop_loss=stop_price,
-                take_profit=take_profit_price if take_profit_price > 0.0 else None,
-            )
-            if record_preflight is not None:
-                record_preflight(
-                    _preflight_long_entry_order_row(
-                        entry_link=entry_link,
-                        now_ms=now_ms,
-                        candidate=candidate,
-                        strategy_id=strategy_id,
-                        qty=qty,
-                        price=price,
-                        actual_notional=actual_notional,
-                        order_notional_pct_equity=order_notional_pct_equity,
-                        entry_leverage=demo.entry_leverage,
-                        initial_margin_usdt=initial_margin_usdt,
-                        equity_usdt=equity_usdt,
-                        tick_size=tick_size,
-                        qty_step=qty_step,
-                        stop_price=stop_price,
-                        take_profit_price=take_profit_price,
-                        stop_loss_pct=stop_loss_pct,
-                        take_profit_pct=take_profit_pct,
-                        planned_exit_ts_ms=planned_exit_ts_ms,
-                    )
-                )
-            try:
-                order_result = trading_client.place_order(**order_params)
-                submit_mode = "submitted"
-            except Exception as exc:  # noqa: BLE001
-                submit_mode = "error"
-                order_status = "submitted_unconfirmed"
-                error = f"place_order failed: {exc}"[:500]
-                filled_qty = 0.0
-                filled_notional = 0.0
-        if submit_mode == "submitted":
-            try:
-                exec_summary = _wait_for_execution_summary(
-                    trading_client,
-                    symbol=symbol,
-                    order_link_id=entry_link,
-                    poll_seconds=demo.order_fill_confirm_seconds,
-                    poll_interval_seconds=demo.order_fill_poll_interval_seconds,
-                    fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
-                    fast_poll_seconds=demo.order_fill_fast_poll_seconds,
-                    execution_event_router=execution_event_router,
-                    # EXEC-6: without target_qty the first WS leg of a multi-fill
-                    # (book-walk) market order returns immediately and books 'partial'.
-                    target_qty=_float(qty),
-                )
-            except Exception as exc:  # noqa: BLE001
-                order_status = "submitted_unconfirmed"
-                error = f"fill confirmation failed: {exc}"[:500]
-                filled_qty = 0.0
-                filled_notional = 0.0
-            else:
-                filled_qty = _float(exec_summary.get("qty"))
-                entry_price = _float(exec_summary.get("avg_price")) or price
-                entry_fee_usdt = _float(exec_summary.get("fee"))
-                entry_exec_time_ms = int(_float(exec_summary.get("exec_time_ms") or 0))
-                filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
-                order_status = order_fill_status(target_qty=qty, filled_qty=filled_qty)
-            finally:
-                # Router contract: drop the reconciled link's WS buffer.
-                if execution_event_router is not None:
-                    execution_event_router.clear(entry_link)
-            if filled_qty > 0.0:
-                filled_stop_price = _stop_price_for_entry(
-                    entry_price=entry_price, side="long",
-                    stop_loss_pct=stop_loss_pct, tick_size=tick_size,
-                )
-                filled_take_profit_price = _take_profit_price_for_entry(
-                    entry_price=entry_price, side="long",
-                    take_profit_pct=take_profit_pct, tick_size=tick_size,
-                )
-                if not _prices_close(stop_price, filled_stop_price, tolerance_bps=0.0) or (
-                    filled_take_profit_price > 0.0
-                    and not _prices_close(take_profit_price, filled_take_profit_price, tolerance_bps=0.0)
-                ):
-                    try:
-                        trading_client.set_trading_stop(
-                            symbol=symbol,
-                            stop_loss=_decimal_text(Decimal(str(filled_stop_price)))
-                            if filled_stop_price > 0.0 else None,
-                            take_profit=_decimal_text(Decimal(str(filled_take_profit_price)))
-                            if filled_take_profit_price > 0.0 else None,
-                        )
-                        protection_update_status = "submitted"
-                    except Exception as exc:  # noqa: BLE001
-                        protection_update_status = "failed"
-                        protection_update_error = str(exc)[:500]
-                stop_price = filled_stop_price
-                take_profit_price = filled_take_profit_price
-
-    entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
-    filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
-    trade_row: dict[str, Any] | None = None
-    if not demo.submit_orders or filled_qty > 0.0:
-        trade_row = {
-            "trade_id": str(candidate["trade_id"]),
-            "sleeve": "long",
-            "strategy_id": strategy_id,
-            "symbol": symbol,
-            "side": "long",
-            "pattern": str(candidate.get("pattern", "fomo_chase")),
-            "status": "open",
-            "entry_reason": str(candidate.get("entry_reason", "")),
-            "entry_policy": str(candidate.get("entry_policy", "")),
-            "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
-            "entry_rule": str(candidate.get("entry_rule", "")),
-            "signal_ts_ms": int(candidate["signal_ts_ms"]),
-            "signal_close": _float(candidate.get("signal_close")),
-            "retrace_threshold": _float(candidate.get("retrace_threshold")),
-            "sniper_deadline_ms": int(candidate.get("sniper_deadline_ms") or 0),
-            "ts_ms": now_ms,
-            "entry_ts_ms": now_ms,
-            "entry_exec_time_ms": entry_exec_time_ms,
-            "entry_fee_usdt": entry_fee_usdt,
-            "entry_price": entry_price,
-            "qty": entry_qty or qty,
-            "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
-            "equity_usdt": equity_usdt,
-            "target_notional_pct_equity": order_notional_pct_equity,
-            "entry_leverage": demo.entry_leverage,
-            "notional_multiplier": demo.notional_multiplier,
-            "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
-            "tick_size": tick_size,
-            "qty_step": qty_step,
-            "stop_price": stop_price,
-            "take_profit_price": take_profit_price,
-            "stop_loss_pct": stop_loss_pct,
-            "take_profit_pct": take_profit_pct,
-            "atr_14d_pct": _float(candidate.get("atr_14d_pct")),
-            "realized_vol": _float(candidate.get("realized_vol")),
-            "position_weight": _float(candidate.get("position_weight")),
-            "planned_exit_ts_ms": planned_exit_ts_ms,
-            "max_hold_days": int(candidate.get("max_hold_days") or 3),
-            "entry_stop_update_status": protection_update_status,
-            "entry_stop_update_error": protection_update_error,
-            "entry_order_link_id": entry_link,
-            "entry_order_id": order_result.get("orderId", ""),
-            "submit_mode": submit_mode,
-            "opened_at_ms": now_ms,
-            "updated_at_ms": now_ms,
-        }
-    order_row = {
-        "order_link_id": entry_link,
-        "ts_ms": now_ms,
-        "trade_id": str(candidate["trade_id"]),
-        "strategy_id": strategy_id,
-        "symbol": symbol,
-        "side": "Buy",
-        "order_type": demo.entry_order_type,
-        "qty": entry_qty or qty,
-        "reduce_only": False,
-        "order_id": order_result.get("orderId", ""),
-        "submit_mode": submit_mode,
-        "avg_price": entry_price,
-        "decision_price": price,
-        "submission_price": price,
-        "submitted_at_ms": now_ms,
-        "fee_usdt": entry_fee_usdt,
-        "exec_time_ms": entry_exec_time_ms,
-        "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
-        "target_notional_pct_equity": order_notional_pct_equity,
-        "entry_leverage": demo.entry_leverage,
-        "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
-        "status": order_status,
-        "trade_side": "long",
-        "signal_ts_ms": int(candidate["signal_ts_ms"]),
-        "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or now_ms),
-        "entry_policy": str(candidate.get("entry_policy", "")),
-        "entry_rule": str(candidate.get("entry_rule", "")),
-        "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
-        "equity_usdt": equity_usdt,
-        "tick_size": tick_size,
-        "qty_step": qty_step,
-        "stop_price": stop_price,
-        "take_profit_price": take_profit_price,
-        "stop_loss_pct": stop_loss_pct,
-        "take_profit_pct": take_profit_pct,
-        "planned_exit_ts_ms": planned_exit_ts_ms,
-        "entry_stop_update_status": protection_update_status,
-        "entry_stop_update_error": protection_update_error,
-        "error": error,
-        "sleeve": "long",
-        # filled_qty/target_qty: ws_risk's pending-fill reconciler delta-adds
-        # (venue cumulative − filled_qty); without filled_qty a "partial" entry's
-        # already-booked leg double-added on the next reconcile (audit 2026-06-11).
-        # target_qty is the SUBMITTED qty — the row's "qty" is already the filled
-        # amount on a partial, which made fully_filled misread the order as done.
-        "filled_qty": entry_qty,
-        "target_qty": qty,
-        "canonical_fill_details": exec_summary.get("fill_details", []),
-    }
-    return trade_row, order_row
-
-
-def _long_entry_rejection_order_row(
-    candidate: dict[str, Any],
-    *,
-    now_ms: int,
-    strategy_id: str,
-    reason: str,
-    price: float,
-) -> dict[str, Any]:
-    """Durable attempt row for a selected candidate that never reached Bybit."""
-    symbol = str(candidate.get("symbol") or "")
-    signal_ts_ms = int(candidate.get("signal_ts_ms") or now_ms)
-    return {
-        "order_link_id": _long_order_link_id(
-            LONG_ENTRY_LINK_PREFIX, symbol=symbol, signal_ts_ms=signal_ts_ms
-        ),
-        "ts_ms": now_ms,
-        "updated_at_ms": now_ms,
-        "trade_id": str(candidate.get("trade_id") or ""),
-        "strategy_id": strategy_id,
-        "sleeve": "long",
-        "symbol": symbol,
-        "side": "Buy",
-        "trade_side": "long",
-        "order_type": "Market",
-        "qty": "",
-        "reduce_only": False,
-        "submit_mode": "not_submitted",
-        "status": "rejected",
-        "signal_ts_ms": signal_ts_ms,
-        "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or now_ms),
-        "avg_price": float(price or 0.0),
-        "notional_usdt": 0.0,
-        "filled_qty": "",
-        "target_qty": "",
-        "error": reason[:500],
-    }
-
-
-def _preflight_long_entry_order_row(
-    *,
-    entry_link: str,
-    now_ms: int,
-    candidate: dict[str, Any],
-    strategy_id: str,
-    qty: str,
-    price: float,
-    actual_notional: float,
-    order_notional_pct_equity: float,
-    entry_leverage: float,
-    initial_margin_usdt: float,
-    equity_usdt: float,
-    tick_size: float,
-    qty_step: float,
-    stop_price: float,
-    take_profit_price: float,
-    stop_loss_pct: float,
-    take_profit_pct: float,
-    planned_exit_ts_ms: int,
-) -> dict[str, Any]:
-    return {
-        "order_link_id": entry_link,
-        "ts_ms": now_ms,
-        "trade_id": str(candidate["trade_id"]),
-        "strategy_id": strategy_id,
-        "symbol": str(candidate["symbol"]),
-        "side": "Buy",
-        "order_type": "Market",
-        "qty": qty,
-        "reduce_only": False,
-        "submit_mode": "preflight",
-        "status": "submitted_unconfirmed",
-        "trade_side": "long",
-        "signal_ts_ms": int(candidate["signal_ts_ms"]),
-        "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or now_ms),
-        "avg_price": price,
-        "notional_usdt": actual_notional,
-        "target_notional_pct_equity": order_notional_pct_equity,
-        "entry_leverage": entry_leverage,
-        "initial_margin_usdt": initial_margin_usdt,
-        "equity_usdt": equity_usdt,
-        "tick_size": tick_size,
-        "qty_step": qty_step,
-        "stop_price": stop_price,
-        "take_profit_price": take_profit_price,
-        "stop_loss_pct": stop_loss_pct,
-        "take_profit_pct": take_profit_pct,
-        "planned_exit_ts_ms": planned_exit_ts_ms,
-        "sleeve": "long",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Telegram
-# ---------------------------------------------------------------------------
-
-
-def _maybe_long_notify(
-    payload: dict[str, Any],
-    *,
-    enabled: bool,
-) -> tuple[bool, str]:
-    if not enabled:
-        return False, "disabled"
-    try:
-        # Reason + formatter INSIDE the try: the formatter does direct subscripts on the
-        # cycle payload, and a malformed payload must degrade to a reported error — never
-        # propagate into the cycle after orders have executed (EVE-2 pattern).
-        reason = _long_telegram_reason(payload)
-        if not reason:
-            return False, "quiet_no_material_event"
-        alert_state: tuple[Path, dict[str, int], set[str], int] | None = None
-        if reason in {
-            "long_entry_error",
-            "long_exit_error",
-            "long_entry_stop_update_failed",
-        }:
-            alert_signatures = _long_operational_alert_signatures(payload, reason=reason)
-            report_dir_text = str(payload.get("report_dir") or "")
-            if alert_signatures and report_dir_text:
-                state_path = Path(report_dir_text) / LONG_REJECTION_TELEGRAM_STATE_FILE
-                sent_at_by_signature = _read_long_rejection_alert_state(state_path)
-                now_ms = int(payload.get("cycle", {}).get("ts_ms") or _utc_now_ms())
-                eligible = {
-                    signature
-                    for signature in alert_signatures
-                    if now_ms - int(sent_at_by_signature.get(signature, 0))
-                    >= LONG_REJECTION_TELEGRAM_COOLDOWN_MS
-                }
-                if not eligible:
-                    duplicate_reason = (
-                        "quiet_duplicate_long_entry_rejection"
-                        if reason == "long_entry_error"
-                        and not _has_non_rejection_long_entry_error(payload)
-                        else "quiet_duplicate_long_operational_error"
-                    )
-                    return False, duplicate_reason
-                alert_state = (
-                    state_path,
-                    sent_at_by_signature,
-                    eligible,
-                    now_ms,
-                )
-        text = format_long_telegram_status_message(payload, reason=reason)
-        sent = send_telegram_message(text, enabled=True)
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc)[:500]
-    if not sent:
-        return False, "telegram env missing or Telegram API returned false"
-    if alert_state is not None:
-        state_path, sent_at_by_signature, eligible, now_ms = alert_state
-        for signature in eligible:
-            sent_at_by_signature[signature] = now_ms
-        try:
-            _write_long_rejection_alert_state(
-                state_path,
-                sent_at_by_signature,
-                now_ms=now_ms,
-            )
-        except Exception as exc:  # noqa: BLE001 - notification already succeeded
-            _logger.warning("failed to persist LONG rejection Telegram cooldown: %s", exc)
-    return True, ""
-
-
-def _has_non_rejection_long_entry_error(payload: dict[str, Any]) -> bool:
-    """True when an entry failure still deserves an immediate page.
-
-    Only deterministic local rejections are cooldown-deduped. Venue/API
-    failures remain immediate because their recovery state can change between
-    cycles even when an order link is reused.
-    """
-    return any(
-        str(row.get("submit_mode") or "") == "error"
-        or str(row.get("status") or "") == "failed"
-        for row in payload.get("entry_orders", [])
-    )
-
-
-def _long_rejection_alert_signatures(payload: dict[str, Any]) -> set[str]:
-    """Restart-stable identities for deterministic local entry rejections."""
-    signatures: set[str] = set()
-    for row in payload.get("entry_orders", []):
-        if str(row.get("status") or "") != "rejected":
-            continue
-        link = str(row.get("order_link_id") or "")
-        if not link:
-            continue
-        signatures.add(
-            json.dumps(
-                [link, _long_rejection_reason_code(row.get("error"))],
-                ensure_ascii=True,
-                separators=(",", ":"),
+                signed_notional_usdt=target_notional,
+                leverage=demo.entry_leverage,
+                reason=str(candidate.get("entry_reason") or "long_entry"),
+                metadata={
+                    "source": "long_native_target_adapter",
+                    "decision_reference_price": price,
+                    "stop_loss_pct": stop_loss_pct,
+                    "take_profit_pct": take_profit_pct,
+                    "max_hold_duration_ms": max_hold_duration_ms,
+                    "signal_ts_ms": int(candidate.get("signal_ts_ms") or 0),
+                    "signal_valid_until_ms": (
+                        int(candidate.get("signal_ts_ms") or 0) + SIGNAL_FRESHNESS_MS
+                    ),
+                    "position_weight": _float(candidate.get("position_weight") or 1.0),
+                    "max_hold_days": max_hold_days,
+                    "pattern": str(candidate.get("pattern") or ""),
+                    "entry_policy": str(candidate.get("entry_policy") or ""),
+                    "entry_rule": str(candidate.get("entry_rule") or ""),
+                    "entry_quality_tier": str(candidate.get("entry_quality_tier") or ""),
+                    "raw_target_notional_usdt": target_notional,
+                    "quantity_authority": "account_kernel_demo_rules",
+                },
             )
         )
-    return signatures
-
-
-def _long_operational_alert_signatures(payload: dict[str, Any], *, reason: str) -> set[str]:
-    """Stable identities for repeatable long-sleeve order/protection faults."""
-    if reason == "long_entry_error" and not _has_non_rejection_long_entry_error(payload):
-        return _long_rejection_alert_signatures(payload)
-    rows: list[dict[str, Any]] = []
-    if reason == "long_entry_error":
-        rows.extend(payload.get("entry_orders", []) or [])
-    elif reason == "long_exit_error":
-        rows.extend(payload.get("exit_orders", []) or [])
-    else:
-        rows.extend(payload.get("entries", []) or [])
-        rows.extend(payload.get("entry_orders", []) or [])
-    signatures: set[str] = set()
-    for row in rows:
-        symbol = str(row.get("symbol") or "")
-        link = str(row.get("order_link_id") or row.get("entry_order_link_id") or "")
-        error = str(
-            row.get("error")
-            or row.get("entry_stop_update_error")
-            or row.get("status")
-            or row.get("entry_stop_update_status")
-            or ""
-        )[:240]
-        if not (symbol or link or error):
-            continue
-        signatures.add(
-            json.dumps(
-                [reason, link, symbol, error],
-                ensure_ascii=True,
-                separators=(",", ":"),
-            )
-        )
-    return signatures
-
-
-def _long_rejection_reason_code(error: Any) -> str:
-    """Stable rejection class, excluding volatile price/notional diagnostics."""
-    text = str(error or "").strip()
-    prefix = text.split(":", 1)[0].strip().lower()
-    if prefix in {"price_unavailable", "sizing_rejected"}:
-        return prefix
-    return text
-
-
-def _read_long_rejection_alert_state(path: Path) -> dict[str, int]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, ValueError, TypeError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    output: dict[str, int] = {}
-    for signature, sent_at_ms in raw.items():
-        try:
-            output[str(signature)] = int(sent_at_ms)
-        except (TypeError, ValueError):
-            continue
-    return output
-
-
-def _write_long_rejection_alert_state(
-    path: Path,
-    sent_at_by_signature: dict[str, int],
-    *,
-    now_ms: int,
-) -> None:
-    # Bound the restart-safe state file while retaining several cooldown
-    # windows for clock skew and temporarily dormant signals.
-    keep_after_ms = now_ms - max(
-        exact_duration_ms(days=30),
-        LONG_REJECTION_TELEGRAM_COOLDOWN_MS * 4,
-    )
-    retained = {
-        signature: sent_at_ms
-        for signature, sent_at_ms in sent_at_by_signature.items()
-        if int(sent_at_ms) >= keep_after_ms
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(
-        json.dumps(retained, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    tmp_path.replace(path)
-
-
-def _long_telegram_reason(payload: dict[str, Any]) -> str:
-    # Snapshot/wallet health is owned by ws_risk + the cooldown watchdog and
-    # the hourly digest.  Treating an unchanged connection fault as a per-cycle
-    # trade event caused repeated Telegram pages.
-    if any(
-        str(row.get("submit_mode", "")) == "error"
-        or str(row.get("status", "")) in {"failed", "rejected"}
-        for row in payload.get("entry_orders", [])
-    ):
-        return "long_entry_error"
-    if any(str(row.get("submit_mode", "")) == "error" for row in payload.get("exit_orders", [])):
-        return "long_exit_error"
-    if any(
-        str(row.get("entry_stop_update_status", "")) == "failed"
-        for row in (payload.get("entries") or []) + (payload.get("entry_orders") or [])
-    ):
-        return "long_entry_stop_update_failed"
-    # The shared ws_risk engine owns successful open/close notifications after
-    # venue confirmation. The sleeve retains only operational failures; two
-    # independent success producers otherwise announce one fill twice.
-    return ""
-
-
-def format_long_telegram_status_message(payload: dict[str, Any], *, reason: str) -> str:
-    cycle = payload["cycle"]
-    titles = {
-        "long_entry_executed": "\N{LARGE GREEN CIRCLE} Position opened",
-        "long_exit_executed": "\N{WHITE HEAVY CHECK MARK} Position closed",
-        "long_entry_error": "\N{WARNING SIGN} Entry order failed",
-        "long_exit_error": "\N{WARNING SIGN} Exit order failed",
-        "long_entry_stop_update_failed": "\N{WARNING SIGN} Position protection failed",
-    }
-    title = titles.get(reason, "\N{INFORMATION SOURCE} Long update")
-    if (payload.get("entries") or []) and (payload.get("exits") or []):
-        title = "\N{CLOCKWISE OPEN CIRCLE ARROW} Position updates"
-    lines = [f"{title} \N{MIDDLE DOT} Long demo", _iso_dt(cycle.get("ts_ms"))]
-    entries = payload.get("entries", []) or []
-    if entries:
-        for index, entry in enumerate(entries[:6]):
-            if index:
-                lines.append("")
-            symbol = str(entry.get("symbol") or "UNKNOWN")
-            qty = abs(_float(entry.get("qty")))
-            price = _float(entry.get("entry_price"))
-            notional = _float(entry.get("notional_usdt")) or price * qty
-            lines.extend(
-                [
-                    f"{symbol} LONG",
-                    f"Opened {qty:g} @ ${price:.8g} \N{MIDDLE DOT} exposure {format_usd(notional)}",
-                    f"TP ${_float(entry.get('take_profit_price')):.8g} \N{MIDDLE DOT} "
-                    f"SL ${_float(entry.get('stop_price')):.8g}",
-                ]
-            )
-    exits = payload.get("exits", []) or []
-    if exits:
-        for index, ex in enumerate(exits[:6]):
-            if index or entries:
-                lines.append("")
-            symbol = str(ex.get("symbol") or "UNKNOWN")
-            raw_reason = str(ex.get("exit_reason") or "closed").lower()
-            if "take_profit" in raw_reason or raw_reason == "tp":
-                reason_text = "TAKE PROFIT"
-            elif "stop" in raw_reason:
-                reason_text = "STOP LOSS"
-            elif raw_reason in {"time_stop", "max_hold"}:
-                reason_text = "MAX HOLD / TIME EXIT"
-            else:
-                reason_text = raw_reason.replace("_", " ").upper()
-            qty = abs(_float(ex.get("qty")))
-            entry = _float(ex.get("entry_price"))
-            exit_price = _float(ex.get("exit_price"))
-            lines.extend([f"{symbol} LONG \N{MIDDLE DOT} {reason_text}", f"Closed {qty:g} @ ${exit_price:.8g}"])
-            if entry > 0.0 and exit_price > 0.0 and qty > 0.0:
-                gross = (exit_price - entry) * qty
-                fees = _float(ex.get("entry_fee_usdt")) + _float(ex.get("exit_fee_usdt"))
-                lines.append(
-                    f"Realised P&L {format_usd(gross - fees, signed=True)} "
-                    f"({format_pct((exit_price - entry) / entry, signed=True)} before leverage)"
-                )
-    if not entries and not exits:
-        rejected = [
-            row for row in payload.get("entry_orders", [])
-            if str(row.get("status") or "") in {"failed", "rejected"}
-            or str(row.get("submit_mode") or "") == "error"
-        ]
-        for row in rejected[:4]:
-            lines.append(
-                f"{row.get('symbol', 'UNKNOWN')}: {str(row.get('error') or row.get('status') or 'order failed')[:240]}"
-            )
-    return "\n".join(lines)[:3900]
-
-
-# ---------------------------------------------------------------------------
-# Optional aggregate (multi-sleeve) Telegram summary
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class _LedgerSummary:
-    available: bool
-    trade_count: int = 0
-    open_count: int = 0
-    realized_pnl_usdt: float = 0.0
-    open_notional_usdt: float = 0.0
-    open_positions: tuple[str, ...] = ()
-    awaiting_pnl_count: int = 0
-    awaiting_pnl_symbols: tuple[str, ...] = ()
-    # One entry per net (symbol, side) plus the number of component/trade
-    # rows behind it.  A venue position may legitimately map to several
-    # component rows, so raw row count must never be called live positions.
-    open_leg_counts: tuple[tuple[str, str, int], ...] = ()
-    recent_opened_count: int = 0
-    recent_closed_count: int = 0
-    recent_realized_pnl_usdt: float = 0.0
-    recent_realized_complete: bool = True
-    recent_closes: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class _CycleSummary:
-    available: bool
-    cycle_count: int = 0
-    latest_ts_ms: int | None = None
-    latest_mode: str = ""
-
-
-def format_combined_book_summary(
-    *,
-    short_root: Path | None,
-    long_root: Path | None,
-    continuous_root: Path | None = None,
-    continuous_paper_root: Path | None = None,
-    continuous_hedge_root: Path | None = None,
-    now_ms: int,
-    bybit_position_summary: dict[str, Any] | None = None,
-    bybit_positions: list[dict[str, Any]] | None = None,
-    sleeve_states: dict[str, str] | None = None,
-    live_positions_error: str | None = None,
-    account_equity_usdt: float | None = None,
-    wallet_error: str | None = None,
-) -> str:
-    """Build the hourly operator digest, with Bybit as live-position authority.
-
-    Local ledgers provide attribution and accounting context only.  Whenever a
-    successful Bybit snapshot disagrees, the message calls out stale rows and
-    excludes them from the live exposure headline.
-    """
-    states = {k: str(v).strip().lower() for k, v in (sleeve_states or {}).items()}
-    short = _ledger_summary(short_root, "event_demo_trades", now_ms=now_ms)
-    long = _ledger_summary(long_root, LONG_DEMO_TRADES_DATASET, now_ms=now_ms)
-    continuous = _ledger_summary(continuous_root, CONTINUOUS_DEMO_TRADES_DATASET, now_ms=now_ms)
-    continuous_paper = _ledger_summary(
-        continuous_paper_root, CONTINUOUS_PAPER_TRADES_DATASET, now_ms=now_ms
-    )
-    hedge = _ledger_summary(
-        continuous_hedge_root, CONTINUOUS_DEMO_TRADES_DATASET, now_ms=now_ms
-    )
-    continuous_cycles = _cycle_summary(continuous_root, CONTINUOUS_DEMO_CYCLES_DATASET, now_ms=now_ms)
-    long_cycles = _cycle_summary(long_root, "long_native_demo_cycles", now_ms=now_ms)
-    continuous_paper_cycles = _cycle_summary(
-        continuous_paper_root, CONTINUOUS_PAPER_CYCLES_DATASET, now_ms=now_ms,
-    )
-
-    live_summaries = [short, long, continuous, hedge]
-    tracked_open_count = sum(s.open_count for s in live_summaries)
-    tracked_realized = sum(s.realized_pnl_usdt for s in live_summaries)
-    live_positions = int((bybit_position_summary or {}).get("positions") or 0)
-    snapshot_consistency_error = ""
-    if bybit_position_summary is not None and (
-        bybit_positions is None or live_positions != len(bybit_positions)
-    ):
-        snapshot_consistency_error = (
-            f"Bybit snapshot count mismatch: summary={live_positions}, "
-            f"detail_rows={len(bybit_positions or [])}"
-        )
-    venue_verified = (
-        bybit_position_summary is not None
-        and bybit_positions is not None
-        and not live_positions_error
-        and not snapshot_consistency_error
-    )
-    live_value = _float((bybit_position_summary or {}).get("position_value_usdt"))
-    live_upnl = _float((bybit_position_summary or {}).get("unrealized_pnl_usdt"))
-    live_pnl_pct = _float((bybit_position_summary or {}).get("pnl_pct"))
-    live_keys = {
-        (str(row.get("symbol") or ""), str(row.get("side") or "").lower())
-        for row in (bybit_positions or [])
-        if str(row.get("symbol") or "")
-    }
-    tracked_leg_rows = [
-        leg
-        for summary in (short, long, continuous, hedge)
-        for leg in summary.open_leg_counts
-    ]
-    stale_legs = [leg for leg in tracked_leg_rows if (leg[0], leg[1]) not in live_keys]
-    stale_rows = sum(leg[2] for leg in stale_legs) if venue_verified else 0
-    tracked_keys = {(symbol, side) for symbol, side, _count in tracked_leg_rows}
-    venue_only = sorted(live_keys - tracked_keys) if venue_verified else []
-    continuous_live = live_keys & {
-        (symbol, side) for symbol, side, _count in continuous.open_leg_counts
-    }
-    hedge_live = live_keys & {
-        (symbol, side) for symbol, side, _count in hedge.open_leg_counts
-    }
-    hedge_manager_state = _state_label(
-        states.get("CONTINUOUS_HEDGE_TIMER"),
-        default="unknown",
-    )
-
-    lines = ["\N{BAR CHART} Hourly portfolio \N{MIDDLE DOT} Bybit demo", format_utc_time_ms(now_ms)]
-    position_warnings: list[str] = []
-    loss_alert_floor = position_loss_alert_levels()[0]
-    if wallet_error:
-        lines.append(f"Equity: unavailable ({str(wallet_error)[:120]})")
-    elif account_equity_usdt is not None and account_equity_usdt > 0.0:
-        lines.append(f"Equity: {format_usd(account_equity_usdt)}")
-
-    effective_position_error = str(live_positions_error or snapshot_consistency_error)
-    if effective_position_error:
-        lines.extend(
-            [
-                "",
-                "\N{WARNING SIGN} Open positions: UNKNOWN",
-                f"Bybit position check failed: {effective_position_error[:180]}",
-                f"Local ledgers contain {tracked_open_count} open row(s), but they are not proof of live exposure.",
-            ]
-        )
-    elif venue_verified and live_positions == 0:
-        lines.extend(["", "Open positions: 0", "No open positions on Bybit."])
-    elif venue_verified:
-        lines.extend(
-            [
-                "",
-                f"Open positions: {live_positions} \N{MIDDLE DOT} exposure {format_usd(live_value)}",
-                f"Unrealised P&L: {format_usd(live_upnl, signed=True)} ({format_pct(live_pnl_pct, signed=True)})",
-            ]
-        )
-        for row in (bybit_positions or [])[:12]:
-            row_pnl_pct = _float(row.get("pnl_pct"))
-            loss_warning = row_pnl_pct <= -loss_alert_floor
-            marker = "\N{WARNING SIGN}" if loss_warning else "\N{BULLET}"
-            loss_label = " \N{MIDDLE DOT} LOSS WARNING" if loss_warning else ""
-            leverage = _float(row.get("leverage"))
-            leverage_label = f" \N{MIDDLE DOT} {leverage:g}x" if leverage > 0.0 else ""
-            lines.append(
-                f"{marker} {row.get('symbol', 'UNKNOWN')} {str(row.get('side') or '').upper()} \N{MIDDLE DOT} "
-                f"{format_usd(row.get('position_value_usdt'))}{leverage_label} \N{MIDDLE DOT} "
-                f"P&L {format_usd(row.get('unrealized_pnl_usdt'), signed=True)} "
-                f"({format_pct(row_pnl_pct, signed=True)}){loss_label}"
-            )
-            avg_price = _float(row.get("avg_price"))
-            mark_price = _float(row.get("mark_price"))
-            if avg_price > 0.0 and mark_price > 0.0:
-                protection = []
-                stop = _float(row.get("stop_price"))
-                take_profit = _float(row.get("take_profit_price"))
-                side = str(row.get("side") or "").lower()
-                tp_reached = take_profit > 0.0 and (
-                    (side == "short" and mark_price <= take_profit)
-                    or (side == "long" and mark_price >= take_profit)
-                )
-                if tp_reached:
-                    protection.append(f"TP ${take_profit:.8g} REACHED — still open")
-                    position_warnings.append(
-                        f"{row.get('symbol', 'UNKNOWN')} has crossed its venue TP but Bybit still reports it open."
-                    )
-                elif take_profit > 0.0:
-                    tp_distance = (
-                        (mark_price - take_profit) / mark_price
-                        if side == "short"
-                        else (take_profit - mark_price) / mark_price
-                    )
-                    protection.append(
-                        f"TP ${take_profit:.8g} ({format_pct(max(tp_distance, 0.0))} away)"
-                    )
-                else:
-                    protection.append("no venue TP")
-                protection.append(f"SL ${stop:.8g}" if stop > 0.0 else "no venue stop")
-                lines.append(
-                    f"  entry ${avg_price:.8g} \N{RIGHTWARDS ARROW} mark ${mark_price:.8g} \N{MIDDLE DOT} "
-                    + " \N{MIDDLE DOT} ".join(protection)
-                )
-        if live_positions > 12:
-            lines.append(f"… {live_positions - 12} more open position(s) omitted from this digest.")
-    else:
-        lines.extend(
-            [
-                "",
-                "Open positions: not checked",
-                f"Local ledgers contain {tracked_open_count} open row(s); live exposure is unknown.",
-            ]
-        )
-
-    recent_opened = sum(
-        summary.recent_opened_count for summary in (short, long, continuous, hedge)
-    )
-    recent_closed = sum(
-        summary.recent_closed_count for summary in (short, long, continuous, hedge)
-    )
-    recent_realized = sum(
-        summary.recent_realized_pnl_usdt for summary in (short, long, continuous, hedge)
-    )
-    recent_realized_complete = all(
-        summary.recent_realized_complete
-        for summary in (short, long, continuous, hedge)
-        if summary.recent_closed_count
-    )
-    recent_closes = [
-        close
-        for summary in (short, long, continuous, hedge)
-        for close in summary.recent_closes
-    ]
-    awaiting_pnl_count = sum(
-        summary.awaiting_pnl_count for summary in (short, long, continuous, hedge)
-    )
-    awaiting_pnl_symbols = sorted(
-        {
-            symbol
-            for summary in (short, long, continuous, hedge)
-            for symbol in summary.awaiting_pnl_symbols
-        }
-    )
-    lines.extend(["", "Last 60 minutes"])
-    if recent_opened or recent_closed:
-        realized_text = (
-            f"realised {format_usd(recent_realized, signed=True)}"
-            if recent_realized_complete
-            else f"realised P&L incomplete (known {format_usd(recent_realized, signed=True)})"
-        )
-        lines.append(
-            f"{recent_opened} opened \N{MIDDLE DOT} {recent_closed} closed \N{MIDDLE DOT} "
-            f"{realized_text}"
-        )
-        lines.extend(f"\N{BULLET} {close}" for close in recent_closes[:6])
-    else:
-        lines.append("No position changes.")
-    if awaiting_pnl_count:
-        lines.append(
-            f"P&L confirmation pending for {awaiting_pnl_count} local trade row(s)"
-            + (f" ({', '.join(awaiting_pnl_symbols[:8])})" if awaiting_pnl_symbols else "")
-            + "; Bybit reports no matching open exposure."
-        )
-
-    lines.extend(
-        [
-            "",
-            "Systems",
-            f"\N{BULLET} Continuous {_state_label(states.get('CONTINUOUS_SLEEVE'), default='off')} \N{MIDDLE DOT} "
-            f"last cycle {format_age_ms(now_ms=now_ms, then_ms=continuous_cycles.latest_ts_ms)}",
-            f"\N{BULLET} Long {_state_label(states.get('LONG_SLEEVE'), default='off')} \N{MIDDLE DOT} "
-            f"last cycle {format_age_ms(now_ms=now_ms, then_ms=long_cycles.latest_ts_ms)}",
-            f"\N{BULLET} Hedge manager {hedge_manager_state} \N{MIDDLE DOT} "
-            f"live hedge {'present' if hedge_live else 'none'}"
-            + (
-                " \N{MIDDLE DOT} target need is not inferred"
-                if continuous_live and not hedge_live
-                else ""
-            ),
-            f"\N{BULLET} Paper shadow {_state_label(states.get('CONTINUOUS_PAPER_SLEEVE'), default='off')} \N{MIDDLE DOT} "
-            f"{continuous_paper.open_count} simulated open row(s) \N{MIDDLE DOT} "
-            f"last cycle {format_age_ms(now_ms=now_ms, then_ms=continuous_paper_cycles.latest_ts_ms)}",
-            f"Ledger realised P&L (all time): {format_usd(tracked_realized, signed=True)}",
-        ]
-    )
-
-    warnings: list[str] = list(position_warnings)
-    if hedge_live and hedge_manager_state == "UNKNOWN":
-        warnings.append(
-            "A live hedge exists but hedge-manager state is unavailable; activity is not being inferred from the continuous sleeve."
-        )
-    elif hedge_live and hedge_manager_state != "ON":
-        warnings.append(
-            "A live hedge exists while its manager is OFF; this stopless position is unmanaged."
-        )
-    if stale_rows:
-        stale_symbols = ", ".join(
-            f"{symbol} x{count}" if count > 1 else symbol
-            for symbol, _side, count in stale_legs[:8]
-        )
-        warnings.append(
-            f"Bybit and local ledgers disagree: {stale_rows} local open row(s) ({stale_symbols}) "
-            "do not exist on Bybit. They are excluded from live totals and need reconciliation."
-        )
-    if venue_only:
-        warnings.append(
-            "Bybit has position(s) with no owning live ledger: "
-            + ", ".join(f"{symbol} {side}" for symbol, side in venue_only[:8])
-            + "."
-        )
-    if (
-        _cycle_stale(continuous_cycles, now_ms=now_ms, stale_minutes=20.0)
-        and states.get("CONTINUOUS_SLEEVE", "off") != "off"
-    ):
-        warnings.append("Continuous demo cycle is stale; inspect the daemon/liveness journal.")
-    if (
-        _cycle_stale(long_cycles, now_ms=now_ms, stale_minutes=20.0)
-        and states.get("LONG_SLEEVE", "off") != "off"
-    ):
-        warnings.append("Long demo cycle is stale; inspect the daemon/liveness journal.")
-    if warnings:
-        lines.extend(["", "Needs attention"])
-        lines.extend(f"\N{WARNING SIGN} {warning}" for warning in warnings)
-    else:
-        lines.extend(["", "No action needed."])
-    return "\n".join(lines)[:3900]
-
-
-def _state_label(value: str | None, *, default: str) -> str:
-    raw = (value or default).strip().lower()
-    if raw in {"on", "1", "true", "yes"}:
-        return "ON"
-    if raw in {"off", "0", "false", "no"}:
-        return "OFF"
-    return raw.upper() or default.upper()
-
-
-def _format_book_line(
-    name: str,
-    state: str,
-    ledger: _LedgerSummary,
-    cycles: _CycleSummary | None,
-    *,
-    now_ms: int,
-) -> str:
-    if not ledger.available:
-        base = "no ledger yet"
-    elif ledger.open_count:
-        base = f"{ledger.open_count} open, {format_usd(ledger.open_notional_usdt)} open value"
-        if ledger.open_positions:
-            base += " [" + "; ".join(ledger.open_positions[:4])
-            if len(ledger.open_positions) > 4:
-                base += f"; +{len(ledger.open_positions) - 4} more"
-            base += "]"
-    else:
-        base = "flat"
-    parts = [f"- {name} ({state}): {base}", f"realized {format_usd(ledger.realized_pnl_usdt, signed=True)}"]
-    if ledger.awaiting_pnl_count:
-        parts.append(f"{ledger.awaiting_pnl_count} awaiting P&L confirmation")
-    if ledger.available:
-        parts.append(f"{ledger.trade_count} trade row(s)")
-    if cycles is not None and cycles.available:
-        parts.append(f"last cycle {format_age_ms(now_ms=now_ms, then_ms=cycles.latest_ts_ms)}")
-    elif cycles is not None:
-        parts.append("no cycle ledger yet")
-    return "; ".join(parts)
-
-
-def format_portfolio_alert_overview(
-    *,
-    short_root: Path | None,
-    long_root: Path | None,
-    continuous_root: Path | None = None,
-    continuous_paper_root: Path | None = None,
-    continuous_hedge_root: Path | None = None,
-    now_ms: int,
-    sleeve_states: dict[str, str] | None = None,
-) -> str:
-    """Compact local-ledger context; never claim this is current venue state.
-
-    Runtime Telegram events no longer append this block.  It remains as a
-    diagnostic compatibility helper for callers that explicitly want ledger
-    context without a Bybit snapshot.
-    """
-    states = {
-        "SHORT_SLEEVE": os.environ.get("SHORT_SLEEVE", "off"),
-        "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "off"),
-        "CONTINUOUS_SLEEVE": os.environ.get("CONTINUOUS_SLEEVE", "off"),
-        "CONTINUOUS_PAPER_SLEEVE": os.environ.get("CONTINUOUS_PAPER_SLEEVE", "off"),
-        "CONTINUOUS_HEDGE_TIMER": os.environ.get("CONTINUOUS_HEDGE_TIMER", "unknown"),
-    }
-    if sleeve_states:
-        states.update(sleeve_states)
-    states = {k: str(v).strip().lower() for k, v in states.items()}
-
-    short = _ledger_summary(short_root, "event_demo_trades")
-    long = _ledger_summary(long_root, LONG_DEMO_TRADES_DATASET)
-    continuous = _ledger_summary(continuous_root, CONTINUOUS_DEMO_TRADES_DATASET)
-    hedge = _ledger_summary(continuous_hedge_root, CONTINUOUS_DEMO_TRADES_DATASET)
-    continuous_paper = _ledger_summary(continuous_paper_root, CONTINUOUS_PAPER_TRADES_DATASET)
-    continuous_cycles = _cycle_summary(continuous_root, CONTINUOUS_DEMO_CYCLES_DATASET, now_ms=now_ms)
-
-    live_summaries = [short, long, continuous, hedge]
-    tracked_open_count = sum(s.open_count for s in live_summaries)
-    tracked_open_value = sum(s.open_notional_usdt for s in live_summaries)
-    tracked_realized = sum(s.realized_pnl_usdt for s in live_summaries)
-
-    lines = [
-        "Local ledger overview (not venue-verified)",
-        f"- open ledger rows: {tracked_open_count}, {format_usd(tracked_open_value)} recorded value, "
-        f"realized {format_usd(tracked_realized, signed=True)}",
-        _format_book_line(
-            "Continuous demo",
-            _state_label(states.get("CONTINUOUS_SLEEVE"), default="off"),
-            continuous,
-            continuous_cycles,
-            now_ms=now_ms,
-        ),
-        _format_book_line(
-            "Long",
-            _state_label(states.get("LONG_SLEEVE"), default="off"),
-            long,
-            None,
-            now_ms=now_ms,
-        ),
-        _format_book_line(
-            "BTC/ETH hedge",
-            _state_label(states.get("CONTINUOUS_HEDGE_TIMER"), default="unknown"),
-            hedge,
-            None,
-            now_ms=now_ms,
-        ),
-        _format_book_line(
-            "Continuous paper",
-            _state_label(states.get("CONTINUOUS_PAPER_SLEEVE"), default="off"),
-            continuous_paper,
-            None,
-            now_ms=now_ms,
-        ),
-    ]
-    return "\n".join(lines)[:1400]
-
-
-def safe_portfolio_alert_overview(
-    *,
-    short_root: Path | None,
-    long_root: Path | None,
-    continuous_root: Path | None = None,
-    continuous_paper_root: Path | None = None,
-    continuous_hedge_root: Path | None = None,
-    now_ms: int,
-) -> str:
-    try:
-        return format_portfolio_alert_overview(
-            short_root=short_root,
-            long_root=long_root,
-            continuous_root=continuous_root,
-            continuous_paper_root=continuous_paper_root,
-            continuous_hedge_root=continuous_hedge_root,
-            now_ms=now_ms,
-        )
-    except Exception as exc:  # noqa: BLE001 - Telegram context must never break trading
-        return f"Local ledger overview unavailable: {type(exc).__name__}: {str(exc)[:200]}"
-
-
-def _cycle_stale(cycles: _CycleSummary, *, now_ms: int, stale_minutes: float) -> bool:
-    if not cycles.available or cycles.latest_ts_ms is None:
-        return True
-    return (now_ms - cycles.latest_ts_ms) > exact_duration_ms(minutes=stale_minutes)
-
-
-def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
-    """Returns (trade_count, realized_pnl_usdt, open_notional_usdt) from a ledger.
-
-    Realized PnL is NET of fees when `entry_fee_usdt` / `exit_fee_usdt` are
-    populated on the closed trade rows (always true for trades written by the
-    post-2026-05-28 daemon). On older rows where those columns are missing or
-    NULL, the helper degrades gracefully to gross PnL — a known underestimate
-    that matches the legacy behaviour.
-
-    Used by the combined-book summary; fails open (returns zeros) so a
-    missing/empty ledger never breaks the message build.
-    """
-    summary = _ledger_summary(root, dataset)
-    return summary.trade_count, summary.realized_pnl_usdt, summary.open_notional_usdt
-
-
-def _ledger_summary(
-    root: Path | None,
-    dataset: str,
-    *,
-    now_ms: int | None = None,
-) -> _LedgerSummary:
-    if root is None:
-        return _LedgerSummary(available=False)
-    if not root.exists():
-        return _LedgerSummary(available=False)
-    try:
-        trades = read_dataset(root, dataset)
-    except Exception:  # noqa: BLE001 - aggregate roll-up must never crash a cycle
-        return _LedgerSummary(available=False)
-    if trades.is_empty():
-        return _LedgerSummary(available=True)
-    trade_count = trades.height
-    realized = 0.0
-    open_notional = 0.0
-    open_count = 0
-    open_positions: list[str] = []
-    open_leg_counts: dict[tuple[str, str], int] = {}
-    awaiting_pnl_symbols: set[str] = set()
-    recent_open_legs: set[tuple[str, str]] = set()
-    recent_close_buckets: dict[tuple[str, str], dict[str, Any]] = {}
-    recent_cutoff_ms = int(now_ms) - exact_duration_ms(hours=1) if now_ms is not None else None
-    if "status" not in trades.columns:
-        return _LedgerSummary(available=True, trade_count=trade_count)
-    has_entry_fee = "entry_fee_usdt" in trades.columns
-    has_exit_fee = "exit_fee_usdt" in trades.columns
-    closed = trades.filter(pl.col("status") == "closed")
-    if not closed.is_empty():
-        for row in closed.to_dicts():
-            entry = _float(row.get("entry_price"))
-            exit_price = _float(row.get("exit_price"))
-            qty = _float(row.get("qty"))
-            symbol = str(row.get("symbol") or "UNKNOWN")
-            raw_side = str(row.get("side") or row.get("trade_side") or "position").lower()
-            side = (
-                "short" if raw_side in {"short", "sell"}
-                else "long" if raw_side in {"long", "buy"}
-                else raw_side
-            )
-            exit_ts = int(
-                _float(
-                    row.get("exit_ts_ms")
-                    or row.get("closed_at_ms")
-                    or row.get("updated_at_ms")
-                )
-            )
-            is_recent = recent_cutoff_ms is not None and exit_ts >= recent_cutoff_ms
-            bucket: dict[str, Any] | None = None
-            if is_recent:
-                bucket = recent_close_buckets.setdefault(
-                    (symbol, side),
-                    {"pnl": 0.0, "pnl_known": True, "reasons": set()},
-                )
-                bucket["reasons"].add(
-                    human_exit_reason(row.get("exit_reason"))
-                )
-
-            # Prefer the account's allocated Closed-PnL, then an explicitly
-            # stored realised-PnL value. Only reconstruct from prices and fees
-            # when neither stronger value exists. This keeps the hourly dollar
-            # total consistent with the venue-confirmed close notification.
-            venue_pnl_raw = row.get("venue_closed_pnl_allocated_usdt")
-            realized_pnl_raw = row.get("realized_pnl_usdt")
-            row_realized: float | None
-            if venue_pnl_raw not in (None, ""):
-                row_realized = _float(venue_pnl_raw)
-            elif realized_pnl_raw not in (None, ""):
-                row_realized = _float(realized_pnl_raw)
-            elif entry > 0.0 and exit_price > 0.0 and qty > 0.0:
-                gross = (
-                    (entry - exit_price) * qty
-                    if side == "short"
-                    else (exit_price - entry) * qty
-                )
-                fee = (
-                    (_float(row.get("entry_fee_usdt")) if has_entry_fee else 0.0)
-                    + (_float(row.get("exit_fee_usdt")) if has_exit_fee else 0.0)
-                )
-                row_realized = gross - fee
-            else:
-                row_realized = None
-            if row_realized is None:
-                if bucket is not None:
-                    bucket["pnl_known"] = False
-                continue
-            realized += row_realized
-            if bucket is not None:
-                bucket["pnl"] = _float(bucket.get("pnl")) + row_realized
-    if recent_cutoff_ms is not None:
-        for row in trades.to_dicts():
-            entry_ts = int(
-                _float(
-                    row.get("entry_ts_ms")
-                    or row.get("opened_at_ms")
-                    or row.get("ts_ms")
-                )
-            )
-            if entry_ts >= recent_cutoff_ms:
-                symbol = str(row.get("symbol") or "UNKNOWN")
-                raw_side = str(row.get("side") or row.get("trade_side") or "position").lower()
-                side = (
-                    "short" if raw_side in {"short", "sell"}
-                    else "long" if raw_side in {"long", "buy"}
-                    else raw_side
-                )
-                recent_open_legs.add((symbol, side))
-    if {"entry_price", "qty"}.issubset(trades.columns):
-        open_trades = trades.filter(pl.col("status") == "open")
-        open_count = open_trades.height
-        if not open_trades.is_empty():
-            for row in open_trades.to_dicts():
-                qty = _float(row.get("qty"))
-                entry = _float(row.get("entry_price"))
-                symbol = str(row.get("symbol") or "")
-                raw_side = str(row.get("side") or row.get("trade_side") or "").lower()
-                side = (
-                    "short" if raw_side in {"short", "sell"}
-                    else "long" if raw_side in {"long", "buy"}
-                    else raw_side
-                )
-                if symbol and side:
-                    key = (symbol, side)
-                    open_leg_counts[key] = open_leg_counts.get(key, 0) + 1
-                if qty > 0.0 and entry > 0.0:
-                    notional = qty * entry
-                    open_notional += notional
-                    open_positions.append(_open_position_label(row, notional_usdt=notional))
-    awaiting_pnl = trades.filter(pl.col("status") == "awaiting_pnl")
-    if not awaiting_pnl.is_empty() and "symbol" in awaiting_pnl.columns:
-        awaiting_pnl_symbols = {
-            str(symbol) for symbol in awaiting_pnl["symbol"].to_list() if str(symbol)
-        }
-    return _LedgerSummary(
-        available=True,
-        trade_count=trade_count,
-        open_count=open_count,
-        realized_pnl_usdt=realized,
-        open_notional_usdt=open_notional,
-        open_positions=tuple(open_positions),
-        awaiting_pnl_count=awaiting_pnl.height,
-        awaiting_pnl_symbols=tuple(sorted(awaiting_pnl_symbols)),
-        open_leg_counts=tuple(
-            (symbol, side, count)
-            for (symbol, side), count in sorted(open_leg_counts.items())
-        ),
-        recent_opened_count=len(recent_open_legs),
-        recent_closed_count=len(recent_close_buckets),
-        recent_realized_pnl_usdt=sum(
-            _float(bucket.get("pnl")) for bucket in recent_close_buckets.values()
-        ),
-        recent_realized_complete=all(
-            bool(bucket.get("pnl_known")) for bucket in recent_close_buckets.values()
-        ),
-        recent_closes=tuple(
-            f"{symbol} {' / '.join(sorted(bucket['reasons']))} "
-            + (
-                format_usd(bucket.get("pnl"), signed=True)
-                if bucket.get("pnl_known")
-                else "P&L unavailable"
-            )
-            for (symbol, _side), bucket in sorted(recent_close_buckets.items())
-        ),
-    )
-
-
-def _open_position_label(row: dict[str, Any], *, notional_usdt: float) -> str:
-    symbol = str(row.get("symbol") or "?")
-    side = str(row.get("side") or row.get("trade_side") or "").lower() or "open"
-    parts = [f"{symbol} {side}", format_usd(notional_usdt)]
-    stop = _float(row.get("stop_price") or row.get("stopLoss"))
-    take_profit = _float(row.get("take_profit_price") or row.get("takeProfit"))
-    if stop > 0.0:
-        parts.append(f"SL ${stop:.6g}")
-    elif side == "short":
-        parts.append("no SL")
-    if take_profit > 0.0:
-        parts.append(f"TP ${take_profit:.6g}")
-    return " ".join(parts)
-
-
-def _cycle_summary(root: Path | None, dataset: str, *, now_ms: int) -> _CycleSummary:
-    del now_ms  # kept for call-site symmetry and future windowing without API churn
-    if root is None:
-        return _CycleSummary(available=False)
-    if not root.exists():
-        return _CycleSummary(available=False)
-    try:
-        cycles = read_dataset(root, dataset)
-    except Exception:  # noqa: BLE001 - report must fail open
-        return _CycleSummary(available=False)
-    if cycles.is_empty() or "ts_ms" not in cycles.columns:
-        return _CycleSummary(available=True, cycle_count=cycles.height)
-    latest = cycles.sort("ts_ms").tail(1).to_dicts()[0]
-    return _CycleSummary(
-        available=True,
-        cycle_count=cycles.height,
-        latest_ts_ms=int(latest.get("ts_ms") or 0) or None,
-        latest_mode=str(latest.get("mode") or ""),
-    )
+    return intents
 
 
 def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:
-    """Pretty-print a cycle payload — used by the CLI and daemon for stdout/journald."""
+    """Concise target-producer status for stdout/journald."""
     if "cycle" not in payload:
-        # Fail LOUD + self-describing instead of the bare KeyError('cycle') the daemon's
-        # `except Exception: _logger.exception(...)` swallowed opaquely every cycle (audit 2026-06-02).
-        # A flat payload here means another sleeve's payload (e.g. the continuous flat dict) was routed
-        # to the long formatter -- each sleeve must supply its own _format_cycle_summary (continuous does).
         raise KeyError(
-            "format_long_demo_cycle_summary received a FLAT payload with no 'cycle' key "
-            f"(keys={sorted(payload)[:8]}); wrong-sleeve formatter? Use that sleeve's _format_cycle_summary."
+            "format_long_demo_cycle_summary received a FLAT payload with no 'cycle' key; "
+            "wrong-sleeve formatter"
         )
     cycle = payload["cycle"]
-    lines = [
-        "long-native event demo cycle "
-        f"id={cycle.get('cycle_id', '')} mode={cycle.get('mode')} "
-        f"profile={cycle.get('strategy_profile')} symbols={cycle.get('symbols')} "
-        f"vt={_float(cycle.get('vol_target_scale')):.2f} "
-        f"features={cycle.get('feature_rows')} entries={cycle.get('entries_executed')}/{cycle.get('entry_candidates')} "
-        f"exits={cycle.get('exits_executed')}/{cycle.get('exit_candidates')} "
-        f"open_long={cycle.get('open_long_positions_after')} equity=${_float(cycle.get('equity_usdt')):,.2f} "
-        f"elapsed={_float(cycle.get('cycle_elapsed_pre_persist_ms')):.0f}ms",
-    ]
-    return "\n".join(lines)
+    health_error = str(cycle.get("account_owner_health_error") or "")
+    health = "healthy" if not health_error else f"blocked:{health_error[:120]}"
+    return (
+        "long target producer "
+        f"id={cycle.get('cycle_id', '')} mode={cycle.get('mode', '')} "
+        f"profile={cycle.get('strategy_profile', '')} symbols={cycle.get('symbols', 0)} "
+        f"features={cycle.get('feature_rows', 0)} candidates={cycle.get('entry_candidates', 0)} "
+        f"targets=entry:{cycle.get('entry_targets_queued', 0)} "
+        f"exit:{cycle.get('exit_targets_queued', 0)} "
+        f"open_components={cycle.get('open_long_components', 0)} "
+        f"equity=${_float(cycle.get('equity_usdt')):,.2f} owner={health} "
+        f"elapsed={_float(cycle.get('cycle_elapsed_pre_persist_ms')):.0f}ms"
+    )

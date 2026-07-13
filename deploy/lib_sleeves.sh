@@ -4,25 +4,25 @@
 # narrow an enabled repo sleeve to off). bash-3.2-safe (no associative arrays).
 # See deploy/sleeves.env for semantics.
 
-# Space-separated unit lists per sleeve (entry/exit daemons + paper shadow). The risk service
-# is intentionally NOT here - it always runs and protects every sleeve's open positions.
-# Retired units stay in this cleanup list so stale VPS timers/services do not
-# keep failing after a deploy or recovery.
-# Continuous is split: the DEMO order-submitting sleeve vs the no-order PAPER
-# evidence collector.
-RETIRED_SLEEVE_UNITS="liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service liquidity-migration-continuous-forward-report.service liquidity-migration-continuous-forward-report.timer"
+# Space-separated unit lists per strategy target producer. Canonical demo/paper
+# account owners are intentionally not sleeve-toggled: enabled producers require
+# them, and the owners exclusively reconcile and protect account positions.
+# Continuous is split into demo and deterministic-paper target producers.
 LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"
 CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"
 CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"
 # Timer the continuous sleeve owns (the daily rmom-gate refresh). It runs when either
 # continuous demo or continuous paper is on, because both need residual_momentum.parquet.
 CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"
-# The BTC-beta hedge is an order-submitting continuous-demo addon, not paper evidence.
+# The BTC/ETH hedge is a target-only continuous-demo add-on; the account owner
+# remains the only process allowed to submit its resulting venue orders.
 CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"
 CONTINUOUS_HEDGE_SERVICES="liquidity-migration-continuous-hedge.service"
 
 LM_HOST_SLEEVES_ENV="${LM_HOST_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.env}"
 LM_RESOLVED_SLEEVES_ENV="${LM_RESOLVED_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.resolved.env}"
+LM_SYSTEMD_UNIT_DIR="${LM_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}"
 
 # Load the toggles: committed defaults first, then an optional per-host override. The
 # host override is intentionally a safety NARROWING layer: it may turn a repo-on
@@ -42,7 +42,7 @@ lm_load_sleeve_toggles() {
     # Fallbacks if NEITHER file set a toggle (a stripped checkout): EVERY sleeve
     # fails safe to OFF (audit 2026-06-12 round 3 - LONG previously failed OPEN,
     # so an accidentally deleted/renamed sleeves.env would have enabled and
-    # restarted the order-submitting long demo against the operator's LONG=off
+    # restarted the long demo target producer against the operator's LONG=off
     # intent). The committed deploy/sleeves.env is the real source of truth;
     # these are last-resort. A missing config disables everything; it can never
     # resurrect a sleeve.
@@ -169,10 +169,33 @@ lm_host_liqmig_units() {
     {
         systemctl list-unit-files 'liquidity-migration-*' --no-legend --no-pager 2>/dev/null || true
         systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager --plain 2>/dev/null || true
-        for _lhlu_path in /etc/systemd/system/liquidity-migration-*; do
+        for _lhlu_path in \
+            "$LM_SYSTEMD_UNIT_DIR"/liquidity-migration-*.service \
+            "$LM_SYSTEMD_UNIT_DIR"/liquidity-migration-*.timer \
+            "$LM_RUNTIME_SYSTEMD_UNIT_DIR"/liquidity-migration-*.service \
+            "$LM_RUNTIME_SYSTEMD_UNIT_DIR"/liquidity-migration-*.timer; do
             [ -e "$_lhlu_path" ] && basename "$_lhlu_path"
         done
-    } | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^liquidity-migration-/) {print $i; break}}' | sed '/^$/d' | sort -u
+        # A retired unit file may already be gone while an operator/runtime
+        # drop-in survives. Surface its owning unit name so cleanup removes the
+        # orphaned override too; expected current-unit drop-ins remain intact.
+        for _lhlu_dropin in \
+            "$LM_SYSTEMD_UNIT_DIR"/liquidity-migration-*.service.d \
+            "$LM_SYSTEMD_UNIT_DIR"/liquidity-migration-*.timer.d \
+            "$LM_RUNTIME_SYSTEMD_UNIT_DIR"/liquidity-migration-*.service.d \
+            "$LM_RUNTIME_SYSTEMD_UNIT_DIR"/liquidity-migration-*.timer.d; do
+            [ -d "$_lhlu_dropin" ] && basename "$_lhlu_dropin" .d
+        done
+        # Broken enablement symlinks can outlive both the unit file and
+        # systemd's list-unit-files output. Inventory them explicitly so an old
+        # wants/requires link cannot resurrect after a later file reappears.
+        for _lhlu_root in "$LM_SYSTEMD_UNIT_DIR" "$LM_RUNTIME_SYSTEMD_UNIT_DIR"; do
+            [ -d "$_lhlu_root" ] || continue
+            find "$_lhlu_root" -type l \
+                \( -name 'liquidity-migration-*.service' -o -name 'liquidity-migration-*.timer' \) \
+                -print 2>/dev/null
+        done | while IFS= read -r _lhlu_link; do basename "$_lhlu_link"; done
+    } | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^liquidity-migration-.*\.(service|timer)$/) {print $i; break}}' | sed '/^$/d' | sort -u
 }
 
 lm_cleanup_unknown_liqmig_units() {
@@ -183,7 +206,17 @@ lm_cleanup_unknown_liqmig_units() {
         esac
         echo "cleanup: unknown liquidity-migration unit -> disable/remove $_lcu_unit" >&2
         systemctl disable --now "$_lcu_unit" 2>/dev/null || true
-        rm -f "/etc/systemd/system/$_lcu_unit"
+        for _lcu_root in "$LM_SYSTEMD_UNIT_DIR" "$LM_RUNTIME_SYSTEMD_UNIT_DIR"; do
+            rm -f "$_lcu_root/$_lcu_unit"
+            if [ -d "$_lcu_root" ]; then
+                find "$_lcu_root" -type l -name "$_lcu_unit" -delete 2>/dev/null || true
+            fi
+            _lcu_dropin_dir="$_lcu_root/$_lcu_unit.d"
+            if [ -d "$_lcu_dropin_dir" ]; then
+                find "$_lcu_dropin_dir" -mindepth 1 -delete
+                rmdir "$_lcu_dropin_dir" 2>/dev/null || true
+            fi
+        done
         systemctl reset-failed "$_lcu_unit" 2>/dev/null || true
     done
 }
@@ -197,6 +230,44 @@ lm_verify_no_unknown_liqmig_units() {
         echo "verify failed: unknown liquidity-migration unit present: $_lvnu_unit" >&2
         return 1
     done
+}
+
+# Install exactly the checked-in unit manifest without enabling or starting any
+# current service/timer. Unknown historical units are stopped and removed because
+# allowing a retired order mutator to survive this phase would defeat the point of
+# a single-owner cutover. This function deliberately does not read or create the
+# account-execution-capture-enabled authorization marker.
+lm_install_current_systemd_units() {
+    _licsu_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for _licsu_required in \
+        liquidity-migration-account-execution.service \
+        liquidity-migration-account-paper-execution.service; do
+        if [ ! -f "$_licsu_dir/systemd/$_licsu_required" ]; then
+            echo "install failed: required account owner unit is absent from manifest: $_licsu_required" >&2
+            return 1
+        fi
+    done
+    mkdir -p "$LM_SYSTEMD_UNIT_DIR"
+    for _licsu_path in \
+        "$_licsu_dir"/systemd/liquidity-migration-*.service \
+        "$_licsu_dir"/systemd/liquidity-migration-*.timer; do
+        [ -e "$_licsu_path" ] || continue
+        cp "$_licsu_path" "$LM_SYSTEMD_UNIT_DIR/$(basename "$_licsu_path")"
+    done
+
+    # Remove the named emergency mute from the current continuous producer. It
+    # suppressed stale-ledger spam before notification ownership moved to the
+    # account owner; retaining it would also suppress legitimate runner errors.
+    for _licsu_root in "$LM_SYSTEMD_UNIT_DIR" "$LM_RUNTIME_SYSTEMD_UNIT_DIR"; do
+        _licsu_quiet_dir="$_licsu_root/liquidity-migration-bybit-continuous-demo.service.d"
+        rm -f "$_licsu_quiet_dir/telegram-quiet.conf"
+        rmdir "$_licsu_quiet_dir" 2>/dev/null || true
+    done
+
+    systemctl daemon-reload
+    lm_cleanup_unknown_liqmig_units
+    systemctl daemon-reload
+    lm_verify_no_unknown_liqmig_units
 }
 
 # apply_sleeve_enable <flag-value> <unit...> - on: `systemctl enable` each unit; off:

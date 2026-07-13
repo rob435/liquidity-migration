@@ -28,8 +28,6 @@ Usage: scripts/ops.sh <command> [arguments]
 
 Safe operator commands:
   status [ARGS...]             read-only VPS verification
-  reconcile quick [ARGS...]   fast paper <-> demo reconciliation
-  reconcile full [ARGS...]    full demo <-> backtest <-> paper reconciliation
   equity [ARGS...]             official equity-curve runner
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
   data-audit [ARGS...]         read-only granular/PIT coverage audit
@@ -38,6 +36,10 @@ Safe operator commands:
   tail-run [ARGS...]           run the preregistered tail-survival experiment
   overhaul-plan [ARGS...]      strategy-overhaul shallow readiness plan
   overhaul-phase0 [ARGS...]    outcome-blind strategy-overhaul inventory
+  account-parity [ARGS...]     compare historical/paper/demo account journals
+  twin-calibrate [ARGS...]     calibrate the execution twin from demo tapes
+  venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
+  cutover-authority [ARGS...]  review/issue/verify evidence-bound deploy authority
   test [PYTEST_ARGS...]        run pytest
   deploy --execute [ARGS...]   checked VPS deploy; explicit handshake required
   help                         show this help and do nothing else
@@ -111,22 +113,6 @@ case "$command" in
   status)
     exec "$ROOT_DIR/scripts/verify_vps_live.sh" "$@"
     ;;
-  reconcile)
-    mode="${1:-}"
-    [[ -n "$mode" ]] || die_usage "reconcile requires quick or full"
-    shift
-    case "$mode" in
-      quick)
-        exec bash "$ROOT_DIR/scripts/reconcile.sh" --quick "$@"
-        ;;
-      full)
-        exec bash "$ROOT_DIR/scripts/reconcile.sh" "$@"
-        ;;
-      *)
-        die_usage "unknown reconcile mode '$mode' (expected quick or full)"
-        ;;
-    esac
-    ;;
   equity)
     exec bash "$ROOT_DIR/scripts/equity_curves.sh" "$@"
     ;;
@@ -153,6 +139,18 @@ case "$command" in
     ;;
   overhaul-phase0)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/strategy_overhaul_scout_2026_07_10.py" --phase0-inventory "$@"
+    ;;
+  account-parity)
+    exec "$PYTHON_BIN" -m liquidity_migration.kernel_parity "$@"
+    ;;
+  twin-calibrate)
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/calibrate_execution_twin.py" "$@"
+    ;;
+  venue-accounting)
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/reconcile_bybit_demo_accounting.py" "$@"
+    ;;
+  cutover-authority)
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/account_execution_cutover_authority.py" "$@"
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest "$@"

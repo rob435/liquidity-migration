@@ -278,8 +278,9 @@ def plan_continuous_rebalance_resizes(
     components enter at 0.10-0.40 of base; legacy single-component rows default
     to 1.0) and ``vol_weight_multiplier`` preserves inverse-vol entry sizing
     from the ledger row (legacy/flat rows default to 1.0). Rows whose trade_id
-    ends with one of ``exclude_trade_id_suffixes`` (sniper fills — deliberately
-    quarter-size, lifecycle-managed by the sniper) are never resized.
+    ends with one of ``exclude_trade_id_suffixes`` is never resized. The current
+    caller retains ``-snipe`` only as a read-safety guard for archived
+    adverse-limit children; no future runtime creates those rows.
 
     Positive delta means increase the short with a non-reduce-only Sell. Negative
     delta means reduce the short with a reduce-only Buy. This planner deliberately
@@ -704,7 +705,16 @@ def apply_rebalance_rule(
 
         equity *= 1.0 + basket_return
         peak = max(peak, equity)
-        row = (day, basket_return, scale, gross, entry_cost, funding, resize_cost, equity)
+        row: tuple[int | float, ...] = (
+            day,
+            basket_return,
+            scale,
+            gross,
+            entry_cost,
+            funding,
+            resize_cost,
+            equity,
+        )
         if hedged:
             row = row + (hedge_ratio, hedge_return, hedge_funding_return, hedge_cost_return)
         if two_leg:

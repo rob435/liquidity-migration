@@ -13,7 +13,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # The continuous signal gates on residual_momentum.parquet; rebuild it daily from each
 # enabled continuous root's own kline store so the causal shift-3 trailing residual
 # sum is fresh for rmom[today]. The wrapper reads deploy/sleeves.env plus /etc
-# overrides, so paper-only evidence collection works while the order-submitting
+# overrides, so paper-only evidence collection works while the target-publishing
 # demo sleeve remains off.
 ExecStart=/bin/bash /opt/liquidity-migration/scripts/run_continuous_rmom_refresh.sh
 Nice=10

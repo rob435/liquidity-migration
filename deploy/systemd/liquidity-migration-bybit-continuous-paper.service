@@ -1,7 +1,9 @@
 [Unit]
-Description=liquidity-migration Bybit continuous-fade paper (dry-run) sleeve
+Description=liquidity-migration continuous-fade paper target producer
 Wants=network-online.target
-After=network-online.target
+Requires=liquidity-migration-account-paper-execution.service
+After=network-online.target liquidity-migration-account-paper-execution.service
+ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
 
 [Service]
 Type=simple
@@ -9,18 +11,14 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+EnvironmentFile=/etc/liquidity-migration/account-paper-execution.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-continuous-paper-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-# PAPER shadow of the continuous-demo sleeve: NO order submission, idealized fills
-# at the signal price. SUBMIT_ORDERS=0 + RECORD_DRY_RUN=1 + PAPER_MODE=1 routes
-# writes to continuous_fade_paper_* so reconcile-continuous-paper-demo can pair
-# this against the live demo ledger and measure execution slippage. Without
-# PAPER_MODE=1 it would silently write the demo dataset names → reconcile paired=0.
-Environment=SUBMIT_ORDERS=0
-Environment=CONFIRM_DEMO_ORDERS=0
-Environment=RECORD_DRY_RUN=1
-Environment=PAPER_MODE=1
-Environment=TELEGRAM_ENABLED=0
+# PAPER shadow of the continuous-demo sleeve: it publishes targets to the
+# deterministic paper account owner and never touches the venue.
+Environment=EXECUTION_ENVIRONMENT=paper
 Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LOOKBACK_DAYS=45
@@ -29,31 +27,12 @@ Environment=WORKERS=2
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
 Environment=MAX_HOLD_HOURS=24
-# Mirrors demo continuous_ensemble_v2 profile: TP12, daily vol-target rebalance
-# disabled, CTRL_BTC_RISK_70_90_35 BTC-risk sizing, TP/24h only.
+# Mirrors the demo continuous_ensemble_v2 target profile. The paper account
+# owner derives fill-anchored protection and lifecycle state.
 Environment=STRATEGY_PROFILE=continuous_ensemble_v2
 Environment=FEATURE_SET=max_ret168
 Environment=ENTRY_EVENT_TRIGGER=none
-# Explicitly mirror the demo rollback. The runner defaults this off, but pinning
-# the value makes demo/paper intent auditable and deploy-verifiable.
-Environment=CONTINUOUS_SNIPER=0
 Environment=BTC_TREND_GATE=uptrend
-Environment=DAILY_REBALANCE_ENABLED=0
-Environment=DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90
-Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045
-Environment=DAILY_REBALANCE_MAX_SCALE=4
-Environment=DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04
-Environment=DAILY_REBALANCE_RESIZE_COST_BPS=10
-Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0
-Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_MIN_RETURN=0
-Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_SCALE_WHEN_BELOW=0
-Environment=STOP_LOSS_PCT=0
-Environment=LEFT_DECILE_EXIT_ENABLED=0
-Environment=STOP_APPROACH_FRAC=0
-Environment=FAILED_FADE_HOURS=0
-Environment=FAILED_FADE_LOSS_PCT=0
-Environment=FAILED_FADE_MIN_MFE_PCT=0
-Environment=BREAKEVEN_ARM_PCT=0
 # Exact sizing shadow of the demo stress epoch.  Exchange leverage changes
 # margin accounting; NOTIONAL_MULTIPLIER changes the simulated order quantity.
 Environment=ENTRY_LEVERAGE=10
@@ -63,9 +42,6 @@ Environment=SIZING_MODE=inverse_vol
 Environment=TARGET_VOL_PER_NAME=0.01
 Environment=VOL_WEIGHT_CLAMP=2
 Environment=LIQ_TURNOVER_MIN=500000
-Environment=ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0
-Environment=ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1
-Environment=ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0
 # Market-data plane (deploy-env-timers-3): this PAPER shadow runs its OWN kline pool. Do not set
 # KLINES_FOLLOW_ROOT here; paper may be enabled while demo is off, so following
 # demo's kline store can freeze paper execution while the unit appears healthy.

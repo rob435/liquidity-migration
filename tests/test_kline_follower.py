@@ -236,6 +236,8 @@ def test_cli_klines_follow_root_parses_into_config(tmp_path: Path) -> None:
             "--data-root",
             str(tmp_path),
             "continuous-event-demo-cycle",
+            "--execution-environment",
+            "demo",
             "--klines-follow-root",
             "data/bybit-continuous-demo-event",
         ]
@@ -243,7 +245,13 @@ def test_cli_klines_follow_root_parses_into_config(tmp_path: Path) -> None:
     assert args.klines_follow_root == "data/bybit-continuous-demo-event"
     # default stays "own pool"
     args_default = build_parser().parse_args(
-        ["--data-root", str(tmp_path), "continuous-event-demo-cycle"]
+        [
+            "--data-root",
+            str(tmp_path),
+            "continuous-event-demo-cycle",
+            "--execution-environment",
+            "demo",
+        ]
     )
     assert args_default.klines_follow_root == ""
 

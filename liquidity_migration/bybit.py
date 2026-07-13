@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import logging
 import os
-import random
 import threading
 import time
 from collections import deque
@@ -12,11 +11,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 try:
-    from pybit.unified_trading import HTTP, WebSocket, WebSocketTrading
+    from pybit.unified_trading import HTTP, WebSocket
 except ModuleNotFoundError:  # pragma: no cover - dependency may be absent before install
     HTTP = None
     WebSocket = None
-    WebSocketTrading = None
 
 
 class _PybitRateLimitLogFilter(logging.Filter):
@@ -56,6 +54,14 @@ _logger_account = logging.getLogger("liquidity_migration.bybit.account")
 
 class BybitDataError(RuntimeError):
     pass
+
+
+class BybitRequestRejected(BybitDataError):
+    """The venue returned a definite negative response; no mutation was accepted."""
+
+
+class BybitSubmissionUncertain(BybitDataError):
+    """A state-changing request may have reached the venue, but its response was lost."""
 
 
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -129,10 +135,8 @@ def _reject_ambiguous_flag(name: str) -> None:
     )
 
 
-def validate_order_submit_allowed(*, submit_orders: bool, confirm_demo_orders: bool) -> None:
-    """Guard automated order submission: explicit confirm flag and demo account only."""
-    if not submit_orders:
-        return
+def validate_demo_order_permission(*, confirm_demo_orders: bool) -> None:
+    """Guard the demo account owner: explicit confirmation and demo credentials only."""
     if not confirm_demo_orders:
         raise RuntimeError("Refusing to submit orders without --confirm-demo-orders")
     _, _, demo = resolve_private_credentials()
@@ -140,6 +144,15 @@ def validate_order_submit_allowed(*, submit_orders: bool, confirm_demo_orders: b
         raise RuntimeError(
             "Refusing to submit orders with REAL_MONEY=true. "
             "Unset REAL_MONEY or use demo credentials for automated cycles."
+        )
+
+
+def _assert_account_execution_owner(*, owner: bool, action: str) -> None:
+    """Permit venue mutation only to an explicitly constructed account owner."""
+
+    if not owner:
+        raise RuntimeError(
+            f"Refusing to {action}: this client is not the account execution owner"
         )
 
 
@@ -571,13 +584,14 @@ class BybitPrivateClient:
     retry_sleep_seconds: float = 0.5
     rate_limiter: BybitRestRateLimiter | None = None
     # Defense in depth: the demo-only invariant is enforced once at config
-    # validation (validate_order_submit_allowed), but that runs three call
+    # validation (validate_demo_order_permission), but that runs three call
     # layers away from where the order is actually signed. Re-assert it HERE,
     # at the signing client, so a real-money account can only ever mutate
     # orders when the caller explicitly opted in. Reads (get_*) are never
     # gated; only state-changing submissions are. Defaults off, matching the
     # repo rule that REAL_MONEY is never enabled without explicit instruction.
     confirm_real_money: bool = False
+    account_execution_owner: bool = False
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -597,6 +611,7 @@ class BybitPrivateClient:
         the caller explicitly opted in at construction. Asserted at the layer
         that signs the order, so the demo-only invariant survives a future
         submit path that forgets the config-time guard."""
+        _assert_account_execution_owner(owner=self.account_execution_owner, action=action)
         if not self.demo and not self.confirm_real_money:
             raise RuntimeError(
                 f"Refusing to {action} on a REAL_MONEY account: this client was "
@@ -611,6 +626,22 @@ class BybitPrivateClient:
     def get_api_key_information(self) -> dict[str, Any]:
         payload = self._call("get_api_key_information")
         return payload.get("result", {})
+
+    def get_instruments_info(self, *, max_pages: int = 50) -> list[dict[str, Any]]:
+        """Read structural rules through the authenticated demo endpoint."""
+
+        return self._cursor_result_list(
+            "get_instruments_info",
+            {"category": self.category, "limit": 1000},
+            max_pages=max_pages,
+        )
+
+    def get_tickers(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"category": self.category}
+        if symbol:
+            params["symbol"] = symbol
+        payload = self._call("get_tickers", **params)
+        return payload.get("result", {}).get("list", [])
 
     def place_order(self, **params: Any) -> dict[str, Any]:
         if "orderLinkId" not in params:
@@ -634,11 +665,27 @@ class BybitPrivateClient:
                 order_link_id=params["orderLinkId"],
             )
             if existing is None:
-                # Bybit reported a duplicate but we cannot see the order — surface
-                # the original reject rather than silently swallowing it.
-                raise
-            return existing
-        return payload.get("result", {})
+                # A duplicate id proves that some prior request reached Bybit,
+                # but until order/trade history becomes readable its outcome is
+                # unknown. Never turn this into a local rejection: that would
+                # remove the command from working exposure and permit a second
+                # order while the first may still be live.
+                raise BybitSubmissionUncertain(
+                    f"Bybit reports duplicate orderLinkId {params['orderLinkId']!r}, "
+                    "but the existing order is not yet observable"
+                ) from exc
+            recovered = dict(existing)
+            recovered["_idempotent_existing_order"] = True
+            return recovered
+        result = dict(payload.get("result", {}))
+        # V5 exposes the server receipt timestamp at the response envelope,
+        # outside ``result``. Preserve it for account-owner request/ack latency
+        # evidence; dropping it makes one-way entry/response decomposition
+        # impossible even when the operator supplies a clock-offset receipt.
+        response_time_ms = payload.get("time")
+        if response_time_ms is not None:
+            result["_response_time_ms"] = response_time_ms
+        return result
 
     def _lookup_order_by_link(
         self, *, symbol: str | None, order_link_id: str,
@@ -673,21 +720,12 @@ class BybitPrivateClient:
         payload = self._call("cancel_order", category=self.category, symbol=symbol, orderLinkId=order_link_id)
         return payload.get("result", {})
 
-    def cancel_all_orders(self, *, symbol: str | None = None, settle_coin: str | None = "USDT") -> dict[str, Any]:
-        self._assert_submit_allowed("cancel_all_orders")
-        params: dict[str, Any] = {"category": self.category}
-        if symbol:
-            params["symbol"] = symbol
-        elif settle_coin:
-            params["settleCoin"] = settle_coin
-        payload = self._call("cancel_all_orders", **params)
-        return payload.get("result", {})
-
     def get_open_orders(
         self,
         *,
         symbol: str | None = None,
         settle_coin: str | None = "USDT",
+        order_filter: str | None = None,
         limit: int = 50,
         max_pages: int = 20,
     ) -> list[dict[str, Any]]:
@@ -696,6 +734,8 @@ class BybitPrivateClient:
             params["symbol"] = symbol
         elif settle_coin:
             params["settleCoin"] = settle_coin
+        if order_filter:
+            params["orderFilter"] = order_filter
         return self._cursor_result_list("get_open_orders", params, max_pages=max_pages)
 
     def get_order_history(
@@ -746,16 +786,39 @@ class BybitPrivateClient:
         self,
         *,
         symbol: str | None = None,
+        order_id: str | None = None,
         order_link_id: str | None = None,
         limit: int = 50,
+        max_pages: int = 20,
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"category": self.category, "limit": limit}
+        params: dict[str, Any] = {
+            "category": self.category,
+            "limit": max(1, min(int(limit), 100)),
+        }
         if symbol:
             params["symbol"] = symbol
+        if order_id:
+            params["orderId"] = order_id
         if order_link_id:
             params["orderLinkId"] = order_link_id
-        payload = self._call_optional(("get_executions", "get_trade_history"), **params)
-        return payload.get("result", {}).get("list", []) if payload else []
+        rows: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(max(1, int(max_pages))):
+            page_params = dict(params)
+            if cursor:
+                page_params["cursor"] = cursor
+            payload = self._call_optional(
+                ("get_executions", "get_trade_history"),
+                **page_params,
+            )
+            if not payload:
+                break
+            result = payload.get("result", {})
+            rows.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor") or None
+            if not cursor:
+                break
+        return rows
 
     def get_positions(
         self,
@@ -795,6 +858,7 @@ class BybitPrivateClient:
         end_time_ms: int | None = None,
         limit: int = 50,
         max_pages: int = 50,
+        strict: bool = False,
     ) -> list[dict[str, Any]]:
         """Closed-PnL records for the account.
 
@@ -826,11 +890,22 @@ class BybitPrivateClient:
             params = dict(base_params)
             if cursor:
                 params["cursor"] = cursor
-            payload = self._call_optional(("get_closed_pnl",), **params)
+            payload = (
+                self._call("get_closed_pnl", **params)
+                if strict
+                else self._call_optional(("get_closed_pnl",), **params)
+            )
             if not payload:
+                if strict:
+                    raise BybitDataError("Bybit get_closed_pnl returned no payload")
                 break
             result = payload.get("result", {})
-            rows.extend(result.get("list", []))
+            page_rows = result.get("list") if isinstance(result, Mapping) else None
+            if not isinstance(page_rows, list) or any(not isinstance(row, Mapping) for row in page_rows):
+                if strict:
+                    raise BybitDataError("Bybit get_closed_pnl returned an invalid result list")
+                break
+            rows.extend(dict(row) for row in page_rows)
             cursor = result.get("nextPageCursor") or None
             if not cursor:
                 break
@@ -839,10 +914,11 @@ class BybitPrivateClient:
     def get_funding_settlements(
         self,
         *,
-        start_time_ms: int | None = None,
-        end_time_ms: int | None = None,
-        limit: int = 200,
+        start_time_ms: int,
+        end_time_ms: int,
+        limit: int = 50,
         max_pages: int = 50,
+        strict: bool = False,
     ) -> list[dict[str, Any]]:
         """Funding-settlement rows from the account transaction log.
 
@@ -853,34 +929,78 @@ class BybitPrivateClient:
         the account received funding). Returns the result.list as-is (empty list
         on a missing endpoint, mirroring get_closed_pnl).
 
-        Bybit caps the transaction log at 200 rows/page. Over a multi-day
+        Bybit caps the transaction log at 50 rows/page. Over a multi-day
         reconciliation lookback a funding-active account easily exceeds one
         page (funding settles every 8h per open position), so follow
         ``nextPageCursor`` to the end. Without this the funding total — a
         first-order driver of the short's edge — was silently truncated to
-        the first 200 rows. ``max_pages`` bounds the loop defensively.
+        the first page. ``max_pages`` bounds the loop defensively.
         """
+        return self.get_account_transactions(
+            transaction_type="SETTLEMENT",
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            limit=limit,
+            max_pages=max_pages,
+            strict=strict,
+        )
+
+    def get_account_transactions(
+        self,
+        *,
+        transaction_type: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        limit: int = 50,
+        max_pages: int = 50,
+        strict: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Read one explicit Bybit transaction-log type over a bounded window.
+
+        Acceptance evidence uses ``strict=True`` so an absent SDK method,
+        transport error, or malformed response cannot be confused with a
+        successful query containing zero rows.
+        """
+
+        normalized_type = str(transaction_type).upper()
+        if normalized_type not in {"TRADE", "SETTLEMENT"}:
+            raise ValueError("transaction_type must be TRADE or SETTLEMENT")
+        start_ms = int(start_time_ms)
+        end_ms = int(end_time_ms)
+        if start_ms <= 0 or end_ms <= start_ms:
+            raise ValueError("transaction-log window must be positive and increasing")
+        if end_ms - start_ms > 7 * 24 * 60 * 60 * 1000:
+            raise ValueError("Bybit transaction-log window cannot exceed seven days")
         base_params: dict[str, Any] = {
             "accountType": "UNIFIED",
             "category": self.category,
-            "type": "SETTLEMENT",
-            "limit": max(1, min(int(limit), 200)),
+            "type": normalized_type,
+            "limit": max(1, min(int(limit), 50)),
+            "startTime": start_ms,
+            "endTime": end_ms,
         }
-        if start_time_ms is not None:
-            base_params["startTime"] = int(start_time_ms)
-        if end_time_ms is not None:
-            base_params["endTime"] = int(end_time_ms)
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(max(1, int(max_pages))):
             params = dict(base_params)
             if cursor:
                 params["cursor"] = cursor
-            payload = self._call_optional(("get_transaction_log",), **params)
+            payload = (
+                self._call("get_transaction_log", **params)
+                if strict
+                else self._call_optional(("get_transaction_log",), **params)
+            )
             if not payload:
+                if strict:
+                    raise BybitDataError("Bybit get_transaction_log returned no payload")
                 break
             result = payload.get("result", {})
-            rows.extend(result.get("list", []))
+            page_rows = result.get("list") if isinstance(result, Mapping) else None
+            if not isinstance(page_rows, list) or any(not isinstance(row, Mapping) for row in page_rows):
+                if strict:
+                    raise BybitDataError("Bybit get_transaction_log returned an invalid result list")
+                break
+            rows.extend(dict(row) for row in page_rows)
             cursor = result.get("nextPageCursor") or None
             if not cursor:
                 break
@@ -974,12 +1094,16 @@ class BybitPrivateClient:
             payload = method(**params)
             ret_code = payload.get("retCode")
             if ret_code != 0:
-                raise BybitDataError(f"Bybit {method_name} failed: {payload}")
+                raise BybitRequestRejected(f"Bybit {method_name} failed: {payload}")
             return payload
         except BybitDataError:
             raise
         except Exception as exc:  # noqa: BLE001 - pybit raises several transport types
-            raise BybitDataError(f"Bybit {method_name} failed: {exc}") from exc
+            if type(exc).__name__ == "InvalidRequestError":
+                raise BybitRequestRejected(f"Bybit {method_name} failed: {exc}") from exc
+            raise BybitSubmissionUncertain(
+                f"Bybit {method_name} outcome is unknown after transport failure: {exc}"
+            ) from exc
 
     def _call(self, method_name: str, **params: Any) -> dict[str, Any]:
         method = getattr(self._client, method_name)
@@ -1185,431 +1309,6 @@ class BybitPrivateWebSocketStream:
 _PROBE_PRESENT_STATUSES = frozenset(
     {"new", "partiallyfilled", "filled", "untriggered", "triggered"}
 )
-
-
-class BybitTradeRouter:
-    """Route order placement + cancellation through WS first, REST as fallback.
-
-    Exposes the same surface as :class:`BybitPrivateClient` so cycle code
-    that calls ``trading_client.place_order(**params)`` is a drop-in user:
-    no caller change needed. Internally:
-
-      1. If a :class:`BybitWebSocketTradeClient` is wired AND ``order_submit_mode``
-         allows WS, try WS first. Bybit's WS trade ack arrives in <50ms.
-      2. If WS is unavailable, times out, or returns a non-zero retCode and
-         ``rest_fallback`` is true, fall back to ``BybitPrivateClient.place_order``.
-         The router never raises just because WS was unavailable — REST is
-         the safety net.
-      3. If ``order_submit_mode == "rest"``, skip WS entirely. This is the
-         opt-out for operators who want to run REST-only for safety.
-
-    Non-order methods (``set_leverage``, ``get_positions``, ``get_open_orders``,
-    ``get_wallet_balance``, ``get_trade_history``, ``get_order_history``) pass
-    straight through to REST — there is no WS equivalent for those at Bybit.
-
-    Bybit demo currently rejects WS trade order entry; on demo, the router's
-    first WS attempt typically returns a non-zero retCode and we transparently
-    fall back to REST. Flipping on real money is NOT a one-flag change: every
-    client construction site would also need ``confirm_real_money=True`` wired in,
-    otherwise the signing-layer ``_assert_submit_allowed`` guard raises on every
-    submit. That is the intended fail-closed posture (real money requires a
-    deliberate code change plus explicit owner action, never a flag flip); on a
-    properly-wired real-money deployment WS placement would succeed and save
-    ~150-200ms per order.
-
-    Submission stats are exposed via :meth:`stats` so the operator can
-    observe whether placement is going WS or REST in production telemetry.
-    """
-
-    DEFAULT_TIMEOUT_SECONDS = 5.0
-
-    def __init__(
-        self,
-        *,
-        rest_client: Any,
-        ws_client: Any | None = None,
-        order_submit_mode: str = "ws_then_rest",
-        rest_fallback: bool = True,
-        ws_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-    ) -> None:
-        if rest_client is None:
-            raise ValueError("rest_client is required (it is the failsafe path)")
-        if order_submit_mode not in {"ws", "ws_then_rest", "rest"}:
-            raise ValueError("order_submit_mode must be ws, ws_then_rest, or rest")
-        if order_submit_mode == "ws" and rest_fallback:
-            raise ValueError("order_submit_mode='ws' is incompatible with rest_fallback=True")
-        if ws_timeout_seconds <= 0.0:
-            raise ValueError("ws_timeout_seconds must be positive")
-        self._rest = rest_client
-        self._ws = ws_client
-        self._mode = order_submit_mode
-        self._rest_fallback = bool(rest_fallback)
-        self._ws_timeout_seconds = float(ws_timeout_seconds)
-        self._lock = threading.Lock()
-        self._ws_attempts = 0
-        self._ws_successes = 0
-        self._ws_timeouts = 0
-        self._ws_rejects = 0
-        self._ws_exceptions = 0
-        self._rest_fallbacks = 0
-        self._rest_only = 0
-        # Incremented when a WS timeout's REST-fallback was suppressed
-        # because the probe found the order already at Bybit (the WS submit
-        # had reached the venue but the ack network-delayed past the
-        # timeout). Tracks how often the probe is saving us from a
-        # double-submit race.
-        self._ws_timeout_probe_recovered = 0
-        self._ws_timeout_probe_attempts = 0
-
-    # -- order placement / cancellation -------------------------------
-
-    def place_order(self, **params: Any) -> dict[str, Any]:
-        if "orderLinkId" not in params:
-            raise ValueError("orderLinkId is required for idempotent Bybit order submission")
-        if self._should_attempt_ws():
-            try:
-                return self._ws_call_sync("place_order", **params)
-            except _RouterWsFailed as failure:
-                # On a WS timeout / exception / malformed-ack the submit may have
-                # reached Bybit before the ack was lost or garbled, so the order
-                # could be LIVE. Probe by orderLinkId FIRST — independent of
-                # rest_fallback — and return the existing order if present. A
-                # "rejected" kind is a definitive venue reject (the order did NOT
-                # take), so it is excluded from the probe; REST resubmits and
-                # re-rejects cleanly (audit 2026-06-02 #44).
-                #
-                # The probe runs even in strict-WS (rest_fallback=False): without
-                # it, strict-WS gave LESS orphan protection than the default mode
-                # — a lost-ack-but-order-took race recorded an error while the
-                # position was live, with no way to recover the orderId. The probe
-                # never resubmits, so strict-WS still won't double-submit; it just
-                # recovers the order it already placed before raising.
-                if failure.kind in ("timeout", "exception", "malformed_ack"):
-                    probed = self._probe_existing_order(
-                        symbol=params.get("symbol"),
-                        order_link_id=params["orderLinkId"],
-                    )
-                    if probed is not None:
-                        _logger_trade_router.info(
-                            "place_order WS %s but order present on probe; "
-                            "returning existing order symbol=%s link=%s",
-                            failure.kind, params.get("symbol"), params["orderLinkId"],
-                        )
-                        return probed
-                if not self._rest_fallback:
-                    raise
-                _logger_trade_router.info(
-                    "place_order WS failed (%s); REST fallback symbol=%s link=%s",
-                    failure.kind, params.get("symbol"), params.get("orderLinkId"),
-                )
-                with self._lock:
-                    self._rest_fallbacks += 1
-        else:
-            with self._lock:
-                self._rest_only += 1
-        return self._rest.place_order(**params)
-
-    def cancel_order(self, *, symbol: str, order_link_id: str) -> dict[str, Any]:
-        if self._should_attempt_ws():
-            try:
-                return self._ws_call_sync(
-                    "cancel_order", symbol=symbol, order_link_id=order_link_id,
-                )
-            except _RouterWsFailed as failure:
-                if not self._rest_fallback:
-                    raise
-                _logger_trade_router.info(
-                    "cancel_order WS failed (%s); REST fallback symbol=%s link=%s",
-                    failure.kind, symbol, order_link_id,
-                )
-                with self._lock:
-                    self._rest_fallbacks += 1
-        else:
-            with self._lock:
-                self._rest_only += 1
-        return self._rest.cancel_order(symbol=symbol, order_link_id=order_link_id)
-
-    # -- pass-throughs (no WS equivalent) -----------------------------
-
-    def __getattr__(self, name: str) -> Any:
-        # Forward any other attribute access to the REST client so this
-        # router is a true drop-in replacement. set_leverage, get_positions,
-        # get_open_orders, get_wallet_balance, get_trade_history,
-        # get_order_history, cancel_all_orders — all route through REST.
-        # __getattr__ is only invoked for attributes NOT found on the
-        # router itself, so place_order/cancel_order keep their override.
-        return getattr(self._rest, name)
-
-    # -- introspection ------------------------------------------------
-
-    def stats(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "mode": self._mode,
-                "rest_fallback": self._rest_fallback,
-                "ws_wired": self._ws is not None,
-                "ws_attempts": self._ws_attempts,
-                "ws_successes": self._ws_successes,
-                "ws_timeouts": self._ws_timeouts,
-                "ws_rejects": self._ws_rejects,
-                "ws_exceptions": self._ws_exceptions,
-                "rest_fallbacks": self._rest_fallbacks,
-                "rest_only": self._rest_only,
-                "ws_timeout_probe_attempts": self._ws_timeout_probe_attempts,
-                "ws_timeout_probe_recovered": self._ws_timeout_probe_recovered,
-            }
-
-    # -- internals ----------------------------------------------------
-
-    def _should_attempt_ws(self) -> bool:
-        return self._mode in {"ws", "ws_then_rest"} and self._ws is not None
-
-    def _ws_call_sync(self, method: str, **params: Any) -> dict[str, Any]:
-        """Issue a WS call and block (with timeout) for the ack.
-
-        Returns the ack's ``data`` field on success (mirroring REST's
-        ``result`` shape so the caller sees identical structure). Raises
-        ``_RouterWsFailed`` on any failure mode — timeout, non-zero
-        retCode, transport exception. The caller decides whether to
-        REST-fallback based on ``rest_fallback``."""
-        with self._lock:
-            self._ws_attempts += 1
-        completed = threading.Event()
-        ack_holder: dict[str, Any] = {}
-
-        def _on_ack(message: Any) -> None:
-            ack_holder["message"] = message
-            completed.set()
-
-        try:
-            ws_method = getattr(self._ws, method)
-            ws_method(_on_ack, **params)
-        except Exception as exc:  # noqa: BLE001
-            with self._lock:
-                self._ws_exceptions += 1
-            raise _RouterWsFailed("exception", str(exc)) from exc
-
-        if not completed.wait(timeout=self._ws_timeout_seconds):
-            with self._lock:
-                self._ws_timeouts += 1
-            raise _RouterWsFailed("timeout", f"no ack within {self._ws_timeout_seconds}s")
-
-        message = ack_holder.get("message")
-        if not isinstance(message, Mapping):
-            with self._lock:
-                self._ws_rejects += 1
-            raise _RouterWsFailed("malformed_ack", repr(message)[:200])
-        ret_code = message.get("retCode")
-        if ret_code != 0:
-            with self._lock:
-                self._ws_rejects += 1
-            ret_msg = str(message.get("retMsg") or message.get("ret_msg") or "")
-            raise _RouterWsFailed(
-                "rejected", f"retCode={ret_code} retMsg={ret_msg}",
-            )
-        with self._lock:
-            self._ws_successes += 1
-        data = message.get("data")
-        return dict(data) if isinstance(data, Mapping) else {}
-
-    def _probe_existing_order(
-        self, *, symbol: str | None, order_link_id: str,
-    ) -> dict[str, Any] | None:
-        """Look up an order by orderLinkId after a WS timeout. Returns a
-        place_order-shaped dict (``{"orderId", "orderLinkId"}``) when Bybit
-        already has the order, else None. Probe failures (transport error,
-        endpoint missing) return None — the caller then REST-falls-back as
-        before, so the probe never makes things worse than the old path."""
-        if not order_link_id:
-            return None
-        with self._lock:
-            self._ws_timeout_probe_attempts += 1
-        rows: list[dict[str, Any]] = []
-        # Check open orders first (lighter call than history scan, and an
-        # order ack-delayed past timeout is still open at the matching
-        # engine in the common case).
-        try:
-            open_rows = self._rest.get_open_orders(symbol=symbol) if symbol else self._rest.get_open_orders()
-        except Exception:  # noqa: BLE001 - any transport / endpoint failure → fall through
-            open_rows = []
-        rows.extend(
-            row for row in (open_rows or [])
-            if str(row.get("orderLinkId") or "") == order_link_id
-        )
-        if not rows:
-            try:
-                history = self._rest.get_order_history(
-                    symbol=symbol, order_link_id=order_link_id, limit=10,
-                )
-            except Exception:  # noqa: BLE001
-                history = []
-            # Only an active/filled history row counts as "present" — a
-            # Rejected/Cancelled/Expired row means the submit did not take, so
-            # returning it would wrongly suppress the REST resubmit and leave the
-            # position unentered (audit 2026-06-02 #45). Open-orders matches above
-            # are active by definition and need no status filter.
-            rows.extend(
-                row for row in (history or [])
-                if str(row.get("orderLinkId") or row.get("order_link_id") or "") == order_link_id
-                and str(row.get("orderStatus") or row.get("order_status") or "").lower()
-                in _PROBE_PRESENT_STATUSES
-            )
-        if not rows:
-            return None
-        # Pick the most-recently-created row (history is usually newest-first
-        # already, but be defensive — only one orderLinkId per UID per window,
-        # so this is conservative). _safe_int guards the venue-supplied
-        # createdTime/updatedTime: a malformed (non-numeric) timestamp degrades
-        # to "pick any matching row" rather than raising a ValueError that would
-        # escape the probe and turn a recoverable WS-timeout fallback into a hard
-        # place_order failure — honouring the probe's "never make things worse"
-        # contract (the two REST calls above are already guarded).
-        chosen = max(
-            rows,
-            key=lambda r: _safe_int(r.get("createdTime") or r.get("updatedTime")),
-        )
-        with self._lock:
-            self._ws_timeout_probe_recovered += 1
-        return dict(chosen)
-
-
-class _RouterWsFailed(RuntimeError):
-    """Internal signal that the WS submission failed — the router decides
-    whether to fall back to REST based on its configuration."""
-
-    def __init__(self, kind: str, detail: str = "") -> None:
-        super().__init__(f"{kind}: {detail}" if detail else kind)
-        self.kind = kind
-        self.detail = detail
-
-
-_logger_trade_router = logging.getLogger("liquidity_migration.bybit.trade_router")
-
-
-@dataclass(slots=True)
-class BybitWebSocketTradeClient:
-    category: str = "linear"
-    testnet: bool = False
-    demo: bool = True
-    api_key: str | None = None
-    api_secret: str | None = None
-    recv_window: int = 1000
-    # audit2: mirror BybitPrivateClient's defense-in-depth real-money guard on the WS
-    # signing path. The config-time validate_order_submit_allowed gate protects the
-    # normal wiring, but the REST client deliberately RE-asserts the demo-only invariant
-    # at the layer that signs the order; the WS submit path had no such guard, so a
-    # future/refactored wiring that built this client with demo=False would place a
-    # real-money WS order with nothing between it and the venue. Defaults off, matching
-    # the repo rule that REAL_MONEY is never enabled without explicit instruction.
-    confirm_real_money: bool = False
-    _client: Any = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        if WebSocketTrading is None:
-            raise RuntimeError("pybit is required for BybitWebSocketTradeClient")
-        if not self.api_key or not self.api_secret:
-            raise RuntimeError("Bybit private websocket trading requires API key and secret")
-        self._client = WebSocketTrading(
-            testnet=self.testnet,
-            demo=self.demo,
-            api_key=self.api_key,
-            api_secret=self.api_secret,
-            recv_window=self.recv_window,
-        )
-
-    def _assert_submit_allowed(self, action: str) -> None:
-        """Refuse a state-changing WS submission on a real-money account unless the
-        caller explicitly opted in at construction — the WS twin of
-        BybitPrivateClient._assert_submit_allowed, asserted at the signing layer."""
-        if not self.demo and not self.confirm_real_money:
-            raise RuntimeError(
-                f"Refusing to {action} on a REAL_MONEY account: this websocket trade "
-                "client was built without confirm_real_money=True. The strategy is not "
-                "validated for real money; keep it on demo."
-            )
-
-    def place_order(self, callback: Any, **params: Any) -> None:
-        if "orderLinkId" not in params:
-            raise ValueError("orderLinkId is required for idempotent Bybit websocket order submission")
-        self._assert_submit_allowed("place an order")
-        self._client.place_order(callback, category=self.category, **params)
-
-    def cancel_order(self, callback: Any, *, symbol: str, order_link_id: str) -> None:
-        self._assert_submit_allowed("cancel an order")
-        self._client.cancel_order(callback, category=self.category, symbol=symbol, orderLinkId=order_link_id)
-
-    def close(self) -> None:
-        _close_ws_client(self._client)
-
-
-def build_ws_trade_client(
-    *,
-    category: str,
-    testnet: bool,
-    demo: bool,
-    api_key: str | None,
-    api_secret: str | None,
-    recv_window: int = 1000,
-    confirm_real_money: bool = False,
-    attempts: int = 4,
-    base_backoff_seconds: float = 0.5,
-    max_backoff_seconds: float = 8.0,
-    initial_jitter_seconds: float = 2.0,
-    sleep: Callable[[float], None] = time.sleep,
-    rng: Callable[[float, float], float] = random.uniform,
-) -> BybitWebSocketTradeClient:
-    """Build a WS trade client, retrying with jittered exponential backoff.
-
-    pybit's ``WebSocketTrading`` connects synchronously in its constructor and,
-    on repeated failure, raises AND permanently stops reconnecting on that
-    client ("Too many connection attempts. pybit will no longer try to
-    reconnect"). On the demo endpoint this is hit when several daemons open
-    auth-WS connections from one IP at once (per-IP connection-attempt rate
-    limit). The fix:
-
-      * each retry builds a FRESH client (the old one won't reconnect);
-      * an initial random jitter de-syncs the simultaneous boot of the short /
-        long / risk daemons so their first attempts don't collide;
-      * full-jitter exponential backoff spreads the retries.
-
-    On mainnet the first attempt typically succeeds instantly. If all attempts
-    fail the last error is raised so the caller falls back to REST (the
-    seatbelt). ``sleep``/``rng`` are injectable for deterministic tests.
-
-    PERMANENT errors (pybit not installed, or missing credentials) raise
-    IMMEDIATELY with no jitter/backoff — retrying can't fix them, and this keeps
-    credential-less unit tests fast and network-free."""
-    if WebSocketTrading is None:
-        raise RuntimeError("pybit is required for BybitWebSocketTradeClient")
-    if not api_key or not api_secret:
-        raise RuntimeError("Bybit private websocket trading requires API key and secret")
-    if initial_jitter_seconds > 0.0:
-        sleep(rng(0.0, initial_jitter_seconds))
-    last_exc: Exception | None = None
-    attempts = max(1, attempts)
-    for i in range(attempts):
-        try:
-            return BybitWebSocketTradeClient(
-                category=category,
-                testnet=testnet,
-                demo=demo,
-                api_key=api_key,
-                api_secret=api_secret,
-                recv_window=recv_window,
-                confirm_real_money=confirm_real_money,
-            )
-        except Exception as exc:  # noqa: BLE001 - retry transient connect failures; caller REST-falls-back
-            last_exc = exc
-            if i + 1 >= attempts:
-                break
-            backoff = min(max_backoff_seconds, base_backoff_seconds * (2 ** i))
-            backoff += rng(0.0, backoff)  # full jitter
-            logging.getLogger("liquidity_migration.bybit").info(
-                "ws trade client connect attempt %d/%d failed (%s); retrying in %.1fs",
-                i + 1, attempts, str(exc)[:140], backoff,
-            )
-            sleep(backoff)
-    raise last_exc if last_exc is not None else RuntimeError("ws trade client build failed")
 
 
 def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:

@@ -21,9 +21,8 @@ MS_PER_MINUTE = 60_000
 MS_PER_HOUR = 3_600_000
 MS_PER_DAY = 86_400_000
 
-# Order statuses that are still in-flight (not terminal): a pending entry/exit that
-# ws_risk and the sleeves must not double-submit or treat as flat. Single source of
-# truth so sleeve implementations cannot silently drift apart.
+# Order statuses that are still in-flight (not terminal): execution and planning
+# code must not double-submit them or treat them as flat.
 PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
 
 
@@ -95,8 +94,8 @@ def finite_float(value: Any, *, default: float | None = None) -> float | None:
 def coerce_int(value: Any, *, default: int = 0) -> int:
     """Coerce `value` to an int, returning `default` (0) on a missing/invalid value.
 
-    Shared single implementation for the trivial parse that reconciliation.py and
-    ws_risk.py each re-defined as a private ``_int`` (quality-dup-9)."""
+    Shared single implementation for the trivial parse that reconciliation.py
+    previously re-defined as a private ``_int`` (quality-dup-9)."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -196,7 +195,14 @@ def calendar_roll(
 def _date_range(df: pl.DataFrame) -> dict[str, str | None]:
     if df.is_empty() or "ts_ms" not in df.columns:
         return {"start": None, "end": None}
-    return {"start": _iso_date(int(df["ts_ms"].min())), "end": _iso_date(int(df["ts_ms"].max()))}
+    minimum = df["ts_ms"].min()
+    maximum = df["ts_ms"].max()
+    if minimum is None or maximum is None:
+        return {"start": None, "end": None}
+    return {
+        "start": _iso_date(coerce_int(minimum)),
+        "end": _iso_date(coerce_int(maximum)),
+    }
 
 
 def _iso_date(ts_ms: int) -> str:

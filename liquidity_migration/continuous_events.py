@@ -12,10 +12,10 @@ It REPRODUCES the proxy SELECTION exactly (so it is auditable against p1d/p1j/p1
   - short the top composite decile (D9), fresh spell entry (gap > 1h), liquid gate
     (signal-bar hourly turnover_quote >= threshold).
 
-It runs that selection through the validated execution core
-(`_simulate_indexed_trade` + `trade_lifecycle`: stop fills, funding-to-exit, MAE/MFE,
-compounding equity, drawdown, Sharpe) and adds the three realism upgrades the proxy
-lacked:
+It runs that selection chronologically through per-position lifecycle state and,
+for market orders, a persistent shared account kernel. Stops, funding-to-exit,
+MAE/MFE, compounding equity, drawdown, and Sharpe use the same lifecycle
+accounting helpers. The three realism upgrades the proxy lacked are:
   1. HONEST +1h entry -- fill at the bar AFTER the deciding bar's close. The proxy
      filled at the same close it ranked on (execution look-ahead). entry_delay_hours=0
      reproduces the proxy (validation only).
@@ -34,34 +34,47 @@ from __future__ import annotations
 
 import bisect
 import hashlib
-import heapq
 import json
 import tempfile
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import polars as pl
 
 from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift, exact_duration_ms
+from .account_kernel import AccountRiskPolicy, verify_account_journal
+from .account_service import SleeveAdapterKind
 from .config import DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .daily_feature_panel import _autodetect_dataset_names, _date_str_to_ms, _read_window
 from .storage import read_dataset_columns
 from .trade_lifecycle import (
+    _IndexedTradeState,
     _empty_trades,
     _funding_lookup,
     _indexed_price_bars_by_symbol,
-    _simulate_indexed_trade,
+    _stop_price,
+    _take_profit_price,
     _collapse_interval_min,
     annualized_sharpe,
     derive_funding_interval_min,
     funding_cadence_stats,
 )
-from .canonical_journal import verify_journal
-from .lifecycle_bridge import record_historical_trades
+from .execution_adapters import ExecutionTwinConfig, LatencyProfile
+from .historical_account_replay import (
+    HistoricalAccountReplay,
+    HistoricalAccountSession,
+    HistoricalTargetDecision,
+    historical_cycles_from_decisions,
+    historical_submission_feedback,
+    neutralize_historical_decisions,
+    synthetic_historical_rules,
+    synthetic_historical_rules_for_symbols,
+)
+from .strategy_targets import component_target_intent
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
 BTC_TREND_MODE_DAILY_PRIOR = "daily_prior"
@@ -76,6 +89,19 @@ BTC_TREND_MODES = (
 )
 BTC_EXACT_MONTH_DAYS = 365.25 / 12.0
 
+
+class BtcTrendConfig(Protocol):
+    """Read-only BTC-trend fields shared by historical and forward configs."""
+
+    @property
+    def btc_trend_mode(self) -> str: ...
+
+    @property
+    def btc_trend_lookback_days(self) -> int: ...
+
+    @property
+    def btc_trend_month_days(self) -> float: ...
+
 _RESEARCH_INPUT_CACHE_MAX = 4
 _RESEARCH_INPUT_CACHE: OrderedDict[tuple[str, str, str, int], dict[str, Any]] = OrderedDict()
 
@@ -84,6 +110,10 @@ _RESEARCH_INPUT_CACHE: OrderedDict[tuple[str, str, str, int], dict[str, Any]] = 
 class ContinuousEventConfig:
     """Continuous-fade engine config. See module docstring + the pre-registration."""
 
+    # Operational execution identity and venue leverage. They are independent
+    # from gross exposure; registered parity runs must set them explicitly.
+    execution_strategy_id: str = ""
+    execution_leverage: float = 1.0
     start_date: str = "2023-04-01"
     end_date: str = ""                    # "" = data-driven: clamp to the root's last available day
     #                                       (end-exclusive, so the final full day is included). A
@@ -134,7 +164,7 @@ class ContinuousEventConfig:
     entry_disaster_shock_frac: float = 1.0
     # Aggregate live-notional shock budget. Applied independently to each
     # component before ensemble weighting; with component weights summing to 1,
-    # the combined book inherits the same cap.
+    # the aggregate ensemble inherits the same cap.
     entry_portfolio_heat_cap_frac: float = 0.0  # 0=off
     age_days_min: int = 0                 # skip symbols younger than this (fresh-listing squeezers)
     entry_max_ret168_max: float = 10.0    # skip entries with trailing 168h max 1h return above this; 10=off
@@ -181,9 +211,20 @@ class ContinuousEventConfig:
         return self.gross_exposure / max(self.max_active, 1)
 
     def config_hash(self) -> str:
+        material = asdict(self)
+        # Research identity is intentionally stable under execution-only
+        # routing and margin choices. Those fields remain explicit in report
+        # config and canonical target events; changing frozen research hashes
+        # would rewrite preregistered evidence without changing the signal.
+        material.pop("execution_strategy_id", None)
+        material.pop("execution_leverage", None)
         return hashlib.sha256(
-            json.dumps(asdict(self), sort_keys=True, default=str).encode("utf-8")
+            json.dumps(material, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()[:12]
+
+    @property
+    def kernel_strategy_id(self) -> str:
+        return self.execution_strategy_id.strip() or f"continuous_events_{self.config_hash()}"
 
 
 def _iso_day(ts_ms: int) -> str:
@@ -897,7 +938,7 @@ def _btc_trend_lookup_key(signal_ts_ms: int, *, mode: str) -> int:
     return int(signal_ts_ms)
 
 
-def _btc_trend_lookback_duration_ms(config: ContinuousEventConfig) -> int:
+def _btc_trend_lookback_duration_ms(config: BtcTrendConfig) -> int:
     if config.btc_trend_mode == BTC_TREND_MODE_DAILY_PRIOR:
         return int(config.btc_trend_lookback_days) * MS_PER_DAY
     if config.btc_trend_mode == BTC_TREND_MODE_HOURLY_30D:
@@ -1126,6 +1167,23 @@ def _resolve_entry_fill(
     return None
 
 
+@dataclass(slots=True)
+class _ContinuousHistoricalOpen:
+    """One accepted CONTINUOUS position advanced only by timestamped bars."""
+
+    state: _IndexedTradeState
+    bars: dict[str, Any]
+    next_bar_index: int
+    end_bar_index: int
+    component_id: str
+    stop_approach_on: bool
+    state_mode: bool
+    max_hold_ms: int
+    risk_metadata: dict[str, Any]
+    candidate_tape_index: int | None
+    last_mark_price: float
+
+
 def _run_trades(
     entries: pl.DataFrame,
     symbol_bars: dict[str, Any],
@@ -1138,10 +1196,12 @@ def _run_trades(
     size_mult_lookup: dict[tuple[str, int], float] | None = None,
     admission_lookup: dict[tuple[str, int], bool] | None = None,
     listing_ts_by_symbol: dict[str, int] | None = None,
+    kernel_decision_sink: list[HistoricalTargetDecision] | None = None,
+    kernel_session: HistoricalAccountSession | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
-    (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
-    shared `_simulate_indexed_trade` path (identical fills/funding/exit semantics).
+    (age / fade-deceleration / market-context), size by the chosen rule, and advance each accepted
+    position through the shared chronological lifecycle state.
 
     `candidate_sink` (default None) is the candidate-tape audit hook: when a list is supplied, every
     candidate fed into this loop appends one decision row (selected OR the exact rejection reason,
@@ -1150,6 +1210,12 @@ def _run_trades(
     the pre-hook engine (no work, no output change), so existing callers are unaffected.
 
     Returns (trades, skip-counts)."""
+    if not np.isfinite(config.execution_leverage) or config.execution_leverage <= 0.0:
+        raise ValueError("continuous execution_leverage must be finite and positive")
+    if kernel_session is not None and config.entry_adverse_limit_pct > 0.0:
+        raise ValueError(
+            "online historical account session currently supports market entries only"
+        )
     if entries.is_empty():
         return _empty_trades(), {}
     # Optional exit ladder (off unless the config sets it).
@@ -1190,8 +1256,7 @@ def _run_trades(
             ts_i = int(ts)
             signal_counts[ts_i] = signal_counts.get(ts_i, 0) + 1
     adverse_exit_ts: list[int] = []   # ASCENDING net-negative exit timestamps (circuit-breaker, causal)
-    active: list[int] = []          # min-heap of actual exit timestamps of open positions
-    active_notional: list[tuple[int, float]] = []  # min-heap of (exit_ts, abs non-hedge notional)
+    open_positions: dict[str, _ContinuousHistoricalOpen] = {}
     last_entry: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
     btc_gate = config.btc_trend_gate
@@ -1212,6 +1277,13 @@ def _run_trades(
     skipped_external_size_multiplier = 0
     skipped_entry_limit_unfilled = 0
     skipped_portfolio_heat = 0
+    skipped_account_kernel = 0
+    pending_entry_ts_ms: int | None = None
+    pending_entry_decisions: list[HistoricalTargetDecision] = []
+    pending_entry_position_keys: list[str] = []
+    pending_entry_tape_indices: list[int] = []
+    pending_prior_last_entry: dict[str, int | None] = {}
+    last_advanced_ts_ms: int | None = None
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
@@ -1251,6 +1323,7 @@ def _run_trades(
         entry_reference_price: float | None = None,
         entry_limit_price: float | None = None,
         entry_fill_mode: str | None = None,
+        account_rejection_keys: tuple[str, ...] | None = None,
     ) -> None:
         if candidate_sink is None:
             return
@@ -1318,6 +1391,7 @@ def _run_trades(
                 "entry_reference_price": entry_reference_price,
                 "entry_limit_price": entry_limit_price,
                 "entry_fill_mode": entry_fill_mode,
+                "account_rejection_keys": list(account_rejection_keys or ()),
                 "crowding_count": int(signal_counts.get(int(sig_ts), 0)) if crowding_on else None,
                 "active_count": active_count,
                 "btc_trend_gate": btc_gate,
@@ -1340,21 +1414,205 @@ def _run_trades(
             }
         )
 
+    def _submit_kernel_decisions(
+        decisions: list[HistoricalTargetDecision],
+    ) -> tuple[bool, tuple[str, ...], bool]:
+        if not decisions:
+            return True, (), False
+        if kernel_decision_sink is not None:
+            kernel_decision_sink.extend(decisions)
+        if kernel_session is None:
+            return True, (), False
+        outputs = kernel_session.submit_decisions(
+            decisions,
+            equity_usdt=config.deploy_capital_usd,
+            batch_prefix="continuous-chronological",
+            market_prices={
+                position.state.symbol: position.last_mark_price
+                for position in open_positions.values()
+            },
+        )
+        feedback = historical_submission_feedback(outputs)
+        return feedback.accepted, feedback.rejection_keys, feedback.target_committed
+
+    def _cancel_committed_entries_after_execution_rejection() -> None:
+        """Remove desired targets after the venue/twin refused their orders.
+
+        An accepted account target followed by a rejected execution is not an
+        open position, but leaving the desired target behind would silently
+        retry or reopen it on a later unrelated cycle. Submit explicit zero
+        replacements before the local provisional positions are discarded.
+        """
+
+        assert kernel_session is not None
+        cancellations = neutralize_historical_decisions(
+            pending_entry_decisions,
+            reason="entry_execution_rejected",
+            source="continuous_events_execution_rejection_compensation",
+        )
+        accepted, rejection_keys, _ = _submit_kernel_decisions(list(cancellations))
+        if not accepted:
+            raise RuntimeError(
+                "historical account kernel could not neutralize rejected entries: "
+                + ", ".join(rejection_keys)
+            )
+
+    def _flush_pending_entries() -> None:
+        nonlocal pending_entry_ts_ms, skipped_account_kernel
+        if not pending_entry_decisions:
+            return
+        accepted, rejection_keys, target_committed = _submit_kernel_decisions(
+            pending_entry_decisions
+        )
+        if not accepted:
+            if target_committed:
+                _cancel_committed_entries_after_execution_rejection()
+            skipped_account_kernel += len(pending_entry_decisions)
+            for position_key in pending_entry_position_keys:
+                open_positions.pop(position_key, None)
+            if candidate_sink is not None:
+                for tape_index in pending_entry_tape_indices:
+                    candidate_sink[tape_index].update({
+                        "selected": False,
+                        "reason": "account_kernel_rejection",
+                        "account_rejection_keys": list(rejection_keys),
+                    })
+            for symbol, prior in pending_prior_last_entry.items():
+                if prior is None:
+                    last_entry.pop(symbol, None)
+                else:
+                    last_entry[symbol] = prior
+        pending_entry_ts_ms = None
+        pending_entry_decisions.clear()
+        pending_entry_position_keys.clear()
+        pending_entry_tape_indices.clear()
+        pending_prior_last_entry.clear()
+
+    def _materialize_open(position: _ContinuousHistoricalOpen) -> dict[str, Any]:
+        trade = position.state.to_trade()
+        if position.stop_approach_on and trade.get("exit_reason") == "stop_loss":
+            trade["exit_reason"] = "stop_approach"
+        if (
+            position.state_mode
+            and trade.get("exit_reason") == "max_hold"
+            and position.state.planned_exit_ts_ms
+            < position.state.entry_ts_ms + position.max_hold_ms
+            and int(trade.get("exit_ts_ms") or 0) == position.state.planned_exit_ts_ms
+        ):
+            trade["exit_reason"] = "left_decile"
+        if position.risk_metadata:
+            trade.update(position.risk_metadata)
+        return trade
+
+    def _exit_decision(
+        position: _ContinuousHistoricalOpen,
+        trade: dict[str, Any],
+    ) -> HistoricalTargetDecision:
+        exit_ts_ms = int(trade["exit_ts_ms"])
+        return HistoricalTargetDecision(
+            wall_ts_ns=exit_ts_ms * 1_000_000,
+            reference_price=float(trade["exit_price"]),
+            intent=component_target_intent(
+                adapter_kind=SleeveAdapterKind.CONTINUOUS,
+                action="exit",
+                decision_ts_ms=exit_ts_ms,
+                strategy_id=config.kernel_strategy_id,
+                component_id=position.component_id,
+                symbol=str(trade["symbol"]),
+                signed_notional_usdt=0.0,
+                leverage=config.execution_leverage,
+                reason=str(trade["exit_reason"]),
+                metadata={
+                    "source": "continuous_events_chronological_target",
+                    "owner_sleeve": "continuous",
+                    "prior_trade_id": position.component_id,
+                },
+            ),
+        )
+
+    def _record_finalized(
+        position: _ContinuousHistoricalOpen,
+        trade: dict[str, Any],
+    ) -> None:
+        rows.append(trade)
+        if position.candidate_tape_index is not None and candidate_sink is not None:
+            candidate_sink[position.candidate_tape_index]["exit_ts_ms"] = int(
+                trade["exit_ts_ms"]
+            )
+        if breaker_on and float(trade.get("net_return") or 0.0) < 0.0:
+            bisect.insort(adverse_exit_ts, int(trade["exit_ts_ms"]))
+
+    def _advance_positions(through_ts_ms: int, *, final: bool = False) -> None:
+        closed_keys: list[str] = []
+        closed: list[tuple[str, _ContinuousHistoricalOpen, dict[str, Any]]] = []
+        for key, position in sorted(
+            open_positions.items(),
+            key=lambda item: (item[1].state.entry_ts_ms, item[0]),
+        ):
+            state = position.state
+            bars = position.bars
+            while position.next_bar_index < position.end_bar_index and not state.closed:
+                bar_index = position.next_bar_index
+                bar_end_ts_ms = int(bars["bar_end_ts_ms"][bar_index])
+                if bar_end_ts_ms > through_ts_ms:
+                    break
+                position.next_bar_index += 1
+                position.last_mark_price = float(bars["close"][bar_index])
+                state.on_bar(
+                    high=float(bars["high"][bar_index]),
+                    low=float(bars["low"][bar_index]),
+                    close=float(bars["close"][bar_index]),
+                    bar_end_ts_ms=bar_end_ts_ms,
+                )
+            if (
+                not state.closed
+                and position.next_bar_index >= position.end_bar_index
+                and position.end_bar_index > 0
+            ):
+                last_index = position.end_bar_index - 1
+                boundary_ts_ms = int(bars["bar_end_ts_ms"][last_index])
+                if final or boundary_ts_ms >= state.planned_exit_ts_ms:
+                    state.close_at_boundary(
+                        close=float(bars["close"][last_index]),
+                        bar_end_ts_ms=boundary_ts_ms,
+                    )
+            if state.closed:
+                closed_keys.append(key)
+                closed.append((key, position, _materialize_open(position)))
+        grouped: dict[int, list[tuple[_ContinuousHistoricalOpen, dict[str, Any]]]] = {}
+        for _key, position, trade in closed:
+            grouped.setdefault(int(trade["exit_ts_ms"]), []).append((position, trade))
+        for _exit_ts, items in sorted(grouped.items()):
+            if kernel_decision_sink is not None or kernel_session is not None:
+                accepted, rejection_keys, _ = _submit_kernel_decisions([
+                    _exit_decision(position, trade) for position, trade in items
+                ])
+                if not accepted:
+                    raise RuntimeError(
+                        "historical account kernel rejected a strategy exit batch: "
+                        + ", ".join(rejection_keys)
+                    )
+            for position, trade in items:
+                _record_finalized(position, trade)
+        for key in closed_keys:
+            del open_positions[key]
+
     for idx, (sym, sig_ts, comp, turn, spell_end) in enumerate(zip(syms, tss, comps, turns, spell_ends)):
         cand_meta = entry_meta_rows[idx]
+        order_submit_ts = int(sig_ts) + delay_ms
+        if pending_entry_ts_ms is not None and pending_entry_ts_ms != order_submit_ts:
+            _flush_pending_entries()
+        if last_advanced_ts_ms != order_submit_ts:
+            _advance_positions(order_submit_ts)
+            last_advanced_ts_ms = order_submit_ts
         bars = symbol_bars.get(sym)
         if bars is None:
             _emit("no_bar_symbol")
             skipped_no_bar += 1
             continue
-        order_submit_ts = int(sig_ts) + delay_ms
         cand_trend: float | None = None
-        while active and active[0] <= order_submit_ts:
-            heapq.heappop(active)
-        while active_notional and active_notional[0][0] <= order_submit_ts:
-            heapq.heappop(active_notional)
         if crowding_on and signal_counts.get(int(sig_ts), 0) > config.entry_crowding_max_fresh:
-            _emit("crowding", order_submit_ts_ms=order_submit_ts, active_count=len(active))
+            _emit("crowding", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
             skipped_crowding += 1
             continue
         # Circuit breaker: pause this entry if too many net-negative covers have CLOSED in the trailing
@@ -1364,20 +1622,20 @@ def _run_trades(
             lo = bisect.bisect_left(adverse_exit_ts, order_submit_ts - pause_window_ms)
             hi = bisect.bisect_left(adverse_exit_ts, order_submit_ts)
             if hi - lo >= config.entry_pause_after_adverse_exits:
-                _emit("breaker", order_submit_ts_ms=order_submit_ts, active_count=len(active))
+                _emit("breaker", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
                 skipped_breaker += 1
                 continue
         if sym in last_entry and order_submit_ts - last_entry[sym] < cooldown_ms:
-            _emit("cooldown", order_submit_ts_ms=order_submit_ts, active_count=len(active))
+            _emit("cooldown", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
             skipped_cooldown += 1
             continue
-        if len(active) >= config.max_active:
-            _emit("capacity", order_submit_ts_ms=order_submit_ts, active_count=len(active))
+        if len(open_positions) >= config.max_active:
+            _emit("capacity", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
             skipped_capacity += 1
             continue
         order_submit_bar = bars["by_end"].get(order_submit_ts)
         if order_submit_bar is None:
-            _emit("no_bar_entry", order_submit_ts_ms=order_submit_ts, active_count=len(active))
+            _emit("no_bar_entry", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
             skipped_no_bar += 1
             continue
         close_arr = bars["close"]
@@ -1393,30 +1651,30 @@ def _run_trades(
             if listing_ts is None:
                 listing_ts = int(bars["bar_end_ts_ms"][0])
             if (order_submit_ts - int(listing_ts)) < age_min_ms:
-                _emit("age", order_submit_ts_ms=order_submit_ts, active_count=len(active))
+                _emit("age", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
                 skipped_gate += 1
                 continue
         regime_size_mult = 1.0
         if btc_gate != "off":
             trend = (btc_trend_daily or {}).get(_btc_trend_lookup_key(int(sig_ts), mode=btc_mode))
             if trend is None:
-                _emit("btc_trend_unknown", order_submit_ts_ms=order_submit_ts, active_count=len(active))
+                _emit("btc_trend_unknown", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
                 skipped_btc_trend += 1
                 continue
             cand_trend = float(trend)
             if btc_gate == "uptrend" and trend <= 0.0:
-                _emit("btc_trend", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
+                _emit("btc_trend", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
             if btc_gate == "downtrend" and trend > 0.0:
-                _emit("btc_trend", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
+                _emit("btc_trend", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
         if decel_h > 0 and order_submit_bar - decel_h >= 0:
             base_px = float(close_arr[order_submit_bar - decel_h])
             recent_ret = (float(close_arr[order_submit_bar]) / base_px - 1.0) if base_px > 0 else 0.0
             if recent_ret > config.entry_decel_max_ret:   # still ripping up -> not a confirmed fade
-                _emit("decel", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
+                _emit("decel", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
         if config.market_min_ret_1d > -1.0 and market_daily is not None:
@@ -1427,11 +1685,11 @@ def _run_trades(
             entry_day = (order_submit_ts // MS_PER_DAY) * MS_PER_DAY
             mkt = market_daily.get(entry_day - MS_PER_DAY)
             if mkt is not None and mkt < config.market_min_ret_1d:   # short into a weak tape = squeeze risk
-                _emit("market", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
+                _emit("market", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
                 skipped_gate += 1
                 continue
         if admission_lookup is not None and not bool(admission_lookup.get((sym, int(sig_ts)), False)):
-            _emit("admission", order_submit_ts_ms=order_submit_ts, active_count=len(active), regime_trend=cand_trend)
+            _emit("admission", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
             skipped_admission += 1
             continue
         external_size_multiplier = 1.0
@@ -1441,7 +1699,7 @@ def _run_trades(
             _emit(
                 "external_size_multiplier",
                 order_submit_ts_ms=order_submit_ts,
-                active_count=len(active),
+                active_count=len(open_positions),
                 regime_trend=cand_trend,
                 regime_size_mult=regime_size_mult,
                 external_size_multiplier=external_size_multiplier,
@@ -1468,7 +1726,7 @@ def _run_trades(
                 fill_window_start_ts_ms=order_submit_ts,
                 fill_window_end_ts_ms=order_submit_ts
                 + exact_duration_ms(hours=max(config.entry_adverse_limit_wait_hours, 0)),
-                active_count=len(active),
+                active_count=len(open_positions),
                 regime_trend=cand_trend,
                 entry_reference_price=ref_price,
                 entry_limit_price=limit_price,
@@ -1506,7 +1764,10 @@ def _run_trades(
         portfolio_heat_before_frac: float | None = None
         portfolio_heat_after_frac: float | None = None
         if portfolio_heat_on:
-            active_notional_weight = sum(weight for _exit, weight in active_notional)
+            active_notional_weight = sum(
+                abs(position.state.notional_weight * position.state.position_weight)
+                for position in open_positions.values()
+            )
             portfolio_heat_before_frac = active_notional_weight * disaster_shock
             remaining_notional_weight = max(
                 (portfolio_heat_cap / disaster_shock) - active_notional_weight,
@@ -1516,7 +1777,7 @@ def _run_trades(
                 _emit(
                     "portfolio_heat",
                     order_submit_ts_ms=order_submit_ts,
-                    active_count=len(active),
+                    active_count=len(open_positions),
                     regime_trend=cand_trend,
                     regime_size_mult=regime_size_mult,
                     external_size_multiplier=external_size_multiplier,
@@ -1537,59 +1798,106 @@ def _run_trades(
             delay_ms=delay_ms, max_hold_ms=max_hold_ms, hold_ms=hold_ms,
         )
         round_trip = _round_trip_bps(config, turn, notional_weight=nw)
-        trade = _simulate_indexed_trade(
-            symbol=sym, side=config.side, score=float(comp) if comp is not None else 0.0,
-            rank=int(config.decile), basket_id=_iso_day(entry_bar_end), signal_ts_ms=int(sig_ts),
-            entry_bar=int(entry_bar), symbol_bars=bars, planned_exit_ts_ms=planned_exit,
-            notional_weight=nw, position_weight=1.0, config=lifecycle,
-            round_trip_cost_bps=round_trip, stop_pct=trade_stop,
-            rank_lookup=rank_lookup or {}, event_decay_threshold=0.0,
-            funding_lookup=funding_lookup if config.use_funding else None,
-            stop_fill_mode=config.stop_fill_mode, stop_slippage_cap_pct=config.stop_slippage_cap_pct,
-            entry_price_override=fill.get("entry_price_override"),
+        entry_price = (
+            float(fill["entry_price_override"])
+            if fill.get("entry_price_override") is not None
+            else float(close_arr[entry_bar])
         )
-        trade_rows = [] if trade is None else [trade]
-        if not trade_rows:
+        next_bar_index = bisect.bisect_right(bars["ends"], entry_bar_end)
+        end_bar_index = bisect.bisect_right(bars["ends"], planned_exit)
+        if entry_price <= 0.0 or next_bar_index >= end_bar_index:
             _emit(
                 "no_fill",
                 entry_bar_end=entry_bar_end,
                 order_submit_ts_ms=order_submit_ts,
                 fill_window_start_ts_ms=fill.get("fill_window_start_ts_ms"),
                 fill_window_end_ts_ms=fill.get("fill_window_end_ts_ms"),
-                active_count=len(active),
+                active_count=len(open_positions),
                 entry_reference_price=fill.get("entry_reference_price"),
                 entry_limit_price=fill.get("entry_limit_price"),
                 entry_fill_mode=fill.get("entry_fill_mode"),
             )
             skipped_no_bar += 1
             continue
-        if stop_approach_on and trade.get("exit_reason") == "stop_loss":
-            trade["exit_reason"] = "stop_approach"
-        if (
-            state_mode
-            and trade.get("exit_reason") == "max_hold"
-            and planned_exit < entry_bar_end + max_hold_ms
-            and int(trade.get("exit_ts_ms") or 0) == int(planned_exit)
-        ):
-            trade["exit_reason"] = "left_decile"
+        component_id = f"{_iso_day(entry_bar_end)}-{config.side[0]}-{sym}"
+        state = _IndexedTradeState(
+            symbol=sym,
+            side=config.side,
+            score=float(comp) if comp is not None else 0.0,
+            rank=int(config.decile),
+            basket_id=_iso_day(entry_bar_end),
+            signal_ts_ms=int(sig_ts),
+            entry_ts_ms=entry_bar_end,
+            entry_price=entry_price,
+            planned_exit_ts_ms=planned_exit,
+            notional_weight=nw,
+            position_weight=1.0,
+            config=lifecycle,
+            round_trip_cost_bps=round_trip,
+            stop_price=_stop_price(
+                entry_price,
+                side=config.side,
+                stop_loss_pct=trade_stop or 0.0,
+            ),
+            take_profit_price=_take_profit_price(
+                entry_price,
+                side=config.side,
+                take_profit_pct=lifecycle.take_profit_pct,
+            ),
+            rank_lookup=rank_lookup or {},
+            event_decay_threshold=0.0,
+            funding_lookup=funding_lookup if config.use_funding else None,
+            stop_fill_mode=config.stop_fill_mode,
+            stop_slippage_cap_pct=config.stop_slippage_cap_pct,
+        )
+        entry_decision: HistoricalTargetDecision | None = None
+        if kernel_decision_sink is not None or kernel_session is not None:
+            strategy_id = config.kernel_strategy_id
+            signed_notional = abs(nw) * config.deploy_capital_usd
+            if config.side == "short":
+                signed_notional *= -1.0
+            entry_decision = HistoricalTargetDecision(
+                wall_ts_ns=entry_bar_end * 1_000_000,
+                reference_price=entry_price,
+                intent=component_target_intent(
+                    adapter_kind=SleeveAdapterKind.CONTINUOUS,
+                    action="entry",
+                    decision_ts_ms=entry_bar_end,
+                    strategy_id=strategy_id,
+                    component_id=component_id,
+                    symbol=sym,
+                    signed_notional_usdt=signed_notional,
+                    leverage=config.execution_leverage,
+                    reason="historical_continuous_entry",
+                    metadata={
+                        "source": "continuous_events_chronological_target",
+                        "signal_ts_ms": int(sig_ts),
+                        "signal_valid_until_ms": entry_bar_end + MS_PER_HOUR,
+                        "stop_loss_pct": float(trade_stop or 0.0),
+                        "take_profit_pct": float(lifecycle.take_profit_pct),
+                        "max_hold_duration_ms": max_hold_ms,
+                        "notional_weight": nw,
+                    },
+                ),
+            )
+        risk_metadata = {}
         if disaster_budget_on or portfolio_heat_on:
-            trade.update({
+            risk_metadata = {
                 "pre_risk_notional_weight": pre_risk_nw,
                 "entry_disaster_notional_cap": disaster_notional_cap,
                 "entry_disaster_shock_frac": disaster_shock,
                 "entry_portfolio_heat_before_frac": portfolio_heat_before_frac,
                 "entry_portfolio_heat_after_frac": portfolio_heat_after_frac,
                 "entry_risk_size_clamped": risk_size_clamped,
-            })
-        rows.append(trade)
-        exit_ts = int(trade["exit_ts_ms"])
+            }
+        candidate_tape_index = len(candidate_sink) if candidate_sink is not None else None
         _emit(
             "selected",
             entry_bar_end=entry_bar_end,
             order_submit_ts_ms=order_submit_ts,
             fill_window_start_ts_ms=fill.get("fill_window_start_ts_ms"),
             fill_window_end_ts_ms=fill.get("fill_window_end_ts_ms"),
-            active_count=len(active),
+            active_count=len(open_positions),
             regime_trend=cand_trend,
             regime_size_mult=regime_size_mult,
             notional_weight=nw,
@@ -1604,15 +1912,39 @@ def _run_trades(
             entry_reference_price=fill.get("entry_reference_price"),
             entry_limit_price=fill.get("entry_limit_price"),
             entry_fill_mode=fill.get("entry_fill_mode"),
-            exit_ts_ms=exit_ts,
+            exit_ts_ms=None,
         )
-        heapq.heappush(active, exit_ts)
-        heapq.heappush(active_notional, (exit_ts, abs(float(trade.get("notional_weight") or 0.0))))
+        position_key = f"{component_id}/{int(sig_ts)}/{idx}"
+        open_positions[position_key] = _ContinuousHistoricalOpen(
+            state=state,
+            bars=bars,
+            next_bar_index=next_bar_index,
+            end_bar_index=end_bar_index,
+            component_id=component_id,
+            stop_approach_on=stop_approach_on,
+            state_mode=state_mode,
+            max_hold_ms=max_hold_ms,
+            risk_metadata=risk_metadata,
+            candidate_tape_index=candidate_tape_index,
+            last_mark_price=entry_price,
+        )
+        if entry_decision is not None:
+            if kernel_session is not None:
+                if pending_entry_ts_ms is None:
+                    pending_entry_ts_ms = entry_bar_end
+                elif pending_entry_ts_ms != entry_bar_end:
+                    raise RuntimeError("entry decision batching crossed a wall timestamp")
+                pending_entry_decisions.append(entry_decision)
+                pending_entry_position_keys.append(position_key)
+                if candidate_tape_index is not None:
+                    pending_entry_tape_indices.append(candidate_tape_index)
+                if sym not in pending_prior_last_entry:
+                    pending_prior_last_entry[sym] = last_entry.get(sym)
+            else:
+                _submit_kernel_decisions([entry_decision])
         last_entry[sym] = order_submit_ts
-        if breaker_on:
-            for trade in trade_rows:
-                if float(trade.get("net_return") or 0.0) < 0.0:
-                    bisect.insort(adverse_exit_ts, int(trade["exit_ts_ms"]))
+    _flush_pending_entries()
+    _advance_positions(2**63 - 1, final=True)
     skips = {
         "skipped_capacity": skipped_capacity,
         "skipped_cooldown": skipped_cooldown,
@@ -1625,10 +1957,11 @@ def _run_trades(
         "skipped_external_size_multiplier": skipped_external_size_multiplier,
         "skipped_entry_limit_unfilled": skipped_entry_limit_unfilled,
         "skipped_portfolio_heat": skipped_portfolio_heat,
+        "skipped_account_kernel": skipped_account_kernel,
     }
     if not rows:
         return _empty_trades(), skips
-    return pl.DataFrame(rows), skips
+    return pl.DataFrame(rows).sort(["entry_ts_ms", "symbol", "trade_id"]), skips
 
 
 def _additive_equity(trades: pl.DataFrame) -> pl.DataFrame:
@@ -1992,13 +2325,65 @@ def run_continuous_event_research(
     rank_lookup = inputs["rank_lookup"]
     listing_ts_by_symbol = inputs["listing_ts_by_symbol"]
 
+    lifecycle_strategy_id = config.kernel_strategy_id
+    replay_policy = AccountRiskPolicy(
+        max_component_gross_notional_usdt=config.deploy_capital_usd * 10.0,
+        max_account_gross_notional_usdt=config.deploy_capital_usd * 100.0,
+        max_symbol_notional_usdt=config.deploy_capital_usd * 10.0,
+        max_initial_margin_usdt=config.deploy_capital_usd * 100.0,
+        max_leverage=config.execution_leverage,
+    )
+    execution_config = ExecutionTwinConfig(
+        fee_bps=config.taker_fee_bps * config.round_trip_cost_multiplier,
+        latency=LatencyProfile(0, 0, 0),
+        max_decision_age_ns=0,
+    )
+    temporary_lifecycle = None
+    if report_dir is not None:
+        lifecycle_root = Path(str(report_dir)).expanduser() / "common_kernel_execution"
+        lifecycle_root.mkdir(parents=True, exist_ok=True)
+    else:
+        temporary_lifecycle = tempfile.TemporaryDirectory(
+            prefix="liqmig-continuous-lifecycle-"
+        )
+        lifecycle_root = Path(temporary_lifecycle.name)
+    online_market_kernel = config.entry_adverse_limit_pct <= 0.0
+    online_session: HistoricalAccountSession | None = None
+    if online_market_kernel:
+        observed_ts_ns = max(
+            1,
+            min(
+                (
+                    int(bars["bar_end_ts_ms"][0]) * 1_000_000
+                    for bars in symbol_bars.values()
+                    if len(bars.get("bar_end_ts_ms", ())) > 0
+                ),
+                default=1,
+            ),
+        )
+        online_session = HistoricalAccountSession(
+            lifecycle_root,
+            account_id=lifecycle_strategy_id,
+            risk_policy=replay_policy,
+            instrument_rules=synthetic_historical_rules_for_symbols(
+                list(symbol_bars),
+                max_leverage=config.execution_leverage,
+                observed_ts_ns=observed_ts_ns,
+            ),
+            execution_config=execution_config,
+            id_seed=f"{lifecycle_strategy_id}:historical",
+        )
+
     candidate_sink: list[dict[str, Any]] | None = [] if candidate_tape_path is not None else None
+    kernel_decisions: list[HistoricalTargetDecision] = []
     if not entries.is_empty() and symbol_bars:
         trades, skips = _run_trades(
             entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup,
             candidate_sink=candidate_sink, size_mult_lookup=size_mult_lookup,
             admission_lookup=admission_lookup,
             listing_ts_by_symbol=listing_ts_by_symbol,
+            kernel_decision_sink=kernel_decisions,
+            kernel_session=online_session,
         )
     else:
         trades, skips = _empty_trades(), {}
@@ -2024,37 +2409,60 @@ def run_continuous_event_research(
         "metrics_mtm": mtm,                # portfolio mark-to-market (correlated-DD aware)
     }
 
-    # Historical execution is replayed through the same canonical lifecycle
-    # reducer as paper/demo. Citable runs retain the journal; ad-hoc runs use a
-    # temporary root so the data root remains immutable while parity is still
-    # validated on every invocation.
-    lifecycle_strategy_id = f"continuous_events_{config.config_hash()}"
-    if report_dir is not None:
-        lifecycle_root = Path(str(report_dir)).expanduser() / "canonical_execution"
-        lifecycle_root.mkdir(parents=True, exist_ok=True)
-        lifecycle_result = record_historical_trades(
-            lifecycle_root,
-            trades,
-            sleeve="continuous",
-            strategy_id=lifecycle_strategy_id,
-            now_ms=max(end_ms, 1),
-            deploy_capital_usd=config.deploy_capital_usd,
-        )
-        payload["canonical_journal"] = verify_journal(lifecycle_root)
-        payload["canonical_journal"]["events_appended_this_run"] = lifecycle_result["events_appended"]
+    if online_session is not None:
+        lifecycle_receipt = verify_account_journal(lifecycle_root)
+        lifecycle_receipt.update({
+            "batches": len(online_session.outputs),
+            "strategy_targets": len(kernel_decisions),
+            "final_state_hash": online_session.final_state_hash,
+            "evidence_label": "chronological_strategy_targets_through_live_common_account_kernel",
+            "historical_strategy_runtime_is_sequential": True,
+            "account_kernel_feedback_online": True,
+            "same_timestamp_strategy_batching": True,
+            "strategy_runtime_shared_across_environments": False,
+            "market_tape_shared_across_environments": False,
+            "venue_rule_parity": False,
+        })
     else:
-        with tempfile.TemporaryDirectory(prefix="liqmig-continuous-lifecycle-") as lifecycle_tmp:
-            record_historical_trades(
-                lifecycle_tmp,
-                trades,
-                sleeve="continuous",
-                strategy_id=lifecycle_strategy_id,
-                now_ms=max(end_ms, 1),
-                deploy_capital_usd=config.deploy_capital_usd,
-            )
-            lifecycle_receipt = verify_journal(lifecycle_tmp)
+        # Research-only adverse-limit entries are outside the current market-
+        # order twin. Their lifecycle is chronological, but kernel feedback is
+        # replayed afterward until a limit-order execution port is implemented.
+        replay_cycles = historical_cycles_from_decisions(
+            kernel_decisions,
+            equity_usdt=config.deploy_capital_usd,
+        )
+        lifecycle_result = HistoricalAccountReplay(
+            lifecycle_root,
+            account_id=lifecycle_strategy_id,
+            risk_policy=replay_policy,
+            instrument_rules=synthetic_historical_rules(kernel_decisions),
+            execution_config=execution_config,
+            id_seed=f"{lifecycle_strategy_id}:historical",
+        ).run(replay_cycles)
+        lifecycle_receipt = verify_account_journal(lifecycle_root)
+        lifecycle_receipt.update({
+            "batches": len(lifecycle_result.batches),
+            "strategy_targets": len(kernel_decisions),
+            "final_state_hash": lifecycle_result.final_state_hash,
+            "evidence_label": "chronological_limit_targets_postrun_common_kernel_replay",
+            "historical_strategy_runtime_is_sequential": True,
+            "account_kernel_feedback_online": False,
+            "same_timestamp_strategy_batching": True,
+            "strategy_runtime_shared_across_environments": False,
+            "market_tape_shared_across_environments": False,
+            "venue_rule_parity": False,
+        })
+
+    if report_dir is not None:
+        payload["account_journal"] = lifecycle_receipt
+    else:
         payload["canonical_lifecycle_validated"] = True
         payload["canonical_lifecycle_events"] = lifecycle_receipt["events"]
+        payload["canonical_lifecycle_evidence_label"] = lifecycle_receipt["evidence_label"]
+    payload["canonical_common_kernel_parity"] = True
+    payload["cross_environment_strategy_parity"] = False
+    if temporary_lifecycle is not None:
+        temporary_lifecycle.cleanup()
 
     if candidate_tape_path is not None:
         tape_path = Path(str(candidate_tape_path)).expanduser()
@@ -2101,6 +2509,7 @@ def run_continuous_event_research(
             "entry_reference_price": pl.Float64,
             "entry_limit_price": pl.Float64,
             "entry_fill_mode": pl.Utf8,
+            "account_rejection_keys": pl.List(pl.Utf8),
             "crowding_count": pl.Int64,
             "active_count": pl.Int64,
             "btc_trend_gate": pl.Utf8,

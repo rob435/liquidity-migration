@@ -6,39 +6,41 @@ import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 
 from liquidity_migration import event_demo_data
 from liquidity_migration.config import ResearchConfig
-from liquidity_migration.event_demo import (
-    EventDemoCycleConfig,
+from liquidity_migration.event_demo_data import (
     _build_demo_universe,
-    _collect_private_snapshots,
     _demo_instruments,
     _demo_kline_fetch_ranges,
     _download_recent_1h_klines,
-    _refresh_positions_and_orders,
+    _resolve_ticker_snapshot,
 )
 from liquidity_migration.event_demo_data import _prune_event_demo_kline_cache
 from liquidity_migration.storage import read_dataset, write_dataset
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 
-from _event_demo_fixtures import *  # noqa: F401,F403  (shared fakes/helpers)
-from _event_demo_fixtures import (  # noqa: F401  explicit for the linters
+from _event_demo_fixtures import (
     FailingKlineMarket,
     FakeKlineMarket,
-    FakeRiskClient,
-    MinimalEventMarket,
-    _ClosedPnlClient,
     _RecordingInstrumentsMarket,
-    _feature_cache_klines,
-    _feature_cache_universe,
     _make_instruments_frame,
     _make_tickers_frame,
-    _open_trade_row,
-    _patch_minimal_event_cycle,
 )
+
+
+def _public_config(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "universe_rank_end": 0,
+        "universe_max_symbols": 0,
+        "universe_min_turnover_24h": 0.0,
+        "lookback_days": 45,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def test_demo_kline_cache_avoids_refetching_complete_window(tmp_path: Path) -> None:
@@ -444,7 +446,6 @@ def test_download_recent_1h_klines_without_store_keeps_legacy_behavior(tmp_path:
 def test_resolve_ticker_snapshot_prefers_fresh_cache() -> None:
     """When the ticker cache is seeded + fresh, _resolve_ticker_snapshot
     returns the cache snapshot and never touches REST."""
-    from liquidity_migration.event_demo import _resolve_ticker_snapshot
     from liquidity_migration.ws_state_cache import TickerCache
 
     cache = TickerCache()
@@ -462,7 +463,6 @@ def test_resolve_ticker_snapshot_prefers_fresh_cache() -> None:
 
 
 def test_resolve_ticker_snapshot_falls_back_to_rest_when_unseeded() -> None:
-    from liquidity_migration.event_demo import _resolve_ticker_snapshot
     from liquidity_migration.ws_state_cache import TickerCache
 
     cache = TickerCache()  # never seeded
@@ -483,7 +483,6 @@ def test_resolve_ticker_snapshot_falls_back_when_cache_stale() -> None:
     rows. Critical for safety: trading on a stale price snapshot is worse
     than waiting one REST roundtrip."""
     import time as _time
-    from liquidity_migration.event_demo import _resolve_ticker_snapshot
     from liquidity_migration.ws_state_cache import TickerCache
 
     cache = TickerCache()
@@ -503,8 +502,6 @@ def test_resolve_ticker_snapshot_falls_back_when_cache_stale() -> None:
 
 
 def test_resolve_ticker_snapshot_with_no_cache_uses_rest() -> None:
-    from liquidity_migration.event_demo import _resolve_ticker_snapshot
-
     class _RestPublic:
         def get_tickers(self):
             return [{"symbol": "X", "lastPrice": "1"}]
@@ -514,75 +511,6 @@ def test_resolve_ticker_snapshot_with_no_cache_uses_rest() -> None:
     )
     assert source == "rest"
     assert rows[0]["symbol"] == "X"
-
-
-def test_resolve_private_snapshot_prefers_fresh_cache() -> None:
-    from liquidity_migration.event_demo import EventDemoCycleConfig, _resolve_private_snapshot
-    from liquidity_migration.ws_state_cache import PrivateStateCache
-
-    cache = PrivateStateCache()
-    cache.seed(
-        equity_usdt=12_500.0,
-        positions=[{"symbol": "BTCUSDT", "size": "1.0"}],
-        open_orders=[],
-    )
-
-    class _FailingClient:
-        def get_positions(self, **kwargs):
-            raise AssertionError("REST must not be called when cache is fresh")
-
-        def get_open_orders(self, **kwargs):
-            raise AssertionError("REST must not be called when cache is fresh")
-
-        def get_wallet_balance(self, **kwargs):
-            raise AssertionError("REST must not be called when cache is fresh")
-
-    snap, source = _resolve_private_snapshot(
-        _FailingClient(),
-        EventDemoCycleConfig(),
-        private_state_cache=cache,
-        state_cache_stale_seconds=60.0,
-    )
-    assert source == "ws_cache"
-    assert snap["equity_usdt"] == 12_500.0
-    assert snap["raw_positions"][0]["symbol"] == "BTCUSDT"
-    assert snap["raw_open_orders"] == []
-
-
-def test_resolve_private_snapshot_falls_back_to_rest_when_cache_stale() -> None:
-    import time as _time
-    from liquidity_migration.event_demo import EventDemoCycleConfig, _resolve_private_snapshot
-    from liquidity_migration.ws_state_cache import PrivateStateCache
-
-    cache = PrivateStateCache()
-    cache.seed(equity_usdt=10_000.0)
-    cache._stats.last_event_monotonic = _time.monotonic() - 1000.0
-
-    # trading_client=None hits the neutral REST snapshot path.
-    snap, source = _resolve_private_snapshot(
-        None,
-        EventDemoCycleConfig(fallback_equity_usdt=5_000.0),
-        private_state_cache=cache,
-        state_cache_stale_seconds=60.0,
-    )
-    assert source == "rest"
-    # REST neutral snapshot returns the fallback equity, not the cached 10_000.
-    assert snap["equity_usdt"] == 5_000.0
-
-
-def test_resolve_private_snapshot_falls_back_to_rest_when_cache_unseeded() -> None:
-    from liquidity_migration.event_demo import EventDemoCycleConfig, _resolve_private_snapshot
-    from liquidity_migration.ws_state_cache import PrivateStateCache
-
-    cache = PrivateStateCache()
-    snap, source = _resolve_private_snapshot(
-        None,
-        EventDemoCycleConfig(fallback_equity_usdt=5_000.0),
-        private_state_cache=cache,
-        state_cache_stale_seconds=60.0,
-    )
-    assert source == "rest"
-    assert snap["equity_usdt"] == 5_000.0
 
 
 def test_event_demo_cycles_dataset_is_date_partitioned(tmp_path: Path) -> None:
@@ -645,48 +573,6 @@ def test_demo_instruments_falls_back_to_stale_cache_on_fetch_error(tmp_path: Pat
     assert served.equals(cached)
 
 
-def test_collect_private_snapshots_neutral_without_client() -> None:
-    """With no trading client the snapshot must be the same neutral result the
-    old serial path produced: fallback equity, empty orders/positions, no errors."""
-    snapshot = _collect_private_snapshots(None, EventDemoCycleConfig(fallback_equity_usdt=12_345.0))
-    assert snapshot["equity_usdt"] == 12_345.0
-    assert snapshot["raw_open_orders"] == []
-    assert snapshot["raw_positions"] == []
-    assert snapshot["wallet_error"] == ""
-    assert snapshot["open_order_error"] == ""
-    assert snapshot["position_error"] == ""
-
-
-def test_collect_private_snapshots_gathers_all_three_from_client() -> None:
-    """The concurrent fan-out must still return each endpoint's data correctly."""
-
-    class _FakeClient:
-        def get_wallet_balance(self, **_kwargs: object) -> dict[str, object]:
-            return {"list": [{"totalEquity": "8000", "coin": [{"coin": "USDT", "equity": "8000"}]}]}
-
-        def get_open_orders(self, **_kwargs: object) -> list[dict[str, str]]:
-            return [{"symbol": "AAAUSDT", "orderLinkId": "lm-en-1"}]
-
-        def get_positions(self, **_kwargs: object) -> list[dict[str, str]]:
-            return [{"symbol": "BBBUSDT", "size": "3"}]
-
-    snapshot = _collect_private_snapshots(_FakeClient(), EventDemoCycleConfig())
-    assert snapshot["equity_usdt"] == 8000.0
-    assert snapshot["raw_open_orders"] == [{"symbol": "AAAUSDT", "orderLinkId": "lm-en-1"}]
-    assert snapshot["raw_positions"] == [{"symbol": "BBBUSDT", "size": "3"}]
-    assert snapshot["wallet_error"] == ""
-
-
-def test_refresh_positions_and_orders_returns_both_results() -> None:
-    """The post-trade refetch runs positions + open orders concurrently; with no
-    client both come back as the neutral empty result."""
-    (positions, position_error), (orders, open_order_error) = _refresh_positions_and_orders(
-        None, settle_coin="USDT"
-    )
-    assert positions == [] and position_error == ""
-    assert orders == [] and open_order_error == ""
-
-
 def test_build_demo_universe_match_backtest_mode_includes_all_trading_perps() -> None:
     """With universe_rank_end == universe_max_symbols == 0 the demo's
     universe is every Trading USDT-perp (ex the hard exclusion list).
@@ -695,7 +581,7 @@ def test_build_demo_universe_match_backtest_mode_includes_all_trading_perps() ->
     downstream (matching the backtest's path).
     """
     snapshot_ts_ms = 1_779_440_000_000  # 2026-05-22-ish, past NEWUSDT's launch
-    demo_config = EventDemoCycleConfig(
+    demo_config = _public_config(
         universe_rank_end=0,
         universe_max_symbols=0,
         universe_min_turnover_24h=0.0,
@@ -720,7 +606,7 @@ def test_build_demo_universe_legacy_mode_applies_30_day_age_floor() -> None:
     documents the behavior delta so operators downgrading to legacy
     mode know what they get."""
     snapshot_ts_ms = 1_779_440_000_000  # NEWUSDT is only ~5 days old here
-    demo_config = EventDemoCycleConfig(
+    demo_config = _public_config(
         universe_rank_end=400,
         universe_max_symbols=400,
         universe_min_turnover_24h=0.0,
@@ -923,7 +809,7 @@ def test_build_demo_universe_unlimited_drops_age_floor(monkeypatch) -> None:
     monkeypatch.setattr(event_demo_data, "build_current_universe_table", spy_build)
     empty = pl.DataFrame()
 
-    unlimited = event_demo_data.EventDemoCycleConfig(
+    unlimited = _public_config(
         universe_rank_end=0, universe_max_symbols=0,
     )
     event_demo_data._build_demo_universe(
@@ -931,7 +817,7 @@ def test_build_demo_universe_unlimited_drops_age_floor(monkeypatch) -> None:
     )
     assert captured[-1] == 0  # age floor dropped in unlimited mode
 
-    narrow = event_demo_data.EventDemoCycleConfig(
+    narrow = _public_config(
         universe_rank_end=200, universe_max_symbols=50,
     )
     event_demo_data._build_demo_universe(

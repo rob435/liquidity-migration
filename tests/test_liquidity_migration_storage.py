@@ -76,8 +76,12 @@ def test_continuous_fade_datasets_registered_and_roundtrip(tmp_path: Path) -> No
     )
     from liquidity_migration.storage import DATASET_KEYS, DATASETS
 
-    demo_names = continuous_dataset_names(ContinuousDemoCycleConfig())
-    paper_names = continuous_dataset_names(ContinuousDemoCycleConfig(paper_mode=True))
+    demo_names = continuous_dataset_names(
+        ContinuousDemoCycleConfig(execution_environment="demo")
+    )
+    paper_names = continuous_dataset_names(
+        ContinuousDemoCycleConfig(execution_environment="paper")
+    )
     key_by_suffix = {"trades": "trade_id", "orders": "order_link_id", "cycles": "cycle_id"}
     for trades, orders, cycles in (demo_names, paper_names):
         for dataset in (trades, orders, cycles):

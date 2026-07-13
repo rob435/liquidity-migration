@@ -32,6 +32,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from ._common import coerce_int
 from .continuous_rebalance import (
     ContinuousHedgeRule,
     ContinuousRebalanceComponents,
@@ -328,7 +329,10 @@ def update_forward_ledger(
                     day_drifted = True
             if day_drifted:
                 rebased += 1
-        last_stored = int(stored["ts_ms"].max())
+        last_stored_value = stored["ts_ms"].max()
+        if last_stored_value is None:
+            raise RuntimeError(f"{venue}: stored forward ledger has no timestamp")
+        last_stored = coerce_int(last_stored_value)
         append = new.filter(pl.col("ts_ms") > last_stored)
         verified = stored.height - rebased
         if rebased:
@@ -363,7 +367,7 @@ def update_forward_ledger(
         appended_days=append.height,
         verified_overlap_days=verified,
         total_days=out.height,
-        last_day_ms=int(out["ts_ms"].max()) if out.height else None,
+        last_day_ms=coerce_int(out["ts_ms"].max()) if out.height else None,
         rebased_days=rebased,
     )
 
@@ -412,9 +416,8 @@ def forward_readiness_summary(
     dd = float((eq / np.maximum.accumulate(eq) - 1.0).min())
     total = float(eq[-1] - 1.0)
     # Calendar-span years WITHOUT the +1 the gate basis carries — aligns the
-    # annualizer denominator with the sibling annualizers (continuous_events
-    # ._daily_pnl_metrics, reconciliation._calendar_metrics), which use the raw
-    # span and not span+1 (metrics-6).
+    # annualizer denominator with the other calendar-span metrics, which use the
+    # raw span and not span+1 (metrics-6).
     years = (last_ms - first_ms) / (ANN_DAYS * MS_PER_DAY) or (1.0 / ANN_DAYS)
     # No measurable drawdown (dd >= 0) -> MAR is a divide-by-~0 artifact, not
     # "infinitely good". Emit JSON null (None) rather than float("inf"), which

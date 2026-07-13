@@ -31,8 +31,10 @@ authoritative. Do not maintain or invent a static subcommand list.
 
 ## Use canonical wrappers
 
-- Reconciliation: `scripts/ops.sh reconcile quick|full` or
-  `bash scripts/reconcile.sh`; apply the `pit-reconcile` skill.
+- Account evidence: `scripts/ops.sh status` for read-only deployment state and
+  `scripts/ops.sh account-parity` for source-bound structural journal
+  comparison; apply the `pit-reconcile` skill. There is no current combined
+  PIT/model/runtime reconciliation command.
 - Equity curves: `scripts/ops.sh equity` or `scripts/equity_curves.sh`; apply
   the `equity-curve` skill.
 - Current registered tail experiment: `scripts/ops.sh tail-plan` before
@@ -47,7 +49,7 @@ command; label ad hoc work exploratory.
 ## Verify order behavior
 
 Never call a cycle “dry” merely because it targets demo. Before any forward
-command, inspect environment and flags controlling `SUBMIT_ORDERS`, confirmation,
+command, inspect the explicit `EXECUTION_ENVIRONMENT=demo|paper`, confirmation,
 paper mode, profile, credentials, and `REAL_MONEY`. Use a true dry-run/plan mode
 when the command provides one.
 

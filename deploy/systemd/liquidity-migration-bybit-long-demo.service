@@ -1,7 +1,9 @@
 [Unit]
 Description=liquidity-migration Bybit long-sleeve (LongV11aDivWeekendVol) demo event runner
 Wants=network-online.target
-After=network-online.target
+Requires=liquidity-migration-account-execution.service
+After=network-online.target liquidity-migration-account-execution.service
+ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
 
 [Service]
 Type=simple
@@ -10,11 +12,13 @@ Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
+EnvironmentFile=/etc/liquidity-migration/account-execution.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-long-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-Environment=SUBMIT_ORDERS=1
-Environment=CONFIRM_DEMO_ORDERS=1
-Environment=TELEGRAM_ENABLED=1
+Environment=EXECUTION_ENVIRONMENT=demo
+Environment=TELEGRAM_ENABLED=0
 Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol
 Environment=INTERVAL_SECONDS=60
 Environment=USE_DAEMON=1

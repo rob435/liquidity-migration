@@ -29,6 +29,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import polars as pl
 
+from .deterministic_serialization import canonical_json as _canonical_json
+from .deterministic_serialization import json_safe as _json_safe
 from .storage import exclusive_file_lock, write_dataset
 
 
@@ -102,41 +104,6 @@ def _finite(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return output if math.isfinite(output) else None
-
-
-def _json_safe(value: Any) -> Any:
-    """Return a deterministic, finite JSON representation.
-
-    Polars/numpy scalars are normalized through ``item`` where available.
-    Non-finite floats become ``None`` rather than invalid JSON ``NaN`` tokens.
-    """
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        return [_json_safe(item) for item in sorted(value, key=lambda item: str(item))]
-    item_method = getattr(value, "item", None)
-    if callable(item_method):
-        try:
-            return _json_safe(item_method())
-        except (TypeError, ValueError):
-            pass
-    return str(value)
-
-
-def _canonical_json(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        _json_safe(payload),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
 
 
 def _event_hash(payload: Mapping[str, Any]) -> str:
@@ -888,6 +855,69 @@ def record_verified_flat_snapshot(
     return append_events(root, specs)
 
 
+def record_archived_paper_epoch_reset(
+    root: str | Path,
+    *,
+    now_ms: int,
+    reset_id: str,
+    source: str,
+    trade_ids: set[str] | None = None,
+) -> list[CanonicalEvent]:
+    """Retire locally-active paper rows when their deterministic epoch is archived.
+
+    A paper reset deliberately starts a new empty simulated account; it is not a
+    venue observation and must not borrow a demo-account flatness proof. This
+    supplemental fact makes prior open/submitted projections inactive without
+    inventing a close fill, realized P&L, or ``VENUE_SNAPSHOT``.
+    """
+
+    projection = replay_journal(root)
+    specs: list[EventSpec] = []
+    for state in projection.trades.values():
+        if trade_ids is not None and state.trade_id not in trade_ids:
+            continue
+        status = str(state.trade_row.get("status") or "").strip().lower()
+        if status not in {"open", "submitted"}:
+            continue
+        if state.mode != "paper":
+            raise ValueError(
+                "record_archived_paper_epoch_reset only accepts paper trades; "
+                f"{state.trade_id!r} has mode {state.mode!r}"
+            )
+        specs.append(
+            EventSpec(
+                event_type=EventType.PROJECTION_PATCH,
+                mode=state.mode,
+                sleeve=state.sleeve,
+                strategy_id=state.strategy_id,
+                trade_id=state.trade_id,
+                symbol=state.symbol,
+                side=state.side,
+                local_ts_ms=int(now_ms),
+                venue_ts_ms=0,
+                order_version=state.order_version,
+                position_version=state.position_version,
+                idempotency_key=f"paper-epoch-reset:{reset_id}:{state.trade_id}",
+                metadata={
+                    "source": source,
+                    "reset_id": reset_id,
+                    "reconciliation_state": "paper_epoch_archived",
+                    "prior_position_resolution": "archived_not_carried_forward",
+                    "venue_flat_verified": False,
+                    "close_resubmit_allowed": False,
+                },
+                trade_patch={
+                    "status": "archived",
+                    "paper_epoch_reset_at_ms": int(now_ms),
+                    "paper_epoch_reset_id": reset_id,
+                    "canonical_reconciliation_state": "paper_epoch_archived",
+                },
+                trade_dataset=str(state.trade_row.get("_projection_trade_dataset") or ""),
+            )
+        )
+    return append_events(root, specs)
+
+
 def journal_dataset_registrations(root: str | Path) -> tuple[set[str], set[str]]:
     trades: set[str] = set()
     orders: set[str] = set()
@@ -929,6 +959,7 @@ __all__ = [
     "read_journal",
     "rebuild_all_registered_projections",
     "rebuild_ledger_projections",
+    "record_archived_paper_epoch_reset",
     "record_due_markouts",
     "record_unavailable_markouts",
     "record_verified_flat_snapshot",

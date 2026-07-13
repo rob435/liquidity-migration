@@ -1,7 +1,7 @@
-"""Guards against circular-import regressions in the post-refactor module split.
+"""Guards against circular-import regressions in the active module split.
 
-The `event_demo` helpers and active standalone `volume_events_charts` /
-`volume_events_pit` helpers are still imported by live long/continuous paths.
+The public-data helpers and active standalone `volume_events_charts` /
+`volume_events_pit` helpers are imported by live long/continuous paths.
 Importing a sibling FIRST in a fresh process used to deadlock on partially
 initialized shared modules; `liquidity_migration/__init__.py` preloads the
 needed hubs/helpers to break it. These tests pin that contract.
@@ -21,11 +21,9 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Every sibling module produced by the event_demo + chart/PIT + cli splits.
+# Every active sibling produced by the public-data + chart/PIT + CLI splits.
 _SPLIT_SIBLINGS = [
     "event_demo_data",
-    "event_demo_reports",
-    "event_demo_exits",
     "order_link_id",
     "volume_events_charts",
     "volume_events_pit",

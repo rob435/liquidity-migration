@@ -1,15 +1,13 @@
-"""orderLinkId encode/decode — the single home for the sleeve-routing identity scheme.
+"""orderLinkId encode/decode — the single home for strategy-order identity.
 
-Bybit orderLinkIds carry the sleeve + signal timestamp so ws_risk can route a fill to
-the right ledger and, on a VPS rebuild, reconstruct the deterministic trade_id from
-Bybit's retained orderLinkId (avoiding the lossy adopted-* fallback). Encode
-(``_order_link_id`` / ``_risk_order_link_id``, per-sleeve prefix) and decode
-(``decode_entry_order_link_id``) live together so a round-trip test pins them as one
-unit; the sleeve modules build links via the prefix and ws_risk decodes them.
+Bybit orderLinkIds carry the sleeve and signal timestamp so fill attribution and
+rebuild-time compatibility reconciliation can recover the deterministic trade id
+instead of falling back to a lossy ``adopted-*`` id. Encode and decode live together
+so round-trip tests pin one format contract across target producers, the account
+execution plane, and retained ledger tooling.
 
-Extracted verbatim from event_demo.py (which re-exports these for backward
-compatibility). This module is a leaf — it imports nothing from the package — so it
-can be a shared dependency of the sleeve runtimes + ws_risk without a circular import.
+The retired direct-execution module no longer re-exports these helpers.
+This module is deliberately dependency-free to avoid circular imports.
 """
 from __future__ import annotations
 
@@ -17,10 +15,11 @@ from collections.abc import Iterable
 
 # The orderLinkId prefix vocabulary — ONE registry so a new sleeve/exit prefix is added in a single
 # place. Entry links are decoded by ``decode_entry_order_link_id``; exit/risk-side links are matched
-# by ``is_exit_link`` (event_demo._is_own_exit_order enumerated these inline; quality-dup-12).
+# by ``is_exit_link``; the retired direct executor enumerated these inline.
 #   entry:  lm-en-{base}-{ts36} (compatibility short rows — decoded for adoption only)
 #           lm-en-l-… (long) · lm-en-c{tag}-…[-seq] (continuous: plain "c", ensemble component
-#           tags "cp3"/"cp4p3"/"cp4p5", sniper "cs") · lm-en-ca-… (continuous_addon/hedge)
+#           tags "cp3"/"cp4p3"/"cp4p5", archived adverse-limit "cs") ·
+#           lm-en-ca-… (continuous_addon/hedge)
 #           CONSTRAINT: a continuous component tag must never begin with "a" — "c"+"a…" would
 #           collide with the "ca" addon prefix and mis-route the fill.
 #   exit/risk: lm-ex- (planned exit) · lm-rx- (risk exit) · lm-wx- (watchdog) · lm-ux- (untracked unwind)
@@ -102,7 +101,7 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int, str] 
     ``adopted-*`` fallback that drops strategy context).
 
     ``component_tag`` is the continuous family's sub-tag ("" plain book / long / short; "p3"… for
-    ensemble components; "s" for the sniper; addon sub-tag after "ca") — the live continuous trade_id
+    ensemble components; historical "s" for archived adverse-limit links; addon sub-tag after "ca") — the live continuous trade_id
     carries the component (``{base_id}-{component}``), so the rebuild reconstruction needs it to pair
     with the paper twin (audit 2026-06-12: every component-tagged adoption rebuilt a component-less
     id that matched no paper row).
@@ -112,7 +111,7 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int, str] 
     if not order_link_id or not order_link_id.startswith("lm-en"):
         return None
     parts = order_link_id.split("-")
-    # `-x{base36}` sub-order uniquifier (continuous resize/sniper/exit links carry a short
+    # `-x{base36}` sub-order uniquifier (continuous resize/exit and archived adverse-limit links carry a short
     # trade-id hash so two same-symbol orders in the same second never share a link — Bybit
     # accepts a reused link once the first order is terminal, which cross-wired WS fill
     # attribution; audit 2026-06-12). It is ORDER-level identity, not entry identity: strip it
@@ -133,7 +132,7 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int, str] 
     # Short:      lm-en-{base}-{ts36}                -> 4 parts, sleeve="short" (compatibility adoption)
     # Long:       lm-en-l-{base}-{ts36}              → 5 parts (parts[2]=="l"), sleeve="long"
     # Continuous: lm-en-c{tag}-{base}-{ts36}[-{seq}] → 5/6 parts; tag is "" (plain), an ensemble
-    #             component ("p3"/"p4p3"/"p4p5" → "cp3"…), or the sniper "s" → "cs".
+    #             component ("p3"/"p4p3"/"p4p5" → "cp3"…), or historical "s" → "cs".
     #             The deployed ensemble profiles emit ONLY component-tagged links — a
     #             decoder that knew bare "c" alone sent every live entry to the adopted-*
     #             fallback as sleeve="short" on rebuild (audit 2026-06-11).

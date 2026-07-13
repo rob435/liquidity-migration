@@ -50,7 +50,7 @@ def test_bybit_private_client_constructs_demo_session(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
 
     assert client._client.kwargs["demo"] is True
     assert client._client.kwargs["api_key"] == "key"
@@ -58,7 +58,7 @@ def test_bybit_private_client_constructs_demo_session(monkeypatch) -> None:
 
 
 def test_get_funding_settlements_follows_pagination_cursor(monkeypatch) -> None:
-    """H4: the funding total must not be truncated to the first 200-row page —
+    """H4: the funding total must not be truncated to the first 50-row page —
     follow nextPageCursor to the end."""
     pages = {
         None: {
@@ -80,18 +80,51 @@ def test_get_funding_settlements_follows_pagination_cursor(monkeypatch) -> None:
             return pages[params.get("cursor")]
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
 
     rows = client.get_funding_settlements(start_time_ms=1_000, end_time_ms=2_000)
 
     assert [row["funding"] for row in rows] == ["1", "2", "3"]
     # Two pages fetched: the cursor was followed exactly once.
     assert len(client._client.calls) == 2
+    assert client._client.calls[0]["limit"] == 50
+    assert client._client.calls[0]["type"] == "SETTLEMENT"
     assert client._client.calls[1]["cursor"] == "page2"
 
 
+def test_strict_accounting_queries_reject_malformed_payloads(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_transaction_log(self, **params):
+            return {"retCode": 0, "result": {"list": None}}
+
+        def get_closed_pnl(self, **params):
+            return {"retCode": 0, "result": {"list": "not-a-list"}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="key", api_secret="secret", demo=True, account_execution_owner=True
+    )
+
+    with pytest.raises(bybit.BybitDataError, match="invalid result list"):
+        client.get_account_transactions(
+            transaction_type="TRADE",
+            start_time_ms=1_000,
+            end_time_ms=2_000,
+            strict=True,
+        )
+    with pytest.raises(bybit.BybitDataError, match="invalid result list"):
+        client.get_closed_pnl(
+            start_time_ms=1_000,
+            end_time_ms=2_000,
+            strict=True,
+        )
+
+
 def test_get_closed_pnl_follows_pagination_cursor(monkeypatch) -> None:
-    """A re-entered symbol's closures can exceed one 200-row page; the orphan-close
+    """A re-entered symbol's closures can exceed one 100-row page; the orphan-close
     backfill must follow nextPageCursor or it could miss the real closing record
     (audit pass2 #6). Single-page behaviour (no cursor) is unchanged."""
     pages = {
@@ -108,7 +141,7 @@ def test_get_closed_pnl_follows_pagination_cursor(monkeypatch) -> None:
             return pages[params.get("cursor")]
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
 
     rows = client.get_closed_pnl(symbol="FOOUSDT")
 
@@ -229,49 +262,6 @@ def test_bybit_pybit_ping_timer_patch_uses_daemon_timer(monkeypatch) -> None:
     manager._agc_ping_timer.cancel()
 
 
-def test_bybit_websocket_trade_client_wraps_place_and_cancel(monkeypatch) -> None:
-    class FakeWebSocketTrading:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            self.calls = []
-
-        def place_order(self, callback, **params):
-            self.calls.append(("place", callback, params))
-
-        def cancel_order(self, callback, **params):
-            self.calls.append(("cancel", callback, params))
-
-    monkeypatch.setattr(bybit, "WebSocketTrading", FakeWebSocketTrading)
-
-    client = bybit.BybitWebSocketTradeClient(api_key="key", api_secret="secret", demo=True, recv_window=1000)
-    callback = object()
-    client.place_order(callback, symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="agc")
-    client.cancel_order(callback, symbol="BTCUSDT", order_link_id="agc")
-
-    assert client._client.kwargs == {
-        "testnet": False,
-        "demo": True,
-        "api_key": "key",
-        "api_secret": "secret",
-        "recv_window": 1000,
-    }
-    assert client._client.calls == [
-        (
-            "place",
-            callback,
-            {
-                "category": "linear",
-                "symbol": "BTCUSDT",
-                "side": "Buy",
-                "orderType": "Market",
-                "qty": "0.001",
-                "orderLinkId": "agc",
-            },
-        ),
-        ("cancel", callback, {"category": "linear", "symbol": "BTCUSDT", "orderLinkId": "agc"}),
-    ]
-
-
 def test_resolve_private_credentials_toggle(monkeypatch) -> None:
     monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
     monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
@@ -306,7 +296,7 @@ def test_bybit_private_client_accepts_mainnet(monkeypatch) -> None:
             constructed.update(kwargs)
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
+    bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False, account_execution_owner=True)
     assert constructed["demo"] is False
 
 
@@ -327,7 +317,7 @@ def test_bybit_private_client_wraps_order_and_trade_history(monkeypatch) -> None
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     orders = client.get_order_history(symbol="BTCUSDT", order_link_id="lm-link")
     trades = client.get_trade_history(symbol="BTCUSDT", order_link_id="lm-link")
 
@@ -362,7 +352,7 @@ def test_bybit_private_client_pages_account_order_history(monkeypatch) -> None:
             }
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
 
     rows = client.get_order_history(
         settle_coin="USDT",
@@ -381,16 +371,11 @@ def test_bybit_private_client_pages_account_order_history(monkeypatch) -> None:
     assert client._client.calls[1]["cursor"] == "next"
 
 
-def test_bybit_private_client_wraps_cancel_all_and_positions_by_settle(monkeypatch) -> None:
+def test_bybit_private_client_wraps_positions_by_settle(monkeypatch) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
-            self.cancel_all_calls = []
             self.position_calls = []
-
-        def cancel_all_orders(self, **params):
-            self.cancel_all_calls.append(params)
-            return {"retCode": 0, "result": {"success": "1"}}
 
         def get_positions(self, **params):
             self.position_calls.append(params)
@@ -398,13 +383,10 @@ def test_bybit_private_client_wraps_cancel_all_and_positions_by_settle(monkeypat
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
-    cancelled = client.cancel_all_orders(settle_coin="USDT")
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     positions = client.get_positions(settle_coin="USDT")
 
-    assert cancelled["success"] == "1"
     assert positions[0]["symbol"] == "BTCUSDT"
-    assert client._client.cancel_all_calls == [{"category": "linear", "settleCoin": "USDT"}]
     assert client._client.position_calls == [{"category": "linear", "limit": 200, "settleCoin": "USDT"}]
 
 
@@ -420,11 +402,37 @@ def test_bybit_private_client_wraps_open_orders_by_settle(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     orders = client.get_open_orders()
 
     assert orders[0]["orderStatus"] == "New"
     assert client._client.open_order_calls == [{"category": "linear", "limit": 50, "settleCoin": "USDT"}]
+
+
+def test_bybit_private_client_forwards_explicit_open_order_filter(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.open_order_calls = []
+
+        def get_open_orders(self, **params):
+            self.open_order_calls.append(params)
+            return {"retCode": 0, "result": {"list": []}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        account_execution_owner=True,
+    )
+
+    assert client.get_open_orders(order_filter="StopOrder") == []
+    assert client._client.open_order_calls == [{
+        "category": "linear",
+        "limit": 50,
+        "settleCoin": "USDT",
+        "orderFilter": "StopOrder",
+    }]
 
 
 def test_bybit_private_client_paginates_open_orders(monkeypatch) -> None:
@@ -442,7 +450,7 @@ def test_bybit_private_client_paginates_open_orders(monkeypatch) -> None:
             return pages[params.get("cursor")]
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
 
     orders = client.get_open_orders(settle_coin="USDT")
 
@@ -468,7 +476,7 @@ def test_bybit_private_client_paginates_positions(monkeypatch) -> None:
             return pages[params.get("cursor")]
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
 
     positions = client.get_positions(settle_coin="USDT")
 
@@ -491,7 +499,7 @@ def test_bybit_private_client_sets_demo_leverage(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     result = client.set_leverage(symbol="BTCUSDT", buy_leverage=1.0, sell_leverage=1.0)
 
     assert result == {"symbol": "BTCUSDT"}
@@ -512,7 +520,7 @@ def test_bybit_private_client_treats_existing_leverage_as_success(monkeypatch) -
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     result = client.set_leverage(symbol="BTCUSDT", buy_leverage=1.0, sell_leverage=1.0)
 
     assert result == {"symbol": "BTCUSDT", "buyLeverage": "1", "sellLeverage": "1", "retCode": 110043}
@@ -529,7 +537,7 @@ def test_bybit_private_client_treats_pybit_existing_leverage_exception_as_succes
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     result = client.set_leverage(symbol="BTCUSDT", buy_leverage=1.0, sell_leverage=1.0)
 
     assert result == {"symbol": "BTCUSDT", "buyLeverage": "1", "sellLeverage": "1", "retCode": 110043}
@@ -547,7 +555,7 @@ def test_bybit_private_client_wraps_trading_stop(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     result = client.set_trading_stop(
         symbol="BTCUSDT",
         stop_loss="120",
@@ -586,11 +594,7 @@ def test_kline_download_chunks_full_range_when_bybit_returns_newest_first(monkey
             start = int(params["start"])
             end = int(params["end"])
             limit = int(params["limit"])
-            rows = [
-                [str(ts), "1", "2", "0.5", "1.5", "10", "15"]
-                for ts in timestamps
-                if start <= ts <= end
-            ]
+            rows = [[str(ts), "1", "2", "0.5", "1.5", "10", "15"] for ts in timestamps if start <= ts <= end]
             return {"retCode": 0, "result": {"list": list(reversed(rows))[:limit]}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
@@ -663,12 +667,17 @@ def _newest_first_page(timestamps: list[int], params: dict, timestamp_key: str, 
     start = int(params["startTime"])
     end = int(params["endTime"])
     limit = int(params[limit_key])
-    rows = [{timestamp_key: str(ts), "fundingRate": "0.0001", "openInterest": "100"} for ts in timestamps if start <= ts <= end]
+    rows = [
+        {timestamp_key: str(ts), "fundingRate": "0.0001", "openInterest": "100"}
+        for ts in timestamps
+        if start <= ts <= end
+    ]
     return {"retCode": 0, "result": {"list": list(reversed(rows))[:limit]}}
 
 
 def test_bybit_rest_rate_limiter_throttles_within_window() -> None:
     import time as _time
+
     limiter = bybit.BybitRestRateLimiter(max_requests=3, per_seconds=0.2)
     started = _time.monotonic()
     for _ in range(6):
@@ -696,6 +705,7 @@ def test_bybit_market_data_routes_get_through_rate_limiter(monkeypatch) -> None:
     public REST budget; without it, pybit handles the 429 by sleeping 2s per
     retry, which previously caused ~30 spam lines per demo entry cycle.
     """
+
     class FakeHTTP:
         def __init__(self, *, testnet: bool):
             self.testnet = testnet
@@ -729,6 +739,7 @@ def test_bybit_private_client_routes_call_through_rate_limiter(monkeypatch) -> N
     test. Without this, parallel place_orders bypass the budget that protects
     against Bybit's per-account REST throttles.
     """
+
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -755,6 +766,7 @@ def test_bybit_private_client_routes_call_through_rate_limiter(monkeypatch) -> N
         api_key="k",
         api_secret="s",
         demo=True,
+        account_execution_owner=True,
         rate_limiter=limiter,  # type: ignore[arg-type]
     )
 
@@ -807,21 +819,21 @@ def test_bybit_private_client_rate_limiter_acquires_each_retry(monkeypatch) -> N
     assert limiter.acquires == 2
 
 
-def test_validate_order_submit_allowed_blocks_mainnet(monkeypatch) -> None:
+def test_validate_demo_order_permission_blocks_mainnet(monkeypatch) -> None:
     monkeypatch.setenv("REAL_MONEY", "true")
     monkeypatch.delenv("DEMO", raising=False)
     monkeypatch.setenv("BYBIT_REAL_API_KEY", "k")
     monkeypatch.setenv("BYBIT_REAL_API_SECRET", "s")
     with pytest.raises(RuntimeError, match="REAL_MONEY"):
-        bybit.validate_order_submit_allowed(submit_orders=True, confirm_demo_orders=True)
+        bybit.validate_demo_order_permission(confirm_demo_orders=True)
 
 
-def test_validate_order_submit_allowed_requires_confirm_flag(monkeypatch) -> None:
+def test_validate_demo_order_permission_requires_confirm_flag(monkeypatch) -> None:
     monkeypatch.delenv("REAL_MONEY", raising=False)
     monkeypatch.setenv("BYBIT_DEMO_API_KEY", "k")
     monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "s")
     with pytest.raises(RuntimeError, match="confirm-demo-orders"):
-        bybit.validate_order_submit_allowed(submit_orders=True, confirm_demo_orders=False)
+        bybit.validate_demo_order_permission(confirm_demo_orders=False)
 
 
 def test_api_key_allows_order_submit_rejects_read_only_key() -> None:
@@ -871,73 +883,10 @@ def test_private_client_get_api_key_information(monkeypatch) -> None:
             }
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     info = client.get_api_key_information()
     assert info["readOnly"] == 0
     assert bybit.api_key_allows_order_submit(info) == (True, "")
-
-
-def test_private_credentials_present_uses_active_account(monkeypatch) -> None:
-    from liquidity_migration.event_demo import _private_credentials_present
-
-    monkeypatch.setenv("REAL_MONEY", "true")
-    monkeypatch.delenv("DEMO", raising=False)
-    monkeypatch.delenv("BYBIT_DEMO_API_KEY", raising=False)
-    monkeypatch.setenv("BYBIT_REAL_API_KEY", "k")
-    monkeypatch.setenv("BYBIT_REAL_API_SECRET", "s")
-    assert _private_credentials_present() is True
-
-
-def test_build_ws_trade_client_retries_then_succeeds(monkeypatch) -> None:
-    """The multi-daemon demo connect-storm fix: a transient connect failure is
-    retried with backoff (fresh client each attempt) until it succeeds."""
-    monkeypatch.setattr(bybit, "WebSocketTrading", object)  # pybit "present"
-    calls = {"n": 0}
-
-    class _Fake:
-        def __init__(self, **kwargs):
-            calls["n"] += 1
-            if calls["n"] < 3:
-                raise RuntimeError("connection failed. Too many connection attempts")
-
-    monkeypatch.setattr(bybit, "BybitWebSocketTradeClient", _Fake)
-    slept: list[float] = []
-    client = bybit.build_ws_trade_client(
-        category="linear", testnet=False, demo=True, api_key="k", api_secret="s",
-        sleep=lambda s: slept.append(s), rng=lambda a, b: 0.0,
-    )
-    assert isinstance(client, _Fake)
-    assert calls["n"] == 3  # failed twice, succeeded on the third fresh client
-    assert len(slept) >= 2  # backoff slept between retries
-
-
-def test_build_ws_trade_client_raises_after_max_attempts(monkeypatch) -> None:
-    """All attempts fail -> raise so the caller falls back to REST (seatbelt)."""
-    monkeypatch.setattr(bybit, "WebSocketTrading", object)
-
-    class _AlwaysFail:
-        def __init__(self, **kwargs):
-            raise RuntimeError("too many connection attempts")
-
-    monkeypatch.setattr(bybit, "BybitWebSocketTradeClient", _AlwaysFail)
-    with pytest.raises(RuntimeError, match="too many"):
-        bybit.build_ws_trade_client(
-            category="linear", testnet=False, demo=True, api_key="k", api_secret="s",
-            attempts=3, sleep=lambda s: None, rng=lambda a, b: 0.0,
-        )
-
-
-def test_build_ws_trade_client_fails_fast_on_missing_creds(monkeypatch) -> None:
-    """Permanent errors (no creds) raise immediately with NO jitter/backoff —
-    keeps credential-less unit tests fast and network-free."""
-    monkeypatch.setattr(bybit, "WebSocketTrading", object)
-    slept: list[float] = []
-    with pytest.raises(RuntimeError, match="API key"):
-        bybit.build_ws_trade_client(
-            category="linear", testnet=False, demo=True, api_key=None, api_secret=None,
-            sleep=lambda s: slept.append(s), rng=lambda a, b: 0.0,
-        )
-    assert slept == []
 
 
 def test_bybit_market_data_does_not_retry_definite_reject(monkeypatch) -> None:
@@ -965,6 +914,7 @@ def test_bybit_market_data_does_not_retry_definite_reject(monkeypatch) -> None:
 
 def test_bybit_market_data_still_retries_rate_limit(monkeypatch) -> None:
     """EXC-3 guard: a rate-limit reject must STILL retry (only definite rejects short-circuit)."""
+
     class FakeHTTP:
         def __init__(self, *, testnet: bool):
             self.calls = 0
@@ -1000,7 +950,7 @@ def test_private_call_definite_reject_no_retry_and_message_preserved(monkeypatch
             raise InvalidRequestError("order not exists or too late to cancel (ErrCode: 110001)")
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     client.retry_sleep_seconds = 0.0
     with pytest.raises(bybit.BybitDataError) as excinfo:
         client.cancel_order(symbol="BTCUSDT", order_link_id="lm-x")
@@ -1011,6 +961,7 @@ def test_private_call_definite_reject_no_retry_and_message_preserved(monkeypatch
 def test_private_call_transport_retries_and_final_message_carries_cause(monkeypatch) -> None:
     """Transport errors still retry; the exhausted-retries raise now carries the last
     error's text (callers ledger f"{exc}" — __cause__ never reached those columns)."""
+
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.calls = 0
@@ -1020,7 +971,7 @@ def test_private_call_transport_retries_and_final_message_carries_cause(monkeypa
             raise ConnectionError("connection reset by venue")
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
     client.retry_sleep_seconds = 0.0
     with pytest.raises(bybit.BybitDataError) as excinfo:
         client.cancel_order(symbol="BTCUSDT", order_link_id="lm-x")
@@ -1032,6 +983,7 @@ def test_private_call_transport_retries_and_final_message_carries_cause(monkeypa
 # audit2
 # B2 bybit._is_rate_limit must classify on retCode/retMsg, not the whole payload.
 # ---------------------------------------------------------------------------
+
 
 def test_is_rate_limit_ignores_orderid_substring() -> None:
     # orderId contains "10006" but retCode is a definite reject -> NOT a rate limit.
@@ -1054,49 +1006,6 @@ def test_is_rate_limit_string_fallback() -> None:
     assert bybit._is_rate_limit("position closed") is False
 
 
-# ---------------------------------------------------------------------------
-# B3 WS trade client carries the demo-only submit guard (defense in depth).
-# ---------------------------------------------------------------------------
-
-class _FakeWsTrading:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-        self.calls = []
-
-    def place_order(self, callback, **params):
-        self.calls.append(("place", params))
-
-    def cancel_order(self, callback, **params):
-        self.calls.append(("cancel", params))
-
-
-def test_ws_trade_client_blocks_real_money_submit_without_confirm(monkeypatch) -> None:
-    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
-    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=False)
-    with pytest.raises(RuntimeError, match="REAL_MONEY"):
-        client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
-    with pytest.raises(RuntimeError, match="REAL_MONEY"):
-        client.cancel_order(object(), symbol="BTCUSDT", order_link_id="x")
-    assert client._client.calls == []  # nothing reached the venue
-
-
-def test_ws_trade_client_allows_real_money_with_confirm(monkeypatch) -> None:
-    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
-    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=False, confirm_real_money=True)
-    client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
-    assert client._client.calls == [("place", {
-        "category": "linear", "symbol": "BTCUSDT", "side": "Buy",
-        "orderType": "Market", "qty": "0.001", "orderLinkId": "x",
-    })]
-
-
-def test_ws_trade_client_demo_path_unaffected(monkeypatch) -> None:
-    monkeypatch.setattr(bybit, "WebSocketTrading", _FakeWsTrading)
-    client = bybit.BybitWebSocketTradeClient(api_key="k", api_secret="s", demo=True)
-    client.place_order(object(), symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="x")
-    assert len(client._client.calls) == 1
-
-
 # ==========================================================================
 # Relocated from the audit bucket b01 (exec-router, ratelimit-rest,
 # realmoney-safety, ws-pool findings).
@@ -1110,7 +1019,7 @@ def test_ws_trade_client_demo_path_unaffected(monkeypatch) -> None:
 
 def _make_private_client(monkeypatch, fake_http_cls) -> bybit.BybitPrivateClient:
     monkeypatch.setattr(bybit, "HTTP", fake_http_cls)
-    return bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
+    return bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True, account_execution_owner=True)
 
 
 def test_place_order_duplicate_link_returns_existing_open_order(monkeypatch) -> None:
@@ -1131,19 +1040,47 @@ def test_place_order_duplicate_link_returns_existing_open_order(monkeypatch) -> 
             return {
                 "retCode": 0,
                 "result": {
-                    "list": [
-                        {"orderId": "live-1", "orderLinkId": "agc-1", "orderStatus": "New"}
-                    ],
+                    "list": [{"orderId": "live-1", "orderLinkId": "agc-1", "orderStatus": "New"}],
                     "nextPageCursor": "",
                 },
             }
 
     client = _make_private_client(monkeypatch, FakeHTTP)
     result = client.place_order(
-        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-1",
+        symbol="BTCUSDT",
+        side="Buy",
+        orderType="Market",
+        qty="1",
+        orderLinkId="agc-1",
     )
     assert result["orderId"] == "live-1"
     assert result["orderLinkId"] == "agc-1"
+    assert result["_idempotent_existing_order"] is True
+
+
+def test_place_order_preserves_v5_response_envelope_time(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            return {
+                "retCode": 0,
+                "result": {"orderId": "venue-1", "orderLinkId": "ack-time-1"},
+                "time": 1_700_000_000_123,
+            }
+
+    client = _make_private_client(monkeypatch, FakeHTTP)
+    result = client.place_order(
+        symbol="BTCUSDT",
+        side="Buy",
+        orderType="Market",
+        qty="1",
+        orderLinkId="ack-time-1",
+    )
+
+    assert result["orderId"] == "venue-1"
+    assert result["_response_time_ms"] == 1_700_000_000_123
 
 
 def test_place_order_duplicate_link_raises_when_order_not_findable(monkeypatch) -> None:
@@ -1165,9 +1102,13 @@ def test_place_order_duplicate_link_raises_when_order_not_findable(monkeypatch) 
             return {"retCode": 0, "result": {"list": []}}
 
     client = _make_private_client(monkeypatch, FakeHTTP)
-    with pytest.raises(bybit.BybitDataError):
+    with pytest.raises(bybit.BybitSubmissionUncertain):
         client.place_order(
-            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-x",
+            symbol="BTCUSDT",
+            side="Buy",
+            orderType="Market",
+            qty="1",
+            orderLinkId="agc-x",
         )
 
 
@@ -1183,9 +1124,32 @@ def test_place_order_non_duplicate_reject_still_raises(monkeypatch) -> None:
             return {"retCode": 110007, "retMsg": "insufficient balance", "result": {}}
 
     client = _make_private_client(monkeypatch, FakeHTTP)
-    with pytest.raises(bybit.BybitDataError, match="110007"):
+    with pytest.raises(bybit.BybitRequestRejected, match="110007"):
         client.place_order(
-            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-y",
+            symbol="BTCUSDT",
+            side="Buy",
+            orderType="Market",
+            qty="1",
+            orderLinkId="agc-y",
+        )
+
+
+def test_place_order_transport_failure_is_outcome_unknown(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def place_order(self, **_params):
+            raise TimeoutError("response lost after socket write")
+
+    client = _make_private_client(monkeypatch, FakeHTTP)
+    with pytest.raises(bybit.BybitSubmissionUncertain, match="outcome is unknown"):
+        client.place_order(
+            symbol="BTCUSDT",
+            side="Buy",
+            orderType="Market",
+            qty="1",
+            orderLinkId="agc-timeout",
         )
 
 
@@ -1207,17 +1171,17 @@ def test_place_order_duplicate_link_uses_history_only_for_active_status(monkeypa
         def get_order_history(self, **_params):
             return {
                 "retCode": 0,
-                "result": {
-                    "list": [
-                        {"orderId": "dead", "orderLinkId": "agc-z", "orderStatus": "Rejected"}
-                    ]
-                },
+                "result": {"list": [{"orderId": "dead", "orderLinkId": "agc-z", "orderStatus": "Rejected"}]},
             }
 
     client = _make_private_client(monkeypatch, FakeHTTP)
     with pytest.raises(bybit.BybitDataError):
         client.place_order(
-            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-z",
+            symbol="BTCUSDT",
+            side="Buy",
+            orderType="Market",
+            qty="1",
+            orderLinkId="agc-z",
         )
 
 
@@ -1237,17 +1201,17 @@ def test_place_order_duplicate_link_ignores_wrong_history_link(monkeypatch) -> N
         def get_order_history(self, **_params):
             return {
                 "retCode": 0,
-                "result": {
-                    "list": [
-                        {"orderId": "other", "orderLinkId": "agc-other", "orderStatus": "Filled"}
-                    ]
-                },
+                "result": {"list": [{"orderId": "other", "orderLinkId": "agc-other", "orderStatus": "Filled"}]},
             }
 
     client = _make_private_client(monkeypatch, FakeHTTP)
     with pytest.raises(bybit.BybitDataError):
         client.place_order(
-            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="agc-z",
+            symbol="BTCUSDT",
+            side="Buy",
+            orderType="Market",
+            qty="1",
+            orderLinkId="agc-z",
         )
 
 
@@ -1458,10 +1422,14 @@ def test_private_client_refuses_real_money_submit_by_default(monkeypatch) -> Non
             raise AssertionError("real-money submit should have been blocked")
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
+    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False, account_execution_owner=True)
     with pytest.raises(RuntimeError, match="REAL_MONEY"):
         client.place_order(
-            symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="rm-1",
+            symbol="BTCUSDT",
+            side="Buy",
+            orderType="Market",
+            qty="1",
+            orderLinkId="rm-1",
         )
     with pytest.raises(RuntimeError, match="REAL_MONEY"):
         client.cancel_order(symbol="BTCUSDT", order_link_id="rm-1")
@@ -1480,7 +1448,7 @@ def test_private_client_real_money_reads_are_never_gated(monkeypatch) -> None:
             return {"retCode": 0, "result": {"list": [{"coin": "USDT"}]}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
+    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False, account_execution_owner=True)
     balance = client.get_wallet_balance()
     assert balance["list"][0]["coin"] == "USDT"
 
@@ -1499,10 +1467,18 @@ def test_private_client_real_money_submit_allowed_with_explicit_optin(monkeypatc
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
     client = bybit.BybitPrivateClient(
-        api_key="k", api_secret="s", demo=False, confirm_real_money=True,
+        api_key="k",
+        api_secret="s",
+        demo=False,
+        confirm_real_money=True,
+        account_execution_owner=True,
     )
     result = client.place_order(
-        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="rm-2",
+        symbol="BTCUSDT",
+        side="Buy",
+        orderType="Market",
+        qty="1",
+        orderLinkId="rm-2",
     )
     assert result["orderId"] == "rm-ok"
 
@@ -1519,9 +1495,13 @@ def test_private_client_demo_submit_unaffected(monkeypatch) -> None:
             return {"retCode": 0, "result": {"orderId": "demo-ok"}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
+    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True, account_execution_owner=True)
     result = client.place_order(
-        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="demo-1",
+        symbol="BTCUSDT",
+        side="Buy",
+        orderType="Market",
+        qty="1",
+        orderLinkId="demo-1",
     )
     assert result["orderId"] == "demo-ok"
 
@@ -1585,7 +1565,8 @@ def test_ping_timer_patch_cancels_prior_timer_on_reconnect(monkeypatch) -> None:
             pass
 
     monkeypatch.setitem(
-        sys.modules, "pybit._websocket_stream",
+        sys.modules,
+        "pybit._websocket_stream",
         SimpleNamespace(_V5WebSocketManager=FakeManager),
     )
     bybit._patch_pybit_daemon_ping_timer()
@@ -1834,3 +1815,30 @@ def test_open_interest_mid_range_empty_also_guarded(monkeypatch) -> None:
 
     with pytest.raises(bybit.BybitDataError):
         client.get_open_interest("BTCUSDT", "5min", start=0, end=10, limit=2)
+
+
+def test_account_owner_guard_blocks_non_owner_rest_mutations(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **_kwargs):
+            self.calls = []
+
+        def place_order(self, **params):
+            self.calls.append(params)
+            return {"retCode": 0, "result": {"orderId": "o1"}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    legacy = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
+    with pytest.raises(RuntimeError, match="not the account execution owner"):
+        legacy.place_order(orderLinkId="legacy-1", symbol="BUSDT", side="Buy", orderType="Market", qty="1")
+    assert legacy._client.calls == []
+
+    owner = bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=True,
+        account_execution_owner=True,
+    )
+    assert (
+        owner.place_order(orderLinkId="owner-1", symbol="BUSDT", side="Buy", orderType="Market", qty="1")["orderId"]
+        == "o1"
+    )

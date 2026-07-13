@@ -93,7 +93,7 @@ def _row_hash(row: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(_json_safe(dict(row)))).hexdigest()
 
 
-def infer_mode(*, dataset: str = "", submit_orders: bool | None = None, explicit: str = "") -> str:
+def infer_mode(*, dataset: str = "", explicit: str = "") -> str:
     if explicit:
         return explicit
     lowered = dataset.lower()
@@ -101,8 +101,6 @@ def infer_mode(*, dataset: str = "", submit_orders: bool | None = None, explicit
         return "paper"
     if "shadow" in lowered:
         return "shadow"
-    if submit_orders is False:
-        return "paper"
     return "demo"
 
 

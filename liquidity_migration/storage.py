@@ -27,7 +27,7 @@ _DATASET_TMP_SWEEP_GUARD = threading.Lock()
 # storage-concurrency-2: per-acquisition tokens currently OWNED by THIS live
 # process. _lock_owner_is_dead short-circuits a pid==os.getpid() payload to
 # "alive" so a process never evicts its own live lock. But a singleton lock
-# taken with stale_seconds=0 (event_ws_risk_cycle.lock) has no age-eviction
+# taken with stale_seconds=0 has no age-eviction
 # backstop: if the daemon crashes holding the lock and systemd restarts it
 # within RestartSec and the kernel hands the SAME pid back (Linux pids cycle to
 # pid_max), the new process reads its dead predecessor's pid==getpid() and would
@@ -119,15 +119,15 @@ DATASETS = {
     "long_native_demo_trades",
     "long_native_demo_orders",
     "long_native_demo_cycles",
-    # B.4: paper-shadow ledger for the long sleeve. Same schema as the demo
-    # ledger; written by the paper runner which records idealised fills at the
-    # signal price and never submits orders.
+    # Compatibility paper-projection ledger for LONG. Same schema as the old
+    # demo ledger; optional strategy-row recording models signal-price fills.
+    # Canonical deterministic paper execution lives in the account journal.
     "long_native_paper_trades",
     "long_native_paper_orders",
     "long_native_paper_cycles",
-    # Continuous-fade sleeve (SHORT-direction): own ledger root,
-    # own datasets so it nets/reconciles separately from compatibility + long on the
-    # shared demo account. demo = live-submitted; paper = idealised-fill shadow.
+    # Continuous-fade compatibility strategy ledgers. Canonical demo and paper
+    # execution/accounting now live in their respective account journals; these
+    # datasets remain for projection diagnostics and historical reconciliation.
     "continuous_fade_demo_trades",
     "continuous_fade_demo_orders",
     "continuous_fade_demo_cycles",
@@ -141,13 +141,6 @@ DATASETS = {
     "binance_usdm_funding",
     "binance_usdm_open_interest",
     "binance_usdm_taker_flow_1h",
-    # Cross-sleeve margin-budget + same-symbol reservation control table
-    # (long-sleeve-5/6). ONE control row per netted account, OWNED + rewritten by
-    # ws_risk each reconcile pass; every sleeve reads it read-only before sizing.
-    # Structured fields are JSON-string columns (scalar Utf8 is schema-stable under
-    # the diagonal_relaxed concat/dedup the read+write paths use). See
-    # read_control_row / write_control_row below.
-    "cross_sleeve_account_state",
 }
 
 DATASET_KEYS = {
@@ -187,9 +180,6 @@ DATASET_KEYS = {
     "binance_usdm_funding": ("ts_ms", "symbol"),
     "binance_usdm_open_interest": ("ts_ms", "symbol"),
     "binance_usdm_taker_flow_1h": ("ts_ms", "symbol"),
-    # Single control row per netted account; key = account_key (write_control_row
-    # relies on this so _write_part dedups the upsert on it).
-    "cross_sleeve_account_state": ("account_key",),
 }
 
 
@@ -508,8 +498,8 @@ def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:
 
 # reconcile-ledger-5 / quality-dup-5: the demo/paper trade+order ledgers were
 # written with partition_by=() -> a single monolithic part.parquet that the live
-# hot path read-modify-rewrites under the lock (write cost O(history)) and that
-# ws_risk re-reads in full every reconcile pass (read cost O(history)). Bucket
+# compatibility hot paths read-modify-rewrite under the lock, making both writes
+# and repeated reconciliation reads O(history). Bucket
 # these ledgers by calendar month so each write/read touches only the current
 # month. The bucket column MUST be derived from a per-row IMMUTABLE timestamp:
 # dedup in _write_part is per-part-file, so a row that changes buckets across an
@@ -848,9 +838,9 @@ def read_ledger_window(
     months_back: int = 3,
 ) -> pl.DataFrame:
     """Windowed read of a month-bucketed ledger: only the most-recent ``months_back``
-    month buckets plus the legacy monolith / _ledger_month=0 tail. quality-dup-5:
-    ws_risk's per-reconcile read no longer scales with the daemon's whole-history
-    ledger -- it only needs OPEN trades and recently-touched orders, and an open trade
+    month buckets plus the legacy monolith / _ledger_month=0 tail. Reconciliation
+    reads no longer scale with the whole-history ledger: they need open trades and
+    recently touched orders, and an open trade
     older than the window is still served by the always-included legacy tail until the
     migration drains it. Falls back to the full read for a non-bucketed dataset."""
     path = dataset_path(data_root, dataset)
@@ -881,9 +871,9 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
     if keys:
         # Dedup by the dataset's natural keys. When rows carry updated_at_ms
         # (trades/orders), keep the freshest VERSION rather than whichever row
-        # happened to be written last: two processes (the demo cycle and the
-        # ws_risk engine) both author these rows, so write order is not a
-        # reliable proxy for recency. Sort ascending (nulls — legacy rows with
+        # happened to be written last: historical roots may contain rows from
+        # multiple writers, so write order is not a reliable proxy for recency.
+        # Sort ascending (nulls — legacy rows with
         # no updated_at_ms — first) so the max updated_at_ms lands last and
         # unique(keep="last") wins it; among ties / nulls the concat order
         # (existing then new) still lets a same-version new row win.

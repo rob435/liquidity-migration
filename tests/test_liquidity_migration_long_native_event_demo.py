@@ -2,20 +2,19 @@
 
 Covers:
 - Profile loader returns the v11a uni50 sniper config
-- Order-link prefix is `lm-en-l-*` so ws_risk routes fills to the long ledger
 - Per-position notional sizing scales by notional_multiplier × base
 - Sniper retrace candidate selection enters when live price reaches threshold
   AND falls through after deadline expires
 - Cooldown prevents same-symbol re-entry within cooldown_days
-- Time-stop exit plans only trigger past planned_exit_ts_ms
-- Telegram notification fires only on material events
-- Combined-book aggregate roll-up reads both ledgers
+- Time-stop exit plans publish zero component targets
+- Demo and paper cycles publish only through the account owner inbox
 """
+
 from __future__ import annotations
 
+import json
 import logging
 import math
-import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -25,42 +24,33 @@ import pytest
 
 import liquidity_migration.long_native_event_demo as lnd
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
+from liquidity_migration.account_route import (
+    AccountRoute,
+    AccountRouteMismatchError,
+    ensure_account_route,
+)
 from liquidity_migration.config import ResearchConfig
-from liquidity_migration.event_demo import EventDemoCycleConfig
-from liquidity_migration.event_demo_exits import _reconcile_pending_order_fills
 from liquidity_migration.long_native_event_demo import (
     FC_VOLUME_RANK_TELEMETRY_MARGIN,
     LONG_DEMO_STRATEGY_PROFILES,
-    LONG_DEMO_TRADES_DATASET,
-    LONG_ENTRY_LINK_PREFIX,
-    LONG_EXIT_LINK_PREFIX,
     LongNativeDemoCycleConfig,
     LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
-    _execute_long_entries,
     _fc_rank_is_near_boundary,
     _log_fc_rank_boundary,
-    _execute_long_exits,
-    _filter_pending_long_entries,
+    _count_long_target_reservations,
     _long_demo_event_config,
     _long_demo_strategy_id,
-    _long_order_link_id,
-    _maybe_long_notify,
     _open_long_trades,
     _plan_time_stop_exits,
     _select_long_entry_candidates,
     _validate_long_demo_config,
     _v11a_long_native_config,
     _vol_parity_weight,
-    format_combined_book_summary,
-    format_portfolio_alert_overview,
     format_long_demo_cycle_summary,
-    format_long_telegram_status_message,
     projected_long_initial_margin_pct_equity,
     run_long_native_demo_cycle,
     target_long_order_notional_pct_equity,
-    _long_telegram_reason,
 )
-from liquidity_migration.storage import write_dataset
 
 
 def test_v11a_config_matches_research_run() -> None:
@@ -139,10 +129,61 @@ def test_projected_margin_guard_allows_explicit_safe_levered_demo() -> None:
     safe = LongNativeDemoCycleConfig(
         notional_multiplier=2.0,
         max_projected_initial_margin_pct_equity=0.50,
+        execution_environment="demo",
+        account_intent_inbox_root="inbox",
+        account_execution_root="account",
     )
     projection = projected_long_initial_margin_pct_equity(safe, strategy)
     assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.375)
     _validate_long_demo_config(safe, strategy)
+
+
+@pytest.mark.parametrize("missing_root", [None, "", "   "])
+def test_submit_mode_requires_account_owner_route(
+    tmp_path: Path,
+    missing_root: str | None,
+) -> None:
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=missing_root,
+        account_execution_root=missing_root,
+    )
+
+    with pytest.raises(ValueError, match="direct sleeve order authority is retired"):
+        run_long_native_demo_cycle(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=demo,
+        )
+
+
+def test_long_config_has_no_direct_execution_or_telegram_fields() -> None:
+    retired = {
+        "fallback_equity_usdt",
+        "entry_order_type",
+        "exit_order_type",
+        "order_fill_confirm_seconds",
+        "order_fill_poll_interval_seconds",
+        "order_fill_fast_poll_interval_seconds",
+        "order_fill_fast_poll_seconds",
+        "telegram",
+        "record_dry_run",
+        "account_type",
+        "settle_coin",
+    }
+    assert retired.isdisjoint(LongNativeDemoCycleConfig.__dataclass_fields__)
+    assert not hasattr(lnd, "_execute_long_entries")
+    assert not hasattr(lnd, "_execute_long_exits")
+    assert not hasattr(lnd, "_resolve_private_snapshot")
+
+
+def test_long_cycle_refuses_local_dry_run(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="execution_environment"):
+        run_long_native_demo_cycle(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=LongNativeDemoCycleConfig(),
+        )
 
 
 def test_live_sizing_rejects_unmirrored_per_symbol_cap_drift() -> None:
@@ -160,12 +201,12 @@ def test_vol_target_scale_volup125() -> None:
 
     cfg = _v11a_long_native_config()  # enable_vol_target=True, annual=0.60, max=1.25, min=0.30
     assert _vol_target_scale(cfg, 0.30) == pytest.approx(1.25)  # calm -> mild lever-up, capped at 1.25
-    assert _vol_target_scale(cfg, 0.60) == pytest.approx(1.0)   # at target -> 1.0
-    assert _vol_target_scale(cfg, 1.20) == pytest.approx(0.5)   # storm -> de-risk to 0.5
+    assert _vol_target_scale(cfg, 0.60) == pytest.approx(1.0)  # at target -> 1.0
+    assert _vol_target_scale(cfg, 1.20) == pytest.approx(0.5)  # storm -> de-risk to 0.5
     assert _vol_target_scale(cfg, 10.0) == pytest.approx(0.30)  # extreme -> floored at min_scale
-    assert _vol_target_scale(cfg, None) == pytest.approx(1.0)   # missing rv -> neutral
+    assert _vol_target_scale(cfg, None) == pytest.approx(1.0)  # missing rv -> neutral
     off = replace(cfg, enable_vol_target=False)
-    assert _vol_target_scale(off, 1.20) == pytest.approx(1.0)   # disabled -> always 1.0
+    assert _vol_target_scale(off, 1.20) == pytest.approx(1.0)  # disabled -> always 1.0
 
 
 def test_strategy_profile_resolution() -> None:
@@ -177,21 +218,6 @@ def test_strategy_profile_resolution() -> None:
     assert cfg.enable_fomo_chase
     with pytest.raises(ValueError):
         _long_demo_event_config("nope")
-
-
-def test_long_order_link_id_uses_long_prefix_for_ws_risk_routing() -> None:
-    """ws_risk routes long-sleeve fills to the long ledger based on the
-    `lm-en-l-` / `lm-ux-l-` order-link prefixes. Verify both prefixes are used."""
-    entry_link = _long_order_link_id(LONG_ENTRY_LINK_PREFIX, symbol="BTCUSDT", signal_ts_ms=1700000000000)
-    assert entry_link.startswith("lm-en-l-"), entry_link
-    assert len(entry_link) <= 36  # Bybit order_link_id limit
-
-    # Long exit prefix (used by _execute_long_exits via _long_risk_order_link_id)
-    # has 'ux-l' base. Smoke-test format.
-    from liquidity_migration.long_native_event_demo import _long_risk_order_link_id
-    exit_link = _long_risk_order_link_id(LONG_EXIT_LINK_PREFIX, symbol="ETHUSDT", ts_ms=1700000000000, attempt=0)
-    assert exit_link.startswith("lm-ux-l-"), exit_link
-    assert len(exit_link) <= 36
 
 
 def test_per_position_notional_scales_by_multiplier() -> None:
@@ -223,36 +249,38 @@ def _build_features_with_fc_signal(*, symbol: str, signal_ts_ms: int, signal_clo
     """Minimal features row that passes detect_pattern_fomo_chase."""
     # FC requires: in_universe, regime_on, eth_regime_on, today_volume_rank <= 10,
     # log_return >= 2.5 * sigma_daily, close_location >= 0.7, atr_14d_pct <= 0.12
-    return pl.DataFrame([
-        {
-            "ts_ms": signal_ts_ms,
-            "symbol": symbol,
-            "close": signal_close,
-            "in_universe": True,
-            "regime_on": True,
-            "eth_regime_on": True,
-            "today_volume_rank": 5,
-            "log_return": math.log(1.0 + 0.20),  # 20% day
-            "close_location": 0.85,
-            "atr_14d_pct": 0.05,
-            "sigma_daily_30d": 0.05,  # 2.5*0.05 = 0.125 threshold, 0.20 > 0.125 → trigger
-            "pump_3d_log": 0.10,
-            "pump_7d_log": 0.20,
-            "close_loc_3d": 0.7,
-            "close_loc_7d": 0.7,
-            "intra_max_Nh_pump_log": 0.0,
-            "realized_vol": 0.6,
-            "coin_30d_return": 0.5,
-            "coin_60d_return": 0.5,
-            "coin_fc_sma": None,
-            "btc_high_proximity": 0.5,
-            "btc_sma_dist": 0.05,
-            "vol_vs_30d_median": 2.0,
-            "own_pump_quantile_90d": 0.10,
-            "own_atr_quantile_90d": 0.10,
-            "atr_20d": 5.0,
-        }
-    ])
+    return pl.DataFrame(
+        [
+            {
+                "ts_ms": signal_ts_ms,
+                "symbol": symbol,
+                "close": signal_close,
+                "in_universe": True,
+                "regime_on": True,
+                "eth_regime_on": True,
+                "today_volume_rank": 5,
+                "log_return": math.log(1.0 + 0.20),  # 20% day
+                "close_location": 0.85,
+                "atr_14d_pct": 0.05,
+                "sigma_daily_30d": 0.05,  # 2.5*0.05 = 0.125 threshold, 0.20 > 0.125 → trigger
+                "pump_3d_log": 0.10,
+                "pump_7d_log": 0.20,
+                "close_loc_3d": 0.7,
+                "close_loc_7d": 0.7,
+                "intra_max_Nh_pump_log": 0.0,
+                "realized_vol": 0.6,
+                "coin_30d_return": 0.5,
+                "coin_60d_return": 0.5,
+                "coin_fc_sma": None,
+                "btc_high_proximity": 0.5,
+                "btc_sma_dist": 0.05,
+                "vol_vs_30d_median": 2.0,
+                "own_pump_quantile_90d": 0.10,
+                "own_atr_quantile_90d": 0.10,
+                "atr_20d": 5.0,
+            }
+        ]
+    )
 
 
 def _build_features_without_fc_signal(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:
@@ -261,10 +289,12 @@ def _build_features_without_fc_signal(*, symbol: str, signal_ts_ms: int, signal_
         symbol=symbol,
         signal_ts_ms=signal_ts_ms,
         signal_close=signal_close,
-    ).with_columns([
-        pl.lit(math.log1p(0.01)).alias("log_return"),
-        pl.lit(0.10).alias("close_location"),
-    ])
+    ).with_columns(
+        [
+            pl.lit(math.log1p(0.01)).alias("log_return"),
+            pl.lit(0.10).alias("close_location"),
+        ]
+    )
 
 
 def test_sniper_retrace_enters_when_live_price_reaches_threshold() -> None:
@@ -277,8 +307,12 @@ def test_sniper_retrace_enters_when_live_price_reaches_threshold() -> None:
     klines = pl.DataFrame()  # not used by _select_long_entry_candidates directly
     all_trades = pl.DataFrame()
     candidates, skips = _select_long_entry_candidates(
-        features=features, klines=klines, all_trades=all_trades, now_ms=now,
-        strategy=strategy, price_by_symbol={"BTCUSDT": 98.5},
+        features=features,
+        klines=klines,
+        all_trades=all_trades,
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.5},
         max_new_entries=5,
     )
     assert len(candidates) == 1
@@ -346,9 +380,11 @@ def test_sniper_entry_delay_uses_exact_elapsed_hours() -> None:
 
 def test_long_cooldown_until_uses_exact_elapsed_days() -> None:
     exit_ts = 1_700_000_123_456
-    trades = pl.DataFrame([
-        {"symbol": "BTCUSDT", "status": "closed", "exit_ts_ms": exit_ts},
-    ])
+    trades = pl.DataFrame(
+        [
+            {"symbol": "BTCUSDT", "status": "closed", "exit_ts_ms": exit_ts},
+        ]
+    )
 
     cooldown = lnd._cooldown_until_long(trades, cooldown_days=7)
 
@@ -364,8 +400,11 @@ def test_sniper_falls_through_after_deadline_when_no_retrace() -> None:
     now = signal_ts + 8 * MS_PER_HOUR
     features = _build_features_with_fc_signal(symbol="ETHUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     candidates, _ = _select_long_entry_candidates(
-        features=features, klines=pl.DataFrame(), all_trades=pl.DataFrame(),
-        now_ms=now, strategy=strategy,
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
         price_by_symbol={"ETHUSDT": 100.5},
         max_new_entries=5,
     )
@@ -379,14 +418,18 @@ def test_long_candidates_rank_before_max_new_entries_truncation() -> None:
     now = signal_ts + 2 * MS_PER_HOUR
     low = _build_features_with_fc_signal(symbol="LOWUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     high = _build_features_with_fc_signal(symbol="HIGHUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
-    low = low.with_columns([
-        pl.lit(math.log1p(0.16)).alias("log_return"),
-        pl.lit(10).alias("today_volume_rank"),
-    ])
-    high = high.with_columns([
-        pl.lit(math.log1p(0.30)).alias("log_return"),
-        pl.lit(1).alias("today_volume_rank"),
-    ])
+    low = low.with_columns(
+        [
+            pl.lit(math.log1p(0.16)).alias("log_return"),
+            pl.lit(10).alias("today_volume_rank"),
+        ]
+    )
+    high = high.with_columns(
+        [
+            pl.lit(math.log1p(0.30)).alias("log_return"),
+            pl.lit(1).alias("today_volume_rank"),
+        ]
+    )
     features = pl.concat([low, high], how="vertical_relaxed")
     candidates, skips = _select_long_entry_candidates(
         features=features,
@@ -407,8 +450,11 @@ def test_sniper_waits_when_within_window_and_no_retrace() -> None:
     now = signal_ts + 3 * MS_PER_HOUR  # inside window, no retrace yet
     features = _build_features_with_fc_signal(symbol="SOLUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     candidates, skips = _select_long_entry_candidates(
-        features=features, klines=pl.DataFrame(), all_trades=pl.DataFrame(),
-        now_ms=now, strategy=strategy,
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
         price_by_symbol={"SOLUSDT": 100.5},  # no retrace
         max_new_entries=5,
     )
@@ -422,8 +468,12 @@ def test_stale_signal_beyond_24h_is_dropped() -> None:
     now = signal_ts + 36 * MS_PER_HOUR  # past 24h freshness bound
     features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     candidates, skips = _select_long_entry_candidates(
-        features=features, klines=pl.DataFrame(), all_trades=pl.DataFrame(),
-        now_ms=now, strategy=strategy, price_by_symbol={"BTCUSDT": 98.0},
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.0},
         max_new_entries=5,
     )
     assert candidates == []
@@ -467,15 +517,26 @@ def test_cooldown_blocks_re_entry() -> None:
     features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     # Recently-closed trade within cooldown
     recent_exit = now - 1 * MS_PER_DAY  # 1 day ago, well inside 7-day cooldown
-    all_trades = pl.DataFrame([
-        {
-            "trade_id": "old", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
-            "status": "closed", "exit_ts_ms": recent_exit, "qty": "0.001",
-        }
-    ])
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "old",
+                "sleeve": "long",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "status": "closed",
+                "exit_ts_ms": recent_exit,
+                "qty": "0.001",
+            }
+        ]
+    )
     candidates, skips = _select_long_entry_candidates(
-        features=features, klines=pl.DataFrame(), all_trades=all_trades,
-        now_ms=now, strategy=strategy, price_by_symbol={"BTCUSDT": 98.0},
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=all_trades,
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.0},
         max_new_entries=5,
     )
     assert candidates == []
@@ -487,77 +548,104 @@ def test_open_position_blocks_re_entry() -> None:
     signal_ts = 1_700_000_000_000
     now = signal_ts + 2 * MS_PER_HOUR
     features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
-    all_trades = pl.DataFrame([
-        {
-            "trade_id": "open-1", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
-            "status": "open", "qty": "0.001",
-        }
-    ])
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "open-1",
+                "sleeve": "long",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "0.001",
+            }
+        ]
+    )
     candidates, skips = _select_long_entry_candidates(
-        features=features, klines=pl.DataFrame(), all_trades=all_trades,
-        now_ms=now, strategy=strategy, price_by_symbol={"BTCUSDT": 98.0},
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=all_trades,
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.0},
         max_new_entries=5,
     )
     assert candidates == []
     assert skips["already_open"] == 1
 
 
+@pytest.mark.parametrize("target_action", ["open_or_resize", "close"])
+def test_pending_long_target_reserves_entry_but_is_not_exit_or_pnl_open(
+    target_action: str,
+) -> None:
+    strategy = _v11a_long_native_config()
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + 2 * MS_PER_HOUR
+    features = _build_features_with_fc_signal(
+        symbol="BTCUSDT",
+        signal_ts_ms=signal_ts,
+        signal_close=100.0,
+    )
+    pending = pl.DataFrame([
+        {
+            "trade_id": "pending-1",
+            "sleeve": "long",
+            "strategy_id": "strategy",
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "status": "target_pending",
+            "target_action": target_action,
+            "qty": "0.001",
+            "planned_exit_ts_ms": now - MS_PER_HOUR,
+        }
+    ])
+
+    candidates, skips = _select_long_entry_candidates(
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pending,
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.0},
+        max_new_entries=5,
+    )
+
+    assert candidates == []
+    assert skips["already_open"] == 1
+    assert _count_long_target_reservations(pending) == 1
+    assert _open_long_trades(pending).is_empty()
+    assert _plan_time_stop_exits(
+        pending,
+        now_ms=now,
+    ) == []
+
+
 def test_plan_time_stop_exits_only_for_expired_long_positions() -> None:
     now = 2_000_000_000_000
-    trades = pl.DataFrame([
-        {  # Past planned_exit_ts_ms → eligible
-            "trade_id": "expired-1", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
-            "status": "open", "qty": "0.001",
-            "planned_exit_ts_ms": now - 1 * MS_PER_HOUR,
-        },
-        {  # Future planned_exit_ts_ms → not eligible
-            "trade_id": "live-1", "sleeve": "long", "symbol": "ETHUSDT", "side": "long",
-            "status": "open", "qty": "0.01",
-            "planned_exit_ts_ms": now + 24 * MS_PER_HOUR,
-        },
-        {  # Already has live exit order pending → skipped
-            "trade_id": "exiting-1", "sleeve": "long", "symbol": "SOLUSDT", "side": "long",
-            "status": "open", "qty": "1.0",
-            "planned_exit_ts_ms": now - 1 * MS_PER_HOUR,
-        },
-    ])
-    plans = _plan_time_stop_exits(trades, now_ms=now, live_exit_order_symbols={"SOLUSDT"})
+    trades = pl.DataFrame(
+        [
+            {  # Past planned_exit_ts_ms → eligible
+                "trade_id": "expired-1",
+                "sleeve": "long",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "0.001",
+                "planned_exit_ts_ms": now - 1 * MS_PER_HOUR,
+            },
+            {  # Future planned_exit_ts_ms → not eligible
+                "trade_id": "live-1",
+                "sleeve": "long",
+                "symbol": "ETHUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "0.01",
+                "planned_exit_ts_ms": now + 24 * MS_PER_HOUR,
+            },
+        ]
+    )
+    plans = _plan_time_stop_exits(trades, now_ms=now)
     assert [p["symbol"] for p in plans] == ["BTCUSDT"]
     assert plans[0]["exit_reason"] == "time_stop"
-
-
-def test_long_dry_run_exit_marks_to_live_price_not_flat() -> None:
-    """Paper/dry-run long exits must mark to the live ticker price, not record a FLAT
-    0% close at the entry price (long-sleeve-2). Without a live price threaded in, the
-    long paper shadow booked 0% on every time-stop and was useless as a forward arbiter."""
-    from liquidity_migration.long_native_event_demo import _execute_long_exits
-
-    now = 2_000_000_000_000
-    all_trades = pl.DataFrame([
-        {
-            "trade_id": "t1", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
-            "status": "open", "qty": "0.001", "entry_price": 100.0,
-            "notional_usdt": 1_000.0, "equity_usdt": 10_000.0,
-            "planned_exit_ts_ms": now - MS_PER_HOUR,
-        },
-    ])
-    plan = {"trade_id": "t1", "symbol": "BTCUSDT", "qty": "0.001", "exit_reason": "time_stop"}
-    demo = LongNativeDemoCycleConfig(submit_orders=False)
-
-    rows, _orders = _execute_long_exits(
-        [plan], all_trades, trading_client=None, demo=demo, now_ms=now,
-        price_by_symbol={"BTCUSDT": 110.0},  # live price +10%
-    )
-    assert len(rows) == 1 and rows[0]["status"] == "closed"
-    assert float(rows[0]["exit_price"]) == pytest.approx(110.0)
-    assert float(rows[0]["gross_trade_return"]) == pytest.approx(0.10, abs=1e-6)
-    assert float(rows[0]["net_return"]) != 0.0, "paper exit must not record FLAT PnL"
-
-    # With NO live price available it falls back to the entry price (the old flat behavior).
-    rows_flat, _ = _execute_long_exits(
-        [plan], all_trades, trading_client=None, demo=demo, now_ms=now, price_by_symbol={},
-    )
-    assert float(rows_flat[0]["gross_trade_return"]) == pytest.approx(0.0)
 
 
 def test_long_entry_excludes_incomplete_today_bar() -> None:
@@ -570,603 +658,52 @@ def test_long_entry_excludes_incomplete_today_bar() -> None:
     # ONLY a future-ts (today, still forming) bar -> its day-END ts is in the future -> not eligible.
     future_bar = pl.DataFrame([{"symbol": "BTCUSDT", "ts_ms": now + MS_PER_HOUR, "close": 100.0}])
     candidates, skips = _select_long_entry_candidates(
-        features=future_bar, klines=pl.DataFrame(), all_trades=pl.DataFrame(), now_ms=now,
-        strategy=LongNativeConfig(), price_by_symbol={"BTCUSDT": 90.0}, max_new_entries=5,
+        features=future_bar,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=LongNativeConfig(),
+        price_by_symbol={"BTCUSDT": 90.0},
+        max_new_entries=5,
     )
     assert candidates == []
     assert skips["no_signal"] == 1  # the only bar's day-END ts is in the future -> excluded
 
 
-def test_pending_entry_dedupe_skips_in_flight_orders() -> None:
-    now = 1_700_000_000_000
-    candidates = [
-        {"trade_id": "t1", "symbol": "BTCUSDT", "signal_ts_ms": now},
-        {"trade_id": "t2", "symbol": "ETHUSDT", "signal_ts_ms": now},
-    ]
-    orders = pl.DataFrame([
-        {
-            "order_link_id": "lm-en-l-BTC-x", "trade_id": "t1", "symbol": "BTCUSDT",
-            "reduce_only": False, "status": "submitted", "ts_ms": now - 60_000,
-        }
-    ])
-    kept, skipped = _filter_pending_long_entries(candidates, orders, now_ms=now)
-    assert {c["symbol"] for c in kept} == {"ETHUSDT"}
-    assert skipped == 1
-
-
 def test_open_long_trades_filter_excludes_short_and_closed() -> None:
-    trades = pl.DataFrame([
-        {"trade_id": "l-open", "sleeve": "long", "symbol": "BTCUSDT", "side": "long", "status": "open"},
-        {"trade_id": "l-closed", "sleeve": "long", "symbol": "ETHUSDT", "side": "long", "status": "closed"},
-        {"trade_id": "s-open", "sleeve": "short", "symbol": "AAVEUSDT", "side": "short", "status": "open"},
-    ])
+    trades = pl.DataFrame(
+        [
+            {"trade_id": "l-open", "sleeve": "long", "symbol": "BTCUSDT", "side": "long", "status": "open"},
+            {"trade_id": "l-closed", "sleeve": "long", "symbol": "ETHUSDT", "side": "long", "status": "closed"},
+            {"trade_id": "s-open", "sleeve": "short", "symbol": "AAVEUSDT", "side": "short", "status": "open"},
+        ]
+    )
     result = _open_long_trades(trades)
     assert result["trade_id"].to_list() == ["l-open"]
-
-
-def test_telegram_notify_quiet_when_no_material_event() -> None:
-    payload: dict[str, Any] = {
-        "cycle": {
-            "ts_ms": 1_700_000_000_000,
-            "mode": "submit",
-            "equity_usdt": 10_000.0,
-            "entries_executed": 0,
-            "exits_executed": 0,
-            "entry_candidates": 0,
-            "exit_candidates": 0,
-            "open_long_positions_after": 0,
-            "order_notional_pct_equity": 2.0,
-            "entry_leverage": 10.0,
-            "notional_multiplier": 10.0,
-        },
-        "entries": [],
-        "exits": [],
-        "entry_orders": [],
-        "exit_orders": [],
-        "ledger_position_summary": {},
-    }
-    sent, reason = _maybe_long_notify(payload, enabled=True)
-    assert sent is False
-    assert reason == "quiet_no_material_event"
-
-
-def test_telegram_notify_reason_classification() -> None:
-    cycle = {"ts_ms": 1, "mode": "submit", "equity_usdt": 100.0,
-             "entries_executed": 0, "exits_executed": 0,
-             "entry_candidates": 0, "exit_candidates": 0,
-             "order_notional_pct_equity": 0.0, "entry_leverage": 0.0}
-    # Successful fills are announced once by the shared ws_risk engine after
-    # venue confirmation, never again by the sleeve cycle.
-    assert _long_telegram_reason({"cycle": {**cycle, "entries_executed": 1}, "entry_orders": [], "exit_orders": []}) == ""
-    # Entry error
-    assert _long_telegram_reason({"cycle": cycle, "entry_orders": [{"submit_mode": "error"}], "exit_orders": []}) == "long_entry_error"
-    assert _long_telegram_reason({"cycle": cycle, "entry_orders": [{"status": "rejected", "submit_mode": "not_submitted"}], "exit_orders": []}) == "long_entry_error"
-    # Operational snapshot faults are handled by the deduplicated risk/watchdog
-    # path, not repeated once per long cycle.
-    assert _long_telegram_reason({"cycle": {**cycle, "position_report_error": "rest down"}, "entry_orders": [], "exit_orders": []}) == ""
-
-
-def test_deterministic_long_entry_rejection_telegram_is_restart_safe_rate_limited(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sent: list[str] = []
-    monkeypatch.setattr(
-        lnd,
-        "send_telegram_message",
-        lambda text, *, enabled: sent.append(text) or True,
-    )
-    rejection = {
-        "order_link_id": "lm-en-l-NOPRICE-abc",
-        "status": "rejected",
-        "submit_mode": "not_submitted",
-        "error": "price_unavailable",
-    }
-
-    def payload(ts_ms: int, *, error: str = "price_unavailable") -> dict[str, Any]:
-        return {
-            "cycle": {
-                "ts_ms": ts_ms,
-                "mode": "submit",
-                "equity_usdt": 10_000.0,
-                "entries_executed": 0,
-                "exits_executed": 0,
-                "entry_candidates": 1,
-                "exit_candidates": 0,
-                "open_long_positions_after": 0,
-                "order_notional_pct_equity": 0.1,
-                "entry_leverage": 10.0,
-                "notional_multiplier": 1.0,
-            },
-            "entry_orders": [{**rejection, "error": error}],
-            "exit_orders": [],
-            "entries": [],
-            "exits": [],
-            "ledger_position_summary": {},
-            "report_dir": str(tmp_path),
-        }
-
-    first_ts = 1_700_000_000_000
-    assert _maybe_long_notify(payload(first_ts), enabled=True) == (True, "")
-    assert _maybe_long_notify(payload(first_ts + 60_000), enabled=True) == (
-        False,
-        "quiet_duplicate_long_entry_rejection",
-    )
-    assert len(sent) == 1
-
-    # The persisted state simulates a daemon restart. A materially different
-    # deterministic rejection on the same order link pages immediately.
-    assert _maybe_long_notify(
-        payload(first_ts + 120_000, error="sizing_rejected:min_qty=10"),
-        enabled=True,
-    ) == (True, "")
-    assert len(sent) == 2
-
-    # Numeric sizing diagnostics move with price/equity every cycle; they are
-    # one root rejection class and must not bypass the cooldown.
-    assert _maybe_long_notify(
-        payload(
-            first_ts + 180_000,
-            error="sizing_rejected:notional=999,price=1.23,min_qty=11",
-        ),
-        enabled=True,
-    ) == (False, "quiet_duplicate_long_entry_rejection")
-    assert len(sent) == 2
-
-    # A still-identical rejection is allowed to remind the operator only after
-    # the bounded cooldown, never once per 60-second cycle.
-    assert _maybe_long_notify(
-        payload(first_ts + lnd.LONG_REJECTION_TELEGRAM_COOLDOWN_MS + 1),
-        enabled=True,
-    ) == (True, "")
-    assert len(sent) == 3
-
-
-def test_long_venue_error_is_rate_limited_by_stable_order_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    sent: list[str] = []
-    monkeypatch.setattr(
-        lnd,
-        "send_telegram_message",
-        lambda text, *, enabled: sent.append(text) or True,
-    )
-
-    def payload(ts_ms: int, error: str) -> dict[str, Any]:
-        return {
-            "cycle": {
-                "ts_ms": ts_ms,
-                "entries_executed": 0,
-                "exits_executed": 0,
-            },
-            "entry_orders": [
-                {
-                    "order_link_id": "lm-en-l-AAA-abc",
-                    "symbol": "AAAUSDT",
-                    "submit_mode": "error",
-                    "status": "failed",
-                    "error": error,
-                }
-            ],
-            "exit_orders": [],
-            "entries": [],
-            "exits": [],
-            "report_dir": str(tmp_path),
-        }
-
-    now = 1_700_000_000_000
-    assert _maybe_long_notify(payload(now, "place_order failed: timeout"), enabled=True) == (True, "")
-    assert _maybe_long_notify(
-        payload(now + 60_000, "place_order failed: timeout"), enabled=True
-    ) == (False, "quiet_duplicate_long_operational_error")
-    # A different failure class is actionable and pages immediately.
-    assert _maybe_long_notify(
-        payload(now + 120_000, "place_order failed: permission denied"), enabled=True
-    ) == (True, "")
-    assert len(sent) == 2
-
-
-def test_format_long_telegram_message_contains_essentials() -> None:
-    payload = {
-        "cycle": {
-            "ts_ms": 1_700_000_000_000, "mode": "submit", "equity_usdt": 10_000.0,
-            "entries_executed": 1, "exits_executed": 0,
-            "entry_candidates": 1, "exit_candidates": 0,
-            "open_long_positions_after": 1,
-            "order_notional_pct_equity": 2.0,
-            "entry_leverage": 10.0, "notional_multiplier": 10.0,
-        },
-        "entries": [{
-            "symbol": "BTCUSDT", "qty": 0.001, "entry_price": 50000.0,
-            "entry_reason": "sniper_retrace", "stop_price": 47500.0, "take_profit_price": 60000.0,
-        }],
-        "exits": [],
-        "ledger_position_summary": {"unrealized_pnl_usdt": 0.0, "pnl_pct": 0.0},
-        "portfolio_overview": "Portfolio overview\n- Long (ON): 1 open [ADAUSDT long $591.83]",
-    }
-    text = format_long_telegram_status_message(payload, reason="long_entry_executed")
-    assert "Position opened · Long demo" in text
-    assert "BTCUSDT LONG" in text
-    assert "Opened 0.001 @ $50000" in text
-    assert "TP $60000 · SL $47500" in text
-    assert "Portfolio overview" not in text
-    assert "ADAUSDT" not in text
-
-
-def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
-    short_root = tmp_path / "short"
-    long_root = tmp_path / "long"
-    continuous_root = tmp_path / "continuous"
-    continuous_paper_root = tmp_path / "continuous-paper"
-    hedge_root = tmp_path / "hedge"
-    short_root.mkdir()
-    long_root.mkdir()
-    continuous_root.mkdir()
-    continuous_paper_root.mkdir()
-    hedge_root.mkdir()
-    # Short ledger: 1 closed winning short trade
-    write_dataset(
-        pl.DataFrame([{
-            "trade_id": "s1", "sleeve": "short", "symbol": "AAAUSDT", "side": "short",
-            "status": "closed", "qty": 1.0, "entry_price": 100.0, "exit_price": 90.0,
-        }]),
-        short_root, "event_demo_trades", partition_by=(),
-    )
-    # Long ledger: 1 open long trade
-    write_dataset(
-        pl.DataFrame([{
-            "trade_id": "l1", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
-            "status": "open", "qty": 0.001, "entry_price": 50_000.0,
-        }]),
-        long_root, LONG_DEMO_TRADES_DATASET, partition_by=(),
-    )
-    write_dataset(
-        pl.DataFrame([{
-            "trade_id": "c1", "sleeve": "continuous", "symbol": "ETHUSDT", "side": "short",
-            "status": "open", "qty": 2.0, "entry_price": 2_000.0,
-        }]),
-        continuous_root, "continuous_fade_demo_trades", partition_by=(),
-    )
-    write_dataset(
-        pl.DataFrame([{"ts_ms": 1_700_000_000_000 - 60_000, "mode": "submit"}]),
-        continuous_root, "continuous_fade_demo_cycles", partition_by=(),
-    )
-    write_dataset(
-        pl.DataFrame([{"ts_ms": 1_700_000_000_000 - 120_000, "mode": "dry_run"}]),
-        continuous_paper_root, "continuous_fade_paper_cycles", partition_by=(),
-    )
-    text = format_combined_book_summary(
-        short_root=short_root,
-        long_root=long_root,
-        continuous_root=continuous_root,
-        continuous_paper_root=continuous_paper_root,
-        continuous_hedge_root=hedge_root,
-        now_ms=1_700_000_000_000,
-        bybit_position_summary={
-            "positions": 2,
-            "position_value_usdt": 4_050.0,
-            "unrealized_pnl_usdt": 50.0,
-            "pnl_pct": 50.0 / 4_050.0,
-        },
-        bybit_positions=[
-            {
-                "symbol": "BTCUSDT", "side": "long", "qty": 0.001,
-                "avg_price": 50_000.0, "mark_price": 50_100.0,
-                "position_value_usdt": 50.0, "unrealized_pnl_usdt": 0.10,
-                "pnl_pct": 0.002, "stop_price": 47_500.0,
-                "take_profit_price": 60_000.0,
-            },
-            {
-                "symbol": "ETHUSDT", "side": "short", "qty": 2.0,
-                "avg_price": 2_000.0, "mark_price": 1_975.0,
-                "position_value_usdt": 4_000.0, "unrealized_pnl_usdt": 49.90,
-                "pnl_pct": 49.90 / 4_000.0, "stop_price": 0.0,
-                "take_profit_price": 1_760.0,
-            },
-        ],
-        account_equity_usdt=10_050.0,
-        sleeve_states={
-            "SHORT_SLEEVE": "off",
-            "LONG_SLEEVE": "off",
-            "CONTINUOUS_SLEEVE": "on",
-            "CONTINUOUS_PAPER_SLEEVE": "on",
-            "CONTINUOUS_HEDGE_TIMER": "off",
-        },
-    )
-    assert "Hourly portfolio" in text
-    assert "Equity: $10,050.00" in text
-    assert "Open positions: 2" in text
-    assert "Continuous ON" in text
-    assert "Long OFF" in text
-    assert "Hedge manager OFF · live hedge none" in text
-    assert "Paper shadow ON" in text
-    assert "BTCUSDT LONG" in text
-    assert "ETHUSDT SHORT" in text
-    assert "no venue stop" in text
-    assert "live hedge none · target need is not inferred" in text
-    # Short realized PnL: (100 - 90) * 1 = 10
-    assert "$10.00" in text
-    # Long open notional: 0.001 * 50_000 = 50
-    assert "$50.00" in text
-    # Continuous open notional: 2 * 2_000 = 4,000
-    assert "$4,000.00" in text
-    assert "trades=0" not in text
-
-    alert_text = format_portfolio_alert_overview(
-        short_root=short_root,
-        long_root=long_root,
-        continuous_root=continuous_root,
-        continuous_paper_root=continuous_paper_root,
-        continuous_hedge_root=hedge_root,
-        now_ms=1_700_000_000_000,
-        sleeve_states={
-            "LONG_SLEEVE": "on",
-            "CONTINUOUS_SLEEVE": "on",
-            "CONTINUOUS_PAPER_SLEEVE": "on",
-            "CONTINUOUS_HEDGE_TIMER": "off",
-        },
-    )
-    assert "Local ledger overview (not venue-verified)" in alert_text
-    assert "open ledger rows: 2" in alert_text
-    assert "BTCUSDT long" in alert_text
-    assert "ETHUSDT short" in alert_text
-    assert "hedge ledger is flat" not in alert_text
-
-
-def test_combined_book_summary_does_not_present_unverified_compatibility_row_as_live(tmp_path: Path) -> None:
-    short_root = tmp_path / "short"
-    write_dataset(
-        pl.DataFrame([{
-            "trade_id": "s-open", "sleeve": "short", "symbol": "AAAUSDT", "side": "short",
-            "status": "open", "qty": 1.0, "entry_price": 100.0,
-        }]),
-        short_root, "event_demo_trades", partition_by=(),
-    )
-    text = format_combined_book_summary(
-        short_root=short_root, long_root=None,
-        now_ms=1_700_000_000_000, sleeve_states={"SHORT_SLEEVE": "off"},
-    )
-    assert "Open positions: not checked" in text
-    assert "Local ledgers contain 1 open row(s); live exposure is unknown." in text
-    assert "AAAUSDT SHORT" not in text
-
-
-def test_hourly_summary_uses_flat_bybit_snapshot_over_stale_open_ledger_rows(
-    tmp_path: Path,
-) -> None:
-    continuous_root = tmp_path / "continuous"
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "trade_id": f"bus-{component}",
-                    "symbol": "BUSDT",
-                    "side": "short",
-                    "status": "open",
-                    "qty": qty,
-                    "entry_price": 0.12564,
-                    "component": component,
-                }
-                for component, qty in (("p3", 100.0), ("p4p3", 200.0), ("p4p5", 300.0))
-            ]
-        ),
-        continuous_root,
-        "continuous_fade_demo_trades",
-        partition_by=(),
-    )
-
-    text = format_combined_book_summary(
-        short_root=None,
-        long_root=None,
-        continuous_root=continuous_root,
-        now_ms=1_700_000_000_000,
-        bybit_position_summary={
-            "positions": 0,
-            "position_value_usdt": 0.0,
-            "unrealized_pnl_usdt": 0.0,
-            "pnl_pct": 0.0,
-        },
-        bybit_positions=[],
-        sleeve_states={"CONTINUOUS_SLEEVE": "on"},
-    )
-
-    assert "Open positions: 0" in text
-    assert "No open positions on Bybit." in text
-    assert "3 local open row(s) (BUSDT x3) do not exist on Bybit" in text
-    assert "excluded from live totals" in text
-    assert "Continuous exposure is live" not in text
-
-
-def test_hourly_summary_never_calls_failed_bybit_check_flat() -> None:
-    text = format_combined_book_summary(
-        short_root=None,
-        long_root=None,
-        now_ms=1_700_000_000_000,
-        bybit_position_summary=None,
-        bybit_positions=None,
-        live_positions_error="REST timeout",
-    )
-
-    assert "Open positions: UNKNOWN" in text
-    assert "Bybit position check failed: REST timeout" in text
-    assert "No open positions on Bybit" not in text
-
-
-def test_hourly_summary_highlights_bad_loss_and_open_position_past_tp() -> None:
-    rows = [
-        {
-            "symbol": "LOSSUSDT", "side": "short", "qty": 100.0,
-            "avg_price": 1.0, "mark_price": 1.10,
-            "position_value_usdt": 110.0, "unrealized_pnl_usdt": -10.0,
-            "pnl_pct": -10.0 / 110.0, "take_profit_price": 0.88,
-            "stop_price": 0.0,
-        },
-        {
-            "symbol": "TPUSDT", "side": "short", "qty": 100.0,
-            "avg_price": 1.0, "mark_price": 0.85,
-            "position_value_usdt": 85.0, "unrealized_pnl_usdt": 15.0,
-            "pnl_pct": 15.0 / 85.0, "take_profit_price": 0.88,
-            "stop_price": 0.0,
-        },
-    ]
-    text = format_combined_book_summary(
-        short_root=None,
-        long_root=None,
-        now_ms=1_700_000_000_000,
-        bybit_position_summary={
-            "positions": 2,
-            "position_value_usdt": 195.0,
-            "unrealized_pnl_usdt": 5.0,
-            "pnl_pct": 5.0 / 195.0,
-        },
-        bybit_positions=rows,
-    )
-
-    assert "LOSSUSDT SHORT" in text
-    assert "LOSS WARNING" in text
-    assert "TP $0.88 (20.00% away)" in text
-    assert "TP $0.88 REACHED — still open" in text
-    assert "TPUSDT has crossed its venue TP but Bybit still reports it open" in text
-
-
-def test_hourly_summary_uses_resolved_hedge_manager_state(tmp_path: Path) -> None:
-    hedge_root = tmp_path / "hedge"
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "trade_id": "hedge-btc",
-                    "symbol": "BTCUSDT",
-                    "side": "long",
-                    "sleeve": "continuous_addon",
-                    "status": "open",
-                    "qty": 0.001,
-                    "entry_price": 50_000.0,
-                }
-            ]
-        ),
-        hedge_root,
-        "continuous_fade_demo_trades",
-        partition_by=(),
-    )
-
-    text = format_combined_book_summary(
-        short_root=None,
-        long_root=None,
-        continuous_hedge_root=hedge_root,
-        now_ms=1_700_000_000_000,
-        bybit_position_summary={
-            "positions": 1,
-            "position_value_usdt": 50.0,
-            "unrealized_pnl_usdt": 0.0,
-            "pnl_pct": 0.0,
-        },
-        bybit_positions=[
-            {
-                "symbol": "BTCUSDT",
-                "side": "long",
-                "qty": 0.001,
-                "avg_price": 50_000.0,
-                "mark_price": 50_000.0,
-                "position_value_usdt": 50.0,
-                "unrealized_pnl_usdt": 0.0,
-                "pnl_pct": 0.0,
-                "take_profit_price": 0.0,
-                "stop_price": 0.0,
-            }
-        ],
-        sleeve_states={
-            "CONTINUOUS_SLEEVE": "on",
-            "CONTINUOUS_HEDGE_TIMER": "off",
-        },
-    )
-
-    assert "Hedge manager OFF · live hedge present" in text
-    assert "A live hedge exists while its manager is OFF" in text
-
-
-def test_hourly_summary_nets_recent_component_activity_by_position(tmp_path: Path) -> None:
-    now = 1_700_000_000_000
-    continuous_root = tmp_path / "continuous"
-    rows = [
-        {
-            "trade_id": f"bus-{component}", "symbol": "BUSDT", "side": "short",
-            "status": "closed", "qty": qty, "entry_price": 1.0, "exit_price": 0.90,
-            "entry_ts_ms": now - 2 * MS_PER_HOUR, "exit_ts_ms": now - 10 * 60_000,
-            "exit_reason": "take_profit", "entry_fee_usdt": 0.0, "exit_fee_usdt": 0.0,
-        }
-        for component, qty in (("p3", 10.0), ("p4p3", 20.0), ("p4p5", 30.0))
-    ]
-    rows.append(
-        {
-            "trade_id": "new-1", "symbol": "NEWUSDT", "side": "short",
-            "status": "open", "qty": 10.0, "entry_price": 2.0,
-            "entry_ts_ms": now - 20 * 60_000,
-        }
-    )
-    write_dataset(
-        pl.DataFrame(rows),
-        continuous_root,
-        "continuous_fade_demo_trades",
-        partition_by=(),
-    )
-
-    text = format_combined_book_summary(
-        short_root=None,
-        long_root=None,
-        continuous_root=continuous_root,
-        now_ms=now,
-        bybit_position_summary={
-            "positions": 1,
-            "position_value_usdt": 20.0,
-            "unrealized_pnl_usdt": 0.0,
-            "pnl_pct": 0.0,
-        },
-        bybit_positions=[
-            {
-                "symbol": "NEWUSDT", "side": "short", "qty": 10.0,
-                "avg_price": 2.0, "mark_price": 2.0,
-                "position_value_usdt": 20.0, "unrealized_pnl_usdt": 0.0,
-                "pnl_pct": 0.0, "take_profit_price": 1.76, "stop_price": 0.0,
-            }
-        ],
-    )
-
-    assert "1 opened · 1 closed · realised +$6.00" in text
-    assert "BUSDT TAKE PROFIT +$6.00" in text
-
-
-def test_combined_book_summary_fails_open_on_missing_roots(tmp_path: Path) -> None:
-    # Missing roots/datasets should not raise — aggregate reports must
-    # never break the cron job
-    text = format_combined_book_summary(
-        short_root=tmp_path / "no-such-short",
-        long_root=tmp_path / "no-such-long",
-        continuous_root=tmp_path / "no-such-continuous",
-        continuous_paper_root=tmp_path / "no-such-continuous-paper",
-        continuous_hedge_root=tmp_path / "no-such-hedge",
-        now_ms=1_700_000_000_000,
-    )
-    assert "Hourly portfolio" in text
-    assert "Local ledgers contain 0 open row(s); live exposure is unknown." in text
-    assert "No action needed." in text
 
 
 def test_long_demo_cycle_summary_includes_key_fields() -> None:
     payload = {
         "cycle": {
-            "cycle_id": "abc", "mode": "submit", "strategy_profile": "LongV11aDivWeekendVol",
-            "symbols": 10, "feature_rows": 100,
-            "entries_executed": 1, "entry_candidates": 1,
-            "exits_executed": 0, "exit_candidates": 0,
-            "open_long_positions_after": 1, "equity_usdt": 10_000.0,
+            "cycle_id": "abc",
+            "mode": "demo_target",
+            "strategy_profile": "LongV11aDivWeekendVol",
+            "symbols": 10,
+            "feature_rows": 100,
+            "entry_candidates": 1,
+            "entry_targets_queued": 1,
+            "exit_candidates": 0,
+            "exit_targets_queued": 0,
+            "open_long_components": 1,
+            "equity_usdt": 10_000.0,
+            "account_owner_health_error": "",
             "cycle_elapsed_pre_persist_ms": 500.0,
         }
     }
     text = format_long_demo_cycle_summary(payload)
-    assert "long-native event demo cycle" in text
+    assert "long target producer" in text
     assert "LongV11aDivWeekendVol" in text
-    assert "entries=1/1" in text
+    assert "targets=entry:1 exit:0" in text
 
 
 def test_long_kline_universe_fetcher_scopes_to_top_n_by_turnover() -> None:
@@ -1265,7 +802,10 @@ def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> N
     )
 
     notional, scale = _compute_long_order_sizing(
-        demo=demo, strategy=strategy, features=features, now_ms=now,
+        demo=demo,
+        strategy=strategy,
+        features=features,
+        now_ms=now,
     )
 
     expected_scale = _vol_target_scale(strategy, 1.20)
@@ -1293,12 +833,89 @@ def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists()
     )
 
     notional, scale = _compute_long_order_sizing(
-        demo=demo, strategy=strategy, features=features, now_ms=now,
+        demo=demo,
+        strategy=strategy,
+        features=features,
+        now_ms=now,
     )
 
     expected_scale = _vol_target_scale(strategy, None)
     assert scale == pytest.approx(expected_scale)
     assert notional == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * expected_scale)
+
+
+def test_long_entry_and_exit_adapters_share_stable_component_target_key() -> None:
+    now_ms = 1_700_000_000_000
+    strategy_id = "long-v11a"
+    candidate = {
+        "trade_id": "long-trade-1",
+        "symbol": "ABCUSDT",
+        "signal_ts_ms": now_ms - 60_000,
+        "entry_reason": "fomo_chase",
+        "position_weight": 0.5,
+        "stop_loss_pct": 0.03,
+        "take_profit_pct": 0.08,
+        "max_hold_days": 3,
+    }
+    demo = LongNativeDemoCycleConfig(entry_leverage=10.0)
+
+    entries = lnd._long_entry_target_intents(
+        [candidate],
+        demo=demo,
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.10,
+        price_by_symbol={"ABCUSDT": 2.0},
+        now_ms=now_ms,
+        strategy_id=strategy_id,
+    )
+    assert len(entries) == 1
+    entry = entries[0].intent
+    # Raw strategy notional is preserved. Venue step/minimum decisions happen
+    # later in the account kernel using verified demo rules.
+    assert entry.signed_notional_usdt == 500.0
+    assert entry.leverage == 10.0
+    assert entry.metadata["quantity_authority"] == "account_kernel_demo_rules"
+    assert entry.metadata["entry_attempt_key"] == f"entry-attempt/{entry.target_key}"
+    assert entry.metadata["signal_valid_until_ms"] == (
+        candidate["signal_ts_ms"] + lnd.SIGNAL_FRESHNESS_MS
+    )
+    assert entry.metadata["stop_loss_pct"] == pytest.approx(0.03)
+    assert entry.metadata["take_profit_pct"] == pytest.approx(0.08)
+    assert entry.metadata["max_hold_duration_ms"] == 3 * lnd.MS_PER_DAY
+    assert {
+        "stop_price",
+        "take_profit_price",
+        "planned_exit_ts_ms",
+    }.isdisjoint(entry.metadata)
+
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "long-trade-1",
+                "symbol": "ABCUSDT",
+                "entry_leverage": 10.0,
+                "planned_exit_ts_ms": now_ms,
+            }
+        ]
+    )
+    exits = lnd._long_exit_target_intents(
+        [{"trade_id": "long-trade-1", "symbol": "ABCUSDT", "exit_reason": "time_stop"}],
+        trades,
+        strategy_id=strategy_id,
+        now_ms=now_ms + 1,
+        default_leverage=10.0,
+    )
+    assert len(exits) == 1
+    exit_intent = exits[0].intent
+    assert exit_intent.signed_notional_usdt == 0.0
+    assert exit_intent.target_key == entry.target_key
+    assert exit_intent.reason == "time_stop"
+
+
+def test_registered_long_profile_carries_live_kernel_identity_and_leverage() -> None:
+    strategy = _long_demo_event_config("LongV11aDivWeekendVol")
+    assert strategy.execution_strategy_id == LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
+    assert strategy.execution_leverage == 10.0
 
 
 def test_median_universe_selection_steady_state_is_byte_match_noop() -> None:
@@ -1313,13 +930,17 @@ def test_median_universe_selection_steady_state_is_byte_match_noop() -> None:
     # 5 names on the latest bar, finite medians 50>40>30>20>10. build_long_features would set
     # in_universe = top-3 by median = {s50, s40, s30}. Pre-set it that way; the helper must agree.
     rows = []
-    for sym, med, tq, inu in [("s50", 50.0, 1.0, True), ("s40", 40.0, 1.0, True),
-                              ("s30", 30.0, 1.0, True), ("s20", 20.0, 9.0, False),
-                              ("s10", 10.0, 9.0, False)]:
-        rows.append({"ts_ms": now, "symbol": sym, "turnover_median_90d": med,
-                     "turnover_quote": tq, "in_universe": inu})
-        rows.append({"ts_ms": prev, "symbol": sym, "turnover_median_90d": med,
-                     "turnover_quote": tq, "in_universe": True})  # historical bar (must be untouched)
+    for sym, med, tq, inu in [
+        ("s50", 50.0, 1.0, True),
+        ("s40", 40.0, 1.0, True),
+        ("s30", 30.0, 1.0, True),
+        ("s20", 20.0, 9.0, False),
+        ("s10", 10.0, 9.0, False),
+    ]:
+        rows.append({"ts_ms": now, "symbol": sym, "turnover_median_90d": med, "turnover_quote": tq, "in_universe": inu})
+        rows.append(
+            {"ts_ms": prev, "symbol": sym, "turnover_median_90d": med, "turnover_quote": tq, "in_universe": True}
+        )  # historical bar (must be untouched)
     feat = pl.DataFrame(rows)
     out, fallback = _apply_median_universe_selection(feat, universe_size=3, snapshot_ts_ms=now)
     assert fallback == 0
@@ -1422,6 +1043,9 @@ def test_weekend_mult_one_low_multiplier_still_passes() -> None:
         notional_multiplier=2.0,
         entry_leverage=10.0,
         max_projected_initial_margin_pct_equity=0.50,
+        execution_environment="demo",
+        account_intent_inbox_root="inbox",
+        account_execution_root="account",
     )
     projection = projected_long_initial_margin_pct_equity(demo, strategy)
 
@@ -1444,24 +1068,8 @@ def test_weekend_mult_below_one_does_not_relax_guard() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# audit2b — long-demo cycle telemetry truthfulness (entries_parallel_workers)   #
+# Account-target cycle fixtures                                                #
 # --------------------------------------------------------------------------- #
-class _ThreadRecordingClient:
-    """Private client that records the thread each place_order ran on."""
-
-    def __init__(self) -> None:
-        self.place_threads: list[int] = []
-        self.set_leverage_calls: list[dict] = []
-
-    def set_leverage(self, **kw: Any) -> dict:
-        self.set_leverage_calls.append(kw)
-        return {}
-
-    def place_order(self, **params: Any) -> dict:
-        self.place_threads.append(threading.get_ident())
-        return {"orderId": f"oid-{len(self.place_threads)}"}
-
-
 def _candidate(symbol: str, signal_ts_ms: int = 1_700_000_000_000) -> dict[str, Any]:
     return {
         "trade_id": f"long-{symbol}-{signal_ts_ms}",
@@ -1478,7 +1086,6 @@ def _candidate(symbol: str, signal_ts_ms: int = 1_700_000_000_000) -> dict[str, 
         "stop_loss_pct": 0.1,
         "take_profit_pct": 0.2,
         "max_hold_days": 3,
-        "planned_exit_ts_ms": signal_ts_ms + 3 * lnd.MS_PER_DAY,
         "atr_14d_pct": 0.05,
         "realized_vol": 0.5,
         "position_weight": 1.0,
@@ -1491,58 +1098,32 @@ def _candidate(symbol: str, signal_ts_ms: int = 1_700_000_000_000) -> dict[str, 
 
 
 def _stub_cycle_dependencies(monkeypatch: pytest.MonkeyPatch, *, candidates: list[dict]) -> None:
-    """Patch the heavy collaborators so the cycle reaches the entries-telemetry
-    block deterministically and offline. Leaves the real `requested_entry_workers`
-    computation + cycle-row assembly (the code under test) untouched."""
-    universe = pl.DataFrame(
-        {"symbol": [c["symbol"] for c in candidates] or ["AAAUSDT"]}
-    )
+    """Patch public-market collaborators so target publication is offline."""
+    universe = pl.DataFrame({"symbol": [c["symbol"] for c in candidates] or ["AAAUSDT"]})
 
     monkeypatch.setattr(lnd, "_demo_instruments", lambda *a, **k: pl.DataFrame())
-    monkeypatch.setattr(
-        lnd, "_resolve_ticker_snapshot", lambda *a, **k: ([], "rest")
-    )
+    monkeypatch.setattr(lnd, "_resolve_ticker_snapshot", lambda *a, **k: ([], "rest"))
     monkeypatch.setattr(lnd, "_normalize_tickers", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(lnd, "_build_long_universe", lambda *a, **k: universe)
     monkeypatch.setattr(
         lnd,
-        "_resolve_private_snapshot",
-        lambda *a, **k: (
-            {
-                "equity_usdt": 10_000.0,
-                "wallet_error": "",
-                "raw_open_orders": [],
-                "open_order_error": "",
-                "raw_positions": [],
-                "position_error": "",
-            },
-            "rest",
-        ),
-    )
-    monkeypatch.setattr(
-        lnd, "_download_recent_1h_klines",
+        "_download_recent_1h_klines",
         lambda *a, **k: (
             pl.DataFrame(),
             {"cache_rows": 0, "fetched_rows": 0, "store_rows": 0, "store_symbols": 0},
         ),
     )
     monkeypatch.setattr(lnd, "build_long_features", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(lnd, "_apply_median_universe_selection", lambda features, **k: (features, 0))
     monkeypatch.setattr(
-        lnd, "_apply_median_universe_selection", lambda features, **k: (features, 0)
-    )
-    monkeypatch.setattr(
-        lnd, "_price_lookup_from_tickers_and_klines",
+        lnd,
+        "_price_lookup_from_tickers_and_klines",
         lambda *a, **k: {c["symbol"]: c["live_price"] for c in candidates},
     )
-    monkeypatch.setattr(lnd, "_contract_lookup", lambda *a, **k: {})
     monkeypatch.setattr(
-        lnd, "_select_long_entry_candidates",
+        lnd,
+        "_select_long_entry_candidates",
         lambda **k: (list(candidates), {"no_signal": 0}),
-    )
-    # Entries are a no-op for the telemetry test: we only care about the worker
-    # count the cycle REPORTS, not the executed rows.
-    monkeypatch.setattr(
-        lnd, "_execute_long_entries", lambda *a, **k: ([], [], 0)
     )
 
 
@@ -1551,262 +1132,408 @@ def _run_cycle(tmp_path: Path, demo: LongNativeDemoCycleConfig) -> dict[str, Any
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
         demo_config=demo,
-        private_client=_ThreadRecordingClient(),
         now_ms=1_700_000_300_000,
     )
 
 
-def test_submit_cycle_reports_truthful_worker_count_of_one(
+def _ensure_owner_route(
+    account_root: Path,
+    inbox_root: Path,
+    *,
+    environment: str,
+) -> AccountRoute:
+    account_id = (
+        "bybit-demo-unified" if environment == "demo" else "bybit-paper-unified"
+    )
+    return ensure_account_route(
+        account_id=account_id,
+        environment=environment,
+        account_root=account_root,
+        inbox_root=inbox_root,
+    )
+
+
+def _write_owner_health(
+    account_root: Path,
+    inbox_root: Path,
+    *,
+    environment: str,
+    equity_usdt: float = 10_000.0,
+    now_ms: int = 1_700_000_300_000,
+) -> None:
+    from liquidity_migration.account_kernel import read_account_journal
+    from liquidity_migration.account_owner_health import (
+        AccountOwnerHealth,
+        write_account_owner_health,
+    )
+
+    route = _ensure_owner_route(
+        account_root,
+        inbox_root,
+        environment=environment,
+    )
+    journal = read_account_journal(account_root, verify=True)
+    write_account_owner_health(
+        account_root,
+        AccountOwnerHealth(
+            owner="account_execution",
+            environment=environment,
+            account_id=route.account_id,
+            status="healthy",
+            observed_ts_ns=now_ms * 1_000_000,
+            loop_sequence=1,
+            journal_sequence=journal[-1].sequence if journal else 0,
+            journal_state_hash=journal[-1].state_hash if journal else "0" * 64,
+            equity_usdt=equity_usdt,
+            available_margin_usdt=equity_usdt,
+            requested_symbols_ready=True,
+        ),
+    )
+
+
+def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """submit_orders=True, max_concurrent_entries=4, 2 candidates: the OLD code
-    set entries_parallel_workers = min(4, 2) = 2 and reported it, despite
-    sequential execution. The fix reports the ACTUAL worker count, 1."""
-    cands = [_candidate("AAAUSDT"), _candidate("BBBUSDT", signal_ts_ms=1_700_000_001_000)]
-    _stub_cycle_dependencies(monkeypatch, candidates=cands)
-    demo = LongNativeDemoCycleConfig(
-        submit_orders=True,
-        confirm_demo_orders=True,
-        max_concurrent_entries=4,
-        max_new_entries_per_cycle=5,
-        ws_klines_enabled=False,
-    )
-    payload = _run_cycle(tmp_path, demo)
-    # 2 candidates reached the entries block (proves the >1 branch could fire).
-    assert payload["cycle"]["entry_candidates"] == 2
-    # Truthful: sequential execution => 1 worker. OLD code reported 2 here.
-    assert payload["cycle"]["entries_parallel_workers"] == 1
-
-
-def test_dry_run_cycle_worker_count_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The normal dry-run path never entered the parallel branch and reported 1
-    both before and after the fix — the fix must not perturb it."""
-    cands = [_candidate("AAAUSDT"), _candidate("BBBUSDT", signal_ts_ms=1_700_000_001_000)]
-    _stub_cycle_dependencies(monkeypatch, candidates=cands)
-    demo = LongNativeDemoCycleConfig(
-        submit_orders=False,
-        record_dry_run=True,
-        max_concurrent_entries=4,
-        max_new_entries_per_cycle=5,
-        ws_klines_enabled=False,
-    )
-    payload = _run_cycle(tmp_path, demo)
-    assert payload["cycle"]["entry_candidates"] == 2
-    assert payload["cycle"]["entries_parallel_workers"] == 1
-
-
-def test_submit_cycle_single_candidate_worker_count_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A single candidate never trips the >1 branch (len(candidates) > 1 is
-    False), so both old and new report 1 — the other happy path."""
-    cands = [_candidate("AAAUSDT")]
-    _stub_cycle_dependencies(monkeypatch, candidates=cands)
-    demo = LongNativeDemoCycleConfig(
-        submit_orders=True,
-        confirm_demo_orders=True,
-        max_concurrent_entries=4,
-        max_new_entries_per_cycle=5,
-        ws_klines_enabled=False,
-    )
-    payload = _run_cycle(tmp_path, demo)
-    assert payload["cycle"]["entry_candidates"] == 1
-    assert payload["cycle"]["entries_parallel_workers"] == 1
-
-
-def test_execute_long_entries_runs_on_single_thread_despite_max_workers() -> None:
-    """The fact that makes any reported worker count >1 a lie: even handed
-    max_workers=4 and a private_client_factory, _execute_long_entries submits
-    every entry on the SAME (calling) thread — there is no parallelism."""
-    client = _ThreadRecordingClient()
-    contracts = {
-        "AAAUSDT": {"tick_size": 0.01, "qty_step": 0.001, "min_order_qty": 0.0,
-                    "min_notional_value": 0.0, "max_order_qty": 1e9},
-        "BBBUSDT": {"tick_size": 0.01, "qty_step": 0.001, "min_order_qty": 0.0,
-                    "min_notional_value": 0.0, "max_order_qty": 1e9},
-        "CCCUSDT": {"tick_size": 0.01, "qty_step": 0.001, "min_order_qty": 0.0,
-                    "min_notional_value": 0.0, "max_order_qty": 1e9},
-    }
-    cands = [
-        _candidate("AAAUSDT"),
-        _candidate("BBBUSDT", signal_ts_ms=1_700_000_001_000),
-        _candidate("CCCUSDT", signal_ts_ms=1_700_000_002_000),
-    ]
-    demo = LongNativeDemoCycleConfig(
-        submit_orders=True, confirm_demo_orders=True, entry_leverage=10.0
-    )
-
-    def _factory() -> _ThreadRecordingClient:  # would-be parallel worker client
-        return _ThreadRecordingClient()
-
-    _rows, _orders, _skipped = _execute_long_entries(
-        cands,
-        trading_client=client,
-        demo=demo,
-        equity_usdt=10_000.0,
-        order_notional_pct_equity=0.1,
-        price_by_symbol={"AAAUSDT": 99.0, "BBBUSDT": 99.0, "CCCUSDT": 99.0},
-        contract_by_symbol=contracts,
-        now_ms=1_700_000_300_000,
-        strategy_id="s",
-        record_preflight=None,
-        private_client_factory=_factory,
-        execution_event_router=None,
-        max_workers=4,  # explicitly request parallelism...
-    )
-    # ...yet all three place_order calls ran sequentially on this one thread via
-    # the single injected trading_client (the factory was never used). Three
-    # placements is itself proof the burst was not short-circuited.
-    assert len(client.place_threads) == 3
-    assert set(client.place_threads) == {threading.get_ident()}
-
-
-def test_long_selected_candidate_rejection_writes_durable_attempt_reason() -> None:
-    demo = LongNativeDemoCycleConfig(submit_orders=False, record_dry_run=True)
-    rows, orders, skipped = _execute_long_entries(
-        [{**_candidate("NOPRICEUSDT"), "live_price": 0.0}],
-        trading_client=None,
-        demo=demo,
-        equity_usdt=10_000.0,
-        order_notional_pct_equity=0.1,
-        price_by_symbol={},
-        contract_by_symbol={},
-        now_ms=1_700_000_300_000,
-        strategy_id="s",
-        record_preflight=None,
-        private_client_factory=None,
-        execution_event_router=None,
-        max_workers=1,
-    )
-    assert rows == [] and skipped == 0
-    assert len(orders) == 1
-    assert orders[0]["status"] == "rejected"
-    assert orders[0]["submit_mode"] == "not_submitted"
-    assert orders[0]["error"] == "price_unavailable"
-
-
-def test_long_pending_entry_fill_recovery_inherits_intent_max_hold_deadline() -> None:
     candidate = _candidate("AAAUSDT")
-    planned = int(candidate["planned_exit_ts_ms"])
-    preflight_rows: list[dict[str, Any]] = []
+    _stub_cycle_dependencies(monkeypatch, candidates=[candidate])
+    inbox = tmp_path / "account-inbox"
+    account_root = tmp_path / "account"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox),
+        account_execution_root=str(account_root),
+        ws_klines_enabled=False,
+    )
+    _write_owner_health(
+        account_root,
+        inbox,
+        environment="demo",
+        equity_usdt=12_345.0,
+    )
 
-    class _PendingThenFilledClient(_ThreadRecordingClient):
-        fill_visible = False
+    payload = _run_cycle(tmp_path / "long", demo)
 
-        def get_trade_history(self, **_kwargs: Any) -> list[dict[str, Any]]:
-            if not self.fill_visible:
-                return []
-            return [{
-                "execQty": "10.101",
-                "execPrice": "99",
-                "execValue": "999.999",
-                "execFee": "0.55",
-                "execTime": "1700000360000",
-            }]
+    assert payload["cycle"]["account_target_route"] is True
+    assert payload["cycle"]["entry_targets_queued"] == 1
+    assert payload["cycle"]["equity_usdt"] == pytest.approx(12_345.0)
+    assert payload["cycle"]["account_state_source"] == "account_owner_health:demo"
+    assert "entries_executed" not in payload["cycle"]
+    assert "bybit_positions" not in payload
+    assert payload["account_target_requests"]["entry_request"]["intent_count"] == 1
+    assert payload["account_target_requests"]["exit_request_ids"] == []
+    pending = list((inbox / "pending").glob("*.json"))
+    assert len(pending) == 1
+    request = json.loads(pending[0].read_bytes())
+    intent = request["intents"][0]["intent"]
+    assert intent["target_key"].startswith("long/")
+    assert intent["signed_notional_usdt"] > 0.0
 
-    client = _PendingThenFilledClient()
-    rows, orders, skipped = _execute_long_entries(
-        [candidate],
-        trading_client=client,
-        demo=LongNativeDemoCycleConfig(
-            submit_orders=True,
-            confirm_demo_orders=True,
-            entry_leverage=10.0,
-            order_fill_confirm_seconds=0.0,
-        ),
+
+def test_long_producer_rejects_cross_wired_route_before_cycle_resources(
+    tmp_path: Path,
+) -> None:
+    account_a = tmp_path / "account-a"
+    inbox_a = tmp_path / "inbox-a"
+    account_b = tmp_path / "account-b"
+    inbox_b = tmp_path / "inbox-b"
+    _ensure_owner_route(account_a, inbox_a, environment="demo")
+    _ensure_owner_route(account_b, inbox_b, environment="demo")
+    cycle_root = tmp_path / "long-cycle"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox_b),
+        account_execution_root=str(account_a),
+        ws_klines_enabled=False,
+    )
+
+    with pytest.raises(AccountRouteMismatchError, match="manifests disagree"):
+        run_long_native_demo_cycle(
+            cycle_root,
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=demo,
+            now_ms=1_700_000_300_000,
+        )
+
+    assert not cycle_root.exists()
+
+
+def test_account_route_blocks_risk_increase_without_fresh_owner_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_cycle_dependencies(monkeypatch, candidates=[_candidate("AAAUSDT")])
+    inbox = tmp_path / "account-inbox"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox),
+        account_execution_root=str(tmp_path / "missing-account"),
+        ws_klines_enabled=False,
+    )
+    _ensure_owner_route(
+        tmp_path / "missing-account",
+        inbox,
+        environment="demo",
+    )
+
+    payload = _run_cycle(tmp_path / "long", demo)
+
+    assert payload["cycle"]["entry_targets_queued"] == 0
+    assert payload["cycle"]["skipped_account_owner_health"] == 1
+    assert payload["cycle"]["equity_usdt"] == 0.0
+    assert payload["cycle"]["account_owner_health_error"]
+    assert list((inbox / "pending").glob("*.json")) == []
+
+
+def test_account_route_pending_entry_is_not_republished_on_next_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidates = [_candidate("AAAUSDT")]
+    _stub_cycle_dependencies(monkeypatch, candidates=candidates)
+    inbox = tmp_path / "account-inbox"
+    account_root = tmp_path / "account"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox),
+        account_execution_root=str(account_root),
+        ws_klines_enabled=False,
+    )
+    _write_owner_health(account_root, inbox, environment="demo")
+
+    first = _run_cycle(tmp_path / "long", demo)
+    second = _run_cycle(tmp_path / "long", demo)
+
+    assert first["cycle"]["entry_targets_queued"] == 1
+    assert second["cycle"]["entry_targets_queued"] == 0
+    assert second["cycle"]["unresolved_entry_target_suppressions"] == 1
+    assert len(list((inbox / "pending").glob("*.json"))) == 1
+
+
+def test_account_route_new_signal_key_remains_eligible_while_prior_is_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidates = [_candidate("AAAUSDT")]
+    _stub_cycle_dependencies(monkeypatch, candidates=candidates)
+    inbox = tmp_path / "account-inbox"
+    account_root = tmp_path / "account"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox),
+        account_execution_root=str(account_root),
+        ws_klines_enabled=False,
+    )
+    _write_owner_health(account_root, inbox, environment="demo")
+    _run_cycle(tmp_path / "long", demo)
+
+    candidates[:] = [_candidate("AAAUSDT", signal_ts_ms=1_700_000_060_000)]
+    second = _run_cycle(tmp_path / "long", demo)
+
+    assert second["cycle"]["entry_targets_queued"] == 1
+    assert second["cycle"]["unresolved_entry_target_suppressions"] == 0
+    assert len(list((inbox / "pending").glob("*.json"))) == 2
+
+
+def test_account_risk_rejected_exact_entry_attempt_is_not_republished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from liquidity_migration.account_kernel import (
+        AccountExecutionKernel,
+        AccountRiskPolicy,
+        AccountRiskSnapshot,
+        DesiredTarget,
+        InstrumentRules,
+        MarketInputRef,
+    )
+    from liquidity_migration.deterministic_runtime import VirtualClock
+
+    candidate = _candidate("AAAUSDT")
+    candidates = [candidate]
+    _stub_cycle_dependencies(monkeypatch, candidates=candidates)
+    inbox = tmp_path / "account-inbox"
+    account_root = tmp_path / "account"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox),
+        account_execution_root=str(account_root),
+        ws_klines_enabled=False,
+    )
+    strategy_id = _long_demo_strategy_id(demo.strategy_profile)
+    route = _ensure_owner_route(account_root, inbox, environment="demo")
+    proposed = lnd._long_entry_target_intents(
+        candidates,
+        demo=demo,
         equity_usdt=10_000.0,
-        order_notional_pct_equity=0.1,
+        order_notional_pct_equity=0.10,
         price_by_symbol={"AAAUSDT": 99.0},
-        contract_by_symbol={
-            "AAAUSDT": {
-                "tick_size": 0.01,
-                "qty_step": 0.001,
-                "min_order_qty": 0.0,
-                "min_notional_value": 0.0,
-                "max_order_qty": 1e9,
-            }
-        },
         now_ms=1_700_000_300_000,
-        strategy_id="s",
-        record_preflight=preflight_rows.append,
-        private_client_factory=None,
-        execution_event_router=None,
-        max_workers=1,
+        strategy_id=strategy_id,
+    )[0].intent
+    clock = VirtualClock(
+        current_wall_ns=1_700_000_300_000_000_000,
+        current_monotonic_ns=1,
     )
+    kernel = AccountExecutionKernel(
+        route.account_path,
+        account_id=route.account_id,
+        clock=clock,
+    )
+    result = kernel.submit_targets(
+        batch_id="risk-rejected-entry",
+        market_inputs=[MarketInputRef("book", "AAAUSDT", 1, 2, 99.0)],
+        targets=[DesiredTarget(
+            decision_key=proposed.decision_key,
+            target_key=proposed.target_key,
+            sleeve="long",
+            strategy_id=proposed.strategy_id,
+            component_id=proposed.component_id,
+            symbol="AAAUSDT",
+            signed_qty=1_000.0,
+            reference_price=99.0,
+            leverage=10.0,
+            reason=proposed.reason,
+            metadata=proposed.metadata,
+        )],
+        risk_snapshot=AccountRiskSnapshot(10_000.0, 10_000.0, "wallet", 3),
+        risk_policy=AccountRiskPolicy(100.0, 100.0, 100.0, 100.0, 10.0),
+        instrument_rules={"AAAUSDT": InstrumentRules("AAAUSDT", 0.1, 0.1, 1.0)},
+    )
+    assert not result.accepted
+    _write_owner_health(account_root, inbox, environment="demo")
 
-    assert skipped == 0
-    assert rows == []
-    assert orders[0]["status"] == "submitted_unconfirmed"
-    assert preflight_rows[0]["planned_exit_ts_ms"] == planned
-    assert orders[0]["planned_exit_ts_ms"] == planned
+    payload = _run_cycle(tmp_path / "long", demo)
 
-    # Simulate the producer crashing after the durable preflight write. The
-    # independent risk daemon later sees the venue fill and reconstructs the
-    # missing LONG trade through the production pending-fill reconciler.
-    client.fill_visible = True
-    recovered_trades, recovered_orders = _reconcile_pending_order_fills(
-        pl.DataFrame(preflight_rows, infer_schema_length=None),
-        pl.DataFrame(),
-        trading_client=client,
-        demo=EventDemoCycleConfig(
-            submit_orders=True,
-            confirm_demo_orders=True,
-            entry_leverage=10.0,
+    assert payload["cycle"]["entry_targets_queued"] == 0
+    assert payload["cycle"]["terminal_entry_attempt_suppressions"] == 1
+    assert list((inbox / "pending").glob("*.json")) == []
+
+
+def test_service_expired_entry_receipt_suppresses_same_attempt_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from liquidity_migration.account_intent_client import AccountTargetPublisher
+    from liquidity_migration.account_service import AccountServiceReceipt
+
+    candidate = _candidate(
+        "AAAUSDT",
+        signal_ts_ms=1_700_000_300_000 - 25 * MS_PER_HOUR,
+    )
+    candidates = [candidate]
+    _stub_cycle_dependencies(monkeypatch, candidates=candidates)
+    inbox_root = tmp_path / "account-inbox"
+    account_root = tmp_path / "account"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox_root),
+        account_execution_root=str(account_root),
+        ws_klines_enabled=False,
+    )
+    route = _ensure_owner_route(account_root, inbox_root, environment="demo")
+    strategy_id = _long_demo_strategy_id(demo.strategy_profile)
+    proposed = lnd._long_entry_target_intents(
+        candidates,
+        demo=demo,
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.10,
+        price_by_symbol={"AAAUSDT": 99.0},
+        now_ms=1_700_000_300_000,
+        strategy_id=strategy_id,
+    )[0]
+    publisher = AccountTargetPublisher(route)
+    published = publisher.publish(
+        batch_id="expired-before-restart",
+        intents=(proposed,),
+        created_ts_ns=1_700_000_299_000_000_000,
+    )
+    claimed = publisher.inbox.claim_next()
+    assert claimed is not None
+    publisher.inbox.complete(
+        claimed[0],
+        AccountServiceReceipt(
+            request_id=published.request.request_id,
+            request_hash=published.request.content_hash(),
+            batch_id=published.request.batch_id,
+            accepted=False,
+            rejection_keys=(
+                "account-service:entry-signal-expired:"
+                f"{proposed.intent.metadata['entry_attempt_key']}",
+            ),
+            command_ids=(),
+            execution_event_ids=(),
+            final_state_hash="0" * 64,
+            disposition="expired",
         ),
-        now_ms=1_700_000_360_000,
-        live_position_symbols={"AAAUSDT"},
+    )
+    _write_owner_health(account_root, inbox_root, environment="demo")
+
+    payload = _run_cycle(tmp_path / "long", demo)
+
+    assert payload["cycle"]["entry_targets_queued"] == 0
+    assert payload["cycle"]["terminal_entry_attempt_suppressions"] == 1
+    assert list((inbox_root / "pending").glob("*.json")) == []
+
+
+def test_paper_cycle_uses_account_inbox_and_never_writes_idealized_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_cycle_dependencies(monkeypatch, candidates=[_candidate("AAAUSDT")])
+    inbox = tmp_path / "paper-inbox"
+    account_root = tmp_path / "paper-account"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="paper",
+        account_intent_inbox_root=str(inbox),
+        account_execution_root=str(account_root),
+        ws_klines_enabled=False,
+    )
+    _write_owner_health(
+        account_root,
+        inbox,
+        environment="paper",
+        equity_usdt=7_654.0,
     )
 
-    assert len(recovered_trades) == len(recovered_orders) == 1
-    recovered = recovered_trades[0]
-    assert recovered["trade_id"] == candidate["trade_id"]
-    assert recovered["sleeve"] == "long"
-    assert recovered["side"] == "long"
-    assert recovered["status"] == "open"
-    assert recovered["planned_exit_ts_ms"] == planned
+    payload = _run_cycle(tmp_path / "long-paper", demo)
+
+    assert payload["cycle"]["account_target_route"] is True
+    assert payload["cycle"]["entry_targets_queued"] == 1
+    assert payload["cycle"]["equity_usdt"] == pytest.approx(7_654.0)
+    assert payload["cycle"]["account_state_source"] == "account_owner_health:paper"
+    assert "entries_executed" not in payload["cycle"]
+    assert len(list((inbox / "pending").glob("*.json"))) == 1
 
 
-# ---------------------------------------------------------------------------
-# Relocated from tests/test_audit_fix_b11.py (audit bucket b11).
-# ---------------------------------------------------------------------------
-
-
-# long-sleeve-1: live path applies the deployed weekend 1.5x size tilt
 def _fc_signal_features(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:
     """Minimal feature row that passes detect_pattern_fomo_chase (mirrors the
     long_native_event_demo test fixture)."""
-    return pl.DataFrame([
-        {
-            "ts_ms": signal_ts_ms,
-            "symbol": symbol,
-            "close": signal_close,
-            "in_universe": True,
-            "regime_on": True,
-            "eth_regime_on": True,
-            "today_volume_rank": 5,
-            "log_return": math.log(1.0 + 0.20),
-            "close_location": 0.85,
-            "atr_14d_pct": 0.05,
-            "sigma_daily_30d": 0.05,
-            "pump_3d_log": 0.10,
-            "pump_7d_log": 0.20,
-            "close_loc_3d": 0.7,
-            "close_loc_7d": 0.7,
-            "intra_max_Nh_pump_log": 0.0,
-            "realized_vol": 0.6,
-            "coin_30d_return": 0.5,
-            "coin_60d_return": 0.5,
-            "coin_fc_sma": None,
-            "btc_high_proximity": 0.5,
-            "btc_sma_dist": 0.05,
-            "vol_vs_30d_median": 2.0,
-            "own_pump_quantile_90d": 0.10,
-            "own_atr_quantile_90d": 0.10,
-            "atr_20d": 5.0,
-        }
-    ])
+    return pl.DataFrame(
+        [
+            {
+                "ts_ms": signal_ts_ms,
+                "symbol": symbol,
+                "close": signal_close,
+                "in_universe": True,
+                "regime_on": True,
+                "eth_regime_on": True,
+                "today_volume_rank": 5,
+                "log_return": math.log(1.0 + 0.20),
+                "close_location": 0.85,
+                "atr_14d_pct": 0.05,
+                "sigma_daily_30d": 0.05,
+                "pump_3d_log": 0.10,
+                "pump_7d_log": 0.20,
+                "close_loc_3d": 0.7,
+                "close_loc_7d": 0.7,
+                "intra_max_Nh_pump_log": 0.0,
+                "realized_vol": 0.6,
+                "coin_30d_return": 0.5,
+                "coin_60d_return": 0.5,
+                "coin_fc_sma": None,
+                "btc_high_proximity": 0.5,
+                "btc_sma_dist": 0.05,
+                "vol_vs_30d_median": 2.0,
+                "own_pump_quantile_90d": 0.10,
+                "own_atr_quantile_90d": 0.10,
+                "atr_20d": 5.0,
+            }
+        ]
+    )
 
 
 # 2023-04-01 12:00Z is a Saturday; 2023-04-05 12:00Z is a Wednesday.
@@ -1843,52 +1570,6 @@ def test_live_weekend_size_tilt_matches_backtest() -> None:
 
 
 # long-sleeve-3: live per-trade net_return is NET of venue fees
-def test_live_long_exit_net_return_subtracts_fees() -> None:
-    from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
-
-    now = 2_000_000_000_000
-    # Trade carries an entry fee; equity 10k, notional 1k (weight 0.1), +10% move.
-    all_trades = pl.DataFrame([
-        {
-            "trade_id": "t1", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
-            "status": "open", "qty": "0.001", "entry_price": 100.0,
-            "notional_usdt": 1_000.0, "equity_usdt": 10_000.0,
-            "entry_fee_usdt": 0.6,  # taker fee on entry
-            "planned_exit_ts_ms": now - MS_PER_HOUR,
-        },
-    ])
-    plan = {"trade_id": "t1", "symbol": "BTCUSDT", "qty": "0.001", "exit_reason": "time_stop"}
-    demo = LongNativeDemoCycleConfig(submit_orders=False)  # dry-run -> exit_fee 0
-
-    rows, _ = _execute_long_exits(
-        [plan], all_trades, trading_client=None, demo=demo, now_ms=now,
-        price_by_symbol={"BTCUSDT": 110.0},  # +10%
-    )
-    assert len(rows) == 1 and rows[0]["status"] == "closed"
-    gross = 0.10 * (1_000.0 / 10_000.0)  # gross_trade_return * notional_weight
-    fee_return = (0.6 + 0.0) / 10_000.0
-    # net_return must be NET of fees; the original bug recorded the gross value.
-    assert float(rows[0]["net_return"]) == pytest.approx(gross - fee_return)
-    assert float(rows[0]["net_return"]) < gross
-
-
-# ratelimit-rest-4: stale "short never gets starved" claim removed
-def test_rate_limit_docstring_no_longer_overstates_cross_sleeve_protection() -> None:
-    from liquidity_migration.long_native_event_demo import (
-        _long_demo_private_rest_rate_limit_per_second,
-    )
-
-    doc = _long_demo_private_rest_rate_limit_per_second.__doc__ or ""
-    assert "ratelimit-rest-4" in doc
-    assert "per-IP" in doc  # explicitly states it is NOT a per-IP coordinator
-    assert "never gets starved" not in doc  # the stale claim is gone
-
-
-# --------------------------------------------------------------------------- #
-# long-sleeve-2: live FC rank-boundary telemetry (observability ONLY)
-# (relocated from tests/test_audit_int_iG.py)
-# --------------------------------------------------------------------------- #
-
 def test_fc_rank_near_boundary_predicate() -> None:
     cutoff = 10
     margin = FC_VOLUME_RANK_TELEMETRY_MARGIN
@@ -1927,16 +1608,24 @@ def test_median_universe_selection_targets_latest_closed_bar_not_future_bar() ->
     from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
 
     now = 1_700_000_000_000
-    closed = now - 3_600_000   # latest closed bar (<= now)
-    future = now + 3_600_000   # next-midnight partial bar (> now)
+    closed = now - 3_600_000  # latest closed bar (<= now)
+    future = now + 3_600_000  # next-midnight partial bar (> now)
     rows = []
     for sym, med in [("s30", 30.0), ("s20", 20.0), ("s10", 10.0)]:
         # CLOSED bar: top-2-by-median = {s30, s20}; pre-set in_universe all False.
-        rows.append({"ts_ms": closed, "symbol": sym, "turnover_median_90d": med,
-                     "turnover_quote": 1.0, "in_universe": False})
+        rows.append(
+            {"ts_ms": closed, "symbol": sym, "turnover_median_90d": med, "turnover_quote": 1.0, "in_universe": False}
+        )
         # FUTURE bar: DIFFERENT (inverted) ranking + pre-set True; must stay untouched.
-        rows.append({"ts_ms": future, "symbol": sym, "turnover_median_90d": 100.0 - med,
-                     "turnover_quote": 1.0, "in_universe": True})
+        rows.append(
+            {
+                "ts_ms": future,
+                "symbol": sym,
+                "turnover_median_90d": 100.0 - med,
+                "turnover_quote": 1.0,
+                "in_universe": True,
+            }
+        )
     feat = pl.DataFrame(rows)
     out, fallback = _apply_median_universe_selection(feat, universe_size=2, snapshot_ts_ms=now)
     assert fallback == 0

@@ -1,0 +1,29 @@
+[Unit]
+Description=liquidity-migration shared deterministic paper account execution owner
+Wants=network-online.target
+After=network-online.target
+Before=liquidity-migration-bybit-long-paper.service liquidity-migration-bybit-continuous-paper.service
+ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/account-paper-execution.env
+Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/scripts/run_account_paper_execution_service.sh
+Restart=always
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

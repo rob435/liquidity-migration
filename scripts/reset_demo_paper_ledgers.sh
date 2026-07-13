@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Archive and rebuild demo/paper ledger projections on the VPS.
+# Archive and rebuild demo/paper account state and strategy projections on the VPS.
 #
 # Safe defaults:
 #   * no flag means DRY RUN (no service or file mutation)
 #   * --execute is required to stop services, archive, and rebuild projections
 #   * concurrent execute attempts are refused by a nonblocking process lock
 #   * REAL_MONEY/mainnet configuration is refused
-#   * submit-armed systemd units must load the same resolved demo env file
+#   * the demo owner must load the same resolved demo credential env file
+#   * canonical demo/paper account roots, inboxes, and captures are archived
+#     and recreated empty in the same maintenance transaction
 #   * the Bybit demo account must have no positions and no open orders
 #   * only initially-active daemons/timers are restarted and verified
 #   * configs, locks, reports, signal files, market-data caches, and the
@@ -27,8 +29,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/reset_demo_paper_ledgers.sh [options]
 
-Archive and rebuild demo + paper trade/order projections. Cycle and deprecated
-operational streams begin a new epoch; the canonical journal is never removed.
+Archive and rebuild demo + paper account state and strategy trade/order
+projections. Canonical account journals begin a new epoch only after the venue
+flatness guard; the prior journals remain in the verified archive.
 Default mode is a read-only preview. Mutation requires --execute.
 
 Options:
@@ -41,17 +44,23 @@ Options:
   --include-reports         also archive/reset reports/ in selected roots
   --include-caches          also archive/reset .cache/ in selected roots (slow rebuild)
   --env-file FILE           demo credential env (default: /etc/liquidity-migration/bybit-demo.env)
+  --account-env-file FILE   demo owner route env (default: /etc/liquidity-migration/account-execution.env)
+  --paper-account-env-file FILE
+                            paper owner route env (default: /etc/liquidity-migration/account-paper-execution.env)
   --settle-seconds N        wait before restart verification (default: 3; max: 60)
   -h, --help                show this help
 
-After a continuous reset it writes one fresh demo + paper cycle heartbeat recording
-the verified-flat reset boundary, so the hedge timer can distinguish the controlled
-empty epoch from a corrupt/missing ledger before the first normal cycle.
+After a continuous reset it writes fresh demo + paper cycle heartbeats. The demo
+heartbeat records the venue-verified flat boundary; the paper heartbeat records
+that the old deterministic epoch was archived and not carried forward.
 
-Trade/order ledgers are rebuildable projections of canonical_journal/events.jsonl.
-Execute bootstraps any pre-journal rows, records the proven-flat account snapshot,
-archives the old projections, deletes only generated views, then replays the
-journal. It never deletes execution history merely to clear an operational view.
+Legacy strategy trade/order ledgers are rebuildable projections of their
+canonical journals. The account-owner roots, intent inboxes, and raw captures
+are a separate execution epoch: execute archives them in full, verifies the
+archive, then creates fresh empty directories. It never discards execution
+history without a durable archive. Demo reset additionally requires venue-flat
+proof; paper reset explicitly retires the archived simulated epoch without
+pretending the demo proof applies to it.
 
 The command never removes configs, .locks, canonical_journal/, residual_momentum.parquet, root-level
 market-data datasets, or continuous_account_equity_state.json. The equity state is
@@ -109,6 +118,8 @@ SLEEVES_RAW="all"
 INCLUDE_REPORTS=0
 INCLUDE_CACHES=0
 ENV_FILE="/etc/liquidity-migration/bybit-demo.env"
+ACCOUNT_ENV_FILE="${ACCOUNT_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-execution.env}"
+PAPER_ACCOUNT_ENV_FILE="${ACCOUNT_PAPER_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-paper-execution.env}"
 SETTLE_SECONDS="${LEDGER_RESET_SETTLE_SECONDS:-3}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 LOCK_FILE="${LEDGER_RESET_LOCK_FILE:-/run/lock/liquidity-migration-ledger-reset.lock}"
@@ -151,6 +162,16 @@ while [[ "$#" -gt 0 ]]; do
       ENV_FILE="$2"
       shift 2
       ;;
+    --account-env-file)
+      [[ "$#" -ge 2 ]] || die "--account-env-file requires a value"
+      ACCOUNT_ENV_FILE="$2"
+      shift 2
+      ;;
+    --paper-account-env-file)
+      [[ "$#" -ge 2 ]] || die "--paper-account-env-file requires a value"
+      PAPER_ACCOUNT_ENV_FILE="$2"
+      shift 2
+      ;;
     --settle-seconds)
       [[ "$#" -ge 2 ]] || die "--settle-seconds requires a value"
       SETTLE_SECONDS="$2"
@@ -183,11 +204,161 @@ if [[ "${REAL_MONEY+x}" == "x" ]]; then
   validate_real_money_value "the caller environment" "$REAL_MONEY"
 fi
 
-# Parse and canonicalise sleeve selection. "all" also includes the shared
-# compatibility ledger owned by ws_risk; selected named sleeves do not.
+CANONICAL_PYTHON="$PWD/.venv/bin/python"
+if [[ ! -x "$CANONICAL_PYTHON" ]]; then
+  CANONICAL_PYTHON="$(command -v python3 || true)"
+fi
+[[ -n "$CANONICAL_PYTHON" && -x "$CANONICAL_PYTHON" ]] \
+  || die "Python runtime is required to validate reset paths"
+
+# Read systemd EnvironmentFile values as data. Do not source these files into
+# the maintenance shell: route files must not be able to overwrite reset control
+# variables, and credential/Telegram values must not leak into systemctl, tar,
+# or projection-rebuild children.
+systemd_env_value() {
+  "$CANONICAL_PYTHON" - "$1" "$2" <<'PY'
+import pathlib
+import re
+import shlex
+import sys
+
+
+path = pathlib.Path(sys.argv[1])
+target = sys.argv[2]
+matches: list[str] = []
+for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    if "=" not in stripped:
+        continue
+    key, raw = stripped.split("=", 1)
+    key = key.strip()
+    if key != target:
+        continue
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        print(f"invalid environment key at {path}:{number}", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        parts = shlex.split(raw.strip(), comments=False, posix=True)
+    except ValueError as exc:
+        print(f"invalid {target} value at {path}:{number}: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    if len(parts) > 1:
+        print(f"ambiguous whitespace in {target} at {path}:{number}", file=sys.stderr)
+        raise SystemExit(2)
+    matches.append(parts[0] if parts else "")
+if len(matches) > 1:
+    print(f"duplicate {target} definitions in {path}", file=sys.stderr)
+    raise SystemExit(2)
+print(matches[0] if matches else "")
+PY
+}
+
+[[ -r "$ACCOUNT_ENV_FILE" ]] || die "demo account env is missing or unreadable: $ACCOUNT_ENV_FILE"
+[[ -r "$PAPER_ACCOUNT_ENV_FILE" ]] || die "paper account env is missing or unreadable: $PAPER_ACCOUNT_ENV_FILE"
+
+# Resolve each owner route independently; paper and demo intentionally reuse
+# variable names in separate env files.
+DEMO_KERNEL_REQUIRED="$(systemd_env_value "$ACCOUNT_ENV_FILE" ACCOUNT_EXECUTION_KERNEL_REQUIRED)"
+DEMO_ACCOUNT_ROOT="$(systemd_env_value "$ACCOUNT_ENV_FILE" ACCOUNT_EXECUTION_ROOT)"
+DEMO_ACCOUNT_INBOX_ROOT="$(systemd_env_value "$ACCOUNT_ENV_FILE" ACCOUNT_INTENT_INBOX_ROOT)"
+DEMO_ACCOUNT_CAPTURE_ROOT="$(systemd_env_value "$ACCOUNT_ENV_FILE" ACCOUNT_CAPTURE_ROOT)"
+[[ "$DEMO_KERNEL_REQUIRED" == "1" ]] \
+  || die "demo account env must set ACCOUNT_EXECUTION_KERNEL_REQUIRED=1"
+[[ -n "$DEMO_ACCOUNT_ROOT" && -n "$DEMO_ACCOUNT_INBOX_ROOT" && -n "$DEMO_ACCOUNT_CAPTURE_ROOT" ]] \
+  || die "demo account env must set ACCOUNT_EXECUTION_ROOT, ACCOUNT_INTENT_INBOX_ROOT, and ACCOUNT_CAPTURE_ROOT"
+
+PAPER_KERNEL_REQUIRED="$(systemd_env_value "$PAPER_ACCOUNT_ENV_FILE" ACCOUNT_PAPER_KERNEL_REQUIRED)"
+PAPER_ACCOUNT_ROOT="$(systemd_env_value "$PAPER_ACCOUNT_ENV_FILE" ACCOUNT_EXECUTION_ROOT)"
+PAPER_ACCOUNT_INBOX_ROOT="$(systemd_env_value "$PAPER_ACCOUNT_ENV_FILE" ACCOUNT_INTENT_INBOX_ROOT)"
+PAPER_ACCOUNT_CAPTURE_ROOT="$(systemd_env_value "$PAPER_ACCOUNT_ENV_FILE" ACCOUNT_PAPER_CAPTURE_ROOT)"
+[[ "$PAPER_KERNEL_REQUIRED" == "1" ]] \
+  || die "paper account env must set ACCOUNT_PAPER_KERNEL_REQUIRED=1"
+[[ -n "$PAPER_ACCOUNT_ROOT" && -n "$PAPER_ACCOUNT_INBOX_ROOT" && -n "$PAPER_ACCOUNT_CAPTURE_ROOT" ]] \
+  || die "paper account env must set ACCOUNT_EXECUTION_ROOT, ACCOUNT_INTENT_INBOX_ROOT, and ACCOUNT_PAPER_CAPTURE_ROOT"
+
+repo_data_path() {
+  "$CANONICAL_PYTHON" - "$1" "$PWD" <<'PY'
+import pathlib
+import sys
+
+raw = pathlib.Path(sys.argv[1]).expanduser()
+repo = pathlib.Path(sys.argv[2]).resolve()
+resolved = (raw if raw.is_absolute() else repo / raw).resolve(strict=False)
+try:
+    relative = resolved.relative_to(repo)
+    relative.relative_to("data")
+except ValueError:
+    print(f"account state path must stay below {repo / 'data'}: {resolved}", file=sys.stderr)
+    raise SystemExit(1)
+print(relative)
+PY
+}
+
+DEMO_ACCOUNT_ROOT="$(repo_data_path "$DEMO_ACCOUNT_ROOT")" || die "invalid demo account root"
+DEMO_ACCOUNT_INBOX_ROOT="$(repo_data_path "$DEMO_ACCOUNT_INBOX_ROOT")" || die "invalid demo account inbox root"
+DEMO_ACCOUNT_CAPTURE_ROOT="$(repo_data_path "$DEMO_ACCOUNT_CAPTURE_ROOT")" || die "invalid demo account capture root"
+PAPER_ACCOUNT_ROOT="$(repo_data_path "$PAPER_ACCOUNT_ROOT")" || die "invalid paper account root"
+PAPER_ACCOUNT_INBOX_ROOT="$(repo_data_path "$PAPER_ACCOUNT_INBOX_ROOT")" || die "invalid paper account inbox root"
+PAPER_ACCOUNT_CAPTURE_ROOT="$(repo_data_path "$PAPER_ACCOUNT_CAPTURE_ROOT")" || die "invalid paper account capture root"
+
+ACCOUNT_STATE_TARGETS=(
+  "$DEMO_ACCOUNT_ROOT"
+  "$DEMO_ACCOUNT_INBOX_ROOT"
+  "$DEMO_ACCOUNT_CAPTURE_ROOT"
+  "$PAPER_ACCOUNT_ROOT"
+  "$PAPER_ACCOUNT_INBOX_ROOT"
+  "$PAPER_ACCOUNT_CAPTURE_ROOT"
+)
+
+# Account-owner state is an independently reset execution epoch. Refuse route
+# layouts that overlap each other or any strategy/legacy root: otherwise a
+# seemingly narrow account reset could recursively erase a preserved canonical
+# journal, cache, config, or an unselected sleeve. The normal deployment uses six
+# sibling roots, so overlap indicates a bad env file rather than a supported
+# layout.
+"$CANONICAL_PYTHON" - "$PWD" "${ACCOUNT_STATE_TARGETS[@]}" <<'PY' \
+  || die "account execution roots must be pairwise disjoint and separate from strategy roots"
+import pathlib
+import sys
+
+
+repo = pathlib.Path(sys.argv[1]).resolve()
+account_paths = [(repo / raw).resolve(strict=False) for raw in sys.argv[2:]]
+reserved = [
+    (repo / raw).resolve(strict=False)
+    for raw in (
+        "data/bybit-long-demo-event",
+        "data/bybit-long-paper-event",
+        "data/bybit-continuous-demo-event",
+        "data/bybit-continuous-paper-event",
+        "data/bybit-continuous-hedge-event",
+        "data/bybit-demo-event",
+    )
+]
+
+
+def overlaps(left: pathlib.Path, right: pathlib.Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+
+for index, left in enumerate(account_paths):
+    for right in account_paths[index + 1 :]:
+        if overlaps(left, right):
+            print(f"overlapping account roots: {left} and {right}", file=sys.stderr)
+            raise SystemExit(1)
+    for right in reserved:
+        if overlaps(left, right):
+            print(f"account root overlaps strategy root: {left} and {right}", file=sys.stderr)
+            raise SystemExit(1)
+PY
+
+# Parse and canonicalise sleeve selection. "all" also retires the obsolete
+# shared compatibility root; continuous retires the obsolete hedge ledger root.
 SELECT_LONG=0
 SELECT_CONTINUOUS=0
-SELECT_SHARED=0
+RETIRE_LEGACY_SHARED=0
 normalised_sleeves="$(printf '%s' "$SLEEVES_RAW" | tr ',' ' ')"
 [[ -n "${normalised_sleeves//[[:space:]]/}" ]] || die "--sleeves must not be empty"
 for sleeve in $normalised_sleeves; do
@@ -195,7 +366,7 @@ for sleeve in $normalised_sleeves; do
     all)
       SELECT_LONG=1
       SELECT_CONTINUOUS=1
-      SELECT_SHARED=1
+      RETIRE_LEGACY_SHARED=1
       ;;
     long)
       SELECT_LONG=1
@@ -214,7 +385,7 @@ done
 SELECTED_SLEEVES=()
 (( SELECT_LONG )) && SELECTED_SLEEVES+=("long")
 (( SELECT_CONTINUOUS )) && SELECTED_SLEEVES+=("continuous")
-(( SELECT_SHARED )) && SELECTED_SLEEVES+=("shared-compat")
+(( RETIRE_LEGACY_SHARED )) && SELECTED_SLEEVES+=("retire-shared-compat")
 
 # Static allowlist of generated projections/epoch telemetry. The canonical
 # journal is intentionally absent: no caller-supplied path can delete it.
@@ -232,28 +403,19 @@ CONTINUOUS_LEDGER_TARGETS=(
   data/bybit-continuous-demo-event/continuous_fade_demo_cycles
   data/bybit-continuous-demo-event/continuous_risk_events.jsonl
   data/bybit-continuous-demo-event/continuous_lifecycle_events.jsonl
-  data/bybit-continuous-demo-event/continuous_dynexit_shadow.jsonl
   data/bybit-continuous-paper-event/continuous_fade_paper_trades
   data/bybit-continuous-paper-event/continuous_fade_paper_orders
   data/bybit-continuous-paper-event/continuous_fade_paper_cycles
   data/bybit-continuous-paper-event/continuous_risk_events.jsonl
   data/bybit-continuous-paper-event/continuous_lifecycle_events.jsonl
-  data/bybit-continuous-paper-event/continuous_dynexit_shadow.jsonl
-  data/bybit-continuous-hedge-event/continuous_fade_demo_trades
-  data/bybit-continuous-hedge-event/continuous_fade_demo_orders
 )
-SHARED_LEDGER_TARGETS=(
-  data/bybit-demo-event/event_demo_trades
-  data/bybit-demo-event/event_demo_orders
-  data/bybit-demo-event/event_demo_cycles
-)
+LEGACY_CONTINUOUS_TARGETS=(data/bybit-continuous-hedge-event)
+LEGACY_SHARED_TARGETS=(data/bybit-demo-event)
 LONG_ROOTS=(data/bybit-long-demo-event data/bybit-long-paper-event)
 CONTINUOUS_ROOTS=(
   data/bybit-continuous-demo-event
   data/bybit-continuous-paper-event
-  data/bybit-continuous-hedge-event
 )
-SHARED_ROOTS=(data/bybit-demo-event)
 CANONICAL_SPECS=()
 if (( SELECT_LONG )); then
   CANONICAL_SPECS+=(
@@ -265,12 +427,6 @@ if (( SELECT_CONTINUOUS )); then
   CANONICAL_SPECS+=(
     "data/bybit-continuous-demo-event|continuous_fade_demo_trades|continuous_fade_demo_orders|demo|continuous"
     "data/bybit-continuous-paper-event|continuous_fade_paper_trades|continuous_fade_paper_orders|paper|continuous"
-    "data/bybit-continuous-hedge-event|continuous_fade_demo_trades|continuous_fade_demo_orders|demo|continuous_addon"
-  )
-fi
-if (( SELECT_SHARED )); then
-  CANONICAL_SPECS+=(
-    "data/bybit-demo-event|event_demo_trades|event_demo_orders|demo|short"
   )
 fi
 CONTINUOUS_PRESERVED_AUDIT_TARGETS=(
@@ -280,14 +436,16 @@ CONTINUOUS_PRESERVED_AUDIT_TARGETS=(
 
 OUT=()
 (( SELECT_LONG )) && append_unique "${LONG_LEDGER_TARGETS[@]}"
-(( SELECT_CONTINUOUS )) && append_unique "${CONTINUOUS_LEDGER_TARGETS[@]}"
-(( SELECT_SHARED )) && append_unique "${SHARED_LEDGER_TARGETS[@]}"
+if (( SELECT_CONTINUOUS )); then
+  append_unique "${CONTINUOUS_LEDGER_TARGETS[@]}" "${LEGACY_CONTINUOUS_TARGETS[@]}"
+fi
+(( RETIRE_LEGACY_SHARED )) && append_unique "${LEGACY_SHARED_TARGETS[@]}"
+append_unique "${ACCOUNT_STATE_TARGETS[@]}"
 TARGETS=("${OUT[@]}")
 
 OUT=()
 (( SELECT_LONG )) && append_unique "${LONG_ROOTS[@]}"
 (( SELECT_CONTINUOUS )) && append_unique "${CONTINUOUS_ROOTS[@]}"
-(( SELECT_SHARED )) && append_unique "${SHARED_ROOTS[@]}"
 SELECTED_ROOTS=("${OUT[@]}")
 
 if (( INCLUDE_REPORTS )); then
@@ -305,15 +463,20 @@ if (( INCLUDE_CACHES )); then
   done
 fi
 
-EXISTING_TARGETS=()
-for target in "${TARGETS[@]}"; do
-  case "$target" in
-    data/bybit-*) ;;
-    *) die "internal safety error: non-data target '$target'" ;;
-  esac
-  [[ "$target" != *".."* ]] || die "internal safety error: traversal target '$target'"
-  [[ -e "$target" || -L "$target" ]] && EXISTING_TARGETS+=("$target")
-done
+refresh_existing_targets() {
+  local target
+  EXISTING_TARGETS=()
+  for target in "${TARGETS[@]}"; do
+    case "$target" in
+      data/bybit-*) ;;
+      *) die "internal safety error: non-data target '$target'" ;;
+    esac
+    [[ "$target" != *".."* ]] || die "internal safety error: traversal target '$target'"
+    [[ -e "$target" || -L "$target" ]] && EXISTING_TARGETS+=("$target")
+  done
+  return 0
+}
+refresh_existing_targets
 
 # Account drawdown is an account-level risk memory, not a disposable ledger.
 # Snapshot it at the reset boundary for auditability but deliberately do not add
@@ -326,17 +489,13 @@ if (( SELECT_CONTINUOUS )); then
   done
 fi
 
-# The archive must never sit inside a directory that is about to be archived
-# and removed. Besides losing the recovery copy, tar could consume its own
-# growing output. Canonicalise through existing symlinks and collapse '.', '..',
-# and relative/absolute aliases; a lexical prefix check is bypassable with e.g.
-# ``target/./_archive``.
-CANONICAL_PYTHON="$PWD/.venv/bin/python"
-if [[ ! -x "$CANONICAL_PYTHON" ]]; then
-  CANONICAL_PYTHON="$(command -v python3 || true)"
-fi
-[[ -n "$CANONICAL_PYTHON" && -x "$CANONICAL_PYTHON" ]] \
-  || die "Python runtime is required to canonicalise the archive safety boundary"
+# The archive must never sit inside anything that will be added to the archive,
+# whether that path is reset or retained live. Besides losing the recovery copy,
+# tar could consume its own growing output. Canonical journals may be created by
+# the pre-archive bootstrap below, so guard their potential paths even when they
+# do not exist yet. Canonicalise through existing symlinks and collapse '.',
+# '..', and relative/absolute aliases; a lexical prefix check is bypassable with
+# e.g. ``target/./_archive``.
 canonical_path() {
   "$CANONICAL_PYTHON" -c '
 import pathlib
@@ -346,7 +505,11 @@ print(pathlib.Path(sys.argv[1]).resolve(strict=False))
 ' "$1"
 }
 archive_compare="$(canonical_path "$ARCHIVE_DIR")"
-for target in "${TARGETS[@]}"; do
+ARCHIVE_INPUT_PATHS=("${TARGETS[@]}" "${PRESERVED_AUDIT_TARGETS[@]}")
+for root in "${SELECTED_ROOTS[@]}"; do
+  ARCHIVE_INPUT_PATHS+=("$root/canonical_journal")
+done
+for target in "${ARCHIVE_INPUT_PATHS[@]}"; do
   target_compare="$(canonical_path "$target")"
   case "$archive_compare/" in
     "$target_compare/"*)
@@ -355,13 +518,11 @@ for target in "${TARGETS[@]}"; do
   esac
 done
 
-# The account is shared, so every writer and the shared risk authority must be
-# quiesced even for a one-sleeve reset. Otherwise the unselected sleeve could
-# submit while ws_risk is deliberately down. Timers/readers are stopped to avoid
-# a hedge launch or false liveness page during the maintenance window.
+# The account is shared, so every target producer and both account owners must
+# be quiesced even for a one-sleeve reset. Producers stop before owners; this
+# prevents new targets from being queued while their sole consumer is down.
 STOP_UNITS=(
   liquidity-migration-demo-liveness.timer
-  liquidity-migration-combined-book-report.timer
   liquidity-migration-continuous-hedge.timer
   liquidity-migration-continuous-rmom-refresh.timer
   liquidity-migration-bybit-long-demo.service
@@ -371,35 +532,33 @@ STOP_UNITS=(
   liquidity-migration-continuous-hedge.service
   liquidity-migration-continuous-rmom-refresh.service
   liquidity-migration-demo-liveness.service
-  liquidity-migration-combined-book-report.service
-  liquidity-migration-bybit-risk.service
+  liquidity-migration-account-execution.service
+  liquidity-migration-account-paper-execution.service
 )
-# These units can submit or manage demo-account orders. Every one must use the
-# exact credential file selected by --env-file (after symlink/path resolution)
-# before any unit is stopped. Paper/read-only units are intentionally excluded.
+# The account owner is the only venue-mutating process and must use the exact
+# credential file selected by --env-file (after symlink/path resolution).
 ACCOUNT_BOUND_UNITS=(
-  liquidity-migration-bybit-risk.service
-  liquidity-migration-bybit-long-demo.service
-  liquidity-migration-bybit-continuous-demo.service
-  liquidity-migration-continuous-hedge.service
+  liquidity-migration-account-execution.service
 )
 NON_RESTARTABLE_ONESHOTS=(
   liquidity-migration-continuous-hedge.service
   liquidity-migration-continuous-rmom-refresh.service
   liquidity-migration-demo-liveness.service
-  liquidity-migration-combined-book-report.service
 )
-RESTART_UNITS=(
-  liquidity-migration-bybit-risk.service
+OWNER_RESTART_UNITS=(
+  liquidity-migration-account-execution.service
+  liquidity-migration-account-paper-execution.service
+)
+DOWNSTREAM_RESTART_UNITS=(
   liquidity-migration-bybit-long-demo.service
   liquidity-migration-bybit-long-paper.service
   liquidity-migration-bybit-continuous-demo.service
   liquidity-migration-bybit-continuous-paper.service
   liquidity-migration-continuous-rmom-refresh.timer
   liquidity-migration-continuous-hedge.timer
-  liquidity-migration-combined-book-report.timer
   liquidity-migration-demo-liveness.timer
 )
+RESTART_UNITS=("${OWNER_RESTART_UNITS[@]}" "${DOWNSTREAM_RESTART_UNITS[@]}")
 
 echo "Ledger reset plan"
 echo "  mode: $MODE"
@@ -407,6 +566,7 @@ echo "  sleeves: ${SELECTED_SLEEVES[*]}"
 echo "  archive dir: $ARCHIVE_DIR"
 echo "  include reports: $INCLUDE_REPORTS"
 echo "  include caches: $INCLUDE_CACHES"
+echo "  canonical account state: ${ACCOUNT_STATE_TARGETS[*]}"
 echo "  existing targets: ${#EXISTING_TARGETS[@]}"
 for target in "${EXISTING_TARGETS[@]}"; do
   size="$(du -sh "$target" 2>/dev/null | awk '{print $1}' || true)"
@@ -418,7 +578,7 @@ for target in "${PRESERVED_AUDIT_TARGETS[@]}"; do
   echo "    - $target (archived, retained live)"
 done
 
-echo "  preserved by default: canonical_journal/, configs/, .locks/, reports/, .cache/, residual_momentum.parquet, root-level market data, account-equity high-water state"
+echo "  preserved by default: strategy canonical_journal/, configs/, .locks/, reports/, .cache/, residual_momentum.parquet, root-level market data, account-equity high-water state"
 (( INCLUDE_REPORTS )) && echo "  selected exception: reports/ will be archived and reset"
 (( INCLUDE_CACHES )) && echo "  selected exception: .cache/ will be archived and reset; expect market-data bootstrap"
 echo "  quiesced units: ${#STOP_UNITS[@]} (all shared-account writers plus maintenance readers/timers)"
@@ -450,16 +610,10 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 [[ -n "$PYTHON" && -x "$PYTHON" ]] || die "Python runtime not found (.venv/bin/python or python3)"
 
-# Validate the final service environment before acquiring the execute lock or
-# querying/stopping systemd. This runs in a subshell so values from the secret
-# env file never leak into this script's later command environment or output.
-(
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-  validate_real_money_value "$ENV_FILE" "${REAL_MONEY-__unset__}"
-)
+# Validate the selected credential file before acquiring the execute lock or
+# querying/stopping systemd. Only the high-stakes toggle is read here.
+credential_real_money="$(systemd_env_value "$ENV_FILE" REAL_MONEY)"
+validate_real_money_value "$ENV_FILE" "${credential_real_money:-__unset__}"
 
 # Keep fd 9 open for the entire execute process. BSD/Linux flock locks are tied
 # to this inherited open-file description, so the lock remains held while the
@@ -566,6 +720,77 @@ raise SystemExit(0 if found_expected else 1)
   fi
 done
 
+# The reset must archive the same canonical roots that the two running owners
+# will reopen. Reject a drop-in or extra env file that redirects an owner after
+# the reset has already removed a different route.
+verify_owner_route_env() {
+  local unit="$1" expected_file="$2" protected_csv="$3"
+  local unit_environment_files unit_environment
+  unit_environment_files="$(
+    "$SYSTEMCTL_BIN" show "$unit" --property=EnvironmentFiles --value
+  )" || die "failed to resolve route EnvironmentFiles for owner: $unit"
+  unit_environment="$(
+    "$SYSTEMCTL_BIN" show "$unit" --property=Environment --value
+  )" || die "failed to resolve direct route Environment assignments for owner: $unit"
+  "$PYTHON" -c '
+import pathlib
+import re
+import shlex
+import sys
+
+expected = pathlib.Path(sys.argv[1]).resolve(strict=True)
+raw_files = sys.argv[2]
+raw_environment = sys.argv[3]
+protected = set(sys.argv[4].split(","))
+paths = re.findall(
+    r"(?:^|[\n ])(.+?) \(ignore_errors=(?:yes|no)\)(?=[\n ]|$)",
+    raw_files,
+)
+found_expected = False
+for value in paths:
+    try:
+        candidate = pathlib.Path(value).resolve(strict=True)
+    except (OSError, RuntimeError):
+        continue
+    if candidate == expected:
+        found_expected = True
+        continue
+    try:
+        lines = candidate.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        continue
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in protected:
+            print(f"conflicting owner route key {key} in {candidate}", file=sys.stderr)
+            raise SystemExit(2)
+try:
+    direct_assignments = shlex.split(raw_environment)
+except ValueError:
+    print("unparseable direct owner Environment assignments", file=sys.stderr)
+    raise SystemExit(3)
+for assignment in direct_assignments:
+    key = assignment.split("=", 1)[0]
+    if "=" in assignment and key in protected:
+        print(f"conflicting direct owner route key {key}", file=sys.stderr)
+        raise SystemExit(4)
+raise SystemExit(0 if found_expected else 1)
+' "$expected_file" "$unit_environment_files" "$unit_environment" "$protected_csv" \
+    || die "owner $unit has an ambiguous route environment or does not exclusively load $expected_file; refusing before stopping services"
+}
+
+verify_owner_route_env \
+  liquidity-migration-account-execution.service \
+  "$ACCOUNT_ENV_FILE" \
+  ACCOUNT_EXECUTION_ROOT,ACCOUNT_INTENT_INBOX_ROOT,ACCOUNT_CAPTURE_ROOT
+verify_owner_route_env \
+  liquidity-migration-account-paper-execution.service \
+  "$PAPER_ACCOUNT_ENV_FILE" \
+  ACCOUNT_EXECUTION_ROOT,ACCOUNT_INTENT_INBOX_ROOT,ACCOUNT_CAPTURE_ROOT,ACCOUNT_PAPER_CAPTURE_ROOT
+
 was_active() {
   local needle="$1" unit
   for unit in "${ACTIVE_BEFORE[@]:-}"; do
@@ -587,8 +812,37 @@ MANIFEST_DIR=""
 restart_previously_active() {
   local context="$1" unit failed=0
   echo
-  echo "Restarting previously-active daemons/timers ($context) ..."
-  for unit in "${RESTART_UNITS[@]}"; do
+  echo "Restarting previously-active account owners first ($context) ..."
+  for unit in "${OWNER_RESTART_UNITS[@]}"; do
+    if was_active "$unit"; then
+      if "$SYSTEMCTL_BIN" start "$unit"; then
+        echo "  started $unit"
+      else
+        echo "  FAILED to start $unit" >&2
+        failed=1
+      fi
+    else
+      echo "  left inactive $unit (it was inactive before reset)"
+    fi
+  done
+  if (( failed )); then
+    echo "  owner start failed; downstream producers remain stopped" >&2
+    return "$failed"
+  fi
+  if (( SETTLE_SECONDS > 0 )); then
+    echo "Waiting ${SETTLE_SECONDS}s for account owners before downstream startup ..."
+    sleep "$SETTLE_SECONDS"
+  fi
+  for unit in "${OWNER_RESTART_UNITS[@]}"; do
+    if was_active "$unit" && ! "$SYSTEMCTL_BIN" is-active --quiet "$unit"; then
+      echo "  owner did not remain active: $unit; downstream producers remain stopped" >&2
+      failed=1
+    fi
+  done
+  (( failed == 0 )) || return "$failed"
+
+  echo "Restarting previously-active downstream producers/timers ($context) ..."
+  for unit in "${DOWNSTREAM_RESTART_UNITS[@]}"; do
     if was_active "$unit"; then
       if "$SYSTEMCTL_BIN" start "$unit"; then
         echo "  started $unit"
@@ -634,11 +888,14 @@ echo "  quiescence verified"
 echo
 echo "Checking demo/mainnet boundary and flat-account precondition ..."
 (
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-  validate_real_money_value "$ENV_FILE" "${REAL_MONEY-__unset__}"
+  unset DEMO REAL_MONEY BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
+    BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+  DEMO="$(systemd_env_value "$ENV_FILE" DEMO)"
+  REAL_MONEY="$(systemd_env_value "$ENV_FILE" REAL_MONEY)"
+  BYBIT_DEMO_API_KEY="$(systemd_env_value "$ENV_FILE" BYBIT_DEMO_API_KEY)"
+  BYBIT_DEMO_API_SECRET="$(systemd_env_value "$ENV_FILE" BYBIT_DEMO_API_SECRET)"
+  export DEMO REAL_MONEY BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
+  validate_real_money_value "$ENV_FILE" "${REAL_MONEY:-__unset__}"
   "$PYTHON" - <<'PY'
 import sys
 
@@ -666,7 +923,19 @@ if not api_key or not api_secret:
 
 client = BybitPrivateClient(api_key=api_key, api_secret=api_secret, demo=True)
 positions = [row for row in client.get_positions(settle_coin="USDT") if amount(row) > 0.0]
-orders = list(client.get_open_orders(settle_coin="USDT"))
+# Bybit documents the omitted orderFilter as all linear order kinds, but issue
+# an explicit StopOrder query as well. Reset is a destructive epoch boundary;
+# it must not rely on a wrapper/default continuing to expose conditional rows.
+all_orders = list(client.get_open_orders(settle_coin="USDT"))
+conditional_orders = list(
+    client.get_open_orders(settle_coin="USDT", order_filter="StopOrder")
+)
+orders_by_identity: dict[str, dict] = {}
+for source, rows in (("all-kinds", all_orders), ("conditional", conditional_orders)):
+    for index, row in enumerate(rows):
+        identity = str(row.get("orderId") or row.get("orderLinkId") or f"{source}:{index}")
+        orders_by_identity[identity] = row
+orders = list(orders_by_identity.values())
 if positions or orders:
     print(
         f"ERROR: demo account is not flat: open_positions={len(positions)} open_orders={len(orders)}. "
@@ -689,13 +958,13 @@ print("  demo-account-flat-ok positions=0 open_orders=0")
 PY
 )
 
-# Import any pre-journal rows before touching projections, then record the
-# account-level fact proven immediately above. Open/submitted rows become
-# awaiting_pnl (not fabricated closed rows), so they stop triggering orders and
-# pages while closed-PnL evidence can still complete them later.
+# Import any pre-journal rows before touching projections. Demo rows receive the
+# venue-flat fact proven immediately above and become awaiting_pnl without a
+# fabricated close. Paper rows receive a distinct archived-epoch fact and become
+# inactive; no demo venue observation or realized P&L is attributed to them.
 echo
 echo "Bootstrapping and verifying canonical journals ..."
-"$PYTHON" - --prepare-canonical-flat "${CANONICAL_SPECS[@]}" <<'PY'
+"$PYTHON" - --prepare-canonical-reset "${CANONICAL_SPECS[@]}" <<'PY'
 import datetime as dt
 import sys
 from pathlib import Path
@@ -703,6 +972,7 @@ from pathlib import Path
 from liquidity_migration.canonical_journal import (
     journal_path,
     rebuild_all_registered_projections,
+    record_archived_paper_epoch_reset,
     record_verified_flat_snapshot,
     verify_journal,
 )
@@ -710,7 +980,7 @@ from liquidity_migration.lifecycle_bridge import bootstrap_legacy_ledgers
 
 
 now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
-verification_id = f"ledger-rebuild-flat-{now_ms}"
+reset_id = f"ledger-rebuild-{now_ms}"
 for raw in sys.argv[2:]:
     root_raw, trades, orders, mode, sleeve = raw.split("|", 4)
     root = Path(root_raw)
@@ -723,19 +993,37 @@ for raw in sys.argv[2:]:
         sleeve=sleeve,
         now_ms=now_ms,
     )
-    record_verified_flat_snapshot(
-        root,
-        now_ms=now_ms,
-        verification_id=verification_id,
-        source="reset_workflow_positions_and_open_orders_flat",
-    )
+    if mode == "demo":
+        record_verified_flat_snapshot(
+            root,
+            now_ms=now_ms,
+            verification_id=f"{reset_id}:demo-venue-flat",
+            source="reset_workflow_demo_positions_and_open_orders_flat",
+        )
+        boundary = "demo_venue_flat"
+    elif mode == "paper":
+        record_archived_paper_epoch_reset(
+            root,
+            now_ms=now_ms,
+            reset_id=f"{reset_id}:paper-epoch-archived",
+            source="reset_workflow_archived_deterministic_paper_epoch",
+        )
+        boundary = "paper_epoch_archived"
+    else:
+        raise ValueError(f"unsupported reset mode: {mode}")
     rebuild_all_registered_projections(root)
     receipt = verify_journal(root)
     print(
         f"  canonical-ok root={root} events={receipt['events']} "
-        f"trades={receipt['trades']} path={journal_path(root)}"
+        f"trades={receipt['trades']} boundary={boundary} path={journal_path(root)}"
     )
 PY
+
+# The preview inventory was collected while producers were still running.
+# Refresh after quiescence and bootstrap so an inbox/capture/projection created
+# during that interval cannot survive into the fresh epoch merely because its
+# path did not exist during planning.
+refresh_existing_targets
 
 # Snapshot each now-existing journal in the archive while retaining it live.
 for root in "${SELECTED_ROOTS[@]}"; do
@@ -766,7 +1054,14 @@ git_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
   echo "include_reports=$INCLUDE_REPORTS"
   echo "include_caches=$INCLUDE_CACHES"
   echo "env_file=$ENV_FILE"
+  echo "account_env_file=$ACCOUNT_ENV_FILE"
+  echo "paper_account_env_file=$PAPER_ACCOUNT_ENV_FILE"
+  echo "demo_boundary=venue_verified_flat_positions_0_open_orders_0"
+  echo "paper_boundary=archived_deterministic_epoch_not_carried_forward"
   echo "active_before=${ACTIVE_BEFORE[*]}"
+  for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
+    echo "account_epoch_target=$target"
+  done
   for target in "${EXISTING_TARGETS[@]}"; do
     echo "target=$target"
   done
@@ -825,6 +1120,14 @@ for target in "${EXISTING_TARGETS[@]}"; do
 done
 
 echo
+echo "Creating fresh empty canonical account roots, inboxes, and captures ..."
+for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
+  mkdir -p -- "$target"
+  chmod 0700 "$target"
+  echo "  created $target"
+done
+
+echo
 echo "Rebuilding trade/order projections from canonical journals ..."
 "$PYTHON" - --rebuild-canonical-projections "${CANONICAL_SPECS[@]}" <<'PY'
 import sys
@@ -855,7 +1158,7 @@ PY
 # flat reset from corrupt/missing state without weakening its fail-closed default.
 if (( SELECT_CONTINUOUS )); then
   echo
-  echo "Writing post-reset flat boundary heartbeats ..."
+  echo "Writing post-reset demo-flat and paper-archive boundary heartbeats ..."
   "$PYTHON" - --write-reset-boundary "$STAMP" "$ARCHIVE_PATH" <<'PY'
 import datetime as dt
 import sys
@@ -885,22 +1188,35 @@ for root, dataset, mode in (
         "cycle_id": f"ledger-reset-{stamp}-{mode}",
         "ts_ms": now_ms,
         "mode": "ledger_reset_boundary",
-        "reason": "verified_flat_ledger_reset",
+        "environment": mode,
         "entries_executed": 0,
         "exits_executed": 0,
         "open_trades_before": 0,
         "open_trades_after": 0,
-        "account_flat_verified": True,
         "reset_archive": archive_path,
     }
+    if mode == "demo":
+        row.update(
+            reason="verified_flat_ledger_reset",
+            account_flat_verified=True,
+            paper_epoch_archived=False,
+            flatness_basis="bybit_demo_positions_and_open_orders",
+        )
+    else:
+        row.update(
+            reason="archived_paper_epoch_reset",
+            account_flat_verified=False,
+            paper_epoch_archived=True,
+            flatness_basis="fresh_empty_deterministic_epoch",
+        )
     write_dataset(pl.DataFrame([row]), root, dataset, append=True)
-print("  reset-boundary-heartbeats-ok demo=1 paper=1 flat=true")
+print("  reset-boundary-heartbeats-ok demo_venue_flat=1 paper_epoch_archived=1")
 PY
 fi
 
 restart_previously_active "normal completion"
 if (( SETTLE_SECONDS > 0 )); then
-  echo "Waiting ${SETTLE_SECONDS}s before service verification ..."
+  echo "Waiting ${SETTLE_SECONDS}s before final service verification ..."
   sleep "$SETTLE_SECONDS"
 fi
 for unit in "${RESTART_UNITS[@]}"; do
@@ -918,6 +1234,8 @@ echo "  archive: $ARCHIVE_PATH"
 echo "  archive sha256: $archive_sha"
 echo "  archive digest: $SHA_PATH"
 echo "  archived/reset targets: ${#EXISTING_TARGETS[@]}"
-echo "  canonical journals: preserved; trade/order projections rebuilt by replay"
+echo "  strategy journals: preserved; compatibility projections rebuilt by replay"
+echo "  account journals/inboxes/captures: archived; fresh empty epoch created"
+echo "  boundary truth: demo venue-flat verified; prior paper epoch archived, not venue-verified"
 echo "  service state: restored to the pre-reset active set and verified"
 echo "  preserved: configs, locks, signal files, account-equity high-water state, and unselected caches/reports"

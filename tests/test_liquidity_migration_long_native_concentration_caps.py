@@ -20,9 +20,16 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
+from polars.testing import assert_frame_equal
 
 from liquidity_migration._common import MS_PER_HOUR, date_ms
+from liquidity_migration.account_kernel import AccountRiskPolicy
 from liquidity_migration.config import CostConfig
+from liquidity_migration.execution_adapters import ExecutionTwinConfig, LatencyProfile
+from liquidity_migration.historical_account_replay import (
+    HistoricalAccountSession,
+    synthetic_historical_rules_for_symbols,
+)
 from liquidity_migration.long_native import (
     FUNDING_MODELED_FRACTION_THRESHOLD,
     LongNativeConfig,
@@ -122,6 +129,507 @@ def _bars_for(symbol: str, *, day_ts_ms: int, entry_price: float = 100.0,
         "low": closes * 0.995,
         "close": closes,
     }
+
+
+def _sniper_bars_for(
+    *,
+    signal_ts_ms: int,
+    retrace_hour: int,
+    signal_price: float = 100.0,
+    retrace_price: float = 97.0,
+    hours: int = 49,
+) -> dict:
+    """Hourly bars including the signal-close bar and one later retrace."""
+    bars = _bars_for(
+        "unused",
+        day_ts_ms=signal_ts_ms - MS_PER_HOUR,
+        entry_price=signal_price,
+        hours=hours,
+    )
+    retrace_idx = bars["by_end"][signal_ts_ms + retrace_hour * MS_PER_HOUR]
+    bars["close"][retrace_idx] = retrace_price
+    bars["low"][retrace_idx] = min(bars["low"][retrace_idx], retrace_price)
+    return bars
+
+
+def _online_long_config() -> LongNativeConfig:
+    return LongNativeConfig(
+        execution_strategy_id="long-online-test",
+        execution_leverage=10.0,
+        enable_capitulation_rebound=False,
+        enable_volume_resurrection=False,
+        enable_funding_squeeze=False,
+        enable_fomo_chase=True,
+        fc_min_day_return=0.05,
+        fc_eth_regime_required=False,
+        fc_btc_regime_required=False,
+        fc_min_close_location=0.0,
+        fc_top_volume_rank_max=10,
+        fc_max_atr_pct=1.0,
+        fc_use_sigma_threshold=False,
+        fc_use_sniper_entry=False,
+        fc_provisional_entry=False,
+        max_concurrent_positions=1,
+        cooldown_days=0,
+        gross_exposure=1.0,
+        require_full_pit_universe=False,
+        cost_multiplier=0.0,
+    )
+
+
+def _online_long_session(
+    root: Path,
+    *,
+    risk_limit: float,
+    stale_execution: bool = False,
+    symbols: tuple[str, ...] = ("WIFUSDT",),
+) -> HistoricalAccountSession:
+    return HistoricalAccountSession(
+        root,
+        account_id="long-online-test",
+        risk_policy=AccountRiskPolicy(
+            risk_limit,
+            risk_limit,
+            risk_limit,
+            risk_limit,
+            10.0,
+        ),
+        instrument_rules=synthetic_historical_rules_for_symbols(
+            list(symbols),
+            max_leverage=10.0,
+            observed_ts_ns=1,
+        ),
+        execution_config=ExecutionTwinConfig(
+            fee_bps=0.0,
+            latency=LatencyProfile(1 if stale_execution else 0, 0, 0),
+            max_decision_age_ns=0,
+        ),
+        id_seed="long-online-test",
+    )
+
+
+def test_standard_long_history_uses_online_account_feedback(tmp_path: Path) -> None:
+    day_ts = 1_700_000_000_000
+    decisions = []
+    session = _online_long_session(tmp_path / "account", risk_limit=1e12)
+    features = pl.DataFrame([
+        _features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)
+    ])
+    bars = {"WIFUSDT": _bars_for("WIFUSDT", day_ts_ms=day_ts)}
+    config = _online_long_config()
+
+    trades, stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+        kernel_decision_sink=decisions,
+        kernel_session=session,
+    )
+
+    assert trades.height == 1
+    assert stats["skipped_account_kernel"] == 0
+    assert len(decisions) == 2
+    assert len(session.outputs) == 2
+    assert session.kernel is not None
+    state = session.kernel.state()
+    assert state.component_targets == {}
+    assert state.positions["WIFUSDT"].signed_qty == pytest.approx(0.0)
+
+    legacy_trades, legacy_stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+    )
+    assert_frame_equal(trades, legacy_trades)
+    assert stats == legacy_stats
+
+
+def test_standard_long_batches_same_timestamp_entries_and_exits(tmp_path: Path) -> None:
+    day_ts = 1_700_000_000_000
+    symbols = ("WIFUSDT", "PEPEUSDT")
+    decisions = []
+    session = _online_long_session(
+        tmp_path / "account",
+        risk_limit=1e12,
+        symbols=symbols,
+    )
+    config = dataclasses.replace(
+        _online_long_config(),
+        max_concurrent_positions=2,
+    )
+
+    trades, stats, _ = _run_long_pipeline(
+        features=pl.DataFrame([
+            _features_row(symbol=symbol, ts_ms=day_ts, day_return=0.20)
+            for symbol in symbols
+        ]),
+        bars_by_symbol={
+            symbol: _bars_for(symbol, day_ts_ms=day_ts)
+            for symbol in symbols
+        },
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+        kernel_decision_sink=decisions,
+        kernel_session=session,
+    )
+
+    assert trades.height == 2
+    assert stats["skipped_account_kernel"] == 0
+    assert len(decisions) == 4
+    # One atomic entry target batch and one atomic data-end exit batch.
+    assert len(session.outputs) == 2
+    assert all(output.target_result.accepted for output in session.outputs)
+
+
+def test_online_long_advances_hourly_exits_before_later_entry_capacity(
+    tmp_path: Path,
+) -> None:
+    day_0 = 1_700_000_000_000
+    day_1 = day_0 + 24 * MS_PER_HOUR
+    features = pl.DataFrame([
+        _features_row(symbol="WIFUSDT", ts_ms=day_0, day_return=0.20),
+        _features_row(symbol="PEPEUSDT", ts_ms=day_1, day_return=0.20),
+    ])
+    bars = {
+        "WIFUSDT": _bars_for("WIFUSDT", day_ts_ms=day_0, hours=72),
+        "PEPEUSDT": _bars_for("PEPEUSDT", day_ts_ms=day_1, hours=48),
+    }
+    # WIF stops at day_1+1h. With a 3h entry delay, that exit is knowable
+    # before PEPE's day_1+3h order decision.
+    bars["WIFUSDT"]["low"][24] = 1.0
+    config = dataclasses.replace(
+        _online_long_config(),
+        entry_delay_hours=3,
+        max_concurrent_positions=1,
+    )
+
+    legacy_trades, legacy_stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+    )
+    session = _online_long_session(
+        tmp_path / "account",
+        risk_limit=1e12,
+        symbols=("WIFUSDT", "PEPEUSDT"),
+    )
+    online_trades, online_stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+        kernel_session=session,
+    )
+
+    assert legacy_trades["symbol"].to_list() == ["WIFUSDT"]
+    assert legacy_stats["skipped_capacity"] == 1
+    assert online_trades["symbol"].to_list() == ["WIFUSDT", "PEPEUSDT"]
+    assert online_stats["skipped_capacity"] == 0
+
+
+def test_standard_long_does_not_invent_trade_after_account_risk_rejection(
+    tmp_path: Path,
+) -> None:
+    day_ts = 1_700_000_000_000
+    decisions = []
+    session = _online_long_session(tmp_path / "account", risk_limit=100.0)
+
+    trades, stats, _ = _run_long_pipeline(
+        features=pl.DataFrame([
+            _features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)
+        ]),
+        bars_by_symbol={
+            "WIFUSDT": _bars_for("WIFUSDT", day_ts_ms=day_ts)
+        },
+        funding_lookup=None,
+        config=_online_long_config(),
+        costs=CostConfig(),
+        kernel_decision_sink=decisions,
+        kernel_session=session,
+    )
+
+    assert trades.is_empty()
+    assert stats["skipped_account_kernel"] == 1
+    assert len(decisions) == 1
+    assert session.kernel is not None
+    state = session.kernel.state()
+    assert state.component_targets == {}
+    assert state.positions == {}
+
+
+def test_standard_long_neutralizes_committed_target_after_execution_rejection(
+    tmp_path: Path,
+) -> None:
+    day_ts = 1_700_000_000_000
+    decisions = []
+    session = _online_long_session(
+        tmp_path / "account",
+        risk_limit=1e12,
+        stale_execution=True,
+    )
+
+    trades, stats, _ = _run_long_pipeline(
+        features=pl.DataFrame([
+            _features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)
+        ]),
+        bars_by_symbol={
+            "WIFUSDT": _bars_for("WIFUSDT", day_ts_ms=day_ts)
+        },
+        funding_lookup=None,
+        config=_online_long_config(),
+        costs=CostConfig(),
+        kernel_decision_sink=decisions,
+        kernel_session=session,
+    )
+
+    assert trades.is_empty()
+    assert stats["skipped_account_kernel"] == 1
+    assert len(decisions) == 2
+    assert decisions[-1].intent.intent.signed_notional_usdt == 0.0
+    assert session.kernel is not None
+    state = session.kernel.state()
+    assert state.component_targets == {}
+    assert state.positions == {}
+
+
+def test_sniper_long_submits_at_observed_retrace_boundary(tmp_path: Path) -> None:
+    day_ts = 1_700_000_000_000
+    decisions = []
+    config = dataclasses.replace(
+        _online_long_config(),
+        fc_use_sniper_entry=True,
+        fc_sniper_retrace_pct=0.02,
+        fc_sniper_deadline_hours=6,
+    )
+    bars = {
+        "WIFUSDT": _sniper_bars_for(
+            signal_ts_ms=day_ts,
+            retrace_hour=3,
+        )
+    }
+    session = _online_long_session(tmp_path / "account", risk_limit=1e12)
+
+    online_trades, stats, _ = _run_long_pipeline(
+        features=pl.DataFrame([
+            _features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)
+        ]),
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+        kernel_decision_sink=decisions,
+        kernel_session=session,
+    )
+    legacy_trades, _, _ = _run_long_pipeline(
+        features=pl.DataFrame([
+            _features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)
+        ]),
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+    )
+
+    assert stats["skipped_account_kernel"] == 0
+    assert decisions[0].wall_ts_ns == (day_ts + 3 * MS_PER_HOUR) * 1_000_000
+    assert decisions[0].reference_price == pytest.approx(97.0)
+    assert len(session.outputs) == 2
+    assert_frame_equal(online_trades, legacy_trades)
+
+
+def test_sniper_long_allocates_capacity_in_fill_time_order(tmp_path: Path) -> None:
+    day_ts = 1_700_000_000_000
+    symbols = ("WIFUSDT", "PEPEUSDT")
+    config = dataclasses.replace(
+        _online_long_config(),
+        fc_use_sniper_entry=True,
+        fc_sniper_retrace_pct=0.02,
+        fc_sniper_deadline_hours=8,
+        max_concurrent_positions=1,
+    )
+    features = pl.DataFrame([
+        _features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.30),
+        _features_row(symbol="PEPEUSDT", ts_ms=day_ts, day_return=0.20),
+    ])
+    bars = {
+        # WIF ranks first at the signal boundary but retraces later.
+        "WIFUSDT": _sniper_bars_for(signal_ts_ms=day_ts, retrace_hour=6),
+        "PEPEUSDT": _sniper_bars_for(signal_ts_ms=day_ts, retrace_hour=2),
+    }
+
+    legacy_trades, legacy_stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+    )
+    session = _online_long_session(
+        tmp_path / "account",
+        risk_limit=1e12,
+        symbols=symbols,
+    )
+    online_trades, online_stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+        kernel_session=session,
+    )
+
+    assert legacy_trades["symbol"].to_list() == ["WIFUSDT"]
+    assert legacy_stats["skipped_capacity"] == 1
+    assert online_trades["symbol"].to_list() == ["PEPEUSDT"]
+    assert online_stats["skipped_capacity"] == 1
+
+
+def test_provisional_long_batches_equal_timestamp_targets_online(
+    tmp_path: Path,
+) -> None:
+    day_ts = 1_700_000_000_000
+    prior_ts = day_ts - 24 * MS_PER_HOUR
+    trigger_ts = prior_ts + 6 * MS_PER_HOUR
+    symbols = ("WIFUSDT", "PEPEUSDT")
+    features = pl.DataFrame([
+        _features_row(symbol=symbol, ts_ms=ts, day_return=day_return)
+        for ts, day_return in ((prior_ts, 0.0), (day_ts, 0.20))
+        for symbol in symbols
+    ])
+    bars = {
+        symbol: _bars_for(symbol, day_ts_ms=prior_ts, hours=48)
+        for symbol in symbols
+    }
+    config = dataclasses.replace(
+        _online_long_config(),
+        fc_provisional_entry=True,
+        max_concurrent_positions=2,
+    )
+    decisions = []
+    session = _online_long_session(
+        tmp_path / "account",
+        risk_limit=1e12,
+        symbols=symbols,
+    )
+
+    trades, stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+        provisional_triggers={
+            day_ts: [(trigger_ts, symbol) for symbol in symbols]
+        },
+        kernel_decision_sink=decisions,
+        kernel_session=session,
+    )
+
+    assert trades.height == 2
+    assert stats["provisional_entries"] == 2
+    assert stats["provisional_confirmed"] == 2
+    assert len(decisions) == 4
+    assert {decision.wall_ts_ns for decision in decisions[:2]} == {
+        trigger_ts * 1_000_000
+    }
+    # One entry batch and one final-exit batch, each with both symbols.
+    assert len(session.outputs) == 2
+
+
+def test_provisional_long_rejection_does_not_create_local_trade(
+    tmp_path: Path,
+) -> None:
+    day_ts = 1_700_000_000_000
+    prior_ts = day_ts - 24 * MS_PER_HOUR
+    trigger_ts = prior_ts + 6 * MS_PER_HOUR
+    features = pl.DataFrame([
+        _features_row(symbol="WIFUSDT", ts_ms=ts, day_return=0.0)
+        for ts in (prior_ts, day_ts)
+    ])
+    session = _online_long_session(tmp_path / "account", risk_limit=100.0)
+
+    trades, stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol={
+            "WIFUSDT": _bars_for("WIFUSDT", day_ts_ms=prior_ts, hours=48)
+        },
+        funding_lookup=None,
+        config=dataclasses.replace(
+            _online_long_config(),
+            fc_provisional_entry=True,
+        ),
+        costs=CostConfig(),
+        provisional_triggers={day_ts: [(trigger_ts, "WIFUSDT")]},
+        kernel_session=session,
+    )
+
+    assert trades.is_empty()
+    assert stats["provisional_entries"] == 0
+    assert stats["skipped_account_kernel"] == 1
+    assert session.kernel is not None
+    assert session.kernel.state().positions == {}
+
+
+def test_provisional_long_releases_capacity_at_trigger_boundary(
+    tmp_path: Path,
+) -> None:
+    day_0 = 1_700_000_000_000
+    day_1 = day_0 + 24 * MS_PER_HOUR
+    trigger_ts = day_0 + 10 * MS_PER_HOUR
+    features = pl.DataFrame([
+        _features_row(symbol="WIFUSDT", ts_ms=day_0, day_return=0.20),
+        _features_row(symbol="PEPEUSDT", ts_ms=day_0, day_return=0.0),
+        _features_row(symbol="WIFUSDT", ts_ms=day_1, day_return=0.0),
+        _features_row(symbol="PEPEUSDT", ts_ms=day_1, day_return=0.0),
+    ])
+    bars = {
+        symbol: _bars_for(symbol, day_ts_ms=day_0, hours=48)
+        for symbol in ("WIFUSDT", "PEPEUSDT")
+    }
+    # WIF enters at +1h and stops at +5h, before PEPE's +10h trigger.
+    bars["WIFUSDT"]["low"][4] = 1.0
+    config = dataclasses.replace(
+        _online_long_config(),
+        fc_provisional_entry=True,
+        max_concurrent_positions=1,
+    )
+    provisional = {day_1: [(trigger_ts, "PEPEUSDT")]}
+
+    legacy_trades, legacy_stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+        provisional_triggers=provisional,
+    )
+    session = _online_long_session(
+        tmp_path / "account",
+        risk_limit=1e12,
+        symbols=("WIFUSDT", "PEPEUSDT"),
+    )
+    online_trades, online_stats, _ = _run_long_pipeline(
+        features=features,
+        bars_by_symbol=bars,
+        funding_lookup=None,
+        config=config,
+        costs=CostConfig(),
+        provisional_triggers=provisional,
+        kernel_session=session,
+    )
+
+    assert legacy_trades["symbol"].to_list() == ["WIFUSDT"]
+    assert legacy_stats["skipped_capacity"] == 1
+    assert online_trades["symbol"].to_list() == ["WIFUSDT", "PEPEUSDT"]
+    assert online_stats["skipped_capacity"] == 0
 
 
 def test_load_sector_map_returns_empty_when_path_none() -> None:
@@ -493,20 +1001,73 @@ def test_final_exit_scan_catches_stop_when_no_later_feature_rows() -> None:
         cooldown_days=0,
         require_full_pit_universe=False,
         cost_multiplier=0.0,
+        notional_multiplier=4.0,
+        execution_strategy_id="long-target-projection-test",
+        execution_leverage=10.0,
     )
     bars = _bars_for("WIFUSDT", day_ts_ms=day_ts, hours=12)
     bars["low"][2] = 94.0
+    kernel_decisions = []
     trades, stats, _events = _run_long_pipeline(
         features=pl.DataFrame([_features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)]),
         bars_by_symbol={"WIFUSDT": bars},
         funding_lookup=None,
         config=cfg,
         costs=CostConfig(),
+        kernel_decision_sink=kernel_decisions,
     )
     assert not trades.is_empty()
     assert trades["exit_reason"][0] == "stop_loss"
     assert int(trades["exit_ts_ms"][0]) == int(bars["bar_end_ts_ms"][2])
     assert stats["exits_stop"] == 1
+    assert len(kernel_decisions) == 2
+    assert kernel_decisions[0].intent.intent.signed_notional_usdt > 0.0
+    assert kernel_decisions[0].intent.intent.leverage == 10.0
+    assert kernel_decisions[1].intent.intent.signed_notional_usdt == 0.0
+    assert kernel_decisions[1].intent.intent.leverage == 10.0
+    assert kernel_decisions[1].intent.intent.reason == "stop_loss"
+
+    # Given the same selected candidate and sizing inputs, the live adapter and
+    # historical strategy path must now produce exactly the same component
+    # identity, decision identity, quantity intent, and leverage.
+    from liquidity_migration.long_native_event_demo import (
+        LongNativeDemoCycleConfig,
+        _long_entry_target_intents,
+    )
+
+    historical_entry = kernel_decisions[0].intent.intent
+    live_entry = _long_entry_target_intents(
+        [{
+            "trade_id": historical_entry.component_id,
+            "symbol": historical_entry.symbol,
+            "signal_ts_ms": historical_entry.metadata["signal_ts_ms"],
+            "entry_reason": historical_entry.reason,
+            "position_weight": historical_entry.metadata["position_weight"],
+            "stop_loss_pct": 0.05,
+            "take_profit_pct": 10.0,
+            "max_hold_days": 3,
+        }],
+        demo=LongNativeDemoCycleConfig(entry_leverage=10.0),
+        equity_usdt=1_000_000.0,
+        order_notional_pct_equity=(
+            cfg.gross_exposure / cfg.max_concurrent_positions * cfg.notional_multiplier
+        ),
+        price_by_symbol={historical_entry.symbol: kernel_decisions[0].reference_price},
+        now_ms=kernel_decisions[0].wall_ts_ns // 1_000_000,
+        strategy_id=cfg.execution_strategy_id,
+    )[0].intent
+    assert live_entry.decision_key == historical_entry.decision_key
+    assert live_entry.target_key == historical_entry.target_key
+    assert live_entry.signed_notional_usdt == historical_entry.signed_notional_usdt
+    assert live_entry.leverage == historical_entry.leverage
+    assert live_entry.metadata["stop_loss_pct"] == pytest.approx(0.05)
+    assert live_entry.metadata["take_profit_pct"] == pytest.approx(10.0)
+    assert live_entry.metadata["max_hold_duration_ms"] == 3 * 86_400_000
+    assert {
+        "stop_price",
+        "take_profit_price",
+        "planned_exit_ts_ms",
+    }.isdisjoint(live_entry.metadata)
 
 
 def test_windowed_force_close_uses_configured_end_date() -> None:
@@ -591,6 +1152,49 @@ def test_run_long_native_research_precomputed_inputs_are_equivalent(tmp_path) ->
     assert default["rows"] == precomp["rows"]
     assert default["splits"] == precomp["splits"]
     assert default["run_label"] == precomp["run_label"]
+    assert "canonical_journal" not in default
+    receipt = default["account_journal"]
+    assert receipt["strategy_targets"] == 0
+    assert receipt["canonical_common_kernel_parity"] is True
+    assert receipt["cross_environment_strategy_parity"] is False
+    assert receipt["historical_strategy_runtime_is_sequential"] is True
+    assert receipt["strategy_runtime_shared_across_environments"] is False
+    assert receipt["venue_rule_parity"] is False
+    assert receipt["account_kernel_feedback_online"] is True
+    assert receipt["entry_capacity_evaluated_at_actual_entry_boundary"] is True
+    assert receipt["evidence_label"] == (
+        "chronological_strategy_targets_through_live_common_account_kernel"
+    )
+
+
+def test_run_long_native_default_mode_reports_online_account_feedback(
+    tmp_path: Path,
+) -> None:
+    from liquidity_migration.ingestion import generate_fixture_data
+    from liquidity_migration.long_native import run_long_native_research
+    from liquidity_migration.long_native_event_demo import _v11a_long_native_config
+
+    generate_fixture_data(tmp_path)
+    config = dataclasses.replace(
+        _v11a_long_native_config(),
+        fc_use_sniper_entry=False,
+        fc_provisional_entry=False,
+        require_full_pit_universe=False,
+    )
+    result = run_long_native_research(
+        tmp_path,
+        config=config,
+        report_dir=tmp_path / "online-default",
+    )
+
+    assert "canonical_journal" not in result
+    receipt = result["account_journal"]
+    assert receipt["account_kernel_feedback_online"] is True
+    assert receipt["same_timestamp_strategy_batching"] is True
+    assert receipt["entry_capacity_evaluated_at_actual_entry_boundary"] is True
+    assert receipt["evidence_label"] == (
+        "chronological_strategy_targets_through_live_common_account_kernel"
+    )
 
 
 # ============================================================================

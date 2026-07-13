@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import SupportsFloat
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,15 +23,20 @@ class TelegramConfig:
     rate_limit_retry_cap_seconds: float = 5.0
 
 
-def format_usd(value: object, *, signed: bool = False) -> str:
+def _finite_float(value: object) -> float:
+    if value is None:
+        return 0.0
+    if not isinstance(value, (str, bytes, bytearray, SupportsFloat)):
+        return 0.0
     try:
-        amount = float(value or 0.0)
-    except (TypeError, ValueError):
-        amount = 0.0
-    # audit2: `value or 0.0` does NOT catch NaN (nan is truthy, so `nan or 0.0`
-    # stays nan) and a raw nan would render as "$nan"; coerce non-finite to 0.0.
-    if not math.isfinite(amount):
-        amount = 0.0
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
+def format_usd(value: object, *, signed: bool = False) -> str:
+    amount = _finite_float(value)
     if amount < 0:
         return f"-${abs(amount):,.2f}"
     sign = "+" if signed and amount > 0 else ""
@@ -38,14 +44,7 @@ def format_usd(value: object, *, signed: bool = False) -> str:
 
 
 def format_pct(value: object, *, signed: bool = False) -> str:
-    try:
-        pct = float(value or 0.0)
-    except (TypeError, ValueError):
-        pct = 0.0
-    # audit2: same NaN escape as format_usd — a non-finite pct would render
-    # "nan%"; coerce to 0.0 so finite inputs format byte-identically to before.
-    if not math.isfinite(pct):
-        pct = 0.0
+    pct = _finite_float(value)
     sign = "+" if signed and pct > 0 else ""
     return f"{sign}{pct:.2%}"
 
@@ -72,9 +71,8 @@ def telegram_configured(*, config: TelegramConfig | None = None) -> bool:
     """True when the token + chat-id env vars are both present (a send can be
     attempted). Lets callers distinguish "not configured" — a False return from
     ``send_telegram_message`` that no retry will ever fix — from a transport
-    failure worth retrying (audit 2026-06-12 round 3: ws_risk un-recorded its
-    dedupe key and rewrote the dedupe file at heartbeat cadence when the env was
-    simply absent)."""
+    failure worth retrying. Callers can therefore avoid advancing notification
+    dedupe state when delivery was never configured."""
     cfg = config or TelegramConfig()
     return bool(os.environ.get(cfg.token_env)) and bool(os.environ.get(cfg.chat_id_env))
 
@@ -88,13 +86,9 @@ def send_telegram_message(
     # Contract: returns True on a 2xx response, False when disabled or when the
     # token/chat_id env vars are absent. Transport errors (timeout, HTTPError,
     # URLError) PROPAGATE to the caller — this function does NOT swallow them.
-    # audit2: a prior version of this comment claimed "every call site wraps
-    # this in try/except"; that is FALSE — e.g. cli.py's combined-book report
-    # (_cmd ... `send_telegram_message(message, enabled=True)`) calls it bare,
-    # so a transport fault there crashes the command. Callers that must not crash
-    # MUST wrap this in try/except themselves; do not rely on the transport to be
-    # exception-free. (Changing it to swallow is blocked by the frozen
-    # propagation tests in tests/test_liquidity_migration_telegram.py.) The ONE
+    # Callers that must not crash MUST wrap this in try/except themselves; do not
+    # rely on the transport to be exception-free. The propagation contract is
+    # pinned by tests/test_liquidity_migration_telegram.py. The ONE
     # internal retry is the 429 rate-limit case below — bounded by
     # rate_limit_retry_cap_seconds, after which the 429 propagates like any
     # other HTTPError.

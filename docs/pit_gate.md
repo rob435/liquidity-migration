@@ -6,14 +6,9 @@ trade, and the thing that broke the backtest↔paper reconciliation on 2026-05-3
 
 TL;DR: the known signal-day off-by-one is fixed and the plumbing has coverage
 checks. The manifest still has explicit provenance limits described below.
-There is one command for the whole reconciliation — it refreshes
-PIT data, pulls the live ledgers, runs each sleeve's backtest over the forward
-window, and reconciles the model against demo + paper, all in a single run:
-
-```bash
-bash scripts/reconcile.sh              # full demo<->backtest<->paper, both sleeves
-bash scripts/reconcile.sh --quick      # fast paper<->demo execution check only
-```
+Validate PIT inside the exact research run whose claim depends on it. Runtime
+account acceptance is a separate evidence problem; there is no combined
+live-ledger/PIT command that proves both.
 
 ## What the gate is
 
@@ -116,123 +111,53 @@ per-trade membership gate that never ran. PIT membership is enforced at the
 universe level by the gate above; do not re-introduce a flag implying per-trade
 gating without an actual enforcement path.
 
-## The one-command workflow
+## Current workflow
 
-`scripts/reconcile.sh` is the single front door. By default it runs the full
-demo ↔ backtest ↔ paper three-way for BOTH sleeves (see the next section). The
-`--quick` flag routes to the fast two-way (paper ↔ demo execution only, driver
-`scripts/reconcile.py`, no PIT download / no backtest). It tests execution-plane
-agreement, not agreement with the backtest model:
+Treat PIT membership as a research-data validity gate, not as an execution
+reconciler.
 
-```bash
-bash scripts/reconcile.sh --quick              # both active sleeves
-bash scripts/reconcile.sh --quick --sleeves long
-```
+1. Inspect the active command's help and the selected root's manifest/kline
+   coverage.
+2. Rebuild the manifest for that exact root and an explicit end-exclusive
+   boundary when the manifest is missing or stale:
 
-The `--quick` path, in order:
+   ```bash
+   python -m liquidity_migration --data-root ROOT archive-manifest \
+     --start YYYY-MM-DD --end YYYY-MM-DD
+   ```
 
-1. **pull** — rsync every selected sleeve's demo + paper ledgers from the VPS
-   (long `long_native_{demo,paper}_*`; continuous
-   `continuous_fade_{demo,paper}_*` + the continuous rmom panel + WS kline
-   store), read-only. Skip with `--no-pull`.
-2. **optional RMOM maintenance** — quick mode does not rebuild research RMOM by
-   default. Request it explicitly with `--refresh-rmom`.
-3. **reconcile** — per sleeve: LONG `reconcile-long-paper-demo` (paper ↔ demo),
-   and, only when selected, CONTINUOUS `continuous-forward-readiness --paper-only`
-   + a signal-consistency replay.
-4. **summary** — one unified headline across selected sleeves.
+3. Close any named kline gap with the appropriate current archive-download
+   command, using its `--help` rather than copying a dated command line.
+4. Re-run the exact backtest or registered experiment. Preserve its config,
+   run label, warnings, root identity, and output artifact.
 
-`--quick` flags: `--sleeves long,continuous`, `--dry-run`, `--no-pull`,
-`--refresh-rmom`, `--bybit-root PATH`, `--config PATH`, `--vps HOST`. The matching
-skills are `.claude/skills/pit-reconcile` / `.codex/skills/pit-reconcile`.
+The former `scripts/reconcile.sh`, `scripts/reconcile.py`,
+`scripts/reconcile_three_way.py`, and sleeve-local reconciliation CLI commands
+were retired on 2026-07-13. They mixed PIT/model checks with demo and paper
+compatibility projections that are not authoritative under the target-only
+account-owner architecture. Their archived reports can describe the historical
+run that produced them; they are not a current operational gate.
 
-Refreshing the manifest on its own is the manual command above
-(`python -m liquidity_migration --data-root <root> archive-manifest`).
+For runtime evidence, `scripts/ops.sh account-parity` compares non-empty
+historical, paper, and demo account journals structurally. It does not inspect
+PIT coverage and cannot prove common market-tape provenance, common strategy
+scheduling, fresh venue rules, credentialed demo execution, or fill/P&L
+agreement. The open runtime gates are listed in
+`docs/account_execution_cutover.md`.
 
-## The three-way (demo ↔ backtest ↔ paper) workflow
+## When PIT membership fails
 
-This is the **default** of `scripts/reconcile.sh` (the whole reconciliation in
-one run), implemented by `scripts/reconcile_three_way.py` for BOTH active sleeves:
-
-```bash
-bash scripts/reconcile.sh                    # long + continuous, full pipeline (default)
-bash scripts/reconcile.sh --no-data-refresh  # skip the PIT download
-bash scripts/reconcile.sh --sleeves long     # one sleeve
-# (scripts/reconcile_three_way.sh is a back-compat alias for the same thing.)
-```
-
-It (0) refreshes PIT data on the research root over a **gap-only** tail window
-(archive-manifest `--allow-degraded` + 1h klines + filter; the manifest stage
-unions with the persisted manifest so a narrow rebuild augments, never wipes,
-coverage), (1) pulls the live ledgers, then per sleeve:
-
-The refresh **short-circuits** any dataset already current and runs each sub-stage
-under a wall-clock timeout, so a current root does ~no work and nothing can hang
-(the original tool stalled for hours re-checking already-present partitions over a
-blind wide window). **Funding is OFF by default** (`--with-funding` to enable): it
-changes only the backtest's PnL/cost, not which entries the model picks, so it is
-irrelevant to the entry agreement and a full-universe funding backfill is slow.
-
-- **LONG** (discrete-event): runs the v11a backtest over the forward window on
-  the fresh root and reconciles the **backtest entries vs demo and vs paper** by
-  `(symbol, side, signal-day)`, plus the demo↔paper execution leg. `model_only`
-  is expected when the live sleeve was off/just re-enabled; the tripwire is a
-  live entry with **no** matching backtest signal (`demo_not_in_model` /
-  `paper_not_in_model` > 0 → possible look-ahead in live, stale-PIT in the
-  backtest, or threshold drift). The backtest `run_label` is surfaced verbatim.
-- **CONTINUOUS** (rebalance book): demo↔paper execution leg + a **backtest-match**
-  that re-derives the deployed `continuous_ensemble_v2` ENTRY candidate set per
-  component (`scripts/reconcile_fills.py`, default-ON rmom recompute as step 1b
-  below). It reuses the engine's own `compute_continuous_decile_panel` +
-  `_entry_event_expr` to reproduce the per-bar predicate `decile==9 & turnover≥liq
-  & component-trigger` (the uncapped form of `select_continuous_entries`), then
-  asks: is every live entry a genuine engine candidate? A live entry that is **not**
-  a candidate is the tripwire — classified `hard` (D7 or below → look-ahead/drift)
-  vs soft (`near_decile ≥D8` boundary flip, or `no_panel_row` snapshot gap). Only
-  `hard` fails. The older decile-membership-only check remains as a complementary
-  signal-consistency leg and uses the same D8-soft/D7-hard boundary.
-
-### Fill-level cross-check + the two recompute planes (2026-06-18)
-
-`scripts/reconcile_fills.py` runs automatically inside the three-way and adds the
-**entry-price** corner: for the entries the books share it joins `entry_price`
-across backtest/model, demo, and paper and reports the pairwise delta in bps
-(per-entry CSV at `data/reconcile/{long,continuous}_three_way_fills.csv`). LONG
-uses the backtest `entry_price`; CONTINUOUS prices the model at the PIT kline close
-and notional-weights paper's per-component legs into one symbol fill to match
-demo's netted position.
-
-- **Step 1b — RMOM recompute (default ON for full continuous):**
-  `precompute_residual_momentum.py` refreshes research-root
-  `residual_momentum.parquet`. Skip with `--no-rmom`; `--with-rmom` is a
-  deprecated no-op. The current COMMON4 RMOM spine is kline-based and is not
-  truncated by funding/OI/premium coverage. `--with-funding` is for costed PnL,
-  not an RMOM repair switch.
-- **Research vs live plane:** the normal full path uses the independently
-  refreshed research root. When data/RMOM refresh is explicitly skipped it can
-  fall back to the live signal plane, which is current but not an independent
-  data recompute. Read the printed plane and coverage rather than assuming either.
-
-Why the asymmetry: LONG entries pair 1:1 to the backtest trade ledger by
-`(symbol, side, signal-day)`. CONTINUOUS is a path-dependent ensemble book — the
-live engine caps entries (MAX_ACTIVE / max-new-per-cycle / cooldown / held-state),
-so a backtest can't reproduce the exact entry SET; the recompute therefore yields
-the UNCAPPED per-component candidate set and the check is directional (every live
-entry must be a candidate; a candidate not taken live is expected capacity). The
-backtest leg is agreement/execution evidence. It does not itself support alpha
-or authorize deployment (`docs/governance.md`). Matching skill:
-`.codex/skills/pit-reconcile`.
-
-## When a reconcile shows `paper-only` / `pit_membership_fail`
-
-1. Refresh the manifest manually
-   (`python -m liquidity_migration --data-root <root> archive-manifest`), then
-   re-run `bash scripts/reconcile.sh`.
-2. If a single very-recent signal is still `paper-only`, the trading-day archive
-   has not published yet — wait for the next day (a current-universe diagnostic
-   backtest is possible but is biased and must be labelled as such).
-3. `paper↔demo` measures execution-plane agreement and slippage independently of
-   the model leg. A clean quick result does not establish model agreement.
+1. Read the emitted warning and coverage report; identify whether the missing
+   object is manifest membership, kline data, or both.
+2. Rebuild only with a boundary justified by the claim. The `--end` value is
+   exclusive.
+3. Confirm the manifest row's `source`. A V5-derived tail row is inferred
+   current-listing coverage, not an archive observation.
+4. Re-run the same research command. Do not switch to the current universe or
+   disable `require_full_pit_universe` after seeing the result and then present
+   it as the original historical-universe claim.
+5. If the full population is not needed for a narrower diagnostic, label that
+   diagnostic and its missing population explicitly under `docs/governance.md`.
 
 ## Design receipt
 

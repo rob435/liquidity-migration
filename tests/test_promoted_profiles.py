@@ -20,7 +20,7 @@ def test_promoted_trading_logic_doc_exists_and_names_lifecycles() -> None:
     assert "Long-Native v11a Sleeve" in text
     assert "STRATEGY_PROFILE=continuous_ensemble_v2" in text
     assert "BTC_TREND_GATE=uptrend" in text
-    assert "STOP_LOSS_PCT=0" in text
+    assert "The strategy has no component stop" in text
     assert "SIZING_MODE=inverse_vol" in text
     assert "TARGET_VOL_PER_NAME=0.01" in text
     assert "VOL_WEIGHT_CLAMP=2" in text
@@ -54,8 +54,14 @@ def test_promoted_trading_logic_doc_matches_resolved_profile_values() -> None:
     assert f"- `VOL_WEIGHT_CLAMP={int(cont.vol_weight_clamp)}`." in text
     assert f"`[{cont.entry_btc_risk_low:.2f}, {cont.entry_btc_risk_high:.2f})`" in text
     assert f"`btc_risk_stack_mult={cont.entry_btc_risk_tail_mult}`" in text
-    assert f"- `max_hold` force cover after {cont.max_hold_hours} hours." in text
-    assert f"- `STOP_LOSS_PCT={int(cont.stop_loss_pct)}`; no venue/server disaster stop." in text
+    assert (
+        "- The sleeve publishes a zero component target at `max_hold` after "
+        f"{cont.max_hold_hours} hours;"
+        in text
+    )
+    assert "- The strategy has no component stop." in text
+    assert "explicit exchange-native disaster" in text
+    assert "account safety control" in text
     for name, trigger, age_days, take_profit_pct, weight in cont.ensemble_components:
         pct = int(round(take_profit_pct * 100))
         assert f"| `{name}` | `{trigger}` | {age_days}d | {pct}% | {weight} |" in text

@@ -78,7 +78,9 @@ def diagnose(
                 TAINTED,
                 "PIT membership manifest is empty — the universe cannot be reconstructed "
                 "point-in-time, so results are survivorship-biased and not citable as clean.",
-                "Backfill the manifest, then re-run: bash scripts/reconcile.sh",
+                "Rebuild the manifest for the affected root, then re-run the exact "
+                "research command: `python -m liquidity_migration --data-root ROOT "
+                "archive-manifest`",
             )
         )
     elif not full_pit_universe_pass:
@@ -89,8 +91,9 @@ def diagnose(
                 "Full-PIT universe gate FAILED — the run fell back to the CURRENT universe, "
                 "so delisted/renamed/prelisted names are missing (survivorship bias). "
                 "Not citable as clean evidence.",
-                "Close the kline/manifest coverage gap: bash scripts/reconcile.sh, then "
-                "`python -m liquidity_migration archive-download-klines-1h` for the gap dates.",
+                "Rebuild membership with `python -m liquidity_migration --data-root ROOT "
+                "archive-manifest`, close the named kline gap for that root, and inspect "
+                "each command's current `--help` before choosing dates.",
             )
         )
 

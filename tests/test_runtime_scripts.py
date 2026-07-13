@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 import textwrap
@@ -16,6 +17,308 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SH = REPO_ROOT / "scripts" / "deploy_vps_live.sh"
 VERIFY_SH = REPO_ROOT / "scripts" / "verify_vps_live.sh"
 RECOVERY_SH = REPO_ROOT / "scripts" / "vps_console_recover_and_deploy.sh"
+
+_ACCOUNT_ROOT_LABELS = (
+    "demo account root",
+    "demo intent inbox root",
+    "demo capture root",
+    "paper account root",
+    "paper intent inbox root",
+    "paper capture root",
+)
+
+
+def _run_account_root_validator(
+    script: Path,
+    roots: tuple[str, ...],
+) -> subprocess.CompletedProcess[str]:
+    assert len(roots) == len(_ACCOUNT_ROOT_LABELS)
+    text = script.read_text(encoding="utf-8")
+    start = text.index("validate_account_execution_roots() {")
+    end = text.index("\n}\n", start) + len("\n}\n")
+    function = text[start:end]
+    args = ["test account routes"]
+    for label, root in zip(_ACCOUNT_ROOT_LABELS, roots, strict=True):
+        args.extend((label, root))
+    command = "\n".join(
+        (
+            function,
+            f"PYTHON={shlex.quote(sys.executable)}",
+            "validate_account_execution_roots "
+            + " ".join(shlex.quote(value) for value in args),
+        )
+    )
+    return subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+@pytest.mark.parametrize(
+    ("script", "first_startup_action"),
+    [
+        (
+            DEPLOY_SH,
+            "systemctl enable liquidity-migration-liquidation-collector.service",
+        ),
+        (
+            RECOVERY_SH,
+            "systemctl enable liquidity-migration-account-execution.service",
+        ),
+        (
+            VERIFY_SH,
+            "systemctl is-enabled --quiet liquidity-migration-account-execution.service",
+        ),
+    ],
+)
+def test_account_root_isolation_runs_before_authorized_unit_startup(
+    script: Path,
+    first_startup_action: str,
+) -> None:
+    text = script.read_text(encoding="utf-8")
+    call = text.index("if ! validate_account_execution_roots")
+    call_end = text.index("; then", call)
+    call_block = text[call:call_end]
+
+    for variable in (
+        "DEMO_ACCOUNT_EXECUTION_ROOT",
+        "DEMO_ACCOUNT_INTENT_INBOX_ROOT",
+        "DEMO_ACCOUNT_CAPTURE_ROOT",
+        "PAPER_ACCOUNT_EXECUTION_ROOT",
+        "PAPER_ACCOUNT_INTENT_INBOX_ROOT",
+        "PAPER_ACCOUNT_CAPTURE_ROOT",
+    ):
+        assert f'"${variable}"' in call_block
+    assert call < text.index(first_startup_action)
+
+
+@pytest.mark.parametrize("script", [DEPLOY_SH, RECOVERY_SH])
+def test_install_preflight_exits_before_secrets_readiness_and_startup(script: Path) -> None:
+    text = script.read_text(encoding="utf-8")
+    branch_start = text.index('if [ "$INSTALL_PREFLIGHT_ONLY" = "1" ]; then')
+    branch_end = text.index("\nfi", branch_start) + len("\nfi")
+    branch = text[branch_start:branch_end]
+
+    assert "lm_install_current_systemd_units" in branch
+    assert "install-preflight-ok" in branch
+    assert "exit 0" in branch
+    assert branch_start < text.index(
+        "if [ ! -f /etc/liquidity-migration/bybit-demo.env",
+        branch_end,
+    )
+    assert branch_start < text.index("account-execution-ready", branch_end)
+    for forbidden in (
+        "systemctl enable",
+        "systemctl start",
+        "systemctl restart",
+        "touch ",
+        "/etc/liquidity-migration/bybit-demo.env",
+        "/etc/liquidity-migration/account-execution-ready",
+    ):
+        assert forbidden not in branch
+
+
+@pytest.mark.parametrize("script", [DEPLOY_SH, RECOVERY_SH])
+def test_install_preflight_requires_fleet_quiescence_before_checkout(script: Path) -> None:
+    text = script.read_text(encoding="utf-8")
+    call = text.index("require_install_preflight_quiescence\n")
+    checkout = (
+        text.index('cd "$REPO_DIR"')
+        if script == DEPLOY_SH
+        else text.index('if [ -e "$REPO_DIR" ]')
+    )
+
+    assert call < checkout
+    function = text[text.index("require_install_preflight_quiescence()") : call]
+    assert "systemctl list-units 'liquidity-migration-*' --all" in function
+    assert '$3 != "inactive" && $3 != "failed"' in function
+    assert "failed to inspect liquidity-migration unit state" in function
+    assert "quiesce every liquidity-migration unit before checkout" in function
+
+
+@pytest.mark.parametrize("script", [DEPLOY_SH, RECOVERY_SH])
+def test_full_deploy_requires_capture_and_verified_authorization_before_checkout(
+    script: Path,
+) -> None:
+    text = script.read_text(encoding="utf-8")
+    checkout = (
+        text.index('cd "$REPO_DIR"')
+        if script == DEPLOY_SH
+        else text.index('if [ -e "$REPO_DIR" ]')
+    )
+    if script == DEPLOY_SH:
+        authority_check = text.index("require_full_deploy_authority\n")
+        function = text[text.index("require_full_deploy_authority()") : authority_check]
+    else:
+        authority_check = text.index('if [ "$INSTALL_PREFLIGHT_ONLY" = "0" ]; then')
+        function = text[authority_check:checkout]
+
+    assert authority_check < checkout
+    assert "account-execution-capture-enabled" in function
+    assert "account-execution-deploy-ready" in function
+    assert "account-execution-ready" in function
+    assert "account_execution_cutover_authority.py" in function
+    assert "--expected-commit" in function
+    assert "--repo-root" in function
+    assert "staged cutover authority verifier is unavailable" in function
+    assert "[ ! -e /etc/liquidity-migration/account-execution-deploy-ready ]" not in function
+
+
+def test_live_verifier_validates_deploy_authorization_receipt() -> None:
+    text = VERIFY_SH.read_text(encoding="utf-8")
+
+    assert "scripts/account_execution_cutover_authority.py verify" in text
+    assert "--expected-commit \"$actual_commit\"" in text
+    assert "--repo-root \"$REPO_DIR\"" in text
+    assert "[ ! -e /etc/liquidity-migration/account-execution-deploy-ready ]" not in text
+
+
+def test_install_current_systemd_units_purges_only_unknown_units_without_starting(
+    tmp_path: Path,
+) -> None:
+    unit_dir = tmp_path / "etc-systemd"
+    runtime_dir = tmp_path / "run-systemd"
+    fake_bin = tmp_path / "bin"
+    log = tmp_path / "systemctl.log"
+    unit_dir.mkdir()
+    runtime_dir.mkdir()
+    fake_bin.mkdir()
+
+    retired = "liquidity-migration-bybit-risk.service"
+    (unit_dir / retired).write_text("retired\n", encoding="utf-8")
+    retired_dropin = runtime_dir / f"{retired}.d"
+    retired_dropin.mkdir()
+    (retired_dropin / "legacy.conf").write_text("legacy\n", encoding="utf-8")
+    orphaned = "liquidity-migration-combined-book-report.service"
+    orphaned_dropin = unit_dir / f"{orphaned}.d"
+    orphaned_dropin.mkdir()
+    (orphaned_dropin / "legacy.conf").write_text("legacy\n", encoding="utf-8")
+    broken = "liquidity-migration-continuous-forward-report.timer"
+    wants = unit_dir / "timers.target.wants"
+    wants.mkdir()
+    broken_link = wants / broken
+    broken_link.symlink_to(unit_dir / broken)
+
+    current = "liquidity-migration-bybit-continuous-demo.service"
+    current_dropin = unit_dir / f"{current}.d"
+    current_dropin.mkdir()
+    (current_dropin / "telegram-quiet.conf").write_text("mute\n", encoding="utf-8")
+    operator_dropin = current_dropin / "operator.conf"
+    operator_dropin.write_text("keep\n", encoding="utf-8")
+
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+            case "${1:-}" in
+              list-unit-files|list-units) ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    command = textwrap.dedent(
+        f"""\
+        set -euo pipefail
+        export PATH={shlex.quote(str(fake_bin))}:$PATH
+        export SYSTEMCTL_LOG={shlex.quote(str(log))}
+        export LM_SYSTEMD_UNIT_DIR={shlex.quote(str(unit_dir))}
+        export LM_RUNTIME_SYSTEMD_UNIT_DIR={shlex.quote(str(runtime_dir))}
+        . {shlex.quote(str(REPO_ROOT / 'deploy' / 'lib_sleeves.sh'))}
+        lm_install_current_systemd_units
+        """
+    )
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for source in (REPO_ROOT / "deploy" / "systemd").glob(
+        "liquidity-migration-*.*"
+    ):
+        if source.suffix not in {".service", ".timer"}:
+            continue
+        assert (unit_dir / source.name).read_bytes() == source.read_bytes()
+    assert not (unit_dir / retired).exists()
+    assert not retired_dropin.exists()
+    assert not orphaned_dropin.exists()
+    assert not broken_link.is_symlink()
+    assert not (current_dropin / "telegram-quiet.conf").exists()
+    assert operator_dropin.read_text(encoding="utf-8") == "keep\n"
+
+    commands = log.read_text(encoding="utf-8").splitlines()
+    assert f"disable --now {retired}" in commands
+    assert f"disable --now {orphaned}" in commands
+    assert f"disable --now {broken}" in commands
+    assert commands.count("daemon-reload") == 2
+    assert not any(
+        re.match(r"^(enable|start|restart|try-restart)(?:\s|$)", command)
+        for command in commands
+    )
+
+
+@pytest.mark.parametrize("script", [DEPLOY_SH, VERIFY_SH, RECOVERY_SH])
+def test_account_root_validator_accepts_six_absolute_disjoint_roots(script: Path) -> None:
+    roots = tuple(f"/srv/liquidity-migration/{index}" for index in range(6))
+
+    result = _run_account_root_validator(script, roots)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("script", [DEPLOY_SH, VERIFY_SH, RECOVERY_SH])
+@pytest.mark.parametrize("overlap", ["equal", "nested", "canonical-alias"])
+def test_account_root_validator_rejects_overlapping_demo_and_paper_roots(
+    script: Path,
+    overlap: str,
+) -> None:
+    roots = [f"/srv/liquidity-migration/{index}" for index in range(6)]
+    if overlap == "equal":
+        roots[3] = roots[0]
+    elif overlap == "nested":
+        roots[3] = f"{roots[0]}/paper"
+    else:
+        roots[3] = "/srv/liquidity-migration/alias/../0"
+
+    result = _run_account_root_validator(script, tuple(roots))
+
+    assert result.returncode != 0
+    assert "account execution roots must be pairwise disjoint" in result.stderr
+    assert "demo account root" in result.stderr
+    assert "paper account root" in result.stderr
+
+
+@pytest.mark.parametrize("script", [DEPLOY_SH, VERIFY_SH, RECOVERY_SH])
+@pytest.mark.parametrize(
+    ("bad_index", "bad_value", "message"),
+    [
+        (1, "data/demo-intents", "must be absolute"),
+        (5, "", "paper capture root is required"),
+    ],
+)
+def test_account_root_validator_rejects_relative_or_incomplete_routes(
+    script: Path,
+    bad_index: int,
+    bad_value: str,
+    message: str,
+) -> None:
+    roots = [f"/srv/liquidity-migration/{index}" for index in range(6)]
+    roots[bad_index] = bad_value
+
+    result = _run_account_root_validator(script, tuple(roots))
+
+    assert result.returncode != 0
+    assert message in result.stderr
 
 
 def test_continuous_hedge_timer_reconciles_within_five_minutes() -> None:
@@ -48,7 +351,8 @@ def test_deploy_verify_require_unit_env_matches_unit_files() -> None:
         "liquidity-migration-bybit-long-paper.service",
         "liquidity-migration-bybit-continuous-demo.service",
         "liquidity-migration-bybit-continuous-paper.service",
-        "liquidity-migration-bybit-risk.service",
+        "liquidity-migration-account-execution.service",
+        "liquidity-migration-account-paper-execution.service",
     }
     unit_env = {unit: _unit_env(unit) for unit in units}
     pattern = re.compile(r"require_unit_env\s+([^\s]+)\s+'([^'=]+)=([^']*)'")
@@ -222,159 +526,29 @@ def test_verify_vps_accepts_unique_abbreviated_commit(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_reconcile_shell_exports_utf8_python_io() -> None:
-    text = (REPO_ROOT / "scripts" / "reconcile.sh").read_text(encoding="utf-8")
 
-    assert 'PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"' in text
-    quick = (REPO_ROOT / "scripts" / "reconcile.py").read_text(encoding="utf-8")
-    assert 'p.add_argument("--sleeves", default="long,continuous"' in quick
-
-
-def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
+def test_legacy_execution_authorities_are_removed() -> None:
     repo = Path(__file__).resolve().parents[1]
-    scripts = [
+    retired = (
         repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh",
-    ]
-
-    for script in scripts:
-        text = script.read_text(encoding="utf-8")
-        assert "rm -f \"$DATA_ROOT/.locks/" not in text
-        assert "mkdir -p \"$DATA_ROOT/.locks\"" in text
-
-
-def test_ws_risk_runner_requires_every_shared_account_root() -> None:
-    repo = Path(__file__).resolve().parents[1]
-    text = (repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh").read_text(encoding="utf-8")
-
-    assert "-z \"$LONG_DATA_ROOT\"" in text
-    assert "-z \"$CONTINUOUS_DATA_ROOT\"" in text
-    assert "-z \"$CONTINUOUS_ADDON_DATA_ROOT\"" in text
-    assert "Set all three roots" in text
-
-
-def test_continuous_rebalance_cycle_audit_parser_defaults() -> None:
-    from liquidity_migration.cli import build_parser
-
-    parser = build_parser()
-    args = parser.parse_args(["continuous-rebalance-cycle-audit"])
-
-    assert args.command == "continuous-rebalance-cycle-audit"
-    # The audit's own root lives on a unique dest so it no longer shadows the
-    # global --data-root (argparse subparser-default collision); the global stays
-    # at its own default (None) unless the operator passes it.
-    assert args.audit_data_root == "data/bybit-continuous-paper-event"
-    assert args.data_root is None
-    assert args.cycles_dataset == "continuous_fade_paper_cycles"
-    assert args.orders_dataset == "continuous_fade_paper_orders"
-    assert args.start_ts_ms is None
-    assert args.strategy_profile is None
-    assert args.strategy_id is None
-
-    # A global --data-root before the subcommand is preserved (was silently
-    # clobbered by the subparser default before the dest rename).
-    args2 = parser.parse_args(["--data-root", "data/custom", "continuous-rebalance-cycle-audit"])
-    assert args2.data_root == "data/custom"
-    assert args2.audit_data_root == "data/bybit-continuous-paper-event"
-
-    args3 = parser.parse_args(
-        [
-            "continuous-rebalance-cycle-audit",
-            "--start-ts-ms",
-            "1781812440000",
-            "--strategy-profile",
-            "continuous_ensemble_v2",
-            "--strategy-id",
-            "continuous_fade_v2_paper",
-        ]
+        repo / "deploy" / "systemd" / "liquidity-migration-bybit-risk.service",
+        repo / "deploy" / "systemd" / "liquidity-migration-combined-book-report.service",
+        repo / "deploy" / "systemd" / "liquidity-migration-combined-book-report.timer",
     )
-    assert args3.start_ts_ms == 1_781_812_440_000
-    assert args3.strategy_profile == "continuous_ensemble_v2"
-    assert args3.strategy_id == "continuous_fade_v2_paper"
+
+    assert all(not path.exists() for path in retired)
 
 
-def test_continuous_forward_readiness_parser_defaults() -> None:
-    from liquidity_migration.cli import build_parser
 
-    parser = build_parser()
-    args = parser.parse_args(["continuous-forward-readiness"])
-
-    assert args.command == "continuous-forward-readiness"
-    assert args.paper_data_root == "data/bybit-continuous-paper-event"
-    assert args.demo_data_root == "data/bybit-continuous-demo-event"
-    assert args.entry_tolerance_ms == 600_000
-    assert args.min_pairs_warning == 20
-    assert args.allow_unmatched is False
-    assert args.paper_only is False
-    assert args.start_ts_ms is None
-    assert args.strategy_profile is None
-    assert args.paper_strategy_id is None
-    assert args.demo_strategy_id is None
-
-    args2 = parser.parse_args(
-        [
-            "continuous-forward-readiness",
-            "--start-ts-ms",
-            "1781812440000",
-            "--strategy-profile",
-            "continuous_ensemble_v2",
-            "--paper-strategy-id",
-            "continuous_fade_v2_paper",
-            "--demo-strategy-id",
-            "continuous_fade_v2",
-        ]
-    )
-    assert args2.start_ts_ms == 1_781_812_440_000
-    assert args2.strategy_profile == "continuous_ensemble_v2"
-    assert args2.paper_strategy_id == "continuous_fade_v2_paper"
-    assert args2.demo_strategy_id == "continuous_fade_v2"
-
-
-def test_continuous_forward_readiness_cli_prints_na_for_skipped_demo(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    from liquidity_migration import cli
-
-    args = cli.build_parser().parse_args(["continuous-forward-readiness", "--paper-only"])
-    payload = {
-        "ok": True,
-        "summary": {
-            "paper_only_mode": True,
-            "paper_rebalance_ok": True,
-            "demo_rebalance_ok": None,
-            "paper_operational_ok": True,
-            "demo_operational_ok": None,
-            "paired": None,
-            "paper_only": None,
-            "demo_only": None,
-            "sample_warning": None,
-            "start_ts_ms": None,
-            "strategy_profile": "",
-            "paper_strategy_id": "",
-            "demo_strategy_id": "",
-        },
-        "report_path": str(tmp_path / "report.md"),
-    }
-    monkeypatch.setattr(cli, "run_continuous_forward_readiness", lambda *args, **kwargs: payload)
-
-    assert cli._cmd_continuous_forward_readiness(args, None, tmp_path) == 0  # type: ignore[arg-type]
-    output = capsys.readouterr().out
-    assert "demo_rebalance_ok=n/a" in output
-    assert "demo_operational_ok=n/a" in output
-    assert "paired=n/a" in output
-    assert "paper_only=n/a" in output
-    assert "demo_only=n/a" in output
-    assert "sample_warning=n/a" in output
-
-
-def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
+def test_continuous_event_demo_cycle_parser_target_profile_flags() -> None:
     from liquidity_migration.cli import build_parser
 
     parser = build_parser()
     args = parser.parse_args(
         [
             "continuous-event-demo-cycle",
+            "--execution-environment",
+            "demo",
             "--strategy-profile",
             "continuous_ensemble_v2",
             "--feature-set",
@@ -383,7 +557,6 @@ def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
             "none",
             "--btc-trend-gate",
             "uptrend",
-            "--daily-rebalance-enabled",
         ]
     )
 
@@ -392,10 +565,9 @@ def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
     assert args.feature_set == "max_ret168"
     assert args.entry_event_trigger == "none"
     assert args.btc_trend_gate == "uptrend"
-    assert args.daily_rebalance_enabled is True
 
 
-def test_continuous_runner_wires_rebalance_profile_env() -> None:
+def test_continuous_runner_wires_target_profile_env() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh").read_text(encoding="utf-8")
 
@@ -409,58 +581,34 @@ def test_continuous_runner_wires_rebalance_profile_env() -> None:
     assert "--strategy-profile \"$STRATEGY_PROFILE\"" in text
     assert "--feature-set \"$FEATURE_SET\"" in text
     assert "--max-hold-hours \"$MAX_HOLD_HOURS\"" in text
-    assert 'LEFT_DECILE_EXIT_ENABLED="${LEFT_DECILE_EXIT_ENABLED:-0}"' in text
-    assert 'STOP_APPROACH_FRAC="${STOP_APPROACH_FRAC:-0}"' in text
-    assert "--stop-approach-frac \"$STOP_APPROACH_FRAC\"" in text
-    assert "--failed-fade-hours \"$FAILED_FADE_HOURS\"" in text
-    assert "--breakeven-arm-pct \"$BREAKEVEN_ARM_PCT\"" in text
     assert 'NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"' in text
     assert "--notional-multiplier \"$NOTIONAL_MULTIPLIER\"" in text
     assert 'SIZING_MODE="${SIZING_MODE:-inverse_vol}"' in text
     assert 'TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"' in text
     assert 'VOL_WEIGHT_CLAMP="${VOL_WEIGHT_CLAMP:-2}"' in text
-    assert 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC="${ENTRY_PORTFOLIO_HEAT_CAP_FRAC:-0}"' in text
-    assert 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC="${ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC:-1}"' in text
-    assert (
-        'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC="${ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC:-0}"'
-        in text
-    )
     assert "--sizing-mode \"$SIZING_MODE\"" in text
     assert "--target-vol-per-name \"$TARGET_VOL_PER_NAME\"" in text
     assert "--vol-weight-clamp \"$VOL_WEIGHT_CLAMP\"" in text
-    assert "--entry-portfolio-heat-cap-frac \"$ENTRY_PORTFOLIO_HEAT_CAP_FRAC\"" in text
-    assert "--entry-portfolio-heat-shock-frac \"$ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC\"" in text
-    assert (
-        "--entry-account-drawdown-kill-switch-frac \"$ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC\""
-        in text
-    )
-    assert 'DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-0}"' in text
-    assert 'DAILY_REBALANCE_TARGET_DAILY_VOL="${DAILY_REBALANCE_TARGET_DAILY_VOL:-0.045}"' in text
-    assert 'DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS="${DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS:-0}"' in text
-    assert "--daily-rebalance-enabled" in text
-    assert "--daily-rebalance-strategy-momentum-min-return" in text
-    # sniper arm switch present (default off; CONTINUOUS_SNIPER=1 arms it)
-    assert "CONTINUOUS_SNIPER" in text
+    for retired in (
+        "LEFT_DECILE_EXIT_ENABLED",
+        "STOP_APPROACH_FRAC",
+        "FAILED_FADE_HOURS",
+        "BREAKEVEN_ARM_PCT",
+        "FALLBACK_EQUITY_USDT",
+        "ENTRY_PORTFOLIO_HEAT_CAP_FRAC",
+        "ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC",
+        "DAILY_REBALANCE_ENABLED",
+        "--telegram",
+        "--record-dry-run",
+    ):
+        assert retired not in text
+    # Rejected adverse-limit mode has no launcher reactivation surface.
+    assert "CONTINUOUS_SNIPER" not in text
+    assert "--sniper-enabled" not in text
 
 
-def test_reconcile_continuous_uses_forward_readiness_gate() -> None:
-    repo = Path(__file__).resolve().parents[1]
-    text = (repo / "scripts" / "reconcile.py").read_text(encoding="utf-8")
 
-    assert '"continuous-forward-readiness"' in text
-    assert '"--paper-only"' in text
-    assert "CONTINUOUS_V2_START_MS" in text
-    assert '"--strategy-profile", strategy_profile' in text
-    assert '"--paper-strategy-id", paper_strategy_id' in text
-    assert '"reconcile-continuous-paper-demo"' in text
-    assert '"--demo-strategy-id", demo_strategy_id' in text
-    assert '"--min-pairs-warning", "0"' in text
-    assert '"--root", paper' in text
-    assert '"--market-root", demo' in text
-    assert '"--trades-dataset", "continuous_fade_paper_trades"' in text
-
-
-def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controlled() -> None:
+def test_continuous_units_target_profile_but_stay_kill_switch_controlled() -> None:
     repo = Path(__file__).resolve().parents[1]
     # 2026-06-10: both units run the validated continuous_ensemble_v2 ensemble
     # (the profile owns triggers/age/TP per component; unit-level trigger is none).
@@ -473,44 +621,45 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
         assert "Environment=FEATURE_SET=max_ret168" in text
         assert "Environment=ENTRY_EVENT_TRIGGER=none" in text
         assert "Environment=BTC_TREND_GATE=uptrend" in text
-        assert "Environment=LEFT_DECILE_EXIT_ENABLED=0" in text
-        assert "Environment=STOP_APPROACH_FRAC=0" in text
-        assert "Environment=FAILED_FADE_HOURS=0" in text
-        assert "Environment=BREAKEVEN_ARM_PCT=0" in text
-        assert "Environment=DAILY_REBALANCE_ENABLED=0" in text
-        assert "Environment=DAILY_REBALANCE_TARGET_DAILY_VOL=0.045" in text
-        assert "Environment=DAILY_REBALANCE_MAX_SCALE=4" in text
-        assert "Environment=DAILY_REBALANCE_STRATEGY_MOMENTUM_WINDOW_DAYS=0" in text
         assert "Environment=SIZING_MODE=inverse_vol" in text
         assert "Environment=TARGET_VOL_PER_NAME=0.01" in text
         assert "Environment=VOL_WEIGHT_CLAMP=2" in text
-        assert "Environment=ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0" in text
-        assert "Environment=ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1" in text
-        assert "Environment=ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0" in text
         assert "Environment=ENTRY_LEVERAGE=10" in text
         assert "Environment=NOTIONAL_MULTIPLIER=10" in text
         assert "Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2" in text
-        assert "CTRL_BTC_RISK_70_90_35" in text
+        for retired in (
+            "LEFT_DECILE_EXIT_ENABLED",
+            "STOP_APPROACH_FRAC",
+            "FAILED_FADE_HOURS",
+            "BREAKEVEN_ARM_PCT",
+            "DAILY_REBALANCE_ENABLED",
+            "ENTRY_PORTFOLIO_HEAT_CAP_FRAC",
+            "ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC",
+            "TELEGRAM_ENABLED",
+        ):
+            assert retired not in text
     demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service").read_text(encoding="utf-8")
     paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service").read_text(encoding="utf-8")
-    # 2026-07-10 risk rollback: demo-only adverse adds are explicitly off on
-    # both units until new two-venue + forward evidence earns reactivation.
-    assert "Environment=CONTINUOUS_SNIPER=0" in demo_text
-    assert "Environment=CONTINUOUS_SNIPER=0" in paper_text
-    # 2f hedge submit armed (demo-only; runner enforces demo credentials + confirm flag)
+    # The rejected demo-only adverse add is absent rather than flag-disabled.
+    assert "CONTINUOUS_SNIPER" not in demo_text
+    assert "CONTINUOUS_SNIPER" not in paper_text
+    # 2f hedge publisher armed. It requires the account owner route and never
+    # receives credentials or direct venue-order confirmation.
     hedge_text = (repo / "deploy" / "systemd" / "liquidity-migration-continuous-hedge.service").read_text(encoding="utf-8")
     assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in hedge_text
+    assert "EnvironmentFile=/etc/liquidity-migration/account-execution.env" in hedge_text
+    assert "Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1" in hedge_text
     assert "Environment=HEDGE_MODE=2f" in hedge_text
     assert "Environment=SUBMIT_HEDGE=1" in hedge_text
-    assert "Environment=CONFIRM_DEMO_ORDERS=1" in hedge_text
+    assert "Environment=TELEGRAM_ENABLED=0" in hedge_text
+    assert "UnsetEnvironment=BYBIT_DEMO_API_KEY" in hedge_text
+    assert "CONFIRM_DEMO_ORDERS" not in hedge_text
+    assert "bybit-demo.env" not in hedge_text
 
 
-def test_continuous_live_overlay_defaults_are_pinned_for_demo_paper_parity() -> None:
+def test_continuous_target_producers_pin_the_same_live_sizing_defaults() -> None:
     repo = Path(__file__).resolve().parents[1]
     required = (
-        "ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0",
-        "ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1",
-        "ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0",
         "ENTRY_LEVERAGE=10",
         "NOTIONAL_MULTIPLIER=10",
         "PER_POSITION_NOTIONAL_PCT_EQUITY=2",
@@ -537,10 +686,9 @@ def test_long_units_pin_descriptive_v11a_profile() -> None:
     paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-long-paper.service").read_text(encoding="utf-8")
 
     assert "Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol" in demo_text
-    assert "Environment=SUBMIT_ORDERS=1" in demo_text
+    assert "Environment=EXECUTION_ENVIRONMENT=demo" in demo_text
     assert "Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol" in paper_text
-    assert "Environment=SUBMIT_ORDERS=0" in paper_text
-    assert "Environment=PAPER_MODE=1" in paper_text
+    assert "Environment=EXECUTION_ENVIRONMENT=paper" in paper_text
 
 
 def test_continuous_rmom_refresh_rebuilds_each_active_sleeve_root() -> None:
@@ -611,10 +759,29 @@ def test_liveness_watchdog_checks_continuous_paper_evidence_root() -> None:
     script = (repo / "scripts" / "check_demo_liveness.py").read_text(encoding="utf-8")
 
     assert "--continuous-paper-root /opt/liquidity-migration/data/bybit-continuous-paper-event" in service
+    assert "--account-root /opt/liquidity-migration/data/bybit-account-execution" in service
+    assert "--account-paper-root /opt/liquidity-migration/data/bybit-account-paper" in service
+    assert "--account-capture-root /opt/liquidity-migration/data/bybit-account-market-capture" in service
+    assert "--account-paper-capture-root /opt/liquidity-migration/data/bybit-account-paper-market-capture" in service
+    assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" in service
+    assert "--telegram" in service
+    assert "Environment=TELEGRAM_ENABLED=1" in service
+    assert "UnsetEnvironment=BYBIT_DEMO_API_KEY" in service
     assert not any("--continuous-stop-check" in line for line in _active_lines(service))
     assert "liquidity-migration-bybit-continuous-paper.service" in script
     assert "_sleeve_on(\"CONTINUOUS_PAPER_SLEEVE\")" in script
-    assert "continuous_stop_check" in script
+    assert "continuous_stop_check" not in script
+    assert "--account-root /opt/liquidity-migration/data/bybit-account-execution" in service
+    assert "--account-capture-root /opt/liquidity-migration/data/bybit-account-market-capture" in service
+    assert (
+        "--account-paper-capture-root "
+        "/opt/liquidity-migration/data/bybit-account-paper-market-capture"
+    ) in service
+    assert "liquidity-migration-account-execution.service" in service
+    assert "liquidity-migration-account-paper-execution.service" in service
+    assert "gather_account_health_alerts" in script
+    assert "gather_risk_alerts" not in script
+    assert "gather_hedge_orphan_alerts" not in script
 
 
 def test_continuous_rmom_timer_wired_to_paper_evidence_gate() -> None:
@@ -634,20 +801,58 @@ def test_continuous_rmom_timer_wired_to_paper_evidence_gate() -> None:
     assert 'CONTINUOUS_HEDGE_SERVICES="liquidity-migration-continuous-hedge.service"' in lib
 
 
-def test_combined_book_report_includes_continuous_roots_and_sleeve_toggles() -> None:
+def test_account_owners_are_mandatory_for_every_live_sleeve() -> None:
     repo = Path(__file__).resolve().parents[1]
-    service = (repo / "deploy" / "systemd" / "liquidity-migration-combined-book-report.service").read_text(
+    systemd = repo / "deploy" / "systemd"
+    expected = {
+        "liquidity-migration-bybit-long-demo.service": (
+            "liquidity-migration-account-execution.service",
+            "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1",
+            "account-execution.env",
+        ),
+        "liquidity-migration-bybit-continuous-demo.service": (
+            "liquidity-migration-account-execution.service",
+            "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1",
+            "account-execution.env",
+        ),
+        "liquidity-migration-bybit-long-paper.service": (
+            "liquidity-migration-account-paper-execution.service",
+            "ACCOUNT_PAPER_KERNEL_REQUIRED=1",
+            "account-paper-execution.env",
+        ),
+        "liquidity-migration-bybit-continuous-paper.service": (
+            "liquidity-migration-account-paper-execution.service",
+            "ACCOUNT_PAPER_KERNEL_REQUIRED=1",
+            "account-paper-execution.env",
+        ),
+    }
+    for unit, (owner, latch, env_file) in expected.items():
+        text = (systemd / unit).read_text(encoding="utf-8")
+        assert f"Requires={owner}" in text
+        assert f"Environment={latch}" in text
+        assert f"EnvironmentFile=/etc/liquidity-migration/{env_file}" in text
+        assert (
+            "ConditionPathExists=/etc/liquidity-migration/"
+            "account-execution-capture-enabled"
+        ) in text
+        if "continuous" in unit:
+            assert "Environment=TELEGRAM_ENABLED" not in text
+        else:
+            assert "Environment=TELEGRAM_ENABLED=0" in text
+        assert "CONFIRM_DEMO_ORDERS" not in text
+        assert (
+            "UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET "
+            "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID"
+        ) in text
+
+    liveness = (systemd / "liquidity-migration-demo-liveness.service").read_text(
         encoding="utf-8"
     )
-
-    assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in service
-    assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" not in service
-    # Guard against the compatibility root drifting back into the active report.
-    assert "--short-data-root" not in service
-    assert "--long-data-root data/bybit-long-demo-event" in service
-    assert "--continuous-data-root data/bybit-continuous-demo-event" in service
-    assert "--continuous-paper-data-root data/bybit-continuous-paper-event" in service
-    assert "--continuous-hedge-data-root data/bybit-continuous-hedge-event" in service
+    assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" in liveness
+    assert "UnsetEnvironment=BYBIT_DEMO_API_KEY" in liveness
+    assert "TELEGRAM_BOT_TOKEN" not in next(
+        line for line in liveness.splitlines() if line.startswith("UnsetEnvironment=")
+    )
 
 
 def test_long_units_lookback_days_satisfies_validation_floor() -> None:
@@ -671,45 +876,25 @@ def test_long_units_lookback_days_satisfies_validation_floor() -> None:
         )
 
 
-def test_paper_services_enable_record_dry_run() -> None:
-    """Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles
-    persist trades — otherwise paper-vs-demo reconciliation has no paper-side
-    data to pair against the live demo ledger."""
-    repo = Path(__file__).resolve().parents[1]
-    for unit in (
-        "liquidity-migration-bybit-long-paper.service",
-    ):
-        text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
-        assert "Environment=SUBMIT_ORDERS=0" in text, f"{unit}: paper service must not submit orders"
-        assert "Environment=RECORD_DRY_RUN=1" in text, f"{unit}: paper service must enable RECORD_DRY_RUN"
-
-
-def test_long_paper_service_enables_paper_mode() -> None:
-    """Long-paper writes need to land in long_native_paper_* datasets so the
-    reconcile-long-paper-demo CLI can pair them against the live long-demo
-    ledger. The long reconciler looks for paper_dataset='long_native_paper_trades'
-    specifically; without PAPER_MODE=1 the long-paper service writes to
-    long_native_demo_trades and reconciliation silently returns paired=0."""
+def test_long_paper_service_selects_explicit_paper_environment() -> None:
+    """The paper producer must route targets to the deterministic paper owner."""
     repo = Path(__file__).resolve().parents[1]
     text = (
         repo / "deploy" / "systemd" / "liquidity-migration-bybit-long-paper.service"
     ).read_text(encoding="utf-8")
-    assert "Environment=PAPER_MODE=1" in text, (
-        "long-paper service must set PAPER_MODE=1 so writes route to the "
-        "long_native_paper_* dataset family the reconciler expects."
+    assert "Environment=EXECUTION_ENVIRONMENT=paper" in text, (
+        "long-paper service must select only the paper account route."
     )
 
 
-def test_long_runner_wires_paper_mode() -> None:
-    """The long-sleeve bash runner must surface --paper-mode via the
-    PAPER_MODE env var so the long-paper service can route writes to the
-    paper dataset family."""
+def test_long_runner_wires_explicit_execution_environment() -> None:
+    """The runner passes one environment through to the target producer."""
     repo = Path(__file__).resolve().parents[1]
     text = (
         repo / "scripts" / "run_bybit_long_demo_event_engine.sh"
     ).read_text(encoding="utf-8")
-    assert 'PAPER_MODE:-0}" == "1"' in text, "long runner missing PAPER_MODE gate"
-    assert "--paper-mode" in text, "long runner does not pass --paper-mode"
+    assert 'case "${EXECUTION_ENVIRONMENT:-}" in' in text
+    assert '--execution-environment "$EXECUTION_ENVIRONMENT"' in text
 
 
 def test_long_runner_and_units_default_to_safe_1x_sizing() -> None:
@@ -771,8 +956,8 @@ def test_bash_runners_wire_ws_klines_env() -> None:
 def test_live_runners_do_not_write_repo_bytecode() -> None:
     repo = Path(__file__).resolve().parents[1]
     paths = [
-        repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh",
-        repo / "deploy" / "systemd" / "liquidity-migration-bybit-risk.service",
+        repo / "deploy" / "systemd" / "liquidity-migration-account-execution.service",
+        repo / "deploy" / "systemd" / "liquidity-migration-account-paper-execution.service",
     ]
 
     for path in paths:
@@ -803,16 +988,24 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "systemctl disable --now" in lib
     retired_unit_marker = "model" "050426"
     assert retired_unit_marker not in text
-    # Deploy actively removes retired units.
-    assert "RETIRED_SLEEVE_UNITS" in text
-    assert "liquidity-migration-bybit-risk.service" in text
-    # The risk service has NO sleeve toggle — it is the shared reconcile authority for
-    # the whole demo account and must always enable/restart/verify regardless of which
-    # entry sleeves are on (turning a sleeve off must never stop position protection).
-    assert "systemctl enable liquidity-migration-bybit-risk.service" in text
-    assert "systemctl restart liquidity-migration-bybit-risk.service" in text
-    assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
+    # Deploy installs the checked-in manifest and generically removes anything
+    # outside it; a hand-maintained retired allowlist can drift behind the host.
+    assert "lm_install_current_systemd_units" in text
+    assert "lm_install_current_systemd_units()" in lib
+    assert "RETIRED_SLEEVE_UNITS" not in lib
+    assert "/etc/liquidity-migration/account-execution-capture-enabled" in text
+    assert "/etc/liquidity-migration/account-execution-deploy-ready" in text
+    assert "/etc/liquidity-migration/account-execution.env" in text
+    assert "/etc/liquidity-migration/account-paper-execution.env" in text
+    for owner in (
+        "liquidity-migration-account-execution.service",
+        "liquidity-migration-account-paper-execution.service",
+    ):
+        assert f"systemctl enable {owner}" in text
+        assert f"systemctl restart {owner}" in text
+        assert f"systemctl is-active --quiet {owner}" in text
+        assert f"systemctl is-enabled --quiet {owner}" in text
+    assert "liquidity-migration-bybit-risk.service" not in text
     # Per-sleeve kill-switch: the deploy sources the shared lib, loads the toggles, then
     # enables/restarts/verifies each sleeve THROUGH the toggle-aware helpers (an off
     # sleeve gets `disable --now`d and is not expected up). The exact unit set each
@@ -822,17 +1015,19 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "lm_load_sleeve_toggles" in text
     assert "lm_write_resolved_sleeve_toggles" in text
     assert "lm_verify_resolved_sleeve_toggles" in text
-    assert "lm_cleanup_unknown_liqmig_units" in text
+    assert "lm_cleanup_unknown_liqmig_units" in lib
+    assert "lm_verify_no_unknown_liqmig_units" in lib
     for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The canonical unit set (what each sleeve enables/restarts/verifies, and what the
     # liveness watchdog/recovery must bring up) lives in the lib — pin it there.
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
-    assert "liquidity-migration-bybit-demo.service" in lib
-    assert "liquidity-migration-bybit-paper.service" in lib
-    assert "liquidity-migration-continuous-forward-report.service" in lib
-    assert "liquidity-migration-continuous-forward-report.timer" in lib
+    assert "lm_expected_systemd_units()" in lib
+    assert "liquidity-migration-bybit-demo.service" not in lib
+    assert "liquidity-migration-bybit-paper.service" not in lib
+    assert "liquidity-migration-continuous-forward-report.service" not in lib
+    assert "liquidity-migration-continuous-forward-report.timer" not in lib
     assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
     assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
     assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
@@ -854,46 +1049,44 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # Continuous demo orders are ON; long is controlled by its own sleeve toggle.
     assert "CONTINUOUS_SLEEVE=on" in sleeves
     assert "CONTINUOUS_PAPER_SLEEVE=on" in sleeves
-    # Timers ship with the unit files but `systemctl enable` is required to
-    # actually schedule them. Pin both timers so a deploy can't silently leave
-    # the demo-health watchdog or hourly combined-book report inactive.
+    # The liveness timer remains mandatory. Hourly reports now come from the
+    # account owner rather than a second oneshot report authority.
     assert "systemctl enable --now liquidity-migration-demo-liveness.timer" in text
-    assert "systemctl enable --now liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
-    assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
-    assert "telegram-quiet.conf" in text
-    assert "/etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d" in text
-    assert "liquidity-migration-combined-book-report.service.d" in text
+    assert "liquidity-migration-combined-book-report.timer" not in text
+    assert "telegram-quiet.conf" in lib
+    assert "liquidity-migration-bybit-continuous-demo.service.d" in lib
+    assert "liquidity-migration-combined-book-report.service.d" not in lib
     assert "require_unit_env()" in text
     assert "systemctl cat" not in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'" in text
+    assert "require_unit_env liquidity-migration-account-execution.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-account-execution.service 'CONFIRM_DEMO_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-account-paper-execution.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
     assert "liquidity-migration-bybit-continuous-demo.service" in text
     assert "liquidity-migration-bybit-continuous-paper.service" in text
     assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
-    # deploy-env-timers-1: the hedge timer is gated on a computed _hedge_timer_state
-    # (not raw CONTINUOUS_SLEEVE) so retiring continuous does NOT orphan an open,
-    # stopless hedge leg — when continuous is off it keeps the timer enabled (and
-    # pages CRITICAL) while the hedge addon ledger holds open rows, disabling only
-    # once flat. apply and verify must use the SAME computed state.
+    # The hedge timer is gated on canonical account-owned hedge state. Apply and
+    # verify must use the same computed state.
     assert 'CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"' in text
     assert 'apply_hedge_timer_enable "$_hedge_timer_state"' in text
     assert 'verify_hedge_timer_enable "$_hedge_timer_state"' in text
-    assert "data/bybit-continuous-hedge-event" in text  # the open-hedge ledger check
-    assert "_hedge_timer_state=on" in text              # fail-safe keeps it enabled while open
+    assert "canonical_strategy_trade_rows" in text
+    assert 'ACCOUNT_ROOT="$ACCOUNT_EXECUTION_ROOT"' in text
+    assert "data/bybit-continuous-hedge-event" not in text
+    assert "_hedge_timer_state=on" in text
     assert "continuous_rmom_refresh_on" in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'EXECUTION_ENVIRONMENT=demo'" in text
     assert "require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'SUBMIT_ORDERS=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'EXECUTION_ENVIRONMENT=paper'" in text
     assert "require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'EXECUTION_ENVIRONMENT=demo'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'" in text
@@ -901,27 +1094,12 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1'" in text
-    assert (
-        "require_unit_env liquidity-migration-bybit-continuous-demo.service "
-        "'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0'"
-    ) in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_ENABLED=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_RESIZE_COST_BPS=10'" in text
     assert 'cont.sizing_mode == "inverse_vol"' in text
     assert "cont.target_vol_per_name == 0.01" in text
-    assert "cont.daily_rebalance_enabled is False" in text
-    assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
     assert "cont.entry_btc_risk_low == 0.70" in text
     assert "cont.entry_btc_risk_high == 0.90" in text
     assert "cont.entry_btc_risk_tail_mult == 0.35" in text
     assert "c[0]: c[3] for c in cont.ensemble_components" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_LOSS_PCT=0'" in text
     # Deploy must seed missing/stale gates (or rebuild after relevant code changes),
     # but must not spend minutes rebuilding identical healthy state on every deploy.
     # Any required seed still runs before the continuous daemons restart.
@@ -950,16 +1128,14 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "rmom gate is EMPTY, provisional-only, or stale after deploy gate check" in text
     assert "scripts/check_residual_momentum_gate.py" in text
     assert "ALLOW_EMPTY_RMOM_GATE" in text
-    # Reboot-safety invariant (audit 2026-06-02 #51): the risk service (the single
-    # reconcile authority that tracks the continuous sleeve's positions) must come
-    # up BEFORE the continuous daemon, else the continuous sleeve's live positions
-    # look untracked and get flattened. Pin both the enable and restart order.
+    # Reboot-safety invariant: the single account owner must start before any
+    # target producer.
     assert (
-        text.index("systemctl enable liquidity-migration-bybit-risk.service")
+        text.index("systemctl enable liquidity-migration-account-execution.service")
         < text.index('apply_sleeve_enable "$CONTINUOUS_SLEEVE"')
     )
     assert (
-        text.index("systemctl restart liquidity-migration-bybit-risk.service")
+        text.index("systemctl restart liquidity-migration-account-execution.service")
         < text.index("systemctl restart liquidity-migration-bybit-continuous-demo.service")
     )
     assert "deploy-verify-ok commit=" in text
@@ -1024,17 +1200,21 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "require_unit_env()" in text
     assert "systemctl cat" not in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'" in text
+    assert "require_unit_env liquidity-migration-account-execution.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-account-paper-execution.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
     # Per-sleeve kill-switch: verify is toggle-aware — it sources the shared lib, loads
     # the toggles, and routes per-sleeve active+enabled checks through verify_sleeve (so
     # an intentionally-off sleeve is required DOWN, not flagged as a failed deploy). The
-    # risk service is NOT toggled — always verified up (it protects every sleeve).
+    # account owners are not toggled and are always verified up.
     assert "lib_sleeves.sh" in text
     assert "lm_load_sleeve_toggles" in text
     assert "lm_verify_resolved_sleeve_toggles" in text
     assert "lm_verify_no_unknown_liqmig_units" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
-    assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-account-execution.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-account-execution.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-account-paper-execution.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-account-paper-execution.service" in text
+    assert "liquidity-migration-bybit-risk.service" not in text
     assert "systemctl is-enabled --quiet liquidity-migration-liquidation-collector.service" in text
     assert "systemctl is-active --quiet liquidity-migration-liquidation-collector.service" in text
     for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
@@ -1050,17 +1230,13 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     # Read-only verify must catch a missing-timer regression that the deploy
     # script would have caused — parity check, no-write semantics.
     assert "systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
-    assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
+    assert "liquidity-migration-combined-book-report" not in text
     assert "emergency Telegram mute still installed" in text
     assert "/etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d" in text
-    assert "liquidity-migration-combined-book-report.service.d" in text
     # Continuous-fade sleeve (live on demo 2026-06-01): its daily rmom-refresh timer is
     # verified only when the sleeve is on (guarded by sleeve_on); the daemon's own
-    # active+enabled state is covered by the verify_sleeve loop above. The risk service
-    # stays wired to read the continuous ledger even when the sleeve is off (asserted
-    # below, unconditional) — else its open positions would silently flatten.
+    # active+enabled state is covered by the verify_sleeve loop above.
     assert "continuous_rmom_refresh_on" in text
     assert "verify_timer on $CONTINUOUS_SLEEVE_TIMERS" in text
     assert "_verify_rmom_root" in text
@@ -1070,15 +1246,17 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert 'CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"' in text
     assert 'verify_hedge_timer_enable "$_hedge_timer_state"' in text
     assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "canonical_strategy_trade_rows" in text
+    assert 'ACCOUNT_ROOT="$ACCOUNT_EXECUTION_ROOT"' in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'EXECUTION_ENVIRONMENT=demo'" in text
     assert "require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'SUBMIT_ORDERS=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'EXECUTION_ENVIRONMENT=paper'" in text
     assert "require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'EXECUTION_ENVIRONMENT=demo'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'" in text
@@ -1086,27 +1264,12 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1'" in text
-    assert (
-        "require_unit_env liquidity-migration-bybit-continuous-demo.service "
-        "'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0'"
-    ) in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_ENABLED=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_RESIZE_COST_BPS=10'" in text
     assert 'cont.sizing_mode == "inverse_vol"' in text
     assert "cont.target_vol_per_name == 0.01" in text
-    assert "cont.daily_rebalance_enabled is False" in text
-    assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
     assert "cont.entry_btc_risk_low == 0.70" in text
     assert "cont.entry_btc_risk_high == 0.90" in text
     assert "cont.entry_btc_risk_tail_mult == 0.35" in text
     assert "c[0]: c[3] for c in cont.ensemble_components" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_LOSS_PCT=0'" in text
     assert "verify-ok commit=" in text
     assert "--property=Environment --value" in text
 
@@ -1128,6 +1291,13 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     # never actually stop/start (the deploy sources both at runtime).
     assert '"deploy/sleeves.env"' in text
     assert '"deploy/lib_sleeves.sh"' in text
+    assert '"scripts/check_residual_momentum_gate.py"' in text
+    assert "install-preflight" in text
+    assert "INSTALL_PREFLIGHT_ONLY=1" in text
+    assert (
+        "github.event_name == 'workflow_dispatch' && inputs.mode == 'install-preflight'"
+        in text
+    )
     assert "wait-deploy" in text
     assert "wait_timeout_seconds" in text
     assert "wait_interval_seconds" in text
@@ -1341,9 +1511,15 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "systemctl disable --now" in lib
     retired_unit_marker = "model" "050426"
     assert retired_unit_marker not in text
-    # Deploy actively removes retired units.
-    assert "RETIRED_SLEEVE_UNITS" in text
-    assert "liquidity-migration-bybit-risk.service" in text
+    # Recovery shares the same manifest installer and generic retired-unit purge.
+    assert "lm_install_current_systemd_units" in text
+    assert "lm_install_current_systemd_units()" in lib
+    assert "RETIRED_SLEEVE_UNITS" not in lib
+    assert "/etc/liquidity-migration/account-execution-capture-enabled" in text
+    assert "/etc/liquidity-migration/account-execution-deploy-ready" in text
+    assert "/etc/liquidity-migration/account-execution.env" in text
+    assert "/etc/liquidity-migration/account-paper-execution.env" in text
+    assert "liquidity-migration-bybit-risk.service" not in text
     # Recovery routes sleeve enable/restart/verify through the SAME kill-switch as
     # deploy_vps_live.sh (single source of truth) — NO hardcoded per-sleeve enables that
     # could resurrect an OFF sleeve (e.g. the look-ahead-disabled continuous sleeve).
@@ -1351,10 +1527,16 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "lm_load_sleeve_toggles" in text
     assert "lm_write_resolved_sleeve_toggles" in text
     assert "lm_verify_resolved_sleeve_toggles" in text
-    assert "lm_cleanup_unknown_liqmig_units" in text
-    assert "systemctl enable liquidity-migration-bybit-risk.service" in text
-    assert "systemctl restart liquidity-migration-bybit-risk.service" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
+    assert "lm_cleanup_unknown_liqmig_units" in lib
+    assert "lm_verify_no_unknown_liqmig_units" in lib
+    for owner in (
+        "liquidity-migration-account-execution.service",
+        "liquidity-migration-account-paper-execution.service",
+    ):
+        assert f"systemctl enable {owner}" in text
+        assert f"systemctl restart {owner}" in text
+        assert f"systemctl is-active --quiet {owner}" in text
+        assert f"systemctl is-enabled --quiet {owner}" in text
     assert "liquidity-migration-liquidation-collector.service" in text
     for sleeve in ("LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
@@ -1364,12 +1546,12 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "continuous_rmom_refresh_on" in text
     assert "require_unit_env()" in text
     assert "systemctl cat" not in text
-    assert "telegram-quiet.conf" in text
-    assert "/etc/systemd/system/liquidity-migration-bybit-continuous-demo.service.d" in text
-    assert "liquidity-migration-combined-book-report.service.d" in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'ORDER_SUBMIT_MODE=ws_then_rest'" in text
-    # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
-    # live daemons, plus its rmom timer; risk service wired to read its ledger.
+    assert "telegram-quiet.conf" in lib
+    assert "liquidity-migration-bybit-continuous-demo.service.d" in lib
+    assert "liquidity-migration-combined-book-report" not in text
+    assert "require_unit_env liquidity-migration-account-execution.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-account-paper-execution.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
+    # Continuous-fade sleeve is brought up like the other target producers.
     assert "liquidity-migration-bybit-continuous-demo.service" in text
     assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
     assert "_hedge_timer_state" in text
@@ -1378,15 +1560,17 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert 'verify_hedge_timer_enable "$_hedge_timer_state"' in text
     assert 'apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
     assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' not in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'LONG_DATA_ROOT=data/bybit-long-demo-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-risk.service 'CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "canonical_strategy_trade_rows" in text
+    assert 'ACCOUNT_ROOT="$ACCOUNT_EXECUTION_ROOT"' in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-demo.service 'EXECUTION_ENVIRONMENT=demo'" in text
     assert "require_unit_env liquidity-migration-bybit-long-demo.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'SUBMIT_ORDERS=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'PAPER_MODE=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-long-paper.service 'EXECUTION_ENVIRONMENT=paper'" in text
     assert "require_unit_env liquidity-migration-bybit-long-paper.service 'STRATEGY_PROFILE=LongV11aDivWeekendVol'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SUBMIT_ORDERS=1'" in text
+    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'EXECUTION_ENVIRONMENT=demo'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'FEATURE_SET=max_ret168'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_EVENT_TRIGGER=none'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'BTC_TREND_GATE=uptrend'" in text
@@ -1394,42 +1578,40 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'SIZING_MODE=inverse_vol'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'TARGET_VOL_PER_NAME=0.01'" in text
     assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'VOL_WEIGHT_CLAMP=2'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC=1'" in text
-    assert (
-        "require_unit_env liquidity-migration-bybit-continuous-demo.service "
-        "'ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0'"
-    ) in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_REALIZED_VOL_WINDOW_DAYS=90'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_TARGET_DAILY_VOL=0.045'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_MAX_SCALE=4'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_ENABLED=0'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_DRAWDOWN_HALF_THRESHOLD=-0.04'" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'DAILY_REBALANCE_RESIZE_COST_BPS=10'" in text
     assert 'cont.sizing_mode == "inverse_vol"' in text
     assert "cont.target_vol_per_name == 0.01" in text
-    assert "cont.daily_rebalance_enabled is False" in text
-    assert "cont.daily_rebalance_target_daily_vol == 0.045" in text
     assert "cont.entry_btc_risk_low == 0.70" in text
     assert "cont.entry_btc_risk_high == 0.90" in text
     assert "cont.entry_btc_risk_tail_mult == 0.35" in text
     assert "c[0]: c[3] for c in cont.ensemble_components" in text
-    assert "require_unit_env liquidity-migration-bybit-continuous-demo.service 'STOP_LOSS_PCT=0'" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment --value" in text
 
 
 _LEDGER_RESET_ACTIVE_UNITS = (
-    "liquidity-migration-bybit-risk.service",
+    "liquidity-migration-account-execution.service",
+    "liquidity-migration-account-paper-execution.service",
     "liquidity-migration-bybit-long-demo.service",
     "liquidity-migration-bybit-long-paper.service",
     "liquidity-migration-bybit-continuous-demo.service",
     "liquidity-migration-bybit-continuous-paper.service",
     "liquidity-migration-continuous-rmom-refresh.timer",
     "liquidity-migration-continuous-hedge.timer",
-    "liquidity-migration-combined-book-report.timer",
     "liquidity-migration-demo-liveness.timer",
 )
+
+
+def test_reset_demo_paper_ledgers_checks_conditional_orders_explicitly() -> None:
+    text = (REPO_ROOT / "scripts" / "reset_demo_paper_ledgers.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'client.get_open_orders(settle_coin="USDT")' in text
+    assert (
+        'client.get_open_orders(settle_coin="USDT", order_filter="StopOrder")'
+        in text
+    )
+    assert "orders_by_identity" in text
 
 
 def _ledger_reset_harness(
@@ -1453,6 +1635,10 @@ def _ledger_reset_harness(
         """#!/usr/bin/env bash
 cmd="$1"
 shift
+if [[ -n "${FAKE_SECRET_LEAK_MARKER:-}" ]] && \
+   [[ -n "${TELEGRAM_BOT_TOKEN:-}" || -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+  : > "$FAKE_SECRET_LEAK_MARKER"
+fi
 printf '%s %s\\n' "$cmd" "$*" >> "$SYSTEMCTL_LOG"
 case "$cmd" in
   show)
@@ -1463,6 +1649,11 @@ case "$cmd" in
         env_file="$FAKE_SYSTEMD_ENV_MISMATCH_FILE"
       fi
       printf '%s (ignore_errors=no)\n' "$env_file"
+      if [[ "$unit" == "liquidity-migration-account-execution.service" ]]; then
+        printf '%s (ignore_errors=no)\n' "$FAKE_ACCOUNT_ROUTE_ENV_FILE"
+      elif [[ "$unit" == "liquidity-migration-account-paper-execution.service" ]]; then
+        printf '%s (ignore_errors=no)\n' "$FAKE_PAPER_ROUTE_ENV_FILE"
+      fi
       if [[ "${FAKE_SYSTEMD_EXTRA_ENV_UNIT:-}" == "$unit" ]]; then
         printf '%s (ignore_errors=no)\n' "$FAKE_SYSTEMD_EXTRA_ENV_FILE"
       fi
@@ -1477,6 +1668,11 @@ case "$cmd" in
     grep -Fqx "$1" "$SYSTEMCTL_STATE"
     ;;
   stop)
+    if [[ -n "${FAKE_CREATE_DURING_STOP:-}" && ! -e "${FAKE_CREATE_DURING_STOP_MARKER:-}" ]]; then
+      mkdir -p "$(dirname "$FAKE_CREATE_DURING_STOP")"
+      printf 'created-before-quiescence\n' > "$FAKE_CREATE_DURING_STOP"
+      : > "$FAKE_CREATE_DURING_STOP_MARKER"
+    fi
     for unit in "$@"; do
       grep -Fxv "$unit" "$SYSTEMCTL_STATE" > "$SYSTEMCTL_STATE.tmp" || true
       mv "$SYSTEMCTL_STATE.tmp" "$SYSTEMCTL_STATE"
@@ -1514,13 +1710,23 @@ fi
 if [[ "${1:-}" == "-" && "${2:-}" == "--write-reset-boundary" ]]; then
   exec "$REAL_PYTHON" "$@"
 fi
-if [[ "${1:-}" == "-" && "${2:-}" == "--prepare-canonical-flat" ]]; then
+if [[ "${1:-}" == "-" && "${2:-}" == "--prepare-canonical-reset" ]]; then
   exec "$REAL_PYTHON" "$@"
 fi
 if [[ "${1:-}" == "-" && "${2:-}" == "--rebuild-canonical-projections" ]]; then
   exec "$REAL_PYTHON" "$@"
 fi
+if [[ "${1:-}" == "-" && "$#" -ge 3 ]]; then
+  exec "$REAL_PYTHON" "$@"
+fi
 cat >/dev/null
+if [[ -n "${FAKE_FLAT_ENV_PROBE:-}" ]]; then
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" || -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+    printf 'secret-leaked\\n' > "$FAKE_FLAT_ENV_PROBE"
+  else
+    printf 'credentials-only\\n' > "$FAKE_FLAT_ENV_PROBE"
+  fi
+fi
 if [[ "${FAKE_ACCOUNT_GUARD_RC:-0}" == "0" ]]; then
   echo "  demo-account-flat-ok positions=0 open_orders=0"
   exit 0
@@ -1538,6 +1744,22 @@ exit "$FAKE_ACCOUNT_GUARD_RC"
         "BYBIT_DEMO_API_KEY=fake\nBYBIT_DEMO_API_SECRET=fake\n",
         encoding="utf-8",
     )
+    account_env = tmp_path / "account-execution.env"
+    account_env.write_text(
+        "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1\n"
+        "ACCOUNT_EXECUTION_ROOT=data/bybit-account-execution\n"
+        "ACCOUNT_INTENT_INBOX_ROOT=data/bybit-account-intents\n"
+        "ACCOUNT_CAPTURE_ROOT=data/bybit-account-market-capture\n",
+        encoding="utf-8",
+    )
+    paper_account_env = tmp_path / "account-paper-execution.env"
+    paper_account_env.write_text(
+        "ACCOUNT_PAPER_KERNEL_REQUIRED=1\n"
+        "ACCOUNT_EXECUTION_ROOT=data/bybit-account-paper\n"
+        "ACCOUNT_INTENT_INBOX_ROOT=data/bybit-account-paper-intents\n"
+        "ACCOUNT_PAPER_CAPTURE_ROOT=data/bybit-account-paper-market-capture\n",
+        encoding="utf-8",
+    )
     env = os.environ.copy()
     env.pop("REAL_MONEY", None)
     env.update(
@@ -1548,6 +1770,10 @@ exit "$FAKE_ACCOUNT_GUARD_RC"
             "SYSTEMCTL_LOG": str(log),
             "FAKE_ACCOUNT_GUARD_RC": str(account_guard_rc),
             "FAKE_SYSTEMD_ENV_FILE": str(env_file),
+            "ACCOUNT_EXECUTION_ENV_FILE": str(account_env),
+            "ACCOUNT_PAPER_EXECUTION_ENV_FILE": str(paper_account_env),
+            "FAKE_ACCOUNT_ROUTE_ENV_FILE": str(account_env),
+            "FAKE_PAPER_ROUTE_ENV_FILE": str(paper_account_env),
             "REAL_PYTHON": sys.executable,
             "PYTHONPATH": (
                 f"{REPO_ROOT}{os.pathsep}{env.get('PYTHONPATH', '')}"
@@ -1571,9 +1797,20 @@ def test_reset_demo_paper_ledgers_is_dry_run_by_default_and_execute_is_archival(
     klines = tmp_path / "data" / "bybit-long-demo-event" / "event_demo_klines_1h"
     cache = tmp_path / "data" / "bybit-long-demo-event" / ".cache"
     reports = tmp_path / "data" / "bybit-long-demo-event" / "reports"
+    account_epoch_files = (
+        tmp_path / "data/bybit-account-execution/account_journal/events.jsonl",
+        tmp_path / "data/bybit-account-intents/pending/request.json",
+        tmp_path / "data/bybit-account-market-capture/books.jsonl",
+        tmp_path / "data/bybit-account-paper/account_journal/events.jsonl",
+        tmp_path / "data/bybit-account-paper-intents/pending/request.json",
+        tmp_path / "data/bybit-account-paper-market-capture/books.jsonl",
+    )
     for directory in (cycles, klines, cache, reports):
         directory.mkdir(parents=True)
         (directory / "part.parquet").write_bytes(b"x")
+    for account_file in account_epoch_files:
+        account_file.parent.mkdir(parents=True, exist_ok=True)
+        account_file.write_text("old-account-epoch\n", encoding="utf-8")
     write_dataset(
         pl.DataFrame([{
             "trade_id": "long-reset-row",
@@ -1603,6 +1840,7 @@ def test_reset_demo_paper_ledgers_is_dry_run_by_default_and_execute_is_archival(
     assert "no services or files were changed" in preview.stdout
     assert ledger.exists() and cycles.exists() and klines.exists()
     assert cache.exists() and reports.exists()
+    assert all(path.exists() for path in account_epoch_files)
     assert not log.exists(), "dry-run must not even query or stop systemd units"
     assert not (tmp_path / "data" / "_archive").exists()
 
@@ -1637,6 +1875,11 @@ def test_reset_demo_paper_ledgers_is_dry_run_by_default_and_execute_is_archival(
     assert klines.exists(), "root-level market data must be preserved"
     assert cache.exists(), "cache removal requires --include-caches"
     assert reports.exists(), "report removal requires --include-reports"
+    assert all(not path.exists() for path in account_epoch_files)
+    for path in account_epoch_files:
+        # Each configured account root/inbox/capture is recreated, but old
+        # journal/request/capture payloads cannot leak into the new epoch.
+        assert path.parents[1].exists() or path.parent.exists()
     archives = list((tmp_path / "data" / "_archive").glob("ledger-reset-*-exit-overhaul.tar.gz"))
     assert len(archives) == 1
     digest = archives[0].with_name(archives[0].name + ".sha256")
@@ -1646,14 +1889,74 @@ def test_reset_demo_paper_ledgers_is_dry_run_by_default_and_execute_is_archival(
         names = archive.getnames()
     assert "ledger-reset-manifest.txt" in names
     assert any(name.startswith("data/bybit-long-demo-event/long_native_demo_trades") for name in names)
+    for account_file in account_epoch_files:
+        assert str(account_file.relative_to(tmp_path)) in names
 
     systemctl_log = log.read_text(encoding="utf-8")
     assert "stop liquidity-migration-bybit-long-demo.service" in systemctl_log
     assert "stop liquidity-migration-bybit-continuous-demo.service" in systemctl_log
-    assert "stop liquidity-migration-bybit-risk.service" in systemctl_log
-    assert "start liquidity-migration-bybit-risk.service" in systemctl_log
-    assert "is-active --quiet liquidity-migration-bybit-risk.service" in systemctl_log
+    assert "stop liquidity-migration-account-execution.service" in systemctl_log
+    assert "stop liquidity-migration-account-paper-execution.service" in systemctl_log
+    assert "start liquidity-migration-account-execution.service" in systemctl_log
+    assert "start liquidity-migration-account-paper-execution.service" in systemctl_log
+    assert "is-active --quiet liquidity-migration-account-execution.service" in systemctl_log
+    assert "liquidity-migration-bybit-risk.service" not in systemctl_log
+    assert "liquidity-migration-combined-book-report" not in systemctl_log
+    systemctl_lines = systemctl_log.splitlines()
+    assert systemctl_lines.index("stop liquidity-migration-bybit-long-demo.service") < systemctl_lines.index(
+        "stop liquidity-migration-account-execution.service"
+    )
+    assert systemctl_lines.index(
+        "stop liquidity-migration-bybit-continuous-paper.service"
+    ) < systemctl_lines.index("stop liquidity-migration-account-paper-execution.service")
+    assert systemctl_lines.index("start liquidity-migration-account-execution.service") < systemctl_lines.index(
+        "start liquidity-migration-bybit-long-demo.service"
+    )
+    assert systemctl_lines.index(
+        "start liquidity-migration-account-paper-execution.service"
+    ) < systemctl_lines.index("start liquidity-migration-bybit-long-paper.service")
+    assert systemctl_lines.index(
+        "start liquidity-migration-bybit-continuous-demo.service"
+    ) < systemctl_lines.index("start liquidity-migration-continuous-hedge.timer")
     assert "service state: restored" in executed.stdout
+
+
+def test_reset_demo_paper_ledgers_reinventories_state_after_quiescence(
+    tmp_path: Path,
+) -> None:
+    import tarfile
+
+    script, env_file, env, _log = _ledger_reset_harness(tmp_path)
+    old_account_event = tmp_path / "data/bybit-account-execution/old-event.jsonl"
+    old_account_event.parent.mkdir(parents=True)
+    old_account_event.write_text("old-account-epoch\n", encoding="utf-8")
+    raced_request = tmp_path / "data/bybit-account-intents/pending/raced.json"
+    env["FAKE_CREATE_DURING_STOP"] = str(raced_request)
+    env["FAKE_CREATE_DURING_STOP_MARKER"] = str(tmp_path / "race-created")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--execute",
+            "--sleeves",
+            "long",
+            "--env-file",
+            str(env_file),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not raced_request.exists(), "pre-quiescence request must not enter the new epoch"
+    archives = list((tmp_path / "data/_archive").glob("ledger-reset-*.tar.gz"))
+    assert len(archives) == 1
+    with tarfile.open(archives[0]) as archive:
+        assert str(raced_request.relative_to(tmp_path)) in archive.getnames()
 
 
 @pytest.mark.parametrize("via_symlink", [False, True])
@@ -1696,6 +1999,143 @@ def test_reset_demo_paper_ledgers_refuses_archive_inside_reset_target_after_cano
     assert not log.exists(), "containment refusal must precede all systemd access"
 
 
+def test_reset_demo_paper_ledgers_refuses_archive_inside_preserved_canonical_journal(
+    tmp_path: Path,
+) -> None:
+    script, _env_file, env, log = _ledger_reset_harness(tmp_path)
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+    archive_dir = Path(
+        "data/bybit-long-demo-event/canonical_journal/operator-archive"
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--sleeves",
+            "long",
+            "--archive-dir",
+            str(archive_dir),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "--archive-dir must be outside reset targets" in result.stderr
+    assert ledger.exists()
+    assert not log.exists(), "containment refusal must precede all systemd access"
+
+
+@pytest.mark.parametrize("overlap_kind", ["strategy", "account"])
+def test_reset_demo_paper_ledgers_refuses_overlapping_account_routes(
+    tmp_path: Path,
+    overlap_kind: str,
+) -> None:
+    script, _env_file, env, log = _ledger_reset_harness(tmp_path)
+    account_env = Path(env["ACCOUNT_EXECUTION_ENV_FILE"])
+    if overlap_kind == "strategy":
+        account_root = "data/bybit-long-demo-event"
+        inbox_root = "data/bybit-account-intents"
+    else:
+        account_root = "data/bybit-account-execution"
+        inbox_root = "data/bybit-account-execution/inbox"
+    account_env.write_text(
+        "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1\n"
+        f"ACCOUNT_EXECUTION_ROOT={account_root}\n"
+        f"ACCOUNT_INTENT_INBOX_ROOT={inbox_root}\n"
+        "ACCOUNT_CAPTURE_ROOT=data/bybit-account-market-capture\n",
+        encoding="utf-8",
+    )
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+
+    result = subprocess.run(
+        ["bash", str(script), "--sleeves", "long"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "account execution roots must be pairwise disjoint" in result.stderr
+    assert ledger.exists()
+    assert not log.exists(), "route-layout refusal must precede all systemd access"
+
+
+def test_reset_demo_paper_ledgers_reads_route_files_as_data_not_shell_code(
+    tmp_path: Path,
+) -> None:
+    script, _env_file, env, log = _ledger_reset_harness(tmp_path)
+    account_env = Path(env["ACCOUNT_EXECUTION_ENV_FILE"])
+    with account_env.open("a", encoding="utf-8") as handle:
+        handle.write("MODE=execute\nARCHIVE_DIR=/should-not-be-used\n")
+    ledger = tmp_path / "data/bybit-long-demo-event/long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+
+    result = subprocess.run(
+        ["bash", str(script), "--sleeves", "long"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "mode: dry-run" in result.stdout.lower()
+    assert "archive dir: data/_archive" in result.stdout
+    assert not log.exists()
+
+
+def test_reset_demo_paper_ledgers_scopes_credential_and_telegram_environment(
+    tmp_path: Path,
+) -> None:
+    script, env_file, env, _log = _ledger_reset_harness(tmp_path)
+    with env_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "TELEGRAM_BOT_TOKEN=must-not-leak\n"
+            "TELEGRAM_CHAT_ID=must-not-leak\n"
+        )
+    old_account_event = tmp_path / "data/bybit-account-execution/old-event.jsonl"
+    old_account_event.parent.mkdir(parents=True)
+    old_account_event.write_text("old-account-epoch\n", encoding="utf-8")
+    flat_probe = tmp_path / "flat-env-probe"
+    systemctl_leak = tmp_path / "systemctl-secret-leak"
+    env["FAKE_FLAT_ENV_PROBE"] = str(flat_probe)
+    env["FAKE_SECRET_LEAK_MARKER"] = str(systemctl_leak)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--execute",
+            "--sleeves",
+            "long",
+            "--env-file",
+            str(env_file),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert flat_probe.read_text(encoding="utf-8") == "credentials-only\n"
+    assert not systemctl_leak.exists()
+
+
 def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_is_opt_in(
     tmp_path: Path,
 ) -> None:
@@ -1727,10 +2167,8 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     )
     demo_risk_events = continuous_ledger.parent / "continuous_risk_events.jsonl"
     demo_lifecycle_events = continuous_ledger.parent / "continuous_lifecycle_events.jsonl"
-    demo_dynexit_shadow = continuous_ledger.parent / "continuous_dynexit_shadow.jsonl"
     paper_risk_events = paper_ledger.parent / "continuous_risk_events.jsonl"
     paper_lifecycle_events = paper_ledger.parent / "continuous_lifecycle_events.jsonl"
-    paper_dynexit_shadow = paper_ledger.parent / "continuous_dynexit_shadow.jsonl"
     long_ledger.mkdir(parents=True)
     (long_ledger / "part.parquet").write_bytes(b"x")
     cache.mkdir(parents=True)
@@ -1758,10 +2196,8 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     for events in (
         demo_risk_events,
         demo_lifecycle_events,
-        demo_dynexit_shadow,
         paper_risk_events,
         paper_lifecycle_events,
-        paper_dynexit_shadow,
     ):
         events.write_text('{"event":"old-forward-window"}\n', encoding="utf-8")
     for state in (demo_equity_state, paper_equity_state):
@@ -1787,14 +2223,20 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     assert executed.returncode == 0, executed.stderr
     assert long_ledger.exists(), "continuous-only reset must preserve long ledgers"
     assert continuous_ledger.exists() and paper_ledger.exists()
-    assert hedge_ledger.exists(), "continuous hedge projection must be rebuilt from its journal"
+    assert not hedge_ledger.parent.exists(), (
+        "retired hedge compatibility root must not survive account-owner cutover"
+    )
     assert read_dataset(continuous_ledger.parent, "continuous_fade_demo_trades").select("status").item() == "awaiting_pnl"
+    paper_reset_row = read_dataset(
+        paper_ledger.parent,
+        "continuous_fade_paper_trades",
+    ).to_dicts()[0]
+    assert paper_reset_row["status"] == "archived"
+    assert paper_reset_row["canonical_reconciliation_state"] == "paper_epoch_archived"
+    assert "canonical_flat_verified_at_ms" not in paper_reset_row
     assert not demo_risk_events.exists() and not demo_lifecycle_events.exists()
     assert not paper_risk_events.exists() and not paper_lifecycle_events.exists(), (
         "old operational failures must not contaminate the post-reset forward window"
-    )
-    assert not demo_dynexit_shadow.exists() and not paper_dynexit_shadow.exists(), (
-        "pre-reset dynamic-exit shadow evidence must not leak into the new forward window"
     )
     assert "reset-boundary-heartbeats-ok" in executed.stdout
     demo_boundary = read_dataset(
@@ -1807,7 +2249,10 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     )
     assert demo_boundary.height == 1 and paper_boundary.height == 1
     assert demo_boundary.select("reason").item() == "verified_flat_ledger_reset"
-    assert paper_boundary.select("account_flat_verified").item() is True
+    assert demo_boundary.select("account_flat_verified").item() is True
+    assert paper_boundary.select("reason").item() == "archived_paper_epoch_reset"
+    assert paper_boundary.select("account_flat_verified").item() is False
+    assert paper_boundary.select("paper_epoch_archived").item() is True
     assert cache.exists(), "cache is preserved unless explicitly selected"
     assert demo_equity_state.exists() and paper_equity_state.exists(), (
         "a ledger reset must not erase the account drawdown high-water risk memory"
@@ -1823,9 +2268,9 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     assert str(paper_equity_state.relative_to(tmp_path)) in names
     assert str(demo_risk_events.relative_to(tmp_path)) in names
     assert str(paper_lifecycle_events.relative_to(tmp_path)) in names
-    assert str(demo_dynexit_shadow.relative_to(tmp_path)) in names
-    assert str(paper_dynexit_shadow.relative_to(tmp_path)) in names
     assert f"preserved_risk_state={demo_equity_state.relative_to(tmp_path)}" in manifest_text
+    assert "demo_boundary=venue_verified_flat_positions_0_open_orders_0" in manifest_text
+    assert "paper_boundary=archived_deterministic_epoch_not_carried_forward" in manifest_text
 
     cache_reset = subprocess.run(
         [
@@ -1849,15 +2294,15 @@ def test_reset_demo_paper_ledgers_continuous_selection_includes_hedge_and_cache_
     assert demo_equity_state.exists() and paper_equity_state.exists()
 
 
-def test_reset_demo_paper_ledgers_all_includes_shared_risk_compatibility_ledger(
+def test_reset_demo_paper_ledgers_all_archives_and_removes_shared_compatibility_root(
     tmp_path: Path,
 ) -> None:
     script, env_file, env, _ = _ledger_reset_harness(tmp_path)
     shared_trade = tmp_path / "data" / "bybit-demo-event" / "event_demo_trades"
     shared_order = tmp_path / "data" / "bybit-demo-event" / "event_demo_orders"
-    shared_state = tmp_path / "data" / "bybit-demo-event" / "cross_sleeve_account_state"
-    shared_state.mkdir(parents=True)
-    (shared_state / "part.parquet").write_bytes(b"x")
+    retired_artifact = tmp_path / "data" / "bybit-demo-event" / "retired-artifact"
+    retired_artifact.mkdir(parents=True)
+    (retired_artifact / "part.parquet").write_bytes(b"x")
     write_dataset(
         pl.DataFrame([{
             "trade_id": "shared-reset",
@@ -1883,12 +2328,10 @@ def test_reset_demo_paper_ledgers_all_includes_shared_risk_compatibility_ledger(
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert shared_trade.exists()
-    assert read_dataset(shared_trade.parent, "event_demo_trades").select("status").item() == "awaiting_pnl"
-    assert shared_order.exists(), "registered empty order projection should be materialized"
-    assert read_dataset(shared_order.parent, "event_demo_orders").is_empty()
-    assert shared_state.exists(), "derived account state is not a trade ledger and stays preserved"
-    assert "shared-compat" in result.stdout
+    assert not shared_trade.parent.exists()
+    assert not shared_order.exists()
+    assert not retired_artifact.exists()
+    assert "retire-shared-compat" in result.stdout
 
 
 def test_reset_demo_paper_ledgers_refuses_real_money_before_service_mutation(tmp_path: Path) -> None:
@@ -1961,7 +2404,7 @@ def test_reset_demo_paper_ledgers_refuses_systemd_env_mismatch_before_service_mu
         "BYBIT_DEMO_API_KEY=other\nBYBIT_DEMO_API_SECRET=other\n",
         encoding="utf-8",
     )
-    mismatch_unit = "liquidity-migration-bybit-continuous-demo.service"
+    mismatch_unit = "liquidity-migration-account-execution.service"
     env["FAKE_SYSTEMD_ENV_MISMATCH_UNIT"] = mismatch_unit
     env["FAKE_SYSTEMD_ENV_MISMATCH_FILE"] = str(other_env)
 
@@ -1995,7 +2438,7 @@ def test_reset_demo_paper_ledgers_refuses_later_credential_override(
     ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
     ledger.mkdir(parents=True)
     (ledger / "part.parquet").write_bytes(b"x")
-    unit = "liquidity-migration-bybit-long-demo.service"
+    unit = "liquidity-migration-account-execution.service"
     if override_kind == "later_file":
         override = tmp_path / "later-credentials.env"
         override.write_text(
@@ -2025,23 +2468,65 @@ def test_reset_demo_paper_ledgers_refuses_later_credential_override(
     )
 
 
+@pytest.mark.parametrize(
+    ("unit", "key"),
+    [
+        ("liquidity-migration-account-execution.service", "ACCOUNT_CAPTURE_ROOT"),
+        (
+            "liquidity-migration-account-paper-execution.service",
+            "ACCOUNT_PAPER_CAPTURE_ROOT",
+        ),
+    ],
+)
+def test_reset_demo_paper_ledgers_refuses_owner_route_override(
+    tmp_path: Path,
+    unit: str,
+    key: str,
+) -> None:
+    script, env_file, env, log = _ledger_reset_harness(tmp_path)
+    ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
+    ledger.mkdir(parents=True)
+    (ledger / "part.parquet").write_bytes(b"x")
+    override = tmp_path / "later-owner-route.env"
+    override.write_text(f"{key}=data/wrong-owner-route\n", encoding="utf-8")
+    env["FAKE_SYSTEMD_EXTRA_ENV_UNIT"] = unit
+    env["FAKE_SYSTEMD_EXTRA_ENV_FILE"] = str(override)
+
+    result = subprocess.run(
+        ["bash", str(script), "--execute", "--sleeves", "long", "--env-file", str(env_file)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "ambiguous route environment" in result.stderr
+    assert ledger.exists()
+    systemctl_log = log.read_text(encoding="utf-8")
+    assert not any(
+        line.startswith(("stop ", "start ")) for line in systemctl_log.splitlines()
+    )
+
+
 def test_reset_demo_paper_ledgers_lock_stays_held_during_failure_recovery_restart(
     tmp_path: Path,
 ) -> None:
     import time
 
-    risk_unit = "liquidity-migration-bybit-risk.service"
+    owner_unit = "liquidity-migration-account-execution.service"
     script, env_file, env, log = _ledger_reset_harness(
         tmp_path,
         account_guard_rc=7,
-        active_units=(risk_unit,),
+        active_units=(owner_unit,),
     )
     ledger = tmp_path / "data" / "bybit-long-demo-event" / "long_native_demo_trades"
     ledger.mkdir(parents=True)
     (ledger / "part.parquet").write_bytes(b"x")
     release_restart = tmp_path / "release-restart"
     env["FAKE_START_WAIT_FILE"] = str(release_restart)
-    env["FAKE_START_WAIT_UNIT"] = risk_unit
+    env["FAKE_START_WAIT_UNIT"] = owner_unit
 
     first = subprocess.Popen(
         ["bash", str(script), "--execute", "--sleeves", "long", "--env-file", str(env_file)],
@@ -2054,7 +2539,7 @@ def test_reset_demo_paper_ledgers_lock_stays_held_during_failure_recovery_restar
     try:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if log.exists() and f"start {risk_unit}" in log.read_text(encoding="utf-8"):
+            if log.exists() and f"start {owner_unit}" in log.read_text(encoding="utf-8"):
                 break
             time.sleep(0.02)
         else:
@@ -2091,7 +2576,8 @@ def test_reset_demo_paper_ledgers_flat_check_failure_restores_services_without_d
     tmp_path: Path,
 ) -> None:
     active = (
-        "liquidity-migration-bybit-risk.service",
+        "liquidity-migration-account-execution.service",
+        "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-continuous-demo.service",
     )
     script, env_file, env, log = _ledger_reset_harness(
@@ -2122,8 +2608,9 @@ def test_reset_demo_paper_ledgers_flat_check_failure_restores_services_without_d
     assert ledger.exists(), "flat-account guard must run before archive/removal"
     assert not (tmp_path / "data" / "_archive").exists()
     systemctl_log = log.read_text(encoding="utf-8")
-    assert "stop liquidity-migration-bybit-risk.service" in systemctl_log
-    assert "start liquidity-migration-bybit-risk.service" in systemctl_log
+    assert "stop liquidity-migration-account-execution.service" in systemctl_log
+    assert "start liquidity-migration-account-execution.service" in systemctl_log
+    assert "start liquidity-migration-account-paper-execution.service" in systemctl_log
     assert "start liquidity-migration-bybit-continuous-demo.service" in systemctl_log
 
 
@@ -2205,7 +2692,7 @@ def test_unit_execstart_args_parse_against_their_script_parsers() -> None:
             ) from exc
         checked += 1
     # the units this test exists for must actually be covered
-    assert checked >= 4, f"expected at least 4 argv-driven units, checked {checked}"
+    assert checked >= 3, f"expected at least 3 argv-driven units, checked {checked}"
 
 
 def test_vps_deploy_paths_filter_covers_every_unit_invoked_script() -> None:
@@ -2285,13 +2772,12 @@ def _unit_environment(unit_path: Path) -> dict[str, str]:
         ("liquidity-migration-bybit-continuous-paper.service", "run_bybit_continuous_demo_event_engine.sh"),
         ("liquidity-migration-bybit-long-demo.service", "run_bybit_long_demo_event_engine.sh"),
         ("liquidity-migration-bybit-long-paper.service", "run_bybit_long_demo_event_engine.sh"),
-        ("liquidity-migration-bybit-risk.service", "run_bybit_demo_ws_risk_engine.sh"),
     ],
 )
 def test_wrapper_unit_env_builds_argv_that_parses(unit_name: str, wrapper_name: str, tmp_path: Path) -> None:
     """Round 4: the ExecStart<->argparse parity test deliberately skips the
     env-driven run_*.sh wrapper units — so a dropped/renamed CLI flag bricked
-    the ORDER-SUBMITTING daemon at restart instead of failing the pre-restart
+    the target producer at restart instead of failing the pre-restart
     smoke gate. Run each wrapper with PYTHON_BIN pointed at an argv-capturing
     stub under the unit's own Environment= values, then parse the captured argv
     with the real CLI parser."""
@@ -2314,21 +2800,32 @@ def test_wrapper_unit_env_builds_argv_that_parses(unit_name: str, wrapper_name: 
 
     env = {**os.environ, **_unit_environment(unit_path)}
     env["PYTHON_BIN"] = stub.as_posix()
-    # The wrappers fail loud on missing telegram/API creds (correct on the box,
-    # where the EnvironmentFile provides them) — supply dummies here. The stub
-    # never reaches the network.
-    env.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
-    env.setdefault("TELEGRAM_CHAT_ID", "1")
-    env.setdefault("BYBIT_DEMO_API_KEY", "test-key")
-    env.setdefault("BYBIT_DEMO_API_SECRET", "test-secret")
+    env["ACCOUNT_INTENT_INBOX_ROOT"] = str(tmp_path / "account-intents")
+    env["ACCOUNT_EXECUTION_ROOT"] = str(tmp_path / "account-root")
     env["RUN_ONCE"] = "1"
+
+    # Preserve the production capture-authority check while relocating its filesystem
+    # fixture and repo-root lookup into this unprivileged test directory.
+    capture_enabled = tmp_path / "account-execution-capture-enabled"
+    capture_enabled.touch()
+    wrapper_text = (repo / "scripts" / wrapper_name).read_text(encoding="utf-8")
+    wrapper_text = wrapper_text.replace(
+        '/etc/liquidity-migration/account-execution-capture-enabled',
+        str(capture_enabled),
+    ).replace(
+        'REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"',
+        f'REPO_ROOT="{repo}"',
+    )
+    test_wrapper = tmp_path / wrapper_name
+    test_wrapper.write_text(wrapper_text, encoding="utf-8")
+    test_wrapper.chmod(0o755)
 
     # Daemon-mode wrappers exec the stub and return immediately; the legacy
     # single-cycle loop (USE_DAEMON=0, the long paper unit) honors RUN_ONCE here
     # so this smoke gate remains deterministic.
     try:
         result = subprocess.run(
-            ["bash", str(repo / "scripts" / wrapper_name)],
+                ["bash", str(test_wrapper)],
             env=env, cwd=repo, capture_output=True, text=True, timeout=10,
         )
         assert result.returncode == 0, f"{wrapper_name} failed under {unit_name} env: {result.stderr}"
@@ -2626,22 +3123,57 @@ def test_deploy_and_verify_check_bybit_order_permissions_after_env_guard() -> No
         check_idx = text.index("scripts/check_bybit_order_permissions.py")
         assert source_idx < guard_idx < check_idx
         assert token in text
+        assert "ACCOUNT_EXECUTION_KERNEL_REQUIRED" in text
+        assert "ACCOUNT_PAPER_KERNEL_REQUIRED" in text
+        assert "ACCOUNT_CAPTURE_ROOT" in text
+        assert "ACCOUNT_PAPER_CAPTURE_ROOT" in text
 
 
-def test_order_submitting_runners_fail_fast_on_bybit_order_permissions() -> None:
-    # A read-only demo key can pass wallet/position reads and then fail only at
-    # set_leverage. Every submit-enabled wrapper should detect that at startup.
-    for script_name, confirm_token, context in [
-        ("run_bybit_long_demo_event_engine.sh", "CONFIRM_DEMO_ORDERS=1", "--context long-demo"),
-        ("run_bybit_continuous_demo_event_engine.sh", "CONFIRM_DEMO_ORDERS=1", "--context continuous-demo"),
-        ("run_bybit_demo_ws_risk_engine.sh", "CONFIRM_DEMO_ORDERS=1", "--context ws-risk"),
-        ("run_continuous_hedge.sh", "CONFIRM_DEMO_ORDERS=1", "--context continuous-hedge"),
-    ]:
+def test_target_producer_runners_have_no_private_venue_authority() -> None:
+    for script_name in (
+        "run_bybit_long_demo_event_engine.sh",
+        "run_bybit_continuous_demo_event_engine.sh",
+    ):
         text = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-        confirm_idx = text.index(confirm_token)
-        check_idx = text.index("scripts/check_bybit_order_permissions.py")
-        assert confirm_idx < check_idx
-        assert context in text
+        assert "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1" in text
+        assert "ACCOUNT_INTENT_INBOX_ROOT" in text
+        assert "ACCOUNT_EXECUTION_ROOT" in text
+        assert "check_bybit_order_permissions.py" not in text
+        assert "CONFIRM_DEMO_ORDERS" not in text
+        assert "BYBIT_DEMO_API_KEY" not in text
+        assert "BYBIT_DEMO_API_SECRET" not in text
+
+    long_runner = (REPO_ROOT / "scripts" / "run_bybit_long_demo_event_engine.sh").read_text(
+        encoding="utf-8"
+    )
+    for retired in (
+        "ORDER_FILL_CONFIRM_SECONDS",
+        "ORDER_FILL_POLL_INTERVAL_SECONDS",
+        "FALLBACK_EQUITY_USDT",
+        "--order-fill-confirm-seconds",
+        "--order-fill-poll-interval-seconds",
+        "--fallback-equity-usdt",
+        "--record-dry-run",
+        "--telegram",
+    ):
+        assert retired not in long_runner
+
+
+def test_hedge_runner_only_publishes_to_the_mandatory_account_owner() -> None:
+    text = (REPO_ROOT / "scripts" / "run_continuous_hedge.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1"' in text
+    assert "ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT are required" in text
+    assert "account-execution-capture-enabled" in text
+    assert "--account-inbox-root" in text
+    assert "--account-root" in text
+    assert "--submit" in text
+    assert "CONFIRM_DEMO_ORDERS" not in text
+    assert "check_bybit_order_permissions.py" not in text
+    assert "HEDGE_DATA_ROOT" not in text
+    assert "--data-root" not in text
 
 
 def test_order_permission_checker_fails_cleanly_without_demo_credentials() -> None:
@@ -2677,11 +3209,13 @@ def test_order_permission_checker_fails_cleanly_without_demo_credentials() -> No
 
 def test_deploy_keeps_hedge_timer_when_continuous_off_but_leg_open() -> None:
     # deploy-env-timers-1: the gating must NOT be a bare apply_timer_enable on
-    # CONTINUOUS_SLEEVE; it must consult the hedge ledger and keep the timer enabled
-    # while an open hedge leg exists.
+    # CONTINUOUS_SLEEVE; it must consult the canonical account projection and
+    # keep the timer enabled while an open hedge target exists.
     txt = DEPLOY_SH.read_text()
     assert "_hedge_timer_state" in txt
-    assert "bybit-continuous-hedge-event" in txt
+    assert "canonical_strategy_trade_rows" in txt
+    assert 'ACCOUNT_ROOT="$ACCOUNT_EXECUTION_ROOT"' in txt
+    assert "bybit-continuous-hedge-event" not in txt
     # The verify side must mirror the apply side, not raw CONTINUOUS_SLEEVE.
     assert 'CONTINUOUS_HEDGE_TIMER="$_hedge_timer_state"' in txt
     assert 'verify_hedge_timer_enable "$_hedge_timer_state"' in txt
@@ -2902,12 +3436,14 @@ def test_recovery_collector_verify_is_in_the_post_settle_block_before_verify_ok(
     assert settle_idx < is_enabled_idx < verify_ok_idx
 
 
-def test_recovery_collector_verify_matches_risk_service_pattern() -> None:
-    """Parity check: the collector is verified the SAME way as the risk service
-    (both is-active and is-enabled, --quiet), so the gate fails loud."""
+def test_recovery_collector_verify_matches_account_owner_pattern() -> None:
+    """The collector and both owners fail loud on inactive/disabled state."""
     text = _read(RECOVERY)
-    risk = "liquidity-migration-bybit-risk.service"
-    for unit in (risk, COLLECTOR):
+    for unit in (
+        "liquidity-migration-account-execution.service",
+        "liquidity-migration-account-paper-execution.service",
+        COLLECTOR,
+    ):
         assert re.search(
             rf"^\s*systemctl is-active --quiet {re.escape(unit)}\s*$", text, re.MULTILINE
         ), f"missing is-active --quiet for {unit}"
@@ -2916,78 +3452,48 @@ def test_recovery_collector_verify_matches_risk_service_pattern() -> None:
         ), f"missing is-enabled --quiet for {unit}"
 
 
-# --- relocated from tests/test_audit_int_iJ.py (audit integration bucket iJ) ---
-# deploy-ci-4: the combined-book report systemd unit must keep compatibility
-# roots out of the active report while every active sleeve root stays wired.
-_REPORT_UNIT = (
-    Path(__file__).resolve().parents[1]
-    / "deploy"
-    / "systemd"
-    / "liquidity-migration-combined-book-report.service"
-)
-_REPORT_TIMER = _REPORT_UNIT.with_suffix(".timer")
-_LIVENESS_UNIT = _REPORT_UNIT.with_name("liquidity-migration-demo-liveness.service")
-_RISK_UNIT = _REPORT_UNIT.with_name("liquidity-migration-bybit-risk.service")
+# The account execution owner is now the sole operational notification and
+# reconciliation authority; the legacy report/risk units must stay deleted.
+_SYSTEMD_DIR = REPO_ROOT / "deploy" / "systemd"
 
 
-def _report_unit_text() -> str:
-    return _REPORT_UNIT.read_text(encoding="utf-8")
+def test_account_owner_replaces_legacy_risk_and_report_units() -> None:
+    owner = (_SYSTEMD_DIR / "liquidity-migration-account-execution.service").read_text(
+        encoding="utf-8"
+    )
+    liveness = (_SYSTEMD_DIR / "liquidity-migration-demo-liveness.service").read_text(
+        encoding="utf-8"
+    )
 
-
-def test_telegram_report_is_hourly_and_operational_repeats_are_bounded() -> None:
-    timer = _REPORT_TIMER.read_text(encoding="utf-8")
-    liveness = _LIVENESS_UNIT.read_text(encoding="utf-8")
-    risk = _RISK_UNIT.read_text(encoding="utf-8")
-
-    assert "OnCalendar=*-*-* *:05:00 UTC" in timer
+    assert "run_account_execution_service.sh" in owner
+    assert "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1" in owner
+    assert "CONFIRM_DEMO_ORDERS=1" in owner
+    assert "TELEGRAM_ENABLED=1" in owner
     assert "--cooldown-min 360" in liveness
-    assert "TELEGRAM_POSITION_LOSS_LEVELS=0.05,0.10,0.20,0.40" in risk
-
-
-def test_report_unit_no_longer_wires_compatibility_short_data_root() -> None:
-    """Compatibility short roots must not appear in the live report ExecStart."""
-    text = _report_unit_text()
-    assert "--short-data-root" not in text, (
-        "report unit still wires --short-data-root for the compatibility root"
-    )
-    assert "bybit-demo-event" not in text, (
-        "report unit still references the compatibility data root"
-    )
-
-
-def test_report_unit_still_wires_every_active_sleeve_root() -> None:
-    """Long, continuous, paper, and hedge roots stay wired for the active books."""
-    text = _report_unit_text()
-    assert "combined-book-telegram-report" in text
-    for arg in (
-        "--long-data-root data/bybit-long-demo-event",
-        "--continuous-data-root data/bybit-continuous-demo-event",
-        "--continuous-paper-data-root data/bybit-continuous-paper-event",
-        "--continuous-hedge-data-root data/bybit-continuous-hedge-event",
-        "--include-live-positions",
+    for retired in (
+        "liquidity-migration-bybit-risk.service",
+        "liquidity-migration-combined-book-report.service",
+        "liquidity-migration-combined-book-report.timer",
     ):
-        assert arg in text, f"report unit dropped an active-sleeve arg: {arg}"
+        assert not (_SYSTEMD_DIR / retired).exists()
 
 
-def test_report_unit_execstart_still_well_formed() -> None:
-    """The multi-line ExecStart continuation must stay intact after the edit:
-    every line but the last in the ExecStart block ends with a backslash, and
-    the unit still declares a single ExecStart."""
-    lines = _report_unit_text().splitlines()
-    exec_indices = [i for i, ln in enumerate(lines) if ln.startswith("ExecStart=")]
-    assert len(exec_indices) == 1, "expected exactly one ExecStart in the report unit"
+def test_account_owner_launchers_have_no_default_state_routes() -> None:
+    demo = (REPO_ROOT / "scripts" / "run_account_execution_service.sh").read_text(
+        encoding="utf-8"
+    )
+    paper = (
+        REPO_ROOT / "scripts" / "run_account_paper_execution_service.sh"
+    ).read_text(encoding="utf-8")
 
-    start = exec_indices[0]
-    # Walk the continued command; every continued line ends with a trailing '\'.
-    i = start
-    saw_continuation = False
-    while lines[i].rstrip().endswith("\\"):
-        saw_continuation = True
-        i += 1
-        assert i < len(lines), "ExecStart continuation runs off the end of the unit"
-    assert saw_continuation, "ExecStart should span multiple continued lines"
-    # The final command line of the block must not dangle a continuation.
-    assert not lines[i].rstrip().endswith("\\")
+    for text in (demo, paper):
+        assert "account-execution-capture-enabled" in text
+        assert "ACCOUNT_INTENT_INBOX_ROOT" in text
+        assert 'ACCOUNT_ROOT="${ACCOUNT_EXECUTION_ROOT:-}"' in text
+    assert 'ACCOUNT_CAPTURE_ROOT="${ACCOUNT_CAPTURE_ROOT:-}"' in demo
+    assert 'ACCOUNT_CAPTURE_ROOT="${ACCOUNT_PAPER_CAPTURE_ROOT:-}"' in paper
+    assert "data/bybit-account-execution" not in demo
+    assert "data/bybit-account-paper" not in paper
 
 
 # --- relocated from tests/test_audit_int_iM.py (audit bucket iM) ---------------
@@ -3055,24 +3561,27 @@ def test_paper_unit_keeps_its_own_paper_data_root() -> None:
 
 
 def test_paper_unit_load_bearing_paper_knobs_intact() -> None:
-    """Dropping the follow line must not disturb the knobs that make this a true
-    no-submit shadow of the demo book (PAPER_MODE/dry-run routing + the mirrored
-    strategy knobs)."""
+    """The target-only paper service keeps its routing and strategy knobs."""
     env = _paper_environment_assignments()
     for key, expected in (
-        ("SUBMIT_ORDERS", "0"),
-        ("RECORD_DRY_RUN", "1"),
-        ("PAPER_MODE", "1"),
+        ("EXECUTION_ENVIRONMENT", "paper"),
         ("STRATEGY_PROFILE", "continuous_ensemble_v2"),
-        ("CONTINUOUS_SNIPER", "0"),
-        ("LEFT_DECILE_EXIT_ENABLED", "0"),
-        ("STOP_APPROACH_FRAC", "0"),
-        ("FAILED_FADE_HOURS", "0"),
-        ("BREAKEVEN_ARM_PCT", "0"),
     ):
         assert env.get(key) == expected, (
             f"PAPER unit knob {key} changed: expected {expected!r}, got {env.get(key)!r}"
         )
+    for retired in (
+        "LEFT_DECILE_EXIT_ENABLED",
+        "STOP_APPROACH_FRAC",
+        "FAILED_FADE_HOURS",
+        "BREAKEVEN_ARM_PCT",
+        "DAILY_REBALANCE_ENABLED",
+        "ENTRY_PORTFOLIO_HEAT_CAP_FRAC",
+        "ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC",
+        "TELEGRAM_ENABLED",
+        "CONTINUOUS_SNIPER",
+    ):
+        assert retired not in env
 
 
 def test_paper_unit_documents_the_dropped_follow_override() -> None:

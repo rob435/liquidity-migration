@@ -16,7 +16,6 @@ from liquidity_migration.continuous_hedge_manager import (
     HEDGE_SYMBOL,
     HEDGE_SYMBOL_2,
     ContinuousHedgeConfig,
-    build_hedge_trade_row,
     compute_hedge_decision_2f,
     load_warmstart_2f,
 )
@@ -112,19 +111,6 @@ def test_load_warmstart_2f_backward_compatible_without_eth(tmp_path) -> None:
     assert unit == [0.001]
     assert btc == [0.01]
     assert eth == [None]
-
-
-def test_hedge_trade_row_symbol_parameter() -> None:
-    cfg = ContinuousHedgeConfig()
-    row = build_hedge_trade_row(
-        cfg, qty=0.5, entry_price=3_000.0, now_ms=1_700_000_000_000,
-        order_link_id="lm-en-ca-test", symbol=HEDGE_SYMBOL_2,
-    )
-    assert row["symbol"] == HEDGE_SYMBOL_2
-    assert row["side"] == "long"
-    assert row["sleeve"] == "continuous_addon"
-    # force-exit triggers all disabled (externally managed) — the ws_risk safety contract
-    assert row["stop_price"] == 0.0 and row["take_profit_price"] == 0.0 and row["planned_exit_ts_ms"] == 0
 
 
 # ==========================================================================

@@ -245,29 +245,6 @@ def test_beta_extra_lag_changes_estimation_not_position_day() -> None:
     assert df0["hedge_ratio"].to_list() != df1["hedge_ratio"].to_list()
 
 
-def test_plan_continuous_sniper_orders() -> None:
-    from liquidity_migration.continuous_demo import (
-        ContinuousDemoCycleConfig,
-        plan_continuous_sniper_orders,
-    )
-
-    entries = [
-        {"symbol": "AAAUSDT", "entry_price": 100.0, "qty": 10.0, "notional_usdt": 1000.0, "trade_id": "t1", "signal_ts_ms": 5},
-        {"symbol": "BBBUSDT", "entry_price": 0.0, "qty": 0.0, "notional_usdt": 0.0, "trade_id": "t2"},  # unusable
-    ]
-    off = plan_continuous_sniper_orders(entries, config=ContinuousDemoCycleConfig(), price_by_symbol={})
-    assert off == []  # default disabled
-    cfg = ContinuousDemoCycleConfig(sniper_enabled=True, sniper_wick_pct=0.08, sniper_size_frac=0.25)
-    plans = plan_continuous_sniper_orders(entries, config=cfg, price_by_symbol={})
-    assert len(plans) == 1  # the zero-price entry is skipped
-    p = plans[0]
-    assert p["symbol"] == "AAAUSDT" and p["side"] == "Sell" and p["reduce_only"] is False
-    assert p["order_type"] == "Limit"
-    assert abs(p["limit_price"] - 108.0) < 1e-9  # entry * 1.08, above entry (squeeze wick)
-    assert abs(p["qty"] - 2.5) < 1e-9 and abs(p["notional_usdt"] - 250.0) < 1e-9  # 0.25x base
-    assert p["base_trade_id"] == "t1"
-
-
 # ---------------------------------------------------------------------------
 # Relocated from tests/test_audit_fix_b03.py (sizing-rebalance-1). Reuses the
 # module-level `_components`, `_rule`, `_hedge_rule` helpers above.

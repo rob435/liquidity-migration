@@ -1,6 +1,6 @@
 # Active Trading Logic
 
-Last manually reconciled with code and deploy files: 2026-07-10. Verify the
+Last manually reconciled with code and deploy files: 2026-07-13. Verify the
 current sources below before acting.
 
 This file describes the active profile lifecycle. It is not a research diary.
@@ -21,25 +21,39 @@ When files disagree, fix them in one change. Read in this order:
    effectively running.
 2. `deploy/sleeves.env` for the repository deployment ceiling/default; host
    overrides may narrow an `on` sleeve to `off`.
-3. `liquidity_migration/promoted.py` for registry objects.
-4. `liquidity_migration/continuous_demo.py` and
+3. `deploy/systemd/*.service` and the account execution environment for the
+   repository process topology. The capture marker authorizes a bounded evidence
+   window; the separate evidence-bound deploy authorization is still an operator gate, not proof
+   that the host passed it.
+4. `liquidity_migration/account_service.py`, `account_kernel.py`,
+   `account_service_runner.py`, `account_reconcile.py`,
+   `account_venue_accounting.py`, and `account_paper_runner.py` for execution,
+   accounting, risk and notification ownership.
+5. `liquidity_migration/promoted.py` for registry objects.
+6. `liquidity_migration/continuous_demo.py` and
    `liquidity_migration/continuous_forward_replay.py` for continuous runtime and
    replay config.
-5. `liquidity_migration/long_native_event_demo.py` for long v11a runtime config.
-6. `deploy/systemd/*.service` for repository service env; compare it with the
-   effective VPS unit state.
+7. `liquidity_migration/long_native_event_demo.py` for long v11a runtime config.
 
 ## Running Surface
 
 The repository ceiling in `deploy/sleeves.env` currently requests:
 
-| Sleeve | Toggle | Runtime |
+| Process group | Gate | Runtime role |
 | --- | --- | --- |
-| Long demo + paper | `LONG_SLEEVE=on` | bybit long event engines |
-| Continuous demo | `CONTINUOUS_SLEEVE=on` | bybit continuous event engine |
-| Continuous paper | `CONTINUOUS_PAPER_SLEEVE=on` | bybit continuous dry-run engine |
+| Demo account owner | capture marker + account env | sole Bybit mutator; position/funding reconciler; risk/protection and Telegram owner |
+| Paper account owner | capture marker + paper account env + passing calibration | sole deterministic paper execution/accounting owner |
+| Long demo + paper | `LONG_SLEEVE=on` | signal engines that publish component targets |
+| Continuous demo | `CONTINUOUS_SLEEVE=on` | signal engine that publishes component targets |
+| Continuous paper | `CONTINUOUS_PAPER_SLEEVE=on` | signal engine that publishes paper component targets |
+| Continuous hedge | continuous demo gate + timer | BTC/ETH target calculator and publisher |
 
-Paper services submit no orders. They write comparison ledgers.
+Sleeves do not own credentials, venue orders, fills, P&L, protection repair or
+Telegram. Demo targets are executed only by the account owner. Paper targets
+are advanced only by the shared execution twin against its independent L2
+capture. Canonical account journals are authority; sleeve Parquet is signal or
+compatibility telemetry. See `docs/account_execution_cutover.md` for the open
+acceptance gate before enabling this repository surface on a host.
 
 ## Continuous v2 Fade Book
 
@@ -64,7 +78,11 @@ Data roots:
 - Entry timing uses confirmed bars with `entry_confirm_delay_hours=1`.
 - Max active shorts: 25.
 - Max new entries per cycle: 5.
-- Adverse-exit pause: 8 exits inside 1440 minutes.
+- Adverse-reduction pause: 8 account/symbol loss batches inside 1440 minutes,
+  counted once per canonical P&L key rather than once per component row. The
+  inherited threshold has not yet been re-estimated under this new counting
+  unit, so it is a prospective demo/paper guardrail rather than a validated
+  optimum.
 
 ### Components
 
@@ -76,7 +94,7 @@ Data roots:
 
 ### Sizing
 
-Live order notional:
+Raw component target notional before account-kernel venue discretization:
 
 ```text
 equity
@@ -115,70 +133,54 @@ same-entry decisions, entries sharing a `(symbol, signal_ts)` use
 
 ### Continuous Entry Safety
 
-Submit-mode new entries pass a cycle-level risk-health gate before candidate
-selection. It blocks new entries when private account snapshots have errors, when
-a genuine private execution WS stream has emitted and then gone stale beyond
-`ENTRY_PRIVATE_WS_STALE_SECONDS` / `--entry-private-ws-stale-seconds` (default
-300 seconds), or when an open continuous ledger symbol is missing from the venue
-position snapshot. It also blocks a live exchange-only position when the
-continuous order ledger has a recent non-reduce-only entry attempt for that
-symbol but no open continuous trade row. For profiles that expect venue stops
-(`STOP_LOSS_PCT > 0`), it blocks new submitted entries while an open non-hedge
-continuous position has no venue `stopLoss` protection in the private position
-snapshot. The active v2 object is stopless (`STOP_LOSS_PCT=0`), so missing stops
-remain telemetry rather than an entry-blocking reason for that profile. The gate
-also records compact live lifecycle-state counts (`PROTECTED`,
-`PROTECTION_PENDING`, `EXIT_ORDER_SUBMITTED`, `ORPHAN`, etc.) for open
-continuous trades. Before submitted trade rows are flushed, the lifecycle
-guard enforces an explicit trade-row transition table: terminal rows cannot be
-reopened, close rows need prior ledger state, protected rows cannot silently
-regress to `PROTECTION_PENDING`, and in-flight exit markers cannot be dropped.
-Rejected rows are written to `continuous_risk_events.jsonl` and page as
-lifecycle-transition violations. Healthy submitted cycles also persist
-`PROTECTED` promotions from the private position snapshot onto full copied trade
-rows for stop-required profiles; missing stops never demote ledger state.
-Submitted live, paper and historical execution now use the shared canonical
-journal and reducer described in `docs/canonical_execution_journal.md`. The old
-continuous-only lifecycle JSONL is read solely as a compatibility fallback for
-archived pre-migration roots; it is no longer written or authoritative.
-Dry-run and paper evidence cycles keep running and record the same fields
-without suppressing candidates. Blocked submit cycles append
-`continuous_risk_events.jsonl` with `event=entry_risk_health_blocked`.
+The target route requires a healthy, recent account-owner capital observation
+and canonical component state. The sleeve uses those read models for sizing and
+held-name decisions, then atomically publishes desired component targets. It
+has no private venue client and cannot accept, submit, adopt, repair or close an
+order.
 
-`ws_risk` appends stop/take-profit repair attempts to
-`reports/event-risk-ws/stop_audit_events.jsonl` after sleeve tagging. These rows
-are audit evidence for target/current protection and submit outcome; they do not
-change routing.
+The account kernel evaluates each target batch against the current account risk
+snapshot, explicit absolute risk policy and fresh demo-verified instrument
+rules. Quantity step, minimum quantity, minimum notional, maximum order size and
+leverage constraints live there, not in a sleeve. A rejected batch is durably
+journaled with stable rejection keys. The demo owner reconciles REST and private
+execution events, and fails health closed on mismatch, stale market data,
+missing rules or missing native protection. Paper uses the same kernel and rule
+rows with the deterministic execution twin.
 
-Submit-mode portfolio heat is recorded on cycle rows. The cap itself is an
-explicit live overlay, default OFF (`ENTRY_PORTFOLIO_HEAT_CAP_FRAC=0`), because
-it is not part of the active v2 backtest selection object. If enabled, it caps
-entries before candidate selection using current non-hedge open notional plus
-conservative per-entry heat under `ENTRY_PORTFOLIO_HEAT_SHOCK_FRAC`.
+Demo, paper and historical account execution use the shared canonical journal
+and reducer described in `docs/canonical_execution_journal.md`. Old mutable
+sleeve lifecycle rows are compatibility input for archived roots only; they are
+not current position, fill or P&L authority.
 
-Submit-mode account drawdown is also recorded on cycle rows. The kill-switch is
-an explicit live overlay, default OFF
-(`ENTRY_ACCOUNT_DRAWDOWN_KILL_SWITCH_FRAC=0`), for the same demo/paper/backtest
-parity reason. If enabled, current wallet equity more than the configured
-fraction below the prior healthy cycle high-water mark blocks new entries.
-Wallet/private snapshot errors block separately and are not treated as drawdown
-evidence from fallback equity.
+Archived pre-cutover roots may contain
+`reports/event-risk-ws/stop_audit_events.jsonl`, written by the retired
+`ws_risk` process. Reconciliation can retain those rows as historical repair
+evidence. No active service writes that path and it has no routing authority.
 
-Those parity choices describe a demo/paper research object only. They are not a
-mainnet precedent: capital-preservation limits must be chosen from explicit
-ruin/exposure constraints and need not improve an alpha metric or preserve
-backtest parity (`docs/governance.md`).
+The former sleeve-local portfolio-heat and account-drawdown overlays are removed
+from the target producer. Account-wide exposure, margin and drawdown authority
+belongs to the serialized account kernel under an explicit risk-policy file.
+Those limits are capital controls, not backtest-parity knobs, and must be chosen
+from explicit ruin/exposure constraints before any real-money discussion.
 
 ### Continuous Exit Logic
 
 Active exits:
 
-- Component venue take-profit at 12%.
-- `max_hold` force cover after 24 hours.
-- `STOP_LOSS_PCT=0`; no venue/server disaster stop.
+- After the entry is fully and unambiguously filled, the account protection
+  engine derives the component's 12% take-profit from confirmed fill VWAP and
+  turns its target to zero when crossed.
+- The sleeve publishes a zero component target at `max_hold` after 24 hours;
+  the clock starts at the first attributable fill, and only the account owner
+  may translate the target into a venue order.
+- The strategy has no component stop.
 
-The stopless state is accepted only within the current demo/paper authorization.
-It is not evidence that stopless mainnet risk is acceptable.
+The demo account owner separately requires an explicit exchange-native disaster
+stop for every reconstructed net position. That process-death seatbelt is an
+account safety control, not a strategy stop and not part of the research P&L
+claim. A stopless component remains acceptable only inside the current
+demo/paper authorization; it is not a mainnet precedent.
 
 Disabled daemon exits that must not be silently reintroduced:
 
@@ -201,12 +203,22 @@ The frozen object includes:
 - Hedge cap 2.0, hedge cost 5 bps.
 - BTC-vol regime overlay with `lam=0.5`, `vol_window=30`, `pct_window=250`.
 
-Sniper is disabled in demo and paper with `CONTINUOUS_SNIPER=0`. The former
-quarter-size PostOnly sell at +8% was rolled back on 2026-07-10 after it added
-loss into the forward 1000TAGUSDT squeeze without paper/backtest parity. It may
-only return after a new preregistered two-venue replay and forward-paper plan.
+The periodic hedge process reads the canonical CONTINUOUS component book and a
+recent healthy owner equity observation, calculates absolute BTC/ETH targets,
+and publishes them to the same account inbox. It owns no venue client or hedge
+ledger. There is no fixed strategy-side resize floor; executable quantities are
+decided from the verified symbol rule row by the account kernel.
 
-Dynamic exit remains no-order paper shadow.
+The former quarter-size PostOnly sell at +8% was rolled back on 2026-07-10
+after it added loss into the forward 1000TAGUSDT squeeze without paper/backtest
+parity. Its config, placement, cleanup, notification, CLI and service wiring are
+removed from the future runtime; only archived link/ledger attribution remains.
+The account-owner cutover must prove venue-flat positions and zero regular or
+conditional orders before an empty/new journal may start.
+
+The rejected dynamic-exit paper shadow was retired on 2026-07-13. It never had
+order authority; its negative decision record remains in the research history,
+but current demo and paper cycles no longer run or persist that experiment.
 
 ### Reconstruction Boundary
 
@@ -214,9 +226,10 @@ The official local continuous replay target is `FROZEN_FORWARD_CONFIG`: three
 components, inverse-vol component sizing, 24h hold, 12% component TP, no stop,
 BTC+ETH hedge, and BTC-vol regime.
 
-The daemon adds live execution behavior, paper/demo state, optional flag-off
-sniper plumbing, and the BTC-risk sizing overlay. A frozen component-ledger backtest is therefore not a
-literal daemon replay unless it explicitly implements those state machines.
+The daemon adds target-publishing behavior, paper/demo state, and the BTC-risk
+sizing overlay. A frozen component-ledger
+backtest is therefore not a literal daemon replay unless it explicitly
+implements those state machines and the account execution model.
 
 ## Long-Native v11a Sleeve
 
@@ -277,14 +290,21 @@ Strategy config:
 
 ### Long Exit Logic
 
-Venue-managed exits:
+Component exit thresholds:
 
 - ATR stop multiple 1.5.
 - ATR take-profit multiple 4.0.
 - Max hold 3 days.
 
-The cycle handles time-stop fall-through with reduce-only market exits. Paper
-marks exits to live ticker when available.
+The target records relative stop/take-profit fractions determined from the
+signal's ATR. After the entry is fully and unambiguously filled, the account
+protection engine derives executable thresholds from confirmed fill VWAP and
+publishes a zero component target when one is crossed. The demo owner also
+installs one exchange-native net disaster stop using the outermost applicable
+component stop (lowest for a long, highest for a short), never the tightest.
+The sleeve publishes a zero target three days after the first attributable
+fill. Only the account owner turns aggregate target changes into venue orders;
+paper uses the shared execution twin rather than sleeve-local idealized fills.
 
 ### Reconstruction Boundary
 

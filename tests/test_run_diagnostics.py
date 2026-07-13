@@ -41,9 +41,9 @@ def test_survivorship_is_tainted_not_just_a_label() -> None:
     assert "PIT_SURVIVORSHIP" in _codes(ws)
     assert is_tainted(ws)
     assert max_severity(ws) == TAINTED
-    # the fix must be actionable (names the backfill path)
+    # The fix names the current membership rebuild path, not a retired wrapper.
     surv = next(w for w in ws if w.code == "PIT_SURVIVORSHIP")
-    assert "reconcile.sh" in surv.fix
+    assert "archive-manifest" in surv.fix
 
 
 def test_empty_manifest_is_tainted() -> None:

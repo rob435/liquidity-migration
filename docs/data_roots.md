@@ -63,39 +63,67 @@ profile, threshold, stopping decision, or clock. Preserve immutable epochs and
 all reset/change points. A new clock does not erase the evidentiary exposure of
 earlier ledgers. See `docs/governance.md`.
 
-## Live demo + paper roots
+## Demo + paper operational roots
 
-The live Bybit demo runner intentionally uses a separate operational root,
-**on the VPS** (these are not local on the research machine):
+The repository account-kernel layout uses separate operational roots **on the
+VPS** (these are not local research roots). Exact host paths come from
+`/etc/liquidity-migration/account-{,paper-}execution.env`; the canonical layout
+is:
 
 ```text
-/opt/liquidity-migration/data/bybit-demo-event            # ws_risk engine root: heartbeat cycles + reports
-/opt/liquidity-migration/data/bybit-paper-event           # unused paper root, no writer
-/opt/liquidity-migration/data/bybit-long-demo-event
-/opt/liquidity-migration/data/bybit-long-paper-event
-/opt/liquidity-migration/data/bybit-continuous-demo-event
-/opt/liquidity-migration/data/bybit-continuous-paper-event
-/opt/liquidity-migration/data/bybit-continuous-hedge-event
+/opt/liquidity-migration/data/bybit-account-execution       # demo account journal + projections + owner health
+/opt/liquidity-migration/data/bybit-account-intents         # atomic demo target-request inbox
+/opt/liquidity-migration/data/bybit-account-market-capture  # raw demo-owner L2 capture
+/opt/liquidity-migration/data/bybit-account-paper           # paper account journal + projections + owner health
+/opt/liquidity-migration/data/bybit-account-paper-intents   # atomic paper target-request inbox
+/opt/liquidity-migration/data/bybit-account-paper-market-capture # independent raw paper L2 capture
+
+/opt/liquidity-migration/data/bybit-long-demo-event          # LONG signals, market cache and cycle telemetry
+/opt/liquidity-migration/data/bybit-long-paper-event         # LONG paper signals, market cache and cycle telemetry
+/opt/liquidity-migration/data/bybit-continuous-demo-event    # CONTINUOUS signals, market cache and cycle telemetry
+/opt/liquidity-migration/data/bybit-continuous-paper-event   # CONTINUOUS paper signals, market cache and cycle telemetry
 ```
 
-Which sleeves are live at any moment is `deploy/sleeves.env` + STATE.md, not
-this file; every root keeps its ledgers regardless of toggle state because
-`ws_risk` reads all configured roots.
+The account roots, not mutable sleeve trade rows, are execution and accounting
+authority. Demo and paper sleeves publish absolute component targets to their
+respective inboxes. The demo account owner alone mutates Bybit; the paper owner
+alone advances the deterministic execution twin. Raw captures are intentionally
+independent so a healthy demo feed cannot hide a dead paper feed.
+
+Which sleeves are requested at any moment is `deploy/sleeves.env`; what is
+actually running is systemd state plus the resolved host environment and the
+read-only verifier. Turning a sleeve off stops new strategy decisions but does
+not delete canonical account history or imply that its existing target is flat.
 
 VPS ledger history restarted from a clean slate at the 2026-06-09 full rebuild
 (all prior demo/paper history lost — see STATE.md). The research roots and VPS
 roots remain fully independent.
-Do not point the live demo order/trade ledgers at any research root. Each
-demo root contains its forward kline cache, order ledgers, trade ledgers,
-cycle reports, and risk-watchdog reports.
+Do not point any live account or sleeve root at a research root. Sleeve roots
+retain forward signal inputs, caches and cycle telemetry; compatibility
+Parquet views are not position or P&L authority. The account journal and its
+rebuildable projections own that state.
 
-Each sleeve has a paper (dry-run) shadow on its own root (long:
-`data/bybit-long-paper-event`, continuous: `data/bybit-continuous-paper-event`)
-— same profile/universe/cadence, no orders, idealized fills at signal price.
-Comparing the paper and demo ledgers measures demo-vs-paper execution slippage.
-Run `bash scripts/reconcile.sh` (skill: `pit-reconcile`) — the single reconcile
-entrypoint (full demo↔backtest↔paper by default; `--quick` for the fast
-demo↔paper-only check). Do not hand-assemble the `reconcile-*` calls.
+Each sleeve has a target-publishing paper shadow on its own decision root
+(long: `data/bybit-long-paper-event`, continuous:
+`data/bybit-continuous-paper-event`) with the same profile, universe and cadence.
+The shared paper owner fills accepted aggregate targets against captured L2,
+subject to the same verified instrument rules and account kernel as demo.
+Comparing the paper and demo account journals measures model-versus-demo
+execution differences without pretending that the old sleeve-local idealized
+fill ledgers are authoritative.
+
+Use `scripts/ops.sh account-parity` for structural comparison of historical,
+paper and demo account journals. It records hashes and refuses empty journals,
+but it does not by itself prove shared market-tape or strategy-scheduler parity;
+see `docs/account_execution_cutover.md`.
+
+The former `scripts/reconcile.sh` and sleeve-local `reconcile-*` commands were
+retired on 2026-07-13. They read compatibility projections rather than the
+account journal and could therefore produce agreement without validating the
+current owner. Historical reports from those tools remain historical evidence;
+they are not a current operational gate. Use the exact research command for a
+new model/PIT claim, and use the account cutover acceptance checklist for a
+runtime claim.
 
 Do not use ad hoc current-universe or temporary recent roots for a historical
 universe claim. They remain useful for explicitly scoped diagnostics. A live

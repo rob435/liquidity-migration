@@ -43,12 +43,15 @@ from ._common import (
     MS_PER_HOUR,
     calendar_roll,
     calendar_shift,
+    finite_float,
     date_ms,
     exact_duration_ms,
     exact_lookback_cutoff_ms,
     is_weekend_ms,
     pct,
 )
+from .account_kernel import AccountRiskPolicy, verify_account_journal
+from .account_service import SleeveAdapterKind
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .momentum_signals import daily_bars, add_returns_and_age
 from .run_diagnostics import diagnose, is_tainted, render
@@ -61,8 +64,19 @@ from .trade_lifecycle import (
     summarize_baskets,
     summarize_trade_backtest,
 )
-from .canonical_journal import verify_journal
-from .lifecycle_bridge import record_historical_trades
+from .execution_adapters import ExecutionTwinConfig, LatencyProfile
+from .historical_account_replay import (
+    HistoricalAccountReplay,
+    HistoricalAccountSession,
+    HistoricalTargetDecision,
+    historical_cycles_from_decisions,
+    historical_submission_feedback,
+    neutralize_historical_decisions,
+    synthetic_historical_rules,
+    synthetic_historical_rules_for_symbols,
+)
+from .long_identity import long_trade_id
+from .strategy_targets import component_target_intent
 from ._common import _date_range, _exclude_symbols, _iso_date, _iso_month
 from .volume_events_charts import _write_equity_benchmark_chart
 from .volume_events_pit import (
@@ -81,6 +95,7 @@ BTC_MONTH_REGIME_MODES = (
     BTC_MONTH_REGIME_MODE_SMART_MONTH,
 )
 BTC_EXACT_MONTH_DAYS = 365.25 / 12.0
+LONG_HISTORICAL_KERNEL_EQUITY_USDT = 1_000_000.0
 
 
 # Splits are exclusively a per-run config: see LongNativeConfig.splits.
@@ -91,6 +106,11 @@ BTC_EXACT_MONTH_DAYS = 365.25 / 12.0
 
 @dataclass(frozen=True, slots=True)
 class LongNativeConfig:
+    # Operational identity and venue leverage are distinct from strategy gross.
+    # Registered live profiles set these explicitly; ad-hoc research receives a
+    # config-hash namespace and unlevered margin accounting by default.
+    execution_strategy_id: str = ""
+    execution_leverage: float = 1.0
     # --- window ---
     start_date: str = ""
     end_date: str = ""
@@ -714,7 +734,7 @@ def _mtm_summary(mtm: pl.DataFrame) -> dict[str, Any]:
     n_days = len(rets)
     total = float(eq[-1] - 1.0)
     years = n_days / 365.25
-    maxdd = float(min(mtm["drawdown"].min(), 0.0))
+    maxdd = min(finite_float(mtm["drawdown"].min(), default=0.0) or 0.0, 0.0)
     std = float(rets.std())
     return {
         "mtm_total_return": round(total, 6),
@@ -819,6 +839,19 @@ def _long_equity_chart_metrics(summary: dict[str, Any], equity: pl.DataFrame) ->
     return metrics
 
 
+def _long_kernel_strategy_id(config: LongNativeConfig, costs: CostConfig) -> str:
+    if config.execution_strategy_id.strip():
+        return config.execution_strategy_id.strip()
+    config_hash = hashlib.sha256(
+        json.dumps(
+            {"config": asdict(config), "costs": asdict(costs)},
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    return f"long_native_{config_hash}"
+
+
 def run_long_native_research(
     data_root: str | Path,
     *,
@@ -854,12 +887,49 @@ def run_long_native_research(
         if (cfg.fc_provisional_entry and cfg.enable_fomo_chase)
         else None
     )
+    lifecycle_strategy_id = _long_kernel_strategy_id(cfg, costs)
+    lifecycle_root = output_dir / "common_kernel_execution"
+    replay_policy = AccountRiskPolicy(
+        max_component_gross_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 10.0,
+        max_account_gross_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 100.0,
+        max_symbol_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 10.0,
+        max_initial_margin_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 100.0,
+        max_leverage=max(float(cfg.execution_leverage), 1.0),
+    )
+    execution_config = ExecutionTwinConfig(
+        fee_bps=costs.base_entry_exit_cost_bps * cfg.cost_multiplier / 2.0,
+        latency=LatencyProfile(0, 0, 0),
+        max_decision_age_ns=0,
+    )
+    online_session: HistoricalAccountSession | None = None
+    max_entry_wait_hours = (
+        max(cfg.entry_delay_hours, cfg.fc_sniper_deadline_hours)
+        if cfg.fc_use_sniper_entry
+        else cfg.entry_delay_hours
+    )
+    if max_entry_wait_hours <= 24:
+        observed_ts_ns = max(int(features["ts_ms"].min() or 0) * 1_000_000, 1)
+        online_session = HistoricalAccountSession(
+            lifecycle_root,
+            account_id=lifecycle_strategy_id,
+            risk_policy=replay_policy,
+            instrument_rules=synthetic_historical_rules_for_symbols(
+                list(bars_by_symbol),
+                max_leverage=max(float(cfg.execution_leverage), 1.0),
+                observed_ts_ns=observed_ts_ns,
+            ),
+            execution_config=execution_config,
+            id_seed=f"{lifecycle_strategy_id}:historical",
+        )
+    kernel_decisions: list[HistoricalTargetDecision] = []
     trades, lifecycle_stats, event_counts = _run_long_pipeline(
         features=features,
         bars_by_symbol=bars_by_symbol,
         funding_lookup=funding_lookup,
         config=cfg, costs=costs,
         provisional_triggers=provisional_triggers,
+        kernel_decision_sink=kernel_decisions,
+        kernel_session=online_session,
     )
 
     bt_config = TradeLifecycleConfig(
@@ -877,27 +947,46 @@ def run_long_native_research(
                                     funding_mode=funding_mode,
                                     full_pit_universe_pass=full_pit_universe_pass)
 
-    lifecycle_config_hash = hashlib.sha256(
-        json.dumps(
-            {"config": asdict(cfg), "costs": asdict(costs)},
-            sort_keys=True,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()[:12]
-    lifecycle_root = output_dir / "canonical_execution"
-    lifecycle_result = record_historical_trades(
-        lifecycle_root,
-        trades,
-        sleeve="long",
-        strategy_id=f"long_native_{lifecycle_config_hash}",
-        now_ms=(
-            int(trades["exit_ts_ms"].max())
-            if not trades.is_empty() and "exit_ts_ms" in trades.columns
-            else 1
+    if online_session is not None:
+        replay_batches = len(online_session.outputs)
+        final_state_hash = online_session.final_state_hash
+        evidence_label = "chronological_strategy_targets_through_live_common_account_kernel"
+        account_kernel_feedback_online = True
+    else:
+        synthetic_rules = synthetic_historical_rules(kernel_decisions)
+        replay = HistoricalAccountReplay(
+            lifecycle_root,
+            account_id=lifecycle_strategy_id,
+            risk_policy=replay_policy,
+            instrument_rules=synthetic_rules,
+            execution_config=execution_config,
+            id_seed=f"{lifecycle_strategy_id}:historical",
+        ).run(historical_cycles_from_decisions(
+            kernel_decisions,
+            equity_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT,
+        ))
+        replay_batches = len(replay.batches)
+        final_state_hash = replay.final_state_hash
+        evidence_label = "chronological_trigger_targets_postrun_common_kernel_replay"
+        account_kernel_feedback_online = False
+    lifecycle_receipt = verify_account_journal(lifecycle_root)
+    lifecycle_receipt.update({
+        "batches": replay_batches,
+        "strategy_targets": len(kernel_decisions),
+        "final_state_hash": final_state_hash,
+        "evidence_label": evidence_label,
+        "historical_strategy_runtime_is_sequential": True,
+        "account_kernel_feedback_online": account_kernel_feedback_online,
+        "same_timestamp_strategy_batching": True,
+        "entry_capacity_evaluated_at_actual_entry_boundary": (
+            online_session is not None
         ),
-    )
-    lifecycle_receipt = verify_journal(lifecycle_root)
-    lifecycle_receipt["events_appended_this_run"] = lifecycle_result["events_appended"]
+        "strategy_runtime_shared_across_environments": False,
+        "market_tape_shared_across_environments": False,
+        "canonical_common_kernel_parity": True,
+        "cross_environment_strategy_parity": False,
+        "venue_rule_parity": False,
+    })
 
     if not trades.is_empty():
         trades.write_csv(output_dir / "long_native_trades.csv")
@@ -983,7 +1072,7 @@ def run_long_native_research(
         "tainted": is_tainted(warnings),
         "equity_chart": chart_metadata,
         "equity_mtm": mtm_metadata,
-        "canonical_journal": lifecycle_receipt,
+        "account_journal": lifecycle_receipt,
     }
     (output_dir / "long_native_research_report.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     (output_dir / "long_native_research_report.md").write_text(format_long_native_report(metadata), encoding="utf-8")
@@ -2135,7 +2224,19 @@ def _run_long_pipeline(
     config: LongNativeConfig,
     costs: CostConfig,
     provisional_triggers: dict[int, list[tuple[int, str]]] | None = None,
+    kernel_decision_sink: list[HistoricalTargetDecision] | None = None,
+    kernel_session: HistoricalAccountSession | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int], dict[str, int]]:
+    max_entry_wait_hours = (
+        max(config.entry_delay_hours, config.fc_sniper_deadline_hours)
+        if config.fc_use_sniper_entry
+        else config.entry_delay_hours
+    )
+    if kernel_session is not None and max_entry_wait_hours > 24:
+        raise ValueError(
+            "online LONG account feedback requires the chronological trigger scheduler; "
+            "entry waits over 24h remain post-run replay"
+        )
     dates_all = sorted(int(ts) for ts in features["ts_ms"].unique().to_list())
     features_by_date: dict[int, list[dict[str, Any]]] = {}
     for part in features.partition_by("ts_ms", maintain_order=True):
@@ -2154,12 +2255,15 @@ def _run_long_pipeline(
         "exits_stop": 0, "exits_take_profit": 0, "exits_time": 0,
         "provisional_entries": 0, "exits_unconfirmed_cut": 0, "provisional_confirmed": 0,
         "fc_atr_exit_fallback_count": 0,
+        "skipped_account_kernel": 0,
     }
     event_counts = {"capitulation_rebound": 0, "funding_squeeze": 0, "volume_resurrection": 0,
                     "oversold_bounce": 0, "fomo_chase": 0, "uptrend_dip": 0, "xsec_momentum": 0,
                     "lowvol": 0, "reversal": 0, "funding_carry": 0, "oi_momentum": 0, "metrics": 0}
     round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
     notional_weight = config.gross_exposure / max(config.max_concurrent_positions, 1)
+    if not math.isfinite(config.execution_leverage) or config.execution_leverage <= 0.0:
+        raise ValueError("long-native execution_leverage must be finite and positive")
     if config.sizing not in {"vol_parity", "equal"}:
         raise ValueError(f"unsupported long-native sizing mode: {config.sizing!r}")
     window_end_ts_ms = date_ms(config.end_date) if config.end_date else None
@@ -2168,6 +2272,159 @@ def _run_long_pipeline(
     dd_peak_eq = 1.0
     dd_counted = 0
     dd_cur = 0.0
+    kernel_strategy_id = _long_kernel_strategy_id(config, costs)
+
+    def _target_component_id(pos: dict[str, Any]) -> str:
+        return long_trade_id(
+            symbol=str(pos["symbol"]),
+            signal_ts_ms=int(pos["entry_signal_ts_ms"]),
+        )
+
+    def _entry_target(pos: dict[str, Any]) -> HistoricalTargetDecision:
+        trade_id = _target_component_id(pos)
+        entry_ts_ms = int(pos["entry_ts_ms"])
+        target_notional = (
+            LONG_HISTORICAL_KERNEL_EQUITY_USDT
+            * notional_weight
+            * float(pos["position_weight"])
+            * config.notional_multiplier
+        )
+        return HistoricalTargetDecision(
+            wall_ts_ns=entry_ts_ms * 1_000_000,
+            reference_price=float(pos["entry_price"]),
+            intent=component_target_intent(
+                adapter_kind=SleeveAdapterKind.LONG,
+                action="entry",
+                decision_ts_ms=entry_ts_ms,
+                strategy_id=kernel_strategy_id,
+                component_id=trade_id,
+                symbol=str(pos["symbol"]),
+                signed_notional_usdt=target_notional,
+                leverage=max(float(config.execution_leverage), 1.0),
+                reason=str(pos.get("pattern") or "historical_long_entry"),
+                metadata={
+                    "source": "long_native_in_engine_target",
+                    "signal_ts_ms": int(pos["entry_signal_ts_ms"]),
+                    "signal_valid_until_ms": entry_ts_ms + MS_PER_HOUR,
+                    "stop_loss_pct": float(pos["stop_pct"]),
+                    "take_profit_pct": float(pos["tp_pct"]),
+                    "max_hold_duration_ms": (
+                        int(pos["planned_exit_ts_ms"]) - entry_ts_ms
+                    ),
+                    "position_weight": float(pos["position_weight"]),
+                },
+            ),
+        )
+
+    def _market_prices(through_ts_ms: int) -> dict[str, float]:
+        prices: dict[str, float] = {}
+        for symbol, pos in open_positions.items():
+            bars = bars_by_symbol.get(symbol)
+            price = float(pos["entry_price"])
+            if bars is not None:
+                index = bisect_right(bars["ends"], int(through_ts_ms)) - 1
+                if index >= 0:
+                    candidate = float(bars["close"][index])
+                    if math.isfinite(candidate) and candidate > 0.0:
+                        price = candidate
+            prices[symbol] = price
+        return prices
+
+    def _submit_kernel_decisions(
+        decisions: list[HistoricalTargetDecision],
+        *,
+        batch_prefix: str,
+    ) -> tuple[bool, tuple[str, ...], bool]:
+        if not decisions:
+            return True, (), False
+        if kernel_decision_sink is not None:
+            kernel_decision_sink.extend(decisions)
+        if kernel_session is None:
+            return True, (), False
+        outputs = kernel_session.submit_decisions(
+            decisions,
+            equity_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT,
+            batch_prefix=batch_prefix,
+            market_prices=_market_prices(
+                max(decision.wall_ts_ns for decision in decisions) // 1_000_000
+            ),
+        )
+        feedback = historical_submission_feedback(outputs)
+        return feedback.accepted, feedback.rejection_keys, feedback.target_committed
+
+    def _neutralize_rejected_entries(
+        decisions: list[HistoricalTargetDecision],
+    ) -> None:
+        cancellations = neutralize_historical_decisions(
+            decisions,
+            reason="entry_execution_rejected",
+            source="long_native_execution_rejection_compensation",
+        )
+        accepted, rejection_keys, _ = _submit_kernel_decisions(
+            list(cancellations),
+            batch_prefix="long-native-entry-compensation",
+        )
+        if not accepted:
+            raise RuntimeError(
+                "historical LONG account kernel could not neutralize rejected entries: "
+                + ", ".join(rejection_keys)
+            )
+
+    def _emit_entry_target(pos: dict[str, Any]) -> None:
+        _submit_kernel_decisions(
+            [_entry_target(pos)],
+            batch_prefix="long-native-entry",
+        )
+
+    pending_online_exits: list[tuple[dict[str, Any], HistoricalTargetDecision]] = []
+
+    def _record_exit_target(
+        pos: dict[str, Any],
+        *,
+        exit_ts_ms: int,
+        exit_price: float,
+        reason: str,
+    ) -> dict[str, Any]:
+        trade = _finalize_trade(
+            pos,
+            exit_ts_ms=exit_ts_ms,
+            exit_price=exit_price,
+            reason=reason,
+            notional_weight=notional_weight,
+            round_trip_cost_bps=round_trip_cost_bps,
+            funding_lookup=funding_lookup,
+            notional_multiplier=config.notional_multiplier,
+        )
+        trade_id = _target_component_id(pos)
+        decision = HistoricalTargetDecision(
+                wall_ts_ns=int(exit_ts_ms) * 1_000_000,
+                reference_price=float(exit_price),
+                intent=component_target_intent(
+                    adapter_kind=SleeveAdapterKind.LONG,
+                    action="exit",
+                    decision_ts_ms=exit_ts_ms,
+                    strategy_id=kernel_strategy_id,
+                    component_id=trade_id,
+                    symbol=str(pos["symbol"]),
+                    signed_notional_usdt=0.0,
+                    leverage=max(float(config.execution_leverage), 1.0),
+                    reason=reason,
+                    metadata={
+                        "source": "long_native_in_engine_target",
+                        "owner_sleeve": "long",
+                        "prior_trade_id": trade_id,
+                    },
+                ),
+            )
+        if kernel_session is None:
+            trade_rows.append(trade)
+            _submit_kernel_decisions(
+                [decision],
+                batch_prefix="long-native-exit",
+            )
+        else:
+            pending_online_exits.append((trade, decision))
+        return trade
 
     def _scan_position_exit(symbol: str, pos: dict[str, Any], through_ts: int) -> bool:
         bars = bars_by_symbol.get(symbol)
@@ -2205,37 +2462,64 @@ def _run_long_pipeline(
                 if trail > pos["stop_price"]:
                     pos["stop_price"] = trail
             if bar_low <= pos["stop_price"]:
-                trade_rows.append(_finalize_trade(
-                    pos, exit_ts_ms=bar_end_ts, exit_price=pos["stop_price"],
-                    reason="stop_loss", notional_weight=notional_weight,
-                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
-                    notional_multiplier=config.notional_multiplier,
-                ))
+                _record_exit_target(
+                    pos, exit_ts_ms=bar_end_ts, exit_price=pos["stop_price"], reason="stop_loss"
+                )
                 cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
                 stats["exits_stop"] += 1
                 return True
             if bar_high >= pos["take_profit_price"]:
-                trade_rows.append(_finalize_trade(
-                    pos, exit_ts_ms=bar_end_ts, exit_price=pos["take_profit_price"],
-                    reason="take_profit", notional_weight=notional_weight,
-                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
-                    notional_multiplier=config.notional_multiplier,
-                ))
+                _record_exit_target(
+                    pos,
+                    exit_ts_ms=bar_end_ts,
+                    exit_price=pos["take_profit_price"],
+                    reason="take_profit",
+                )
                 cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
                 stats["exits_take_profit"] += 1
                 return True
             if bar_end_ts >= pos["planned_exit_ts_ms"]:
-                trade_rows.append(_finalize_trade(
-                    pos, exit_ts_ms=bar_end_ts, exit_price=bar_close,
-                    reason="time_stop", notional_weight=notional_weight,
-                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
-                    notional_multiplier=config.notional_multiplier,
-                ))
+                _record_exit_target(
+                    pos, exit_ts_ms=bar_end_ts, exit_price=bar_close, reason="time_stop"
+                )
                 cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
                 stats["exits_time"] += 1
                 return True
         pos["last_exit_scan_ts_ms"] = through_ts
         return False
+
+    def _flush_online_exits() -> None:
+        if kernel_session is None or not pending_online_exits:
+            return
+        grouped: dict[int, list[tuple[dict[str, Any], HistoricalTargetDecision]]] = {}
+        for trade, decision in pending_online_exits:
+            grouped.setdefault(decision.wall_ts_ns, []).append((trade, decision))
+        for _wall_ts_ns, items in sorted(grouped.items()):
+            ordered = sorted(
+                items,
+                key=lambda item: (
+                    item[1].intent.intent.symbol,
+                    item[1].intent.intent.target_key,
+                ),
+            )
+            accepted, rejection_keys, _ = _submit_kernel_decisions(
+                [decision for _, decision in ordered],
+                batch_prefix="long-native-exit",
+            )
+            if not accepted:
+                raise RuntimeError(
+                    "historical LONG account kernel rejected a strategy exit batch: "
+                    + ", ".join(rejection_keys)
+                )
+            trade_rows.extend(trade for trade, _ in ordered)
+        pending_online_exits.clear()
+
+    def _scan_all_positions(through_ts: int) -> None:
+        for symbol in list(open_positions):
+            pos = open_positions[symbol]
+            if _scan_position_exit(symbol, pos, through_ts):
+                del open_positions[symbol]
+        _flush_online_exits()
 
     for ts in dates_all:
         rows_today = features_by_date.get(ts, [])
@@ -2248,32 +2532,23 @@ def _run_long_pipeline(
         if provisional_triggers:
             prev_rows = features_by_date.get(ts - MS_PER_DAY, [])
             prev_by_symbol = {str(r["symbol"]): r for r in prev_rows}
-            for trig_ts, symbol in provisional_triggers.get(ts, []):
-                if trig_ts >= ts:
-                    continue  # the daily-close bar itself belongs to the standard path
-                if window_end_ts_ms is not None and trig_ts > window_end_ts_ms:
-                    continue
-                if symbol in open_positions:
-                    stats["skipped_already_held"] += 1
-                    continue
-                if cooldown_until.get(symbol, 0) > trig_ts:
-                    stats["skipped_cooldown"] += 1
-                    continue
-                if len(open_positions) >= config.max_concurrent_positions:
-                    stats["skipped_capacity"] += 1
-                    continue
+
+            def _provisional_position(
+                trig_ts: int,
+                symbol: str,
+            ) -> dict[str, Any] | None:
                 row_prev = prev_by_symbol.get(symbol)
                 if row_prev is None:
-                    continue
+                    return None
                 bars = bars_by_symbol.get(symbol)
                 entry_idx = bars["by_end"].get(trig_ts) if bars else None
                 if entry_idx is None or bars is None:
                     stats["skipped_no_entry_bar"] += 1
-                    continue
+                    return None
                 entry_price = float(bars["close"][entry_idx])
                 if not math.isfinite(entry_price) or entry_price <= 0.0:
                     stats["skipped_no_entry_bar"] += 1
-                    continue
+                    return None
                 stop_pct, tp_pct = _fc_exit_params(row_prev, config)
                 if not _fc_atr_available(row_prev, config):
                     stats["fc_atr_exit_fallback_count"] += 1
@@ -2282,11 +2557,14 @@ def _run_long_pipeline(
                 else:
                     vol_est = _safe_float(row_prev.get("realized_vol")) or config.vol_floor_annual
                     vol_used = max(vol_est, config.vol_floor_annual)
-                    position_weight = min(config.vol_floor_annual / vol_used,
-                                          config.max_position_weight / notional_weight)
+                    position_weight = min(
+                        config.vol_floor_annual / vol_used,
+                        config.max_position_weight / notional_weight,
+                    )
                     position_weight = max(position_weight, 0.25)
                 position_weight = position_weight * _vol_target_scale(
-                    config, _safe_float(row_prev.get("btc_rv_30")))
+                    config, _safe_float(row_prev.get("btc_rv_30"))
+                )
                 if config.enable_dd_throttle and dd_cur <= config.dd_throttle_trigger:
                     position_weight = position_weight * config.dd_throttle_scale
                 if config.weekend_size_mult != 1.0 and is_weekend_ms(int(trig_ts)):
@@ -2294,14 +2572,10 @@ def _run_long_pipeline(
                 if config.max_per_symbol_weight > 0.0:
                     effective_gross = notional_weight * position_weight
                     if effective_gross > config.max_per_symbol_weight:
-                        position_weight = config.max_per_symbol_weight / max(notional_weight, 1e-12)
-                stats["provisional_entries"] += 1
-                # event_counts["fomo_chase"] is NOT bumped here: it is the daily-
-                # classification firing count, incremented once in the standard loop
-                # (~line 2046). A confirmed provisional symbol re-classifies there, so
-                # counting it here too double-counted it (audit-iter3 backlog). Provisional
-                # fills are tracked via stats["provisional_entries"]/["provisional_confirmed"].
-                open_positions[symbol] = {
+                        position_weight = config.max_per_symbol_weight / max(
+                            notional_weight, 1e-12
+                        )
+                return {
                     "symbol": symbol,
                     "pattern": "fomo_chase",
                     "entry_signal_ts_ms": int(trig_ts),
@@ -2311,7 +2585,9 @@ def _run_long_pipeline(
                     "entry_price": entry_price,
                     "stop_price": float(entry_price * (1.0 - stop_pct)),
                     "take_profit_price": float(entry_price * (1.0 + tp_pct)),
-                    "planned_exit_ts_ms": int(trig_ts + exact_duration_ms(days=config.fc_max_hold_days)),
+                    "planned_exit_ts_ms": int(
+                        trig_ts + exact_duration_ms(days=config.fc_max_hold_days)
+                    ),
                     "position_weight": float(position_weight),
                     "stop_pct": float(stop_pct),
                     "tp_pct": float(tp_pct),
@@ -2322,11 +2598,83 @@ def _run_long_pipeline(
                     "provisional_day_ts": int(ts),
                 }
 
+            valid_triggers: list[tuple[int, str]] = []
+            for raw_trig_ts, raw_symbol in provisional_triggers.get(ts, []):
+                trig_ts = int(raw_trig_ts)
+                if trig_ts >= ts:
+                    continue
+                if window_end_ts_ms is not None and trig_ts > window_end_ts_ms:
+                    continue
+                valid_triggers.append((trig_ts, str(raw_symbol)))
+            if kernel_session is None:
+                for trig_ts, symbol in valid_triggers:
+                    if symbol in open_positions:
+                        stats["skipped_already_held"] += 1
+                        continue
+                    if cooldown_until.get(symbol, 0) > trig_ts:
+                        stats["skipped_cooldown"] += 1
+                        continue
+                    if len(open_positions) >= config.max_concurrent_positions:
+                        stats["skipped_capacity"] += 1
+                        continue
+                    position = _provisional_position(trig_ts, symbol)
+                    if position is None:
+                        continue
+                    stats["provisional_entries"] += 1
+                    open_positions[symbol] = position
+                    _emit_entry_target(position)
+            else:
+                grouped_triggers: dict[int, list[str]] = {}
+                for trig_ts, symbol in valid_triggers:
+                    grouped_triggers.setdefault(trig_ts, []).append(symbol)
+                for trig_ts, symbols in sorted(grouped_triggers.items()):
+                    # Release capacity from every exit observable before this
+                    # trigger, then admit all same-timestamp targets atomically.
+                    _scan_all_positions(trig_ts)
+                    provisional_admitted: list[
+                        tuple[str, dict[str, Any], HistoricalTargetDecision]
+                    ] = []
+                    for symbol in symbols:
+                        if symbol in open_positions:
+                            stats["skipped_already_held"] += 1
+                            continue
+                        if cooldown_until.get(symbol, 0) > trig_ts:
+                            stats["skipped_cooldown"] += 1
+                            continue
+                        if len(open_positions) >= config.max_concurrent_positions:
+                            stats["skipped_capacity"] += 1
+                            continue
+                        position = _provisional_position(trig_ts, symbol)
+                        if position is None:
+                            continue
+                        open_positions[symbol] = position
+                        provisional_admitted.append(
+                            (symbol, position, _entry_target(position))
+                        )
+                    if not provisional_admitted:
+                        continue
+                    decisions = [item[2] for item in provisional_admitted]
+                    accepted, rejection_keys, target_committed = _submit_kernel_decisions(
+                        decisions,
+                        batch_prefix="long-native-provisional-entry",
+                    )
+                    if accepted:
+                        stats["provisional_entries"] += len(provisional_admitted)
+                        continue
+                    if target_committed:
+                        _neutralize_rejected_entries(decisions)
+                    stats["skipped_account_kernel"] += len(provisional_admitted)
+                    for symbol, position, _ in provisional_admitted:
+                        if open_positions.get(symbol) is position:
+                            del open_positions[symbol]
+
+            # event_counts["fomo_chase"] is NOT bumped for provisional fills:
+            # it is the daily-classification firing count. Confirmed provisional
+            # symbols classify in the standard loop, so counting them here would
+            # double-count the signal.
+
         # ---- check exits for currently held positions ----
-        for symbol in list(open_positions.keys()):
-            pos = open_positions[symbol]
-            if _scan_position_exit(symbol, pos, int(ts)):
-                del open_positions[symbol]
+        _scan_all_positions(int(ts))
 
         # update realized-equity drawdown (from trades closed so far) for the throttle
         if config.enable_dd_throttle:
@@ -2370,18 +2718,30 @@ def _run_long_pipeline(
                     stats["provisional_confirmed"] += 1
                     continue
                 bars = bars_by_symbol.get(symbol)
-                close_idx = bars["by_end"].get(ts) if bars else None
+                if bars is None:
+                    continue
+                close_idx = bars["by_end"].get(ts)
                 if close_idx is None:
                     continue  # no daily-close bar: leave to the stop/TP/time machinery
-                trade_rows.append(_finalize_trade(
-                    pos, exit_ts_ms=int(ts), exit_price=float(bars["close"][close_idx]),
-                    reason="unconfirmed_cut", notional_weight=notional_weight,
-                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
-                    notional_multiplier=config.notional_multiplier,
-                ))
+                _record_exit_target(
+                    pos,
+                    exit_ts_ms=int(ts),
+                    exit_price=float(bars["close"][close_idx]),
+                    reason="unconfirmed_cut",
+                )
                 cooldown_until[symbol] = int(ts) + exact_duration_ms(days=config.cooldown_days)
                 stats["exits_unconfirmed_cut"] += 1
                 del open_positions[symbol]
+            _flush_online_exits()
+
+        # The online default path evaluates capacity at the actual entry
+        # boundary, after every exit observable by then. The legacy research
+        # loop waited until the next daily scan, which can order a later entry
+        # before an earlier hourly exit when entry_delay_hours > 1.
+        if kernel_session is not None:
+            _scan_all_positions(
+                int(ts + exact_duration_ms(hours=config.entry_delay_hours))
+            )
 
         # Rank candidates: by score if v6 enabled, else by raw 24h log return
         if config.fc_rank_by_score:
@@ -2404,37 +2764,39 @@ def _run_long_pipeline(
                 else:
                     fc_kept.append(cand)
             candidates = fc_kept
+        pending_online_entries: list[
+            tuple[str, dict[str, Any], HistoricalTargetDecision]
+        ] = []
         for row, pattern, stop_pct, tp_pct, hold_days, score in candidates:
             symbol = str(row["symbol"])
-            if symbol in open_positions:
-                stats["skipped_already_held"] += 1
-                continue
-            # B.3: explicit per-symbol concurrent cap (orthogonal to the
-            # "skipped_already_held" gate above, which only covers exact-symbol
-            # re-entry; the symbol cap is meant for the future case where the
-            # universe allows multiple positions in correlated derivatives of
-            # the same symbol, e.g. perp + dated future).
-            if config.max_per_symbol_concurrent > 0:
-                held_same_symbol = sum(1 for p in open_positions.values() if p["symbol"] == symbol)
-                if held_same_symbol >= config.max_per_symbol_concurrent:
-                    stats["skipped_symbol_cap"] += 1
+            if kernel_session is None:
+                if symbol in open_positions:
+                    stats["skipped_already_held"] += 1
                     continue
-            # B.3: per-sector concurrent cap (disabled when 0).
-            if config.max_per_sector_concurrent > 0 and sector_map:
-                cand_sector = sector_map.get(symbol, "unknown")
-                held_in_sector = sum(
-                    1 for p in open_positions.values()
-                    if sector_map.get(p["symbol"], "unknown") == cand_sector
-                )
-                if held_in_sector >= config.max_per_sector_concurrent:
-                    stats["skipped_sector_cap"] += 1
+                # Legacy/post-run mode preserves signal-time admission exactly.
+                if config.max_per_symbol_concurrent > 0:
+                    held_same_symbol = sum(
+                        1 for p in open_positions.values()
+                        if p["symbol"] == symbol
+                    )
+                    if held_same_symbol >= config.max_per_symbol_concurrent:
+                        stats["skipped_symbol_cap"] += 1
+                        continue
+                if config.max_per_sector_concurrent > 0 and sector_map:
+                    cand_sector = sector_map.get(symbol, "unknown")
+                    held_in_sector = sum(
+                        1 for p in open_positions.values()
+                        if sector_map.get(p["symbol"], "unknown") == cand_sector
+                    )
+                    if held_in_sector >= config.max_per_sector_concurrent:
+                        stats["skipped_sector_cap"] += 1
+                        continue
+                if cooldown_until.get(symbol, 0) > ts:
+                    stats["skipped_cooldown"] += 1
                     continue
-            if cooldown_until.get(symbol, 0) > ts:
-                stats["skipped_cooldown"] += 1
-                continue
-            if len(open_positions) >= config.max_concurrent_positions:
-                stats["skipped_capacity"] += 1
-                continue
+                if len(open_positions) >= config.max_concurrent_positions:
+                    stats["skipped_capacity"] += 1
+                    continue
             entry_ts_ms = ts + exact_duration_ms(hours=config.entry_delay_hours)
             if window_end_ts_ms is not None and entry_ts_ms > window_end_ts_ms:
                 stats["skipped_no_entry_bar"] += 1
@@ -2546,7 +2908,7 @@ def _run_long_pipeline(
                     position_weight = config.max_per_symbol_weight / max(notional_weight, 1e-12)
 
             trailing_atr = _safe_float(row.get("atr_20d"))
-            open_positions[symbol] = {
+            position = {
                 "symbol": symbol,
                 "pattern": pattern,
                 "entry_signal_ts_ms": int(ts),
@@ -2565,6 +2927,77 @@ def _run_long_pipeline(
                 "high_water_close": float(entry_price),
                 "trailing_atr": trailing_atr,
             }
+            if kernel_session is None:
+                open_positions[symbol] = position
+                _emit_entry_target(position)
+            else:
+                pending_online_entries.append((
+                    symbol,
+                    position,
+                    _entry_target(position),
+                ))
+
+        if pending_online_entries:
+            grouped_entries: dict[
+                int, list[tuple[str, dict[str, Any], HistoricalTargetDecision]]
+            ] = {}
+            for item in pending_online_entries:
+                grouped_entries.setdefault(item[2].wall_ts_ns, []).append(item)
+            for wall_ts_ns, items in sorted(grouped_entries.items()):
+                entry_ts_ms = int(wall_ts_ns // 1_000_000)
+                # Sniper candidates can resolve at different hours. Advance the
+                # account/book chronologically before applying admission gates so
+                # an earlier observable exit can release capacity for a later fill.
+                _scan_all_positions(entry_ts_ms)
+
+                admitted: list[
+                    tuple[str, dict[str, Any], HistoricalTargetDecision]
+                ] = []
+                for symbol, pos, decision in items:
+                    if symbol in open_positions:
+                        stats["skipped_already_held"] += 1
+                        continue
+                    if config.max_per_symbol_concurrent > 0:
+                        held_same_symbol = sum(
+                            1 for held in open_positions.values()
+                            if held["symbol"] == symbol
+                        )
+                        if held_same_symbol >= config.max_per_symbol_concurrent:
+                            stats["skipped_symbol_cap"] += 1
+                            continue
+                    if config.max_per_sector_concurrent > 0 and sector_map:
+                        cand_sector = sector_map.get(symbol, "unknown")
+                        held_in_sector = sum(
+                            1 for held in open_positions.values()
+                            if sector_map.get(held["symbol"], "unknown") == cand_sector
+                        )
+                        if held_in_sector >= config.max_per_sector_concurrent:
+                            stats["skipped_sector_cap"] += 1
+                            continue
+                    if cooldown_until.get(symbol, 0) > entry_ts_ms:
+                        stats["skipped_cooldown"] += 1
+                        continue
+                    if len(open_positions) >= config.max_concurrent_positions:
+                        stats["skipped_capacity"] += 1
+                        continue
+                    open_positions[symbol] = pos
+                    admitted.append((symbol, pos, decision))
+
+                if not admitted:
+                    continue
+                decisions = [item[2] for item in admitted]
+                accepted, rejection_keys, target_committed = _submit_kernel_decisions(
+                    decisions,
+                    batch_prefix="long-native-entry",
+                )
+                if accepted:
+                    continue
+                if target_committed:
+                    _neutralize_rejected_entries(decisions)
+                stats["skipped_account_kernel"] += len(admitted)
+                for symbol, pos, _ in admitted:
+                    if open_positions.get(symbol) is pos:
+                        del open_positions[symbol]
 
     # Force-close at the configured research boundary, not at the tail of the
     # whole loaded root. A windowed run must not leak future bars into its final
@@ -2584,12 +3017,14 @@ def _run_long_pipeline(
                 continue
             exit_price = float(bars["close"][exit_idx])
             exit_ts = int(bars["bar_end_ts_ms"][exit_idx])
-            trade = _finalize_trade(pos, exit_ts_ms=exit_ts, exit_price=exit_price,
-                                    reason="data_end", notional_weight=notional_weight,
-                                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
-                                    notional_multiplier=config.notional_multiplier)
-            trade_rows.append(trade)
+            _record_exit_target(
+                pos,
+                exit_ts_ms=exit_ts,
+                exit_price=exit_price,
+                reason="data_end",
+            )
             stats["exits_time"] += 1
+        _flush_online_exits()
 
     trades = (
         pl.DataFrame(trade_rows, infer_schema_length=None).sort(["entry_ts_ms", "symbol"])

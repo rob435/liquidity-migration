@@ -1,12 +1,9 @@
-"""Live BTC-beta hedge manager for the continuous demo book (WP3, banked 2026-06-09).
+"""Pure BTC/ETH beta-hedge target calculator for the continuous book.
 
 A periodic target-position manager that holds small LONG BTC/ETH positions sized to the continuous
 short book's causal rolling beta, market-neutralizing its uncompensated alt-season
-exposure (receipts: continuous-hedge-{overlay,engine}-2026-06-09.md). It is a
-SEPARATE sleeve from the entry daemon: its own ledger root, its own orderLinkId
-namespace (`lm-en-ca-*`), registered with the risk service via
-`continuous_addon_data_root` so the BTC long is ADOPTED (tracked, never flattened as
-an orphan), and it submits through the same REST private client (demo has no WS-trade).
+exposure. The module only calculates targets. The account execution owner handles
+venue rules, orders, fills, protection, and attribution.
 
 Sizing is the parity-tested live twin of the backtest hedge leg
 (`compute_continuous_hedge_ratio` + `plan_continuous_hedge_resize`, frozen
@@ -15,7 +12,7 @@ shipped research unit-return + BTC series (`deploy/hedge_warmstart/`) and extend
 with realized live book days, so the hedge is correctly sized from day one rather
 than after a 90-day live warm-up.
 
-Demo only. REAL_MONEY must be false. This is execution evidence, not alpha proof.
+This is a sizing model, not alpha proof or venue authorization.
 """
 
 from __future__ import annotations
@@ -38,7 +35,6 @@ from .continuous_regime import latest_btcvol_intensity
 
 HEDGE_SYMBOL = "BTCUSDT"
 HEDGE_SYMBOL_2 = "ETHUSDT"  # second leg of the banked 2f hedge (2026-06-10 Stage-B)
-HEDGE_LINK_PREFIX = "en-ca"  # ws_risk continuous-addon adoption namespace
 # Frozen hedge rule — the banked engine-leg parameters (Stage-B, 8/8 pass; the same
 # rule object parameterizes both the single-leg WP3 form and the 2f form). Derived from
 # the single source of truth (FROZEN_FORWARD_CONFIG['hedge']) so the live manager can't
@@ -64,25 +60,15 @@ def _regime_hedge_intensity(btc_returns: list[float | None]) -> float:
         btc_returns, regime["lam"], regime["vol_window"], regime["pct_window"]
     )
 
-
 @dataclass(frozen=True, slots=True)
 class ContinuousHedgeConfig:
-    data_root: str = "data/bybit-continuous-hedge-event"
     warmstart_csv: str = "deploy/hedge_warmstart/bybit_warmstart.csv"
-    trades_dataset: str = "continuous_fade_demo_trades"
-    orders_dataset: str = "continuous_fade_demo_orders"
     strategy_id: str = "continuous_btc_hedge_v2"
     # "2f" = the banked BTC+ETH two-factor hedge (Stage-B s0-s8 PASS, 2026-06-10);
     # "btc" = the prior single-leg WP3 form (fallback; also used when the warm-start
     # has no eth_ret column or too few joint observations).
     hedge_mode: str = "2f"
-    # No strategy-side dollar deadband.  The executor applies each leg's live
-    # qtyStep, minOrderQty and minNotionalValue immediately before submission.
-    min_resize_notional_usdt: float = 0.0
     max_hedge_equity_frac: float = 0.30  # hard sanity cap on TOTAL live hedge size
-    fallback_equity_usdt: float = 10_000.0
-    submit_orders: bool = False
-    confirm_demo_orders: bool = False
 
 
 @dataclass(slots=True)
@@ -96,12 +82,6 @@ class HedgeDecision:
     n_obs: int
     plan: ContinuousRebalanceResizePlan | None
     diagnostics: dict[str, Any] = field(default_factory=dict)
-
-
-def load_warmstart(path: str | Path) -> tuple[list[float], list[float | None]]:
-    """Return (unit_returns, btc_returns) oldest->newest from the shipped warm-start CSV."""
-    unit, btc, _eth = load_warmstart_2f(path)
-    return unit, btc
 
 
 def load_warmstart_2f(path: str | Path) -> tuple[list[float], list[float | None], list[float | None]]:
@@ -126,32 +106,14 @@ def load_warmstart_2f(path: str | Path) -> tuple[list[float], list[float | None]
             unit.append(u)
             for col, out in (("btc_ret", btc), ("eth_ret", eth)):
                 v = row.get(col)
+                if v in (None, ""):
+                    out.append(None)
+                    continue
                 try:
-                    out.append(float(v) if v not in (None, "") else None)
+                    out.append(float(str(v)))
                 except (TypeError, ValueError):
                     out.append(None)
     return unit, btc, eth
-
-
-def extend_with_live_days(
-    warm_unit: list[float],
-    warm_btc: list[float | None],
-    live_unit_by_day: dict[str, float],
-    live_btc_by_day: dict[str, float],
-) -> tuple[list[float], list[float | None]]:
-    """Append realized live book days (oldest->newest) onto the warm-start series.
-
-    ``live_*_by_day`` are keyed by ISO date strings AFTER the warm-start window; both
-    book and BTC returns must be realized (a day enters only when the book return is
-    known). Missing BTC for a present book-day enters as None (excluded from beta).
-    """
-    unit = list(warm_unit)
-    btc = list(warm_btc)
-    for day in sorted(live_unit_by_day):
-        unit.append(float(live_unit_by_day[day]))
-        b = live_btc_by_day.get(day)
-        btc.append(float(b) if b is not None else None)
-    return unit, btc
 
 
 def compute_hedge_decision(
@@ -193,7 +155,6 @@ def compute_hedge_decision(
             price=btc_price,
             equity_usdt=equity_usdt,
             hedge_ratio=ratio,
-            min_resize_notional_usdt=config.min_resize_notional_usdt,
         )
     target_notional = max(equity_usdt, 0.0) * ratio
     return HedgeDecision(
@@ -334,13 +295,11 @@ def compute_hedge_decision_2f(
         plan_btc = plan_continuous_hedge_resize(
             hedge_symbol=HEDGE_SYMBOL, current_qty=current_btc_qty, price=btc_price,
             equity_usdt=equity_usdt, hedge_ratio=r_btc,
-            min_resize_notional_usdt=config.min_resize_notional_usdt,
         )
     if eth_price > 0.0:
         plan_eth = plan_continuous_hedge_resize(
             hedge_symbol=HEDGE_SYMBOL_2, current_qty=current_eth_qty, price=eth_price,
             equity_usdt=equity_usdt, hedge_ratio=r_eth,
-            min_resize_notional_usdt=config.min_resize_notional_usdt,
         )
     eq = max(equity_usdt, 0.0)
     return HedgeDecision2F(
@@ -361,82 +320,3 @@ def compute_hedge_decision_2f(
             "history_days": len(unit_returns),
         },
     )
-
-
-def build_hedge_trade_row(
-    config: ContinuousHedgeConfig,
-    *,
-    qty: float,
-    entry_price: float,
-    now_ms: int,
-    order_link_id: str,
-    order_id: str = "",
-    symbol: str = HEDGE_SYMBOL,
-) -> dict[str, Any]:
-    """Conforming OPEN trade row for a submitted hedge BTC long."""
-    return build_hedge_tracking_row(
-        config,
-        qty=qty,
-        entry_price=entry_price,
-        opened_ms=now_ms,
-        updated_ms=now_ms,
-        order_link_id=order_link_id,
-        order_id=order_id,
-        signal_ts_ms=now_ms,
-        submit_mode="submitted" if order_id else "dry_run",
-        symbol=symbol,
-    )
-
-
-def build_hedge_tracking_row(
-    config: ContinuousHedgeConfig,
-    *,
-    qty: float,
-    entry_price: float,
-    opened_ms: int,
-    updated_ms: int,
-    order_link_id: str,
-    order_id: str = "",
-    signal_ts_ms: int | None = None,
-    submit_mode: str | None = None,
-    symbol: str = HEDGE_SYMBOL,
-) -> dict[str, Any]:
-    """Conforming OPEN tracking row for the externally managed hedge BTC long.
-
-    SAFETY CONTRACT (verified against ws_risk.plan_risk_exits): stop_price,
-    take_profit_price and planned_exit_ts_ms are ALL 0, so the risk service TRACKS
-    this position (its symbol enters open_symbols -> adoption skips it) but NEVER
-    force-exits it — the periodic hedge manager is its sole manager. side='long',
-    sleeve='continuous_addon' routes it to the addon ledger the risk service reads.
-    """
-    return {
-        "trade_id": f"hedge-{order_link_id}",
-        "strategy_id": config.strategy_id,
-        "symbol": symbol,
-        "side": "long",
-        "sleeve": "continuous_addon",
-        "status": "open",
-        "ts_ms": opened_ms,
-        "entry_ts_ms": opened_ms,
-        "opened_at_ms": opened_ms,
-        "updated_at_ms": updated_ms,
-        "signal_ts_ms": opened_ms if signal_ts_ms is None else signal_ts_ms,
-        "entry_price": float(entry_price),
-        "qty": float(qty),
-        "notional_usdt": abs(float(entry_price) * float(qty)),
-        # The three force-exit triggers, all disabled — externally managed.
-        "stop_price": 0.0,
-        "take_profit_price": 0.0,
-        "planned_exit_ts_ms": 0,
-        "stop_loss_pct": 0.0,
-        "entry_order_link_id": order_link_id,
-        "entry_order_id": order_id,
-        "submit_mode": submit_mode or ("submitted" if order_id else "dry_run"),
-    }
-
-
-def hedge_order_link_id(now_ms: int, symbol: str = HEDGE_SYMBOL) -> str:
-    """Stable-namespaced link id for a hedge leg (ws_risk continuous-addon route)."""
-    from .event_demo import _order_link_id
-
-    return _order_link_id(HEDGE_LINK_PREFIX, symbol=symbol, signal_ts_ms=int(now_ms))

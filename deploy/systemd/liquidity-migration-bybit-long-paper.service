@@ -1,7 +1,9 @@
 [Unit]
-Description=liquidity-migration Bybit long-sleeve (LongV11aDivWeekendVol) paper (dry-run) runner
+Description=liquidity-migration long-sleeve paper target producer (LongV11aDivWeekendVol)
 Wants=network-online.target
-After=network-online.target
+Requires=liquidity-migration-account-paper-execution.service
+After=network-online.target liquidity-migration-account-paper-execution.service
+ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
 
 [Service]
 Type=simple
@@ -9,16 +11,13 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+EnvironmentFile=/etc/liquidity-migration/account-paper-execution.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-long-paper-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-Environment=SUBMIT_ORDERS=0
-Environment=CONFIRM_DEMO_ORDERS=0
-Environment=RECORD_DRY_RUN=1
-# PAPER_MODE=1 routes writes to long_native_paper_* datasets so the long
-# reconciler (reconcile-long-paper-demo) can pair this output against the
-# live long-demo ledger. Without it the paper service silently writes to
-# the demo dataset names and reconciliation finds paired=0.
-Environment=PAPER_MODE=1
+# Explicit paper environment publishes targets to the deterministic paper owner.
+Environment=EXECUTION_ENVIRONMENT=paper
 Environment=TELEGRAM_ENABLED=0
 Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol
 Environment=INTERVAL_SECONDS=60

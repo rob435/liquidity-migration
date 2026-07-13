@@ -1,103 +1,122 @@
 # Timestamp glossary
 
-The trade ledger carries **several** timestamps that all sound interchangeable
-("the time of the trade") but mean very different things. Conflating them
-caused the 2026-05-25 WAVESUSDT premature-exit bug: the orderLinkId recovery
-set `entry_ts_ms = signal_ts_ms`, which collapsed the venue fill time onto
-the signal time and made the position look 1-6h older than it really was, so
-both `event_decay` and `planned_exit_ts_ms` tripped early.
+The current execution authority is the account journal, not a mutable sleeve
+trade row. Keep event time, strategy-decision time and compatibility-projection
+time separate: they answer different questions and cannot be substituted for
+one another.
 
-Read this before touching anything in the trade-row builder, the adoption
-path, the cycle's exit logic, or reconciliation.
+## Canonical account-event clocks
 
-## The 6 timestamps
+Every canonical event has:
+
+- `wall_ts_ns`: the owner's local wall clock when the event was appended;
+- `monotonic_ns`: the owner's monotonic clock for local sequencing and latency;
+- `exchange_ts_ns`: the venue timestamp when the venue supplied one, otherwise
+  zero;
+- a root-global `sequence`, which is the durable ordering authority.
+
+Fill and acknowledgement payloads also retain their specific venue and local
+receive timestamps. Use those fields for execution latency and TCA. Never infer
+a venue fill time from a strategy projection or from file-write time.
+
+## Strategy and compatibility timestamps
+
+Sleeve target metadata retains strategy-decision timestamps. The canonical
+strategy read model joins those targets to execution anchors reconstructed from
+the account journal. Target clocks and fill clocks remain separate even when a
+legacy-shaped projection carries both.
 
 ### `signal_ts_ms`
-**The kline bar timestamp that triggered the entry.** Always the closing
-boundary of a 1h bar (so always at `xx:00:00.000 UTC`). Same on demo and
-paper for the same signal — it's part of the deterministic `trade_id`
-(`{scenario_id}-{symbol}-{signal_ts_ms}`). Encoded into the order_link_id
-as base36(signal_ts_ms // 1000).
 
-  - Set by: the cycle when it builds an entry candidate from a detected event.
-  - Read by: `trade_id`, `order_link_id`, reconciliation pairing.
-  - Survives a VPS rebuild: yes (decoded back from orderLinkId).
+The closed kline boundary that caused the strategy decision. It is part of the
+stable component identity and survives into target metadata. For the current
+hourly decision paths it is aligned to an hour boundary.
+
+- Set by: the strategy candidate builder.
+- Read by: component identity, re-entry/cooldown logic and reconciliation.
+- Execution meaning: none; it is not a submit, acknowledgement or fill time.
 
 ### `entry_ready_ts_ms`
-**The earliest moment the signal may be acted on under the backtest model**:
-`signal_ts_ms + entry_delay_hours` (1h) for the fixed-delay policy, or the
-first qualifying squeeze bar for quality-squeeze entries. The long sleeve sets
-this to `now_ms` when the live candidate builder emits the candidate. In
-production the feature pipeline only surfaces candidates after bar close and
-feature computation; the stale gate budgets for that operational lag:
-`now - entry_ready_ts_ms > MAX_ENTRY_LAG_MINUTES` → reject as stale.
 
-  - Set by: the sleeve's entry decision / candidate builder.
-  - Read by: stale-skip gate.
+The earliest causal time at which a signal may be acted on under its entry
+policy. Fixed-delay entries use `signal_ts_ms + entry_delay`; sniper/retrace
+entries use their first qualifying boundary or deadline.
+
+- Set by: the strategy scheduler/candidate builder.
+- Read by: stale-signal and chronological scheduling checks.
+- Execution meaning: eligibility, not a fill.
 
 ### `entry_ts_ms`
-**The actual venue fill time** for live orders, or the cycle's submit time
-for paper (which idealizes fills at signal price). This is what the cycle's
-exit logic uses for hold-window calc:
-`planned_exit_ts_ms = entry_ts_ms + hold_days * MS_PER_DAY`.
 
-  - Set by: cycle's order-fill confirmation (live) or cycle's signal-time
-    snapshot (paper).
-  - Read by: `event_decay` rank-checks, `planned_exit_ts_ms`, time-stop
-    logic.
-  - **DO NOT** set this to `signal_ts_ms` in the adoption recovery path
-    (that's the bug). Use `opened_at_ms` instead.
+On the current `canonical_strategy_trade_rows` read model this is the local
+receive time of the first journal-confirmed fill attributable to the component.
+It remains null before a fill and when an aggregate same-symbol fill cannot be
+attributed safely. It is never replaced with target acceptance time.
+
+Archived pre-account-kernel sleeve roots used this name for an actual fill time
+or, in paper mode, a submit-time idealization. Do not combine those legacy rows
+with current target projections without labelling the semantic change.
 
 ### `opened_at_ms`
-**Bybit's reported `createdTime` for the position.** Closest server-side
-timestamp to the actual fill. The recovery path's source of truth for
-when the venue saw the order land.
 
-  - Set by: adoption (from `position.createdTime`).
-  - Read by: nothing in the cycle directly; mirror copy for audit.
+On the current strategy read model this mirrors `entry_ts_ms`: the first
+attributable fill's local receive time. Archived direct-execution roots used it
+for Bybit's reported `createdTime`. Venue fill time remains separately preserved
+on the canonical execution event.
+
+### `entry_target_ts_ms`
+
+The wall time of the first accepted non-zero component target. This is the
+planning/admission clock that older projections incorrectly exposed as
+`entry_ts_ms`. It may precede a fill and never starts protection or max hold.
+
+### `max_hold_duration_ms`
+
+The strategy-decided hold duration published with an entry target. New target
+producers publish a duration, not an absolute decision-time deadline. Historical
+target metadata may be interpreted only as a labelled duration delta.
 
 ### `planned_exit_ts_ms`
-**When the cycle's hold-window scheduler will close the position.** Computed
-as `entry_ts_ms + hold_days * MS_PER_DAY` for the strategy, or
-`opened_at_ms + adopt_hold_days * MS_PER_DAY` for adoption.
 
-  - Set by: trade-row builder + adoption.
-  - Read by: cycle's time-stop check.
+On the current strategy read model this is derived as first attributable fill
+time plus `max_hold_duration_ms`. It stays null before a fill or when attribution
+is ambiguous. The sleeve may publish a zero target after this boundary; the
+field does not assert when the account owner will fill the resulting aggregate
+order.
 
-### `ts_ms` (on the trade row itself)
-**The wall-clock moment the trade row was written / last updated.** Closer
-to `now` than to any of the above. Only useful for ordering ledger writes
-on the same machine.
+`target_planned_exit_ts_ms` preserves any legacy absolute deadline from target
+metadata for audit only. It is not a lifecycle clock.
 
-  - Set by: every code path that builds or updates a trade row.
-  - Read by: ledger-display tooling only.
+### `ts_ms`
+
+The wall-clock write/update time on legacy-shaped Parquet rows. It is useful for
+ordering local projection writes only. It is not an exchange timestamp and it
+is not authoritative over the journal sequence.
 
 ## Invariants
 
-These should hold for every trade row. If you write code that violates them,
-the cycle's exit/staleness logic breaks.
+- `signal_ts_ms` must not be later than the strategy decision that cites it.
+- `entry_target_ts_ms` must not precede the signal decision that produced it.
+- `entry_ts_ms` and `opened_at_ms` remain null until an attributable fill and,
+  when present, identify the same first-fill clock.
+- `planned_exit_ts_ms` equals fill time plus the declared duration whenever both
+  are available; it is not derived from target acceptance.
+- Component stop/take-profit prices are derived from confirmed fill VWAP, never
+  from a decision reference price.
+- Venue latency, fill price, fee, close and P&L must come from canonical
+  acknowledgement/fill/P&L events, never from the planning timestamps above.
+- A zero `exchange_ts_ns` means that the venue supplied no timestamp; it does
+  not mean Unix epoch.
 
-  - `entry_ts_ms >= signal_ts_ms`  
-    Always. The fill cannot precede the signal that caused it.
-  - `planned_exit_ts_ms > entry_ts_ms`  
-    Hold window is positive.
-  - `signal_ts_ms % MS_PER_HOUR == 0`  
-    Signal ts is a 1h-bar boundary.
-  - `opened_at_ms >= signal_ts_ms` (when present)  
-    Bybit can't have created the position before the signal.
+`tests/test_account_strategy_state.py` pins the current strategy-projection
+semantics. Account event ordering and fill clocks are covered by the account
+kernel, execution-stream and reconciliation tests.
 
-The adoption-recovery test pins these explicitly:
-`tests/test_liquidity_migration_ws_risk.py::test_ws_risk_recovers_strategy_trade_id_from_bot_order_link`.
+## Legacy warning
 
-## Common pitfalls
-
-  - **Confusing signal_ts with entry_ts.** Signal_ts is the bar
-    boundary (00, 60, 120 min). Entry_ts is the venue fill time which can
-    be 1-6h later. The cycle's exit logic uses entry_ts; setting it to
-    signal_ts trips exits prematurely.
-  - **Using `now_ms` as `entry_ts_ms`.** When closing a trade you write
-    `exit_ts_ms = now_ms` but **don't touch** `entry_ts_ms`. The entry
-    time is permanent once the order fills.
-  - **Decoding orderLinkId timestamps without re-multiplying by 1000.**
-    The orderLinkId encodes `base36(signal_ts_ms // 1000)`. Reversing:
-    `signal_ts_ms = int(ts36, 36) * 1000`.
+The 2026-05-25 WAVESUSDT incident came from a retired adoption path that decoded
+an order-link signal timestamp and wrote it as `entry_ts_ms`, making the position
+appear hours older than the venue fill. Archived rows produced by that path are
+historical evidence, not a recovery mechanism. Current account commands use
+canonical command identities, and venue fill time comes from the account event
+stream.

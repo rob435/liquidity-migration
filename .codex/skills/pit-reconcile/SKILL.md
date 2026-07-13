@@ -1,89 +1,102 @@
 ---
 name: pit-reconcile
-description: Reconcile LONG and CONTINUOUS demo and paper ledgers, run the full demo, backtest, and paper model check, and diagnose archive_trade_manifest or PIT coverage problems. Use scripts/ops.sh reconcile or bash scripts/reconcile.sh whenever checking execution agreement, model drift, unmatched rows, fill slippage, stale membership, or pit_membership_fail. Distinguish quick execution-plane evidence from the full model leg and verify current options with help.
+description: Assess current account-execution reconciliation and PIT/model evidence after retirement of the sleeve-local reconciler. Use when checking account-journal parity, venue/account mismatches, execution agreement, model drift, fill or P&L evidence, archive_trade_manifest coverage, or pit_membership_fail. Distinguish available structural checks from the open captured-tape and venue gates; never invoke deleted reconcile scripts.
 ---
 
-# Reconcile ledgers and PIT membership
+# Reconcile account evidence and PIT claims
 
-Use the single wrapper and inspect current options:
-
-```bash
-bash scripts/reconcile.sh --help
-bash scripts/reconcile.sh --quick --help
-scripts/ops.sh reconcile quick --help
-scripts/ops.sh reconcile full --help
-```
-
-The commands are read-only against the VPS but can download data and write local
-reports. They never authorize real money.
-
-## Quick: paper and demo execution plane
+First inspect the current operator and package surfaces:
 
 ```bash
-bash scripts/reconcile.sh --quick
-bash scripts/reconcile.sh --quick --sleeves long
-bash scripts/reconcile.sh --quick --dry-run
+scripts/ops.sh --help
+scripts/ops.sh account-parity --help
+scripts/ops.sh venue-accounting --help
+python -m liquidity_migration --help
 ```
 
-Quick mode currently defaults to both active sleeves. It pulls paper/demo
-ledgers and compares their execution/lifecycle surfaces; it does not run a
-backtest or refresh PIT data. It does not rebuild research RMOM unless
-`--refresh-rmom` is explicitly requested.
+These commands are demo/paper or research surfaces. They never authorize real
+money.
 
-A clean quick result supports paper/demo execution agreement for the inspected
-window. It does not establish agreement with the backtest model, alpha, OOS
-performance, or deployment readiness.
+## Account runtime evidence
 
-## Full: data, model, demo, and paper
+Use `scripts/ops.sh status` for a read-only deployed-service/liveness view.
+Use `scripts/ops.sh account-parity` only when actual non-empty historical,
+paper, and demo account roots have been captured:
 
 ```bash
-bash scripts/reconcile.sh
-bash scripts/reconcile.sh --sleeves long
-bash scripts/reconcile.sh --no-data-refresh
-bash scripts/reconcile.sh --with-funding
-bash scripts/reconcile.sh --dry-run
+scripts/ops.sh account-parity \
+  --environment historical=/path/to/historical-account-root \
+  --environment paper=/path/to/paper-account-root \
+  --environment demo=/path/to/demo-account-root \
+  --quantity-tolerance 1e-12 \
+  --output /path/to/account-kernel-parity.json
 ```
 
-Full mode currently defaults to both sleeves. It:
+The receipt binds normalized journal bytes and compares decision keys, rejection
+keys, target quantities, event-type sequence, and replayed account-state hashes.
+A pass supports only those structural claims. It does not establish market-tape
+provenance, a common strategy scheduler, fresh venue rules, credentialed demo
+execution, immutable venue P&L, funding agreement, alpha, or deployment
+readiness. Read `docs/account_execution_cutover.md` before making a runtime
+acceptance claim.
 
-1. refreshes the bounded manifest/kline tail unless disabled;
-2. pulls demo and paper ledgers unless disabled;
-3. refreshes the kline-based COMMON4 residual-momentum panel for continuous
-   unless data/RMOM refresh is disabled;
-4. runs the LONG forward-window backtest/model comparison;
-5. re-derives CONTINUOUS per-component entry candidates and compares fills;
-6. writes per-row artifacts and a combined status.
+For a live mismatch, inspect the account journal, owner reconciliation report,
+venue snapshot, and immutable venue records directly. Do not treat sleeve-local
+trade/order Parquet projections as position or P&L authority.
 
-Funding refresh is off by default because it is not needed for entry agreement.
-Use `--with-funding` when interpreting costed PnL. It is not an RMOM repair flag.
-When independent refresh is skipped, read the printed plane and coverage because
-the continuous check may use the live signal plane instead of an independent
-research recompute.
-
-## Interpret the legs separately
-
-- Paper versus demo: execution agreement, misses, lifecycle, and fill/slippage
-  differences.
-- Model versus paper/demo: signal/config/data agreement for the modeled window.
-- PIT status: coverage under the manifest contract in `docs/pit_gate.md`, whose
-  V5-derived rows have explicit provenance limits.
-- Funding-off PnL: not a net-performance result.
-
-Read per-trade CSVs and report classifications directly. Do not hardcode current
-bucket thresholds into this skill; source code and report output own them.
-Investigate any unexplained live row absent from the model, material lifecycle
-divergence, impossible fill, stale plane, or manifest failure before calling the
-execution object consistent.
-
-## Diagnose PIT failures
-
-Run or preview the full wrapper first. For a targeted manifest refresh:
+After the bounded demo tape is complete and the demo owner is stopped, use the
+owner-serialized, read-only accounting capture over the exact fresh-ledger
+epoch (never more than seven days):
 
 ```bash
-python -m liquidity_migration --data-root ROOT archive-manifest
+scripts/ops.sh venue-accounting \
+  --account-root /absolute/path/to/demo-account-root \
+  --account-id bybit-demo-unified \
+  --start-time-ms FRESH_EPOCH_START_MS \
+  --output /absolute/path/to/venue-accounting.json
 ```
 
-Verify `source` provenance, end-exclusive boundary, archive lag, kline coverage,
-and the active profile's `require_full_pit_universe` value. Do not loosen the
-gate to rescue a historical-universe claim. A partial run can still support an
-explicitly narrower diagnostic under `docs/governance.md`.
+The self-hashed receipt replays the current canonical journal and binds raw
+Bybit demo TRADE, closed-PnL, and SETTLEMENT rows plus position/open-order
+snapshots before and after capture. It checks exact execution/order identities,
+target-to-order lineage, observed fees, fill P&L, funding identities/values,
+and local/venue flatness. The preregistered default floors are two trade rows,
+one closed-PnL row, and one funding settlement; a zero-funding window does not
+pass by assumption. This is accounting evidence for the named fresh demo epoch,
+not component P&L attribution, strategy parity, alpha, or deployment authority.
+
+## PIT and model evidence
+
+PIT is checked inside the exact research run whose claim depends on it. There is
+no current combined PIT plus live-ledger reconciliation command.
+
+For a targeted manifest rebuild:
+
+```bash
+python -m liquidity_migration --data-root ROOT archive-manifest \
+  --start YYYY-MM-DD --end YYYY-MM-DD
+```
+
+Inspect the selected command's current `--help`, preserve the end-exclusive
+boundary, root identity, config, warnings, run label, and artifacts, and rerun
+the same research command after closing the named data gap. Verify manifest
+`source` provenance and kline coverage. Do not loosen
+`require_full_pit_universe` after seeing a result in order to rescue a
+historical-universe claim. A partial run may support only an explicitly narrower
+diagnostic under `docs/governance.md`.
+
+## Retired surface
+
+The following were removed on 2026-07-13 because they compared sleeve-local
+compatibility projections rather than the authoritative target/account-owner
+boundary:
+
+- `scripts/reconcile.sh` and `scripts/reconcile.py`;
+- `scripts/reconcile_three_way.py` and `scripts/reconcile_fills.py`;
+- `reconcile-long-paper-demo` and `reconcile-continuous-paper-demo`;
+- `continuous-forward-readiness` and
+  `continuous-rebalance-cycle-audit`.
+
+Historical receipts from those tools remain evidence about their dated runs.
+They are not a current operational gate and must not be recreated merely to
+restore a green headline.
