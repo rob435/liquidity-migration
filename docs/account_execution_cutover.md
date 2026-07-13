@@ -36,18 +36,33 @@ confirmed zero positions and zero regular/conditional orders, and the unit plus
 flatness evidence was retained under the host's mode-restricted cutover-evidence
 directory.
 
-Staged topology installation of clean commit `27428d462b1a` passed 142 Linux
+Staged topology installation of clean commit `4950b4cb0520` passed 142 Linux
 smoke tests, installed both inactive owner units, and removed the retired risk
 and combined-book reporter units. It did not start a process or create either
-cutover marker. Both owner route files, the six fresh roots, demo-rule receipt,
-and all captured-tape gates remain absent. Therefore this is a valid stopped
-staging boundary, not deployment readiness or final-flatness evidence.
+cutover marker. The guarded reset then re-proved venue flatness, archived 12
+legacy roots/projections to the verified archive whose SHA-256 is
+`07e76e35e688fb6f20e17c78ea9bc8489144c852f4c99fcb9964d887c06c6d6a`,
+rebuilt compatibility projections from canonical journals, and created all six
+fresh empty account/inbox/capture roots. No service was active before or after
+the reset.
+
+The first 20-USDT rule-probe ceiling failed before order submission because
+current `BTCUSDT` structural minimum quantity exceeded it. The failed attempt
+is retained. A second, flat-account 200-USDT feasibility probe passed and
+produced the self-hashed three-symbol receipt bound in demo calibration v2. Its
+largest observed minimum is 62.1029 USDT, so the original 30-USDT calibration
+plan is closed as infeasible and v2 prospectively fixes 80 USDT before any
+calibration target/fill outcome. Route/risk/symbol files now exist. The capture
+marker remains absent, both owners remain inactive, and every captured-tape
+gate remains open. This is a valid stopped/reset staging boundary, not
+deployment readiness or final-flatness evidence.
 
 The full acceptance gate remains open, and no deploy-authorization assessment
 or receipt has been issued:
 
-- the credentialed `api-demo` rule probe has not run for this cutover, so no
-  fresh venue-derived rules receipt exists;
+- the credentialed `api-demo` rule gate passed only for the three calibration
+  symbols; candidate coverage for actual LONG/CONTINUOUS strategy tapes remains
+  open;
 - standard and bounded sniper-retrace LONG historical execution submit
   chronological same-timestamp
   targets to a persistent account kernel and consumes risk/execution feedback
@@ -195,7 +210,7 @@ probe, and performs a final flatness audit:
 python3 scripts/probe_bybit_demo_rules.py \
   --symbols BUSDT,BTCUSDT,ETHUSDT \
   --account-root data/bybit-account-execution \
-  --max-probe-notional-usdt 20 \
+  --max-probe-notional-usdt 200 \
   --leverage 10 \
   --output /etc/liquidity-migration/account-execution/demo-rules.json \
   --confirm-demo-probe
@@ -288,7 +303,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
     Natural LONG/CONTINUOUS events remain required for their strategy-parity
     comparison, but they need not be abused to manufacture the execution-twin
     sample count. The prospective bounded driver in
-    `docs/preregistration/account_execution_calibration_2026_07_13.md` publishes
+    `docs/preregistration/account_execution_calibration_v2_2026_07_13.md` publishes
     one tiny target at a time through the same owner and event clock, holds no
     credentials, and explicitly cannot satisfy LONG/CONTINUOUS parity:
 
@@ -300,7 +315,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
       --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-events.jsonl \
       --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-run.json \
       --expected-commit "$(git rev-parse HEAD)" \
-      --plan-id demo-calibration-20260713-v1
+      --plan-id demo-calibration-20260713-v2
     ```
 
     Add the preregistered `--funding-symbol BTCUSDT` and an explicit future

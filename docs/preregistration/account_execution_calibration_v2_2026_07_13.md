@@ -1,17 +1,30 @@
-# Demo execution calibration v1 (closed at feasibility)
+# Demo execution calibration v2
 
-Status: registered prospectively and execution-outcome unseen, then closed at
-the demo-rule feasibility gate on 2026-07-13. No calibration target or market
-order was emitted. Forward-execution evidence only; no alpha,
-LONG/CONTINUOUS parity, deployment, or real-money claim.
+Status: prospective and execution-outcome unseen at registration. Registered
+after venue-rule feasibility only; no calibration target, market order, fill,
+latency, slippage, fee, P&L, or funding outcome has been observed. Forward
+execution evidence only; no alpha, LONG/CONTINUOUS parity, deployment, or
+real-money claim.
 
-The first rule-probe attempt failed before order submission because current
-`BTCUSDT` structural minimum quantity exceeded the registered 20-USDT probe
-ceiling. The subsequent flat-account feasibility probe observed a 62.1029-USDT
-minimum for `BTCUSDT`, making this plan's 30-USDT open and its 25% minimum
-buffer impossible. This contract remains immutable spent design history. Its
-prospective successor is
-`account_execution_calibration_v2_2026_07_13.md`.
+## Revision boundary
+
+V1 is closed, not edited retroactively. Its 20-USDT rule-probe ceiling failed
+before order submission because `BTCUSDT` structural minimum quantity exceeded
+that ceiling. A second flat-account feasibility probe used a predeclared
+200-USDT ceiling and completed with no residual positions or orders. Its
+immutable inputs are:
+
+- verified timestamp: `1783986138270164217` ns;
+- receipt file SHA-256:
+  `a5053de858bceeafc8ca76c1a902719b7fad184cc26e3b0b42b3502b7babc756`;
+- self-hash:
+  `ae4f4916cfa7e0ec7200c832af0e1100ceda2d78b805f46e6eac3d1a92427c7a`;
+- observed minimum notionals: `BTCUSDT=62.1029`, `ETHUSDT=17.6703`,
+  `BUSDT=5.05579` USDT.
+
+The 25% buffer over the largest observed minimum is 77.628625 USDT. V2 fixes a
+round 80-USDT notional before any affected execution result. That is a design
+repair from a venue feasibility receipt, not a post-fill threshold change.
 
 ## Claim and decision
 
@@ -23,9 +36,10 @@ the deterministic paper owner. It cannot establish strategy parity or authorize
 the full deployment.
 
 The runtime source must be one exact clean commit containing this contract. The
-target-sequence receipt records that commit, event-tape hash, account-journal
-head, and demo-rule receipt. Previously accumulated sleeve-local demo rows are
-spent operational history and are excluded by the fresh account epoch.
+target-sequence receipt records that commit, route-manifest hash, demo-rule file
+and artifact hashes, event-tape hash, and account-journal head. Previously
+accumulated sleeve-local demo rows are excluded by the fresh archived/reset
+account epoch.
 
 ## Fixed sample plan
 
@@ -34,7 +48,10 @@ spent operational history and are excluded by the fresh account epoch.
 - Five round trips per symbol, iterating the symbol order within each round.
 - Direction alternates deterministically by `(round + symbol_index) % 2`.
 - One position at a time; every open must converge before its matching flat.
-- Explicit notional: 30 USDT per open; leverage: 2; post-fill hold: one second.
+- Explicit notional: 80 USDT per open; leverage: 2; post-fill hold: one second.
+- Calibration-only risk envelope: 100-USDT component/symbol/account gross caps,
+  50-USDT initial-margin cap, 2x leverage cap, and an explicit 2% native
+  disaster stop. This envelope intentionally blocks general strategy sizing.
 - Target author: target-only `execution-calibration-v1` through the HEDGE
   adapter and canonical account inbox. It receives no Bybit credentials.
 - Scheduling: every transition is durably appended to the shared hash-chained
@@ -42,13 +59,13 @@ spent operational history and are excluded by the fresh account epoch.
   verified plan prefix and immutable request identities.
 - This produces 30 target transitions/order commands/fills and 15 reductions
   when every request succeeds. Zero-fill terminal orders do not count.
-- A separate final 30-USDT `BTCUSDT` funding hold may be appended. Its close
+- A separate final 80-USDT `BTCUSDT` funding hold may be appended. Its close
   timestamp must be registered before the open from Bybit's published next
-  funding time, no more than 24 hours ahead, and must be after the settlement.
+  funding time, no more than 24 hours ahead, and must be after settlement.
 
-The 30-USDT value is an experiment-specific exposure, not a runtime resize
-floor. Each probed demo minimum must be no more than 80% of it; otherwise the
-sequence refuses rather than changing size after inspecting fills.
+The 80-USDT value is experiment-specific exposure, not a runtime resize floor.
+Each probed demo minimum must be no more than 80% of it; otherwise the sequence
+refuses rather than changing size after inspecting fills.
 
 ## Clock and calibration gates
 
@@ -56,14 +73,15 @@ Before calibration, collect 21 unauthenticated `api-demo` server-time samples
 on the VPS, retain the five lowest-RTT samples, and use their median midpoint
 offset. `timedatectl` must report NTP synchronized. The selected RTT ceiling is
 250 ms and the conservative offset-error ceiling is 50 ms. The receipt is
-self-hashed and must be no older than 24 hours.
+self-hashed and must be no older than 24 hours. Parameters that differ from
+this exact contract are rejected.
 
 The execution-twin floors remain those registered in
 `docs/account_execution_cutover.md`: 5,000 clock-adjusted feed observations, 30
 targets, 30 commands, 30 request/ack samples, 30 filled orders, 10 P&L events,
 three symbols, 95% command/book linkage, 99% nonnegative clock-adjusted latency,
-and 99% reference match within 0.01 bp. Do not lower a floor after viewing the
-epoch.
+and 99% reference match within 0.01 bp. Runtime and receipt validation reject a
+weaker floor; do not lower one after viewing the epoch.
 
 Bybit depth is market-by-price. Passive queue position is not identifiable, so
 the result must keep passive queue calibration false. Observed multifill and
@@ -76,7 +94,7 @@ Abort on stale/blocked owner health, foreign exposure, any simultaneous working
 order, rejected target, convergence timeout, route/rule mismatch, capture gap,
 or non-flat round-trip boundary. Keep the sole owner running for protection and
 strictly reducing recovery if exposure remains. Resume cannot overwrite a
-changed plan or tape.
+changed plan, tape, run receipt, or rule/route identity.
 
 This sequence does not replace actual LONG/CONTINUOUS target-tape comparison,
 historical/paper replay, venue accounting, final flatness, or owner-first start

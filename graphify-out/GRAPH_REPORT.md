@@ -1,7 +1,7 @@
 # Graph Report - liquidity-migration  (2026-07-14)
 
 ## Corpus Check
-- 274 files · ~1,069,649 words
+- 274 files · ~1,070,735 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary

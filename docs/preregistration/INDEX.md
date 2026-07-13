@@ -29,7 +29,8 @@ does not become confirmatory retroactively.
 | Strategy overhaul scout | `strategy-overhaul-scout-2026-07-10.md` | Local full-window outcome-blind Phase 0 `strategy-overhaul-phase0-bccefdfc38ae9fda3c17` is internally re-executable but `NOT_READY`; it found a seven-day Binance root/provenance gap that was repaired prospectively afterward, both roots still lack canonical lineage, no big-PC bundle or canonical child exists, and no population/outcome stage was inspected |
 | Long v11a | FC-only long sleeve with v11a sniper entry, vol parity, ATR exits | Best current internal positive object; tiny ADA forward sample has timing/exit mismatch |
 | Account runtime acceptance | `docs/account_execution_cutover.md` | Open. The sleeve-local reconciler was retired 2026-07-13 because its compatibility projections are not authoritative for the account owner. Structural account-journal parity exists, but captured-tape, common-scheduler, venue-rule, credentialed-demo, and fill/P&L gates remain unproven. |
-| Demo execution calibration v1 | `docs/preregistration/account_execution_calibration_2026_07_13.md` | Prospective bounded target-only sample: three symbols, five round trips each, optional registered funding hold, independent clock-offset gate. Execution calibration only; LONG/CONT parity remains separate. |
+| Demo execution calibration v1 | `docs/preregistration/account_execution_calibration_2026_07_13.md` | Closed at feasibility before a calibration order: current BTC structural minimum made its $30 open impossible. Preserved as spent design history. |
+| Demo execution calibration v2 | `docs/preregistration/account_execution_calibration_v2_2026_07_13.md` | Prospective bounded target-only sample registered from rule feasibility only: three symbols, five $80 round trips each, optional registered funding hold, independent clock-offset gate. Execution calibration only; LONG/CONT parity remains separate. |
 
 ## Closed Continuous Arcs
 

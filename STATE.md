@@ -13,7 +13,7 @@ research decisions are in
 | --- | --- | --- |
 | `continuous_ensemble_v2` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
 | `LongV11aDivWeekendVol` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
-| Shared account execution | demo + paper | Owner units installed but inactive; route files and evidence gates still absent |
+| Shared account execution | demo + paper | Owner units/routes installed but inactive; fresh roots empty; capture marker absent |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
@@ -25,12 +25,26 @@ research decisions are in
   checksums are retained under
   `/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z`.
 - Staged topology installation from branch
-  `codex/account-execution-cutover` at commit `27428d462b1a` passed 142 Linux
+  `codex/account-execution-cutover` at commit `4950b4cb0520` passed 142 Linux
   smoke tests. It installed the two owner units and removed the retired Bybit
   risk and combined-book reporter units without starting any unit or creating
   a capture/deploy marker. This is maintenance staging, not an accepted full
-  deployment. The owner route files, demo-rule receipt, and fresh six-root
-  reset still do not exist.
+  deployment.
+- The guarded all-sleeve reset completed at `2026-07-13T23:43:14Z`. It re-proved
+  venue flatness, archived 12 legacy projections/roots plus preserved risk
+  state to a verified 335-MB archive with SHA-256
+  `07e76e35e688fb6f20e17c78ea9bc8489144c852f4c99fcb9964d887c06c6d6a`,
+  rebuilt compatibility projections from preserved canonical journals, and
+  created six fresh empty demo/paper account, inbox, and capture roots. Every
+  unit was inactive before reset and remained inactive afterward.
+- A first 20-USDT rule-probe ceiling failed before order submission because
+  current BTC minimum quantity exceeded it. The failure is retained rather
+  than hidden. A second flat-account 200-USDT feasibility probe passed with
+  observed minima `BTCUSDT=62.1029`, `ETHUSDT=17.6703`, and `BUSDT=5.05579`
+  USDT and no residual order/position. That invalidated the original $30
+  calibration plan; prospective v2 fixes $80 before any calibration target or
+  fill. Owner route/risk/symbol files and the self-hashed demo-rule receipt now
+  exist, but the capture marker does not and no owner has started.
 - The committed account-execution overhaul has one append-only account
   kernel, atomic cross-sleeve target aggregation/risk, deterministic scheduling
   and fault injection, sequence-aware L2 capture, a market-order execution twin,
@@ -44,20 +58,20 @@ research decisions are in
   are deleted. The demo owner also recovers strict Bybit funding-settlement rows,
   and a new owner-serialized read-only receipt can reconcile stopped-journal
   target/order/fill lineage, fees, closed P&L, funding, and pre/post flatness.
-  Commit `27428d462b1a` is published and staged on the stopped VPS. A prospective
-  bounded calibration driver and independent public clock-offset receipt are a
-  follow-up local change under validation; neither has run and no calibration
-  outcome has been viewed.
+  Commit `4950b4cb0520` is published and staged on the stopped VPS. Its bounded
+  calibration driver and independent public clock-offset receipt passed 2,416
+  local tests. The venue-feasibility-driven $80 v2 constant is a follow-up local
+  change under validation; no calibration target or outcome has been viewed.
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now
   share an ordered hash-chained event-clock boundary and callback time. Their
   arrival/selection adapters are not yet full strategy parity. CONTINUOUS
   adverse-limit mode and LONG waits beyond 24 hours remain post-run replay.
-- The cutover acceptance gate is open: no fresh cutover-specific demo-rule
-  receipt, fresh demo/paper account roots, actual target/order/fill/P&L tape,
-  clock-offset receipt, passing execution-twin calibration, venue-accounting
-  receipt, or full historical/paper/demo comparison exists. The paper owner refuses startup
+- The cutover acceptance gate is open: fresh rules and reset roots now exist,
+  but no actual target/order/fill/P&L tape, clock-offset receipt, passing
+  execution-twin calibration, venue-accounting receipt, or full
+  historical/paper/demo comparison exists. The paper owner refuses startup
   without a passing calibration. Full deploy now requires a short-lived,
   mode-`0600` `account-execution-deploy-ready` authorization receipt and
   verifies its self-hash, host, exact clean commit, registered gate set, and
