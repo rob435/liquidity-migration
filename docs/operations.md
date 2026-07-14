@@ -116,8 +116,8 @@ Paper startup consumes only a self-hashed receipt whose registered sample gate
 passed. The receipt does not authorize deployment.
 
 The optional bounded sample generator is separately preregistered in
-`docs/preregistration/account_execution_calibration_v6_2026_07_14.md`. V4 and V5
-are retained failed pilots and must not be resumed or merged. V6 may supply
+`docs/preregistration/account_execution_calibration_v7_2026_07_14.md`. V4, V5,
+and V6 are retained failed pilots and must not be resumed or merged. V7 may supply
 execution-twin observations efficiently but does not replace actual
 LONG/CONTINUOUS strategy-tape comparison.
 

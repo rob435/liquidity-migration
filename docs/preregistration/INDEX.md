@@ -34,7 +34,8 @@ does not become confirmatory retroactively.
 | Demo execution calibration v3 | `docs/preregistration/account_execution_calibration_v3_2026_07_13.md` | Closed before a calibration target: the first clock receipt failed its 50-ms bound and persistent RTT diagnostics proved that ceiling geographically infeasible. |
 | Demo execution calibration v4 | `docs/preregistration/account_execution_calibration_v4_2026_07_14.md` | Closed/spent after the first real BTC fill exposed bounded reconciliation-propagation and competing-ACK journal races. Recovery finished local/venue flat; no calibration floor passed. |
 | Demo execution calibration v5 | `docs/preregistration/account_execution_calibration_v5_2026_07_14.md` | Closed/spent during its first BTC round trip: ACK/fill races converged, then native protection misclassified the canonical in-flight zero-target close as ownerless. Two fills and P&L were retained; final local/venue flatness passed. |
-| Demo execution calibration v6 | `docs/preregistration/account_execution_calibration_v6_2026_07_14.md` | Prospective fresh-epoch rerun with unchanged $160 sample/gates. Retains only an existing active stop across a journal-proven, fully covering canonical close; orphan and inadequate-protection states remain fail-closed. No V5 sample reuse. |
+| Demo execution calibration v6 | `docs/preregistration/account_execution_calibration_v6_2026_07_14.md` | Closed/spent after event 9: four closes proved retained-stop behavior, then the exact-health gate remained one reconciliation snapshot behind. Canonical ETH recovery and final local/venue flatness passed. |
+| Demo execution calibration v7 | `docs/preregistration/account_execution_calibration_v7_2026_07_14.md` | Prospective fresh-epoch rerun with unchanged $160 sample/gates. Republishes atomic health for every journal head while preserving the exact-head consumer and existing wallet REST cadence. No V6 sample reuse. |
 
 ## Closed Continuous Arcs
 

@@ -27,6 +27,7 @@ from liquidity_migration.account_service import AccountConvergenceItem, AccountC
 from liquidity_migration.account_paper_runner import publish_paper_owner_health
 from liquidity_migration.account_service_runner import (
     notification_position_truth,
+    owner_health_publish_decision,
     publish_demo_owner_health,
 )
 from liquidity_migration.deterministic_runtime import VirtualClock
@@ -185,6 +186,130 @@ def test_demo_publisher_binds_wallet_capital_to_current_kernel_state(tmp_path: P
     assert published.available_margin_usdt == 8_250.0
     assert published.last_batch_id == "batch-1"
     assert read_account_owner_health(tmp_path) == published
+
+
+def test_owner_health_republishes_each_journal_head_without_wallet_rest_burst() -> None:
+    health_signature = ("healthy", "", True)
+    journal_signature = (10, "a" * 64)
+    common = {
+        "receipt_completed": False,
+        "health_signature": health_signature,
+        "last_health_signature": health_signature,
+        "journal_signature": journal_signature,
+        "last_health_journal_signature": journal_signature,
+        "now_monotonic": 12.0,
+        "last_capital_refresh_monotonic": 10.0,
+        "health_interval_seconds": 5.0,
+    }
+
+    assert owner_health_publish_decision(**common) == (False, False)
+    assert owner_health_publish_decision(
+        **{
+            **common,
+            "journal_signature": (11, "b" * 64),
+        }
+    ) == (True, False)
+    assert owner_health_publish_decision(
+        **{
+            **common,
+            "receipt_completed": True,
+        }
+    ) == (True, True)
+    assert owner_health_publish_decision(
+        **{
+            **common,
+            "health_signature": ("blocked", "reconcile mismatch", True),
+        }
+    ) == (True, True)
+    assert owner_health_publish_decision(
+        **{
+            **common,
+            "now_monotonic": 15.0,
+        }
+    ) == (True, True)
+
+    with pytest.raises(ValueError, match="must be positive"):
+        owner_health_publish_decision(
+            **{
+                **common,
+                "health_interval_seconds": 0.0,
+            }
+        )
+
+
+def test_journal_only_health_republish_restores_exact_head_binding(tmp_path: Path) -> None:
+    kernel = AccountExecutionKernel(tmp_path, account_id="demo-account")
+    snapshot = AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 10_000)
+    kernel.record_venue_snapshot(
+        snapshot_key="first",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=10_000,
+    )
+    first = publish_demo_owner_health(
+        kernel=kernel,
+        account_root=tmp_path,
+        account_id="demo-account",
+        risk_snapshot=snapshot,
+        status=AccountOwnerHealthStatus.HEALTHY,
+        observed_ts_ns=11_000,
+        loop_sequence=1,
+        requested_symbols_ready=True,
+    )
+    kernel.record_venue_snapshot(
+        snapshot_key="second",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=12_000,
+    )
+    with pytest.raises(RuntimeError, match="journal sequence mismatch"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=10_000,
+            now_ns=12_500,
+            expected_account_id="demo-account",
+        )
+
+    publish, refresh_capital = owner_health_publish_decision(
+        receipt_completed=False,
+        health_signature=("healthy", "", True),
+        last_health_signature=("healthy", "", True),
+        journal_signature=(
+            kernel._state_ref().events_applied,
+            kernel._state_ref().rolling_state_hash,
+        ),
+        last_health_journal_signature=(
+            first.journal_sequence,
+            first.journal_state_hash,
+        ),
+        now_monotonic=2.0,
+        last_capital_refresh_monotonic=1.0,
+        health_interval_seconds=5.0,
+    )
+    assert (publish, refresh_capital) == (True, False)
+    rebound = publish_demo_owner_health(
+        kernel=kernel,
+        account_root=tmp_path,
+        account_id="demo-account",
+        risk_snapshot=snapshot,
+        status=AccountOwnerHealthStatus.HEALTHY,
+        observed_ts_ns=13_000,
+        loop_sequence=2,
+        requested_symbols_ready=True,
+    )
+    assert rebound.journal_sequence == 2
+    assert require_recent_account_owner_health(
+        tmp_path,
+        environment="demo",
+        max_age_ns=10_000,
+        now_ns=13_500,
+        expected_account_id="demo-account",
+    ) == rebound
 
 
 def test_notification_position_truth_is_independent_of_native_protection_health(

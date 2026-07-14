@@ -13,7 +13,7 @@ research decisions are in
 | --- | --- | --- |
 | `continuous_ensemble_v2` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
 | `LongV11aDivWeekendVol` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
-| Shared account execution | demo + paper | Demo owner stopped after verified-flat V5 failure; V4/V5 evidence retained; capture marker enabled; paper never started |
+| Shared account execution | demo + paper | Demo owner stopped after verified-flat V6 failure; V4/V5/V6 evidence retained; capture marker enabled; paper never started |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
@@ -25,7 +25,7 @@ research decisions are in
   checksums are retained under
   `/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z`.
 - Staged topology installation from branch
-  `codex/account-execution-cutover` through commit `c113d78014e0` passed 142 Linux
+  `codex/account-execution-cutover` through commit `b82a378cfcf0` passed 142 Linux
   smoke tests. It installed the two owner units and removed the retired Bybit
   risk and combined-book reporter units without starting any unit or creating
   a capture/deploy marker. This is maintenance staging, not an accepted full
@@ -63,10 +63,11 @@ research decisions are in
   are deleted. The demo owner also recovers strict Bybit funding-settlement rows,
   and a new owner-serialized read-only receipt can reconcile stopped-journal
   target/order/fill lineage, fees, closed P&L, funding, and pre/post flatness.
-  Commit `95e49120f8a1` is published and staged on the VPS. Its bounded
-  calibration driver and independent public clock-offset receipt passed 2,417
-  local tests and 142 remote Linux smoke tests. The demo owner started alone,
-  created the route, stayed healthy/flat, and captured all three L2 books.
+  Commit `b82a378cfcf0` is published and staged on the VPS. Its bounded
+  calibration driver, retained-stop transition, and independent public
+  clock-offset receipt passed 2,428 local tests and 142 remote Linux smoke
+  tests. The demo owner started alone, created the route, stayed healthy/flat,
+  and captured all three L2 books.
   V4 then emitted one canonical BTC target and received a real `0.002 BTC`
   fill. It failed immediately rather than accepting a result: REST position
   truth temporarily preceded private-fill journal propagation, and the REST
@@ -85,20 +86,31 @@ research decisions are in
   removed the component owner but before its reduce-only fill updated the
   position, native-protection sync misclassified the canonical in-flight close
   as ownerless. Final self-hashed evidence proved local/venue flatness and no
-  open orders, and the owner was stopped. V5 is spent. Paper and ordinary
-  producers were never started. Prospective V6 retains all numerical gates and
-  permits the installed native stop to survive only a fully covering canonical
-  reduce-only close; missing protection, partial/terminal/wrong-side work, and
-  real orphan positions remain fail-closed. V6 still requires full validation,
-  an exact staged commit, and a new archived/reset epoch before any V6 target.
+  open orders, and the owner was stopped. V5 is spent. Commit `b82a378cfcf0`
+  then passed 2,428 local tests, repository-wide Ruff, scoped mypy, and 142
+  remote Linux smoke tests. A third guarded reset archived V5 under SHA-256
+  `bdcb6399c255863eef648b7424ca9121ef46c49726a1b98dff026d3d74969c0f`.
+  V6's fresh clock gate passed at 84.664-ms maximum error. Its retained-stop
+  repair worked across four real closes, but event 9 opened `+0.08 ETH` and the
+  next between-step gate failed because health stayed one journal sequence
+  behind reconciliation's newer snapshot. The exact V6 error was
+  `health=201, journal=202`; the producer stopped without lowering the gate.
+  One separately labelled canonical recovery command closed ETH. Self-hashed
+  evidence proved local/venue flatness, zero orders, and a genuine stopped
+  health/journal match at sequence 367. V6 is spent. Paper and ordinary
+  producers were never started. Prospective V7 republishes owner health after
+  every journal-head change while reusing the last wallet snapshot for
+  journal-only refreshes; exact-head validation and every numerical gate remain
+  unchanged. V7 still requires full validation, an exact staged commit, and a
+  new archived/reset epoch before any V7 target.
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now
   share an ordered hash-chained event-clock boundary and callback time. Their
   arrival/selection adapters are not yet full strategy parity. CONTINUOUS
   adverse-limit mode and LONG waits beyond 24 hours remain post-run replay.
-- The cutover acceptance gate is open: fresh rules and failed V4/V5 evidence
-  exist, but no passing calibration target/order/fill/P&L tape, fresh V6
+- The cutover acceptance gate is open: fresh rules and failed V4/V5/V6 evidence
+  exist, but no passing calibration target/order/fill/P&L tape, fresh V7
   clock-offset receipt,
   passing execution-twin calibration, venue-accounting receipt, or full
   historical/paper/demo comparison exists. The paper owner refuses startup

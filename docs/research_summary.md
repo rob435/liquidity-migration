@@ -250,13 +250,20 @@ that in-flight close as an orphan. The close filled and final self-hashed
 evidence proved local/venue flat with no open order. Both epochs are spent;
 paper and ordinary producers never started.
 
+V6 proved that retained-stop rule across four real closes, then its event-9 ETH
+open exposed a separate exact-health publication mismatch. Reconciliation
+journals every two seconds while unchanged health had published every five, so
+the next gate remained one head behind (`health=201`, `journal=202`) for its
+retry bound. A separate canonical recovery flattened ETH, and final evidence
+bound zero local/venue exposure to an exact stopped health/journal head at
+sequence 367. V6 is also spent; paper and ordinary producers never started.
+
 This is useful negative operational evidence, not a calibrated latency or
-slippage estimate and not deployment acceptance. Prospective V6 excludes both
-pilots, keeps every sample size and numerical decision rule unchanged, and
-retains the existing stop only when immutable state proves a fully covering
-canonical reduce-only close to an explicit zero target. It still fails on a
-missing stop, incomplete/terminal/wrong-side work, or a true orphan position.
-Even a passing V6 would open only execution-twin calibration and paper
+slippage estimate and not deployment acceptance. Prospective V7 excludes all
+three pilots, keeps every sample size and numerical decision rule unchanged,
+and republishes health for each journal-head change without spending extra
+wallet REST calls on journal-only refreshes. Exact-head validation is not
+relaxed. Even a passing V7 would open only execution-twin calibration and paper
 collection; actual
 LONG/CONTINUOUS tapes, deterministic replay comparison, venue accounting,
 funding, final flatness, and cutover authorization remain separate gates.

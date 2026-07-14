@@ -141,6 +141,38 @@ def publish_demo_owner_health(
     return health
 
 
+def owner_health_publish_decision(
+    *,
+    receipt_completed: bool,
+    health_signature: tuple[str, str, bool],
+    last_health_signature: tuple[str, str, bool] | None,
+    journal_signature: tuple[int, str],
+    last_health_journal_signature: tuple[int, str] | None,
+    now_monotonic: float,
+    last_capital_refresh_monotonic: float,
+    health_interval_seconds: float,
+) -> tuple[bool, bool]:
+    """Decide whether to publish health and whether wallet capital is due.
+
+    Reconciliation and private execution can advance the immutable journal more
+    often than the ordinary health interval. Exact-head consumers must not have
+    to win a timing race against that deliberate audit traffic, so any new head
+    republishes health. Journal-only refreshes reuse the last wallet snapshot;
+    only a completed request, status change, or elapsed interval spends another
+    wallet REST call.
+    """
+
+    if health_interval_seconds <= 0.0:
+        raise ValueError("health_interval_seconds must be positive")
+    refresh_capital = (
+        receipt_completed
+        or health_signature != last_health_signature
+        or now_monotonic - last_capital_refresh_monotonic >= health_interval_seconds
+    )
+    publish = refresh_capital or journal_signature != last_health_journal_signature
+    return publish, refresh_capital
+
+
 def _load_json(path: str | Path) -> Mapping[str, Any]:
     payload = json.loads(Path(path).expanduser().read_text())
     if not isinstance(payload, Mapping):
@@ -399,8 +431,9 @@ def main(argv: list[str] | None = None) -> int:
     last_reconcile = time.monotonic()
     last_symbol_refresh = time.monotonic()
     last_notification_poll = 0.0
-    last_health_write = float("-inf")
+    last_capital_refresh = float("-inf")
     last_health_signature: tuple[str, str, bool] | None = None
+    last_health_journal_signature: tuple[int, str] | None = None
     last_batch_id = ""
     loop_sequence = 0
     requested_symbols_ready = True
@@ -512,22 +545,36 @@ def main(argv: list[str] | None = None) -> int:
                 health_detail[:1000],
                 requested_symbols_ready,
             )
-            if (
-                receipt is not None
-                or health_signature != last_health_signature
-                or health_now - last_health_write >= args.health_interval_seconds
-            ):
-                try:
-                    last_capital_snapshot = snapshot_provider.current(batch_id=f"owner-health/{loop_sequence}")
-                except Exception as exc:  # noqa: BLE001 - preserve last capital, mark blocked
-                    health_status = AccountOwnerHealthStatus.BLOCKED
-                    health_detail = f"wallet snapshot failed: {type(exc).__name__}: {exc}"[:1000]
-                    health_signature = (
-                        health_status.value,
-                        health_detail,
-                        requested_symbols_ready,
-                    )
-                publish_demo_owner_health(
+            health_state = kernel._state_ref()
+            health_journal_signature = (
+                health_state.events_applied,
+                health_state.rolling_state_hash,
+            )
+            publish_health, refresh_capital = owner_health_publish_decision(
+                receipt_completed=receipt is not None,
+                health_signature=health_signature,
+                last_health_signature=last_health_signature,
+                journal_signature=health_journal_signature,
+                last_health_journal_signature=last_health_journal_signature,
+                now_monotonic=health_now,
+                last_capital_refresh_monotonic=last_capital_refresh,
+                health_interval_seconds=args.health_interval_seconds,
+            )
+            if publish_health:
+                if refresh_capital:
+                    try:
+                        last_capital_snapshot = snapshot_provider.current(
+                            batch_id=f"owner-health/{loop_sequence}"
+                        )
+                    except Exception as exc:  # noqa: BLE001 - preserve last capital, mark blocked
+                        health_status = AccountOwnerHealthStatus.BLOCKED
+                        health_detail = f"wallet snapshot failed: {type(exc).__name__}: {exc}"[:1000]
+                        health_signature = (
+                            health_status.value,
+                            health_detail,
+                            requested_symbols_ready,
+                        )
+                published_health = publish_demo_owner_health(
                     kernel=kernel,
                     account_root=route.account_path,
                     account_id=route.account_id,
@@ -539,8 +586,13 @@ def main(argv: list[str] | None = None) -> int:
                     last_batch_id=last_batch_id,
                     detail=health_detail,
                 )
-                last_health_write = health_now
+                if refresh_capital:
+                    last_capital_refresh = health_now
                 last_health_signature = health_signature
+                last_health_journal_signature = (
+                    published_health.journal_sequence,
+                    published_health.journal_state_hash,
+                )
             if notifier is not None and now - last_notification_poll >= max(args.notification_poll_seconds, 0.25):
                 midpoint_by_symbol: dict[str, float] = {}
                 unavailable_midpoint_symbols: list[str] = []

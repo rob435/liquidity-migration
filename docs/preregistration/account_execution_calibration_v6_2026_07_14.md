@@ -1,10 +1,50 @@
 # Demo execution calibration v6
 
-Status: prospective and execution-outcome unseen for the new epoch at
-registration. Registered after the V5 first-round-trip protection-transition
-failure and verified-flat recovery, but before any V6 target, order, fill,
-slippage, fee, realized P&L, or funding outcome. Forward execution evidence
+Status: **closed and spent after target event 9**. This contract was prospective
+and execution-outcome unseen at registration. It remains the historical
+statement of what was fixed before the V6 result; the prospective successor is
+`account_execution_calibration_v7_2026_07_14.md`. Forward execution evidence
 only; no alpha, LONG/CONTINUOUS parity, deployment, HFT, or real-money claim.
+
+## Observed outcome
+
+V6 ran from a new verified reset archive with SHA-256
+`bdcb6399c255863eef648b7424ca9121ef46c49726a1b98dff026d3d74969c0f`
+on exact commit `b82a378cfcf005cb1729039279b7b2c24b05dbc0`. Its independent
+clock receipt passed with self-hash
+`5349306bb966b0725ef917365e273d10534b4738741a3e941cb232882f5553c8`
+and estimated maximum midpoint error `84,664,160` ns. The prospective BTC
+funding input was sealed separately with self-hash
+`0165f10fe67099135dbb625405904b0c83dadee689217df72d76bc6024a4b2e5`.
+The exact plan hash was
+`2e6a556d33aa993b18ad1da167e5d6f28ba9cefd70f59c017c25ad8528db506c`.
+
+The V5 protection fix worked: BTC, ETH, B, and the next BTC open/close pairs all
+converged, including four zero-target closes through the strict retained-stop
+path. Event 9 then opened `+0.08 ETH`. Before event 10 could be published, the
+driver's between-step health gate retried for ten seconds and failed with
+`account-owner health journal sequence mismatch: health=201, journal=202`.
+The target producer stopped and did not lower or bypass the exact-head gate.
+
+Source inspection and the retained timing showed the mismatch was structural,
+not stale computation: reconciliation appends a canonical venue-snapshot every
+two seconds while unchanged owner health is normally republished every five
+seconds. Exact-head validation therefore sees predictable one-event-behind
+intervals, and its fixed 100-ms retry can remain phase-aligned with those
+intervals. V6's nine target events and all resulting execution/P&L facts are
+excluded from every V7 floor.
+
+The last open ETH position remained protected by one active conditional stop.
+A separately labelled canonical request,
+`demo-calibration-20260714-v6/recovery/eth-flat-001`, emitted one accepted
+reduce-only command/fill. Final evidence proved zero local and venue positions,
+zero working/open/conditional orders, and no component target. Health and the
+stopped journal genuinely matched at sequence 367; no health file was rewritten
+by hand. The final-flatness receipt has self-hash
+`ae5ce88109f019dd8d8a30df7401aa42523fdcc87a50e0913454c20d4ef8ff43`.
+The demo owner was stopped, paper and ordinary producers were never started,
+and no deployment marker was issued. V6 must not be resumed, merged into V7,
+or presented as a passing calibration.
 
 ## Revision boundary
 

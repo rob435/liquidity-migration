@@ -100,11 +100,25 @@ orphan. The close filled; a self-hashed final receipt proved zero local/venue
 position and no open orders. V5 is spent and none of its sample counts toward
 V6.
 
-Prospective V6 retains every numerical sample/gate choice and changes only that
-protection transition under the strict proof described above. Its code must
-pass full validation and be staged exactly, then all six roots must be
-archived/reset again before a V6 target. This is a verified-flat failure
-boundary, not deployment readiness.
+V6 then ran from a third guarded reset whose archive SHA-256 is
+`bdcb6399c255863eef648b7424ca9121ef46c49726a1b98dff026d3d74969c0f`.
+The retained-stop repair worked across four real closes. Event 9 opened
+`+0.08 ETH`, but the next between-step exact-health gate failed with
+`health=201, journal=202`. The owner deliberately journals reconciliation
+snapshots every two seconds while unchanged health had been published every
+five, so exact-head readers could remain one snapshot behind and a fixed retry
+could miss the shorter matched windows. A separately labelled canonical
+recovery command flattened ETH; final self-hashed evidence proved zero
+local/venue position and orders plus an exact stopped health/journal match at
+sequence 367. V6 is spent and none of its sample counts toward V7.
+
+Prospective V7 retains every numerical sample/gate choice and changes only the
+health-publication invariant: every new journal head causes an atomic health
+refresh, while journal-only refreshes reuse the last wallet snapshot to avoid a
+REST burst. Exact-head validation remains unchanged. V7 code must pass full
+validation and be staged exactly, then all six roots must be archived/reset
+again before a V7 target. This is a verified-flat failure boundary, not
+deployment readiness.
 
 The full acceptance gate remains open, and no deploy-authorization assessment
 or receipt has been issued:
@@ -147,8 +161,8 @@ or receipt has been issued:
   pending, and same-symbol venue fills are netted, so exact component P&L is
   also pending unless a prospective allocation policy can be shown to be
   identifiable from canonical orders and executions;
-- no demo tape has met the preregistered execution-twin sample floors. V4 and
-  V5 both produced useful but spent failure evidence; V6 requires a new clock
+- no demo tape has met the preregistered execution-twin sample floors. V4, V5,
+  and V6 produced useful but spent failure evidence; V7 requires a new clock
   receipt and fresh tape. No calibration receipt has
   passed. Paper startup therefore remains intentionally blocked.
 
@@ -353,7 +367,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
     Natural LONG/CONTINUOUS events remain required for their strategy-parity
     comparison, but they need not be abused to manufacture the execution-twin
     sample count. The prospective bounded driver in
-    `docs/preregistration/account_execution_calibration_v6_2026_07_14.md` publishes
+    `docs/preregistration/account_execution_calibration_v7_2026_07_14.md` publishes
     one tiny target at a time through the same owner and event clock, holds no
     credentials, and explicitly cannot satisfy LONG/CONTINUOUS parity:
 
@@ -362,10 +376,10 @@ The switch must be one maintenance transaction, not a rolling overlap:
       --account-root /opt/liquidity-migration/data/bybit-account-execution \
       --inbox-root /opt/liquidity-migration/data/bybit-account-intents \
       --demo-rules-file /etc/liquidity-migration/account-execution/demo-rules.json \
-      --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v6-events.jsonl \
-      --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v6-run.json \
+      --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v7-events.jsonl \
+      --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v7-run.json \
       --expected-commit "$(git rev-parse HEAD)" \
-      --plan-id demo-calibration-20260714-v6
+      --plan-id demo-calibration-20260714-v7
     ```
 
     Add the preregistered `--funding-symbol BTCUSDT` and an explicit future
