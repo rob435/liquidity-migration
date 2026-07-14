@@ -57,6 +57,7 @@ def _build_demo_tapes(
     record_fill: bool = True,
     market_reference_price: float = 10.0,
     idempotent_existing_order: bool = False,
+    inferred_ack_first: bool = False,
 ) -> tuple[Path, Path]:
     capture_root = tmp_path / "capture"
     segment = capture_root / "2026-01-01" / "BUSDT" / "segment-000000.jsonl"
@@ -73,43 +74,50 @@ def _build_demo_tapes(
 
     account_root = tmp_path / "account"
     clock = VirtualClock(current_wall_ns=1_100_000_000)
-    kernel = AccountExecutionKernel(
-        account_root, account_id=ACCOUNT_ID, clock=clock, id_seed="calibration-test"
-    )
+    kernel = AccountExecutionKernel(account_root, account_id=ACCOUNT_ID, clock=clock, id_seed="calibration-test")
     result = kernel.submit_targets(
         batch_id="batch-1",
-        market_inputs=[MarketInputRef(
-            input_key=str(context["record_id"]),
-            symbol="BUSDT",
-            exchange_ts_ns=1_000_000_000,
-            local_receive_ts_ns=1_102_000_000,
-            reference_price=market_reference_price,
-            bid_price=9.99,
-            ask_price=10.01,
-            book_sequence=1,
-            source="bybit_raw_l2",
-        )],
-        targets=[DesiredTarget(
-            decision_key="decision-1",
-            target_key="long/main/BUSDT",
-            sleeve="long",
-            strategy_id="long-v1",
-            component_id="main",
-            symbol="BUSDT",
-            signed_qty=requested_qty,
-            reference_price=10.0,
-            leverage=2.0,
-        )],
+        market_inputs=[
+            MarketInputRef(
+                input_key=str(context["record_id"]),
+                symbol="BUSDT",
+                exchange_ts_ns=1_000_000_000,
+                local_receive_ts_ns=1_102_000_000,
+                reference_price=market_reference_price,
+                bid_price=9.99,
+                ask_price=10.01,
+                book_sequence=1,
+                source="bybit_raw_l2",
+            )
+        ],
+        targets=[
+            DesiredTarget(
+                decision_key="decision-1",
+                target_key="long/main/BUSDT",
+                sleeve="long",
+                strategy_id="long-v1",
+                component_id="main",
+                symbol="BUSDT",
+                signed_qty=requested_qty,
+                reference_price=10.0,
+                leverage=2.0,
+            )
+        ],
         risk_snapshot=AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 1_099_000_000),
         risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 1_000.0, 10.0),
-        instrument_rules={
-            "BUSDT": InstrumentRules(
-                "BUSDT", 0.1, 0.1, 1.0, max_order_qty=100.0, max_leverage=10.0
-            )
-        },
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0, max_order_qty=100.0, max_leverage=10.0)},
     )
     assert result.accepted and len(result.commands) == 1
     command = result.commands[0]
+    if inferred_ack_first:
+        kernel.record_ack(
+            command_id=command.command_id,
+            accepted=True,
+            venue_order_id="venue-1",
+            exchange_ts_ns=1_004_000_000,
+            local_ack_ts_ns=1_105_000_000,
+            metadata={"inferred_from_execution_id": "execution-1"},
+        )
     kernel.record_ack(
         command_id=command.command_id,
         accepted=True,
@@ -216,9 +224,7 @@ def test_calibration_recovers_latency_fill_slippage_and_fee(tmp_path: Path) -> N
 
 
 def test_partial_fill_frequency_is_observed_not_assumed(tmp_path: Path) -> None:
-    account_root, capture_root = _build_demo_tapes(
-        tmp_path, requested_qty=2.0, fill_qty=1.0
-    )
+    account_root, capture_root = _build_demo_tapes(tmp_path, requested_qty=2.0, fill_qty=1.0)
     receipt = calibrate_execution_twin(
         account_root=account_root,
         market_capture_root=capture_root,
@@ -297,6 +303,29 @@ def test_idempotent_duplicate_lookup_is_not_a_latency_sample(tmp_path: Path) -> 
     assert receipt["execution_twin_gate_passed"] is False
 
 
+def test_late_http_ack_observation_preserves_request_latency_sample(
+    tmp_path: Path,
+) -> None:
+    account_root, capture_root = _build_demo_tapes(
+        tmp_path,
+        inferred_ack_first=True,
+    )
+
+    receipt = calibrate_execution_twin(
+        account_root=account_root,
+        market_capture_root=capture_root,
+        expected_account_id=ACCOUNT_ID,
+        observed_ts_ns=2_000_000_000,
+        local_minus_exchange_ns=OFFSET_NS,
+        clock_offset_receipt_sha256="3" * 64,
+        requirements=_requirements(),
+    )
+
+    assert receipt["sample_counts"]["accepted_acks"] == 1
+    assert receipt["sample_counts"]["request_ack_rtt"] == 1
+    assert receipt["latency_ns"]["request_ack_round_trip"]["p50"] == 5_000_000
+
+
 def test_zero_fill_terminal_order_does_not_satisfy_filled_order_gate(
     tmp_path: Path,
 ) -> None:
@@ -369,9 +398,7 @@ def test_rehashed_receipt_cannot_override_failed_sample_gate(tmp_path: Path) -> 
     )
     forged = json.loads(json.dumps(receipt))
     forged["execution_twin_gate_passed"] = True
-    forged["artifact_sha256"] = hashlib.sha256(
-        canonical_json({**forged, "artifact_sha256": ""})
-    ).hexdigest()
+    forged["artifact_sha256"] = hashlib.sha256(canonical_json({**forged, "artifact_sha256": ""})).hexdigest()
 
     with pytest.raises(ValueError, match="aggregate gate is inconsistent"):
         verify_calibration_receipt(forged)

@@ -26,7 +26,15 @@ private execution consumer, reconciliation loop, and Telegram reader therefore
 cannot observe a partially-applied or failed transaction. Native-protection
 state and venue mutations are separately serialized by one reentrant manager
 lock. These are concurrency invariants under automated fault tests, not proof
-of host or venue behavior.
+of host or venue behavior. Competing REST/private ACK observers decide against
+fresh state under the journal lock: a semantically identical second observation
+cannot duplicate the state transition, while changed acceptance or conflicting
+nonempty venue order IDs fail closed. If a private fill establishes acceptance
+before the HTTP create response, the later request/response timing is retained
+as a supplemental immutable `ack_observation` rather than overwriting the ACK
+or losing a calibration sample. Execution redelivery similarly permits
+different local receive time/provenance but requires exact identity/timestamp
+and `1e-12`-tolerant quantity, price, and fee agreement.
 
 The 2026-07-13 audit first found the old fleet active at clean commit
 `5f6d9986d935`, with both account owners absent. The demo key permission check
@@ -36,7 +44,7 @@ confirmed zero positions and zero regular/conditional orders, and the unit plus
 flatness evidence was retained under the host's mode-restricted cutover-evidence
 directory.
 
-Staged topology installation through clean commit `e40a13f750f0` passed 142 Linux
+Staged topology installation through clean commit `95e49120f8a1` passed 142 Linux
 smoke tests, installed both inactive owner units, and removed the retired risk
 and combined-book reporter units. It did not start a process or create either
 cutover marker. The guarded reset then re-proved venue flatness, archived 12
@@ -56,13 +64,26 @@ BTC quantity-step rounding erased its executable buffer. V3 then fixed 160 USDT
 and a quantization-safe 2.5-times-minimum bound, but its first clock receipt
 failed the fixed 50-ms error ceiling; persistent-session diagnostics proved the
 geographic path itself is roughly 169 ms RTT. No retry was reinterpreted as a
-pass. Prospective v4 retains the $160 order plan and registers a single
-preconnected session plus a disclosed 100-ms worst-case clock-error ceiling
-before any calibration target/fill outcome. Route/risk/symbol files now exist.
-The demo owner ran alone, stayed healthy/flat, captured raw L2, and was stopped
-for exact-commit restaging; paper and every producer have never started. Every
-captured execution-tape gate remains open. This is a valid stopped/reset staging
-boundary, not deployment readiness or final-flatness evidence.
+pass. V4 retained the $160 order plan and registered one preconnected session
+plus a disclosed 100-ms worst-case clock-error ceiling. Its schema-v2 receipt
+passed with an 84.805-ms estimated maximum midpoint error. The owner started
+alone, and the first canonical BTC target received a real `0.002 BTC` demo fill.
+The run then failed immediately: REST reconciliation briefly observed that fill
+before local private-stream propagation, and the create-response/private-fill
+race proposed the same ACK with different observation provenance, which the old
+immutable journal rejected as changed content.
+
+V4 was not resumed. A separately labelled canonical zero target recovered the
+position, final read-only evidence proved zero local and venue position plus no
+open order, and the owner was stopped. Paper and ordinary producers never
+started. The failed V4 run/tape and recovery remain evidence but count toward no
+calibration floor. Prospective V5 uses a new exact plan id and clean epoch,
+retains all numerical sample/gate choices, allows only the exact
+post-publication reconciliation propagation state for at most ten seconds, and
+makes same-fact ACK/fill redelivery idempotent under the journal lock. V5 code
+must pass full validation and be staged exactly, then all six roots must be
+archived/reset again before a V5 target. This is a verified-flat failure
+boundary, not deployment readiness.
 
 The full acceptance gate remains open, and no deploy-authorization assessment
 or receipt has been issued:
@@ -105,9 +126,10 @@ or receipt has been issued:
   pending, and same-symbol venue fills are netted, so exact component P&L is
   also pending unless a prospective allocation policy can be shown to be
   identifiable from canonical orders and executions;
-- no demo tape has met the preregistered execution-twin sample floors, no clock
-  offset receipt has supported one-way latency estimates, and no calibration
-  receipt has passed. Paper startup therefore remains intentionally blocked.
+- no demo tape has met the preregistered execution-twin sample floors. The V4
+  clock receipt supported bounded one-way estimates but its execution sample
+  failed; V5 requires a new receipt and fresh tape. No calibration receipt has
+  passed. Paper startup therefore remains intentionally blocked.
 
 Do not issue the deploy-ready authorization by interpreting
 `canonical_common_kernel_parity` as full strategy parity. Reports also carry
@@ -310,7 +332,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
     Natural LONG/CONTINUOUS events remain required for their strategy-parity
     comparison, but they need not be abused to manufacture the execution-twin
     sample count. The prospective bounded driver in
-    `docs/preregistration/account_execution_calibration_v4_2026_07_14.md` publishes
+    `docs/preregistration/account_execution_calibration_v5_2026_07_14.md` publishes
     one tiny target at a time through the same owner and event clock, holds no
     credentials, and explicitly cannot satisfy LONG/CONTINUOUS parity:
 
@@ -319,10 +341,10 @@ The switch must be one maintenance transaction, not a rolling overlap:
       --account-root /opt/liquidity-migration/data/bybit-account-execution \
       --inbox-root /opt/liquidity-migration/data/bybit-account-intents \
       --demo-rules-file /etc/liquidity-migration/account-execution/demo-rules.json \
-      --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-events.jsonl \
-      --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-run.json \
+      --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v5-events.jsonl \
+      --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v5-run.json \
       --expected-commit "$(git rev-parse HEAD)" \
-      --plan-id demo-calibration-20260714-v4
+      --plan-id demo-calibration-20260714-v5
     ```
 
     Add the preregistered `--funding-symbol BTCUSDT` and an explicit future

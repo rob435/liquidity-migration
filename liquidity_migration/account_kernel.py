@@ -63,6 +63,10 @@ class AccountEventType(StrEnum):
     RISK_DECISION = "risk_decision"
     ORDER_COMMAND = "order_command"
     ACK = "ack"
+    # Supplemental transport observation. A private fill can establish the
+    # semantic ACK before the HTTP create response returns; retain that later
+    # request/response timing without rewriting or duplicating the transition.
+    ACK_OBSERVATION = "ack_observation"
     FILL = "fill"
     PROTECTION = "protection"
     CLOSE = "close"
@@ -223,6 +227,8 @@ class OrderState:
     signed_qty: float
     reduce_only: bool
     status: str = "commanded"
+    ack_accepted: bool | None = None
+    ack_request_timing_observed: bool = False
     filled_signed_qty: float = 0.0
     venue_order_id: str = ""
     rejection_key: str = ""
@@ -566,11 +572,46 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         if order.status != "commanded":
             raise AccountTransitionError(f"second/stale acknowledgement for command {command_id}")
         accepted = bool(payload.get("accepted"))
+        order.ack_accepted = accepted
         order.status = "acknowledged" if accepted else "rejected"
         if not accepted:
             state.working_order_ids.discard(command_id)
         order.venue_order_id = str(payload.get("venue_order_id") or "")
         order.rejection_key = str(payload.get("rejection_key") or "")
+        ack_metadata = payload.get("metadata") or {}
+        try:
+            local_socket_send_ts_ns = int(
+                (ack_metadata.get("local_socket_send_ts_ns") if isinstance(ack_metadata, Mapping) else 0) or 0
+            )
+        except (TypeError, ValueError):
+            local_socket_send_ts_ns = 0
+        order.ack_request_timing_observed = local_socket_send_ts_ns > 0
+    elif event_type is AccountEventType.ACK_OBSERVATION:
+        command_id = str(payload.get("command_id") or "")
+        if command_id not in state.orders:
+            raise AccountTransitionError(f"ack observation references unknown command {command_id!r}")
+        order = state.orders[command_id]
+        accepted = bool(payload.get("accepted"))
+        if order.ack_accepted is None or order.ack_accepted is not accepted:
+            raise AccountTransitionError(f"ack observation contradicts command {command_id}")
+        observed_venue_order_id = str(payload.get("venue_order_id") or "")
+        if observed_venue_order_id and order.venue_order_id and observed_venue_order_id != order.venue_order_id:
+            raise AccountTransitionError(f"ack observation changed venue order id for command {command_id}")
+        observation_metadata = payload.get("metadata") or {}
+        try:
+            local_socket_send_ts_ns = int(
+                (
+                    observation_metadata.get("local_socket_send_ts_ns")
+                    if isinstance(observation_metadata, Mapping)
+                    else 0
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            local_socket_send_ts_ns = 0
+        if payload.get("observation_kind") != "http_create_response_timing" or local_socket_send_ts_ns <= 0:
+            raise AccountTransitionError(f"ack observation lacks request timing for command {command_id}")
+        order.ack_request_timing_observed = True
     elif event_type is AccountEventType.FILL:
         _apply_fill(state, event)
         command_id = str(payload.get("command_id") or "")
@@ -1118,8 +1159,7 @@ def _target_batch_request_hash(
         }
     else:
         if len(request_content_hash) != 64 or any(
-            character not in "0123456789abcdef"
-            for character in request_content_hash
+            character not in "0123456789abcdef" for character in request_content_hash
         ):
             raise ValueError("request_content_hash must be lowercase SHA-256")
         identity = {"upstream_request_content_hash": request_content_hash}
@@ -1795,34 +1835,93 @@ class AccountExecutionKernel:
         rejection_key: str = "",
         metadata: Mapping[str, Any] | None = None,
     ) -> tuple[AccountEvent, ...]:
-        state = self._state_ref()
-        order = state.orders.get(command_id)
-        if order is None:
-            raise AccountTransitionError(f"unknown command {command_id!r}")
+        accepted = bool(accepted)
+        venue_order_id = str(venue_order_id)
+        rejection_key = str(rejection_key)
+        exchange_ts_ns = int(exchange_ts_ns)
+        local_ack_ts_ns = int(local_ack_ts_ns)
+        normalized_metadata = json_safe(dict(metadata or {}))
         event_key = f"ack:{command_id}:{venue_order_id or rejection_key or int(accepted)}"
-        specs = [
-            AccountEventSpec(
-                event_type=AccountEventType.ACK,
-                idempotency_key=event_key,
-                correlation_id=order.batch_id,
-                causation_id=command_id,
-                account_id=self.account_id,
-                sleeve="account_execution",
-                symbol=order.symbol,
-                wall_ts_ns=max(int(local_ack_ts_ns), 1),
-                monotonic_ns=self.clock.monotonic_ns(),
-                payload={
-                    "command_id": command_id,
-                    "accepted": bool(accepted),
-                    "venue_order_id": venue_order_id,
-                    "exchange_ts_ns": int(exchange_ts_ns),
-                    "local_ack_ts_ns": int(local_ack_ts_ns),
-                    "rejection_key": rejection_key,
-                    "metadata": json_safe(dict(metadata or {})),
-                },
-            )
-        ]
-        return tuple(self.journal.transact(lambda _: specs, trusted_readonly_builder=True))
+
+        def build(state: AccountState) -> list[AccountEventSpec]:
+            order = state.orders.get(command_id)
+            if order is None:
+                raise AccountTransitionError(f"unknown command {command_id!r}")
+            if order.ack_accepted is not None:
+                if order.ack_accepted is not accepted:
+                    raise AccountTransitionError(f"ack acceptance changed for command {command_id}")
+                if venue_order_id and order.venue_order_id and venue_order_id != order.venue_order_id:
+                    raise AccountTransitionError(f"ack venue order id changed for command {command_id}")
+                if rejection_key and order.rejection_key and rejection_key != order.rejection_key:
+                    raise AccountTransitionError(f"ack rejection key changed for command {command_id}")
+                # REST create responses, private executions, and private order
+                # rows can race while carrying the same durable acknowledgement.
+                # The first observation owns the semantic transition. Preserve
+                # a later HTTP request/response measurement as a supplemental
+                # fact so execution calibration does not lose valid timing.
+                try:
+                    local_socket_send_ts_ns = int(normalized_metadata.get("local_socket_send_ts_ns") or 0)
+                except (TypeError, ValueError):
+                    local_socket_send_ts_ns = 0
+                if accepted and local_socket_send_ts_ns > 0 and not order.ack_request_timing_observed:
+                    return [
+                        AccountEventSpec(
+                            event_type=AccountEventType.ACK_OBSERVATION,
+                            idempotency_key=(
+                                f"ack-observation:{command_id}:"
+                                f"{venue_order_id or 1}:{local_socket_send_ts_ns}:"
+                                f"{local_ack_ts_ns}"
+                            ),
+                            correlation_id=order.batch_id,
+                            causation_id=command_id,
+                            account_id=self.account_id,
+                            sleeve="account_execution",
+                            symbol=order.symbol,
+                            wall_ts_ns=max(local_ack_ts_ns, 1),
+                            # The HTTP response's durable wall timestamps are in
+                            # the payload. Zero keeps exact redelivery
+                            # idempotent; a later process cannot reconstruct the
+                            # first observer's process-local monotonic clock.
+                            monotonic_ns=0,
+                            payload={
+                                "command_id": command_id,
+                                "accepted": accepted,
+                                "venue_order_id": venue_order_id,
+                                "exchange_ts_ns": exchange_ts_ns,
+                                "local_ack_ts_ns": local_ack_ts_ns,
+                                "rejection_key": rejection_key,
+                                "metadata": normalized_metadata,
+                                "observation_kind": "http_create_response_timing",
+                            },
+                        )
+                    ]
+                return []
+            if order.status != "commanded":
+                raise AccountTransitionError(f"acknowledgement for non-commanded order {command_id}")
+            return [
+                AccountEventSpec(
+                    event_type=AccountEventType.ACK,
+                    idempotency_key=event_key,
+                    correlation_id=order.batch_id,
+                    causation_id=command_id,
+                    account_id=self.account_id,
+                    sleeve="account_execution",
+                    symbol=order.symbol,
+                    wall_ts_ns=max(local_ack_ts_ns, 1),
+                    monotonic_ns=self.clock.monotonic_ns(),
+                    payload={
+                        "command_id": command_id,
+                        "accepted": accepted,
+                        "venue_order_id": venue_order_id,
+                        "exchange_ts_ns": exchange_ts_ns,
+                        "local_ack_ts_ns": local_ack_ts_ns,
+                        "rejection_key": rejection_key,
+                        "metadata": normalized_metadata,
+                    },
+                )
+            ]
+
+        return tuple(self.journal.transact(build, trusted_readonly_builder=True))
 
     def record_fill(
         self,
@@ -1836,34 +1935,65 @@ class AccountExecutionKernel:
         local_receive_ts_ns: int,
         metadata: Mapping[str, Any] | None = None,
     ) -> tuple[AccountEvent, ...]:
-        state = self._state_ref()
-        order = state.orders.get(command_id)
-        if order is None:
-            raise AccountTransitionError(f"unknown command {command_id!r}")
-        specs = [
-            AccountEventSpec(
-                event_type=AccountEventType.FILL,
-                idempotency_key=f"fill:{execution_id}",
-                correlation_id=order.batch_id,
-                causation_id=command_id,
-                account_id=self.account_id,
-                sleeve="account_execution",
-                symbol=order.symbol,
-                wall_ts_ns=max(int(local_receive_ts_ns), 1),
-                monotonic_ns=self.clock.monotonic_ns(),
-                payload={
-                    "command_id": command_id,
-                    "execution_id": execution_id,
-                    "signed_qty": _finite(signed_qty, label="fill signed_qty"),
-                    "price": _finite(price, label="fill price"),
-                    "fee_usdt": _finite(fee_usdt, label="fill fee_usdt"),
-                    "exchange_ts_ns": int(exchange_ts_ns),
-                    "local_receive_ts_ns": int(local_receive_ts_ns),
-                    "metadata": json_safe(dict(metadata or {})),
-                },
-            )
-        ]
-        return tuple(self.journal.transact(lambda _: specs, trusted_readonly_builder=True))
+        execution_id = str(execution_id)
+        normalized_signed_qty = _finite(signed_qty, label="fill signed_qty")
+        normalized_price = _finite(price, label="fill price")
+        normalized_fee_usdt = _finite(fee_usdt, label="fill fee_usdt")
+        exchange_ts_ns = int(exchange_ts_ns)
+        local_receive_ts_ns = int(local_receive_ts_ns)
+
+        def build(state: AccountState) -> list[AccountEventSpec]:
+            order = state.orders.get(command_id)
+            if order is None:
+                raise AccountTransitionError(f"unknown command {command_id!r}")
+            prior = state.executions.get(execution_id)
+            if prior is not None:
+                if str(prior.get("command_id") or "") != command_id:
+                    raise AccountTransitionError(f"execution {execution_id} changed command identity")
+                numeric_facts = (
+                    ("signed quantity", prior.get("signed_qty"), normalized_signed_qty),
+                    ("price", prior.get("price"), normalized_price),
+                    ("fee", prior.get("fee_usdt"), normalized_fee_usdt),
+                )
+                for label, existing, proposed in numeric_facts:
+                    if not math.isclose(
+                        _finite(existing, label=f"existing fill {label}"),
+                        proposed,
+                        rel_tol=1e-12,
+                        abs_tol=1e-12,
+                    ):
+                        raise AccountTransitionError(f"execution {execution_id} changed {label}")
+                if int(prior.get("exchange_ts_ns") or 0) != exchange_ts_ns:
+                    raise AccountTransitionError(f"execution {execution_id} changed exchange timestamp")
+                # Delivery-local timestamps and source metadata may legitimately
+                # differ across WS redelivery and REST recovery. The first
+                # durable observation remains authoritative.
+                return []
+            return [
+                AccountEventSpec(
+                    event_type=AccountEventType.FILL,
+                    idempotency_key=f"fill:{execution_id}",
+                    correlation_id=order.batch_id,
+                    causation_id=command_id,
+                    account_id=self.account_id,
+                    sleeve="account_execution",
+                    symbol=order.symbol,
+                    wall_ts_ns=max(local_receive_ts_ns, 1),
+                    monotonic_ns=self.clock.monotonic_ns(),
+                    payload={
+                        "command_id": command_id,
+                        "execution_id": execution_id,
+                        "signed_qty": normalized_signed_qty,
+                        "price": normalized_price,
+                        "fee_usdt": normalized_fee_usdt,
+                        "exchange_ts_ns": exchange_ts_ns,
+                        "local_receive_ts_ns": local_receive_ts_ns,
+                        "metadata": json_safe(dict(metadata or {})),
+                    },
+                )
+            ]
+
+        return tuple(self.journal.transact(build, trusted_readonly_builder=True))
 
     def record_synchronous_ack_fill_batch(
         self,

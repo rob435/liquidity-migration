@@ -39,6 +39,7 @@ from .strategy_targets import component_target_intent
 CALIBRATION_PLAN_SCHEMA_VERSION = 1
 CALIBRATION_EVENT_SOURCE = "demo-execution-calibration-v1"
 CALIBRATION_STRATEGY_ID = "execution-calibration-v1"
+REGISTERED_CALIBRATION_PLAN_ID = "demo-calibration-20260714-v5"
 REGISTERED_CALIBRATION_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BUSDT")
 REGISTERED_ROUND_TRIPS_PER_SYMBOL = 5
 REGISTERED_NOTIONAL_USDT = 160.0
@@ -146,51 +147,60 @@ class CalibrationPlan:
                 # Exercise both sides without allowing simultaneous exposure.
                 sign = 1.0 if (round_trip + symbol_index) % 2 == 0 else -1.0
                 component_id = f"round-{round_trip:02d}-{symbol.lower()}"
-                rows.append(CalibrationStep(
-                    sequence=sequence,
-                    round_trip_index=round_trip,
-                    symbol=symbol,
-                    phase="open",
-                    signed_notional_usdt=sign * self.notional_usdt,
-                    component_id=component_id,
-                ))
+                rows.append(
+                    CalibrationStep(
+                        sequence=sequence,
+                        round_trip_index=round_trip,
+                        symbol=symbol,
+                        phase="open",
+                        signed_notional_usdt=sign * self.notional_usdt,
+                        component_id=component_id,
+                    )
+                )
                 sequence += 1
-                rows.append(CalibrationStep(
-                    sequence=sequence,
-                    round_trip_index=round_trip,
-                    symbol=symbol,
-                    phase="close",
-                    signed_notional_usdt=0.0,
-                    component_id=component_id,
-                ))
+                rows.append(
+                    CalibrationStep(
+                        sequence=sequence,
+                        round_trip_index=round_trip,
+                        symbol=symbol,
+                        phase="close",
+                        signed_notional_usdt=0.0,
+                        component_id=component_id,
+                    )
+                )
                 sequence += 1
         if self.funding_symbol:
             component_id = f"funding-{self.funding_symbol.lower()}"
-            rows.append(CalibrationStep(
-                sequence=sequence,
-                round_trip_index=self.round_trips_per_symbol,
-                symbol=self.funding_symbol,
-                phase="funding_open",
-                signed_notional_usdt=self.notional_usdt,
-                component_id=component_id,
-            ))
+            rows.append(
+                CalibrationStep(
+                    sequence=sequence,
+                    round_trip_index=self.round_trips_per_symbol,
+                    symbol=self.funding_symbol,
+                    phase="funding_open",
+                    signed_notional_usdt=self.notional_usdt,
+                    component_id=component_id,
+                )
+            )
             sequence += 1
-            rows.append(CalibrationStep(
-                sequence=sequence,
-                round_trip_index=self.round_trips_per_symbol,
-                symbol=self.funding_symbol,
-                phase="funding_close",
-                signed_notional_usdt=0.0,
-                component_id=component_id,
-                not_before_ts_ns=self.funding_close_not_before_ts_ns,
-            ))
+            rows.append(
+                CalibrationStep(
+                    sequence=sequence,
+                    round_trip_index=self.round_trips_per_symbol,
+                    symbol=self.funding_symbol,
+                    phase="funding_close",
+                    signed_notional_usdt=0.0,
+                    component_id=component_id,
+                    not_before_ts_ns=self.funding_close_not_before_ts_ns,
+                )
+            )
         return tuple(rows)
 
 
 def require_registered_calibration_plan(plan: CalibrationPlan) -> None:
-    """Refuse drift from the outcome-unseen 2026-07-13 sample contract."""
+    """Refuse drift from the prospective V5 sample contract."""
 
     expected = {
+        "plan_id": REGISTERED_CALIBRATION_PLAN_ID,
         "symbols": REGISTERED_CALIBRATION_SYMBOLS,
         "round_trips_per_symbol": REGISTERED_ROUND_TRIPS_PER_SYMBOL,
         "notional_usdt": REGISTERED_NOTIONAL_USDT,
@@ -198,6 +208,7 @@ def require_registered_calibration_plan(plan: CalibrationPlan) -> None:
         "hold_seconds": REGISTERED_HOLD_SECONDS,
     }
     observed = {
+        "plan_id": plan.plan_id,
         "symbols": plan.symbols,
         "round_trips_per_symbol": plan.round_trips_per_symbol,
         "notional_usdt": plan.notional_usdt,
@@ -231,17 +242,12 @@ def require_quantization_safe_minimum_buffer(
         observed_minimum = float(observed_min_notional_by_symbol[symbol])
         if not math.isfinite(observed_minimum) or observed_minimum <= 0.0:
             raise ValueError(f"calibration observed minimum is invalid for {symbol}")
-        required = (
-            observed_minimum
-            * REGISTERED_MIN_NOTIONAL_BUFFER
-            * REGISTERED_QUANTIZATION_SAFETY_FACTOR
-        )
+        required = observed_minimum * REGISTERED_MIN_NOTIONAL_BUFFER * REGISTERED_QUANTIZATION_SAFETY_FACTOR
         if plan.notional_usdt + 1e-12 < required:
             unsafe.append(f"{symbol}:{required:.12g}")
     if unsafe:
         raise ValueError(
-            "calibration notional lacks the quantization-safe registered minimum "
-            "buffer for " + ",".join(unsafe)
+            "calibration notional lacks the quantization-safe registered minimum buffer for " + ",".join(unsafe)
         )
 
 
@@ -351,13 +357,19 @@ class DemoExecutionCalibrationDriver:
             recorder=self.recorder,
         )
 
-    def _require_health(self) -> None:
+    def _require_health(self, *, allow_reconciliation_transition: bool = False) -> None:
         deadline = time.monotonic() + 10.0
-        transient_fragments = (
+        transient_fragments = [
             "changed while binding",
             "journal sequence mismatch",
             "journal state hash mismatch",
-        )
+        ]
+        if allow_reconciliation_transition:
+            # Immediately after a target is published, venue REST can observe a
+            # fill before the private execution consumer commits it locally (or
+            # the reverse). This exact mismatch is an expected propagation
+            # state, but only inside the bounded post-publication wait.
+            transient_fragments.append("account owner is blocked: account reconciliation mismatch:")
         while True:
             try:
                 require_recent_account_owner_health(
@@ -371,9 +383,13 @@ class DemoExecutionCalibrationDriver:
                 if not any(fragment in str(exc) for fragment in transient_fragments):
                     raise
                 if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"account-owner health never rebound to the current journal: {exc}"
-                    ) from exc
+                    if allow_reconciliation_transition:
+                        detail = (
+                            f"account-owner health did not recover within the bounded post-target transition: {exc}"
+                        )
+                    else:
+                        detail = f"account-owner health never rebound to the current journal: {exc}"
+                    raise RuntimeError(detail) from exc
                 self.sleeper(0.1)
 
     def _publish_event(self, event: StrategyEvent) -> object:
@@ -393,10 +409,12 @@ class DemoExecutionCalibrationDriver:
             "calibration_round_trip_index": step.round_trip_index,
         }
         if action == "entry":
-            metadata.update({
-                "signal_ts_ms": decision_ts_ms,
-                "signal_valid_until_ms": decision_ts_ms + 600_000,
-            })
+            metadata.update(
+                {
+                    "signal_ts_ms": decision_ts_ms,
+                    "signal_valid_until_ms": decision_ts_ms + 600_000,
+                }
+            )
         intent = component_target_intent(
             adapter_kind=SleeveAdapterKind.HEDGE,
             action=action,
@@ -418,15 +436,12 @@ class DemoExecutionCalibrationDriver:
     def _receipt(self, request_id: str) -> AccountServiceReceipt:
         deadline = time.monotonic() + self.transition_timeout_seconds
         while time.monotonic() < deadline:
-            self._require_health()
+            self._require_health(allow_reconciliation_transition=True)
             for request, receipt in self.publisher.inbox.completed_requests():
                 if request.request_id != request_id:
                     continue
                 if not receipt.accepted:
-                    raise RuntimeError(
-                        f"calibration request {request_id} rejected: "
-                        f"{','.join(receipt.rejection_keys)}"
-                    )
+                    raise RuntimeError(f"calibration request {request_id} rejected: {','.join(receipt.rejection_keys)}")
                 if not receipt.command_ids:
                     raise RuntimeError(f"calibration request {request_id} emitted no order command")
                 return receipt
@@ -479,7 +494,7 @@ class DemoExecutionCalibrationDriver:
         deadline = time.monotonic() + self.transition_timeout_seconds
         last_hash = ""
         while time.monotonic() < deadline:
-            self._require_health()
+            self._require_health(allow_reconciliation_transition=True)
             converged, last_hash = self._converged(
                 step=step,
                 target_key=target_key,
@@ -488,9 +503,7 @@ class DemoExecutionCalibrationDriver:
             if converged:
                 return last_hash
             self.sleeper(self.poll_seconds)
-        raise TimeoutError(
-            f"calibration step {step.sequence} did not converge; state_hash={last_hash}"
-        )
+        raise TimeoutError(f"calibration step {step.sequence} did not converge; state_hash={last_hash}")
 
     def _wait_not_before(self, step: CalibrationStep) -> None:
         next_progress = time.monotonic()
@@ -501,9 +514,7 @@ class DemoExecutionCalibrationDriver:
                 raise RuntimeError("funding hold became flat before its registered close time")
             remaining_seconds = (step.not_before_ts_ns - self.clock.wall_time_ns()) / 1_000_000_000
             if time.monotonic() >= next_progress:
-                self.progress(
-                    f"funding_hold_remaining_seconds={max(remaining_seconds, 0.0):.1f}"
-                )
+                self.progress(f"funding_hold_remaining_seconds={max(remaining_seconds, 0.0):.1f}")
                 next_progress = time.monotonic() + 60.0
             self.sleeper(min(max(remaining_seconds, 0.0), 1.0))
 
@@ -522,20 +533,21 @@ class DemoExecutionCalibrationDriver:
             published = self._publish_event(event)
             request_id = published.request.request_id  # type: ignore[attr-defined]
             receipt = self._receipt(request_id)
-            results.append(CalibrationStepResult(
-                sequence=event.source_sequence,
-                event_id=event.event_id,
-                request_id=request_id,
-                batch_id=receipt.batch_id,
-                command_ids=receipt.command_ids,
-                final_state_hash=receipt.final_state_hash,
-            ))
+            results.append(
+                CalibrationStepResult(
+                    sequence=event.source_sequence,
+                    event_id=event.event_id,
+                    request_id=request_id,
+                    batch_id=receipt.batch_id,
+                    command_ids=receipt.command_ids,
+                    final_state_hash=receipt.final_state_hash,
+                )
+            )
         if prior_events:
             last_step = steps[len(prior_events) - 1]
             last_result = results[-1]
             target_key = (
-                f"{SleeveAdapterKind.HEDGE.value}/{CALIBRATION_STRATEGY_ID}/"
-                f"{last_step.component_id}/{last_step.symbol}"
+                f"{SleeveAdapterKind.HEDGE.value}/{CALIBRATION_STRATEGY_ID}/{last_step.component_id}/{last_step.symbol}"
             )
             last_receipt = self._receipt(last_result.request_id)
             self._wait_convergence(
@@ -544,9 +556,7 @@ class DemoExecutionCalibrationDriver:
                 receipt=last_receipt,
             )
 
-        if not prior_events and not _is_flat_boundary(
-            self.kernel.state(), tolerance=self.quantity_tolerance
-        ):
+        if not prior_events and not _is_flat_boundary(self.kernel.state(), tolerance=self.quantity_tolerance):
             raise RuntimeError("calibration requires a wholly flat account boundary")
 
         for step in steps[len(prior_events) :]:
@@ -554,9 +564,7 @@ class DemoExecutionCalibrationDriver:
                 if step.phase == "close" and plan.hold_seconds:
                     self.sleeper(plan.hold_seconds)
                 self._wait_not_before(step)
-            elif not _is_flat_boundary(
-                self.kernel.state(), tolerance=self.quantity_tolerance
-            ):
+            elif not _is_flat_boundary(self.kernel.state(), tolerance=self.quantity_tolerance):
                 raise RuntimeError("calibration refuses simultaneous or foreign account exposure")
 
             self._require_health()
@@ -567,24 +575,23 @@ class DemoExecutionCalibrationDriver:
             event = calibration_event(plan, step, now_ns=self.clock.wall_time_ns())
             published = self.event_clock.dispatch(event, self._publish_event)
             request_id = published.request.request_id  # type: ignore[attr-defined]
-            target_key = (
-                f"{SleeveAdapterKind.HEDGE.value}/{CALIBRATION_STRATEGY_ID}/"
-                f"{step.component_id}/{step.symbol}"
-            )
+            target_key = f"{SleeveAdapterKind.HEDGE.value}/{CALIBRATION_STRATEGY_ID}/{step.component_id}/{step.symbol}"
             receipt = self._receipt(request_id)
             state_hash = self._wait_convergence(
                 step=step,
                 target_key=target_key,
                 receipt=receipt,
             )
-            results.append(CalibrationStepResult(
-                sequence=step.sequence,
-                event_id=event.event_id,
-                request_id=request_id,
-                batch_id=receipt.batch_id,
-                command_ids=receipt.command_ids,
-                final_state_hash=state_hash,
-            ))
+            results.append(
+                CalibrationStepResult(
+                    sequence=step.sequence,
+                    event_id=event.event_id,
+                    request_id=request_id,
+                    batch_id=receipt.batch_id,
+                    command_ids=receipt.command_ids,
+                    final_state_hash=state_hash,
+                )
+            )
             self.progress(
                 f"calibration_step_converged sequence={step.sequence} "
                 f"commands={len(receipt.command_ids)} state_hash={state_hash}"

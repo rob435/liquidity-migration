@@ -328,6 +328,206 @@ def test_partial_fills_survive_restart_and_have_replayable_position_hash(tmp_pat
     assert final.positions["BUSDT"].average_price == pytest.approx(10.175)
 
 
+def test_racing_ack_observers_are_semantically_idempotent_under_journal_lock(
+    tmp_path: Path,
+) -> None:
+    first = _kernel(tmp_path)
+    result = first.submit_targets(
+        batch_id="racing-ack",
+        market_inputs=[_market()],
+        targets=[_target(decision="d1", key="continuous/main/BUSDT", sleeve="continuous", qty=2.0)],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    command = result.commands[0]
+    stale_observer = _kernel(tmp_path)
+    assert stale_observer.state().orders[command.command_id].status == "commanded"
+
+    committed = first.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-race",
+        exchange_ts_ns=1_200_000_000,
+        local_ack_ts_ns=1_210_000_000,
+        metadata={"source": "bybit_create_response"},
+    )
+    duplicate = stale_observer.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-race",
+        exchange_ts_ns=1_205_000_000,
+        local_ack_ts_ns=1_215_000_000,
+        metadata={"source": "bybit_private_execution_ws"},
+    )
+
+    assert len(committed) == 1
+    assert duplicate == ()
+    assert [event.event_type for event in read_account_journal(tmp_path)].count(AccountEventType.ACK.value) == 1
+    assert stale_observer.state().orders[command.command_id].ack_accepted is True
+
+
+def test_late_http_ack_timing_is_supplemental_to_an_inferred_semantic_ack(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    result = kernel.submit_targets(
+        batch_id="late-http-ack",
+        market_inputs=[_market()],
+        targets=[
+            _target(
+                decision="d1",
+                key="continuous/main/BUSDT",
+                sleeve="continuous",
+                qty=2.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    command = result.commands[0]
+    kernel.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-late-http",
+        exchange_ts_ns=1_205_000_000,
+        local_ack_ts_ns=1_215_000_000,
+        metadata={"inferred_from_execution_id": "execution-1"},
+    )
+
+    timing = _kernel(tmp_path).record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-late-http",
+        exchange_ts_ns=1_203_000_000,
+        local_ack_ts_ns=1_216_000_000,
+        metadata={
+            "local_socket_send_ts_ns": 1_201_000_000,
+            "source": "bybit_create_response",
+        },
+    )
+
+    assert len(timing) == 1
+    assert timing[0].event_type == AccountEventType.ACK_OBSERVATION.value
+    events = read_account_journal(tmp_path)
+    assert sum(event.event_type == AccountEventType.ACK.value for event in events) == 1
+    assert sum(event.event_type == AccountEventType.ACK_OBSERVATION.value for event in events) == 1
+    replayed = _kernel(tmp_path).state()
+    assert replayed.orders[command.command_id].ack_accepted is True
+    assert replayed.orders[command.command_id].ack_request_timing_observed is True
+    assert replayed.orders[command.command_id].venue_order_id == "venue-late-http"
+    assert (
+        _kernel(tmp_path).record_ack(
+            command_id=command.command_id,
+            accepted=True,
+            venue_order_id="venue-late-http",
+            exchange_ts_ns=1_203_000_000,
+            local_ack_ts_ns=1_216_000_000,
+            metadata={
+                "local_socket_send_ts_ns": 1_201_000_000,
+                "source": "bybit_create_response",
+            },
+        )
+        == ()
+    )
+
+
+def test_racing_ack_observers_reject_conflicting_durable_facts(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    result = kernel.submit_targets(
+        batch_id="conflicting-ack",
+        market_inputs=[_market()],
+        targets=[_target(decision="d1", key="continuous/main/BUSDT", sleeve="continuous", qty=2.0)],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    command = result.commands[0]
+    kernel.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-1",
+        exchange_ts_ns=1_200_000_000,
+        local_ack_ts_ns=1_210_000_000,
+    )
+
+    with pytest.raises(account_kernel_module.AccountTransitionError, match="venue order id changed"):
+        _kernel(tmp_path).record_ack(
+            command_id=command.command_id,
+            accepted=True,
+            venue_order_id="venue-2",
+            exchange_ts_ns=1_200_000_001,
+            local_ack_ts_ns=1_210_000_001,
+        )
+    with pytest.raises(account_kernel_module.AccountTransitionError, match="acceptance changed"):
+        _kernel(tmp_path).record_ack(
+            command_id=command.command_id,
+            accepted=False,
+            venue_order_id="",
+            exchange_ts_ns=1_200_000_002,
+            local_ack_ts_ns=1_210_000_002,
+            rejection_key="late-reject",
+        )
+
+
+def test_racing_fill_redelivery_ignores_local_provenance_but_not_venue_facts(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    result = kernel.submit_targets(
+        batch_id="racing-fill",
+        market_inputs=[_market()],
+        targets=[_target(decision="d1", key="continuous/main/BUSDT", sleeve="continuous", qty=2.0)],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    command = result.commands[0]
+    kernel.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-fill",
+        exchange_ts_ns=1_200_000_000,
+        local_ack_ts_ns=1_210_000_000,
+    )
+    stale_observer = _kernel(tmp_path)
+    kernel.record_fill(
+        command_id=command.command_id,
+        execution_id="execution-race",
+        signed_qty=1.0,
+        price=10.1,
+        fee_usdt=0.001,
+        exchange_ts_ns=1_220_000_000,
+        local_receive_ts_ns=1_225_000_000,
+        metadata={"source": "ws"},
+    )
+
+    assert (
+        stale_observer.record_fill(
+            command_id=command.command_id,
+            execution_id="execution-race",
+            signed_qty=1.0,
+            price=10.1,
+            fee_usdt=0.001,
+            exchange_ts_ns=1_220_000_000,
+            local_receive_ts_ns=1_230_000_000,
+            metadata={"source": "rest_recovery"},
+        )
+        == ()
+    )
+    with pytest.raises(account_kernel_module.AccountTransitionError, match="changed price"):
+        stale_observer.record_fill(
+            command_id=command.command_id,
+            execution_id="execution-race",
+            signed_qty=1.0,
+            price=10.2,
+            fee_usdt=0.001,
+            exchange_ts_ns=1_220_000_000,
+            local_receive_ts_ns=1_230_000_001,
+        )
+
+
 def test_native_protection_fill_atomically_zeros_targets_and_records_pnl(tmp_path: Path) -> None:
     kernel = _kernel(tmp_path)
     opened = kernel.submit_targets(
@@ -1212,10 +1412,12 @@ def test_bybit_demo_adapter_times_create_after_leverage_negotiation() -> None:
         chunk_index=0,
         chunk_count=1,
     )
-    observation = tuple(BybitDemoExecutionAdapter(DemoClient(), clock=clock).submit(
-        command,
-        _market(),
-    ))[0]
+    observation = tuple(
+        BybitDemoExecutionAdapter(DemoClient(), clock=clock).submit(
+            command,
+            _market(),
+        )
+    )[0]
 
     assert observation.metadata["local_socket_send_ts_ns"] == 2_050_000_000
     assert observation.local_receive_ts_ns == 2_055_000_000
@@ -1504,6 +1706,37 @@ def test_explicit_parity_gate_checks_keys_quantities_event_types_and_state_hashe
         exchange_ts_ns=0,
         local_receive_ts_ns=1_500_000_000,
     )
+    assert compare_kernel_journals(roots, quantity_tolerance=1e-12).passed
+
+    demo_kernel = _kernel(roots["demo"], account_id="gate-account")
+    demo_order = next(iter(demo_kernel.state().orders.values()))
+    supplemental = demo_kernel.journal.transact(
+        lambda _state: [
+            account_kernel_module.AccountEventSpec(
+                event_type=AccountEventType.ACK_OBSERVATION,
+                idempotency_key="parity-only-ack-observation",
+                correlation_id=demo_order.batch_id,
+                causation_id=demo_order.command_id,
+                account_id="gate-account",
+                sleeve="account_execution",
+                symbol=demo_order.symbol,
+                wall_ts_ns=1_500_000_000,
+                monotonic_ns=0,
+                payload={
+                    "command_id": demo_order.command_id,
+                    "accepted": True,
+                    "venue_order_id": demo_order.venue_order_id,
+                    "exchange_ts_ns": 1_400_000_000,
+                    "local_ack_ts_ns": 1_500_000_000,
+                    "rejection_key": "",
+                    "metadata": {"local_socket_send_ts_ns": 1_300_000_000},
+                    "observation_kind": "http_create_response_timing",
+                },
+            )
+        ],
+        trusted_readonly_builder=True,
+    )
+    assert supplemental[0].event_type == AccountEventType.ACK_OBSERVATION.value
     assert compare_kernel_journals(roots, quantity_tolerance=1e-12).passed
 
     different = tmp_path / "different"

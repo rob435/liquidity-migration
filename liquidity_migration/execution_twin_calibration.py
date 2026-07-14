@@ -93,9 +93,7 @@ def require_decision_grade_calibration_requirements(
     if requirements.max_reference_error_bps > baseline.max_reference_error_bps:
         weakened.append("max_reference_error_bps")
     if weakened:
-        raise ValueError(
-            "execution-twin requirements weaken registered floors: " + ",".join(weakened)
-        )
+        raise ValueError("execution-twin requirements weaken registered floors: " + ",".join(weakened))
 
 
 def _requirements_from_receipt(payload: Mapping[str, Any]) -> CalibrationRequirements:
@@ -107,17 +105,14 @@ def _requirements_from_receipt(payload: Mapping[str, Any]) -> CalibrationRequire
         raise ValueError("execution-twin calibration count requirements must be integers")
     numeric_fields = expected_fields - set(_COUNT_REQUIREMENT_FIELDS)
     if any(
-        isinstance(raw.get(field_name), bool)
-        or not isinstance(raw.get(field_name), (int, float))
+        isinstance(raw.get(field_name), bool) or not isinstance(raw.get(field_name), (int, float))
         for field_name in numeric_fields
     ):
         raise ValueError("execution-twin calibration ratio/error requirements must be numeric")
     return CalibrationRequirements(**dict(raw))
 
 
-def _recomputed_sample_gate(
-    payload: Mapping[str, Any], requirements: CalibrationRequirements
-) -> dict[str, bool]:
+def _recomputed_sample_gate(payload: Mapping[str, Any], requirements: CalibrationRequirements) -> dict[str, bool]:
     counts = payload.get("sample_counts")
     latency = payload.get("latency_ns")
     inputs = payload.get("inputs")
@@ -157,34 +152,22 @@ def _recomputed_sample_gate(
         "feed_samples": count(counts, "feed_latency") >= requirements.min_feed_samples,
         "target_events": count(counts, "target_events") >= requirements.min_target_events,
         "order_commands": count(counts, "order_commands") >= requirements.min_order_commands,
-        "request_ack_samples": (
-            count(counts, "request_ack_rtt") >= requirements.min_request_ack_samples
-        ),
+        "request_ack_samples": (count(counts, "request_ack_rtt") >= requirements.min_request_ack_samples),
         "order_entry_samples": (
-            distribution_count("order_entry_clock_adjusted")
-            >= requirements.min_request_ack_samples
+            distribution_count("order_entry_clock_adjusted") >= requirements.min_request_ack_samples
         ),
         "order_response_samples": (
-            distribution_count("order_response_clock_adjusted")
-            >= requirements.min_request_ack_samples
+            distribution_count("order_response_clock_adjusted") >= requirements.min_request_ack_samples
         ),
         "filled_orders": count(counts, "filled_orders") >= requirements.min_filled_orders,
         "pnl_events": count(counts, "pnl_events") >= requirements.min_pnl_events,
         "symbols": count(counts, "symbols") >= requirements.min_symbols,
         "context_link_ratio": ratio("context_link_ratio") >= requirements.min_context_link_ratio,
-        "reference_match_ratio": (
-            ratio("reference_match_ratio") >= requirements.min_reference_match_ratio
-        ),
-        "slippage_samples": (
-            count(counts, "slippage_orders") >= requirements.min_filled_orders
-        ),
+        "reference_match_ratio": (ratio("reference_match_ratio") >= requirements.min_reference_match_ratio),
+        "slippage_samples": (count(counts, "slippage_orders") >= requirements.min_filled_orders),
         "clock_offset_receipt": has_clock_receipt,
-        "nonnegative_adjusted_feed_latency": (
-            ratio("negative_adjusted_feed_latency_ratio") <= 0.01
-        ),
-        "nonnegative_adjusted_order_entry_latency": (
-            ratio("negative_adjusted_order_entry_latency_ratio") <= 0.01
-        ),
+        "nonnegative_adjusted_feed_latency": (ratio("negative_adjusted_feed_latency_ratio") <= 0.01),
+        "nonnegative_adjusted_order_entry_latency": (ratio("negative_adjusted_order_entry_latency_ratio") <= 0.01),
         "nonnegative_adjusted_order_response_latency": (
             ratio("negative_adjusted_order_response_latency_ratio") <= 0.01
         ),
@@ -259,10 +242,12 @@ def _read_capture(
         data = path.read_bytes()
         if data and not data.endswith(b"\n"):
             raise ValueError(f"market capture segment has a partial final line: {path}")
-        manifest.append({
-            "path": str(path.relative_to(root)),
-            "sha256": hashlib.sha256(data).hexdigest(),
-        })
+        manifest.append(
+            {
+                "path": str(path.relative_to(root)),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
         for line_number, raw in enumerate(data.splitlines(), start=1):
             try:
                 value = json.loads(raw)
@@ -291,9 +276,7 @@ def _journal_sha256(events: Sequence[AccountEvent]) -> str:
     return digest.hexdigest()
 
 
-def _events_of_type(
-    events: Sequence[AccountEvent], event_type: AccountEventType
-) -> list[AccountEvent]:
+def _events_of_type(events: Sequence[AccountEvent], event_type: AccountEventType) -> list[AccountEvent]:
     return [event for event in events if event.event_type == event_type.value]
 
 
@@ -308,9 +291,7 @@ def _latency_ns(
     return local_ns - exchange_ns - local_minus_exchange_ns
 
 
-def _visible_book_vwap(
-    row: Mapping[str, Any], *, signed_qty: float, fill_qty: float
-) -> float | None:
+def _visible_book_vwap(row: Mapping[str, Any], *, signed_qty: float, fill_qty: float) -> float | None:
     """Walk the captured decision book for the quantity actually filled."""
 
     if signed_qty == 0.0 or fill_qty <= 0.0:
@@ -322,11 +303,7 @@ def _visible_book_vwap(
     notional = 0.0
     executed = 0.0
     for raw_level in raw_levels:
-        if (
-            not isinstance(raw_level, Sequence)
-            or isinstance(raw_level, (str, bytes))
-            or len(raw_level) < 2
-        ):
+        if not isinstance(raw_level, Sequence) or isinstance(raw_level, (str, bytes)) or len(raw_level) < 2:
             continue
         price = _number(raw_level[0]) or 0.0
         available = _number(raw_level[1]) or 0.0
@@ -351,11 +328,7 @@ def _top_of_book_mid(row: Mapping[str, Any]) -> float | None:
             return []
         output: list[float] = []
         for raw_level in raw_levels:
-            if (
-                not isinstance(raw_level, Sequence)
-                or isinstance(raw_level, (str, bytes))
-                or not raw_level
-            ):
+            if not isinstance(raw_level, Sequence) or isinstance(raw_level, (str, bytes)) or not raw_level:
                 continue
             price = _number(raw_level[0]) or 0.0
             if price > 0.0:
@@ -388,9 +361,7 @@ def calibrate_execution_twin(
     if not expected_account_id.strip() or observed_ts_ns <= 0:
         raise ValueError("calibration requires an explicit account id and observation time")
     if (local_minus_exchange_ns is None) != (not clock_offset_receipt_sha256):
-        raise ValueError(
-            "clock correction and its source receipt hash must be supplied together"
-        )
+        raise ValueError("clock correction and its source receipt hash must be supplied together")
     if clock_offset_receipt_sha256 and (
         len(clock_offset_receipt_sha256) != 64
         or any(character not in "0123456789abcdef" for character in clock_offset_receipt_sha256)
@@ -404,33 +375,25 @@ def calibrate_execution_twin(
         raise ValueError("demo account journal is empty")
     account_ids = {event.account_id for event in events}
     if account_ids != {expected_account_id}:
-        raise ValueError(
-            f"journal account ids {sorted(account_ids)!r} do not equal {expected_account_id!r}"
-        )
+        raise ValueError(f"journal account ids {sorted(account_ids)!r} do not equal {expected_account_id!r}")
     capture_rows, capture_manifest, capture_manifest_sha256 = _read_capture(capture_path)
 
     targets = _events_of_type(events, AccountEventType.TARGET)
     commands = _events_of_type(events, AccountEventType.ORDER_COMMAND)
     acks = _events_of_type(events, AccountEventType.ACK)
+    ack_observations = _events_of_type(events, AccountEventType.ACK_OBSERVATION)
     fills = _events_of_type(events, AccountEventType.FILL)
     statuses = _events_of_type(events, AccountEventType.ORDER_STATUS)
     pnl_events = _events_of_type(events, AccountEventType.PNL)
     market_refs = _events_of_type(events, AccountEventType.MARKET_INPUT_REF)
 
     commands_by_id = {
-        str(event.payload.get("command_id") or ""): event
-        for event in commands
-        if event.payload.get("command_id")
+        str(event.payload.get("command_id") or ""): event for event in commands if event.payload.get("command_id")
     }
     market_by_batch_symbol = {
-        (str(event.payload.get("batch_id") or event.correlation_id), event.symbol): event
-        for event in market_refs
+        (str(event.payload.get("batch_id") or event.correlation_id), event.symbol): event for event in market_refs
     }
-    capture_by_id = {
-        str(row.get("record_id") or ""): row
-        for row in capture_rows
-        if row.get("record_id")
-    }
+    capture_by_id = {str(row.get("record_id") or ""): row for row in capture_rows if row.get("record_id")}
     capture_ids = set(capture_by_id)
     linked_contexts = 0
     reference_matches = 0
@@ -468,13 +431,9 @@ def calibrate_execution_twin(
     for row in capture_rows:
         kind = str(row.get("kind") or "")
         if kind.startswith("orderbook_"):
-            exchange_ns = _integer(
-                row.get("exchange_engine_ts_ns") or row.get("exchange_system_ts_ns")
-            )
+            exchange_ns = _integer(row.get("exchange_engine_ts_ns") or row.get("exchange_system_ts_ns"))
         elif kind == "public_trade":
-            exchange_ns = _integer(
-                row.get("exchange_trade_ts_ns") or row.get("exchange_system_ts_ns")
-            )
+            exchange_ns = _integer(row.get("exchange_trade_ts_ns") or row.get("exchange_system_ts_ns"))
         else:
             continue
         local_ns = _integer(row.get("local_receive_ts_ns"))
@@ -492,42 +451,39 @@ def calibrate_execution_twin(
     request_ack_rtt_ns: list[float] = []
     order_entry_ns: list[float] = []
     order_response_ns: list[float] = []
-    accepted_ack_count = 0
-    for ack in acks:
+    accepted_ack_count = sum(ack.payload.get("accepted") is True for ack in acks)
+    timing_ack_by_command: dict[str, AccountEvent] = {}
+    for ack in (*acks, *ack_observations):
         if ack.payload.get("accepted") is not True:
             continue
-        accepted_ack_count += 1
         command_id = str(ack.payload.get("command_id") or "")
-        ack_command = commands_by_id.get(command_id)
         metadata = ack.payload.get("metadata") or {}
         if isinstance(metadata, Mapping) and metadata.get("idempotent_existing_order") is True:
-            # A duplicate-link recovery proves venue ownership but its lookup
-            # duration and historical updatedTime are not create-request
-            # latency observations.
+            # A duplicate-link lookup is ownership evidence, not create timing.
             continue
+        send_ns = _integer(metadata.get("local_socket_send_ts_ns")) if isinstance(metadata, Mapping) else 0
+        if not command_id or send_ns <= 0:
+            continue
+        current = timing_ack_by_command.get(command_id)
+        if current is None or (_integer(ack.payload.get("local_ack_ts_ns")), ack.sequence) < (
+            _integer(current.payload.get("local_ack_ts_ns")),
+            current.sequence,
+        ):
+            timing_ack_by_command[command_id] = ack
+    for command_id, ack in sorted(timing_ack_by_command.items()):
+        ack_command = commands_by_id.get(command_id)
+        metadata = ack.payload.get("metadata") or {}
         send_ns = _integer(metadata.get("local_socket_send_ts_ns")) if isinstance(metadata, Mapping) else 0
         local_ack_ns = _integer(ack.payload.get("local_ack_ts_ns"))
         exchange_ack_ns = _integer(ack.payload.get("exchange_ts_ns"))
-        if (
-            send_ns > 0
-            and ack_command is not None
-            and send_ns >= ack_command.wall_ts_ns
-        ):
+        if send_ns > 0 and ack_command is not None and send_ns >= ack_command.wall_ts_ns:
             decision_to_socket_ns.append(float(send_ns - ack_command.wall_ts_ns))
         if send_ns > 0 and local_ack_ns >= send_ns:
             request_ack_rtt_ns.append(float(local_ack_ns - send_ns))
-        if (
-            send_ns > 0
-            and exchange_ack_ns > 0
-            and local_minus_exchange_ns is not None
-        ):
+        if send_ns > 0 and exchange_ack_ns > 0 and local_minus_exchange_ns is not None:
             # local = exchange + offset
-            order_entry_ns.append(
-                float(exchange_ack_ns - send_ns + local_minus_exchange_ns)
-            )
-            order_response_ns.append(
-                float(local_ack_ns - exchange_ack_ns - local_minus_exchange_ns)
-            )
+            order_entry_ns.append(float(exchange_ack_ns - send_ns + local_minus_exchange_ns))
+            order_response_ns.append(float(local_ack_ns - exchange_ack_ns - local_minus_exchange_ns))
 
     fills_by_command: dict[str, list[AccountEvent]] = {}
     for fill in fills:
@@ -550,8 +506,7 @@ def calibrate_execution_twin(
             continue
         requested_qty = abs(_number(filled_command.payload.get("qty")) or 0.0)
         filled_qty = math.fsum(
-            abs(_number(fill.payload.get("signed_qty")) or 0.0)
-            for fill in fills_by_command.get(command_id, ())
+            abs(_number(fill.payload.get("signed_qty")) or 0.0) for fill in fills_by_command.get(command_id, ())
         )
         if requested_qty > 0.0 and filled_qty >= requested_qty - 1e-12:
             fully_filled_without_status.add(command_id)
@@ -574,17 +529,12 @@ def calibrate_execution_twin(
             continue
         command_fills = sorted(
             fills_by_command.get(command_id, ()),
-            key=lambda event: (
-                _integer(event.payload.get("exchange_ts_ns")), event.sequence
-            ),
+            key=lambda event: (_integer(event.payload.get("exchange_ts_ns")), event.sequence),
         )
         if len(command_fills) > 1:
             multi_fill_orders += 1
         requested_qty = abs(_number(completed_command.payload.get("qty")) or 0.0)
-        filled_qty = math.fsum(
-            abs(_number(fill.payload.get("signed_qty")) or 0.0)
-            for fill in command_fills
-        )
+        filled_qty = math.fsum(abs(_number(fill.payload.get("signed_qty")) or 0.0) for fill in command_fills)
         if requested_qty > 0.0 and command_id in fill_order_ids:
             ratio = min(filled_qty / requested_qty, 1.0)
             fill_ratios.append(ratio)
@@ -633,50 +583,22 @@ def calibrate_execution_twin(
             if validated_context is not None
             else None
         )
-        if (
-            reference_price > 0.0
-            and actual_fill_qty > 0.0
-            and visible_vwap is not None
-        ):
+        if reference_price > 0.0 and actual_fill_qty > 0.0 and visible_vwap is not None:
             actual_vwap = actual_fill_notional / actual_fill_qty
-            visible_book_slippage_bps.append(
-                direction
-                * (visible_vwap - reference_price)
-                / reference_price
-                * 10_000.0
-            )
-            residual_slippage_bps.append(
-                direction
-                * (actual_vwap - visible_vwap)
-                / reference_price
-                * 10_000.0
-            )
+            visible_book_slippage_bps.append(direction * (visible_vwap - reference_price) / reference_price * 10_000.0)
+            residual_slippage_bps.append(direction * (actual_vwap - visible_vwap) / reference_price * 10_000.0)
 
     command_ids = set(commands_by_id)
     completed_with_commands = len(completed_order_ids & command_ids)
     filled_with_commands = len(fill_order_ids & command_ids)
-    zero_fill_terminal_orders = len(
-        (completed_order_ids & command_ids) - fill_order_ids
-    )
-    fee_bps = (
-        total_fee_usdt / total_fill_notional * 10_000.0
-        if total_fill_notional > 0.0
-        else None
-    )
+    zero_fill_terminal_orders = len((completed_order_ids & command_ids) - fill_order_ids)
+    fee_bps = total_fee_usdt / total_fill_notional * 10_000.0 if total_fill_notional > 0.0 else None
     adjusted_negative_ratio = (
-        sum(value < 0.0 for value in feed_adjusted_ns) / len(feed_adjusted_ns)
-        if feed_adjusted_ns
-        else 1.0
+        sum(value < 0.0 for value in feed_adjusted_ns) / len(feed_adjusted_ns) if feed_adjusted_ns else 1.0
     )
-    entry_negative_ratio = (
-        sum(value < 0.0 for value in order_entry_ns) / len(order_entry_ns)
-        if order_entry_ns
-        else 1.0
-    )
+    entry_negative_ratio = sum(value < 0.0 for value in order_entry_ns) / len(order_entry_ns) if order_entry_ns else 1.0
     response_negative_ratio = (
-        sum(value < 0.0 for value in order_response_ns) / len(order_response_ns)
-        if order_response_ns
-        else 1.0
+        sum(value < 0.0 for value in order_response_ns) / len(order_response_ns) if order_response_ns else 1.0
     )
     symbols = sorted({event.symbol for event in commands if event.symbol})
 
@@ -691,9 +613,7 @@ def calibrate_execution_twin(
         "pnl_events": len(pnl_events) >= requirements.min_pnl_events,
         "symbols": len(symbols) >= requirements.min_symbols,
         "context_link_ratio": context_link_ratio >= requirements.min_context_link_ratio,
-        "reference_match_ratio": (
-            reference_match_ratio >= requirements.min_reference_match_ratio
-        ),
+        "reference_match_ratio": (reference_match_ratio >= requirements.min_reference_match_ratio),
         "slippage_samples": len(residual_slippage_bps) >= requirements.min_filled_orders,
         "clock_offset_receipt": local_minus_exchange_ns is not None,
         "nonnegative_adjusted_feed_latency": adjusted_negative_ratio <= 0.01,
@@ -702,9 +622,7 @@ def calibrate_execution_twin(
     }
     execution_twin_gate_passed = all(sample_gate.values())
     partial_upper_bound = (
-        min(1.0, 3.0 / filled_with_commands)
-        if filled_with_commands and multi_fill_orders == 0
-        else None
+        min(1.0, 3.0 / filled_with_commands) if filled_with_commands and multi_fill_orders == 0 else None
     )
 
     receipt: dict[str, Any] = {
@@ -764,17 +682,9 @@ def calibrate_execution_twin(
         "fills": {
             "fill_ratio": _distribution(fill_ratios),
             "multi_fill_orders": multi_fill_orders,
-            "multi_fill_order_rate": (
-                multi_fill_orders / filled_with_commands
-                if filled_with_commands
-                else None
-            ),
+            "multi_fill_order_rate": (multi_fill_orders / filled_with_commands if filled_with_commands else None),
             "incomplete_orders": incomplete_orders,
-            "incomplete_order_rate": (
-                incomplete_orders / filled_with_commands
-                if filled_with_commands
-                else None
-            ),
+            "incomplete_order_rate": (incomplete_orders / filled_with_commands if filled_with_commands else None),
             "zero_fill_terminal_orders": zero_fill_terminal_orders,
             "zero_multi_fill_rule_of_three_upper_bound": partial_upper_bound,
             "allow_partial_fills": True,
@@ -782,12 +692,8 @@ def calibrate_execution_twin(
         "slippage": {
             "reference": "account decision-boundary captured mid",
             "adverse_bps": _distribution(slippage_bps),
-            "visible_book_walk_adverse_bps": _distribution(
-                visible_book_slippage_bps
-            ),
-            "residual_adverse_bps_after_visible_book": _distribution(
-                residual_slippage_bps
-            ),
+            "visible_book_walk_adverse_bps": _distribution(visible_book_slippage_bps),
+            "residual_adverse_bps_after_visible_book": _distribution(residual_slippage_bps),
             "notional_weighted_adverse_bps": (
                 weighted_slippage_numerator / weighted_slippage_denominator
                 if weighted_slippage_denominator > 0.0
@@ -813,9 +719,7 @@ def calibrate_execution_twin(
         "execution_twin_gate_passed": execution_twin_gate_passed,
         "artifact_sha256": "",
     }
-    receipt["artifact_sha256"] = hashlib.sha256(
-        canonical_json({**receipt, "artifact_sha256": ""})
-    ).hexdigest()
+    receipt["artifact_sha256"] = hashlib.sha256(canonical_json({**receipt, "artifact_sha256": ""})).hexdigest()
     return receipt
 
 
@@ -830,9 +734,7 @@ def verify_calibration_receipt(
     if payload.get("kind") != "bybit_demo_market_order_execution_twin_calibration":
         raise ValueError("unexpected execution-twin calibration kind")
     observed = str(payload.get("artifact_sha256") or "")
-    expected = hashlib.sha256(
-        canonical_json({**payload, "artifact_sha256": ""})
-    ).hexdigest()
+    expected = hashlib.sha256(canonical_json({**payload, "artifact_sha256": ""})).hexdigest()
     if observed != expected:
         raise ValueError("execution-twin calibration receipt hash mismatch")
     requirements = _requirements_from_receipt(payload)
@@ -928,9 +830,7 @@ def execution_twin_config_from_calibration(
     fee_bps = (payload.get("slippage") or {}).get("fee_bps")
     if fee_bps is None:
         raise ValueError("calibration has no observed fee basis")
-    residual_distribution = (payload.get("slippage") or {}).get(
-        "residual_adverse_bps_after_visible_book"
-    ) or {}
+    residual_distribution = (payload.get("slippage") or {}).get("residual_adverse_bps_after_visible_book") or {}
     residual_slippage = residual_distribution.get(slippage_quantile)
     if residual_slippage is None:
         raise ValueError("calibration has no visible-book residual slippage basis")

@@ -56,10 +56,7 @@ def _rejection_keys(events: Sequence[AccountEvent]) -> tuple[str, ...]:
     for event in events:
         if event.event_type == AccountEventType.RISK_DECISION.value:
             keys.extend(str(key) for key in event.payload.get("rejection_keys") or ())
-        elif (
-            event.event_type == AccountEventType.ACK.value
-            and event.payload.get("accepted") is False
-        ):
+        elif event.event_type == AccountEventType.ACK.value and event.payload.get("accepted") is False:
             key = str(event.payload.get("rejection_key") or "")
             if key:
                 keys.append(key)
@@ -78,7 +75,10 @@ def _targets(events: Sequence[AccountEvent]) -> dict[tuple[str, str], float]:
     }
 
 
-_SUPPLEMENTAL_PARITY_EVENTS = {AccountEventType.VENUE_SNAPSHOT.value}
+_SUPPLEMENTAL_PARITY_EVENTS = {
+    AccountEventType.ACK_OBSERVATION.value,
+    AccountEventType.VENUE_SNAPSHOT.value,
+}
 
 
 def _parity_events(events: Sequence[AccountEvent]) -> tuple[AccountEvent, ...]:
@@ -198,10 +198,7 @@ def compare_kernel_journals(
             targets_ok = False
             mismatches.append(f"target keys differ: {baseline_name} vs {name}")
         else:
-            bad = [
-                key for key in base_targets
-                if abs(base_targets[key] - targets[key]) > quantity_tolerance
-            ]
+            bad = [key for key in base_targets if abs(base_targets[key] - targets[key]) > quantity_tolerance]
             if bad:
                 targets_ok = False
                 mismatches.append(f"target quantities differ: {baseline_name} vs {name}: {bad[:5]}")
@@ -359,8 +356,7 @@ def _environment_arg(raw: str) -> tuple[str, Path]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare historical, paper, and demo account journals and write a "
-            "source-bound structural parity receipt."
+            "Compare historical, paper, and demo account journals and write a source-bound structural parity receipt."
         )
     )
     parser.add_argument(
@@ -382,10 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         environments[name] = root
     required = {"historical", "paper", "demo"}
     if set(environments) != required:
-        parser.error(
-            "environments must be exactly historical, paper, and demo; got "
-            + ", ".join(sorted(environments))
-        )
+        parser.error("environments must be exactly historical, paper, and demo; got " + ", ".join(sorted(environments)))
 
     receipt = build_kernel_parity_receipt(
         environments,

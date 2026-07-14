@@ -1,11 +1,38 @@
 # Demo execution calibration v4
 
-Status: prospective and execution-outcome unseen at registration. Registered
-after rule/quantity feasibility and clock-transport diagnostics only. The demo
-owner has run alone and stayed flat; no calibration target, market order, fill,
-slippage, fee, realized P&L, or funding outcome has been observed. Forward
-execution evidence only; no alpha, LONG/CONTINUOUS parity, deployment, HFT, or
-real-money claim.
+Status: **closed and spent after the first target**. This contract was
+prospective and execution-outcome unseen at registration. It remains the
+historical statement of what was fixed before the V4 result; the prospective
+successor is
+`account_execution_calibration_v5_2026_07_14.md`. Forward execution evidence
+only; no alpha, LONG/CONTINUOUS parity, deployment, HFT, or real-money claim.
+
+## Observed outcome
+
+The schema-v2 persistent-session clock receipt passed before the target sample:
+
+- self-hash:
+  `574f9f4ff755e25daf2d403cd3179930352d936f0c19896636c7e360975cef68`;
+- estimated maximum midpoint error: `84,804,732` ns;
+- median local-minus-exchange correction: `1,942` ns.
+
+The exact V4 plan hash was
+`e0285d731ea81af636bd165f45509c5b4712f2b60aa9b8cd9cb12f3f064ed361`.
+Its first canonical BTC target produced a real `0.002 BTC` demo fill. The
+driver then stopped because REST position reconciliation temporarily observed
+the venue fill before the private execution consumer had committed it locally.
+While that consumer caught up, the REST create response and private fill path
+raced to record the same accepted ACK with different observation timestamps and
+metadata. The old implementation proposed an immutable-event rewrite and
+raised `AccountJournalIntegrityError`.
+
+No later V4 step ran and the sample did not satisfy any calibration floor. A
+separate, explicitly labelled recovery-zero target was published through the
+canonical inbox. The owner reconciled the fill and close; a final read-only
+snapshot proved zero local position, zero venue position, and zero open orders.
+The demo owner was then stopped and paper was never started. The failed run,
+event tape, recovery receipt, and final-flatness receipt remain retained. They
+must not be resumed, merged into V5, or presented as a passing calibration.
 
 ## Revision boundary
 
