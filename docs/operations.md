@@ -116,7 +116,7 @@ Paper startup consumes only a self-hashed receipt whose registered sample gate
 passed. The receipt does not authorize deployment.
 
 The optional bounded sample generator is separately preregistered in
-`docs/preregistration/account_execution_calibration_v3_2026_07_13.md`. It supplies
+`docs/preregistration/account_execution_calibration_v4_2026_07_14.md`. It supplies
 execution-twin observations efficiently but does not replace actual
 LONG/CONTINUOUS strategy-tape comparison.
 

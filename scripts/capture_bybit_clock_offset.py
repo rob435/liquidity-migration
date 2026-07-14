@@ -4,15 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 
 from liquidity_migration.clock_offset_receipt import (
     CLOCK_OFFSET_ENDPOINT,
+    CLOCK_OFFSET_TRANSPORT,
     REGISTERED_MAX_ERROR_NS,
     REGISTERED_MAX_RTT_NS,
     REGISTERED_SAMPLE_COUNT,
@@ -69,21 +70,40 @@ def main(argv: list[str] | None = None) -> int:
     if not registered:
         parser.error("clock-offset parameters must match the preregistered 21/5 demo contract")
 
-    request = urllib.request.Request(
-        args.endpoint,
-        headers={"User-Agent": "liquidity-migration-clock-offset-v1"},
-        method="GET",
-    )
+    connection = http.client.HTTPSConnection("api-demo.bybit.com", timeout=5)
+    registered_socket: object | None = None
 
     def request_once() -> bytes:
-        with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310 - fixed HTTPS default
-            return response.read()
+        if registered_socket is None or connection.sock is not registered_socket:
+            raise OSError("registered Bybit server-time TLS session changed before request")
+        connection.request(
+            "GET",
+            "/v5/market/time",
+            headers={"User-Agent": "liquidity-migration-clock-offset-v2"},
+        )
+        response = connection.getresponse()
+        data = response.read()
+        if response.status != 200:
+            raise OSError(f"Bybit server-time HTTP status is {response.status}")
+        if (
+            response.will_close
+            or str(response.getheader("Connection") or "").lower() == "close"
+            or connection.sock is not registered_socket
+        ):
+            raise OSError("Bybit server-time endpoint closed the registered persistent session")
+        return data
 
     try:
+        # Establish TLS outside every measured interval. All 21 measurements
+        # then share one explicit HTTP/1.1 keep-alive session; a reconnect
+        # would change the registered transport and therefore aborts.
+        connection.connect()
+        registered_socket = connection.sock
         receipt = capture_clock_offset(
             request_once=request_once,
             ntp_synchronized=_ntp_synchronized(),
             endpoint=args.endpoint,
+            transport=CLOCK_OFFSET_TRANSPORT,
             sample_count=args.samples,
             selected_count=args.selected_samples,
             interval_seconds=args.interval_seconds,
@@ -94,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as exc:
         print(f"clock-offset capture failed: {exc}", file=sys.stderr)
         return 2
+    finally:
+        connection.close()
     print(json.dumps({
         "output": str(output),
         "artifact_sha256": receipt["artifact_sha256"],

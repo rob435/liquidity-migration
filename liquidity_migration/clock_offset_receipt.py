@@ -18,18 +18,20 @@ from typing import Any, Callable, Mapping
 from .deterministic_serialization import canonical_json
 
 
-CLOCK_OFFSET_SCHEMA_VERSION = 1
-CLOCK_OFFSET_SOURCE = "bybit_public_server_time_low_rtt_midpoint"
+CLOCK_OFFSET_SCHEMA_VERSION = 2
+CLOCK_OFFSET_SOURCE = "bybit_public_server_time_persistent_low_rtt_midpoint_v2"
 CLOCK_OFFSET_ENDPOINT = "https://api-demo.bybit.com/v5/market/time"
+CLOCK_OFFSET_TRANSPORT = "single_preconnected_tls_session_http11"
 REGISTERED_SAMPLE_COUNT = 21
 REGISTERED_SELECTED_COUNT = 5
 REGISTERED_MAX_RTT_NS = 250_000_000
-REGISTERED_MAX_ERROR_NS = 50_000_000
+REGISTERED_MAX_ERROR_NS = 100_000_000
 REGISTERED_MAX_AGE_HOURS = 24.0
 _RECEIPT_FIELDS = frozenset({
     "schema_version",
     "source",
     "endpoint",
+    "transport",
     "observed_ts_ns",
     "ntp_synchronized",
     "sample_count",
@@ -76,6 +78,7 @@ def capture_clock_offset(
     request_once: Callable[[], bytes],
     ntp_synchronized: bool,
     endpoint: str,
+    transport: str = CLOCK_OFFSET_TRANSPORT,
     sample_count: int = 21,
     selected_count: int = 5,
     interval_seconds: float = 0.05,
@@ -93,6 +96,8 @@ def capture_clock_offset(
         raise ValueError("clock offset timing bounds are invalid")
     if not endpoint.startswith("https://"):
         raise ValueError("clock offset endpoint must use HTTPS")
+    if not transport:
+        raise ValueError("clock offset transport identity is required")
 
     samples: list[dict[str, int]] = []
     for index in range(sample_count):
@@ -145,6 +150,7 @@ def capture_clock_offset(
         "schema_version": CLOCK_OFFSET_SCHEMA_VERSION,
         "source": CLOCK_OFFSET_SOURCE,
         "endpoint": endpoint,
+        "transport": transport,
         "observed_ts_ns": observed_ts_ns,
         "ntp_synchronized": ntp_synchronized,
         "sample_count": sample_count,
@@ -187,9 +193,13 @@ def verify_clock_offset_receipt(
         "https://"
     ):
         raise ValueError("clock-offset receipt endpoint is invalid")
+    if not isinstance(payload.get("transport"), str) or not payload["transport"]:
+        raise ValueError("clock-offset receipt transport is invalid")
     if require_registered_contract:
         if payload["endpoint"] != CLOCK_OFFSET_ENDPOINT:
             raise ValueError("clock-offset receipt does not use the registered Bybit demo endpoint")
+        if payload["transport"] != CLOCK_OFFSET_TRANSPORT:
+            raise ValueError("clock-offset receipt does not use the registered persistent transport")
         if int(payload.get("sample_count") or 0) != REGISTERED_SAMPLE_COUNT:
             raise ValueError("clock-offset receipt does not contain the registered sample count")
         if int(payload.get("selected_count") or 0) != REGISTERED_SELECTED_COUNT:

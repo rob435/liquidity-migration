@@ -36,7 +36,7 @@ confirmed zero positions and zero regular/conditional orders, and the unit plus
 flatness evidence was retained under the host's mode-restricted cutover-evidence
 directory.
 
-Staged topology installation of clean commit `4950b4cb0520` passed 142 Linux
+Staged topology installation through clean commit `e40a13f750f0` passed 142 Linux
 smoke tests, installed both inactive owner units, and removed the retired risk
 and combined-book reporter units. It did not start a process or create either
 cutover marker. The guarded reset then re-proved venue flatness, archived 12
@@ -52,12 +52,17 @@ is retained. A second, flat-account 200-USDT feasibility probe passed and
 produced the self-hashed three-symbol rule receipt. Its largest observed minimum
 is 62.1029 USDT, so the original 30-USDT calibration plan is closed as
 infeasible. Static inspection then closed the 80-USDT v2 before startup because
-BTC quantity-step rounding erased its executable buffer. Prospective v3 fixes
-160 USDT and enforces a quantization-safe 2.5-times-minimum bound before any
-calibration target/fill outcome. Route/risk/symbol files now exist. The capture
-marker remains absent, both owners remain inactive, and every captured-tape
-gate remains open. This is a valid stopped/reset staging boundary, not
-deployment readiness or final-flatness evidence.
+BTC quantity-step rounding erased its executable buffer. V3 then fixed 160 USDT
+and a quantization-safe 2.5-times-minimum bound, but its first clock receipt
+failed the fixed 50-ms error ceiling; persistent-session diagnostics proved the
+geographic path itself is roughly 169 ms RTT. No retry was reinterpreted as a
+pass. Prospective v4 retains the $160 order plan and registers a single
+preconnected session plus a disclosed 100-ms worst-case clock-error ceiling
+before any calibration target/fill outcome. Route/risk/symbol files now exist.
+The demo owner ran alone, stayed healthy/flat, captured raw L2, and was stopped
+for exact-commit restaging; paper and every producer have never started. Every
+captured execution-tape gate remains open. This is a valid stopped/reset staging
+boundary, not deployment readiness or final-flatness evidence.
 
 The full acceptance gate remains open, and no deploy-authorization assessment
 or receipt has been issued:
@@ -305,7 +310,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
     Natural LONG/CONTINUOUS events remain required for their strategy-parity
     comparison, but they need not be abused to manufacture the execution-twin
     sample count. The prospective bounded driver in
-    `docs/preregistration/account_execution_calibration_v3_2026_07_13.md` publishes
+    `docs/preregistration/account_execution_calibration_v4_2026_07_14.md` publishes
     one tiny target at a time through the same owner and event clock, holds no
     credentials, and explicitly cannot satisfy LONG/CONTINUOUS parity:
 
@@ -317,7 +322,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
       --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-events.jsonl \
       --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-run.json \
       --expected-commit "$(git rev-parse HEAD)" \
-      --plan-id demo-calibration-20260713-v3
+      --plan-id demo-calibration-20260714-v4
     ```
 
     Add the preregistered `--funding-symbol BTCUSDT` and an explicit future
@@ -477,9 +482,12 @@ timing. The response-envelope timestamp is an API-server boundary, not proof of
 matching-engine entry time.
 
 The clock receipt samples Bybit's unauthenticated `GET /v5/market/time` endpoint
-from the VPS and combines it with a required NTP-synchronized local clock. It
-selects the five lowest-RTT observations from 21 and refuses an estimated error
-above 50 ms or selected RTT above 250 ms. This bounds, but does not eliminate,
+from the VPS and combines it with a required NTP-synchronized local clock. V4
+preconnects one TLS/HTTP1.1 session, aborts on reconnect, selects the five
+lowest-RTT observations from 21, and refuses an estimated error above 100 ms or
+selected RTT above 250 ms. The first 50-ms receipt failed and remains retained;
+the wider prospective ceiling is explicitly scoped to hourly/sub-hourly paper
+timing, not HFT or matching-engine claims. This bounds, but does not eliminate,
 the symmetric-path assumption in one-way latency estimates.
 
 Bybit depth is market-by-price, not market-by-order. It cannot identify passive

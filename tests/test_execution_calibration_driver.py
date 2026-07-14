@@ -16,7 +16,7 @@ from liquidity_migration.execution_calibration_driver import (
 
 def _plan(**overrides: object) -> CalibrationPlan:
     values: dict[str, object] = {
-        "plan_id": "demo-calibration-20260713-v3",
+        "plan_id": "demo-calibration-20260714-v4",
         "symbols": ("BTCUSDT", "ETHUSDT", "BUSDT"),
         "round_trips_per_symbol": 5,
         "notional_usdt": 160.0,

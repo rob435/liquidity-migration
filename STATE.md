@@ -13,7 +13,7 @@ research decisions are in
 | --- | --- | --- |
 | `continuous_ensemble_v2` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
 | `LongV11aDivWeekendVol` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
-| Shared account execution | demo + paper | Owner units/routes installed but inactive; fresh roots empty; capture marker absent |
+| Shared account execution | demo + paper | Demo owner stopped flat for v4 restage; route/journal/L2 retained; capture marker enabled; paper never started |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
@@ -25,7 +25,7 @@ research decisions are in
   checksums are retained under
   `/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z`.
 - Staged topology installation from branch
-  `codex/account-execution-cutover` at commit `4950b4cb0520` passed 142 Linux
+  `codex/account-execution-cutover` through commit `e40a13f750f0` passed 142 Linux
   smoke tests. It installed the two owner units and removed the retired Bybit
   risk and combined-book reporter units without starting any unit or creating
   a capture/deploy marker. This is maintenance staging, not an accepted full
@@ -43,10 +43,13 @@ research decisions are in
   observed minima `BTCUSDT=62.1029`, `ETHUSDT=17.6703`, and `BUSDT=5.05579`
   USDT and no residual order/position. That invalidated the original $30 plan.
   Static inspection then closed the $80 v2 before startup because BTC
-  quantity-step rounding erased its executable buffer. Prospective v3 fixes
-  $160 and a quantization-safe 2.5-times-minimum preflight before any calibration
-  target or fill. Owner route/risk/symbol files and the self-hashed demo-rule
-  receipt now exist, but the capture marker does not and no owner has started.
+  quantity-step rounding erased its executable buffer. V3 fixed $160 and a
+  quantization-safe 2.5-times-minimum preflight, but its first clock receipt
+  failed the fixed 50-ms error ceiling. Persistent diagnostics showed the
+  official demo endpoint path itself is roughly 169 ms RTT, so no blind retry
+  was attempted. Prospective v4 retains $160 and registers one preconnected
+  session with a disclosed 100-ms worst-case error ceiling before any
+  calibration target or fill.
 - The committed account-execution overhaul has one append-only account
   kernel, atomic cross-sleeve target aggregation/risk, deterministic scheduling
   and fault injection, sequence-aware L2 capture, a market-order execution twin,
@@ -60,10 +63,13 @@ research decisions are in
   are deleted. The demo owner also recovers strict Bybit funding-settlement rows,
   and a new owner-serialized read-only receipt can reconcile stopped-journal
   target/order/fill lineage, fees, closed P&L, funding, and pre/post flatness.
-  Commit `4950b4cb0520` is published and staged on the stopped VPS. Its bounded
-  calibration driver and independent public clock-offset receipt passed 2,416
-  local tests. The quantity-safe $160 v3 contract is a follow-up local change
-  under validation; no calibration target or outcome has been viewed.
+  Commit `e40a13f750f0` is published and staged on the stopped VPS. Its bounded
+  calibration driver and independent public clock-offset receipt passed 2,417
+  local tests. The demo owner subsequently started alone, created the fresh
+  route, stayed healthy/flat while capturing all three L2 books, and stopped
+  cleanly for v4 restaging. Paper and every target producer remain never-started
+  in this epoch. The v4 clock transport is a follow-up local change under
+  validation; no calibration target or execution outcome has been viewed.
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now
@@ -71,8 +77,8 @@ research decisions are in
   arrival/selection adapters are not yet full strategy parity. CONTINUOUS
   adverse-limit mode and LONG waits beyond 24 hours remain post-run replay.
 - The cutover acceptance gate is open: fresh rules and reset roots now exist,
-  but no actual target/order/fill/P&L tape, clock-offset receipt, passing
-  execution-twin calibration, venue-accounting receipt, or full
+  but no actual target/order/fill/P&L tape, passing clock-offset receipt,
+  passing execution-twin calibration, venue-accounting receipt, or full
   historical/paper/demo comparison exists. The paper owner refuses startup
   without a passing calibration. Full deploy now requires a short-lived,
   mode-`0600` `account-execution-deploy-ready` authorization receipt and

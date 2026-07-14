@@ -1,10 +1,17 @@
-# Demo execution calibration v3
+# Demo execution calibration v3 (closed at clock feasibility)
 
-Status: prospective and execution-outcome unseen at registration. Registered
-after rule feasibility and a static quantity-step audit only. No account owner,
-calibration target, market order, fill, latency, slippage, fee, P&L, or funding
-outcome has been observed. Forward execution evidence only; no alpha,
+Status: registered prospectively and execution-outcome unseen, then closed at
+the clock-feasibility gate before any calibration target. The account owner ran
+alone and stayed flat, but no market order, fill, slippage, fee, realized P&L,
+or funding outcome was observed. Forward execution evidence only; no alpha,
 LONG/CONTINUOUS parity, deployment, or real-money claim.
+
+The first schema-v1 clock receipt retained five approximately 188-ms RTT
+samples and estimated a 95.208695-ms worst-case offset error, failing v3's fixed
+50-ms ceiling. A persistent-connection diagnostic remained approximately
+169 ms, proving the ceiling geographically infeasible rather than transient.
+V3 remains immutable spent design history. Its successor is
+`account_execution_calibration_v4_2026_07_14.md`.
 
 ## Revision boundary
 

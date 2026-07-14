@@ -31,7 +31,8 @@ does not become confirmatory retroactively.
 | Account runtime acceptance | `docs/account_execution_cutover.md` | Open. The sleeve-local reconciler was retired 2026-07-13 because its compatibility projections are not authoritative for the account owner. Structural account-journal parity exists, but captured-tape, common-scheduler, venue-rule, credentialed-demo, and fill/P&L gates remain unproven. |
 | Demo execution calibration v1 | `docs/preregistration/account_execution_calibration_2026_07_13.md` | Closed at feasibility before a calibration order: current BTC structural minimum made its $30 open impossible. Preserved as spent design history. |
 | Demo execution calibration v2 | `docs/preregistration/account_execution_calibration_v2_2026_07_13.md` | Closed before owner startup: its $80 request lost the claimed buffer after BTC quantity-step rounding. Preserved as spent design history. |
-| Demo execution calibration v3 | `docs/preregistration/account_execution_calibration_v3_2026_07_13.md` | Prospective quantization-safe target-only sample: three symbols, five $160 round trips each, optional registered funding hold, independent clock-offset gate. Execution calibration only; LONG/CONT parity remains separate. |
+| Demo execution calibration v3 | `docs/preregistration/account_execution_calibration_v3_2026_07_13.md` | Closed before a calibration target: the first clock receipt failed its 50-ms bound and persistent RTT diagnostics proved that ceiling geographically infeasible. |
+| Demo execution calibration v4 | `docs/preregistration/account_execution_calibration_v4_2026_07_14.md` | Prospective quantization-safe $160 target sample with one preconnected clock session and a disclosed 100-ms worst-case error ceiling for hourly/sub-hourly use. Execution calibration only; no HFT or LONG/CONT parity claim. |
 
 ## Closed Continuous Arcs
 
