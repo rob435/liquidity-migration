@@ -1,24 +1,21 @@
-# Demo execution calibration v2 (closed at rounding audit)
+# Demo execution calibration v3
 
-Status: registered prospectively and execution-outcome unseen, then closed at
-the quantity-step rounding audit before owner startup. No calibration target,
-market order, fill, latency, slippage, fee, P&L, or funding outcome was
-observed. Forward execution evidence only; no alpha, LONG/CONTINUOUS parity,
-deployment, or real-money claim.
-
-V2 correctly put 25% headroom on the requested 80-USDT notional, but BTC's
-0.001 quantity step rounded that request toward zero to one approximately
-62-USDT step. The executable target therefore did not retain the claimed
-headroom. V2 remains immutable spent design history. Its prospective successor
-is `account_execution_calibration_v3_2026_07_13.md`.
+Status: prospective and execution-outcome unseen at registration. Registered
+after rule feasibility and a static quantity-step audit only. No account owner,
+calibration target, market order, fill, latency, slippage, fee, P&L, or funding
+outcome has been observed. Forward execution evidence only; no alpha,
+LONG/CONTINUOUS parity, deployment, or real-money claim.
 
 ## Revision boundary
 
-V1 is closed, not edited retroactively. Its 20-USDT rule-probe ceiling failed
-before order submission because `BTCUSDT` structural minimum quantity exceeded
-that ceiling. A second flat-account feasibility probe used a predeclared
-200-USDT ceiling and completed with no residual positions or orders. Its
-immutable inputs are:
+V1's 20-USDT probe ceiling failed before order submission. V2 then used the
+verified 62.1029-USDT BTC minimum to request 80 USDT, but static inspection
+found that rounding toward the 0.001 BTC quantity step would return the target
+to one approximately 62-USDT step. V2 is closed before owner startup rather
+than relabeling requested headroom as executable headroom.
+
+The same successful flat-account rule receipt remains the only viewed venue
+input:
 
 - verified timestamp: `1783986138270164217` ns;
 - receipt file SHA-256:
@@ -26,11 +23,18 @@ immutable inputs are:
 - self-hash:
   `ae4f4916cfa7e0ec7200c832af0e1100ceda2d78b805f46e6eac3d1a92427c7a`;
 - observed minimum notionals: `BTCUSDT=62.1029`, `ETHUSDT=17.6703`,
-  `BUSDT=5.05579` USDT.
+  `BUSDT=5.05579` USDT;
+- probe quantity steps/prices: BTC `0.001 @ 62102.9`, ETH `0.01 @ 1767.03`,
+  B `1 @ 0.10757`.
 
-The 25% buffer over the largest observed minimum is 77.628625 USDT. V2 fixes a
-round 80-USDT notional before any affected execution result. That is a design
-repair from a venue feasibility receipt, not a post-fill threshold change.
+For any positive current step notional `x <= requested`, venue-step rounding
+toward zero produces `floor(requested / x) * x >= requested / 2`. V3 therefore
+requires requested notional to be at least `2 * 1.25 * observed_minimum` for
+every symbol. The largest bound is `155.25725` USDT for BTC, fixed prospectively
+at a round 160 USDT. Thus every nonzero rounded target retains at least 80 USDT
+of executable notional, exceeding the registered 77.628625-USDT buffer. A
+current step larger than the request still rejects; it never becomes a silent
+zero.
 
 ## Claim and decision
 
@@ -54,9 +58,10 @@ account epoch.
 - Five round trips per symbol, iterating the symbol order within each round.
 - Direction alternates deterministically by `(round + symbol_index) % 2`.
 - One position at a time; every open must converge before its matching flat.
-- Explicit notional: 80 USDT per open; leverage: 2; post-fill hold: one second.
-- Calibration-only risk envelope: 100-USDT component/symbol/account gross caps,
-  50-USDT initial-margin cap, 2x leverage cap, and an explicit 2% native
+- Explicit requested notional: 160 USDT per open; leverage: 2; post-fill hold:
+  one second.
+- Calibration-only risk envelope: 200-USDT component/symbol/account gross caps,
+  100-USDT initial-margin cap, 2x leverage cap, and an explicit 2% native
   disaster stop. This envelope intentionally blocks general strategy sizing.
 - Target author: target-only `execution-calibration-v1` through the HEDGE
   adapter and canonical account inbox. It receives no Bybit credentials.
@@ -65,13 +70,14 @@ account epoch.
   verified plan prefix and immutable request identities.
 - This produces 30 target transitions/order commands/fills and 15 reductions
   when every request succeeds. Zero-fill terminal orders do not count.
-- A separate final 80-USDT `BTCUSDT` funding hold may be appended. Its close
+- A separate final 160-USDT `BTCUSDT` funding hold may be appended. Its close
   timestamp must be registered before the open from Bybit's published next
   funding time, no more than 24 hours ahead, and must be after settlement.
 
-The 80-USDT value is experiment-specific exposure, not a runtime resize floor.
-Each probed demo minimum must be no more than 80% of it; otherwise the sequence
-refuses rather than changing size after inspecting fills.
+The 160-USDT value is experiment-specific exposure, not a runtime resize floor.
+The runner rejects a rule set unless requested notional is at least 2.5 times
+every observed minimum, preserving the 25% buffer after worst-case nonzero
+step rounding rather than only before it.
 
 ## Clock and calibration gates
 

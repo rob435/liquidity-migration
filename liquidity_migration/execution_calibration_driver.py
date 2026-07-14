@@ -41,10 +41,12 @@ CALIBRATION_EVENT_SOURCE = "demo-execution-calibration-v1"
 CALIBRATION_STRATEGY_ID = "execution-calibration-v1"
 REGISTERED_CALIBRATION_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BUSDT")
 REGISTERED_ROUND_TRIPS_PER_SYMBOL = 5
-REGISTERED_NOTIONAL_USDT = 80.0
+REGISTERED_NOTIONAL_USDT = 160.0
 REGISTERED_LEVERAGE = 2.0
 REGISTERED_HOLD_SECONDS = 1.0
 REGISTERED_FUNDING_SYMBOL = "BTCUSDT"
+REGISTERED_MIN_NOTIONAL_BUFFER = 1.25
+REGISTERED_QUANTIZATION_SAFETY_FACTOR = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +208,41 @@ def require_registered_calibration_plan(plan: CalibrationPlan) -> None:
         raise ValueError("calibration plan differs from the preregistered fixed sample")
     if plan.funding_symbol not in {"", REGISTERED_FUNDING_SYMBOL}:
         raise ValueError("calibration funding hold differs from the preregistered BTCUSDT hold")
+
+
+def require_quantization_safe_minimum_buffer(
+    plan: CalibrationPlan,
+    observed_min_notional_by_symbol: dict[str, float],
+) -> None:
+    """Keep 25% headroom after venue-step rounding, not only before it.
+
+    For any positive step notional ``x <= requested``, rounding toward zero
+    produces ``floor(requested / x) * x >= requested / 2``. Requiring twice
+    the desired buffer therefore makes the guarantee independent of the
+    current price/step boundary. A step larger than the request is still
+    rejected by the account service rather than silently accepted as zero.
+    """
+
+    missing = sorted(set(plan.symbols) - set(observed_min_notional_by_symbol))
+    if missing:
+        raise ValueError(f"calibration symbols lack observed minima: {missing}")
+    unsafe: list[str] = []
+    for symbol in plan.symbols:
+        observed_minimum = float(observed_min_notional_by_symbol[symbol])
+        if not math.isfinite(observed_minimum) or observed_minimum <= 0.0:
+            raise ValueError(f"calibration observed minimum is invalid for {symbol}")
+        required = (
+            observed_minimum
+            * REGISTERED_MIN_NOTIONAL_BUFFER
+            * REGISTERED_QUANTIZATION_SAFETY_FACTOR
+        )
+        if plan.notional_usdt + 1e-12 < required:
+            unsafe.append(f"{symbol}:{required:.12g}")
+    if unsafe:
+        raise ValueError(
+            "calibration notional lacks the quantization-safe registered minimum "
+            "buffer for " + ",".join(unsafe)
+        )
 
 
 @dataclass(frozen=True, slots=True)

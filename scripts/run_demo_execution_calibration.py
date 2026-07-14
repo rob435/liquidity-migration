@@ -28,6 +28,7 @@ from liquidity_migration.execution_calibration_driver import (
     REGISTERED_LEVERAGE,
     REGISTERED_NOTIONAL_USDT,
     REGISTERED_ROUND_TRIPS_PER_SYMBOL,
+    require_quantization_safe_minimum_buffer,
     require_registered_calibration_plan,
 )
 
@@ -195,15 +196,10 @@ def main(argv: list[str] | None = None) -> int:
         missing = sorted(set(symbols) - set(rules))
         if missing:
             raise ValueError(f"calibration symbols lack demo rule receipts: {missing}")
-        too_small = sorted(
-            symbol for symbol in symbols
-            if plan.notional_usdt < rules[symbol].min_notional * 1.25
+        require_quantization_safe_minimum_buffer(
+            plan,
+            {symbol: rules[symbol].min_notional for symbol in symbols},
         )
-        if too_small:
-            raise ValueError(
-                "calibration notional lacks the registered 25% venue-minimum buffer for "
-                + ",".join(too_small)
-            )
         route = require_account_route(
             account_id=args.account_id,
             environment="demo",

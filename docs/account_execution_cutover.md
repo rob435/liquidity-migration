@@ -49,9 +49,11 @@ the reset.
 The first 20-USDT rule-probe ceiling failed before order submission because
 current `BTCUSDT` structural minimum quantity exceeded it. The failed attempt
 is retained. A second, flat-account 200-USDT feasibility probe passed and
-produced the self-hashed three-symbol receipt bound in demo calibration v2. Its
-largest observed minimum is 62.1029 USDT, so the original 30-USDT calibration
-plan is closed as infeasible and v2 prospectively fixes 80 USDT before any
+produced the self-hashed three-symbol rule receipt. Its largest observed minimum
+is 62.1029 USDT, so the original 30-USDT calibration plan is closed as
+infeasible. Static inspection then closed the 80-USDT v2 before startup because
+BTC quantity-step rounding erased its executable buffer. Prospective v3 fixes
+160 USDT and enforces a quantization-safe 2.5-times-minimum bound before any
 calibration target/fill outcome. Route/risk/symbol files now exist. The capture
 marker remains absent, both owners remain inactive, and every captured-tape
 gate remains open. This is a valid stopped/reset staging boundary, not
@@ -303,7 +305,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
     Natural LONG/CONTINUOUS events remain required for their strategy-parity
     comparison, but they need not be abused to manufacture the execution-twin
     sample count. The prospective bounded driver in
-    `docs/preregistration/account_execution_calibration_v2_2026_07_13.md` publishes
+    `docs/preregistration/account_execution_calibration_v3_2026_07_13.md` publishes
     one tiny target at a time through the same owner and event clock, holds no
     credentials, and explicitly cannot satisfy LONG/CONTINUOUS parity:
 
@@ -315,7 +317,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
       --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-events.jsonl \
       --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-run.json \
       --expected-commit "$(git rev-parse HEAD)" \
-      --plan-id demo-calibration-20260713-v2
+      --plan-id demo-calibration-20260713-v3
     ```
 
     Add the preregistered `--funding-symbol BTCUSDT` and an explicit future

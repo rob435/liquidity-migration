@@ -41,10 +41,12 @@ research decisions are in
   current BTC minimum quantity exceeded it. The failure is retained rather
   than hidden. A second flat-account 200-USDT feasibility probe passed with
   observed minima `BTCUSDT=62.1029`, `ETHUSDT=17.6703`, and `BUSDT=5.05579`
-  USDT and no residual order/position. That invalidated the original $30
-  calibration plan; prospective v2 fixes $80 before any calibration target or
-  fill. Owner route/risk/symbol files and the self-hashed demo-rule receipt now
-  exist, but the capture marker does not and no owner has started.
+  USDT and no residual order/position. That invalidated the original $30 plan.
+  Static inspection then closed the $80 v2 before startup because BTC
+  quantity-step rounding erased its executable buffer. Prospective v3 fixes
+  $160 and a quantization-safe 2.5-times-minimum preflight before any calibration
+  target or fill. Owner route/risk/symbol files and the self-hashed demo-rule
+  receipt now exist, but the capture marker does not and no owner has started.
 - The committed account-execution overhaul has one append-only account
   kernel, atomic cross-sleeve target aggregation/risk, deterministic scheduling
   and fault injection, sequence-aware L2 capture, a market-order execution twin,
@@ -60,8 +62,8 @@ research decisions are in
   target/order/fill lineage, fees, closed P&L, funding, and pre/post flatness.
   Commit `4950b4cb0520` is published and staged on the stopped VPS. Its bounded
   calibration driver and independent public clock-offset receipt passed 2,416
-  local tests. The venue-feasibility-driven $80 v2 constant is a follow-up local
-  change under validation; no calibration target or outcome has been viewed.
+  local tests. The quantity-safe $160 v3 contract is a follow-up local change
+  under validation; no calibration target or outcome has been viewed.
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now

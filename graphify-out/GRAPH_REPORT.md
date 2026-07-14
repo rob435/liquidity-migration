@@ -1,12 +1,12 @@
 # Graph Report - liquidity-migration  (2026-07-14)
 
 ## Corpus Check
-- 274 files · ~1,070,735 words
+- 274 files · ~1,071,846 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 7746 nodes · 24067 edges · 164 communities detected
-- Extraction: 55% EXTRACTED · 45% INFERRED · 0% AMBIGUOUS · INFERRED: 10786 edges (avg confidence: 0.62)
+- 7755 nodes · 24151 edges · 164 communities detected
+- Extraction: 55% EXTRACTED · 45% INFERRED · 0% AMBIGUOUS · INFERRED: 10866 edges (avg confidence: 0.62)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -72,7 +72,7 @@
 - [[_COMMUNITY_Community 59|Community 59]]
 - [[_COMMUNITY_Community 60|Community 60]]
 - [[_COMMUNITY_Community 61|Community 61]]
-- [[_COMMUNITY_Community 63|Community 63]]
+- [[_COMMUNITY_Community 62|Community 62]]
 - [[_COMMUNITY_Community 64|Community 64]]
 - [[_COMMUNITY_Community 65|Community 65]]
 - [[_COMMUNITY_Community 66|Community 66]]
@@ -176,28 +176,28 @@
 - [[_COMMUNITY_Community 166|Community 166]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `AccountExecutionKernel` - 312 edges
+1. `AccountExecutionKernel` - 319 edges
 2. `AccountRiskPolicy` - 300 edges
-3. `SystemClock` - 249 edges
-4. `Clock` - 247 edges
+3. `SystemClock` - 256 edges
+4. `Clock` - 254 edges
 5. `ExecutionTwinConfig` - 219 edges
-6. `InstrumentRules` - 212 edges
-7. `SleeveAdapterKind` - 209 edges
+6. `SleeveAdapterKind` - 216 edges
+7. `InstrumentRules` - 212 edges
 8. `LatencyProfile` - 203 edges
 9. `KlineStore` - 187 edges
 10. `HistoricalAccountSession` - 187 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `_v11a_long_native_config()` --calls--> `test_v11a_config_matches_research_run()`  [INFERRED]
-  liquidity_migration/long_native_event_demo.py → tests/test_liquidity_migration_long_native_event_demo.py
-- `TradeLifecycleConfig` --uses--> `Tests for the daily-aligned Sharpe in trade_lifecycle.  `summarize_trade_backtes`  [INFERRED]
-  liquidity_migration/config.py → tests/test_liquidity_migration_trade_lifecycle_sharpe.py
-- `TradeLifecycleConfig` --uses--> `Synthesise a minimal trade row that summarize_trade_backtest accepts.`  [INFERRED]
-  liquidity_migration/config.py → tests/test_liquidity_migration_trade_lifecycle_sharpe.py
-- `TradeLifecycleConfig` --uses--> `Regression (audit-iter1 event-demo-1): production exits carry intra-day     wall`  [INFERRED]
-  liquidity_migration/config.py → tests/test_liquidity_migration_trade_lifecycle_sharpe.py
-- `TradeLifecycleConfig` --uses--> `Honest daily Sharpe should not depend on the assumed `rebalance_days`.      Two`  [INFERRED]
-  liquidity_migration/config.py → tests/test_liquidity_migration_trade_lifecycle_sharpe.py
+- `CostConfig` --calls--> `test_cost_config_default_models_live_100pct_taker()`  [INFERRED]
+  liquidity_migration/config.py → tests/test_liquidity_migration_config.py
+- `CostConfig` --calls--> `test_cost_config_default_is_full_taker_not_maker_blend()`  [INFERRED]
+  liquidity_migration/config.py → tests/test_liquidity_migration_config.py
+- `ResearchConfig` --uses--> `data-download-4: a never-before-covered range that returns [] (a symbol that`  [INFERRED]
+  liquidity_migration/config.py → tests/test_liquidity_migration_downloaders.py
+- `ResearchConfig` --uses--> `data-download-1: Binance OI-hist / taker-flow only serve a rolling ~30-day     w`  [INFERRED]
+  liquidity_migration/config.py → tests/test_liquidity_migration_downloaders.py
+- `ResearchConfig` --uses--> `Normal finite, non-negative volumes: derived fields are the exact prior values.`  [INFERRED]
+  liquidity_migration/config.py → tests/test_liquidity_migration_downloaders.py
 
 ## Hyperedges (group relationships)
 - **Account execution safety boundary** — account_execution_cutover_account_owner_single_writer, account_execution_cutover_atomic_account_journal, account_execution_cutover_persistent_account_kernel, account_execution_cutover_native_protection, account_execution_cutover_account_reconciliation [EXTRACTED 1.00]
@@ -208,19 +208,19 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.01
-Nodes (591): BybitAccountExecutionConsumer, _command_id_for_row(), _float(), PendingTerminalStatus, Normalize Bybit private execution/order streams into account-kernel facts., Resolve Bybit rows by either client id or the venue's durable order id.      Exc, One consumer thread owns all private-stream mutation of the kernel., _rows() (+583 more)
+Nodes (610): BybitAccountExecutionConsumer, _command_id_for_row(), _float(), PendingTerminalStatus, Normalize Bybit private execution/order streams into account-kernel facts., Resolve Bybit rows by either client id or the venue's durable order id.      Exc, One consumer thread owns all private-stream mutation of the kernel., _rows() (+602 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.01
-Nodes (484): BybitMarketData, BybitPublicTickerStream, BybitRestRateLimiter, _is_rate_limit(), _PybitRateLimitLogFilter, int(value) that returns 0 instead of raising on a non-numeric/None value., Thread-safe sliding-window rate limiter shared across BybitMarketData     instan, Drop pybit's 10006 (rate limit) retry chatter.      pybit's _handle_retryable_er (+476 more)
+Nodes (539): AccountRiskPolicy, SleeveAdapterKind, date_boundary_ms(), date_ms(), Parse an ISO date/datetime to epoch milliseconds (UTC), or None if empty.      A, Parse an ISO date/datetime to epoch milliseconds (UTC). Raises on empty., CostConfig, TradeLifecycleConfig (+531 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.01
-Nodes (429): HTMLParser, _archive_cache_is_complete(), ArchiveDownloadIncompleteError, ArchiveFileNotFoundError, _content_length(), download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive() (+421 more)
+Nodes (459): terminal_entry_attempt_keys(), ArchiveDownloadIncompleteError, ArchiveFileNotFoundError, ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig, ArchiveManifestConfig, Config for ``build_archive_trade_manifest``.      The manifest is always built f (+451 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.02
-Nodes (424): AccountRiskPolicy, SleeveAdapterKind, CostConfig, TradeLifecycleConfig, _btc_trend_gate_value(), _additive_equity(), _additive_summary(), _apply_entry_order() (+416 more)
+Cohesion: 0.01
+Nodes (442): HTMLParser, _archive_cache_is_complete(), _content_length(), download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _archive_kline_skip_rows(), build_archive_trade_manifest() (+434 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.01
@@ -228,31 +228,31 @@ Nodes (387): finite_float(), Coerce `value` to a finite float, returning `defaul
 
 ### Community 5 - "Community 5"
 Cohesion: 0.02
-Nodes (362): apply_continuous_demo_profile(), ContinuousDemoCycleConfig, Live continuous-fade demo config (mirrors LongNativeDemoCycleConfig; sleeve-spec, Resolve named demo profiles into explicit knobs.      ``continuous_ensemble_v2``, Bybit liquidity-migration research package., LongNativeConfig, A0ConfigIdentityError, assert_stage_config_identity_is_current() (+354 more)
+Nodes (345): Bybit liquidity-migration research package., LongNativeConfig, A0ConfigIdentityError, assert_stage_config_identity_is_current(), assert_stage_config_matches_identity(), _canonical_config_artifact(), canonical_json_bytes(), canonical_json_sha256() (+337 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.01
-Nodes (296): assessment_template(), _atomic_write(), build_authorization_receipt(), build_reviewed_evidence(), _commit_prefix(), _file_identity(), _full_commit(), _git_output() (+288 more)
+Nodes (236): entry_request(), entry_request_id(), _canonical_funding_events(), _funding_number(), _funding_row_material(), _require_same_funding_event(), _validated_funding_row(), _validated_open_order_rows() (+228 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.01
-Nodes (236): entry_request(), entry_request_id(), _validated_open_order_rows(), api_key_allows_order_submit(), _assert_account_execution_owner(), BybitDataError, BybitPrivateClient, BybitPublicTradeStream (+228 more)
+Nodes (235): assessment_template(), _atomic_write(), build_authorization_receipt(), build_reviewed_evidence(), _commit_prefix(), _file_identity(), _full_commit(), _git_output() (+227 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.02
-Nodes (253): component_target_key(), publish_exit_first_target_requests(), requested_target(), unresolved_target_snapshot(), _accepted_batches(), _batch_fill_summary(), canonical_adverse_reduction_events(), canonical_component_execution_anchors() (+245 more)
+Nodes (199): BybitRestRateLimiter, Thread-safe sliding-window rate limiter shared across BybitMarketData     instan, FollowerKlineStreamManager, Read-only kline FOLLOWER — share one WS kline data plane across co-located sleev, Initial snapshot read + start the poll thread. Never blocks on a         bootstr, Warn ONCE per staleness episode when the leader snapshot stops moving —, Drop follower-side symbols that are no longer in the leader snapshot         (th, Re-read the leader snapshot iff its (mtime, size) changed. Returns         True (+191 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.02
-Nodes (188): _follower_continuous_kline_stream_manager_factory(), FollowerKlineStreamManager, Read-only kline FOLLOWER — share one WS kline data plane across co-located sleev, Initial snapshot read + start the poll thread. Never blocks on a         bootstr, Warn ONCE per staleness episode when the leader snapshot stops moving —, Drop follower-side symbols that are no longer in the leader snapshot         (th, Re-read the leader snapshot iff its (mtime, size) changed. Returns         True, ``KlineStreamManager`` drop-in that follows another root's flushed snapshot. (+180 more)
+Cohesion: 0.01
+Nodes (261): _cal_roll(), calendar_roll(), calendar_shift(), coerce_int(), _date_range(), _date_symbol_set(), _exclude_symbols(), is_weekend_ms() (+253 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.01
-Nodes (234): _cal_roll(), coerce_int(), date_boundary_ms(), date_ms(), _date_range(), _date_symbol_set(), _exclude_symbols(), _float_or_nan() (+226 more)
+Nodes (173): BybitKlineStreamPool, _close_state(), _close_ws_client(), _is_already_subscribed_error(), _KlineConnectionState, Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method, True for pybit's "You have already subscribed to this topic" error.      pybit's, Per-connection bookkeeping for the pool. (+165 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.01
-Nodes (173): BybitKlineStreamPool, _close_state(), _close_ws_client(), _is_already_subscribed_error(), _KlineConnectionState, Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method, True for pybit's "You have already subscribed to this topic" error.      pybit's, Per-connection bookkeeping for the pool. (+165 more)
+Cohesion: 0.02
+Nodes (198): _build_demo_universe(), _bust_demo_instruments_cache(), _column_values(), _concat_recent_klines(), _dedupe_recent_klines(), _demo_feature_cache_fingerprint(), _demo_feature_cache_paths(), _demo_instruments() (+190 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.03
@@ -260,187 +260,187 @@ Nodes (227): _empty_continuous_entry_anchor(), _empty_continuous_minimal_labels(
 
 ### Community 13 - "Community 13"
 Cohesion: 0.02
-Nodes (224): _btc_hourly_exact_month_context(), _btc_month_regime_allows(), _btc_month_regime_value(), build_long_features(), _cal_roll(), _classify_entry(), detect_pattern_capitulation(), detect_pattern_fomo_chase() (+216 more)
+Nodes (143): build_parser(), _parse_discover_universe(), _patch_archive(), _patch_universe(), _run(), _subparser_actions(), test_archive_klines_print_slugged_path(), test_archive_manifest_normal_name_path_unchanged() (+135 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.02
-Nodes (149): build_parser(), test_cli_klines_follow_root_parses_into_config(), _parse_discover_universe(), _patch_archive(), _patch_universe(), Live daemon entrypoints self-provision a missing ledger root (so a brand-new sle, _run(), _subparser_actions() (+141 more)
+Cohesion: 0.04
+Nodes (153): _active_trade_snapshots(), _aggregate_bars(), analyze(), _annualized_sharpe(), _append_forward_curve(), _atr_pct_before(), _bar_at_or_after(), _bars_dict_to_state_frame() (+145 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.02
-Nodes (179): calendar_roll(), calendar_shift(), is_weekend_ms(), A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl, Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r, True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day, _aggregate_daily_funding(), _aggregate_daily_klines() (+171 more)
+Cohesion: 0.03
+Nodes (147): _btc_month_regime_allows(), _btc_month_regime_value(), _classify_entry(), _coin_track_record_scale(), detect_pattern_capitulation(), detect_pattern_fomo_chase(), detect_pattern_funding_carry(), detect_pattern_funding_squeeze() (+139 more)
 
 ### Community 16 - "Community 16"
-Cohesion: 0.04
-Nodes (152): _active_trade_snapshots(), _aggregate_bars(), analyze(), _annualized_sharpe(), _append_forward_curve(), _atr_pct_before(), _bar_at_or_after(), _bars_dict_to_state_frame() (+144 more)
+Cohesion: 0.03
+Nodes (134): BinanceDataError, BinanceUSDMData, _ceil_to_period(), _floor_to_period(), _http_error_detail(), _raise_if_suspicious_empty_page(), Seconds to wait after a 429/418, from the Retry-After header.          Falls bac, Best-effort detail string from an HTTPError body (the Binance error JSON). (+126 more)
 
 ### Community 17 - "Community 17"
-Cohesion: 0.03
-Nodes (110): BinanceDataError, BinanceUSDMData, _ceil_to_period(), _floor_to_period(), _http_error_detail(), _raise_if_suspicious_empty_page(), Seconds to wait after a 429/418, from the Retry-After header.          Falls bac, Best-effort detail string from an HTTPError body (the Binance error JSON). (+102 more)
+Cohesion: 0.05
+Nodes (118): completed_expired_entry_attempt_keys(), account_route_manifest_path(), AccountRouteConfigurationError, AccountRouteCutoverRequiredError, AccountRouteError, AccountRouteIntegrityError, AccountRouteMissingError, _atomic_create() (+110 more)
 
 ### Community 18 - "Community 18"
-Cohesion: 0.03
-Nodes (110): _assert_download_completeness(), build_binance_oos(), _days_between(), discover(), fetch_daily_klines(), _fetch_expected_sha256(), fetch_month_klines(), list_symbol_months() (+102 more)
+Cohesion: 0.04
+Nodes (105): build_venue_local_instrument_map(), _canonical_json(), derive_venue_local_instrument_map_from_roots(), load_venue_local_manifest_projection(), _observe_manifest_files(), Deterministic venue-local identity maps for A0 artifacts.  The A0 hypotheses are, Validate manifest storage, then collapse it to venue/symbol/day only., Derive a non-portable map and bind its exact manifest projection source. (+97 more)
 
 ### Community 19 - "Community 19"
 Cohesion: 0.05
-Nodes (101): append_events(), apply_event(), _apply_lifecycle_event(), _apply_patches(), CanonicalEvent, _event_hash(), EventSpec, EventType (+93 more)
+Nodes (100): append_events(), apply_event(), _apply_lifecycle_event(), _apply_patches(), CanonicalEvent, _event_hash(), EventSpec, EventType (+92 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.05
-Nodes (74): account_route_manifest_path(), AccountRouteConfigurationError, AccountRouteCutoverRequiredError, AccountRouteError, AccountRouteIntegrityError, AccountRouteMissingError, _atomic_create(), derive_account_route() (+66 more)
+Cohesion: 0.04
+Nodes (84): _float_or_nan(), pct(), Format a fraction as a 2-decimal percentage, or `invalid` if not finite., _has_columns(), _btc_daily_close_series(), _chart_final_values(), _chart_font(), _chart_metric_tiles() (+76 more)
 
 ### Community 21 - "Community 21"
 Cohesion: 0.04
-Nodes (59): account_owner_health_path(), _atomic_replace(), fold_convergence_health(), format_convergence_health(), from_dict(), Durable liveness evidence for a single account-execution owner.  The health proj, Atomically publish the latest owner observation under ``root``., Read and strictly validate the latest durable owner observation. (+51 more)
+Nodes (81): account_owner_health_path(), _atomic_replace(), fold_convergence_health(), format_convergence_health(), from_dict(), Durable liveness evidence for a single account-execution owner.  The health proj, Atomically publish the latest owner observation under ``root``., Read and strictly validate the latest durable owner observation. (+73 more)
 
 ### Community 22 - "Community 22"
+Cohesion: 0.06
+Nodes (58): btc_context_by_day(), BtcRiskLiveSizer, _daily_closes_by_day(), _equal_optional_float(), ExpandingBtcRiskState, _finite(), _fsync_directory(), _fsync_file() (+50 more)
+
+### Community 23 - "Community 23"
 Cohesion: 0.07
 Nodes (71): _assert_expected_consumer(), _canonical_json(), _expected_identity(), _file_bytes_and_sha256(), _json_hash(), Phase0BundleVerification, Phase0BundleVerificationError, Strict internal re-execution checks for strategy-overhaul Phase-0 bundles.  The (+63 more)
 
-### Community 23 - "Community 23"
+### Community 24 - "Community 24"
 Cohesion: 0.04
 Nodes (69): Pin the Strictness Manifesto decision-rule analyzer.  Specifically validates aga, Construct a cell that passes EVERY gate; verify it's labelled candidate., A near-miss is inconclusive (Bybit passes, Binance falls short on sharpe Δ)., M6: a status!=ok cell must be returned as an explicit exclusion (a     falsifier, The full_pit_universe_pass column is parsed into CellMetrics so the     analyzer, At window_days = 365.25 (one calendar year), annualized = total_return.     Sani, At window_days = 182.625 (half year), annualized = (1+r)^2 - 1., The actual Round 1 / Phase 0 / R1 baseline at 1125 days (Bybit):     total_retur (+61 more)
 
-### Community 24 - "Community 24"
-Cohesion: 0.09
-Nodes (54): _finite_float(), format_age_ms(), format_pct(), format_usd(), format_utc_time_ms(), _rate_limit_retry_seconds(), Seconds to wait before the single 429 retry, or None when the error is     not a, True when the token + chat-id env vars are both present (a send can be     attem (+46 more)
-
 ### Community 25 - "Community 25"
-Cohesion: 0.13
-Nodes (56): account_journal_path(), account_transactions_path(), read_account_journal(), verify_account_journal(), _atomic_write_receipt(), build_kernel_parity_receipt(), compare_kernel_journals(), _decision_keys() (+48 more)
+Cohesion: 0.09
+Nodes (60): _accepted_batches(), _batch_fill_summary(), canonical_adverse_reduction_events(), canonical_component_execution_anchors(), canonical_entry_attempts(), canonical_reduction_events(), _canonical_reduction_events_from_events(), canonical_strategy_trade_rows() (+52 more)
 
 ### Community 26 - "Community 26"
 Cohesion: 0.09
-Nodes (48): AccountNotificationEngine, _active_stop(), _batch_target_proposals(), _clear_recent_entry_rejection_counters(), _component_attribution_pending(), _entry_attempt_key(), _entry_rejection_summary(), _entry_risk_decision_messages() (+40 more)
+Nodes (52): _finite_float(), format_age_ms(), format_pct(), format_usd(), format_utc_time_ms(), _rate_limit_retry_seconds(), Seconds to wait before the single 429 retry, or None when the error is     not a, True when the token + chat-id env vars are both present (a send can be     attem (+44 more)
 
 ### Community 27 - "Community 27"
-Cohesion: 0.06
-Nodes (49): _coerce_bool(), _coerce_field(), ensure_data_root_exists(), ExchangeConfig, load_config(), _merge_dataclass(), _merge_universe_config(), Strict bool coercion. builtin bool('false') is True, silently flipping a     quo (+41 more)
+Cohesion: 0.09
+Nodes (48): AccountNotificationEngine, _active_stop(), _batch_target_proposals(), _clear_recent_entry_rejection_counters(), _component_attribution_pending(), _entry_attempt_key(), _entry_rejection_summary(), _entry_risk_decision_messages() (+40 more)
 
 ### Community 28 - "Community 28"
-Cohesion: 0.05
-Nodes (50): band_notionals(), build_arg_parser(), collect_cycle(), enforce_retention(), _file_day(), free_disk_bytes(), _get_json(), iter_jsonl_rows() (+42 more)
+Cohesion: 0.16
+Nodes (51): read_account_journal(), _atomic_write_receipt(), build_kernel_parity_receipt(), compare_kernel_journals(), _decision_keys(), load_kernel_parity_receipt(), main(), _order_position_payload() (+43 more)
 
 ### Community 29 - "Community 29"
 Cohesion: 0.05
-Nodes (54): Absolute Pairwise-Disjoint Runtime Roots, Account Execution Cutover, Account-Owner Execution Topology, Active Profile Lifecycle, Profile Backtest Integrity Contract, Canonical Account Journal Authority, Canonical Execution Journal Reference, Account Execution Capture-Enabled Marker (+46 more)
+Nodes (50): band_notionals(), build_arg_parser(), collect_cycle(), enforce_retention(), _file_day(), free_disk_bytes(), _get_json(), iter_jsonl_rows() (+42 more)
 
 ### Community 30 - "Community 30"
-Cohesion: 0.18
-Nodes (44): completed_expired_entry_attempt_keys(), CountingTwin, _inbox(), _market(), _policy(), _request(), _route(), _rules() (+36 more)
+Cohesion: 0.05
+Nodes (54): Absolute Pairwise-Disjoint Runtime Roots, Account Execution Cutover, Account-Owner Execution Topology, Active Profile Lifecycle, Profile Backtest Integrity Contract, Canonical Account Journal Authority, Canonical Execution Journal Reference, Account Execution Capture-Enabled Marker (+46 more)
 
 ### Community 31 - "Community 31"
-Cohesion: 0.07
-Nodes (50): Alert, build_arg_parser(), _continuous_rmom_refresh_on(), _default_root(), _default_units_for_toggles(), evaluate_cycle_liveness(), evaluate_hedge_warmstart_freshness(), evaluate_required_account_owner_states() (+42 more)
+Cohesion: 0.06
+Nodes (44): _coerce_field(), ensure_data_root_exists(), load_config(), _merge_dataclass(), Raise FileNotFoundError when the research data root is missing., _continuous_payload_from_summary(), _delisted_traded(), _find_png() (+36 more)
 
 ### Community 32 - "Community 32"
+Cohesion: 0.05
+Nodes (28): _run_both_roots_skipped(), _stub_account_authority(), test_account_health_requires_fresh_healthy_canonical_snapshot(), test_account_owner_health_requires_fresh_matching_healthy_projection(), test_continuous_rmom_refresh_on_predicate(), test_continuous_root_still_drives_default_state_dir(), test_dropped_resolved_note_does_not_suppress_genuine_refire(), test_explicit_state_file_unchanged() (+20 more)
+
+### Community 33 - "Community 33"
+Cohesion: 0.15
+Nodes (36): _assert_exact_key_coverage(), _assert_population_preserved(), attach_long_source_context(), _attach_rank_metadata_and_check_parity(), _is_outcome_like_column(), long_context_runtime_parity_surface(), LongSourceContextError, _rank_specs() (+28 more)
+
+### Community 34 - "Community 34"
 Cohesion: 0.09
 Nodes (33): continuous_order_link_id(), continuous_suborder_link_id(), continuous_trade_id(), Build the deterministic continuous sleeve orderLinkId.      ``reentry_seq`` > 0, Order link with a deterministic trade-id hash suffix.      The suffix disambigua, Deterministic continuous trade id, with optional same-window re-entry seq., Recover the exact live snipe trade id from a hashed snipe orderLinkId., recover_snipe_trade_id_from_link() (+25 more)
 
-### Community 33 - "Community 33"
+### Community 35 - "Community 35"
 Cohesion: 0.09
 Nodes (28): build_arg_parser(), bybit_linear_symbols(), connection_expired(), JsonlDayWriter, main(), parse_bybit_event(), Live liquidation collector — Bybit allLiquidation (P3, 2026-06-10).  Raw Bybit l, Thread-safe append-only writer, one file per venue per UTC day. (+20 more)
 
-### Community 34 - "Community 34"
+### Community 36 - "Community 36"
 Cohesion: 0.18
 Nodes (30): build_continuous_population_keys(), build_long_population_keys(), _frame_sha256(), _json_scalar(), long_expected_population(), PopulationKeyArtifacts, PopulationKeyError, Outcome-blind population-key manifests for the A0 sleeve runners.  These primiti (+22 more)
 
-### Community 35 - "Community 35"
+### Community 37 - "Community 37"
 Cohesion: 0.09
 Nodes (31): _bookdepth_row(), _bookdepth_zip(), _load_backfill_bookdepth(), Regression tests for audit2 unit ``bookdepth_backfill``.  Ports the metrics-back, When both fetch attempts exhaust retries, _day_rows yields the distinct     _TRA, A genuine 404 (None blob) stays None — a real no-data day., Numerical-equivalence gate: a normal day with two snapshots in the same hour, When EVERY day fails transiently, the writer must NOT touch an empty marker (+23 more)
 
-### Community 36 - "Community 36"
+### Community 38 - "Community 38"
 Cohesion: 0.13
 Nodes (30): _load_module(), test_5m_timing_rejects_incomplete_post_entry_path(), test_adverse_limit_timing_fills_at_limit_price(), test_cluster_risk_of_ruin_bootstrap_writes_tail_injected_scenarios(), test_conditional_scale_in_tables_write_by_trade_and_summary(), test_conditional_scale_in_trade_row_models_threshold_addon(), test_delay_15m_timing_uses_5m_bar_close(), test_disaster_sizing_tables_compare_current_to_loss_budget() (+22 more)
 
-### Community 37 - "Community 37"
+### Community 39 - "Community 39"
 Cohesion: 0.07
 Nodes (16): Pin the R1 robustness / Tier-2 demo-candidate analyzer's gate integrity.  Audit, A >=100% cumulative loss makes (1+total_return) non-positive; a fractional     p, audit-iter1 scripts-1: a zero-span (start==end) window floors _window_years to, audit-iter1 scripts-2: a truncated/malformed monthly CSV must signal unreadable, audit-iter5: the moving-block upper bound must be n-block+1 so a block can cover, re-audit rescan-rmom-funding-2: the non-circular moving-block bootstrap must, The max(n-block+1, 1) guard must not IndexError when n < block., test_annualize_and_engine_mar_stay_real_below_minus_100pct() (+8 more)
 
-### Community 38 - "Community 38"
+### Community 40 - "Community 40"
 Cohesion: 0.12
 Nodes (19): _args(), _commit_all(), _exact_environment_fixture(), _fake_source_snapshot(), _init_git_repo(), _phase0_inventory(), test_deterministic_phase0_plan_ignores_rmom_compressed_bytes(), test_dirty_commit_keeps_plan_incomplete() (+11 more)
 
-### Community 39 - "Community 39"
+### Community 41 - "Community 41"
 Cohesion: 0.16
 Nodes (26): _control_metrics(), _passing_metrics(), test_begin_rerun_invalidates_old_complete_verdict_before_purge(), test_complete_diagnostic_matrix_cannot_pass(), test_equity_metrics_count_initial_loss_from_starting_capital(), test_equity_metrics_use_unrounded_calendar_path(), test_exact_funding_validation_refuses_internal_settlement_holes(), test_exact_trade_funding_validation_refuses_missing_symbol_day() (+18 more)
 
-### Community 40 - "Community 40"
+### Community 42 - "Community 42"
+Cohesion: 0.17
+Nodes (26): component_target_key(), publish_exit_first_target_requests(), requested_target(), unresolved_target_snapshot(), Count crash-durable CONT entry batches not yet terminal in the inbox., _unresolved_continuous_entry_request_count(), component_target_intent(), Build one replacement target with the repository's sole key grammar.      Signal (+18 more)
+
+### Community 43 - "Community 43"
 Cohesion: 0.19
 Nodes (27): _flat(), _load(), _manifest(), _partition(), test_audit_cap_fails_before_unbounded_scan(), test_binance_flat_5m_extension_is_refused(), test_bookdepth_requires_ten_unique_bands_per_hour(), test_both_venue_roots_must_be_disjoint_including_resolved_child_scopes() (+19 more)
 
-### Community 41 - "Community 41"
+### Community 44 - "Community 44"
 Cohesion: 0.12
 Nodes (26): _load_backfill_metrics(), _metrics_row(), _metrics_zip(), Tests for scripts/backfill_binance_metrics_vision.py.  backfill-writers-2 (2026-, The core backfill-writers-1 fix: a previously-written parquet is UNIONED with, A re-fetched/corrected day supersedes the stale row (keep=last)., A prior parquet that already carried a `coverage` column must not break the, End-to-end through backfill_symbol: a second run that fetches a new day must (+18 more)
 
-### Community 42 - "Community 42"
+### Community 45 - "Community 45"
+Cohesion: 0.13
+Nodes (18): _download_manifest_staleness_lines(), coverage_status(), CoverageStatus, format_coverage(), _has_parquet(), latest_signal_trading_day(), _max_partition_date(), _per_symbol_manifest_lags() (+10 more)
+
+### Community 46 - "Community 46"
 Cohesion: 0.1
 Nodes (6): _FakeJsonResponse, _Headers, _kline_row(), test_paged_kline_raises_on_suspicious_mid_range_empty_page(), test_paged_kline_terminal_empty_page_after_partial_is_benign(), test_recent_history_start_clamps_to_latest_30_days()
 
-### Community 43 - "Community 43"
-Cohesion: 0.21
-Nodes (18): diagnose(), is_tainted(), max_severity(), Named, backfillable backtest warnings — the single place that turns a run's inte, True when any warning marks the result survivorship/look-ahead biased., A compact, loud block for stdout. Empty list → a single clean line., Build the warning list for a completed run from its integrity signals.      Pure, render() (+10 more)
-
-### Community 44 - "Community 44"
+### Community 47 - "Community 47"
 Cohesion: 0.11
 Nodes (7): _naive(), audit2 regression: regenerate_hedge_warmstart.daily_returns gap-guard.  The naiv, The pre-fix builder: pairs adjacent present days, no calendar guard., test_contiguous_series_identical_to_naive(), test_gap_day_pair_is_dropped(), test_live_component_root_requires_tp12_btc_risk_and_complete_tape_funding(), _write_component_funding_rows()
 
-### Community 45 - "Community 45"
-Cohesion: 0.16
-Nodes (15): coverage_status(), CoverageStatus, _has_parquet(), latest_signal_trading_day(), _max_partition_date(), _per_symbol_manifest_lags(), Point-in-time coverage / staleness diagnostics for a data root.  The recurring o, Return symbols with at least one parquet partition for ``day``.      The canonic (+7 more)
+### Community 48 - "Community 48"
+Cohesion: 0.21
+Nodes (18): diagnose(), is_tainted(), max_severity(), Named, backfillable backtest warnings — the single place that turns a run's inte, True when any warning marks the result survivorship/look-ahead biased., A compact, loud block for stdout. Empty list → a single clean line., Build the warning list for a completed run from its integrity signals.      Pure, render() (+10 more)
 
-### Community 46 - "Community 46"
+### Community 49 - "Community 49"
 Cohesion: 0.15
 Nodes (20): Fail-closed abort and reducing-recovery protocol, Account owner as sole venue-mutation authority, Account and venue reconciliation, Atomic account journal, Bybit V5 demo and order API documentation, account-execution-capture-enabled marker, Account execution cutover runbook, Strict demo-or-paper execution route (+12 more)
 
-### Community 47 - "Community 47"
+### Community 50 - "Community 50"
 Cohesion: 0.17
 Nodes (14): Functional tests for the per-sleeve kill-switch (deploy/lib_sleeves.sh + sleeves, # NOTE: the `enable` branch deliberately matches real `systemctl enable` (withou, Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):     EV, _run(), test_continuous_paper_split_keeps_demo_orders_off_runs_paper(), test_hedge_lifecycle_off_stops_armed_service(), test_hedge_lifecycle_off_verify_fails_when_service_active(), test_lib_fallback_defaults_every_sleeve_off() (+6 more)
 
-### Community 48 - "Community 48"
+### Community 51 - "Community 51"
 Cohesion: 0.17
 Nodes (15): _apply(), _assert_existing_keys_allclose(), _patch_residual_inputs(), Causality tests for the residual-momentum precompute (scripts/precompute_residua, Forward targets arrive late: a padded tail value may legitimately     change onc, residual_momentum[D] = sum residual_return[D-9 .. D-3] (rolling 7, shift 3)., Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d, test_precompute_append_allows_provisional_tail_to_mature() (+7 more)
 
-### Community 49 - "Community 49"
+### Community 52 - "Community 52"
 Cohesion: 0.11
 Nodes (13): _make_page(), audit2 regression: binance funding-vision backfill — two defects.  (1) In-progre, Within the publish-lag window the immediately-prior month is also protected., Build a JSON funding-rate page of n settlements starting at start_ts., Normal (unchanged) behaviour: a single short page returns exactly its rows., No data at all -> empty result (unchanged)., backfill-writers-4: vision-first ordering + unique(keep='first', maintain_order=, Normal (unchanged) behaviour: a strictly-older 404 month IS cached. (+5 more)
 
-### Community 50 - "Community 50"
-Cohesion: 0.19
-Nodes (16): CellMetrics, CellVerdict, compute_annualized_return(), compute_mar(), evaluate_cell(), evaluate_cell_investigation(), _index_by_cell(), main() (+8 more)
-
-### Community 51 - "Community 51"
+### Community 53 - "Community 53"
 Cohesion: 0.18
 Nodes (9): _drive_main(), _eq_df(), Tests for scripts/equity_curves.py (+ scripts/continuous_deployed_equity_refresh, Run ``main`` for the continuous sleeve and capture run_venue's kwargs., test_continuous_inherits_frozen_start_when_window_unset(), test_continuous_uses_explicit_start_when_given(), test_continuous_uses_rolling_start_when_years_given(), test_stats_no_drawdown_returns_none_mar() (+1 more)
 
-### Community 52 - "Community 52"
+### Community 54 - "Community 54"
 Cohesion: 0.15
 Nodes (4): test_btc_trend_gate_override_changes_config_hash(), test_component_overrides_model_take_profit_and_leverage(), test_monthly_trade_counts_dedupes_component_overlap(), _write_trades()
 
-### Community 53 - "Community 53"
+### Community 55 - "Community 55"
 Cohesion: 0.21
 Nodes (8): _mk(), Tests for the PIT coverage / staleness diagnostics (FIX C)., test_coverage_flags_per_symbol_manifest_lag_when_global_dates_match(), test_coverage_flags_per_symbol_manifest_missing_within_tail_lookback(), test_coverage_fresh_manifest_is_not_stale(), test_coverage_missing_manifest(), test_coverage_stale_manifest_flagged(), test_symbols_on_date_handles_date_first_and_symbol_first_layouts()
 
-### Community 54 - "Community 54"
+### Community 56 - "Community 56"
 Cohesion: 0.23
 Nodes (13): backfill_symbol(), _day_rows(), _days(), _fetch(), _kline_spans(), main(), _max_date_from_file(), _merge_with_existing() (+5 more)
 
-### Community 55 - "Community 55"
+### Community 57 - "Community 57"
 Cohesion: 0.17
 Nodes (3): Lease, ReadOnlyClient, test_accounting_script_is_owner_serialized_and_read_only()
 
-### Community 56 - "Community 56"
+### Community 58 - "Community 58"
 Cohesion: 0.4
 Nodes (12): _read_nul_args(), _run_ops(), test_ops_data_build_requires_explicit_execute(), test_ops_deploy_requires_first_argument_execute_and_routes_after_handshake(), test_ops_help_is_read_only(), test_ops_python_override_and_argument_forwarding(), test_ops_rejects_unknown_or_incomplete_routes(), test_ops_remote_calibration_routes_require_execute_and_preserve_arguments() (+4 more)
-
-### Community 57 - "Community 57"
-Cohesion: 0.3
-Nodes (11): backfill_symbol(), backfill_symbol_missing_days(), _bookdepth_frame(), _day_rows(), _days(), _fetch(), _kline_spans(), main() (+3 more)
-
-### Community 58 - "Community 58"
-Cohesion: 0.27
-Nodes (4): _BrokenScalar, _Scalar, test_canonical_json_preserves_exact_normalization_and_bytes(), test_json_safe_normalizes_item_scalars_and_falls_back_to_text()
 
 ### Community 59 - "Community 59"
 Cohesion: 0.33
@@ -454,9 +454,9 @@ Nodes (8): _config(), _snapshot(), test_capture_rotates_segments_before_size_lim
 Cohesion: 0.31
 Nodes (8): _load_orchestrator(), Tests for scripts/continuous_forward_replay_orchestrator.py.  forward-replay-5 (, A drift RuntimeError in one venue must be captured as a per-venue 'drift' status, A non-drift failure is reported as 'error' (still isolated), not silently swallo, A stalled clock (a venue that drifted/failed) must make main() exit non-zero so, test_orchestrator_main_exits_nonzero_on_stall(), test_orchestrator_run_venue_isolates_drift(), test_orchestrator_run_venue_isolates_generic_error()
 
-### Community 63 - "Community 63"
-Cohesion: 0.52
-Nodes (6): _plan(), test_event_tape_prefix_is_bound_to_exact_plan(), test_optional_funding_hold_is_explicit_and_ends_flat(), test_plan_predeclares_thirty_alternating_market_order_transitions(), test_plan_rejects_unsafe_or_underspecified_variants(), test_runtime_sample_cannot_drift_from_preregistered_plan()
+### Community 62 - "Community 62"
+Cohesion: 0.46
+Nodes (7): _plan(), test_event_tape_prefix_is_bound_to_exact_plan(), test_optional_funding_hold_is_explicit_and_ends_flat(), test_plan_predeclares_thirty_alternating_market_order_transitions(), test_plan_rejects_unsafe_or_underspecified_variants(), test_registered_notional_preserves_buffer_after_step_rounding(), test_runtime_sample_cannot_drift_from_preregistered_plan()
 
 ### Community 64 - "Community 64"
 Cohesion: 0.7
@@ -1067,17 +1067,17 @@ Nodes (1): The removal is documented in-unit (audit id + rationale) so an operat
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `KlineStore` connect `Community 9` to `Community 1`?**
-  _High betweenness centrality (0.047) - this node is a cross-community bridge._
-- **Why does `LongNativeConfig` connect `Community 5` to `Community 0`, `Community 1`, `Community 3`, `Community 10`, `Community 12`, `Community 13`?**
-  _High betweenness centrality (0.043) - this node is a cross-community bridge._
-- **Why does `ContinuousDemoCycleConfig` connect `Community 5` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 8`, `Community 9`?**
-  _High betweenness centrality (0.040) - this node is a cross-community bridge._
-- **Are the 293 inferred relationships involving `AccountExecutionKernel` (e.g. with `AccountValuation` and `TwinAccountConfig`) actually correct?**
-  _`AccountExecutionKernel` has 293 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `LongNativeConfig` connect `Community 5` to `Community 0`, `Community 33`, `Community 2`, `Community 1`, `Community 9`, `Community 12`, `Community 15`?**
+  _High betweenness centrality (0.049) - this node is a cross-community bridge._
+- **Why does `ContinuousEventConfig` connect `Community 1` to `Community 2`, `Community 4`, `Community 6`, `Community 41`, `Community 14`, `Community 54`?**
+  _High betweenness centrality (0.045) - this node is a cross-community bridge._
+- **Why does `KlineStore` connect `Community 8` to `Community 3`, `Community 2`, `Community 11`, `Community 7`?**
+  _High betweenness centrality (0.042) - this node is a cross-community bridge._
+- **Are the 300 inferred relationships involving `AccountExecutionKernel` (e.g. with `AccountValuation` and `TwinAccountConfig`) actually correct?**
+  _`AccountExecutionKernel` has 300 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 298 inferred relationships involving `AccountRiskPolicy` (e.g. with `SleeveTargetIntent` and `TargetAdapter`) actually correct?**
   _`AccountRiskPolicy` has 298 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 278 inferred relationships involving `ValueError` (e.g. with `write_regime_portfolio_replay()` and `write_skip_portfolio_replay()`) actually correct?**
-  _`ValueError` has 278 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 245 inferred relationships involving `SystemClock` (e.g. with `LongNativeDemoDaemon` and `Long-running strategy/target producer for the v11a sleeve.  Demo and paper route`) actually correct?**
-  _`SystemClock` has 245 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 279 inferred relationships involving `ValueError` (e.g. with `write_regime_portfolio_replay()` and `write_skip_portfolio_replay()`) actually correct?**
+  _`ValueError` has 279 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 252 inferred relationships involving `SystemClock` (e.g. with `LongNativeDemoDaemon` and `Long-running strategy/target producer for the v11a sleeve.  Demo and paper route`) actually correct?**
+  _`SystemClock` has 252 INFERRED edges - model-reasoned connections that need verification._
