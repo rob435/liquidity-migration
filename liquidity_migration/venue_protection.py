@@ -11,7 +11,13 @@ from functools import wraps
 from threading import RLock
 from typing import Any, Concatenate, Mapping, ParamSpec, Sequence, TypeVar
 
-from .account_kernel import AccountExecutionKernel, AccountTransitionError, InstrumentRules
+from .account_kernel import (
+    AccountExecutionKernel,
+    AccountState,
+    AccountTransitionError,
+    InstrumentRules,
+    PositionState,
+)
 from .account_strategy_state import canonical_component_execution_anchors
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
@@ -117,6 +123,13 @@ class BybitNativeProtectionManager:
             and float(target.get("signed_qty") or 0.0) * position.signed_qty > 0.0
         ]
         if not targets:
+            retained = self._plan_for_canonical_close(
+                symbol,
+                state=state,
+                position=position,
+            )
+            if retained is not None:
+                return retained
             raise RuntimeError(f"{symbol} position has no same-direction component target owner")
         anchors = {
             anchor.target_key: anchor
@@ -205,12 +218,114 @@ class BybitNativeProtectionManager:
             target_keys=target_keys,
         )
 
+    def _plan_for_canonical_close(
+        self,
+        symbol: str,
+        *,
+        state: AccountState,
+        position: PositionState,
+    ) -> NativeProtectionPlan | None:
+        """Retain an installed stop across the journal/venue close transition.
+
+        An accepted target-flat replacement removes the component owner before
+        its reduce-only market order can update the reconstructed position. The
+        position is not orphaned during that bounded interval, but only when the
+        journal proves every remaining unit is covered by canonical reduce-only
+        work. Never derive a new stop here: absence of a previously installed,
+        active stop remains a hard failure.
+        """
+
+        tolerance = max(abs(position.signed_qty) * 1e-12, 1e-12)
+        if symbol not in state.aggregate_targets:
+            return None
+        if abs(float(state.aggregate_targets[symbol])) > tolerance:
+            return None
+
+        symbol_desires = [
+            target
+            for target in state.component_target_desires.values()
+            if str(target.get("symbol") or "").upper() == symbol
+        ]
+        if not symbol_desires or any(
+            abs(float(target.get("signed_qty") or 0.0)) > tolerance
+            for target in symbol_desires
+        ):
+            return None
+        if any(
+            str(target.get("symbol") or "").upper() == symbol
+            and abs(float(target.get("signed_qty") or 0.0)) > tolerance
+            for target in state.component_targets.values()
+        ):
+            return None
+
+        working_orders = [
+            state.orders[command_id]
+            for command_id in state.working_order_ids
+            if state.orders[command_id].symbol == symbol
+            and abs(state.orders[command_id].remaining_signed_qty) > tolerance
+        ]
+        if not working_orders:
+            return None
+        if any(
+            not order.reduce_only
+            or order.remaining_signed_qty * position.signed_qty >= 0.0
+            for order in working_orders
+        ):
+            return None
+        projected_qty = math.fsum(
+            [position.signed_qty]
+            + [order.remaining_signed_qty for order in working_orders]
+        )
+        if abs(projected_qty) > tolerance:
+            return None
+
+        active = self._active_from_state(state, symbol)
+        if active is None or str(active[1].get("status") or "") != "active":
+            return None
+        metadata = active[1].get("metadata") or {}
+        if not isinstance(metadata, Mapping):
+            return None
+        active_qty = _finite_or_zero(metadata.get("signed_qty"))
+        if active_qty * position.signed_qty <= 0.0:
+            return None
+        stop = _optional_float(active[1].get("stop_price"))
+        if stop is None:
+            return None
+        market = state.latest_market_inputs.get(symbol) or {}
+        mark = float(market.get("reference_price") or position.average_price or 0.0)
+        if mark <= 0.0:
+            return None
+        if (position.signed_qty > 0.0 and stop >= mark) or (
+            position.signed_qty < 0.0 and stop <= mark
+        ):
+            return None
+        protection_key = self._plan_key(active)
+        if not protection_key:
+            return None
+        return NativeProtectionPlan(
+            protection_key=protection_key,
+            symbol=symbol,
+            signed_qty=position.signed_qty,
+            stop_price=stop,
+            stop_source=str(metadata.get("stop_source") or "retained_canonical_close"),
+            target_keys=tuple(
+                sorted(str(key) for key in (metadata.get("target_keys") or ()) if str(key))
+            ),
+        )
+
     @_serialized_manager_method
     def active(self, symbol: str) -> tuple[str, Mapping[str, Any]] | None:
         symbol = symbol.upper()
+        return self._active_from_state(self.kernel.state(), symbol)
+
+    @staticmethod
+    def _active_from_state(
+        state: AccountState,
+        symbol: str,
+    ) -> tuple[str, Mapping[str, Any]] | None:
         matches = [
             (key, protection)
-            for key, protection in self.kernel.state().protections.items()
+            for key, protection in state.protections.items()
             if str(protection.get("status") or "") in {"active", "triggering"}
             and bool((protection.get("metadata") or {}).get("native_exchange"))
             and str((protection.get("metadata") or {}).get("symbol") or symbol).upper() == symbol

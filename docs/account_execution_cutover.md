@@ -36,6 +36,15 @@ or losing a calibration sample. Execution redelivery similarly permits
 different local receive time/provenance but requires exact identity/timestamp
 and `1e-12`-tolerant quantity, price, and fee agreement.
 
+An accepted zero target removes the nonzero component owner before its
+reduce-only fill necessarily reaches the journal. Native protection retains the
+already-installed stop across only that bounded transition: the immutable state
+must show an explicit zero aggregate, all-zero latest component desires, no
+nonzero component target, fully covering opposite-side reduce-only work, and a
+valid active same-direction stop. It never derives a replacement stop there.
+Missing protection, incomplete/terminal/risk-increasing work, or a true orphan
+position still blocks.
+
 The 2026-07-13 audit first found the old fleet active at clean commit
 `5f6d9986d935`, with both account owners absent. The demo key permission check
 passed and a read-only venue query was flat. Flat maintenance then began at
@@ -44,7 +53,7 @@ confirmed zero positions and zero regular/conditional orders, and the unit plus
 flatness evidence was retained under the host's mode-restricted cutover-evidence
 directory.
 
-Staged topology installation through clean commit `95e49120f8a1` passed 142 Linux
+Staged topology installation through clean commit `c113d78014e0` passed 142 Linux
 smoke tests, installed both inactive owner units, and removed the retired risk
 and combined-book reporter units. It did not start a process or create either
 cutover marker. The guarded reset then re-proved venue flatness, archived 12
@@ -77,12 +86,24 @@ V4 was not resumed. A separately labelled canonical zero target recovered the
 position, final read-only evidence proved zero local and venue position plus no
 open order, and the owner was stopped. Paper and ordinary producers never
 started. The failed V4 run/tape and recovery remain evidence but count toward no
-calibration floor. Prospective V5 uses a new exact plan id and clean epoch,
-retains all numerical sample/gate choices, allows only the exact
-post-publication reconciliation propagation state for at most ten seconds, and
-makes same-fact ACK/fill redelivery idempotent under the journal lock. V5 code
-must pass full validation and be staged exactly, then all six roots must be
-archived/reset again before a V5 target. This is a verified-flat failure
+calibration floor.
+
+V5 then ran from another guarded reset whose verified archive SHA-256 is
+`56cb3787d12b9c6e72bb684e59b37e3c6fbdc62fded8db32612da293bf629f7c`.
+Its independent clock receipt passed, and its first BTC open/close round trip
+produced two real `0.002 BTC` fills plus an immutable provisional
+`-0.13755984 USDT` fee-inclusive P&L event. The V4 ACK/fill and reconciliation
+repairs worked. V5 nevertheless aborted when protection synchronization saw the
+accepted zero target after component-owner removal but before the closing fill
+updated the position, and misclassified that canonical in-flight close as an
+orphan. The close filled; a self-hashed final receipt proved zero local/venue
+position and no open orders. V5 is spent and none of its sample counts toward
+V6.
+
+Prospective V6 retains every numerical sample/gate choice and changes only that
+protection transition under the strict proof described above. Its code must
+pass full validation and be staged exactly, then all six roots must be
+archived/reset again before a V6 target. This is a verified-flat failure
 boundary, not deployment readiness.
 
 The full acceptance gate remains open, and no deploy-authorization assessment
@@ -126,9 +147,9 @@ or receipt has been issued:
   pending, and same-symbol venue fills are netted, so exact component P&L is
   also pending unless a prospective allocation policy can be shown to be
   identifiable from canonical orders and executions;
-- no demo tape has met the preregistered execution-twin sample floors. The V4
-  clock receipt supported bounded one-way estimates but its execution sample
-  failed; V5 requires a new receipt and fresh tape. No calibration receipt has
+- no demo tape has met the preregistered execution-twin sample floors. V4 and
+  V5 both produced useful but spent failure evidence; V6 requires a new clock
+  receipt and fresh tape. No calibration receipt has
   passed. Paper startup therefore remains intentionally blocked.
 
 Do not issue the deploy-ready authorization by interpreting
@@ -332,7 +353,7 @@ The switch must be one maintenance transaction, not a rolling overlap:
     Natural LONG/CONTINUOUS events remain required for their strategy-parity
     comparison, but they need not be abused to manufacture the execution-twin
     sample count. The prospective bounded driver in
-    `docs/preregistration/account_execution_calibration_v5_2026_07_14.md` publishes
+    `docs/preregistration/account_execution_calibration_v6_2026_07_14.md` publishes
     one tiny target at a time through the same owner and event clock, holds no
     credentials, and explicitly cannot satisfy LONG/CONTINUOUS parity:
 
@@ -341,10 +362,10 @@ The switch must be one maintenance transaction, not a rolling overlap:
       --account-root /opt/liquidity-migration/data/bybit-account-execution \
       --inbox-root /opt/liquidity-migration/data/bybit-account-intents \
       --demo-rules-file /etc/liquidity-migration/account-execution/demo-rules.json \
-      --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v5-events.jsonl \
-      --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v5-run.json \
+      --event-tape /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v6-events.jsonl \
+      --output /var/lib/liquidity-migration/cutover-evidence/demo-calibration-v6-run.json \
       --expected-commit "$(git rev-parse HEAD)" \
-      --plan-id demo-calibration-20260714-v5
+      --plan-id demo-calibration-20260714-v6
     ```
 
     Add the preregistered `--funding-symbol BTCUSDT` and an explicit future

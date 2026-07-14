@@ -1,12 +1,12 @@
 # Graph Report - liquidity-migration  (2026-07-14)
 
 ## Corpus Check
-- 274 files · ~1,075,882 words
+- 274 files · ~1,078,074 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 7814 nodes · 24388 edges · 169 communities detected
-- Extraction: 55% EXTRACTED · 45% INFERRED · 0% AMBIGUOUS · INFERRED: 11076 edges (avg confidence: 0.62)
+- 7830 nodes · 24497 edges · 167 communities detected
+- Extraction: 54% EXTRACTED · 46% INFERRED · 0% AMBIGUOUS · INFERRED: 11158 edges (avg confidence: 0.61)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -73,15 +73,15 @@
 - [[_COMMUNITY_Community 60|Community 60]]
 - [[_COMMUNITY_Community 61|Community 61]]
 - [[_COMMUNITY_Community 62|Community 62]]
-- [[_COMMUNITY_Community 63|Community 63]]
 - [[_COMMUNITY_Community 64|Community 64]]
+- [[_COMMUNITY_Community 65|Community 65]]
 - [[_COMMUNITY_Community 66|Community 66]]
 - [[_COMMUNITY_Community 67|Community 67]]
 - [[_COMMUNITY_Community 68|Community 68]]
 - [[_COMMUNITY_Community 69|Community 69]]
 - [[_COMMUNITY_Community 70|Community 70]]
-- [[_COMMUNITY_Community 71|Community 71]]
-- [[_COMMUNITY_Community 72|Community 72]]
+- [[_COMMUNITY_Community 73|Community 73]]
+- [[_COMMUNITY_Community 74|Community 74]]
 - [[_COMMUNITY_Community 75|Community 75]]
 - [[_COMMUNITY_Community 76|Community 76]]
 - [[_COMMUNITY_Community 77|Community 77]]
@@ -177,17 +177,15 @@
 - [[_COMMUNITY_Community 167|Community 167]]
 - [[_COMMUNITY_Community 168|Community 168]]
 - [[_COMMUNITY_Community 169|Community 169]]
-- [[_COMMUNITY_Community 170|Community 170]]
-- [[_COMMUNITY_Community 171|Community 171]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `AccountExecutionKernel` - 326 edges
-2. `AccountRiskPolicy` - 300 edges
-3. `SystemClock` - 299 edges
-4. `Clock` - 297 edges
+1. `AccountExecutionKernel` - 335 edges
+2. `SystemClock` - 308 edges
+3. `Clock` - 306 edges
+4. `AccountRiskPolicy` - 301 edges
 5. `SleeveAdapterKind` - 223 edges
 6. `ExecutionTwinConfig` - 223 edges
-7. `InstrumentRules` - 212 edges
+7. `InstrumentRules` - 222 edges
 8. `LatencyProfile` - 207 edges
 9. `KlineStore` - 187 edges
 10. `HistoricalAccountSession` - 187 edges
@@ -213,183 +211,183 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.01
-Nodes (605): Normalize Bybit private execution/order streams into account-kernel facts., Resolve Bybit rows by either client id or the venue's durable order id.      Exc, One consumer thread owns all private-stream mutation of the kernel., AccountTargetPublisher, completed_expired_entry_attempt_keys(), ExitFirstPublication, PublishedTargetRequest, Strategy-side client for the durable account target inbox.  This is the write-on (+597 more)
+Nodes (679): BybitAccountExecutionConsumer, _command_id_for_row(), _float(), PendingTerminalStatus, Normalize Bybit private execution/order streams into account-kernel facts., Resolve Bybit rows by either client id or the venue's durable order id.      Exc, One consumer thread owns all private-stream mutation of the kernel., _rows() (+671 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.01
-Nodes (481): HTMLParser, _archive_cache_is_complete(), ArchiveDownloadIncompleteError, ArchiveFileNotFoundError, _content_length(), download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive() (+473 more)
+Nodes (534): HTMLParser, _archive_cache_is_complete(), ArchiveDownloadIncompleteError, ArchiveFileNotFoundError, _content_length(), download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive() (+526 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.02
-Nodes (416): AccountRiskPolicy, SleeveAdapterKind, CostConfig, TradeLifecycleConfig, _additive_equity(), _additive_summary(), _apply_entry_order(), _assert_funding_one_per_settlement() (+408 more)
+Nodes (430): AccountRiskPolicy, SleeveAdapterKind, argparse subcommand builders for the liquidity_migration CLI.  Extracted verbati, CLI for the v11a long sleeve forward-testing cycle. Mirrors event-demo-cycle., CLI for the continuous-fade demo sleeve (sub-hourly, ticker-driven; separate led, _date_range(), _iso_date(), _iso_month() (+422 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.01
-Nodes (387): finite_float(), Coerce `value` to a finite float, returning `default` if missing/invalid., component_source_paths(), ContinuousComponentSource, load_continuous_component_source(), Current frozen component source metadata for the continuous ensemble., build_full_ledger(), _config_path() (+379 more)
+Nodes (394): finite_float(), Coerce `value` to a finite float, returning `default` if missing/invalid., component_source_paths(), ContinuousComponentSource, load_continuous_component_source(), Current frozen component source metadata for the continuous ensemble., build_full_ledger(), _config_path() (+386 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.01
-Nodes (302): BybitRestRateLimiter, Thread-safe sliding-window rate limiter shared across BybitMarketData     instan, _build_demo_universe(), _bust_demo_instruments_cache(), _column_values(), _concat_recent_klines(), _dedupe_recent_klines(), _demo_feature_cache_fingerprint() (+294 more)
+Nodes (345): terminal_entry_attempt_keys(), _cmd_long_native_event_demo_cycle(), date_boundary_ms(), date_ms(), _date_symbol_set(), exact_duration_ms(), exact_lookback_cutoff_ms(), _exclude_symbols() (+337 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.01
-Nodes (299): BybitMarketData, _cmd_continuous_event_demo_cycle(), _cmd_discover_universe(), Resolve the data root for a CLI command: commands that don't use it get the path, Coverage table + (when stale) a prominent WARNING that download-data does not, Parse a comma-separated --symbols string into upper-cased symbols.      Single s, Fail loud if any requested dataset name is not a known/served dataset.      The, _universe_config_from_args() (+291 more)
+Cohesion: 0.02
+Nodes (318): apply_continuous_demo_profile(), ContinuousDemoCycleConfig, Live continuous-fade demo config (mirrors LongNativeDemoCycleConfig; sleeve-spec, Resolve named demo profiles into explicit knobs.      ``continuous_ensemble_v2``, Bybit liquidity-migration research package., LongNativeConfig, A0ConfigIdentityError, assert_stage_config_identity_is_current() (+310 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.02
-Nodes (347): apply_continuous_demo_profile(), Resolve named demo profiles into explicit knobs.      ``continuous_ensemble_v2``, Bybit liquidity-migration research package., LongNativeConfig, A0ConfigIdentityError, assert_stage_config_identity_is_current(), assert_stage_config_matches_identity(), _canonical_config_artifact() (+339 more)
+Cohesion: 0.01
+Nodes (263): assessment_template(), _atomic_write(), build_authorization_receipt(), build_reviewed_evidence(), _commit_prefix(), _file_identity(), _full_commit(), _git_output() (+255 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.01
-Nodes (245): BybitAccountExecutionConsumer, _command_id_for_row(), _float(), PendingTerminalStatus, _rows(), _terminal(), _terminal_status(), _timestamp_ns() (+237 more)
+Nodes (207): BybitRestRateLimiter, Thread-safe sliding-window rate limiter shared across BybitMarketData     instan, _follower_continuous_kline_stream_manager_factory(), Read-only follower of the leader root's flushed kline snapshot (no WS pool)., FollowerKlineStreamManager, Read-only kline FOLLOWER — share one WS kline data plane across co-located sleev, Initial snapshot read + start the poll thread. Never blocks on a         bootstr, Warn ONCE per staleness episode when the leader snapshot stops moving — (+199 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.02
-Nodes (297): _cmd_long_native_event_demo_cycle(), _float(), _price_lookup_from_tickers_and_klines(), _yyyymmddhhmmss(), long_trade_id(), Stable LONG execution identities shared by research, paper, and demo., _btc_month_regime_allows(), _btc_month_regime_value() (+289 more)
+Nodes (226): ResearchConfig, ContinuousDemoDaemon, Target-only CONT producer built on the long daemon scaffolding.      The only CO, _build_demo_universe(), _bust_demo_instruments_cache(), _column_values(), _concat_recent_klines(), _dedupe_recent_klines() (+218 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.02
-Nodes (222): assessment_template(), _atomic_write(), build_authorization_receipt(), build_reviewed_evidence(), _commit_prefix(), _file_identity(), _full_commit(), _git_output() (+214 more)
+Nodes (244): component_target_key(), publish_exit_first_target_requests(), requested_target(), unresolved_target_snapshot(), BybitMarketData, _cmd_discover_universe(), _universe_config_from_args(), coerce_int() (+236 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.01
-Nodes (237): _cal_roll(), coerce_int(), date_boundary_ms(), date_ms(), _date_range(), _date_symbol_set(), _exclude_symbols(), _float_or_nan() (+229 more)
-
-### Community 11 - "Community 11"
-Cohesion: 0.01
 Nodes (173): BybitKlineStreamPool, _close_state(), _close_ws_client(), _is_already_subscribed_error(), _KlineConnectionState, Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method, True for pybit's "You have already subscribed to this topic" error.      pybit's, Per-connection bookkeeping for the pool. (+165 more)
 
-### Community 12 - "Community 12"
+### Community 11 - "Community 11"
 Cohesion: 0.03
-Nodes (227): _empty_continuous_entry_anchor(), _empty_continuous_minimal_labels(), _assert_identity_parity(), build_long_s03_entry_policy(), build_long_s04_path_labels(), LongStageBoundaryError, _project_hourly_bars(), _project_output() (+219 more)
+Nodes (226): _empty_continuous_entry_anchor(), _empty_continuous_minimal_labels(), _assert_identity_parity(), build_long_s03_entry_policy(), build_long_s04_path_labels(), LongStageBoundaryError, _project_hourly_bars(), _project_output() (+218 more)
+
+### Community 12 - "Community 12"
+Cohesion: 0.02
+Nodes (189): _canonical_funding_events(), _funding_number(), _funding_row_material(), _require_same_funding_event(), _validated_funding_row(), _validated_open_order_rows(), BybitPublicTradeStream, _default_kline_websocket_factory() (+181 more)
 
 ### Community 13 - "Community 13"
 Cohesion: 0.02
-Nodes (199): entry_request(), entry_request_id(), _validated_open_order_rows(), BybitPublicTradeStream, _default_kline_websocket_factory(), _patch_pybit_daemon_ping_timer(), Ensure pybit's ping timer is a daemon thread that does not block shutdown., Create a fresh pybit WebSocket client tuned for kline streams. (+191 more)
+Nodes (146): build_parser(), test_cli_klines_follow_root_parses_into_config(), _parse_discover_universe(), _patch_archive(), _patch_universe(), Live daemon entrypoints self-provision a missing ledger root (so a brand-new sle, _run(), _subparser_actions() (+138 more)
 
 ### Community 14 - "Community 14"
 Cohesion: 0.02
-Nodes (148): build_parser(), test_cli_klines_follow_root_parses_into_config(), _parse_discover_universe(), _patch_archive(), _patch_universe(), Live daemon entrypoints self-provision a missing ledger root (so a brand-new sle, _run(), _subparser_actions() (+140 more)
+Nodes (168): _cal_roll(), calendar_roll(), calendar_shift(), A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl, Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r, BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms g, _aggregate_daily_funding(), _aggregate_daily_klines() (+160 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.02
-Nodes (179): calendar_roll(), calendar_shift(), is_weekend_ms(), A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unl, Calendar-aware rolling window over an integer timestamp grid.      Row-based ``r, True when the UTC day containing ``ts_ms`` is Saturday or Sunday.      Epoch day, _aggregate_daily_funding(), _aggregate_daily_klines() (+171 more)
+Cohesion: 0.04
+Nodes (152): _active_trade_snapshots(), _aggregate_bars(), analyze(), _annualized_sharpe(), _append_forward_curve(), _atr_pct_before(), _bar_at_or_after(), _bars_dict_to_state_frame() (+144 more)
 
 ### Community 16 - "Community 16"
-Cohesion: 0.04
-Nodes (153): _active_trade_snapshots(), _aggregate_bars(), analyze(), _annualized_sharpe(), _append_forward_curve(), _atr_pct_before(), _bar_at_or_after(), _bars_dict_to_state_frame() (+145 more)
+Cohesion: 0.05
+Nodes (96): account_journal_lock_path(), account_journal_path(), account_transactions_path(), AccountEventSpec, AccountJournal, AccountJournalIntegrityError, AccountKernelError, _aggregate_target_quantities() (+88 more)
 
 ### Community 17 - "Community 17"
 Cohesion: 0.03
-Nodes (103): Read fresh public tickers from the cache, falling back to public REST., _resolve_ticker_snapshot(), _first_price(), _float(), _message_rows(), _order_keys(), PrivateStateCache, _PrivateStateStats (+95 more)
+Nodes (110): BinanceDataError, BinanceUSDMData, _ceil_to_period(), _floor_to_period(), _http_error_detail(), _raise_if_suspicious_empty_page(), Seconds to wait after a 429/418, from the Retry-After header.          Falls bac, Best-effort detail string from an HTTPError body (the Binance error JSON). (+102 more)
 
 ### Community 18 - "Community 18"
 Cohesion: 0.03
-Nodes (109): BinanceDataError, BinanceUSDMData, _ceil_to_period(), _floor_to_period(), _http_error_detail(), _raise_if_suspicious_empty_page(), Seconds to wait after a 429/418, from the Retry-After header.          Falls bac, Best-effort detail string from an HTTPError body (the Binance error JSON). (+101 more)
+Nodes (111): annualized_sharpe(), _bar_close_location(), _bar_excursion(), _bar_exit_hits(), build_equity_curve(), _daily_equity_values(), _daily_sharpe(), _date_boundary_ms() (+103 more)
 
 ### Community 19 - "Community 19"
 Cohesion: 0.04
-Nodes (105): build_venue_local_instrument_map(), _canonical_json(), derive_venue_local_instrument_map_from_roots(), load_venue_local_manifest_projection(), _observe_manifest_files(), Deterministic venue-local identity maps for A0 artifacts.  The A0 hypotheses are, Validate manifest storage, then collapse it to venue/symbol/day only., Derive a non-portable map and bind its exact manifest projection source. (+97 more)
+Nodes (104): _finite_float(), format_age_ms(), format_pct(), format_usd(), format_utc_time_ms(), _rate_limit_retry_seconds(), Seconds to wait before the single 429 retry, or None when the error is     not a, True when the token + chat-id env vars are both present (a send can be     attem (+96 more)
 
 ### Community 20 - "Community 20"
 Cohesion: 0.05
-Nodes (102): append_events(), apply_event(), _apply_lifecycle_event(), _apply_patches(), CanonicalEvent, _event_hash(), EventSpec, EventType (+94 more)
+Nodes (101): append_events(), apply_event(), _apply_lifecycle_event(), _apply_patches(), CanonicalEvent, _event_hash(), EventSpec, EventType (+93 more)
 
 ### Community 21 - "Community 21"
-Cohesion: 0.05
-Nodes (74): account_route_manifest_path(), AccountRouteConfigurationError, AccountRouteCutoverRequiredError, AccountRouteError, AccountRouteIntegrityError, AccountRouteMissingError, _atomic_create(), derive_account_route() (+66 more)
+Cohesion: 0.06
+Nodes (85): _accepted_batches(), _batch_fill_summary(), canonical_adverse_reduction_events(), canonical_component_execution_anchors(), canonical_entry_attempts(), canonical_reduction_events(), _canonical_reduction_events_from_events(), canonical_strategy_trade_rows() (+77 more)
 
 ### Community 22 - "Community 22"
-Cohesion: 0.11
-Nodes (51): AccountIntentInbox, _atomic_replace(), _filename(), _superseding_requests(), exclusive_file_lock(), Unlink a lock file with retries on Windows PermissionError (WinError 32).      W, _unlink_with_retry(), _canonical_json() (+43 more)
+Cohesion: 0.04
+Nodes (84): _float_or_nan(), pct(), Format a fraction as a 2-decimal percentage, or `invalid` if not finite., _has_columns(), _btc_daily_close_series(), _chart_final_values(), _chart_font(), _chart_metric_tiles() (+76 more)
 
 ### Community 23 - "Community 23"
-Cohesion: 0.06
-Nodes (58): btc_context_by_day(), BtcRiskLiveSizer, _daily_closes_by_day(), _equal_optional_float(), ExpandingBtcRiskState, _finite(), _fsync_directory(), _fsync_file() (+50 more)
+Cohesion: 0.04
+Nodes (57): account_owner_health_path(), _atomic_replace(), from_dict(), Atomically publish the latest owner observation under ``root``., Read and strictly validate the latest durable owner observation., Require fresh health bound to the verified canonical journal head., read_account_owner_health(), require_recent_account_owner_health() (+49 more)
 
 ### Community 24 - "Community 24"
+Cohesion: 0.06
+Nodes (76): _assert_exact_key_coverage(), _assert_population_preserved(), attach_long_source_context(), _attach_rank_metadata_and_check_parity(), _is_outcome_like_column(), long_context_runtime_parity_surface(), LongSourceContextError, _rank_specs() (+68 more)
+
+### Community 25 - "Community 25"
+Cohesion: 0.06
+Nodes (59): btc_context_by_day(), BtcRiskLiveSizer, _daily_closes_by_day(), _equal_optional_float(), ExpandingBtcRiskState, _finite(), _fsync_directory(), _fsync_file() (+51 more)
+
+### Community 26 - "Community 26"
 Cohesion: 0.07
 Nodes (71): _assert_expected_consumer(), _canonical_json(), _expected_identity(), _file_bytes_and_sha256(), _json_hash(), Phase0BundleVerification, Phase0BundleVerificationError, Strict internal re-execution checks for strategy-overhaul Phase-0 bundles.  The (+63 more)
 
-### Community 25 - "Community 25"
+### Community 27 - "Community 27"
+Cohesion: 0.11
+Nodes (50): completed_expired_entry_attempt_keys(), Project terminal entry attempts from verified service-expiry receipts., AccountIntentInbox, _atomic_replace(), _filename(), _superseding_requests(), _canonical_json(), CountingTwin (+42 more)
+
+### Community 28 - "Community 28"
 Cohesion: 0.04
 Nodes (69): Pin the Strictness Manifesto decision-rule analyzer.  Specifically validates aga, Construct a cell that passes EVERY gate; verify it's labelled candidate., A near-miss is inconclusive (Bybit passes, Binance falls short on sharpe Δ)., M6: a status!=ok cell must be returned as an explicit exclusion (a     falsifier, The full_pit_universe_pass column is parsed into CellMetrics so the     analyzer, At window_days = 365.25 (one calendar year), annualized = total_return.     Sani, At window_days = 182.625 (half year), annualized = (1+r)^2 - 1., The actual Round 1 / Phase 0 / R1 baseline at 1125 days (Bybit):     total_retur (+61 more)
 
-### Community 26 - "Community 26"
-Cohesion: 0.13
-Nodes (60): account_journal_path(), account_transactions_path(), read_account_journal(), _read_jsonl_projection(), verify_account_journal(), _atomic_write_receipt(), build_kernel_parity_receipt(), compare_kernel_journals() (+52 more)
+### Community 29 - "Community 29"
+Cohesion: 0.07
+Nodes (59): account_route_manifest_path(), AccountRouteConfigurationError, AccountRouteCutoverRequiredError, AccountRouteError, AccountRouteIntegrityError, AccountRouteMissingError, _atomic_create(), derive_account_route() (+51 more)
 
-### Community 27 - "Community 27"
+### Community 30 - "Community 30"
+Cohesion: 0.08
+Nodes (59): append_continuous_extended_path_atlas(), append_continuous_path_labels(), _append_path_labels(), _attach_event_waves(), attach_ideal_next_close_path_labels(), _attach_membership_spells(), _attach_rank_block(), build_continuous_entry_anchor() (+51 more)
+
+### Community 31 - "Community 31"
 Cohesion: 0.09
-Nodes (54): _finite_float(), format_age_ms(), format_pct(), format_usd(), format_utc_time_ms(), _rate_limit_retry_seconds(), Seconds to wait before the single 429 retry, or None when the error is     not a, True when the token + chat-id env vars are both present (a send can be     attem (+46 more)
+Nodes (48): AccountNotificationEngine, _active_stop(), _batch_target_proposals(), _clear_recent_entry_rejection_counters(), _component_attribution_pending(), _entry_attempt_key(), _entry_rejection_summary(), _entry_risk_decision_messages() (+40 more)
 
-### Community 28 - "Community 28"
+### Community 32 - "Community 32"
+Cohesion: 0.06
+Nodes (49): _coerce_bool(), _coerce_field(), ensure_data_root_exists(), ExchangeConfig, load_config(), _merge_dataclass(), _merge_universe_config(), Strict bool coercion. builtin bool('false') is True, silently flipping a     quo (+41 more)
+
+### Community 33 - "Community 33"
 Cohesion: 0.05
 Nodes (50): band_notionals(), build_arg_parser(), collect_cycle(), enforce_retention(), _file_day(), free_disk_bytes(), _get_json(), iter_jsonl_rows() (+42 more)
 
-### Community 29 - "Community 29"
-Cohesion: 0.09
-Nodes (46): AccountNotificationEngine, _active_stop(), _batch_target_proposals(), _clear_recent_entry_rejection_counters(), _component_attribution_pending(), _entry_attempt_key(), _entry_rejection_summary(), _entry_risk_decision_messages() (+38 more)
-
-### Community 30 - "Community 30"
+### Community 34 - "Community 34"
 Cohesion: 0.05
 Nodes (54): Absolute Pairwise-Disjoint Runtime Roots, Account Execution Cutover, Account-Owner Execution Topology, Active Profile Lifecycle, Profile Backtest Integrity Contract, Canonical Account Journal Authority, Canonical Execution Journal Reference, Account Execution Capture-Enabled Marker (+46 more)
 
-### Community 31 - "Community 31"
-Cohesion: 0.07
-Nodes (50): Alert, build_arg_parser(), _continuous_rmom_refresh_on(), _default_root(), _default_units_for_toggles(), evaluate_cycle_liveness(), evaluate_hedge_warmstart_freshness(), evaluate_required_account_owner_states() (+42 more)
-
-### Community 32 - "Community 32"
-Cohesion: 0.09
-Nodes (39): build_parser(), _add_archive_download_klines_1h_api_parser(), _add_archive_download_klines_1h_parser(), _add_archive_download_klines_parser(), _add_archive_manifest_parser(), _add_canonical_journal_parser(), _add_continuous_event_demo_cycle_parser(), _add_continuous_events_parser() (+31 more)
-
-### Community 33 - "Community 33"
+### Community 35 - "Community 35"
 Cohesion: 0.09
 Nodes (33): continuous_order_link_id(), continuous_suborder_link_id(), continuous_trade_id(), Build the deterministic continuous sleeve orderLinkId.      ``reentry_seq`` > 0, Order link with a deterministic trade-id hash suffix.      The suffix disambigua, Deterministic continuous trade id, with optional same-window re-entry seq., Recover the exact live snipe trade id from a hashed snipe orderLinkId., recover_snipe_trade_id_from_link() (+25 more)
 
-### Community 34 - "Community 34"
+### Community 36 - "Community 36"
 Cohesion: 0.09
 Nodes (28): build_arg_parser(), bybit_linear_symbols(), connection_expired(), JsonlDayWriter, main(), parse_bybit_event(), Live liquidation collector — Bybit allLiquidation (P3, 2026-06-10).  Raw Bybit l, Thread-safe append-only writer, one file per venue per UTC day. (+20 more)
 
-### Community 35 - "Community 35"
-Cohesion: 0.09
-Nodes (31): _bookdepth_row(), _bookdepth_zip(), _load_backfill_bookdepth(), Regression tests for audit2 unit ``bookdepth_backfill``.  Ports the metrics-back, When both fetch attempts exhaust retries, _day_rows yields the distinct     _TRA, A genuine 404 (None blob) stays None — a real no-data day., Numerical-equivalence gate: a normal day with two snapshots in the same hour, When EVERY day fails transiently, the writer must NOT touch an empty marker (+23 more)
-
-### Community 36 - "Community 36"
+### Community 37 - "Community 37"
 Cohesion: 0.18
 Nodes (30): build_continuous_population_keys(), build_long_population_keys(), _frame_sha256(), _json_scalar(), long_expected_population(), PopulationKeyArtifacts, PopulationKeyError, Outcome-blind population-key manifests for the A0 sleeve runners.  These primiti (+22 more)
 
-### Community 37 - "Community 37"
+### Community 38 - "Community 38"
+Cohesion: 0.09
+Nodes (31): _bookdepth_row(), _bookdepth_zip(), _load_backfill_bookdepth(), Regression tests for audit2 unit ``bookdepth_backfill``.  Ports the metrics-back, When both fetch attempts exhaust retries, _day_rows yields the distinct     _TRA, A genuine 404 (None blob) stays None — a real no-data day., Numerical-equivalence gate: a normal day with two snapshots in the same hour, When EVERY day fails transiently, the writer must NOT touch an empty marker (+23 more)
+
+### Community 39 - "Community 39"
 Cohesion: 0.13
 Nodes (30): _load_module(), test_5m_timing_rejects_incomplete_post_entry_path(), test_adverse_limit_timing_fills_at_limit_price(), test_cluster_risk_of_ruin_bootstrap_writes_tail_injected_scenarios(), test_conditional_scale_in_tables_write_by_trade_and_summary(), test_conditional_scale_in_trade_row_models_threshold_addon(), test_delay_15m_timing_uses_5m_bar_close(), test_disaster_sizing_tables_compare_current_to_loss_budget() (+22 more)
 
-### Community 38 - "Community 38"
+### Community 40 - "Community 40"
 Cohesion: 0.07
 Nodes (16): Pin the R1 robustness / Tier-2 demo-candidate analyzer's gate integrity.  Audit, A >=100% cumulative loss makes (1+total_return) non-positive; a fractional     p, audit-iter1 scripts-1: a zero-span (start==end) window floors _window_years to, audit-iter1 scripts-2: a truncated/malformed monthly CSV must signal unreadable, audit-iter5: the moving-block upper bound must be n-block+1 so a block can cover, re-audit rescan-rmom-funding-2: the non-circular moving-block bootstrap must, The max(n-block+1, 1) guard must not IndexError when n < block., test_annualize_and_engine_mar_stay_real_below_minus_100pct() (+8 more)
 
-### Community 39 - "Community 39"
+### Community 41 - "Community 41"
 Cohesion: 0.12
 Nodes (19): _args(), _commit_all(), _exact_environment_fixture(), _fake_source_snapshot(), _init_git_repo(), _phase0_inventory(), test_deterministic_phase0_plan_ignores_rmom_compressed_bytes(), test_dirty_commit_keeps_plan_incomplete() (+11 more)
 
-### Community 40 - "Community 40"
+### Community 42 - "Community 42"
 Cohesion: 0.16
 Nodes (26): _control_metrics(), _passing_metrics(), test_begin_rerun_invalidates_old_complete_verdict_before_purge(), test_complete_diagnostic_matrix_cannot_pass(), test_equity_metrics_count_initial_loss_from_starting_capital(), test_equity_metrics_use_unrounded_calendar_path(), test_exact_funding_validation_refuses_internal_settlement_holes(), test_exact_trade_funding_validation_refuses_missing_symbol_day() (+18 more)
 
-### Community 41 - "Community 41"
-Cohesion: 0.17
-Nodes (26): component_target_key(), publish_exit_first_target_requests(), requested_target(), unresolved_target_snapshot(), Count crash-durable CONT entry batches not yet terminal in the inbox., _unresolved_continuous_entry_request_count(), component_target_intent(), Build one replacement target with the repository's sole key grammar.      Signal (+18 more)
-
-### Community 42 - "Community 42"
+### Community 43 - "Community 43"
 Cohesion: 0.19
 Nodes (27): _flat(), _load(), _manifest(), _partition(), test_audit_cap_fails_before_unbounded_scan(), test_binance_flat_5m_extension_is_refused(), test_bookdepth_requires_ten_unique_bands_per_hour(), test_both_venue_roots_must_be_disjoint_including_resolved_child_scopes() (+19 more)
 
-### Community 43 - "Community 43"
+### Community 44 - "Community 44"
 Cohesion: 0.12
 Nodes (26): _load_backfill_metrics(), _metrics_row(), _metrics_zip(), Tests for scripts/backfill_binance_metrics_vision.py.  backfill-writers-2 (2026-, The core backfill-writers-1 fix: a previously-written parquet is UNIONED with, A re-fetched/corrected day supersedes the stale row (keep=last)., A prior parquet that already carried a `coverage` column must not break the, End-to-end through backfill_symbol: a second run that fetches a new day must (+18 more)
-
-### Community 44 - "Community 44"
-Cohesion: 0.13
-Nodes (18): _download_manifest_staleness_lines(), coverage_status(), CoverageStatus, format_coverage(), _has_parquet(), latest_signal_trading_day(), _max_partition_date(), _per_symbol_manifest_lags() (+10 more)
 
 ### Community 45 - "Community 45"
 Cohesion: 0.1
@@ -404,28 +402,28 @@ Cohesion: 0.21
 Nodes (18): diagnose(), is_tainted(), max_severity(), Named, backfillable backtest warnings — the single place that turns a run's inte, True when any warning marks the result survivorship/look-ahead biased., A compact, loud block for stdout. Empty list → a single clean line., Build the warning list for a completed run from its integrity signals.      Pure, render() (+10 more)
 
 ### Community 48 - "Community 48"
+Cohesion: 0.16
+Nodes (15): coverage_status(), CoverageStatus, _has_parquet(), latest_signal_trading_day(), _max_partition_date(), _per_symbol_manifest_lags(), Point-in-time coverage / staleness diagnostics for a data root.  The recurring o, Return symbols with at least one parquet partition for ``day``.      The canonic (+7 more)
+
+### Community 49 - "Community 49"
 Cohesion: 0.15
 Nodes (20): Fail-closed abort and reducing-recovery protocol, Account owner as sole venue-mutation authority, Account and venue reconciliation, Atomic account journal, Bybit V5 demo and order API documentation, account-execution-capture-enabled marker, Account execution cutover runbook, Strict demo-or-paper execution route (+12 more)
 
-### Community 49 - "Community 49"
+### Community 50 - "Community 50"
 Cohesion: 0.17
 Nodes (14): Functional tests for the per-sleeve kill-switch (deploy/lib_sleeves.sh + sleeves, # NOTE: the `enable` branch deliberately matches real `systemctl enable` (withou, Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):     EV, _run(), test_continuous_paper_split_keeps_demo_orders_off_runs_paper(), test_hedge_lifecycle_off_stops_armed_service(), test_hedge_lifecycle_off_verify_fails_when_service_active(), test_lib_fallback_defaults_every_sleeve_off() (+6 more)
 
-### Community 50 - "Community 50"
+### Community 51 - "Community 51"
 Cohesion: 0.17
 Nodes (15): _apply(), _assert_existing_keys_allclose(), _patch_residual_inputs(), Causality tests for the residual-momentum precompute (scripts/precompute_residua, Forward targets arrive late: a padded tail value may legitimately     change onc, residual_momentum[D] = sum residual_return[D-9 .. D-3] (rolling 7, shift 3)., Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d, test_precompute_append_allows_provisional_tail_to_mature() (+7 more)
 
-### Community 51 - "Community 51"
+### Community 52 - "Community 52"
 Cohesion: 0.11
 Nodes (13): _make_page(), audit2 regression: binance funding-vision backfill — two defects.  (1) In-progre, Within the publish-lag window the immediately-prior month is also protected., Build a JSON funding-rate page of n settlements starting at start_ts., Normal (unchanged) behaviour: a single short page returns exactly its rows., No data at all -> empty result (unchanged)., backfill-writers-4: vision-first ordering + unique(keep='first', maintain_order=, Normal (unchanged) behaviour: a strictly-older 404 month IS cached. (+5 more)
 
-### Community 52 - "Community 52"
+### Community 53 - "Community 53"
 Cohesion: 0.19
 Nodes (16): CellMetrics, CellVerdict, compute_annualized_return(), compute_mar(), evaluate_cell(), evaluate_cell_investigation(), _index_by_cell(), main() (+8 more)
-
-### Community 53 - "Community 53"
-Cohesion: 0.23
-Nodes (15): _continuous_payload_from_summary(), _delisted_traded(), _find_png(), _headline(), _infer_venue_from_root(), _label(), main(), _pit_verdict() (+7 more)
 
 ### Community 54 - "Community 54"
 Cohesion: 0.18
@@ -453,662 +451,654 @@ Nodes (12): _read_nul_args(), _run_ops(), test_ops_data_build_requires_explicit_
 
 ### Community 60 - "Community 60"
 Cohesion: 0.33
-Nodes (7): _plan(), test_event_tape_prefix_is_bound_to_exact_plan(), test_optional_funding_hold_is_explicit_and_ends_flat(), test_plan_predeclares_thirty_alternating_market_order_transitions(), test_plan_rejects_unsafe_or_underspecified_variants(), test_registered_notional_preserves_buffer_after_step_rounding(), test_runtime_sample_cannot_drift_from_preregistered_plan()
-
-### Community 61 - "Community 61"
-Cohesion: 0.36
-Nodes (7): _authorization(), _machine_id(), _passing_assessment(), test_authorization_binds_host_commit_expiry_and_all_registered_gates(), test_authorization_detects_rehashed_gate_role_substitution(), test_authorization_file_must_be_private(), test_open_or_incomplete_assessment_cannot_issue()
-
-### Community 62 - "Community 62"
-Cohesion: 0.44
-Nodes (9): _provisional_trigger_panel(), PE2: hourly trailing-24h FC trigger panel (long-provisional-entry-engine receipt, _cfg(), _features(), _hourly(), Tests for the PE2 provisional trigger-hour panel (long_native)., test_gates_block_triggers(), test_trigger_fires_on_pump_and_dedupes_cluster() (+1 more)
-
-### Community 63 - "Community 63"
-Cohesion: 0.33
 Nodes (9): _cache_cutoff_month(), _fapi_topup(), _fetch(), _kline_spans(), main(), _month_rows(), _months(), Oldest month whose empty-404 archive must NOT be permanently cached.      The Vi (+1 more)
 
-### Community 64 - "Community 64"
+### Community 61 - "Community 61"
+Cohesion: 0.5
+Nodes (8): _config(), _snapshot(), test_capture_rotates_segments_before_size_limit(), test_public_trade_capture_preserves_trade_and_receive_timestamps(), test_raw_snapshot_delta_capture_reconstructs_book_and_clock_offsets(), test_raw_stream_subscribes_orderbook_and_trade_topics_without_pybit_rewrite(), test_regression_marks_book_unhealthy_until_fresh_snapshot(), test_update_id_one_forces_documented_restart_snapshot()
+
+### Community 62 - "Community 62"
 Cohesion: 0.31
 Nodes (8): _load_orchestrator(), Tests for scripts/continuous_forward_replay_orchestrator.py.  forward-replay-5 (, A drift RuntimeError in one venue must be captured as a per-venue 'drift' status, A non-drift failure is reported as 'error' (still isolated), not silently swallo, A stalled clock (a venue that drifted/failed) must make main() exit non-zero so, test_orchestrator_main_exits_nonzero_on_stall(), test_orchestrator_run_venue_isolates_drift(), test_orchestrator_run_venue_isolates_generic_error()
 
-### Community 66 - "Community 66"
+### Community 64 - "Community 64"
 Cohesion: 0.7
 Nodes (4): _load_module(), test_arm_specs_pin_control_and_primary_on(), test_primary_acceptance_rejects_single_venue_mar_failure(), test_summary_metrics_gap_fills_calendar_days()
 
-### Community 67 - "Community 67"
+### Community 65 - "Community 65"
 Cohesion: 0.5
 Nodes (3): Canonical tests for liquidity_migration.momentum_signals., _attach_residual_momentum is gone; the two genuinely-used helpers stay., test_residual_momentum_dead_join_is_removed()
 
-### Community 68 - "Community 68"
+### Community 66 - "Community 66"
 Cohesion: 0.5
 Nodes (1): Regression checks for the canonical Binance full-PIT refresh surface.
 
-### Community 69 - "Community 69"
+### Community 67 - "Community 67"
 Cohesion: 1.0
 Nodes (2): _skill_files(), test_codex_and_claude_project_skills_are_identical()
 
-### Community 70 - "Community 70"
+### Community 68 - "Community 68"
 Cohesion: 0.67
 Nodes (1): Guards against circular-import regressions in the active module split.  The publ
 
-### Community 71 - "Community 71"
+### Community 69 - "Community 69"
 Cohesion: 1.0
 Nodes (1): The manifest cannot PIT-validate the most recent daily-close signal.
 
-### Community 72 - "Community 72"
+### Community 70 - "Community 70"
 Cohesion: 1.0
 Nodes (1): Extract (orderId, orderLinkId) — accept Bybit's camelCase or the         snake_c
 
-### Community 75 - "Community 75"
+### Community 73 - "Community 73"
 Cohesion: 1.0
 Nodes (1): Capture a self-hashed offset receipt from an injected public request.
 
-### Community 76 - "Community 76"
+### Community 74 - "Community 74"
 Cohesion: 1.0
 Nodes (1): Verify identity, freshness, and the prospective quality gate.
 
-### Community 77 - "Community 77"
+### Community 75 - "Community 75"
 Cohesion: 1.0
 Nodes (1): Atomically create a private calibration input without overwriting evidence.
 
-### Community 78 - "Community 78"
+### Community 76 - "Community 76"
 Cohesion: 1.0
 Nodes (1): Capture a self-hashed offset receipt from an injected public request.
 
-### Community 79 - "Community 79"
+### Community 77 - "Community 77"
 Cohesion: 1.0
 Nodes (1): Verify identity, freshness, and the prospective quality gate.
 
-### Community 80 - "Community 80"
+### Community 78 - "Community 78"
 Cohesion: 1.0
 Nodes (1): Atomically write a private calibration input.
 
-### Community 81 - "Community 81"
+### Community 79 - "Community 79"
 Cohesion: 1.0
 Nodes (1): Build V0 BTC-risk context keyed by signal day, using prior BTC closes only.
 
-### Community 82 - "Community 82"
+### Community 80 - "Community 80"
 Cohesion: 1.0
 Nodes (1): Causal expanding percentile state for the V0 BTC-risk score.
 
-### Community 83 - "Community 83"
+### Community 81 - "Community 81"
 Cohesion: 1.0
 Nodes (1): Persistent live state for ``CTRL_BTC_RISK_70_90_35``.
 
-### Community 84 - "Community 84"
+### Community 82 - "Community 82"
 Cohesion: 1.0
 Nodes (1): Score unique final candidate decisions and return lookup + cycle stats.
 
-### Community 85 - "Community 85"
+### Community 83 - "Community 83"
 Cohesion: 1.0
 Nodes (1): Persist only newly scored decisions that reached accepted execution.
 
-### Community 86 - "Community 86"
+### Community 84 - "Community 84"
 Cohesion: 1.0
 Nodes (1): True when any warning marks the result survivorship/look-ahead biased.
 
-### Community 87 - "Community 87"
+### Community 85 - "Community 85"
 Cohesion: 1.0
 Nodes (1): A compact, loud block for stdout. Empty list → a single clean line.
 
-### Community 88 - "Community 88"
+### Community 86 - "Community 86"
 Cohesion: 1.0
 Nodes (1): Base class for journal integrity and lifecycle errors.
 
-### Community 89 - "Community 89"
+### Community 87 - "Community 87"
 Cohesion: 1.0
 Nodes (1): The journal cannot be reconstructed exactly.
 
-### Community 90 - "Community 90"
+### Community 88 - "Community 88"
 Cohesion: 1.0
 Nodes (1): An event violates the canonical lifecycle state machine.
 
-### Community 91 - "Community 91"
+### Community 89 - "Community 89"
 Cohesion: 1.0
 Nodes (1): Return a deterministic, finite JSON representation.      Polars/numpy scalars ar
 
-### Community 92 - "Community 92"
+### Community 90 - "Community 90"
 Cohesion: 1.0
 Nodes (1): Atomically sequence, validate and durably append new events.      Deterministic
 
-### Community 93 - "Community 93"
+### Community 91 - "Community 91"
 Cohesion: 1.0
 Nodes (1): Rebuild mutable compatibility ledgers exclusively from the journal.
 
-### Community 94 - "Community 94"
+### Community 92 - "Community 92"
 Cohesion: 1.0
 Nodes (1): Write the reconstructable per-fill TCA projection as Parquet.
 
-### Community 95 - "Community 95"
+### Community 93 - "Community 93"
 Cohesion: 1.0
 Nodes (1): Record every due 1/5/30-minute fill markout available in ``prices``.      The ca
 
-### Community 96 - "Community 96"
+### Community 94 - "Community 94"
 Cohesion: 1.0
 Nodes (1): Make unavailable markouts explicit instead of leaving ambiguous nulls.
 
-### Community 97 - "Community 97"
+### Community 95 - "Community 95"
 Cohesion: 1.0
 Nodes (1): Project locally-open rows to ``awaiting_pnl`` after a proven flat venue.      Th
 
-### Community 98 - "Community 98"
+### Community 96 - "Community 96"
 Cohesion: 1.0
 Nodes (1): Retire locally-active paper rows when their deterministic epoch is archived.
 
-### Community 99 - "Community 99"
+### Community 97 - "Community 97"
 Cohesion: 1.0
 Nodes (1): Render stable, human-readable desired-vs-executed owner health.      Ages delibe
 
-### Community 100 - "Community 100"
+### Community 98 - "Community 98"
 Cohesion: 1.0
 Nodes (1): Fold convergence SLA state into the owner heartbeat projection.
 
-### Community 101 - "Community 101"
+### Community 99 - "Community 99"
 Cohesion: 1.0
 Nodes (1): Latest completed owner-loop observation.      ``journal_sequence`` and ``journal
 
-### Community 102 - "Community 102"
+### Community 100 - "Community 100"
 Cohesion: 1.0
 Nodes (1): Atomically publish the latest owner observation under ``root``.
 
-### Community 103 - "Community 103"
+### Community 101 - "Community 101"
 Cohesion: 1.0
 Nodes (1): Read and strictly validate the latest durable owner observation.
 
-### Community 104 - "Community 104"
+### Community 102 - "Community 102"
 Cohesion: 1.0
 Nodes (1): Require a fresh, healthy owner observation for one environment.
 
-### Community 105 - "Community 105"
+### Community 103 - "Community 103"
 Cohesion: 1.0
 Nodes (1): OLS beta of per-unit book return on hedge return over trailing ledger days.
 
-### Community 106 - "Community 106"
+### Community 104 - "Community 104"
 Cohesion: 1.0
 Nodes (1): Bivariate OLS betas of per-unit book return on two hedge legs.      Trailing ``b
 
-### Community 107 - "Community 107"
+### Community 105 - "Community 105"
 Cohesion: 1.0
 Nodes (1): Long-only per-leg ratios with a joint proportional cap of ``hedge_cap*scale``.
 
-### Community 108 - "Community 108"
+### Community 106 - "Community 106"
 Cohesion: 1.0
 Nodes (1): Prior-only state required to compute the live/paper hedge ratio.      ``prior_ra
 
-### Community 109 - "Community 109"
+### Community 107 - "Community 107"
 Cohesion: 1.0
 Nodes (1): Prior-only state for the two-leg (BTC+ETH) hedge ratio computation.
 
-### Community 110 - "Community 110"
+### Community 108 - "Community 108"
 Cohesion: 1.0
 Nodes (1): Live/paper twin of the two-leg hedge sizing inside ``apply_rebalance_rule``.
 
-### Community 111 - "Community 111"
+### Community 109 - "Community 109"
 Cohesion: 1.0
 Nodes (1): Live/paper twin of the hedge sizing inside ``apply_rebalance_rule``.      Return
 
-### Community 112 - "Community 112"
+### Community 110 - "Community 110"
 Cohesion: 1.0
 Nodes (1): Plan the order that brings the LONG hedge leg to ``equity * hedge_ratio``.
 
-### Community 113 - "Community 113"
+### Community 111 - "Community 111"
 Cohesion: 1.0
 Nodes (1): Apply a causal daily scale rule and rebuild decomposed equity.      With ``hedge
 
-### Community 114 - "Community 114"
+### Community 112 - "Community 112"
 Cohesion: 1.0
 Nodes (1): Minimal trade row reconcile_paper_demo accepts (mirrors test_..._reconciliation)
 
-### Community 115 - "Community 115"
+### Community 113 - "Community 113"
 Cohesion: 1.0
 Nodes (1): Reconciling a ledger against ITSELF must pair every trade (exact trade_id match)
 
-### Community 116 - "Community 116"
+### Community 114 - "Community 114"
 Cohesion: 1.0
 Nodes (1): True for pybit's "You have already subscribed to this topic" error.      pybit's
 
-### Community 117 - "Community 117"
+### Community 115 - "Community 115"
 Cohesion: 1.0
 Nodes (1): Read fresh public tickers from the cache, falling back to public REST.
 
-### Community 118 - "Community 118"
+### Community 116 - "Community 116"
 Cohesion: 1.0
 Nodes (1): Best-effort bounded retention for per-cycle public planning reports.
 
-### Community 119 - "Community 119"
+### Community 117 - "Community 117"
 Cohesion: 1.0
 Nodes (1): Return (normalised instruments frame, fetched_ts_ms), or (None, 0).
 
-### Community 120 - "Community 120"
+### Community 118 - "Community 118"
 Cohesion: 1.0
 Nodes (1): Delete the instruments cache so the next _demo_instruments call refetches.
 
-### Community 121 - "Community 121"
+### Community 119 - "Community 119"
 Cohesion: 1.0
 Nodes (1): Normalised Bybit instruments, cached with a TTL.      Contract specs (tick size,
 
-### Community 122 - "Community 122"
+### Community 120 - "Community 120"
 Cohesion: 1.0
 Nodes (1): Resolve one fresh, public-only strategy universe.
 
-### Community 123 - "Community 123"
+### Community 121 - "Community 121"
 Cohesion: 1.0
 Nodes (1): Return the (symbol, ts_ms) rectangular klines for the demo cycle.      Sources t
 
-### Community 124 - "Community 124"
+### Community 122 - "Community 122"
 Cohesion: 1.0
 Nodes (1): Concat any number of klines frames, skipping empties. Returns the     canonical
 
-### Community 125 - "Community 125"
+### Community 123 - "Community 123"
 Cohesion: 1.0
 Nodes (1): Delete ``date=YYYY-MM-DD`` partitions older than the demo lookback window.
 
-### Community 126 - "Community 126"
+### Community 124 - "Community 124"
 Cohesion: 1.0
 Nodes (1): Symbols in ``klines`` carrying a MID-WINDOW 1h hole inside ``[start, end]``.
 
-### Community 127 - "Community 127"
+### Community 125 - "Community 125"
 Cohesion: 1.0
 Nodes (1): Cheap content fingerprint of the (klines, universe) feature-build inputs.      T
 
-### Community 128 - "Community 128"
+### Community 126 - "Community 126"
 Cohesion: 1.0
 Nodes (1): Closed-PnL records for the account.          Used by the orphan reconciler to ba
 
-### Community 129 - "Community 129"
+### Community 127 - "Community 127"
 Cohesion: 1.0
 Nodes (1): Funding-settlement rows from the account transaction log.          Used by the d
 
-### Community 130 - "Community 130"
+### Community 128 - "Community 128"
 Cohesion: 1.0
 Nodes (1): int(value) that returns 0 instead of raising on a non-numeric/None value.
 
-### Community 131 - "Community 131"
+### Community 129 - "Community 129"
 Cohesion: 1.0
 Nodes (1): True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur
 
-### Community 132 - "Community 132"
+### Community 130 - "Community 130"
 Cohesion: 1.0
 Nodes (1): Subscribe to wallet balance pushes. Bybit pushes a per-account         snapshot
 
-### Community 133 - "Community 133"
+### Community 131 - "Community 131"
 Cohesion: 1.0
 Nodes (1): Socket-level liveness of the private stream. pybit's WebSocket subclasses
 
-### Community 134 - "Community 134"
+### Community 132 - "Community 132"
 Cohesion: 1.0
 Nodes (1): Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method
 
-### Community 135 - "Community 135"
+### Community 133 - "Community 133"
 Cohesion: 1.0
 Nodes (1): Ensure pybit's ping timer is a daemon thread that does not block shutdown.
 
-### Community 136 - "Community 136"
+### Community 134 - "Community 134"
 Cohesion: 1.0
 Nodes (1): Create a fresh pybit WebSocket client tuned for kline streams.
 
-### Community 137 - "Community 137"
+### Community 135 - "Community 135"
 Cohesion: 1.0
 Nodes (1): Per-connection bookkeeping for the pool.
 
-### Community 138 - "Community 138"
+### Community 136 - "Community 136"
 Cohesion: 1.0
 Nodes (1): Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large
 
-### Community 139 - "Community 139"
+### Community 137 - "Community 137"
 Cohesion: 1.0
 Nodes (1): Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n
 
-### Community 140 - "Community 140"
+### Community 138 - "Community 138"
 Cohesion: 1.0
 Nodes (1): Diff the current assignment against ``new_symbols``: subscribe to         adds,
 
-### Community 141 - "Community 141"
+### Community 139 - "Community 139"
 Cohesion: 1.0
 Nodes (1): Build a closure that parses pybit's kline message, marks the         connection
 
-### Community 142 - "Community 142"
+### Community 140 - "Community 140"
 Cohesion: 1.0
 Nodes (1): Inspect every connection's ``last_message_monotonic``. Connections         idle
 
-### Community 143 - "Community 143"
+### Community 141 - "Community 141"
 Cohesion: 1.0
 Nodes (1): Extract the symbol component from a kline topic ``kline.60.SYMBOL``.
 
-### Community 144 - "Community 144"
+### Community 142 - "Community 142"
 Cohesion: 1.0
 Nodes (1): realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')
 
-### Community 145 - "Community 145"
+### Community 143 - "Community 143"
 Cohesion: 1.0
 Nodes (1): audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams
 
-### Community 146 - "Community 146"
+### Community 144 - "Community 144"
 Cohesion: 1.0
 Nodes (1): Non-comment, non-blank directive lines of a systemd unit.
 
-### Community 147 - "Community 147"
+### Community 145 - "Community 145"
 Cohesion: 1.0
 Nodes (1): audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —
 
-### Community 148 - "Community 148"
+### Community 146 - "Community 146"
 Cohesion: 1.0
 Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
-### Community 149 - "Community 149"
+### Community 147 - "Community 147"
 Cohesion: 1.0
 Nodes (1): The paper producer must route targets to the deterministic paper owner.
 
-### Community 150 - "Community 150"
+### Community 148 - "Community 148"
 Cohesion: 1.0
 Nodes (1): The runner passes one environment through to the target producer.
 
-### Community 151 - "Community 151"
+### Community 149 - "Community 149"
 Cohesion: 1.0
 Nodes (1): Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED
 
-### Community 152 - "Community 152"
+### Community 150 - "Community 150"
 Cohesion: 1.0
 Nodes (1): The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest
 
-### Community 153 - "Community 153"
+### Community 151 - "Community 151"
 Cohesion: 1.0
 Nodes (1): Create deterministic systemctl/account guards around the VPS-only script.
 
-### Community 154 - "Community 154"
+### Community 152 - "Community 152"
 Cohesion: 1.0
 Nodes (1): THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa
 
-### Community 155 - "Community 155"
+### Community 153 - "Community 153"
 Cohesion: 1.0
 Nodes (1): Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed
 
-### Community 156 - "Community 156"
+### Community 154 - "Community 154"
 Cohesion: 1.0
 Nodes (1): deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a
 
-### Community 157 - "Community 157"
+### Community 155 - "Community 155"
 Cohesion: 1.0
 Nodes (1): Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri
 
-### Community 158 - "Community 158"
+### Community 156 - "Community 156"
 Cohesion: 1.0
 Nodes (1): Run the script's current N_SYMBOLS logic in isolation via bash.
 
-### Community 159 - "Community 159"
+### Community 157 - "Community 157"
 Cohesion: 1.0
 Nodes (1): Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.
 
-### Community 160 - "Community 160"
+### Community 158 - "Community 158"
 Cohesion: 1.0
 Nodes (1): Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the
 
-### Community 161 - "Community 161"
+### Community 159 - "Community 159"
 Cohesion: 1.0
 Nodes (1): Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_
 
-### Community 162 - "Community 162"
+### Community 160 - "Community 160"
 Cohesion: 1.0
 Nodes (1): A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.
 
-### Community 163 - "Community 163"
+### Community 161 - "Community 161"
 Cohesion: 1.0
 Nodes (1): The fail-closed arm must only match truthy spellings — demo / false /     unset
 
-### Community 164 - "Community 164"
+### Community 162 - "Community 162"
 Cohesion: 1.0
 Nodes (1): Sanity precondition for the finding: the recovery path DOES bring the     always
 
-### Community 165 - "Community 165"
+### Community 163 - "Community 163"
 Cohesion: 1.0
 Nodes (1): The collector check must sit in the POST-settle verify block (after the     slee
 
-### Community 166 - "Community 166"
+### Community 164 - "Community 164"
 Cohesion: 1.0
 Nodes (1): The collector and both owners fail loud on inactive/disabled state.
 
-### Community 167 - "Community 167"
+### Community 165 - "Community 165"
 Cohesion: 1.0
 Nodes (1): Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).
 
-### Community 168 - "Community 168"
+### Community 166 - "Community 166"
 Cohesion: 1.0
 Nodes (1): deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov
 
-### Community 169 - "Community 169"
+### Community 167 - "Community 167"
 Cohesion: 1.0
 Nodes (1): No active Environment= assignment in the PAPER unit may reference the demo     d
 
-### Community 170 - "Community 170"
+### Community 168 - "Community 168"
 Cohesion: 1.0
 Nodes (1): The target-only paper service keeps its routing and strategy knobs.
 
-### Community 171 - "Community 171"
+### Community 169 - "Community 169"
 Cohesion: 1.0
 Nodes (1): The removal is documented in-unit (audit id + rationale) so an operator     re-a
 
 ## Knowledge Gaps
 - **827 isolated node(s):** `Causal BTC-risk entry-size overlay for the continuous demo book.  ``CTRL_BTC_RIS`, `Validate and normalize one versioned, self-hashed decision receipt.      Chain a`, `Build V0 BTC-risk context keyed by signal day, using prior BTC closes only.`, `Causal expanding percentile state for the V0 BTC-risk score.`, `Persistent live state for ``CTRL_BTC_RISK_70_90_35``.` (+822 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 68`** (4 nodes): `test_build_full_pit_binance_script.py`, `Regression checks for the canonical Binance full-PIT refresh surface.`, `test_daily_tail_default_is_month_start_containing_end_minus_one_day()`, `test_script_is_valid_bash_and_daily_tail_follows_clean_monthly_rebuild()`
+- **Thin community `Community 66`** (4 nodes): `test_build_full_pit_binance_script.py`, `Regression checks for the canonical Binance full-PIT refresh surface.`, `test_daily_tail_default_is_month_start_containing_end_minus_one_day()`, `test_script_is_valid_bash_and_daily_tail_follows_clean_monthly_rebuild()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 69`** (3 nodes): `test_project_skill_mirrors.py`, `_skill_files()`, `test_codex_and_claude_project_skills_are_identical()`
+- **Thin community `Community 67`** (3 nodes): `test_project_skill_mirrors.py`, `_skill_files()`, `test_codex_and_claude_project_skills_are_identical()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 70`** (3 nodes): `test_package_import_integrity.py`, `Guards against circular-import regressions in the active module split.  The publ`, `test_split_sibling_imports_cold_in_fresh_process()`
+- **Thin community `Community 68`** (3 nodes): `test_package_import_integrity.py`, `Guards against circular-import regressions in the active module split.  The publ`, `test_split_sibling_imports_cold_in_fresh_process()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 71`** (1 nodes): `The manifest cannot PIT-validate the most recent daily-close signal.`
+- **Thin community `Community 69`** (1 nodes): `The manifest cannot PIT-validate the most recent daily-close signal.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 72`** (1 nodes): `Extract (orderId, orderLinkId) — accept Bybit's camelCase or the         snake_c`
+- **Thin community `Community 70`** (1 nodes): `Extract (orderId, orderLinkId) — accept Bybit's camelCase or the         snake_c`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 75`** (1 nodes): `Capture a self-hashed offset receipt from an injected public request.`
+- **Thin community `Community 73`** (1 nodes): `Capture a self-hashed offset receipt from an injected public request.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 76`** (1 nodes): `Verify identity, freshness, and the prospective quality gate.`
+- **Thin community `Community 74`** (1 nodes): `Verify identity, freshness, and the prospective quality gate.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 77`** (1 nodes): `Atomically create a private calibration input without overwriting evidence.`
+- **Thin community `Community 75`** (1 nodes): `Atomically create a private calibration input without overwriting evidence.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 78`** (1 nodes): `Capture a self-hashed offset receipt from an injected public request.`
+- **Thin community `Community 76`** (1 nodes): `Capture a self-hashed offset receipt from an injected public request.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 79`** (1 nodes): `Verify identity, freshness, and the prospective quality gate.`
+- **Thin community `Community 77`** (1 nodes): `Verify identity, freshness, and the prospective quality gate.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 80`** (1 nodes): `Atomically write a private calibration input.`
+- **Thin community `Community 78`** (1 nodes): `Atomically write a private calibration input.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 81`** (1 nodes): `Build V0 BTC-risk context keyed by signal day, using prior BTC closes only.`
+- **Thin community `Community 79`** (1 nodes): `Build V0 BTC-risk context keyed by signal day, using prior BTC closes only.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 82`** (1 nodes): `Causal expanding percentile state for the V0 BTC-risk score.`
+- **Thin community `Community 80`** (1 nodes): `Causal expanding percentile state for the V0 BTC-risk score.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 83`** (1 nodes): `Persistent live state for ``CTRL_BTC_RISK_70_90_35``.`
+- **Thin community `Community 81`** (1 nodes): `Persistent live state for ``CTRL_BTC_RISK_70_90_35``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 84`** (1 nodes): `Score unique final candidate decisions and return lookup + cycle stats.`
+- **Thin community `Community 82`** (1 nodes): `Score unique final candidate decisions and return lookup + cycle stats.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 85`** (1 nodes): `Persist only newly scored decisions that reached accepted execution.`
+- **Thin community `Community 83`** (1 nodes): `Persist only newly scored decisions that reached accepted execution.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 86`** (1 nodes): `True when any warning marks the result survivorship/look-ahead biased.`
+- **Thin community `Community 84`** (1 nodes): `True when any warning marks the result survivorship/look-ahead biased.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 87`** (1 nodes): `A compact, loud block for stdout. Empty list → a single clean line.`
+- **Thin community `Community 85`** (1 nodes): `A compact, loud block for stdout. Empty list → a single clean line.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 88`** (1 nodes): `Base class for journal integrity and lifecycle errors.`
+- **Thin community `Community 86`** (1 nodes): `Base class for journal integrity and lifecycle errors.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 89`** (1 nodes): `The journal cannot be reconstructed exactly.`
+- **Thin community `Community 87`** (1 nodes): `The journal cannot be reconstructed exactly.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 90`** (1 nodes): `An event violates the canonical lifecycle state machine.`
+- **Thin community `Community 88`** (1 nodes): `An event violates the canonical lifecycle state machine.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 91`** (1 nodes): `Return a deterministic, finite JSON representation.      Polars/numpy scalars ar`
+- **Thin community `Community 89`** (1 nodes): `Return a deterministic, finite JSON representation.      Polars/numpy scalars ar`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 92`** (1 nodes): `Atomically sequence, validate and durably append new events.      Deterministic`
+- **Thin community `Community 90`** (1 nodes): `Atomically sequence, validate and durably append new events.      Deterministic`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 93`** (1 nodes): `Rebuild mutable compatibility ledgers exclusively from the journal.`
+- **Thin community `Community 91`** (1 nodes): `Rebuild mutable compatibility ledgers exclusively from the journal.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 94`** (1 nodes): `Write the reconstructable per-fill TCA projection as Parquet.`
+- **Thin community `Community 92`** (1 nodes): `Write the reconstructable per-fill TCA projection as Parquet.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 95`** (1 nodes): `Record every due 1/5/30-minute fill markout available in ``prices``.      The ca`
+- **Thin community `Community 93`** (1 nodes): `Record every due 1/5/30-minute fill markout available in ``prices``.      The ca`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 96`** (1 nodes): `Make unavailable markouts explicit instead of leaving ambiguous nulls.`
+- **Thin community `Community 94`** (1 nodes): `Make unavailable markouts explicit instead of leaving ambiguous nulls.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 97`** (1 nodes): `Project locally-open rows to ``awaiting_pnl`` after a proven flat venue.      Th`
+- **Thin community `Community 95`** (1 nodes): `Project locally-open rows to ``awaiting_pnl`` after a proven flat venue.      Th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 98`** (1 nodes): `Retire locally-active paper rows when their deterministic epoch is archived.`
+- **Thin community `Community 96`** (1 nodes): `Retire locally-active paper rows when their deterministic epoch is archived.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 99`** (1 nodes): `Render stable, human-readable desired-vs-executed owner health.      Ages delibe`
+- **Thin community `Community 97`** (1 nodes): `Render stable, human-readable desired-vs-executed owner health.      Ages delibe`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 100`** (1 nodes): `Fold convergence SLA state into the owner heartbeat projection.`
+- **Thin community `Community 98`** (1 nodes): `Fold convergence SLA state into the owner heartbeat projection.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 101`** (1 nodes): `Latest completed owner-loop observation.      ``journal_sequence`` and ``journal`
+- **Thin community `Community 99`** (1 nodes): `Latest completed owner-loop observation.      ``journal_sequence`` and ``journal`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 102`** (1 nodes): `Atomically publish the latest owner observation under ``root``.`
+- **Thin community `Community 100`** (1 nodes): `Atomically publish the latest owner observation under ``root``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 103`** (1 nodes): `Read and strictly validate the latest durable owner observation.`
+- **Thin community `Community 101`** (1 nodes): `Read and strictly validate the latest durable owner observation.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 104`** (1 nodes): `Require a fresh, healthy owner observation for one environment.`
+- **Thin community `Community 102`** (1 nodes): `Require a fresh, healthy owner observation for one environment.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 105`** (1 nodes): `OLS beta of per-unit book return on hedge return over trailing ledger days.`
+- **Thin community `Community 103`** (1 nodes): `OLS beta of per-unit book return on hedge return over trailing ledger days.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 106`** (1 nodes): `Bivariate OLS betas of per-unit book return on two hedge legs.      Trailing ``b`
+- **Thin community `Community 104`** (1 nodes): `Bivariate OLS betas of per-unit book return on two hedge legs.      Trailing ``b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 107`** (1 nodes): `Long-only per-leg ratios with a joint proportional cap of ``hedge_cap*scale``.`
+- **Thin community `Community 105`** (1 nodes): `Long-only per-leg ratios with a joint proportional cap of ``hedge_cap*scale``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 108`** (1 nodes): `Prior-only state required to compute the live/paper hedge ratio.      ``prior_ra`
+- **Thin community `Community 106`** (1 nodes): `Prior-only state required to compute the live/paper hedge ratio.      ``prior_ra`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 109`** (1 nodes): `Prior-only state for the two-leg (BTC+ETH) hedge ratio computation.`
+- **Thin community `Community 107`** (1 nodes): `Prior-only state for the two-leg (BTC+ETH) hedge ratio computation.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 110`** (1 nodes): `Live/paper twin of the two-leg hedge sizing inside ``apply_rebalance_rule``.`
+- **Thin community `Community 108`** (1 nodes): `Live/paper twin of the two-leg hedge sizing inside ``apply_rebalance_rule``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 111`** (1 nodes): `Live/paper twin of the hedge sizing inside ``apply_rebalance_rule``.      Return`
+- **Thin community `Community 109`** (1 nodes): `Live/paper twin of the hedge sizing inside ``apply_rebalance_rule``.      Return`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 112`** (1 nodes): `Plan the order that brings the LONG hedge leg to ``equity * hedge_ratio``.`
+- **Thin community `Community 110`** (1 nodes): `Plan the order that brings the LONG hedge leg to ``equity * hedge_ratio``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 113`** (1 nodes): `Apply a causal daily scale rule and rebuild decomposed equity.      With ``hedge`
+- **Thin community `Community 111`** (1 nodes): `Apply a causal daily scale rule and rebuild decomposed equity.      With ``hedge`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 114`** (1 nodes): `Minimal trade row reconcile_paper_demo accepts (mirrors test_..._reconciliation)`
+- **Thin community `Community 112`** (1 nodes): `Minimal trade row reconcile_paper_demo accepts (mirrors test_..._reconciliation)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 115`** (1 nodes): `Reconciling a ledger against ITSELF must pair every trade (exact trade_id match)`
+- **Thin community `Community 113`** (1 nodes): `Reconciling a ledger against ITSELF must pair every trade (exact trade_id match)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 116`** (1 nodes): `True for pybit's "You have already subscribed to this topic" error.      pybit's`
+- **Thin community `Community 114`** (1 nodes): `True for pybit's "You have already subscribed to this topic" error.      pybit's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 117`** (1 nodes): `Read fresh public tickers from the cache, falling back to public REST.`
+- **Thin community `Community 115`** (1 nodes): `Read fresh public tickers from the cache, falling back to public REST.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 118`** (1 nodes): `Best-effort bounded retention for per-cycle public planning reports.`
+- **Thin community `Community 116`** (1 nodes): `Best-effort bounded retention for per-cycle public planning reports.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 119`** (1 nodes): `Return (normalised instruments frame, fetched_ts_ms), or (None, 0).`
+- **Thin community `Community 117`** (1 nodes): `Return (normalised instruments frame, fetched_ts_ms), or (None, 0).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 120`** (1 nodes): `Delete the instruments cache so the next _demo_instruments call refetches.`
+- **Thin community `Community 118`** (1 nodes): `Delete the instruments cache so the next _demo_instruments call refetches.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 121`** (1 nodes): `Normalised Bybit instruments, cached with a TTL.      Contract specs (tick size,`
+- **Thin community `Community 119`** (1 nodes): `Normalised Bybit instruments, cached with a TTL.      Contract specs (tick size,`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 122`** (1 nodes): `Resolve one fresh, public-only strategy universe.`
+- **Thin community `Community 120`** (1 nodes): `Resolve one fresh, public-only strategy universe.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 123`** (1 nodes): `Return the (symbol, ts_ms) rectangular klines for the demo cycle.      Sources t`
+- **Thin community `Community 121`** (1 nodes): `Return the (symbol, ts_ms) rectangular klines for the demo cycle.      Sources t`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 124`** (1 nodes): `Concat any number of klines frames, skipping empties. Returns the     canonical`
+- **Thin community `Community 122`** (1 nodes): `Concat any number of klines frames, skipping empties. Returns the     canonical`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 125`** (1 nodes): `Delete ``date=YYYY-MM-DD`` partitions older than the demo lookback window.`
+- **Thin community `Community 123`** (1 nodes): `Delete ``date=YYYY-MM-DD`` partitions older than the demo lookback window.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 126`** (1 nodes): `Symbols in ``klines`` carrying a MID-WINDOW 1h hole inside ``[start, end]``.`
+- **Thin community `Community 124`** (1 nodes): `Symbols in ``klines`` carrying a MID-WINDOW 1h hole inside ``[start, end]``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 127`** (1 nodes): `Cheap content fingerprint of the (klines, universe) feature-build inputs.      T`
+- **Thin community `Community 125`** (1 nodes): `Cheap content fingerprint of the (klines, universe) feature-build inputs.      T`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 128`** (1 nodes): `Closed-PnL records for the account.          Used by the orphan reconciler to ba`
+- **Thin community `Community 126`** (1 nodes): `Closed-PnL records for the account.          Used by the orphan reconciler to ba`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 129`** (1 nodes): `Funding-settlement rows from the account transaction log.          Used by the d`
+- **Thin community `Community 127`** (1 nodes): `Funding-settlement rows from the account transaction log.          Used by the d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 130`** (1 nodes): `int(value) that returns 0 instead of raising on a non-numeric/None value.`
+- **Thin community `Community 128`** (1 nodes): `int(value) that returns 0 instead of raising on a non-numeric/None value.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 131`** (1 nodes): `True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur`
+- **Thin community `Community 129`** (1 nodes): `True for Bybit's duplicate-orderLinkId reject (retCode 110089).      Bybit retur`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 132`** (1 nodes): `Subscribe to wallet balance pushes. Bybit pushes a per-account         snapshot`
+- **Thin community `Community 130`** (1 nodes): `Subscribe to wallet balance pushes. Bybit pushes a per-account         snapshot`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 133`** (1 nodes): `Socket-level liveness of the private stream. pybit's WebSocket subclasses`
+- **Thin community `Community 131`** (1 nodes): `Socket-level liveness of the private stream. pybit's WebSocket subclasses`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 134`** (1 nodes): `Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method`
+- **Thin community `Community 132`** (1 nodes): `Close a pybit WS client with a hard timeout.      pybit's exit/close/stop method`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 135`** (1 nodes): `Ensure pybit's ping timer is a daemon thread that does not block shutdown.`
+- **Thin community `Community 133`** (1 nodes): `Ensure pybit's ping timer is a daemon thread that does not block shutdown.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 136`** (1 nodes): `Create a fresh pybit WebSocket client tuned for kline streams.`
+- **Thin community `Community 134`** (1 nodes): `Create a fresh pybit WebSocket client tuned for kline streams.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 137`** (1 nodes): `Per-connection bookkeeping for the pool.`
+- **Thin community `Community 135`** (1 nodes): `Per-connection bookkeeping for the pool.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 138`** (1 nodes): `Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large`
+- **Thin community `Community 136`** (1 nodes): `Multi-connection WebSocket pool for 1h kline subscriptions.      Splits a large`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 139`** (1 nodes): `Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n`
+- **Thin community `Community 137`** (1 nodes): `Subscribe to ``symbols``. Idempotent: re-subscribing the same set         is a n`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 140`** (1 nodes): `Diff the current assignment against ``new_symbols``: subscribe to         adds,`
+- **Thin community `Community 138`** (1 nodes): `Diff the current assignment against ``new_symbols``: subscribe to         adds,`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 141`** (1 nodes): `Build a closure that parses pybit's kline message, marks the         connection`
+- **Thin community `Community 139`** (1 nodes): `Build a closure that parses pybit's kline message, marks the         connection`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 142`** (1 nodes): `Inspect every connection's ``last_message_monotonic``. Connections         idle`
+- **Thin community `Community 140`** (1 nodes): `Inspect every connection's ``last_message_monotonic``. Connections         idle`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 143`** (1 nodes): `Extract the symbol component from a kline topic ``kline.60.SYMBOL``.`
+- **Thin community `Community 141`** (1 nodes): `Extract the symbol component from a kline topic ``kline.60.SYMBOL``.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 144`** (1 nodes): `realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')`
+- **Thin community `Community 142`** (1 nodes): `realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.     'enabled')`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 145`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
+- **Thin community `Community 143`** (1 nodes): `audit2 (deploy-env-timers-3 follow-up): since 7d39d61 the paper shadow streams`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 146`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
+- **Thin community `Community 144`** (1 nodes): `Non-comment, non-blank directive lines of a systemd unit.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 147`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
+- **Thin community `Community 145`** (1 nodes): `audit2: since 7d39d61 the paper unit no longer FOLLOWS the demo kline plane —`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 148`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 146`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 149`** (1 nodes): `The paper producer must route targets to the deterministic paper owner.`
+- **Thin community `Community 147`** (1 nodes): `The paper producer must route targets to the deterministic paper owner.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 150`** (1 nodes): `The runner passes one environment through to the target producer.`
+- **Thin community `Community 148`** (1 nodes): `The runner passes one environment through to the target producer.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 151`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
+- **Thin community `Community 149`** (1 nodes): `Long demo/paper services must enable the WS     kline manager. WS_KLINES_ENABLED`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 152`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
+- **Thin community `Community 150`** (1 nodes): `The deploy + disaster-recovery scripts run pinned pytest subsets as     pre-rest`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 153`** (1 nodes): `Create deterministic systemctl/account guards around the VPS-only script.`
+- **Thin community `Community 151`** (1 nodes): `Create deterministic systemctl/account guards around the VPS-only script.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 154`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
+- **Thin community `Community 152`** (1 nodes): `THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept     pa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 155`** (1 nodes): `Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed`
+- **Thin community `Community 153`** (1 nodes): `Round 4: the workflow paths-filter class bit twice (configs/ in round 2,     hed`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 156`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
+- **Thin community `Community 154`** (1 nodes): `deploy-ci-2 (folded from test_audit_fix_b05.py): the deploy workflow must run a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 157`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
+- **Thin community `Community 155`** (1 nodes): `Round 4: the ExecStart<->argparse parity test deliberately skips the     env-dri`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 158`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
+- **Thin community `Community 156`** (1 nodes): `Run the script's current N_SYMBOLS logic in isolation via bash.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 159`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
+- **Thin community `Community 157`** (1 nodes): `Run the original buggy N_SYMBOLS logic, for the failing-on-old assertion.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 160`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
+- **Thin community `Community 158`** (1 nodes): `Model the OLD gate-7 lint line: ``$VENV check || ruff check``.      Returns the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 161`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
+- **Thin community `Community 159`** (1 nodes): `Model the NEW gate-7 lint logic: pick the binary, then run it once.      ``venv_`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 162`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
+- **Thin community `Community 160`** (1 nodes): `A `case "${REAL_MONEY:-}"` guard whose truthy arm exits non-zero.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 163`** (1 nodes): `The fail-closed arm must only match truthy spellings — demo / false /     unset`
+- **Thin community `Community 161`** (1 nodes): `The fail-closed arm must only match truthy spellings — demo / false /     unset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 164`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
+- **Thin community `Community 162`** (1 nodes): `Sanity precondition for the finding: the recovery path DOES bring the     always`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 165`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
+- **Thin community `Community 163`** (1 nodes): `The collector check must sit in the POST-settle verify block (after the     slee`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 166`** (1 nodes): `The collector and both owners fail loud on inactive/disabled state.`
+- **Thin community `Community 164`** (1 nodes): `The collector and both owners fail loud on inactive/disabled state.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 167`** (1 nodes): `Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).`
+- **Thin community `Community 165`** (1 nodes): `Parse the unit's active ``Environment=KEY=VALUE`` lines (skip comments).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 168`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
+- **Thin community `Community 166`** (1 nodes): `deploy-env-timers-3: the PAPER shadow must not carry a KLINES_FOLLOW_ROOT     ov`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 169`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
+- **Thin community `Community 167`** (1 nodes): `No active Environment= assignment in the PAPER unit may reference the demo     d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 170`** (1 nodes): `The target-only paper service keeps its routing and strategy knobs.`
+- **Thin community `Community 168`** (1 nodes): `The target-only paper service keeps its routing and strategy knobs.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 171`** (1 nodes): `The removal is documented in-unit (audit id + rationale) so an operator     re-a`
+- **Thin community `Community 169`** (1 nodes): `The removal is documented in-unit (audit id + rationale) so an operator     re-a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `write_dataset()` connect `Community 1` to `Community 2`, `Community 4`, `Community 5`, `Community 7`, `Community 8`, `Community 14`, `Community 18`, `Community 20`, `Community 22`, `Community 63`?**
-  _High betweenness centrality (0.048) - this node is a cross-community bridge._
-- **Why does `LongNativeConfig` connect `Community 6` to `Community 0`, `Community 2`, `Community 5`, `Community 8`, `Community 10`, `Community 12`, `Community 62`?**
-  _High betweenness centrality (0.046) - this node is a cross-community bridge._
-- **Why does `KlineStore` connect `Community 4` to `Community 5`?**
-  _High betweenness centrality (0.043) - this node is a cross-community bridge._
-- **Are the 307 inferred relationships involving `AccountExecutionKernel` (e.g. with `AccountValuation` and `TwinAccountConfig`) actually correct?**
-  _`AccountExecutionKernel` has 307 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 298 inferred relationships involving `AccountRiskPolicy` (e.g. with `SleeveTargetIntent` and `TargetAdapter`) actually correct?**
-  _`AccountRiskPolicy` has 298 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 279 inferred relationships involving `ValueError` (e.g. with `write_regime_portfolio_replay()` and `write_skip_portfolio_replay()`) actually correct?**
-  _`ValueError` has 279 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 295 inferred relationships involving `SystemClock` (e.g. with `LongNativeDemoDaemon` and `Long-running strategy/target producer for the v11a sleeve.  Demo and paper route`) actually correct?**
-  _`SystemClock` has 295 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `write_dataset()` connect `Community 1` to `Community 2`, `Community 4`, `Community 8`, `Community 9`, `Community 13`, `Community 17`, `Community 20`, `Community 23`, `Community 60`?**
+  _High betweenness centrality (0.049) - this node is a cross-community bridge._
+- **Why does `LongNativeConfig` connect `Community 5` to `Community 0`, `Community 2`, `Community 4`, `Community 9`, `Community 11`, `Community 24`?**
+  _High betweenness centrality (0.044) - this node is a cross-community bridge._
+- **Why does `KlineStore` connect `Community 7` to `Community 8`, `Community 9`, `Community 4`?**
+  _High betweenness centrality (0.042) - this node is a cross-community bridge._
+- **Are the 316 inferred relationships involving `AccountExecutionKernel` (e.g. with `AccountValuation` and `TwinAccountConfig`) actually correct?**
+  _`AccountExecutionKernel` has 316 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 304 inferred relationships involving `SystemClock` (e.g. with `LongNativeDemoDaemon` and `Long-running strategy/target producer for the v11a sleeve.  Demo and paper route`) actually correct?**
+  _`SystemClock` has 304 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 301 inferred relationships involving `Clock` (e.g. with `LongNativeDemoDaemon` and `Long-running strategy/target producer for the v11a sleeve.  Demo and paper route`) actually correct?**
+  _`Clock` has 301 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 299 inferred relationships involving `AccountRiskPolicy` (e.g. with `SleeveTargetIntent` and `TargetAdapter`) actually correct?**
+  _`AccountRiskPolicy` has 299 INFERRED edges - model-reasoned connections that need verification._

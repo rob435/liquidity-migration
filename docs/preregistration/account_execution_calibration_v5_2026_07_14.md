@@ -1,10 +1,43 @@
 # Demo execution calibration v5
 
-Status: prospective and execution-outcome unseen for the new epoch at
-registration. Registered after the V4 first-target failure and verified-flat
-recovery, but before any V5 target, order, fill, slippage, fee, realized P&L, or
-funding outcome. Forward execution evidence only; no alpha, LONG/CONTINUOUS
-parity, deployment, HFT, or real-money claim.
+Status: **closed and spent during the first round trip**. This contract was
+prospective and execution-outcome unseen at registration. It remains the
+historical statement of what was fixed before the V5 result; the prospective
+successor is
+`account_execution_calibration_v6_2026_07_14.md`. Forward execution evidence
+only; no alpha, LONG/CONTINUOUS parity, deployment, HFT, or real-money claim.
+
+## Observed outcome
+
+V5 ran from a new archived/reset epoch on exact commit
+`c113d78014e0188285787a8b2154088a5ae3b2a1`. Its fresh schema-v2 clock receipt
+passed with self-hash
+`864558d6ddc1864c308704b779a59f1311a84a1ecfb20423b561253bf554283d`
+and an estimated maximum midpoint error of `84,667,657` ns. The exact V5 plan
+hash was
+`f3df25fedb44bb815df40264617fe6c2f6cdcc293ec5b74742ad1528b0d581b0`.
+
+The first `BTCUSDT` open and matching close each produced one real `0.002 BTC`
+demo fill at `62527.2`. The immutable account journal recorded both observed
+execution fees and one provisional reduction P&L event: gross P&L `0`, fees
+`0.13755984` USDT, net P&L `-0.13755984` USDT. The ACK/fill race repaired after
+V4 converged correctly.
+
+V5 nevertheless failed rather than accepting that round trip. Once the zero
+target was accepted, the reducer correctly removed the nonzero component
+target before the reduce-only market order's private fill updated the
+reconstructed position. Native-protection synchronization saw that legitimate
+in-flight interval as an ownerless open position and raised
+`BTCUSDT position has no same-direction component target owner`. The close
+filled, but the driver had already aborted. The two-event target tape and all
+journal facts are retained and count toward no V6 floor.
+
+The final flatness receipt has self-hash
+`56dbf11a1f5f2ead6744ea3e29331e6d5cf5e4c077ec44c11918439cc261aa23`.
+It binds journal sequence 179, zero local and venue position, no working local
+order, no venue open order, and healthy owner state. The owner was then stopped;
+paper and ordinary strategy producers were never started. V5 must not be
+resumed, merged into V6, or presented as a passing calibration.
 
 ## Revision boundary
 

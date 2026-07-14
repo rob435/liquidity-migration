@@ -39,7 +39,7 @@ from .strategy_targets import component_target_intent
 CALIBRATION_PLAN_SCHEMA_VERSION = 1
 CALIBRATION_EVENT_SOURCE = "demo-execution-calibration-v1"
 CALIBRATION_STRATEGY_ID = "execution-calibration-v1"
-REGISTERED_CALIBRATION_PLAN_ID = "demo-calibration-20260714-v5"
+REGISTERED_CALIBRATION_PLAN_ID = "demo-calibration-20260714-v6"
 REGISTERED_CALIBRATION_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BUSDT")
 REGISTERED_ROUND_TRIPS_PER_SYMBOL = 5
 REGISTERED_NOTIONAL_USDT = 160.0
@@ -197,7 +197,7 @@ class CalibrationPlan:
 
 
 def require_registered_calibration_plan(plan: CalibrationPlan) -> None:
-    """Refuse drift from the prospective V5 sample contract."""
+    """Refuse drift from the prospective V6 sample contract."""
 
     expected = {
         "plan_id": REGISTERED_CALIBRATION_PLAN_ID,

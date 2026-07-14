@@ -14,6 +14,7 @@ from liquidity_migration.account_kernel import (
     DesiredTarget,
     InstrumentRules,
     MarketInputRef,
+    TargetBatchResult,
     read_account_journal,
 )
 from liquidity_migration.deterministic_runtime import VirtualClock
@@ -127,6 +128,164 @@ def _manager(kernel: AccountExecutionKernel, clock: VirtualClock) -> tuple[Bybit
         clock=clock,
     )
     return manager, client
+
+
+def _replace_long_target(
+    kernel: AccountExecutionKernel,
+    *,
+    batch_id: str,
+    signed_qty: float,
+) -> TargetBatchResult:
+    return kernel.submit_targets(
+        batch_id=batch_id,
+        market_inputs=(MarketInputRef(
+            input_key=f"book-{batch_id}",
+            symbol="BUSDT",
+            exchange_ts_ns=1_800_000_000,
+            local_receive_ts_ns=1_810_000_000,
+            reference_price=10.0,
+        ),),
+        targets=(DesiredTarget(
+            decision_key=f"decision-{batch_id}",
+            target_key="long/strategy/trade/BUSDT",
+            sleeve="long",
+            strategy_id="strategy",
+            component_id="trade",
+            symbol="BUSDT",
+            signed_qty=signed_qty,
+            reference_price=10.0,
+            leverage=10.0,
+            reason="test replacement",
+        ),),
+        risk_snapshot=AccountRiskSnapshot(
+            10_000.0,
+            9_000.0,
+            f"wallet-{batch_id}",
+            1_805_000_000,
+        ),
+        risk_policy=AccountRiskPolicy(
+            1_000.0,
+            1_000.0,
+            1_000.0,
+            1_000.0,
+            10.0,
+        ),
+        instrument_rules={
+            "BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0, tick_size=0.1),
+        },
+    )
+
+
+def test_manager_retains_existing_stop_during_fully_covered_canonical_close(
+    tmp_path: Path,
+) -> None:
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0)
+    manager, client = _manager(kernel, clock)
+    installed = manager.sync("BUSDT")
+    assert installed is not None
+
+    close = _replace_long_target(kernel, batch_id="close", signed_qty=0.0)
+    assert len(close.commands) == 1
+    assert close.commands[0].reduce_only is True
+    retained = manager.sync("BUSDT")
+
+    assert retained is not None
+    assert retained.protection_key == installed.protection_key
+    assert retained.stop_price == installed.stop_price
+    assert len(client.stops) == 1
+    manager.require_recent_healthy(max_age_ns=1_000_000_000)
+
+    command = close.commands[0]
+    KernelExecutionDriver(kernel).ingest((
+        ExecutionObservation(
+            observation_type="ack",
+            command_id=command.command_id,
+            exchange_ts_ns=1_820_000_000,
+            local_receive_ts_ns=1_821_000_000,
+            accepted=True,
+            venue_order_id="close-order",
+        ),
+        ExecutionObservation(
+            observation_type="fill",
+            command_id=command.command_id,
+            exchange_ts_ns=1_830_000_000,
+            local_receive_ts_ns=1_831_000_000,
+            venue_order_id="close-order",
+            execution_id="close-partial",
+            signed_qty=-0.5,
+            price=10.0,
+            fee_usdt=0.01,
+        ),
+    ))
+    partial = manager.sync("BUSDT")
+    assert partial is not None
+    assert partial.protection_key == installed.protection_key
+    assert partial.signed_qty == 1.5
+    assert len(client.stops) == 1
+
+    KernelExecutionDriver(kernel).ingest((ExecutionObservation(
+        observation_type="fill",
+        command_id=command.command_id,
+        exchange_ts_ns=1_840_000_000,
+        local_receive_ts_ns=1_841_000_000,
+        venue_order_id="close-order",
+        execution_id="close-final",
+        signed_qty=-1.5,
+        price=10.0,
+        fee_usdt=0.01,
+    ),))
+    assert manager.sync("BUSDT") is None
+    assert manager.active("BUSDT") is None
+    assert kernel.state().protections[installed.protection_key]["status"] == "position_flat"
+
+
+def test_manager_does_not_invent_stop_for_unprotected_close_transition(
+    tmp_path: Path,
+) -> None:
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0)
+    close = _replace_long_target(kernel, batch_id="close", signed_qty=0.0)
+    assert close.commands[0].reduce_only is True
+    manager, client = _manager(kernel, clock)
+
+    with pytest.raises(RuntimeError, match="no same-direction component target owner"):
+        manager.plan("BUSDT")
+    assert client.stops == []
+
+
+def test_manager_rejects_superseded_risk_increasing_work_as_close_coverage(
+    tmp_path: Path,
+) -> None:
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0)
+    manager, _client = _manager(kernel, clock)
+    manager.sync("BUSDT")
+    increase = _replace_long_target(kernel, batch_id="increase", signed_qty=3.0)
+    assert len(increase.commands) == 1
+    assert increase.commands[0].reduce_only is False
+    close = _replace_long_target(kernel, batch_id="supersede-flat", signed_qty=0.0)
+    assert close.accepted is True
+    assert close.commands == ()
+
+    with pytest.raises(RuntimeError, match="no same-direction component target owner"):
+        manager.plan("BUSDT")
+
+
+def test_manager_rejects_terminal_close_as_position_coverage(tmp_path: Path) -> None:
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0)
+    manager, _client = _manager(kernel, clock)
+    manager.sync("BUSDT")
+    close = _replace_long_target(kernel, batch_id="close", signed_qty=0.0)
+    command = close.commands[0]
+    KernelExecutionDriver(kernel).ingest((ExecutionObservation(
+        observation_type="ack",
+        command_id=command.command_id,
+        exchange_ts_ns=1_820_000_000,
+        local_receive_ts_ns=1_821_000_000,
+        accepted=False,
+        rejection_key="venue-rejected-close",
+    ),))
+
+    with pytest.raises(RuntimeError, match="no same-direction component target owner"):
+        manager.plan("BUSDT")
 
 
 def test_manager_installs_outermost_component_stop_and_requires_health(tmp_path: Path) -> None:

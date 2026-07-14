@@ -240,22 +240,24 @@ must not be presented as current runtime readiness.
 
 ## Account-owner cutover evidence
 
-The V4 demo calibration is closed after one real `0.002 BTC` fill exposed two
-runtime races: the venue/local reconciliation snapshot can transiently lead the
-private execution journal, and two valid ACK observers can carry different
-observation timestamps for the same accepted order. The run aborted before any
-calibration floor. A separate canonical recovery target finished local/venue
-flat with no open order; paper and ordinary producers never started.
+V4 is closed after one real `0.002 BTC` fill exposed bounded reconciliation and
+competing-ACK races. V5's fresh-epoch first BTC round trip proved those repairs:
+both `0.002 BTC` fills and their fees reached the immutable journal, which
+recorded provisional net P&L of `-0.13755984 USDT`. V5 then exposed a distinct
+ordering defect: component-owner removal for an accepted zero target can
+precede its canonical reduce-only fill, and native protection misclassified
+that in-flight close as an orphan. The close filled and final self-hashed
+evidence proved local/venue flat with no open order. Both epochs are spent;
+paper and ordinary producers never started.
 
-This is useful negative operational evidence, not a latency/slippage estimate
-and not deployment acceptance. Prospective V5 excludes the V4 pilot, keeps the
-  sample size and numerical decision rules unchanged, and requires a fresh reset
-  epoch. Its only revisions are a ten-second, post-publication-only allowance for
-  the exact reconciliation propagation state and semantic ACK/fill idempotency
-  under the journal lock. A later HTTP create-response timing remains a separate
-  immutable observation if a private fill established acceptance first;
-  conflicting durable facts still fail. Even a passing V5
-would open only execution-twin calibration and paper collection; actual
+This is useful negative operational evidence, not a calibrated latency or
+slippage estimate and not deployment acceptance. Prospective V6 excludes both
+pilots, keeps every sample size and numerical decision rule unchanged, and
+retains the existing stop only when immutable state proves a fully covering
+canonical reduce-only close to an explicit zero target. It still fails on a
+missing stop, incomplete/terminal/wrong-side work, or a true orphan position.
+Even a passing V6 would open only execution-twin calibration and paper
+collection; actual
 LONG/CONTINUOUS tapes, deterministic replay comparison, venue accounting,
 funding, final flatness, and cutover authorization remain separate gates.
 

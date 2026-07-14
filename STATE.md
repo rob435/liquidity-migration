@@ -13,7 +13,7 @@ research decisions are in
 | --- | --- | --- |
 | `continuous_ensemble_v2` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
 | `LongV11aDivWeekendVol` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
-| Shared account execution | demo + paper | Demo owner stopped after verified-flat V4 recovery; V4 evidence retained; capture marker enabled; paper never started |
+| Shared account execution | demo + paper | Demo owner stopped after verified-flat V5 failure; V4/V5 evidence retained; capture marker enabled; paper never started |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
@@ -25,7 +25,7 @@ research decisions are in
   checksums are retained under
   `/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z`.
 - Staged topology installation from branch
-  `codex/account-execution-cutover` through commit `95e49120f8a1` passed 142 Linux
+  `codex/account-execution-cutover` through commit `c113d78014e0` passed 142 Linux
   smoke tests. It installed the two owner units and removed the retired Bybit
   risk and combined-book reporter units without starting any unit or creating
   a capture/deploy marker. This is maintenance staging, not an accepted full
@@ -73,26 +73,33 @@ research decisions are in
   ACK/private-fill race exposed a second-observer immutable-ACK collision. A
   separate canonical recovery-zero target closed the position; final evidence
   proved local and venue flatness plus no open orders, and the owner was
-  stopped. V4 is spent and cannot be resumed or counted. Paper and ordinary
-  strategy producers were never started. Prospective V5 keeps the numerical
-  sample and gates unchanged, binds a new exact plan id, permits only that exact
-  post-publication reconciliation transition for at most ten seconds, and
-  makes semantically identical ACK/fill redelivery idempotent under the journal
-  lock while rejecting changed durable facts. A late HTTP create response is
-  retained as a supplemental timing observation when a private fill established
-  acceptance first, so the race fix does not discard calibration data. The V5
-  repair passed 2,424 local tests plus repository-wide Ruff and scoped mypy.
-  It still requires an exact clean commit, remote Linux smoke, staged install,
-  and another archived/reset epoch before any V5 target.
+  stopped. V4 is spent and cannot be resumed or counted. Commit `c113d78014e0`
+  then passed 2,424 local tests, repository-wide Ruff, scoped mypy, and 142
+  remote Linux smoke tests. A second guarded reset archived the failed V4 epoch
+  to a 6.0-MB archive with SHA-256
+  `56cb3787d12b9c6e72bb684e59b37e3c6fbdc62fded8db32612da293bf629f7c`
+  and created another six fresh roots. V5's fresh clock receipt passed with an
+  84.668-ms maximum midpoint-error estimate. Its first BTC open and close each
+  filled `0.002 BTC`; the journal recorded both fees and a provisional
+  `-0.13755984 USDT` reduction P&L. V5 still aborted: after the zero target
+  removed the component owner but before its reduce-only fill updated the
+  position, native-protection sync misclassified the canonical in-flight close
+  as ownerless. Final self-hashed evidence proved local/venue flatness and no
+  open orders, and the owner was stopped. V5 is spent. Paper and ordinary
+  producers were never started. Prospective V6 retains all numerical gates and
+  permits the installed native stop to survive only a fully covering canonical
+  reduce-only close; missing protection, partial/terminal/wrong-side work, and
+  real orphan positions remain fail-closed. V6 still requires full validation,
+  an exact staged commit, and a new archived/reset epoch before any V6 target.
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now
   share an ordered hash-chained event-clock boundary and callback time. Their
   arrival/selection adapters are not yet full strategy parity. CONTINUOUS
   adverse-limit mode and LONG waits beyond 24 hours remain post-run replay.
-- The cutover acceptance gate is open: fresh rules exist and the V4 pilot plus
-  recovery are retained, but no passing calibration target/order/fill/P&L tape,
-  fresh V5 clock-offset receipt,
+- The cutover acceptance gate is open: fresh rules and failed V4/V5 evidence
+  exist, but no passing calibration target/order/fill/P&L tape, fresh V6
+  clock-offset receipt,
   passing execution-twin calibration, venue-accounting receipt, or full
   historical/paper/demo comparison exists. The paper owner refuses startup
   without a passing calibration. Full deploy now requires a short-lived,
