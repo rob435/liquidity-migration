@@ -183,9 +183,67 @@ def test_install_preflight_requires_fleet_quiescence_before_checkout(script: Pat
     assert call < checkout
     function = text[text.index("require_install_preflight_quiescence()") : call]
     assert "systemctl list-units 'liquidity-migration-*' --all" in function
-    assert '$3 != "inactive" && $3 != "failed"' in function
+    assert 'NF >= 3 && $3 != "inactive" && $3 != "failed"' in function
     assert "failed to inspect liquidity-migration unit state" in function
     assert "quiesce every liquidity-migration unit before checkout" in function
+
+
+@pytest.mark.parametrize("script", [DEPLOY_SH, RECOVERY_SH])
+def test_install_preflight_accepts_an_empty_fleet_but_refuses_an_active_unit(
+    script: Path,
+    tmp_path: Path,
+) -> None:
+    text = script.read_text(encoding="utf-8")
+    call = text.index("require_install_preflight_quiescence\n")
+    function = text[text.index("require_install_preflight_quiescence()") : call]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    output = tmp_path / "systemctl-output"
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "cat \"$SYSTEMCTL_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SYSTEMCTL_OUTPUT": str(output),
+    }
+    command = "\n".join(
+        (
+            "set -euo pipefail",
+            function,
+            "INSTALL_PREFLIGHT_ONLY=1",
+            "require_install_preflight_quiescence",
+        )
+    )
+
+    output.write_text("", encoding="utf-8")
+    empty = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+    assert empty.returncode == 0, empty.stderr
+
+    output.write_text(
+        "liquidity-migration-account-execution.service loaded active running owner\n",
+        encoding="utf-8",
+    )
+    active = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+    assert active.returncode != 0
+    assert "liquidity-migration-account-execution.service (active)" in active.stderr
 
 
 def test_install_preflight_can_checkout_candidate_branch_ahead_of_main(

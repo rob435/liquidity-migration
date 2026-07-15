@@ -235,7 +235,7 @@ require_install_preflight_quiescence() {
     echo "Refusing recovery install preflight: failed to inspect liquidity-migration unit state." >&2
     exit 1
   fi
-  _preflight_running="$(printf '%s\n' "$_preflight_units" | awk '$3 != "inactive" && $3 != "failed" {print $1 " (" $3 ")"}')"
+  _preflight_running="$(printf '%s\n' "$_preflight_units" | awk 'NF >= 3 && $3 != "inactive" && $3 != "failed" {print $1 " (" $3 ")"}')"
   if [ -n "$_preflight_running" ]; then
     echo "Refusing recovery install preflight: quiesce every liquidity-migration unit before checkout:" >&2
     printf '%s\n' "$_preflight_running" >&2
