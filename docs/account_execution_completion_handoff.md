@@ -51,6 +51,22 @@ registered natural window is exactly 120 hours. Avoiding redundant suite runs
 saves compute and operator time; shortening that window would invalidate the
 registered evidence rather than accelerate it.
 
+Replacement candidate `54536f194d91bcabb5fe8f47310c6a09928ecf12` later
+passed its complete local, canonical pre-push, and exact-head noncontacting
+Linux gates, but its first public-demo capacity diagnostic failed before output
+on ticker-only label `WC_ENG_ARG_USDT-15JUL26`, which was absent from the
+complete instrument snapshot and outside the strategy symbol grammar. The
+candidate was not installed or retried and is spent. The prospective repair
+bumps the candidate-universe artifact to schema v2: every raw source row remains
+hash-bound, noncanonical ticker-only rows are recorded explicitly as rejected
+from candidate evaluation, and instrument-mappable/missing/duplicate rows stay
+fail-closed. A first repaired capacity-only diagnostic observed 616 union
+symbols and one rejected ticker-only row; it is not the natural freeze or a
+rule-coverage receipt. A new exact candidate and all candidate gates remain
+required. The host also needs additional capture/archive storage before the
+stopped topology install and V8 reset; do not treat cache deletion or the
+existing 40-GB root filesystem as sufficient.
+
 ## Efficient validation cadence
 
 Testing is progressive, not absent:

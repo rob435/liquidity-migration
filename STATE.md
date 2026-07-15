@@ -37,9 +37,17 @@ research decisions are in
   `98b3916a4a135df3508f051f2354bc2346904690`. Candidate
   `c7d6509d3a21c75db77ed9486129a3cc4cfaa591` passed 2,950 local tests and an
   exact-head non-contacting Ubuntu candidate-CI run, but it was never installed
-  and does not repair the V7 defects. It is retained as spent candidate history.
-  A new clean replacement candidate and all applicable gates are required
-  before staging V8. This remains maintenance work, not deployment.
+  and does not repair the V7 defects. Replacement candidate
+  `54536f194d91bcabb5fe8f47310c6a09928ecf12` repaired those defects and passed
+  2,954 local tests plus exact-head non-contacting Ubuntu candidate CI, but a
+  first public-demo capacity diagnostic then exposed one noncanonical
+  ticker-only Bybit row that made candidate-universe construction fail before
+  output. It was not retried or installed and is also spent. The prospective
+  schema-v2 repair keeps and hashes the raw row, records it explicitly as
+  outside candidate evaluation, and preserves strict validation for every
+  instrument-mappable row. A new clean replacement candidate and all applicable
+  gates are required before staging V8. This remains maintenance work, not
+  deployment.
 - The guarded all-sleeve reset completed at `2026-07-13T23:43:14Z`. It re-proved
   venue flatness, archived 12 legacy projections/roots plus preserved risk
   state to a verified 335-MB archive with SHA-256
@@ -141,7 +149,8 @@ research decisions are in
   replay.
 - The cutover acceptance gate is open: fresh rules and failed V4--V7 evidence
   exist, but the prospective V8 follow-on has not been frozen into a clean exact
-  replacement candidate or passed its non-contacting `candidate-ci` gate. V8
+  post-`54536f1` replacement candidate or passed its non-contacting
+  `candidate-ci` gate. V8
   and its partial-fill gate have not run; there is no passing calibration
   target/order/fill/P&L tape, second full registered-output natural-holdout reset, owner-first
   readiness pair, 120-hour natural LONG/CONT tape, periodic clock series,

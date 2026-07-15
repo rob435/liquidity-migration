@@ -24,7 +24,7 @@ from .downloaders import _normalize_instruments, _normalize_tickers
 from .universe import build_current_universe_table
 
 
-CANDIDATE_UNIVERSE_SCHEMA_VERSION = 1
+CANDIDATE_UNIVERSE_SCHEMA_VERSION = 2
 CANDIDATE_UNIVERSE_KIND = "account_execution_candidate_universe"
 _PROFILE_NAMES = ("long", "continuous")
 
@@ -62,6 +62,54 @@ def _unique_rows(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, 
             raise ValueError(f"{label} contains duplicate symbol {symbol!r}")
         output[symbol] = row
     return output
+
+
+def _partition_ticker_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    instrument_symbols: set[str],
+    label: str,
+) -> tuple[dict[str, Mapping[str, Any]], list[dict[str, Any]]]:
+    """Separate canonical candidate tickers from out-of-domain source rows.
+
+    Bybit's linear ticker endpoint can contain synthetic rows that are absent
+    from the complete linear instrument snapshot and whose venue label is not a
+    valid strategy symbol. They cannot enter the instrument/ticker inner join,
+    but they remain raw source evidence. Missing symbols, duplicate labels, and
+    every row that maps to a validated instrument continue to fail closed.
+    """
+
+    output: dict[str, Mapping[str, Any]] = {}
+    rejected: list[dict[str, Any]] = []
+    rejected_labels: set[str] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"{label}[{index}] must be an object")
+        raw_symbol = row.get("symbol")
+        try:
+            symbol = _symbol(raw_symbol)
+        except ValueError:
+            if not isinstance(raw_symbol, str) or not raw_symbol.strip():
+                raise
+            source_label = raw_symbol
+            comparison_label = source_label.strip().upper()
+            if comparison_label in instrument_symbols:
+                raise
+            if comparison_label in rejected_labels:
+                raise ValueError(
+                    f"{label} contains duplicate symbol {comparison_label!r}"
+                )
+            rejected_labels.add(comparison_label)
+            rejected.append({
+                "row_index": index,
+                "raw_symbol": source_label,
+                "reason": "noncanonical_ticker_only_symbol",
+            })
+            continue
+        if symbol in output:
+            raise ValueError(f"{label} contains duplicate symbol {symbol!r}")
+        output[symbol] = row
+    return output, rejected
 
 
 def profile_universe_inputs(
@@ -165,10 +213,14 @@ def build_profile_universe_tables(
         raise ValueError("snapshot_ts_ms must be positive")
     if set(profile_inputs) != set(_PROFILE_NAMES):
         raise ValueError("candidate profile inputs must contain long and continuous")
-    _unique_rows(instrument_rows, label="instrument_rows")
-    _unique_rows(ticker_rows, label="ticker_rows")
-    instruments = _normalize_instruments([dict(row) for row in instrument_rows])
-    tickers = _normalize_tickers([dict(row) for row in ticker_rows])
+    instrument_map = _unique_rows(instrument_rows, label="instrument_rows")
+    ticker_map, _ = _partition_ticker_rows(
+        ticker_rows,
+        instrument_symbols=set(instrument_map),
+        label="ticker_rows",
+    )
+    instruments = _normalize_instruments([dict(row) for row in instrument_map.values()])
+    tickers = _normalize_tickers([dict(row) for row in ticker_map.values()])
     return build_profile_universe_tables_from_frames(
         instruments,
         tickers,
@@ -304,7 +356,11 @@ def build_candidate_universe_artifact(
         raise ValueError("snapshot_ts_ns must be positive")
     snapshot_ts_ms = snapshot_ts_ns // 1_000_000
     instruments = _unique_rows(instrument_rows, label="instrument_rows")
-    tickers = _unique_rows(ticker_rows, label="ticker_rows")
+    tickers, rejected_tickers = _partition_ticker_rows(
+        ticker_rows,
+        instrument_symbols=set(instruments),
+        label="ticker_rows",
+    )
     inputs = profile_universe_inputs(
         long_config=long_config,
         continuous_config=continuous_config,
@@ -343,6 +399,8 @@ def build_candidate_universe_artifact(
         "raw_source": {
             "instrument_rows": len(instrument_rows),
             "ticker_rows": len(ticker_rows),
+            "evaluated_ticker_rows": len(tickers),
+            "rejected_ticker_rows": len(rejected_tickers),
             "instrument_rows_sha256": hashlib.sha256(
                 canonical_json({"rows": raw_instruments})
             ).hexdigest(),
@@ -354,6 +412,7 @@ def build_candidate_universe_artifact(
             "instrument_rows": raw_instruments,
             "ticker_rows": raw_tickers,
         },
+        "rejected_ticker_rows": rejected_tickers,
         "profile_eligible_symbols": {
             profile: sorted(eligible[profile]) for profile in _PROFILE_NAMES
         },
@@ -484,6 +543,21 @@ def load_candidate_universe(
         canonical_json({"rows": raw_tickers})
     ).hexdigest():
         raise ValueError("candidate-universe raw source hashes are invalid")
+    instrument_map = _unique_rows(raw_instruments, label="raw instrument_rows")
+    ticker_map, rebuilt_rejected_tickers = _partition_ticker_rows(
+        raw_tickers,
+        instrument_symbols=set(instrument_map),
+        label="raw ticker_rows",
+    )
+    declared_rejected_tickers = payload.get("rejected_ticker_rows")
+    if (
+        not isinstance(declared_rejected_tickers, list)
+        or canonical_json({"rows": declared_rejected_tickers})
+        != canonical_json({"rows": rebuilt_rejected_tickers})
+        or raw_source.get("evaluated_ticker_rows") != len(ticker_map)
+        or raw_source.get("rejected_ticker_rows") != len(rebuilt_rejected_tickers)
+    ):
+        raise ValueError("candidate-universe rejected ticker rows are inconsistent")
     snapshot_ts_ns = int(payload.get("snapshot_ts_ns") or 0)
     if snapshot_ts_ns <= 0:
         raise ValueError("candidate-universe snapshot_ts_ns must be positive")
@@ -520,8 +594,6 @@ def load_candidate_universe(
     decisions = payload.get("decisions")
     if not isinstance(decisions, list):
         raise ValueError("candidate-universe decisions must be a list")
-    instrument_map = _unique_rows(raw_instruments, label="raw instrument_rows")
-    ticker_map = _unique_rows(raw_tickers, label="raw ticker_rows")
     rebuilt_decisions = _decision_rows(
         instrument_map,
         ticker_map,

@@ -212,6 +212,14 @@ order as an operational sequence. The registered order is:
 Build the natural run config before T0. No branch promotion or deployment is a
 step in this sequence.
 
+Candidate-universe schema v2 retains and hashes the complete raw instrument and
+ticker snapshots. A noncanonical ticker label absent from the complete
+instrument snapshot is recorded under `rejected_ticker_rows` and excluded from
+candidate evaluation; it is never normalized into a strategy symbol. Missing
+labels, duplicates, noncanonical instrument rows, and any row that could map to
+a validated instrument remain fail-closed. The loader recomputes this partition
+and the full decision table from the raw snapshot.
+
 ```bash
 # Read-only production verification.
 scripts/ops.sh status

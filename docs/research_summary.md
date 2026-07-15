@@ -297,10 +297,20 @@ is therefore resolved in source.
 Candidate `c7d6509` passed its clean local and non-contacting exact-head Linux
 gates, but the V7 failures exposed code paths it did not repair; it is therefore
 spent as the cutover candidate and was never installed. This is implementation
-progress, not a result: no clean replacement-candidate CI receipt, passing V8
-or partial-fill gate, second reset, owner-first readiness
-pair, 120-hour natural tape, venue-accounting/final-flatness receipt, stopped
-seal, replay result, fresh epoch, or deployment authorization exists. Local
+history, not a result. Replacement candidate `54536f1` repaired the V7 paths and
+passed its clean local, canonical pre-push, and exact-head Linux gates, but its
+first public-demo capacity diagnostic failed before output on a noncanonical
+ticker-only Bybit row absent from the complete instrument snapshot. That
+candidate was not installed or retried and is also spent. A prospective
+schema-v2 source-partition repair retains and hashes such raw rows, records them
+as excluded from candidate evaluation, and keeps instrument and duplicate
+validation fail-closed. Its first repaired diagnostic observed 616 candidate
+symbols and one rejected ticker-only row; that snapshot is capacity-planning
+evidence only, not the natural freeze or a rule-coverage result. There is still
+no clean replacement-candidate CI receipt after that repair, passing V8 or
+partial-fill gate, second reset, owner-first readiness pair, 120-hour natural
+tape, venue-accounting/final-flatness receipt, stopped seal, replay result,
+fresh epoch, or deployment authorization. Local
 analysis timestamps enforce declared internal chronology rather than
 authenticate wall-clock execution. The target manifest assigns its completion
 time after replay construction; source reopening and exact dependency hashes,

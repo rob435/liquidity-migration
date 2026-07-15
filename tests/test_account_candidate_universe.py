@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ from liquidity_migration.account_candidate_universe import (
     write_candidate_universe,
 )
 from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
+from liquidity_migration.deterministic_serialization import canonical_json
 from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
 
 
@@ -160,3 +162,82 @@ def test_builder_rejects_duplicate_raw_symbol() -> None:
             long_config=LongNativeDemoCycleConfig(),
             continuous_config=ContinuousDemoCycleConfig(),
         )
+
+
+def test_builder_records_noncanonical_ticker_only_source_rejection(
+    tmp_path: Path,
+) -> None:
+    synthetic = _ticker("WC_ENG_ARG_USDT-15JUL26", "14932.6400")
+    synthetic.update({
+        "deliveryTime": "1784073600000",
+        "predictedDeliveryPrice": "",
+        "curPreListingPhase": "",
+    })
+    payload = build_candidate_universe_artifact(
+        [_instrument("AAAUSDT")],
+        [_ticker("AAAUSDT", "3000000"), synthetic],
+        snapshot_ts_ns=SNAPSHOT_NS,
+        long_config=LongNativeDemoCycleConfig(),
+        continuous_config=ContinuousDemoCycleConfig(),
+    )
+
+    assert payload["schema_version"] == 2
+    assert payload["symbols"] == ["AAAUSDT"]
+    assert payload["raw_source"]["ticker_rows"] == 2
+    assert payload["raw_snapshot"]["ticker_rows"][1] == synthetic
+    assert payload["rejected_ticker_rows"] == [{
+        "row_index": 1,
+        "raw_symbol": "WC_ENG_ARG_USDT-15JUL26",
+        "reason": "noncanonical_ticker_only_symbol",
+    }]
+    assert {row["symbol"] for row in payload["decisions"]} == {"AAAUSDT"}
+    assert load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate.json", payload)
+    ).symbols == ("AAAUSDT",)
+
+    with pytest.raises(ValueError, match="invalid candidate-universe symbol"):
+        build_candidate_universe_artifact(
+            [_instrument("WC_ENG_ARG_USDT-15JUL26")],
+            [synthetic],
+            snapshot_ts_ns=SNAPSHOT_NS,
+            long_config=LongNativeDemoCycleConfig(),
+            continuous_config=ContinuousDemoCycleConfig(),
+        )
+
+    with pytest.raises(ValueError, match="duplicate symbol"):
+        build_candidate_universe_artifact(
+            [_instrument("AAAUSDT")],
+            [synthetic, dict(synthetic)],
+            snapshot_ts_ns=SNAPSHOT_NS,
+            long_config=LongNativeDemoCycleConfig(),
+            continuous_config=ContinuousDemoCycleConfig(),
+        )
+
+    with pytest.raises(ValueError, match="invalid candidate-universe symbol"):
+        build_candidate_universe_artifact(
+            [_instrument("AAAUSDT")],
+            [{"turnover24h": "3000000"}],
+            snapshot_ts_ns=SNAPSHOT_NS,
+            long_config=LongNativeDemoCycleConfig(),
+            continuous_config=ContinuousDemoCycleConfig(),
+        )
+
+
+def test_loader_recomputes_noncanonical_ticker_source_rejections(
+    tmp_path: Path,
+) -> None:
+    synthetic = _ticker("WC_ENG_ARG_USDT-15JUL26", "14932.6400")
+    payload = build_candidate_universe_artifact(
+        [_instrument("AAAUSDT")],
+        [_ticker("AAAUSDT", "3000000"), synthetic],
+        snapshot_ts_ns=SNAPSHOT_NS,
+        long_config=LongNativeDemoCycleConfig(),
+        continuous_config=ContinuousDemoCycleConfig(),
+    )
+    payload["rejected_ticker_rows"][0]["reason"] = "silently_ignored"
+    payload["artifact_sha256"] = ""
+    payload["artifact_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
+    path = write_candidate_universe(tmp_path / "candidate.json", payload)
+
+    with pytest.raises(ValueError, match="rejected ticker rows are inconsistent"):
+        load_candidate_universe(path)
