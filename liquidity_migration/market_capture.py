@@ -739,7 +739,7 @@ class SequenceAwareMarketRecorder:
             bid_price=bid_price,
             ask_price=ask_price,
             required_symbols_sha256=hashlib.sha256(
-                canonical_json(sorted(required_symbols))
+                canonical_json({"symbols": sorted(required_symbols)})
             ).hexdigest(),
             required_symbol_count=len(required_symbols),
             healthy_symbol_count=len(healthy_states),

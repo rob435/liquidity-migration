@@ -345,9 +345,9 @@ def _validate_environments(
         else tuple(_INPUT_KEYS)
     )
     for filename in input_filenames:
-        keys = _INPUT_KEYS[filename]
+        input_keys = _INPUT_KEYS[filename]
         environment = values[filename]
-        for key in keys:
+        for key in input_keys:
             raw = environment.get(key, "")
             path = Path(raw).expanduser()
             if not path.is_absolute():
