@@ -16,9 +16,14 @@ gates, but its first public candidate-universe construction exposed a
 noncanonical ticker-only source row that failed before output; it was not
 installed or retried and is also spent. The prospective schema-v2 repair keeps
 and hashes that raw source row while explicitly excluding it from candidate
-evaluation, without widening the strategy symbol grammar. There is no frozen
-passing replacement candidate after that repair; V8 and its partial-fill gate
-have not run; and there is
+evaluation, without widening the strategy symbol grammar. Schema-v2 candidate
+`344cd72` passed its registered local Ruff/full-pytest gate, then the canonical
+pre-push gate failed before network update because the hook's `.git/tmp`
+basetemp violated existing source-snapshot tests' outside-repository invariant.
+The candidate is spent. The prospective hook repair moves and validates that
+basetemp outside the repository; it does not change Strategy Overhaul logic.
+There is no frozen passing replacement candidate after that repair; V8 and its
+partial-fill gate have not run; and there is
 no natural 120-hour LONG/CONT epoch, periodic clock series,
 venue-accounting/final-flatness receipt, offline replay/parity/drift/sufficiency
 result, real stopped-natural-epoch seal, real fresh-deploy epoch, or cutover
@@ -136,8 +141,9 @@ the V7 defects. Candidate `54536f194d91` then repaired those defects and passed
 2,954 local tests plus exact-head Linux CI, but its first public-demo capacity
 snapshot failed closed on a ticker-only synthetic label absent from the complete
 instrument snapshot. It was not installed. Re-stage and verify only a new exact
-post-schema-v2 replacement candidate before V8. No staged revision or failed
-V7 path created a deploy-ready or activation marker. The
+post-`344cd72` replacement candidate with the external-basetemp hook repair
+before V8. No staged revision or failed V7 path created a deploy-ready or
+activation marker. The
 guarded reset then re-proved venue flatness, archived 12 legacy
 roots/projections to the verified archive whose SHA-256 is
 `07e76e35e688fb6f20e17c78ea9bc8489144c852f4c99fcb9964d887c06c6d6a`,

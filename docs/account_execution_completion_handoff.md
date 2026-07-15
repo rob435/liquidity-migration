@@ -62,10 +62,18 @@ hash-bound, noncanonical ticker-only rows are recorded explicitly as rejected
 from candidate evaluation, and instrument-mappable/missing/duplicate rows stay
 fail-closed. A first repaired capacity-only diagnostic observed 616 union
 symbols and one rejected ticker-only row; it is not the natural freeze or a
-rule-coverage receipt. A new exact candidate and all candidate gates remain
-required. The host also needs additional capture/archive storage before the
-stopped topology install and V8 reset; do not treat cache deletion or the
-existing 40-GB root filesystem as sufficient.
+rule-coverage receipt. First schema-v2 candidate
+`344cd727b0d89380dd8bf4e7aaa112bfe5b3d885` passed its registered local suite
+with 2,956 tests, then its canonical pre-push gate failed before network update:
+the tracked hook placed pytest output under `.git/tmp`, while nine existing
+Strategy Overhaul source-snapshot tests require immutable outputs outside the
+repository. The 2,947-pass/one-failure/eight-error result is retained; the
+candidate was not pushed or installed and is spent. The prospective hook fix
+moves and validates only the pytest basetemp, not alpha logic or a gate. A new
+exact candidate and all candidate gates remain required. The host also needs
+additional capture/archive storage before the stopped topology install and V8
+reset; do not treat cache deletion or the existing 40-GB root filesystem as
+sufficient.
 
 ## Efficient validation cadence
 

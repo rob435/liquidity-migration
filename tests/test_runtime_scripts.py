@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import shlex
@@ -3795,6 +3796,55 @@ def test_vps_deploy_workflow_has_full_suite_ci_gate() -> None:
     assert "pull_request:" in wf
     # The deploy job must not touch the box on a PR.
     assert "github.event_name != 'pull_request'" in wf
+
+
+def test_pre_push_hook_keeps_pytest_basetemp_outside_repository(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    hook = repo / "pre-push"
+    hook.write_bytes((REPO_ROOT / "scripts" / "git-hooks" / "pre-push").read_bytes())
+    hook.chmod(0o755)
+
+    argv_log = tmp_path / "python-argv.jsonl"
+    python_stub = repo / ".venv" / "bin" / "python"
+    python_stub.parent.mkdir(parents=True)
+    python_stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['PREPUSH_ARGV_LOG'], 'a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    python_stub.chmod(0o755)
+    external_tmp = tmp_path / "external-tmp"
+    external_tmp.mkdir()
+    env = {
+        **os.environ,
+        "PREPUSH_ARGV_LOG": str(argv_log),
+        "TMPDIR": str(external_tmp),
+    }
+
+    subprocess.run([str(hook)], cwd=repo, env=env, check=True)
+    calls = [json.loads(line) for line in argv_log.read_text().splitlines()]
+    assert len(calls) == 2
+    pytest_argv = calls[1]
+    basetemp = Path(pytest_argv[pytest_argv.index("--basetemp") + 1]).resolve()
+    assert not basetemp.is_relative_to(repo.resolve())
+    assert basetemp.parent == external_tmp.resolve()
+
+    rejected = subprocess.run(
+        [str(hook)],
+        cwd=repo,
+        env={**env, "PYTEST_BASETEMP": str(repo / ".git" / "pytest")},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "refusing pytest basetemp inside repository" in rejected.stderr
 
 
 def _unit_environment(unit_path: Path) -> dict[str, str]:

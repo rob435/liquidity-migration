@@ -45,9 +45,17 @@ research decisions are in
   output. It was not retried or installed and is also spent. The prospective
   schema-v2 repair keeps and hashes the raw row, records it explicitly as
   outside candidate evaluation, and preserves strict validation for every
-  instrument-mappable row. A new clean replacement candidate and all applicable
-  gates are required before staging V8. This remains maintenance work, not
-  deployment.
+  instrument-mappable row. First schema-v2 candidate
+  `344cd727b0d89380dd8bf4e7aaa112bfe5b3d885` passed repository Ruff and all
+  2,956 tests in its registered local suite. Its canonical pre-push gate then
+  failed before network update because the tracked hook put pytest's basetemp
+  below `.git/tmp`; nine existing Strategy Overhaul source-snapshot tests
+  correctly reject any output root inside the repository. The result was 2,947
+  passes, one failure, and eight setup errors. The candidate was not pushed or
+  installed and is spent. The prospective hook repair moves and validates the
+  basetemp outside the repository without changing any alpha test or rule. A
+  new clean replacement candidate and all applicable gates are required before
+  staging V8. This remains maintenance work, not deployment.
 - The guarded all-sleeve reset completed at `2026-07-13T23:43:14Z`. It re-proved
   venue flatness, archived 12 legacy projections/roots plus preserved risk
   state to a verified 335-MB archive with SHA-256
@@ -149,7 +157,7 @@ research decisions are in
   replay.
 - The cutover acceptance gate is open: fresh rules and failed V4--V7 evidence
   exist, but the prospective V8 follow-on has not been frozen into a clean exact
-  post-`54536f1` replacement candidate or passed its non-contacting
+  post-`344cd72` replacement candidate or passed its non-contacting
   `candidate-ci` gate. V8
   and its partial-fill gate have not run; there is no passing calibration
   target/order/fill/P&L tape, second full registered-output natural-holdout reset, owner-first

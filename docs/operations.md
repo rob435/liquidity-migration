@@ -156,6 +156,11 @@ BTCUSDT/ETHUSDT/BUSDT V8 symbol file, not the candidate-universe artifact.
 
 ## Exact-candidate Linux CI
 
+The tracked pre-push hook runs its full pytest gate with a basetemp outside the
+repository and refuses an override that resolves below the checkout. This is a
+source-snapshot integrity requirement: `.git/tmp` is still repository-local and
+must not be used for a complete candidate run.
+
 Dispatch the checked candidate branch with workflow mode `candidate-ci`; do not
 use a pull-request merge SHA:
 

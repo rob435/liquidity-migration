@@ -306,8 +306,15 @@ schema-v2 source-partition repair retains and hashes such raw rows, records them
 as excluded from candidate evaluation, and keeps instrument and duplicate
 validation fail-closed. Its first repaired diagnostic observed 616 candidate
 symbols and one rejected ticker-only row; that snapshot is capacity-planning
-evidence only, not the natural freeze or a rule-coverage result. There is still
-no clean replacement-candidate CI receipt after that repair, passing V8 or
+evidence only, not the natural freeze or a rule-coverage result. Schema-v2
+candidate `344cd72` passed its registered local Ruff/full-pytest gate with 2,956
+tests, then its canonical pre-push gate failed before network update because the
+tracked hook placed pytest output below `.git/tmp`. Nine existing
+Strategy-Overhaul source-snapshot tests correctly refused that repository-local
+output (2,947 passed, one failed, eight setup errors). No alpha code or rule was
+changed; the prospective hook repair uses and validates an external basetemp.
+Candidate `344cd72` was not pushed or installed and is spent. There is still no
+clean replacement-candidate CI receipt after that repair, passing V8 or
 partial-fill gate, second reset, owner-first readiness pair, 120-hour natural
 tape, venue-accounting/final-flatness receipt, stopped seal, replay result,
 fresh epoch, or deployment authorization. Local
