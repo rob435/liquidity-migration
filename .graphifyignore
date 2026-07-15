@@ -18,6 +18,9 @@ graphify-out/GRAPH_REPORT.md
 graphify-out/wiki/
 .env
 full_env.txt
+# Separate untracked owner work; do not fold the big-PC program into this
+# account-execution candidate's architecture graph.
+STRATEGY_OVERHAUL_MASTER_PLAN_HANDOFF.md
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal

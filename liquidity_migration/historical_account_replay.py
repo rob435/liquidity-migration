@@ -19,6 +19,7 @@ from .account_kernel import (
     AccountRiskPolicy,
     AccountRiskSnapshot,
     InstrumentRules,
+    MarketInputRef,
     TargetBatchResult,
 )
 from .account_service import RequestedIntent, SleeveAdapterKind
@@ -41,10 +42,38 @@ class HistoricalReplayCycle:
     books: Mapping[str, L2BookSnapshot]
     intents: tuple[RequestedIntent, ...]
     risk_snapshot: AccountRiskSnapshot
+    monotonic_ns: int | None = None
+    market_inputs: Mapping[str, MarketInputRef] | None = None
+    command_symbols: frozenset[str] | None = None
+    require_strict_risk_reduction: bool = False
+    request_content_hash: str | None = None
 
     def __post_init__(self) -> None:
         if not self.batch_id or self.wall_ts_ns <= 0 or not self.books or not self.intents:
             raise ValueError("historical replay cycle requires batch, time, books, and intents")
+        if self.monotonic_ns is not None and self.monotonic_ns < 0:
+            raise ValueError("historical replay monotonic time cannot be negative")
+        book_symbols = {str(symbol).upper() for symbol in self.books}
+        if any(book.symbol.upper() != str(symbol).upper() for symbol, book in self.books.items()):
+            raise ValueError("historical replay book keys must match book symbols")
+        if self.market_inputs is not None:
+            market_symbols = {str(symbol).upper() for symbol in self.market_inputs}
+            if market_symbols != book_symbols:
+                raise ValueError("exact market inputs and replay books must cover the same symbols")
+            for symbol, market in self.market_inputs.items():
+                if market.symbol.upper() != str(symbol).upper():
+                    raise ValueError("historical replay market-input keys must match input symbols")
+        if self.command_symbols is not None:
+            normalized_commands = {str(symbol).upper() for symbol in self.command_symbols}
+            if not normalized_commands or not normalized_commands.issubset(book_symbols):
+                raise ValueError("historical replay command symbols require matching books")
+        if type(self.require_strict_risk_reduction) is not bool:
+            raise ValueError("historical replay strict-reduction mode must be a boolean")
+        if self.request_content_hash is not None and (
+            len(self.request_content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.request_content_hash)
+        ):
+            raise ValueError("historical replay request hash must be lowercase SHA-256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +322,7 @@ class HistoricalAccountReplay:
         instrument_rules: Mapping[str, InstrumentRules],
         execution_config: ExecutionTwinConfig,
         id_seed: str,
+        execution_id_seed: str | None = None,
     ) -> None:
         self.root = Path(root)
         self.account_id = account_id
@@ -300,6 +330,7 @@ class HistoricalAccountReplay:
         self.instrument_rules = dict(instrument_rules)
         self.execution_config = execution_config
         self.id_seed = id_seed
+        self.execution_id_seed = execution_id_seed
 
     def run(self, cycles: Sequence[HistoricalReplayCycle]) -> HistoricalReplayResult:
         ordered = list(cycles)
@@ -312,6 +343,7 @@ class HistoricalAccountReplay:
             instrument_rules=self.instrument_rules,
             execution_config=self.execution_config,
             id_seed=self.id_seed,
+            execution_id_seed=self.execution_id_seed,
         )
         for cycle in ordered:
             session.process_cycle(cycle)
@@ -340,6 +372,7 @@ class HistoricalAccountSession:
         instrument_rules: Mapping[str, InstrumentRules],
         execution_config: ExecutionTwinConfig,
         id_seed: str,
+        execution_id_seed: str | None = None,
     ) -> None:
         self.root = Path(root)
         self.account_id = account_id
@@ -349,6 +382,7 @@ class HistoricalAccountSession:
         }
         self.execution_config = execution_config
         self.id_seed = id_seed
+        self.execution_id_seed = execution_id_seed or self.id_seed + ":execution"
         self.clock: VirtualClock | None = None
         self.event_clock: DeterministicEventClock[AccountCycleResult] | None = None
         self.kernel: AccountExecutionKernel | None = None
@@ -358,17 +392,21 @@ class HistoricalAccountSession:
             instrument_rules=self.instrument_rules,
             config=self.execution_config,
             name="historical",
-            id_seed=self.id_seed + ":execution",
+            id_seed=self.execution_id_seed,
         )
         self.outputs: list[AccountCycleResult] = []
         self._last_wall_ts_ns = 0
+        self._last_monotonic_ns = -1
         self._synthetic_sequence = 0
         self._strategy_event_sequence = 0
 
-    def _ensure_started(self, wall_ts_ns: int) -> None:
+    def _ensure_started(self, wall_ts_ns: int, monotonic_ns: int | None = None) -> None:
         if self.kernel is not None:
             return
-        self.clock = VirtualClock(current_wall_ns=wall_ts_ns, current_monotonic_ns=0)
+        self.clock = VirtualClock(
+            current_wall_ns=wall_ts_ns,
+            current_monotonic_ns=0 if monotonic_ns is None else monotonic_ns,
+        )
         recorder = JsonlStrategyEventTape(self.root / "strategy_event_tape.jsonl")
         self.event_clock = DeterministicEventClock(
             clock=self.clock,
@@ -393,8 +431,27 @@ class HistoricalAccountSession:
     def process_cycle(self, cycle: HistoricalReplayCycle) -> AccountCycleResult:
         if cycle.wall_ts_ns < self._last_wall_ts_ns:
             raise ValueError("historical account session cannot move backward in wall time")
-        self._ensure_started(cycle.wall_ts_ns)
+        if cycle.monotonic_ns is not None and cycle.monotonic_ns < self._last_monotonic_ns:
+            raise ValueError("historical account session cannot move backward in monotonic time")
+        self._ensure_started(cycle.wall_ts_ns, cycle.monotonic_ns)
         assert self.clock is not None and self.runtime is not None and self.event_clock is not None
+        exact_market_by_symbol = (
+            {
+                str(symbol).upper(): market
+                for symbol, market in cycle.market_inputs.items()
+            }
+            if cycle.market_inputs is not None
+            else {}
+        )
+        if cycle.monotonic_ns is not None:
+            if cycle.wall_ts_ns < self.clock.current_wall_ns:
+                raise ValueError("historical account session cannot retime an exact wall clock")
+            if cycle.monotonic_ns < self.clock.current_monotonic_ns:
+                raise ValueError("historical account session cannot retime an exact monotonic clock")
+            # The captured journal records both clocks. Set the exact pair
+            # before dispatch; dispatch then observes a zero wall-time delta.
+            self.clock.current_wall_ns = cycle.wall_ts_ns
+            self.clock.current_monotonic_ns = cycle.monotonic_ns
         self._strategy_event_sequence += 1
         event = StrategyEvent(
             event_ts_ns=cycle.wall_ts_ns,
@@ -409,6 +466,10 @@ class HistoricalAccountSession:
                         "symbol": symbol.upper(),
                         "sequence": book.sequence,
                         "exchange_ts_ns": book.exchange_ts_ns,
+                        "input_key": (
+                            exact_market_by_symbol[symbol.upper()].input_key
+                            if symbol.upper() in exact_market_by_symbol else ""
+                        ),
                     }
                     for symbol, book in sorted(cycle.books.items())
                 ],
@@ -424,13 +485,18 @@ class HistoricalAccountSession:
 
     def _execute_cycle_event(self, cycle: HistoricalReplayCycle) -> AccountCycleResult:
         assert self.runtime is not None
-        market_inputs = {
-            symbol.upper(): book.market_ref(
-                input_key=f"replay:{cycle.batch_id}:{symbol.upper()}:{book.sequence}",
-                source="historical_l2_tape",
-            )
-            for symbol, book in cycle.books.items()
-        }
+        if cycle.market_inputs is None:
+            market_inputs = {
+                symbol.upper(): book.market_ref(
+                    input_key=f"replay:{cycle.batch_id}:{symbol.upper()}:{book.sequence}",
+                    source="historical_l2_tape",
+                )
+                for symbol, book in cycle.books.items()
+            }
+        else:
+            market_inputs = {
+                symbol.upper(): market for symbol, market in cycle.market_inputs.items()
+            }
         self.execution_adapter.books = {
             symbol.upper(): book for symbol, book in cycle.books.items()
         }
@@ -442,9 +508,13 @@ class HistoricalAccountSession:
             risk_policy=self.risk_policy,
             instrument_rules=self.instrument_rules,
             execution_adapter=self.execution_adapter,
+            command_symbols=cycle.command_symbols,
+            require_strict_risk_reduction=cycle.require_strict_risk_reduction,
+            request_content_hash=cycle.request_content_hash,
         )
         self.outputs.append(output)
         self._last_wall_ts_ns = cycle.wall_ts_ns
+        self._last_monotonic_ns = self.clock.monotonic_ns() if self.clock is not None else -1
         return output
 
     def submit_decisions(

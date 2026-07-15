@@ -85,7 +85,7 @@ def test_daemon_has_no_private_execution_surface_and_cycle_is_public_only(
         "BybitTradeRouter",
         "ExecutionEventRouter",
         "PrivateStateCache",
-        "resolve_private_credentials",
+        "resolve_demo_credentials",
     ):
         assert not hasattr(daemon_module, removed_module_name)
     kwargs = seen["kwargs"]

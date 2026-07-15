@@ -24,14 +24,16 @@ import json
 import logging
 import os
 import shutil
+import stat
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping
 
+from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .deterministic_serialization import canonical_json, json_safe
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import BookLevel, L2BookSnapshot
@@ -40,6 +42,11 @@ _logger = logging.getLogger(__name__)
 
 MAINNET_PUBLIC_LINEAR_WS = "wss://stream.bybit.com/v5/public/linear"
 TESTNET_PUBLIC_LINEAR_WS = "wss://stream-testnet.bybit.com/v5/public/linear"
+OWNER_CAPTURE_READINESS_FILENAME = "account_owner_capture_readiness.json"
+OWNER_CAPTURE_READINESS_KIND = "account_owner_capture_readiness"
+OWNER_CAPTURE_READINESS_SCHEMA_VERSION = 1
+OWNER_CAPTURE_READINESS_PUBLISH_INTERVAL_NS = 1_000_000_000
+MAX_OWNER_CAPTURE_RECORD_BYTES = 4 * 1024 * 1024
 
 
 class MarketCaptureError(RuntimeError):
@@ -67,6 +74,155 @@ class MarketCaptureConfig:
             raise ValueError("capture storage limits must be positive")
 
 
+@dataclass(frozen=True, slots=True)
+class CaptureAppendLocation:
+    """Exact immutable byte range written by one completed store append."""
+
+    path: Path
+    byte_offset: int
+    byte_length: int
+    record_sha256: str
+    segment_device: int
+    segment_inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerCaptureReadinessSidecar:
+    """Bounded pointer from one owner generation to one captured row."""
+
+    owner_invocation_id: str
+    local_receive_ts_ns: int
+    record_id: str
+    record_sha256: str
+    segment_path: str
+    segment_device: int
+    segment_inode: int
+    byte_offset: int
+    byte_length: int
+    kind: str = OWNER_CAPTURE_READINESS_KIND
+    schema_version: int = OWNER_CAPTURE_READINESS_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.kind != OWNER_CAPTURE_READINESS_KIND:
+            raise ValueError("invalid owner-capture readiness kind")
+        if self.schema_version != OWNER_CAPTURE_READINESS_SCHEMA_VERSION:
+            raise ValueError("unsupported owner-capture readiness schema")
+        if type(self.owner_invocation_id) is not str or not self.owner_invocation_id:
+            raise ValueError("owner-capture readiness invocation id is required")
+        if type(self.local_receive_ts_ns) is not int or self.local_receive_ts_ns <= 0:
+            raise ValueError("owner-capture readiness receive timestamp must be positive")
+        if (
+            type(self.record_id) is not str
+            or len(self.record_id) != 24
+            or any(character not in "0123456789abcdef" for character in self.record_id)
+        ):
+            raise ValueError("owner-capture readiness record id must be lowercase hexadecimal")
+        if (
+            type(self.record_sha256) is not str
+            or len(self.record_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.record_sha256)
+        ):
+            raise ValueError("owner-capture readiness record hash must be lowercase SHA-256")
+        if type(self.segment_path) is not str or not self.segment_path or "\\" in self.segment_path:
+            raise ValueError("owner-capture readiness segment path must be normalized POSIX relative")
+        logical_path = PurePosixPath(self.segment_path)
+        if (
+            logical_path.is_absolute()
+            or logical_path.as_posix() != self.segment_path
+            or any(part in {"", ".", ".."} for part in logical_path.parts)
+        ):
+            raise ValueError("owner-capture readiness segment path must not escape its root")
+        if len(logical_path.parts) != 3:
+            raise ValueError("owner-capture readiness segment path must have the capture layout")
+        day, _symbol, filename = logical_path.parts
+        if (
+            len(day) != 10
+            or day[4] != "-"
+            or day[7] != "-"
+            or not (day[:4] + day[5:7] + day[8:]).isdigit()
+            or not filename.startswith("segment-")
+            or not filename.endswith(".jsonl")
+            or not filename[len("segment-") : -len(".jsonl")].isdigit()
+        ):
+            raise ValueError("owner-capture readiness segment path has an invalid capture layout")
+        if type(self.segment_device) is not int or self.segment_device < 0:
+            raise ValueError("owner-capture readiness segment device must be non-negative")
+        if type(self.segment_inode) is not int or self.segment_inode <= 0:
+            raise ValueError("owner-capture readiness segment inode must be positive")
+        if type(self.byte_offset) is not int or self.byte_offset < 0:
+            raise ValueError("owner-capture readiness byte offset must be non-negative")
+        if (
+            type(self.byte_length) is not int
+            or self.byte_length <= 0
+            or self.byte_length > MAX_OWNER_CAPTURE_RECORD_BYTES
+        ):
+            raise ValueError("owner-capture readiness byte length is outside the bounded limit")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "OwnerCaptureReadinessSidecar":
+        expected = set(cls.__dataclass_fields__)
+        missing = sorted(expected - set(payload))
+        unknown = sorted(set(payload) - expected)
+        if missing or unknown:
+            raise ValueError(
+                "owner-capture readiness fields mismatch: "
+                f"missing={missing}, unknown={unknown}"
+            )
+        return cls(**{key: payload[key] for key in expected})
+
+
+def owner_capture_readiness_path(root: str | Path) -> Path:
+    return Path(root).expanduser() / OWNER_CAPTURE_READINESS_FILENAME
+
+
+def _atomic_write_owner_capture_readiness(
+    root: str | Path,
+    sidecar: OwnerCaptureReadinessSidecar,
+) -> Path:
+    path = owner_capture_readiness_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    )
+    flags = (
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_WRONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(str(temporary), flags, 0o600)
+        try:
+            data = canonical_json(sidecar.to_dict()) + b"\n"
+            view = memoryview(data)
+            offset = 0
+            while offset < len(data):
+                written = os.write(descriptor, view[offset:])
+                if written <= 0:
+                    raise OSError("owner-capture readiness write made no progress")
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        directory_descriptor = os.open(
+            str(path.parent),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return path
+
+
 @dataclass(slots=True)
 class _Segment:
     day: str
@@ -81,7 +237,7 @@ class SegmentedCaptureStore:
     """Bounded-segment JSONL store with periodic fsync and disk fail-closed."""
 
     def __init__(self, root: str | Path, *, config: MarketCaptureConfig) -> None:
-        self.root = Path(root).expanduser()
+        self.root = Path(os.path.abspath(Path(root).expanduser()))
         self.config = config
         self._segments: dict[str, _Segment] = {}
         self._lock = threading.RLock()
@@ -112,12 +268,35 @@ class SegmentedCaptureStore:
                 continue
         index = max(indices, default=-1) + 1
         path = directory / f"segment-{index:06d}.jsonl"
-        file = open(path, "ab", buffering=0)
-        segment = _Segment(day=day, index=index, path=path, file=file, bytes_written=path.stat().st_size)
+        descriptor = os.open(
+            str(path),
+            os.O_CREAT
+            | os.O_APPEND
+            | os.O_WRONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise MarketCaptureError(f"capture segment is not a regular file: {path}")
+            file = os.fdopen(descriptor, "ab", buffering=0)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        segment = _Segment(
+            day=day,
+            index=index,
+            path=path,
+            file=file,
+            bytes_written=metadata.st_size,
+        )
         self._segments[key] = segment
         return segment
 
-    def append(self, record: Mapping[str, Any]) -> Path:
+    def append(self, record: Mapping[str, Any]) -> CaptureAppendLocation:
         local_ns = int(record.get("local_receive_ts_ns") or 0)
         if local_ns <= 0:
             raise MarketCaptureError("capture record requires local_receive_ts_ns")
@@ -130,15 +309,48 @@ class SegmentedCaptureStore:
             if segment.bytes_written and segment.bytes_written + len(payload) > self.config.segment_max_bytes:
                 segment.bytes_written = self.config.segment_max_bytes
                 segment = self._segment(symbol=symbol, local_receive_ts_ns=local_ns)
+            before = os.fstat(segment.file.fileno())
+            byte_offset = before.st_size
+            if byte_offset != segment.bytes_written:
+                raise MarketCaptureError("capture segment changed outside its owning store")
             written = segment.file.write(payload)
             if written != len(payload):
                 raise OSError("short market-capture write")
             segment.bytes_written += written
+            after = os.fstat(segment.file.fileno())
+            if after.st_size != byte_offset + written:
+                raise MarketCaptureError("capture segment append location is ambiguous")
             segment.records_since_sync += 1
             if segment.records_since_sync >= self.config.fsync_every_records:
                 os.fsync(segment.file.fileno())
                 segment.records_since_sync = 0
-            return segment.path
+            return CaptureAppendLocation(
+                path=segment.path,
+                byte_offset=byte_offset,
+                byte_length=written,
+                record_sha256=hashlib.sha256(payload).hexdigest(),
+                segment_device=after.st_dev,
+                segment_inode=after.st_ino,
+            )
+
+    def sync(self, location: CaptureAppendLocation) -> None:
+        """Durably flush the active segment containing ``location``."""
+
+        with self._lock:
+            for segment in self._segments.values():
+                if segment.path != location.path:
+                    continue
+                metadata = os.fstat(segment.file.fileno())
+                if (
+                    metadata.st_dev != location.segment_device
+                    or metadata.st_ino != location.segment_inode
+                    or metadata.st_size < location.byte_offset + location.byte_length
+                ):
+                    raise MarketCaptureError("capture append location changed before sync")
+                os.fsync(segment.file.fileno())
+                segment.records_since_sync = 0
+                return
+        raise MarketCaptureError("capture append location is no longer active")
 
     def close(self) -> None:
         with self._lock:
@@ -237,23 +449,74 @@ class SequenceAwareMarketRecorder:
         *,
         config: MarketCaptureConfig | None = None,
         clock: Clock | None = None,
+        owner_invocation_id: str | None = None,
     ) -> None:
+        if owner_invocation_id is not None and (
+            type(owner_invocation_id) is not str or not owner_invocation_id
+        ):
+            raise ValueError("owner_invocation_id must be a non-empty string when provided")
         self.config = config or MarketCaptureConfig()
         self.clock = clock or SystemClock()
+        self.owner_invocation_id = owner_invocation_id
         self.store = SegmentedCaptureStore(root, config=self.config)
+        self._last_readiness_publish_monotonic_ns: int | None = None
         self.books: dict[str, BookReconstruction] = {}
         self.rings: dict[str, deque[dict[str, Any]]] = {}
         self._lock = threading.RLock()
 
     def _persist(self, record: dict[str, Any]) -> dict[str, Any]:
         record["schema_version"] = 1
+        if self.owner_invocation_id is not None:
+            record["owner_invocation_id"] = self.owner_invocation_id
         record["record_id"] = capture_record_id(record)
         safe = json_safe(record)
-        self.store.append(safe)
+        location = self.store.append(safe)
+        self._publish_owner_readiness(safe, location=location)
         symbol = str(record.get("symbol") or "ACCOUNT")
         ring = self.rings.setdefault(symbol, deque(maxlen=self.config.ring_records_per_symbol))
         ring.append(dict(safe))
         return dict(safe)
+
+    def _publish_owner_readiness(
+        self,
+        record: Mapping[str, Any],
+        *,
+        location: CaptureAppendLocation,
+    ) -> None:
+        invocation_id = self.owner_invocation_id
+        if invocation_id is None:
+            return
+        now_monotonic_ns = self.clock.monotonic_ns()
+        last_publish_ns = self._last_readiness_publish_monotonic_ns
+        if (
+            last_publish_ns is not None
+            and now_monotonic_ns - last_publish_ns
+            < OWNER_CAPTURE_READINESS_PUBLISH_INTERVAL_NS
+        ):
+            return
+        try:
+            relative_path = location.path.relative_to(self.store.root).as_posix()
+        except ValueError as exc:
+            raise MarketCaptureError("capture append escaped its configured root") from exc
+        sidecar = OwnerCaptureReadinessSidecar(
+            owner_invocation_id=invocation_id,
+            local_receive_ts_ns=int(record.get("local_receive_ts_ns") or 0),
+            record_id=str(record.get("record_id") or ""),
+            record_sha256=location.record_sha256,
+            segment_path=relative_path,
+            segment_device=location.segment_device,
+            segment_inode=location.segment_inode,
+            byte_offset=location.byte_offset,
+            byte_length=location.byte_length,
+        )
+        # Make the target row durable before atomically publishing a durable
+        # pointer to it. At most one such fsync and sidecar replace occurs per
+        # second; the first completed row is published immediately.
+        # Latch the attempt before I/O so even a post-replace directory-fsync
+        # error cannot cause another visible replace inside the same interval.
+        self._last_readiness_publish_monotonic_ns = now_monotonic_ns
+        self.store.sync(location)
+        _atomic_write_owner_capture_readiness(self.store.root, sidecar)
 
     def on_message(self, message: Mapping[str, Any], *, local_receive_ts_ns: int | None = None) -> list[dict[str, Any]]:
         local_ns = int(local_receive_ts_ns or self.clock.wall_time_ns())
@@ -539,10 +802,25 @@ def recorder_callback(recorder: SequenceAwareMarketRecorder) -> Callable[[Mappin
     return callback
 
 
-def symbols_from_file(path: Path) -> set[str]:
-    if not path.exists():
+def symbols_from_file(
+    path: Path,
+    *,
+    snapshot: StableFileSnapshot | None = None,
+) -> set[str]:
+    if snapshot is None and not path.exists():
         return set()
-    text = path.read_text().strip()
+    if snapshot is None:
+        snapshot = read_stable_file(
+            path,
+            label="market-capture symbols file",
+            require_single_link=False,
+        )
+    elif snapshot.path != Path(os.path.abspath(path.expanduser())):
+        raise ValueError("market-capture symbols snapshot path differs")
+    try:
+        text = snapshot.data.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("market-capture symbols file is not valid UTF-8") from exc
     if not text:
         return set()
     if text.startswith("[") or text.startswith("{"):

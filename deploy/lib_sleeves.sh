@@ -24,18 +24,102 @@ LM_RESOLVED_SLEEVES_ENV="${LM_RESOLVED_SLEEVES_ENV:-/etc/liquidity-migration/sle
 LM_SYSTEMD_UNIT_DIR="${LM_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}"
 
-# Load the toggles: committed defaults first, then an optional per-host override. The
-# host override is intentionally a safety NARROWING layer: it may turn a repo-on
-# sleeve off for one box, but it may not turn a repo-off sleeve back on. Resolves the
-# repo dir from this file's location so it works regardless of the caller's CWD.
+# These units cross the fresh-epoch authorization boundary. Their complete
+# workload argv lives in run_authorized_fresh_runtime.sh; an operator/runtime
+# drop-in or alternate fragment would otherwise be able to replace it after the
+# checked commit had passed review.
+LM_FRESH_EPOCH_GUARDED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service liquidity-migration-continuous-hedge.service liquidity-migration-continuous-rmom-refresh.service liquidity-migration-demo-liveness.service"
+
+lm_parse_sleeve_environment() {
+    _lpe_file="$1"
+    _LM_PARSED_LONG_PRESENT=0
+    _LM_PARSED_CONTINUOUS_PRESENT=0
+    _LM_PARSED_CONTINUOUS_PAPER_PRESENT=0
+    _LM_PARSED_LONG=""
+    _LM_PARSED_CONTINUOUS=""
+    _LM_PARSED_CONTINUOUS_PAPER=""
+    _lpe_line_number=0
+    while IFS= read -r _lpe_line || [ -n "$_lpe_line" ]; do
+        _lpe_line_number=$((_lpe_line_number + 1))
+        case "$_lpe_line" in
+            ""|\#*) continue ;;
+            *=*)
+                _lpe_key="${_lpe_line%%=*}"
+                _lpe_value="${_lpe_line#*=}"
+                ;;
+            *)
+                echo "invalid sleeve environment assignment at $_lpe_file:$_lpe_line_number" >&2
+                return 1
+                ;;
+        esac
+        case "$_lpe_value" in
+            ""|on|ON|On|1|true|TRUE|yes|YES|off|OFF|Off|0|false|FALSE|no|NO)
+                ;;
+            *)
+                echo "invalid sleeve toggle value at $_lpe_file:$_lpe_line_number" >&2
+                return 1
+                ;;
+        esac
+        case "$_lpe_key" in
+            LONG_SLEEVE)
+                [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || {
+                    echo "duplicate LONG_SLEEVE at $_lpe_file:$_lpe_line_number" >&2
+                    return 1
+                }
+                _LM_PARSED_LONG_PRESENT=1
+                _LM_PARSED_LONG="$_lpe_value"
+                ;;
+            CONTINUOUS_SLEEVE)
+                [ "$_LM_PARSED_CONTINUOUS_PRESENT" -eq 0 ] || {
+                    echo "duplicate CONTINUOUS_SLEEVE at $_lpe_file:$_lpe_line_number" >&2
+                    return 1
+                }
+                _LM_PARSED_CONTINUOUS_PRESENT=1
+                _LM_PARSED_CONTINUOUS="$_lpe_value"
+                ;;
+            CONTINUOUS_PAPER_SLEEVE)
+                [ "$_LM_PARSED_CONTINUOUS_PAPER_PRESENT" -eq 0 ] || {
+                    echo "duplicate CONTINUOUS_PAPER_SLEEVE at $_lpe_file:$_lpe_line_number" >&2
+                    return 1
+                }
+                _LM_PARSED_CONTINUOUS_PAPER_PRESENT=1
+                _LM_PARSED_CONTINUOUS_PAPER="$_lpe_value"
+                ;;
+            *)
+                echo "unknown sleeve toggle at $_lpe_file:$_lpe_line_number" >&2
+                return 1
+                ;;
+        esac
+    done < "$_lpe_file"
+}
+
+# Load the toggles as strict data: committed defaults first, then an optional
+# per-host override. The host override is intentionally a safety NARROWING
+# layer: it may turn a repo-on sleeve off for one box, but it may not turn a
+# repo-off sleeve back on. Resolve the repo dir from this file's location so it
+# works regardless of the caller's CWD.
 lm_load_sleeve_toggles() {
     _lm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     unset LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE 2>/dev/null || true
-    [ -f "$_lm_dir/sleeves.env" ] && . "$_lm_dir/sleeves.env"
+    if [ -f "$_lm_dir/sleeves.env" ]; then
+        lm_parse_sleeve_environment "$_lm_dir/sleeves.env"
+        [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || LONG_SLEEVE="$_LM_PARSED_LONG"
+        [ "$_LM_PARSED_CONTINUOUS_PRESENT" -eq 0 ] \
+            || CONTINUOUS_SLEEVE="$_LM_PARSED_CONTINUOUS"
+        [ "$_LM_PARSED_CONTINUOUS_PAPER_PRESENT" -eq 0 ] \
+            || CONTINUOUS_PAPER_SLEEVE="$_LM_PARSED_CONTINUOUS_PAPER"
+    fi
     _lm_repo_long="${LONG_SLEEVE:-off}"
     _lm_repo_continuous="${CONTINUOUS_SLEEVE:-off}"
     _lm_repo_continuous_paper="${CONTINUOUS_PAPER_SLEEVE:-off}"
-    [ -f "$LM_HOST_SLEEVES_ENV" ] && . "$LM_HOST_SLEEVES_ENV"
+    if [ -f "$LM_HOST_SLEEVES_ENV" ]; then
+        lm_parse_sleeve_environment "$LM_HOST_SLEEVES_ENV"
+        [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || LONG_SLEEVE="$_LM_PARSED_LONG"
+        [ "$_LM_PARSED_CONTINUOUS_PRESENT" -eq 0 ] \
+            || CONTINUOUS_SLEEVE="$_LM_PARSED_CONTINUOUS"
+        [ "$_LM_PARSED_CONTINUOUS_PAPER_PRESENT" -eq 0 ] \
+            || CONTINUOUS_PAPER_SLEEVE="$_LM_PARSED_CONTINUOUS_PAPER"
+    fi
     if ! sleeve_on "$_lm_repo_long"; then LONG_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_continuous"; then CONTINUOUS_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_continuous_paper"; then CONTINUOUS_PAPER_SLEEVE=off; fi
@@ -232,6 +316,65 @@ lm_verify_no_unknown_liqmig_units() {
     done
 }
 
+# Fail closed unless systemd's effective guarded-unit surface is exactly the
+# checked manifest. We never delete a current-unit drop-in here: it may be
+# operator work. Instead deployment stops and names the conflicting path.
+lm_verify_guarded_unit_surfaces() {
+    _lvgus_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for _lvgus_unit in $LM_FRESH_EPOCH_GUARDED_UNITS; do
+        _lvgus_source="$_lvgus_dir/systemd/$_lvgus_unit"
+        _lvgus_installed="$LM_SYSTEMD_UNIT_DIR/$_lvgus_unit"
+        if [ ! -f "$_lvgus_source" ] || [ ! -f "$_lvgus_installed" ]; then
+            echo "verify failed: guarded unit fragment is missing: $_lvgus_unit" >&2
+            return 1
+        fi
+        if ! cmp -s "$_lvgus_source" "$_lvgus_installed"; then
+            echo "verify failed: guarded unit differs from checked manifest: $_lvgus_installed" >&2
+            return 1
+        fi
+
+        for _lvgus_root in "$LM_SYSTEMD_UNIT_DIR" "$LM_RUNTIME_SYSTEMD_UNIT_DIR"; do
+            _lvgus_dropin_dir="$_lvgus_root/$_lvgus_unit.d"
+            if [ -d "$_lvgus_dropin_dir" ] \
+                && [ -n "$(find "$_lvgus_dropin_dir" -mindepth 1 -print -quit)" ]; then
+                echo "verify failed: guarded unit has an unreviewed drop-in: $_lvgus_dropin_dir" >&2
+                return 1
+            fi
+        done
+
+        _lvgus_fragment="$(systemctl show "$_lvgus_unit" --property=FragmentPath --value --no-pager)" || return 1
+        if [ "$_lvgus_fragment" != "$_lvgus_installed" ]; then
+            echo "verify failed: guarded unit loaded from unexpected fragment: $_lvgus_unit -> $_lvgus_fragment" >&2
+            return 1
+        fi
+        _lvgus_dropins="$(systemctl show "$_lvgus_unit" --property=DropInPaths --value --no-pager)" || return 1
+        if [ -n "$_lvgus_dropins" ]; then
+            echo "verify failed: guarded unit has effective drop-ins: $_lvgus_unit -> $_lvgus_dropins" >&2
+            return 1
+        fi
+        _lvgus_exec="$(systemctl show "$_lvgus_unit" --property=ExecStart --value --no-pager)" || return 1
+        case "$_lvgus_exec" in
+            *"argv[]=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh $_lvgus_unit main ;"*) ;;
+            *)
+                echo "verify failed: guarded unit has unexpected effective ExecStart: $_lvgus_unit -> $_lvgus_exec" >&2
+                return 1
+                ;;
+        esac
+        case "$_lvgus_unit" in
+            liquidity-migration-account-execution.service | liquidity-migration-account-paper-execution.service)
+                _lvgus_post="$(systemctl show "$_lvgus_unit" --property=ExecStartPost --value --no-pager)" || return 1
+                case "$_lvgus_post" in
+                    *"argv[]=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh $_lvgus_unit readiness ;"*) ;;
+                    *)
+                        echo "verify failed: guarded owner has unexpected effective ExecStartPost: $_lvgus_unit -> $_lvgus_post" >&2
+                        return 1
+                        ;;
+                esac
+                ;;
+        esac
+    done
+}
+
 # Install exactly the checked-in unit manifest without enabling or starting any
 # current service/timer. Unknown historical units are stopped and removed because
 # allowing a retired order mutator to survive this phase would defeat the point of
@@ -268,6 +411,7 @@ lm_install_current_systemd_units() {
     lm_cleanup_unknown_liqmig_units
     systemctl daemon-reload
     lm_verify_no_unknown_liqmig_units
+    lm_verify_guarded_unit_surfaces
 }
 
 # apply_sleeve_enable <flag-value> <unit...> - on: `systemctl enable` each unit; off:

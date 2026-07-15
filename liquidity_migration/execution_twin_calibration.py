@@ -19,13 +19,20 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .account_kernel import AccountEvent, AccountEventType, read_account_journal
+from .account_kernel import (
+    AccountEvent,
+    AccountEventType,
+    account_journal_path,
+    account_transactions_path,
+    read_account_journal_bytes,
+)
+from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .deterministic_serialization import canonical_json
 from .execution_adapters import ExecutionTwinConfig, LatencyProfile
 from .market_capture import capture_record_id
 
 
-CALIBRATION_SCHEMA_VERSION = 1
+CALIBRATION_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +49,8 @@ class CalibrationRequirements:
     min_context_link_ratio: float = 0.95
     min_reference_match_ratio: float = 0.99
     max_reference_error_bps: float = 0.01
+    min_observed_multi_fill_orders: int = 3
+    min_partial_fill_spacing_samples: int = 3
 
     def __post_init__(self) -> None:
         counts = (
@@ -52,9 +61,15 @@ class CalibrationRequirements:
             self.min_filled_orders,
             self.min_pnl_events,
             self.min_symbols,
+            self.min_observed_multi_fill_orders,
+            self.min_partial_fill_spacing_samples,
         )
         if min(counts) < 0:
             raise ValueError("calibration sample floors cannot be negative")
+        if self.min_observed_multi_fill_orders < 1:
+            raise ValueError("min_observed_multi_fill_orders must be positive")
+        if self.min_partial_fill_spacing_samples < 1:
+            raise ValueError("min_partial_fill_spacing_samples must be positive")
         if not 0.0 <= self.min_context_link_ratio <= 1.0:
             raise ValueError("min_context_link_ratio must be between zero and one")
         if not 0.0 <= self.min_reference_match_ratio <= 1.0:
@@ -72,6 +87,8 @@ _COUNT_REQUIREMENT_FIELDS = (
     "min_filled_orders",
     "min_pnl_events",
     "min_symbols",
+    "min_observed_multi_fill_orders",
+    "min_partial_fill_spacing_samples",
 )
 
 
@@ -148,6 +165,9 @@ def _recomputed_sample_gate(payload: Mapping[str, Any], requirements: Calibratio
         and len(clock_hash) == 64
         and all(character in "0123456789abcdef" for character in clock_hash)
     )
+    filled_orders = count(counts, "filled_orders")
+    submit_to_first_fill_orders = count(counts, "submit_to_first_fill_orders")
+    fill_response_orders = count(counts, "fill_response_orders")
     return {
         "feed_samples": count(counts, "feed_latency") >= requirements.min_feed_samples,
         "target_events": count(counts, "target_events") >= requirements.min_target_events,
@@ -159,7 +179,18 @@ def _recomputed_sample_gate(payload: Mapping[str, Any], requirements: Calibratio
         "order_response_samples": (
             distribution_count("order_response_clock_adjusted") >= requirements.min_request_ack_samples
         ),
-        "filled_orders": count(counts, "filled_orders") >= requirements.min_filled_orders,
+        "submit_to_first_fill_samples": (
+            submit_to_first_fill_orders == filled_orders
+            and submit_to_first_fill_orders >= requirements.min_filled_orders
+            and distribution_count("submit_to_first_fill_clock_adjusted")
+            >= submit_to_first_fill_orders
+        ),
+        "fill_response_samples": (
+            fill_response_orders == filled_orders
+            and fill_response_orders >= requirements.min_filled_orders
+            and distribution_count("fill_response_clock_adjusted") >= fill_response_orders
+        ),
+        "filled_orders": filled_orders >= requirements.min_filled_orders,
         "pnl_events": count(counts, "pnl_events") >= requirements.min_pnl_events,
         "symbols": count(counts, "symbols") >= requirements.min_symbols,
         "context_link_ratio": ratio("context_link_ratio") >= requirements.min_context_link_ratio,
@@ -171,6 +202,36 @@ def _recomputed_sample_gate(payload: Mapping[str, Any], requirements: Calibratio
         "nonnegative_adjusted_order_response_latency": (
             ratio("negative_adjusted_order_response_latency_ratio") <= 0.01
         ),
+        "nonnegative_adjusted_submit_to_first_fill_latency": (
+            ratio("negative_adjusted_submit_to_first_fill_latency_ratio") <= 0.01
+        ),
+        "nonnegative_adjusted_fill_response_latency": (
+            ratio("negative_adjusted_fill_response_latency_ratio") <= 0.01
+        ),
+    }
+
+
+def _recomputed_partial_fill_gate(
+    payload: Mapping[str, Any],
+    requirements: CalibrationRequirements,
+) -> dict[str, bool]:
+    fills = payload.get("fills")
+    latency = payload.get("latency_ns")
+    if not isinstance(fills, Mapping) or not isinstance(latency, Mapping):
+        raise ValueError("execution-twin partial-fill gate inputs are malformed")
+
+    observed_orders = fills.get("multi_fill_orders")
+    if type(observed_orders) is not int or observed_orders < 0:
+        raise ValueError("execution-twin observed multifill order count is invalid")
+    spacing = latency.get("partial_fill_spacing")
+    if not isinstance(spacing, Mapping):
+        raise ValueError("execution-twin partial-fill spacing distribution is invalid")
+    spacing_samples = spacing.get("count")
+    if type(spacing_samples) is not int or spacing_samples < 0:
+        raise ValueError("execution-twin partial-fill spacing count is invalid")
+    return {
+        "observed_multi_fill_orders": (observed_orders >= requirements.min_observed_multi_fill_orders),
+        "partial_fill_spacing_samples": (spacing_samples >= requirements.min_partial_fill_spacing_samples),
     }
 
 
@@ -229,23 +290,93 @@ def _distribution(values: Sequence[float]) -> dict[str, float | int | None]:
     }
 
 
+def _snapshot_fingerprint(
+    snapshots: Mapping[str, StableFileSnapshot],
+) -> dict[str, tuple[Any, ...]]:
+    return {
+        label: (
+            str(snapshot.path),
+            snapshot.device,
+            snapshot.inode,
+            snapshot.metadata.st_mode,
+            snapshot.uid,
+            snapshot.nlink,
+            snapshot.size,
+            snapshot.mtime_ns,
+            snapshot.metadata.st_ctime_ns,
+            snapshot.sha256,
+        )
+        for label, snapshot in sorted(snapshots.items())
+    }
+
+
+def _read_journal_snapshot(
+    root: Path,
+) -> tuple[list[AccountEvent], dict[str, StableFileSnapshot]]:
+    transaction_root = account_transactions_path(root)
+    transaction_paths = (
+        sorted(transaction_root.glob("*.json")) if transaction_root.is_dir() else []
+    )
+    snapshots: dict[str, StableFileSnapshot] = {}
+    if transaction_paths:
+        for path in transaction_paths:
+            label = f"transactions/{path.name}"
+            snapshots[label] = read_stable_file(
+                path,
+                label=f"calibration account journal {label}",
+                require_single_link=False,
+            )
+        events = read_account_journal_bytes(
+            transaction_files=[
+                (label.removeprefix("transactions/"), snapshots[label].data)
+                for label in sorted(snapshots)
+            ],
+            verify=True,
+        )
+    else:
+        projection = account_journal_path(root)
+        snapshots["events.jsonl"] = read_stable_file(
+            projection,
+            label="calibration account journal projection",
+            require_single_link=False,
+        )
+        events = read_account_journal_bytes(
+            projection_data=snapshots["events.jsonl"].data,
+            verify=True,
+        )
+    return events, snapshots
+
+
 def _read_capture(
     root: Path,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]], str]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, str]],
+    str,
+    dict[str, StableFileSnapshot],
+]:
     paths = sorted(root.rglob("segment-*.jsonl")) if root.is_dir() else []
     if not paths:
         raise ValueError(f"no market capture segments found under {root}")
     rows: list[dict[str, Any]] = []
     manifest: list[dict[str, str]] = []
+    snapshots: dict[str, StableFileSnapshot] = {}
     seen_record_ids: set[str] = set()
     for path in paths:
-        data = path.read_bytes()
+        relative = str(path.relative_to(root))
+        snapshot = read_stable_file(
+            path,
+            label=f"calibration market capture {relative}",
+            require_single_link=False,
+        )
+        snapshots[relative] = snapshot
+        data = snapshot.data
         if data and not data.endswith(b"\n"):
             raise ValueError(f"market capture segment has a partial final line: {path}")
         manifest.append(
             {
-                "path": str(path.relative_to(root)),
-                "sha256": hashlib.sha256(data).hexdigest(),
+                "path": relative,
+                "sha256": snapshot.sha256,
             }
         )
         for line_number, raw in enumerate(data.splitlines(), start=1):
@@ -265,7 +396,7 @@ def _read_capture(
             seen_record_ids.add(record_id)
             rows.append(value)
     manifest_sha256 = hashlib.sha256(canonical_json({"files": manifest})).hexdigest()
-    return rows, manifest, manifest_sha256
+    return rows, manifest, manifest_sha256, snapshots
 
 
 def _journal_sha256(events: Sequence[AccountEvent]) -> str:
@@ -368,15 +499,22 @@ def calibrate_execution_twin(
     ):
         raise ValueError("clock-offset receipt SHA-256 must be 64 lowercase hex characters")
     requirements = requirements or CalibrationRequirements()
-    account_path = Path(account_root).expanduser()
-    capture_path = Path(market_capture_root).expanduser()
-    events = read_account_journal(account_path, verify=True)
+    account_path = Path(account_root).expanduser().resolve(strict=True)
+    capture_path = Path(market_capture_root).expanduser().resolve(strict=True)
+    if not account_path.is_dir() or not capture_path.is_dir():
+        raise ValueError("calibration account and market-capture roots must be directories")
+    events, journal_snapshots = _read_journal_snapshot(account_path)
     if not events:
         raise ValueError("demo account journal is empty")
     account_ids = {event.account_id for event in events}
     if account_ids != {expected_account_id}:
         raise ValueError(f"journal account ids {sorted(account_ids)!r} do not equal {expected_account_id!r}")
-    capture_rows, capture_manifest, capture_manifest_sha256 = _read_capture(capture_path)
+    (
+        capture_rows,
+        capture_manifest,
+        capture_manifest_sha256,
+        capture_snapshots,
+    ) = _read_capture(capture_path)
 
     targets = _events_of_type(events, AccountEventType.TARGET)
     commands = _events_of_type(events, AccountEventType.ORDER_COMMAND)
@@ -511,10 +649,13 @@ def calibrate_execution_twin(
         if requested_qty > 0.0 and filled_qty >= requested_qty - 1e-12:
             fully_filled_without_status.add(command_id)
     completed_order_ids = terminal_command_ids | fully_filled_without_status
-    multi_fill_orders = 0
-    incomplete_orders = 0
+    multi_fill_order_ids: set[str] = set()
+    incomplete_order_ids: set[str] = set()
     fill_ratios: list[float] = []
+    submit_to_first_fill_ns: list[float] = []
+    submit_to_first_fill_command_ids: set[str] = set()
     fill_response_ns: list[float] = []
+    fill_response_command_ids: set[str] = set()
     fill_spacing_ns: list[float] = []
     slippage_bps: list[float] = []
     visible_book_slippage_bps: list[float] = []
@@ -528,18 +669,40 @@ def calibrate_execution_twin(
         if completed_command is None:
             continue
         command_fills = sorted(
-            fills_by_command.get(command_id, ()),
+            (
+                fill
+                for fill in fills_by_command.get(command_id, ())
+                if abs(_number(fill.payload.get("signed_qty")) or 0.0) > 0.0
+            ),
             key=lambda event: (_integer(event.payload.get("exchange_ts_ns")), event.sequence),
         )
         if len(command_fills) > 1:
-            multi_fill_orders += 1
+            multi_fill_order_ids.add(command_id)
         requested_qty = abs(_number(completed_command.payload.get("qty")) or 0.0)
         filled_qty = math.fsum(abs(_number(fill.payload.get("signed_qty")) or 0.0) for fill in command_fills)
         if requested_qty > 0.0 and command_id in fill_order_ids:
             ratio = min(filled_qty / requested_qty, 1.0)
             fill_ratios.append(ratio)
             if ratio < 1.0 - 1e-9:
-                incomplete_orders += 1
+                incomplete_order_ids.add(command_id)
+        timing_ack = timing_ack_by_command.get(command_id)
+        if command_fills and timing_ack is not None and local_minus_exchange_ns is not None:
+            timing_metadata = timing_ack.payload.get("metadata") or {}
+            send_ns = (
+                _integer(timing_metadata.get("local_socket_send_ts_ns"))
+                if isinstance(timing_metadata, Mapping)
+                else 0
+            )
+            first_fill_exchange_ns = _integer(command_fills[0].payload.get("exchange_ts_ns"))
+            if send_ns > 0 and first_fill_exchange_ns > 0:
+                # local = exchange + offset, so this is the identifiable
+                # socket-send -> first exchange fill interval.  It deliberately
+                # does not use the API response-envelope timestamp as a
+                # matching-engine boundary.
+                submit_to_first_fill_ns.append(
+                    float(first_fill_exchange_ns - send_ns + local_minus_exchange_ns)
+                )
+                submit_to_first_fill_command_ids.add(command_id)
         previous_exchange_ns = 0
         reference_price = _number(completed_command.payload.get("reference_price")) or 0.0
         signed_command_qty = _number(completed_command.payload.get("signed_qty")) or 0.0
@@ -556,7 +719,8 @@ def calibrate_execution_twin(
             )
             if adjusted is not None:
                 fill_response_ns.append(float(adjusted))
-            if previous_exchange_ns and exchange_ns >= previous_exchange_ns:
+                fill_response_command_ids.add(command_id)
+            if previous_exchange_ns > 0 and exchange_ns > previous_exchange_ns:
                 fill_spacing_ns.append(float(exchange_ns - previous_exchange_ns))
             previous_exchange_ns = exchange_ns or previous_exchange_ns
             price = _number(fill.payload.get("price")) or 0.0
@@ -591,6 +755,9 @@ def calibrate_execution_twin(
     command_ids = set(commands_by_id)
     completed_with_commands = len(completed_order_ids & command_ids)
     filled_with_commands = len(fill_order_ids & command_ids)
+    multi_fill_orders = len(multi_fill_order_ids)
+    incomplete_orders = len(incomplete_order_ids)
+    observed_partial_fill_orders = len(multi_fill_order_ids | incomplete_order_ids)
     zero_fill_terminal_orders = len((completed_order_ids & command_ids) - fill_order_ids)
     fee_bps = total_fee_usdt / total_fill_notional * 10_000.0 if total_fill_notional > 0.0 else None
     adjusted_negative_ratio = (
@@ -599,6 +766,16 @@ def calibrate_execution_twin(
     entry_negative_ratio = sum(value < 0.0 for value in order_entry_ns) / len(order_entry_ns) if order_entry_ns else 1.0
     response_negative_ratio = (
         sum(value < 0.0 for value in order_response_ns) / len(order_response_ns) if order_response_ns else 1.0
+    )
+    first_fill_negative_ratio = (
+        sum(value < 0.0 for value in submit_to_first_fill_ns) / len(submit_to_first_fill_ns)
+        if submit_to_first_fill_ns
+        else 1.0
+    )
+    fill_response_negative_ratio = (
+        sum(value < 0.0 for value in fill_response_ns) / len(fill_response_ns)
+        if fill_response_ns
+        else 1.0
     )
     symbols = sorted({event.symbol for event in commands if event.symbol})
 
@@ -609,6 +786,14 @@ def calibrate_execution_twin(
         "request_ack_samples": len(request_ack_rtt_ns) >= requirements.min_request_ack_samples,
         "order_entry_samples": len(order_entry_ns) >= requirements.min_request_ack_samples,
         "order_response_samples": len(order_response_ns) >= requirements.min_request_ack_samples,
+        "submit_to_first_fill_samples": (
+            len(submit_to_first_fill_command_ids) == filled_with_commands
+            and len(submit_to_first_fill_command_ids) >= requirements.min_filled_orders
+        ),
+        "fill_response_samples": (
+            len(fill_response_command_ids) == filled_with_commands
+            and len(fill_response_command_ids) >= requirements.min_filled_orders
+        ),
         "filled_orders": filled_with_commands >= requirements.min_filled_orders,
         "pnl_events": len(pnl_events) >= requirements.min_pnl_events,
         "symbols": len(symbols) >= requirements.min_symbols,
@@ -619,11 +804,20 @@ def calibrate_execution_twin(
         "nonnegative_adjusted_feed_latency": adjusted_negative_ratio <= 0.01,
         "nonnegative_adjusted_order_entry_latency": entry_negative_ratio <= 0.01,
         "nonnegative_adjusted_order_response_latency": response_negative_ratio <= 0.01,
+        "nonnegative_adjusted_submit_to_first_fill_latency": first_fill_negative_ratio <= 0.01,
+        "nonnegative_adjusted_fill_response_latency": fill_response_negative_ratio <= 0.01,
     }
-    execution_twin_gate_passed = all(sample_gate.values())
+    market_order_smoke_gate_passed = all(sample_gate.values())
     partial_upper_bound = (
         min(1.0, 3.0 / filled_with_commands) if filled_with_commands and multi_fill_orders == 0 else None
     )
+
+    partial_fill_gate = {
+        "observed_multi_fill_orders": (multi_fill_orders >= requirements.min_observed_multi_fill_orders),
+        "partial_fill_spacing_samples": (len(fill_spacing_ns) >= requirements.min_partial_fill_spacing_samples),
+    }
+    partial_fill_calibration_gate_passed = all(partial_fill_gate.values())
+    execution_twin_gate_passed = market_order_smoke_gate_passed and partial_fill_calibration_gate_passed
 
     receipt: dict[str, Any] = {
         "schema_version": CALIBRATION_SCHEMA_VERSION,
@@ -632,13 +826,18 @@ def calibrate_execution_twin(
         "expected_account_id": expected_account_id,
         "scope": {
             "order_type": "market",
-            "claim": "calibrates the market-order execution twin only",
+            "claim": (
+                "estimates market-order latency, visible-book walk, fees, and residual slippage; "
+                "partial-fill timing/behavior is calibrated only when its separate gate passes"
+            ),
             "does_not_establish": [
                 "alpha validity",
                 "live-runtime parity",
                 "deployment authorization",
                 "passive limit-order queue position",
                 "market impact beyond captured visible depth",
+                "partial-fill probability outside the bounded observed sample",
+                "one-to-one correspondence between MBP levels and venue execution partitions",
             ],
         },
         "inputs": {
@@ -660,6 +859,10 @@ def calibrate_execution_twin(
             "order_commands": len(commands),
             "accepted_acks": accepted_ack_count,
             "request_ack_rtt": len(request_ack_rtt_ns),
+            "submit_to_first_fill": len(submit_to_first_fill_ns),
+            "submit_to_first_fill_orders": len(submit_to_first_fill_command_ids),
+            "fill_response": len(fill_response_ns),
+            "fill_response_orders": len(fill_response_command_ids),
             "fill_events": len(fills),
             "filled_orders": filled_with_commands,
             "terminal_or_fully_filled_orders": completed_with_commands,
@@ -676,6 +879,7 @@ def calibrate_execution_twin(
             "request_ack_round_trip": _distribution(request_ack_rtt_ns),
             "order_entry_clock_adjusted": _distribution(order_entry_ns),
             "order_response_clock_adjusted": _distribution(order_response_ns),
+            "submit_to_first_fill_clock_adjusted": _distribution(submit_to_first_fill_ns),
             "fill_response_clock_adjusted": _distribution(fill_response_ns),
             "partial_fill_spacing": _distribution(fill_spacing_ns),
         },
@@ -686,8 +890,21 @@ def calibrate_execution_twin(
             "incomplete_orders": incomplete_orders,
             "incomplete_order_rate": (incomplete_orders / filled_with_commands if filled_with_commands else None),
             "zero_fill_terminal_orders": zero_fill_terminal_orders,
+            "observed_partial_fill_orders": observed_partial_fill_orders,
             "zero_multi_fill_rule_of_three_upper_bound": partial_upper_bound,
-            "allow_partial_fills": True,
+            "partial_fill_calibrated": partial_fill_calibration_gate_passed,
+            "allow_partial_fills": partial_fill_calibration_gate_passed,
+            "calibration_scope": (
+                "observed multifill/incomplete occurrence, fill ratio, and positive "
+                "within-order venue-timestamp spacing only"
+            ),
+            "book_level_partition_calibrated": False,
+            "uncalibrated_behavior": "single_level_full_fill_or_reject",
+            "uncertainty": (
+                "Observed rates and spacing describe only this bounded market-order sample; "
+                "zero events do not identify timing or prove partial fills impossible, and a "
+                "passing minimum does not identify passive queue position or market impact."
+            ),
         },
         "slippage": {
             "reference": "account decision-boundary captured mid",
@@ -715,11 +932,34 @@ def calibrate_execution_twin(
         "negative_adjusted_feed_latency_ratio": adjusted_negative_ratio,
         "negative_adjusted_order_entry_latency_ratio": entry_negative_ratio,
         "negative_adjusted_order_response_latency_ratio": response_negative_ratio,
+        "negative_adjusted_submit_to_first_fill_latency_ratio": first_fill_negative_ratio,
+        "negative_adjusted_fill_response_latency_ratio": fill_response_negative_ratio,
         "sample_gate": sample_gate,
+        "market_order_smoke_gate_passed": market_order_smoke_gate_passed,
+        "partial_fill_gate": partial_fill_gate,
+        "partial_fill_calibration_gate_passed": partial_fill_calibration_gate_passed,
         "execution_twin_gate_passed": execution_twin_gate_passed,
         "artifact_sha256": "",
     }
     receipt["artifact_sha256"] = hashlib.sha256(canonical_json({**receipt, "artifact_sha256": ""})).hexdigest()
+    final_events, final_journal_snapshots = _read_journal_snapshot(account_path)
+    (
+        _final_capture_rows,
+        final_capture_manifest,
+        final_capture_manifest_sha256,
+        final_capture_snapshots,
+    ) = _read_capture(capture_path)
+    if (
+        _snapshot_fingerprint(final_journal_snapshots)
+        != _snapshot_fingerprint(journal_snapshots)
+        or _snapshot_fingerprint(final_capture_snapshots)
+        != _snapshot_fingerprint(capture_snapshots)
+        or canonical_json({"events": [event.to_dict() for event in final_events]})
+        != canonical_json({"events": [event.to_dict() for event in events]})
+        or final_capture_manifest != capture_manifest
+        or final_capture_manifest_sha256 != capture_manifest_sha256
+    ):
+        raise RuntimeError("execution-twin calibration sources mutated during computation")
     return receipt
 
 
@@ -748,7 +988,38 @@ def verify_calibration_receipt(
     expected_gate = _recomputed_sample_gate(payload, requirements)
     if dict(sample_gate) != expected_gate:
         raise ValueError("execution-twin calibration sample gate does not reproduce")
-    gate_passed = all(value is True for value in expected_gate.values())
+    smoke_gate_passed = all(value is True for value in expected_gate.values())
+    if payload.get("market_order_smoke_gate_passed") is not smoke_gate_passed:
+        raise ValueError("execution-twin market-order smoke gate is inconsistent")
+
+    partial_fill_gate = payload.get("partial_fill_gate")
+    if not isinstance(partial_fill_gate, Mapping) or not partial_fill_gate:
+        raise ValueError("execution-twin partial-fill gate is missing")
+    if any(value is not True and value is not False for value in partial_fill_gate.values()):
+        raise ValueError("execution-twin partial-fill gate values must be booleans")
+    expected_partial_fill_gate = _recomputed_partial_fill_gate(payload, requirements)
+    if dict(partial_fill_gate) != expected_partial_fill_gate:
+        raise ValueError("execution-twin partial-fill gate does not reproduce")
+    partial_fill_gate_passed = all(value is True for value in expected_partial_fill_gate.values())
+    if payload.get("partial_fill_calibration_gate_passed") is not partial_fill_gate_passed:
+        raise ValueError("execution-twin partial-fill aggregate gate is inconsistent")
+    fills = payload.get("fills")
+    if not isinstance(fills, Mapping):
+        raise ValueError("execution-twin fill calibration is malformed")
+    if fills.get("partial_fill_calibrated") is not partial_fill_gate_passed:
+        raise ValueError("execution-twin partial-fill calibration label is inconsistent")
+    if fills.get("allow_partial_fills") is not partial_fill_gate_passed:
+        raise ValueError("execution-twin partial-fill behavior is inconsistent")
+    if fills.get("book_level_partition_calibrated") is not False:
+        raise ValueError("execution-twin MBP fill partition must remain an assumption")
+    if fills.get("calibration_scope") != (
+        "observed multifill/incomplete occurrence, fill ratio, and positive within-order venue-timestamp spacing only"
+    ):
+        raise ValueError("execution-twin partial-fill calibration scope is unknown")
+    if fills.get("uncalibrated_behavior") != "single_level_full_fill_or_reject":
+        raise ValueError("execution-twin uncalibrated partial-fill behavior is unknown")
+
+    gate_passed = smoke_gate_passed and partial_fill_gate_passed
     if payload.get("execution_twin_gate_passed") is not gate_passed:
         raise ValueError("execution-twin calibration aggregate gate is inconsistent")
     return payload
@@ -758,26 +1029,40 @@ def write_calibration_receipt(path: str | Path, receipt: Mapping[str, Any]) -> P
     payload = verify_calibration_receipt(receipt)
     resolved = Path(path).expanduser()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    temporary = resolved.with_name(f".{resolved.name}.{os.getpid()}.tmp")
-    fd = os.open(str(temporary), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    created = False
     try:
-        data = canonical_json(payload) + b"\n"
-        view = memoryview(data)
-        written = 0
-        while written < len(data):
-            count = os.write(fd, view[written:])
-            if count <= 0:
-                raise OSError("calibration receipt write made no progress")
-            written += count
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(temporary, resolved)
-    directory_fd = os.open(str(resolved.parent), os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+        fd = os.open(
+            str(resolved),
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_WRONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        created = True
+        try:
+            data = canonical_json(payload) + b"\n"
+            view = memoryview(data)
+            written = 0
+            while written < len(data):
+                count = os.write(fd, view[written:])
+                if count <= 0:
+                    raise OSError("calibration receipt write made no progress")
+                written += count
+            os.fchmod(fd, 0o600)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        directory_fd = os.open(str(resolved.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        if created:
+            resolved.unlink(missing_ok=True)
+        raise
     return resolved
 
 
@@ -785,8 +1070,17 @@ def load_calibration_receipt(
     path: str | Path,
     *,
     require_registered_requirements: bool = True,
+    snapshot: StableFileSnapshot | None = None,
 ) -> dict[str, Any]:
-    value = json.loads(Path(path).expanduser().read_bytes())
+    if snapshot is None:
+        snapshot = read_stable_file(
+            path,
+            label="execution-twin calibration receipt",
+            require_single_link=False,
+        )
+    elif snapshot.path != Path(path).expanduser().absolute():
+        raise ValueError("execution-twin calibration receipt snapshot path differs")
+    value = json.loads(snapshot.data)
     if not isinstance(value, dict):
         raise ValueError("execution-twin calibration receipt must be an object")
     return verify_calibration_receipt(
@@ -804,14 +1098,19 @@ def execution_twin_config_from_calibration(
     require_gate: bool = True,
     require_registered_requirements: bool = True,
 ) -> ExecutionTwinConfig:
-    """Construct the twin config while keeping stress quantiles explicit."""
+    """Construct the twin config while keeping stress quantiles explicit.
+
+    A receipt that passes only the market-order smoke gate can be inspected with
+    ``require_gate=False``. Its config fails closed on any multi-level or
+    incomplete-fill path; it never invents a spacing value.
+    """
 
     payload = verify_calibration_receipt(
         receipt,
         require_registered_requirements=require_registered_requirements,
     )
     if require_gate and payload.get("execution_twin_gate_passed") is not True:
-        raise ValueError("execution-twin calibration sample gate has not passed")
+        raise ValueError("execution-twin calibration gate has not passed")
     if latency_quantile not in {"p50", "p75", "p95", "p99"}:
         raise ValueError("latency_quantile must be p50, p75, p95, or p99")
     if slippage_quantile not in {"p50", "p75", "p95", "p99"}:
@@ -827,6 +1126,13 @@ def execution_twin_config_from_calibration(
             return fallback
         return max(int(round(float(raw))), 0)
 
+    def required_value(metric: str) -> int:
+        distribution = latency.get(metric) or {}
+        raw = distribution.get(latency_quantile)
+        if raw is None:
+            raise ValueError(f"calibration has no observed {metric} basis")
+        return max(int(round(float(raw))), 0)
+
     fee_bps = (payload.get("slippage") or {}).get("fee_bps")
     if fee_bps is None:
         raise ValueError("calibration has no observed fee basis")
@@ -834,16 +1140,27 @@ def execution_twin_config_from_calibration(
     residual_slippage = residual_distribution.get(slippage_quantile)
     if residual_slippage is None:
         raise ValueError("calibration has no visible-book residual slippage basis")
+    partial_fill_calibrated = payload.get("partial_fill_calibration_gate_passed") is True
+    if partial_fill_calibrated:
+        raw_fill_spacing = (latency.get("partial_fill_spacing") or {}).get(latency_quantile)
+        if raw_fill_spacing is None:
+            raise ValueError("partial-fill gate passed without an observed spacing basis")
+        fill_spacing_ns = value("partial_fill_spacing")
+    else:
+        fill_spacing_ns = 0
     return ExecutionTwinConfig(
         fee_bps=float(fee_bps),
         latency=LatencyProfile(
             decision_to_socket_ns=value("decision_to_socket"),
             order_entry_ns=value("order_entry_clock_adjusted"),
             order_response_ns=value("order_response_clock_adjusted"),
-            fill_spacing_ns=max(value("partial_fill_spacing", fallback=1), 1),
+            fill_spacing_ns=fill_spacing_ns,
+            submit_to_first_fill_ns=required_value("submit_to_first_fill_clock_adjusted"),
+            fill_response_ns=required_value("fill_response_clock_adjusted"),
         ),
         max_decision_age_ns=max_decision_age_ns,
-        allow_partial_fills=True,
+        allow_partial_fills=partial_fill_calibrated,
+        fill_partition_policy=("book_level" if partial_fill_calibrated else "single_level_full_fill_or_reject"),
         immutable_replay_book=True,
         residual_adverse_slippage_bps=float(residual_slippage),
     )

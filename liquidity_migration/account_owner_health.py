@@ -10,18 +10,24 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
+from .artifact_snapshot import read_stable_file
 from .account_kernel import GENESIS_HASH, read_account_journal
 from .deterministic_serialization import canonical_json
 
 
-ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION = 1
+ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION = 2
 ACCOUNT_OWNER_HEALTH_FILENAME = "account_owner_health.json"
+# Stable test value for fixtures. Production construction must always provide
+# systemd's actual INVOCATION_ID explicitly; there is deliberately no dataclass
+# default that could hide a missing generation binding.
+TEST_ACCOUNT_OWNER_INVOCATION_ID = "00000000000000000000000000000001"
 # Risk-increasing target producers require a much tighter bound than the
 # operator-facing watchdog. Owners normally publish every five seconds.
 TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
@@ -30,6 +36,33 @@ TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
 class AccountOwnerHealthStatus(StrEnum):
     HEALTHY = "healthy"
     BLOCKED = "blocked"
+
+
+def validate_systemd_invocation_id(value: object, *, label: str = "systemd INVOCATION_ID") -> str:
+    """Return one canonical non-zero systemd invocation identifier."""
+
+    if type(value) is not str or len(value) != 32 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(f"{label} must be exactly 32 lowercase hexadecimal characters")
+    if value == "0" * 32:
+        raise ValueError(f"{label} cannot be the zero identifier")
+    return value
+
+
+def require_systemd_invocation_id(
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Read and strictly validate the current service generation from systemd."""
+
+    source = os.environ if environment is None else environment
+    value = source.get("INVOCATION_ID")
+    if value is None:
+        raise RuntimeError("systemd INVOCATION_ID is required for account-owner startup")
+    try:
+        return validate_systemd_invocation_id(value)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def format_convergence_health(report: Any, *, max_items: int = 3) -> str:
@@ -83,9 +116,10 @@ def fold_convergence_health(
 class AccountOwnerHealth:
     """Latest completed owner-loop observation.
 
-    ``journal_sequence`` and ``journal_state_hash`` bind the operational
-    heartbeat to the exact canonical state observed by the owner.  They are
-    evidence references only; this projection never mutates that state.
+    ``invocation_id`` binds the heartbeat to one systemd service generation;
+    ``journal_sequence`` and ``journal_state_hash`` bind it to the exact
+    canonical state observed by that owner.  They are evidence references only;
+    this projection never mutates that state.
     """
 
     owner: str
@@ -99,6 +133,7 @@ class AccountOwnerHealth:
     equity_usdt: float
     available_margin_usdt: float
     requested_symbols_ready: bool
+    invocation_id: str
     last_batch_id: str = ""
     detail: str = ""
     schema_version: int = ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION
@@ -129,6 +164,10 @@ class AccountOwnerHealth:
             raise ValueError("account-owner health available_margin_usdt must be finite and non-negative")
         if not isinstance(self.requested_symbols_ready, bool):
             raise ValueError("account-owner health requested_symbols_ready must be boolean")
+        validate_systemd_invocation_id(
+            self.invocation_id,
+            label="account-owner health invocation_id",
+        )
         if len(self.last_batch_id) > 500:
             raise ValueError("account-owner health last_batch_id is too long")
         if len(self.detail) > 1000:
@@ -162,6 +201,7 @@ class AccountOwnerHealth:
                 equity_usdt=float(payload["equity_usdt"]),
                 available_margin_usdt=float(payload["available_margin_usdt"]),
                 requested_symbols_ready=payload["requested_symbols_ready"],
+                invocation_id=payload["invocation_id"],
                 last_batch_id=str(payload["last_batch_id"]),
                 detail=str(payload["detail"]),
             )
@@ -175,10 +215,22 @@ def account_owner_health_path(root: str | Path) -> Path:
 
 def _atomic_replace(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    )
+    flags = (
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_WRONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    created_temporary = False
     try:
-        descriptor = os.open(str(temporary), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        descriptor = os.open(str(temporary), flags, 0o600)
+        created_temporary = True
         try:
+            os.fchmod(descriptor, 0o600)
             view = memoryview(data)
             offset = 0
             while offset < len(data):
@@ -196,7 +248,8 @@ def _atomic_replace(path: Path, data: bytes) -> None:
         finally:
             os.close(directory_descriptor)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        if created_temporary:
+            temporary.unlink(missing_ok=True)
         raise
 
 
@@ -213,8 +266,14 @@ def read_account_owner_health(root: str | Path) -> AccountOwnerHealth:
 
     path = account_owner_health_path(root)
     try:
-        payload = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError) as exc:
+        snapshot = read_stable_file(
+            path,
+            label="account-owner health artifact",
+            reject_empty=True,
+            require_single_link=True,
+        )
+        payload = json.loads(snapshot.data)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read account-owner health artifact {path}: {exc}") from exc
     if not isinstance(payload, Mapping):
         raise ValueError(f"account-owner health artifact must contain an object: {path}")
@@ -228,6 +287,7 @@ def require_recent_account_owner_health(
     max_age_ns: int,
     now_ns: int | None = None,
     expected_account_id: str | None = None,
+    expected_invocation_id: str | None = None,
 ) -> AccountOwnerHealth:
     """Require fresh health bound to the verified canonical journal head."""
 
@@ -237,9 +297,22 @@ def require_recent_account_owner_health(
         raise ValueError("max account-owner health age must be positive")
     if expected_account_id is not None and not expected_account_id:
         raise ValueError("expected account-owner account_id cannot be empty")
+    expected_generation = (
+        None
+        if expected_invocation_id is None
+        else validate_systemd_invocation_id(
+            expected_invocation_id,
+            label="expected account-owner invocation id",
+        )
+    )
     health = read_account_owner_health(root)
     if health.environment != environment:
         raise RuntimeError(f"account-owner health environment is {health.environment}, expected {environment}")
+    if expected_generation is not None and health.invocation_id != expected_generation:
+        raise RuntimeError(
+            "account-owner health invocation id does not match the current systemd generation: "
+            f"health={health.invocation_id}, expected={expected_generation}"
+        )
     if AccountOwnerHealthStatus(health.status) is not AccountOwnerHealthStatus.HEALTHY:
         raise RuntimeError(f"account owner is blocked: {health.detail or 'no detail'}")
     if not health.requested_symbols_ready:

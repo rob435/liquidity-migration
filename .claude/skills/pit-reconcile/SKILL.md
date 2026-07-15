@@ -28,16 +28,48 @@ scripts/ops.sh account-parity \
   --environment historical=/path/to/historical-account-root \
   --environment paper=/path/to/paper-account-root \
   --environment demo=/path/to/demo-account-root \
+  --comparison-scope-file /path/to/frozen-natural-batches.json \
+  --event-parity-receipt /path/to/event-parity.json \
+  --fresh-epoch-reset-receipt /path/to/natural-reset-receipt.json \
+  --risk-policy-file /path/to/risk-policy.json \
+  --rules-file /path/to/demo-rules.json \
+  --effective-runtime-config-bundle /path/to/effective-runtime-config-bundle.json \
+  --twin-calibration-receipt /path/to/pre-reset-twin-calibration.json \
+  --repo-root /path/to/clean/repository \
+  --expected-commit FULL_40_CHARACTER_COMMIT \
   --quantity-tolerance 1e-12 \
-  --output /path/to/account-kernel-parity.json
+  --output /path/outside/repository/account-kernel-parity.json
 ```
 
-The receipt binds normalized journal bytes and compares decision keys, rejection
-keys, target quantities, event-type sequence, and replayed account-state hashes.
-A pass supports only those structural claims. It does not establish market-tape
-provenance, a common strategy scheduler, fresh venue rules, credentialed demo
-execution, immutable venue P&L, funding agreement, alpha, or deployment
-readiness. Read `docs/account_execution_cutover.md` before making a runtime
+The schema-v3 comparison scope and schema-v4 kernel receipt reopen and rehash
+the authoritative transaction files, then recompute a frozen, ordered
+natural-batch window from each raw journal. The receipt requires exact
+decision/target keys, target discrete fields, risk
+acceptance/rejection keys, risk target presence, and semantic command tuples.
+All target/risk/command quantities must be finite and agree at the fixed
+absolute tolerance `1e-12`. Raw command IDs may differ by environment, but must
+form a one-to-one map to semantic commands.
+
+Actual demo acknowledgements, partial fills, prices, fees, P&L, funding,
+reconciliation, owner-convergence, and native-protection facts are classified
+and counted; they are deliberately not compared byte-for-byte with the model.
+Historical-versus-paper modeled execution is reported as a separate normalized
+exact subgate. A schema-v4 plan-parity pass therefore does not claim exact demo
+execution, accounting agreement, market-tape provenance, scheduler parity,
+fresh venue rules, alpha, or deployment readiness.
+
+The deploy-valid receipt also binds the event-parity, fresh/reset, risk, rules,
+source-reopened effective LONG/CONT runtime-config bundle, and pre-reset
+calibration artifacts plus an exact clean Git commit. Its verifier rereads every
+natural journal and evidence file; older receipts and self-rehashed receipts
+with missing or changed sources fail. The
+calibration receipt's embedded live paths are not reopened because reset reuses
+those lexical paths. Kernel parity binds its immutable receipt/config hashes
+and rejects calibration/natural journal-hash reuse; archived calibration-source
+revalidation belongs to the independent execution-twin drift gate.
+
+Source-process quiescence remains operator evidence, not something a journal
+hash can prove. Read `docs/account_execution_cutover.md` before making a runtime
 acceptance claim.
 
 For a live mismatch, inspect the account journal, owner reconciliation report,
@@ -60,10 +92,13 @@ The self-hashed receipt replays the current canonical journal and binds raw
 Bybit demo TRADE, closed-PnL, and SETTLEMENT rows plus position/open-order
 snapshots before and after capture. It checks exact execution/order identities,
 target-to-order lineage, observed fees, fill P&L, funding identities/values,
-and local/venue flatness. The preregistered default floors are two trade rows,
-one closed-PnL row, and one funding settlement; a zero-funding window does not
-pass by assumption. This is accounting evidence for the named fresh demo epoch,
-not component P&L attribution, strategy parity, alpha, or deployment authority.
+and local/venue flatness. The registered minimum floors are two trade rows, one
+closed-PnL row, and one funding settlement; a zero-funding window does not pass
+by assumption. Registered maximum tolerances are `1e-12` quantity, `1e-8`
+price/amount, and `1e-9` relative. The command and verifier reject lower floors
+or wider tolerances. This is accounting evidence for the named fresh demo
+epoch, not component P&L attribution, strategy parity, alpha, or deployment
+authority.
 
 ## PIT and model evidence
 

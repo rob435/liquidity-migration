@@ -1280,6 +1280,7 @@ def canonical_strategy_trade_rows(
     *,
     sleeve: str,
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
+    account_events: Sequence[AccountEvent] | None = None,
 ) -> pl.DataFrame:
     """Project accepted desires plus fill-backed component lifecycle rows.
 
@@ -1290,7 +1291,11 @@ def canonical_strategy_trade_rows(
     cooldown clock.
     """
 
-    events = read_account_journal(account_root, verify=True)
+    events = (
+        list(account_events)
+        if account_events is not None
+        else read_account_journal(account_root, verify=True)
+    )
     if not events:
         return pl.DataFrame()
     accepted_batches = _accepted_batches(events)

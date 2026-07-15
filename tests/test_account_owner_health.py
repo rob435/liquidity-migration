@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from liquidity_migration.account_kernel import (
 )
 from liquidity_migration.account_owner_health import (
     ACCOUNT_OWNER_HEALTH_FILENAME,
+    ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION,
+    TEST_ACCOUNT_OWNER_INVOCATION_ID,
     AccountOwnerHealth,
     AccountOwnerHealthStatus,
     account_owner_health_path,
@@ -20,6 +23,8 @@ from liquidity_migration.account_owner_health import (
     format_convergence_health,
     read_account_owner_health,
     require_recent_account_owner_health,
+    require_systemd_invocation_id,
+    validate_systemd_invocation_id,
     write_account_owner_health,
 )
 from liquidity_migration.account_reconcile import AccountReconciliationReport
@@ -46,6 +51,7 @@ def _health(*, loop_sequence: int = 1) -> AccountOwnerHealth:
         equity_usdt=10_000.0,
         available_margin_usdt=10_000.0,
         requested_symbols_ready=True,
+        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
 
 
@@ -110,14 +116,61 @@ def test_health_artifact_round_trips_strict_canonical_schema(tmp_path: Path) -> 
         "equity_usdt": 10_000.0,
         "journal_sequence": 0,
         "journal_state_hash": GENESIS_HASH,
+        "invocation_id": TEST_ACCOUNT_OWNER_INVOCATION_ID,
         "last_batch_id": "",
         "loop_sequence": 1,
         "observed_ts_ns": 10_000,
         "owner": "account_execution",
         "requested_symbols_ready": True,
-        "schema_version": 1,
+        "schema_version": ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION,
         "status": "healthy",
     }
+
+
+def test_health_reader_rejects_symbolic_and_hard_link_aliases(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = write_account_owner_health(source_root, _health())
+
+    symlink_root = tmp_path / "symlink"
+    symlink_root.mkdir()
+    account_owner_health_path(symlink_root).symlink_to(source)
+    with pytest.raises(ValueError, match="symbolic link"):
+        read_account_owner_health(symlink_root)
+
+    hardlink_root = tmp_path / "hardlink"
+    hardlink_root.mkdir()
+    os.link(source, account_owner_health_path(hardlink_root))
+    with pytest.raises(ValueError, match="hard-linked"):
+        read_account_owner_health(hardlink_root)
+
+
+def test_reader_rejects_pre_generation_health_schema(tmp_path: Path) -> None:
+    legacy = _health().to_dict()
+    legacy["schema_version"] = 1
+    legacy.pop("invocation_id")
+    account_owner_health_path(tmp_path).write_text(json.dumps(legacy), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing fields: invocation_id"):
+        read_account_owner_health(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("", "0" * 32, "a" * 31, "A" * 32, "g" * 32, None),
+)
+def test_systemd_invocation_id_validation_is_strict(value: object) -> None:
+    with pytest.raises(ValueError, match="invocation|INVOCATION"):
+        validate_systemd_invocation_id(value)
+
+
+def test_systemd_invocation_id_is_required_from_the_service_environment() -> None:
+    invocation_id = "a1" * 16
+    assert require_systemd_invocation_id({"INVOCATION_ID": invocation_id}) == invocation_id
+    with pytest.raises(RuntimeError, match="INVOCATION_ID is required"):
+        require_systemd_invocation_id({})
+    with pytest.raises(RuntimeError, match="lowercase hexadecimal"):
+        require_systemd_invocation_id({"INVOCATION_ID": "A" * 32})
 
 
 def test_paper_publisher_binds_fixed_capital_to_current_kernel_state(tmp_path: Path) -> None:
@@ -148,6 +201,7 @@ def test_paper_publisher_binds_fixed_capital_to_current_kernel_state(tmp_path: P
         observed_ts_ns=20_000,
         loop_sequence=7,
         requested_symbols_ready=False,
+        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
         last_batch_id="batch-6",
         detail="targets lack demo-verified rules: NEWUSDT",
     )
@@ -156,6 +210,7 @@ def test_paper_publisher_binds_fixed_capital_to_current_kernel_state(tmp_path: P
     assert published.journal_state_hash == state.rolling_state_hash
     assert published.equity_usdt == 12_345.0
     assert published.available_margin_usdt == 12_345.0
+    assert published.invocation_id == TEST_ACCOUNT_OWNER_INVOCATION_ID
     assert published.status == AccountOwnerHealthStatus.BLOCKED
     assert read_account_owner_health(tmp_path) == published
 
@@ -178,12 +233,14 @@ def test_demo_publisher_binds_wallet_capital_to_current_kernel_state(tmp_path: P
         observed_ts_ns=31_000,
         loop_sequence=2,
         requested_symbols_ready=True,
+        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
         last_batch_id="batch-1",
     )
 
     assert published.environment == "demo"
     assert published.equity_usdt == 10_125.5
     assert published.available_margin_usdt == 8_250.0
+    assert published.invocation_id == TEST_ACCOUNT_OWNER_INVOCATION_ID
     assert published.last_batch_id == "batch-1"
     assert read_account_owner_health(tmp_path) == published
 
@@ -257,6 +314,7 @@ def test_journal_only_health_republish_restores_exact_head_binding(tmp_path: Pat
         observed_ts_ns=11_000,
         loop_sequence=1,
         requested_symbols_ready=True,
+        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
     kernel.record_venue_snapshot(
         snapshot_key="second",
@@ -301,6 +359,7 @@ def test_journal_only_health_republish_restores_exact_head_binding(tmp_path: Pat
         observed_ts_ns=13_000,
         loop_sequence=2,
         requested_symbols_ready=True,
+        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
     assert rebound.journal_sequence == 2
     assert require_recent_account_owner_health(
@@ -383,6 +442,7 @@ def test_notification_position_truth_requires_a_completed_reconciliation(
     ("field", "value", "message"),
     [
         ("requested_symbols_ready", 1, "must be boolean"),
+        ("invocation_id", int("1" * 32), "lowercase hexadecimal"),
         ("equity_usdt", float("nan"), "finite and positive"),
         ("available_margin_usdt", -1.0, "finite and non-negative"),
         ("journal_state_hash", "not-a-hash", "lowercase SHA-256"),
@@ -429,6 +489,26 @@ def test_failed_atomic_publish_preserves_last_good_health(
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_atomic_publish_refuses_a_precreated_temporary_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "unrelated"
+    target.write_text("preserve me", encoding="utf-8")
+    monkeypatch.setattr("liquidity_migration.account_owner_health.time.time_ns", lambda: 123)
+    monkeypatch.setattr("liquidity_migration.account_owner_health.threading.get_ident", lambda: 456)
+    temporary = tmp_path / (
+        f".{ACCOUNT_OWNER_HEALTH_FILENAME}.{os.getpid()}.456.123.tmp"
+    )
+    temporary.symlink_to(target)
+
+    with pytest.raises(FileExistsError):
+        write_account_owner_health(tmp_path, _health())
+
+    assert target.read_text(encoding="utf-8") == "preserve me"
+    assert temporary.is_symlink()
+
+
 def test_require_recent_health_checks_environment_status_and_age(tmp_path: Path) -> None:
     write_account_owner_health(tmp_path, _health())
 
@@ -438,9 +518,18 @@ def test_require_recent_health_checks_environment_status_and_age(tmp_path: Path)
             environment="paper",
             max_age_ns=2_000,
             now_ns=11_000,
+            expected_invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
         )
         == _health()
     )
+    with pytest.raises(RuntimeError, match="current systemd generation"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="paper",
+            max_age_ns=2_000,
+            now_ns=11_000,
+            expected_invocation_id="00000000000000000000000000000002",
+        )
     with pytest.raises(RuntimeError, match="environment"):
         require_recent_account_owner_health(
             tmp_path,

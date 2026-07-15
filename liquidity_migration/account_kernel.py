@@ -341,6 +341,7 @@ class OrderCommand:
     chunk_index: int
     chunk_count: int
     leverage: float = 1.0
+    created_ts_ns: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,9 +454,24 @@ def _apply_fill(state: AccountState, event: AccountEvent) -> None:
     if abs(next_filled) > abs(order.signed_qty) + tolerance:
         raise AccountTransitionError(f"fill overstates command quantity for {command_id}")
     order.filled_signed_qty = next_filled
+    fill_metadata = payload.get("metadata") or {}
+    modeled_terminal_qty = 0.0
+    if isinstance(fill_metadata, Mapping) and "modeled_terminal_cumulative_filled_qty" in fill_metadata:
+        modeled_terminal_qty = abs(
+            _finite(
+                fill_metadata.get("modeled_terminal_cumulative_filled_qty"),
+                label="modeled terminal cumulative filled qty",
+            )
+        )
+        if modeled_terminal_qty <= tolerance or modeled_terminal_qty > abs(order.signed_qty) + tolerance:
+            raise AccountTransitionError(
+                f"invalid modeled terminal cumulative quantity for command {command_id}"
+            )
     if abs(next_filled - order.signed_qty) <= tolerance:
         order.status = "filled"
-    elif bool((payload.get("metadata") or {}).get("terminal")):
+    elif modeled_terminal_qty and abs(next_filled) >= modeled_terminal_qty - tolerance:
+        order.status = "partially_filled_cancelled"
+    elif not modeled_terminal_qty and bool(fill_metadata.get("terminal")):
         order.status = "partially_filled_cancelled"
     else:
         order.status = "partially_filled"
@@ -706,13 +722,9 @@ def reduce_account_events(events: Sequence[AccountEvent]) -> AccountState:
     return state
 
 
-def _read_jsonl_projection(root: str | Path) -> list[AccountEvent]:
-    path = account_journal_path(root)
-    if not path.exists():
-        return []
-    raw = path.read_bytes()
+def _read_jsonl_projection_bytes(raw: bytes, *, label: str) -> list[AccountEvent]:
     if raw and not raw.endswith(b"\n"):
-        raise AccountJournalIntegrityError(f"account journal has a truncated record: {path}")
+        raise AccountJournalIntegrityError(f"account journal has a truncated record: {label}")
     events: list[AccountEvent] = []
     for line_number, raw_line in enumerate(raw.splitlines(), start=1):
         try:
@@ -722,39 +734,54 @@ def _read_jsonl_projection(root: str | Path) -> list[AccountEvent]:
     return events
 
 
+def _read_jsonl_projection(root: str | Path) -> list[AccountEvent]:
+    path = account_journal_path(root)
+    if not path.exists():
+        return []
+    return _read_jsonl_projection_bytes(path.read_bytes(), label=str(path))
+
+
 def _transaction_hash(payload: Mapping[str, Any]) -> str:
     material = dict(payload)
     material.pop("transaction_hash", None)
     return hashlib.sha256(canonical_json(material)).hexdigest()
 
 
+def _read_transaction_event_bytes(
+    files: Sequence[tuple[str, bytes]],
+) -> list[AccountEvent] | None:
+    if not files:
+        return None
+    events: list[AccountEvent] = []
+    for label, data in files:
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise AccountJournalIntegrityError(f"invalid account transaction {label}: {exc}") from exc
+        if not isinstance(payload, Mapping):
+            raise AccountJournalIntegrityError(f"account transaction is not an object: {label}")
+        if int(payload.get("schema_version") or 0) != ACCOUNT_SCHEMA_VERSION:
+            raise AccountJournalIntegrityError(f"unsupported account transaction schema: {label}")
+        if str(payload.get("transaction_hash") or "") != _transaction_hash(payload):
+            raise AccountJournalIntegrityError(f"account transaction hash mismatch: {label}")
+        rows = payload.get("events")
+        if not isinstance(rows, list) or not rows:
+            raise AccountJournalIntegrityError(f"account transaction has no events: {label}")
+        transaction_events = [AccountEvent.from_dict(row) for row in rows]
+        if int(payload.get("first_sequence") or 0) != transaction_events[0].sequence:
+            raise AccountJournalIntegrityError(f"account transaction first_sequence mismatch: {label}")
+        if int(payload.get("last_sequence") or 0) != transaction_events[-1].sequence:
+            raise AccountJournalIntegrityError(f"account transaction last_sequence mismatch: {label}")
+        events.extend(transaction_events)
+    return events
+
+
 def _read_transaction_events(root: str | Path) -> list[AccountEvent] | None:
     directory = account_transactions_path(root)
     paths = sorted(directory.glob("*.json")) if directory.is_dir() else []
-    if not paths:
-        return None
-    events: list[AccountEvent] = []
-    for path in paths:
-        try:
-            payload = json.loads(path.read_bytes())
-        except (json.JSONDecodeError, OSError) as exc:
-            raise AccountJournalIntegrityError(f"invalid account transaction {path}: {exc}") from exc
-        if not isinstance(payload, Mapping):
-            raise AccountJournalIntegrityError(f"account transaction is not an object: {path}")
-        if int(payload.get("schema_version") or 0) != ACCOUNT_SCHEMA_VERSION:
-            raise AccountJournalIntegrityError(f"unsupported account transaction schema: {path}")
-        if str(payload.get("transaction_hash") or "") != _transaction_hash(payload):
-            raise AccountJournalIntegrityError(f"account transaction hash mismatch: {path}")
-        rows = payload.get("events")
-        if not isinstance(rows, list) or not rows:
-            raise AccountJournalIntegrityError(f"account transaction has no events: {path}")
-        transaction_events = [AccountEvent.from_dict(row) for row in rows]
-        if int(payload.get("first_sequence") or 0) != transaction_events[0].sequence:
-            raise AccountJournalIntegrityError(f"account transaction first_sequence mismatch: {path}")
-        if int(payload.get("last_sequence") or 0) != transaction_events[-1].sequence:
-            raise AccountJournalIntegrityError(f"account transaction last_sequence mismatch: {path}")
-        events.extend(transaction_events)
-    return events
+    return _read_transaction_event_bytes(
+        [(str(path), path.read_bytes()) for path in paths]
+    )
 
 
 def _verify_account_events(events: Sequence[AccountEvent], *, verify: bool) -> list[AccountEvent]:
@@ -797,6 +824,26 @@ def read_account_journal(root: str | Path, *, verify: bool = True) -> list[Accou
 
     transaction_events = _read_transaction_events(root)
     events = transaction_events if transaction_events is not None else _read_jsonl_projection(root)
+    return _verify_account_events(events, verify=verify)
+
+
+def read_account_journal_bytes(
+    *,
+    transaction_files: Sequence[tuple[str, bytes]] = (),
+    projection_data: bytes | None = None,
+    projection_label: str = "events.jsonl",
+    verify: bool = True,
+) -> list[AccountEvent]:
+    """Verify one already-captured authoritative account-journal snapshot."""
+
+    transaction_events = _read_transaction_event_bytes(transaction_files)
+    if transaction_events is not None:
+        events = transaction_events
+    else:
+        events = _read_jsonl_projection_bytes(
+            projection_data or b"",
+            label=projection_label,
+        )
     return _verify_account_events(events, verify=verify)
 
 
@@ -918,11 +965,21 @@ def _append_jsonl_projection(
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     created = not path.exists()
-    with path.open("ab") as handle:
+    descriptor = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
         for event in appended:
-            handle.write(canonical_json(event.to_dict()) + b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+            data = canonical_json(event.to_dict()) + b"\n"
+            view = memoryview(data)
+            offset = 0
+            while offset < len(data):
+                written = os.write(descriptor, view[offset:])
+                if written <= 0:
+                    raise OSError("account journal projection append made no progress")
+                offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     if created:
         directory = os.open(str(path.parent), os.O_RDONLY)
         try:
@@ -1172,6 +1229,25 @@ def _target_batch_request_hash(
     return hashlib.sha256(canonical_json(material)).hexdigest()
 
 
+def target_batch_request_hash(
+    *,
+    batch_id: str,
+    target_payloads: Sequence[Mapping[str, Any]],
+    command_symbols: set[str] | None,
+    require_strict_risk_reduction: bool,
+    request_content_hash: str | None,
+) -> str:
+    """Public verifier for the immutable request identity stored in risk events."""
+
+    return _target_batch_request_hash(
+        batch_id=batch_id,
+        target_payloads=target_payloads,
+        command_symbols=command_symbols,
+        require_strict_risk_reduction=require_strict_risk_reduction,
+        request_content_hash=request_content_hash,
+    )
+
+
 def _quantized_down(qty: float, step: float) -> float:
     if step <= 0.0:
         raise AccountKernelError("qty_step must be positive")
@@ -1314,6 +1390,11 @@ def _order_commands_from_events(events: Iterable[AccountEvent]) -> tuple[OrderCo
                 chunk_index=int(payload["chunk_index"]),
                 chunk_count=int(payload["chunk_count"]),
                 leverage=float(payload.get("leverage") or 1.0),
+                # Pre-cutover journals did not persist command time in the
+                # payload.  Their immutable event envelope remains the direct
+                # source for that timestamp; new journals persist both and the
+                # drift verifier requires them to agree.
+                created_ts_ns=int(payload.get("created_ts_ns") or event.wall_ts_ns),
             )
         )
     return tuple(commands)
@@ -1498,6 +1579,7 @@ class AccountExecutionKernel:
                 risk_snapshot=risk_snapshot,
                 risk_policy=risk_policy,
                 instrument_rules=rules_by_symbol,
+                command_created_ts_ns=now_wall,
                 command_symbols=normalized_command_symbols,
                 require_strict_risk_reduction=require_strict_risk_reduction,
             )
@@ -1568,6 +1650,7 @@ class AccountExecutionKernel:
         risk_snapshot: AccountRiskSnapshot,
         risk_policy: AccountRiskPolicy,
         instrument_rules: Mapping[str, InstrumentRules],
+        command_created_ts_ns: int,
         command_symbols: set[str] | None = None,
         require_strict_risk_reduction: bool = False,
     ) -> tuple[bool, list[str], dict[str, Any], list[OrderCommand]]:
@@ -1797,6 +1880,7 @@ class AccountExecutionKernel:
                             chunk_index=chunk_index,
                             chunk_count=chunk_count,
                             leverage=min(symbol_leverages[symbol]),
+                            created_ts_ns=command_created_ts_ns,
                         )
                     )
 

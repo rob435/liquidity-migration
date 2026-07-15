@@ -271,6 +271,44 @@ def test_gather_long_alerts_covers_cycle_and_input_freshness(tmp_path) -> None:
     }
 
 
+def test_gather_long_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
+    import argparse
+
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
+    long_root = tmp_path / "long-paper"
+    long_root.mkdir()
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "paper-c1",
+                    "ts_ms": now - 60 * MIN,
+                    "kline_store_max_ts_ms": now - 8 * HOUR,
+                }
+            ]
+        ),
+        long_root,
+        "long_native_paper_cycles",
+        partition_by=(),
+    )
+
+    keys = {
+        alert.key
+        for alert in M.gather_long_alerts(
+            long_root=long_root,
+            now_ms=now,
+            args=args,
+            cycles_dataset="long_native_paper_cycles",
+        )
+    }
+    assert keys == {"liveness:long-paper", "ws_stale:long-paper"}
+
+
 def test_gather_long_alerts_skips_when_root_absent(tmp_path) -> None:
     import argparse
 
@@ -356,6 +394,7 @@ def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> N
 
 def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_path) -> None:
     from liquidity_migration.account_owner_health import (
+        TEST_ACCOUNT_OWNER_INVOCATION_ID,
         AccountOwnerHealth,
         write_account_owner_health,
     )
@@ -374,6 +413,7 @@ def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_pat
         equity_usdt=10_000.0,
         available_margin_usdt=9_000.0,
         requested_symbols_ready=True,
+        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
     write_account_owner_health(demo_root, health)
     assert (
@@ -824,8 +864,10 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
         "continuous_root",
         "continuous_paper_root",
         "long_root",
+        "long_paper_root",
         "hedge_warmstart",
         "account_root",
+        "account_paper_root",
         "account_capture_root",
         "account_paper_capture_root",
     ):
@@ -834,6 +876,32 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
         assert value.is_relative_to(REPO_ROOT), f"{attr} must be under the repo dir, got {value}"
     # The documented '' skip sentinel is untouched by the anchoring.
     assert M._default_root("data/x") == str(REPO_ROOT / "data/x")
+
+
+def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
+    roots = {
+        "CONTINUOUS_DEMO_DATA_ROOT": "/fresh/continuous-demo",
+        "CONTINUOUS_PAPER_DATA_ROOT": "/fresh/continuous-paper",
+        "LONG_DEMO_DATA_ROOT": "/fresh/long-demo",
+        "LONG_PAPER_DATA_ROOT": "/fresh/long-paper",
+        "ACCOUNT_EXECUTION_ROOT": "/fresh/demo-account",
+        "ACCOUNT_PAPER_EXECUTION_ROOT": "/fresh/paper-account",
+        "ACCOUNT_CAPTURE_ROOT": "/fresh/demo-capture",
+        "ACCOUNT_PAPER_CAPTURE_ROOT": "/fresh/paper-capture",
+    }
+    for key, value in roots.items():
+        monkeypatch.setenv(key, value)
+
+    args = M.build_arg_parser().parse_args([])
+
+    assert args.continuous_root == roots["CONTINUOUS_DEMO_DATA_ROOT"]
+    assert args.continuous_paper_root == roots["CONTINUOUS_PAPER_DATA_ROOT"]
+    assert args.long_root == roots["LONG_DEMO_DATA_ROOT"]
+    assert args.long_paper_root == roots["LONG_PAPER_DATA_ROOT"]
+    assert args.account_root == roots["ACCOUNT_EXECUTION_ROOT"]
+    assert args.account_paper_root == roots["ACCOUNT_PAPER_EXECUTION_ROOT"]
+    assert args.account_capture_root == roots["ACCOUNT_CAPTURE_ROOT"]
+    assert args.account_paper_capture_root == roots["ACCOUNT_PAPER_CAPTURE_ROOT"]
 
 
 def test_depth_collector_unit_monitored_only_when_operator_enabled(monkeypatch) -> None:

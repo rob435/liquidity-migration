@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -57,9 +59,25 @@ def test_ops_help_is_read_only(help_args: list[str], tmp_path: Path) -> None:
     assert "Usage: scripts/ops.sh" in result.stdout
     assert "never enables REAL_MONEY" in result.stdout
     assert "never auto-promoted" in result.stdout
+    assert "event-parity" in result.stdout
+    assert "target-replay" in result.stdout
+    assert "account-replay" in result.stdout
     assert "account-parity" in result.stdout
+    assert "account-parity-scope" in result.stdout
+    assert "natural-freeze" in result.stdout
+    assert "natural-run-config" in result.stdout
+    assert "natural-effective-config" in result.stdout
+    assert "natural-sufficiency" in result.stdout
     assert "clock-offset" in result.stdout
+    assert "clock-series" in result.stdout
     assert "demo-calibration" in result.stdout
+    assert "natural-safety-flatten" in result.stdout
+    assert "twin-drift" in result.stdout
+    assert "v7-archive" in result.stdout
+    assert "stopped-epoch" in result.stdout
+    assert "fresh-deploy-epoch" in result.stdout
+    assert "fresh-deploy-env" in result.stdout
+    assert "authorized-deploy-epoch" in result.stdout
     assert "venue-accounting" in result.stdout
     assert "cutover-authority" in result.stdout
     assert not call_log.exists()
@@ -141,8 +159,89 @@ def test_ops_routes_canonical_shell_commands_with_exact_arguments(
             ],
         ),
         (
+            ["event-parity", "--environment", "historical=tape with spaces"],
+            ["-m", "liquidity_migration.strategy_event_parity"],
+        ),
+        (
+            ["target-replay", "--capture", "capture with spaces.jsonl"],
+            ["-m", "liquidity_migration.strategy_target_replay"],
+        ),
+        (
+            ["account-replay", "--target-capture", "capture with spaces.jsonl"],
+            ["-m", "liquidity_migration.captured_account_replay"],
+        ),
+        (
             ["account-parity", "--environment", "historical=root with spaces"],
             ["-m", "liquidity_migration.kernel_parity"],
+        ),
+        (
+            ["account-parity-scope", "--output", "scope with spaces.json"],
+            [str(REPO_ROOT / "scripts" / "build_kernel_parity_scope.py")],
+        ),
+        (
+            ["natural-freeze", "verify", "--manifest", "freeze with spaces.json"],
+            ["-m", "liquidity_migration.natural_cutover_freeze_manifest"],
+        ),
+        (
+            ["natural-run-config", "build", "--freeze-manifest", "freeze with spaces.json"],
+            ["-m", "liquidity_migration.natural_run_config"],
+        ),
+        (
+            ["natural-effective-config", "verify-bundle", "--bundle", "bundle with spaces.json"],
+            ["-m", "liquidity_migration.natural_effective_config"],
+        ),
+        (
+            ["natural-sufficiency", "--output", "receipt with spaces"],
+            ["-m", "liquidity_migration.natural_tape_sufficiency"],
+        ),
+        (
+            ["clock-series", "verify", "--series", "series with spaces.json"],
+            ["-m", "liquidity_migration.clock_offset_series"],
+        ),
+        (
+            ["twin-calibrate", "--account-root", "root with spaces"],
+            [str(REPO_ROOT / "scripts" / "calibrate_execution_twin.py")],
+        ),
+        (
+            ["twin-drift", "verify", "--output", "receipt with spaces"],
+            ["-m", "liquidity_migration.execution_twin_drift"],
+        ),
+        (
+            [
+                "v7-archive",
+                "from-stopped-roots",
+                "--destination-root",
+                "archive with spaces",
+            ],
+            ["-m", "liquidity_migration.v7_archive_materialization"],
+        ),
+        (
+            ["stopped-epoch", "verify", "--seal", "seal with spaces.json"],
+            ["-m", "liquidity_migration.stopped_natural_epoch"],
+        ),
+        (
+            [
+                "fresh-deploy-epoch",
+                "create",
+                "--stopped-seal",
+                "seal with spaces.json",
+                "--epoch-parent",
+                "epoch with spaces",
+            ],
+            ["-m", "liquidity_migration.fresh_deploy_epoch"],
+        ),
+        (
+            ["fresh-deploy-env", "verify", "--manifest", "fresh with spaces.json"],
+            ["-m", "liquidity_migration.fresh_deploy_environment"],
+        ),
+        (
+            [
+                "authorized-deploy-epoch",
+                "prepare",
+                "--authorization",
+                "authority with spaces.json",
+            ],
+            ["-m", "liquidity_migration.authorized_deploy_epoch"],
         ),
         (
             ["venue-accounting", "--output", "receipt with spaces"],
@@ -189,11 +288,119 @@ def test_ops_python_override_and_argument_forwarding(
         assert routed == [*expected_prefix, "--binance-root", "root with spaces"]
     elif args[0] == "overhaul-phase0":
         assert routed == [*expected_prefix, "--output-root", "root with spaces"]
+    elif args[0] == "event-parity":
+        assert routed == [
+            *expected_prefix,
+            "--environment",
+            "historical=tape with spaces",
+        ]
+    elif args[0] == "target-replay":
+        assert routed == [
+            *expected_prefix,
+            "--capture",
+            "capture with spaces.jsonl",
+        ]
+    elif args[0] == "account-replay":
+        assert routed == [
+            *expected_prefix,
+            "--target-capture",
+            "capture with spaces.jsonl",
+        ]
     elif args[0] == "account-parity":
         assert routed == [
             *expected_prefix,
             "--environment",
             "historical=root with spaces",
+        ]
+    elif args[0] == "account-parity-scope":
+        assert routed == [
+            *expected_prefix,
+            "--output",
+            "scope with spaces.json",
+        ]
+    elif args[0] == "natural-freeze":
+        assert routed == [
+            *expected_prefix,
+            "verify",
+            "--manifest",
+            "freeze with spaces.json",
+        ]
+    elif args[0] == "natural-run-config":
+        assert routed == [
+            *expected_prefix,
+            "build",
+            "--freeze-manifest",
+            "freeze with spaces.json",
+        ]
+    elif args[0] == "natural-effective-config":
+        assert routed == [
+            *expected_prefix,
+            "verify-bundle",
+            "--bundle",
+            "bundle with spaces.json",
+        ]
+    elif args[0] == "natural-sufficiency":
+        assert routed == [
+            *expected_prefix,
+            "--output",
+            "receipt with spaces",
+        ]
+    elif args[0] == "clock-series":
+        assert routed == [
+            *expected_prefix,
+            "verify",
+            "--series",
+            "series with spaces.json",
+        ]
+    elif args[0] == "twin-calibrate":
+        assert routed == [
+            *expected_prefix,
+            "--account-root",
+            "root with spaces",
+        ]
+    elif args[0] == "twin-drift":
+        assert routed == [
+            *expected_prefix,
+            "verify",
+            "--output",
+            "receipt with spaces",
+        ]
+    elif args[0] == "v7-archive":
+        assert routed == [
+            *expected_prefix,
+            "from-stopped-roots",
+            "--destination-root",
+            "archive with spaces",
+        ]
+    elif args[0] == "stopped-epoch":
+        assert routed == [
+            *expected_prefix,
+            "verify",
+            "--seal",
+            "seal with spaces.json",
+        ]
+    elif args[0] == "fresh-deploy-epoch":
+        assert routed == [
+            *expected_prefix,
+            "create",
+            "--stopped-seal",
+            "seal with spaces.json",
+            "--epoch-parent",
+            "epoch with spaces",
+        ]
+    elif args[0] == "fresh-deploy-env":
+        assert routed == [
+            *expected_prefix,
+            "verify",
+            "--manifest",
+            "fresh with spaces.json",
+        ]
+    elif args[0] == "authorized-deploy-epoch":
+        assert routed == [
+            *expected_prefix,
+            "prepare",
+            "--authorization",
+            "authority with spaces.json",
         ]
     elif args[0] == "venue-accounting":
         assert routed == [
@@ -210,6 +417,40 @@ def test_ops_python_override_and_argument_forwarding(
         ]
     else:
         assert routed == [*expected_prefix, "-q", "tests/a file.py"]
+
+
+def test_ops_twin_calibrate_help_works_without_an_editable_install(tmp_path: Path) -> None:
+    bootstrap = tmp_path / "isolated_bootstrap.py"
+    bootstrap.write_text(
+        "\n".join(
+            (
+                "import runpy",
+                "import sys",
+                f"sys.path.append({sysconfig.get_paths()['purelib']!r})",
+                "script = sys.argv[1]",
+                "sys.argv = sys.argv[1:]",
+                "runpy.run_path(script, run_name='__main__')",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    python = tmp_path / "isolated-python"
+    python.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" -I -S "{bootstrap}" "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+
+    result = _run_ops(
+        ["twin-calibrate", "--help"],
+        env={"PYTHON": str(python)},
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "usage: calibrate_execution_twin.py" in result.stdout
+    assert "--market-capture-root" in result.stdout
 
 
 def test_ops_data_build_requires_explicit_execute() -> None:
@@ -387,6 +628,11 @@ def test_ops_deploy_requires_first_argument_execute_and_routes_after_handshake(
             "demo-calibration",
             "scripts/run_demo_execution_calibration.py",
             ["--confirm-demo-calibration"],
+        ),
+        (
+            "natural-safety-flatten",
+            "scripts/publish_natural_safety_flatten.py",
+            ["--confirm-demo-safety-flatten"],
         ),
     ],
 )

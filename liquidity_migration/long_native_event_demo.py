@@ -49,6 +49,12 @@ from .account_intent_client import (
     publish_exit_first_target_requests,
     unresolved_target_snapshot,
 )
+from .account_candidate_universe import (
+    enforce_frozen_candidate_frames,
+    load_candidate_universe,
+    long_profile_universe_inputs,
+    require_profile_binding,
+)
 from .account_owner_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
@@ -61,7 +67,7 @@ from .account_strategy_state import (
     target_reservation_rows,
     terminal_entry_attempt_keys,
 )
-from .bybit import BybitMarketData
+from .bybit_market_data import BybitMarketData
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_tickers
 from .event_demo_data import (
@@ -86,6 +92,7 @@ from .long_native import LongNativeConfig, _classify_entry, _fc_atr_available, _
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID, long_trade_id
 from .strategy_targets import component_target_intent
+from .strategy_target_replay import PublishedTargetCyclePayload
 from .universe import build_current_universe_table
 
 
@@ -140,6 +147,9 @@ class LongNativeDemoCycleConfig:
     # required together so planning cannot mix account targets with stale
     # sleeve-owned open rows.
     account_execution_root: str | None = None
+    # Optional bounded-evidence population contract. When set, every cycle
+    # fails if a frozen symbol disappears and ignores post-freeze listings.
+    candidate_universe_file: str = ""
     data_name: str = "long-native-event-demo"
     strategy_profile: str = "LongV11aDivWeekendVol"
     # Daemon constructs a KlineStreamManager to feed an in-memory store. The
@@ -454,6 +464,24 @@ def run_long_native_demo_cycle(
         )
         tickers = _normalize_tickers(raw_tickers)
         universe = _build_long_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
+        candidate_universe = None
+        if demo.candidate_universe_file:
+            candidate_universe = load_candidate_universe(demo.candidate_universe_file)
+            require_profile_binding(
+                candidate_universe,
+                profile="long",
+                current_inputs=long_profile_universe_inputs(demo),
+            )
+            enforce_frozen_candidate_frames(
+                instruments,
+                tickers,
+                candidate_universe,
+                snapshot_ts_ms=cycle_now_ms,
+                context="LONG cycle",
+            )
+            universe = universe.filter(
+                pl.col("symbol").is_in(list(candidate_universe.symbols))
+            )
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
             raise RuntimeError("long-native demo cycle found no current tradable symbols after universe filters")
@@ -653,6 +681,9 @@ def run_long_native_demo_cycle(
             "mode": f"{owner_environment}_target",
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
+            "candidate_universe_artifact_sha256": (
+                candidate_universe.artifact_sha256 if candidate_universe else ""
+            ),
             "symbols": len(symbols),
             "universe_fallback_24h": universe_fallback_24h,  # ls-4: cold-start 24h backfill count (0 = warm)
             "vol_target_scale": vol_target_scale,  # div: de-risk-only book scalar applied to live sizing
@@ -746,7 +777,11 @@ def run_long_native_demo_cycle(
         cycle_row["timing_persist_ms"] = round((time.perf_counter() - persist_perf_start) * 1000.0, 3)
         cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row
-    return payload
+    return PublishedTargetCyclePayload(
+        payload,
+        publication=publication,
+        route=target_publisher.route,
+    )
 
 
 def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:

@@ -13,7 +13,10 @@ WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/account-execution.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+# Maintenance-only natural holdout activation. The owner-only optional file
+# must set both NATURAL_EVIDENCE_REQUIRED=1 and NATURAL_RUN_CONFIG=/absolute/path.
+EnvironmentFile=-/etc/liquidity-migration/natural-run.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-long-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
@@ -38,7 +41,12 @@ Environment=UNIVERSE_SIZE=50
 Environment=LOOKBACK_DAYS=100
 Environment=WORKERS=2
 Environment=WS_KLINES_ENABLED=1
-ExecStart=/opt/liquidity-migration/scripts/run_bybit_long_demo_event_engine.sh
+# Loaded after natural-run.env and every checked-in default. The fresh-epoch
+# file can therefore replace DATA_ROOT/account routes and clear
+# NATURAL_EVIDENCE_REQUIRED, NATURAL_RUN_CONFIG, STRATEGY_TARGET_CAPTURE_PATH,
+# and CANDIDATE_UNIVERSE_FILE without mutating the sealed natural environment.
+EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-bybit-long-demo.service.env
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-bybit-long-demo.service main
 Restart=always
 RestartSec=30
 KillMode=control-group

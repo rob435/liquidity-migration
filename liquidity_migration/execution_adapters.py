@@ -1,8 +1,10 @@
 """Execution ports for the account kernel and a deterministic market-order twin.
 
-Historical and paper runs use :class:`MarketOrderExecutionTwin`.  Demo uses the
-same :class:`KernelExecutionDriver` with :class:`BybitDemoExecutionAdapter`;
-private WebSocket executions are normalized into the same observations.
+Historical and paper runs use :class:`MarketOrderExecutionTwin`. Demo uses the
+same :class:`KernelExecutionDriver` with the account-owner-only adapter in
+``bybit_execution_adapter``; private venue dependencies do not belong in this
+shared replay module. Private WebSocket executions are normalized into the same
+observations.
 
 The twin intentionally makes the replay-book limitation explicit: it walks the
 observed book for this order but does not mutate future historical snapshots.
@@ -25,8 +27,7 @@ from .account_kernel import (
     OrderCommand,
     TargetBatchResult,
 )
-from .deterministic_runtime import Clock, DeterministicIds, SystemClock
-from .bybit import BybitRequestRejected
+from .deterministic_runtime import DeterministicIds
 
 
 class ExecutionObservationType(StrEnum):
@@ -97,7 +98,11 @@ class LatencyProfile:
     decision_to_socket_ns: int
     order_entry_ns: int
     order_response_ns: int
-    fill_spacing_ns: int = 1
+    # Retain the fourth positional field for narrow test callers, but keep the
+    # meanings distinct: spacing applies only after the first fill.
+    fill_spacing_ns: int = 0
+    submit_to_first_fill_ns: int = 0
+    fill_response_ns: int = 0
 
     def __post_init__(self) -> None:
         if min(
@@ -105,6 +110,8 @@ class LatencyProfile:
             self.order_entry_ns,
             self.order_response_ns,
             self.fill_spacing_ns,
+            self.submit_to_first_fill_ns,
+            self.fill_response_ns,
         ) < 0:
             raise ValueError("latencies cannot be negative")
 
@@ -117,6 +124,7 @@ class ExecutionTwinConfig:
     rate_limit_orders: int = 0
     rate_limit_window_ns: int = 1_000_000_000
     allow_partial_fills: bool = True
+    fill_partition_policy: str = "book_level"
     immutable_replay_book: bool = True
     residual_adverse_slippage_bps: float = 0.0
 
@@ -127,6 +135,16 @@ class ExecutionTwinConfig:
             raise ValueError("max_decision_age_ns cannot be negative")
         if self.rate_limit_orders < 0 or self.rate_limit_window_ns <= 0:
             raise ValueError("execution-twin rate limits are invalid")
+        if self.fill_partition_policy not in {
+            "book_level",
+            "single_level_full_fill_or_reject",
+        }:
+            raise ValueError("execution-twin fill partition policy is invalid")
+        if (
+            self.fill_partition_policy == "single_level_full_fill_or_reject"
+            and self.allow_partial_fills
+        ):
+            raise ValueError("single-level full-fill policy cannot allow partial fills")
         if not math.isfinite(self.residual_adverse_slippage_bps):
             raise ValueError("residual adverse slippage must be finite")
         if self.residual_adverse_slippage_bps <= -10_000.0:
@@ -175,7 +193,11 @@ class MarketOrderExecutionTwin:
             local_receive_ts_ns=local_receive_ts_ns,
             accepted=False,
             rejection_key=f"execution:{command.command_id}:{reason}",
-            metadata={"reason": reason, "local_socket_send_ts_ns": send_ts_ns},
+            metadata={
+                "reason": reason,
+                "local_socket_send_ts_ns": send_ts_ns,
+                "fill_partition_policy": self.config.fill_partition_policy,
+            },
         ),)
 
     def submit(
@@ -186,7 +208,9 @@ class MarketOrderExecutionTwin:
         symbol = command.symbol.upper()
         book = self.books.get(symbol)
         rules = self.instrument_rules.get(symbol)
-        send_ts_ns = market_input.local_receive_ts_ns + self.config.latency.decision_to_socket_ns
+        if command.created_ts_ns <= 0:
+            raise ValueError("execution-twin command requires an explicit positive created_ts_ns")
+        send_ts_ns = command.created_ts_ns + self.config.latency.decision_to_socket_ns
         exchange_ack_ts_ns = send_ts_ns + self.config.latency.order_entry_ns
         local_ack_ts_ns = exchange_ack_ts_ns + self.config.latency.order_response_ns
         if book is None or rules is None:
@@ -206,6 +230,14 @@ class MarketOrderExecutionTwin:
                 send_ts_ns=send_ts_ns,
             )
         decision_age_ns = send_ts_ns - market_input.local_receive_ts_ns
+        if command.created_ts_ns < market_input.local_receive_ts_ns:
+            return self._rejection(
+                command,
+                reason="future_decision_book",
+                exchange_ts_ns=exchange_ack_ts_ns,
+                local_receive_ts_ns=local_ack_ts_ns,
+                send_ts_ns=send_ts_ns,
+            )
         if decision_age_ns > self.config.max_decision_age_ns:
             return self._rejection(
                 command,
@@ -252,7 +284,10 @@ class MarketOrderExecutionTwin:
             self._send_times_ns.append(send_ts_ns)
 
         levels = book.asks if command.signed_qty > 0.0 else book.bids
-        available = math.fsum(level.qty for level in levels if level.qty > 0.0 and level.price > 0.0)
+        valid_levels = tuple(
+            level for level in levels if level.qty > 0.0 and level.price > 0.0
+        )
+        available = math.fsum(level.qty for level in valid_levels)
         if available <= 0.0:
             return self._rejection(
                 command,
@@ -265,6 +300,17 @@ class MarketOrderExecutionTwin:
             return self._rejection(
                 command,
                 reason="insufficient_depth",
+                exchange_ts_ns=exchange_ack_ts_ns,
+                local_receive_ts_ns=local_ack_ts_ns,
+                send_ts_ns=send_ts_ns,
+            )
+        if (
+            self.config.fill_partition_policy == "single_level_full_fill_or_reject"
+            and valid_levels[0].qty < command.qty - 1e-12
+        ):
+            return self._rejection(
+                command,
+                reason="unidentified_split_fill_path",
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
@@ -284,22 +330,31 @@ class MarketOrderExecutionTwin:
                 "book_exchange_ts_ns": book.exchange_ts_ns,
                 "book_local_receive_ts_ns": book.local_receive_ts_ns,
                 "feed_latency_ns": book.local_receive_ts_ns - book.exchange_ts_ns,
+                "command_created_ts_ns": command.created_ts_ns,
+                "decision_book_age_ns": decision_age_ns,
                 "order_entry_latency_ns": self.config.latency.order_entry_ns,
                 "order_response_latency_ns": self.config.latency.order_response_ns,
+                "submit_to_first_fill_latency_ns": self.config.latency.submit_to_first_fill_ns,
+                "fill_response_latency_ns": self.config.latency.fill_response_ns,
                 "immutable_replay_book": self.config.immutable_replay_book,
+                "fill_partition_policy": self.config.fill_partition_policy,
             },
         )]
         remaining = command.qty
         executable = min(command.qty, available)
         fill_count = 0
-        for level in levels:
-            if remaining <= 1e-12 or level.qty <= 0.0 or level.price <= 0.0:
+        for level in valid_levels:
+            if remaining <= 1e-12:
                 continue
             fill_qty = min(remaining, level.qty)
             remaining -= fill_qty
             fill_count += 1
             signed_qty = math.copysign(fill_qty, command.signed_qty)
-            exchange_fill_ts_ns = exchange_ack_ts_ns + fill_count * self.config.latency.fill_spacing_ns
+            exchange_fill_ts_ns = (
+                send_ts_ns
+                + self.config.latency.submit_to_first_fill_ns
+                + (fill_count - 1) * self.config.latency.fill_spacing_ns
+            )
             terminal = abs(math.fsum(obs.signed_qty for obs in observations) + signed_qty) >= executable - 1e-12
             direction = 1.0 if command.signed_qty > 0.0 else -1.0
             fill_price = level.price * (
@@ -314,7 +369,7 @@ class MarketOrderExecutionTwin:
                 observation_type=ExecutionObservationType.FILL,
                 command_id=command.command_id,
                 exchange_ts_ns=exchange_fill_ts_ns,
-                local_receive_ts_ns=exchange_fill_ts_ns + self.config.latency.order_response_ns,
+                local_receive_ts_ns=exchange_fill_ts_ns + self.config.latency.fill_response_ns,
                 venue_order_id=venue_order_id,
                 execution_id=self.ids.make("execution", command.command_id, fill_count),
                 signed_qty=signed_qty,
@@ -323,140 +378,49 @@ class MarketOrderExecutionTwin:
                 metadata={
                     "book_sequence": book.sequence,
                     "book_level": fill_count - 1,
+                    # Every modeled fill carries the terminal modeled quantity so
+                    # equal-timestamp executions remain replayable when delivery
+                    # order differs from book-level order.  ``terminal`` still
+                    # identifies the source-order final fill, but kernel state is
+                    # based on reconstructed cumulative quantity.
+                    "modeled_terminal_cumulative_filled_qty": executable,
+                    "submit_to_first_fill_latency_ns": self.config.latency.submit_to_first_fill_ns,
+                    "inter_fill_spacing_ns": self.config.latency.fill_spacing_ns,
+                    "fill_response_latency_ns": self.config.latency.fill_response_ns,
                     "visible_book_price": level.price,
                     "residual_adverse_slippage_bps": self.config.residual_adverse_slippage_bps,
                     "terminal": terminal,
                     "unfilled_cancelled_qty": max(command.qty - executable, 0.0) if terminal else 0.0,
                     "immutable_replay_book": self.config.immutable_replay_book,
+                    "fill_partition_policy": self.config.fill_partition_policy,
                     "fee_observed": True,
                     "fee_status": "modeled_execution_fee",
                     "fee_source": "execution_twin_config.fee_bps",
                     "source": "execution_twin_l2_fill",
                 },
             ))
+        final_fill = next(
+            observation
+            for observation in reversed(observations)
+            if observation.observation_type == ExecutionObservationType.FILL
+        )
         observations.append(ExecutionObservation(
             observation_type=ExecutionObservationType.ORDER_STATUS,
             command_id=command.command_id,
-            exchange_ts_ns=exchange_ack_ts_ns + (fill_count + 1) * self.config.latency.fill_spacing_ns,
-            local_receive_ts_ns=(
-                exchange_ack_ts_ns
-                + (fill_count + 1) * self.config.latency.fill_spacing_ns
-                + self.config.latency.order_response_ns
-            ),
+            # No terminal-status latency is identifiable in V3.  Keep the
+            # synchronous modeled status at the final fill boundary instead of
+            # reusing inter-fill spacing for a different phenomenon.
+            exchange_ts_ns=final_fill.exchange_ts_ns,
+            local_receive_ts_ns=final_fill.local_receive_ts_ns,
             venue_order_id=venue_order_id,
             status="filled" if executable >= command.qty - 1e-12 else "partially_filled_cancelled",
             cumulative_filled_qty=executable,
-            metadata={"source": "execution_twin_order_status"},
+            metadata={
+                "source": "execution_twin_order_status",
+                "fill_partition_policy": self.config.fill_partition_policy,
+            },
         ))
         return tuple(observations)
-
-
-class BybitDemoExecutionAdapter:
-    """Thin, demo-only Bybit command adapter.
-
-    Submission yields the create acknowledgement only.  Actual executions must
-    arrive through the private execution stream and be passed to
-    :meth:`KernelExecutionDriver.ingest`; the adapter never invents fills from a
-    successful create response.
-    """
-
-    name = "bybit_demo"
-
-    def __init__(self, client: Any, *, clock: Clock | None = None) -> None:
-        if not bool(getattr(client, "demo", False)):
-            raise ValueError("BybitDemoExecutionAdapter requires a demo client; mainnet is forbidden")
-        self.client = client
-        self.clock = clock or SystemClock()
-
-    def submit(self, command: OrderCommand, market_input: MarketInputRef) -> Iterable[ExecutionObservation]:
-        params = {
-            "symbol": command.symbol,
-            "side": command.side,
-            "orderType": "Market",
-            "qty": format(Decimal(str(command.qty)), "f"),
-            "orderLinkId": command.command_id,
-            "reduceOnly": command.reduce_only,
-        }
-        if not command.reduce_only:
-            try:
-                self.client.set_leverage(
-                    symbol=command.symbol,
-                    buy_leverage=command.leverage,
-                    sell_leverage=command.leverage,
-                )
-            except BybitRequestRejected as exc:
-                local_ack_ts_ns = self.clock.wall_time_ns()
-                return (ExecutionObservation(
-                    observation_type=ExecutionObservationType.ACK,
-                    command_id=command.command_id,
-                    exchange_ts_ns=0,
-                    local_receive_ts_ns=local_ack_ts_ns,
-                    accepted=False,
-                    rejection_key=f"bybit-demo:{command.command_id}:set_leverage_failed",
-                    metadata={
-                        "local_socket_send_ts_ns": 0,
-                        "exchange_ack_ts_status": "unavailable",
-                        "error_type": type(exc).__name__,
-                        "error": str(exc)[:500],
-                        "requested_leverage": command.leverage,
-                        "submission_phase": "set_leverage",
-                    },
-                ),)
-        # Measure the create-order request itself. Entry leverage negotiation is
-        # intentionally outside request/ack RTT but remains inside the broader
-        # command-decision-to-socket delay.
-        send_ts_ns = self.clock.wall_time_ns()
-        try:
-            result = self.client.place_order(**params)
-        except BybitRequestRejected as exc:
-            local_ack_ts_ns = self.clock.wall_time_ns()
-            return (ExecutionObservation(
-                observation_type=ExecutionObservationType.ACK,
-                command_id=command.command_id,
-                exchange_ts_ns=0,
-                local_receive_ts_ns=local_ack_ts_ns,
-                accepted=False,
-                rejection_key=f"bybit-demo:{command.command_id}:place_order_failed",
-                metadata={
-                    "local_socket_send_ts_ns": send_ts_ns,
-                    "exchange_ack_ts_status": "unavailable",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc)[:500],
-                    "requested_leverage": command.leverage,
-                },
-            ),)
-        # Transport failures and duplicate-link visibility races are ambiguous:
-        # the venue may already own this command. Let the service release the
-        # request while the command remains ``commanded``. REST reconciliation
-        # queries the same orderLinkId before any safe idempotent retry.
-        local_ack_ts_ns = self.clock.wall_time_ns()
-        idempotent_existing_order = bool(result.get("_idempotent_existing_order"))
-        exchange_ack_ms = 0
-        if not idempotent_existing_order:
-            exchange_ack_ms = result.get("_response_time_ms") or result.get("time") or 0
-        try:
-            exchange_ack_ts_ns = int(float(exchange_ack_ms) * 1_000_000)
-        except (TypeError, ValueError):
-            exchange_ack_ts_ns = 0
-        return (ExecutionObservation(
-            observation_type=ExecutionObservationType.ACK,
-            command_id=command.command_id,
-            exchange_ts_ns=exchange_ack_ts_ns,
-            local_receive_ts_ns=local_ack_ts_ns,
-            accepted=True,
-            venue_order_id=str(result.get("orderId") or ""),
-            metadata={
-                "local_socket_send_ts_ns": send_ts_ns,
-                "exchange_ack_ts_status": "observed" if exchange_ack_ts_ns else "unavailable",
-                "exchange_ack_ts_source": (
-                    "bybit_v5_response_envelope_time"
-                    if exchange_ack_ts_ns
-                    else "unavailable"
-                ),
-                "idempotent_existing_order": idempotent_existing_order,
-                "requested_leverage": command.leverage,
-            },
-        ),)
 
 
 class KernelExecutionDriver:
@@ -571,9 +535,22 @@ class KernelExecutionDriver:
             ExecutionObservationType.FILL: 1,
             ExecutionObservationType.ORDER_STATUS: 2,
         }
+
+        def modeled_fill_order(item: ExecutionObservation) -> tuple[int, int]:
+            if ExecutionObservationType(item.observation_type) is not ExecutionObservationType.FILL:
+                return (0, 0)
+            metadata = item.metadata if isinstance(item.metadata, Mapping) else {}
+            raw_level = metadata.get("book_level")
+            if type(raw_level) is int and raw_level >= 0:
+                return (0, raw_level)
+            # For non-twin observations with an exchange-timestamp tie, never
+            # apply an explicitly terminal fill before another same-time fill.
+            return (1 if bool(metadata.get("terminal")) else 0, 0)
+
         normalized.sort(key=lambda item: (
             priority[ExecutionObservationType(item.observation_type)],
             item.exchange_ts_ns,
+            modeled_fill_order(item),
             item.execution_id,
         ))
         return tuple(normalized)

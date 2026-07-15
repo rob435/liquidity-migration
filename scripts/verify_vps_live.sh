@@ -143,10 +143,16 @@ if [ ! -f /etc/liquidity-migration/bybit-demo.env ]; then
   echo "Verification failed: missing /etc/liquidity-migration/bybit-demo.env" >&2
   exit 1
 fi
+. deploy/lib_systemd_environment.sh
+if [[ ! "$EXPECTED_TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]]; then
+  echo "Verification failed: EXPECTED_TELEGRAM_CHAT_ID must be a signed decimal integer." >&2
+  exit 1
+fi
 
-set -a
-. /etc/liquidity-migration/bybit-demo.env
-set +a
+lm_load_private_systemd_environment "$PYTHON" \
+  /etc/liquidity-migration/bybit-demo.env \
+  BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY \
+  TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 
 if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
   echo "Verification failed: TELEGRAM_CHAT_ID is '${TELEGRAM_CHAT_ID:-unset}', expected '$EXPECTED_TELEGRAM_CHAT_ID'" >&2
@@ -158,13 +164,19 @@ fi
 # account this env file defines; demo-only operation otherwise depends solely on
 # the per-process runtime guard validate_demo_order_permission(). Make the VERIFY
 # itself fail-closed - parity with the same guard in scripts/deploy_vps_live.sh -
-# so a mis-edited bybit-demo.env that ever set REAL_MONEY truthy is caught here,
+# so a mis-edited bybit-demo.env with a non-false REAL_MONEY value is caught here,
 # not just at submission time. The strategy is NOT validated for real money.
 case "${REAL_MONEY:-}" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On)
     echo "Verification failed: REAL_MONEY='${REAL_MONEY}' in /etc/liquidity-migration/bybit-demo.env." \
          "This box runs a demo account owner; real money is not validated. Fix the env file to" \
          "demo (unset/false REAL_MONEY) before relying on this host." >&2
+    exit 1
+    ;;
+  ""|0|false|FALSE|False|no|NO|No|off|OFF|Off)
+    ;;
+  *)
+    echo "Verification failed: REAL_MONEY='${REAL_MONEY}' in /etc/liquidity-migration/bybit-demo.env is ambiguous; unset it or use an explicit false value." >&2
     exit 1
     ;;
 esac
@@ -178,47 +190,35 @@ if [ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]; then
   echo "Verification failed: missing account-execution-capture-enabled marker." >&2
   exit 1
 fi
-if ! "$PYTHON" scripts/account_execution_cutover_authority.py verify \
-  --receipt /etc/liquidity-migration/account-execution-deploy-ready \
-  --expected-commit "$actual_commit" \
-  --repo-root "$REPO_DIR"; then
-  echo "Verification failed: deploy-ready authorization is missing, stale, altered, or not bound to this host/commit." >&2
-  exit 1
-fi
+. deploy/lib_fresh_epoch.sh
+# Read-only post-start verification uses the immutable activation latch. The
+# short-lived authorization has been spent; its exact bytes remain bound and
+# are reopened without expiry renewal or a private-repository network lookup.
+lm_verify_authorized_deploy_epoch "$PYTHON" "$REPO_DIR" "$actual_commit"
 if [ ! -s /etc/liquidity-migration/account-execution.env ]; then
   echo "Verification failed: account-execution.env is missing or empty." >&2
   exit 1
 fi
-set -a
-. /etc/liquidity-migration/account-execution.env
-set +a
+lm_load_private_systemd_environment "$PYTHON" \
+  /etc/liquidity-migration/account-execution.env \
+  ACCOUNT_EXECUTION_KERNEL_REQUIRED
 if [ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]; then
   echo "Verification failed: ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required." >&2
   exit 1
 fi
 DEMO_ACCOUNT_EXECUTION_KERNEL_REQUIRED="$ACCOUNT_EXECUTION_KERNEL_REQUIRED"
-DEMO_ACCOUNT_EXECUTION_ROOT="${ACCOUNT_EXECUTION_ROOT:-}"
-DEMO_ACCOUNT_INTENT_INBOX_ROOT="${ACCOUNT_INTENT_INBOX_ROOT:-}"
-DEMO_ACCOUNT_CAPTURE_ROOT="${ACCOUNT_CAPTURE_ROOT:-}"
 if [ ! -s /etc/liquidity-migration/account-paper-execution.env ]; then
   echo "Verification failed: account-paper-execution.env is missing or empty." >&2
   exit 1
 fi
-unset ACCOUNT_EXECUTION_KERNEL_REQUIRED ACCOUNT_PAPER_KERNEL_REQUIRED \
-  ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT ACCOUNT_CAPTURE_ROOT ACCOUNT_PAPER_CAPTURE_ROOT
-set -a
-. /etc/liquidity-migration/account-paper-execution.env
-set +a
+lm_load_private_systemd_environment "$PYTHON" \
+  /etc/liquidity-migration/account-paper-execution.env \
+  ACCOUNT_PAPER_KERNEL_REQUIRED ACCOUNT_TWIN_CALIBRATION_FILE
 PAPER_ACCOUNT_KERNEL_REQUIRED="${ACCOUNT_PAPER_KERNEL_REQUIRED:-}"
-PAPER_ACCOUNT_EXECUTION_ROOT="${ACCOUNT_EXECUTION_ROOT:-}"
-PAPER_ACCOUNT_INTENT_INBOX_ROOT="${ACCOUNT_INTENT_INBOX_ROOT:-}"
-PAPER_ACCOUNT_CAPTURE_ROOT="${ACCOUNT_PAPER_CAPTURE_ROOT:-}"
 PAPER_ACCOUNT_TWIN_CALIBRATION_FILE="${ACCOUNT_TWIN_CALIBRATION_FILE:-}"
+unset ACCOUNT_PAPER_KERNEL_REQUIRED ACCOUNT_TWIN_CALIBRATION_FILE
 export ACCOUNT_EXECUTION_KERNEL_REQUIRED="$DEMO_ACCOUNT_EXECUTION_KERNEL_REQUIRED"
-export ACCOUNT_EXECUTION_ROOT="$DEMO_ACCOUNT_EXECUTION_ROOT"
-export ACCOUNT_INTENT_INBOX_ROOT="$DEMO_ACCOUNT_INTENT_INBOX_ROOT"
-export ACCOUNT_CAPTURE_ROOT="$DEMO_ACCOUNT_CAPTURE_ROOT"
-unset ACCOUNT_PAPER_KERNEL_REQUIRED ACCOUNT_PAPER_CAPTURE_ROOT
+lm_load_fresh_epoch_roots "$PYTHON" "$REPO_DIR" "$actual_commit"
 if [ "$PAPER_ACCOUNT_KERNEL_REQUIRED" != "1" ]; then
   echo "Verification failed: ACCOUNT_PAPER_KERNEL_REQUIRED=1 is required." >&2
   exit 1
@@ -298,19 +298,16 @@ if continuous_rmom_refresh_on; then
     _rmom_root="$2"
     if _rmom_status="$("$PYTHON" scripts/check_residual_momentum_gate.py --path "$_rmom_root" 2>&1)"; then
       echo "continuous ${_rmom_label} rmom gate ok: ${_rmom_status}"
-    elif [ "${ALLOW_EMPTY_RMOM_GATE:-0}" = "1" ]; then
-      echo "WARN: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale: ${_rmom_status}. ALLOW_EMPTY_RMOM_GATE=1" \
-           "lets verify continue, but that sleeve may emit NO entries until rmom is rebuilt." >&2
     else
       echo "verify failed: continuous ${_rmom_label} rmom gate is unusable at ${_rmom_root}: ${_rmom_status}" >&2
       return 1
     fi
   }
   if sleeve_on "$CONTINUOUS_SLEEVE"; then
-    _verify_rmom_root "demo" "data/bybit-continuous-demo-event/residual_momentum.parquet"
+    _verify_rmom_root "demo" "$CONTINUOUS_DEMO_DATA_ROOT/residual_momentum.parquet"
   fi
   if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
-    _verify_rmom_root "paper" "data/bybit-continuous-paper-event/residual_momentum.parquet"
+    _verify_rmom_root "paper" "$CONTINUOUS_PAPER_DATA_ROOT/residual_momentum.parquet"
   fi
 fi
 # Timer parity - read-only verify must catch a disabled liveness watchdog.
@@ -350,6 +347,24 @@ verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 lm_verify_no_unknown_liqmig_units
+lm_verify_guarded_unit_surfaces
+_fresh_active_units=(
+  liquidity-migration-account-execution.service
+  liquidity-migration-account-paper-execution.service
+)
+if sleeve_on "$LONG_SLEEVE"; then
+  _fresh_active_units+=(
+    liquidity-migration-bybit-long-demo.service
+    liquidity-migration-bybit-long-paper.service
+  )
+fi
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  _fresh_active_units+=(liquidity-migration-bybit-continuous-demo.service)
+fi
+if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
+  _fresh_active_units+=(liquidity-migration-bybit-continuous-paper.service)
+fi
+lm_verify_active_fresh_processes "$PYTHON" "$REPO_DIR" "$actual_commit" "${_fresh_active_units[@]}"
 
 require_unit_env liquidity-migration-account-execution.service 'ACCOUNT_EXECUTION_KERNEL_REQUIRED=1'
 require_unit_env liquidity-migration-account-execution.service 'CONFIRM_DEMO_ORDERS=1'
@@ -398,7 +413,6 @@ require_unit_env liquidity-migration-bybit-continuous-paper.service 'PER_POSITIO
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'SIZING_MODE=inverse_vol'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'TARGET_VOL_PER_NAME=0.01'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'VOL_WEIGHT_CLAMP=2'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DATA_ROOT=data/bybit-continuous-paper-event'
 
 systemctl show liquidity-migration-account-execution.service \
   --property=ActiveState \

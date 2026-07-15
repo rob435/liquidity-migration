@@ -26,7 +26,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
-from .bybit import BybitMarketData
+from .bybit_market_data import BybitMarketData
 from .config import ResearchConfig
 from .continuous_demo import (
     ContinuousDemoCycleConfig,

@@ -14,15 +14,19 @@ from typing import Any, Mapping, Sequence
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.account_owner_lease import AccountOwnerLease  # noqa: E402
+from liquidity_migration.account_owner_lease import (  # noqa: E402
+    DemoAccountIdentity,
+    DemoAccountMutationLease,
+)
 from liquidity_migration.account_venue_accounting import (  # noqa: E402
     VenueAccountingRequirements,
     build_venue_accounting_receipt,
+    require_registered_venue_accounting_requirements,
     write_venue_accounting_receipt,
 )
 from liquidity_migration.bybit import (  # noqa: E402
     BybitPrivateClient,
-    resolve_private_credentials,
+    resolve_demo_credentials,
 )
 
 
@@ -69,14 +73,16 @@ def _positions(client: Any) -> list[dict[str, Any]]:
 
 
 def _requirements(args: argparse.Namespace) -> VenueAccountingRequirements:
-    return VenueAccountingRequirements(
-        min_trade_rows=args.min_trade_rows,
-        min_closed_pnl_rows=args.min_closed_pnl_rows,
-        min_funding_rows=args.min_funding_rows,
-        quantity_abs_tolerance=args.quantity_abs_tolerance,
-        price_abs_tolerance=args.price_abs_tolerance,
-        amount_abs_tolerance=args.amount_abs_tolerance,
-        relative_tolerance=args.relative_tolerance,
+    return require_registered_venue_accounting_requirements(
+        VenueAccountingRequirements(
+            min_trade_rows=args.min_trade_rows,
+            min_closed_pnl_rows=args.min_closed_pnl_rows,
+            min_funding_rows=args.min_funding_rows,
+            quantity_abs_tolerance=args.quantity_abs_tolerance,
+            price_abs_tolerance=args.price_abs_tolerance,
+            amount_abs_tolerance=args.amount_abs_tolerance,
+            relative_tolerance=args.relative_tolerance,
+        )
     )
 
 
@@ -92,7 +98,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Fixed inclusive end time; defaults to capture time after the pre-snapshot.",
     )
     parser.add_argument("--output", required=True)
-    parser.add_argument("--owner-lock", default="")
     parser.add_argument("--min-trade-rows", type=int, default=2)
     parser.add_argument("--min-closed-pnl-rows", type=int, default=1)
     parser.add_argument("--min-funding-rows", type=int, default=1)
@@ -101,30 +106,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--amount-abs-tolerance", type=float, default=1e-8)
     parser.add_argument("--relative-tolerance", type=float, default=1e-9)
     args = parser.parse_args(argv)
+    try:
+        requirements = _requirements(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     account_root = Path(args.account_root).expanduser().resolve(strict=True)
     output = Path(args.output).expanduser().resolve()
-    lease = AccountOwnerLease(
-        args.owner_lock
-        or str(account_root / "account_execution_owner.lock")
+    api_key, api_secret = resolve_demo_credentials()
+    if not api_key or not api_secret:
+        raise RuntimeError(
+            "BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET are required"
+        )
+    client = BybitPrivateClient(
+        category="linear",
+        testnet=False,
+        demo=True,
+        api_key=api_key,
+        api_secret=api_secret,
     )
+    identity = DemoAccountIdentity.from_api_key_info(
+        api_key=api_key,
+        api_key_info=client.get_api_key_information(),
+    )
+    lease = DemoAccountMutationLease(identity)
     lease.acquire()
     try:
-        api_key, api_secret, demo = resolve_private_credentials()
-        if not demo:
-            raise RuntimeError("venue accounting refuses REAL_MONEY/mainnet credentials")
-        if not api_key or not api_secret:
-            raise RuntimeError(
-                "BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET are required"
-            )
-        client = BybitPrivateClient(
-            category="linear",
-            testnet=False,
-            demo=True,
-            api_key=api_key,
-            api_secret=api_secret,
-        )
-
         pre_positions = _positions(client)
         pre_orders = _open_orders_all_kinds(client)
         query_end_ms = args.end_time_ms or time.time_ns() // 1_000_000
@@ -176,7 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pre_open_order_rows=pre_orders,
             post_position_rows=post_positions,
             post_open_order_rows=post_orders,
-            requirements=_requirements(args),
+            requirements=requirements,
         )
         write_venue_accounting_receipt(output, receipt)
     finally:

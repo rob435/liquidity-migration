@@ -43,7 +43,7 @@ from typing import Any
 
 
 from ._common import MS_PER_HOUR, exact_duration_ms
-from .bybit import (
+from .bybit_market_data import (
     BybitKlineStreamPool,
     BybitMarketData,
     BybitRestRateLimiter,

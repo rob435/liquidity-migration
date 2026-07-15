@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
+from typing import Any, Mapping
+
+import pytest
 
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.market_capture import (
+    OWNER_CAPTURE_READINESS_FILENAME,
     BybitRawPublicMarketStream,
     MarketCaptureConfig,
+    SegmentedCaptureStore,
     SequenceAwareMarketRecorder,
+    symbols_from_file,
 )
 
 
@@ -28,7 +36,7 @@ def _snapshot(*, update_id: int = 100, seq: int = 1_000) -> dict[str, object]:
 
 
 def _config(**overrides: object) -> MarketCaptureConfig:
-    values = {
+    values: dict[str, Any] = {
         "depth": 50,
         "segment_max_bytes": 1_000_000,
         "fsync_every_records": 1,
@@ -37,6 +45,23 @@ def _config(**overrides: object) -> MarketCaptureConfig:
     }
     values.update(overrides)
     return MarketCaptureConfig(**values)
+
+
+def test_symbols_file_uses_a_descriptor_bound_utf8_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "candidate-universe.json"
+    source.write_text('{"symbols":["BTCUSDT","ethusdt"]}\n', encoding="utf-8")
+
+    assert symbols_from_file(source) == {"BTCUSDT", "ETHUSDT"}
+
+    alias = tmp_path / "symbols-link.json"
+    alias.symlink_to(source)
+    with pytest.raises(ValueError, match="must not be a symbolic link"):
+        symbols_from_file(alias)
+
+    invalid = tmp_path / "invalid-symbols.txt"
+    invalid.write_bytes(b"\xff")
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        symbols_from_file(invalid)
 
 
 def test_raw_snapshot_delta_capture_reconstructs_book_and_clock_offsets(tmp_path: Path) -> None:
@@ -86,6 +111,7 @@ def test_raw_snapshot_delta_capture_reconstructs_book_and_clock_offsets(tmp_path
         for line in path.read_text().splitlines()
     ]
     assert [row["kind"] for row in lines] == ["orderbook_snapshot", "orderbook_delta", "book_context"]
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in tmp_path.rglob("*.jsonl"))
 
 
 def test_regression_marks_book_unhealthy_until_fresh_snapshot(tmp_path: Path) -> None:
@@ -143,6 +169,127 @@ def test_public_trade_capture_preserves_trade_and_receive_timestamps(tmp_path: P
     recorder.close()
 
 
+def test_owner_invocation_id_is_optional_and_persisted_on_every_owner_row(
+    tmp_path: Path,
+) -> None:
+    invocation_id = "a1" * 16
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path / "owner",
+        config=_config(),
+        owner_invocation_id=invocation_id,
+    )
+    snapshot = recorder.on_message(
+        _snapshot(),
+        local_receive_ts_ns=1_800_000_000_010_000_000,
+    )[0]
+    context, _book = recorder.capture_context(
+        symbol="BUSDT",
+        context_kind="decision",
+        reference_key="decision-1",
+    )
+    recorder.close()
+
+    assert snapshot["owner_invocation_id"] == invocation_id
+    assert context["owner_invocation_id"] == invocation_id
+    persisted = [
+        json.loads(line)
+        for path in (tmp_path / "owner").rglob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert persisted
+    assert all(row["owner_invocation_id"] == invocation_id for row in persisted)
+    assert (tmp_path / "owner" / OWNER_CAPTURE_READINESS_FILENAME).is_file()
+
+    standalone = SequenceAwareMarketRecorder(tmp_path / "standalone", config=_config())
+    standalone_row = standalone.on_message(
+        _snapshot(),
+        local_receive_ts_ns=1_800_000_000_010_000_000,
+    )[0]
+    standalone.close()
+    assert "owner_invocation_id" not in standalone_row
+    assert not (tmp_path / "standalone" / OWNER_CAPTURE_READINESS_FILENAME).exists()
+
+
+def test_segment_store_returns_exact_completed_append_location(tmp_path: Path) -> None:
+    store = SegmentedCaptureStore(tmp_path, config=_config(fsync_every_records=100))
+    record = {
+        "schema_version": 1,
+        "record_id": "a1" * 12,
+        "kind": "test",
+        "symbol": "BUSDT",
+        "local_receive_ts_ns": 1_800_000_000_010_000_000,
+    }
+
+    location = store.append(record)
+    descriptor = os.open(location.path, os.O_RDONLY)
+    try:
+        stored = os.pread(descriptor, location.byte_length, location.byte_offset)
+        metadata = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    store.close()
+
+    assert json.loads(stored) == record
+    assert location.byte_offset == 0
+    assert location.byte_length == len(stored)
+    assert location.segment_device == metadata.st_dev
+    assert location.segment_inode == metadata.st_ino
+    assert location.record_sha256 == hashlib.sha256(stored).hexdigest()
+
+
+def test_owner_readiness_sidecar_is_first_row_immediate_and_at_most_once_per_second(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(
+        current_wall_ns=1_800_000_000_010_000_000,
+        current_monotonic_ns=0,
+    )
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(fsync_every_records=100),
+        clock=clock,
+        owner_invocation_id="a1" * 16,
+    )
+    first = recorder.on_message(
+        _snapshot(update_id=100, seq=1_000),
+        local_receive_ts_ns=clock.wall_time_ns(),
+    )[0]
+    sidecar_path = tmp_path / OWNER_CAPTURE_READINESS_FILENAME
+    first_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+
+    clock.advance_ns(999_999_999)
+    second = recorder.on_message(
+        _snapshot(update_id=101, seq=1_001),
+        local_receive_ts_ns=clock.wall_time_ns(),
+    )[0]
+    throttled_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+
+    clock.advance_ns(1)
+    third = recorder.on_message(
+        _snapshot(update_id=102, seq=1_002),
+        local_receive_ts_ns=clock.wall_time_ns(),
+    )[0]
+    refreshed_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    recorder.close()
+
+    assert first_sidecar["record_id"] == first["record_id"]
+    assert throttled_sidecar["record_id"] == first["record_id"]
+    assert throttled_sidecar["record_id"] != second["record_id"]
+    assert refreshed_sidecar["record_id"] == third["record_id"]
+    segment = tmp_path / str(refreshed_sidecar["segment_path"])
+    descriptor = os.open(segment, os.O_RDONLY)
+    try:
+        target = os.pread(
+            descriptor,
+            int(refreshed_sidecar["byte_length"]),
+            int(refreshed_sidecar["byte_offset"]),
+        )
+    finally:
+        os.close(descriptor)
+    assert json.loads(target)["record_id"] == third["record_id"]
+    assert hashlib.sha256(target).hexdigest() == refreshed_sidecar["record_sha256"]
+
+
 def test_raw_stream_subscribes_orderbook_and_trade_topics_without_pybit_rewrite() -> None:
     class Socket:
         def __init__(self) -> None:
@@ -151,7 +298,7 @@ def test_raw_stream_subscribes_orderbook_and_trade_topics_without_pybit_rewrite(
         def send(self, value: str) -> None:
             self.sent.append(json.loads(value))
 
-    seen: list[dict[str, object]] = []
+    seen: list[Mapping[str, Any]] = []
     stream = BybitRawPublicMarketStream(
         testnet=True,
         depth=50,

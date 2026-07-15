@@ -31,6 +31,7 @@ from .account_kernel import (
     TargetBatchResult,
 )
 from .account_route import AccountRoute, require_account_route
+from .artifact_snapshot import read_stable_file
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
 from .entry_attempts import entry_signal_expiry_rejection
@@ -253,6 +254,41 @@ class AccountTargetRequest:
             )
 
 
+def prepare_account_request_intents(
+    request: AccountTargetRequest,
+) -> tuple[tuple[RequestedIntent, SleeveTargetIntent], ...]:
+    """Apply the request provenance that the production owner journals.
+
+    Captured account replay must not maintain a second approximation of this
+    transformation.  Keeping it here gives the demo/paper service and the
+    offline production-kernel port one exact implementation.
+    """
+
+    if type(request) is not AccountTargetRequest:
+        raise TypeError("request must be an AccountTargetRequest")
+    prepared: list[tuple[RequestedIntent, SleeveTargetIntent]] = []
+    for item in request.intents:
+        intent = replace(
+            item.intent,
+            metadata={
+                **dict(item.intent.metadata),
+                "account_request_id": request.request_id,
+                "account_request_created_ts_ns": request.created_ts_ns,
+            },
+        )
+        prepared.append((item, intent))
+    return tuple(prepared)
+
+
+@dataclass(frozen=True, slots=True)
+class DurableTargetRequestEvidence:
+    """Exact current inbox location for one previously published request."""
+
+    path: Path
+    queue_state: str
+    arrival_sequence: int
+
+
 @dataclass(frozen=True, slots=True)
 class AccountServiceReceipt:
     request_id: str
@@ -402,8 +438,13 @@ class AccountIntentInbox:
                 f"queued request {request.request_id!r} lacks a durable arrival sequence"
             )
         try:
-            payload = json.loads(path.read_bytes())
-        except (OSError, TypeError, json.JSONDecodeError) as exc:
+            snapshot = read_stable_file(
+                path,
+                label=f"arrival sequence for request {request.request_id}",
+                reject_empty=True,
+            )
+            payload = json.loads(snapshot.data)
+        except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(
                 f"queued request {request.request_id!r} has an unreadable arrival sequence"
             ) from exc
@@ -503,6 +544,74 @@ class AccountIntentInbox:
                     ) from exc
                 return True
             return False
+
+    def require_durable_request(
+        self,
+        request: AccountTargetRequest,
+    ) -> DurableTargetRequestEvidence:
+        """Re-read one exact publication under the inbox lock.
+
+        A publication path can move from pending through processing to a
+        terminal directory before its strategy callback returns.  Capture
+        evidence therefore cannot trust the originally returned pathname.  It
+        must locate exactly one current file, parse the request through the
+        route-bound schema, compare every canonical field, and verify the
+        durable arrival sidecar while holding the same lock used for moves.
+        """
+
+        request.require_route(self.route)
+        filename = self._filename(request.request_id)
+        with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
+            candidates = [
+                self.root / state / filename
+                for state in ("pending", "processing", "completed", "failed")
+                if (self.root / state / filename).exists()
+            ]
+            if len(candidates) != 1:
+                raise RuntimeError(
+                    f"published request {request.request_id!r} has {len(candidates)} durable files"
+                )
+            path = candidates[0]
+            try:
+                snapshot = read_stable_file(
+                    path,
+                    label=f"published request {request.request_id}",
+                    reject_empty=True,
+                )
+                payload = json.loads(snapshot.data)
+            except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"published request {request.request_id!r} is unreadable"
+                ) from exc
+            queue_state = path.parent.name
+            request_payload = (
+                payload.get("request")
+                if queue_state in {"completed", "failed"} and isinstance(payload, Mapping)
+                else payload
+            )
+            if not isinstance(request_payload, Mapping):
+                raise RuntimeError(
+                    f"published request {request.request_id!r} lacks canonical request content"
+                )
+            try:
+                observed = self._request_from_payload(request_payload)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"published request {request.request_id!r} failed schema validation"
+                ) from exc
+            if observed.to_dict() != request.to_dict():
+                raise RuntimeError(
+                    f"published request {request.request_id!r} changed canonical content"
+                )
+            sequence = self._read_arrival_sequence_locked(
+                filename=filename,
+                request=observed,
+            )
+            return DurableTargetRequestEvidence(
+                path=snapshot.path,
+                queue_state=queue_state,
+                arrival_sequence=sequence,
+            )
 
     def requested_symbols(self) -> set[str]:
         """Symbols needed by pending/claimed work, for dynamic market capture."""
@@ -739,6 +848,45 @@ class AccountIntentInbox:
                     continue
                 return processing, request, replacements
             return None
+
+    def peek_next(self) -> AccountTargetRequest | None:
+        """Return the earliest pending request without moving or consuming it."""
+
+        with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
+            queued = self._queued()
+            return queued[0][3] if queued else None
+
+    def claim_expected_next(
+        self,
+        expected_request_id: str,
+    ) -> tuple[Path, AccountTargetRequest, tuple[AccountTargetRequest, ...]] | None:
+        """Atomically claim the expected head and classify its replacements.
+
+        The account-owner runner uses this strict form while market data warms.
+        The supersession decision and pending-to-processing move share one
+        inbox lock, so a later flat cannot race between the readiness check and
+        claiming an entry.
+        """
+
+        if not expected_request_id:
+            raise ValueError("expected_request_id is required")
+        with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
+            queued = self._queued()
+            if not queued:
+                return None
+            _, _, pending, request = queued[0]
+            if request.request_id != expected_request_id:
+                return None
+            replacements = self._superseding_requests(
+                request,
+                [row[3] for row in queued[1:]],
+            )
+            processing = self.root / "processing" / pending.name
+            try:
+                os.replace(pending, processing)
+            except FileNotFoundError:
+                return None
+            return processing, request, replacements
 
     def claim_next(self) -> tuple[Path, AccountTargetRequest] | None:
         # Filenames, producer clocks, and exchange timestamps have no queue
@@ -1086,18 +1234,7 @@ class AccountExecutionService:
     def _prepared_request_intents(
         request: AccountTargetRequest,
     ) -> list[tuple[RequestedIntent, SleeveTargetIntent]]:
-        prepared: list[tuple[RequestedIntent, SleeveTargetIntent]] = []
-        for item in request.intents:
-            intent = replace(
-                item.intent,
-                metadata={
-                    **dict(item.intent.metadata),
-                    "account_request_id": request.request_id,
-                    "account_request_created_ts_ns": request.created_ts_ns,
-                },
-            )
-            prepared.append((item, intent))
-        return prepared
+        return list(prepare_account_request_intents(request))
 
     @staticmethod
     def _adapt_request_targets(
@@ -1578,11 +1715,52 @@ class AccountExecutionService:
         )
         return self._submit_convergence_plan(plan, batch_id=batch_id, attempt=attempt)
 
-    def run_once(self, inbox: AccountIntentInbox, *, permanent_failure: bool = False) -> AccountServiceReceipt | None:
+    def run_once(
+        self,
+        inbox: AccountIntentInbox,
+        *,
+        permanent_failure: bool = False,
+        expected_request_id: str | None = None,
+    ) -> AccountServiceReceipt | None:
         if inbox.route != self.route:
             raise ValueError("account service and inbox routes do not match")
         last_superseded: AccountServiceReceipt | None = None
+        strict_arrival = expected_request_id is not None
+        strict_claimed: tuple[Path, AccountTargetRequest] | None = None
+        if strict_arrival and not expected_request_id:
+            # The readiness pass observed an empty inbox. A request may arrive
+            # before this call, but it has not had any book-readiness check and
+            # must remain pending until the next pass. Convergence retries are
+            # independent canonical work and remain safe to service.
+            self.converge_once()
+            return None
+        if strict_arrival and expected_request_id:
+            expected = inbox.claim_expected_next(expected_request_id)
+            if expected is None:
+                return None
+            path, request, replacements = expected
+            if replacements:
+                replacement_ids = tuple(item.request_id for item in replacements)
+                state = self.kernel._state_ref()
+                last_superseded = AccountServiceReceipt(
+                    request_id=request.request_id,
+                    request_hash=request.content_hash(),
+                    batch_id=request.batch_id,
+                    accepted=False,
+                    rejection_keys=("account-service:request-superseded",),
+                    command_ids=(),
+                    execution_event_ids=(),
+                    final_state_hash=state.state_hash(),
+                    disposition="superseded",
+                    superseded_by_request_id=replacement_ids[-1],
+                    superseded_by_request_ids=replacement_ids,
+                )
+                inbox.complete(path, last_superseded)
+                return last_superseded
+            strict_claimed = (path, request)
         while True:
+            if strict_arrival:
+                break
             superseded = inbox.claim_superseded()
             if superseded is None:
                 break
@@ -1603,11 +1781,18 @@ class AccountExecutionService:
                 superseded_by_request_ids=replacement_ids,
             )
             inbox.complete(path, last_superseded)
-        claimed = inbox.claim_next()
+        claimed = (
+            strict_claimed
+            if strict_arrival
+            else inbox.claim_next()
+        )
         if claimed is None:
             self.converge_once()
             return last_superseded
         path, request = claimed
+        if strict_arrival and request.request_id != expected_request_id:
+            inbox.release(path)
+            return last_superseded
         try:
             receipt = self.handle(request)
         except Exception as exc:

@@ -5,12 +5,15 @@
 #   * no flag means DRY RUN (no service or file mutation)
 #   * --execute is required to stop services, archive, and rebuild projections
 #   * concurrent execute attempts are refused by a nonblocking process lock
+#   * execute holds the authenticated demo-account lease from quiescence through
+#     archive/reset, then releases it only for the owner-first restart handoff
 #   * REAL_MONEY/mainnet configuration is refused
 #   * the demo owner must load the same resolved demo credential env file
 #   * canonical demo/paper account roots, inboxes, and captures are archived
 #     and recreated empty in the same maintenance transaction
 #   * the Bybit demo account must have no positions and no open orders
-#   * only initially-active daemons/timers are restarted and verified
+#   * only initially-active daemons/timers are restarted and verified, unless
+#     --leave-stopped is selected for a controlled evidence cutover
 #   * configs, locks, reports, signal files, market-data caches, and the
 #     continuous account-equity high-water risk state are preserved
 #
@@ -37,12 +40,16 @@ Default mode is a read-only preview. Mutation requires --execute.
 Options:
   --execute                 stop writers, verify demo account flat, archive, rebuild,
                             restart previously-active units, and verify them
+  --leave-stopped           execute the reset but leave every managed unit stopped;
+                            required before explicit paper-owner/demo-owner staging
   --dry-run                 explicit preview (the default)
   --sleeves LIST            all (default), long, continuous, or comma-separated list
   --archive-dir DIR         archive destination (default: data/_archive)
   --label LABEL             optional safe suffix added after the UTC timestamp
   --include-reports         also archive/reset reports/ in selected roots
   --include-caches          also archive/reset .cache/ in selected roots (slow rebuild)
+  --receipt FILE            write one source-reopening success receipt (mode 0600);
+                            requires --execute --leave-stopped and an absolute new path
   --env-file FILE           demo credential env (default: /etc/liquidity-migration/bybit-demo.env)
   --account-env-file FILE   demo owner route env (default: /etc/liquidity-migration/account-execution.env)
   --paper-account-env-file FILE
@@ -70,7 +77,9 @@ refuses until the configured Bybit demo account is already flat with no open ord
 Execute also refuses if another reset holds the process lock or if any submit-armed
 systemd unit does not load the same resolved credential env file. Tests may override
 the default /run/lock/liquidity-migration-ledger-reset.lock with
-LEDGER_RESET_LOCK_FILE.
+LEDGER_RESET_LOCK_FILE. The authenticated demo-account lock path has no operator
+override; it is derived from Bybit `userID` through the same repository helper as
+the owner, rule probe, and venue-accounting command.
 EOF
 }
 
@@ -117,6 +126,10 @@ LABEL=""
 SLEEVES_RAW="all"
 INCLUDE_REPORTS=0
 INCLUDE_CACHES=0
+LEAVE_STOPPED=0
+RECEIPT_PATH=""
+RECEIPT_CANDIDATE_COMMIT=""
+RESET_STARTED_TS_NS=""
 ENV_FILE="/etc/liquidity-migration/bybit-demo.env"
 ACCOUNT_ENV_FILE="${ACCOUNT_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-execution.env}"
 PAPER_ACCOUNT_ENV_FILE="${ACCOUNT_PAPER_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-paper-execution.env}"
@@ -132,6 +145,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --dry-run)
       MODE="dry-run"
+      shift
+      ;;
+    --leave-stopped)
+      LEAVE_STOPPED=1
       shift
       ;;
     --sleeves)
@@ -156,6 +173,11 @@ while [[ "$#" -gt 0 ]]; do
     --include-caches)
       INCLUDE_CACHES=1
       shift
+      ;;
+    --receipt)
+      [[ "$#" -ge 2 ]] || die "--receipt requires a value"
+      RECEIPT_PATH="$2"
+      shift 2
       ;;
     --env-file)
       [[ "$#" -ge 2 ]] || die "--env-file requires a value"
@@ -393,9 +415,16 @@ LONG_LEDGER_TARGETS=(
   data/bybit-long-demo-event/long_native_demo_trades
   data/bybit-long-demo-event/long_native_demo_orders
   data/bybit-long-demo-event/long_native_demo_cycles
+  data/bybit-long-demo-event/strategy_event_tape.jsonl
+  data/bybit-long-demo-event/strategy_event_decision_tape.jsonl
+  data/bybit-long-demo-event/strategy_target_scheduling_capture.jsonl
+  data/bybit-long-demo-event/natural-effective-runtime-config.json
   data/bybit-long-paper-event/long_native_paper_trades
   data/bybit-long-paper-event/long_native_paper_orders
   data/bybit-long-paper-event/long_native_paper_cycles
+  data/bybit-long-paper-event/strategy_event_tape.jsonl
+  data/bybit-long-paper-event/strategy_event_decision_tape.jsonl
+  data/bybit-long-paper-event/strategy_target_scheduling_capture.jsonl
 )
 CONTINUOUS_LEDGER_TARGETS=(
   data/bybit-continuous-demo-event/continuous_fade_demo_trades
@@ -403,12 +432,20 @@ CONTINUOUS_LEDGER_TARGETS=(
   data/bybit-continuous-demo-event/continuous_fade_demo_cycles
   data/bybit-continuous-demo-event/continuous_risk_events.jsonl
   data/bybit-continuous-demo-event/continuous_lifecycle_events.jsonl
+  data/bybit-continuous-demo-event/strategy_event_tape.jsonl
+  data/bybit-continuous-demo-event/strategy_event_decision_tape.jsonl
+  data/bybit-continuous-demo-event/strategy_target_scheduling_capture.jsonl
+  data/bybit-continuous-demo-event/natural-effective-runtime-config.json
   data/bybit-continuous-paper-event/continuous_fade_paper_trades
   data/bybit-continuous-paper-event/continuous_fade_paper_orders
   data/bybit-continuous-paper-event/continuous_fade_paper_cycles
   data/bybit-continuous-paper-event/continuous_risk_events.jsonl
   data/bybit-continuous-paper-event/continuous_lifecycle_events.jsonl
+  data/bybit-continuous-paper-event/strategy_event_tape.jsonl
+  data/bybit-continuous-paper-event/strategy_event_decision_tape.jsonl
+  data/bybit-continuous-paper-event/strategy_target_scheduling_capture.jsonl
 )
+NATURAL_RUNTIME_TARGETS=(data/bybit-natural-account-cutover)
 LEGACY_CONTINUOUS_TARGETS=(data/bybit-continuous-hedge-event)
 LEGACY_SHARED_TARGETS=(data/bybit-demo-event)
 LONG_ROOTS=(data/bybit-long-demo-event data/bybit-long-paper-event)
@@ -441,6 +478,7 @@ if (( SELECT_CONTINUOUS )); then
 fi
 (( RETIRE_LEGACY_SHARED )) && append_unique "${LEGACY_SHARED_TARGETS[@]}"
 append_unique "${ACCOUNT_STATE_TARGETS[@]}"
+append_unique "${NATURAL_RUNTIME_TARGETS[@]}"
 TARGETS=("${OUT[@]}")
 
 OUT=()
@@ -560,12 +598,37 @@ DOWNSTREAM_RESTART_UNITS=(
 )
 RESTART_UNITS=("${OWNER_RESTART_UNITS[@]}" "${DOWNSTREAM_RESTART_UNITS[@]}")
 
+if [[ -n "$RECEIPT_PATH" ]]; then
+  [[ "$MODE" == "execute" ]] \
+    || die "--receipt is a success artifact and requires --execute"
+  (( LEAVE_STOPPED )) \
+    || die "--receipt requires --leave-stopped so no owner can write the fresh roots before receipt creation"
+  [[ "$RECEIPT_PATH" == /* && "$RECEIPT_PATH" != *$'\n'* ]] \
+    || die "--receipt must be one absolute path"
+  RECEIPT_CANDIDATE_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
+  [[ "$RECEIPT_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+    || die "--receipt requires a repository checkout with one full Git HEAD"
+  receipt_preflight_args=(
+    preflight
+    --output "$RECEIPT_PATH"
+  )
+  for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
+    receipt_preflight_args+=(--forbidden-root "$PWD/$target")
+  done
+  "$CANONICAL_PYTHON" -m liquidity_migration.account_reset_receipt \
+    "${receipt_preflight_args[@]}" >/dev/null \
+    || die "account reset receipt output preflight failed"
+  RESET_STARTED_TS_NS="$("$CANONICAL_PYTHON" -c 'import time; print(time.time_ns())')"
+fi
+
 echo "Ledger reset plan"
 echo "  mode: $MODE"
 echo "  sleeves: ${SELECTED_SLEEVES[*]}"
 echo "  archive dir: $ARCHIVE_DIR"
 echo "  include reports: $INCLUDE_REPORTS"
 echo "  include caches: $INCLUDE_CACHES"
+echo "  leave managed units stopped: $LEAVE_STOPPED"
+[[ -z "$RECEIPT_PATH" ]] || echo "  structured success receipt: $RECEIPT_PATH"
 echo "  canonical account state: ${ACCOUNT_STATE_TARGETS[*]}"
 echo "  existing targets: ${#EXISTING_TARGETS[@]}"
 for target in "${EXISTING_TARGETS[@]}"; do
@@ -591,16 +654,16 @@ if [[ "$MODE" == "dry-run" ]]; then
   [[ -n "$LABEL" ]] && execute_hint="$execute_hint --label $LABEL"
   (( INCLUDE_REPORTS )) && execute_hint="$execute_hint --include-reports"
   (( INCLUDE_CACHES )) && execute_hint="$execute_hint --include-caches"
+  (( LEAVE_STOPPED )) && execute_hint="$execute_hint --leave-stopped"
   echo "  $execute_hint"
   echo "Execute will refuse REAL_MONEY, missing demo credentials, any open demo position/order, missing units, or restart verification failure."
   exit 0
 fi
 
-[[ "${#EXISTING_TARGETS[@]}" -gt 0 ]] || {
-  echo
-  echo "Nothing to reset: none of the selected allowlisted targets exists."
-  exit 0
-}
+# Even a first-time/fully-absent layout must pass through the flatness guard,
+# create all six fresh roots, and leave a durable archive+manifest receipt. A
+# successful no-op here would make a missing epoch indistinguishable from a
+# completed reset.
 [[ -r "$ENV_FILE" ]] || die "demo env file is missing or unreadable: $ENV_FILE"
 command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1 || die "systemctl command not found: $SYSTEMCTL_BIN"
 
@@ -610,10 +673,15 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 [[ -n "$PYTHON" && -x "$PYTHON" ]] || die "Python runtime not found (.venv/bin/python or python3)"
 
-# Validate the selected credential file before acquiring the execute lock or
-# querying/stopping systemd. Only the high-stakes toggle is read here.
+# Freeze the selected demo credential for the identity and flatness checks. Do
+# not export it into systemctl, tar, or projection-rebuild children.
+credential_demo="$(systemd_env_value "$ENV_FILE" DEMO)"
 credential_real_money="$(systemd_env_value "$ENV_FILE" REAL_MONEY)"
+credential_api_key="$(systemd_env_value "$ENV_FILE" BYBIT_DEMO_API_KEY)"
+credential_api_secret="$(systemd_env_value "$ENV_FILE" BYBIT_DEMO_API_SECRET)"
 validate_real_money_value "$ENV_FILE" "${credential_real_money:-__unset__}"
+[[ -n "$credential_api_key" && -n "$credential_api_secret" ]] \
+  || die "missing BYBIT_DEMO_API_KEY/BYBIT_DEMO_API_SECRET in $ENV_FILE"
 
 # Keep fd 9 open for the entire execute process. BSD/Linux flock locks are tied
 # to this inherited open-file description, so the lock remains held while the
@@ -636,6 +704,46 @@ except BlockingIOError:
 ' 9; then
   die "another demo/paper ledger reset is already executing (lock: $LOCK_FILE)"
 fi
+
+# This read-only authenticated call resolves the venue account before any
+# service mutation. The ordinary module constructor has no path override; the
+# returned path is account-wide across API keys because it is keyed by Bybit
+# userID, not by a caller-selected ledger root or API-key fingerprint.
+if ! DEMO_ACCOUNT_LEASE_PATH="$(
+  unset DEMO REAL_MONEY BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
+    BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+  DEMO="$credential_demo"
+  REAL_MONEY="$credential_real_money"
+  BYBIT_DEMO_API_KEY="$credential_api_key"
+  BYBIT_DEMO_API_SECRET="$credential_api_secret"
+  export DEMO REAL_MONEY BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
+  "$PYTHON" - --resolve-demo-account-lease <<'PY'
+import sys
+
+from liquidity_migration.account_owner_lease import (
+    DemoAccountIdentity,
+    canonical_demo_account_lease_path,
+)
+from liquidity_migration.bybit import BybitPrivateClient, resolve_demo_credentials
+
+
+api_key, api_secret = resolve_demo_credentials()
+if not api_key or not api_secret:
+    print("missing demo API credentials", file=sys.stderr)
+    raise SystemExit(1)
+client = BybitPrivateClient(api_key=api_key, api_secret=api_secret, demo=True)
+identity = DemoAccountIdentity.from_api_key_info(
+    api_key=api_key,
+    api_key_info=client.get_api_key_information(),
+)
+print(canonical_demo_account_lease_path(identity))
+PY
+)"; then
+  die "cannot derive the authenticated canonical demo-account lease"
+fi
+[[ "$DEMO_ACCOUNT_LEASE_PATH" == /* && "$DEMO_ACCOUNT_LEASE_PATH" != *$'\n'* ]] \
+  || die "canonical demo-account lease path is not one absolute path"
+echo "  authenticated demo-account lease: $DEMO_ACCOUNT_LEASE_PATH"
 
 ACTIVE_BEFORE=()
 for unit in "${STOP_UNITS[@]}"; do
@@ -807,7 +915,80 @@ done
 
 SERVICES_STOPPED=0
 RESTART_COMPLETE=0
+FAILURE_RECOVERY_ALLOWED=1
 MANIFEST_DIR=""
+DEMO_ACCOUNT_LEASE_HELD=0
+
+acquire_demo_account_lease() {
+  local lock_parent previous_umask rc
+
+  lock_parent="${DEMO_ACCOUNT_LEASE_PATH%/*}"
+  [[ "$lock_parent" != "$DEMO_ACCOUNT_LEASE_PATH" ]] || lock_parent="."
+  if ! mkdir -p -- "$lock_parent"; then
+    die "cannot create canonical demo-account lease directory: $lock_parent"
+  fi
+
+  previous_umask="$(umask)"
+  umask 077
+  if ! { exec 8<>"$DEMO_ACCOUNT_LEASE_PATH"; }; then
+    umask "$previous_umask"
+    die "cannot open canonical demo-account lease: $DEMO_ACCOUNT_LEASE_PATH (no alternate path is allowed)"
+  fi
+  umask "$previous_umask"
+
+  if "$PYTHON" -c '
+import fcntl
+import json
+import os
+import sys
+import time
+
+
+fd = int(sys.argv[1])
+path = sys.argv[2]
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(73)
+except OSError as exc:
+    print(f"cannot lock {path}: {exc}", file=sys.stderr)
+    raise SystemExit(74)
+os.fchmod(fd, 0o600)
+metadata = {
+    "environment": "demo",
+    "pid": os.getppid(),
+    "role": "ledger_reset",
+    "started_at_ns": time.time_ns(),
+    "venue": "bybit",
+}
+payload = (json.dumps(metadata, sort_keys=True) + "\n").encode("utf-8")
+os.ftruncate(fd, 0)
+os.lseek(fd, 0, os.SEEK_SET)
+os.write(fd, payload)
+os.fsync(fd)
+' 8 "$DEMO_ACCOUNT_LEASE_PATH"; then
+    DEMO_ACCOUNT_LEASE_HELD=1
+    echo "  canonical demo-account lease acquired for flatness/archive/reset: $DEMO_ACCOUNT_LEASE_PATH"
+    return 0
+  else
+    rc="$?"
+  fi
+
+  exec 8>&-
+  if [[ "$rc" == "73" ]]; then
+    die "canonical demo-account lease is already held: $DEMO_ACCOUNT_LEASE_PATH"
+  fi
+  die "cannot acquire canonical demo-account lease: $DEMO_ACCOUNT_LEASE_PATH (no alternate path is allowed)"
+}
+
+release_demo_account_lease() {
+  local context="$1"
+  if (( DEMO_ACCOUNT_LEASE_HELD )); then
+    exec 8>&-
+    DEMO_ACCOUNT_LEASE_HELD=0
+    echo "  canonical demo-account lease released for owner-first restart handoff ($context)"
+  fi
+}
 
 restart_previously_active() {
   local context="$1" unit failed=0
@@ -862,8 +1043,13 @@ cleanup() {
   trap - EXIT INT TERM
   [[ -z "$MANIFEST_DIR" ]] || rm -rf -- "$MANIFEST_DIR"
   if (( SERVICES_STOPPED )) && (( ! RESTART_COMPLETE )); then
-    echo "Reset did not complete; attempting to restore pre-reset service state." >&2
-    restart_previously_active "failure recovery" || true
+    release_demo_account_lease "failure recovery"
+    if (( FAILURE_RECOVERY_ALLOWED )) && (( ! LEAVE_STOPPED )); then
+      echo "Reset did not complete; attempting to restore pre-reset service state." >&2
+      restart_previously_active "failure recovery" || true
+    else
+      echo "Reset handoff did not complete; refusing an automatic retry. Managed units remain stopped." >&2
+    fi
   fi
   exit "$rc"
 }
@@ -885,21 +1071,23 @@ for unit in "${STOP_UNITS[@]}"; do
 done
 echo "  quiescence verified"
 
+acquire_demo_account_lease
+
 echo
 echo "Checking demo/mainnet boundary and flat-account precondition ..."
 (
   unset DEMO REAL_MONEY BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
     BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-  DEMO="$(systemd_env_value "$ENV_FILE" DEMO)"
-  REAL_MONEY="$(systemd_env_value "$ENV_FILE" REAL_MONEY)"
-  BYBIT_DEMO_API_KEY="$(systemd_env_value "$ENV_FILE" BYBIT_DEMO_API_KEY)"
-  BYBIT_DEMO_API_SECRET="$(systemd_env_value "$ENV_FILE" BYBIT_DEMO_API_SECRET)"
+  DEMO="$credential_demo"
+  REAL_MONEY="$credential_real_money"
+  BYBIT_DEMO_API_KEY="$credential_api_key"
+  BYBIT_DEMO_API_SECRET="$credential_api_secret"
   export DEMO REAL_MONEY BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
   validate_real_money_value "$ENV_FILE" "${REAL_MONEY:-__unset__}"
   "$PYTHON" - <<'PY'
 import sys
 
-from liquidity_migration.bybit import BybitPrivateClient, resolve_private_credentials
+from liquidity_migration.bybit import BybitPrivateClient, resolve_demo_credentials
 
 
 def amount(row: dict) -> float:
@@ -913,10 +1101,7 @@ def amount(row: dict) -> float:
     return 0.0
 
 
-api_key, api_secret, demo = resolve_private_credentials()
-if not demo:
-    print("ERROR: resolved credentials select REAL_MONEY/mainnet; refusing reset", file=sys.stderr)
-    raise SystemExit(1)
+api_key, api_secret = resolve_demo_credentials()
 if not api_key or not api_secret:
     print("ERROR: missing BYBIT_DEMO_API_KEY/BYBIT_DEMO_API_SECRET; cannot prove account is flat", file=sys.stderr)
     raise SystemExit(1)
@@ -1047,15 +1232,20 @@ umask 077
 MANIFEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ledger-reset-manifest.XXXXXX")"
 MANIFEST_PATH="$MANIFEST_DIR/ledger-reset-manifest.txt"
 git_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+if [[ -n "$RECEIPT_PATH" && "$git_head" != "$RECEIPT_CANDIDATE_COMMIT" ]]; then
+  die "repository HEAD changed after the reset receipt preflight"
+fi
 {
   echo "ledger_reset_utc=$STAMP"
   echo "git_head=$git_head"
   echo "sleeves=${SELECTED_SLEEVES[*]}"
   echo "include_reports=$INCLUDE_REPORTS"
   echo "include_caches=$INCLUDE_CACHES"
+  echo "leave_stopped=$LEAVE_STOPPED"
   echo "env_file=$ENV_FILE"
   echo "account_env_file=$ACCOUNT_ENV_FILE"
   echo "paper_account_env_file=$PAPER_ACCOUNT_ENV_FILE"
+  echo "demo_account_lease_path=$DEMO_ACCOUNT_LEASE_PATH"
   echo "demo_boundary=venue_verified_flat_positions_0_open_orders_0"
   echo "paper_boundary=archived_deterministic_epoch_not_carried_forward"
   echo "active_before=${ACTIVE_BEFORE[*]}"
@@ -1214,28 +1404,78 @@ print("  reset-boundary-heartbeats-ok demo_venue_flat=1 paper_epoch_archived=1")
 PY
 fi
 
-restart_previously_active "normal completion"
-if (( SETTLE_SECONDS > 0 )); then
-  echo "Waiting ${SETTLE_SECONDS}s before final service verification ..."
-  sleep "$SETTLE_SECONDS"
-fi
-for unit in "${RESTART_UNITS[@]}"; do
-  if was_active "$unit"; then
-    "$SYSTEMCTL_BIN" is-active --quiet "$unit" || die "restart verification failed: $unit is not active"
-    echo "  active: $unit"
+FAILURE_RECOVERY_ALLOWED=0
+release_demo_account_lease "normal completion"
+if (( LEAVE_STOPPED )); then
+  echo
+  echo "Leaving every managed unit stopped for explicit owner-first staging ..."
+  for unit in "${STOP_UNITS[@]}"; do
+    if "$SYSTEMCTL_BIN" is-active --quiet "$unit"; then
+      die "leave-stopped verification failed: $unit is active"
+    fi
+    echo "  inactive: $unit"
+  done
+else
+  restart_previously_active "normal completion"
+  if (( SETTLE_SECONDS > 0 )); then
+    echo "Waiting ${SETTLE_SECONDS}s before final service verification ..."
+    sleep "$SETTLE_SECONDS"
   fi
-done
+  for unit in "${RESTART_UNITS[@]}"; do
+    if was_active "$unit"; then
+      "$SYSTEMCTL_BIN" is-active --quiet "$unit" || die "restart verification failed: $unit is not active"
+      echo "  active: $unit"
+    fi
+  done
+fi
 RESTART_COMPLETE=1
 SERVICES_STOPPED=0
+
+if [[ -n "$RECEIPT_PATH" ]]; then
+  receipt_create_args=(
+    create
+    --repository-root "$PWD"
+    --candidate-commit "$RECEIPT_CANDIDATE_COMMIT"
+    --started-ts-ns "$RESET_STARTED_TS_NS"
+    --archive "$(canonical_path "$ARCHIVE_PATH")"
+    --sha256-sidecar "$(canonical_path "$SHA_PATH")"
+    --output "$RECEIPT_PATH"
+    --leave-stopped
+    --demo-account-root "$(canonical_path "$DEMO_ACCOUNT_ROOT")"
+    --demo-inbox-root "$(canonical_path "$DEMO_ACCOUNT_INBOX_ROOT")"
+    --demo-capture-root "$(canonical_path "$DEMO_ACCOUNT_CAPTURE_ROOT")"
+    --paper-account-root "$(canonical_path "$PAPER_ACCOUNT_ROOT")"
+    --paper-inbox-root "$(canonical_path "$PAPER_ACCOUNT_INBOX_ROOT")"
+    --paper-capture-root "$(canonical_path "$PAPER_ACCOUNT_CAPTURE_ROOT")"
+  )
+  (( INCLUDE_REPORTS )) && receipt_create_args+=(--include-reports)
+  (( INCLUDE_CACHES )) && receipt_create_args+=(--include-caches)
+  for sleeve in "${SELECTED_SLEEVES[@]}"; do
+    receipt_create_args+=(--sleeve "$sleeve")
+  done
+  for unit in "${STOP_UNITS[@]}"; do
+    receipt_create_args+=(--managed-unit "$unit" --inactive-after-unit "$unit")
+  done
+  for unit in "${ACTIVE_BEFORE[@]:-}"; do
+    [[ -z "$unit" ]] || receipt_create_args+=(--active-before-unit "$unit")
+  done
+  "$PYTHON" -m liquidity_migration.account_reset_receipt "${receipt_create_args[@]}" \
+    || die "completed reset could not produce its structured success receipt"
+fi
 
 echo
 echo "Ledger reset complete."
 echo "  archive: $ARCHIVE_PATH"
 echo "  archive sha256: $archive_sha"
 echo "  archive digest: $SHA_PATH"
+[[ -z "$RECEIPT_PATH" ]] || echo "  structured reset receipt: $RECEIPT_PATH"
 echo "  archived/reset targets: ${#EXISTING_TARGETS[@]}"
 echo "  strategy journals: preserved; compatibility projections rebuilt by replay"
 echo "  account journals/inboxes/captures: archived; fresh empty epoch created"
 echo "  boundary truth: demo venue-flat verified; prior paper epoch archived, not venue-verified"
-echo "  service state: restored to the pre-reset active set and verified"
+if (( LEAVE_STOPPED )); then
+  echo "  service state: all managed units stopped and verified"
+else
+  echo "  service state: restored to the pre-reset active set and verified"
+fi
 echo "  preserved: configs, locks, signal files, account-equity high-water state, and unselected caches/reports"

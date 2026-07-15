@@ -10,14 +10,24 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET
 EnvironmentFile=/etc/liquidity-migration/account-execution.env
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/liquidity-migration/scripts/run_account_execution_service.sh
+# Optional only while the preregistered natural window still uses the legacy
+# roots. Post-window deployment authority must materialize and validate this
+# exact per-unit file before starting the fresh epoch.
+EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-account-execution.service.env
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-account-execution.service main
+# Type=simple process start is not owner readiness. Hold every After=/Requires=
+# dependent producer until this systemd invocation has published the exact
+# route/head-bound HEALTHY projection and a later fresh raw capture row.
+ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-account-execution.service readiness
 Restart=always
 RestartSec=2
+TimeoutStartSec=240
 KillMode=control-group
 TimeoutStopSec=180
 Nice=-5

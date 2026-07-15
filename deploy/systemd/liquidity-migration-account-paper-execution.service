@@ -11,11 +11,19 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/account-paper-execution.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/liquidity-migration/scripts/run_account_paper_execution_service.sh
+# Late fresh-epoch route override. It remains optional until the natural window
+# is sealed; deployment authority must require its exact validated contents.
+EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-account-paper-execution.service.env
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-account-paper-execution.service main
+# Prevent paper producers from racing a previous or merely-forked owner on
+# deploy or boot; the capture must also postdate this invocation's health.
+ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-account-paper-execution.service readiness
 Restart=always
 RestartSec=2
+TimeoutStartSec=240
 KillMode=control-group
 TimeoutStopSec=180
 NoNewPrivileges=true

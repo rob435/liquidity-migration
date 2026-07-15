@@ -6,6 +6,91 @@ verified-flat recovery, but before any V7 target, order, fill, slippage, fee,
 realized P&L, or funding outcome. Forward execution evidence only; no alpha,
 LONG/CONTINUOUS parity, deployment, HFT, or real-money claim.
 
+## Prospective pre-run amendment — 2026-07-14T10:51:30Z
+
+This amendment was registered before any V7 target, order, fill, slippage, fee,
+P&L, funding, or calibration outcome was observed. V7 has not started and no V7
+sample exists. The `demo-calibration-20260714-v7` name is retained for the fresh
+epoch; the original registration below is preserved rather than rewritten.
+
+The candidate V7 commit now contains calibration-contract changes beyond the
+original health-publication-only delta. Its exact clean identity is not frozen
+yet and may also contain separately reviewed account-ownership, public/private
+market-data-boundary, and deterministic-comparator hardening. Those changes
+must pass their own tests and review. The fixed symbol/target sequence, $160
+notional, risk envelope, operational abort rule, clock rule, and all original
+latency/slippage sample floors remain unchanged.
+
+The decision boundary changes prospectively as follows:
+
+- The original execution-twin sample gates are now the
+  `market_order_smoke_gate_passed` gate. They can support only the bounded V7
+  market-order feed, request/ack, book-linkage, fee, and slippage smoke claim.
+- Receipt schema v3 retains the v2 `min_observed_multi_fill_orders=3` and
+  `min_partial_fill_spacing_samples=3` rule and additionally requires a
+  clock-adjusted socket-send-to-first-fill and exchange-fill-to-local-fill
+  response sample for each filled order. An observed multifill order is a command
+  with multiple positive fills. A spacing sample requires two positive fills for the same
+  command with valid strictly increasing venue timestamps. Equal timestamps
+  establish multifill behavior but leave spacing interval-censored at the venue
+  timestamp resolution. Terminal incomplete single-fill orders remain reported,
+  but do not satisfy the multifill floor. Both requirements must pass before
+  partial-fill timing/behavior is called calibrated.
+- `execution_twin_gate_passed` is the conjunction of the smoke gate and the
+  separate partial-fill gate. Paper-owner startup and cutover acceptance remain
+  blocked when only the smoke gate passes.
+- A smoke-only receipt can be inspected offline only with the full-gate check
+  explicitly disabled. Its config sets `allow_partial_fills=false`, uses
+  `fill_spacing_ns=0`, and applies
+  `single_level_full_fill_or_reject`: any order that would require multiple book
+  levels or an incomplete fill is rejected. Zero is a marker that no split-fill
+  timing is modeled, not a 0-ns latency estimate. The former 1-ns fallback is
+  prohibited.
+- The order command's immutable creation timestamp anchors decision-to-socket
+  timing. It cannot precede the linked book's local receive timestamp, and age is
+  measured at socket send. API create-response timing remains an API boundary;
+  it is not substituted for exchange first-fill or local fill-response timing.
+  Schema-v2 receipts are not accepted for paper configuration under this
+  corrected model.
+
+The fixed small-order V7 sequence does not guarantee a multifill. If it reaches
+all original floors with no identifiable partial-fill spacing, retain the epoch
+as a passing market-order smoke result and an inconclusive partial-fill result;
+do not resize, extend, reset, or retry opportunistically. Paper remains blocked.
+A later targeted partial-fill study would need a new prospective size/risk,
+sample, and stopping rule without merging its observations into V7.
+
+Even when the new minimum passes, three repeated observations are only a bounded
+existence/timing basis. They do not resolve a multifill frequency distribution,
+make `p75`/`p95`/`p99` empirical tail quantiles at N=3, identify partial-fill
+probability outside the sample, future book mutation, market impact, or passive
+queue position. Those higher labels remain explicit stress choices. The
+market-by-price queue limitation in the original registration remains binding.
+The paper twin's split quantities still follow immutable decision-book levels;
+an observed multifill does not prove a one-to-one mapping between MBP levels and
+venue execution partitions.
+
+## Prospective runtime-safety amendment — 2026-07-14T23:16:37Z
+
+This amendment was registered before any V7 target or execution outcome. It
+does not change the fixed V7 sequence, risk envelope, clock rule, sample floors,
+or abort rule. Non-finite rule-age/readiness values now fail rather than disable
+their comparisons: the owner accepts no more than 168 hours of rule age and 30
+seconds of queue-head market warmup, validated before credentials or startup.
+The credential-free target producer requires `REAL_MONEY` to be unset or
+explicitly false before marker or Git inspection. Private Bybit HTTP/WebSocket
+clients accept only `api-demo` (`demo=true`, `testnet=false`), and mutations
+revalidate that realm before the account-bound lease. Fresh-epoch root values
+are reopened through the authority verifier and transferred to Bash only as
+NUL-delimited data; generated systemd EnvironmentFiles are never
+shell-evaluated. The older private Bybit and account-route EnvironmentFiles are
+also descriptor-read as current-user-owned, single-link, exact-mode-`0600`
+data, with only fixed allowlisted keys transferred; sleeve toggles use a strict
+three-key data parser. This is machine enforcement of the already registered
+demo-only and bounded-freshness contract, not a post-result revision.
+
+## Original V7 registration (retained)
+
 ## Revision boundary
 
 V1 failed rule feasibility before order submission. V2 failed static
@@ -132,3 +217,50 @@ Even a passing V7 permits only construction of the execution-twin receipt and
 paper-owner startup. Actual LONG/CONTINUOUS target tapes, common-clock replay,
 venue accounting, funding, final flatness, owner-first evidence, and the
 deployment authorization assessment remain independent open gates.
+
+## Independent common-clock comparison contract
+
+This clarification does not change V7's sample, abort rule, or decision rule
+and cannot make a V7 outcome satisfy strategy parity. The independent
+LONG/CONTINUOUS common-clock gate requires fresh non-empty historical, paper,
+and demo `StrategyEvent` tapes produced from byte-identical immutable replay
+input artifacts. For this cutover, the input is explicitly a captured
+target/scheduling artifact consumed by a dedicated offline replay adapter—not a
+claimed raw-market snapshot and not an unrelated file merely hashed by a live
+daemon. Every event must bind that artifact with
+`replay_input_sha256`. Each environment must also provide a separate
+post-callback hash-chained decision tape with exactly one raw-event-id-keyed,
+sorted `decision_keys` outcome per event (including an explicit empty list for
+a no-decision cycle). Raw sources must be mapped explicitly per environment;
+normalization may replace only those exact source labels and
+`execution_environment`. Event time, phase/kind, source sequence, canonical
+normalized event identity, remaining payload, and decision keys are exact
+comparisons with no numeric tolerance. `ingest_ts_ns` remains bound in the raw
+tape but is excluded from normalized parity because it is arrival telemetry,
+not an order-key/input field.
+
+The natural and parity artifacts are causally separate. LONG and CONT may share
+one interprocess-locked capture path. After each production callback returns,
+the producer re-reads the returned `PublishedTargetRequest` files under the
+route-bound inbox lock; only an error-free, verifiable publication appends the
+natural capture and companion outcome. Successful no-target callbacks are
+explicit empty rows. Freeze that provenance artifact before the offline replay
+creates historical, paper, and demo-labelled scheduling tapes from the same
+bytes. Those labels do not represent account-owner or venue execution.
+
+The machine receipt must reproduce from all nine bound replay files, pass each native
+event/decision hash chain plus duplicate/backward/alignment checks, and pass
+both normalized chain comparisons. A missing identity, changed input byte,
+mismatch, corrupt tape, or ordinary live producer without a companion outcome
+tape fails closed. The
+receipt proves only normalized scheduling/input-declaration/decision-tape
+equality. It does not authenticate market-data provenance, prove strategy or
+configuration identity omitted from payloads, replace account-kernel parity,
+or establish signal-selection parity, raw-market-tape parity, venue fills,
+fees, P&L, funding, alpha, deployment readiness, or authorization. The replay
+adapter and post-callback producer outcome code cannot satisfy the gate without
+a fresh natural capture and successful offline receipt. Decision keys come from
+durable published `AccountTargetRequest` intents; failed or unverifiable
+callbacks leave an outcome missing rather than record an empty success. Actual
+V7 demo orders/fills/accounting remain separate evidence and cannot be replaced
+by the offline `demo` scheduling directory.

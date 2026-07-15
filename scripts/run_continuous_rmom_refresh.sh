@@ -11,6 +11,17 @@ if [ ! -x "$PYTHON_BIN" ]; then
     PYTHON_BIN=python3
 fi
 
+# The checked-in roots remain the pre-fresh defaults. A late per-unit systemd
+# environment file replaces them after the natural epoch is sealed. Use the
+# unset-only expansion (not `:-`) so an explicitly empty late override fails
+# closed instead of silently falling back into a sealed root.
+CONTINUOUS_DEMO_DATA_ROOT="${CONTINUOUS_DEMO_DATA_ROOT-data/bybit-continuous-demo-event}"
+CONTINUOUS_PAPER_DATA_ROOT="${CONTINUOUS_PAPER_DATA_ROOT-data/bybit-continuous-paper-event}"
+if [ -z "$CONTINUOUS_DEMO_DATA_ROOT" ] || [ -z "$CONTINUOUS_PAPER_DATA_ROOT" ]; then
+    echo "CONTINUOUS_DEMO_DATA_ROOT and CONTINUOUS_PAPER_DATA_ROOT must be non-empty." >&2
+    exit 2
+fi
+
 # Demo and deterministic-paper target producers keep independent kline/RMOM
 # roots so one dead feed cannot be hidden by the other. Refresh every enabled
 # producer's gate from its own current store; otherwise q25 never resolves and
@@ -21,11 +32,13 @@ if sleeve_on "${CONTINUOUS_SLEEVE:-off}"; then
     # research archives. Append-mode overlap equivalence is correct for stable
     # roots, but these live roots should rebuild the gate from the current store
     # instead of parking the daily timer in FAILED when old overlap rows drift.
-    "$PYTHON_BIN" -u scripts/precompute_residual_momentum.py --root data/bybit-continuous-demo-event --full-rewrite
+    "$PYTHON_BIN" -u scripts/precompute_residual_momentum.py \
+        --root "$CONTINUOUS_DEMO_DATA_ROOT" --full-rewrite
     refreshed=1
 fi
 if sleeve_on "${CONTINUOUS_PAPER_SLEEVE:-off}"; then
-    "$PYTHON_BIN" -u scripts/precompute_residual_momentum.py --root data/bybit-continuous-paper-event --full-rewrite
+    "$PYTHON_BIN" -u scripts/precompute_residual_momentum.py \
+        --root "$CONTINUOUS_PAPER_DATA_ROOT" --full-rewrite
     refreshed=1
 fi
 if [ "$refreshed" -eq 0 ]; then

@@ -14,12 +14,18 @@ acceptance conditions are recorded in `docs/account_execution_cutover.md`.
   reconciliation, the canonical demo account journal, desired-vs-executed
   convergence, and operational Telegram messages.
 - `liquidity-migration-account-paper-execution.service` owns the deterministic
-  paper account journal and consumes its separate target inbox and L2 capture.
+  paper account journal and consumes its separate target inbox and L2 capture;
+  its unit explicitly removes every demo/mainnet private credential,
+  `REAL_MONEY`, and Telegram credential from the inherited environment.
 - LONG and CONTINUOUS demo/paper services are target producers. Their unit
-  environments remove Bybit private keys and Telegram credentials even though
-  they retain the shared public configuration file.
-- `liquidity-migration-continuous-hedge.service` publishes a BTC+ETH hedge target;
-  `SUBMIT_HEDGE=1` arms publication to the owner inbox, not direct venue orders.
+  environments remove Bybit private keys, `REAL_MONEY`, and Telegram
+  credentials even though they retain the shared public configuration file.
+- The target-only hedge and local RMOM refresh apply the same explicit removal;
+  the demo account owner is the only fresh-epoch unit that receives demo
+  private credentials.
+- `liquidity-migration-continuous-hedge.service` names its `demo|paper` route
+  explicitly; `HEDGE_ACTION=execute` publishes to that owner inbox, while the
+  launcher defaults to dry-run and never places venue orders itself.
 - `liquidity-migration-demo-liveness.service` reads canonical account journals
   and captures. It does not load the private credential environment.
 
@@ -54,7 +60,10 @@ The account-owner cutover can install its current software and units before the
 deploy gate exists:
 
 ```bash
+CANDIDATE_BRANCH="$(git branch --show-current)"
+test -n "$CANDIDATE_BRANCH"
 INSTALL_PREFLIGHT_ONLY=1 \
+  BRANCH="$CANDIDATE_BRANCH" \
   EXPECTED_COMMIT="$(git rev-parse HEAD)" \
   scripts/deploy_vps_live.sh
 ```
@@ -64,7 +73,8 @@ The provider-console recovery script accepts the same
 `install-preflight` mode. The phase checks out the exact commit, installs the
 current scripts/config and systemd manifest, and disables/removes unknown
 historical `liquidity-migration-*` units and drop-ins. It deliberately does not
-read or modify either cutover marker, load the Bybit or owner route
+read or modify the capture-enable marker, pre-cutover runtime marker, or
+deploy-ready receipt, load the Bybit or owner route
 environments, or enable/start/restart any current `liquidity-migration` unit.
 Already-running current units are left running, so enter the maintenance window
 and stop the installed fleet before invoking this phase; otherwise the checkout
@@ -83,17 +93,21 @@ exists; only the safe staged installation above is exempt:
 /etc/liquidity-migration/account-execution-capture-enabled
 ```
 
-This marker authorizes demo/paper tape collection only. It is not evidence of
-parity, calibration, P&L agreement, or deployment readiness. Full deployment,
-verification, and full recovery additionally require a mode-`0600` JSON
-authorization receipt at:
+This marker enables the guarded demo/paper capture topology. It is first issued
+for tape collection and, if the cutover is later authorized, persists unchanged
+for the deployed runtime. It is not evidence of parity, calibration, P&L
+agreement, or deployment readiness. Initial full deployment additionally
+requires a mode-`0600` JSON authorization receipt at:
 
 ```text
 /etc/liquidity-migration/account-execution-deploy-ready
 ```
 
-They verify the capture marker and the deploy receipt before checkout and refuse
-the retired ambiguous `account-execution-ready` filename. The receipt is
+The one-time deployment verifies the capture marker and deploy receipt before
+checkout and refuses the retired ambiguous `account-execution-ready` filename.
+Routine same-commit verification/recovery instead reopens the persistent
+activation latch and exact bound artifacts; expiry cannot grant a new deploy or
+invalidate an already activated filesystem epoch. The deploy receipt is
 self-hashed, expires within 24 hours, and binds the reviewed evidence to this
 host and exact clean staged commit. Do not `touch` this path. Issue it through
 `scripts/ops.sh cutover-authority` only after the gates in
@@ -135,8 +149,14 @@ Bybit demo and Telegram secrets remain in
 `/etc/liquidity-migration/bybit-demo.env`. The demo account owner loads both.
 The liveness watchdog loads Telegram only and explicitly removes every Bybit
 credential plus `REAL_MONEY` before execution. Target producers explicitly
-unset private API and Telegram variables. `REAL_MONEY` is refused throughout
-this workflow.
+unset private API and Telegram variables, and the demo owner explicitly removes
+the unused mainnet credential names. All three private EnvironmentFiles above
+must be current-user-owned, single-link regular files with exact mode `0600`
+and strict `KEY=VALUE` syntax. Checked deploy, verification, and recovery read
+only an allowlist through the stable data parser; they never source these files
+as shell programs. Shell expansion, escape syntax, duplicate keys, ambiguous
+whitespace, and unknown `REAL_MONEY` spellings are refused. `REAL_MONEY` is
+refused throughout this workflow.
 
 ## Checked deploy and verification
 
@@ -155,6 +175,35 @@ an owner/producer that does not become active. It starts both account owners
 before enabled target producers. Verification is read-only and checks the same
 topology and unit environment latches.
 
+Before the evidence window, explicitly bind the staged clean commit and machine
+with `authorized-deploy-epoch prepare-evidence-runtime`. That command creates
+the owner-only mode-`0600`
+`/etc/liquidity-migration/account-execution-pre-cutover-ready` marker; absence
+is a hard failure, not an implicit legacy fallback. The authorized cutover later
+consumes that marker and writes the persistent fresh-epoch latch next to
+`/etc/liquidity-migration/fresh-deploy`. Before it materializes any environment
+file, it also publishes the irreversible mode-`0600`
+`account-execution-fresh-epoch-activation-started.json` history marker. A
+failed or partial activation retains that marker; deleting the environment,
+latch, or authorization cannot make `prepare-evidence-runtime` legal again.
+
+Every one of the nine account-owner, producer, hedge, refresh, and liveness
+units enters through `run_authorized_fresh_runtime.sh`. Systemd may select only
+the checked `main` or owner `readiness` entrypoint; the wrapper owns the exact
+command and argv and rejects caller-supplied commands. Installation and verify
+also reject any guarded-unit drop-in, alternate fragment, or effective
+`ExecStart`/`ExecStartPost` override. The wrapper checks the
+exact environment inherited by that process and immediately `exec`s the
+workload, so there is no second systemd environment load between verification
+and execution. Before activation it requires the commit/machine-bound evidence
+marker. After activation it performs bounded checks of the clean checkout,
+machine, authorization, fresh manifest, materialization receipt, every fragment,
+and the unit's required values. Any partial or deleted activation state, a
+lingering pre-cutover marker, or a changed dependency blocks startup instead of
+falling back to a legacy root. The latch preserves the original authorization
+identity after its bounded issuance window; it does not grant new deployment
+authority.
+
 Sleeve enablement comes from `deploy/sleeves.env`, narrowed only by
 `/etc/liquidity-migration/sleeves.env`. The resolved values are written to
 `/etc/liquidity-migration/sleeves.resolved.env`. Turning a sleeve off stops new
@@ -167,6 +216,17 @@ must use the checked scripts rather than hand-starting a partial fleet:
 scripts/print_vps_recovery_command.sh --recommended-only
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/vps_console_recover_and_deploy.sh
 ```
+
+Full recovery is activated-latch, same-commit only: it does not fetch or upgrade.
+If explicitly asked to clean a dirty checkout, it archives the dirty bytes and
+resets to the already-proved full commit before sourcing any checkout helper or
+Python verifier. The console printer embeds scripts from that exact trusted
+local Git object; it does not bootstrap this private repository through an
+anonymous content URL. Initial deploy and recovery install only exact
+`requirements.lock` versions with dependency resolution disabled; neither runs
+an editable install nor upgrades pip.
+Preactivation must use the checked initial deploy, and any partial activation
+state is preserved as an incident and fails closed.
 
 ## Evidence-window startup and inspection
 

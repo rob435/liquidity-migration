@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from liquidity_migration.account_kernel import AccountState, InstrumentRules, OrderCommand, OrderState
+from liquidity_migration.account_execution_config import load_demo_rules, load_risk_policy
 from liquidity_migration.account_service_bybit import (
     BybitDemoAccountSnapshotProvider,
     CapturedBybitMarketProvider,
@@ -17,12 +18,20 @@ from liquidity_migration.account_service_bybit import (
     require_bybit_demo_order_ownership,
 )
 from liquidity_migration.account_service_runner import (
-    load_demo_rules,
-    load_risk_policy,
     require_order_submit_permission,
 )
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.deterministic_serialization import canonical_json
+from liquidity_migration.demo_rule_probe import (
+    DEMO_RULE_PROBE_EVIDENCE_KIND,
+    DEMO_RULE_PROBE_EVIDENCE_SCHEMA_VERSION,
+    DEMO_RULES_KIND,
+    DEMO_RULES_SCHEMA_VERSION,
+    ORDER_CANCEL_SOURCE,
+    ORDER_CREATE_SOURCE,
+    ORDER_HISTORY_SOURCE,
+    TRADE_HISTORY_SOURCE,
+)
 from liquidity_migration.execution_adapters import (
     ExecutionObservationType,
     ExecutionTwinConfig,
@@ -106,6 +115,7 @@ def test_paper_adapter_executes_against_exact_captured_decision_book(tmp_path: P
                 target_signed_qty=1.0,
                 chunk_index=0,
                 chunk_count=1,
+                created_ts_ns=market.local_receive_ts_ns,
             ),
             market,
         )
@@ -367,10 +377,17 @@ def test_demo_rule_provider_never_falls_back_to_unverified_public_minimums() -> 
 
 def test_runner_loaders_require_explicit_demo_rules_and_absolute_risk_limits(tmp_path: Path) -> None:
     rules_path = tmp_path / "rules.json"
+    order_id = "probe-order-1"
+    order_link_id = "lm-demo-rule-BUSDT-test-1"
     rules_payload: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": DEMO_RULES_SCHEMA_VERSION,
+        "kind": DEMO_RULES_KIND,
+        "status": "passed",
         "environment": "demo",
         "verified_ts_ns": 123,
+        "max_probe_notional_usdt": 200.0,
+        "probe_distance_bps": 100.0,
+        "max_private_requests_per_second": 5,
         "rules": {
             "BUSDT": {
                 "qty_step": 1,
@@ -379,15 +396,62 @@ def test_runner_loaders_require_explicit_demo_rules_and_absolute_risk_limits(tmp
                 "tick_size": 0.0001,
                 "max_order_qty": 1000,
                 "max_leverage": 25,
-                "source": "demo_order_probe",
+                "source": "bybit_demo_post_only_acceptance_probe",
                 "environment": "demo",
                 "observed_ts_ns": 123,
             }
         },
         "evidence": {
             "BUSDT": {
+                "schema_version": DEMO_RULE_PROBE_EVIDENCE_SCHEMA_VERSION,
+                "kind": DEMO_RULE_PROBE_EVIDENCE_KIND,
+                "environment": "demo",
+                "observed_ts_ns": 123,
+                "symbol": "BUSDT",
+                "probe_price": 1,
+                "probe_distance_bps": 100,
+                "lowest_accepted_qty": 1,
                 "lowest_accepted_notional_usdt": 1,
-                "attempts": [{"accepted": True, "qty": 1, "notional_usdt": 1}],
+                "highest_rejected_qty": 0,
+                "highest_rejected_notional_usdt": 0,
+                "tested_leverage": 10,
+                "terminal_history_timeout_seconds": 5.0,
+                "terminal_history_poll_seconds": 0.1,
+                "terminal_history_max_polls": 50,
+                "required_terminal_confirmation_polls": 2,
+                "attempts": [{
+                    "step_count": 1,
+                    "qty": 1,
+                    "notional_usdt": 1,
+                    "accepted": True,
+                    "outcome": "verified_cancelled_no_fill",
+                    "rejection": "",
+                    "order_link_id": order_link_id,
+                    "order_id": order_id,
+                    "create_ack_source": ORDER_CREATE_SOURCE,
+                    "create_ack_order_id": order_id,
+                    "create_ack_order_link_id": order_link_id,
+                    "cancel_ack_source": ORDER_CANCEL_SOURCE,
+                    "cancel_ack_order_id": order_id,
+                    "cancel_ack_order_link_id": order_link_id,
+                    "order_history_source": ORDER_HISTORY_SOURCE,
+                    "order_history_query_symbol": "BUSDT",
+                    "order_history_query_order_id": order_id,
+                    "order_history_query_order_link_id": order_link_id,
+                    "terminal_order_id": order_id,
+                    "terminal_order_link_id": order_link_id,
+                    "terminal_status": "Cancelled",
+                    "terminal_cum_exec_qty": "0",
+                    "terminal_cum_exec_value": "0",
+                    "terminal_observed_ts_ns": 123,
+                    "terminal_poll_count": 2,
+                    "terminal_confirmation_polls": 2,
+                    "trade_history_source": TRADE_HISTORY_SOURCE,
+                    "trade_history_query_symbol": "BUSDT",
+                    "trade_history_query_order_id": order_id,
+                    "trade_history_query_order_link_id": order_link_id,
+                    "trade_history_row_count": 0,
+                }],
             }
         },
         "artifact_sha256": "",
@@ -395,8 +459,71 @@ def test_runner_loaders_require_explicit_demo_rules_and_absolute_risk_limits(tmp
     rules_payload["artifact_sha256"] = hashlib.sha256(canonical_json(rules_payload)).hexdigest()
     rules_path.write_text(json.dumps(rules_payload))
     rules = load_demo_rules(rules_path)
-    assert rules["BUSDT"].source == "demo_order_probe"
+    assert rules["BUSDT"].source == "bybit_demo_post_only_acceptance_probe"
     assert rules["BUSDT"].environment == "demo"
+
+    weak_contract = json.loads(json.dumps(rules_payload))
+    weak_contract["probe_distance_bps"] = 50
+    weak_contract["artifact_sha256"] = ""
+    weak_contract["artifact_sha256"] = hashlib.sha256(
+        canonical_json(weak_contract)
+    ).hexdigest()
+    rules_path.write_text(json.dumps(weak_contract))
+    with pytest.raises(ValueError, match="fixed prospectively at 100 bps"):
+        load_demo_rules(rules_path)
+    rules_path.write_text(json.dumps(rules_payload))
+
+    over_cap_attempt = json.loads(json.dumps(rules_payload))
+    over_cap_attempt["rules"]["BUSDT"]["min_notional"] = 201
+    over_cap_attempt["evidence"]["BUSDT"]["lowest_accepted_qty"] = 201
+    over_cap_attempt["evidence"]["BUSDT"]["lowest_accepted_notional_usdt"] = 201
+    over_cap_attempt["evidence"]["BUSDT"]["attempts"][0]["step_count"] = 201
+    over_cap_attempt["evidence"]["BUSDT"]["attempts"][0]["qty"] = 201
+    over_cap_attempt["evidence"]["BUSDT"]["attempts"][0]["notional_usdt"] = 201
+    over_cap_attempt["artifact_sha256"] = ""
+    over_cap_attempt["artifact_sha256"] = hashlib.sha256(
+        canonical_json(over_cap_attempt)
+    ).hexdigest()
+    rules_path.write_text(json.dumps(over_cap_attempt))
+    with pytest.raises(ValueError, match="exceeds the receipt probe-notional cap"):
+        load_demo_rules(rules_path)
+    rules_path.write_text(json.dumps(rules_payload))
+
+    excess_leverage = json.loads(json.dumps(rules_payload))
+    excess_leverage["evidence"]["BUSDT"]["tested_leverage"] = 11
+    excess_leverage["artifact_sha256"] = ""
+    excess_leverage["artifact_sha256"] = hashlib.sha256(
+        canonical_json(excess_leverage)
+    ).hexdigest()
+    rules_path.write_text(json.dumps(excess_leverage))
+    with pytest.raises(ValueError, match="tested leverage exceeds registered 10x"):
+        load_demo_rules(rules_path)
+    rules_path.write_text(json.dumps(rules_payload))
+
+    legacy_payload = json.loads(json.dumps(rules_payload))
+    legacy_payload["evidence"]["BUSDT"] = {
+        "lowest_accepted_notional_usdt": 1,
+        "attempts": [{"accepted": True}],
+    }
+    legacy_payload["artifact_sha256"] = ""
+    legacy_payload["artifact_sha256"] = hashlib.sha256(
+        canonical_json(legacy_payload)
+    ).hexdigest()
+    rules_path.write_text(json.dumps(legacy_payload))
+    with pytest.raises(ValueError, match="probe evidence identity"):
+        load_demo_rules(rules_path)
+    rules_path.write_text(json.dumps(rules_payload))
+
+    wrong_identity = json.loads(json.dumps(rules_payload))
+    wrong_identity["evidence"]["BUSDT"]["attempts"][0]["terminal_order_id"] = "wrong"
+    wrong_identity["artifact_sha256"] = ""
+    wrong_identity["artifact_sha256"] = hashlib.sha256(
+        canonical_json(wrong_identity)
+    ).hexdigest()
+    rules_path.write_text(json.dumps(wrong_identity))
+    with pytest.raises(ValueError, match="does not bind"):
+        load_demo_rules(rules_path)
+    rules_path.write_text(json.dumps(rules_payload))
 
     tampered = dict(rules_payload)
     tampered["verified_ts_ns"] = 124
@@ -407,6 +534,8 @@ def test_runner_loaders_require_explicit_demo_rules_and_absolute_risk_limits(tmp
 
     with pytest.raises(ValueError, match="stale"):
         load_demo_rules(rules_path, now_ns=10_000_000_000, max_age_seconds=1.0)
+    with pytest.raises(ValueError, match="finite and positive"):
+        load_demo_rules(rules_path, max_age_seconds=float("nan"))
 
     policy_path = tmp_path / "policy.json"
     policy_path.write_text("""{

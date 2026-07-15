@@ -106,11 +106,51 @@ TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"
 VOL_WEIGHT_CLAMP="${VOL_WEIGHT_CLAMP:-2}"
 LIQ_TURNOVER_MIN="${LIQ_TURNOVER_MIN:-500000}"
 
-order_args=(
+target_route_args=(
     --execution-environment "$EXECUTION_ENVIRONMENT"
     --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
     --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
 )
+case "${NATURAL_EVIDENCE_REQUIRED:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        [[ "$EXECUTION_ENVIRONMENT" == "demo" ]] || {
+            echo "NATURAL_EVIDENCE_REQUIRED is demo-only." >&2
+            exit 2
+        }
+        [[ -n "${NATURAL_RUN_CONFIG:-}" ]] || {
+            echo "NATURAL_EVIDENCE_REQUIRED needs NATURAL_RUN_CONFIG." >&2
+            exit 2
+        }
+        [[ -f "$NATURAL_RUN_CONFIG" && ! -L "$NATURAL_RUN_CONFIG" ]] || {
+            echo "NATURAL_RUN_CONFIG must be a non-symlink regular file." >&2
+            exit 2
+        }
+        [[ -z "${STRATEGY_TARGET_CAPTURE_PATH:-}" && -z "${CANDIDATE_UNIVERSE_FILE:-}" ]] || {
+            echo "Natural tape/candidate paths come only from NATURAL_RUN_CONFIG." >&2
+            exit 2
+        }
+        target_route_args+=(
+            --natural-evidence-required
+            --natural-run-config "$NATURAL_RUN_CONFIG"
+        )
+        ;;
+    0|false|FALSE|no|NO|off|OFF|"")
+        [[ -z "${NATURAL_RUN_CONFIG:-}" ]] || {
+            echo "NATURAL_RUN_CONFIG requires NATURAL_EVIDENCE_REQUIRED=1." >&2
+            exit 2
+        }
+        if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
+            target_route_args+=(--strategy-target-capture-path "$STRATEGY_TARGET_CAPTURE_PATH")
+        fi
+        if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
+            target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
+        fi
+        ;;
+    *)
+        echo "NATURAL_EVIDENCE_REQUIRED has an invalid boolean value." >&2
+        exit 2
+        ;;
+esac
 # KLINES_FOLLOW_ROOT: the paper shadow follows the demo root's flushed kline
 # snapshot (+rmom gate) read-only instead of running a second WS pool — one
 # shared market-data plane per box. Empty = this sleeve runs its own pool.
@@ -121,7 +161,7 @@ if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
         echo "KLINES_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
         exit 2
     fi
-    order_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
+    target_route_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
 fi
 echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS profile=$STRATEGY_PROFILE notional_x=$NOTIONAL_MULTIPLIER entry_leverage=$ENTRY_LEVERAGE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
 exec "$PYTHON_BIN" -m liquidity_migration \
@@ -145,4 +185,4 @@ exec "$PYTHON_BIN" -m liquidity_migration \
     --vol-weight-clamp "$VOL_WEIGHT_CLAMP" \
     --liq-turnover-min "$LIQ_TURNOVER_MIN" \
     --daemon --interval-seconds "$INTERVAL_SECONDS" \
-    ${order_args[@]+"${order_args[@]}"}
+    ${target_route_args[@]+"${target_route_args[@]}"}

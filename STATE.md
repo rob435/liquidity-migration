@@ -24,12 +24,14 @@ research decisions are in
   venue query was still flat, and the before/after unit inventories plus
   checksums are retained under
   `/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z`.
-- Staged topology installation from branch
-  `codex/account-execution-cutover` through commit `b82a378cfcf0` passed 142 Linux
-  smoke tests. It installed the two owner units and removed the retired Bybit
-  risk and combined-book reporter units without starting any unit or creating
-  a capture/deploy marker. This is maintenance staging, not an accepted full
-  deployment.
+- The last retained operator record says staged topology from branch
+  `codex/account-execution-cutover` advanced through commit `b82a378cfcf0` and
+  passed 142 Linux smoke tests. It installed the two owner units and removed the
+  retired Bybit risk and combined-book reporter units without starting any unit
+  or creating a capture/deploy marker. The host-only evidence is not stored in
+  this worktree, so `b82a378cfcf0` is not independently proven as the VPS's
+  current checkout; re-stage and verify the exact candidate before V7. This is
+  maintenance staging, not an accepted full deployment.
 - The guarded all-sleeve reset completed at `2026-07-13T23:43:14Z`. It re-proved
   venue flatness, archived 12 legacy projections/roots plus preserved risk
   state to a verified 335-MB archive with SHA-256
@@ -63,8 +65,8 @@ research decisions are in
   are deleted. The demo owner also recovers strict Bybit funding-settlement rows,
   and a new owner-serialized read-only receipt can reconcile stopped-journal
   target/order/fill lineage, fees, closed P&L, funding, and pre/post flatness.
-  Commit `b82a378cfcf0` is published and staged on the VPS. Its bounded
-  calibration driver, retained-stop transition, and independent public
+  Commit `b82a378cfcf0` is published and was recorded as staged on the VPS. Its
+  bounded calibration driver, retained-stop transition, and independent public
   clock-offset receipt passed 2,428 local tests and 142 remote Linux smoke
   tests. The demo owner started alone, created the route, stayed healthy/flat,
   and captured all three L2 books.
@@ -106,18 +108,35 @@ research decisions are in
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now
-  share an ordered hash-chained event-clock boundary and callback time. Their
-  arrival/selection adapters are not yet full strategy parity. CONTINUOUS
-  adverse-limit mode and LONG waits beyond 24 hours remain post-run replay.
+  share an ordered hash-chained event-clock boundary and callback time for the
+  registered active LONG/CONT natural market-order paths. This is not literal
+  parity for every timer or mode: arrival/selection adapters are not yet full
+  strategy parity, and hedge/RMOM/liveness, CONTINUOUS adverse-limit mode, and
+  LONG waits beyond 24 hours remain outside that runtime claim or in post-run
+  replay.
 - The cutover acceptance gate is open: fresh rules and failed V4/V5/V6 evidence
-  exist, but no passing calibration target/order/fill/P&L tape, fresh V7
-  clock-offset receipt,
-  passing execution-twin calibration, venue-accounting receipt, or full
-  historical/paper/demo comparison exists. The paper owner refuses startup
-  without a passing calibration. Full deploy now requires a short-lived,
-  mode-`0600` `account-execution-deploy-ready` authorization receipt and
-  verifies its self-hash, host, exact clean commit, registered gate set, and
-  evidence bindings before checkout. No such receipt has been issued.
+  exist, but the current local follow-on has not been frozen into a clean exact
+  candidate or passed the non-contacting `candidate-ci` gate. V7 and its
+  partial-fill gate have not run; there is no passing calibration
+  target/order/fill/P&L tape, second full registered-output natural-holdout reset, owner-first
+  readiness pair, 120-hour natural LONG/CONT tape, periodic clock series,
+  venue-accounting/final-flatness receipt, stopped-source seal, offline
+  replay/parity/sufficiency/drift result, fresh-deploy epoch, or full
+  historical/paper/demo comparison. The stopped and fresh epoch constructors
+  are integrity mechanisms in source, not evidence that either epoch exists.
+  The earlier generic stopped-tree provenance implementation blocker is closed
+  in source: target-replay manifest v2, event parity v3, captured-account replay
+  v3, comparison scope v3, kernel receipt v4, natural sufficiency v3, and the
+  authority aggregate v4 now form a source-reopening path/hash dependency chain
+  with derived-output disjointness checks. Their local timestamps enforce
+  declared internal chronology; they are not authenticated wall-clock proof.
+  The target manifest assigns its completion time after replay construction,
+  while dependency hashes and source reopening carry the causal provenance.
+  None of these validators is a run artifact. The paper owner refuses startup
+  without a passing calibration. Full deploy requires a short-lived,
+  mode-`0600` `account-execution-deploy-ready` authorization receipt that binds
+  the exact clean commit and complete source-reopened gate set. No such receipt
+  has been issued.
 - The owner reports that the Strategy Overhaul master plan is currently running
   on the big PC for alpha research. That workload is separate from this
   execution cutover; no big-PC result or artifact has been ingested or judged in
@@ -396,18 +415,38 @@ Strategy-overhaul status is still synthetic and outcome blind:
 
 ## Next actions
 
-1. After an authorized account-owner cutover, capture actual historical, paper,
-   and demo target/account journals through meaningful decisions and fills.
-   Run structural account parity and the separate venue-rule, captured-tape,
-   scheduler, and immutable P&L checks in the cutover runbook; do not substitute
-   the retired sleeve-projection reconciler.
+1. Finish the account-owner candidate and clean exact-candidate Linux validation
+   first. Then, still without deploying, run the registered flat maintenance
+   sequence: archive/reset the six roots for V7, run the fresh V7 training
+   epoch, materialize its immutable archive **before** the second full
+   registered-output natural-holdout reset, start the paper owner alone and stop it cleanly, then
+   start the demo owner alone before any producer and collect the fixed 120-hour
+   natural LONG/CONT demo tapes. After T1, converge flat, stop the fleet,
+   capture venue accounting/funding and final flatness, and seal the stopped
+   source namespace before any offline historical/paper replay, structural
+   parity, sufficiency, or execution-twin drift analysis.
+   Write every derived analysis artifact to a separate root outside all 11
+   sealed paths; create the ten fresh deployment roots only after every analysis
+   gate passes, and keep those roots outside both namespaces. Do not substitute
+   the retired sleeve-projection reconciler or a V7 training sample for the
+   natural tape.
 2. Let the owner-run Strategy Overhaul master plan continue on the big PC without
    coupling it to this VPS cutover. Ingest its immutable receipts only after the
    run finishes; a positive research result still does not change the live
    profile or authorize deployment.
-3. Build and audit granular datasets before running the adverse-state study.
+3. Keep `codex/account-execution-cutover` off `main` until the registered outcome
+   supports the cutover and the exact short-lived authorization exists. A
+   fast-forward of `main` is the checked deployment boundary, not cleanup.
+   Delete the cutover branch only after that deployment verifies; delete any
+   other branch only after proving it has no unique commit or dirty worktree.
+   Use `docs/account_execution_completion_handoff.md` for a bounded continuation
+   across agent sessions. Defer the aggressive cleanup described in
+   `docs/repository_cleanup_handoff.md` until the cutover is verified deployed
+   or explicitly closed; run it from a separate clean branch/worktree rather
+   than changing the frozen evidence candidate.
+4. Build and audit granular datasets before running the adverse-state study.
    Do not infer missing sub-hour data from 1h bars.
-4. Preserve the verified local `NOT_READY` Phase-0 bundle above as diagnostic
+5. Preserve the verified local `NOT_READY` Phase-0 bundle above as diagnostic
    evidence; do not overwrite or promote it. Capture the prospective source-label
    and now-`WIRED` consumer implementation in a new identity, then use
    `scripts/ops.sh overhaul-plan`
@@ -431,3 +470,7 @@ Strategy-overhaul status is still synthetic and outcome blind:
 - `docs/research_summary.md` — durable evidence and decisions.
 - `docs/data_roots.md` and `docs/pit_gate.md` — data/PIT contracts.
 - `docs/preregistration/INDEX.md` — active experiments and closed arcs.
+- `docs/account_execution_completion_handoff.md` — bounded continuation prompt
+  and efficient candidate-validation cadence.
+- `docs/repository_cleanup_handoff.md` — deferred evidence-driven deletion
+  campaign.

@@ -10,6 +10,8 @@ BRANCH="${BRANCH:-main}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
 SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-15}"
+RMOM_BOOTSTRAP_TIMEOUT_SECONDS="${RMOM_BOOTSTRAP_TIMEOUT_SECONDS:-1800}"
+RMOM_BOOTSTRAP_RETRY_SECONDS="${RMOM_BOOTSTRAP_RETRY_SECONDS:-30}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 INSTALL_PREFLIGHT_ONLY="${INSTALL_PREFLIGHT_ONLY:-0}"
 
@@ -20,6 +22,23 @@ case "$INSTALL_PREFLIGHT_ONLY" in
     exit 1
     ;;
 esac
+
+for _duration_name in SYSTEMD_SETTLE_SECONDS RMOM_BOOTSTRAP_TIMEOUT_SECONDS RMOM_BOOTSTRAP_RETRY_SECONDS; do
+  _duration_value="${!_duration_name}"
+  if [[ ! "$_duration_value" =~ ^[0-9]+$ ]]; then
+    echo "Refusing deploy: $_duration_name must be a non-negative integer." >&2
+    exit 1
+  fi
+done
+if [ "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS" -le 0 ] || [ "$RMOM_BOOTSTRAP_RETRY_SECONDS" -le 0 ]; then
+  echo "Refusing deploy: RMOM bootstrap timeout/retry durations must be positive." >&2
+  exit 1
+fi
+
+if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+  echo "Refusing deploy: BRANCH must be a valid Git branch name." >&2
+  exit 1
+fi
 
 # Local deploys of the private GitHub repository should work through the same
 # checked path as Actions.  Reuse an authenticated gh keyring token when the
@@ -45,6 +64,8 @@ fi
   printf 'EXPECTED_TELEGRAM_CHAT_ID=%q\n' "$EXPECTED_TELEGRAM_CHAT_ID"
   printf 'SYSTEMD_SETTLE_SECONDS=%q\n' "$SYSTEMD_SETTLE_SECONDS"
   printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
+  printf 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS=%q\n' "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS"
+  printf 'RMOM_BOOTSTRAP_RETRY_SECONDS=%q\n' "$RMOM_BOOTSTRAP_RETRY_SECONDS"
   printf 'INSTALL_PREFLIGHT_ONLY=%q\n' "$INSTALL_PREFLIGHT_ONLY"
   cat <<'REMOTE_SCRIPT'
 set -euo pipefail
@@ -53,9 +74,17 @@ git_with_optional_github_token() {
   if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$REPO_URL" == https://github.com/* ]]; then
     local github_basic_auth
     github_basic_auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
-    GIT_TERMINAL_PROMPT=0 git \
-      -c "http.https://github.com/.extraheader=AUTHORIZATION: Basic $github_basic_auth" \
-      "$@"
+    (
+      # Dynamic git configuration is inherited as environment, not exposed in
+      # git's argv. Do not preserve caller-supplied config slots across this
+      # security boundary.
+      export GIT_CONFIG_COUNT=1
+      export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+      export GIT_CONFIG_VALUE_0="AUTHORIZATION: Basic $github_basic_auth"
+      export GIT_TERMINAL_PROMPT=0
+      unset GITHUB_TOKEN
+      git "$@"
+    )
   else
     GIT_TERMINAL_PROMPT=0 git "$@"
   fi
@@ -99,7 +128,8 @@ require_full_deploy_authority() {
     echo "Refusing deploy before checkout: staged cutover authority verifier is unavailable; run install-preflight first." >&2
     exit 1
   fi
-  if ! "$_authority_python" "$_authority_script" verify \
+  if ! GITHUB_TOKEN="$GITHUB_TOKEN" \
+    "$_authority_python" "$_authority_script" verify \
     --receipt /etc/liquidity-migration/account-execution-deploy-ready \
     --expected-commit "$EXPECTED_COMMIT" \
     --repo-root "$REPO_DIR"; then
@@ -119,42 +149,45 @@ if [ -n "$(git status --short)" ]; then
   exit 1
 fi
 
-if git remote get-url "$REMOTE" >/dev/null 2>&1; then
-  git remote set-url "$REMOTE" "$REPO_URL"
-else
-  git remote add "$REMOTE" "$REPO_URL"
-fi
-git_with_optional_github_token fetch "$REMOTE" "$BRANCH"
-unset GITHUB_TOKEN
-# Capture the previously-deployed commit BEFORE checkout - used below to decide
-# whether the dependency manifests changed and the venv needs a pip refresh.
-previous_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
-if [ -n "$EXPECTED_COMMIT" ]; then
-  if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-    echo "Refusing deploy: EXPECTED_COMMIT must be a 7-40 character hexadecimal commit id" >&2
-    exit 1
+checkout_expected_branch_commit() {
+  if git remote get-url "$REMOTE" >/dev/null 2>&1; then
+    git remote set-url "$REMOTE" "$REPO_URL"
+  else
+    git remote add "$REMOTE" "$REPO_URL"
   fi
-  if ! expected_commit_full="$(git rev-parse --verify "${EXPECTED_COMMIT}^{commit}" 2>/dev/null)"; then
-    echo "Refusing deploy: expected commit prefix $EXPECTED_COMMIT is missing or ambiguous" >&2
-    exit 1
+  git_with_optional_github_token fetch "$REMOTE" \
+    "refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH"
+  # Capture the previously-deployed commit BEFORE checkout - used below to decide
+  # whether the dependency manifests changed and the venv needs a pip refresh.
+  previous_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
+  if [ -n "$EXPECTED_COMMIT" ]; then
+    if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      echo "Refusing deploy: EXPECTED_COMMIT must be a 7-40 character hexadecimal commit id" >&2
+      exit 1
+    fi
+    if ! expected_commit_full="$(git rev-parse --verify "${EXPECTED_COMMIT}^{commit}" 2>/dev/null)"; then
+      echo "Refusing deploy: expected commit prefix $EXPECTED_COMMIT is missing or ambiguous" >&2
+      exit 1
+    fi
+    # Deploy exactly the commit that triggered this run. A queued newer run can
+    # move the box forward later; this run must not silently checkout a different
+    # branch head during the trigger->fetch window.
+    if ! git merge-base --is-ancestor "$expected_commit_full" "$REMOTE/$BRANCH"; then
+      echo "Refusing deploy: expected commit $expected_commit_full is not on $REMOTE/$BRANCH" >&2
+      exit 1
+    fi
+    git checkout -B "$BRANCH" "$expected_commit_full"
+  else
+    git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
   fi
-  # Deploy exactly the commit that triggered this run. A queued newer run can
-  # move the box forward later; this run must not silently checkout a different
-  # branch head during the trigger->fetch window.
-  if ! git merge-base --is-ancestor "$expected_commit_full" "$REMOTE/$BRANCH"; then
-    echo "Refusing deploy: expected commit $expected_commit_full is not on $REMOTE/$BRANCH" >&2
-    exit 1
-  fi
-  git checkout -B "$BRANCH" "$expected_commit_full"
-else
-  git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
-fi
+}
 
-if [ -x .venv/bin/python ]; then
-  PYTHON=.venv/bin/python
-else
-  PYTHON=python3
+checkout_expected_branch_commit
+
+if [ ! -x .venv/bin/python ]; then
+  python3 -m venv .venv
 fi
+PYTHON=.venv/bin/python
 
 validate_account_execution_roots() {
   _root_context="$1"
@@ -196,17 +229,11 @@ raise SystemExit(1 if invalid else 0)
 PY
 }
 
-# Venv refresh on dependency change: deploying code whose deps aren't installed
-# fails loud at the smoke tests below but leaves recovery manual. If the diff from
-# the previously-deployed commit touches a dependency manifest - or the previous
-# commit can't be determined - reinstall. Fail-loud: a pip failure aborts (set -e).
-if [ -x .venv/bin/pip ]; then
-  if [ -z "$previous_commit" ] \
-    || ! git diff --quiet "$previous_commit" HEAD -- requirements.lock pyproject.toml; then
-    echo "Dependency manifests changed (or previous commit unknown) - refreshing venv ..."
-    .venv/bin/pip install -q -e ".[dev]"
-  fi
-fi
+# Install only the exact versions reviewed in this commit. The checkout itself
+# supplies importable source from WorkingDirectory, so an editable install and
+# its unpinned build-isolation environment are neither needed nor allowed.
+"$PYTHON" -m pip install --disable-pip-version-check --no-deps \
+  --only-binary=:all: -r requirements.lock
 
 "$PYTHON" -m pytest \
   tests/test_runtime_scripts.py \
@@ -266,11 +293,20 @@ if [ "$INSTALL_PREFLIGHT_ONLY" = "1" ]; then
   echo "install-preflight-ok commit=$(git rev-parse --short HEAD) current_units_installed=1 current_units_started=0 cutover_markers_untouched=1"
   exit 0
 fi
+. deploy/lib_systemd_environment.sh
 
 if [ ! -f /etc/liquidity-migration/bybit-demo.env ]; then
   echo "Missing /etc/liquidity-migration/bybit-demo.env" >&2
   exit 1
 fi
+if [[ ! "$EXPECTED_TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]]; then
+  echo "Refusing deploy: EXPECTED_TELEGRAM_CHAT_ID must be a signed decimal integer." >&2
+  exit 1
+fi
+lm_load_private_systemd_environment "$PYTHON" \
+  /etc/liquidity-migration/bybit-demo.env \
+  BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY \
+  TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 
 cp /etc/liquidity-migration/bybit-demo.env "/etc/liquidity-migration/bybit-demo.env.backup.$(date -u +%Y%m%dT%H%M%SZ)"
 # One backup accumulates per deploy - keep only the 5 newest. (The cp above just
@@ -282,9 +318,10 @@ else
   printf '\nTELEGRAM_CHAT_ID=%s\n' "$EXPECTED_TELEGRAM_CHAT_ID" >> /etc/liquidity-migration/bybit-demo.env
 fi
 
-set -a
-. /etc/liquidity-migration/bybit-demo.env
-set +a
+lm_load_private_systemd_environment "$PYTHON" \
+  /etc/liquidity-migration/bybit-demo.env \
+  BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY \
+  TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 
 if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
   echo "Refusing deploy: TELEGRAM_CHAT_ID is '${TELEGRAM_CHAT_ID:-unset}', expected '$EXPECTED_TELEGRAM_CHAT_ID'" >&2
@@ -293,7 +330,8 @@ fi
 
 # DEFENSE-IN-DEPTH on the highest-stakes toggle: the sole demo account owner
 # runs on the account this env file defines. Make the deploy itself fail closed:
-# if a mis-edited bybit-demo.env sets REAL_MONEY truthy, refuse before restarting
+# if a mis-edited bybit-demo.env sets REAL_MONEY to anything but an explicit
+# false form, refuse before restarting
 # the owner. The strategy is NOT validated
 # for real money; promotion is operator-gated, never a deploy side effect.
 case "${REAL_MONEY:-}" in
@@ -301,6 +339,12 @@ case "${REAL_MONEY:-}" in
     echo "Refusing deploy: REAL_MONEY='${REAL_MONEY}' in /etc/liquidity-migration/bybit-demo.env." \
          "This box deploys a demo account owner; real money is not validated and must not be" \
          "enabled by a deploy. Fix the env file to demo (unset/false REAL_MONEY) and redeploy." >&2
+    exit 1
+    ;;
+  ""|0|false|FALSE|False|no|NO|No|off|OFF|Off)
+    ;;
+  *)
+    echo "Refusing deploy: REAL_MONEY='${REAL_MONEY}' in /etc/liquidity-migration/bybit-demo.env is ambiguous; unset it or use an explicit false value." >&2
     exit 1
     ;;
 esac
@@ -317,47 +361,46 @@ if [ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]; then
   echo "Refusing deploy: missing account-execution-capture-enabled marker." >&2
   exit 1
 fi
-if ! "$PYTHON" scripts/account_execution_cutover_authority.py verify \
+if ! GITHUB_TOKEN="$GITHUB_TOKEN" \
+  "$PYTHON" scripts/account_execution_cutover_authority.py verify \
   --receipt /etc/liquidity-migration/account-execution-deploy-ready \
   --expected-commit "$EXPECTED_COMMIT" \
   --repo-root "$REPO_DIR"; then
   echo "Refusing deploy: deploy-ready authorization failed after checkout." >&2
   exit 1
 fi
+. deploy/lib_fresh_epoch.sh
+# One-time flat cutover transition. This source-reopens the authorization,
+# proves the registered natural units are still stopped, proves all ten new
+# roots are still empty, and atomically materializes their exact late env files.
+# A partially activated/populated epoch must use the explicit recovery path;
+# this deploy path never guesses that populated roots are safe to reuse.
+lm_prepare_authorized_deploy_epoch "$PYTHON" "$REPO_DIR" "$EXPECTED_COMMIT"
+unset GITHUB_TOKEN
 if [ ! -s /etc/liquidity-migration/account-execution.env ]; then
   echo "Refusing deploy: account-execution.env is missing or empty." >&2
   exit 1
 fi
-set -a
-. /etc/liquidity-migration/account-execution.env
-set +a
+lm_load_private_systemd_environment "$PYTHON" \
+  /etc/liquidity-migration/account-execution.env \
+  ACCOUNT_EXECUTION_KERNEL_REQUIRED
 if [ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]; then
   echo "Refusing deploy: ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required." >&2
   exit 1
 fi
 DEMO_ACCOUNT_EXECUTION_KERNEL_REQUIRED="$ACCOUNT_EXECUTION_KERNEL_REQUIRED"
-DEMO_ACCOUNT_EXECUTION_ROOT="${ACCOUNT_EXECUTION_ROOT:-}"
-DEMO_ACCOUNT_INTENT_INBOX_ROOT="${ACCOUNT_INTENT_INBOX_ROOT:-}"
-DEMO_ACCOUNT_CAPTURE_ROOT="${ACCOUNT_CAPTURE_ROOT:-}"
 if [ ! -s /etc/liquidity-migration/account-paper-execution.env ]; then
   echo "Refusing deploy: account-paper-execution.env is missing or empty." >&2
   exit 1
 fi
-unset ACCOUNT_EXECUTION_KERNEL_REQUIRED ACCOUNT_PAPER_KERNEL_REQUIRED \
-  ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT ACCOUNT_CAPTURE_ROOT ACCOUNT_PAPER_CAPTURE_ROOT
-set -a
-. /etc/liquidity-migration/account-paper-execution.env
-set +a
+lm_load_private_systemd_environment "$PYTHON" \
+  /etc/liquidity-migration/account-paper-execution.env \
+  ACCOUNT_PAPER_KERNEL_REQUIRED ACCOUNT_TWIN_CALIBRATION_FILE
 PAPER_ACCOUNT_KERNEL_REQUIRED="${ACCOUNT_PAPER_KERNEL_REQUIRED:-}"
-PAPER_ACCOUNT_EXECUTION_ROOT="${ACCOUNT_EXECUTION_ROOT:-}"
-PAPER_ACCOUNT_INTENT_INBOX_ROOT="${ACCOUNT_INTENT_INBOX_ROOT:-}"
-PAPER_ACCOUNT_CAPTURE_ROOT="${ACCOUNT_PAPER_CAPTURE_ROOT:-}"
 PAPER_ACCOUNT_TWIN_CALIBRATION_FILE="${ACCOUNT_TWIN_CALIBRATION_FILE:-}"
+unset ACCOUNT_PAPER_KERNEL_REQUIRED ACCOUNT_TWIN_CALIBRATION_FILE
 export ACCOUNT_EXECUTION_KERNEL_REQUIRED="$DEMO_ACCOUNT_EXECUTION_KERNEL_REQUIRED"
-export ACCOUNT_EXECUTION_ROOT="$DEMO_ACCOUNT_EXECUTION_ROOT"
-export ACCOUNT_INTENT_INBOX_ROOT="$DEMO_ACCOUNT_INTENT_INBOX_ROOT"
-export ACCOUNT_CAPTURE_ROOT="$DEMO_ACCOUNT_CAPTURE_ROOT"
-unset ACCOUNT_PAPER_KERNEL_REQUIRED ACCOUNT_PAPER_CAPTURE_ROOT
+lm_load_fresh_epoch_roots "$PYTHON" "$REPO_DIR" "$EXPECTED_COMMIT"
 if [ "$PAPER_ACCOUNT_KERNEL_REQUIRED" != "1" ]; then
   echo "Refusing deploy: ACCOUNT_PAPER_KERNEL_REQUIRED=1 is required." >&2
   exit 1
@@ -409,25 +452,22 @@ systemctl enable liquidity-migration-account-execution.service
 systemctl enable liquidity-migration-account-paper-execution.service
 systemctl restart liquidity-migration-account-execution.service
 systemctl restart liquidity-migration-account-paper-execution.service
-# Restart already-running repo timers (round 4): on several systemd versions an
-# ACTIVE timer does not reschedule a changed OnCalendar= until restarted, so a
-# cadence edit silently kept firing on the old schedule. try-restart is a no-op
-# for inactive/disabled timers; the per-toggle enables below start those fresh.
-for unit in deploy/systemd/liquidity-migration-*.timer; do
-    systemctl try-restart "$(basename "$unit")" 2>/dev/null || true
-done
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
-# Timers must be enabled --now: enable alone writes the symlink but does not
-# start the timer. The account owner emits the canonical hourly Telegram report.
-systemctl enable --now liquidity-migration-demo-liveness.timer
-# Daily refresh of the continuous-fade rmom gate + a conditional gate seed when
-# either continuous sleeve is on. Healthy, current gates are retained unless
-# their build/validation code changed; unconditional rebuilds made every deploy
-# spend minutes and large memory recomputing identical state.
+# Start only owner-dependent target producers now. The owner units' ExecStartPost
+# readiness checks make each restart block until its exact route and market tape
+# are healthy. Continuous producers must bootstrap their new kline roots before
+# RMOM can be built, so starting RMOM against an empty pre-bootstrap root is an
+# ordering bug, not a warning to suppress.
+if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
+if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service; fi
+if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-paper.service; fi
+
+# Daily refresh of the continuous-fade RMOM gate. No timer or hedge/liveness
+# auxiliary starts until each enabled continuous producer has bootstrapped and
+# its own fresh-root gate validates.
 if continuous_rmom_refresh_on; then
-apply_timer_enable on $CONTINUOUS_SLEEVE_TIMERS
 _check_rmom_root() {
   _rmom_label="$1"
   _rmom_root="$2"
@@ -435,16 +475,8 @@ _check_rmom_root() {
     echo "continuous ${_rmom_label} rmom gate ok: ${_rmom_status}"
     return 0
   fi
-  if [ "${ALLOW_EMPTY_RMOM_GATE:-0}" = "1" ]; then
-    echo "WARN: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after deploy gate check: ${_rmom_status}. ALLOW_EMPTY_RMOM_GATE=1" \
-         "lets deploy continue, but that sleeve may emit NO entries until rmom is rebuilt." >&2
-  else
-    echo "ERROR: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after deploy gate check: ${_rmom_status}. Re-run" \
-         "'systemctl start liquidity-migration-continuous-rmom-refresh.service' once the" \
-         "daemon has bootstrapped klines, or set ALLOW_EMPTY_RMOM_GATE=1 for an explicit" \
-         "first-boot/no-entry override." >&2
-    return 1
-  fi
+  echo "ERROR: continuous ${_rmom_label} rmom gate is EMPTY, provisional-only, or stale after deploy gate check: ${_rmom_status}." >&2
+  return 1
 }
 _rmom_needs_seed=0
 _rmom_seed_reason=""
@@ -471,7 +503,7 @@ if [ -z "$previous_commit" ] || ! git diff --quiet "$previous_commit" HEAD -- \
 fi
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   if _rmom_status="$("$PYTHON" scripts/check_residual_momentum_gate.py \
-      --path data/bybit-continuous-demo-event/residual_momentum.parquet 2>&1)"; then
+      --path "$CONTINUOUS_DEMO_DATA_ROOT/residual_momentum.parquet" 2>&1)"; then
     echo "continuous demo rmom gate already current: ${_rmom_status}"
   else
     _add_rmom_seed_reason "demo gate missing/stale"
@@ -479,28 +511,53 @@ if sleeve_on "$CONTINUOUS_SLEEVE"; then
 fi
 if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
   if _rmom_status="$("$PYTHON" scripts/check_residual_momentum_gate.py \
-      --path data/bybit-continuous-paper-event/residual_momentum.parquet 2>&1)"; then
+      --path "$CONTINUOUS_PAPER_DATA_ROOT/residual_momentum.parquet" 2>&1)"; then
     echo "continuous paper rmom gate already current: ${_rmom_status}"
   else
     _add_rmom_seed_reason "paper gate missing/stale"
   fi
 fi
 if [ "$_rmom_needs_seed" -eq 1 ]; then
-  # Seed NOW rather than waiting for the 00:20 UTC timer. An empty gate causes
-  # a safe but silent zero-signal blackout. The oneshot blocks until both roots
-  # are rebuilt from their respective kline stores.
+  # Seed only after the continuous daemons have started their fresh-root kline
+  # bootstrap. A failure is fatal: the flat cutover cannot silently ship a
+  # zero-signal sleeve and hope a later timer repairs it.
   echo "Seeding continuous rmom gate (${_rmom_seed_reason}) ..."
-  systemctl start liquidity-migration-continuous-rmom-refresh.service \
-    || echo "WARN: rmom seed service failed; the 00:20 timer + rmom watchdog will cover it." >&2
+  _rmom_deadline=$(( $(date +%s) + RMOM_BOOTSTRAP_TIMEOUT_SECONDS ))
+  while true; do
+    _rmom_attempt_ok=1
+    systemctl reset-failed liquidity-migration-continuous-rmom-refresh.service 2>/dev/null || true
+    if ! systemctl start liquidity-migration-continuous-rmom-refresh.service; then
+      _rmom_attempt_ok=0
+    fi
+    if sleeve_on "$CONTINUOUS_SLEEVE" \
+      && ! _check_rmom_root "demo" "$CONTINUOUS_DEMO_DATA_ROOT/residual_momentum.parquet"; then
+      _rmom_attempt_ok=0
+    fi
+    if sleeve_on "$CONTINUOUS_PAPER_SLEEVE" \
+      && ! _check_rmom_root "paper" "$CONTINUOUS_PAPER_DATA_ROOT/residual_momentum.parquet"; then
+      _rmom_attempt_ok=0
+    fi
+    if [ "$_rmom_attempt_ok" -eq 1 ]; then
+      break
+    fi
+    if [ "$(date +%s)" -ge "$_rmom_deadline" ]; then
+      echo "ERROR: fresh continuous roots did not produce valid RMOM gates within ${RMOM_BOOTSTRAP_TIMEOUT_SECONDS}s." >&2
+      exit 1
+    fi
+    echo "RMOM not ready; waiting ${RMOM_BOOTSTRAP_RETRY_SECONDS}s for fresh-root kline bootstrap ..." >&2
+    sleep "$RMOM_BOOTSTRAP_RETRY_SECONDS"
+  done
 else
   echo "continuous rmom gates are current and build code is unchanged; skipping seed"
 fi
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
-  _check_rmom_root "demo" "data/bybit-continuous-demo-event/residual_momentum.parquet"
+  _check_rmom_root "demo" "$CONTINUOUS_DEMO_DATA_ROOT/residual_momentum.parquet"
 fi
 if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
-  _check_rmom_root "paper" "data/bybit-continuous-paper-event/residual_momentum.parquet"
+  _check_rmom_root "paper" "$CONTINUOUS_PAPER_DATA_ROOT/residual_momentum.parquet"
 fi
+apply_timer_enable on $CONTINUOUS_SLEEVE_TIMERS
+for _rmom_timer in $CONTINUOUS_SLEEVE_TIMERS; do systemctl restart "$_rmom_timer"; done
 else
   echo "kill-switch: continuous demo+paper sleeves off -> skipping rmom timer + gate seed." >&2
   apply_timer_enable off $CONTINUOUS_SLEEVE_TIMERS
@@ -548,12 +605,10 @@ lm_write_resolved_sleeve_toggles
 lm_verify_resolved_sleeve_toggles
 apply_hedge_timer_enable "$_hedge_timer_state"
 
-# --- restart: only the ON target producers (off sleeves were disable --now'd above). ---
-# Long/continuous share the liquidity_migration package, so any Python change
-# requires restarting every running sleeve to pick up the new code.
-if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
-if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service; fi
-if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-paper.service; fi
+# The liveness watchdog starts last, after owners, target producers, fresh RMOM,
+# and the hedge timer all have their final state.
+systemctl enable --now liquidity-migration-demo-liveness.timer
+systemctl restart liquidity-migration-demo-liveness.timer
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
@@ -587,6 +642,23 @@ fi
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
+_fresh_active_units=(
+  liquidity-migration-account-execution.service
+  liquidity-migration-account-paper-execution.service
+)
+if sleeve_on "$LONG_SLEEVE"; then
+  _fresh_active_units+=(
+    liquidity-migration-bybit-long-demo.service
+    liquidity-migration-bybit-long-paper.service
+  )
+fi
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  _fresh_active_units+=(liquidity-migration-bybit-continuous-demo.service)
+fi
+if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
+  _fresh_active_units+=(liquidity-migration-bybit-continuous-paper.service)
+fi
+lm_verify_active_fresh_processes "$PYTHON" "$REPO_DIR" "$EXPECTED_COMMIT" "${_fresh_active_units[@]}"
 if continuous_rmom_refresh_on; then
   verify_timer on $CONTINUOUS_SLEEVE_TIMERS
 else
@@ -657,7 +729,6 @@ fi
 # paper account owner on its own ledger root).
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'EXECUTION_ENVIRONMENT=paper'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'ACCOUNT_PAPER_KERNEL_REQUIRED=1'
-require_unit_env liquidity-migration-bybit-continuous-paper.service 'DATA_ROOT=data/bybit-continuous-paper-event'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'STRATEGY_PROFILE=continuous_ensemble_v2'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'FEATURE_SET=max_ret168'
 require_unit_env liquidity-migration-bybit-continuous-paper.service 'ENTRY_EVENT_TRIGGER=none'

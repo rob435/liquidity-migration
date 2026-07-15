@@ -8,11 +8,22 @@ import math
 import time
 from pathlib import Path
 
+from .account_execution_config import (
+    load_demo_rules,
+    load_risk_policy,
+    require_registered_demo_rule_max_age_hours,
+)
 from .account_kernel import AccountExecutionKernel, AccountRiskSnapshot
+from .account_market_readiness import (
+    RequestedMarketWarmupGate,
+    require_registered_request_market_warmup_timeout,
+    run_ready_request_or_converge,
+)
 from .account_owner_health import (
     AccountOwnerHealth,
     AccountOwnerHealthStatus,
     fold_convergence_health,
+    require_systemd_invocation_id,
     write_account_owner_health,
 )
 from .account_owner_lease import AccountOwnerLease
@@ -23,7 +34,6 @@ from .account_service_bybit import (
     CapturedPaperExecutionAdapter,
     VerifiedBybitDemoRulesProvider,
 )
-from .account_service_runner import load_demo_rules, load_risk_policy
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import MarketOrderExecutionTwin
 from .execution_twin_calibration import (
@@ -71,6 +81,7 @@ def publish_paper_owner_health(
     observed_ts_ns: int,
     loop_sequence: int,
     requested_symbols_ready: bool,
+    invocation_id: str,
     last_batch_id: str = "",
     detail: str = "",
 ) -> AccountOwnerHealth:
@@ -89,6 +100,7 @@ def publish_paper_owner_health(
         equity_usdt=equity_usdt,
         available_margin_usdt=equity_usdt,
         requested_symbols_ready=requested_symbols_ready,
+        invocation_id=invocation_id,
         last_batch_id=last_batch_id[:500],
         detail=detail[:1000],
     )
@@ -105,7 +117,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--demo-rules-file", required=True)
     parser.add_argument("--risk-policy-file", required=True)
     parser.add_argument("--account-id", default="bybit-paper-unified")
-    parser.add_argument("--owner-lock", default="")
     parser.add_argument("--equity-usdt", type=float, required=True)
     parser.add_argument("--calibration-file", required=True)
     parser.add_argument(
@@ -121,11 +132,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-decision-age-ms", type=float, default=250.0)
     parser.add_argument("--max-demo-rule-age-hours", type=float, default=168.0)
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--request-market-warmup-timeout-seconds",
+        type=float,
+        default=30.0,
+        help="Latch owner health blocked if the durable queue head lacks healthy fresh L2.",
+    )
     parser.add_argument("--health-interval-seconds", type=float, default=5.0)
     parser.add_argument("--idle-seconds", type=float, default=0.1)
     args = parser.parse_args(argv)
     if args.health_interval_seconds <= 0.0:
         parser.error("--health-interval-seconds must be positive")
+    try:
+        args.max_demo_rule_age_hours = require_registered_demo_rule_max_age_hours(
+            args.max_demo_rule_age_hours
+        )
+        args.request_market_warmup_timeout_seconds = (
+            require_registered_request_market_warmup_timeout(
+                args.request_market_warmup_timeout_seconds
+            )
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    invocation_id = require_systemd_invocation_id()
 
     route = ensure_account_route(
         account_id=args.account_id,
@@ -134,9 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         inbox_root=args.inbox_root,
     )
 
-    lease = AccountOwnerLease(
-        args.owner_lock or str(route.account_path / "account_execution_owner.lock")
-    )
+    lease = AccountOwnerLease(route.account_path / "account_execution_owner.lock")
     lease.acquire()
     rules = load_demo_rules(
         args.demo_rules_file,
@@ -161,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     recorder = SequenceAwareMarketRecorder(
         args.capture_root,
         config=MarketCaptureConfig(depth=50),
+        owner_invocation_id=invocation_id,
     )
     public_stream = BybitRawPublicMarketStream(
         testnet=False,
@@ -193,6 +221,9 @@ def main(argv: list[str] | None = None) -> int:
         clock=runtime_clock,
     )
     inbox = AccountIntentInbox(route)
+    market_warmup_gate = RequestedMarketWarmupGate(
+        timeout_seconds=args.request_market_warmup_timeout_seconds,
+    )
     protection = AccountProtectionEngine(
         kernel=kernel,
         inbox=inbox,
@@ -231,13 +262,20 @@ def main(argv: list[str] | None = None) -> int:
                 missing = sorted(desired - set(rules))
                 if missing:
                     _logger.error("paper targets lack verified rules: %s", missing)
-                    requested_symbols_ready = False
-                    symbol_health_detail = "targets lack demo-verified rules: " + ", ".join(missing)
-                else:
-                    public_stream.update_symbols(desired)
-                    requested_symbols_ready = True
-                    symbol_health_detail = ""
+                # Capture every pending symbol in parallel. Only the durable
+                # queue head can become executable after exact-book readiness.
+                public_stream.update_symbols(desired)
                 last_symbol_refresh = now
+            market_readiness = market_warmup_gate.evaluate(
+                inbox=inbox,
+                recorder=recorder,
+                verified_rule_symbols=set(rules),
+                now_monotonic=now,
+                now_wall_ns=runtime_clock.wall_time_ns(),
+                max_market_age_ns=service.max_market_age_ns,
+            )
+            requested_symbols_ready = market_readiness.ready
+            symbol_health_detail = market_readiness.detail
             protection_markets = {}
             for symbol, position in kernel.state().positions.items():
                 if position.signed_qty == 0.0:
@@ -257,7 +295,11 @@ def main(argv: list[str] | None = None) -> int:
             retry_delay = 0.0
             receipt = None
             try:
-                receipt = service.run_once(inbox) if requested_symbols_ready else None
+                receipt = run_ready_request_or_converge(
+                    service=service,
+                    inbox=inbox,
+                    readiness=market_readiness,
+                )
             except Exception as exc:  # noqa: BLE001 - durable request returns to pending
                 _logger.exception("paper account request failed and was returned to pending")
                 health_status = AccountOwnerHealthStatus.BLOCKED
@@ -309,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                     observed_ts_ns=runtime_clock.wall_time_ns(),
                     loop_sequence=loop_sequence,
                     requested_symbols_ready=requested_symbols_ready,
+                    invocation_id=invocation_id,
                     last_batch_id=last_batch_id,
                     detail=health_detail,
                 )

@@ -62,6 +62,7 @@ from liquidity_migration.continuous_demo import (
     select_continuous_entries,
 )
 from liquidity_migration.continuous_events import compute_continuous_decile_panel
+from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
 
 
 def _synth(
@@ -699,6 +700,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     import liquidity_migration.continuous_demo as module
 
     route = _route(tmp_path / "route")
+    candidate_path = (tmp_path / "candidate-universe.json").absolute()
     now_ms = 2_000_000_000_000
     strategy_id = "continuous_fade_v2"
     config = ContinuousDemoCycleConfig(
@@ -711,6 +713,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         max_active=5,
         max_new_entries_per_cycle=5,
         max_hold_hours=24,
+        candidate_universe_file=str(candidate_path),
         ensemble_components=(
             ("p3", "none", 0, 0.12, 0.4),
             ("p4p5", "none", 0, 0.12, 0.6),
@@ -763,12 +766,30 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         }
     )
     captured: dict[str, Any] = {}
+    frozen_candidate = SimpleNamespace(
+        path=candidate_path,
+        artifact_sha256="a" * 64,
+    )
+    candidate_loads = 0
 
     monkeypatch.setattr(module, "apply_continuous_demo_profile", lambda value: value)
+
+    def load_candidate(path: str) -> SimpleNamespace:
+        nonlocal candidate_loads
+        candidate_loads += 1
+        assert Path(path).absolute() == candidate_path
+        return frozen_candidate
+
+    monkeypatch.setattr(module, "load_candidate_universe", load_candidate)
+
+    def resolve_universe(**kwargs: Any) -> tuple[pl.DataFrame, list[str], pl.DataFrame, str]:
+        assert kwargs["frozen_candidate_universe"] is frozen_candidate
+        return universe, ["NEWUSDT"], tickers, "fixture"
+
     monkeypatch.setattr(
         module,
         "_resolve_cycle_universe",
-        lambda **_kwargs: (universe, ["NEWUSDT"], tickers, "fixture"),
+        resolve_universe,
     )
     monkeypatch.setattr(
         module,
@@ -829,6 +850,9 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         now_ms=now_ms,
     )
 
+    assert type(payload) is PublishedTargetCyclePayload
+    assert payload.publication == ExitFirstPublication((), (), ())
+    assert payload.route == route
     assert captured["independent_entry_requests"] is True
     assert len(captured["exit_intents"]) == 1
     assert captured["exit_intents"][0].intent.signed_notional_usdt == 0.0
@@ -839,6 +863,8 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     assert payload["planned_exits"] == 1
     assert payload["candidates"] == 2
     assert payload["account_target_route"] is True
+    assert payload["candidate_universe_artifact_sha256"] == "a" * 64
+    assert candidate_loads == 1
 
 
 def test_cross_wired_account_route_fails_before_cycle_resources(tmp_path: Path) -> None:

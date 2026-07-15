@@ -16,6 +16,7 @@ ACCOUNT_SYMBOLS_FILE="${ACCOUNT_SYMBOLS_FILE:-/etc/liquidity-migration/account-e
 ACCOUNT_DEMO_RULES_FILE="${ACCOUNT_DEMO_RULES_FILE:-/etc/liquidity-migration/account-execution/demo-rules.json}"
 ACCOUNT_RISK_POLICY_FILE="${ACCOUNT_RISK_POLICY_FILE:-/etc/liquidity-migration/account-execution/risk-policy.json}"
 MAX_DEMO_RULE_AGE_HOURS="${MAX_DEMO_RULE_AGE_HOURS:-168}"
+ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:-30}"
 
 if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
     echo "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required for account-owner cutover." >&2
@@ -61,6 +62,7 @@ exec "$PYTHON_BIN" -m liquidity_migration.account_service_runner \
     --demo-rules-file "$ACCOUNT_DEMO_RULES_FILE" \
     --risk-policy-file "$ACCOUNT_RISK_POLICY_FILE" \
     --max-demo-rule-age-hours "$MAX_DEMO_RULE_AGE_HOURS" \
+    --request-market-warmup-timeout-seconds "$ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS" \
     --disaster-stop-fraction "$DISASTER_STOP_FRACTION" \
     --confirm-demo-orders \
     "${telegram_args[@]}"

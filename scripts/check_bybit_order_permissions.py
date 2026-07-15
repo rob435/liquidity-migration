@@ -12,7 +12,7 @@ sys.path.insert(0, str(REPO))
 from liquidity_migration.bybit import (  # noqa: E402
     BybitPrivateClient,
     api_key_allows_order_submit,
-    resolve_private_credentials,
+    resolve_demo_credentials,
 )
 
 
@@ -21,13 +21,10 @@ def main() -> int:
     parser.add_argument("--context", default="verify", help="short label for error messages")
     args = parser.parse_args()
 
-    api_key, api_secret, demo = resolve_private_credentials()
-    if not demo:
-        print(
-            f"{args.context}: refusing order-permission check on REAL_MONEY credentials; "
-            "this repo is demo/paper by default.",
-            file=sys.stderr,
-        )
+    try:
+        api_key, api_secret = resolve_demo_credentials()
+    except RuntimeError as exc:
+        print(f"{args.context}: {exc}", file=sys.stderr)
         return 1
     if not api_key or not api_secret:
         print(

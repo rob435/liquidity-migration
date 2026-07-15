@@ -114,18 +114,58 @@ if [[ "${TELEGRAM_ENABLED:-0}" != "0" ]]; then
     exit 2
 fi
 
-order_args=(
+target_route_args=(
     --execution-environment "$EXECUTION_ENVIRONMENT"
     --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
     --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
 )
+case "${NATURAL_EVIDENCE_REQUIRED:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        [[ "$EXECUTION_ENVIRONMENT" == "demo" ]] || {
+            echo "NATURAL_EVIDENCE_REQUIRED is demo-only." >&2
+            exit 2
+        }
+        [[ -n "${NATURAL_RUN_CONFIG:-}" ]] || {
+            echo "NATURAL_EVIDENCE_REQUIRED needs NATURAL_RUN_CONFIG." >&2
+            exit 2
+        }
+        [[ -f "$NATURAL_RUN_CONFIG" && ! -L "$NATURAL_RUN_CONFIG" ]] || {
+            echo "NATURAL_RUN_CONFIG must be a non-symlink regular file." >&2
+            exit 2
+        }
+        [[ -z "${STRATEGY_TARGET_CAPTURE_PATH:-}" && -z "${CANDIDATE_UNIVERSE_FILE:-}" ]] || {
+            echo "Natural tape/candidate paths come only from NATURAL_RUN_CONFIG." >&2
+            exit 2
+        }
+        target_route_args+=(
+            --natural-evidence-required
+            --natural-run-config "$NATURAL_RUN_CONFIG"
+        )
+        ;;
+    0|false|FALSE|no|NO|off|OFF|"")
+        [[ -z "${NATURAL_RUN_CONFIG:-}" ]] || {
+            echo "NATURAL_RUN_CONFIG requires NATURAL_EVIDENCE_REQUIRED=1." >&2
+            exit 2
+        }
+        if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
+            target_route_args+=(--strategy-target-capture-path "$STRATEGY_TARGET_CAPTURE_PATH")
+        fi
+        if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
+            target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
+        fi
+        ;;
+    *)
+        echo "NATURAL_EVIDENCE_REQUIRED has an invalid boolean value." >&2
+        exit 2
+        ;;
+esac
 if [[ "$EXECUTION_ENVIRONMENT" == "demo" ]]; then
     # Configurable space-separated allowlist (was a hard-coded single profile).
-    # Default keeps the safe long-sleeve value; extend ALLOWED_SUBMIT_PROFILES
+    # Default keeps the safe long-sleeve value; extend ALLOWED_TARGET_PROFILES
     # to enable others without editing this script. Safe-by-default.
-    ALLOWED_SUBMIT_PROFILES="${ALLOWED_SUBMIT_PROFILES:-LongV11aDivWeekendVol}"
-    if [[ " $ALLOWED_SUBMIT_PROFILES " != *" $STRATEGY_PROFILE "* ]]; then
-        echo "STRATEGY_PROFILE=$STRATEGY_PROFILE not in ALLOWED_SUBMIT_PROFILES='$ALLOWED_SUBMIT_PROFILES'; refusing to submit." >&2
+    ALLOWED_TARGET_PROFILES="${ALLOWED_TARGET_PROFILES:-LongV11aDivWeekendVol}"
+    if [[ " $ALLOWED_TARGET_PROFILES " != *" $STRATEGY_PROFILE "* ]]; then
+        echo "STRATEGY_PROFILE=$STRATEGY_PROFILE not in ALLOWED_TARGET_PROFILES='$ALLOWED_TARGET_PROFILES'; refusing to publish targets." >&2
         exit 2
     fi
 fi
@@ -157,7 +197,7 @@ if [[ "${USE_DAEMON:-1}" == "1" ]]; then
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
         --strategy-profile "$STRATEGY_PROFILE" \
         --daemon --interval-seconds "$INTERVAL_SECONDS" \
-        "${order_args[@]}" \
+        "${target_route_args[@]}" \
         "${ws_klines_args[@]}"
 fi
 
@@ -178,7 +218,7 @@ while true; do
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
         --strategy-profile "$STRATEGY_PROFILE" \
-        "${order_args[@]}" \
+        "${target_route_args[@]}" \
         "${ws_klines_args[@]}"
     status=$?
     set -e

@@ -17,13 +17,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import stat
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .artifact_snapshot import read_stable_file, rename_noreplace
 from .deterministic_serialization import canonical_json
 from .storage import exclusive_file_lock
 
@@ -360,19 +360,26 @@ def _route_mismatch(observed: AccountRoute, expected: AccountRoute) -> AccountRo
 
 def _read_manifest(path: Path) -> AccountRoute:
     if path.is_symlink():
-        raise AccountRouteIntegrityError(f"account route manifest must not be a symlink: {path}")
+        raise AccountRouteIntegrityError(
+            f"account route manifest must not be a symlink: {path}"
+        )
     try:
-        mode = path.stat().st_mode
-    except FileNotFoundError as exc:
-        raise AccountRouteMissingError(f"account route manifest is missing: {path}") from exc
-    except OSError as exc:
-        raise AccountRouteIntegrityError(f"cannot stat account route manifest {path}: {exc}") from exc
-    if not stat.S_ISREG(mode):
-        raise AccountRouteIntegrityError(f"account route manifest must be a regular file: {path}")
-    try:
-        raw = path.read_bytes()
+        snapshot = read_stable_file(
+            path,
+            label="account route manifest",
+            require_mode=0o600,
+            require_owner=True,
+            require_single_link=True,
+        )
+        raw = snapshot.data
         payload = json.loads(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except ValueError as exc:
+        if not os.path.lexists(path):
+            raise AccountRouteMissingError(
+                f"account route manifest is missing: {path}"
+            ) from exc
+        raise AccountRouteIntegrityError(str(exc)) from exc
+    except (RuntimeError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AccountRouteIntegrityError(f"cannot read account route manifest {path}: {exc}") from exc
     if not isinstance(payload, Mapping):
         raise AccountRouteIntegrityError(f"account route manifest must contain one object: {path}")
@@ -459,7 +466,7 @@ def _atomic_create(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     descriptor: int | None = None
-    linked = False
+    published = False
     try:
         descriptor = os.open(
             str(temporary),
@@ -477,8 +484,12 @@ def _atomic_create(path: Path, data: bytes) -> None:
         os.close(descriptor)
         descriptor = None
         try:
-            os.link(temporary, path)
-            linked = True
+            rename_noreplace(
+                temporary,
+                path,
+                label="account route manifest",
+            )
+            published = True
         except FileExistsError:
             # A non-cooperating same-route initializer may have won the final
             # create race.  Exact canonical bytes are safe; anything else is
@@ -486,14 +497,12 @@ def _atomic_create(path: Path, data: bytes) -> None:
             observed = _read_manifest(path)
             if _manifest_bytes(observed) != data:
                 raise AccountRouteMismatchError(f"account route manifest appeared with conflicting content: {path}")
-        if linked:
+        if published:
             _fsync_directory(path.parent)
     finally:
         if descriptor is not None:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
-        if linked:
-            _fsync_directory(path.parent)
 
 
 def _fsync_directory(path: Path) -> None:

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import liquidity_migration.account_venue_accounting as accounting_module
 from liquidity_migration.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
@@ -15,8 +16,10 @@ from liquidity_migration.account_kernel import (
     DesiredTarget,
     InstrumentRules,
     MarketInputRef,
+    account_transactions_path,
 )
 from liquidity_migration.account_venue_accounting import (
+    VenueAccountingRequirements,
     build_venue_accounting_receipt,
     load_venue_accounting_receipt,
     verify_venue_accounting_receipt,
@@ -288,6 +291,10 @@ def test_venue_accounting_receipt_replays_exact_sources_and_journal(
     )
     assert os.stat(output).st_mode & 0o777 == 0o600
     assert load_venue_accounting_receipt(output) == receipt
+    preserved = output.read_bytes()
+    with pytest.raises(FileExistsError):
+        write_venue_accounting_receipt(output, receipt)
+    assert output.read_bytes() == preserved
 
 
 def test_venue_accounting_receipt_rejects_tampering(tmp_path: Path) -> None:
@@ -325,6 +332,64 @@ def test_venue_accounting_receipt_rejects_tampering(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="does not reproduce"):
         verify_venue_accounting_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    ("requirements", "message"),
+    [
+        (VenueAccountingRequirements(min_trade_rows=1), "min_trade_rows"),
+        (VenueAccountingRequirements(min_closed_pnl_rows=0), "min_closed_pnl_rows"),
+        (VenueAccountingRequirements(min_funding_rows=0), "min_funding_rows"),
+        (
+            VenueAccountingRequirements(quantity_abs_tolerance=1e-11),
+            "quantity_abs_tolerance",
+        ),
+        (
+            VenueAccountingRequirements(price_abs_tolerance=1e-7),
+            "price_abs_tolerance",
+        ),
+        (
+            VenueAccountingRequirements(amount_abs_tolerance=1e-7),
+            "amount_abs_tolerance",
+        ),
+        (
+            VenueAccountingRequirements(relative_tolerance=1e-8),
+            "relative_tolerance",
+        ),
+    ],
+)
+def test_venue_accounting_verifier_rejects_self_hashed_weakened_gate(
+    tmp_path: Path,
+    requirements: VenueAccountingRequirements,
+    message: str,
+) -> None:
+    _closed_journal(tmp_path)
+    weak_receipt = _receipt(tmp_path, requirements=requirements)
+    with pytest.raises(ValueError, match=message):
+        verify_venue_accounting_receipt(weak_receipt)
+
+
+def test_venue_accounting_rejects_journal_mutation_during_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _closed_journal(tmp_path)
+    transaction = next(account_transactions_path(tmp_path).glob("*.json"))
+    original_journal_sha256 = accounting_module._journal_sha256
+
+    def mutate_after_initial_snapshot(
+        events: list[accounting_module.AccountEvent],
+    ) -> str:
+        transaction.write_bytes(transaction.read_bytes())
+        return original_journal_sha256(events)
+
+    monkeypatch.setattr(
+        accounting_module,
+        "_journal_sha256",
+        mutate_after_initial_snapshot,
+    )
+    with pytest.raises(RuntimeError, match="journal mutated during reconciliation"):
+        _receipt(tmp_path)
 
 
 def test_venue_accounting_receipt_fails_missing_funding_and_fee_provenance(

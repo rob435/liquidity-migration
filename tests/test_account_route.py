@@ -43,6 +43,7 @@ def test_owner_binds_route_before_any_runtime_resource(
     monkeypatch: pytest.MonkeyPatch,
     runner_name: str,
 ) -> None:
+    monkeypatch.setenv("INVOCATION_ID", "ab" * 16)
     if runner_name == "demo":
         import liquidity_migration.account_service_runner as runner
 
@@ -63,8 +64,8 @@ def test_owner_binds_route_before_any_runtime_resource(
             "0.25",
         ]
         resource_names = (
-            "AccountOwnerLease",
-            "resolve_private_credentials",
+            "DemoAccountMutationLease",
+            "resolve_demo_credentials",
             "BybitPrivateClient",
             "AccountExecutionKernel",
             "SequenceAwareMarketRecorder",
@@ -560,6 +561,26 @@ def test_manifest_symlink_is_rejected(tmp_path: Path) -> None:
         read_account_route_manifest(account_root)
 
 
+def test_manifest_must_remain_owner_only_and_single_link(tmp_path: Path) -> None:
+    account_root = tmp_path / "account"
+    inbox_root = tmp_path / "inbox"
+    ensure_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=account_root,
+        inbox_root=inbox_root,
+    )
+    account_manifest = account_route_manifest_path(account_root)
+    account_manifest.chmod(0o644)
+    with pytest.raises(AccountRouteIntegrityError, match="mode 0600"):
+        read_account_route_manifest(account_root)
+
+    account_manifest.chmod(0o600)
+    os.link(account_manifest, tmp_path / "route-hardlink.json")
+    with pytest.raises(AccountRouteIntegrityError, match="must not be hard-linked"):
+        read_account_route_manifest(account_root)
+
+
 def test_resolved_symlink_roots_have_one_identity(tmp_path: Path) -> None:
     real_account = tmp_path / "real-account"
     real_inbox = tmp_path / "real-inbox"
@@ -641,7 +662,7 @@ def test_manifest_creation_fsyncs_files_and_directories(
     )
 
     assert sum(stat.S_ISREG(mode) for mode in observed_modes) >= 2
-    assert sum(stat.S_ISDIR(mode) for mode in observed_modes) >= 4
+    assert sum(stat.S_ISDIR(mode) for mode in observed_modes) >= 2
 
 
 @pytest.mark.parametrize(

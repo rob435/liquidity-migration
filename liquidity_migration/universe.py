@@ -9,7 +9,7 @@ from typing import Any
 
 import polars as pl
 
-from .bybit import BybitMarketData
+from .bybit_market_data import BybitMarketData
 from .config import ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_tickers
 from .storage import write_dataset

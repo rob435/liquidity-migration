@@ -369,6 +369,11 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         default=None,
         help="Read canonical accepted targets for LONG planning; required with the inbox.",
     )
+    long_demo.add_argument(
+        "--candidate-universe-file",
+        default="",
+        help="Optional mode-0600 frozen natural-evidence candidate artifact.",
+    )
     long_demo.add_argument("--data-name", default=demo_defaults.data_name)
     long_demo.add_argument(
         "--strategy-profile",
@@ -390,6 +395,30 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         action="store_true",
         help="Kill-switch: revert to the fixed-interval timer instead of WS confirmed-bar "
         "event triggering. Default: event-driven.",
+    )
+    long_demo.add_argument(
+        "--strategy-target-capture-path",
+        default=None,
+        help=(
+            "Optional shared hash-chained post-callback target/scheduling capture. "
+            "Set the same path on LONG and CONT for one frozen replay artifact."
+        ),
+    )
+    long_demo.add_argument(
+        "--natural-evidence-required",
+        action="store_true",
+        help=(
+            "Fail the demo producer process on any callback/publication/capture/outcome "
+            "gap; requires candidate universe and explicit shared target capture."
+        ),
+    )
+    long_demo.add_argument(
+        "--natural-run-config",
+        default=None,
+        help=(
+            "Required frozen demo runtime config for natural evidence; binds the "
+            "freeze, exact [T0,T1) window, candidate, and all append-only tape paths."
+        ),
     )
     long_demo.add_argument(
         "--ws-klines-enabled",
@@ -772,6 +801,11 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
         default=None,
         help="Read canonical accepted targets for CONTINUOUS planning; required with the inbox.",
     )
+    p.add_argument(
+        "--candidate-universe-file",
+        default="",
+        help="Optional mode-0600 frozen natural-evidence candidate artifact.",
+    )
     p.add_argument("--data-name", default=d.data_name)
     p.add_argument("--strategy-profile", choices=CONTINUOUS_DEMO_PROFILES, default=d.strategy_profile)
     p.add_argument(
@@ -781,3 +815,27 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     )
     p.add_argument("--interval-seconds", type=float, default=60.0, help="Heartbeat cadence (sub-hourly reaction).")
     p.add_argument("--no-event-driven-cycle", action="store_true")
+    p.add_argument(
+        "--strategy-target-capture-path",
+        default=None,
+        help=(
+            "Optional shared hash-chained post-callback target/scheduling capture. "
+            "Set the same path on LONG and CONT for one frozen replay artifact."
+        ),
+    )
+    p.add_argument(
+        "--natural-evidence-required",
+        action="store_true",
+        help=(
+            "Fail the demo producer process on any callback/publication/capture/outcome "
+            "gap; requires candidate universe and explicit shared target capture."
+        ),
+    )
+    p.add_argument(
+        "--natural-run-config",
+        default=None,
+        help=(
+            "Required frozen demo runtime config for natural evidence; binds the "
+            "freeze, exact [T0,T1) window, candidate, and all append-only tape paths."
+        ),
+    )

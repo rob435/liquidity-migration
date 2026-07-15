@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -81,7 +82,7 @@ def _adapter() -> MarketOrderExecutionTwin:
         config=ExecutionTwinConfig(
             fee_bps=5.5,
             latency=LatencyProfile(1, 1, 1),
-            max_decision_age_ns=100,
+            max_decision_age_ns=200_000_000,
         ),
     )
 
@@ -121,6 +122,7 @@ def test_twin_applies_calibrated_residual_slippage_after_visible_book_walk(
         target_signed_qty=signed_qty,
         chunk_index=1,
         chunk_count=1,
+        created_ts_ns=1_000_000_000,
     )
 
     observations = tuple(adapter.submit(command, _book().market_ref(input_key="book")))
@@ -131,6 +133,142 @@ def test_twin_applies_calibrated_residual_slippage_after_visible_book_walk(
     )
     assert fill.metadata["visible_book_price"] == visible_price
     assert fill.price == pytest.approx(expected_price)
+
+
+def test_uncalibrated_partial_fill_policy_rejects_multi_level_path() -> None:
+    book = L2BookSnapshot(
+        symbol="BUSDT",
+        sequence=1,
+        previous_sequence=0,
+        exchange_ts_ns=900_000_000,
+        local_receive_ts_ns=1_000_000_000,
+        bids=(BookLevel(9.9, 100.0),),
+        asks=(BookLevel(10.1, 0.6), BookLevel(10.2, 0.6)),
+    )
+    adapter = MarketOrderExecutionTwin(
+        books={"BUSDT": book},
+        instrument_rules=_rules(),
+        config=ExecutionTwinConfig(
+            fee_bps=5.5,
+            latency=LatencyProfile(1, 1, 1, fill_spacing_ns=0),
+            max_decision_age_ns=100,
+            allow_partial_fills=False,
+            fill_partition_policy="single_level_full_fill_or_reject",
+        ),
+    )
+    command = OrderCommand(
+        command_id="uncalibrated-split",
+        batch_id="batch-uncalibrated-split",
+        symbol="BUSDT",
+        side="Buy",
+        qty=1.0,
+        signed_qty=1.0,
+        reduce_only=False,
+        reference_price=10.0,
+        target_signed_qty=1.0,
+        chunk_index=1,
+        chunk_count=1,
+        created_ts_ns=1_000_000_000,
+    )
+
+    observations = tuple(adapter.submit(command, book.market_ref(input_key="book")))
+    assert len(observations) == 1
+    assert observations[0].observation_type == ExecutionObservationType.ACK
+    assert observations[0].accepted is False
+    assert observations[0].metadata["reason"] == "unidentified_split_fill_path"
+    assert observations[0].metadata["fill_partition_policy"] == (
+        "single_level_full_fill_or_reject"
+    )
+
+
+def test_twin_anchors_to_command_time_and_separates_first_fill_from_spacing() -> None:
+    book = L2BookSnapshot(
+        symbol="BUSDT",
+        sequence=2,
+        previous_sequence=1,
+        exchange_ts_ns=900_000_000,
+        local_receive_ts_ns=1_000_000_000,
+        bids=(BookLevel(9.9, 10.0),),
+        asks=(BookLevel(10.1, 0.5), BookLevel(10.2, 0.5)),
+    )
+    config = ExecutionTwinConfig(
+        fee_bps=5.5,
+        latency=LatencyProfile(
+            decision_to_socket_ns=10,
+            order_entry_ns=20,
+            order_response_ns=30,
+            submit_to_first_fill_ns=40,
+            fill_response_ns=50,
+            fill_spacing_ns=7,
+        ),
+        max_decision_age_ns=200,
+    )
+    command = OrderCommand(
+        command_id="timed-command",
+        batch_id="timed-batch",
+        symbol="BUSDT",
+        side="Buy",
+        qty=1.0,
+        signed_qty=1.0,
+        reduce_only=False,
+        reference_price=10.0,
+        target_signed_qty=1.0,
+        chunk_index=0,
+        chunk_count=1,
+        created_ts_ns=1_000_000_100,
+    )
+
+    observations = tuple(
+        MarketOrderExecutionTwin(
+            books={"BUSDT": book},
+            instrument_rules=_rules(),
+            config=config,
+        ).submit(command, book.market_ref(input_key="timed-book"))
+    )
+    ack = next(item for item in observations if item.observation_type == ExecutionObservationType.ACK)
+    fills = [item for item in observations if item.observation_type == ExecutionObservationType.FILL]
+    status = next(
+        item for item in observations if item.observation_type == ExecutionObservationType.ORDER_STATUS
+    )
+    assert ack.metadata["local_socket_send_ts_ns"] == command.created_ts_ns + 10
+    assert ack.metadata["decision_book_age_ns"] == 110
+    assert ack.exchange_ts_ns == command.created_ts_ns + 30
+    assert [item.exchange_ts_ns for item in fills] == [
+        command.created_ts_ns + 50,
+        command.created_ts_ns + 57,
+    ]
+    assert [item.local_receive_ts_ns for item in fills] == [
+        command.created_ts_ns + 100,
+        command.created_ts_ns + 107,
+    ]
+    assert status.exchange_ts_ns == fills[-1].exchange_ts_ns
+    assert status.local_receive_ts_ns == fills[-1].local_receive_ts_ns
+
+    stale = MarketOrderExecutionTwin(
+        books={"BUSDT": book},
+        instrument_rules=_rules(),
+        config=ExecutionTwinConfig(
+            fee_bps=5.5,
+            latency=config.latency,
+            max_decision_age_ns=109,
+        ),
+    )
+    rejection = tuple(stale.submit(command, book.market_ref(input_key="timed-book")))
+    assert len(rejection) == 1
+    assert rejection[0].metadata["reason"] == "stale_decision"
+
+    # A decision cannot consume a book that arrived after the command, even if
+    # configured decision-to-socket delay would move the modeled send later.
+    future_book_command = replace(command, created_ts_ns=book.local_receive_ts_ns - 5)
+    future = tuple(
+        MarketOrderExecutionTwin(
+            books={"BUSDT": book},
+            instrument_rules=_rules(),
+            config=config,
+        ).submit(future_book_command, book.market_ref(input_key="timed-book"))
+    )
+    assert len(future) == 1
+    assert future[0].metadata["reason"] == "future_decision_book"
 
 
 def _open_long(root: Path, clock: VirtualClock) -> tuple[AccountExecutionKernel, str]:

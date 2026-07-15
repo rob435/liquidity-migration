@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Generic, Mapping, Protocol, Sequence, TypeVar
 
+from .artifact_snapshot import read_stable_file
 from .deterministic_runtime import Clock, VirtualClock
 from .deterministic_serialization import canonical_json, json_safe
 
@@ -86,13 +87,24 @@ class StrategyEvent:
 
     @classmethod
     def from_dict(cls, row: Mapping[str, Any]) -> "StrategyEvent":
+        expected_fields = {
+            "event_id",
+            "event_ts_ns",
+            "ingest_ts_ns",
+            "source",
+            "source_sequence",
+            "kind",
+            "payload",
+        }
+        if set(row) != expected_fields or not isinstance(row.get("payload"), Mapping):
+            raise ValueError("strategy event has unexpected, missing, or invalid fields")
         event = cls(
             event_ts_ns=int(row["event_ts_ns"]),
             ingest_ts_ns=int(row["ingest_ts_ns"]),
             source=str(row["source"]),
             source_sequence=int(row["source_sequence"]),
             kind=str(row["kind"]),
-            payload=dict(row.get("payload") or {}),
+            payload=dict(row["payload"]),
         )
         if str(row.get("event_id") or "") != event.event_id:
             raise ValueError("strategy event id does not match canonical contents")
@@ -103,6 +115,25 @@ def _next_tape_hash(prior_hash: str, event: StrategyEvent) -> str:
     return hashlib.sha256(
         prior_hash.encode("ascii") + canonical_json({"event": event.to_dict()})
     ).hexdigest()
+
+
+def _append_private_line(path: Path, data: bytes) -> None:
+    """Append one durable evidence row and force owner-only permissions."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(data)
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, view[offset:])
+            if written <= 0:
+                raise OSError("strategy event tape append made no progress")
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class StrategyEventRecorder(Protocol):
@@ -160,53 +191,68 @@ class JsonlStrategyEventTape:
             "tape_hash": tape_hash,
             "event": event.to_dict(),
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("ab") as handle:
-            handle.write(canonical_json(record) + b"\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        _append_private_line(self.path, canonical_json(record) + b"\n")
         self._events = (*self._events, event)
         self._tape_hash = tape_hash
         return tape_hash
 
 
-def load_strategy_event_tape(path: str | Path) -> tuple[tuple[StrategyEvent, ...], str]:
-    """Read and fully verify a strategy event tape; corruption fails closed."""
+def load_strategy_event_tape_bytes(data: bytes) -> tuple[tuple[StrategyEvent, ...], str]:
+    """Parse and fully verify captured strategy-event tape bytes."""
 
     import json
 
-    resolved = Path(path)
-    if not resolved.exists():
-        return (), _GENESIS_HASH
     events: list[StrategyEvent] = []
     tape_hash = _GENESIS_HASH
     previous_order_key: tuple[int, int, str, int, str] | None = None
     seen: set[str] = set()
-    with resolved.open("rb") as handle:
-        for line_number, raw in enumerate(handle, start=1):
-            if not raw.endswith(b"\n"):
-                raise ValueError(f"strategy event tape has a partial line at {line_number}")
-            try:
-                row = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid strategy event tape JSON at line {line_number}") from exc
-            if int(row.get("schema_version", 0)) != 1:
-                raise ValueError(f"unknown strategy event tape schema at line {line_number}")
-            if str(row.get("prior_tape_hash") or "") != tape_hash:
-                raise ValueError(f"strategy event tape chain break at line {line_number}")
-            event = StrategyEvent.from_dict(dict(row.get("event") or {}))
-            expected_hash = _next_tape_hash(tape_hash, event)
-            if str(row.get("tape_hash") or "") != expected_hash:
-                raise ValueError(f"strategy event tape hash mismatch at line {line_number}")
-            if event.event_id in seen:
-                raise ValueError(f"duplicate strategy event at line {line_number}")
-            if previous_order_key is not None and event.order_key < previous_order_key:
-                raise ValueError(f"strategy event tape moves backward at line {line_number}")
-            events.append(event)
-            seen.add(event.event_id)
-            previous_order_key = event.order_key
-            tape_hash = expected_hash
+    for line_number, raw in enumerate(data.splitlines(keepends=True), start=1):
+        if not raw.endswith(b"\n"):
+            raise ValueError(f"strategy event tape has a partial line at {line_number}")
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid strategy event tape JSON at line {line_number}") from exc
+        if not isinstance(row, Mapping) or set(row) != {
+            "schema_version",
+            "prior_tape_hash",
+            "tape_hash",
+            "event",
+        }:
+            raise ValueError(f"strategy event tape has invalid fields at line {line_number}")
+        if int(row.get("schema_version", 0)) != 1:
+            raise ValueError(f"unknown strategy event tape schema at line {line_number}")
+        if str(row.get("prior_tape_hash") or "") != tape_hash:
+            raise ValueError(f"strategy event tape chain break at line {line_number}")
+        raw_event = row.get("event")
+        if not isinstance(raw_event, Mapping):
+            raise ValueError(f"strategy event tape has an invalid event at line {line_number}")
+        event = StrategyEvent.from_dict(raw_event)
+        expected_hash = _next_tape_hash(tape_hash, event)
+        if str(row.get("tape_hash") or "") != expected_hash:
+            raise ValueError(f"strategy event tape hash mismatch at line {line_number}")
+        if event.event_id in seen:
+            raise ValueError(f"duplicate strategy event at line {line_number}")
+        if previous_order_key is not None and event.order_key < previous_order_key:
+            raise ValueError(f"strategy event tape moves backward at line {line_number}")
+        events.append(event)
+        seen.add(event.event_id)
+        previous_order_key = event.order_key
+        tape_hash = expected_hash
     return tuple(events), tape_hash
+
+
+def load_strategy_event_tape(path: str | Path) -> tuple[tuple[StrategyEvent, ...], str]:
+    """Read and fully verify a strategy event tape; corruption fails closed."""
+
+    resolved = Path(path)
+    if not resolved.exists():
+        return (), _GENESIS_HASH
+    snapshot = read_stable_file(
+        resolved,
+        label="strategy event tape",
+    )
+    return load_strategy_event_tape_bytes(snapshot.data)
 
 
 T = TypeVar("T")

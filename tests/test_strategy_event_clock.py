@@ -75,9 +75,29 @@ def test_jsonl_tape_round_trips_and_detects_tampering(tmp_path) -> None:
     loaded, tape_hash = load_strategy_event_tape(path)
     assert loaded == _events()
     assert tape_hash == dispatcher.tape_hash
+    assert path.stat().st_mode & 0o777 == 0o600
 
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     rows[1]["event"]["payload"]["heartbeat"] = 2
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     with pytest.raises(ValueError, match="id|hash"):
+        load_strategy_event_tape(path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda row: {**row, "unsigned_extra": True},
+        lambda row: {**row, "event": {**row["event"], "unsigned_extra": True}},
+        lambda _row: [],
+    ],
+)
+def test_tape_rejects_unhashed_or_non_object_fields(tmp_path, mutate) -> None:
+    path = tmp_path / "strategy-events.jsonl"
+    recorder = JsonlStrategyEventTape(path)
+    recorder.append(_events()[0])
+    row = json.loads(path.read_text())
+    path.write_text(json.dumps(mutate(row)) + "\n")
+
+    with pytest.raises(ValueError, match="invalid fields|unexpected"):
         load_strategy_event_tape(path)

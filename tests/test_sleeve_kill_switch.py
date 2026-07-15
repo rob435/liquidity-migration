@@ -256,6 +256,41 @@ def test_host_override_keeps_repo_on_sleeve_on_when_host_on(tmp_path: Path) -> N
     assert proc.returncode == 0, proc.stderr
 
 
+def test_host_override_is_parsed_as_data_not_shell_source(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    host_env = tmp_path / "host-sleeves.env"
+    marker = tmp_path / "shell-evaluated"
+    (lib_dir / "lib_sleeves.sh").write_text(
+        (REPO / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (lib_dir / "sleeves.env").write_text(
+        "LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=on\nCONTINUOUS_PAPER_SLEEVE=on\n",
+        encoding="utf-8",
+    )
+    host_env.write_text(
+        f'LONG_SLEEVE="$(touch {marker})"\n',
+        encoding="utf-8",
+    )
+    script = textwrap.dedent(f"""
+        set -euo pipefail
+        export LM_HOST_SLEEVES_ENV="{host_env}"
+        . "{lib_dir}/lib_sleeves.sh"
+        lm_load_sleeve_toggles
+    """)
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert proc.returncode != 0
+    assert "invalid sleeve toggle value" in proc.stderr
+    assert not marker.exists()
+
+
 def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     """Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):
     EVERY sleeve defaults OFF since audit 2026-06-12 round 3 — LONG previously

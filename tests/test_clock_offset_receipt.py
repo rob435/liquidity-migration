@@ -12,6 +12,7 @@ from liquidity_migration.clock_offset_receipt import (
     verify_clock_offset_receipt,
     write_clock_offset_receipt,
 )
+from scripts.capture_bybit_clock_offset import _private_output_directory
 
 
 def _next(values: Iterator[int]):
@@ -157,3 +158,15 @@ def test_clock_receipt_registered_contract_cannot_be_weakened() -> None:
             now_ns=int(receipt["observed_ts_ns"]) + 1,
             max_age_hours=24.0,
         )
+
+
+def test_private_clock_sample_directory_is_timer_safe(tmp_path: Path) -> None:
+    output = _private_output_directory(str((tmp_path / "clock-series").resolve()))
+
+    assert output == (tmp_path / "clock-series").resolve()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    with pytest.raises(ValueError, match="absolute"):
+        _private_output_directory("relative-clock-series")
+    output.chmod(0o755)
+    with pytest.raises(ValueError, match="mode 0700"):
+        _private_output_directory(str(output))

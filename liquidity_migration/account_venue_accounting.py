@@ -6,16 +6,17 @@ import hashlib
 import json
 import math
 import os
-import stat
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .account_kernel import (
     AccountEvent,
     AccountEventType,
-    read_account_journal,
+    account_journal_path,
+    account_transactions_path,
+    read_account_journal_bytes,
     reduce_account_events,
 )
 from .deterministic_serialization import canonical_json, json_safe
@@ -53,6 +54,42 @@ class VenueAccountingRequirements:
         ):
             if not math.isfinite(tolerance) or tolerance < 0.0:
                 raise ValueError(f"{label} must be finite and non-negative")
+
+
+REGISTERED_VENUE_ACCOUNTING_REQUIREMENTS = VenueAccountingRequirements()
+
+
+def require_registered_venue_accounting_requirements(
+    requirements: VenueAccountingRequirements,
+) -> VenueAccountingRequirements:
+    """Reject any receipt or invocation that weakens the prospective gate."""
+
+    registered = REGISTERED_VENUE_ACCOUNTING_REQUIREMENTS
+    for label in (
+        "min_trade_rows",
+        "min_closed_pnl_rows",
+        "min_funding_rows",
+    ):
+        observed = int(getattr(requirements, label))
+        minimum = int(getattr(registered, label))
+        if observed < minimum:
+            raise ValueError(
+                f"{label}={observed} weakens the registered minimum {minimum}"
+            )
+    for label in (
+        "quantity_abs_tolerance",
+        "price_abs_tolerance",
+        "amount_abs_tolerance",
+        "relative_tolerance",
+    ):
+        observed_tolerance = float(getattr(requirements, label))
+        maximum_tolerance = float(getattr(registered, label))
+        if observed_tolerance > maximum_tolerance:
+            raise ValueError(
+                f"{label}={observed_tolerance} weakens the registered maximum "
+                f"{maximum_tolerance}"
+            )
+    return requirements
 
 
 def _number(value: Any, *, label: str, empty_is_zero: bool = False) -> float:
@@ -134,6 +171,63 @@ def _journal_sha256(events: Sequence[AccountEvent]) -> str:
     ).hexdigest()
 
 
+def _snapshot_fingerprint(
+    snapshots: Mapping[str, StableFileSnapshot],
+) -> dict[str, tuple[Any, ...]]:
+    return {
+        label: (
+            str(snapshot.path),
+            snapshot.device,
+            snapshot.inode,
+            snapshot.metadata.st_mode,
+            snapshot.uid,
+            snapshot.nlink,
+            snapshot.size,
+            snapshot.mtime_ns,
+            snapshot.metadata.st_ctime_ns,
+            snapshot.sha256,
+        )
+        for label, snapshot in sorted(snapshots.items())
+    }
+
+
+def _read_journal_snapshot(
+    root: Path,
+) -> tuple[list[AccountEvent], dict[str, StableFileSnapshot]]:
+    transaction_root = account_transactions_path(root)
+    transaction_paths = (
+        sorted(transaction_root.glob("*.json")) if transaction_root.is_dir() else []
+    )
+    snapshots: dict[str, StableFileSnapshot] = {}
+    if transaction_paths:
+        for path in transaction_paths:
+            label = f"transactions/{path.name}"
+            snapshots[label] = read_stable_file(
+                path,
+                label=f"venue-accounting journal {label}",
+                require_single_link=False,
+            )
+        events = read_account_journal_bytes(
+            transaction_files=[
+                (label.removeprefix("transactions/"), snapshots[label].data)
+                for label in sorted(snapshots)
+            ],
+            verify=True,
+        )
+    else:
+        projection = account_journal_path(root)
+        snapshots["events.jsonl"] = read_stable_file(
+            projection,
+            label="venue-accounting journal projection",
+            require_single_link=False,
+        )
+        events = read_account_journal_bytes(
+            projection_data=snapshots["events.jsonl"].data,
+            verify=True,
+        )
+    return events, snapshots
+
+
 def _event_timestamp_ns(event: AccountEvent) -> int:
     payload = event.payload
     return int(
@@ -188,7 +282,7 @@ def build_venue_accounting_receipt(
         raise ValueError("venue accounting observation cannot precede the query window")
     requirements = requirements or VenueAccountingRequirements()
     account_path = Path(account_root).expanduser().resolve(strict=True)
-    events = read_account_journal(account_path, verify=True)
+    events, journal_snapshots = _read_journal_snapshot(account_path)
     if not events:
         raise ValueError("demo account journal is empty")
     account_ids = {event.account_id for event in events}
@@ -657,6 +751,14 @@ def build_venue_accounting_receipt(
         "artifact_sha256": "",
     }
     receipt["artifact_sha256"] = hashlib.sha256(canonical_json(receipt)).hexdigest()
+    final_events, final_journal_snapshots = _read_journal_snapshot(account_path)
+    if (
+        _snapshot_fingerprint(final_journal_snapshots)
+        != _snapshot_fingerprint(journal_snapshots)
+        or canonical_json({"events": [event.to_dict() for event in final_events]})
+        != canonical_json({"events": [event.to_dict() for event in events]})
+    ):
+        raise RuntimeError("venue-accounting journal mutated during reconciliation")
     return receipt
 
 
@@ -703,7 +805,9 @@ def verify_venue_accounting_receipt(receipt: Mapping[str, Any]) -> dict[str, Any
         ) != _rows_sha256(rows):
             raise ValueError(f"venue-accounting source {name!r} hash/count mismatch")
         source_rows[name] = rows
-    requirements = VenueAccountingRequirements(**dict(raw_requirements))
+    requirements = require_registered_venue_accounting_requirements(
+        VenueAccountingRequirements(**dict(raw_requirements))
+    )
     rebuilt = build_venue_accounting_receipt(
         account_root=str(payload.get("account_root") or ""),
         expected_account_id=str(payload.get("account_id") or ""),
@@ -726,9 +830,18 @@ def verify_venue_accounting_receipt(receipt: Mapping[str, Any]) -> dict[str, Any
 
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    created = False
     try:
-        descriptor = os.open(str(temporary), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        descriptor = os.open(
+            str(path),
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_WRONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        created = True
         try:
             view = memoryview(data)
             offset = 0
@@ -737,18 +850,18 @@ def _atomic_write(path: Path, data: bytes) -> None:
                 if written <= 0:
                     raise OSError("venue-accounting receipt write made no progress")
                 offset += written
+            os.fchmod(descriptor, 0o600)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
         directory_descriptor = os.open(str(path.parent), os.O_RDONLY)
         try:
             os.fsync(directory_descriptor)
         finally:
             os.close(directory_descriptor)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        if created:
+            path.unlink(missing_ok=True)
         raise
 
 
@@ -763,18 +876,24 @@ def write_venue_accounting_receipt(
     return output
 
 
-def load_venue_accounting_receipt(path: str | Path) -> dict[str, Any]:
-    receipt_path = Path(path).expanduser()
-    if receipt_path.is_symlink():
-        raise ValueError("venue-accounting receipt must not be a symbolic link")
-    metadata = receipt_path.stat()
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("venue-accounting receipt must be a regular file")
-    if metadata.st_mode & 0o077:
+def load_venue_accounting_receipt(
+    path: str | Path,
+    *,
+    snapshot: StableFileSnapshot | None = None,
+) -> dict[str, Any]:
+    if snapshot is None:
+        snapshot = read_stable_file(
+            path,
+            label="venue-accounting receipt",
+            require_single_link=False,
+        )
+    elif snapshot.path != Path(path).expanduser().absolute():
+        raise ValueError("venue-accounting receipt snapshot path differs")
+    if snapshot.mode & 0o077:
         raise ValueError("venue-accounting receipt must have mode 0600")
-    if metadata.st_uid != os.geteuid():
+    if snapshot.uid != os.geteuid():
         raise ValueError("venue-accounting receipt is not owned by the verifier")
-    value = json.loads(receipt_path.read_text(encoding="utf-8"))
+    value = json.loads(snapshot.data)
     if not isinstance(value, Mapping):
         raise ValueError("venue-accounting receipt must contain an object")
     return verify_venue_accounting_receipt(value)

@@ -12,7 +12,7 @@ Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/account-paper-execution.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-long-paper-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
@@ -35,7 +35,9 @@ Environment=UNIVERSE_SIZE=50
 Environment=LOOKBACK_DAYS=100
 Environment=WORKERS=2
 Environment=WS_KLINES_ENABLED=1
-ExecStart=/opt/liquidity-migration/scripts/run_bybit_long_demo_event_engine.sh
+# Late fresh-epoch account route and DATA_ROOT override.
+EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-bybit-long-paper.service.env
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-bybit-long-paper.service main
 Restart=always
 RestartSec=30
 KillMode=control-group

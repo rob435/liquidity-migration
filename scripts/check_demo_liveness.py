@@ -685,6 +685,7 @@ def gather_long_alerts(
     now_ms: int,
     args: argparse.Namespace,
     cycle_checks: bool = True,
+    cycles_dataset: str = "long_native_demo_cycles",
 ) -> list[Alert]:
     """Check the LONG strategy scheduler and WS input freshness only."""
     if not long_root.exists():
@@ -693,7 +694,7 @@ def gather_long_alerts(
     alerts: list[Alert] = []
     if cycle_checks:
         try:
-            cyc = read_dataset(long_root, "long_native_demo_cycles")
+            cyc = read_dataset(long_root, cycles_dataset)
         except Exception:  # noqa: BLE001 — watchdog never crashes
             cyc = pl.DataFrame()
         latest_ts = (
@@ -868,18 +869,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # account/capture/strategy safety gathers.
     p.add_argument(
         "--continuous-root",
-        default=_default_root("data/bybit-continuous-demo-event"),
+        default=os.environ.get("CONTINUOUS_DEMO_DATA_ROOT")
+        or _default_root("data/bybit-continuous-demo-event"),
         help="continuous-fade sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
         "--continuous-paper-root",
-        default=_default_root("data/bybit-continuous-paper-event"),
+        default=os.environ.get("CONTINUOUS_PAPER_DATA_ROOT")
+        or _default_root("data/bybit-continuous-paper-event"),
         help="continuous-fade paper root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
         "--long-root",
-        default=_default_root("data/bybit-long-demo-event"),
+        default=os.environ.get("LONG_DEMO_DATA_ROOT")
+        or _default_root("data/bybit-long-demo-event"),
         help="long-native sleeve root for cycle/input freshness ('' to skip)",
+    )
+    p.add_argument(
+        "--long-paper-root",
+        default=os.environ.get("LONG_PAPER_DATA_ROOT")
+        or _default_root("data/bybit-long-paper-event"),
+        help="long-native paper sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
         "--account-root",
@@ -985,6 +995,7 @@ def main() -> int:
     continuous_root = Path(args.continuous_root) if str(args.continuous_root).strip() else None
     continuous_paper_root = Path(args.continuous_paper_root) if str(args.continuous_paper_root).strip() else None
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
+    long_paper_root = Path(args.long_paper_root) if str(args.long_paper_root).strip() else None
     liquidations_root = Path(args.liquidations_root) if str(args.liquidations_root).strip() else None
     # audit2b: anchor the state-file fallback at the repo dir (NOT CWD), matching the
     # _default_root root anchoring — when BOTH sleeve roots are explicitly skipped the
@@ -1102,6 +1113,15 @@ def main() -> int:
                 now_ms=now_ms,
                 args=args,
                 cycle_checks=_sleeve_on("LONG_SLEEVE"),
+            )
+        )
+    if long_paper_root is not None and _sleeve_on("LONG_SLEEVE"):
+        alerts.extend(
+            gather_long_alerts(
+                long_root=long_paper_root,
+                now_ms=now_ms,
+                args=args,
+                cycles_dataset="long_native_paper_cycles",
             )
         )
     to_send, resolved, new_state = select_alerts_to_send(

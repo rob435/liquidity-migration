@@ -7,6 +7,7 @@ import argparse
 import http.client
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -38,7 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Capture low-RTT public Bybit server-time clock evidence"
     )
-    parser.add_argument("--output", required=True)
+    output = parser.add_mutually_exclusive_group(required=True)
+    output.add_argument("--output")
+    output.add_argument(
+        "--output-directory",
+        help=(
+            "create clock-offset-<observed-ns>.json in this private directory; "
+            "safe for an external six-hour timer"
+        ),
+    )
     parser.add_argument("--endpoint", default=CLOCK_OFFSET_ENDPOINT)
     parser.add_argument("--samples", type=int, default=REGISTERED_SAMPLE_COUNT)
     parser.add_argument("--selected-samples", type=int, default=REGISTERED_SELECTED_COUNT)
@@ -46,6 +55,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-rtt-ms", type=float, default=REGISTERED_MAX_RTT_NS / 1_000_000)
     parser.add_argument("--max-error-ms", type=float, default=REGISTERED_MAX_ERROR_NS / 1_000_000)
     return parser
+
+
+def _private_output_directory(raw: str) -> Path:
+    directory = Path(raw).expanduser()
+    if not directory.is_absolute():
+        raise ValueError("clock-offset output directory must be absolute")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    metadata = directory.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("clock-offset output directory must be a non-symlink directory")
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise ValueError("clock-offset output directory must be verifier-owned mode 0700")
+    return directory.resolve(strict=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,6 +91,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not registered:
         parser.error("clock-offset parameters must match the preregistered 21/5 demo contract")
+    try:
+        output_directory = (
+            _private_output_directory(args.output_directory)
+            if args.output_directory
+            else None
+        )
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
     connection = http.client.HTTPSConnection("api-demo.bybit.com", timeout=5)
     registered_socket: object | None = None
@@ -110,7 +140,12 @@ def main(argv: list[str] | None = None) -> int:
             max_rtt_ns=int(args.max_rtt_ms * 1_000_000),
             max_error_ns=int(args.max_error_ms * 1_000_000),
         )
-        output = write_clock_offset_receipt(Path(args.output), receipt)
+        output_path = (
+            output_directory / f"clock-offset-{receipt['observed_ts_ns']}.json"
+            if output_directory is not None
+            else Path(args.output)
+        )
+        output = write_clock_offset_receipt(output_path, receipt)
     except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as exc:
         print(f"clock-offset capture failed: {exc}", file=sys.stderr)
         return 2

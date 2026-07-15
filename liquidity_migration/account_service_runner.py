@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import logging
 import time
 from collections.abc import Sequence
@@ -12,11 +10,19 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .account_execution_stream import BybitAccountExecutionConsumer
+from .account_execution_config import (
+    load_demo_rules,
+    load_risk_policy,
+    require_registered_demo_rule_max_age_hours,
+)
 from .account_kernel import (
     AccountExecutionKernel,
-    AccountRiskPolicy,
     AccountRiskSnapshot,
-    InstrumentRules,
+)
+from .account_market_readiness import (
+    RequestedMarketWarmupGate,
+    require_registered_request_market_warmup_timeout,
+    run_ready_request_or_converge,
 )
 from .account_reconcile import (
     AccountReconciliationReport,
@@ -30,9 +36,10 @@ from .account_owner_health import (
     AccountOwnerHealthStatus,
     fold_convergence_health,
     format_convergence_health,
+    require_systemd_invocation_id,
     write_account_owner_health,
 )
-from .account_owner_lease import AccountOwnerLease
+from .account_owner_lease import DemoAccountIdentity, DemoAccountMutationLease
 from .account_service import AccountExecutionService, AccountIntentInbox
 from .account_service_bybit import (
     BybitDemoAccountSnapshotProvider,
@@ -44,11 +51,10 @@ from .bybit import (
     BybitPrivateClient,
     BybitPrivateWebSocketStream,
     api_key_allows_order_submit,
-    resolve_private_credentials,
+    resolve_demo_credentials,
     validate_demo_order_permission,
 )
-from .deterministic_serialization import canonical_json
-from .execution_adapters import BybitDemoExecutionAdapter
+from .bybit_execution_adapter import BybitDemoExecutionAdapter
 from .market_capture import (
     BybitRawPublicMarketStream,
     MarketCaptureConfig,
@@ -98,12 +104,14 @@ def notification_position_truth(
     return True, ""
 
 
-def require_order_submit_permission(client: Any) -> None:
+def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
     """Fail owner startup unless the configured key can mutate demo orders."""
 
-    allowed, reason = api_key_allows_order_submit(client.get_api_key_information())
+    api_key_info = client.get_api_key_information()
+    allowed, reason = api_key_allows_order_submit(api_key_info)
     if not allowed:
         raise RuntimeError(f"Bybit demo API key cannot submit orders: {reason}")
+    return api_key_info
 
 
 def publish_demo_owner_health(
@@ -116,6 +124,7 @@ def publish_demo_owner_health(
     observed_ts_ns: int,
     loop_sequence: int,
     requested_symbols_ready: bool,
+    invocation_id: str,
     last_batch_id: str = "",
     detail: str = "",
 ) -> AccountOwnerHealth:
@@ -134,6 +143,7 @@ def publish_demo_owner_health(
         equity_usdt=risk_snapshot.equity_usdt,
         available_margin_usdt=risk_snapshot.available_margin_usdt,
         requested_symbols_ready=requested_symbols_ready,
+        invocation_id=invocation_id,
         last_batch_id=last_batch_id[:500],
         detail=detail[:1000],
     )
@@ -173,93 +183,6 @@ def owner_health_publish_decision(
     return publish, refresh_capital
 
 
-def _load_json(path: str | Path) -> Mapping[str, Any]:
-    payload = json.loads(Path(path).expanduser().read_text())
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"configuration must be a JSON object: {path}")
-    return payload
-
-
-def load_demo_rules(
-    path: str | Path,
-    *,
-    now_ns: int | None = None,
-    max_age_seconds: float | None = None,
-) -> dict[str, InstrumentRules]:
-    payload = _load_json(path)
-    if int(payload.get("schema_version") or 0) != 2 or payload.get("environment") != "demo":
-        raise ValueError("demo rules file requires schema_version=2 and environment='demo'")
-    observed_hash = str(payload.get("artifact_sha256") or "")
-    expected_hash = hashlib.sha256(
-        canonical_json({**payload, "artifact_sha256": ""})
-    ).hexdigest()
-    if observed_hash != expected_hash:
-        raise ValueError("demo rules file artifact_sha256 is missing or invalid")
-    verified_ts_ns = int(payload.get("verified_ts_ns") or 0)
-    if verified_ts_ns <= 0:
-        raise ValueError("demo rules file requires verified_ts_ns")
-    if max_age_seconds is not None:
-        current_ns = time.time_ns() if now_ns is None else now_ns
-        if max_age_seconds <= 0.0:
-            raise ValueError("max demo rule age must be positive")
-        age_ns = current_ns - verified_ts_ns
-        if age_ns < 0 or age_ns > max_age_seconds * 1_000_000_000:
-            raise ValueError("demo rules receipt is stale or future-dated")
-    rows = payload.get("rules")
-    if not isinstance(rows, Mapping):
-        raise ValueError("demo rules file requires a 'rules' object")
-    evidence = payload.get("evidence")
-    if not isinstance(evidence, Mapping):
-        raise ValueError("demo rules file requires per-symbol probe evidence")
-    output: dict[str, InstrumentRules] = {}
-    for symbol, raw in rows.items():
-        if not isinstance(raw, Mapping):
-            raise ValueError(f"demo rule {symbol} must be an object")
-        normalized_symbol = str(symbol).upper()
-        receipt = evidence.get(symbol) or evidence.get(normalized_symbol)
-        if not isinstance(receipt, Mapping):
-            raise ValueError(f"demo rule {normalized_symbol} lacks probe evidence")
-        accepted_notional = float(receipt.get("lowest_accepted_notional_usdt") or 0.0)
-        attempts = receipt.get("attempts")
-        if (
-            accepted_notional <= 0.0
-            or not isinstance(attempts, list)
-            or not any(isinstance(item, Mapping) and bool(item.get("accepted")) for item in attempts)
-        ):
-            raise ValueError(f"demo rule {normalized_symbol} has invalid acceptance evidence")
-        rule = InstrumentRules(
-            symbol=normalized_symbol,
-            qty_step=float(raw["qty_step"]),
-            min_qty=float(raw["min_qty"]),
-            min_notional=float(raw["min_notional"]),
-            tick_size=float(raw["tick_size"]),
-            max_order_qty=float(raw.get("max_order_qty") or 0.0),
-            max_leverage=float(raw.get("max_leverage") or 0.0),
-            source=str(raw.get("source") or ""),
-            environment=str(raw.get("environment") or ""),
-            observed_ts_ns=int(raw.get("observed_ts_ns") or 0),
-        )
-        if abs(rule.min_notional - accepted_notional) > max(1e-12, accepted_notional * 1e-12):
-            raise ValueError(f"demo rule {normalized_symbol} minimum does not match acceptance evidence")
-        if rule.observed_ts_ns != verified_ts_ns:
-            raise ValueError(f"demo rule {normalized_symbol} timestamp does not match receipt")
-        output[normalized_symbol] = rule
-    VerifiedBybitDemoRulesProvider(output)  # validate every row before returning
-    return output
-
-
-def load_risk_policy(path: str | Path) -> AccountRiskPolicy:
-    payload = _load_json(path)
-    return AccountRiskPolicy(
-        max_component_gross_notional_usdt=float(payload["max_component_gross_notional_usdt"]),
-        max_account_gross_notional_usdt=float(payload["max_account_gross_notional_usdt"]),
-        max_symbol_notional_usdt=float(payload["max_symbol_notional_usdt"]),
-        max_initial_margin_usdt=float(payload["max_initial_margin_usdt"]),
-        max_leverage=float(payload["max_leverage"]),
-        quantity_tolerance=float(payload.get("quantity_tolerance") or 1e-12),
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the demo-only account execution owner")
     parser.add_argument("--account-root", required=True)
@@ -281,9 +204,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Explicit full-position native stop distance used when components have no stop.",
     )
     parser.add_argument("--account-id", default="bybit-demo-unified")
-    parser.add_argument("--owner-lock", default="")
     parser.add_argument("--reconcile-seconds", type=float, default=2.0)
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--request-market-warmup-timeout-seconds",
+        type=float,
+        default=30.0,
+        help="Latch owner health blocked if the durable queue head lacks healthy fresh L2.",
+    )
     parser.add_argument("--idle-seconds", type=float, default=0.1)
     parser.add_argument("--confirm-demo-orders", action="store_true")
     parser.add_argument("--telegram", action="store_true")
@@ -293,6 +221,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.health_interval_seconds <= 0.0:
         parser.error("--health-interval-seconds must be positive")
+    try:
+        args.max_demo_rule_age_hours = require_registered_demo_rule_max_age_hours(
+            args.max_demo_rule_age_hours
+        )
+        args.request_market_warmup_timeout_seconds = (
+            require_registered_request_market_warmup_timeout(
+                args.request_market_warmup_timeout_seconds
+            )
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    invocation_id = require_systemd_invocation_id()
 
     route = ensure_account_route(
         account_id=args.account_id,
@@ -301,17 +241,24 @@ def main(argv: list[str] | None = None) -> int:
         inbox_root=args.inbox_root,
     )
 
-    owner_lease = AccountOwnerLease(
-        args.owner_lock or str(route.account_path / "account_execution_owner.lock")
-    )
-    owner_lease.acquire()
-
     validate_demo_order_permission(confirm_demo_orders=args.confirm_demo_orders)
-    api_key, api_secret, demo = resolve_private_credentials()
-    if not demo:
-        raise RuntimeError("account service runner refuses REAL_MONEY/mainnet")
+    api_key, api_secret = resolve_demo_credentials()
     if not api_key or not api_secret:
         raise RuntimeError("BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET are required")
+    credential_client = BybitPrivateClient(
+        category="linear",
+        testnet=False,
+        demo=True,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+    api_key_info = require_order_submit_permission(credential_client)
+    demo_identity = DemoAccountIdentity.from_api_key_info(
+        api_key=api_key,
+        api_key_info=api_key_info,
+    )
+    owner_lease = DemoAccountMutationLease(demo_identity)
+    owner_lease.acquire()
     rules = load_demo_rules(
         args.demo_rules_file,
         max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
@@ -331,9 +278,8 @@ def main(argv: list[str] | None = None) -> int:
         demo=True,
         api_key=api_key,
         api_secret=api_secret,
-        account_execution_owner=True,
+        mutation_lease=owner_lease,
     )
-    require_order_submit_permission(private_client)
     kernel = AccountExecutionKernel(route.account_path, account_id=route.account_id)
     native_protection = BybitNativeProtectionManager(
         kernel=kernel,
@@ -359,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     recorder = SequenceAwareMarketRecorder(
         args.capture_root,
         config=MarketCaptureConfig(depth=50),
+        owner_invocation_id=invocation_id,
     )
     public_stream = BybitRawPublicMarketStream(
         testnet=False,
@@ -409,6 +356,9 @@ def main(argv: list[str] | None = None) -> int:
         max_health_age_ns=max(int(args.reconcile_seconds * 2 * 1_000_000_000), 1),
     )
     inbox = AccountIntentInbox(route)
+    market_warmup_gate = RequestedMarketWarmupGate(
+        timeout_seconds=args.request_market_warmup_timeout_seconds,
+    )
     protection_engine = AccountProtectionEngine(
         kernel=kernel,
         inbox=inbox,
@@ -472,14 +422,25 @@ def main(argv: list[str] | None = None) -> int:
                 if desired:
                     missing_rules = sorted(desired - set(rules))
                     if missing_rules:
-                        _logger.error("not subscribing symbols without verified demo rules: %s", missing_rules)
-                        requested_symbols_ready = False
-                        symbol_health_detail = "targets lack demo-verified rules: " + ", ".join(missing_rules)
-                    else:
-                        public_stream.update_symbols(desired)
-                        requested_symbols_ready = True
-                        symbol_health_detail = ""
+                        _logger.error(
+                            "requested symbols lack verified demo rules: %s",
+                            missing_rules,
+                        )
+                    # Public capture needs no order-rule authority. Subscribe
+                    # every pending symbol in parallel; the strict queue-head
+                    # gate below decides when one request may be claimed.
+                    public_stream.update_symbols(desired)
                 last_symbol_refresh = now
+            market_readiness = market_warmup_gate.evaluate(
+                inbox=inbox,
+                recorder=recorder,
+                verified_rule_symbols=set(rules),
+                now_monotonic=now,
+                now_wall_ns=time.time_ns(),
+                max_market_age_ns=service.max_market_age_ns,
+            )
+            requested_symbols_ready = market_readiness.ready
+            symbol_health_detail = market_readiness.detail
             protection_markets = {}
             for symbol in {
                 str(target.get("symbol") or "").upper()
@@ -505,7 +466,11 @@ def main(argv: list[str] | None = None) -> int:
                 health_detail = "account reconciliation mismatch: " + "; ".join(latest_reconcile_report.mismatches)
             receipt = None
             try:
-                receipt = service.run_once(inbox) if requested_symbols_ready else None
+                receipt = run_ready_request_or_converge(
+                    service=service,
+                    inbox=inbox,
+                    readiness=market_readiness,
+                )
                 if receipt is not None:
                     last_batch_id = receipt.batch_id
                     native_protection.sync_symbols(
@@ -583,6 +548,7 @@ def main(argv: list[str] | None = None) -> int:
                     observed_ts_ns=time.time_ns(),
                     loop_sequence=loop_sequence,
                     requested_symbols_ready=requested_symbols_ready,
+                    invocation_id=invocation_id,
                     last_batch_id=last_batch_id,
                     detail=health_detail,
                 )

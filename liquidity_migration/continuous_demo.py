@@ -39,6 +39,7 @@ from .account_intent_client import (
     publish_exit_first_target_requests,
     unresolved_target_snapshot,
 )
+from .account_candidate_universe import load_candidate_universe
 from .account_owner_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
@@ -52,7 +53,7 @@ from .account_strategy_state import (
     target_reservation_rows,
     terminal_entry_attempt_keys,
 )
-from .bybit import BybitMarketData
+from .bybit_market_data import BybitMarketData
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig
 from .continuous_btc_risk import (
     BTC_RISK_EVIDENCE_METADATA_KEY,
@@ -92,6 +93,7 @@ from .execution_environment import (
 )
 from .storage import exclusive_file_lock, write_dataset
 from .strategy_targets import component_target_intent
+from .strategy_target_replay import PublishedTargetCyclePayload
 
 CONTINUOUS_STRATEGY_ID = "continuous_fade_v2"
 # --- v2 freeze boundary: the SINGLE source of truth for v2-forward reconcile ---
@@ -193,6 +195,9 @@ class ContinuousDemoCycleConfig:
     # Canonical accepted-target journal used as the planning read model.  It is
     # inseparable from the inbox route to prevent split-brain open positions.
     account_execution_root: str | None = None
+    # Optional natural-evidence candidate population. The shared public-data
+    # resolver enforces it before signal selection in demo and paper alike.
+    candidate_universe_file: str = ""
     data_name: str = "continuous-demo-event"
     strategy_profile: str = "continuous_ensemble_v2"
     # --- continuous_ensemble_v2 3-component ensemble (the validated research object) ---
@@ -1488,6 +1493,11 @@ def run_continuous_demo_cycle(
             category=config.exchange.category,
             testnet=config.exchange.testnet,
         )
+        candidate_universe = (
+            load_candidate_universe(demo.candidate_universe_file)
+            if demo.candidate_universe_file
+            else None
+        )
         universe, symbols, tickers, ticker_source = _resolve_cycle_universe(
             public=public,
             demo=demo,
@@ -1496,6 +1506,7 @@ def run_continuous_demo_cycle(
             cycle_now_ms=cycle_now_ms,
             ticker_cache=ticker_cache,
             state_cache_stale_seconds=state_cache_stale_seconds,
+            frozen_candidate_universe=candidate_universe,
         )
 
         account_owner_health_error = ""
@@ -1849,6 +1860,9 @@ def run_continuous_demo_cycle(
             "mode": f"{environment}_target",
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
+            "candidate_universe_artifact_sha256": (
+                candidate_universe.artifact_sha256 if candidate_universe else ""
+            ),
             "feature_set": ",".join(demo.feature_set),
             "entry_leverage": demo.entry_leverage,
             "per_position_notional_pct_equity": demo.per_position_notional_pct_equity,
@@ -1919,4 +1933,8 @@ def run_continuous_demo_cycle(
             cycles_dataset,
             partition_by=(),
         )
-    return payload
+    return PublishedTargetCyclePayload(
+        payload,
+        publication=publication,
+        route=target_publisher.route,
+    )

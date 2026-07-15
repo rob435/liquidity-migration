@@ -558,6 +558,52 @@ def test_demo_instruments_cache_refetches_after_ttl(tmp_path: Path) -> None:
     assert market.instrument_calls == 2, "a cycle past the TTL must refetch instruments"
 
 
+def test_demo_cache_markers_bind_the_exact_parquet_bytes(tmp_path: Path) -> None:
+    market = _RecordingInstrumentsMarket()
+    now = 1_700_000_000_000
+    _demo_instruments(market, cache_root=tmp_path, now_ms=now)
+    instrument_parquet, _instrument_metadata = (
+        event_demo_data._demo_instruments_cache_paths(tmp_path)
+    )
+    instrument_parquet.write_bytes(instrument_parquet.read_bytes() + b"changed")
+    _demo_instruments(market, cache_root=tmp_path, now_ms=now + 1)
+    assert market.instrument_calls == 2
+
+    klines = pl.DataFrame(
+        {
+            "symbol": ["AAAUSDT"],
+            "ts_ms": [0],
+            "close": [1.0],
+        }
+    )
+    event_demo_data._write_demo_kline_compact_cache(
+        tmp_path,
+        symbols=["AAAUSDT"],
+        start_ms=0,
+        end_ms=0,
+        klines=klines,
+    )
+    kline_parquet, _kline_metadata = (
+        event_demo_data._demo_kline_compact_cache_paths(tmp_path)
+    )
+    kline_parquet.write_bytes(kline_parquet.read_bytes() + b"changed")
+    assert event_demo_data._read_demo_kline_compact_cache(
+        tmp_path,
+        symbols=["AAAUSDT"],
+        start_ms=0,
+        end_ms=0,
+    ).is_empty()
+
+    fingerprint = {"rows": 1}
+    features = pl.DataFrame({"symbol": ["AAAUSDT"], "score": [1.0]})
+    event_demo_data._write_demo_feature_cache(tmp_path, fingerprint, features)
+    feature_parquet, _feature_metadata = event_demo_data._demo_feature_cache_paths(
+        tmp_path
+    )
+    feature_parquet.write_bytes(feature_parquet.read_bytes() + b"changed")
+    assert event_demo_data._read_demo_feature_cache(tmp_path, fingerprint) is None
+
+
 def test_demo_instruments_falls_back_to_stale_cache_on_fetch_error(tmp_path: Path) -> None:
     """A transient instruments-endpoint outage must not fail the whole cycle —
     contract specs barely change, so a stale cache is safe to reuse."""

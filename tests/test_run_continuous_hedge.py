@@ -73,6 +73,7 @@ def _setup_runner(
     account_inbox: bool = True,
     hedge_qty: dict[str, float] | None = None,
     pending_hedge_symbols: set[str] | None = None,
+    execution_environment: str = "demo",
 ) -> None:
     unit = [-0.002, 0.002] * 45
     btc = [0.01, -0.01] * 45
@@ -109,23 +110,25 @@ def _setup_runner(
     )
     monkeypatch.delenv("HEDGE_MODE", raising=False)
     args = list(argv or [])
+    if "--execution-environment" not in args:
+        args[:0] = ["--execution-environment", execution_environment]
     if account_root:
         args.extend(("--account-root", str(tmp_path / "account")))
     if account_inbox and "--account-inbox-root" not in args:
         args.extend(("--account-inbox-root", str(tmp_path / "inbox")))
     if account_root and account_inbox:
         ensure_account_route(
-            account_id="bybit-demo-unified",
-            environment="demo",
+            account_id=f"bybit-{execution_environment}-unified",
+            environment=execution_environment,
             account_root=tmp_path / "account",
             inbox_root=tmp_path / "inbox",
         )
     monkeypatch.setattr(sys, "argv", ["run_continuous_hedge.py", *args])
 
 
-def _submit_args(tmp_path) -> list[str]:
+def _execute_args(tmp_path) -> list[str]:
     return [
-        "--submit",
+        "--execute",
         "--btc-price",
         "100000",
         "--account-inbox-root",
@@ -202,7 +205,7 @@ def test_pending_hedge_target_without_resize_is_not_republished(
     _setup_runner(
         monkeypatch,
         tmp_path,
-        argv=_submit_args(tmp_path),
+        argv=_execute_args(tmp_path),
         pending_hedge_symbols={"BTCUSDT", "ETHUSDT"},
     )
     monkeypatch.setattr(
@@ -214,7 +217,7 @@ def test_pending_hedge_target_without_resize_is_not_republished(
     assert hedge_runner.main() == 0
     out = json.loads(capsys.readouterr().out)
 
-    assert out["status"] == "submit_no_action"
+    assert out["status"] == "execute_no_action"
     assert out["pending_target_refresh_skips"] == ["BTCUSDT", "ETHUSDT"]
     assert list((tmp_path / "inbox" / "pending").glob("*.json")) == []
 
@@ -231,7 +234,7 @@ def test_publish_requires_account_inbox(monkeypatch, tmp_path, capsys) -> None:
     _setup_runner(
         monkeypatch,
         tmp_path,
-        argv=["--submit", "--btc-price", "100000"],
+        argv=["--execute", "--btc-price", "100000"],
         account_inbox=False,
     )
 
@@ -244,7 +247,7 @@ def test_btc_mode_publishes_btc_target_and_explicit_eth_flatten(monkeypatch, tmp
     _setup_runner(
         monkeypatch,
         tmp_path,
-        argv=_submit_args(tmp_path),
+        argv=_execute_args(tmp_path),
         hedge_qty={"ETHUSDT": 2.0},
     )
     monkeypatch.setattr(
@@ -257,7 +260,7 @@ def test_btc_mode_publishes_btc_target_and_explicit_eth_flatten(monkeypatch, tmp
     out = json.loads(capsys.readouterr().out)
 
     assert out["status"] == "target_queued"
-    assert out["mode"] == "publish"
+    assert out["mode"] == "target_publish"
     assert out["queued"]["target_count"] == 2
     pending = list((tmp_path / "inbox" / "pending").glob("*.json"))
     assert len(pending) == 2
@@ -274,14 +277,13 @@ def test_btc_mode_publishes_btc_target_and_explicit_eth_flatten(monkeypatch, tmp
         for item in request["intents"]
     )
     assert len(out["queued"]["request_ids"]) == 2
-    assert not hasattr(hedge_runner, "_submit_plan")
 
 
 def test_two_factor_targets_are_published_as_one_batch(monkeypatch, tmp_path, capsys) -> None:
     _setup_runner(
         monkeypatch,
         tmp_path,
-        argv=[*_submit_args(tmp_path), "--eth-price", "3000"],
+        argv=[*_execute_args(tmp_path), "--eth-price", "3000"],
         warm_eth=[0.001] * 90,
     )
     monkeypatch.setattr(
@@ -300,17 +302,50 @@ def test_two_factor_targets_are_published_as_one_batch(monkeypatch, tmp_path, ca
     }
 
 
+def test_paper_execution_publishes_only_to_bound_paper_route(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    _setup_runner(
+        monkeypatch,
+        tmp_path,
+        argv=_execute_args(tmp_path),
+        execution_environment="paper",
+    )
+    monkeypatch.setattr(
+        hedge_runner,
+        "compute_hedge_decision",
+        lambda cfg, **kwargs: _single_decision(None),
+    )
+
+    assert hedge_runner.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["execution_environment"] == "paper"
+    assert out["status"] == "target_queued"
+    route = json.loads((tmp_path / "account" / "account_route.json").read_text())
+    assert route["account_id"] == "bybit-paper-unified"
+    assert route["environment"] == "paper"
+
+
+def test_execution_environment_is_required(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["run_continuous_hedge.py"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        hedge_runner.main()
+
+    assert excinfo.value.code == 2
+
+
 def test_missing_canonical_equity_blocks_publish(monkeypatch, tmp_path, capsys) -> None:
     _setup_runner(
         monkeypatch,
         tmp_path,
-        argv=_submit_args(tmp_path),
+        argv=_execute_args(tmp_path),
         equity_usdt=0.0,
     )
 
     assert hedge_runner.main() == 1
     out = json.loads(capsys.readouterr().out)
-    assert out["status"] == "submit_blocked_account_owner_unhealthy"
+    assert out["status"] == "execute_blocked_account_owner_unhealthy"
     assert list((tmp_path / "inbox" / "pending").glob("*.json")) == []
 
 
@@ -326,7 +361,7 @@ def test_stale_warmstart_blocks_only_risk_increase(monkeypatch, tmp_path, capsys
     _setup_runner(
         monkeypatch,
         tmp_path,
-        argv=_submit_args(tmp_path),
+        argv=_execute_args(tmp_path),
         warmstart_last=date.today() - timedelta(days=10),
     )
     monkeypatch.setattr(
@@ -358,7 +393,7 @@ def test_stale_warmstart_allows_risk_reducing_target(monkeypatch, tmp_path, caps
     _setup_runner(
         monkeypatch,
         tmp_path,
-        argv=_submit_args(tmp_path),
+        argv=_execute_args(tmp_path),
         warmstart_last=date.today() - timedelta(days=10),
     )
     monkeypatch.setattr(
@@ -374,7 +409,7 @@ def test_stale_warmstart_allows_risk_reducing_target(monkeypatch, tmp_path, caps
 
 
 def test_target_publish_failure_fails_armed_run(monkeypatch, tmp_path, capsys) -> None:
-    _setup_runner(monkeypatch, tmp_path, argv=_submit_args(tmp_path))
+    _setup_runner(monkeypatch, tmp_path, argv=_execute_args(tmp_path))
     monkeypatch.setattr(
         hedge_runner,
         "_publish_hedge_target_batch",

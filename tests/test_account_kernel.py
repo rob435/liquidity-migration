@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -9,7 +7,6 @@ from pathlib import Path
 import pytest
 
 import liquidity_migration.account_kernel as account_kernel_module
-from liquidity_migration.bybit import BybitRequestRejected, BybitSubmissionUncertain
 from liquidity_migration.account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
@@ -25,10 +22,11 @@ from liquidity_migration.account_kernel import (
     read_account_journal,
     verify_account_journal,
 )
+from liquidity_migration.bybit_errors import BybitRequestRejected, BybitSubmissionUncertain
+from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.deterministic_runtime import DeterministicIds, SeededRandom, VirtualClock, VirtualScheduler
 from liquidity_migration.execution_adapters import (
     BookLevel,
-    BybitDemoExecutionAdapter,
     ExecutionObservation,
     ExecutionTwinConfig,
     KernelExecutionDriver,
@@ -38,10 +36,7 @@ from liquidity_migration.execution_adapters import (
 )
 from liquidity_migration.fault_injection import DeliveryFaultPolicy, DeterministicFaultInjector, TapeMessage
 from liquidity_migration.kernel_parity import (
-    build_kernel_parity_receipt,
     compare_kernel_journals,
-    load_kernel_parity_receipt,
-    main as kernel_parity_main,
     verify_kernel_parity_receipt,
 )
 from liquidity_migration.strategy_runtime import (
@@ -168,7 +163,9 @@ def _twin(
                 order_entry_ns=2_000_000,
                 order_response_ns=3_000_000,
             ),
-            max_decision_age_ns=100_000_000,
+            # Command creation is 100 ms after the captured book and the
+            # modeled socket send is another 10 ms later.
+            max_decision_age_ns=200_000_000,
         ),
     )
 
@@ -1671,7 +1668,7 @@ def test_notional_adapter_rounds_quantity_to_venue_step_without_hidden_notional_
     assert target.metadata["quantity_rounding"] == "toward_zero_to_venue_step"
 
 
-def test_explicit_parity_gate_checks_keys_quantities_event_types_and_state_hashes(tmp_path: Path) -> None:
+def test_explicit_parity_gate_checks_scoped_strategy_to_order_plan(tmp_path: Path) -> None:
     roots = {name: tmp_path / name for name in ("historical", "paper", "demo")}
     for root in roots.values():
         kernel = _kernel(root, account_id="gate-account")
@@ -1689,12 +1686,17 @@ def test_explicit_parity_gate_checks_keys_quantities_event_types_and_state_hashe
             market_inputs={"BUSDT": market},
             adapter=_twin(name=root.name),
         )
-    report = compare_kernel_journals(roots, quantity_tolerance=1e-12)
+    report = compare_kernel_journals(
+        roots,
+        comparison_batch_ids=["gate-batch"],
+        quantity_tolerance=1e-12,
+    )
     assert report.passed
     assert report.decision_keys_identical
-    assert report.rejection_keys_identical
-    assert report.target_quantities_within_tolerance
-    assert report.state_hashes_identical_by_sequence
+    assert report.risk_acceptance_and_rejection_keys_identical
+    assert report.quantity_values_within_tolerance
+    assert report.semantic_commands_identical
+    assert report.command_id_mapping_one_to_one
 
     # Demo can carry extra venue-truth evidence without invalidating the
     # normalized order/position parity trace.
@@ -1706,7 +1708,11 @@ def test_explicit_parity_gate_checks_keys_quantities_event_types_and_state_hashe
         exchange_ts_ns=0,
         local_receive_ts_ns=1_500_000_000,
     )
-    assert compare_kernel_journals(roots, quantity_tolerance=1e-12).passed
+    assert compare_kernel_journals(
+        roots,
+        comparison_batch_ids=["gate-batch"],
+        quantity_tolerance=1e-12,
+    ).passed
 
     demo_kernel = _kernel(roots["demo"], account_id="gate-account")
     demo_order = next(iter(demo_kernel.state().orders.values()))
@@ -1737,7 +1743,11 @@ def test_explicit_parity_gate_checks_keys_quantities_event_types_and_state_hashe
         trusted_readonly_builder=True,
     )
     assert supplemental[0].event_type == AccountEventType.ACK_OBSERVATION.value
-    assert compare_kernel_journals(roots, quantity_tolerance=1e-12).passed
+    assert compare_kernel_journals(
+        roots,
+        comparison_batch_ids=["gate-batch"],
+        quantity_tolerance=1e-12,
+    ).passed
 
     different = tmp_path / "different"
     kernel = _kernel(different, account_id="gate-account")
@@ -1750,72 +1760,41 @@ def test_explicit_parity_gate_checks_keys_quantities_event_types_and_state_hashe
         instrument_rules=_rules(),
     )
     failed = compare_kernel_journals(
-        {"historical": roots["historical"], "different": different},
+        {"historical": roots["historical"], "paper": roots["paper"], "demo": different},
+        comparison_batch_ids=["gate-batch"],
         quantity_tolerance=1e-12,
     )
     assert not failed.passed
-    assert not failed.target_quantities_within_tolerance
+    assert not failed.quantity_values_within_tolerance
     with pytest.raises(RuntimeError, match="parity failed"):
         failed.require_passed()
 
 
 def test_parity_gate_refuses_empty_journals(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="has no account events"):
+    with pytest.raises(ValueError, match="account root is missing"):
         compare_kernel_journals(
-            {"historical": tmp_path / "historical", "paper": tmp_path / "paper"},
+            {
+                "historical": tmp_path / "historical",
+                "paper": tmp_path / "paper",
+                "demo": tmp_path / "demo",
+            },
+            comparison_batch_ids=["missing"],
             quantity_tolerance=1e-12,
         )
 
 
-def test_parity_operator_receipt_is_source_bound_and_scope_honest(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_parity_operator_rejects_legacy_self_hashed_receipt() -> None:
+    legacy = {
+        "schema_version": 1,
+        "report": {"passed": True},
+        "artifact_sha256": "0" * 64,
+    }
+    with pytest.raises(ValueError, match="schema v1 is not deploy-valid"):
+        verify_kernel_parity_receipt(legacy)
+
+
+def test_parity_gate_does_not_claim_demo_execution_equality(tmp_path: Path) -> None:
     roots = {name: tmp_path / name for name in ("historical", "paper", "demo")}
-    for root in roots.values():
-        kernel = _kernel(root, account_id="receipt-account")
-        kernel.submit_targets(
-            batch_id="receipt-batch",
-            market_inputs=[_market()],
-            targets=[
-                _target(
-                    decision="receipt-d",
-                    key="continuous/main/BUSDT",
-                    sleeve="continuous",
-                    qty=-2.0,
-                )
-            ],
-            risk_snapshot=_snapshot(),
-            risk_policy=_policy(),
-            instrument_rules=_rules(),
-        )
-
-    receipt = build_kernel_parity_receipt(roots, quantity_tolerance=1e-12)
-    assert receipt["journal_parity_passed"] is True
-    assert receipt["full_cross_environment_acceptance_passed"] is False
-    assert receipt["unverified_external_gates"]
-    assert len(receipt["artifact_sha256"]) == 64
-    assert verify_kernel_parity_receipt(receipt) == receipt
-    hashes = {source["normalized_journal_sha256"] for source in receipt["sources"].values()}
-    assert len(hashes) == 1
-
-    output = tmp_path / "receipts" / "parity.json"
-    args = [item for name, root in roots.items() for item in ("--environment", f"{name}={root}")]
-    result = kernel_parity_main([*args, "--output", str(output)])
-    assert result == 0
-    assert json.loads(output.read_text()) == receipt
-    assert load_kernel_parity_receipt(output) == receipt
-    assert os.stat(output).st_mode & 0o077 == 0
-    assert json.loads(capsys.readouterr().out) == receipt
-
-    changed = json.loads(json.dumps(receipt))
-    changed["report"]["passed"] = False
-    with pytest.raises(ValueError, match="hash mismatch"):
-        verify_kernel_parity_receipt(changed)
-
-
-def test_parity_gate_compares_execution_rejection_keys(tmp_path: Path) -> None:
-    roots = {name: tmp_path / name for name in ("historical", "demo")}
     for name, root in roots.items():
         kernel = _kernel(root, account_id="execution-rejection-gate")
         market = _market()
@@ -1843,13 +1822,17 @@ def test_parity_gate_compares_execution_rejection_keys(tmp_path: Path) -> None:
                     "exchange_ts_ns": 1_200_000_000,
                     "local_receive_ts_ns": 1_205_000_000,
                     "accepted": False,
-                    "rejection_key": f"execution:{name}:rejected",
+                    "rejection_key": f"execution:rejected-{name}",
                 }
             ]
         )
 
-    report = compare_kernel_journals(roots, quantity_tolerance=1e-12)
-    assert not report.passed
+    report = compare_kernel_journals(
+        roots,
+        comparison_batch_ids=["rejected-execution"],
+        quantity_tolerance=1e-12,
+    )
+    assert report.passed
     assert report.decision_keys_identical
-    assert not report.rejection_keys_identical
-    assert any("rejection keys differ" in mismatch for mismatch in report.mismatches)
+    assert report.risk_acceptance_and_rejection_keys_identical
+    assert report.historical_paper_normalized_modeled_execution_exact is False

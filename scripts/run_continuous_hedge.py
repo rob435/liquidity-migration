@@ -1,23 +1,24 @@
-"""Periodic target-hedge runner for the continuous demo book — BTC+ETH two-factor form.
+"""Periodic target-hedge runner for a continuous demo or paper book.
 
 Computes the current two-leg hedge target from the warm-start series and the
-canonical account state. Dry-run prints the decision; ``--submit`` publishes an
+canonical account state. Dry-run prints the decision; ``--execute`` publishes an
 absolute target batch to the single account owner. This process never calls the
 venue private API and never writes a compatibility trade ledger.
 
-Demo only. Dry-run is the safe default. Publishing is blocked from increasing
+The environment is mandatory and selects one bound account route. Dry-run is
+the safe action default. Publishing is blocked from increasing
 hedge exposure while the warm-start is stale; risk-reducing targets still proceed.
 HEDGE_MODE=btc falls back to the single-leg WP3 form.
 
-Exit-code contract (paging): an ARMED (``--submit``) run that is blocked or whose
+Exit-code contract (paging): an armed (``--execute``) run that is blocked or whose
 target publication fails exits NONZERO, so
 the systemd oneshot lands in `failed` and the liveness watchdog pages the
 operator. Dry-run statuses and genuine no-action runs always exit 0. (Before
 2026-06-12 a blocked armed run exited 0 and the book sat unhedged silently.)
 
 Usage:
-    .venv/bin/python scripts/run_continuous_hedge.py --venue bybit            # dry-run
-    SUBMIT_HEDGE=1 .venv/bin/python scripts/run_continuous_hedge.py --venue bybit --submit
+    .venv/bin/python scripts/run_continuous_hedge.py --execution-environment demo
+    .venv/bin/python scripts/run_continuous_hedge.py --execution-environment demo --execute
 """
 
 from __future__ import annotations
@@ -44,6 +45,9 @@ from liquidity_migration.account_intent_client import (  # noqa: E402
 )
 from liquidity_migration.account_service import SleeveAdapterKind  # noqa: E402
 from liquidity_migration.account_route import AccountRoute, require_account_route  # noqa: E402
+from liquidity_migration.execution_environment import (  # noqa: E402
+    account_id_for_environment,
+)
 from liquidity_migration.account_owner_health import (  # noqa: E402
     require_recent_account_owner_health,
 )
@@ -138,16 +142,8 @@ def _publish_hedge_target_batch(
             }
         )
     publisher = AccountTargetPublisher(route)
-    exits = [
-        intent
-        for intent in intents
-        if float(intent.intent.signed_notional_usdt) == 0.0
-    ]
-    nonzero = [
-        intent
-        for intent in intents
-        if float(intent.intent.signed_notional_usdt) != 0.0
-    ]
+    exits = [intent for intent in intents if float(intent.intent.signed_notional_usdt) == 0.0]
+    nonzero = [intent for intent in intents if float(intent.intent.signed_notional_usdt) != 0.0]
     publication = publish_exit_first_target_requests(
         publisher,
         batch_prefix=batch_id,
@@ -157,8 +153,7 @@ def _publish_hedge_target_batch(
     )
     if publication.errors:
         details = "; ".join(
-            f"{item.stage}:{item.target_key}:{item.error_type}:{item.message}"
-            for item in publication.errors
+            f"{item.stage}:{item.target_key}:{item.error_type}:{item.message}" for item in publication.errors
         )
         raise OSError(f"hedge target publication failed: {details}")
     request_ids = [*publication.exit_request_ids]
@@ -219,10 +214,7 @@ def _pending_account_hedge_symbols(
     )
     if rows.is_empty() or "status" not in rows.columns or "symbol" not in rows.columns:
         return set()
-    return {
-        str(symbol).upper()
-        for symbol in rows.filter(pl.col("status") == "target_pending")["symbol"].to_list()
-    }
+    return {str(symbol).upper() for symbol in rows.filter(pl.col("status") == "target_pending")["symbol"].to_list()}
 
 
 def _account_continuous_book_state(
@@ -241,15 +233,8 @@ def _account_continuous_book_state(
         sleeve=SleeveAdapterKind.CONTINUOUS.value,
     )
     reserved = target_reservation_rows(rows)
-    short_targets = (
-        reserved.filter(pl.col("side") == "short")
-        if not reserved.is_empty()
-        else reserved
-    )
-    gross_notional = sum(
-        abs(_float(row.get("notional_usdt")))
-        for row in short_targets.to_dicts()
-    )
+    short_targets = reserved.filter(pl.col("side") == "short") if not reserved.is_empty() else reserved
+    gross_notional = sum(abs(_float(row.get("notional_usdt"))) for row in short_targets.to_dicts())
     if equity_usdt <= 0.0:
         return LiveBookState(0.0, False, "account_target_equity_unavailable")
     return LiveBookState(
@@ -313,6 +298,12 @@ def _plan_json(plan) -> dict | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--venue", default="bybit", choices=["bybit", "binance"])
+    ap.add_argument(
+        "--execution-environment",
+        required=True,
+        choices=("demo", "paper"),
+        help="bound account-owner environment; there is no implicit default",
+    )
     ap.add_argument("--primary-root", default="data/bybit-continuous-demo-event")
     ap.add_argument("--warmstart", default="")
     ap.add_argument("--btc-price", type=float, default=0.0, help="override; else read from kline store")
@@ -323,7 +314,11 @@ def main() -> int:
         default=0.0,
         help="explicit override; otherwise use the latest canonical account observation",
     )
-    ap.add_argument("--submit", action="store_true")
+    ap.add_argument(
+        "--execute",
+        action="store_true",
+        help="publish targets to the selected owner; omission is a dry run",
+    )
     ap.add_argument(
         "--account-inbox-root",
         default=os.environ.get("ACCOUNT_INTENT_INBOX_ROOT", ""),
@@ -338,7 +333,7 @@ def main() -> int:
         "--account-health-max-age-seconds",
         type=float,
         default=30.0,
-        help="maximum age of the demo account owner's healthy capital observation",
+        help="maximum age of the selected account owner's healthy capital observation",
     )
     args = ap.parse_args()
 
@@ -370,8 +365,8 @@ def main() -> int:
     if not inbox_root.is_absolute():
         inbox_root = REPO / inbox_root
     account_route = require_account_route(
-        account_id="bybit-demo-unified",
-        environment="demo",
+        account_id=account_id_for_environment(args.execution_environment),
+        environment=args.execution_environment,
         account_root=account_root,
         inbox_root=inbox_root,
     )
@@ -386,7 +381,7 @@ def main() -> int:
         print(json.dumps({"status": "no_warmstart", "rows": len(warm_unit)}))
         # An ARMED run with no usable warm-start cannot hedge — fail the oneshot
         # so the watchdog pages; a dry-run stays a quiet no-op.
-        return 1 if args.submit else 0
+        return 1 if args.execute else 0
     warmstart_last = _warmstart_last_date(warmstart_path)
     warmstart_age_days = None if warmstart_last is None else (datetime.now(timezone.utc).date() - warmstart_last).days
     warmstart_stale = warmstart_age_days is None or warmstart_age_days > MAX_WARMSTART_STALE_DAYS
@@ -404,7 +399,7 @@ def main() -> int:
     try:
         owner_health = require_recent_account_owner_health(
             account_root,
-            environment="demo",
+            environment=args.execution_environment,
             max_age_ns=int(args.account_health_max_age_seconds * 1_000_000_000),
             expected_account_id=account_route.account_id,
         )
@@ -429,8 +424,9 @@ def main() -> int:
     out: dict = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "venue": args.venue,
+        "execution_environment": args.execution_environment,
         "hedge_mode": "2f" if use_2f else "btc",
-        "mode": "publish" if args.submit else "dry_run",
+        "mode": "target_publish" if args.execute else "dry_run",
         "btc_price": btc_price,
         "eth_price": eth_price,
         "equity_usdt": equity,
@@ -543,26 +539,26 @@ def main() -> int:
         ]
 
     if health_error:
-        out["status"] = "submit_blocked_account_owner_unhealthy" if args.submit else "dry_run_account_owner_unhealthy"
+        out["status"] = "execute_blocked_account_owner_unhealthy" if args.execute else "dry_run_account_owner_unhealthy"
         out["error"] = health_error
     elif equity_source == "unavailable":
-        out["status"] = "submit_blocked_equity_unavailable" if args.submit else "dry_run_equity_unavailable"
+        out["status"] = "execute_blocked_equity_unavailable" if args.execute else "dry_run_equity_unavailable"
         out["error"] = "canonical account equity is unavailable"
     elif btc_price <= 0.0:
         # No BTC price (kline store missing/unreadable and no --btc-price): the plan
         # is necessarily None. Without an explicit status this read as a healthy
-        # "dry_run_ok"/"submit_no_action" no-op — silently masking a dead input.
-        out["status"] = "submit_blocked_btc_price_unavailable" if args.submit else "dry_run_btc_price_unavailable"
-    elif args.submit and not live_book.gross_short_frac_known:
+        # "dry_run_ok"/"execute_no_action" no-op — silently masking a dead input.
+        out["status"] = "execute_blocked_btc_price_unavailable" if args.execute else "dry_run_btc_price_unavailable"
+    elif args.execute and not live_book.gross_short_frac_known:
         # The 0.5 gross-short default is a sizing REFERENCE, not an observation —
         # never submit orders sized off it (it would buy a hedge against a book
         # whose exposure nobody measured).
-        out["status"] = "submit_blocked_book_state_unknown"
-    elif args.submit and use_2f and eth_price <= 0.0:
+        out["status"] = "execute_blocked_book_state_unknown"
+    elif args.execute and use_2f and eth_price <= 0.0:
         # In 2f mode a dead ETH price silently drops the ETH leg; an armed run must
         # surface it instead of part-hedging.
-        out["status"] = "submit_blocked_eth_price_unavailable"
-    elif args.submit:
+        out["status"] = "execute_blocked_eth_price_unavailable"
+    elif args.execute:
         # Kernel route: publish absolute targets, including no-change targets, so
         # convergence never depends on the sleeve's compatibility ledger. Do
         # not refresh a target that is already pending when the planner sees no
@@ -575,18 +571,11 @@ def main() -> int:
         pending_unchanged_targets = [
             target
             for target in desired_targets
-            if target.symbol.upper() in pending_hedge_symbols
-            and target.plan is None
+            if target.symbol.upper() in pending_hedge_symbols and target.plan is None
         ]
-        refreshable_targets = [
-            target
-            for target in desired_targets
-            if target not in pending_unchanged_targets
-        ]
+        refreshable_targets = [target for target in desired_targets if target not in pending_unchanged_targets]
         if pending_unchanged_targets:
-            out["pending_target_refresh_skips"] = sorted(
-                target.symbol.upper() for target in pending_unchanged_targets
-            )
+            out["pending_target_refresh_skips"] = sorted(target.symbol.upper() for target in pending_unchanged_targets)
         if warmstart_stale:
             blocked_add_legs = [plan for plan in plans if not plan.reduce_only]
             submittable_targets = [
@@ -617,7 +606,7 @@ def main() -> int:
                 out["status"] = "target_queued_partial_blocked_stale_warmstart" if blocked_add_legs else "target_queued"
         else:
             out["status"] = (
-                "submit_blocked_stale_warmstart" if blocked_add_legs or warmstart_stale else "submit_no_action"
+                "execute_blocked_stale_warmstart" if blocked_add_legs or warmstart_stale else "execute_no_action"
             )
     elif use_2f and eth_price <= 0.0:
         out["status"] = "dry_run_eth_price_unavailable"
@@ -628,16 +617,16 @@ def main() -> int:
     print(json.dumps(out))
     # A blocked or failed publish makes the oneshot fail so liveness can page.
     failing_statuses = {
-        "submit_blocked_equity_unavailable",
-        "submit_blocked_account_owner_unhealthy",
-        "submit_blocked_btc_price_unavailable",
-        "submit_blocked_book_state_unknown",
-        "submit_blocked_eth_price_unavailable",
-        "submit_blocked_stale_warmstart",
+        "execute_blocked_equity_unavailable",
+        "execute_blocked_account_owner_unhealthy",
+        "execute_blocked_btc_price_unavailable",
+        "execute_blocked_book_state_unknown",
+        "execute_blocked_eth_price_unavailable",
+        "execute_blocked_stale_warmstart",
         "target_queued_partial_blocked_stale_warmstart",
         "target_publish_failed",
     }
-    return 1 if args.submit and out["status"] in failing_statuses else 0
+    return 1 if args.execute and out["status"] in failing_statuses else 0
 
 
 if __name__ == "__main__":

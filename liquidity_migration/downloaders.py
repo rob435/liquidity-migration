@@ -13,7 +13,7 @@ import polars as pl
 from .archive import ArchiveFileNotFoundError, download_public_trade_archive, read_public_trade_archive
 from .archive_manifest import previous_kline_close  # audit2c: seed densify carry-forward like the canonical PIT builder
 from .binance import BinanceDataError, BinanceUSDMData, _recent_history_start
-from .bybit import BybitMarketData
+from .bybit_market_data import BybitMarketData
 from .config import ResearchConfig
 from .ingestion import aggregate_trade_klines_1m, densify_trade_klines_1m, normalize_funding_history
 from .storage import dataset_path, write_dataset

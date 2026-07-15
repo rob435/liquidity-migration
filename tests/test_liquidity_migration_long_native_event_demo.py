@@ -51,6 +51,7 @@ from liquidity_migration.long_native_event_demo import (
     run_long_native_demo_cycle,
     target_long_order_notional_pct_equity,
 )
+from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
 
 
 def test_v11a_config_matches_research_run() -> None:
@@ -1163,6 +1164,7 @@ def _write_owner_health(
 ) -> None:
     from liquidity_migration.account_kernel import read_account_journal
     from liquidity_migration.account_owner_health import (
+        TEST_ACCOUNT_OWNER_INVOCATION_ID,
         AccountOwnerHealth,
         write_account_owner_health,
     )
@@ -1187,6 +1189,7 @@ def _write_owner_health(
             equity_usdt=equity_usdt,
             available_margin_usdt=equity_usdt,
             requested_symbols_ready=True,
+            invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
         ),
     )
 
@@ -1213,6 +1216,9 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
 
     payload = _run_cycle(tmp_path / "long", demo)
 
+    assert type(payload) is PublishedTargetCyclePayload
+    assert payload.publication.entry_request is not None
+    assert payload.route.environment == "demo"
     assert payload["cycle"]["account_target_route"] is True
     assert payload["cycle"]["entry_targets_queued"] == 1
     assert payload["cycle"]["equity_usdt"] == pytest.approx(12_345.0)

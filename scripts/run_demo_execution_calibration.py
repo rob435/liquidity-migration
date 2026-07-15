@@ -15,11 +15,21 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
-from liquidity_migration.account_kernel import read_account_journal
-from liquidity_migration.account_route import require_account_route
-from liquidity_migration.account_service_runner import load_demo_rules
-from liquidity_migration.deterministic_serialization import canonical_json
-from liquidity_migration.execution_calibration_driver import (
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from liquidity_migration.account_kernel import (  # noqa: E402
+    read_account_journal,
+    reduce_account_events,
+)
+from liquidity_migration.account_route import require_account_route  # noqa: E402
+from liquidity_migration.account_execution_config import load_demo_rules  # noqa: E402
+from liquidity_migration.artifact_snapshot import (  # noqa: E402
+    StableFileSnapshot,
+    read_stable_file,
+)
+from liquidity_migration.deterministic_serialization import canonical_json  # noqa: E402
+from liquidity_migration.execution_calibration_driver import (  # noqa: E402
     CalibrationPlan,
     CalibrationStepResult,
     DemoExecutionCalibrationDriver,
@@ -30,6 +40,9 @@ from liquidity_migration.execution_calibration_driver import (
     REGISTERED_ROUND_TRIPS_PER_SYMBOL,
     require_quantization_safe_minimum_buffer,
     require_registered_calibration_plan,
+)
+from liquidity_migration.strategy_event_clock import (  # noqa: E402
+    load_strategy_event_tape_bytes,
 )
 
 
@@ -89,7 +102,38 @@ def _atomic_receipt(path: Path, payload: Mapping[str, Any]) -> Path:
     return output
 
 
-def _journal_head(account_root: str, account_id: str) -> dict[str, object]:
+def _snapshot_identity(
+    snapshot: StableFileSnapshot | None,
+) -> tuple[object, ...] | None:
+    if snapshot is None:
+        return None
+    return (
+        str(snapshot.path),
+        snapshot.device,
+        snapshot.inode,
+        snapshot.metadata.st_mode,
+        snapshot.uid,
+        snapshot.nlink,
+        snapshot.size,
+        snapshot.mtime_ns,
+        snapshot.metadata.st_ctime_ns,
+        snapshot.sha256,
+    )
+
+
+def _event_tape_snapshot(path: Path) -> StableFileSnapshot | None:
+    if not os.path.lexists(path):
+        return None
+    return read_stable_file(
+        path,
+        label="demo calibration strategy event tape",
+        require_mode=0o600,
+        require_owner=True,
+        require_single_link=True,
+    )
+
+
+def _journal_head(account_root: str, account_id: str) -> tuple[dict[str, object], bool]:
     events = read_account_journal(account_root, verify=True)
     if events and events[-1].account_id != account_id:
         raise RuntimeError("account journal id does not match calibration account")
@@ -97,12 +141,22 @@ def _journal_head(account_root: str, account_id: str) -> dict[str, object]:
     for event in events:
         digest.update(canonical_json(event.to_dict()))
         digest.update(b"\n")
-    return {
+    state = reduce_account_events(events)
+    flat = (
+        all(abs(value) <= 1e-12 for value in state.aggregate_targets.values())
+        and all(
+            abs(position.signed_qty) <= 1e-12
+            for position in state.positions.values()
+        )
+        and not state.working_order_ids
+        and not state.component_targets
+    )
+    return ({
         "event_count": len(events),
         "sequence": events[-1].sequence if events else 0,
         "state_hash": events[-1].state_hash if events else "0" * 64,
         "normalized_sha256": digest.hexdigest(),
-    }
+    }, flat)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -127,7 +181,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--funding-symbol", default="")
     parser.add_argument("--funding-close-not-before-ms", type=int, default=0)
     parser.add_argument("--transition-timeout-seconds", type=float, default=90.0)
-    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--confirm-demo-calibration", action="store_true")
     return parser
 
@@ -144,14 +197,31 @@ def main(argv: list[str] | None = None) -> int:
         "BYBIT_REAL_API_SECRET",
     )):
         parser.error("calibration target producer must not receive private API credentials")
-    if os.environ.get("REAL_MONEY", "").strip().lower() in {"1", "true", "yes", "on"}:
-        parser.error("calibration target producer refuses REAL_MONEY")
+    real_money = os.environ.get("REAL_MONEY")
+    if real_money is not None and real_money.strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        parser.error("calibration target producer requires REAL_MONEY unset or explicitly false")
     try:
         marker_stat = CAPTURE_MARKER.lstat()
     except FileNotFoundError:
         parser.error(f"capture marker is missing: {CAPTURE_MARKER}")
     if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_uid != os.geteuid():
         parser.error("capture marker must be a regular file owned by the runner")
+    capture_marker_identity = (
+        marker_stat.st_dev,
+        marker_stat.st_ino,
+        marker_stat.st_mode,
+        marker_stat.st_uid,
+        marker_stat.st_nlink,
+        marker_stat.st_size,
+        marker_stat.st_mtime_ns,
+        marker_stat.st_ctime_ns,
+    )
 
     expected_commit = args.expected_commit.lower()
     if len(expected_commit) != 40 or any(character not in "0123456789abcdef" for character in expected_commit):
@@ -186,10 +256,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         require_registered_calibration_plan(plan)
         rules_path = Path(args.demo_rules_file).expanduser().resolve(strict=True)
-        rules_bytes = rules_path.read_bytes()
-        rules = load_demo_rules(rules_path, max_age_seconds=7 * 24 * 3_600)
-        if rules_path.read_bytes() != rules_bytes:
-            raise ValueError("demo-rule receipt changed while calibration was binding it")
+        rules_snapshot = read_stable_file(
+            rules_path,
+            label="demo calibration rule receipt",
+            require_mode=0o600,
+            require_owner=True,
+            require_single_link=True,
+        )
+        rules_bytes = rules_snapshot.data
+        rules = load_demo_rules(
+            rules_path,
+            max_age_seconds=7 * 24 * 3_600,
+            snapshot=rules_snapshot,
+        )
         rules_payload = json.loads(rules_bytes)
         if not isinstance(rules_payload, Mapping):
             raise ValueError("demo-rule receipt must be an object")
@@ -210,9 +289,17 @@ def main(argv: list[str] | None = None) -> int:
             Path(route.account_root) / "account_route.json",
             Path(route.inbox_root) / "account_route.json",
         )
-        route_manifest_hashes = [
-            hashlib.sha256(path.read_bytes()).hexdigest() for path in route_manifest_paths
-        ]
+        route_manifest_snapshots = tuple(
+            read_stable_file(
+                path,
+                label="demo calibration account route manifest",
+                require_mode=0o600,
+                require_owner=True,
+                require_single_link=True,
+            )
+            for path in route_manifest_paths
+        )
+        route_manifest_hashes = [snapshot.sha256 for snapshot in route_manifest_snapshots]
         if len(set(route_manifest_hashes)) != 1:
             raise ValueError("account route manifest mirrors differ on disk")
     except (OSError, RuntimeError, ValueError, KeyError) as exc:
@@ -223,9 +310,9 @@ def main(argv: list[str] | None = None) -> int:
     output = Path(args.output).expanduser()
     if not event_tape.is_absolute() or not output.is_absolute():
         parser.error("event tape and calibration receipt paths must be absolute")
-    if event_tape.exists() and not args.resume:
-        parser.error("event tape already exists; --resume is required")
-    if output.exists():
+    if os.path.lexists(event_tape):
+        parser.error("event tape already exists; preserve the failed attempt and register a new epoch")
+    if os.path.lexists(output):
         parser.error("calibration receipt path already exists; preserve it and choose a new output")
 
     started_ns = time.time_ns()
@@ -246,21 +333,23 @@ def main(argv: list[str] | None = None) -> int:
     error = ""
     results: tuple[CalibrationStepResult, ...] = ()
     try:
-        results = driver.run(plan, resume=args.resume)
+        results = driver.run(plan, resume=False)
         status = "passed"
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         error = f"{type(exc).__name__}: {exc}"
         print(f"demo calibration failed: {error}", file=sys.stderr, flush=True)
 
     try:
-        journal_head = _journal_head(args.account_root, args.account_id)
-        final_state = driver.kernel.state()
-        account_flat = all(
-            abs(value) <= 1e-12 for value in final_state.aggregate_targets.values()
-        ) and all(
-            abs(position.signed_qty) <= 1e-12
-            for position in final_state.positions.values()
-        ) and not final_state.working_order_ids and not final_state.component_targets
+        journal_head, account_flat = _journal_head(args.account_root, args.account_id)
+        event_tape_snapshot = _event_tape_snapshot(event_tape)
+        event_tape_bytes = (
+            b"" if event_tape_snapshot is None else event_tape_snapshot.data
+        )
+        _events, event_tape_hash = load_strategy_event_tape_bytes(
+            event_tape_bytes
+        )
+        if event_tape_hash != driver.recorder.tape_hash:
+            raise RuntimeError("demo calibration event tape differs from the recorder head")
         receipt_payload = {
             "schema_version": 1,
             "purpose": "bounded_demo_market_order_execution_calibration",
@@ -277,16 +366,63 @@ def main(argv: list[str] | None = None) -> int:
             "demo_rules_file_sha256": hashlib.sha256(rules_bytes).hexdigest(),
             "demo_rules_artifact_sha256": str(rules_payload.get("artifact_sha256") or ""),
             "event_tape_path": str(event_tape.resolve()),
-            "event_tape_sha256": hashlib.sha256(
-                event_tape.read_bytes() if event_tape.exists() else b""
-            ).hexdigest(),
-            "event_tape_hash": driver.recorder.tape_hash,
+            "event_tape_sha256": hashlib.sha256(event_tape_bytes).hexdigest(),
+            "event_tape_hash": event_tape_hash,
             "step_results": [asdict(result) for result in results],
             "journal_head": journal_head,
             "account_flat_after": account_flat,
             "actual_long_continuous_strategy_parity": False,
             "deployment_authority": False,
         }
+        final_commit = _git_output("rev-parse", "HEAD")
+        final_dirty = _git_output("status", "--porcelain", "--untracked-files=all")
+        final_rules_snapshot = read_stable_file(
+            rules_path,
+            label="demo calibration rule receipt",
+            require_mode=0o600,
+            require_owner=True,
+            require_single_link=True,
+        )
+        final_route_snapshots = tuple(
+            read_stable_file(
+                path,
+                label="demo calibration account route manifest",
+                require_mode=0o600,
+                require_owner=True,
+                require_single_link=True,
+            )
+            for path in route_manifest_paths
+        )
+        final_event_tape_snapshot = _event_tape_snapshot(event_tape)
+        final_marker_stat = CAPTURE_MARKER.lstat()
+        final_capture_marker_identity = (
+            final_marker_stat.st_dev,
+            final_marker_stat.st_ino,
+            final_marker_stat.st_mode,
+            final_marker_stat.st_uid,
+            final_marker_stat.st_nlink,
+            final_marker_stat.st_size,
+            final_marker_stat.st_mtime_ns,
+            final_marker_stat.st_ctime_ns,
+        )
+        final_journal_head, final_account_flat = _journal_head(
+            args.account_root,
+            args.account_id,
+        )
+        if (
+            final_commit != actual_commit
+            or final_dirty
+            or final_capture_marker_identity != capture_marker_identity
+            or _snapshot_identity(final_rules_snapshot)
+            != _snapshot_identity(rules_snapshot)
+            or tuple(map(_snapshot_identity, final_route_snapshots))
+            != tuple(map(_snapshot_identity, route_manifest_snapshots))
+            or _snapshot_identity(final_event_tape_snapshot)
+            != _snapshot_identity(event_tape_snapshot)
+            or final_journal_head != journal_head
+            or final_account_flat is not account_flat
+        ):
+            raise RuntimeError("demo calibration source or final account boundary changed before receipt publication")
         receipt_path = _atomic_receipt(output, receipt_payload)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"cannot write demo calibration receipt: {exc}", file=sys.stderr)

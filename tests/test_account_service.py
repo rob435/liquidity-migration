@@ -24,11 +24,11 @@ from liquidity_migration.account_service import (
     SleeveAdapterKind,
 )
 from liquidity_migration.account_intent_client import completed_expired_entry_attempt_keys
-from liquidity_migration.bybit import BybitSubmissionUncertain
+from liquidity_migration.bybit_errors import BybitSubmissionUncertain
+from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.execution_adapters import (
     BookLevel,
-    BybitDemoExecutionAdapter,
     ExecutionObservation,
     ExecutionObservationType,
     ExecutionTwinConfig,
@@ -1242,6 +1242,92 @@ def test_backlogged_entry_is_never_opened_when_a_later_target_is_flat(tmp_path: 
     assert stale["receipt"]["disposition"] == "superseded"
 
 
+def test_strict_expected_request_processes_only_one_arrival_transition(
+    tmp_path: Path,
+) -> None:
+    adapter = CountingTwin()
+    service = _service(tmp_path / "account", adapter)
+    inbox = _inbox(tmp_path)
+    older = _request(
+        _route(tmp_path),
+        request_id="strict-older-entry",
+        batch_id="strict-older-entry",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    )
+    later_flat = _request(
+        _route(tmp_path),
+        request_id="strict-later-flat",
+        batch_id="strict-later-flat",
+        kind=SleeveAdapterKind.LONG,
+        notional=0.0,
+        created_ts_ns=NOW_NS + 1,
+    )
+    inbox.submit(older)
+    inbox.submit(later_flat)
+
+    first = service.run_once(inbox, expected_request_id=older.request_id)
+
+    assert first is not None and first.request_id == older.request_id
+    assert first.disposition == "superseded"
+    assert inbox.peek_next() == later_flat
+    assert adapter.submit_calls == 0
+
+    second = service.run_once(inbox, expected_request_id=later_flat.request_id)
+    assert second is not None and second.request_id == later_flat.request_id
+    assert adapter.submit_calls == 0
+
+
+def test_strict_expected_request_releases_a_raced_later_head(tmp_path: Path) -> None:
+    adapter = CountingTwin()
+    service = _service(tmp_path / "account", adapter)
+    inbox = _inbox(tmp_path)
+    first = _request(
+        _route(tmp_path),
+        request_id="strict-first",
+        batch_id="strict-first",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    )
+    later = _request(
+        _route(tmp_path),
+        request_id="strict-later",
+        batch_id="strict-later",
+        kind=SleeveAdapterKind.CONTINUOUS,
+        notional=-20.0,
+    )
+    inbox.submit(first)
+    inbox.submit(later)
+
+    receipt = service.run_once(inbox, expected_request_id=later.request_id)
+
+    assert receipt is None
+    assert inbox.peek_next() == first
+    assert adapter.submit_calls == 0
+
+
+def test_empty_readiness_observation_cannot_claim_a_new_raced_request(
+    tmp_path: Path,
+) -> None:
+    adapter = CountingTwin()
+    service = _service(tmp_path / "account", adapter)
+    inbox = _inbox(tmp_path)
+    raced = _request(
+        _route(tmp_path),
+        request_id="arrived-after-empty-readiness",
+        batch_id="arrived-after-empty-readiness",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    )
+    inbox.submit(raced)
+
+    receipt = service.run_once(inbox, expected_request_id="")
+
+    assert receipt is None
+    assert inbox.peek_next() == raced
+    assert adapter.submit_calls == 0
+
+
 def test_flat_safety_transition_is_not_superseded_by_later_reentry(tmp_path: Path) -> None:
     inbox = _inbox(tmp_path)
     flat = _request(_route(tmp_path),
@@ -1581,6 +1667,34 @@ def test_inbox_fails_closed_when_pending_request_loses_arrival_sidecar(
 
     with pytest.raises(RuntimeError, match="lacks a durable arrival sequence"):
         inbox.claim_next()
+
+
+def test_durable_request_evidence_reads_one_regular_file_snapshot(
+    tmp_path: Path,
+) -> None:
+    inbox = _inbox(tmp_path)
+    request = _request(
+        _route(tmp_path),
+        request_id="durable-snapshot",
+        batch_id="durable-snapshot",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    )
+    published = inbox.submit(request)
+
+    evidence = inbox.require_durable_request(request)
+
+    assert evidence.path == published.absolute()
+    assert evidence.queue_state == "pending"
+    assert evidence.arrival_sequence == 1
+
+    symlink_target = tmp_path / "replacement-request.json"
+    symlink_target.write_bytes(published.read_bytes())
+    published.unlink()
+    published.symlink_to(symlink_target)
+
+    with pytest.raises(RuntimeError, match="is unreadable"):
+        inbox.require_durable_request(request)
 
 
 def test_queued_replacement_does_not_cross_an_outstanding_working_order(tmp_path: Path) -> None:

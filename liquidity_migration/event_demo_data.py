@@ -7,6 +7,7 @@ both environments; the selected account owner is a separate route.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -19,7 +20,15 @@ from typing import Any, Protocol
 
 import polars as pl
 
-from .bybit import BybitMarketData, BybitRestRateLimiter
+from .account_candidate_universe import (
+    FrozenCandidateUniverse,
+    continuous_profile_universe_inputs,
+    enforce_frozen_candidate_frames,
+    load_candidate_universe,
+    require_profile_binding,
+)
+from .bybit_market_data import BybitMarketData, BybitRestRateLimiter
+from .artifact_snapshot import read_stable_file
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
 from .storage import dataset_path, read_dataset, write_dataset
@@ -188,10 +197,34 @@ def _read_demo_instruments_cache(cache_root: Path) -> tuple[pl.DataFrame | None,
     if not parquet_path.exists() or not metadata_path.exists():
         return None, 0
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata_snapshot = read_stable_file(
+            metadata_path,
+            label="demo instruments cache metadata",
+            require_single_link=False,
+        )
+        metadata = json.loads(metadata_snapshot.data)
+        if not isinstance(metadata, dict):
+            return None, 0
         fetched_ts_ms = int(metadata.get("fetched_ts_ms", 0))
-        frame = pl.read_parquet(parquet_path)
-    except (OSError, json.JSONDecodeError, ValueError, TypeError, pl.exceptions.PolarsError):
+        parquet_snapshot = read_stable_file(
+            parquet_path,
+            label="demo instruments cache parquet",
+            require_single_link=False,
+        )
+        if (
+            set(metadata) != {"fetched_ts_ms", "parquet_sha256"}
+            or metadata.get("parquet_sha256") != parquet_snapshot.sha256
+        ):
+            return None, 0
+        frame = pl.read_parquet(io.BytesIO(parquet_snapshot.data))
+    except (
+        OSError,
+        RuntimeError,
+        json.JSONDecodeError,
+        ValueError,
+        TypeError,
+        pl.exceptions.PolarsError,
+    ):
         return None, 0
     if frame.is_empty():
         return None, 0
@@ -212,9 +245,23 @@ def _write_demo_instruments_cache(cache_root: Path, instruments: pl.DataFrame, f
     temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
         instruments.write_parquet(temp_parquet)
+        parquet_snapshot = read_stable_file(
+            temp_parquet,
+            label="staged demo instruments cache parquet",
+            require_single_link=False,
+        )
         # Parquet first, metadata (the commit marker) last — see the feature cache.
         temp_parquet.replace(parquet_path)
-        temp_metadata.write_text(json.dumps({"fetched_ts_ms": int(fetched_ts_ms)}, sort_keys=True), encoding="utf-8")
+        temp_metadata.write_text(
+            json.dumps(
+                {
+                    "fetched_ts_ms": int(fetched_ts_ms),
+                    "parquet_sha256": parquet_snapshot.sha256,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         temp_metadata.replace(metadata_path)
     except (OSError, pl.exceptions.PolarsError):
         temp_parquet.unlink(missing_ok=True)
@@ -291,6 +338,7 @@ def _resolve_cycle_universe(
     cycle_now_ms: int,
     ticker_cache: Any | None,
     state_cache_stale_seconds: float,
+    frozen_candidate_universe: FrozenCandidateUniverse | None = None,
 ) -> tuple[pl.DataFrame, list[str], pl.DataFrame, str]:
     """Resolve one fresh, public-only strategy universe."""
 
@@ -334,6 +382,28 @@ def _resolve_cycle_universe(
                 instruments.height,
                 tickers.height,
             )
+    candidate_path = str(getattr(demo, "candidate_universe_file", "") or "").strip()
+    if candidate_path:
+        frozen = frozen_candidate_universe or load_candidate_universe(candidate_path)
+        if frozen.path != Path(candidate_path).expanduser().absolute():
+            raise ValueError("CONT candidate-universe snapshot belongs to another path")
+        require_profile_binding(
+            frozen,
+            profile="continuous",
+            current_inputs=continuous_profile_universe_inputs(demo),
+        )
+        enforce_frozen_candidate_frames(
+            instruments,
+            tickers,
+            frozen,
+            snapshot_ts_ms=cycle_now_ms,
+            context="CONT cycle",
+        )
+        # Newly listed symbols may appear in the current public snapshot but
+        # cannot enter this bounded evidence epoch.
+        universe = universe.filter(pl.col("symbol").is_in(list(frozen.symbols)))
+    elif frozen_candidate_universe is not None:
+        raise ValueError("CONT received a frozen candidate universe without a configured path")
     symbols = universe["symbol"].to_list() if not universe.is_empty() else []
     if not symbols:
         raise RuntimeError("public market-data cycle found no tradable symbols")
@@ -624,14 +694,35 @@ def _read_demo_kline_compact_cache(
     if not parquet_path.exists() or not metadata_path.exists():
         return _empty_klines()
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        metadata_snapshot = read_stable_file(
+            metadata_path,
+            label="demo kline compact-cache metadata",
+            require_single_link=False,
+        )
+        metadata = json.loads(metadata_snapshot.data)
+    except (OSError, RuntimeError, json.JSONDecodeError, ValueError):
         return _empty_klines()
-    if metadata != _demo_kline_compact_metadata(symbols=symbols, start_ms=start_ms, end_ms=end_ms):
+    expected_metadata = _demo_kline_compact_metadata(
+        symbols=symbols,
+        start_ms=start_ms,
+        end_ms=end_ms,
+    )
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != set(expected_metadata) | {"parquet_sha256"}
+        or any(metadata.get(key) != value for key, value in expected_metadata.items())
+    ):
         return _empty_klines()
     try:
-        cached = pl.read_parquet(parquet_path)
-    except (OSError, pl.exceptions.PolarsError):
+        parquet_snapshot = read_stable_file(
+            parquet_path,
+            label="demo kline compact-cache parquet",
+            require_single_link=False,
+        )
+        if metadata.get("parquet_sha256") != parquet_snapshot.sha256:
+            return _empty_klines()
+        cached = pl.read_parquet(io.BytesIO(parquet_snapshot.data))
+    except (OSError, RuntimeError, ValueError, pl.exceptions.PolarsError):
         return _empty_klines()
     if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
         return _empty_klines()
@@ -655,7 +746,18 @@ def _write_demo_kline_compact_cache(
     temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
         output.write_parquet(temp_parquet)
-        temp_metadata.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+        parquet_snapshot = read_stable_file(
+            temp_parquet,
+            label="staged demo kline compact-cache parquet",
+            require_single_link=False,
+        )
+        temp_metadata.write_text(
+            json.dumps(
+                {**metadata, "parquet_sha256": parquet_snapshot.sha256},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         temp_parquet.replace(parquet_path)
         temp_metadata.replace(metadata_path)
     except (OSError, pl.exceptions.PolarsError):
@@ -841,14 +943,30 @@ def _read_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any]) -> p
     if not parquet_path.exists() or not metadata_path.exists():
         return None
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        metadata_snapshot = read_stable_file(
+            metadata_path,
+            label="demo feature-cache metadata",
+            require_single_link=False,
+        )
+        metadata = json.loads(metadata_snapshot.data)
+    except (OSError, RuntimeError, json.JSONDecodeError, ValueError):
         return None
-    if metadata != fingerprint:
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != set(fingerprint) | {"parquet_sha256"}
+        or any(metadata.get(key) != value for key, value in fingerprint.items())
+    ):
         return None
     try:
-        return pl.read_parquet(parquet_path)
-    except (OSError, pl.exceptions.PolarsError):
+        parquet_snapshot = read_stable_file(
+            parquet_path,
+            label="demo feature-cache parquet",
+            require_single_link=False,
+        )
+        if metadata.get("parquet_sha256") != parquet_snapshot.sha256:
+            return None
+        return pl.read_parquet(io.BytesIO(parquet_snapshot.data))
+    except (OSError, RuntimeError, ValueError, pl.exceptions.PolarsError):
         return None
 
 def _write_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any], features: pl.DataFrame) -> None:
@@ -860,11 +978,22 @@ def _write_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any], fea
     temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
         features.write_parquet(temp_parquet)
+        parquet_snapshot = read_stable_file(
+            temp_parquet,
+            label="staged demo feature-cache parquet",
+            require_single_link=False,
+        )
         # Replace the parquet first, then the metadata: the metadata file is the
         # commit marker. A crash between the two replaces leaves stale metadata
         # paired with fresh data -> next read mismatches -> safe recompute.
         temp_parquet.replace(parquet_path)
-        temp_metadata.write_text(json.dumps(fingerprint, sort_keys=True), encoding="utf-8")
+        temp_metadata.write_text(
+            json.dumps(
+                {**fingerprint, "parquet_sha256": parquet_snapshot.sha256},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         temp_metadata.replace(metadata_path)
     except (OSError, pl.exceptions.PolarsError):
         temp_parquet.unlink(missing_ok=True)

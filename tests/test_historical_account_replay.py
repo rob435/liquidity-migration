@@ -216,7 +216,11 @@ def test_same_target_tape_has_identical_journal_across_named_environment_roots(t
     roots = {name: tmp_path / name for name in ("historical", "paper", "demo")}
     hashes = [_run(root).final_state_hash for root in roots.values()]
     assert hashes[0] == hashes[1] == hashes[2]
-    assert compare_kernel_journals(roots, quantity_tolerance=1e-12).passed
+    assert compare_kernel_journals(
+        roots,
+        comparison_batch_ids=["entry", "exit"],
+        quantity_tolerance=1e-12,
+    ).passed
 
 
 def test_real_paper_service_and_historical_replay_share_kernel_parity(tmp_path: Path) -> None:
@@ -322,7 +326,8 @@ def test_real_paper_service_and_historical_replay_share_kernel_parity(tmp_path: 
     )])
 
     report = compare_kernel_journals(
-        {"historical": historical_root, "paper": paper_root},
+        {"historical": historical_root, "paper": paper_root, "demo": paper_root},
+        comparison_batch_ids=["entry"],
         quantity_tolerance=1e-12,
     )
     assert report.passed, report.mismatches

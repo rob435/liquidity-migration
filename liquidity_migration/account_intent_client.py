@@ -143,21 +143,14 @@ class AccountTargetPublisher:
         if created <= 0:
             raise ValueError("created_ts_ns must be positive")
         normalized = tuple(intents)
-        request_seed = {
-            "batch_id": clean_batch,
-            "created_ts_ns": created,
-            "route_id": self.route.route_id,
-            "account_id": self.route.account_id,
-            "environment": self.route.environment,
-            "intents": [
-                {
-                    "adapter_kind": SleeveAdapterKind(item.adapter_kind).value,
-                    "intent": asdict(item.intent),
-                }
-                for item in normalized
-            ],
-        }
-        request_id = "target-" + hashlib.sha256(canonical_json(request_seed)).hexdigest()
+        request_id = account_target_request_id(
+            batch_id=clean_batch,
+            created_ts_ns=created,
+            route_id=self.route.route_id,
+            account_id=self.route.account_id,
+            environment=self.route.environment,
+            intents=normalized,
+        )
         request = AccountTargetRequest(
             request_id=request_id,
             batch_id=clean_batch,
@@ -168,6 +161,34 @@ class AccountTargetPublisher:
             intents=normalized,
         )
         return PublishedTargetRequest(request=request, path=self.inbox.submit(request))
+
+
+def account_target_request_id(
+    *,
+    batch_id: str,
+    created_ts_ns: int,
+    route_id: str,
+    account_id: str,
+    environment: str,
+    intents: Sequence[RequestedIntent],
+) -> str:
+    """Derive the immutable request id shared by producer and evidence checks."""
+
+    request_seed = {
+        "batch_id": batch_id,
+        "created_ts_ns": created_ts_ns,
+        "route_id": route_id,
+        "account_id": account_id,
+        "environment": environment,
+        "intents": [
+            {
+                "adapter_kind": SleeveAdapterKind(item.adapter_kind).value,
+                "intent": asdict(item.intent),
+            }
+            for item in intents
+        ],
+    }
+    return "target-" + hashlib.sha256(canonical_json(request_seed)).hexdigest()
 
 
 def unresolved_target_snapshot(

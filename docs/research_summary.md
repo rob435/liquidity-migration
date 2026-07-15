@@ -263,10 +263,42 @@ slippage estimate and not deployment acceptance. Prospective V7 excludes all
 three pilots, keeps every sample size and numerical decision rule unchanged,
 and republishes health for each journal-head change without spending extra
 wallet REST calls on journal-only refreshes. Exact-head validation is not
-relaxed. Even a passing V7 would open only execution-twin calibration and paper
-collection; actual
-LONG/CONTINUOUS tapes, deterministic replay comparison, venue accounting,
-funding, final flatness, and cutover authorization remain separate gates.
+relaxed. Even a passing V7 would supply only the frozen training calibration
+needed for a fresh holdout and an owner-only paper readiness check. Paper
+producers remain stopped; historical and paper comparison is an offline replay
+of the immutable natural demo target/account inputs. Actual LONG/CONTINUOUS
+tapes, the fixed 120-hour sufficiency floor, out-of-sample twin drift,
+deterministic replay comparison, venue accounting, funding, final flatness, and
+cutover authorization remain separate gates.
+
+The local candidate now contains source paths for exact-candidate freezing,
+natural runtime/config binding, periodic clock evidence, deterministic replay,
+structural parity, sufficiency, execution-twin drift, stopped-source sealing,
+fresh deployment roots, and authority-bound startup verification. The current
+provenance contracts are target-replay manifest v2, event parity v3,
+captured-account replay v3, comparison scope v3, kernel receipt v4, natural
+sufficiency v3, and authority aggregate v4. The aggregate reconstructs exact
+stopped-tree path/hash membership, reopens the dependency chain, and checks
+derived-output separation; the former generic provenance implementation blocker
+is therefore resolved in source.
+
+This is implementation progress, not a result: no clean exact-candidate CI
+receipt, passing V7 or partial-fill gate, second reset, owner-first readiness
+pair, 120-hour natural tape, venue-accounting/final-flatness receipt, stopped
+seal, replay result, fresh epoch, or deployment authorization exists. Local
+analysis timestamps enforce declared internal chronology rather than
+authenticate wall-clock execution. The target manifest assigns its completion
+time after replay construction; source reopening and exact dependency hashes,
+not that timestamp alone, carry the causal provenance. The required order is V7
+archive before the second reset; paper owner alone, then demo owner alone,
+before producers; the fixed 120-hour demo capture; venue accounting/final
+flatness and stopped sealing; only then offline replay and analysis in a
+separate derived-evidence root outside all 11 sealed paths and all 10 later
+deployment roots. The deterministic scheduling claim covers the registered
+active LONG/CONT natural market-order paths, not every timer, historical mode,
+or adverse-limit loop. No cutover branch may become `main`, deploy, or be
+deleted as housekeeping before every registered gate passes. The separate
+Strategy Overhaul master run on the big PC is neither an input nor an exception.
 
 ## Strategy-overhaul scout status
 

@@ -7,8 +7,40 @@ from types import SimpleNamespace
 
 import pytest
 
-from liquidity_migration import bybit
-from liquidity_migration.bybit import BybitKlineStreamPool
+from liquidity_migration import bybit, bybit_errors, bybit_market_data
+import liquidity_migration.account_owner_lease as owner_lease_module
+from liquidity_migration.account_owner_lease import (
+    DemoAccountIdentity,
+    DemoAccountMutationLease,
+)
+from liquidity_migration.bybit_market_data import BybitKlineStreamPool
+
+
+@pytest.fixture
+def held_demo_mutation_lease(tmp_path, monkeypatch):
+    leases: list[DemoAccountMutationLease] = []
+    monkeypatch.setattr(
+        owner_lease_module,
+        "canonical_demo_account_lease_path",
+        lambda identity: tmp_path / f"bybit-{identity.environment}-{identity.user_id}.lock",
+    )
+
+    def acquire(api_key: str) -> DemoAccountMutationLease:
+        identity = DemoAccountIdentity.from_api_key_info(
+            api_key=api_key,
+            api_key_info={
+                "apiKey": api_key,
+                "userID": 900_000 + len(leases),
+            },
+        )
+        lease = DemoAccountMutationLease(identity)
+        lease.acquire()
+        leases.append(lease)
+        return lease
+
+    yield acquire
+    for lease in reversed(leases):
+        lease.close()
 
 
 def test_pybit_rate_limit_log_filter_drops_10006_messages(caplog) -> None:
@@ -36,11 +68,30 @@ def test_bybit_market_data_constructs_with_slotted_client(monkeypatch) -> None:
         def __init__(self, *, testnet: bool):
             self.testnet = testnet
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
 
-    client = bybit.BybitMarketData(testnet=True)
+    client = bybit_market_data.BybitMarketData(testnet=True)
 
     assert client._client.testnet is True
+
+
+def test_bybit_market_data_can_select_public_demo_endpoint(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+
+    client = bybit_market_data.BybitMarketData(demo=True)
+
+    assert client._client.kwargs == {"testnet": False, "demo": True}
+
+
+def test_bybit_market_data_rejects_demo_testnet_mix(monkeypatch) -> None:
+    monkeypatch.setattr(bybit_market_data, "HTTP", object)
+
+    with pytest.raises(ValueError, match="both testnet and demo"):
+        bybit_market_data.BybitMarketData(testnet=True, demo=True)
 
 
 def test_bybit_private_client_constructs_demo_session(monkeypatch) -> None:
@@ -50,7 +101,7 @@ def test_bybit_private_client_constructs_demo_session(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
 
     assert client._client.kwargs["demo"] is True
     assert client._client.kwargs["api_key"] == "key"
@@ -80,7 +131,7 @@ def test_get_funding_settlements_follows_pagination_cursor(monkeypatch) -> None:
             return pages[params.get("cursor")]
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
 
     rows = client.get_funding_settlements(start_time_ms=1_000, end_time_ms=2_000)
 
@@ -105,7 +156,7 @@ def test_strict_accounting_queries_reject_malformed_payloads(monkeypatch) -> Non
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
     client = bybit.BybitPrivateClient(
-        api_key="key", api_secret="secret", demo=True, account_execution_owner=True
+        api_key="key", api_secret="secret", demo=True
     )
 
     with pytest.raises(bybit.BybitDataError, match="invalid result list"):
@@ -141,7 +192,7 @@ def test_get_closed_pnl_follows_pagination_cursor(monkeypatch) -> None:
             return pages[params.get("cursor")]
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
 
     rows = client.get_closed_pnl(symbol="FOOUSDT")
 
@@ -168,9 +219,9 @@ def test_bybit_public_trade_stream_subscribes_symbols(monkeypatch) -> None:
         def exit(self):
             self.closed = True
 
-    monkeypatch.setattr(bybit, "WebSocket", FakeWebSocket)
+    monkeypatch.setattr(bybit_market_data, "WebSocket", FakeWebSocket)
 
-    client = bybit.BybitPublicTradeStream(testnet=True)
+    client = bybit_market_data.BybitPublicTradeStream(testnet=True)
     callback = object()
     client.subscribe_public_trades(["BTCUSDT", "ETHUSDT"], callback)
     client.close()
@@ -193,9 +244,9 @@ def test_bybit_public_ticker_stream_subscribes_symbols(monkeypatch) -> None:
         def exit(self):
             self.closed = True
 
-    monkeypatch.setattr(bybit, "WebSocket", FakeWebSocket)
+    monkeypatch.setattr(bybit_market_data, "WebSocket", FakeWebSocket)
 
-    client = bybit.BybitPublicTickerStream(testnet=True, demo=True)
+    client = bybit_market_data.BybitPublicTickerStream(testnet=True, demo=True)
     callback = object()
     client.subscribe_tickers(["BTCUSDT", "ETHUSDT"], callback)
     client.close()
@@ -262,7 +313,7 @@ def test_bybit_pybit_ping_timer_patch_uses_daemon_timer(monkeypatch) -> None:
     manager._agc_ping_timer.cancel()
 
 
-def test_resolve_private_credentials_toggle(monkeypatch) -> None:
+def test_resolve_demo_credentials_has_no_mainnet_branch(monkeypatch) -> None:
     monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
     monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
     monkeypatch.setenv("BYBIT_REAL_API_KEY", "real-k")
@@ -271,24 +322,25 @@ def test_resolve_private_credentials_toggle(monkeypatch) -> None:
     # No toggle set -> demo is the default.
     monkeypatch.delenv("DEMO", raising=False)
     monkeypatch.delenv("REAL_MONEY", raising=False)
-    assert bybit.resolve_private_credentials() == ("demo-k", "demo-s", True)
+    assert bybit.resolve_demo_credentials() == ("demo-k", "demo-s")
 
     # DEMO=true -> demo account.
     monkeypatch.setenv("DEMO", "true")
-    assert bybit.resolve_private_credentials() == ("demo-k", "demo-s", True)
+    assert bybit.resolve_demo_credentials() == ("demo-k", "demo-s")
 
-    # REAL_MONEY=true -> mainnet account.
+    # A stale real-money selection fails closed; real credentials are never read.
     monkeypatch.delenv("DEMO", raising=False)
     monkeypatch.setenv("REAL_MONEY", "true")
-    assert bybit.resolve_private_credentials() == ("real-k", "real-s", False)
-
-    # Both true is a contradiction and raises.
-    monkeypatch.setenv("DEMO", "true")
-    with pytest.raises(RuntimeError, match="both set true"):
-        bybit.resolve_private_credentials()
+    with pytest.raises(RuntimeError, match="demo/paper only"):
+        bybit.resolve_demo_credentials()
 
 
-def test_bybit_private_client_accepts_mainnet(monkeypatch) -> None:
+@pytest.mark.parametrize(("testnet", "demo"), [(False, False), (True, True)])
+def test_bybit_private_client_rejects_non_api_demo_realms(
+    monkeypatch,
+    testnet: bool,
+    demo: bool,
+) -> None:
     constructed: dict = {}
 
     class FakeHTTP:
@@ -296,8 +348,32 @@ def test_bybit_private_client_accepts_mainnet(monkeypatch) -> None:
             constructed.update(kwargs)
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False, account_execution_owner=True)
-    assert constructed["demo"] is False
+    with pytest.raises(RuntimeError, match="demo-only"):
+        bybit.BybitPrivateClient(
+            api_key="k",
+            api_secret="s",
+            testnet=testnet,
+            demo=demo,
+        )
+    assert constructed == {}
+
+
+def test_bybit_private_websocket_rejects_testnet_demo_mix(monkeypatch) -> None:
+    constructed: dict = {}
+
+    class FakeWebSocket:
+        def __init__(self, **kwargs):
+            constructed.update(kwargs)
+
+    monkeypatch.setattr(bybit, "WebSocket", FakeWebSocket)
+    with pytest.raises(RuntimeError, match="api-demo-only"):
+        bybit.BybitPrivateWebSocketStream(
+            api_key="k",
+            api_secret="s",
+            testnet=True,
+            demo=True,
+        )
+    assert constructed == {}
 
 
 def test_bybit_private_client_wraps_order_and_trade_history(monkeypatch) -> None:
@@ -317,7 +393,7 @@ def test_bybit_private_client_wraps_order_and_trade_history(monkeypatch) -> None
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
     orders = client.get_order_history(symbol="BTCUSDT", order_link_id="lm-link")
     trades = client.get_trade_history(symbol="BTCUSDT", order_link_id="lm-link")
 
@@ -352,7 +428,7 @@ def test_bybit_private_client_pages_account_order_history(monkeypatch) -> None:
             }
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
 
     rows = client.get_order_history(
         settle_coin="USDT",
@@ -383,7 +459,7 @@ def test_bybit_private_client_wraps_positions_by_settle(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
     positions = client.get_positions(settle_coin="USDT")
 
     assert positions[0]["symbol"] == "BTCUSDT"
@@ -402,7 +478,7 @@ def test_bybit_private_client_wraps_open_orders_by_settle(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
     orders = client.get_open_orders()
 
     assert orders[0]["orderStatus"] == "New"
@@ -423,7 +499,6 @@ def test_bybit_private_client_forwards_explicit_open_order_filter(monkeypatch) -
         api_key="key",
         api_secret="secret",
         demo=True,
-        account_execution_owner=True,
     )
 
     assert client.get_open_orders(order_filter="StopOrder") == []
@@ -450,7 +525,7 @@ def test_bybit_private_client_paginates_open_orders(monkeypatch) -> None:
             return pages[params.get("cursor")]
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
 
     orders = client.get_open_orders(settle_coin="USDT")
 
@@ -476,7 +551,7 @@ def test_bybit_private_client_paginates_positions(monkeypatch) -> None:
             return pages[params.get("cursor")]
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
 
     positions = client.get_positions(settle_coin="USDT")
 
@@ -487,7 +562,7 @@ def test_bybit_private_client_paginates_positions(monkeypatch) -> None:
     ]
 
 
-def test_bybit_private_client_sets_demo_leverage(monkeypatch) -> None:
+def test_bybit_private_client_sets_demo_leverage(monkeypatch, held_demo_mutation_lease) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -499,7 +574,12 @@ def test_bybit_private_client_sets_demo_leverage(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
     result = client.set_leverage(symbol="BTCUSDT", buy_leverage=1.0, sell_leverage=1.0)
 
     assert result == {"symbol": "BTCUSDT"}
@@ -508,7 +588,9 @@ def test_bybit_private_client_sets_demo_leverage(monkeypatch) -> None:
     ]
 
 
-def test_bybit_private_client_treats_existing_leverage_as_success(monkeypatch) -> None:
+def test_bybit_private_client_treats_existing_leverage_as_success(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -520,13 +602,20 @@ def test_bybit_private_client_treats_existing_leverage_as_success(monkeypatch) -
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
     result = client.set_leverage(symbol="BTCUSDT", buy_leverage=1.0, sell_leverage=1.0)
 
     assert result == {"symbol": "BTCUSDT", "buyLeverage": "1", "sellLeverage": "1", "retCode": 110043}
 
 
-def test_bybit_private_client_treats_pybit_existing_leverage_exception_as_success(monkeypatch) -> None:
+def test_bybit_private_client_treats_pybit_existing_leverage_exception_as_success(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -537,13 +626,18 @@ def test_bybit_private_client_treats_pybit_existing_leverage_exception_as_succes
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
     result = client.set_leverage(symbol="BTCUSDT", buy_leverage=1.0, sell_leverage=1.0)
 
     assert result == {"symbol": "BTCUSDT", "buyLeverage": "1", "sellLeverage": "1", "retCode": 110043}
 
 
-def test_bybit_private_client_wraps_trading_stop(monkeypatch) -> None:
+def test_bybit_private_client_wraps_trading_stop(monkeypatch, held_demo_mutation_lease) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -555,7 +649,12 @@ def test_bybit_private_client_wraps_trading_stop(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
     result = client.set_trading_stop(
         symbol="BTCUSDT",
         stop_loss="120",
@@ -582,7 +681,7 @@ def test_bybit_private_client_wraps_trading_stop(monkeypatch) -> None:
 
 
 def test_kline_download_chunks_full_range_when_bybit_returns_newest_first(monkeypatch) -> None:
-    interval_ms = bybit.INTERVAL_MS["60"]
+    interval_ms = bybit_market_data.INTERVAL_MS["60"]
     timestamps = [index * interval_ms for index in range(10)]
 
     class FakeHTTP:
@@ -597,9 +696,9 @@ def test_kline_download_chunks_full_range_when_bybit_returns_newest_first(monkey
             rows = [[str(ts), "1", "2", "0.5", "1.5", "10", "15"] for ts in timestamps if start <= ts <= end]
             return {"retCode": 0, "result": {"list": list(reversed(rows))[:limit]}}
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
 
-    client = bybit.BybitMarketData()
+    client = bybit_market_data.BybitMarketData()
     rows = client.get_klines("BTCUSDT", "60", timestamps[0], timestamps[-1], limit=3)
 
     assert [int(row[0]) for row in rows] == timestamps
@@ -619,9 +718,9 @@ def test_bybit_market_data_records_retry_and_rate_limit_stats(monkeypatch) -> No
                 return {"retCode": 10006, "retMsg": "Too many visits. Exceeded the API Rate Limit."}
             return {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT"}]}}
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
 
-    client = bybit.BybitMarketData(retry_sleep_seconds=0.0)
+    client = bybit_market_data.BybitMarketData(retry_sleep_seconds=0.0)
     rows = client.get_tickers()
     stats = client.stats()
 
@@ -651,9 +750,9 @@ def test_time_range_download_pages_backward_when_bybit_returns_newest_first(monk
             self.oi_calls.append(params)
             return _newest_first_page(timestamps, params, "timestamp", limit_key="limit")
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
 
-    client = bybit.BybitMarketData()
+    client = bybit_market_data.BybitMarketData()
     funding = client.get_funding_history("BTCUSDT", timestamps[0], timestamps[-1], limit=3)
     oi = client.get_open_interest("BTCUSDT", "1h", timestamps[0], timestamps[-1], limit=3)
 
@@ -678,7 +777,7 @@ def _newest_first_page(timestamps: list[int], params: dict, timestamp_key: str, 
 def test_bybit_rest_rate_limiter_throttles_within_window() -> None:
     import time as _time
 
-    limiter = bybit.BybitRestRateLimiter(max_requests=3, per_seconds=0.2)
+    limiter = bybit_market_data.BybitRestRateLimiter(max_requests=3, per_seconds=0.2)
     started = _time.monotonic()
     for _ in range(6):
         limiter.acquire()
@@ -693,7 +792,7 @@ def test_bybit_rest_rate_limiter_throttles_within_window() -> None:
 
 
 def test_bybit_rest_rate_limiter_no_throttle_under_budget() -> None:
-    limiter = bybit.BybitRestRateLimiter(max_requests=10, per_seconds=1.0)
+    limiter = bybit_market_data.BybitRestRateLimiter(max_requests=10, per_seconds=1.0)
     for _ in range(5):
         limiter.acquire()
     assert limiter.stats()["throttle_events"] == 0
@@ -722,9 +821,9 @@ def test_bybit_market_data_routes_get_through_rate_limiter(monkeypatch) -> None:
         def acquire(self) -> None:
             self.acquires += 1
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
     limiter = RecordingLimiter()
-    client = bybit.BybitMarketData(rate_limiter=limiter)  # type: ignore[arg-type]
+    client = bybit_market_data.BybitMarketData(rate_limiter=limiter)  # type: ignore[arg-type]
 
     client.get_tickers()
     client.get_tickers()
@@ -733,7 +832,9 @@ def test_bybit_market_data_routes_get_through_rate_limiter(monkeypatch) -> None:
     assert client._client.calls == 2
 
 
-def test_bybit_private_client_routes_call_through_rate_limiter(monkeypatch) -> None:
+def test_bybit_private_client_routes_call_through_rate_limiter(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     """BybitPrivateClient must acquire the shared rate limiter before every
     pybit HTTP call on BOTH _call and _call_once paths. Mirrors the public-side
     test. Without this, parallel place_orders bypass the budget that protects
@@ -766,7 +867,7 @@ def test_bybit_private_client_routes_call_through_rate_limiter(monkeypatch) -> N
         api_key="k",
         api_secret="s",
         demo=True,
-        account_execution_owner=True,
+        mutation_lease=held_demo_mutation_lease("k"),
         rate_limiter=limiter,  # type: ignore[arg-type]
     )
 
@@ -883,7 +984,7 @@ def test_private_client_get_api_key_information(monkeypatch) -> None:
             }
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
     info = client.get_api_key_information()
     assert info["readOnly"] == 0
     assert bybit.api_key_allows_order_submit(info) == (True, "")
@@ -903,8 +1004,8 @@ def test_bybit_market_data_does_not_retry_definite_reject(monkeypatch) -> None:
             self.calls += 1
             return {"retCode": 10001, "retMsg": "params error: invalid symbol"}
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitMarketData(retry_sleep_seconds=0.0, retries=3)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    client = bybit_market_data.BybitMarketData(retry_sleep_seconds=0.0, retries=3)
     with _pytest.raises(bybit.BybitDataError):
         client.get_tickers()
     stats = client.stats()
@@ -926,14 +1027,16 @@ def test_bybit_market_data_still_retries_rate_limit(monkeypatch) -> None:
                 return {"retCode": 10006, "retMsg": "Too many visits. Exceeded the API Rate Limit."}
             return {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT"}]}}
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitMarketData(retry_sleep_seconds=0.0, retries=3)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    client = bybit_market_data.BybitMarketData(retry_sleep_seconds=0.0, retries=3)
     assert client.get_tickers() == [{"symbol": "BTCUSDT"}]
     assert client.stats()["http_calls"] == 2
     assert client.stats()["retry_events"] == 1
 
 
-def test_private_call_definite_reject_no_retry_and_message_preserved(monkeypatch) -> None:
+def test_private_call_definite_reject_no_retry_and_message_preserved(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     """REGRESSION (audit 2026-06-12, live-measured): pybit 5.x raises InvalidRequestError
     for a non-zero retCode BEFORE the wrapper's own retCode check, so definite venue
     rejects were retried with backoff (846ms on a cancel-nonexistent) and the final
@@ -950,7 +1053,12 @@ def test_private_call_definite_reject_no_retry_and_message_preserved(monkeypatch
             raise InvalidRequestError("order not exists or too late to cancel (ErrCode: 110001)")
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
     client.retry_sleep_seconds = 0.0
     with pytest.raises(bybit.BybitDataError) as excinfo:
         client.cancel_order(symbol="BTCUSDT", order_link_id="lm-x")
@@ -958,7 +1066,9 @@ def test_private_call_definite_reject_no_retry_and_message_preserved(monkeypatch
     assert "110001" in str(excinfo.value)  # venue message survives into str(exc)
 
 
-def test_private_call_transport_retries_and_final_message_carries_cause(monkeypatch) -> None:
+def test_private_call_transport_retries_and_final_message_carries_cause(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     """Transport errors still retry; the exhausted-retries raise now carries the last
     error's text (callers ledger f"{exc}" — __cause__ never reached those columns)."""
 
@@ -971,7 +1081,12 @@ def test_private_call_transport_retries_and_final_message_carries_cause(monkeypa
             raise ConnectionError("connection reset by venue")
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
     client.retry_sleep_seconds = 0.0
     with pytest.raises(bybit.BybitDataError) as excinfo:
         client.cancel_order(symbol="BTCUSDT", order_link_id="lm-x")
@@ -1017,12 +1132,23 @@ def test_is_rate_limit_string_fallback() -> None:
 # --------------------------------------------------------------------------
 
 
-def _make_private_client(monkeypatch, fake_http_cls) -> bybit.BybitPrivateClient:
+def _make_private_client(
+    monkeypatch,
+    fake_http_cls,
+    held_demo_mutation_lease,
+) -> bybit.BybitPrivateClient:
     monkeypatch.setattr(bybit, "HTTP", fake_http_cls)
-    return bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True, account_execution_owner=True)
+    return bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("k"),
+    )
 
 
-def test_place_order_duplicate_link_returns_existing_open_order(monkeypatch) -> None:
+def test_place_order_duplicate_link_returns_existing_open_order(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     """exec-router-2: a 110089 duplicate-orderLinkId reject must NOT raise; the
     order is already at Bybit under this idempotency key, so place_order probes
     by orderLinkId and returns the existing order. Pre-fix this raised
@@ -1045,7 +1171,7 @@ def test_place_order_duplicate_link_returns_existing_open_order(monkeypatch) -> 
                 },
             }
 
-    client = _make_private_client(monkeypatch, FakeHTTP)
+    client = _make_private_client(monkeypatch, FakeHTTP, held_demo_mutation_lease)
     result = client.place_order(
         symbol="BTCUSDT",
         side="Buy",
@@ -1058,7 +1184,9 @@ def test_place_order_duplicate_link_returns_existing_open_order(monkeypatch) -> 
     assert result["_idempotent_existing_order"] is True
 
 
-def test_place_order_preserves_v5_response_envelope_time(monkeypatch) -> None:
+def test_place_order_preserves_v5_response_envelope_time(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -1070,7 +1198,7 @@ def test_place_order_preserves_v5_response_envelope_time(monkeypatch) -> None:
                 "time": 1_700_000_000_123,
             }
 
-    client = _make_private_client(monkeypatch, FakeHTTP)
+    client = _make_private_client(monkeypatch, FakeHTTP, held_demo_mutation_lease)
     result = client.place_order(
         symbol="BTCUSDT",
         side="Buy",
@@ -1083,7 +1211,9 @@ def test_place_order_preserves_v5_response_envelope_time(monkeypatch) -> None:
     assert result["_response_time_ms"] == 1_700_000_000_123
 
 
-def test_place_order_duplicate_link_raises_when_order_not_findable(monkeypatch) -> None:
+def test_place_order_duplicate_link_raises_when_order_not_findable(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     """exec-router-2: if Bybit reports a duplicate but the order cannot be found
     on either open-orders or history, surface the original reject rather than
     silently swallowing it (returning a phantom success would be worse)."""
@@ -1101,7 +1231,7 @@ def test_place_order_duplicate_link_raises_when_order_not_findable(monkeypatch) 
         def get_order_history(self, **_params):
             return {"retCode": 0, "result": {"list": []}}
 
-    client = _make_private_client(monkeypatch, FakeHTTP)
+    client = _make_private_client(monkeypatch, FakeHTTP, held_demo_mutation_lease)
     with pytest.raises(bybit.BybitSubmissionUncertain):
         client.place_order(
             symbol="BTCUSDT",
@@ -1112,7 +1242,9 @@ def test_place_order_duplicate_link_raises_when_order_not_findable(monkeypatch) 
         )
 
 
-def test_place_order_non_duplicate_reject_still_raises(monkeypatch) -> None:
+def test_place_order_non_duplicate_reject_still_raises(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     """exec-router-2: only 110089 is treated as idempotent success; any other
     non-zero retCode must still raise so genuine rejects are not masked."""
 
@@ -1123,7 +1255,7 @@ def test_place_order_non_duplicate_reject_still_raises(monkeypatch) -> None:
         def place_order(self, **_params):
             return {"retCode": 110007, "retMsg": "insufficient balance", "result": {}}
 
-    client = _make_private_client(monkeypatch, FakeHTTP)
+    client = _make_private_client(monkeypatch, FakeHTTP, held_demo_mutation_lease)
     with pytest.raises(bybit.BybitRequestRejected, match="110007"):
         client.place_order(
             symbol="BTCUSDT",
@@ -1134,7 +1266,9 @@ def test_place_order_non_duplicate_reject_still_raises(monkeypatch) -> None:
         )
 
 
-def test_place_order_transport_failure_is_outcome_unknown(monkeypatch) -> None:
+def test_place_order_transport_failure_is_outcome_unknown(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -1142,7 +1276,7 @@ def test_place_order_transport_failure_is_outcome_unknown(monkeypatch) -> None:
         def place_order(self, **_params):
             raise TimeoutError("response lost after socket write")
 
-    client = _make_private_client(monkeypatch, FakeHTTP)
+    client = _make_private_client(monkeypatch, FakeHTTP, held_demo_mutation_lease)
     with pytest.raises(bybit.BybitSubmissionUncertain, match="outcome is unknown"):
         client.place_order(
             symbol="BTCUSDT",
@@ -1153,7 +1287,9 @@ def test_place_order_transport_failure_is_outcome_unknown(monkeypatch) -> None:
         )
 
 
-def test_place_order_duplicate_link_uses_history_only_for_active_status(monkeypatch) -> None:
+def test_place_order_duplicate_link_uses_history_only_for_active_status(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     """exec-router-2: a Rejected/Cancelled history row does NOT count as present
     (the submit did not take), so the dup-link path must fall through to raise
     rather than returning a dead order."""
@@ -1174,7 +1310,7 @@ def test_place_order_duplicate_link_uses_history_only_for_active_status(monkeypa
                 "result": {"list": [{"orderId": "dead", "orderLinkId": "agc-z", "orderStatus": "Rejected"}]},
             }
 
-    client = _make_private_client(monkeypatch, FakeHTTP)
+    client = _make_private_client(monkeypatch, FakeHTTP, held_demo_mutation_lease)
     with pytest.raises(bybit.BybitDataError):
         client.place_order(
             symbol="BTCUSDT",
@@ -1185,7 +1321,9 @@ def test_place_order_duplicate_link_uses_history_only_for_active_status(monkeypa
         )
 
 
-def test_place_order_duplicate_link_ignores_wrong_history_link(monkeypatch) -> None:
+def test_place_order_duplicate_link_ignores_wrong_history_link(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     """A history row is usable only when its orderLinkId matches the requested link."""
 
     class FakeHTTP:
@@ -1204,7 +1342,7 @@ def test_place_order_duplicate_link_ignores_wrong_history_link(monkeypatch) -> N
                 "result": {"list": [{"orderId": "other", "orderLinkId": "agc-other", "orderStatus": "Filled"}]},
             }
 
-    client = _make_private_client(monkeypatch, FakeHTTP)
+    client = _make_private_client(monkeypatch, FakeHTTP, held_demo_mutation_lease)
     with pytest.raises(bybit.BybitDataError):
         client.place_order(
             symbol="BTCUSDT",
@@ -1223,15 +1361,13 @@ def test_is_duplicate_order_link_matches_code_and_message() -> None:
     assert not bybit._is_duplicate_order_link("retCode 110007 insufficient balance")
 
 
-def test_safe_int_degrades_on_malformed_timestamp() -> None:
-    """exec-router-5: the probe's row selection (and any createdTime parse) must
-    not raise on a non-numeric venue timestamp. _safe_int returns 0 instead of
-    propagating a ValueError that would turn a recoverable fallback into a hard
-    place_order crash."""
-    assert bybit._safe_int("1700000000000") == 1700000000000
-    assert bybit._safe_int("not-a-number") == 0
-    assert bybit._safe_int(None) == 0
-    assert bybit._safe_int({"createdTime": "x"}) == 0
+def test_safe_int_degrades_on_malformed_error_code() -> None:
+    """Malformed venue error codes must classify safely instead of raising."""
+
+    assert bybit_errors._safe_int("10006") == 10006
+    assert bybit_errors._safe_int("not-a-number") == 0
+    assert bybit_errors._safe_int(None) == 0
+    assert bybit_errors._safe_int({"retCode": "x"}) == 0
 
 
 # --------------------------------------------------------------------------
@@ -1252,8 +1388,8 @@ def test_market_data_counters_no_lost_update_under_threads(monkeypatch) -> None:
         def get_tickers(self, **_kwargs):
             return {"retCode": 0, "result": {"list": []}}
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    market = bybit.BybitMarketData()
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    market = bybit_market_data.BybitMarketData()
 
     workers = 16
     per_worker = 50
@@ -1298,8 +1434,8 @@ def test_get_instruments_info_bounds_non_advancing_cursor(monkeypatch) -> None:
                 "result": {"list": [{"symbol": f"S{self.calls}"}], "nextPageCursor": "STUCK"},
             }
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    market = bybit.BybitMarketData()
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    market = bybit_market_data.BybitMarketData()
     rows = market.get_instruments_info()
     # A stable cursor is detected as non-advancing on the SECOND fetch (the new
     # cursor equals the previous), so the walk stops at 2 calls rather than
@@ -1327,11 +1463,54 @@ def test_get_instruments_info_caps_at_max_pages(monkeypatch) -> None:
                 },
             }
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    market = bybit.BybitMarketData()
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    market = bybit_market_data.BybitMarketData()
     rows = market.get_instruments_info(max_pages=3)
     assert market._client.calls == 3
     assert len(rows) == 3
+
+
+def test_get_instruments_info_complete_mode_rejects_truncated_cursor(monkeypatch) -> None:
+    """Evidence-grade population snapshots must not accept bounded truncation."""
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.testnet = testnet
+            self.calls = 0
+
+        def get_instruments_info(self, **_params):
+            self.calls += 1
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [{"symbol": f"S{self.calls}"}],
+                    "nextPageCursor": f"cursor-{self.calls}",
+                },
+            }
+
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    market = bybit_market_data.BybitMarketData()
+    with pytest.raises(bybit.BybitDataError, match="complete instrument coverage"):
+        market.get_instruments_info(max_pages=3, require_complete=True)
+
+
+def test_get_instruments_info_complete_mode_rejects_stuck_cursor(monkeypatch) -> None:
+    """A repeated non-empty cursor is incomplete, not a successful last page."""
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.testnet = testnet
+
+        def get_instruments_info(self, **_params):
+            return {
+                "retCode": 0,
+                "result": {"list": [{"symbol": "S"}], "nextPageCursor": "STUCK"},
+            }
+
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    market = bybit_market_data.BybitMarketData()
+    with pytest.raises(bybit.BybitDataError, match="non-advancing cursor"):
+        market.get_instruments_info(require_complete=True)
 
 
 # --------------------------------------------------------------------------
@@ -1361,10 +1540,10 @@ def test_rate_limiter_counts_throttle_once_per_blocked_acquire(monkeypatch) -> N
         else:
             clock["t"] += seconds
 
-    monkeypatch.setattr(bybit.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(bybit.time, "sleep", fake_sleep)
+    monkeypatch.setattr(bybit_market_data.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(bybit_market_data.time, "sleep", fake_sleep)
 
-    limiter = bybit.BybitRestRateLimiter(max_requests=1, per_seconds=1.0)
+    limiter = bybit_market_data.BybitRestRateLimiter(max_requests=1, per_seconds=1.0)
     limiter.acquire()  # fills the single slot at t=1000
     limiter.acquire()  # blocks; first wake is early, re-loops, second wake claims
 
@@ -1389,10 +1568,10 @@ def test_rate_limiter_no_busy_spin_at_window_boundary(monkeypatch) -> None:
     def fake_sleep(seconds: float) -> None:  # pragma: no cover - must not be reached
         raise AssertionError(f"unexpected sleep({seconds}); boundary slot should free immediately")
 
-    monkeypatch.setattr(bybit.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(bybit.time, "sleep", fake_sleep)
+    monkeypatch.setattr(bybit_market_data.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(bybit_market_data.time, "sleep", fake_sleep)
 
-    limiter = bybit.BybitRestRateLimiter(max_requests=1, per_seconds=1.0)
+    limiter = bybit_market_data.BybitRestRateLimiter(max_requests=1, per_seconds=1.0)
     limiter.acquire()  # slot at t=500
     # Advance the clock to EXACTLY one window later: the slot is at the cutoff.
     clock["t"] = 501.0
@@ -1408,11 +1587,8 @@ def test_rate_limiter_no_busy_spin_at_window_boundary(monkeypatch) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_private_client_refuses_real_money_submit_by_default(monkeypatch) -> None:
-    """realmoney-safety-1: a demo=False (real-money) client must refuse to
-    place/cancel/set-leverage unless confirm_real_money=True was threaded in at
-    construction. Pre-fix there was no per-submit account assertion at the
-    signing layer; the demo-only invariant lived only at config validation."""
+def test_private_client_refuses_every_real_money_mutation(monkeypatch) -> None:
+    """The cutover client cannot even construct a mainnet private session."""
 
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -1421,24 +1597,22 @@ def test_private_client_refuses_real_money_submit_by_default(monkeypatch) -> Non
         def place_order(self, **_params):  # pragma: no cover - must not be reached
             raise AssertionError("real-money submit should have been blocked")
 
+        def cancel_order(self, **_params):  # pragma: no cover - must not be reached
+            raise AssertionError("real-money cancel should have been blocked")
+
+        def set_leverage(self, **_params):  # pragma: no cover - must not be reached
+            raise AssertionError("real-money leverage should have been blocked")
+
+        def set_trading_stop(self, **_params):  # pragma: no cover - must not be reached
+            raise AssertionError("real-money stop should have been blocked")
+
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False, account_execution_owner=True)
-    with pytest.raises(RuntimeError, match="REAL_MONEY"):
-        client.place_order(
-            symbol="BTCUSDT",
-            side="Buy",
-            orderType="Market",
-            qty="1",
-            orderLinkId="rm-1",
-        )
-    with pytest.raises(RuntimeError, match="REAL_MONEY"):
-        client.cancel_order(symbol="BTCUSDT", order_link_id="rm-1")
+    with pytest.raises(RuntimeError, match="demo-only"):
+        bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
 
 
-def test_private_client_real_money_reads_are_never_gated(monkeypatch) -> None:
-    """realmoney-safety-1: the guard only blocks STATE-CHANGING submissions;
-    read-only calls (get_*) on a real-money client must still work so reconcile
-    / balance checks are unaffected."""
+def test_private_client_real_money_reads_are_removed(monkeypatch) -> None:
+    """No current caller justifies retaining a mainnet private read session."""
 
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -1448,15 +1622,14 @@ def test_private_client_real_money_reads_are_never_gated(monkeypatch) -> None:
             return {"retCode": 0, "result": {"list": [{"coin": "USDT"}]}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False, account_execution_owner=True)
-    balance = client.get_wallet_balance()
-    assert balance["list"][0]["coin"] == "USDT"
+    with pytest.raises(RuntimeError, match="demo-only"):
+        bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
 
 
-def test_private_client_real_money_submit_allowed_with_explicit_optin(monkeypatch) -> None:
-    """realmoney-safety-1: an explicit confirm_real_money=True opt-in lets a
-    real-money client submit — the gate is a deliberate switch, not a hard wall,
-    so a future validated real-money path can thread the opt-in through."""
+def test_private_client_real_money_mutation_rejects_demo_lease(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    """Even a live demo capability cannot authorize a mainnet mutation."""
 
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -1466,26 +1639,18 @@ def test_private_client_real_money_submit_allowed_with_explicit_optin(monkeypatc
             return {"retCode": 0, "result": {"orderId": "rm-ok"}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(
-        api_key="k",
-        api_secret="s",
-        demo=False,
-        confirm_real_money=True,
-        account_execution_owner=True,
-    )
-    result = client.place_order(
-        symbol="BTCUSDT",
-        side="Buy",
-        orderType="Market",
-        qty="1",
-        orderLinkId="rm-2",
-    )
-    assert result["orderId"] == "rm-ok"
+    with pytest.raises(RuntimeError, match="demo-only"):
+        bybit.BybitPrivateClient(
+            api_key="k",
+            api_secret="s",
+            demo=False,
+            mutation_lease=held_demo_mutation_lease("k"),
+        )
 
 
-def test_private_client_demo_submit_unaffected(monkeypatch) -> None:
-    """realmoney-safety-1: the guard is a no-op for demo clients (the only mode
-    that runs today)."""
+def test_private_client_demo_submit_requires_held_capability(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
 
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -1495,7 +1660,12 @@ def test_private_client_demo_submit_unaffected(monkeypatch) -> None:
             return {"retCode": 0, "result": {"orderId": "demo-ok"}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True, account_execution_owner=True)
+    client = bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("k"),
+    )
     result = client.place_order(
         symbol="BTCUSDT",
         side="Buy",
@@ -1520,7 +1690,7 @@ def test_resolve_credentials_rejects_ambiguous_real_money(monkeypatch) -> None:
     monkeypatch.delenv("DEMO", raising=False)
     monkeypatch.setenv("REAL_MONEY", "enabled")
     with pytest.raises(RuntimeError, match="not a recognised boolean"):
-        bybit.resolve_private_credentials()
+        bybit.resolve_demo_credentials()
 
 
 def test_resolve_credentials_accepts_recognised_falsey_values(monkeypatch) -> None:
@@ -1531,7 +1701,7 @@ def test_resolve_credentials_accepts_recognised_falsey_values(monkeypatch) -> No
     monkeypatch.delenv("DEMO", raising=False)
     for falsey in ("false", "0", "off", "no", ""):
         monkeypatch.setenv("REAL_MONEY", falsey)
-        assert bybit.resolve_private_credentials() == ("demo-k", "demo-s", True)
+        assert bybit.resolve_demo_credentials() == ("demo-k", "demo-s")
 
 
 def test_resolve_credentials_logs_resolved_account(monkeypatch, caplog) -> None:
@@ -1543,7 +1713,7 @@ def test_resolve_credentials_logs_resolved_account(monkeypatch, caplog) -> None:
     monkeypatch.delenv("DEMO", raising=False)
     monkeypatch.delenv("REAL_MONEY", raising=False)
     with caplog.at_level("INFO", logger="liquidity_migration.bybit.account"):
-        bybit.resolve_private_credentials()
+        bybit.resolve_demo_credentials()
     assert any("resolved account: demo" in r.getMessage() for r in caplog.records)
 
 
@@ -1726,10 +1896,10 @@ def _make_market_data(monkeypatch, responses_by_end_time):
         def get_open_interest(self, **params):
             return self._serve(**params)
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
     # retries=1 keeps the test fast and deterministic; the guard fires before
     # any retry/backoff because BybitDataError(non-rate-limit) raises immediately.
-    return bybit.BybitMarketData(testnet=True, retries=1, retry_sleep_seconds=0.0)
+    return bybit_market_data.BybitMarketData(testnet=True, retries=1, retry_sleep_seconds=0.0)
 
 
 def _funding_row(ts: int) -> dict[str, str]:
@@ -1810,14 +1980,16 @@ def test_open_interest_mid_range_empty_also_guarded(monkeypatch) -> None:
             }
             return {"retCode": 0, "result": {"list": pages[end_time]}}
 
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitMarketData(testnet=True, retries=1, retry_sleep_seconds=0.0)
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    client = bybit_market_data.BybitMarketData(testnet=True, retries=1, retry_sleep_seconds=0.0)
 
     with pytest.raises(bybit.BybitDataError):
         client.get_open_interest("BTCUSDT", "5min", start=0, end=10, limit=2)
 
 
-def test_account_owner_guard_blocks_non_owner_rest_mutations(monkeypatch) -> None:
+def test_demo_mutation_guard_requires_live_credential_bound_lease(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
     class FakeHTTP:
         def __init__(self, **_kwargs):
             self.calls = []
@@ -1828,17 +2000,111 @@ def test_account_owner_guard_blocks_non_owner_rest_mutations(monkeypatch) -> Non
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
     legacy = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
-    with pytest.raises(RuntimeError, match="not the account execution owner"):
+    with pytest.raises(RuntimeError, match="no canonical Bybit demo account mutation lease"):
         legacy.place_order(orderLinkId="legacy-1", symbol="BUSDT", side="Buy", orderType="Market", qty="1")
     assert legacy._client.calls == []
 
+    lease = held_demo_mutation_lease("k")
     owner = bybit.BybitPrivateClient(
         api_key="k",
         api_secret="s",
         demo=True,
-        account_execution_owner=True,
+        mutation_lease=lease,
     )
     assert (
         owner.place_order(orderLinkId="owner-1", symbol="BUSDT", side="Buy", orderType="Market", qty="1")["orderId"]
         == "o1"
     )
+    lease.close()
+    with pytest.raises(RuntimeError, match="not currently held"):
+        owner.place_order(orderLinkId="owner-2", symbol="BUSDT", side="Buy", orderType="Market", qty="1")
+
+
+def test_demo_mutation_guard_rejects_capability_lookalike(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **_kwargs):
+            self.calls = []
+
+        def place_order(self, **params):  # pragma: no cover - guard must run first
+            self.calls.append(params)
+            return {"retCode": 0, "result": {"orderId": "o1"}}
+
+    class LeaseLookalike:
+        def require_held_for(self, **_kwargs):
+            return None
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=True,
+        mutation_lease=LeaseLookalike(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(RuntimeError, match="no canonical Bybit demo account mutation lease"):
+        client.place_order(
+            orderLinkId="lookalike-1",
+            symbol="BUSDT",
+            side="Buy",
+            orderType="Market",
+            qty="1",
+        )
+    assert client._client.calls == []
+
+
+def test_demo_mutation_guard_rejects_lease_for_different_credential(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    class FakeHTTP:
+        def __init__(self, **_kwargs):
+            self.calls = []
+
+        def place_order(self, **params):  # pragma: no cover - guard must run first
+            self.calls.append(params)
+            return {"retCode": 0, "result": {"orderId": "o1"}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="configured-key",
+        api_secret="s",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("different-key"),
+    )
+    with pytest.raises(RuntimeError, match="different API credential"):
+        client.place_order(
+            orderLinkId="wrong-key-1",
+            symbol="BUSDT",
+            side="Buy",
+            orderType="Market",
+            qty="1",
+        )
+    assert client._client.calls == []
+
+
+def test_private_transport_fails_unknown_methods_into_mutation_boundary(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    class FakeHTTP:
+        def __init__(self, **_kwargs):
+            self.calls: list[dict[str, str]] = []
+
+        def amend_order(self, **params):
+            self.calls.append(params)
+            return {"retCode": 0, "result": {"orderId": "amended"}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    read_only = bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=True,
+    )
+    with pytest.raises(RuntimeError, match="no canonical Bybit demo account mutation lease"):
+        read_only._call("amend_order", orderId="o1")
+    assert read_only._client.calls == []
+
+    owner = bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("k"),
+    )
+    assert owner._call("amend_order", orderId="o1")["result"]["orderId"] == "amended"

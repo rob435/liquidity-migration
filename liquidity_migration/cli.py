@@ -365,6 +365,45 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
         run_long_native_demo_cycle,
     )
 
+    natural_evidence_required = bool(
+        getattr(args, "natural_evidence_required", False)
+    )
+    natural_run_config = None
+    candidate_universe_file = getattr(args, "candidate_universe_file", "")
+    strategy_target_capture_path = getattr(
+        args, "strategy_target_capture_path", None
+    )
+    natural_run_config_path = getattr(args, "natural_run_config", None)
+    if natural_evidence_required:
+        if not getattr(args, "daemon", False):
+            raise ValueError("natural evidence requires --daemon")
+        if not natural_run_config_path:
+            raise ValueError("natural evidence requires --natural-run-config")
+        from liquidity_migration.natural_run_config import (
+            load_natural_run_config,
+            validate_natural_runtime_binding,
+        )
+
+        natural_run_config = load_natural_run_config(natural_run_config_path)
+        validate_natural_runtime_binding(
+            natural_run_config,
+            sleeve="long",
+            execution_environment=args.execution_environment,
+            data_root=data_root,
+            candidate_universe_path=candidate_universe_file or None,
+            target_capture_path=strategy_target_capture_path,
+        )
+        candidate_universe_file = str(
+            natural_run_config.candidate_universe_path
+        )
+        strategy_target_capture_path = str(
+            natural_run_config.target_capture_path
+        )
+    elif natural_run_config_path:
+        raise ValueError(
+            "--natural-run-config is valid only with --natural-evidence-required"
+        )
+
     # ws_klines_* defaults read off a throwaway default instance (see the
     # event-demo block above for why the slots class can't be read directly).
     _long_ws_defaults = LongNativeDemoCycleConfig()
@@ -381,6 +420,7 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
         execution_environment=args.execution_environment,
         account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
         account_execution_root=getattr(args, "account_execution_root", None),
+        candidate_universe_file=candidate_universe_file,
         data_name=args.data_name,
         strategy_profile=args.strategy_profile,
         ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
@@ -410,6 +450,9 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
             demo_config=long_demo_config,
             interval_seconds=args.interval_seconds,
             event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
+            strategy_target_capture_path=strategy_target_capture_path,
+            natural_evidence_required=natural_evidence_required,
+            natural_run_config_path=natural_run_config_path,
         )
         long_daemon.install_signal_handlers()
         stats = long_daemon.run()
@@ -427,6 +470,45 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
 
 def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
     from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, run_continuous_demo_cycle
+
+    natural_evidence_required = bool(
+        getattr(args, "natural_evidence_required", False)
+    )
+    natural_run_config = None
+    candidate_universe_file = getattr(args, "candidate_universe_file", "")
+    strategy_target_capture_path = getattr(
+        args, "strategy_target_capture_path", None
+    )
+    natural_run_config_path = getattr(args, "natural_run_config", None)
+    if natural_evidence_required:
+        if not getattr(args, "daemon", False):
+            raise ValueError("natural evidence requires --daemon")
+        if not natural_run_config_path:
+            raise ValueError("natural evidence requires --natural-run-config")
+        from liquidity_migration.natural_run_config import (
+            load_natural_run_config,
+            validate_natural_runtime_binding,
+        )
+
+        natural_run_config = load_natural_run_config(natural_run_config_path)
+        validate_natural_runtime_binding(
+            natural_run_config,
+            sleeve="continuous",
+            execution_environment=args.execution_environment,
+            data_root=data_root,
+            candidate_universe_path=candidate_universe_file or None,
+            target_capture_path=strategy_target_capture_path,
+        )
+        candidate_universe_file = str(
+            natural_run_config.candidate_universe_path
+        )
+        strategy_target_capture_path = str(
+            natural_run_config.target_capture_path
+        )
+    elif natural_run_config_path:
+        raise ValueError(
+            "--natural-run-config is valid only with --natural-evidence-required"
+        )
 
     feature_set = tuple(part.strip() for part in str(args.feature_set).split(",") if part.strip())
     cont_demo_config = ContinuousDemoCycleConfig(
@@ -456,6 +538,7 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
         execution_environment=args.execution_environment,
         account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
         account_execution_root=getattr(args, "account_execution_root", None),
+        candidate_universe_file=candidate_universe_file,
         data_name=args.data_name,
         strategy_profile=args.strategy_profile,
     )
@@ -468,6 +551,9 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
             demo_config=cont_demo_config,
             interval_seconds=args.interval_seconds,
             event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
+            strategy_target_capture_path=strategy_target_capture_path,
+            natural_evidence_required=natural_evidence_required,
+            natural_run_config_path=natural_run_config_path,
         )
         cont_daemon.install_signal_handlers()
         stats = cont_daemon.run()
