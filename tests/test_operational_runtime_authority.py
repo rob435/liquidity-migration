@@ -45,6 +45,8 @@ def _fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     raw_persistence: str = "0",
+    liveness_scope: str = "demo-paper",
+    continuous_paper_sleeve: str = "on",
 ) -> tuple[Path, str, Path, dict[str, Path]]:
     repository, commit = _git_repository(tmp_path / "repo")
     machine_id = _private(tmp_path / "machine-id", "test-machine\n")
@@ -74,10 +76,12 @@ def _fixture(
             config / "account-execution.env",
             "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1\n"
             f"ACCOUNT_RAW_MARKET_PERSISTENCE={raw_persistence}\n"
+            f"ACCOUNT_LIVENESS_SCOPE={liveness_scope}\n"
             f"ACCOUNT_EXECUTION_ROOT={roots['demo-account']}\n"
             f"ACCOUNT_INTENT_INBOX_ROOT={roots['demo-inbox']}\n"
             f"ACCOUNT_CAPTURE_ROOT={roots['demo-market']}\n"
             f"ACCOUNT_SYMBOLS_FILE={symbols}\n"
+            f"CANDIDATE_UNIVERSE_FILE={symbols}\n"
             f"ACCOUNT_DEMO_RULES_FILE={rules}\n"
             f"ACCOUNT_RISK_POLICY_FILE={risk}\n",
         ),
@@ -89,6 +93,7 @@ def _fixture(
             f"ACCOUNT_INTENT_INBOX_ROOT={roots['paper-inbox']}\n"
             f"ACCOUNT_PAPER_CAPTURE_ROOT={roots['paper-market']}\n"
             f"ACCOUNT_SYMBOLS_FILE={symbols}\n"
+            f"CANDIDATE_UNIVERSE_FILE={symbols}\n"
             f"ACCOUNT_DEMO_RULES_FILE={rules}\n"
             f"ACCOUNT_RISK_POLICY_FILE={risk}\n"
             f"ACCOUNT_TWIN_CALIBRATION_FILE={calibration}\n",
@@ -103,7 +108,7 @@ def _fixture(
             config / "sleeves.resolved.env",
             "LONG_SLEEVE=on\n"
             "CONTINUOUS_SLEEVE=on\n"
-            "CONTINUOUS_PAPER_SLEEVE=on\n",
+            f"CONTINUOUS_PAPER_SLEEVE={continuous_paper_sleeve}\n",
         ),
     }
     environment_paths["sleeves.resolved.env"].chmod(0o644)
@@ -121,6 +126,15 @@ def _fixture(
         authority,
         "load_calibration_receipt",
         lambda _path, *, snapshot: {"execution_twin_gate_passed": True},
+    )
+    monkeypatch.setattr(
+        authority,
+        "build_candidate_rule_coverage",
+        lambda candidate_path, rules_path, **_kwargs: {
+            "candidate_path": str(candidate_path),
+            "rules_path": str(rules_path),
+            "status": "passed",
+        },
     )
     return repository, commit, machine_id, {
         **environment_paths,
@@ -225,6 +239,117 @@ def test_calibration_profile_bootstraps_only_demo_owner_with_raw_capture(
         )
 
 
+def test_demo_operational_profile_runs_demo_fleet_without_paper_twin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit, machine_id, paths = _fixture(
+        tmp_path,
+        monkeypatch,
+        raw_persistence="0",
+        liveness_scope="demo",
+        continuous_paper_sleeve="off",
+    )
+    paths["account-paper-execution.env"].unlink()
+    monkeypatch.setattr(
+        authority,
+        "load_calibration_receipt",
+        lambda *_args, **_kwargs: pytest.fail(
+            "demo-operational profile must not inspect a paper calibration"
+        ),
+    )
+    receipt, payload = _issue(
+        tmp_path,
+        repository,
+        commit,
+        machine_id,
+        profile=authority.DEMO_OPERATIONAL_PROFILE,
+    )
+
+    assert payload["scope"] == "demo_operational_only_no_paper_no_real_money"
+    assert payload["raw_market_persistence"] == "disabled"
+    assert payload["research_evidence_status"] == (
+        "paper_twin_and_natural_replay_not_claimed_or_authorized"
+    )
+    assert payload["authorized_units"] == list(
+        authority.DEMO_OPERATIONAL_AUTHORIZED_UNITS
+    )
+    assert set(payload["environment_files"]) == {
+        "account-execution.env",
+        "bybit-demo.env",
+        "sleeves.resolved.env",
+    }
+    assert len(payload["runtime_roots"]) == 3
+    assert len(payload["runtime_inputs"]) == 4
+    assert not any("paper" in unit for unit in payload["authorized_units"])
+
+    monkeypatch.setenv("ACCOUNT_RAW_MARKET_PERSISTENCE", "0")
+    monkeypatch.setenv("ACCOUNT_LIVENESS_SCOPE", "demo")
+    for unit in authority.DEMO_OPERATIONAL_AUTHORIZED_UNITS:
+        authority.verify_operational_authorization(
+            receipt_path=receipt,
+            repo_root=repository,
+            machine_id_path=machine_id,
+            unit=unit,
+        )
+    for unit in (
+        "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-bybit-long-paper.service",
+        "liquidity-migration-bybit-continuous-paper.service",
+    ):
+        with pytest.raises(ValueError, match="not authorized"):
+            authority.verify_operational_authorization(
+                receipt_path=receipt,
+                repo_root=repository,
+                machine_id_path=machine_id,
+                unit=unit,
+            )
+
+
+def test_demo_operational_profile_rejects_paper_scope_and_paper_sleeve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit, machine_id, _paths = _fixture(
+        tmp_path,
+        monkeypatch,
+        liveness_scope="demo-paper",
+    )
+    receipt = tmp_path / "etc" / "ready"
+    receipt.parent.mkdir()
+    with pytest.raises(ValueError, match="ACCOUNT_LIVENESS_SCOPE=demo"):
+        authority.issue_operational_authorization(
+            receipt_path=receipt,
+            expected_commit=commit,
+            repo_root=repository,
+            machine_id_path=machine_id,
+            authorization_reference="owner authorization",
+            owner_acknowledgement=authority.OWNER_ACKNOWLEDGEMENT,
+            profile=authority.DEMO_OPERATIONAL_PROFILE,
+        )
+
+    second = tmp_path / "second"
+    second.mkdir()
+    repository, commit, machine_id, _paths = _fixture(
+        second,
+        monkeypatch,
+        liveness_scope="demo",
+        continuous_paper_sleeve="on",
+    )
+    receipt = second / "etc" / "ready"
+    receipt.parent.mkdir()
+    with pytest.raises(ValueError, match="CONTINUOUS_PAPER_SLEEVE=off"):
+        authority.issue_operational_authorization(
+            receipt_path=receipt,
+            expected_commit=commit,
+            repo_root=repository,
+            machine_id_path=machine_id,
+            authorization_reference="owner authorization",
+            owner_acknowledgement=authority.OWNER_ACKNOWLEDGEMENT,
+            profile=authority.DEMO_OPERATIONAL_PROFILE,
+        )
+
+
 def test_authority_rejects_raw_research_mode_and_wrong_acknowledgement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -254,6 +379,55 @@ def test_authority_rejects_raw_research_mode_and_wrong_acknowledgement(
             machine_id_path=machine_id,
             authorization_reference="owner authorization",
             owner_acknowledgement="yes",
+        )
+
+
+def test_demo_operational_profile_requires_one_source_bound_candidate_population(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit, machine_id, paths = _fixture(
+        tmp_path,
+        monkeypatch,
+        liveness_scope="demo",
+        continuous_paper_sleeve="off",
+    )
+    alternate = _private(tmp_path / "alternate-symbols.txt", "BTCUSDT\n")
+    environment = paths["account-execution.env"].read_text(encoding="utf-8")
+    paths["account-execution.env"].write_text(
+        environment.replace(
+            f"CANDIDATE_UNIVERSE_FILE={paths['symbols']}",
+            f"CANDIDATE_UNIVERSE_FILE={alternate}",
+        ),
+        encoding="utf-8",
+    )
+    paths["account-execution.env"].chmod(0o600)
+
+    with pytest.raises(ValueError, match="must also be the owner symbols file"):
+        _issue(
+            tmp_path,
+            repository,
+            commit,
+            machine_id,
+            profile=authority.DEMO_OPERATIONAL_PROFILE,
+        )
+
+    paths["account-execution.env"].write_text(environment, encoding="utf-8")
+    paths["account-execution.env"].chmod(0o600)
+
+    def reject_coverage(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise ValueError(
+            "demo-rule receipt does not exactly cover candidate universe"
+        )
+
+    monkeypatch.setattr(authority, "build_candidate_rule_coverage", reject_coverage)
+    with pytest.raises(ValueError, match="does not exactly cover"):
+        _issue(
+            tmp_path,
+            repository,
+            commit,
+            machine_id,
+            profile=authority.DEMO_OPERATIONAL_PROFILE,
         )
 
 

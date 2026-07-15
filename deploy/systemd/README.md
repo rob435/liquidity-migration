@@ -125,9 +125,13 @@ receipt:
 `scripts/ops.sh operational-authority` verifies it remotely;
 `operational-authority --execute issue` is the required mutation handshake.
 The temporary `calibration` profile authorizes only the demo account owner and
-requires raw persistence `1`. The permanent `operational` profile requires a
-passing paper twin receipt, raw persistence `0` for both owners, and binds all
-nine guarded units. Both profiles bind the exact clean commit, machine,
+requires raw persistence `1`. The permanent `demo-operational` profile requires
+raw persistence `0`, `ACCOUNT_LIVENESS_SCOPE=demo`, and
+`CONTINUOUS_PAPER_SLEEVE=off`; it binds the six demo owner/producer/hedge/
+refresh/liveness services and refuses every paper unit without reading a paper
+twin. The full `operational` profile requires a passing paper twin receipt, raw
+persistence `0` for both owners, `ACCOUNT_LIVENESS_SCOPE=demo-paper`, and binds
+all nine guarded units. Every profile binds the exact clean commit, machine,
 environment files, immutable config inputs, and runtime-root identities.
 Natural/fresh overrides, simultaneous operational and research-deploy
 receipts, mainnet variables, or changed inputs fail closed.
@@ -148,11 +152,20 @@ ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-execution
 ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-intents
 ACCOUNT_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-market-capture
 ACCOUNT_RAW_MARKET_PERSISTENCE=0
+ACCOUNT_LIVENESS_SCOPE=demo  # demo-paper for the full operational profile
 ACCOUNT_SYMBOLS_FILE=/etc/liquidity-migration/account-execution/symbols.txt
+CANDIDATE_UNIVERSE_FILE=/etc/liquidity-migration/account-execution/symbols.txt
 ACCOUNT_DEMO_RULES_FILE=/etc/liquidity-migration/account-execution/demo-rules.json
 ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-execution/risk-policy.json
 DISASTER_STOP_FRACTION=<explicit-owner-choice>
 ```
+
+For either permanent operational profile, `ACCOUNT_SYMBOLS_FILE` and
+`CANDIDATE_UNIVERSE_FILE` must name the same immutable candidate-universe
+artifact. Operational authorization reopens that artifact and the demo-rule
+receipt and proves exact, source-bound, current rule coverage before any owner
+or producer can start. This keeps both demo producers inside the owner's
+executable symbol set without enabling raw-tape persistence.
 
 The paper owner has a distinct route in
 `/etc/liquidity-migration/account-paper-execution.env`:
@@ -163,7 +176,8 @@ ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-paper
 ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-paper-intents
 ACCOUNT_PAPER_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-paper-market-capture
 ACCOUNT_RAW_MARKET_PERSISTENCE=0
-ACCOUNT_SYMBOLS_FILE=/etc/liquidity-migration/account-paper-execution/symbols.txt
+ACCOUNT_SYMBOLS_FILE=/etc/liquidity-migration/account-execution/symbols.txt
+CANDIDATE_UNIVERSE_FILE=/etc/liquidity-migration/account-execution/symbols.txt
 ACCOUNT_DEMO_RULES_FILE=/etc/liquidity-migration/account-execution/demo-rules.json
 ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-paper-execution/risk-policy.json
 ACCOUNT_TWIN_CALIBRATION_FILE=/etc/liquidity-migration/account-paper-execution/execution-twin-calibration.json
@@ -261,6 +275,41 @@ anonymous content URL. Initial deploy and recovery install only exact
 an editable install nor upgrades pip.
 Preactivation must use the checked initial deploy, and any partial activation
 state is preserved as an incident and fails closed.
+
+## Raw-disabled demo-only startup
+
+Use this path only after a new exact candidate passes its complete local,
+pre-push, and noncontacting Linux gates, installs with every project unit
+stopped, and authenticated venue plus canonical-journal flatness pass. It is
+ordinary demo operation, not a retry or substitute for a failed paper
+calibration.
+
+Before issuing authority, set the demo owner environment to
+`ACCOUNT_RAW_MARKET_PERSISTENCE=0` and `ACCOUNT_LIVENESS_SCOPE=demo`, narrow
+`CONTINUOUS_PAPER_SLEEVE=off` through the host sleeve override, regenerate and
+verify `sleeves.resolved.env`, and keep every paper unit stopped/disabled. The
+depth and liquidation collectors are optional research capture and remain
+stopped in this bounded-storage mode. Issue the create-only receipt with:
+
+```bash
+scripts/ops.sh operational-authority --execute issue \
+  --profile demo-operational \
+  --expected-commit "$(git -C /opt/liquidity-migration rev-parse HEAD)" \
+  --repo-root /opt/liquidity-migration \
+  --authorization-reference "owner task: raw-disabled demo operation" \
+  --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
+```
+
+Start `liquidity-migration-account-execution.service` alone and wait for its
+same-invocation readiness check. Only after it is healthy may the enabled demo
+LONG/CONTINUOUS producer services, hedge timer, RMOM-refresh timer, and
+demo-liveness timer start. The liveness wrapper receives the receipt-bound
+`ACCOUNT_LIVENESS_SCOPE=demo`, so it neither pulls nor alerts on the blocked
+paper owner and ignores the intentionally externalized research collectors.
+Re-prove that every paper unit is inactive and unauthorized, the owner is
+healthy, live L2/readiness and exact decision books advance, raw segment bytes
+do not, journals verify, and authenticated demo positions/orders agree with the
+canonical account state.
 
 ## Evidence-window startup and inspection
 

@@ -1116,6 +1116,8 @@ def test_fresh_runtime_wrapper_verifies_inherited_environment_then_execs() -> No
     assert "--environment paper" in wrapper
     assert "--timeout-seconds 180" in wrapper
     assert "scripts/check_demo_liveness.py" in wrapper
+    assert "--account-scope" in wrapper
+    assert "ACCOUNT_LIVENESS_SCOPE is required" in wrapper
     assert "--telegram" in wrapper
     for selector, command in {
         "liquidity-migration-account-execution.service:main": "run_account_execution_service.sh",
@@ -1380,8 +1382,11 @@ def test_liveness_watchdog_checks_continuous_paper_evidence_root() -> None:
     assert "continuous_stop_check" not in script
     assert "--account-root /opt/liquidity-migration/data/bybit-account-execution" not in service
     assert "--account-capture-root /opt/liquidity-migration/data/bybit-account-market-capture" not in service
-    assert "liquidity-migration-account-execution.service" in service
-    assert "liquidity-migration-account-paper-execution.service" in service
+    requires = next(
+        line for line in service.splitlines() if line.startswith("Requires=")
+    )
+    assert "liquidity-migration-account-execution.service" in requires
+    assert "liquidity-migration-account-paper-execution.service" not in requires
     assert "gather_account_health_alerts" in script
     assert "gather_risk_alerts" not in script
     assert "gather_hedge_orphan_alerts" not in script

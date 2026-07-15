@@ -1,8 +1,8 @@
 [Unit]
 Description=liquidity-migration account-kernel and strategy-input liveness watchdog
 Wants=network-online.target
-Requires=liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service
-After=network-online.target liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service
+Requires=liquidity-migration-account-execution.service
+After=network-online.target liquidity-migration-account-execution.service
 ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
 
 [Service]
@@ -31,10 +31,11 @@ ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
 MemoryMax=512M
-# Requires both account owners, fresh independent demo/paper live L2, and
-# fresh healthy owner artifacts under both canonical account roots. Strategy
-# cycle/input checks remain; retired sleeve-ledger, ws_risk, and combined-report
-# checks do not. Exits 0 always (a watchdog must never crash-loop).
+# ACCOUNT_LIVENESS_SCOPE is bound by operational authorization. Demo-only mode
+# requires the demo owner/readiness/strategy surface and never pulls the blocked
+# paper owner into systemd; the full mode checks both owners. Strategy cycle/input
+# checks remain; retired sleeve-ledger, ws_risk, and combined-report checks do
+# not. Exits 0 always (a watchdog must never crash-loop).
 # New/resolved faults are Telegram-deduplicated; the six-hour cooldown prevents
 # repeated spam. Bybit credentials are removed from this process environment.
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-demo-liveness.service main

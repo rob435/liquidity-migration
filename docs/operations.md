@@ -18,11 +18,12 @@ run both prompts concurrently in the same worktree. Neither prompt grants
 mainnet authority, and the completion prompt deliberately stops before the
 separately authorized `main` push/deployment boundary.
 
-V7 is closed and spent. The active bounded calibration is the prospectively
-registered V8 corrected-defect epoch. The CLI/schema names `v7-archive`,
-`v7_training`, and `--v7-archive-map` remain compatibility labels for the one
-passing training calibration and must bind V8; they cannot consume the failed
-V7 receipt.
+V7 is closed and spent. V8 also closed `failed_prepublication` after its fixed
+160-USDT request fell below BTC's unchanged quantization-safe registered
+minimum; it emitted no target, order, fill, tape, or run receipt and must not be
+resized or retried. The CLI/schema names `v7-archive`, `v7_training`, and
+`--v7-archive-map` remain compatibility labels for the one passing historical
+training calibration; they cannot consume failed V7/V8 evidence.
 
 The owner has made the registered five-day natural/raw-tape run optional
 research. It remains unrun and may not be called passed, waived, or promoted.
@@ -30,6 +31,10 @@ Demo/paper VPS operation instead uses live sequence-aware L2, bounded market
 readiness, exact decision books, and the account journal. Bulk raw persistence
 is explicit: `1` during registered V8/natural evidence, `0` for permanent
 operation. Paper still requires the passing V8 twin receipt.
+Because no such receipt exists, paper remains blocked. The current operational
+path is the separately authorized raw-disabled demo-only topology; it requires
+one shared immutable candidate universe with exact source-bound current demo
+rules and keeps every paper unit stopped.
 
 ```bash
 scripts/ops.sh
@@ -177,35 +182,30 @@ same complete candidate gates first, then use install-preflight while every
 VPS unit is stopped. Re-prove authenticated demo flatness and zero regular and
 conditional orders before issuing either receipt.
 
-For the bounded V8 bootstrap, the demo environment must set raw persistence
-`1`; paper and ordinary producers remain stopped:
+V8's bounded calibration authorization is retired and must not be reissued.
+For the current demo-only path, freeze the full candidate population, probe
+exactly that set once, and verify source-bound rule coverage. Install those
+create-only artifacts as both `ACCOUNT_SYMBOLS_FILE` and
+`CANDIDATE_UNIVERSE_FILE` plus `ACCOUNT_DEMO_RULES_FILE`. The demo environment
+must also set `ACCOUNT_RAW_MARKET_PERSISTENCE=0` and
+`ACCOUNT_LIVENESS_SCOPE=demo`; the resolved paper sleeve must be off.
 
 ```bash
 COMMIT="$(git rev-parse HEAD)"
 scripts/ops.sh operational-authority --execute issue \
-  --profile calibration \
+  --profile demo-operational \
   --expected-commit "$COMMIT" \
   --repo-root /opt/liquidity-migration \
-  --authorization-reference "owner task: bounded V8 bootstrap" \
+  --authorization-reference "owner task: raw-disabled demo operation" \
   --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
 ```
 
-The create-only receipt authorizes only
-`liquidity-migration-account-execution.service`. Start that owner, require its
-same-generation readiness, then run V8 exactly once through
-`demo-calibration --execute`. A failed V8 remains a failure and paper remains
-blocked. Do not resize, resume, reset, or retry it.
-
-After a passing V8, stop the owner and preserve the calibration authorization
-under the private attempt directory. Install the verified twin receipt at the
-paper path, set `ACCOUNT_RAW_MARKET_PERSISTENCE=0` in both owner environments,
-rebuild/verify the resolved sleeve file, and issue a new receipt with
-`--profile operational`. The writer refuses to overwrite the well-known path.
-Start and enable both owners first; only after both readiness gates pass may
-the enabled LONG/CONT demo/paper producers start. Validate RMOM before enabling
-its refresh timer, then the hedge timer, and finally the liveness timer. Data-
-only liquidation/depth collectors are not part of this operational authority
-and need not run on this VPS.
+The create-only receipt authorizes only the demo owner, demo LONG/CONTINUOUS
+producers, hedge, RMOM refresh, and liveness services. Start the demo owner and
+require same-generation readiness before either producer. Validate RMOM before
+enabling its refresh timer, then the hedge timer, and finally the liveness
+timer. Data-only liquidation/depth collectors are not part of this authority
+and need not run on this VPS. Every paper unit remains stopped and refused.
 
 Verification must prove the receipt and active process environments, fresh
 bounded market sidecars for both owners, current account health, no unexpected

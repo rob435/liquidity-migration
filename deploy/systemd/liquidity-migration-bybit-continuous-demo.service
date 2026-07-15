@@ -71,8 +71,9 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
-# Broad (top-250) kline store + per-cycle cross-section recompute. Cap at 4G;
-# normal operation sits well under 1G. Lower the kline universe size if memory-bound.
+# Broad full demo linear-perpetual kline store + per-cycle cross-section
+# recompute. Cap at 4G; normal operation sits well under 1G. A separately
+# declared strategy change would be required to narrow the live universe.
 MemoryMax=4G
 
 [Install]

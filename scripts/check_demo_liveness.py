@@ -2,10 +2,12 @@
 """Fast account-kernel and strategy-input liveness watchdog for demo/paper.
 
 The account execution owners are the only execution, reconciliation, and
-protection authorities.  This checker therefore requires both owner services,
-fresh independent demo/paper live-L2 readiness, fresh owner-health projections,
-and a recent healthy canonical demo venue snapshot. It deliberately does not
-inspect retired sleeve ledgers, ``ws_risk``, or the old combined-book reporter.
+protection authorities.  The checked operational authorization binds this
+process to either ``demo`` or ``demo-paper`` scope.  The checker requires every
+owner, live-L2 readiness sidecar, owner-health projection, and strategy input
+inside that scope plus a recent healthy canonical demo venue snapshot. It
+deliberately does not inspect retired sleeve ledgers, ``ws_risk``, or the old
+combined-book reporter.
 
 Strategy-daemon cycle and input checks remain because an execution owner cannot
 detect a hung signal scheduler or an empty/stale signal source.
@@ -55,6 +57,7 @@ WARNING = "WARNING"
 _DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution.service"
 _PAPER_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-paper-execution.service"
 _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT, _PAPER_ACCOUNT_OWNER_UNIT)
+_ACCOUNT_SCOPES = ("demo", "demo-paper")
 
 
 def _default_root(rel: str) -> str:
@@ -181,7 +184,11 @@ def evaluate_unit_states(
     return alerts
 
 
-def evaluate_required_account_owner_states(unit_states: dict[str, str]) -> list[Alert]:
+def evaluate_required_account_owner_states(
+    unit_states: dict[str, str],
+    *,
+    required_units: tuple[str, ...] = _REQUIRED_ACCOUNT_OWNER_UNITS,
+) -> list[Alert]:
     """Account owners are required continuously, not merely checked for ``failed``.
 
     Strategy cycle rows cannot prove that the sole execution authority is alive,
@@ -190,7 +197,7 @@ def evaluate_required_account_owner_states(unit_states: dict[str, str]) -> list[
     """
 
     alerts: list[Alert] = []
-    for unit in _REQUIRED_ACCOUNT_OWNER_UNITS:
+    for unit in required_units:
         state = unit_states.get(unit, "unknown")
         if state == "active":
             continue
@@ -491,6 +498,36 @@ def _default_units_for_toggles() -> list[str]:
     if _unit_enabled("liquidity-migration-depth-collector.service"):
         units.append("liquidity-migration-depth-collector.service")
     return units
+
+
+def _default_units_for_scope(account_scope: str) -> list[str]:
+    """Narrow the existing toggle-derived inventory to the authorized owners.
+
+    The full ``demo-paper`` path deliberately preserves the historical unit
+    inventory.  ``demo`` removes every paper owner/producer and does not monitor
+    the shared RMOM refresh solely because a disabled paper sleeve is on.
+    """
+
+    if account_scope not in _ACCOUNT_SCOPES:
+        raise ValueError(f"unsupported account liveness scope: {account_scope}")
+    units = _default_units_for_toggles()
+    if account_scope == "demo-paper":
+        return units
+    paper_units = {
+        _PAPER_ACCOUNT_OWNER_UNIT,
+        "liquidity-migration-bybit-long-paper.service",
+        "liquidity-migration-bybit-continuous-paper.service",
+        "liquidity-migration-liquidation-collector.service",
+        "liquidity-migration-depth-collector.service",
+    }
+    if not _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
+        paper_units.update(
+            {
+                "liquidity-migration-continuous-rmom-refresh.service",
+                "liquidity-migration-continuous-rmom-refresh.timer",
+            }
+        )
+    return [unit for unit in units if unit not in paper_units]
 
 
 def _ping_heartbeat(url: str) -> None:
@@ -867,6 +904,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="systemd unit(s) to liveness-check (repeatable). Defaults to the core demo/paper units.",
     )
+    p.add_argument(
+        "--account-scope",
+        choices=_ACCOUNT_SCOPES,
+        default=os.environ.get("ACCOUNT_LIVENESS_SCOPE") or "demo-paper",
+        help="require demo owner/runtime only, or both demo and paper (default: environment or demo-paper)",
+    )
     p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
     # Roots stay str (NOT type=Path): argparse type=Path turns the documented '' skip
@@ -992,11 +1035,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_arg_parser().parse_args()
 
+    required_account_owner_units = (
+        (_DEMO_ACCOUNT_OWNER_UNIT,)
+        if args.account_scope == "demo"
+        else _REQUIRED_ACCOUNT_OWNER_UNITS
+    )
+
     units = list(
         dict.fromkeys(
             [
-                *(args.unit or _default_units_for_toggles()),
-                *_REQUIRED_ACCOUNT_OWNER_UNITS,
+                *(args.unit or _default_units_for_scope(args.account_scope)),
+                *required_account_owner_units,
             ]
         )
     )
@@ -1025,13 +1074,25 @@ def main() -> int:
     # mirror deploy/lib_sleeves.sh: LONG off (round-3 fail-safe change), CONTINUOUS off.
     unit_states = _unit_states(units)
     not_active_timers = {u for u, s in unit_states.items() if u.endswith(".timer") and s != "active"}
-    owner_states = {unit: unit_states.get(unit, "unknown") for unit in _REQUIRED_ACCOUNT_OWNER_UNITS}
-    non_owner_states = {unit: state for unit, state in unit_states.items() if unit not in _REQUIRED_ACCOUNT_OWNER_UNITS}
+    owner_states = {
+        unit: unit_states.get(unit, "unknown")
+        for unit in required_account_owner_units
+    }
+    non_owner_states = {
+        unit: state
+        for unit, state in unit_states.items()
+        if unit not in required_account_owner_units
+    }
     alerts = evaluate_unit_states(
         non_owner_states,
         prior_not_active_timers=prior_not_active_timers,
     )
-    alerts.extend(evaluate_required_account_owner_states(owner_states))
+    alerts.extend(
+        evaluate_required_account_owner_states(
+            owner_states,
+            required_units=required_account_owner_units,
+        )
+    )
     alerts.extend(
         gather_account_capture_alerts(
             capture_root=Path(args.account_capture_root),
@@ -1039,14 +1100,15 @@ def main() -> int:
             max_age_minutes=args.max_account_capture_age_min,
         )
     )
-    alerts.extend(
-        gather_account_capture_alerts(
-            capture_root=Path(args.account_paper_capture_root),
-            now_ms=now_ms,
-            max_age_minutes=args.max_account_capture_age_min,
-            label="paper",
+    if args.account_scope == "demo-paper":
+        alerts.extend(
+            gather_account_capture_alerts(
+                capture_root=Path(args.account_paper_capture_root),
+                now_ms=now_ms,
+                max_age_minutes=args.max_account_capture_age_min,
+                label="paper",
+            )
         )
-    )
     alerts.extend(
         gather_account_health_alerts(
             account_root=Path(args.account_root),
@@ -1062,15 +1124,16 @@ def main() -> int:
             max_age_minutes=args.max_account_health_age_min,
         )
     )
-    alerts.extend(
-        gather_account_owner_health_alerts(
-            account_root=Path(args.account_paper_root),
-            environment="paper",
-            now_ms=now_ms,
-            max_age_minutes=args.max_account_health_age_min,
+    if args.account_scope == "demo-paper":
+        alerts.extend(
+            gather_account_owner_health_alerts(
+                account_root=Path(args.account_paper_root),
+                environment="paper",
+                now_ms=now_ms,
+                max_age_minutes=args.max_account_health_age_min,
+            )
         )
-    )
-    if liquidations_root is not None:
+    if args.account_scope == "demo-paper" and liquidations_root is not None:
         alerts.extend(
             gather_liquidation_capture_alerts(
                 liquidations_root=liquidations_root,
@@ -1079,7 +1142,7 @@ def main() -> int:
             )
         )
     depth_root = Path(args.depth_root) if str(args.depth_root).strip() else None
-    if depth_root is not None:
+    if args.account_scope == "demo-paper" and depth_root is not None:
         alerts.extend(
             gather_depth_capture_alerts(
                 depth_root=depth_root,
@@ -1105,7 +1168,11 @@ def main() -> int:
                 max_age_days=args.max_hedge_warmstart_age_days,
             )
         )
-    if continuous_paper_root is not None and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
+    if (
+        args.account_scope == "demo-paper"
+        and continuous_paper_root is not None
+        and _sleeve_on("CONTINUOUS_PAPER_SLEEVE")
+    ):
         alerts.extend(
             gather_continuous_alerts(
                 continuous_root=continuous_paper_root,
@@ -1123,7 +1190,11 @@ def main() -> int:
                 cycle_checks=_sleeve_on("LONG_SLEEVE"),
             )
         )
-    if long_paper_root is not None and _sleeve_on("LONG_SLEEVE"):
+    if (
+        args.account_scope == "demo-paper"
+        and long_paper_root is not None
+        and _sleeve_on("LONG_SLEEVE")
+    ):
         alerts.extend(
             gather_long_alerts(
                 long_root=long_paper_root,

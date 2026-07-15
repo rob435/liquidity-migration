@@ -27,6 +27,22 @@ research decisions are in
   explicit: `1` for registered V8/natural evidence, `0` for permanent VPS
   operation. The paper owner still requires a passing V8 execution-twin
   calibration; that gate is not waived.
+- Replacement candidate `b501be38a4caade21efd3607fcfcbdd1c892ec28`
+  passed all 2,971 local/pre-push tests and its single exact-head Linux run
+  (`29413772911`), installed cleanly, and passed the fresh rule/reset/clock/
+  demo-owner readiness gates. V8 then closed before publication because its
+  fixed `160 USDT` request was below BTC's unchanged `160.15725 USDT`
+  quantization-safe minimum. No V8 target, order, fill, event tape, or run
+  receipt exists. Authenticated venue/local flatness passed, all units stopped,
+  and the temporary authority was retired. Paper remains blocked and V8 cannot
+  be resized or retried. A distinct prospective `demo-operational` profile is
+  being implemented to run only the raw-disabled demo owner/producers/hedge/
+  refresh/liveness surface; it cannot authorize paper or satisfy V8.
+  Permanent operational authorization additionally requires one immutable
+  candidate-universe artifact to serve as the owner symbol file and both demo
+  producers' population ceiling, then reopens the demo-rule receipt to prove
+  exact, source-bound rule coverage. The old three-symbol V8 files do not meet
+  that operational invariant.
 - Candidate `181027b0853db9e543e30504211d701c7c95fc86` passed all 2,970 local
   tests, the canonical pre-push gate, and its single exact-head noncontacting
   Linux run (`29411462086`). It installed cleanly on the stopped VPS, and the
@@ -58,8 +74,9 @@ research decisions are in
   finalization exposed a second immutable-Close collision. Final proof found
   journal integrity at 6,804 events, zero local/venue positions, zero regular or
   conditional orders, and no active project unit. Paper and ordinary producers
-  never started. V8 is registered prospectively as a corrected-defect successor
-  with the exact V7 sample/risk/clock/decision rules and no V7 sample reuse.
+  never started. V8 was registered as a corrected-defect successor with the
+  exact V7 sample/risk/clock/decision rules and no V7 sample reuse; it later
+  closed at its immutable prepublication size gate as recorded above.
 - Flat maintenance began at `2026-07-13T22:53:17Z`. Immediately before the
   stop, the VPS was clean at `5f6d9986d935`, the demo key was order-capable,
   and Bybit reported zero active positions, regular orders, and conditional
@@ -174,13 +191,13 @@ research decisions are in
   owner failed closed. Final local/venue flatness and stopped-state proof
   passed. V7 cannot be resumed or counted.
 
-  Prospective V8 retains the exact fixed plan and thresholds. Its replacement
-  source runs funding recovery before direct position reconciliation,
+  V8 retained the exact fixed plan and thresholds. Its replacement source runs
+  funding recovery before direct position reconciliation,
   timestamps truth after the REST response, reuses verified journal/read-only
   state caches, and commits terminal reduce-batch Close/P&L atomically. No age,
-  retry, risk, or evidence threshold is relaxed. V8 requires a new frozen
-  candidate, full local/non-contacting Linux gates, exact staging, and another
-  verified six-root reset before any target.
+  retry, risk, or evidence threshold was relaxed. Candidate `b501be3` passed the
+  source/candidate/runtime preconditions, but the immutable size preflight
+  closed V8 before any target as recorded above.
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now
@@ -191,16 +208,18 @@ research decisions are in
   LONG waits beyond 24 hours remain outside that runtime claim or in post-run
   replay.
 - The research-promotion cutover gate remains open: fresh rules and failed
-  V4--V7 evidence exist, but V8 and its partial-fill gate have not run; there is
+  V4--V8 evidence exist, but V8 produced no execution sample or partial-fill
+  result; there is
   no passing calibration tape, 120-hour natural LONG/CONT tape, periodic clock
   series, stopped-source seal, offline replay/parity/sufficiency/drift result,
   fresh-deploy epoch, or historical/paper/demo promotion comparison. Those
   missing artifacts still prohibit any natural/replay/promotion claim. They no
-  longer prohibit the separately owner-authorized demo/paper operational path.
-  That path instead requires one exact clean candidate, its complete local and
-  non-contacting Linux gates, verified demo flatness, V8 for the paper twin,
-  exact immutable runtime inputs, and a machine/commit-bound mode-`0600`
-  operational authorization. The stopped and fresh epoch constructors
+  longer prohibit a separately owner-authorized demo-only operational path.
+  That path requires one exact clean candidate, its complete local and
+  non-contacting Linux gates, verified demo flatness, exact immutable runtime
+  inputs, raw persistence `0`, paper disabled, and a machine/commit-bound
+  mode-`0600` authorization. Full demo/paper operation still requires a new
+  prospective paper-calibration decision. The stopped and fresh epoch constructors
   are integrity mechanisms in source, not evidence that either epoch exists.
   The earlier generic stopped-tree provenance implementation blocker is closed
   in source: target-replay manifest v2, event parity v3, captured-account replay
@@ -493,18 +512,19 @@ Strategy-overhaul status is still synthetic and outcome blind:
 
 ## Next actions
 
-1. Freeze the replacement account-owner candidate and pass its complete local,
-   pre-push, and one exact-head non-contacting Linux gate. Install that exact
-   commit while the VPS remains flat/stopped. Use the calibration-only
-   authorization to start the demo owner alone with raw capture enabled, then
-   run V8 exactly once. If V8 passes, stop the owner, preserve its receipt,
-   switch both owners to raw persistence `0`, issue the full operational
-   authorization, and start demo/paper owners before enabled target producers.
-   Verify bounded live-L2 readiness, account journals, venue flatness/working
-   orders, service health, and that bulk raw segments no longer grow. If V8
-   fails, preserve the failure and leave paper blocked; do not weaken or retry
-   it. The five-day natural study is deferred optional research and may be run
-   later only under its unchanged registered contract with raw persistence `1`.
+1. Freeze the replacement demo-operational candidate and pass its complete
+   local, pre-push, and one exact-head non-contacting Linux gate. Install that
+   exact commit while the VPS remains flat/stopped. Freeze one current full
+   candidate population, obtain one exact source-bound demo-rule receipt, and
+   bind that artifact as both `ACCOUNT_SYMBOLS_FILE` and
+   `CANDIDATE_UNIVERSE_FILE`. Set raw persistence `0`, demo-scoped liveness,
+   and the paper sleeve off; then issue demo-operational authority. Start the
+   demo owner before demo producers and timers. Verify live-L2 readiness,
+   account-journal/venue integrity, service and timer health, bounded storage,
+   and that bulk raw segments do not grow while every paper unit remains
+   stopped and unauthorized. V8 is closed and must not be retried. The five-day
+   natural study is deferred optional research and may run later only under its
+   unchanged registered contract with raw persistence `1`.
 2. Let the owner-run Strategy Overhaul master plan continue on the big PC without
    coupling it to this VPS cutover. Ingest its immutable receipts only after the
    run finishes; a positive research result still does not change the live

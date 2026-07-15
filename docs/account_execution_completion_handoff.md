@@ -52,16 +52,22 @@ passes. It was not retried and is spent. The prospective repair names both
 dated liquidation files explicitly. A new frozen candidate and every candidate
 gate remain required.
 
-The prospective implementation has two non-overlapping authorization profiles:
+The prospective implementation has three non-overlapping authorization profiles:
 
 - `calibration` binds one clean commit, machine, demo route, credentials,
   roots, and immutable inputs; enables raw capture; and authorizes only the demo
   account owner so V8 can bootstrap without paper or producers;
+- `demo-operational` requires raw persistence `0`, binds only the demo route,
+  requires demo-scoped liveness and a disabled paper sleeve, and authorizes the
+  six demo owner/producer/hedge/refresh/liveness services without reading or
+  claiming a paper twin receipt. Its owner symbol file and both producers'
+  `CANDIDATE_UNIVERSE_FILE` are the same immutable artifact, and authorization
+  rebuilds exact source-bound demo-rule coverage before any service starts;
 - `operational` requires the passing twin receipt, binds both owner routes and
   all immutable inputs, requires raw persistence `0`, and authorizes only the
   nine checked demo/paper owner/producer/hedge/refresh/liveness units.
 
-Neither profile claims natural replay, parity, drift, alpha, promotion, or real
+No profile claims natural replay, parity, drift, alpha, promotion, or real
 money. Natural/fresh override files and simultaneous research/operational
 receipts fail closed. The exact checkout, environment files, runtime-root
 identities, config inputs, machine, and allowed unit are re-opened in the same
@@ -84,6 +90,29 @@ either:
 The owner's permission includes demo/paper VPS installation and activation for
 this task. It still does not authorize `REAL_MONEY`, mainnet credentials, a
 `main` push, force-push, branch deletion, or fabricated/retried evidence.
+
+## Successor update — demo-only continuation after V8 preflight, 2026-07-15
+
+Replacement candidate `b501be38a4caade21efd3607fcfcbdd1c892ec28`
+passed its complete local/pre-push/single exact-head Linux gates and installed
+cleanly. Its fresh rule receipt made the unchanged V8 fixed-size preflight
+decisive before publication: BTC required `160.15725 USDT` under the registered
+2.5-times-minimum rule, while V8 fixed `160 USDT`. No V8 target, event tape,
+order, fill, or run receipt was emitted. Authenticated venue/local flatness
+passed, every service stopped, and the calibration authority was retired. V8
+is closed and paper remains blocked; resizing or rerunning it is forbidden.
+
+The owner's broader operational goal can continue without converting that
+negative result into a pass. A new candidate may implement the distinct
+`demo-operational` profile above, repeat every candidate gate, install while
+stopped/flat, disable bulk raw persistence and the paper sleeve, issue a new
+exact-commit/machine/input authorization, then start the demo owner before the
+authorized demo producers and timers. Demo runtime observations are operational
+or exploratory only and cannot satisfy V8, authorize paper, or support a
+research-promotion/mainnet claim. This continuation is complete only when the
+demo owner, enabled demo strategies, hedge/RMOM timers, and demo-scoped liveness
+are healthy under bounded storage while every paper unit remains stopped and
+unauthorized.
 
 ## Successor update — 2026-07-15
 
@@ -308,14 +337,19 @@ Documentation and handoff discipline:
     doing so will not overwrite unrelated graph work.
 
 Definition of done for this prompt:
-- either all preregistered code, candidate-CI, V8, owner-first, 120-hour natural,
-  clock, accounting/flatness, stopped-seal, replay/parity/sufficiency/drift,
-  fresh-root, and assessment gates pass for one exact clean commit and you hand
-  back a verified ready-to-deploy package for explicit owner authorization;
+- either one exact clean demo-operational candidate passes its complete local,
+  pre-push, and single exact-head Linux gates; installs while stopped/flat;
+  binds one immutable full candidate universe to exact source-bound current
+  demo rules; starts the raw-disabled demo owner before enabled demo producers
+  and timers; and verifies owner/strategy/liveness health, journal/venue
+  integrity, bounded storage, and complete paper isolation;
 - or a specific gate fails or remains unidentified, all evidence is preserved,
-  services are left in the safest registered stopped/flat state, the failed
-  attempt is documented only after its frozen window closes, and you identify
-  the smallest prospective next decision.
+  unsafe services remain stopped/flat, and you identify the smallest
+  prospective next decision without weakening or retrying an evidence gate.
+
+The older V8/natural/replay/fresh-root definition is the separate optional
+research-promotion path. V8 is already closed `failed_prepublication`; this
+prompt must not retry it, infer a paper twin, or wait for the five-day tape.
 
 Neither outcome permits real money. Do not promote main or delete the cutover
 branch until a separately authorized deployment has succeeded and verified.

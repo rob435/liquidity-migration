@@ -28,7 +28,11 @@ MIN = 60_000
 def _stub_account_authority(monkeypatch) -> None:
     """Keep unrelated main-loop tests focused on cooldown/timer behavior."""
 
-    monkeypatch.setattr(M, "evaluate_required_account_owner_states", lambda _states: [])
+    monkeypatch.setattr(
+        M,
+        "evaluate_required_account_owner_states",
+        lambda _states, **_kwargs: [],
+    )
     monkeypatch.setattr(M, "gather_account_capture_alerts", lambda **_kwargs: [])
     monkeypatch.setattr(M, "gather_account_health_alerts", lambda **_kwargs: [])
     monkeypatch.setattr(M, "gather_account_owner_health_alerts", lambda **_kwargs: [])
@@ -105,6 +109,16 @@ def test_required_account_owners_must_be_active() -> None:
                 M._DEMO_ACCOUNT_OWNER_UNIT: "active",
                 M._PAPER_ACCOUNT_OWNER_UNIT: "active",
             }
+        )
+        == []
+    )
+    assert (
+        M.evaluate_required_account_owner_states(
+            {
+                M._DEMO_ACCOUNT_OWNER_UNIT: "active",
+                M._PAPER_ACCOUNT_OWNER_UNIT: "inactive",
+            },
+            required_units=(M._DEMO_ACCOUNT_OWNER_UNIT,),
         )
         == []
     )
@@ -637,6 +651,80 @@ def test_default_unit_monitoring_is_always_account_kernel_only(monkeypatch) -> N
     assert "liquidity-migration-combined-book-report.timer" not in units
     assert "liquidity-migration-bybit-long-demo.service" in units
     assert "liquidity-migration-bybit-continuous-demo.service" in units
+
+
+def test_demo_account_scope_excludes_every_paper_owner_and_producer(monkeypatch) -> None:
+    monkeypatch.setenv("LONG_SLEEVE", "on")
+    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
+    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "on")
+
+    units = M._default_units_for_scope("demo")
+
+    assert M._DEMO_ACCOUNT_OWNER_UNIT in units
+    assert M._PAPER_ACCOUNT_OWNER_UNIT not in units
+    assert "liquidity-migration-bybit-long-demo.service" in units
+    assert "liquidity-migration-bybit-long-paper.service" not in units
+    assert "liquidity-migration-bybit-continuous-demo.service" in units
+    assert "liquidity-migration-bybit-continuous-paper.service" not in units
+    assert "liquidity-migration-continuous-rmom-refresh.timer" in units
+    assert "liquidity-migration-liquidation-collector.service" not in units
+    assert "liquidity-migration-depth-collector.service" not in units
+
+    monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
+    assert "liquidity-migration-continuous-rmom-refresh.timer" not in (M._default_units_for_scope("demo"))
+
+
+def test_demo_account_scope_skips_paper_health_and_capture_gathers(tmp_path, monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
+    monkeypatch.setattr(
+        M,
+        "_unit_states",
+        lambda units: {unit: "active" for unit in units},
+    )
+    monkeypatch.setattr(M, "gather_account_health_alerts", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        M,
+        "gather_account_capture_alerts",
+        lambda **kwargs: calls.append(("capture", str(kwargs.get("label") or "demo"))) or [],
+    )
+    monkeypatch.setattr(
+        M,
+        "gather_account_owner_health_alerts",
+        lambda **kwargs: calls.append(("owner", str(kwargs["environment"]))) or [],
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_demo_liveness.py",
+            "--account-scope",
+            "demo",
+            "--continuous-root",
+            "",
+            "--continuous-paper-root",
+            "",
+            "--long-root",
+            "",
+            "--long-paper-root",
+            "",
+            "--hedge-warmstart",
+            "",
+            "--liquidations-root",
+            "",
+            "--depth-root",
+            "",
+            "--state-file",
+            str(tmp_path / "state.json"),
+        ],
+    )
+
+    assert M.main() == 0
+    assert calls == [("capture", "demo"), ("owner", "demo")]
+
+
+def test_account_scope_defaults_from_bound_environment(monkeypatch) -> None:
+    monkeypatch.setenv("ACCOUNT_LIVENESS_SCOPE", "demo")
+    assert M.build_arg_parser().parse_args([]).account_scope == "demo"
 
 
 def test_hedge_lifecycle_monitored_during_continuous_off_winddown(monkeypatch) -> None:

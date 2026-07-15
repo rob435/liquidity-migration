@@ -38,14 +38,22 @@ wrapper refuses if both exist. It also refuses natural/fresh override files,
 the wrong/dirty commit, another machine, changed environment/config/input/root
 identity, mainnet variables, `REAL_MONEY`, or an unregistered unit.
 
-There are two profiles. `calibration` requires raw persistence `1`, binds only
+There are three profiles. `calibration` requires raw persistence `1`, binds only
 the demo route and inputs, and authorizes only the demo account owner. This
 breaks no evidence gate: it exists solely to run the unchanged registered V8
 once before a paper calibration exists. After V8 closes, stop the owner and
 preserve/archive that authorization receipt before changing any bound input.
-`operational` requires raw persistence `0` on both owners and a source-verified
-passing twin receipt; it then authorizes the checked nine-unit demo/paper
-topology. Issue or verify it through:
+`demo-operational` requires raw persistence `0`, demo-scoped liveness, and a
+disabled paper sleeve; it binds only the demo route and authorizes the demo
+owner, demo LONG/CONTINUOUS producers, hedge, RMOM refresh, and liveness. It
+does not read or claim a paper twin receipt and cannot start a paper unit. Both
+permanent profiles require `ACCOUNT_SYMBOLS_FILE` and
+`CANDIDATE_UNIVERSE_FILE` to name the same immutable candidate artifact and
+rebuild exact source-bound demo-rule coverage before authorization. This is an
+execution compatibility gate, not a raw-tape or research-result claim.
+`operational` requires raw persistence `0` on both owners, demo-paper liveness,
+and a source-verified passing twin receipt; it then authorizes the checked
+nine-unit demo/paper topology. Issue or verify a profile through:
 
 ```bash
 COMMIT="$(git -C /opt/liquidity-migration rev-parse HEAD)"
@@ -63,8 +71,12 @@ scripts/ops.sh operational-authority verify \
 The full operational profile uses the same command with
 `--profile operational` only after the twin receipt is installed and both
 owner environments explicitly set `ACCOUNT_RAW_MARKET_PERSISTENCE=0`. These
-receipts authorize demo/paper only. They do not authorize a `main` push,
-mainnet, real money, or a research conclusion.
+receipts authorize only their named demo or demo/paper scope. After a failed or
+deferred V8, a separately frozen candidate may use `--profile
+demo-operational` with `ACCOUNT_RAW_MARKET_PERSISTENCE=0`,
+`ACCOUNT_LIVENESS_SCOPE=demo`, and `CONTINUOUS_PAPER_SLEEVE=off`; that is a
+demo operation decision, not a V8 retry or paper calibration. No profile
+authorizes a `main` push, mainnet, real money, or a research conclusion.
 
 The evidence plan is not complete. Prior candidate `c7d6509` passed a clean
 local/non-contacting `candidate-ci` boundary but was never installed and is
@@ -92,12 +104,16 @@ once at the five-second deadline rather than twice. Cleanup and final flatness
 passed; the candidate is spent. A prospective replacement extends only the
 read-only terminal-history observation defaults to 30 seconds/100 polls while
 retaining every exact-identity, no-fill, rate, cleanup, and flatness gate.
-There is no frozen passing replacement candidate after that repair; V8 and
-its partial-fill gate have not run; and there is
+Replacement `b501be3` passed all candidate gates and that probe, but V8 then
+closed before publication because its fixed 160-USDT size was below BTC's
+unchanged 160.15725-USDT quantization-safe minimum. No V8 target/order/fill
+exists, paper remains blocked, and V8 cannot be resized or retried. There is
 no natural 120-hour LONG/CONT epoch, periodic clock series,
 venue-accounting/final-flatness receipt, offline replay/parity/drift/sufficiency
 result, real stopped-natural-epoch seal, real fresh-deploy epoch, or cutover
-authorization. Promoting or deleting the cutover branch is unsafe while those
+authorization. A new demo-operational candidate may run only the raw-disabled
+demo topology without claiming or authorizing paper. Promoting or deleting the
+cutover branch is unsafe while those
 gates remain open. An unrelated branch may be removed only after proving it has
 no unique commit and no dirty or in-use worktree. The Strategy Overhaul/master alpha plan running
 on the big PC is separate work and cannot advance this cutover's frozen `main`
@@ -328,8 +344,8 @@ or receipt has been issued:
   also pending unless a prospective allocation policy can be shown to be
   identifiable from canonical orders and executions;
 - no demo tape has met the preregistered execution-twin sample floors. V4--V7
-  produced useful but spent failure evidence; V8 requires a new clock receipt,
-  candidate, reset epoch, and fresh tape. No calibration receipt has
+  produced useful but spent execution failures; V8 closed prepublication on
+  its unchanged size preflight and produced no tape. No calibration receipt has
   passed. Paper startup therefore remains intentionally blocked.
 
 Do not issue the deploy-ready authorization by interpreting
@@ -759,6 +775,7 @@ host with every receipt; see `docs/operations.md` for the full boundary.
 
     ```bash
     ACCOUNT_SYMBOLS_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/candidate-universe-natural.json
+    CANDIDATE_UNIVERSE_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/candidate-universe-natural.json
     ACCOUNT_DEMO_RULES_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/demo-rules-natural.json
     ACCOUNT_TWIN_CALIBRATION_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/execution-twin-calibration-v8.json  # paper only
     ```
@@ -1432,6 +1449,7 @@ ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-paper-inte
 ACCOUNT_PAPER_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-paper-market-capture
 ACCOUNT_RAW_MARKET_PERSISTENCE=1
 ACCOUNT_SYMBOLS_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/candidate-universe-natural.json
+CANDIDATE_UNIVERSE_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/candidate-universe-natural.json
 ACCOUNT_DEMO_RULES_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/demo-rules-natural.json
 ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-paper-execution/risk-policy.json
 ACCOUNT_TWIN_CALIBRATION_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/execution-twin-calibration-v8.json

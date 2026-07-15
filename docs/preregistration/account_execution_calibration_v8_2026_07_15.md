@@ -205,3 +205,41 @@ private requests/second ceiling, cleanup, and final flatness. The new candidate
 must repeat every candidate gate and use a new create-only probe path; the
 failed receipt remains negative evidence and cannot be relabelled or combined
 with a later pass.
+
+## Outcome — closed before target publication
+
+Candidate `b501be38a4caade21efd3607fcfcbdd1c892ec28` (tree
+`a1fd23664ff3dcd44f14ec870549ac95179351a5`) passed the complete 2,971-test
+local suite, canonical pre-push gate, and its one exact-head noncontacting Linux
+run `29413772911`. It installed cleanly on the stopped VPS. The new bounded
+rule probe passed once, the six-root reset and independent 21-sample clock gate
+passed, and the demo owner alone reached healthy same-invocation live-L2
+readiness for all three symbols.
+
+The credential-free V8 driver then rejected its fixed plan during immutable
+preflight, before creating an event tape or run receipt and before publishing a
+target. The passing rule receipt observed `BTCUSDT=64.0629`,
+`ETHUSDT=18.641`, and `BUSDT=5.1111 USDT` minima. The unchanged registered
+2.5-times quantization-safe rule therefore required `160.15725 USDT` for BTC,
+while V8 fixed `160 USDT`. The exact failure was
+`calibration notional lacks the quantization-safe registered minimum buffer for
+BTCUSDT:160.15725`.
+
+No V8 order, fill, fee, P&L, funding observation, target, event tape, or run
+receipt exists. The authenticated blocked-state receipt proves zero venue
+positions and zero regular/conditional orders; the verified canonical journal
+contains 103 reconciliation snapshots and zero fills, working orders,
+positions, or targets. Every project service was stopped and the temporary
+calibration authority was retired. The create-only blocked receipts have
+artifact hashes
+`83f7579058610d7c13da3baaf84c20102c9f93edac85e172d24c934b158b22a7`
+and
+`7af9fd22fe8bd0a5b78c8ea2f059c6d06eaf3893c33f874d866885e29f593310`.
+
+Result: V8 is closed as `failed_prepublication`. Its market-order smoke and
+partial-fill claims are `inconclusive`, the paper execution twin remains
+unavailable, and paper operation remains unauthorized. Resizing, reprobe
+selection, or rerunning V8 would be an undisclosed rescue and is forbidden.
+A separately authorized raw-disabled demo-only operational profile may collect
+ordinary operational/exploratory runtime observations, but those observations
+cannot satisfy, resume, or reinterpret V8.

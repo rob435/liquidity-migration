@@ -270,19 +270,22 @@ not the later candidate-gated `c7d6509`, so it is negative operational evidence
 only and cannot support either identity. Paper and ordinary producers never
 started.
 
-Prospective V8 is a corrected-defect study on a new candidate, forward-time
-surface, and six-root epoch. It timestamps direct position truth after the REST
-response, runs funding recovery before that observation, reuses verified
-journal/read-only state caches, and finalizes each terminal reduce-batch Close
-and P&L in one serialized transaction. The two-second/four-second freshness
-rule and every V7 sample, size, clock, smoke, partial-fill, and abort threshold
-remain unchanged. V7 observations and recovery are excluded from every V8
-floor. A passing V8 supplies the calibration needed for the deterministic paper
-owner. It may also seed a later natural holdout, but that 120-hour raw-tape study
-is now optional research rather than an operational prerequisite. Actual
-LONG/CONTINUOUS natural tapes, sufficiency, out-of-sample twin drift,
-deterministic replay comparison, venue accounting, funding, and final flatness
-remain separate research gates and are not inferred from operation.
+V8 is closed `failed_prepublication` on candidate `b501be3`. The corrected
+source timestamps direct position truth after the REST response, runs funding
+recovery before that observation, reuses verified journal/read-only state
+caches, and finalizes each terminal reduce-batch Close and P&L in one serialized
+transaction. Its complete candidate gates, rule probe, reset, clock, and owner
+readiness passed, but the unchanged fixed-size preflight found that BTC required
+`160.15725 USDT` under the registered quantization-safe buffer while V8 fixed
+`160 USDT`. No V8 target, order, fill, event tape, or run receipt was emitted;
+authenticated local/venue flatness passed and every unit stopped. The
+market-order smoke and partial-fill claims are inconclusive, no paper twin
+exists, and paper remains blocked. V7 observations and recovery remain excluded
+and V8 cannot be resized or retried. The 120-hour raw-tape study remains
+optional unrun research. LONG/CONTINUOUS natural tapes, sufficiency,
+out-of-sample twin drift, deterministic replay comparison, venue accounting,
+funding, and final flatness remain separate research gates and are not inferred
+from ordinary demo operation.
 
 The local candidate now contains source paths for exact-candidate freezing,
 natural runtime/config binding, periodic clock evidence, deterministic replay,
@@ -314,9 +317,10 @@ tracked hook placed pytest output below `.git/tmp`. Nine existing
 Strategy-Overhaul source-snapshot tests correctly refused that repository-local
 output (2,947 passed, one failed, eight setup errors). No alpha code or rule was
 changed; the prospective hook repair uses and validates an external basetemp.
-Candidate `344cd72` was not pushed or installed and is spent. There is still no
-clean replacement-candidate CI receipt after that repair, passing V8 or
-partial-fill gate, second reset, owner-first readiness pair, 120-hour natural
+Candidate `344cd72` was not pushed or installed and is spent. At that point
+there was still no clean replacement-candidate CI receipt after that repair,
+passing V8 or partial-fill gate, second reset, owner-first readiness pair,
+120-hour natural
 tape, venue-accounting/final-flatness receipt, stopped seal, replay result,
 fresh epoch, or deployment authorization. Local
 analysis timestamps enforce declared internal chronology rather than
@@ -344,11 +348,13 @@ and public-trade retention is now explicit and required (`1`) for V8/natural
 evidence, but disabled (`0`) for permanent demo/paper operation. Live L2,
 bounded same-generation readiness, exact decision books, and account journals
 remain mandatory. The five-day natural contract is deferred, unrun optional
-research; this is not a positive result or promotion. Exact-branch VPS
-operation is separately owner-authorized only after a new complete candidate
-gate, unchanged V8 pass for paper, verified flatness, and machine/commit/input-
-bound operational authority. `main`, mainnet, and real money remain
-unauthorized.
+research; this is not a positive result or promotion. Exact-branch full
+demo/paper operation remains separately owner-authorized only after a complete
+candidate gate, passing paper calibration, verified flatness, and machine/
+commit/input-bound authority. A narrower demo-only operational path may instead
+authorize only the demo owner/producers/monitoring with raw capture disabled and
+every paper unit refused; it cannot supply the missing paper calibration.
+`main`, mainnet, and real money remain unauthorized.
 
 Candidate `181027b` subsequently passed 2,970 local tests, its canonical
 pre-push gate, and one exact-head noncontacting Linux run. It installed on the
@@ -363,6 +369,19 @@ Candidate `181027b` is spent. A prospective replacement increases only the
 read-only terminal-history observation defaults to 30 seconds/100 polls while
 retaining exact identity, two terminal confirmations, zero fills, empty trade
 history, the five-request/second cap, cleanup, and final flatness.
+
+Replacement candidate `b501be3` made only that prospective observability
+repair, passed all 2,971 local/pre-push tests and exact-head Linux run
+`29413772911`, installed cleanly, and produced the passing probe/reset/clock/
+readiness evidence above. The immutable V8 notional preflight then closed the
+study before publication. The blocked-state receipts self-hash to
+`83f7579058610d7c13da3baaf84c20102c9f93edac85e172d24c934b158b22a7`
+and
+`7af9fd22fe8bd0a5b78c8ea2f059c6d06eaf3893c33f874d866885e29f593310`.
+This is valid forward evidence of a prepublication feasibility failure, not an
+execution result. A distinct raw-disabled demo-only operational profile may
+run the existing demo fleet without paper, but it makes no V8, paper-twin,
+natural-replay, alpha, promotion, or mainnet claim.
 
 ## Strategy-overhaul scout status
 

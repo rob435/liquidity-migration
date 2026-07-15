@@ -67,6 +67,7 @@ case "$UNIT:$ENTRYPOINT" in
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
             scripts/check_demo_liveness.py
+            --account-scope "${ACCOUNT_LIVENESS_SCOPE:?ACCOUNT_LIVENESS_SCOPE is required}"
             --max-cycle-age-min 10
             --cooldown-min 360
             --telegram

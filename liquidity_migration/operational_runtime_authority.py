@@ -1,10 +1,12 @@
-"""Authorize one exact clean commit for demo/paper operation only.
+"""Authorize one exact clean commit for bounded demo/paper operation only.
 
 This is intentionally separate from the natural-tape cutover authority.  It
 does not assert replay, drift, alpha, promotion, or real-money evidence.  The
 calibration profile can authorize only the demo owner with bounded raw capture;
-the operational profile requires the passing twin receipt and disables bulk
-raw persistence while retaining live L2 and exact decision books.
+the demo-operational profile can authorize the existing demo fleet without a
+paper twin; and the full operational profile requires the passing twin receipt.
+Both permanent profiles disable bulk raw persistence while retaining live L2
+and exact decision books.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from typing import Any, Mapping, Sequence
 
 from .account_cutover_authority import require_clean_authorized_checkout
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
+from .candidate_rule_coverage import build_candidate_rule_coverage
 from .deterministic_serialization import canonical_json
 from .execution_twin_calibration import load_calibration_receipt
 from .systemd_environment import parse_systemd_environment_bytes
@@ -35,9 +38,18 @@ DEFAULT_RECEIPT = Path(
 )
 OWNER_ACKNOWLEDGEMENT = "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION"
 CALIBRATION_PROFILE = "calibration"
+DEMO_OPERATIONAL_PROFILE = "demo-operational"
 OPERATIONAL_PROFILE = "operational"
 CALIBRATION_AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution.service",
+)
+DEMO_OPERATIONAL_AUTHORIZED_UNITS = (
+    "liquidity-migration-account-execution.service",
+    "liquidity-migration-bybit-continuous-demo.service",
+    "liquidity-migration-bybit-long-demo.service",
+    "liquidity-migration-continuous-hedge.service",
+    "liquidity-migration-continuous-rmom-refresh.service",
+    "liquidity-migration-demo-liveness.service",
 )
 AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution.service",
@@ -77,6 +89,7 @@ _INPUT_KEYS = {
         "ACCOUNT_TWIN_CALIBRATION_FILE",
     ),
 }
+_CANDIDATE_UNIVERSE_KEY = "CANDIDATE_UNIVERSE_FILE"
 _ROOT_KEYS = {
     "account-execution.env": (
         "ACCOUNT_EXECUTION_ROOT",
@@ -95,6 +108,11 @@ _PROFILE_ENVIRONMENT_NAMES = {
         "bybit-demo.env",
         "sleeves.resolved.env",
     ),
+    DEMO_OPERATIONAL_PROFILE: (
+        "account-execution.env",
+        "bybit-demo.env",
+        "sleeves.resolved.env",
+    ),
     OPERATIONAL_PROFILE: (
         "account-execution.env",
         "account-paper-execution.env",
@@ -102,13 +120,24 @@ _PROFILE_ENVIRONMENT_NAMES = {
         "sleeves.resolved.env",
     ),
 }
-_PROFILE_FIELDS = {
+_PROFILE_FIELDS: dict[str, dict[str, Any]] = {
     CALIBRATION_PROFILE: {
         "scope": "registered_demo_calibration_only_no_real_money",
         "raw_market_persistence": "enabled_for_registered_demo_calibration",
         "research_evidence_status": "forward_calibration_result_not_claimed",
         "authorized_units": CALIBRATION_AUTHORIZED_UNITS,
         "demo_raw_value": "1",
+        "liveness_scope": None,
+    },
+    DEMO_OPERATIONAL_PROFILE: {
+        "scope": "demo_operational_only_no_paper_no_real_money",
+        "raw_market_persistence": "disabled",
+        "research_evidence_status": (
+            "paper_twin_and_natural_replay_not_claimed_or_authorized"
+        ),
+        "authorized_units": DEMO_OPERATIONAL_AUTHORIZED_UNITS,
+        "demo_raw_value": "0",
+        "liveness_scope": "demo",
     },
     OPERATIONAL_PROFILE: {
         "scope": "demo_paper_operational_only_no_real_money",
@@ -118,6 +147,7 @@ _PROFILE_FIELDS = {
         ),
         "authorized_units": AUTHORIZED_UNITS,
         "demo_raw_value": "0",
+        "liveness_scope": "demo-paper",
     },
 }
 
@@ -289,6 +319,15 @@ def _validate_environments(
             "demo environment must set "
             f"ACCOUNT_RAW_MARKET_PERSISTENCE={expected_demo_raw} for profile {profile}"
         )
+    expected_liveness_scope = profile_fields["liveness_scope"]
+    if (
+        expected_liveness_scope is not None
+        and demo.get("ACCOUNT_LIVENESS_SCOPE") != expected_liveness_scope
+    ):
+        raise ValueError(
+            "demo environment must set "
+            f"ACCOUNT_LIVENESS_SCOPE={expected_liveness_scope} for profile {profile}"
+        )
     paper: Mapping[str, str] | None = None
     if profile == OPERATIONAL_PROFILE:
         paper = values["account-paper-execution.env"]
@@ -312,12 +351,19 @@ def _validate_environments(
     for key in ("LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CONTINUOUS_PAPER_SLEEVE"):
         if sleeves.get(key, "").strip().lower() not in {"on", "off"}:
             raise ValueError(f"resolved sleeve environment has invalid {key}")
+    if (
+        profile == DEMO_OPERATIONAL_PROFILE
+        and sleeves.get("CONTINUOUS_PAPER_SLEEVE", "").strip().lower() != "off"
+    ):
+        raise ValueError(
+            "demo-operational profile requires CONTINUOUS_PAPER_SLEEVE=off"
+        )
 
     roots: list[Path] = []
     root_identities: dict[str, dict[str, Any]] = {}
     root_filenames = (
         ("account-execution.env",)
-        if profile == CALIBRATION_PROFILE
+        if profile in {CALIBRATION_PROFILE, DEMO_OPERATIONAL_PROFILE}
         else tuple(_ROOT_KEYS)
     )
     for filename in root_filenames:
@@ -341,11 +387,13 @@ def _validate_environments(
     inputs: dict[str, StableFileSnapshot] = {}
     input_filenames = (
         ("account-execution.env",)
-        if profile == CALIBRATION_PROFILE
+        if profile in {CALIBRATION_PROFILE, DEMO_OPERATIONAL_PROFILE}
         else tuple(_INPUT_KEYS)
     )
     for filename in input_filenames:
         input_keys = _INPUT_KEYS[filename]
+        if profile != CALIBRATION_PROFILE:
+            input_keys = (*input_keys, _CANDIDATE_UNIVERSE_KEY)
         environment = values[filename]
         for key in input_keys:
             raw = environment.get(key, "")
@@ -359,6 +407,38 @@ def _validate_environments(
                 require_owner=True,
             )
             inputs[f"{filename}:{key}"] = snapshot
+    if profile != CALIBRATION_PROFILE:
+        demo_candidate_path = Path(
+            demo.get(_CANDIDATE_UNIVERSE_KEY, "")
+        ).expanduser()
+        demo_symbols_path = Path(demo.get("ACCOUNT_SYMBOLS_FILE", "")).expanduser()
+        if demo_candidate_path != demo_symbols_path:
+            raise ValueError(
+                "demo operational candidate universe must also be the owner symbols file"
+            )
+        candidate_snapshot = inputs[
+            f"account-execution.env:{_CANDIDATE_UNIVERSE_KEY}"
+        ]
+        rules_snapshot = inputs["account-execution.env:ACCOUNT_DEMO_RULES_FILE"]
+        build_candidate_rule_coverage(
+            demo_candidate_path,
+            rules_snapshot.path,
+            candidate_snapshot=candidate_snapshot,
+            demo_rules_snapshot=rules_snapshot,
+        )
+        if profile == OPERATIONAL_PROFILE:
+            assert paper is not None
+            for key in (
+                "ACCOUNT_SYMBOLS_FILE",
+                "ACCOUNT_DEMO_RULES_FILE",
+                _CANDIDATE_UNIVERSE_KEY,
+            ):
+                if Path(paper.get(key, "")).expanduser() != Path(
+                    demo.get(key, "")
+                ).expanduser():
+                    raise ValueError(
+                        f"demo and paper operational environments must share {key}"
+                    )
     if profile == OPERATIONAL_PROFILE:
         assert paper is not None
         calibration_path = Path(paper["ACCOUNT_TWIN_CALIBRATION_FILE"])
@@ -605,6 +685,14 @@ def verify_operational_authorization(
         raise ValueError(
             "account owner runtime did not inherit the authorized raw persistence mode"
         )
+    expected_liveness_scope = profile_fields["liveness_scope"]
+    if (
+        unit == "liquidity-migration-demo-liveness.service"
+        and os.environ.get("ACCOUNT_LIVENESS_SCOPE") != expected_liveness_scope
+    ):
+        raise ValueError(
+            "liveness runtime did not inherit the authorized account scope"
+        )
     return payload
 
 
@@ -620,7 +708,11 @@ def _parser() -> argparse.ArgumentParser:
     issue.add_argument("--owner-acknowledgement", required=True)
     issue.add_argument(
         "--profile",
-        choices=(CALIBRATION_PROFILE, OPERATIONAL_PROFILE),
+        choices=(
+            CALIBRATION_PROFILE,
+            DEMO_OPERATIONAL_PROFILE,
+            OPERATIONAL_PROFILE,
+        ),
         default=OPERATIONAL_PROFILE,
     )
     for name in ("verify", "verify-runtime"):
@@ -670,6 +762,8 @@ __all__ = [
     "AUTHORIZED_UNITS",
     "CALIBRATION_AUTHORIZED_UNITS",
     "CALIBRATION_PROFILE",
+    "DEMO_OPERATIONAL_AUTHORIZED_UNITS",
+    "DEMO_OPERATIONAL_PROFILE",
     "DEFAULT_RECEIPT",
     "OPERATIONAL_PROFILE",
     "OWNER_ACKNOWLEDGEMENT",
