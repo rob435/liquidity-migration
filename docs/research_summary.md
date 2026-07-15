@@ -350,6 +350,20 @@ gate, unchanged V8 pass for paper, verified flatness, and machine/commit/input-
 bound operational authority. `main`, mainnet, and real money remain
 unauthorized.
 
+Candidate `181027b` subsequently passed 2,970 local tests, its canonical
+pre-push gate, and one exact-head noncontacting Linux run. It installed on the
+stopped VPS and produced a passing authenticated six-root reset. The first
+credentialed schema-v3 rule probe then failed before owner startup and before
+any V8 sample: BUSDT's exact cancelled/no-fill order-history row appeared only
+on poll 11 at the five-second deadline, leaving one rather than the required
+two terminal confirmations. Cleanup and final authenticated flatness both
+passed with zero positions and orders. This is limited forward-execution
+evidence of a bounded observability defect, not a trading or V8 result.
+Candidate `181027b` is spent. A prospective replacement increases only the
+read-only terminal-history observation defaults to 30 seconds/100 polls while
+retaining exact identity, two terminal confirmations, zero fills, empty trade
+history, the five-request/second cap, cleanup, and final flatness.
+
 ## Strategy-overhaul scout status
 
 The current claim is only that the proposed population/label plumbing can be

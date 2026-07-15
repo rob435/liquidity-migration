@@ -103,10 +103,10 @@ epoch is superseded by V8. Lexical `v7_training`, `v7-archive`, and
 `--v7-archive-map` names remain compatibility schema/tool labels bound to V8,
 never permission to reuse the failed V7 artifact.
 
-The minimum successful wall time is still more than five days because the
-registered natural window is exactly 120 hours. Avoiding redundant suite runs
-saves compute and operator time; shortening that window would invalidate the
-registered evidence rather than accelerate it.
+The registered 120-hour natural window remains unchanged but is now optional
+research, not part of the operational completion wall time. Demo/paper VPS
+operation still requires V8 for the paper twin, bounded live-L2 readiness,
+exact decision books, canonical journals, and the operational authority path.
 
 Replacement candidate `54536f194d91bcabb5fe8f47310c6a09928ecf12` later
 passed its complete local, canonical pre-push, and exact-head noncontacting
@@ -127,10 +127,20 @@ Strategy Overhaul source-snapshot tests require immutable outputs outside the
 repository. The 2,947-pass/one-failure/eight-error result is retained; the
 candidate was not pushed or installed and is spent. The prospective hook fix
 moves and validates only the pytest basetemp, not alpha logic or a gate. A new
-exact candidate and all candidate gates remain required. The host also needs
-additional capture/archive storage before the stopped topology install and V8
-reset; do not treat cache deletion or the existing 40-GB root filesystem as
-sufficient.
+exact candidate and all candidate gates remain required.
+
+Candidate `181027b0853db9e543e30504211d701c7c95fc86` later passed its complete
+local, canonical pre-push, and single exact-head noncontacting Linux gates,
+installed cleanly, and produced a passing authenticated six-root reset. That
+reset compressed the prior 6.9-GB raw root into a verified 877-MB archive and
+left roughly 25 GB free. The first credentialed schema-v3 rule probe then
+failed before owner startup and before any V8 target: BUSDT terminal
+cancellation history appeared only once at the five-second boundary, not the
+required twice. Cleanup and final flatness passed. Candidate `181027b` is
+spent. The registered prospective repair changes only bounded read-only
+terminal-history observation to 30 seconds/100 polls; all identity, no-fill,
+rate, cleanup, and flatness gates remain unchanged. A new exact candidate and
+all candidate gates are required before another create-only rule-probe path.
 
 ## Efficient validation cadence
 

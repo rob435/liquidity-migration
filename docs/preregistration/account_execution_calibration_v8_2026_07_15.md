@@ -176,3 +176,32 @@ authorization. Downstream tools and schemas may retain lexical `V7`,
 `v7_training`, and `v7-archive` names as compatibility labels for the single
 passing preregistered training epoch. For this cutover those fields must bind
 V8; the failed V7 receipt is forbidden from satisfying them.
+
+## Pre-V8 rule-probe observability amendment
+
+Registered prospectively at `2026-07-15T11:49:51Z`, after the rule-probe
+failure below but before any V8 owner startup, target, order, fill, clock
+receipt, or calibration outcome. Candidate
+`181027b0853db9e543e30504211d701c7c95fc86` passed its complete local,
+canonical pre-push, and single exact-head noncontacting Linux gates, installed
+cleanly on the stopped VPS, and produced a passing six-root reset receipt. Its
+first credentialed schema-v3 rule probe then failed before V8: the accepted
+BUSDT PostOnly order had exact create/cancel identity, no execution rows, and a
+terminal `Cancelled` row with zero cumulative quantity/value, but that row
+first appeared on poll 11 at the five-second deadline. The required second
+terminal confirmation therefore could not be collected. Cleanup and final
+authenticated flatness both passed with zero positions and zero orders. The
+failed probe receipt self-hash is
+`a4928f48df13011e8fe84aad93eff6c46deb570fbed40dd76a7c2ca7c4e2d4dd`.
+
+That result spends candidate `181027b` for operational evidence. It does not
+spend or reveal the V8 sample because the owner and calibration driver never
+started and the fresh account/inbox/capture roots remained empty. The next
+candidate may change only the rule probe's bounded, read-only terminal-history
+observation defaults from five seconds/50 polls to 30 seconds/100 polls. It
+must still require at least two exact `Cancelled` observations, zero cumulative
+fill quantity/value, empty exact-identity trade history, the unchanged five
+private requests/second ceiling, cleanup, and final flatness. The new candidate
+must repeat every candidate gate and use a new create-only probe path; the
+failed receipt remains negative evidence and cannot be relabelled or combined
+with a later pass.

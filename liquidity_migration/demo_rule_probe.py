@@ -22,6 +22,8 @@ REGISTERED_MAX_PROBE_NOTIONAL_USDT = 200.0
 REGISTERED_PROBE_DISTANCE_BPS = 100.0
 REGISTERED_MAX_PRIVATE_REQUESTS_PER_SECOND = 5
 REGISTERED_MAX_TESTED_LEVERAGE = 10.0
+TERMINAL_HISTORY_TIMEOUT_SECONDS = 30.0
+TERMINAL_HISTORY_MAX_POLLS = 100
 
 ORDER_CREATE_SOURCE = "bybit_api_demo_order_create"
 ORDER_CANCEL_SOURCE = "bybit_api_demo_order_cancel"
@@ -469,9 +471,9 @@ def probe_demo_instrument_rule(
     leverage: float = 10.0,
     probe_distance_bps: float = 100.0,
     link_namespace: str = "demo-rule",
-    terminal_history_timeout_seconds: float = 5.0,
+    terminal_history_timeout_seconds: float = TERMINAL_HISTORY_TIMEOUT_SECONDS,
     terminal_history_poll_seconds: float = 0.1,
-    terminal_history_max_polls: int = 50,
+    terminal_history_max_polls: int = TERMINAL_HISTORY_MAX_POLLS,
     terminal_confirmation_polls: int = 2,
     attempt_sink: list[DemoRuleProbeAttempt] | None = None,
 ) -> tuple[InstrumentRules, DemoRuleProbeEvidence]:

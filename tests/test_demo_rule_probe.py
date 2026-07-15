@@ -102,6 +102,7 @@ class _ProbeClient:
         wrong_cancel_identity: bool = False,
         wrong_history_identity: bool = False,
         missing_history_identity: bool = False,
+        missing_history_polls: int = 0,
         partial_fill: bool = False,
     ) -> None:
         self.threshold = threshold
@@ -112,6 +113,7 @@ class _ProbeClient:
         self.wrong_cancel_identity = wrong_cancel_identity
         self.wrong_history_identity = wrong_history_identity
         self.missing_history_identity = missing_history_identity
+        self.missing_history_polls = missing_history_polls
         self.partial_fill = partial_fill
         self.accepted: list[str] = []
         self.cancelled: list[str] = []
@@ -153,7 +155,7 @@ class _ProbeClient:
         assert self.order_ids[link] == order_id
         poll = self.history_polls.get(order_id, 0) + 1
         self.history_polls[order_id] = poll
-        if self.missing_history_identity:
+        if self.missing_history_identity or poll <= self.missing_history_polls:
             return []
         status = self.history_statuses[min(poll - 1, len(self.history_statuses) - 1)]
         return [{
@@ -287,6 +289,29 @@ def test_eventual_clean_cancel_requires_two_terminal_confirmations() -> None:
     accepted = [attempt for attempt in evidence.attempts if attempt.accepted]
     assert accepted[-1].terminal_poll_count == 3
     assert accepted[-1].terminal_confirmation_polls == 2
+
+
+def test_default_window_accepts_delayed_terminal_history_only_after_two_confirmations() -> None:
+    client = _ProbeClient(threshold=1.0, missing_history_polls=11)
+
+    _, evidence = probe_demo_instrument_rule(
+        client,
+        instrument_row=_instrument(),
+        ticker_row={"symbol": "BUSDT", "bid1Price": "10.1"},
+        observed_ts_ns=123456789,
+        max_probe_notional_usdt=20.0,
+        terminal_history_poll_seconds=0.0,
+    )
+
+    accepted = [attempt for attempt in evidence.attempts if attempt.accepted]
+    assert accepted[-1].terminal_poll_count == 13
+    assert accepted[-1].terminal_confirmation_polls == 2
+    assert accepted[-1].terminal_status == "Cancelled"
+    assert accepted[-1].terminal_cum_exec_qty == "0"
+    assert accepted[-1].terminal_cum_exec_value == "0"
+    assert accepted[-1].trade_history_row_count == 0
+    assert evidence.terminal_history_timeout_seconds == 30.0
+    assert evidence.terminal_history_max_polls == 100
 
 
 @pytest.mark.parametrize("distance", [0.0, -1.0, 10_000.0, float("inf")])

@@ -27,6 +27,18 @@ research decisions are in
   explicit: `1` for registered V8/natural evidence, `0` for permanent VPS
   operation. The paper owner still requires a passing V8 execution-twin
   calibration; that gate is not waived.
+- Candidate `181027b0853db9e543e30504211d701c7c95fc86` passed all 2,970 local
+  tests, the canonical pre-push gate, and its single exact-head noncontacting
+  Linux run (`29411462086`). It installed cleanly on the stopped VPS, and the
+  guarded reset archived the prior 6.9-GB raw root into an independently
+  reopened 877-MB archive while proving zero demo positions/orders and creating
+  six fresh roots. The first credentialed schema-v3 rule probe then failed
+  before owner startup or any V8 target: BUSDT terminal cancellation history
+  appeared only once at the five-second boundary, while the gate requires two
+  confirmations. Cleanup and final flatness passed. Candidate `181027b` is
+  spent; a prospective replacement extends only the bounded read-only history
+  observation window to 30 seconds/100 polls without weakening identity,
+  no-fill, rate, cleanup, or flatness evidence.
 - Candidate `0f05060ee30de819f270c3cb695a7f9b66fbebdd` passed its
   2,957-test local and canonical pre-push gates. Its one exact-head Linux run
   (`29403931189`) then failed only
@@ -35,12 +47,11 @@ research decisions are in
   result was 2,956 passes and one failure; it was not retried and the candidate
   is spent. The prospective fix selects the two exact dated paths and asserts
   their contents. A new candidate and one new exact-head run are required.
-- Read-only VPS inspection found the checkout clean at `98b3916a4a135` and all
-  execution units inactive. The 38-GB root filesystem has about 19 GB free.
-  Of 9.2 GB under the repository data root, 6.9 GB is prior bulk account-market
-  capture while the account journal is about 34 MB. The configured paper twin
-  calibration receipt is absent. Existing bytes are preserved; permanent
-  operational mode stops bulk capture growth rather than deleting history.
+- The VPS retains the verified old-root archive outside the checkout and has
+  about 25 GB free after replacing the archived live raw root with the fresh
+  V8 epoch. The configured paper twin calibration receipt is still absent.
+  Existing bytes remain preserved; permanent operational mode stops bulk
+  capture growth rather than deleting history.
 - V7 is closed and spent. Its final `0.002 BTC` funding-hold close failed the
   unchanged four-second position-truth freshness rule; a separate canonical
   recovery target flattened the account, after which concurrent REST

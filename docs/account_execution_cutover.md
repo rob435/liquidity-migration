@@ -84,6 +84,14 @@ Replacement candidate `0f05060` then passed all 2,957 local/pre-push tests,
 but its one exact-head Linux run retained one existing filesystem-order-
 dependent test failure and 2,956 passes. It was not retried and is spent.
 The prospective test repair selects the two exact dated liquidation outputs.
+Candidate `181027b` then passed all 2,970 local tests, canonical pre-push, and
+its one exact-head Linux run. It installed on the stopped VPS and passed the
+authenticated six-root reset. Its first credentialed schema-v3 rule probe
+failed before owner startup because BUSDT cancellation history appeared only
+once at the five-second deadline rather than twice. Cleanup and final flatness
+passed; the candidate is spent. A prospective replacement extends only the
+read-only terminal-history observation defaults to 30 seconds/100 polls while
+retaining every exact-identity, no-fill, rate, cleanup, and flatness gate.
 There is no frozen passing replacement candidate after that repair; V8 and
 its partial-fill gate have not run; and there is
 no natural 120-hour LONG/CONT epoch, periodic clock series,
@@ -509,7 +517,10 @@ floor. It is the smallest accepted quantity step at the recorded probe price,
 so it conservatively upper-bounds the hidden threshold by at most one quantity
 step. Unknown rejects, transport failures, uncancelled orders, stale receipts,
 or any residual position fail the gate rather than being interpreted as a
-minimum. Bybit documents that demo uses `api-demo.bybit.com`, supports order
+minimum. The current source permits up to 30 seconds/100 bounded polls for
+read-only terminal-history visibility but still requires two exact
+`Cancelled`/zero-fill observations and empty exact-identity execution history.
+Bybit documents that demo uses `api-demo.bybit.com`, supports order
 create/cancel, and has an incomplete API surface; the probe therefore uses
 actual order create/cancel rather than assuming the optional pre-check endpoint
 is available: <https://bybit-exchange.github.io/docs/v5/demo>.
