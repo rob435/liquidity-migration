@@ -277,13 +277,18 @@ order as an operational sequence. The registered order is:
 Build the natural run config before T0. No branch promotion or deployment is a
 step in this sequence.
 
-Candidate-universe schema v2 retains and hashes the complete raw instrument and
+Candidate-universe schema v3 retains and hashes the complete raw instrument and
 ticker snapshots. A noncanonical ticker label absent from the complete
 instrument snapshot is recorded under `rejected_ticker_rows` and excluded from
-candidate evaluation; it is never normalized into a strategy symbol. Missing
-labels, duplicates, noncanonical instrument rows, and any row that could map to
-a validated instrument remain fail-closed. The loader recomputes this partition
-and the full decision table from the raw snapshot.
+candidate evaluation; it is never normalized into a strategy symbol. Because
+this repository implements crypto-perp systems while Bybit's linear endpoint
+also returns TradFi perps, only an empty `symbolType` and the crypto
+`innovation` type enter strategy ranking. Every `stock`, `commodity`, `forex`,
+or unknown future type remains in the raw snapshot and is recorded under
+`excluded_instrument_rows` before ranking. Missing labels, duplicates,
+noncanonical instrument rows, and any row that could map to a validated
+instrument remain fail-closed. The loader recomputes both partitions and the
+full decision table from the raw snapshot.
 
 ```bash
 # Read-only production verification.

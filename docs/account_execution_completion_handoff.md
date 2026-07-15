@@ -28,6 +28,33 @@ The receiving agent must re-verify every snapshot claim. It must not reset,
 switch away from, clean, or overwrite the dirty worktree merely because this
 document names a committed head.
 
+## Successor update — TradFi population exclusion, 2026-07-15
+
+Replacement candidate `38f11d070d6a5d0a99bd76e52f139586df0c8aab` repaired the
+terminal-order verifier, passed all 2,987 local/pre-push tests, exact-head
+noncontacting Linux run `29432072223`, and stopped-fleet install-preflight run
+`29432605744` with 174 host smoke tests. Its fresh 620-symbol candidate freeze
+has artifact SHA-256
+`c1fc7f03409de4df4aee024e25af9716a66fe905614dbcfc8c2b6a88ad1895ef`.
+
+The create-only full probe verified 20 crypto rules, then failed at
+`AAOIUSDT` with Bybit error `110126`: the venue requires a separate agreement
+for that stock perpetual. The failure receipt self-hashes to
+`76b52c589c4142674ef542390eba272e7acb3c90cb82c2202db5539dee46e610`;
+cleanup and final authenticated flatness passed, no authority existed, and all
+units remained stopped. Do not convert this attempt into a pass or sign a
+master-account agreement under the general overhaul instruction.
+
+The retained public source proves the underlying defect: Bybit's linear
+endpoint mixed 100 `stock` and four `commodity` perps into a repository whose
+declared strategy domain is crypto perps. The prospective schema-v3 repair
+retains/hashes all 728 raw instrument rows, permits only empty and `innovation`
+`symbolType` rows into ranking, and records each excluded non-crypto or unknown
+type. Exact source replay reduces 620 candidates to 516 by removing those 104
+rows while retaining all 120 `innovation` crypto rows. This is a deliberate
+domain correction, so freeze a new exact candidate and repeat every gate and
+artifact in a new namespace before startup.
+
 ## Successor update — full-population demo probe, 2026-07-15
 
 Demo-operational candidate

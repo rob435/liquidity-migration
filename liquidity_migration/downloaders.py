@@ -934,12 +934,19 @@ def _normalize_instruments(rows: list[dict]) -> pl.DataFrame:
     for row in rows:
         lot = row.get("lotSizeFilter", {})
         price = row.get("priceFilter", {})
+        raw_symbol_type = row.get("symbolType")
+        symbol_type = (
+            str(raw_symbol_type).strip().lower() or None
+            if raw_symbol_type is not None
+            else None
+        )
         normalized.append(
             {
                 "ts_ms": now_ms,
                 "symbol": row["symbol"],
                 "category": "linear",
                 "contract_type": row.get("contractType"),
+                "symbol_type": symbol_type,
                 "status": row.get("status"),
                 "base_coin": row.get("baseCoin"),
                 "quote_coin": row.get("quoteCoin"),

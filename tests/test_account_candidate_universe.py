@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -27,11 +28,13 @@ def _instrument(
     status: str = "Trading",
     launch_time: str = "1700000000000",
     prelisting: bool = False,
+    symbol_type: object = "",
 ) -> dict[str, object]:
     return {
         "symbol": symbol,
         "contractType": "LinearPerpetual",
         "status": status,
+        "symbolType": symbol_type,
         "baseCoin": symbol.removesuffix("USDT"),
         "quoteCoin": "USDT",
         "settleCoin": "USDT",
@@ -112,6 +115,96 @@ def test_build_records_union_and_exact_exclusion_reasons() -> None:
     ]
 
 
+def test_builder_excludes_non_crypto_products_before_liquidity_ranking(
+    tmp_path: Path,
+) -> None:
+    instruments = [
+        _instrument("AAAUSDT"),
+        _instrument("INNOVUSDT", symbol_type="innovation"),
+        _instrument("AAOIUSDT", symbol_type="stock"),
+        _instrument("XAUUSDT", symbol_type="commodity"),
+        _instrument("EURUSDT", symbol_type="forex"),
+        _instrument("FUTUREUSDT", symbol_type="future_tradfi"),
+    ]
+    tickers = [
+        _ticker("AAAUSDT", "10000000"),
+        _ticker("INNOVUSDT", "20000000"),
+        _ticker("AAOIUSDT", "100000000"),
+        _ticker("XAUUSDT", "90000000"),
+        _ticker("EURUSDT", "80000000"),
+        _ticker("FUTUREUSDT", "70000000"),
+    ]
+
+    payload = build_candidate_universe_artifact(
+        instruments,
+        tickers,
+        snapshot_ts_ns=SNAPSHOT_NS,
+        long_config=replace(
+            LongNativeDemoCycleConfig(),
+            universe_superset_size=1,
+        ),
+        continuous_config=ContinuousDemoCycleConfig(),
+    )
+
+    assert payload["schema_version"] == 3
+    assert payload["strategy_domain"] == "crypto_perpetuals"
+    assert payload["strategy_symbol_types"] == ["", "innovation"]
+    assert payload["symbols"] == ["AAAUSDT", "INNOVUSDT"]
+    assert payload["profile_eligible_symbols"] == {
+        "long": ["INNOVUSDT"],
+        "continuous": ["AAAUSDT", "INNOVUSDT"],
+    }
+    assert payload["raw_source"]["instrument_rows"] == 6
+    assert payload["raw_source"]["strategy_instrument_rows"] == 2
+    assert payload["raw_source"]["excluded_instrument_rows"] == 4
+    assert payload["raw_snapshot"]["instrument_rows"] == instruments
+    assert payload["excluded_instrument_rows"] == [
+        {
+            "row_index": 2,
+            "symbol": "AAOIUSDT",
+            "symbol_type": "stock",
+            "reason": "outside_crypto_perp_strategy_domain",
+        },
+        {
+            "row_index": 3,
+            "symbol": "XAUUSDT",
+            "symbol_type": "commodity",
+            "reason": "outside_crypto_perp_strategy_domain",
+        },
+        {
+            "row_index": 4,
+            "symbol": "EURUSDT",
+            "symbol_type": "forex",
+            "reason": "outside_crypto_perp_strategy_domain",
+        },
+        {
+            "row_index": 5,
+            "symbol": "FUTUREUSDT",
+            "symbol_type": "future_tradfi",
+            "reason": "outside_crypto_perp_strategy_domain",
+        },
+    ]
+    decisions = {row["symbol"]: row for row in payload["decisions"]}
+    assert decisions["AAOIUSDT"]["profiles"]["continuous"] == {
+        "included": False,
+        "reasons": ["outside_crypto_perp_strategy_domain"],
+    }
+    assert load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate-v3.json", payload)
+    ).symbols == ("AAAUSDT", "INNOVUSDT")
+
+
+def test_builder_rejects_non_string_symbol_type() -> None:
+    with pytest.raises(ValueError, match="symbolType"):
+        build_candidate_universe_artifact(
+            [_instrument("AAAUSDT", symbol_type=7)],
+            [_ticker("AAAUSDT", "3000000")],
+            snapshot_ts_ns=SNAPSHOT_NS,
+            long_config=LongNativeDemoCycleConfig(),
+            continuous_config=ContinuousDemoCycleConfig(),
+        )
+
+
 def test_write_load_and_enforce_population(tmp_path: Path) -> None:
     path = write_candidate_universe(tmp_path / "candidate.json", _payload())
     assert os.stat(path).st_mode & 0o777 == 0o600
@@ -181,7 +274,7 @@ def test_builder_records_noncanonical_ticker_only_source_rejection(
         continuous_config=ContinuousDemoCycleConfig(),
     )
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["symbols"] == ["AAAUSDT"]
     assert payload["raw_source"]["ticker_rows"] == 2
     assert payload["raw_snapshot"]["ticker_rows"][1] == synthetic
@@ -240,4 +333,21 @@ def test_loader_recomputes_noncanonical_ticker_source_rejections(
     path = write_candidate_universe(tmp_path / "candidate.json", payload)
 
     with pytest.raises(ValueError, match="rejected ticker rows are inconsistent"):
+        load_candidate_universe(path)
+
+
+def test_loader_recomputes_non_crypto_instrument_exclusions(tmp_path: Path) -> None:
+    payload = build_candidate_universe_artifact(
+        [_instrument("AAAUSDT"), _instrument("AAOIUSDT", symbol_type="stock")],
+        [_ticker("AAAUSDT", "3000000"), _ticker("AAOIUSDT", "9000000")],
+        snapshot_ts_ns=SNAPSHOT_NS,
+        long_config=LongNativeDemoCycleConfig(),
+        continuous_config=ContinuousDemoCycleConfig(),
+    )
+    payload["excluded_instrument_rows"][0]["reason"] = "silently_admitted"
+    payload["artifact_sha256"] = ""
+    payload["artifact_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
+    path = write_candidate_universe(tmp_path / "candidate.json", payload)
+
+    with pytest.raises(ValueError, match="excluded instrument rows are inconsistent"):
         load_candidate_universe(path)

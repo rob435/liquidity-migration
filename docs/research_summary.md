@@ -401,6 +401,27 @@ execution history, and fails on any returned identity/status/fill
 contradiction. This is operational compatibility work, not research evidence
 or an alpha/paper/mainnet authorization.
 
+Replacement candidate `38f11d070d6a5d0a99bd76e52f139586df0c8aab` passed 2,987
+local/pre-push tests, exact-head Linux run `29432072223`, and stopped-fleet
+install-preflight run `29432605744`. Its fresh 620-symbol freeze self-hashes to
+`c1fc7f03409de4df4aee024e25af9716a66fe905614dbcfc8c2b6a88ad1895ef`.
+The full rule probe verified 20 crypto contracts and then failed on stock perp
+`AAOIUSDT` with venue error `110126`, which requires a separate trading
+agreement. Cleanup and final authenticated flatness passed, and the failure
+receipt self-hashes to
+`76b52c589c4142674ef542390eba272e7acb3c90cb82c2202db5539dee46e610`.
+No agreement, authority, or startup followed.
+
+This exposed a strategy-domain error rather than negative alpha evidence:
+Bybit's linear snapshot now contains 100 `stock` and four `commodity` perps,
+while the repository implements crypto-perp systems. The prospective
+candidate-universe schema v3 retains and hashes all raw rows, excludes every
+non-crypto or unknown `symbolType` before ranking, and records each decision.
+Exact replay changes the retained population from 620 to 516 by removing those
+104 rows while preserving all 120 `innovation` crypto contracts. The numerical
+change is intentional and prospective; it says nothing about returns,
+promotion, paper calibration, or mainnet suitability.
+
 ## Strategy-overhaul scout status
 
 The current claim is only that the proposed population/label plumbing can be

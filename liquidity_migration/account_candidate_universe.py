@@ -21,10 +21,10 @@ from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .config import DEFAULT_EXCLUDED_SYMBOLS, UniverseConfig
 from .deterministic_serialization import canonical_json, json_safe
 from .downloaders import _normalize_instruments, _normalize_tickers
-from .universe import build_current_universe_table
+from .universe import CRYPTO_LINEAR_SYMBOL_TYPES, build_current_universe_table
 
 
-CANDIDATE_UNIVERSE_SCHEMA_VERSION = 2
+CANDIDATE_UNIVERSE_SCHEMA_VERSION = 3
 CANDIDATE_UNIVERSE_KIND = "account_execution_candidate_universe"
 _PROFILE_NAMES = ("long", "continuous")
 
@@ -52,16 +52,52 @@ def _symbol(value: object) -> str:
     return symbol
 
 
-def _unique_rows(rows: Sequence[Mapping[str, Any]], *, label: str) -> dict[str, Mapping[str, Any]]:
-    output: dict[str, Mapping[str, Any]] = {}
+def _symbol_type(value: object) -> str:
+    if value is None:
+        return ""
+    if type(value) is not str:
+        raise ValueError("candidate-universe symbolType must be a string or null")
+    normalized = value.strip().lower()
+    if normalized and (
+        not normalized.isascii() or not normalized.replace("_", "").isalnum()
+    ):
+        raise ValueError(f"invalid candidate-universe symbolType {value!r}")
+    return normalized
+
+
+def _partition_strategy_instrument_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    label: str,
+) -> tuple[
+    dict[str, Mapping[str, Any]],
+    dict[str, Mapping[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Retain all source rows while separating the crypto strategy domain."""
+
+    all_rows: dict[str, Mapping[str, Any]] = {}
+    strategy_rows: dict[str, Mapping[str, Any]] = {}
+    excluded: list[dict[str, Any]] = []
+    supported = set(CRYPTO_LINEAR_SYMBOL_TYPES)
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             raise ValueError(f"{label}[{index}] must be an object")
         symbol = _symbol(row.get("symbol"))
-        if symbol in output:
+        if symbol in all_rows:
             raise ValueError(f"{label} contains duplicate symbol {symbol!r}")
-        output[symbol] = row
-    return output
+        all_rows[symbol] = row
+        symbol_type = _symbol_type(row.get("symbolType"))
+        if symbol_type in supported:
+            strategy_rows[symbol] = row
+        else:
+            excluded.append({
+                "row_index": index,
+                "symbol": symbol,
+                "symbol_type": symbol_type,
+                "reason": "outside_crypto_perp_strategy_domain",
+            })
+    return all_rows, strategy_rows, excluded
 
 
 def _partition_ticker_rows(
@@ -213,13 +249,18 @@ def build_profile_universe_tables(
         raise ValueError("snapshot_ts_ms must be positive")
     if set(profile_inputs) != set(_PROFILE_NAMES):
         raise ValueError("candidate profile inputs must contain long and continuous")
-    instrument_map = _unique_rows(instrument_rows, label="instrument_rows")
+    instrument_map, strategy_instrument_map, _ = _partition_strategy_instrument_rows(
+        instrument_rows,
+        label="instrument_rows",
+    )
     ticker_map, _ = _partition_ticker_rows(
         ticker_rows,
         instrument_symbols=set(instrument_map),
         label="ticker_rows",
     )
-    instruments = _normalize_instruments([dict(row) for row in instrument_map.values()])
+    instruments = _normalize_instruments([
+        dict(row) for row in strategy_instrument_map.values()
+    ])
     tickers = _normalize_tickers([dict(row) for row in ticker_map.values()])
     return build_profile_universe_tables_from_frames(
         instruments,
@@ -268,6 +309,10 @@ def _base_reasons(
         reasons.append("status_not_trading")
     if str(instrument.get("settleCoin") or "") != "USDT":
         reasons.append("settle_coin_not_usdt")
+    if _symbol_type(instrument.get("symbolType")) not in set(
+        CRYPTO_LINEAR_SYMBOL_TYPES
+    ):
+        reasons.append("outside_crypto_perp_strategy_domain")
     if bool(instrument.get("isPreListing")):
         reasons.append("prelisting")
     contract_type = str(instrument.get("contractType") or "")
@@ -355,7 +400,12 @@ def build_candidate_universe_artifact(
     if snapshot_ts_ns <= 0:
         raise ValueError("snapshot_ts_ns must be positive")
     snapshot_ts_ms = snapshot_ts_ns // 1_000_000
-    instruments = _unique_rows(instrument_rows, label="instrument_rows")
+    instruments, strategy_instruments, excluded_instruments = (
+        _partition_strategy_instrument_rows(
+            instrument_rows,
+            label="instrument_rows",
+        )
+    )
     tickers, rejected_tickers = _partition_ticker_rows(
         ticker_rows,
         instrument_symbols=set(instruments),
@@ -391,6 +441,8 @@ def build_candidate_universe_artifact(
         "environment": "demo",
         "endpoint": "api-demo.bybit.com",
         "snapshot_ts_ns": snapshot_ts_ns,
+        "strategy_domain": "crypto_perpetuals",
+        "strategy_symbol_types": list(CRYPTO_LINEAR_SYMBOL_TYPES),
         "profile_inputs": json_safe(inputs),
         "profile_input_sha256": {
             profile: hashlib.sha256(canonical_json(inputs[profile])).hexdigest()
@@ -398,6 +450,8 @@ def build_candidate_universe_artifact(
         },
         "raw_source": {
             "instrument_rows": len(instrument_rows),
+            "strategy_instrument_rows": len(strategy_instruments),
+            "excluded_instrument_rows": len(excluded_instruments),
             "ticker_rows": len(ticker_rows),
             "evaluated_ticker_rows": len(tickers),
             "rejected_ticker_rows": len(rejected_tickers),
@@ -413,6 +467,7 @@ def build_candidate_universe_artifact(
             "ticker_rows": raw_tickers,
         },
         "rejected_ticker_rows": rejected_tickers,
+        "excluded_instrument_rows": excluded_instruments,
         "profile_eligible_symbols": {
             profile: sorted(eligible[profile]) for profile in _PROFILE_NAMES
         },
@@ -423,6 +478,7 @@ def build_candidate_universe_artifact(
             "forward_point_in_time_population_not_historical_pit_membership",
             "strategy_signal_rank_return_and_entry_conditions_not_evaluated",
             "post_snapshot_listings_are_ignored_for_the_bounded_evidence_window",
+            "non_crypto_linear_products_are_excluded_before_liquidity_ranking",
         ],
         "artifact_sha256": "",
     }
@@ -493,6 +549,10 @@ def load_candidate_universe(
         raise ValueError("candidate-universe identity is invalid")
     if payload.get("endpoint") != "api-demo.bybit.com":
         raise ValueError("candidate-universe endpoint is not api-demo.bybit.com")
+    if payload.get("strategy_domain") != "crypto_perpetuals":
+        raise ValueError("candidate-universe strategy domain is invalid")
+    if payload.get("strategy_symbol_types") != list(CRYPTO_LINEAR_SYMBOL_TYPES):
+        raise ValueError("candidate-universe strategy symbol types are invalid")
     artifact_hash = str(payload.get("artifact_sha256") or "")
     if artifact_hash != _self_hash(payload):
         raise ValueError("candidate-universe artifact_sha256 is invalid")
@@ -543,7 +603,12 @@ def load_candidate_universe(
         canonical_json({"rows": raw_tickers})
     ).hexdigest():
         raise ValueError("candidate-universe raw source hashes are invalid")
-    instrument_map = _unique_rows(raw_instruments, label="raw instrument_rows")
+    instrument_map, strategy_instrument_map, rebuilt_excluded_instruments = (
+        _partition_strategy_instrument_rows(
+            raw_instruments,
+            label="raw instrument_rows",
+        )
+    )
     ticker_map, rebuilt_rejected_tickers = _partition_ticker_rows(
         raw_tickers,
         instrument_symbols=set(instrument_map),
@@ -558,6 +623,17 @@ def load_candidate_universe(
         or raw_source.get("rejected_ticker_rows") != len(rebuilt_rejected_tickers)
     ):
         raise ValueError("candidate-universe rejected ticker rows are inconsistent")
+    declared_excluded_instruments = payload.get("excluded_instrument_rows")
+    if (
+        not isinstance(declared_excluded_instruments, list)
+        or canonical_json({"rows": declared_excluded_instruments})
+        != canonical_json({"rows": rebuilt_excluded_instruments})
+        or raw_source.get("strategy_instrument_rows")
+        != len(strategy_instrument_map)
+        or raw_source.get("excluded_instrument_rows")
+        != len(rebuilt_excluded_instruments)
+    ):
+        raise ValueError("candidate-universe excluded instrument rows are inconsistent")
     snapshot_ts_ns = int(payload.get("snapshot_ts_ns") or 0)
     if snapshot_ts_ns <= 0:
         raise ValueError("candidate-universe snapshot_ts_ns must be positive")

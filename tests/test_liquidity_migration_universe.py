@@ -141,12 +141,14 @@ def _instrument(
     status: str = "Trading",
     contract_type: str | None = "LinearPerpetual",
     settle_coin: str = "USDT",
+    symbol_type: str | None = None,
 ) -> dict:
     return {
         "ts_ms": 1,
         "symbol": symbol,
         "category": "linear",
         "contract_type": contract_type,
+        "symbol_type": symbol_type,
         "status": status,
         "settle_coin": settle_coin,
         "launch_time_ms": launch_time_ms,
@@ -205,6 +207,44 @@ def test_universepit2_excludes_dated_inverse_usdc_and_missing_contract_type() ->
     assert set(table["settle_coin"].to_list()) == {"USDT"}
 
 
+def test_universe_excludes_non_crypto_symbol_types_before_ranking() -> None:
+    snapshot = 1_800_000_000_000
+    old = snapshot - 100 * MS_PER_DAY
+    instruments = pl.DataFrame([
+        _instrument("AAAUSDT", old),
+        _instrument("INNOVUSDT", old, symbol_type="innovation"),
+        _instrument("AAOIUSDT", old, symbol_type="stock"),
+        _instrument("XAUUSDT", old, symbol_type="commodity"),
+        _instrument("EURUSDT", old, symbol_type="forex"),
+        _instrument("FUTUREUSDT", old, symbol_type="future_tradfi"),
+    ])
+    tickers = pl.DataFrame([
+        _ticker("AAAUSDT", 10_000_000.0),
+        _ticker("INNOVUSDT", 20_000_000.0),
+        _ticker("AAOIUSDT", 100_000_000.0),
+        _ticker("XAUUSDT", 90_000_000.0),
+        _ticker("EURUSDT", 80_000_000.0),
+        _ticker("FUTUREUSDT", 70_000_000.0),
+    ])
+
+    table = build_current_universe_table(
+        instruments,
+        tickers,
+        universe_config=UniverseConfig(
+            min_turnover_24h=0.0,
+            min_age_days=30,
+            rank_start=1,
+            rank_end=2,
+            max_symbols=2,
+        ),
+        snapshot_ts_ms=snapshot,
+    )
+
+    assert table["symbol"].to_list() == ["INNOVUSDT", "AAAUSDT"]
+    assert table["liquidity_rank"].to_list() == [1, 2]
+    assert table["symbol_type"].to_list() == ["innovation", None]
+
+
 # --------------------------------------------------------------------------- #
 # audit bucket b10 (relocated from test_audit_fix_b10.py)                       #
 # universe-pit-1 / -3 / -5 — these carry their own `_univ_*` helpers because    #
@@ -214,6 +254,7 @@ def test_universepit2_excludes_dated_inverse_usdc_and_missing_contract_type() ->
 def _univ_instrument(symbol, launch_ms, *, contract_type="LinearPerpetual", settle_coin="USDT", **extra):
     row = {
         "ts_ms": 1, "symbol": symbol, "category": "linear", "contract_type": contract_type,
+        "symbol_type": None,
         "status": "Trading", "settle_coin": settle_coin, "launch_time_ms": launch_ms,
         "tick_size": 0.01, "qty_step": 0.001, "min_notional_value": 5.0, "is_prelisting": False,
     }
@@ -242,6 +283,24 @@ def test_universepit1_missing_contract_type_column_raises() -> None:
         build_current_universe_table(
             instruments, tickers,
             universe_config=UniverseConfig(min_turnover_24h=5_000_000.0, min_age_days=30),
+            snapshot_ts_ms=snapshot,
+        )
+
+
+def test_universe_missing_symbol_type_column_raises() -> None:
+    snapshot = 1_800_000_000_000
+    old = snapshot - 100 * MS_PER_DAY
+    instruments = pl.DataFrame([_univ_instrument("AAAUSDT", old)]).drop("symbol_type")
+    tickers = pl.DataFrame([_univ_ticker("AAAUSDT", 50_000_000.0)])
+
+    with pytest.raises(RuntimeError, match="symbol_type"):
+        build_current_universe_table(
+            instruments,
+            tickers,
+            universe_config=UniverseConfig(
+                min_turnover_24h=5_000_000.0,
+                min_age_days=30,
+            ),
             snapshot_ts_ms=snapshot,
         )
 

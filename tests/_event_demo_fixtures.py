@@ -46,6 +46,7 @@ def _make_instruments_frame() -> pl.DataFrame:
         "settle_coin": ["USDT"] * 4,
         "is_prelisting": [False] * 4,
         "contract_type": ["LinearPerpetual"] * 4,
+        "symbol_type": [None] * 4,
         "launch_time_ms": [
             1_500_000_000_000,
             1_731_919_190_000,

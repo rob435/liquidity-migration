@@ -136,6 +136,29 @@ history, rejects every returned identity/status/fill contradiction, and keeps
 legacy history-only receipts readable. The failed receipt is neither retried
 in place nor converted into passing evidence.
 
+Replacement `38f11d070d6a5d0a99bd76e52f139586df0c8aab` then passed all
+2,987 local/pre-push tests, exact-head noncontacting Linux run `29432072223`,
+and stopped-fleet install-preflight run `29432605744` with 174 host smoke
+tests. Its fresh 620-symbol freeze self-hashes to
+`c1fc7f03409de4df4aee024e25af9716a66fe905614dbcfc8c2b6a88ad1895ef`.
+The full probe verified 20 crypto rules before failing on `AAOIUSDT`: Bybit
+returned `110126` because that stock perpetual requires a separate trading
+agreement. No agreement was signed, no authority was issued, every unit stayed
+stopped, and cleanup/final authenticated flatness passed. The private failure
+receipt self-hashes to
+`76b52c589c4142674ef542390eba272e7acb3c90cb82c2202db5539dee46e610`.
+
+The exact frozen source contained 100 `stock` and four `commodity` linear
+perps. Those are outside the repository's stated crypto-perp domain and must
+not displace crypto contracts in liquidity ranking. The prospective schema-v3
+candidate artifact therefore retains and hashes every raw row, admits only an
+empty or `innovation` `symbolType`, and records every non-crypto or unknown
+type under `excluded_instrument_rows` before ranking. Exact replay on the
+retained source changes the candidate population from 620 to 516 by removing
+those 104 rows; all 120 `innovation` crypto rows remain. This intended universe
+change requires a new candidate and fresh gates/artifacts. It is not permission
+to sign account agreements and is not a research or alpha result.
+
 The earlier generic stopped-tree provenance implementation blocker is resolved
 in source, not in operations. The schema-v4 authority aggregate reconstructs
 the stopped seal's exact path/hash index, reopens the registered dependency

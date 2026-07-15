@@ -349,6 +349,7 @@ def test_normalize_instruments_flattens_lot_and_price_filters() -> None:
         {
             "symbol": "BTCUSDT",
             "contractType": "LinearPerpetual",
+            "symbolType": "Innovation",
             "status": "Trading",
             "baseCoin": "BTC",
             "quoteCoin": "USDT",
@@ -375,6 +376,7 @@ def test_normalize_instruments_flattens_lot_and_price_filters() -> None:
     record = frame.to_dicts()[0]
     assert record["symbol"] == "BTCUSDT"
     assert record["category"] == "linear"
+    assert record["symbol_type"] == "innovation"
     assert record["tick_size"] == 0.1
     assert record["qty_step"] == 0.001
     assert record["min_notional_value"] == 5.0
@@ -396,6 +398,7 @@ def test_normalize_instruments_handles_absent_filter_blocks() -> None:
     assert record["launch_time_ms"] is None
     assert record["delivery_time_ms"] is None
     assert record["funding_interval_min"] is None
+    assert record["symbol_type"] is None
     assert record["is_prelisting"] is False
 
 

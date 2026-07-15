@@ -18,6 +18,14 @@ from ._common import MS_PER_DAY, safe_name
 _logger = logging.getLogger(__name__)
 
 
+# This repository implements crypto-perp strategies. Bybit now returns TradFi
+# linear perps through the same endpoint/category. Empty is the venue's normal
+# crypto label and ``innovation`` is its crypto innovation-zone label; every
+# other present/future symbolType is outside the strategy domain unless this
+# allow-list is changed prospectively.
+CRYPTO_LINEAR_SYMBOL_TYPES: tuple[str, ...] = ("", "innovation")
+
+
 def run_discover_universe(
     data_root: str | Path,
     *,
@@ -97,17 +105,33 @@ def build_current_universe_table(
     # old `if "contract_type" in columns` soft guard) makes the perp invariant a
     # hard schema requirement: a frame missing it fails loudly instead of
     # silently admitting dated-delivery contracts onto the live tradable path.
-    required = {"symbol", "status", "settle_coin", "is_prelisting", "turnover_24h", "contract_type"}
+    required = {
+        "symbol",
+        "status",
+        "settle_coin",
+        "is_prelisting",
+        "turnover_24h",
+        "contract_type",
+        "symbol_type",
+    }
     missing = required - set(joined.columns)
     if missing:
         raise RuntimeError(f"Universe inputs missing required columns: {sorted(missing)}")
 
+    normalized_symbol_type = (
+        pl.col("symbol_type")
+        .cast(pl.String)
+        .fill_null("")
+        .str.strip_chars()
+        .str.to_lowercase()
+    )
     filtered = joined.filter(
         (pl.col("status") == "Trading")
         & (pl.col("settle_coin") == "USDT")
         & (~pl.col("is_prelisting"))
         & (pl.col("turnover_24h").is_not_null())
         & (pl.col("turnover_24h") >= universe_config.min_turnover_24h)
+        & normalized_symbol_type.is_in(list(CRYPTO_LINEAR_SYMBOL_TYPES))
     )
     if exclude:
         filtered = filtered.filter(~pl.col("symbol").is_in(sorted(exclude)))
@@ -175,6 +199,7 @@ def build_current_universe_table(
         "listing_age_days",
         "status",
         "contract_type",
+        "symbol_type",
         "settle_coin",
         "min_notional_value",
         "tick_size",
@@ -259,6 +284,7 @@ def _empty_universe_table() -> pl.DataFrame:
             "funding_rate": pl.Series([], dtype=pl.Float64),
             "launch_time_ms": pl.Series([], dtype=pl.Int64),
             "listing_age_days": pl.Series([], dtype=pl.Float64),
+            "symbol_type": pl.Series([], dtype=pl.String),
         }
     )
 

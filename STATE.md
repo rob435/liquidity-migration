@@ -65,6 +65,29 @@ research decisions are in
   confirmations plus empty execution history, and fails on any identity,
   status, or fill contradiction. It does not relabel or overwrite the failed
   receipt. The VPS remains flat, stopped, and unauthorized.
+- Replacement candidate
+  `38f11d070d6a5d0a99bd76e52f139586df0c8aab` repaired the delayed-history
+  verifier, passed repository Ruff and all 2,987 local/pre-push tests, passed
+  exact-head noncontacting Linux run `29432072223`, and passed stopped-fleet
+  install-preflight run `29432605744` including 174 host smoke tests. Its fresh
+  620-symbol freeze self-hashes to
+  `c1fc7f03409de4df4aee024e25af9716a66fe905614dbcfc8c2b6a88ad1895ef`.
+  The one full-population probe advanced through 20 verified crypto rules, then
+  failed on `AAOIUSDT` when Bybit returned `110126` because the account had not
+  signed the separate agreement required for that stock perpetual. Cleanup and
+  final authenticated flatness passed; no authority or service startup
+  occurred. The retained private failure receipt self-hashes to
+  `76b52c589c4142674ef542390eba272e7acb3c90cb82c2202db5539dee46e610`.
+  Source replay then proved the population bug: the linear endpoint now mixed
+  100 `stock` and four `commodity` perps into this repository's crypto-perp
+  universe. No agreement was signed. The prospective schema-v3 repair retains
+  and hashes all 728 instrument rows, records every product-type exclusion, and
+  removes non-crypto or unknown `symbolType` rows before liquidity ranking.
+  Replaying it on the retained source changes the operational population from
+  620 to 516 symbols by removing exactly those 104 non-crypto rows; all 120
+  `innovation` crypto rows remain eligible. This is an intended domain
+  correction, not a refactor or alpha result. The VPS remains flat, stopped,
+  paper-disabled, and unauthorized.
 - Candidate `181027b0853db9e543e30504211d701c7c95fc86` passed all 2,970 local
   tests, the canonical pre-push gate, and its single exact-head noncontacting
   Linux run (`29411462086`). It installed cleanly on the stopped VPS, and the
