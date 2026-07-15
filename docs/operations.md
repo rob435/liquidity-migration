@@ -312,6 +312,12 @@ scripts/ops.sh status
 # <=200 USDT notional, <=5 authenticated requests/second, and <=10x leverage.
 # Invalid parameters fail before credentials or venue access; persisted attempts
 # must reproduce the receipt cap, venue quantity steps/bounds, and rule minimum.
+# Each accepted attempt must also bind the exact order ID/link ID through two
+# bounded terminal Cancelled observations from order history or the recent
+# real-time closed-order surface, while both surfaces remain identity/fill
+# consistent and exact execution history remains empty. A delayed or failed
+# order surface is not itself a pass; contradictory evidence from either
+# surface fails the probe.
 
 # Canonical pre-window paths derived from the immutable freeze.
 scripts/ops.sh natural-run-config build \

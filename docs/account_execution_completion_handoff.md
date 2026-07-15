@@ -28,6 +28,36 @@ The receiving agent must re-verify every snapshot claim. It must not reset,
 switch away from, clean, or overwrite the dirty worktree merely because this
 document names a committed head.
 
+## Successor update — full-population demo probe, 2026-07-15
+
+Demo-operational candidate
+`1690093011b35d0693f76ca754d0c28c12f9d8e1` passed repository Ruff, all 2,979
+local/pre-push tests, exact-head Linux run `29429929636`, and the stopped-fleet
+install preflight. The VPS was clean, flat, stopped, and paper-disabled. The
+candidate froze a self-hashed 620-symbol public-demo population and attempted
+the create-only full authenticated rule probe once.
+
+That probe failed on the first symbol before authority or service startup. Its
+`0GUSDT` PostOnly order was accepted at 9.97376 USDT, cancelled, and left no
+position or execution, but exact order history remained empty for the complete
+30-second/100-poll window. Cleanup and final authenticated flatness passed. The
+failure receipt remains private and immutable at
+`/var/lib/liquidity-migration/cutover-evidence/demo-operational-1690093-OgYr5Iyg/demo-rules-demo-operational.json.failed-1784131354681439580.json`,
+artifact SHA-256
+`091207fbdbda0935d296e96d8deb272bb2347ac9b91ff38a074d606f715a00b4`.
+A later read-only exact query found the same order cancelled with zero
+cumulative fill and no execution rows. That late observation diagnoses delayed
+history visibility; it does not change the failed receipt into a pass.
+
+The prospective replacement queries both official order-history and recent
+real-time closed-order endpoints on every bounded poll. Every returned row must
+match the exact symbol/order/link identity and show zero cumulative fill; an
+unexpected status or contradiction on either endpoint fails. Two terminal
+`Cancelled` observations from an official surface and an empty exact execution
+history are still mandatory. Legacy receipts remain readable. Freeze a new
+exact candidate, rerun all candidate gates, install it while flat/stopped, and
+use a new evidence namespace rather than overwriting the retained failure.
+
 ## Successor update — operational/raw-tape scope, 2026-07-15
 
 The owner subsequently made a narrower operational decision: the five-day raw

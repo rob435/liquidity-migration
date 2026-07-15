@@ -13,6 +13,8 @@ import pytest
 from liquidity_migration.account_execution_config import load_demo_rules
 from liquidity_migration.demo_rule_probe import (
     DEMO_RULE_PROBE_FAILURE_KIND,
+    ORDER_HISTORY_SOURCE,
+    ORDER_REALTIME_SOURCE,
     DemoRuleProbeAttempt,
     probe_demo_instrument_rule,
 )
@@ -101,9 +103,12 @@ class _ProbeClient:
         wrong_create_identity: bool = False,
         wrong_cancel_identity: bool = False,
         wrong_history_identity: bool = False,
+        wrong_realtime_identity: bool = False,
         missing_history_identity: bool = False,
         missing_history_polls: int = 0,
         partial_fill: bool = False,
+        realtime_statuses: tuple[str, ...] = (),
+        realtime_partial_fill: bool = False,
     ) -> None:
         self.threshold = threshold
         self.unknown_failure = unknown_failure
@@ -112,9 +117,12 @@ class _ProbeClient:
         self.wrong_create_identity = wrong_create_identity
         self.wrong_cancel_identity = wrong_cancel_identity
         self.wrong_history_identity = wrong_history_identity
+        self.wrong_realtime_identity = wrong_realtime_identity
         self.missing_history_identity = missing_history_identity
         self.missing_history_polls = missing_history_polls
         self.partial_fill = partial_fill
+        self.realtime_statuses = realtime_statuses
+        self.realtime_partial_fill = realtime_partial_fill
         self.accepted: list[str] = []
         self.cancelled: list[str] = []
         self.leverage: list[tuple[str, float, float]] = []
@@ -165,6 +173,26 @@ class _ProbeClient:
             "orderStatus": status,
             "cumExecQty": "0.1" if self.partial_fill else "0",
             "cumExecValue": "0.99" if self.partial_fill else "0",
+        }]
+
+    def get_open_orders(self, **params: Any) -> list[dict[str, str]]:
+        order_id = str(params["order_id"])
+        link = str(params["order_link_id"])
+        assert params["symbol"] == "BUSDT"
+        assert params["settle_coin"] is None
+        assert params["open_only"] == 1
+        assert self.order_ids[link] == order_id
+        if not self.realtime_statuses:
+            return []
+        poll = max(1, self.history_polls.get(order_id, 0))
+        status = self.realtime_statuses[min(poll - 1, len(self.realtime_statuses) - 1)]
+        return [{
+            "symbol": "BUSDT",
+            "orderId": "wrong" if self.wrong_realtime_identity else order_id,
+            "orderLinkId": link,
+            "orderStatus": status,
+            "cumExecQty": "0.1" if self.realtime_partial_fill else "0",
+            "cumExecValue": "0.99" if self.realtime_partial_fill else "0",
         }]
 
     def get_trade_history(self, **params: Any) -> list[dict[str, str]]:
@@ -263,6 +291,11 @@ def test_partial_or_late_fill_fails_probe(client: _ProbeClient, message: str) ->
         _ProbeClient(threshold=1.0, wrong_create_identity=True),
         _ProbeClient(threshold=1.0, wrong_cancel_identity=True),
         _ProbeClient(threshold=1.0, wrong_history_identity=True),
+        _ProbeClient(
+            threshold=1.0,
+            realtime_statuses=("Cancelled",),
+            wrong_realtime_identity=True,
+        ),
     ],
 )
 def test_wrong_order_or_link_identity_fails_probe(client: _ProbeClient) -> None:
@@ -278,6 +311,36 @@ def test_missing_terminal_identity_never_becomes_accepted() -> None:
         )
 
 
+def test_realtime_cancel_proves_terminal_state_while_order_history_is_delayed() -> None:
+    _, evidence = _probe(
+        _ProbeClient(
+            threshold=1.0,
+            missing_history_identity=True,
+            realtime_statuses=("Cancelled",),
+        )
+    )
+
+    accepted = [attempt for attempt in evidence.attempts if attempt.accepted]
+    assert accepted[-1].terminal_order_source == ORDER_REALTIME_SOURCE
+    assert accepted[-1].terminal_confirmation_sources == (
+        ORDER_REALTIME_SOURCE,
+        ORDER_REALTIME_SOURCE,
+    )
+    assert accepted[-1].terminal_poll_count == 2
+
+
+def test_realtime_fill_contradiction_fails_even_when_history_is_clean() -> None:
+    with pytest.raises(RuntimeError, match="proves a probe fill"):
+        _probe(
+            _ProbeClient(
+                threshold=1.0,
+                history_statuses=("Cancelled",),
+                realtime_statuses=("Cancelled",),
+                realtime_partial_fill=True,
+            )
+        )
+
+
 def test_eventual_clean_cancel_requires_two_terminal_confirmations() -> None:
     rule, evidence = _probe(
         _ProbeClient(
@@ -289,6 +352,10 @@ def test_eventual_clean_cancel_requires_two_terminal_confirmations() -> None:
     accepted = [attempt for attempt in evidence.attempts if attempt.accepted]
     assert accepted[-1].terminal_poll_count == 3
     assert accepted[-1].terminal_confirmation_polls == 2
+    assert accepted[-1].terminal_confirmation_sources == (
+        ORDER_HISTORY_SOURCE,
+        ORDER_HISTORY_SOURCE,
+    )
 
 
 def test_default_window_accepts_delayed_terminal_history_only_after_two_confirmations() -> None:

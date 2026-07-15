@@ -383,6 +383,24 @@ execution result. A distinct raw-disabled demo-only operational profile may
 run the existing demo fleet without paper, but it makes no V8, paper-twin,
 natural-replay, alpha, promotion, or mainnet claim.
 
+The later demo-operational candidate
+`1690093011b35d0693f76ca754d0c28c12f9d8e1` passed all 2,979 local/pre-push
+tests, exact-head Linux run `29429929636`, and stopped-fleet installation. Its
+first full 620-symbol authenticated rule probe failed on `0GUSDT` before any
+authority or startup: create and cancel acknowledgements were exact and no
+fill or residual exposure occurred, but order history did not expose the
+cancelled row during 30 seconds/100 polls. Cleanup and final authenticated
+flatness passed. The retained failure receipt self-hashes to
+`091207fbdbda0935d296e96d8deb272bb2347ac9b91ff38a074d606f715a00b4`.
+A later exact read observed that order cancelled with zero executions, which
+supports an asynchronous-visibility diagnosis but cannot convert the failed
+attempt into positive rule coverage. The prospective code repair accepts two
+exact terminal confirmations from either order history or the recent real-time
+closed-order surface, still queries both on every poll, requires empty exact
+execution history, and fails on any returned identity/status/fill
+contradiction. This is operational compatibility work, not research evidence
+or an alpha/paper/mainnet authorization.
+
 ## Strategy-overhaul scout status
 
 The current claim is only that the proposed population/label plumbing can be

@@ -289,6 +289,9 @@ class BybitPrivateClient:
         *,
         symbol: str | None = None,
         settle_coin: str | None = "USDT",
+        order_id: str | None = None,
+        order_link_id: str | None = None,
+        open_only: int | None = None,
         order_filter: str | None = None,
         limit: int = 50,
         max_pages: int = 20,
@@ -298,6 +301,14 @@ class BybitPrivateClient:
             params["symbol"] = symbol
         elif settle_coin:
             params["settleCoin"] = settle_coin
+        if order_id:
+            params["orderId"] = order_id
+        if order_link_id:
+            params["orderLinkId"] = order_link_id
+        if open_only is not None:
+            if type(open_only) is not int or open_only not in {0, 1, 2}:
+                raise ValueError("open_only must be 0, 1, or 2")
+            params["openOnly"] = open_only
         if order_filter:
             params["orderFilter"] = order_filter
         return self._cursor_result_list("get_open_orders", params, max_pages=max_pages)

@@ -119,6 +119,23 @@ no unique commit and no dirty or in-use worktree. The Strategy Overhaul/master a
 on the big PC is separate work and cannot advance this cutover's frozen `main`
 base or supply evidence to it.
 
+Demo-operational candidate `1690093011b35d0693f76ca754d0c28c12f9d8e1`
+then passed all 2,979 local/pre-push tests, exact-head Linux run `29429929636`,
+and stopped-fleet install preflight. Its first credentialed probe of the frozen
+620-symbol operational population failed on the first symbol before authority
+or startup: `0GUSDT` was accepted and cancelled without a fill, but exact order
+history remained empty for 30 seconds/100 polls. Cleanup and authenticated
+final flatness passed; the self-hashed failure receipt is retained with
+artifact SHA-256
+`091207fbdbda0935d296e96d8deb272bb2347ac9b91ff38a074d606f715a00b4`.
+A later read-only exact query observed the same order as `Cancelled` with zero
+cumulative execution and no trade rows. The prospective replacement queries
+both official order-history and recent real-time closed-order surfaces on each
+bounded poll. It requires two terminal observations and empty exact execution
+history, rejects every returned identity/status/fill contradiction, and keeps
+legacy history-only receipts readable. The failed receipt is neither retried
+in place nor converted into passing evidence.
+
 The earlier generic stopped-tree provenance implementation blocker is resolved
 in source, not in operations. The schema-v4 authority aggregate reconstructs
 the stopped seal's exact path/hash index, reopens the registered dependency
@@ -534,12 +551,19 @@ so it conservatively upper-bounds the hidden threshold by at most one quantity
 step. Unknown rejects, transport failures, uncancelled orders, stale receipts,
 or any residual position fail the gate rather than being interpreted as a
 minimum. The current source permits up to 30 seconds/100 bounded polls for
-read-only terminal-history visibility but still requires two exact
-`Cancelled`/zero-fill observations and empty exact-identity execution history.
+read-only terminal visibility. Each poll inspects both order history and
+Bybit's recent real-time closed-order surface. Passing requires two exact
+`Cancelled`/zero-fill observations from at least one official surface plus
+empty exact-identity execution history; any returned identity, fill, or
+non-pending/non-cancelled status contradiction from either order surface fails.
 Bybit documents that demo uses `api-demo.bybit.com`, supports order
 create/cancel, and has an incomplete API surface; the probe therefore uses
 actual order create/cancel rather than assuming the optional pre-check endpoint
-is available: <https://bybit-exchange.github.io/docs/v5/demo>.
+is available: <https://bybit-exchange.github.io/docs/v5/demo>. Bybit also
+documents order history as asynchronous and the real-time endpoint as the
+recent open/closed-order view:
+<https://bybit-exchange.github.io/docs/v5/order/order-list> and
+<https://bybit-exchange.github.io/docs/v5/order/open-order>.
 
 ## Ownership switch
 

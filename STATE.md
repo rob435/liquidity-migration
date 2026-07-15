@@ -43,6 +43,28 @@ research decisions are in
   producers' population ceiling, then reopens the demo-rule receipt to prove
   exact, source-bound rule coverage. The old three-symbol V8 files do not meet
   that operational invariant.
+- Demo-operational candidate
+  `1690093011b35d0693f76ca754d0c28c12f9d8e1` passed repository Ruff,
+  all 2,979 local/pre-push tests, and its single exact-head noncontacting Linux
+  run (`29429929636`). Its stopped-fleet install preflight also passed after a
+  separately retained first candidate exposed and repaired an empty-unit-list
+  parser defect. The installed candidate froze one self-hashed 620-symbol
+  public-demo population, then its first credentialed full-population rule
+  probe failed on `0GUSDT` before authorization or service startup. The exact
+  PostOnly order was accepted at 9.97376 USDT and cancelled with no execution,
+  but the asynchronous order-history surface remained empty for all 100
+  bounded polls over 30 seconds. Cleanup and final authenticated flatness
+  passed. The private failure receipt is retained at
+  `/var/lib/liquidity-migration/cutover-evidence/demo-operational-1690093-OgYr5Iyg/demo-rules-demo-operational.json.failed-1784131354681439580.json`
+  with artifact SHA-256
+  `091207fbdbda0935d296e96d8deb272bb2347ac9b91ff38a074d606f715a00b4`.
+  A later read-only exact-identity query observed that same order as
+  `Cancelled`, with zero cumulative quantity/value and no executions. The
+  prospective repair inspects both official order-history and recent
+  real-time closed-order surfaces on every poll, requires two terminal
+  confirmations plus empty execution history, and fails on any identity,
+  status, or fill contradiction. It does not relabel or overwrite the failed
+  receipt. The VPS remains flat, stopped, and unauthorized.
 - Candidate `181027b0853db9e543e30504211d701c7c95fc86` passed all 2,970 local
   tests, the canonical pre-push gate, and its single exact-head noncontacting
   Linux run (`29411462086`). It installed cleanly on the stopped VPS, and the

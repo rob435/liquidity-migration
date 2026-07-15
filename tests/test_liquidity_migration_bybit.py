@@ -510,6 +510,53 @@ def test_bybit_private_client_forwards_explicit_open_order_filter(monkeypatch) -
     }]
 
 
+def test_bybit_private_client_forwards_exact_recent_closed_order_query(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.open_order_calls = []
+
+        def get_open_orders(self, **params):
+            self.open_order_calls.append(params)
+            return {"retCode": 0, "result": {"list": []}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+    )
+
+    assert client.get_open_orders(
+        symbol="0GUSDT",
+        settle_coin=None,
+        order_id="order-1",
+        order_link_id="probe-1",
+        open_only=1,
+        max_pages=2,
+    ) == []
+    assert client._client.open_order_calls == [{
+        "category": "linear",
+        "limit": 50,
+        "symbol": "0GUSDT",
+        "orderId": "order-1",
+        "orderLinkId": "probe-1",
+        "openOnly": 1,
+    }]
+
+
+@pytest.mark.parametrize("open_only", [3, 1.5, True, "1"])
+def test_bybit_private_client_rejects_invalid_open_only(monkeypatch, open_only) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    with pytest.raises(ValueError, match="open_only"):
+        client.get_open_orders(open_only=open_only)
+
+
 def test_bybit_private_client_paginates_open_orders(monkeypatch) -> None:
     pages = {
         None: {"retCode": 0, "result": {"list": [{"orderId": "o1"}], "nextPageCursor": "p2"}},

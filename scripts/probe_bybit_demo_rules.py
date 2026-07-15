@@ -500,13 +500,16 @@ def main(argv: list[str] | None = None) -> int:
             "environment": "demo",
             "verified_ts_ns": observed_ts_ns,
             "method": (
-                "api-demo instruments-info plus terminal Cancelled/zero-fill/"
-                "empty-trade-history PostOnly binary search"
+                "api-demo instruments-info plus exact-identity terminal Cancelled/"
+                "zero-fill/empty-trade-history PostOnly binary search using order-history "
+                "and recent real-time order evidence"
             ),
             "minimum_semantics": (
-                "min_notional is the smallest terminally Cancelled, zero-fill, "
-                "empty-trade-history qty-step notional at probe_price; it is a "
-                "conservative upper bound on the hidden threshold"
+                "min_notional is the smallest exact-identity, terminally Cancelled, "
+                "zero-fill, empty-trade-history qty-step notional at probe_price; "
+                "terminal state may be proven by order-history or the recent real-time "
+                "closed-order surface, and the result is a conservative upper bound on "
+                "the hidden threshold"
             ),
             "max_probe_notional_usdt": args.max_probe_notional_usdt,
             "probe_distance_bps": args.probe_distance_bps,
@@ -515,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
             "official_references": [
                 "https://bybit-exchange.github.io/docs/v5/demo",
                 "https://bybit-exchange.github.io/docs/v5/order/create-order",
+                "https://bybit-exchange.github.io/docs/v5/order/open-order",
+                "https://bybit-exchange.github.io/docs/v5/order/order-list",
                 "https://bybit-exchange.github.io/docs/v5/error",
             ],
             "account_identity": account_identity,

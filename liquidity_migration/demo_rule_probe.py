@@ -28,6 +28,7 @@ TERMINAL_HISTORY_MAX_POLLS = 100
 ORDER_CREATE_SOURCE = "bybit_api_demo_order_create"
 ORDER_CANCEL_SOURCE = "bybit_api_demo_order_cancel"
 ORDER_HISTORY_SOURCE = "bybit_api_demo_order_history"
+ORDER_REALTIME_SOURCE = "bybit_api_demo_order_realtime"
 TRADE_HISTORY_SOURCE = "bybit_api_demo_trade_history"
 
 _PENDING_ORDER_STATUSES = {"created", "new", "untriggered"}
@@ -95,8 +96,14 @@ class DemoRuleProbeAttempt:
     order_history_query_symbol: str = ""
     order_history_query_order_id: str = ""
     order_history_query_order_link_id: str = ""
+    realtime_order_source: str = ""
+    realtime_order_query_symbol: str = ""
+    realtime_order_query_order_id: str = ""
+    realtime_order_query_order_link_id: str = ""
     terminal_order_id: str = ""
     terminal_order_link_id: str = ""
+    terminal_order_source: str = ""
+    terminal_confirmation_sources: tuple[str, ...] = ()
     terminal_status: str = ""
     terminal_cum_exec_qty: str = ""
     terminal_cum_exec_value: str = ""
@@ -227,7 +234,9 @@ def validate_demo_rule_probe_evidence(
 
     Returns the verified minimum notional. A create or cancel acknowledgement is
     deliberately insufficient: every accepted row must carry exact order/link
-    identity through terminal order history and an empty execution-history read.
+    identity through an official terminal order surface and an empty
+    execution-history read. Legacy receipts used order history alone; current
+    receipts also bind the recent real-time closed-order query explicitly.
     """
 
     symbol = expected_symbol.upper()
@@ -391,6 +400,47 @@ def validate_demo_rule_probe_evidence(
                 raise ValueError(
                     f"demo rule {symbol} accepted attempt {field} does not bind the probe order"
                 )
+        terminal_source = str(raw.get("terminal_order_source") or "")
+        realtime_source = str(raw.get("realtime_order_source") or "")
+        raw_confirmation_sources = raw.get("terminal_confirmation_sources")
+        is_dual_source_receipt = bool(
+            terminal_source
+            or realtime_source
+            or raw_confirmation_sources is not None
+        )
+        if is_dual_source_receipt:
+            realtime_strings = {
+                "realtime_order_source": ORDER_REALTIME_SOURCE,
+                "realtime_order_query_symbol": symbol,
+                "realtime_order_query_order_id": order_id,
+                "realtime_order_query_order_link_id": order_link_id,
+            }
+            for field, expected in realtime_strings.items():
+                if str(raw.get(field) or "") != expected:
+                    raise ValueError(
+                        f"demo rule {symbol} accepted attempt {field} does not bind the probe order"
+                    )
+            if terminal_source not in {ORDER_HISTORY_SOURCE, ORDER_REALTIME_SOURCE}:
+                raise ValueError(
+                    f"demo rule {symbol} accepted attempt has invalid terminal order source"
+                )
+            if not isinstance(raw_confirmation_sources, (list, tuple)):
+                raise ValueError(
+                    f"demo rule {symbol} accepted attempt lacks terminal confirmation sources"
+                )
+            confirmation_sources = tuple(str(value) for value in raw_confirmation_sources)
+            if (
+                len(confirmation_sources) != int(raw.get("terminal_confirmation_polls") or 0)
+                or any(
+                    source not in {ORDER_HISTORY_SOURCE, ORDER_REALTIME_SOURCE}
+                    for source in confirmation_sources
+                )
+                or not confirmation_sources
+                or confirmation_sources[-1] != terminal_source
+            ):
+                raise ValueError(
+                    f"demo rule {symbol} accepted attempt terminal confirmation sources are invalid"
+                )
         try:
             cum_qty = Decimal(str(raw.get("terminal_cum_exec_qty")))
             cum_value = Decimal(str(raw.get("terminal_cum_exec_value")))
@@ -483,9 +533,12 @@ def probe_demo_instrument_rule(
     The notional threshold is then tested on the actual order-create endpoint.
     A successful cancel request is not an accepted observation. The exact
     orderId/orderLinkId must subsequently be observed terminal ``Cancelled``
-    with zero cumulative quantity/value and empty trade history on at least two
-    bounded polls. Only documented 110094 lower-notional rejects are treated as
-    search observations; every other failure aborts the probe.
+    through Bybit's order-history or recent real-time order surface, with zero
+    cumulative quantity/value and empty trade history on at least two bounded
+    polls. Every returned row from either order surface must bind the exact
+    identity and remain fill-free. Only documented 110094 lower-notional
+    rejects are treated as search observations; every other failure aborts the
+    probe.
     """
 
     if (
@@ -497,7 +550,7 @@ def probe_demo_instrument_rule(
         or terminal_confirmation_polls < 2
         or terminal_confirmation_polls > terminal_history_max_polls
     ):
-        raise ValueError("terminal history bounds/confirmations are invalid")
+        raise ValueError("terminal order-evidence bounds/confirmations are invalid")
 
     structural = instrument_rules_from_bybit_row(
         instrument_row,
@@ -686,6 +739,10 @@ def probe_demo_instrument_rule(
             "order_history_query_symbol": symbol,
             "order_history_query_order_id": order_id,
             "order_history_query_order_link_id": link,
+            "realtime_order_source": ORDER_REALTIME_SOURCE,
+            "realtime_order_query_symbol": symbol,
+            "realtime_order_query_order_id": order_id,
+            "realtime_order_query_order_link_id": link,
             "trade_history_source": TRADE_HISTORY_SOURCE,
             "trade_history_query_symbol": symbol,
             "trade_history_query_order_id": order_id,
@@ -693,16 +750,19 @@ def probe_demo_instrument_rule(
         }
         deadline = time.monotonic() + terminal_history_timeout_seconds
         confirmations = 0
+        confirmation_sources: list[str] = []
         last_status = ""
         last_cum_qty = ""
         last_cum_value = ""
-        last_error = "terminal order history was not observable"
+        last_terminal_source = ""
+        last_error = "terminal order evidence was not observable"
         last_trade_count = -1
         last_poll_count = 0
         for poll_number in range(1, terminal_history_max_polls + 1):
             if time.monotonic() > deadline:
                 break
             last_poll_count = poll_number
+            order_error = ""
             try:
                 order_rows = client.get_order_history(
                     symbol=symbol,
@@ -713,6 +773,28 @@ def probe_demo_instrument_rule(
                 )
                 if not isinstance(order_rows, list):
                     raise RuntimeError("order-history response must be a list")
+            except Exception as exc:  # noqa: BLE001 - alternate official surface remains valid
+                order_rows = []
+                order_error = f"order-history read failed: {exc}"
+
+            realtime_error = ""
+            try:
+                realtime_rows = client.get_open_orders(
+                    symbol=symbol,
+                    settle_coin=None,
+                    order_id=order_id,
+                    order_link_id=link,
+                    open_only=1,
+                    limit=50,
+                    max_pages=2,
+                )
+                if not isinstance(realtime_rows, list):
+                    raise RuntimeError("real-time order response must be a list")
+            except Exception as exc:  # noqa: BLE001 - alternate official surface remains valid
+                realtime_rows = []
+                realtime_error = f"real-time order read failed: {exc}"
+
+            try:
                 trade_rows = client.get_trade_history(
                     symbol=symbol,
                     order_id=order_id,
@@ -725,6 +807,7 @@ def probe_demo_instrument_rule(
             except Exception as exc:  # noqa: BLE001 - bounded retry, never a pass
                 last_error = f"terminal verification read failed: {exc}"
                 confirmations = 0
+                confirmation_sources.clear()
             else:
                 last_trade_count = len(trade_rows)
                 try:
@@ -742,6 +825,7 @@ def probe_demo_instrument_rule(
                         **verified_identity,
                         terminal_poll_count=poll_number,
                         terminal_confirmation_polls=confirmations,
+                        terminal_confirmation_sources=tuple(confirmation_sources),
                         trade_history_row_count=last_trade_count,
                     )
                 if trade_rows:
@@ -756,28 +840,34 @@ def probe_demo_instrument_rule(
                         **verified_identity,
                         terminal_poll_count=poll_number,
                         terminal_confirmation_polls=confirmations,
+                        terminal_confirmation_sources=tuple(confirmation_sources),
                         trade_history_row_count=last_trade_count,
                     )
-                if len(order_rows) > 1:
-                    fail_verification(
-                        f"order-history query returned {len(order_rows)} rows for one exact identity",
-                        **verified_identity,
-                        terminal_poll_count=poll_number,
-                        terminal_confirmation_polls=confirmations,
-                        trade_history_row_count=0,
-                    )
-                if not order_rows:
-                    last_error = "terminal order history was not observable"
-                    confirmations = 0
-                else:
-                    row = order_rows[0]
+                terminal_observations: list[tuple[str, str, str, str]] = []
+                pending_observations: list[tuple[str, str]] = []
+                for source, label, rows in (
+                    (ORDER_HISTORY_SOURCE, "order-history", order_rows),
+                    (ORDER_REALTIME_SOURCE, "real-time order", realtime_rows),
+                ):
+                    if len(rows) > 1:
+                        fail_verification(
+                            f"{label} query returned {len(rows)} rows for one exact identity",
+                            **verified_identity,
+                            terminal_poll_count=poll_number,
+                            terminal_confirmation_polls=confirmations,
+                            terminal_confirmation_sources=tuple(confirmation_sources),
+                            trade_history_row_count=0,
+                        )
+                    if not rows:
+                        continue
+                    row = rows[0]
                     try:
                         _required_identity(
                             row,
                             symbol=symbol,
                             order_id=order_id,
                             order_link_id=link,
-                            label=f"{symbol} order-history row",
+                            label=f"{symbol} {label} row",
                         )
                     except _ProbeIdentityError as exc:
                         fail_verification(
@@ -785,18 +875,21 @@ def probe_demo_instrument_rule(
                             **verified_identity,
                             terminal_poll_count=poll_number,
                             terminal_confirmation_polls=confirmations,
+                            terminal_confirmation_sources=tuple(confirmation_sources),
                             trade_history_row_count=0,
                         )
                     assert isinstance(row, Mapping)
-                    last_status = str(row.get("orderStatus") or row.get("order_status") or "")
+                    observed_status = str(
+                        row.get("orderStatus") or row.get("order_status") or ""
+                    )
                     try:
-                        last_cum_qty = _require_zero_decimal(
+                        observed_cum_qty = _require_zero_decimal(
                             row.get("cumExecQty"),
-                            label=f"{symbol} terminal cumExecQty",
+                            label=f"{symbol} {label} cumExecQty",
                         )
-                        last_cum_value = _require_zero_decimal(
+                        observed_cum_value = _require_zero_decimal(
                             row.get("cumExecValue"),
-                            label=f"{symbol} terminal cumExecValue",
+                            label=f"{symbol} {label} cumExecValue",
                         )
                     except RuntimeError as exc:
                         fail_verification(
@@ -804,7 +897,9 @@ def probe_demo_instrument_rule(
                             **verified_identity,
                             terminal_order_id=order_id,
                             terminal_order_link_id=link,
-                            terminal_status=last_status,
+                            terminal_order_source=source,
+                            terminal_confirmation_sources=tuple(confirmation_sources),
+                            terminal_status=observed_status,
                             terminal_cum_exec_qty=str(row.get("cumExecQty") or ""),
                             terminal_cum_exec_value=str(row.get("cumExecValue") or ""),
                             terminal_observed_ts_ns=time.time_ns(),
@@ -812,39 +907,52 @@ def probe_demo_instrument_rule(
                             terminal_confirmation_polls=confirmations,
                             trade_history_row_count=0,
                         )
-                    normalized_status = last_status.lower()
-                    if last_status == "Cancelled":
-                        confirmations += 1
-                        if confirmations >= terminal_confirmation_polls:
-                            record_attempt(
-                                step_count=step_count,
-                                qty=qty,
-                                notional=notional,
-                                accepted_value=True,
-                                outcome="verified_cancelled_no_fill",
-                                order_link_id=link,
-                                **verified_identity,
-                                terminal_order_id=order_id,
-                                terminal_order_link_id=link,
-                                terminal_status="Cancelled",
-                                terminal_cum_exec_qty=last_cum_qty,
-                                terminal_cum_exec_value=last_cum_value,
-                                terminal_observed_ts_ns=time.time_ns(),
-                                terminal_poll_count=poll_number,
-                                terminal_confirmation_polls=confirmations,
-                                trade_history_row_count=0,
-                            )
-                            return True
+                    normalized_status = observed_status.lower()
+                    if observed_status == "Cancelled":
+                        terminal_observations.append(
+                            (source, observed_status, observed_cum_qty, observed_cum_value)
+                        )
                     elif normalized_status in _PENDING_ORDER_STATUSES:
-                        last_error = f"order remained non-terminal with status {last_status!r}"
-                        confirmations = 0
+                        pending_observations.append((label, observed_status))
                     else:
                         fail_verification(
-                            f"order reached non-acceptable status {last_status!r}",
+                            f"{label} reached non-acceptable status {observed_status!r}",
                             **verified_identity,
                             terminal_order_id=order_id,
                             terminal_order_link_id=link,
-                            terminal_status=last_status,
+                            terminal_order_source=source,
+                            terminal_confirmation_sources=tuple(confirmation_sources),
+                            terminal_status=observed_status,
+                            terminal_cum_exec_qty=observed_cum_qty,
+                            terminal_cum_exec_value=observed_cum_value,
+                            terminal_observed_ts_ns=time.time_ns(),
+                            terminal_poll_count=poll_number,
+                            terminal_confirmation_polls=confirmations,
+                            trade_history_row_count=0,
+                        )
+                if terminal_observations:
+                    (
+                        last_terminal_source,
+                        last_status,
+                        last_cum_qty,
+                        last_cum_value,
+                    ) = terminal_observations[0]
+                    confirmations += 1
+                    confirmation_sources.append(last_terminal_source)
+                    if confirmations >= terminal_confirmation_polls:
+                        record_attempt(
+                            step_count=step_count,
+                            qty=qty,
+                            notional=notional,
+                            accepted_value=True,
+                            outcome="verified_cancelled_no_fill",
+                            order_link_id=link,
+                            **verified_identity,
+                            terminal_order_id=order_id,
+                            terminal_order_link_id=link,
+                            terminal_order_source=last_terminal_source,
+                            terminal_confirmation_sources=tuple(confirmation_sources),
+                            terminal_status="Cancelled",
                             terminal_cum_exec_qty=last_cum_qty,
                             terminal_cum_exec_value=last_cum_value,
                             terminal_observed_ts_ns=time.time_ns(),
@@ -852,6 +960,19 @@ def probe_demo_instrument_rule(
                             terminal_confirmation_polls=confirmations,
                             trade_history_row_count=0,
                         )
+                        return True
+                else:
+                    details = [value for value in (order_error, realtime_error) if value]
+                    details.extend(
+                        f"{label}={status!r}" for label, status in pending_observations
+                    )
+                    last_error = "; ".join(details) or "terminal order evidence was not observable"
+                    last_status = pending_observations[-1][1] if pending_observations else ""
+                    last_cum_qty = ""
+                    last_cum_value = ""
+                    last_terminal_source = ""
+                    confirmations = 0
+                    confirmation_sources.clear()
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 break
@@ -863,6 +984,8 @@ def probe_demo_instrument_rule(
             **verified_identity,
             terminal_order_id=order_id if last_status else "",
             terminal_order_link_id=link if last_status else "",
+            terminal_order_source=last_terminal_source,
+            terminal_confirmation_sources=tuple(confirmation_sources),
             terminal_status=last_status,
             terminal_cum_exec_qty=last_cum_qty,
             terminal_cum_exec_value=last_cum_value,
