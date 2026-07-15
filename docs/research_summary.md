@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated: 2026-07-14.
+Updated: 2026-07-15.
 
 This is the durable decision log. Live operational state is in `STATE.md`;
 dated experiment contracts are indexed in `docs/preregistration/INDEX.md`.
@@ -258,15 +258,27 @@ retry bound. A separate canonical recovery flattened ETH, and final evidence
 bound zero local/venue exposure to an exact stopped health/journal head at
 sequence 367. V6 is also spent; paper and ordinary producers never started.
 
-This is useful negative operational evidence, not a calibrated latency or
-slippage estimate and not deployment acceptance. Prospective V7 excludes all
-three pilots, keeps every sample size and numerical decision rule unchanged,
-and republishes health for each journal-head change without spending extra
-wallet REST calls on journal-only refreshes. Exact-head validation is not
-relaxed. Even a passing V7 would supply only the frozen training calibration
-needed for a fresh holdout and an owner-only paper readiness check. Paper
-producers remain stopped; historical and paper comparison is an offline replay
-of the immutable natural demo target/account inputs. Actual LONG/CONTINUOUS
+V7 is now closed and spent. Its fixed 30 transitions (15 round trips) completed
+and a `+0.002 BTC` funding hold opened, but the final zero remained pending because
+strict reduction admission repeatedly saw reconciliation truth roughly 9--20
+seconds old against the unchanged four-second limit. A separately labelled
+canonical recovery target flattened BTC. The recovery owner then failed closed
+when concurrent REST redelivery proposed changed immutable Close content. Final
+proof retained journal integrity at 6,804 events and established zero local and
+venue position/order plus no active unit. V7 ran on old host commit `98b3916`,
+not the later candidate-gated `c7d6509`, so it is negative operational evidence
+only and cannot support either identity. Paper and ordinary producers never
+started.
+
+Prospective V8 is a corrected-defect study on a new candidate, forward-time
+surface, and six-root epoch. It timestamps direct position truth after the REST
+response, runs funding recovery before that observation, reuses verified
+journal/read-only state caches, and finalizes each terminal reduce-batch Close
+and P&L in one serialized transaction. The two-second/four-second freshness
+rule and every V7 sample, size, clock, smoke, partial-fill, and abort threshold
+remain unchanged. V7 observations and recovery are excluded from every V8
+floor. Even a passing V8 supplies only the frozen training calibration needed
+for a fresh holdout and owner-only paper readiness check. Actual LONG/CONTINUOUS
 tapes, the fixed 120-hour sufficiency floor, out-of-sample twin drift,
 deterministic replay comparison, venue accounting, funding, final flatness, and
 cutover authorization remain separate gates.
@@ -282,15 +294,19 @@ stopped-tree path/hash membership, reopens the dependency chain, and checks
 derived-output separation; the former generic provenance implementation blocker
 is therefore resolved in source.
 
-This is implementation progress, not a result: no clean exact-candidate CI
-receipt, passing V7 or partial-fill gate, second reset, owner-first readiness
+Candidate `c7d6509` passed its clean local and non-contacting exact-head Linux
+gates, but the V7 failures exposed code paths it did not repair; it is therefore
+spent as the cutover candidate and was never installed. This is implementation
+progress, not a result: no clean replacement-candidate CI receipt, passing V8
+or partial-fill gate, second reset, owner-first readiness
 pair, 120-hour natural tape, venue-accounting/final-flatness receipt, stopped
 seal, replay result, fresh epoch, or deployment authorization exists. Local
 analysis timestamps enforce declared internal chronology rather than
 authenticate wall-clock execution. The target manifest assigns its completion
 time after replay construction; source reopening and exact dependency hashes,
-not that timestamp alone, carry the causal provenance. The required order is V7
-archive before the second reset; paper owner alone, then demo owner alone,
+not that timestamp alone, carry the causal provenance. The required order is V8
+archive (through the compatibility `v7-archive` surface) before the second
+reset; paper owner alone, then demo owner alone,
 before producers; the fixed 120-hour demo capture; venue accounting/final
 flatness and stopped sealing; only then offline replay and analysis in a
 separate derived-evidence root outside all 11 sealed paths and all 10 later

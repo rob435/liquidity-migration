@@ -53,8 +53,8 @@ Safe operator commands:
   natural-safety-flatten --execute
                                publish captured post-T1 demo zero targets
   twin-calibrate [ARGS...]     calibrate the execution twin from demo tapes
-  twin-drift [ARGS...]         verify freeze-bound archived-V7 vs natural drift
-  v7-archive [ARGS...]         materialize stopped V7 sources and freeze source map
+  twin-drift [ARGS...]         verify freeze-bound archived training vs natural drift
+  v7-archive [ARGS...]         archive registered training sources (compatibility name)
   stopped-epoch [ARGS...]      create/verify the stopped natural-source seal
   fresh-deploy-epoch [ARGS...] create/verify fresh roots derived from that seal
   fresh-deploy-env [ARGS...]   materialize/verify bound per-unit fresh-root overrides

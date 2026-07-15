@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from pathlib import Path
 
@@ -901,6 +902,50 @@ def test_account_journal_reader_sees_only_committed_state_while_write_is_blocked
     assert "prospective" in kernel.state().venue_snapshots
 
 
+def test_cached_transaction_append_does_not_rescan_immutable_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _kernel(tmp_path)
+    kernel.record_venue_snapshot(
+        snapshot_key="first-cached-append",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=2,
+    )
+    transaction_directory = account_transactions_path(tmp_path)
+    original_glob = Path.glob
+
+    def forbid_transaction_reread(*_args: object, **_kwargs: object):
+        raise AssertionError("cached append reparsed immutable transaction history")
+
+    def forbid_transaction_glob(path: Path, pattern: str):
+        if path == transaction_directory and pattern == "*.json":
+            raise AssertionError("cached append rescanned immutable transaction paths")
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(
+        account_kernel_module,
+        "_read_transaction_events",
+        forbid_transaction_reread,
+    )
+    monkeypatch.setattr(Path, "glob", forbid_transaction_glob)
+
+    appended = kernel.record_venue_snapshot(
+        snapshot_key="second-cached-append",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=3,
+        local_receive_ts_ns=4,
+    )
+
+    assert len(appended) == 1
+    assert "second-cached-append" in kernel._state_ref().venue_snapshots
+
+
 def test_account_journal_failed_write_does_not_publish_prospective_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1325,6 +1370,131 @@ def test_same_symbol_component_reductions_checkpoint_without_false_later_credit(
     # Component A's earlier realized loss was checkpointed under its own
     # reduction batch; it is not silently rolled into component B's later row.
     assert sum(float(row["net_pnl_usdt"]) for row in final.pnl.values()) == pytest.approx(-0.04)
+
+
+def test_reduce_batch_finalization_is_atomic_under_concurrent_redelivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _kernel(tmp_path)
+    opened = kernel.submit_targets(
+        batch_id="open-before-concurrent-close",
+        market_inputs=[_market()],
+        targets=[
+            _target(
+                decision="open-before-concurrent-close",
+                key="continuous/main/BUSDT",
+                sleeve="continuous",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    open_command = opened.commands[0]
+    kernel.record_ack(
+        command_id=open_command.command_id,
+        accepted=True,
+        venue_order_id="venue-open-before-concurrent-close",
+        exchange_ts_ns=1_200_000_000,
+        local_ack_ts_ns=1_201_000_000,
+    )
+    kernel.record_fill(
+        command_id=open_command.command_id,
+        execution_id="fill-open-before-concurrent-close",
+        signed_qty=1.0,
+        price=10.0,
+        fee_usdt=0.01,
+        exchange_ts_ns=1_300_000_000,
+        local_receive_ts_ns=1_301_000_000,
+    )
+    closed = kernel.submit_targets(
+        batch_id="concurrent-close",
+        market_inputs=[_market(price=11.0, key="book-concurrent-close")],
+        targets=[
+            _target(
+                decision="concurrent-close",
+                key="continuous/main/BUSDT",
+                sleeve="continuous",
+                qty=0.0,
+                price=11.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    close_command = closed.commands[0]
+    assert close_command.reduce_only
+    kernel.record_ack(
+        command_id=close_command.command_id,
+        accepted=True,
+        venue_order_id="venue-concurrent-close",
+        exchange_ts_ns=1_400_000_000,
+        local_ack_ts_ns=1_401_000_000,
+    )
+    kernel.record_fill(
+        command_id=close_command.command_id,
+        execution_id="fill-concurrent-close",
+        signed_qty=-1.0,
+        price=11.0,
+        fee_usdt=0.01,
+        exchange_ts_ns=1_500_000_000,
+        local_receive_ts_ns=1_501_000_000,
+    )
+
+    transaction_count = len(list(account_transactions_path(tmp_path).glob("*.json")))
+    transaction_barrier = threading.Barrier(2)
+    original_transact = kernel.journal.transact
+
+    def synchronized_transact(
+        builder: Callable[
+            [account_kernel_module.AccountState],
+            Iterable[account_kernel_module.AccountEventSpec],
+        ],
+        *,
+        trusted_readonly_builder: bool = False,
+    ) -> list[account_kernel_module.AccountEvent]:
+        transaction_barrier.wait(timeout=5.0)
+        return original_transact(
+            builder,
+            trusted_readonly_builder=trusted_readonly_builder,
+        )
+
+    monkeypatch.setattr(kernel.journal, "transact", synchronized_transact)
+    results: list[tuple[account_kernel_module.AccountEvent, ...]] = []
+    errors: list[BaseException] = []
+
+    def finalize(local_receive_ts_ns: int) -> None:
+        try:
+            results.append(
+                kernel.finalize_flat_position(
+                    symbol="BUSDT",
+                    command_id=close_command.command_id,
+                    exchange_ts_ns=local_receive_ts_ns - 1,
+                    local_receive_ts_ns=local_receive_ts_ns,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    workers = [
+        threading.Thread(target=finalize, args=(1_600_000_000 + offset,))
+        for offset in (0, 1)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10.0)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert errors == []
+    assert sorted(len(result) for result in results) == [0, 2]
+    assert len(list(account_transactions_path(tmp_path).glob("*.json"))) == transaction_count + 1
+    final = kernel.state()
+    assert len(final.closes) == 1
+    assert len(final.pnl) == 1
 
 
 def test_bybit_demo_adapter_refuses_mainnet_and_never_synthesizes_a_fill() -> None:

@@ -71,6 +71,7 @@ def _kernel(root: Path, clock: VirtualClock) -> AccountExecutionKernel:
 
 def test_funding_reconciler_records_and_idempotently_verifies_settlement(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = VirtualClock(
         current_wall_ns=2_000_000_000,
@@ -101,9 +102,20 @@ def test_funding_reconciler_records_and_idempotently_verifies_settlement(
     assert payload["metadata"]["venue_transaction_id"] == "settlement-1"
     event_count = len(read_account_journal(tmp_path))
 
+    cached_journal_reads = 0
+    cached_events = kernel.journal.events
+
+    def read_cached_events():
+        nonlocal cached_journal_reads
+        cached_journal_reads += 1
+        return cached_events()
+
+    monkeypatch.setattr(kernel.journal, "events", read_cached_events)
+
     clock.advance_ns(100_000_000)
     second = reconciler.reconcile_once()
 
+    assert cached_journal_reads == 1
     assert second.settlement_rows_observed == 1
     assert second.settlement_rows_recorded == 0
     assert len(read_account_journal(tmp_path)) == event_count

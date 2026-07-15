@@ -25,6 +25,7 @@ from .account_market_readiness import (
     run_ready_request_or_converge,
 )
 from .account_reconcile import (
+    AccountFundingReconciliationReport,
     AccountReconciliationReport,
     BybitAccountFundingReconciler,
     BybitAccountReconciler,
@@ -77,6 +78,23 @@ class _PositionTruthChecker(Protocol):
     ) -> None: ...
 
 
+def _run_reconciliation_cycle(
+    *,
+    reconciler: BybitAccountReconciler,
+    funding_reconciler: BybitAccountFundingReconciler,
+) -> tuple[AccountReconciliationReport, AccountFundingReconciliationReport]:
+    """Refresh position truth after slower funding/journal recovery.
+
+    Reduction admission consumes the account reconciler's direct position
+    timestamp. Running it last prevents unrelated accounting work from aging a
+    just-completed venue snapshot before the owner can inspect an intent.
+    """
+
+    funding_report = funding_reconciler.reconcile_once()
+    position_report = reconciler.reconcile_once()
+    return position_report, funding_report
+
+
 def notification_position_truth(
     *,
     reconciler: _PositionTruthChecker,
@@ -92,7 +110,7 @@ def notification_position_truth(
 
     if report is None:
         return False, "account reconciliation has not completed"
-    state = kernel.state()
+    state = kernel._state_ref()
     symbols = sorted(set(report.venue_positions) | set(state.positions))
     try:
         reconciler.require_recent_symbols_consistent(
@@ -327,16 +345,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     # Bootstrap venue truth before the service can claim any request. Existing
     # venue exposure with an empty kernel is a hard mismatch, never auto-adopted.
-    startup_reconciliation = reconciler.reconcile_once()
-    startup_reconciliation.require_healthy()
+    bootstrap_reconciliation = reconciler.reconcile_once()
+    bootstrap_reconciliation.require_healthy()
     funding_reconciler = BybitAccountFundingReconciler(
         kernel=kernel,
         client=private_client,
     )
-    startup_funding_reconciliation = funding_reconciler.reconcile_once()
+    startup_reconciliation, startup_funding_reconciliation = _run_reconciliation_cycle(
+        reconciler=reconciler,
+        funding_reconciler=funding_reconciler,
+    )
+    startup_reconciliation.require_healthy()
     startup_funding_reconciliation.require_healthy()
     native_protection.sync_symbols(
-        [symbol for symbol, position in kernel.state().positions.items() if position.signed_qty != 0.0]
+        [
+            symbol
+            for symbol, position in kernel._state_ref().positions.items()
+            if position.signed_qty != 0.0
+        ]
     )
     health_chain = AccountHealthChain(
         (reconciler, funding_reconciler, native_protection)
@@ -395,14 +421,16 @@ def main(argv: list[str] | None = None) -> int:
             now = time.monotonic()
             loop_sequence += 1
             if now - last_reconcile >= max(args.reconcile_seconds, 0.1):
-                report = reconciler.reconcile_once()
+                report, funding_report = _run_reconciliation_cycle(
+                    reconciler=reconciler,
+                    funding_reconciler=funding_reconciler,
+                )
                 latest_reconcile_report = report
                 if not report.healthy:
                     _logger.error("account reconcile blocked new intents: %s", "; ".join(report.mismatches))
-                funding_report = funding_reconciler.reconcile_once()
                 if not funding_report.healthy:
                     _logger.error("account funding reconcile blocked new intents")
-                last_reconcile = now
+                last_reconcile = time.monotonic()
             if now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25):
                 desired = symbols_from_file(symbols_path)
                 desired.update(inbox.requested_symbols())
@@ -444,7 +472,7 @@ def main(argv: list[str] | None = None) -> int:
             protection_markets = {}
             for symbol in {
                 str(target.get("symbol") or "").upper()
-                for target in kernel.state().component_targets.values()
+                for target in kernel._state_ref().component_targets.values()
                 if target.get("symbol") and float(target.get("signed_qty") or 0.0) != 0.0
             }:
                 book = recorder.current_book(symbol)
@@ -474,7 +502,11 @@ def main(argv: list[str] | None = None) -> int:
                 if receipt is not None:
                     last_batch_id = receipt.batch_id
                     native_protection.sync_symbols(
-                        [symbol for symbol, position in kernel.state().positions.items() if position.signed_qty != 0.0]
+                        [
+                            symbol
+                            for symbol, position in kernel._state_ref().positions.items()
+                            if position.signed_qty != 0.0
+                        ]
                     )
                     _logger.info(
                         "account request complete batch=%s accepted=%s commands=%d state=%s",
@@ -563,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
                 midpoint_by_symbol: dict[str, float] = {}
                 unavailable_midpoint_symbols: list[str] = []
                 notification_wall_ns = time.time_ns()
-                for symbol, position in kernel.state().positions.items():
+                for symbol, position in kernel._state_ref().positions.items():
                     if position.signed_qty == 0.0:
                         continue
                     book = recorder.current_book(symbol)

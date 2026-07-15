@@ -13,7 +13,6 @@ from .account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
     InstrumentRules,
-    read_account_journal,
 )
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
@@ -70,11 +69,14 @@ class BybitAccountReconciler:
 
     def reconcile_once(self) -> AccountReconciliationReport:
         pending_statuses = {"commanded", "acknowledged", "partially_filled"}
-        state = self.kernel.state()
+        # Journal cache snapshots are immutable after publication. This owner-
+        # internal read avoids deep-copying a long venue-snapshot history at
+        # every reconciliation pass while transactions continue to publish a
+        # new snapshot atomically.
+        state = self.kernel._state_ref()
         pending = [order for order in state.orders.values() if order.status in pending_statuses]
         execution_rows = 0
         order_rows = 0
-        observed_ns = self.clock.wall_time_ns()
         for order in sorted(pending, key=lambda item: item.command_id):
             venue_identified_external = (
                 order.batch_id.startswith(("external-protection/", "external-reduction/"))
@@ -93,7 +95,10 @@ class BybitAccountReconciler:
                 )
             if executions:
                 execution_rows += len(executions)
-                self.consumer.on_execution({"data": executions}, local_receive_ts_ns=observed_ns)
+                self.consumer.on_execution(
+                    {"data": executions},
+                    local_receive_ts_ns=self.clock.wall_time_ns(),
+                )
             if venue_identified_external:
                 history = self.client.get_order_history(
                     symbol=order.symbol,
@@ -108,14 +113,17 @@ class BybitAccountReconciler:
                 )
             if history:
                 order_rows += len(history)
-                self.consumer.on_order({"data": history}, local_receive_ts_ns=observed_ns)
+                self.consumer.on_order(
+                    {"data": history},
+                    local_receive_ts_ns=self.clock.wall_time_ns(),
+                )
 
         # Exchange-native TP/SL orders have no kernel orderLinkId. Recover any
         # execution newer than the active native protection installation and
         # let the same consumer atomically adopt it. Older account history is
         # ignored so a pre-cutover/manual fill cannot be mistaken for this stop.
         if self.native_protection_manager is not None:
-            current = self.kernel.state()
+            current = self.kernel._state_ref()
             protected_symbols = sorted({
                 symbol
                 for symbol, position in current.positions.items()
@@ -129,7 +137,7 @@ class BybitAccountReconciler:
                 activated_ns = int(active[1].get("local_receive_ts_ns") or 0)
                 recent = self.client.get_trade_history(symbol=symbol, limit=50)
                 external = []
-                refreshed = self.kernel.state()
+                refreshed = self.kernel._state_ref()
                 for row in recent or []:
                     execution_id = str(row.get("execId") or row.get("exec_id") or "")
                     order_link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
@@ -156,10 +164,14 @@ class BybitAccountReconciler:
                                 row.get("execTime") or row.get("exec_time")
                             ),
                         )},
-                        local_receive_ts_ns=observed_ns,
+                        local_receive_ts_ns=self.clock.wall_time_ns(),
                     )
 
         raw_positions = self.client.get_positions(settle_coin=self.settle_coin)
+        # Freshness begins when direct position truth is actually received, not
+        # before preceding REST recovery or journal work. Reduction admission
+        # must age the venue fact itself.
+        observed_ns = self.clock.wall_time_ns()
         venue_positions: dict[str, float] = {}
         active_sides: dict[str, set[str]] = {}
         for row in raw_positions or []:
@@ -173,7 +185,7 @@ class BybitAccountReconciler:
             active_sides.setdefault(symbol, set()).add(side)
         reconstructed = {
             symbol: position.signed_qty
-            for symbol, position in self.kernel.state().positions.items()
+            for symbol, position in self.kernel._state_ref().positions.items()
             if abs(position.signed_qty) > 1e-12
         }
         mismatches: list[str] = []
@@ -261,7 +273,7 @@ class BybitAccountReconciler:
         age_ns = self.clock.wall_time_ns() - report.observed_ts_ns
         if age_ns < 0 or age_ns > max_age_ns:
             raise RuntimeError(f"account reconciliation is stale: age_ns={age_ns}")
-        state = self.kernel.state()
+        state = self.kernel._state_ref()
         contradictions: list[str] = []
         for raw_symbol in symbols:
             symbol = str(raw_symbol).upper()
@@ -336,7 +348,10 @@ class BybitAccountFundingReconciler:
         self.last_report: AccountFundingReconciliationReport | None = None
 
     def reconcile_once(self) -> AccountFundingReconciliationReport:
-        events = read_account_journal(self.kernel.journal.root, verify=True)
+        # AccountJournal owns a verified immutable cache and invalidates it on
+        # any storage-signature change. Re-reading every transaction segment on
+        # every short funding poll made owner latency grow with journal age.
+        events = self.kernel.journal.events()
         if not events:
             raise RuntimeError(
                 "funding reconciliation requires the owner startup venue snapshot first"

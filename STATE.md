@@ -1,6 +1,6 @@
 # Research Program State
 
-Last updated: 2026-07-14.
+Last updated: 2026-07-15.
 
 This is a descriptive live operating page, not research policy. Durable
 research decisions are in
@@ -13,10 +13,18 @@ research decisions are in
 | --- | --- | --- |
 | `continuous_ensemble_v2` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
 | `LongV11aDivWeekendVol` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
-| Shared account execution | demo + paper | Demo owner stopped after verified-flat V6 failure; V4/V5/V6 evidence retained; capture marker enabled; paper never started |
+| Shared account execution | demo + paper | Demo owner stopped and local/venue flat after failed V7 plus canonical recovery; V4--V7 evidence retained; paper never started |
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
+- V7 is closed and spent. Its final `0.002 BTC` funding-hold close failed the
+  unchanged four-second position-truth freshness rule; a separate canonical
+  recovery target flattened the account, after which concurrent REST
+  finalization exposed a second immutable-Close collision. Final proof found
+  journal integrity at 6,804 events, zero local/venue positions, zero regular or
+  conditional orders, and no active project unit. Paper and ordinary producers
+  never started. V8 is registered prospectively as a corrected-defect successor
+  with the exact V7 sample/risk/clock/decision rules and no V7 sample reuse.
 - Flat maintenance began at `2026-07-13T22:53:17Z`. Immediately before the
   stop, the VPS was clean at `5f6d9986d935`, the demo key was order-capable,
   and Bybit reported zero active positions, regular orders, and conditional
@@ -24,14 +32,14 @@ research decisions are in
   venue query was still flat, and the before/after unit inventories plus
   checksums are retained under
   `/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z`.
-- The last retained operator record says staged topology from branch
-  `codex/account-execution-cutover` advanced through commit `b82a378cfcf0` and
-  passed 142 Linux smoke tests. It installed the two owner units and removed the
-  retired Bybit risk and combined-book reporter units without starting any unit
-  or creating a capture/deploy marker. The host-only evidence is not stored in
-  this worktree, so `b82a378cfcf0` is not independently proven as the VPS's
-  current checkout; re-stage and verify the exact candidate before V7. This is
-  maintenance staging, not an accepted full deployment.
+- Read-only post-failure host inspection proved the checkout clean on branch
+  `codex/account-execution-cutover` at old runtime commit
+  `98b3916a4a135df3508f051f2354bc2346904690`. Candidate
+  `c7d6509d3a21c75db77ed9486129a3cc4cfaa591` passed 2,950 local tests and an
+  exact-head non-contacting Ubuntu candidate-CI run, but it was never installed
+  and does not repair the V7 defects. It is retained as spent candidate history.
+  A new clean replacement candidate and all applicable gates are required
+  before staging V8. This remains maintenance work, not deployment.
 - The guarded all-sleeve reset completed at `2026-07-13T23:43:14Z`. It re-proved
   venue flatness, archived 12 legacy projections/roots plus preserved risk
   state to a verified 335-MB archive with SHA-256
@@ -100,11 +108,28 @@ research decisions are in
   One separately labelled canonical recovery command closed ETH. Self-hashed
   evidence proved local/venue flatness, zero orders, and a genuine stopped
   health/journal match at sequence 367. V6 is spent. Paper and ordinary
-  producers were never started. Prospective V7 republishes owner health after
+  producers were never started. The V7 change republished owner health after
   every journal-head change while reusing the last wallet snapshot for
   journal-only refreshes; exact-head validation and every numerical gate remain
-  unchanged. V7 still requires full validation, an exact staged commit, and a
-  new archived/reset epoch before any V7 target.
+  unchanged. V7 subsequently completed the fixed round-trip sequence and
+  opened its registered BTC funding hold, but its final exact zero failed
+  because direct position truth was 9--20 seconds old after slow journal/funding
+  work. The failed receipt has plan hash
+  `57aac4431f792c72ef0d406f86573729412ca63e912c179574d9b8c126be7af6`
+  and self-hash
+  `5b502b9194e6dc38b80560ac8a487e193eeb367f55d350b527effb281ee746da`.
+  A separate HEDGE-authored recovery zero closed BTC; concurrent REST
+  redelivery then exposed changed immutable Close content and the recovery
+  owner failed closed. Final local/venue flatness and stopped-state proof
+  passed. V7 cannot be resumed or counted.
+
+  Prospective V8 retains the exact fixed plan and thresholds. Its replacement
+  source runs funding recovery before direct position reconciliation,
+  timestamps truth after the REST response, reuses verified journal/read-only
+  state caches, and commits terminal reduce-batch Close/P&L atomically. No age,
+  retry, risk, or evidence threshold is relaxed. V8 requires a new frozen
+  candidate, full local/non-contacting Linux gates, exact staging, and another
+  verified six-root reset before any target.
 - Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
   provisional triggers now consume risk/execution feedback through a persistent
   common-kernel session before later decisions. Historical, paper, and demo now
@@ -114,10 +139,10 @@ research decisions are in
   strategy parity, and hedge/RMOM/liveness, CONTINUOUS adverse-limit mode, and
   LONG waits beyond 24 hours remain outside that runtime claim or in post-run
   replay.
-- The cutover acceptance gate is open: fresh rules and failed V4/V5/V6 evidence
-  exist, but the current local follow-on has not been frozen into a clean exact
-  candidate or passed the non-contacting `candidate-ci` gate. V7 and its
-  partial-fill gate have not run; there is no passing calibration
+- The cutover acceptance gate is open: fresh rules and failed V4--V7 evidence
+  exist, but the prospective V8 follow-on has not been frozen into a clean exact
+  replacement candidate or passed its non-contacting `candidate-ci` gate. V8
+  and its partial-fill gate have not run; there is no passing calibration
   target/order/fill/P&L tape, second full registered-output natural-holdout reset, owner-first
   readiness pair, 120-hour natural LONG/CONT tape, periodic clock series,
   venue-accounting/final-flatness receipt, stopped-source seal, offline
@@ -415,10 +440,11 @@ Strategy-overhaul status is still synthetic and outcome blind:
 
 ## Next actions
 
-1. Finish the account-owner candidate and clean exact-candidate Linux validation
-   first. Then, still without deploying, run the registered flat maintenance
-   sequence: archive/reset the six roots for V7, run the fresh V7 training
-   epoch, materialize its immutable archive **before** the second full
+1. Finish the replacement account-owner candidate and clean exact-candidate
+   Linux validation first. Then, still without deploying, run the registered
+   flat maintenance sequence: archive/reset the six roots for V8, run the fresh
+   V8 training epoch, materialize it through the compatibility `v7-archive`
+   surface **before** the second full
    registered-output natural-holdout reset, start the paper owner alone and stop it cleanly, then
    start the demo owner alone before any producer and collect the fixed 120-hour
    natural LONG/CONT demo tapes. After T1, converge flat, stop the fleet,
@@ -428,7 +454,7 @@ Strategy-overhaul status is still synthetic and outcome blind:
    Write every derived analysis artifact to a separate root outside all 11
    sealed paths; create the ten fresh deployment roots only after every analysis
    gate passes, and keep those roots outside both namespaces. Do not substitute
-   the retired sleeve-projection reconciler or a V7 training sample for the
+   the retired sleeve-projection reconciler or a V8 training sample for the
    natural tape.
 2. Let the owner-run Strategy Overhaul master plan continue on the big PC without
    coupling it to this VPS cutover. Ingest its immutable receipts only after the

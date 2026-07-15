@@ -8,9 +8,11 @@ For a multi-session continuation, use the bounded copy-paste prompt and
 progressive test cadence in `docs/account_execution_completion_handoff.md`.
 That handoff does not replace this runbook or grant final deployment authority.
 
-The evidence plan is not complete. There is no clean exact-candidate freeze or
-non-contacting `candidate-ci` receipt; V7 and its partial-fill gate have not
-passed; and there is no natural 120-hour LONG/CONT epoch, periodic clock series,
+The evidence plan is not complete. Prior candidate `c7d6509` passed a clean
+local/non-contacting `candidate-ci` boundary but was never installed and is
+spent after V7 exposed unrepaired owner defects. There is no frozen passing
+replacement candidate; V8 and its partial-fill gate have not run; and there is
+no natural 120-hour LONG/CONT epoch, periodic clock series,
 venue-accounting/final-flatness receipt, offline replay/parity/drift/sufficiency
 result, real stopped-natural-epoch seal, real fresh-deploy epoch, or cutover
 authorization. Promoting or deleting the cutover branch is unsafe while those
@@ -26,6 +28,25 @@ chain, validates captured- and target-replay derived outputs, and rejects
 unregistered inputs or overlap with stopped/fresh namespaces. That validator
 does not imply that any seal, replay, fresh root, or authorization has been
 created.
+
+## V8 corrected-defect successor boundary
+
+V7 is closed and spent after its final funding-hold close failed the unchanged
+position-truth freshness rule. Canonical recovery left the venue/account flat
+and all units stopped, then exposed a concurrent immutable-Close collision.
+The retained outcome and hashes are in
+`docs/preregistration/account_execution_calibration_v7_2026_07_14.md` and
+`STATE.md`; none of its target, fill, timing, fee, P&L, funding, or recovery
+rows count toward another gate.
+
+The next allowed calibration is the prospectively registered V8 contract in
+`docs/preregistration/account_execution_calibration_v8_2026_07_15.md`. It keeps
+the exact V7 sample, risk, clock, smoke, partial-fill, and abort rules while
+repairing only reconciliation freshness/cache ordering and atomic Close/P&L
+finalization. For the remaining procedure, normative references to the next or
+passing V7 training epoch mean V8. Existing `v7_training`, `v7-archive`, and
+`--v7-archive-map` names are compatibility labels and must bind V8; they never
+permit the failed V7 receipt.
 
 The current offline contract chain is target-replay manifest v2, event parity
 v3, captured-account replay v3, kernel comparison scope v3, kernel receipt v4,
@@ -101,15 +122,12 @@ confirmed zero positions and zero regular/conditional orders, and the unit plus
 flatness evidence was retained under the host's mode-restricted cutover-evidence
 directory.
 
-The repository's operational snapshot last records staged topology through
-clean commit `b82a378cfcf0`, with 142 passing Linux smoke tests, both inactive
-owner units installed, and the retired risk and combined-book reporter units
-removed. The mode-restricted host evidence is not present in this worktree, so
-that is a last-recorded staging identity, not independent proof of the VPS's
-current checkout; re-stage and verify the exact candidate before V7. The staged
-installation did not start a process or create the capture-enable marker or
-deploy-ready receipt; the newer commit-bound pre-cutover runtime marker was not
-part of that staged revision. The
+Later read-only inspection proved the host clean on commit `98b3916a4a135`,
+with the target-only topology installed. Candidate `c7d6509d3a21` passed its
+local and non-contacting Linux gates but was never installed and is spent after
+the V7 defects. Re-stage and verify only a new exact replacement candidate
+before V8. No staged revision or failed V7 path created a deploy-ready or
+activation marker. The
 guarded reset then re-proved venue flatness, archived 12 legacy
 roots/projections to the verified archive whose SHA-256 is
 `07e76e35e688fb6f20e17c78ea9bc8489144c852f4c99fcb9964d887c06c6d6a`,
@@ -175,9 +193,11 @@ records the other independently reviewed code changes that may enter the exact
 candidate commit. The fixed target sequence, $160 notional, risk envelope,
 clock rule, and original latency/slippage floors remain unchanged; the latter
 now support only the smoke claim until the new partial-fill gate also passes.
-Exact-head validation remains unchanged. V7 code must pass full validation and
-be staged exactly, then all six roots must be archived/reset again before a V7
-target. This is a verified-flat failure boundary, not deployment readiness.
+Exact-head validation remained unchanged. The V7 contract required fully
+validated, exactly staged code and a new six-root reset before its first target;
+the later run deviated by remaining on old host commit `98b3916`, then failed as
+recorded in the V8 successor boundary above. This is a verified-flat failure
+boundary, not deployment readiness.
 
 The full acceptance gate remains open, and no deploy-authorization assessment
 or receipt has been issued:
@@ -221,9 +241,9 @@ or receipt has been issued:
   pending, and same-symbol venue fills are netted, so exact component P&L is
   also pending unless a prospective allocation policy can be shown to be
   identifiable from canonical orders and executions;
-- no demo tape has met the preregistered execution-twin sample floors. V4, V5,
-  and V6 produced useful but spent failure evidence; V7 requires a new clock
-  receipt and fresh tape. No calibration receipt has
+- no demo tape has met the preregistered execution-twin sample floors. V4--V7
+  produced useful but spent failure evidence; V8 requires a new clock receipt,
+  candidate, reset epoch, and fresh tape. No calibration receipt has
   passed. Paper startup therefore remains intentionally blocked.
 
 Do not issue the deploy-ready authorization by interpreting
@@ -251,7 +271,7 @@ scripts/ops.sh account-parity \
   --risk-policy-file /path/to/risk-policy.json \
   --rules-file /path/to/demo-rules.json \
   --effective-runtime-config-bundle /path/to/effective-runtime-config-bundle.json \
-  --twin-calibration-receipt /path/to/frozen-v7-calibration.json \
+  --twin-calibration-receipt /path/to/frozen-v8-calibration.json \
   --repo-root /absolute/path/to/liquidity-migration \
   --expected-commit "$EXPECTED_COMMIT" \
   --quantity-tolerance 1e-12 \
@@ -377,7 +397,7 @@ umask 077
 mkdir "$EVIDENCE_ROOT"  # must fail if this attempt namespace already exists
 
 ( set -o noclobber
-  printf '%s\n' BTCUSDT ETHUSDT BUSDT >"$EVIDENCE_ROOT/v7-symbols.txt"
+  printf '%s\n' BTCUSDT ETHUSDT BUSDT >"$EVIDENCE_ROOT/v8-symbols.txt"
 )
 
 python3 scripts/probe_bybit_demo_rules.py \
@@ -386,15 +406,15 @@ python3 scripts/probe_bybit_demo_rules.py \
   --probe-distance-bps 100 \
   --max-private-requests-per-second 5 \
   --leverage 10 \
-  --output "$EVIDENCE_ROOT/demo-rules-v7.json" \
+  --output "$EVIDENCE_ROOT/demo-rules-v8.json" \
   --confirm-demo-probe
 ```
 
 Record `ATTEMPT_ID` and the absolute `EVIDENCE_ROOT` in the external run ledger
 and re-export the same values in every later operator shell.
 
-The first receipt covers only the three preregistered V7 symbols. The later
-natural epoch requires a second, exact full-candidate probe after V7 is
+The first receipt covers only the three preregistered V8 symbols. The later
+natural epoch requires a second, exact full-candidate probe after V8 is
 archived; the two files are never aliases or replacements for one another.
 The schema-v3 receipt is self-hashed, created mode `0600`, and fsynced before it
 can gate owner startup. A pre-existing output is a spent or ambiguous attempt,
@@ -423,7 +443,8 @@ The switch must be one maintenance transaction, not a rolling overlap:
 The command blocks below mix the router's documented locality surfaces. Run
 the SSH-backed `reset`, `clock-offset`, `demo-calibration`, and
 `natural-safety-flatten` routes from the control checkout. Run source-local
-routes such as `twin-calibrate`, V7 archive, freeze/config/seal/replay, venue
+routes such as `twin-calibrate`, the compatibility V8 archive,
+freeze/config/seal/replay, venue
 accounting, fresh-root creation, and authority issuance in the staged VPS
 checkout whenever their absolute inputs still live on that host. Record the
 host with every receipt; see `docs/operations.md` for the full boundary.
@@ -474,8 +495,8 @@ host with every receipt; see `docs/operations.md` for the full boundary.
    ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-execution
    ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-intents
    ACCOUNT_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-market-capture
-   ACCOUNT_SYMBOLS_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/v7-symbols.txt
-   ACCOUNT_DEMO_RULES_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/demo-rules-v7.json
+   ACCOUNT_SYMBOLS_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/v8-symbols.txt
+   ACCOUNT_DEMO_RULES_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/demo-rules-v8.json
    ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-execution/risk-policy.json
    DISASTER_STOP_FRACTION=REPLACE_WITH_EXPLICIT_FRACTION
    ```
@@ -542,26 +563,26 @@ host with every receipt; see `docs/operations.md` for the full boundary.
     Natural LONG/CONTINUOUS events remain required for their strategy-parity
     comparison, but they need not be abused to manufacture the execution-twin
     sample count. The prospective bounded driver in
-    `docs/preregistration/account_execution_calibration_v7_2026_07_14.md` publishes
+    `docs/preregistration/account_execution_calibration_v8_2026_07_15.md` publishes
     one tiny target at a time through the same owner and event clock, holds no
     credentials, and explicitly cannot satisfy LONG/CONTINUOUS parity:
 
     ```bash
     scripts/ops.sh clock-offset --execute \
-      --output "$EVIDENCE_ROOT/clock-offset-v7.json"
+      --output "$EVIDENCE_ROOT/clock-offset-v8.json"
 
     scripts/ops.sh demo-calibration --execute \
       --account-root /opt/liquidity-migration/data/bybit-account-execution \
       --inbox-root /opt/liquidity-migration/data/bybit-account-intents \
-      --demo-rules-file "$EVIDENCE_ROOT/demo-rules-v7.json" \
-      --event-tape "$EVIDENCE_ROOT/demo-calibration-v7-events.jsonl" \
-      --output "$EVIDENCE_ROOT/demo-calibration-v7-run.json" \
+      --demo-rules-file "$EVIDENCE_ROOT/demo-rules-v8.json" \
+      --event-tape "$EVIDENCE_ROOT/demo-calibration-v8-events.jsonl" \
+      --output "$EVIDENCE_ROOT/demo-calibration-v8-run.json" \
       --expected-commit "$(git rev-parse HEAD)" \
-      --plan-id demo-calibration-20260714-v7
+      --plan-id demo-calibration-20260715-v8
     ```
 
     The launcher has no resume mode. It refuses any pre-existing event tape or
-    output receipt. Once it emits an event, V7 is spent even if a later step
+    output receipt. Once it emits an event, V8 is spent even if a later step
     aborts; retain the paths and close the attempt rather than deleting,
     resetting, or retrying it.
 
@@ -574,27 +595,27 @@ host with every receipt; see `docs/operations.md` for the full boundary.
       --account-root /opt/liquidity-migration/data/bybit-account-execution \
       --market-capture-root /opt/liquidity-migration/data/bybit-account-market-capture \
       --account-id bybit-demo-unified \
-      --clock-offset-receipt "$EVIDENCE_ROOT/clock-offset-v7.json" \
-      --output "$EVIDENCE_ROOT/execution-twin-calibration-v7.json"
+      --clock-offset-receipt "$EVIDENCE_ROOT/clock-offset-v8.json" \
+      --output "$EVIDENCE_ROOT/execution-twin-calibration-v8.json"
     ```
 
     The calibration constructor source-reopens the stopped journal and raw
     capture set and creates, never replaces, the output. A non-passing receipt
-    or any source mutation is the V7 outcome; it is not a test failure to retry.
+    or any source mutation is the V8 outcome; it is not a test failure to retry.
 
-    V7's small fixed orders do not guarantee a multifill. If every original
-    floor passes but no within-order fill spacing is observed, retain the V7
+    V8's small fixed orders do not guarantee a multifill. If every original
+    floor passes but no within-order fill spacing is observed, retain the V8
     receipt as smoke evidence and leave paper stopped. Do not enlarge, extend,
-    reset, or retry V7 to manufacture the missing event. A targeted partial-fill
+    reset, or retry V8 to manufacture the missing event. A targeted partial-fill
     follow-up needs its own prospective size/risk and stopping rule.
 
     Add the preregistered `--funding-symbol BTCUSDT` and an explicit future
     `--funding-close-not-before-ms` only when that timestamp was recorded from
     the venue before the hold opened. Never improvise it after inspecting the
     funding result.
-11. Treat V7 as training data, not the natural comparison epoch. Only after
+11. Treat V8 as training data, not the natural comparison epoch. Only after
     `execution_twin_gate_passed=true`, with the account already flat and every
-    managed unit stopped, continue. Before any live V7 path is reset or reused, materialize and
+    managed unit stopped, continue. Before any live V8 path is reset or reused, materialize and
     independently re-open its immutable archive-source map, then derive the
     exact baseline and `p95` stress configs from that archived calibration:
 
@@ -602,21 +623,21 @@ host with every receipt; see `docs/operations.md` for the full boundary.
     scripts/ops.sh v7-archive from-stopped-roots \
       --repository-root /opt/liquidity-migration \
       --expected-candidate-commit "$(git rev-parse HEAD)" \
-      --calibration-file "$EVIDENCE_ROOT/execution-twin-calibration-v7.json" \
-      --destination-root /absolute/new/path/v7-immutable-sources \
-      --archive-map-output /absolute/new/path/v7-archive-source-map.json
+      --calibration-file "$EVIDENCE_ROOT/execution-twin-calibration-v8.json" \
+      --destination-root /absolute/new/path/v8-immutable-sources \
+      --archive-map-output /absolute/new/path/v8-archive-source-map.json
 
     scripts/ops.sh twin-drift freeze-configs \
-      --calibration-file "$EVIDENCE_ROOT/execution-twin-calibration-v7.json" \
+      --calibration-file "$EVIDENCE_ROOT/execution-twin-calibration-v8.json" \
       --max-decision-age-ms 250 \
-      --baseline-output /absolute/new/path/v7-baseline-p50.json \
-      --stress-output /absolute/new/path/v7-stress-p95.json
+      --baseline-output /absolute/new/path/v8-baseline-p50.json \
+      --stress-output /absolute/new/path/v8-stress-p95.json
     ```
 
     Archive materialization must happen before reset; recovering from the reset
     archive is an explicit fallback, not the normal order. Next freeze the
     candidate universe, complete the full candidate rule probe, and bind its
-    exact coverage. Every output below must be absent; do not reuse the V7
+    exact coverage. Every output below must be absent; do not reuse the V8
     three-symbol receipt or overwrite a failed natural probe:
 
     ```bash
@@ -643,13 +664,13 @@ host with every receipt; see `docs/operations.md` for the full boundary.
     `ACCOUNT_SYMBOLS_FILE` names the candidate-universe JSON directly and
     `ACCOUNT_DEMO_RULES_FILE` names the full natural receipt. The shared symbol
     loader accepts the self-hashed JSON object's `symbols` field. The paper
-    route must additionally name the passing archived-V7 calibration receipt.
+    route must additionally name the passing archived-V8 calibration receipt.
     Source-reopen all three files after installing the environment files.
 
     ```bash
     ACCOUNT_SYMBOLS_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/candidate-universe-natural.json
     ACCOUNT_DEMO_RULES_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/demo-rules-natural.json
-    ACCOUNT_TWIN_CALIBRATION_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/execution-twin-calibration-v7.json  # paper only
+    ACCOUNT_TWIN_CALIBRATION_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/execution-twin-calibration-v8.json  # paper only
     ```
 
     Only then archive/reset the demo and paper account, inbox, and raw-capture
@@ -694,7 +715,7 @@ host with every receipt; see `docs/operations.md` for the full boundary.
 
     Retain both receipts before creating the freeze.
     While the demo owner remains healthy, bind one future UTC-hour `T0`,
-    `T1=T0+120h`, the exact clean commit/config, V7 receipt/config, six reset
+    `T1=T0+120h`, the exact clean commit/config, V8 receipt/config, six reset
     roots, owner-first receipts, rule/universe receipts, reset receipt, and the
     fresh clock receipt (the initial member of the periodic series, observed no
     more than six hours before T0) in the top-level freeze manifest. Create the
@@ -722,10 +743,10 @@ host with every receipt; see `docs/operations.md` for the full boundary.
       --candidate-universe "$EVIDENCE_ROOT/candidate-universe-natural.json" \
       --demo-rules "$EVIDENCE_ROOT/demo-rules-natural.json" \
       --rule-coverage "$EVIDENCE_ROOT/candidate-rule-coverage-natural.json" \
-      --calibration "$EVIDENCE_ROOT/execution-twin-calibration-v7.json" \
-      --archive-map /absolute/path/v7-archive-source-map.json \
-      --baseline-config /absolute/path/v7-baseline-p50.json \
-      --stress-config /absolute/path/v7-stress-p95.json \
+      --calibration "$EVIDENCE_ROOT/execution-twin-calibration-v8.json" \
+      --archive-map /absolute/path/v8-archive-source-map.json \
+      --baseline-config /absolute/path/v8-baseline-p50.json \
+      --stress-config /absolute/path/v8-stress-p95.json \
       --reset-archive /absolute/path/natural-holdout-reset.tar.gz \
       --reset-sha256 /absolute/path/natural-holdout-reset.tar.gz.sha256 \
       --reset-receipt "$EVIDENCE_ROOT/natural-holdout-reset.json" \
@@ -735,7 +756,7 @@ host with every receipt; see `docs/operations.md` for the full boundary.
       --route paper=/etc/liquidity-migration/account-paper-execution.env \
       --risk-policy demo=/etc/liquidity-migration/account-execution/risk-policy.json \
       --risk-policy paper=/etc/liquidity-migration/account-paper-execution/risk-policy.json \
-      --seed "$EVIDENCE_ROOT/v7-symbols.txt" \
+      --seed "$EVIDENCE_ROOT/v8-symbols.txt" \
       --output "$EVIDENCE_ROOT/natural-cutover-freeze.json"
 
     scripts/ops.sh natural-run-config build \
@@ -755,7 +776,7 @@ host with every receipt; see `docs/operations.md` for the full boundary.
     named freeze sources exactly; both risk policies must resolve to the same
     limits, rule freshness cannot exceed 168 hours, queue-head market warmup
     cannot exceed 30 seconds, and `REAL_MONEY` must be unset or explicitly
-    false. The distinct seed is the original mode-`0600` three-symbol V7
+    false. The distinct seed is the original mode-`0600` three-symbol V8
     file, not the full candidate-universe artifact.
 
     The last two commands atomically install and source-reopen the owner-only
@@ -914,7 +935,7 @@ host with every receipt; see `docs/operations.md` for the full boundary.
     Then create an open assessment template bound to the already-staged full
     commit.
     Machine validation covers the natural freeze, candidate-rule coverage,
-    complete demo-rule probe, V7 calibration, schema-v3 captured-account replay,
+    complete demo-rule probe, V8 calibration, schema-v3 captured-account replay,
     schema-v3 strategy-event parity, schema-v3 comparison scope, schema-v4
     kernel parity, schema-v3 natural sufficiency, twin
     drift, venue accounting/final flatness, stopped-natural-epoch seal, and
@@ -1026,7 +1047,7 @@ Do not equate “latest branch” with “safe `main`.” A push that touches a 
 the VPS workflow's registered `main` filter triggers the checked deployment,
 while this experiment prospectively forbids branch promotion before the final
 source-reopened outcome. Keep the candidate on its cutover branch through Linux
-CI, V7, the fixed natural window, final accounting/flatness and stopped sealing,
+    CI, V8, the fixed natural window, final accounting/flatness and stopped sealing,
 replay, drift, sufficiency, fresh-deploy-root creation, and authorization
 review.
 
@@ -1128,14 +1149,14 @@ independently sourced clock-offset receipt:
 
 ```bash
 scripts/ops.sh clock-offset --execute \
-  --output "$EVIDENCE_ROOT/clock-offset-v7.json"
+  --output "$EVIDENCE_ROOT/clock-offset-v8.json"
 
 scripts/ops.sh twin-calibrate \
   --account-root /opt/liquidity-migration/data/bybit-account-execution \
   --market-capture-root /opt/liquidity-migration/data/bybit-account-market-capture \
   --account-id bybit-demo-unified \
-  --clock-offset-receipt "$EVIDENCE_ROOT/clock-offset-v7.json" \
-  --output "$EVIDENCE_ROOT/execution-twin-calibration-v7.json"
+  --clock-offset-receipt "$EVIDENCE_ROOT/clock-offset-v8.json" \
+  --output "$EVIDENCE_ROOT/execution-twin-calibration-v8.json"
 ```
 
 Both outputs are create-only. Preserve a failed clock or calibration receipt
@@ -1155,7 +1176,7 @@ within-order spacings between positive fills with valid venue timestamps that
 strictly increase. Equal venue timestamps identify a multifill but not its
 spacing. Terminal incomplete single-fill orders remain reported but satisfy
 neither the multifill nor spacing floor. Only the conjunction is
-`execution_twin_gate_passed`. The fixed V7 sample may therefore finish as a valid
+`execution_twin_gate_passed`. The fixed V8 sample may therefore finish as a valid
 latency/slippage smoke and an inconclusive partial-fill calibration.
 
 The receipt binds the verified account journal and every raw capture segment by
@@ -1222,7 +1243,7 @@ the wider prospective ceiling is explicitly scoped to hourly/sub-hourly paper
 timing, not HFT or matching-engine claims. This bounds, but does not eliminate,
 the symmetric-path assumption in one-way latency estimates.
 
-That single receipt remains a V7 calibration input; it is not enough to correct
+That single receipt remains a V8 calibration input; it is not enough to correct
 five days of natural feed timestamps. Before T0, freeze a registered receipt no
 more than six hours old, then capture the same credential-free public receipt
 on a six-hour target cadence through a sample at or after T1. Build the
@@ -1322,7 +1343,7 @@ ACCOUNT_PAPER_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-paper-mar
 ACCOUNT_SYMBOLS_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/candidate-universe-natural.json
 ACCOUNT_DEMO_RULES_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/demo-rules-natural.json
 ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-paper-execution/risk-policy.json
-ACCOUNT_TWIN_CALIBRATION_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/execution-twin-calibration-v7.json
+ACCOUNT_TWIN_CALIBRATION_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/execution-twin-calibration-v8.json
 ACCOUNT_TWIN_LATENCY_QUANTILE=p50
 ACCOUNT_TWIN_SLIPPAGE_QUANTILE=p50
 PAPER_EQUITY_USDT=10000

@@ -1082,14 +1082,27 @@ class AccountJournal:
                 existing = list(self._events_ref())
                 committed_state = self._state_ref()
                 existing_by_id = dict(self._cached_events_by_id or {event.event_id: event for event in existing})
+                storage_signature = self._cached_signature
             if existing and existing[0].account_id != self.account_id:
                 raise AccountJournalIntegrityError(
                     f"journal belongs to {existing[0].account_id!r}, not {self.account_id!r}"
                 )
-            if existing and _read_transaction_events(self.root) is None:
+            transaction_count = 0
+            if storage_signature is not None and storage_signature[0] == "transactions":
+                if (
+                    len(storage_signature) != 4
+                    or type(storage_signature[2]) is not int
+                    or storage_signature[2] <= 0
+                ):
+                    raise AccountJournalIntegrityError("invalid cached account transaction signature")
+                transaction_count = storage_signature[2]
+            elif existing:
                 # One-time migration of a legacy JSONL-only account root.  The
-                # immutable events are copied byte-for-byte into an atomic segment.
+                # verified immutable cache already establishes that no
+                # transaction store exists; do not reparse the whole history
+                # merely to rediscover its storage kind.
                 _write_transaction(self.root, existing)
+                transaction_count = 1
             prospective_state = copy.deepcopy(committed_state)
             builder_state = prospective_state if trusted_readonly_builder else copy.deepcopy(committed_state)
             specs = list(builder(builder_state))
@@ -1145,12 +1158,11 @@ class AccountJournal:
                     transaction_mtime = transaction_path.parent.stat().st_mtime_ns
                 except OSError:
                     transaction_mtime = -1
-                transaction_paths = sorted(transaction_path.parent.glob("*.json"))
                 committed_signature: tuple[object, ...] = (
                     "transactions",
                     transaction_mtime,
-                    len(transaction_paths),
-                    transaction_paths[-1].name,
+                    transaction_count + 1,
+                    transaction_path.name,
                 )
                 # The atomic segment is the commit point. Publish all cache
                 # fields together only after it succeeds; failed writes leave
@@ -1420,7 +1432,7 @@ class AccountExecutionKernel:
         return self.journal.replay()
 
     def _state_ref(self) -> AccountState:
-        """Trusted in-process read for the execution dispatcher; never expose to adapters."""
+        """Trusted immutable in-process owner snapshot; never expose outside the process."""
 
         return self.journal._state_ref()
 
@@ -2233,171 +2245,228 @@ class AccountExecutionKernel:
         """
 
         symbol = symbol.upper()
-        state = self._state_ref()
-        order = state.orders.get(command_id)
-        if order is None or order.symbol != symbol:
-            raise AccountTransitionError(f"unknown close command {command_id!r} for {symbol}")
-        if not order.reduce_only:
-            return ()
-        position = state.positions.get(symbol, PositionState())
-        tolerance = max(abs(order.signed_qty) * 1e-12, 1e-12)
-        batch_orders = {
-            candidate.command_id: candidate
-            for candidate in state.orders.values()
-            if candidate.batch_id == order.batch_id and candidate.symbol == symbol
-        }
-        if any(command in state.working_order_ids for command in batch_orders):
-            return ()
-        batch_execution_ids = {
-            execution_id
-            for execution_id, execution in state.executions.items()
-            if str(execution.get("command_id") or "") in batch_orders
-        }
-        if not batch_execution_ids:
-            return ()
-        close_key = f"reduction:{order.batch_id}:{symbol}"
-        pnl_key = f"fills:{order.batch_id}:{symbol}"
-        if pnl_key in state.pnl:
-            return ()
-
-        reconstructed_flat = (
-            abs(position.signed_qty) <= tolerance
-            and abs(float(state.aggregate_targets.get(symbol, 0.0))) <= tolerance
-            and abs(state.working_signed_qty(symbol)) <= tolerance
-        )
-        target_rows = sorted(
-            (
-                dict(target)
-                for target in state.target_proposals.values()
-                if str(target.get("batch_id") or "") == order.batch_id
-                and str(target.get("symbol") or "").upper() == symbol
-            ),
-            key=lambda target: str(target.get("target_key") or ""),
-        )
-        target_reasons = sorted(
-            {str(target.get("reason") or "") for target in target_rows if str(target.get("reason") or "")}
-        )
-        component_ids = sorted(
-            {str(target.get("component_id") or "") for target in target_rows if str(target.get("component_id") or "")}
-        )
-        component_target_keys = [
-            str(target.get("target_key") or "") for target in target_rows if str(target.get("target_key") or "")
-        ]
-        close_reason = reason or ",".join(target_reasons) or "target_reduction"
-        attribution_status = "pending_account_netting" if component_target_keys else "pending_unidentified_component"
         caller_metadata = dict(metadata or {})
-        venue_flat_confirmed = bool(caller_metadata.get("venue_position_confirmed_flat")) and reconstructed_flat
-        component_metadata = {
-            "accounting_scope": "symbol_reduce_batch",
-            "component_attribution_status": attribution_status,
-            "component_ids": component_ids,
-            "component_target_keys": component_target_keys,
-            "component_reasons": target_reasons,
-        }
-        events: list[AccountEvent] = []
-        if close_key not in state.closes:
-            events.extend(
-                self.record_close(
-                    close_key=close_key,
+
+        def build(state: AccountState) -> list[AccountEventSpec]:
+            # Re-evaluate every precondition inside the serialized journal
+            # transaction. Private-stream and REST recovery can observe the same
+            # terminal fill concurrently; a stale pre-transaction snapshot must
+            # not propose a different immutable Close for an already-finalized
+            # batch.
+            order = state.orders.get(command_id)
+            if order is None or order.symbol != symbol:
+                raise AccountTransitionError(f"unknown close command {command_id!r} for {symbol}")
+            if not order.reduce_only:
+                return []
+            position = state.positions.get(symbol, PositionState())
+            tolerance = max(abs(order.signed_qty) * 1e-12, 1e-12)
+            batch_orders = {
+                candidate.command_id: candidate
+                for candidate in state.orders.values()
+                if candidate.batch_id == order.batch_id and candidate.symbol == symbol
+            }
+            if any(command in state.working_order_ids for command in batch_orders):
+                return []
+            batch_execution_ids = {
+                execution_id
+                for execution_id, execution in state.executions.items()
+                if str(execution.get("command_id") or "") in batch_orders
+            }
+            if not batch_execution_ids:
+                return []
+            close_key = f"reduction:{order.batch_id}:{symbol}"
+            pnl_key = f"fills:{order.batch_id}:{symbol}"
+            if pnl_key in state.pnl:
+                return []
+
+            reconstructed_flat = (
+                abs(position.signed_qty) <= tolerance
+                and abs(float(state.aggregate_targets.get(symbol, 0.0))) <= tolerance
+                and abs(state.working_signed_qty(symbol)) <= tolerance
+            )
+            target_rows = sorted(
+                (
+                    dict(target)
+                    for target in state.target_proposals.values()
+                    if str(target.get("batch_id") or "") == order.batch_id
+                    and str(target.get("symbol") or "").upper() == symbol
+                ),
+                key=lambda target: str(target.get("target_key") or ""),
+            )
+            target_reasons = sorted(
+                {
+                    str(target.get("reason") or "")
+                    for target in target_rows
+                    if str(target.get("reason") or "")
+                }
+            )
+            component_ids = sorted(
+                {
+                    str(target.get("component_id") or "")
+                    for target in target_rows
+                    if str(target.get("component_id") or "")
+                }
+            )
+            component_target_keys = [
+                str(target.get("target_key") or "")
+                for target in target_rows
+                if str(target.get("target_key") or "")
+            ]
+            close_reason = reason or ",".join(target_reasons) or "target_reduction"
+            attribution_status = (
+                "pending_account_netting"
+                if component_target_keys
+                else "pending_unidentified_component"
+            )
+            venue_flat_confirmed = (
+                bool(caller_metadata.get("venue_position_confirmed_flat"))
+                and reconstructed_flat
+            )
+            component_metadata = {
+                "accounting_scope": "symbol_reduce_batch",
+                "component_attribution_status": attribution_status,
+                "component_ids": component_ids,
+                "component_target_keys": component_target_keys,
+                "component_reasons": target_reasons,
+            }
+            specs: list[AccountEventSpec] = []
+            if close_key not in state.closes:
+                specs.append(
+                    AccountEventSpec(
+                        event_type=AccountEventType.CLOSE,
+                        idempotency_key=f"close:{close_key}",
+                        correlation_id=order.batch_id,
+                        causation_id=command_id,
+                        account_id=self.account_id,
+                        sleeve="account_execution",
+                        symbol=symbol,
+                        wall_ts_ns=max(int(local_receive_ts_ns), 1),
+                        monotonic_ns=self.clock.monotonic_ns(),
+                        payload={
+                            "close_key": close_key,
+                            "command_id": command_id,
+                            "reason": close_reason,
+                            # A reconstructed zero is not a fresh REST venue
+                            # fact. Only an explicit caller can confirm it.
+                            "venue_flat": venue_flat_confirmed,
+                            "exchange_ts_ns": int(exchange_ts_ns),
+                            "local_receive_ts_ns": int(local_receive_ts_ns),
+                            "metadata": json_safe({
+                                **caller_metadata,
+                                "source": "fill_reconstruction",
+                                "batch_id": order.batch_id,
+                                "reconstructed_flat": reconstructed_flat,
+                                "venue_position_status": (
+                                    "confirmed_flat"
+                                    if venue_flat_confirmed
+                                    else "pending_reconciliation"
+                                ),
+                                **component_metadata,
+                            }),
+                        },
+                    )
+                )
+
+            gross = position.realized_from_fills_usdt - position.reported_realized_usdt
+            fees = position.fees_from_fills_usdt - position.reported_fees_usdt
+            accounted_execution_ids: set[str] = set()
+            for prior in state.pnl.values():
+                prior_metadata = prior.get("metadata") or {}
+                if not isinstance(prior_metadata, Mapping):
+                    continue
+                prior_ids = prior_metadata.get("accounted_execution_ids") or ()
+                if isinstance(prior_ids, Sequence) and not isinstance(prior_ids, (str, bytes)):
+                    accounted_execution_ids.update(
+                        str(value) for value in prior_ids if str(value)
+                    )
+            unaccounted: dict[str, dict[str, Any]] = {}
+            for execution_id, execution in state.executions.items():
+                execution_order = state.orders.get(str(execution.get("command_id") or ""))
+                if (
+                    execution_id not in accounted_execution_ids
+                    and execution_order is not None
+                    and execution_order.symbol == symbol
+                ):
+                    unaccounted[execution_id] = execution
+            fee_provenance: dict[str, str] = {}
+            for execution_id, execution in sorted(unaccounted.items()):
+                fill_metadata = execution.get("metadata") or {}
+                if not isinstance(fill_metadata, Mapping):
+                    fill_metadata = {}
+                fee_status = str(fill_metadata.get("fee_status") or "")
+                if not fee_status:
+                    if fill_metadata.get("fee_observed") is True:
+                        fee_status = "observed_execution_fee"
+                    elif fill_metadata.get("fee_observed") is False:
+                        fee_status = "pending_missing_execution_fee"
+                    else:
+                        fee_status = "pending_unknown_fee_provenance"
+                fee_provenance[execution_id] = fee_status
+            fee_statuses = set(fee_provenance.values())
+            if any(value.startswith("pending") for value in fee_statuses) or not fee_statuses:
+                fee_status = "pending_missing_or_unknown_execution_fee"
+            elif fee_statuses == {"modeled_execution_fee"}:
+                fee_status = "modeled_execution_fee"
+            elif fee_statuses == {"observed_execution_fee"}:
+                fee_status = "observed_execution_fee"
+            else:
+                fee_status = "observed_or_modeled_execution_fee"
+            execution_twin_model = (
+                bool(fee_statuses) and fee_statuses == {"modeled_execution_fee"}
+            )
+            funding_status = (
+                "modeled_separately"
+                if execution_twin_model
+                else "pending_venue_reconciliation"
+            )
+            venue_pnl_status = (
+                "not_applicable_execution_twin"
+                if execution_twin_model
+                else "pending_venue_reconciliation"
+            )
+            specs.append(
+                AccountEventSpec(
+                    event_type=AccountEventType.PNL,
+                    idempotency_key=f"pnl:{pnl_key}",
+                    correlation_id=close_key,
+                    causation_id=close_key,
+                    account_id=self.account_id,
+                    sleeve="account_accounting",
                     symbol=symbol,
-                    reason=close_reason,
-                    # A reconstructed zero is not a fresh REST venue fact. Keep
-                    # this field false until an explicit caller has venue-flat
-                    # evidence; Telegram can still describe the local lifecycle
-                    # from the metadata without claiming exchange confirmation.
-                    venue_flat=venue_flat_confirmed,
-                    exchange_ts_ns=exchange_ts_ns,
-                    local_receive_ts_ns=local_receive_ts_ns,
-                    command_id=command_id,
-                    metadata={
-                        **caller_metadata,
-                        "source": "fill_reconstruction",
-                        "batch_id": order.batch_id,
-                        "reconstructed_flat": reconstructed_flat,
-                        "venue_position_status": (
-                            "confirmed_flat" if venue_flat_confirmed else "pending_reconciliation"
-                        ),
-                        **component_metadata,
+                    wall_ts_ns=max(int(local_receive_ts_ns), 1),
+                    monotonic_ns=self.clock.monotonic_ns(),
+                    payload={
+                        "pnl_key": pnl_key,
+                        "close_key": close_key,
+                        "gross_pnl_usdt": _finite(gross, label="gross_pnl_usdt"),
+                        "fee_usdt": _finite(fees, label="pnl fee_usdt"),
+                        "funding_usdt": 0.0,
+                        "net_pnl_usdt": _finite(gross - fees, label="net_pnl_usdt"),
+                        "exchange_ts_ns": int(exchange_ts_ns),
+                        "local_receive_ts_ns": int(local_receive_ts_ns),
+                        "source": "fill_reconstructed_provisional_funding",
+                        "metadata": json_safe({
+                            **caller_metadata,
+                            **component_metadata,
+                            "batch_id": order.batch_id,
+                            "fill_accounting_checkpoint": True,
+                            "accounted_execution_ids": sorted(unaccounted),
+                            "fee_status": fee_status,
+                            "fee_provenance_by_execution": fee_provenance,
+                            "funding_status": funding_status,
+                            "venue_closed_pnl_status": venue_pnl_status,
+                            "pnl_finalization_status": (
+                                "modeled_execution_twin"
+                                if execution_twin_model
+                                else "provisional_venue_reconciliation"
+                            ),
+                        }),
                     },
                 )
             )
-            state = self._state_ref()
-            position = state.positions.get(symbol, PositionState())
-        gross = position.realized_from_fills_usdt - position.reported_realized_usdt
-        fees = position.fees_from_fills_usdt - position.reported_fees_usdt
+            return specs
 
-        accounted_execution_ids: set[str] = set()
-        for prior in state.pnl.values():
-            prior_metadata = prior.get("metadata") or {}
-            if not isinstance(prior_metadata, Mapping):
-                continue
-            prior_ids = prior_metadata.get("accounted_execution_ids") or ()
-            if isinstance(prior_ids, Sequence) and not isinstance(prior_ids, (str, bytes)):
-                accounted_execution_ids.update(str(value) for value in prior_ids if str(value))
-        unaccounted: dict[str, dict[str, Any]] = {}
-        for execution_id, execution in state.executions.items():
-            execution_order = state.orders.get(str(execution.get("command_id") or ""))
-            if (
-                execution_id not in accounted_execution_ids
-                and execution_order is not None
-                and execution_order.symbol == symbol
-            ):
-                unaccounted[execution_id] = execution
-        fee_provenance: dict[str, str] = {}
-        for execution_id, execution in sorted(unaccounted.items()):
-            fill_metadata = execution.get("metadata") or {}
-            if not isinstance(fill_metadata, Mapping):
-                fill_metadata = {}
-            fee_status = str(fill_metadata.get("fee_status") or "")
-            if not fee_status:
-                if fill_metadata.get("fee_observed") is True:
-                    fee_status = "observed_execution_fee"
-                elif fill_metadata.get("fee_observed") is False:
-                    fee_status = "pending_missing_execution_fee"
-                else:
-                    fee_status = "pending_unknown_fee_provenance"
-            fee_provenance[execution_id] = fee_status
-        fee_statuses = set(fee_provenance.values())
-        if any(value.startswith("pending") for value in fee_statuses) or not fee_statuses:
-            fee_status = "pending_missing_or_unknown_execution_fee"
-        elif fee_statuses == {"modeled_execution_fee"}:
-            fee_status = "modeled_execution_fee"
-        elif fee_statuses == {"observed_execution_fee"}:
-            fee_status = "observed_execution_fee"
-        else:
-            fee_status = "observed_or_modeled_execution_fee"
-        execution_twin_model = bool(fee_statuses) and fee_statuses == {"modeled_execution_fee"}
-        funding_status = "modeled_separately" if execution_twin_model else "pending_venue_reconciliation"
-        venue_pnl_status = "not_applicable_execution_twin" if execution_twin_model else "pending_venue_reconciliation"
-        events.extend(
-            self.record_pnl(
-                pnl_key=pnl_key,
-                close_key=close_key,
-                symbol=symbol,
-                gross_pnl_usdt=gross,
-                fee_usdt=fees,
-                funding_usdt=0.0,
-                net_pnl_usdt=gross - fees,
-                exchange_ts_ns=exchange_ts_ns,
-                local_receive_ts_ns=local_receive_ts_ns,
-                source="fill_reconstructed_provisional_funding",
-                metadata={
-                    **caller_metadata,
-                    **component_metadata,
-                    "batch_id": order.batch_id,
-                    "fill_accounting_checkpoint": True,
-                    "accounted_execution_ids": sorted(unaccounted),
-                    "fee_status": fee_status,
-                    "fee_provenance_by_execution": fee_provenance,
-                    "funding_status": funding_status,
-                    "venue_closed_pnl_status": venue_pnl_status,
-                    "pnl_finalization_status": (
-                        "modeled_execution_twin" if execution_twin_model else "provisional_venue_reconciliation"
-                    ),
-                },
-            )
-        )
-        return tuple(events)
+        return tuple(self.journal.transact(build, trusted_readonly_builder=True))
 
     def adopt_external_protection_fill(
         self,

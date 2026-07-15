@@ -149,6 +149,31 @@ def test_dual_side_venue_position_fails_closed_for_net_position_kernel(tmp_path:
     assert report.mismatches == ("BUSDT:dual_side_position_not_supported",)
 
 
+def test_position_truth_timestamp_is_taken_after_rest_response(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=0)
+    kernel = AccountExecutionKernel(tmp_path, account_id="fresh-position-truth", clock=clock)
+
+    class DelayedPositionClient:
+        demo = True
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            clock.advance_ns(9_000_000_000)
+            return []
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=DelayedPositionClient(),
+        instrument_rules={},
+        clock=clock,
+    )
+
+    report = reconciler.reconcile_once()
+
+    assert report.observed_ts_ns == clock.wall_time_ns()
+    reconciler.require_recent_healthy(max_age_ns=0)
+
+
 def test_rest_reconcile_recovers_native_stop_execution_missed_by_ws(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
     kernel = AccountExecutionKernel(tmp_path, account_id="native-rest", clock=clock, id_seed="native-rest")

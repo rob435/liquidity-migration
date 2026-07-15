@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+import liquidity_migration.account_service_runner as account_service_runner_module
 from liquidity_migration.account_kernel import AccountState, InstrumentRules, OrderCommand, OrderState
 from liquidity_migration.account_execution_config import load_demo_rules, load_risk_policy
 from liquidity_migration.account_service_bybit import (
@@ -39,6 +40,29 @@ from liquidity_migration.execution_adapters import (
     MarketOrderExecutionTwin,
 )
 from liquidity_migration.market_capture import MarketCaptureConfig, SequenceAwareMarketRecorder
+
+
+def test_owner_reconciliation_cycle_refreshes_position_truth_after_funding() -> None:
+    calls: list[str] = []
+
+    class FundingReconciler:
+        def reconcile_once(self) -> str:
+            calls.append("funding")
+            return "funding-report"
+
+    class PositionReconciler:
+        def reconcile_once(self) -> str:
+            calls.append("position")
+            return "position-report"
+
+    position_report, funding_report = account_service_runner_module._run_reconciliation_cycle(
+        reconciler=PositionReconciler(),
+        funding_reconciler=FundingReconciler(),
+    )
+
+    assert calls == ["funding", "position"]
+    assert position_report == "position-report"
+    assert funding_report == "funding-report"
 
 
 def _capture_config() -> MarketCaptureConfig:

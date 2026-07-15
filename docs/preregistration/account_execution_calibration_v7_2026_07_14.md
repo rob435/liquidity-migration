@@ -1,10 +1,53 @@
 # Demo execution calibration v7
 
-Status: prospective and execution-outcome unseen for the new epoch at
-registration. Registered after the V6 exact-health-head failure and
-verified-flat recovery, but before any V7 target, order, fill, slippage, fee,
-realized P&L, or funding outcome. Forward execution evidence only; no alpha,
-LONG/CONTINUOUS parity, deployment, HFT, or real-money claim.
+Status: **closed and spent after the final funding-hold close failed**. This
+contract was prospective and execution-outcome unseen at registration. It
+remains the historical statement of the V7 plan and abort rule; its prospective
+corrected-defect successor is
+`account_execution_calibration_v8_2026_07_15.md`. Forward execution evidence
+only; no alpha, LONG/CONTINUOUS parity, deployment, HFT, or real-money claim.
+
+## Observed outcome
+
+V7 ran on exact host commit
+`98b3916a4a135df3508f051f2354bc2346904690`. This was an operational
+deviation from the later exact-candidate sequence: candidate
+`c7d6509d3a21c75db77ed9486129a3cc4cfaa591` subsequently passed its local and
+non-contacting Linux candidate gates but was never installed on the host. V7
+therefore cannot support that candidate even absent the failure below.
+
+The fixed sequence of 30 transitions (15 round trips) completed and the
+preregistered BTC funding hold opened `+0.002 BTC`. Its close-not-before boundary was
+`2026-07-14T08:02:00Z`; the exact zero replacement was durably published at
+`2026-07-14T08:02:06Z`. The run then closed as failed under the unchanged owner
+error rule because strict reduction admission repeatedly saw position truth
+roughly 9--20 seconds old against the four-second freshness limit. The failed
+receipt reports `status=failed`, `account_flat_after=false`, plan hash
+`57aac4431f792c72ef0d406f86573729412ca63e912c179574d9b8c126be7af6`,
+self-hash
+`5b502b9194e6dc38b80560ac8a487e193eeb367f55d350b527effb281ee746da`,
+and receipt-file SHA-256
+`de28cb15729af45299a9975deb33cd33e00e653ca3e7d9d83bd165125216e948`.
+Its retained host path is
+`/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z/demo-calibration-v7-run.json`.
+No threshold was changed and the failed step was not resumed.
+
+A separately labelled HEDGE-authored canonical recovery target
+`target-982890e451c5713e4f7d770cc03339f38d94988fb480916308100df060059f52`
+closed the position through reduce-only command
+`71627988-4e7e-5ccb-9974-e25ffd1fcce2`. The recovery-only owner then failed
+closed when concurrent REST redelivery proposed changed content for existing
+Close event `1486ed03-0c9d-5e76-aaba-4ce80e6c9870`. Final source-reopened and
+authenticated venue proof established journal integrity at 6,804 events, head
+`dce7856a44e2c3e76c0caec045bf98453552fc355fccd5b3915d3175de98cad9`,
+zero aggregate/component target, zero local/venue position, zero regular or
+conditional order, and no active project unit.
+
+V7 is valid negative evidence for operational reliability on its exact old
+runtime and contradicts its pass rule. Its execution observations are spent,
+are excluded from every successor floor, and cannot be merged into V8 or the
+natural holdout. Paper and ordinary producers never started; no deployment or
+activation marker was issued.
 
 ## Prospective pre-run amendment — 2026-07-14T10:51:30Z
 

@@ -2,11 +2,11 @@
 
 Status: prospective. Registered at `2026-07-14T11:36:25Z`, before any fresh
 natural-cutover epoch, LONG/CONT target capture, paper/historical replay, or
-holdout execution-twin result. The earlier V4/V5/V6 runs are spent operational
-diagnostics. V7, if it runs, is calibration/training evidence only. No result
+holdout execution-twin result. The earlier V4--V7 runs are spent operational
+diagnostics. V8, if it runs, is calibration/training evidence only. No result
 from the Strategy Overhaul work running separately on the big PC is an input to
-this contract. As of the last prospective amendment below, neither V7 nor the
-fixed 120-hour natural window has run. Implemented constructors and replay
+this contract. As of the last prospective amendment below, V7 has failed and
+neither V8 nor the fixed 120-hour natural window has run. Implemented constructors and replay
 paths are not run artifacts: no natural reset, owner-first receipt, stopped
 seal, offline replay result, fresh-deploy epoch, authorization, or deployment
 exists for this contract. The candidate now implements the exact stopped-tree
@@ -138,6 +138,32 @@ The paper owner and every non-owner fresh-epoch target/hedge/refresh unit also
 explicitly remove demo/mainnet credential names, `REAL_MONEY`, and unused
 Telegram credentials from their inherited systemd environment; only the demo
 account owner retains demo mutation credentials.
+
+## Prospective corrected-defect training successor — 2026-07-15T02:18:26Z
+
+This amendment was registered after V7 closed under its owner-error rule and
+verified-flat recovery, but before any V8 target or any natural-window result.
+V7 is spent and cannot supply the training calibration required by this
+contract. Its failed receipt, all 30 transition execution observations (15
+round trips), funding hold, and recovery fill are excluded from every V8 and natural floor.
+
+The new prospective training contract is
+`account_execution_calibration_v8_2026_07_15.md`. It fixes only the V7
+reconciliation-freshness ordering/cache path and concurrent Close/P&L journal
+finalization while retaining the exact sample, size, risk envelope, clock
+contract, smoke floors, partial-fill floors, abort rule, and no-retry rule.
+Reopening is therefore a corrected-defect study on a new forward-time and
+six-root epoch, not a relabelled V7 retry or a threshold rescue.
+
+Every normative reference below to a *passing* V7 calibration, V7-derived
+configuration, V7 training source, or V7 archive is prospectively rebound to
+the single passing V8 artifact and its immutable archive. Existing schema keys
+and command names such as `v7_training`, `--v7-archive-map`, and `v7-archive`
+remain compatibility labels; they do not permit the failed V7 receipt. V8 must
+pass its full schema-v3 gate, be flat/stopped, and be materialized before the
+second six-root reset. All 120-hour holdout boundaries, comparisons, floors,
+clock-series rules, accounting rules, sealing order, and decision rules below
+remain unchanged. No natural outcome has been inspected.
 
 ## Claim and permitted action
 

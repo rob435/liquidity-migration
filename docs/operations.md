@@ -18,6 +18,12 @@ run both prompts concurrently in the same worktree. Neither prompt grants
 mainnet authority, and the completion prompt deliberately stops before the
 separately authorized `main` push/deployment boundary.
 
+V7 is closed and spent. The active bounded calibration is the prospectively
+registered V8 corrected-defect epoch. The CLI/schema names `v7-archive`,
+`v7_training`, and `--v7-archive-map` remain compatibility labels for the one
+passing training calibration and must bind V8; they cannot consume the failed
+V7 receipt.
+
 ```bash
 scripts/ops.sh
 scripts/ops.sh status
@@ -58,7 +64,7 @@ scripts/ops.sh test -q
   requires `--leave-stopped --receipt /absolute/new/path.json`.
 - `clock-offset` and `demo-calibration` run on the VPS and require `--execute`.
   The first writes a public-time receipt; the second publishes demo targets but
-  receives no API credentials and cannot bypass the account owner. The V7
+  receives no API credentials and cannot bypass the account owner. The V8
   launcher has no resume mode and refuses an existing event tape or run
   receipt; any emitted target spends that registered attempt.
 - `clock-series` only re-opens local evidence. It never contacts the venue,
@@ -121,8 +127,8 @@ overwrite it.
 | `demo-calibration --execute` | VPS `scripts/run_demo_execution_calibration.py` | Emits the preregistered tiny target-only demo sequence through the account inbox; never direct venue execution. |
 | `natural-safety-flatten --execute` | VPS `scripts/publish_natural_safety_flatten.py` | After T1, publishes one captured RISK zero target per still-active natural component and creates a source-bound mode-`0600` capture and manifest; refuses stale/blocked owner health, unresolved inbox work, working orders, malformed desires, or any publication error. |
 | `twin-calibrate` | `scripts/calibrate_execution_twin.py` | Self-hashed market-order twin calibration from verified demo account/L2 tapes; exits nonzero until registered sample gates pass. |
-| `twin-drift` | `python -m liquidity_migration.execution_twin_drift` | Freezes V7 configs and source-recomputes archived-V7 versus natural-holdout drift using the periodic clock series. |
-| `v7-archive` | `python -m liquidity_migration.v7_archive_materialization` | Materializes stopped V7 sources before reset, or recovers them from a verified reset archive, and writes the archive-source map. |
+| `twin-drift` | `python -m liquidity_migration.execution_twin_drift` | Freezes registered training configs and source-recomputes archived-training versus natural-holdout drift using the periodic clock series. |
+| `v7-archive` | `python -m liquidity_migration.v7_archive_materialization` | Compatibility route that materializes stopped registered-training sources before reset, or recovers them from a verified reset archive, and writes the archive-source map. |
 | `stopped-epoch` | `python -m liquidity_migration.stopped_natural_epoch` | Creates/verifies the five-input, 11-root stopped natural-source seal; creation checks the exact 12-unit fleet before and after hashing. |
 | `fresh-deploy-epoch` | `python -m liquidity_migration.fresh_deploy_epoch` | Creates/verifies ten empty deployment roots, deriving candidate, freeze, and exact old-root identities from the stopped seal. |
 | `fresh-deploy-env` | `python -m liquidity_migration.fresh_deploy_environment` | Materializes/verifies nine exact late systemd environment files from a fresh-deploy manifest; it does not create roots or start services. |
@@ -146,7 +152,7 @@ inbox, capture, candidate, rule, risk, calibration, freshness, and paper `p50`
 values against the named sources; the risk policies must be semantically equal
 and the queue-head market warmup timeout cannot exceed 30 seconds. `REAL_MONEY`
 must be unset or explicitly false. Its distinct seed input is the mode-`0600`
-BTCUSDT/ETHUSDT/BUSDT V7 symbol file, not the candidate-universe artifact.
+BTCUSDT/ETHUSDT/BUSDT V8 symbol file, not the candidate-universe artifact.
 
 ## Exact-candidate Linux CI
 
@@ -189,7 +195,7 @@ a VPS path is not evidence. Record the execution host for every gate.
 The blocks below are command references, not permission to follow their page
 order as an operational sequence. The registered order is:
 
-1. archive/reset for V7, run V7, and materialize its immutable archive before
+1. archive/reset for V8, run V8, and materialize its immutable archive before
    the second natural-holdout reset of all registered account, capture, event,
    outcome, target, telemetry, and natural-runtime outputs;
 2. start the paper owner alone and stop it cleanly, then start the demo owner
@@ -210,9 +216,9 @@ step in this sequence.
 # Read-only production verification.
 scripts/ops.sh status
 
-# After passing and archiving V7, freeze the natural candidate population and
+# After passing and archiving V8, freeze the natural candidate population and
 # probe exactly that set. These three outputs must be new and distinct from the
-# three-symbol V7 rules receipt.
+# three-symbol V8 rules receipt.
 .venv/bin/python scripts/freeze_account_candidate_universe.py \
   --output /absolute/new/path/candidate-universe-natural.json
 
@@ -274,7 +280,7 @@ scripts/ops.sh account-replay \
   --market-capture-root /path/to/frozen-demo-market-capture \
   --demo-rules-file /path/to/demo-rules.json \
   --risk-policy-file /path/to/risk-policy.json \
-  --calibration-file /path/to/frozen-v7-calibration.json \
+  --calibration-file /path/to/frozen-v8-calibration.json \
   --freeze-manifest /path/to/natural-cutover-freeze.json \
   --effective-runtime-config-bundle /path/to/effective-runtime-config-bundle.json \
   --safety-target-capture /path/to/post-window-safety-target-capture.jsonl \
@@ -293,7 +299,7 @@ scripts/ops.sh account-replay \
   --market-capture-root /path/to/frozen-demo-market-capture \
   --demo-rules-file /path/to/demo-rules.json \
   --risk-policy-file /path/to/risk-policy.json \
-  --calibration-file /path/to/frozen-v7-calibration.json \
+  --calibration-file /path/to/frozen-v8-calibration.json \
   --freeze-manifest /path/to/natural-cutover-freeze.json \
   --effective-runtime-config-bundle /path/to/effective-runtime-config-bundle.json \
   --safety-target-capture /path/to/post-window-safety-target-capture.jsonl \
@@ -345,16 +351,17 @@ scripts/ops.sh account-parity \
   --risk-policy-file /path/to/risk-policy.json \
   --rules-file /path/to/demo-rules.json \
   --effective-runtime-config-bundle /path/to/effective-runtime-config-bundle.json \
-  --twin-calibration-receipt /path/to/frozen-v7-calibration.json \
+  --twin-calibration-receipt /path/to/frozen-v8-calibration.json \
   --repo-root /absolute/path/to/liquidity-migration \
   --expected-commit "$EXPECTED_COMMIT" \
   --quantity-tolerance 1e-12 \
   --output /path/to/account-kernel-parity.json
 
-# Source-recomputed archived-V7 versus natural-holdout drift.
+# Source-recomputed archived-V8 versus natural-holdout drift. The flag retains
+# its compatibility name, but the bound receipt and archive must be V8.
 scripts/ops.sh twin-drift verify \
-  --calibration-file /path/to/frozen-v7-calibration.json \
-  --v7-archive-map /path/to/v7-archive-source-map.json \
+  --calibration-file /path/to/frozen-v8-calibration.json \
+  --v7-archive-map /path/to/v8-archive-source-map.json \
   --natural-account-root /path/to/stopped-demo-account-root \
   --natural-market-capture-root /path/to/frozen-demo-market-capture \
   --freeze-manifest /path/to/natural-cutover-freeze.json \
@@ -363,8 +370,8 @@ scripts/ops.sh twin-drift verify \
   --safety-manifest /path/to/post-window-safety-manifest.json \
   --demo-rules-file /path/to/demo-rules.json \
   --clock-offset-series /path/to/clock-offset-series.json \
-  --baseline-config /path/to/v7-baseline-p50.json \
-  --stress-config /path/to/v7-stress-p95.json \
+  --baseline-config /path/to/v8-baseline-p50.json \
+  --stress-config /path/to/v8-stress-p95.json \
   --account-id bybit-demo-unified \
   --t0-ns "$T0_NS" --t1-ns "$T1_NS" \
   --output /path/to/execution-twin-drift.json
@@ -434,9 +441,9 @@ venue-accounting gates.
 `account-replay` schema v3 is also offline, but consumes the actual stopped
 natural demo journal and raw decision books. Its loader reopens every bound
 source and output, reruns the replay in a private temporary root, and compares
-the complete historical and paper output trees. V7 is a distinct pre-reset
+the complete historical and paper output trees. V8 is a distinct pre-reset
 training epoch: the
-child `natural_account_replay_input_manifest_v2` binds V7's receipt/config, the
+child `natural_account_replay_input_manifest_v2` binds V8's receipt/config, the
 source-reopened effective-runtime-config bundle, and
 the exact post-reset holdout sources, and rejects reused journal chains or raw
 segments. Every live-source argument must belong to the stopped-natural-epoch
@@ -472,7 +479,7 @@ scope reopens and binds the captured-account-replay and event-parity receipts,
 their modeled output identities, and the canonical target-replay provenance.
 The schema-v4 kernel receipt then reopens the three journals and every bound
 config/evidence file, validates the
-second reset and V7/natural epoch separation, and compares decision/target
+second reset and V8/natural epoch separation, and compares decision/target
 keys, discrete target fields, risk acceptance/rejection and target presence,
 semantic commands, and finite quantities at the fixed absolute tolerance
 `1e-12`. Raw command IDs are mapped one-to-one by semantic command key. Actual
@@ -506,7 +513,7 @@ scripts/ops.sh twin-calibrate \
   --output /path/to/execution-twin-calibration.json
 ```
 
-The clock and calibration outputs are create-only. Stop the owner after V7's
+The clock and calibration outputs are create-only. Stop the owner after V8's
 verified-flat final boundary before calibration so the source-reopening
 constructor observes one immutable journal/capture generation. A changed source
 or non-passing receipt closes the attempt; it is not retried as a test.
@@ -544,27 +551,28 @@ timestamp-specific interpolation and report a non-hard uncertainty sensitivity;
 request/ack RTT and exchange-timestamp fill spacing receive no clock correction.
 
 The optional bounded sample generator is separately preregistered in
-`docs/preregistration/account_execution_calibration_v7_2026_07_14.md`. V4, V5,
-and V6 are retained failed pilots and must not be resumed or merged. V7 may supply
+`docs/preregistration/account_execution_calibration_v8_2026_07_15.md`. V4--V7
+are retained failed pilots and must not be resumed or merged. V8 may supply
 execution-twin observations efficiently but does not replace actual
 LONG/CONTINUOUS strategy-tape comparison.
 
-After V7 passes and the demo account is flat, stop every managed unit and
-materialize V7 before reusing any live path:
+After V8 passes and the demo account is flat, stop every managed unit and
+materialize V8 through the compatibility `v7-archive` route before reusing any
+live path:
 
 ```bash
 scripts/ops.sh v7-archive from-stopped-roots \
   --repository-root /opt/liquidity-migration \
   --expected-candidate-commit "$EXPECTED_COMMIT" \
-  --calibration-file /path/to/frozen-v7-calibration.json \
-  --destination-root /absolute/new/path/v7-immutable-sources \
-  --archive-map-output /absolute/new/path/v7-archive-source-map.json
+  --calibration-file /path/to/frozen-v8-calibration.json \
+  --destination-root /absolute/new/path/v8-immutable-sources \
+  --archive-map-output /absolute/new/path/v8-archive-source-map.json
 
 scripts/ops.sh twin-drift freeze-configs \
-  --calibration-file /path/to/frozen-v7-calibration.json \
+  --calibration-file /path/to/frozen-v8-calibration.json \
   --max-decision-age-ms 250 \
-  --baseline-output /absolute/new/path/v7-baseline-p50.json \
-  --stress-output /absolute/new/path/v7-stress-p95.json
+  --baseline-output /absolute/new/path/v8-baseline-p50.json \
+  --stress-output /absolute/new/path/v8-stress-p95.json
 ```
 
 `from-reset-archive` is a recovery path when the primary stopped-root snapshot
@@ -707,7 +715,7 @@ scripts/ops.sh cutover-authority template \
 ```
 
 The issuer's schema-v4 aggregate machine-validates the natural freeze,
-candidate-rule coverage, complete demo-rule probe, V7 calibration, schema-v3
+candidate-rule coverage, complete demo-rule probe, V8 calibration, schema-v3
 captured-account replay, schema-v3 event-clock comparison, schema-v3 comparison
 scope and schema-v4 kernel parity, schema-v3 natural sufficiency, twin drift,
 venue accounting/final flatness, stopped-natural-epoch seal, and fresh-deploy
@@ -857,7 +865,8 @@ closed even while the original descriptor remains locked.
 The receipt is available only for `--execute --leave-stopped`, is written
 create-only mode `0600`, re-opens the archive/sidecar/manifest, and proves all
 six new account/inbox/capture roots were empty while all 12 managed units were
-stopped. Archive V7 first when this reset creates the natural holdout boundary.
+stopped. Archive V8 first through the compatibility `v7-archive` route when this
+reset creates the natural holdout boundary.
 
 ## Granular data
 
