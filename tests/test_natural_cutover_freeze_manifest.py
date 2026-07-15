@@ -565,7 +565,10 @@ def _local_suite_payload(tmp_path: Path, *, pytest_exit: int = 0) -> tuple[dict[
                     "pytest",
                     "-q",
                     "--basetemp",
-                    str(repository / ".git" / "tmp" / "pytest-natural-freeze-test"),
+                    str(
+                        log.parent
+                        / f"pytest-natural-freeze-{CANDIDATE[:12]}-10-20"
+                    ),
                 ],
                 "cwd": str(repository),
                 "started_ts_ns": 21,
@@ -714,6 +717,32 @@ def test_local_suite_failed_command_cannot_satisfy_freeze_gate(tmp_path: Path) -
         freeze.load_local_suite_receipt(output)
 
 
+def test_local_suite_rejects_repository_local_pytest_basetemp(tmp_path: Path) -> None:
+    payload, _ = _local_suite_payload(tmp_path)
+    repository = Path(payload["repository"]["root"])
+    payload["commands"][1]["argv"][-1] = str(
+        repository
+        / ".git"
+        / "tmp"
+        / f"pytest-natural-freeze-{CANDIDATE[:12]}-10-20"
+    )
+    payload["artifact_sha256"] = freeze._self_hash(payload)
+
+    with pytest.raises(ValueError, match="beside the external command log"):
+        freeze.verify_local_suite_receipt(payload)
+
+
+def test_python_executable_preserves_venv_launcher_symlink(tmp_path: Path) -> None:
+    launcher = tmp_path / "venv" / "bin" / "python"
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(Path(sys.executable).resolve())
+
+    observed = freeze._python_executable(launcher)
+
+    assert observed == launcher.absolute()
+    assert observed.is_symlink()
+
+
 def test_local_suite_producer_executes_registered_commands_and_hashes_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -743,15 +772,26 @@ def test_local_suite_producer_executes_registered_commands_and_hashes_log(
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(freeze.subprocess, "run", fake_run)
+    launcher = tmp_path / "venv" / "bin" / "python"
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(Path(sys.executable).resolve())
     output, receipt = freeze.run_local_suite(
         repository_root=repository,
         candidate_commit=CANDIDATE,
-        python_executable=sys.executable,
+        python_executable=launcher,
         log_path=evidence / "suite.log",
         output_path=evidence / "suite.json",
     )
 
     assert [command[2] for command in observed] == ["ruff", "pytest"]
+    assert all(command[0] == str(launcher.absolute()) for command in observed)
+    pytest_basetemp = Path(observed[1][-1])
+    assert pytest_basetemp.parent == evidence
+    assert pytest_basetemp.name.startswith(
+        f"pytest-natural-freeze-{CANDIDATE[:12]}-"
+    )
+    assert not pytest_basetemp.is_relative_to(repository)
+    assert receipt["python_executable"] == str(launcher.absolute())
     assert receipt["gate_passed"] is True
     assert freeze.load_local_suite_receipt(output) == receipt
 

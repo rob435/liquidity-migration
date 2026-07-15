@@ -324,7 +324,9 @@ def _python_executable(value: str | Path) -> Path:
     discovered = shutil.which(raw) if not Path(raw).expanduser().is_absolute() else raw
     if not discovered:
         raise ValueError(f"Python executable is unavailable: {raw}")
-    executable = Path(discovered).expanduser().resolve(strict=True)
+    # Preserve a venv launcher path. Resolving its final symlink invokes the
+    # base interpreter directly and silently drops the venv's site-packages.
+    executable = Path(os.path.abspath(Path(discovered).expanduser()))
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise ValueError(f"Python executable is not an executable regular file: {executable}")
     return executable
@@ -445,9 +447,21 @@ def verify_local_suite_receipt(
             if len(argv) != 6 or argv[:5] != expected_prefix:
                 raise ValueError("local-suite pytest command differs from the registered command")
             basetemp = Path(argv[5])
-            expected_tmp_parent = Path(repository_root) / ".git" / "tmp"
-            if not basetemp.is_absolute() or basetemp.parent != expected_tmp_parent:
-                raise ValueError("local-suite pytest basetemp is outside repository .git/tmp")
+            expected_tmp_parent = Path(log_identity.path).parent
+            expected_name = re.fullmatch(
+                rf"pytest-natural-freeze-{re.escape(candidate[:12])}-[1-9][0-9]*-[1-9][0-9]*",
+                basetemp.name,
+            )
+            if (
+                not basetemp.is_absolute()
+                or basetemp.parent != expected_tmp_parent
+                or basetemp.is_relative_to(Path(repository_root))
+                or expected_name is None
+            ):
+                raise ValueError(
+                    "local-suite pytest basetemp must be a unique registered path "
+                    "beside the external command log"
+                )
         command_started = int(raw.get("started_ts_ns") or 0)
         command_finished = int(raw.get("finished_ts_ns") or 0)
         log_start = int(raw.get("log_start_byte") or 0)
@@ -556,10 +570,15 @@ def run_local_suite(
     _outside_repository(log_output, repository_root=root, label="local-suite log output")
     _outside_repository(receipt_output, repository_root=root, label="local-suite receipt output")
     started = time.time_ns()
-    pytest_tmp_parent = root / ".git" / "tmp"
-    pytest_tmp_parent.mkdir(parents=True, exist_ok=True)
-    pytest_basetemp = pytest_tmp_parent / (
-        f"pytest-natural-freeze-{candidate[:12]}-{started}-{os.getpid()}"
+    pytest_basetemp = _resolve_new_output(
+        log_output.parent
+        / f"pytest-natural-freeze-{candidate[:12]}-{started}-{os.getpid()}",
+        label="local-suite pytest basetemp",
+    )
+    _outside_repository(
+        pytest_basetemp,
+        repository_root=root,
+        label="local-suite pytest basetemp",
     )
     commands = [
         (
