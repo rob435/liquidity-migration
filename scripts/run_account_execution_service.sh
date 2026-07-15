@@ -17,6 +17,7 @@ ACCOUNT_DEMO_RULES_FILE="${ACCOUNT_DEMO_RULES_FILE:-/etc/liquidity-migration/acc
 ACCOUNT_RISK_POLICY_FILE="${ACCOUNT_RISK_POLICY_FILE:-/etc/liquidity-migration/account-execution/risk-policy.json}"
 MAX_DEMO_RULE_AGE_HOURS="${MAX_DEMO_RULE_AGE_HOURS:-168}"
 ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:-30}"
+ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-}"
 
 if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
     echo "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required for account-owner cutover." >&2
@@ -45,6 +46,15 @@ for required in "$ACCOUNT_SYMBOLS_FILE" "$ACCOUNT_DEMO_RULES_FILE" "$ACCOUNT_RIS
     fi
 done
 
+case "$ACCOUNT_RAW_MARKET_PERSISTENCE" in
+    1) raw_market_args=(--persist-raw-market) ;;
+    0) raw_market_args=(--no-persist-raw-market) ;;
+    *)
+        echo "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly set to 0 or 1." >&2
+        exit 2
+        ;;
+esac
+
 telegram_args=()
 if [[ "${TELEGRAM_ENABLED:-0}" == "1" ]]; then
     if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
@@ -63,6 +73,7 @@ exec "$PYTHON_BIN" -m liquidity_migration.account_service_runner \
     --risk-policy-file "$ACCOUNT_RISK_POLICY_FILE" \
     --max-demo-rule-age-hours "$MAX_DEMO_RULE_AGE_HOURS" \
     --request-market-warmup-timeout-seconds "$ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS" \
+    "${raw_market_args[@]}" \
     --disaster-stop-fraction "$DISASTER_STOP_FRACTION" \
     --confirm-demo-orders \
     "${telegram_args[@]}"

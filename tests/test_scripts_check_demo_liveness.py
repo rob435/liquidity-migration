@@ -317,20 +317,45 @@ def test_gather_long_alerts_skips_when_root_absent(tmp_path) -> None:
 
 
 def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
+    from liquidity_migration.market_capture import MarketCaptureConfig, SequenceAwareMarketRecorder
+
     capture = tmp_path / "capture"
     missing = M.gather_account_capture_alerts(capture_root=capture, now_ms=1_000 * HOUR, max_age_minutes=3)
     assert [alert.key for alert in missing] == ["account_capture_missing"]
 
-    segment = capture / "2026-07-13" / "BTCUSDT" / "segment-000000.jsonl"
-    segment.parent.mkdir(parents=True)
-    segment.write_text("{}\n")
-    mtime_ms = int(segment.stat().st_mtime * 1000)
-    assert M.gather_account_capture_alerts(capture_root=capture, now_ms=mtime_ms + 2 * MIN, max_age_minutes=3) == []
-    stale = M.gather_account_capture_alerts(capture_root=capture, now_ms=mtime_ms + 4 * MIN, max_age_minutes=3)
+    receive_ns = 1_800_000_000_000_000_000
+    recorder = SequenceAwareMarketRecorder(
+        capture,
+        config=MarketCaptureConfig(
+            min_free_disk_bytes=1,
+            persist_raw_market=False,
+        ),
+        owner_invocation_id="a1" * 16,
+    )
+    recorder.on_message(
+        {
+            "topic": "orderbook.50.BTCUSDT",
+            "type": "snapshot",
+            "ts": 1_800_000_000_000,
+            "cts": 1_800_000_000_000,
+            "data": {
+                "s": "BTCUSDT",
+                "b": [["10", "1"]],
+                "a": [["11", "1"]],
+                "u": 1,
+                "seq": 1,
+            },
+        },
+        local_receive_ts_ns=receive_ns,
+    )
+    recorder.close()
+    receive_ms = receive_ns // 1_000_000
+    assert M.gather_account_capture_alerts(capture_root=capture, now_ms=receive_ms + 2 * MIN, max_age_minutes=3) == []
+    stale = M.gather_account_capture_alerts(capture_root=capture, now_ms=receive_ms + 4 * MIN, max_age_minutes=3)
     assert [alert.key for alert in stale] == ["account_capture_stale"]
     paper = M.gather_account_capture_alerts(
         capture_root=tmp_path / "paper-missing",
-        now_ms=mtime_ms,
+        now_ms=receive_ms,
         max_age_minutes=3,
         label="paper",
     )

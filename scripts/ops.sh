@@ -60,6 +60,10 @@ Safe operator commands:
   fresh-deploy-env [ARGS...]   materialize/verify bound per-unit fresh-root overrides
   authorized-deploy-epoch [ARGS...]
                                prepare/verify the authority-bound stopped/fresh epoch
+  operational-authority [ARGS...]
+                               verify exact demo/paper operational authority
+  operational-authority --execute issue [ARGS...]
+                               issue narrow calibration/full operational authority
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
   cutover-authority [ARGS...]  review/issue/verify evidence-bound deploy authority
   test [PYTEST_ARGS...]        run pytest
@@ -142,6 +146,27 @@ remote_python_script() {
 set -euo pipefail
 cd "$REPO_DIR"
 exec .venv/bin/python "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
+REMOTE_SCRIPT
+  } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
+}
+
+remote_python_module() {
+  local module="$1"
+  shift
+  local -a module_args=("$@")
+  local arg
+  {
+    printf 'REPO_DIR=%q\n' "$REPO_DIR"
+    printf 'MODULE=%q\n' "$module"
+    printf 'MODULE_ARGS=('
+    for arg in "${module_args[@]}"; do
+      printf ' %q' "$arg"
+    done
+    printf ' )\n'
+    cat <<'REMOTE_SCRIPT'
+set -euo pipefail
+cd "$REPO_DIR"
+exec .venv/bin/python -m "$MODULE" "${MODULE_ARGS[@]}"
 REMOTE_SCRIPT
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }
@@ -255,6 +280,16 @@ case "$command" in
     ;;
   authorized-deploy-epoch)
     exec "$PYTHON_BIN" -m liquidity_migration.authorized_deploy_epoch "$@"
+    ;;
+  operational-authority)
+    if [[ "${1:-}" == "--execute" ]]; then
+      shift
+      [[ "${1:-}" == "issue" ]] \
+        || die_usage "operational-authority --execute is valid only before the issue subcommand"
+    elif [[ "${1:-}" == "issue" ]]; then
+      die_usage "operational-authority issue mutates the VPS; prefix it with --execute"
+    fi
+    remote_python_module liquidity_migration.operational_runtime_authority "$@"
     ;;
   venue-accounting)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/reconcile_bybit_demo_accounting.py" "$@"

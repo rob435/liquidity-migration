@@ -8,6 +8,64 @@ For a multi-session continuation, use the bounded copy-paste prompt and
 progressive test cadence in `docs/account_execution_completion_handoff.md`.
 That handoff does not replace this runbook or grant final deployment authority.
 
+## Operational retention and authority boundary
+
+The owner has separated demo/paper operation from the optional five-day
+research holdout. Continuous raw order-book/public-trade persistence does not
+participate in target generation, aggregation, risk, order submission,
+protection, reconciliation, or account accounting. It is therefore not a VPS
+operational prerequisite. The registered natural study remains prospective
+and unchanged; omitting it makes no replay, drift, parity, promotion, or alpha
+claim.
+
+`ACCOUNT_RAW_MARKET_PERSISTENCE` is mandatory and has two explicit meanings:
+
+- `1` persists raw L2 and public-trade frames for the registered V8 or natural
+  evidence workflows;
+- `0` is permanent demo/paper operation: public trades are not subscribed,
+  bulk raw L2 frames are not written, but the owner still reconstructs live L2,
+  publishes an atomic bounded same-generation market-readiness sidecar, and
+  persists the exact book at every decision boundary.
+
+The canonical account journal and exact decision books are never optional.
+Existing capture history is preserved; changing to `0` stops future bulk
+growth and is not permission to delete an archive.
+
+Operational startup uses the create-only mode-`0600` receipt
+`/etc/liquidity-migration/account-execution-operational-ready`, independently
+of the research-promotion `account-execution-deploy-ready` receipt. The runtime
+wrapper refuses if both exist. It also refuses natural/fresh override files,
+the wrong/dirty commit, another machine, changed environment/config/input/root
+identity, mainnet variables, `REAL_MONEY`, or an unregistered unit.
+
+There are two profiles. `calibration` requires raw persistence `1`, binds only
+the demo route and inputs, and authorizes only the demo account owner. This
+breaks no evidence gate: it exists solely to run the unchanged registered V8
+once before a paper calibration exists. After V8 closes, stop the owner and
+preserve/archive that authorization receipt before changing any bound input.
+`operational` requires raw persistence `0` on both owners and a source-verified
+passing twin receipt; it then authorizes the checked nine-unit demo/paper
+topology. Issue or verify it through:
+
+```bash
+COMMIT="$(git -C /opt/liquidity-migration rev-parse HEAD)"
+scripts/ops.sh operational-authority --execute issue \
+  --profile calibration \
+  --expected-commit "$COMMIT" \
+  --repo-root /opt/liquidity-migration \
+  --authorization-reference "owner task: bounded V8 bootstrap" \
+  --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
+
+scripts/ops.sh operational-authority verify \
+  --repo-root /opt/liquidity-migration
+```
+
+The full operational profile uses the same command with
+`--profile operational` only after the twin receipt is installed and both
+owner environments explicitly set `ACCOUNT_RAW_MARKET_PERSISTENCE=0`. These
+receipts authorize demo/paper only. They do not authorize a `main` push,
+mainnet, real money, or a research conclusion.
+
 The evidence plan is not complete. Prior candidate `c7d6509` passed a clean
 local/non-contacting `candidate-ci` boundary but was never installed and is
 spent after V7 exposed unrepaired owner defects. Replacement candidate
@@ -22,8 +80,12 @@ pre-push gate failed before network update because the hook's `.git/tmp`
 basetemp violated existing source-snapshot tests' outside-repository invariant.
 The candidate is spent. The prospective hook repair moves and validates that
 basetemp outside the repository; it does not change Strategy Overhaul logic.
-There is no frozen passing replacement candidate after that repair; V8 and its
-partial-fill gate have not run; and there is
+Replacement candidate `0f05060` then passed all 2,957 local/pre-push tests,
+but its one exact-head Linux run retained one existing filesystem-order-
+dependent test failure and 2,956 passes. It was not retried and is spent.
+The prospective test repair selects the two exact dated liquidation outputs.
+There is no frozen passing replacement candidate after that repair; V8 and
+its partial-fill gate have not run; and there is
 no natural 120-hour LONG/CONT epoch, periodic clock series,
 venue-accounting/final-flatness receipt, offline replay/parity/drift/sufficiency
 result, real stopped-natural-epoch seal, real fresh-deploy epoch, or cutover
@@ -511,6 +573,7 @@ host with every receipt; see `docs/operations.md` for the full boundary.
    ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-execution
    ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-intents
    ACCOUNT_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-market-capture
+   ACCOUNT_RAW_MARKET_PERSISTENCE=1
    ACCOUNT_SYMBOLS_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/v8-symbols.txt
    ACCOUNT_DEMO_RULES_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/demo-rules-v8.json
    ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-execution/risk-policy.json
@@ -1356,6 +1419,7 @@ ACCOUNT_PAPER_KERNEL_REQUIRED=1
 ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-paper
 ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-paper-intents
 ACCOUNT_PAPER_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-paper-market-capture
+ACCOUNT_RAW_MARKET_PERSISTENCE=1
 ACCOUNT_SYMBOLS_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/candidate-universe-natural.json
 ACCOUNT_DEMO_RULES_FILE=/var/lib/liquidity-migration/cutover-evidence/REPLACE_WITH_NEW_ATTEMPT_ID/demo-rules-natural.json
 ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-paper-execution/risk-policy.json
@@ -1384,7 +1448,7 @@ the owner lease/journal itself is unsafe.
 - venue/reconstructed position mismatch;
 - desired target/working order/position convergence exceeds its health SLA or
   exhausts the bounded retry policy;
-- missing or stale raw book outside an explicitly journaled, strictly reducing
+- missing, stale, crossed, or sequence-gapped live book outside an explicitly journaled, strictly reducing
   exit-only path;
 - missing demo-verified rule row;
 - open reconstructed position without active native disaster protection;

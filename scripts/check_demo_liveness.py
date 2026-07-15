@@ -3,9 +3,9 @@
 
 The account execution owners are the only execution, reconciliation, and
 protection authorities.  This checker therefore requires both owner services,
-fresh independent demo/paper L2 captures, fresh owner-health projections, and a
-recent healthy canonical demo venue snapshot. It deliberately does not inspect retired sleeve ledgers,
-``ws_risk``, or the old combined-book reporter.
+fresh independent demo/paper live-L2 readiness, fresh owner-health projections,
+and a recent healthy canonical demo venue snapshot. It deliberately does not
+inspect retired sleeve ledgers, ``ws_risk``, or the old combined-book reporter.
 
 Strategy-daemon cycle and input checks remain because an execution owner cannot
 detect a hung signal scheduler or an empty/stale signal source.
@@ -44,6 +44,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from liquidity_migration._common import exact_duration_ms  # noqa: E402
 from liquidity_migration.account_kernel import AccountEventType, read_account_journal  # noqa: E402
 from liquidity_migration.account_owner_health import require_recent_account_owner_health  # noqa: E402
+from liquidity_migration.account_owner_readiness import latest_market_readiness  # noqa: E402
 from liquidity_migration.storage import read_dataset  # noqa: E402
 from liquidity_migration.telegram import send_telegram_message  # noqa: E402
 
@@ -724,23 +725,30 @@ def gather_account_capture_alerts(
     max_age_minutes: float,
     label: str = "",
 ) -> list[Alert]:
-    """Detect an owner that is active/restarting but no longer ingesting L2."""
+    """Detect an owner that is active/restarting but no longer ingesting L2.
+
+    The historical function/key name is retained to avoid resetting alert
+    cooldown state.  The checked artifact is now a bounded live-market sidecar,
+    not a growing raw-capture segment.
+    """
 
     suffix = f"_{label}" if label else ""
     owner_label = f"{label} account execution" if label else "account execution"
     try:
-        newest_ms = max(
-            (int(path.stat().st_mtime * 1000) for path in capture_root.glob("*/*/segment-*.jsonl")),
-            default=0,
-        )
-    except OSError:
-        newest_ms = 0
-    if newest_ms <= 0:
+        readiness = latest_market_readiness(capture_root)
+        oldest_required_ns = readiness.oldest_required_receive_ts_ns
+        if oldest_required_ns is None:
+            raise RuntimeError("required live-L2 receive timestamp is unavailable")
+        newest_ms = oldest_required_ns // 1_000_000
+    except (OSError, RuntimeError, ValueError) as exc:
         return [
             Alert(
                 key=f"account_capture_missing{suffix}",
                 severity=CRITICAL,
-                message=f"{owner_label} owner has no raw L2 capture; decisions cannot be executed safely.",
+                message=(
+                    f"{owner_label} owner has no usable bounded live-L2 readiness; "
+                    f"decisions cannot be executed safely ({type(exc).__name__}: {str(exc)[:160]})."
+                ),
             )
         ]
     age_minutes = (now_ms - newest_ms) / 60_000.0
@@ -750,7 +758,7 @@ def gather_account_capture_alerts(
                 key=f"account_capture_stale{suffix}",
                 severity=CRITICAL,
                 message=(
-                    f"{owner_label} raw L2 capture is {age_minutes:.1f} min stale "
+                    f"{owner_label} live L2 is {age_minutes:.1f} min stale "
                     f"(> {max_age_minutes:g} min); owner may be hung or disconnected."
                 ),
             )
@@ -904,19 +912,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--account-capture-root",
         default=os.environ.get("ACCOUNT_CAPTURE_ROOT") or _default_root("data/bybit-account-market-capture"),
-        help="raw demo account-owner L2 capture root",
+        help="demo account-owner market/readiness and decision-context root",
     )
     p.add_argument(
         "--account-paper-capture-root",
         default=os.environ.get("ACCOUNT_PAPER_CAPTURE_ROOT")
         or _default_root("data/bybit-account-paper-market-capture"),
-        help="raw paper account-owner L2 capture root",
+        help="paper account-owner market/readiness and decision-context root",
     )
     p.add_argument(
         "--max-account-capture-age-min",
         type=float,
         default=3.0,
-        help="critical alert if canonical account L2 capture is older than this",
+        help="critical alert if canonical account-owner live L2 is older than this",
     )
     p.add_argument(
         "--max-account-health-age-min",

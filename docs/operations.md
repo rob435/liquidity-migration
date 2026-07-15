@@ -24,6 +24,13 @@ registered V8 corrected-defect epoch. The CLI/schema names `v7-archive`,
 passing training calibration and must bind V8; they cannot consume the failed
 V7 receipt.
 
+The owner has made the registered five-day natural/raw-tape run optional
+research. It remains unrun and may not be called passed, waived, or promoted.
+Demo/paper VPS operation instead uses live sequence-aware L2, bounded market
+readiness, exact decision books, and the account journal. Bulk raw persistence
+is explicit: `1` during registered V8/natural evidence, `0` for permanent
+operation. Paper still requires the passing V8 twin receipt.
+
 ```bash
 scripts/ops.sh
 scripts/ops.sh status
@@ -48,6 +55,7 @@ scripts/ops.sh stopped-epoch --help
 scripts/ops.sh fresh-deploy-epoch --help
 scripts/ops.sh fresh-deploy-env --help
 scripts/ops.sh authorized-deploy-epoch --help
+scripts/ops.sh operational-authority --help
 scripts/ops.sh venue-accounting --help
 scripts/ops.sh cutover-authority --help
 scripts/ops.sh test -q
@@ -85,6 +93,12 @@ scripts/ops.sh test -q
   prestart empty/stopped check and consumes that marker. `verify`,
   `verify-processes`, and each same-process workload wrapper are read-only
   poststart checks.
+- `operational-authority` runs on the VPS. `verify` and `verify-runtime` are
+  read-only; `issue` is refused unless the operator inserts `--execute` before
+  the subcommand. The calibration profile authorizes only the demo owner with
+  raw capture enabled. The operational profile requires the passing twin
+  receipt, disables bulk raw capture, and authorizes only the checked nine-unit
+  demo/paper topology. Neither profile grants a research conclusion.
 - `natural-safety-flatten` also runs on the VPS and requires `--execute`. It is
   credential-free and can only publish RISK-authored zero targets for exact
   canonical LONG/CONTINUOUS component desires after the registered T1. Its
@@ -133,6 +147,7 @@ overwrite it.
 | `fresh-deploy-epoch` | `python -m liquidity_migration.fresh_deploy_epoch` | Creates/verifies ten empty deployment roots, deriving candidate, freeze, and exact old-root identities from the stopped seal. |
 | `fresh-deploy-env` | `python -m liquidity_migration.fresh_deploy_environment` | Materializes/verifies nine exact late systemd environment files from a fresh-deploy manifest; it does not create roots or start services. |
 | `authorized-deploy-epoch` | `python -m liquidity_migration.authorized_deploy_epoch` | Authority-aware prestart preparation, poststart root/environment verification, and active-process environment verification. |
+| `operational-authority` | VPS `python -m liquidity_migration.operational_runtime_authority` | Creates or verifies exact-commit/machine/input/root-bound calibration-only or demo/paper operational authority. Issue requires the explicit `--execute` router handshake; never authorizes mainnet. |
 | `venue-accounting` | `scripts/reconcile_bybit_demo_accounting.py` | Owner-serialized, venue-read-only demo TRADE/closed-PnL/SETTLEMENT and flatness reconciliation against the stopped canonical journal. |
 | `cutover-authority` | `scripts/account_execution_cutover_authority.py` | Creates reviewed-evidence wrappers, an open assessment template, or the short-lived host/commit/evidence-bound deploy authorization. It never decides a non-machine-verifiable gate by itself. |
 | `equity` | `scripts/equity_curves.sh` | Official LONG/CONTINUOUS equity runner; forwards every option unchanged. |
@@ -151,8 +166,52 @@ sources. It parses both route EnvironmentFiles and cross-checks their account,
 inbox, capture, candidate, rule, risk, calibration, freshness, and paper `p50`
 values against the named sources; the risk policies must be semantically equal
 and the queue-head market warmup timeout cannot exceed 30 seconds. `REAL_MONEY`
-must be unset or explicitly false. Its distinct seed input is the mode-`0600`
+must be unset or explicitly false, and both owner sources must set
+`ACCOUNT_RAW_MARKET_PERSISTENCE=1`. Its distinct seed input is the mode-`0600`
 BTCUSDT/ETHUSDT/BUSDT V8 symbol file, not the candidate-universe artifact.
+
+## Owner-authorized operational VPS path
+
+This path is not the natural/research-promotion deploy. Freeze and pass the
+same complete candidate gates first, then use install-preflight while every
+VPS unit is stopped. Re-prove authenticated demo flatness and zero regular and
+conditional orders before issuing either receipt.
+
+For the bounded V8 bootstrap, the demo environment must set raw persistence
+`1`; paper and ordinary producers remain stopped:
+
+```bash
+COMMIT="$(git rev-parse HEAD)"
+scripts/ops.sh operational-authority --execute issue \
+  --profile calibration \
+  --expected-commit "$COMMIT" \
+  --repo-root /opt/liquidity-migration \
+  --authorization-reference "owner task: bounded V8 bootstrap" \
+  --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
+```
+
+The create-only receipt authorizes only
+`liquidity-migration-account-execution.service`. Start that owner, require its
+same-generation readiness, then run V8 exactly once through
+`demo-calibration --execute`. A failed V8 remains a failure and paper remains
+blocked. Do not resize, resume, reset, or retry it.
+
+After a passing V8, stop the owner and preserve the calibration authorization
+under the private attempt directory. Install the verified twin receipt at the
+paper path, set `ACCOUNT_RAW_MARKET_PERSISTENCE=0` in both owner environments,
+rebuild/verify the resolved sleeve file, and issue a new receipt with
+`--profile operational`. The writer refuses to overwrite the well-known path.
+Start and enable both owners first; only after both readiness gates pass may
+the enabled LONG/CONT demo/paper producers start. Validate RMOM before enabling
+its refresh timer, then the hedge timer, and finally the liveness timer. Data-
+only liquidation/depth collectors are not part of this operational authority
+and need not run on this VPS.
+
+Verification must prove the receipt and active process environments, fresh
+bounded market sidecars for both owners, current account health, no unexpected
+venue positions/orders, and no growing raw order-book/public-trade segments.
+Decision-context segments and journals should grow only when real decisions or
+account events occur.
 
 ## Exact-candidate Linux CI
 
@@ -186,8 +245,9 @@ Python command plus flags into `PYTHON`; it must name one executable or
 executable path.
 
 The router has an explicit locality boundary. `status`, `reset`,
-`clock-offset`, `demo-calibration`, `natural-safety-flatten`, and `deploy` cross
-SSH from the control checkout. The other routes execute in the checkout where
+`clock-offset`, `demo-calibration`, `natural-safety-flatten`,
+`operational-authority`, and `deploy` cross SSH from the control checkout. The
+other routes execute in the checkout where
 `scripts/ops.sh` is invoked. Therefore any local route whose arguments name
 live `/opt/liquidity-migration` or `/var/lib/liquidity-migration` sources must
 be run from the staged VPS checkout (or only after those sources have been

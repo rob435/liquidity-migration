@@ -16,6 +16,7 @@ from liquidity_migration.account_owner_health import (
 from liquidity_migration.account_route import ensure_account_route
 from liquidity_migration.market_capture import (
     OWNER_CAPTURE_READINESS_FILENAME,
+    OWNER_MARKET_READINESS_FILENAME,
     MarketCaptureConfig,
     SequenceAwareMarketRecorder,
 )
@@ -61,6 +62,7 @@ def _ready_roots(
     capture_invocation_id: str | None = None,
     health_observed_ts_ns: int = NOW_NS - 1_000_000,
     capture_receive_ts_ns: int = NOW_NS - 500_000,
+    persist_raw_market: bool = True,
 ) -> tuple[Path, Path, Path]:
     account = tmp_path / f"{environment}-account"
     inbox = tmp_path / f"{environment}-inbox"
@@ -91,7 +93,14 @@ def _ready_roots(
     )
     recorder = SequenceAwareMarketRecorder(
         capture,
-        config=_capture_config(),
+        config=MarketCaptureConfig(
+            depth=50,
+            segment_max_bytes=1_000_000,
+            fsync_every_records=100,
+            min_free_disk_bytes=1,
+            ring_records_per_symbol=100,
+            persist_raw_market=persist_raw_market,
+        ),
         owner_invocation_id=capture_invocation_id or invocation_id,
     )
     recorder.on_message(_snapshot(), local_receive_ts_ns=capture_receive_ts_ns)
@@ -121,8 +130,33 @@ def test_require_owner_ready_binds_route_health_journal_and_capture(
     assert receipt.owner_invocation_id == CURRENT_INVOCATION_ID
     assert receipt.journal_sequence == 0
     assert receipt.journal_state_hash == GENESIS_HASH
-    assert receipt.capture_latest_receive_ts_ns == NOW_NS - 500_000
-    assert receipt.capture_age_ns == 500_000
+    assert receipt.market_symbol == "BTCUSDT"
+    assert receipt.market_required_symbol_count == 1
+    assert receipt.market_oldest_required_receive_ts_ns == NOW_NS - 500_000
+    assert receipt.market_age_ns == 500_000
+    assert receipt.raw_market_persistence_enabled is True
+
+
+def test_owner_readiness_does_not_require_bulk_raw_market_persistence(
+    tmp_path: Path,
+) -> None:
+    account, inbox, capture = _ready_roots(tmp_path, persist_raw_market=False)
+
+    receipt = readiness.require_account_owner_ready(
+        environment="demo",
+        account_root=account,
+        inbox_root=inbox,
+        capture_root=capture,
+        expected_invocation_id=CURRENT_INVOCATION_ID,
+        now_ns=NOW_NS,
+        max_age_ns=2_000_000,
+    )
+
+    assert receipt.raw_market_persistence_enabled is False
+    assert receipt.market_oldest_required_receive_ts_ns == NOW_NS - 500_000
+    assert not list(capture.rglob("segment-*.jsonl"))
+    assert not (capture / OWNER_CAPTURE_READINESS_FILENAME).exists()
+    assert (capture / OWNER_MARKET_READINESS_FILENAME).is_file()
 
 
 def test_readiness_rejects_weakened_freshness_bound_before_files(
@@ -159,7 +193,7 @@ def test_readiness_rejects_fresh_health_from_previous_systemd_generation(
         )
 
 
-def test_readiness_rejects_fresh_capture_from_previous_systemd_generation(
+def test_readiness_rejects_fresh_market_from_previous_systemd_generation(
     tmp_path: Path,
 ) -> None:
     account, inbox, capture = _ready_roots(
@@ -203,7 +237,7 @@ def test_readiness_ignores_old_malformed_and_crash_tail_segments(
         max_age_ns=2_000_000,
     )
 
-    assert receipt.capture_latest_receive_ts_ns == NOW_NS - 500_000
+    assert receipt.market_oldest_required_receive_ts_ns == NOW_NS - 500_000
 
 
 def test_readiness_does_not_infer_cross_projection_wall_clock_order(
@@ -225,7 +259,10 @@ def test_readiness_does_not_infer_cross_projection_wall_clock_order(
         max_age_ns=2_000_000,
     )
 
-    assert receipt.capture_latest_receive_ts_ns < receipt.health_observed_ts_ns
+    assert (
+        receipt.market_oldest_required_receive_ts_ns
+        < receipt.health_observed_ts_ns
+    )
 
 
 def test_readiness_rejects_stale_or_malformed_capture(tmp_path: Path) -> None:
@@ -234,7 +271,7 @@ def test_readiness_rejects_stale_or_malformed_capture(tmp_path: Path) -> None:
         capture_receive_ts_ns=NOW_NS - 10_000_000,
     )
 
-    with pytest.raises(RuntimeError, match="capture is stale"):
+    with pytest.raises(RuntimeError, match="live market is stale"):
         readiness.require_account_owner_ready(
             environment="demo",
             account_root=account,
@@ -254,7 +291,7 @@ def test_readiness_rejects_stale_or_malformed_capture(tmp_path: Path) -> None:
         )
 
 
-def test_stale_sidecar_is_rejected_before_opening_its_segment(
+def test_operational_readiness_never_opens_a_raw_capture_segment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -268,7 +305,7 @@ def test_stale_sidecar_is_rejected_before_opening_its_segment(
 
     monkeypatch.setattr(readiness, "_read_referenced_capture_record", should_not_open)
 
-    with pytest.raises(RuntimeError, match="capture is stale"):
+    with pytest.raises(RuntimeError, match="live market is stale"):
         readiness.require_account_owner_ready(
             environment="demo",
             account_root=account,
@@ -288,6 +325,7 @@ def test_standalone_capture_does_not_require_or_publish_owner_sidecar(tmp_path: 
 
     assert "owner_invocation_id" not in row
     assert not (capture / OWNER_CAPTURE_READINESS_FILENAME).exists()
+    assert not (capture / OWNER_MARKET_READINESS_FILENAME).exists()
     assert len(list(capture.rglob("segment-*.jsonl"))) == 1
 
 

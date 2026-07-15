@@ -31,7 +31,7 @@ ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
 MemoryMax=512M
-# Requires both account owners, fresh independent demo/paper L2 capture, and
+# Requires both account owners, fresh independent demo/paper live L2, and
 # fresh healthy owner artifacts under both canonical account roots. Strategy
 # cycle/input checks remain; retired sleeve-ledger, ws_risk, and combined-report
 # checks do not. Exits 0 always (a watchdog must never crash-loop).

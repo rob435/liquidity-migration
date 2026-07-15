@@ -19,7 +19,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-account-paper-execution.service.env
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-account-paper-execution.service main
 # Prevent paper producers from racing a previous or merely-forked owner on
-# deploy or boot; the capture must also postdate this invocation's health.
+# deploy or boot; live-L2 readiness must bind the same systemd invocation.
 ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-account-paper-execution.service readiness
 Restart=always
 RestartSec=2

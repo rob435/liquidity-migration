@@ -78,6 +78,7 @@ def test_ops_help_is_read_only(help_args: list[str], tmp_path: Path) -> None:
     assert "fresh-deploy-epoch" in result.stdout
     assert "fresh-deploy-env" in result.stdout
     assert "authorized-deploy-epoch" in result.stdout
+    assert "operational-authority" in result.stdout
     assert "venue-accounting" in result.stdout
     assert "cutover-authority" in result.stdout
     assert not call_log.exists()
@@ -677,6 +678,78 @@ def test_ops_remote_calibration_routes_require_execute_and_preserve_arguments(
         *injected,
         "--output",
         "receipt with spaces",
+    ]
+
+
+def test_ops_operational_authority_requires_issue_handshake_and_routes_module(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ssh = fake_bin / "ssh"
+    ssh.write_text("#!/bin/sh\nexec /bin/bash -s\n", encoding="utf-8")
+    ssh.chmod(0o755)
+    remote = tmp_path / "remote repo"
+    python = remote / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    _write_capture_command(python)
+    call_log = tmp_path / "call.bin"
+    env_log = tmp_path / "env.txt"
+    env = {
+        "PATH": f"{fake_bin}{os.pathsep}/usr/bin:/bin",
+        "SSH_TARGET": "operator@example.test",
+        "REPO_DIR": str(remote),
+        "CALL_LOG": str(call_log),
+        "ENV_LOG": str(env_log),
+    }
+
+    refused = _run_ops(["operational-authority", "issue"], env=env)
+    assert refused.returncode == 2
+    assert "prefix it with --execute" in refused.stderr
+    assert not call_log.exists()
+
+    bad_handshake = _run_ops(
+        ["operational-authority", "--execute", "verify"],
+        env=env,
+    )
+    assert bad_handshake.returncode == 2
+    assert "valid only before the issue subcommand" in bad_handshake.stderr
+    assert not call_log.exists()
+
+    issued = _run_ops(
+        [
+            "operational-authority",
+            "--execute",
+            "issue",
+            "--profile",
+            "calibration",
+            "--authorization-reference",
+            "task with spaces",
+        ],
+        env=env,
+    )
+    assert issued.returncode == 0, issued.stderr
+    assert _read_nul_args(call_log) == [
+        "-m",
+        "liquidity_migration.operational_runtime_authority",
+        "issue",
+        "--profile",
+        "calibration",
+        "--authorization-reference",
+        "task with spaces",
+    ]
+
+    verified = _run_ops(
+        ["operational-authority", "verify", "--repo-root", str(remote)],
+        env=env,
+    )
+    assert verified.returncode == 0, verified.stderr
+    assert _read_nul_args(call_log) == [
+        "-m",
+        "liquidity_migration.operational_runtime_authority",
+        "verify",
+        "--repo-root",
+        str(remote),
     ]
 
 

@@ -30,8 +30,10 @@ from .execution_environment import account_id_for_environment, execution_environ
 from .market_capture import (
     MAX_OWNER_CAPTURE_RECORD_BYTES,
     OwnerCaptureReadinessSidecar,
+    OwnerMarketReadinessSidecar,
     capture_record_id,
     owner_capture_readiness_path,
+    owner_market_readiness_path,
 )
 
 
@@ -65,8 +67,12 @@ class AccountOwnerReadiness:
     health_loop_sequence: int
     journal_sequence: int
     journal_state_hash: str
-    capture_latest_receive_ts_ns: int
-    capture_age_ns: int
+    market_symbol: str
+    market_required_symbols_sha256: str
+    market_required_symbol_count: int
+    market_oldest_required_receive_ts_ns: int
+    market_age_ns: int
+    raw_market_persistence_enabled: bool
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -99,17 +105,17 @@ def _stable_signature(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _stable_private_sidecar(path: Path) -> bytes:
+def _stable_private_sidecar(path: Path, *, label: str = "capture") -> bytes:
     """Read the small atomically replaced sidecar without following aliases."""
 
     try:
         before_path = path.lstat()
     except OSError as exc:
-        raise ValueError(f"account owner capture readiness sidecar is unavailable: {path}") from exc
+        raise ValueError(f"account owner {label} readiness sidecar is unavailable: {path}") from exc
     if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
-        raise ValueError("account owner capture readiness sidecar must be a regular non-symlink file")
+        raise ValueError(f"account owner {label} readiness sidecar must be a regular non-symlink file")
     if before_path.st_size <= 0 or before_path.st_size > _MAX_CAPTURE_SIDECAR_BYTES:
-        raise ValueError("account owner capture readiness sidecar has an invalid bounded size")
+        raise ValueError(f"account owner {label} readiness sidecar has an invalid bounded size")
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -119,24 +125,24 @@ def _stable_private_sidecar(path: Path) -> bytes:
     try:
         descriptor = os.open(str(path), flags)
     except OSError as exc:
-        raise ValueError("account owner capture readiness sidecar cannot be opened safely") from exc
+        raise ValueError(f"account owner {label} readiness sidecar cannot be opened safely") from exc
     try:
         before_descriptor = os.fstat(descriptor)
         if _stable_signature(before_descriptor) != _stable_signature(before_path):
-            raise RuntimeError("account owner capture readiness sidecar changed while opening")
+            raise RuntimeError(f"account owner {label} readiness sidecar changed while opening")
         if (
             not stat.S_ISREG(before_descriptor.st_mode)
             or stat.S_IMODE(before_descriptor.st_mode) != 0o600
             or before_descriptor.st_uid != os.geteuid()
             or before_descriptor.st_nlink != 1
         ):
-            raise ValueError("account owner capture readiness sidecar must be private and singly linked")
+            raise ValueError(f"account owner {label} readiness sidecar must be private and singly linked")
         chunks: list[bytes] = []
         remaining = before_descriptor.st_size
         while remaining:
             chunk = os.read(descriptor, min(remaining, 4096))
             if not chunk:
-                raise RuntimeError("account owner capture readiness sidecar ended while reading")
+                raise RuntimeError(f"account owner {label} readiness sidecar ended while reading")
             chunks.append(chunk)
             remaining -= len(chunk)
         data = b"".join(chunks)
@@ -146,13 +152,13 @@ def _stable_private_sidecar(path: Path) -> bytes:
     try:
         after_path = path.lstat()
     except OSError as exc:
-        raise RuntimeError("account owner capture readiness sidecar disappeared while reading") from exc
+        raise RuntimeError(f"account owner {label} readiness sidecar disappeared while reading") from exc
     expected_signature = _stable_signature(before_descriptor)
     if (
         _stable_signature(after_descriptor) != expected_signature
         or _stable_signature(after_path) != expected_signature
     ):
-        raise RuntimeError("account owner capture readiness sidecar changed while reading")
+        raise RuntimeError(f"account owner {label} readiness sidecar changed while reading")
     return data
 
 
@@ -169,6 +175,21 @@ def _read_owner_capture_sidecar(root: Path) -> OwnerCaptureReadinessSidecar:
         return OwnerCaptureReadinessSidecar.from_dict(payload)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid account owner capture readiness sidecar: {exc}") from exc
+
+
+def _read_owner_market_sidecar(root: Path) -> OwnerMarketReadinessSidecar:
+    path = owner_market_readiness_path(root)
+    data = _stable_private_sidecar(path, label="market")
+    try:
+        payload = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("account owner market readiness sidecar is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("account owner market readiness sidecar must contain an object")
+    try:
+        return OwnerMarketReadinessSidecar.from_dict(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid account owner market readiness sidecar: {exc}") from exc
 
 
 def _path_identity(metadata: os.stat_result) -> tuple[int, ...]:
@@ -355,6 +376,50 @@ def latest_capture_receive_ts_ns(
     return sidecar.local_receive_ts_ns
 
 
+def latest_market_readiness(
+    capture_root: str | Path,
+    *,
+    expected_invocation_id: str | None = None,
+) -> OwnerMarketReadinessSidecar:
+    """Verify and return bounded live-L2 readiness independent of raw storage."""
+
+    root = _absolute_directory(capture_root, label="account capture root")
+    sidecar = _read_owner_market_sidecar(root)
+    if expected_invocation_id is not None:
+        expected_generation = validate_systemd_invocation_id(
+            expected_invocation_id,
+            label="expected account-owner market invocation id",
+        )
+        if sidecar.owner_invocation_id != expected_generation:
+            raise RuntimeError(
+                "account owner market readiness does not match the current systemd generation: "
+                f"market={sidecar.owner_invocation_id}, expected={expected_generation}"
+            )
+    if not sidecar.book_healthy or not sidecar.all_required_books_healthy:
+        raise RuntimeError(
+            "account owner market books are unhealthy: "
+            f"representative={sidecar.symbol}, "
+            f"healthy={sidecar.healthy_symbol_count}/"
+            f"{sidecar.required_symbol_count}"
+        )
+    return sidecar
+
+
+def latest_market_receive_ts_ns(
+    capture_root: str | Path,
+    *,
+    expected_invocation_id: str | None = None,
+) -> int:
+    sidecar = latest_market_readiness(
+        capture_root,
+        expected_invocation_id=expected_invocation_id,
+    )
+    timestamp = sidecar.oldest_required_receive_ts_ns
+    if timestamp is None:
+        raise RuntimeError("account owner required live-L2 timestamp is unavailable")
+    return timestamp
+
+
 def _sidecar_for_generation(
     root: Path,
     *,
@@ -380,7 +445,7 @@ def require_account_owner_ready(
     max_age_ns: int = REGISTERED_MAX_AGE_NS,
     now_ns: int | None = None,
 ) -> AccountOwnerReadiness:
-    """Require one exact route, head-bound healthy owner, and fresh capture."""
+    """Require one exact route, healthy owner, and fresh usable live L2."""
 
     selected = execution_environment(environment).value
     account_id = expected_account_id or account_id_for_environment(selected)
@@ -414,15 +479,16 @@ def require_account_owner_ready(
         expected_account_id=account_id,
         expected_invocation_id=expected_generation,
     )
-    capture_sidecar = _sidecar_for_generation(
+    market_sidecar = latest_market_readiness(
         capture,
-        expected_generation=expected_generation,
+        expected_invocation_id=expected_generation,
     )
-    capture_ts_ns = capture_sidecar.local_receive_ts_ns
-    capture_age_ns = observed_now - capture_ts_ns
-    if capture_age_ns < 0 or capture_age_ns > max_age_ns:
-        raise RuntimeError(f"account owner market capture is stale: age_ns={capture_age_ns}")
-    _read_referenced_capture_record(capture, capture_sidecar)
+    market_ts_ns = market_sidecar.oldest_required_receive_ts_ns
+    if market_ts_ns is None:
+        raise RuntimeError("account owner required live-L2 timestamp is unavailable")
+    market_age_ns = observed_now - market_ts_ns
+    if market_age_ns < 0 or market_age_ns > max_age_ns:
+        raise RuntimeError(f"account owner live market is stale: age_ns={market_age_ns}")
     # Generation identifiers, not cross-thread wall-clock ordering, bind these
     # independent projections. Both must be current-generation and fresh; their
     # timestamps do not prove which completed first.
@@ -438,8 +504,16 @@ def require_account_owner_ready(
         health_loop_sequence=health.loop_sequence,
         journal_sequence=health.journal_sequence,
         journal_state_hash=health.journal_state_hash,
-        capture_latest_receive_ts_ns=capture_ts_ns,
-        capture_age_ns=capture_age_ns,
+        market_symbol=market_sidecar.symbol,
+        market_required_symbols_sha256=(
+            market_sidecar.required_symbols_sha256
+        ),
+        market_required_symbol_count=market_sidecar.required_symbol_count,
+        market_oldest_required_receive_ts_ns=market_ts_ns,
+        market_age_ns=market_age_ns,
+        raw_market_persistence_enabled=(
+            market_sidecar.raw_market_persistence_enabled
+        ),
     )
 
 
@@ -493,7 +567,7 @@ def wait_for_account_owner_ready(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Wait for an exact healthy account owner and fresh market capture"
+        description="Wait for an exact healthy account owner and fresh usable live L2"
     )
     parser.add_argument("--environment", required=True, choices=("demo", "paper"))
     parser.add_argument("--account-root", type=Path, required=True)
@@ -534,6 +608,8 @@ if __name__ == "__main__":
 __all__ = [
     "AccountOwnerReadiness",
     "latest_capture_receive_ts_ns",
+    "latest_market_readiness",
+    "latest_market_receive_ts_ns",
     "require_account_owner_ready",
     "wait_for_account_owner_ready",
 ]

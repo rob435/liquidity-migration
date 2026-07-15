@@ -114,6 +114,31 @@ host and exact clean staged commit. Do not `touch` this path. Issue it through
 `docs/account_execution_cutover.md` actually pass. This integrity check does
 not turn operator judgment into a signature or an automatic evidence verdict.
 
+The owner-approved demo/paper operational path is intentionally separate from
+that research-promotion deploy receipt. It uses the create-only mode-`0600`
+receipt:
+
+```text
+/etc/liquidity-migration/account-execution-operational-ready
+```
+
+`scripts/ops.sh operational-authority` verifies it remotely;
+`operational-authority --execute issue` is the required mutation handshake.
+The temporary `calibration` profile authorizes only the demo account owner and
+requires raw persistence `1`. The permanent `operational` profile requires a
+passing paper twin receipt, raw persistence `0` for both owners, and binds all
+nine guarded units. Both profiles bind the exact clean commit, machine,
+environment files, immutable config inputs, and runtime-root identities.
+Natural/fresh overrides, simultaneous operational and research-deploy
+receipts, mainnet variables, or changed inputs fail closed.
+
+Bulk raw retention and execution safety are distinct. With persistence `0`,
+the owners still subscribe to and reconstruct live L2, publish a bounded atomic
+readiness sidecar, and durably capture each exact decision book. They simply do
+not subscribe to public trades or append every raw L2 frame. With persistence
+`1`, raw L2/public-trade segments are also written for V8/natural evidence.
+Existing capture bytes are not deleted by either mode.
+
 The demo owner route is configured in
 `/etc/liquidity-migration/account-execution.env`:
 
@@ -122,6 +147,7 @@ ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-execution
 ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-intents
 ACCOUNT_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-market-capture
+ACCOUNT_RAW_MARKET_PERSISTENCE=0
 ACCOUNT_SYMBOLS_FILE=/etc/liquidity-migration/account-execution/symbols.txt
 ACCOUNT_DEMO_RULES_FILE=/etc/liquidity-migration/account-execution/demo-rules.json
 ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-execution/risk-policy.json
@@ -136,6 +162,7 @@ ACCOUNT_PAPER_KERNEL_REQUIRED=1
 ACCOUNT_EXECUTION_ROOT=/opt/liquidity-migration/data/bybit-account-paper
 ACCOUNT_INTENT_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-paper-intents
 ACCOUNT_PAPER_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-paper-market-capture
+ACCOUNT_RAW_MARKET_PERSISTENCE=0
 ACCOUNT_SYMBOLS_FILE=/etc/liquidity-migration/account-paper-execution/symbols.txt
 ACCOUNT_DEMO_RULES_FILE=/etc/liquidity-migration/account-execution/demo-rules.json
 ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-paper-execution/risk-policy.json
@@ -174,6 +201,13 @@ invalid strategy constants, stale required rmom gates, unknown legacy units, or
 an owner/producer that does not become active. It starts both account owners
 before enabled target producers. Verification is read-only and checks the same
 topology and unit environment latches.
+
+That full deploy route remains the natural/research-promotion path. For the
+owner-approved operational path, first use `INSTALL_PREFLIGHT_ONLY=1` to install
+and verify the exact guarded unit surface without starting anything. Then use
+the operational authorization profiles above and start owners before any
+producer. Do not invent an `account-execution-deploy-ready` receipt merely to
+enter operational mode.
 
 Before the evidence window, explicitly bind the staged clean commit and machine
 with `authorized-deploy-epoch prepare-evidence-runtime`. That command creates
@@ -231,19 +265,25 @@ state is preserved as an incident and fails closed.
 ## Evidence-window startup and inspection
 
 After staged installation, the flat reset, fresh demo rules, and explicit
-capture authorization, start the demo account owner alone. Verify fresh bound
-owner health before starting any demo producer. Calibrate from the resulting
-demo tape before starting the paper owner; verify it before paper producers.
-This sequence is an evidence window, not a full deploy. Useful checks are:
+capture authorization, set the demo owner environment to
+`ACCOUNT_RAW_MARKET_PERSISTENCE=1` and issue the calibration-only operational
+authorization. Start the demo account owner alone. Verify fresh bound owner
+health before running V8; ordinary producers stay stopped. Calibrate from the
+resulting demo tape before starting the paper owner. This sequence is an
+evidence window, not a full deploy. Useful checks are:
 
 ```bash
 install -m 0600 /dev/null /etc/liquidity-migration/account-execution-capture-enabled
+scripts/ops.sh operational-authority --execute issue \
+  --profile calibration \
+  --expected-commit "$(git -C /opt/liquidity-migration rev-parse HEAD)" \
+  --repo-root /opt/liquidity-migration \
+  --authorization-reference "owner task: bounded V8 bootstrap" \
+  --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
 systemctl start liquidity-migration-account-execution.service
 systemctl status liquidity-migration-account-execution.service
 python3 -c 'from liquidity_migration.account_owner_health import require_recent_account_owner_health; require_recent_account_owner_health("/opt/liquidity-migration/data/bybit-account-execution", environment="demo", expected_account_id="bybit-demo-unified", max_age_ns=30_000_000_000)'
-# Only after that command passes:
-systemctl start liquidity-migration-bybit-long-demo.service
-systemctl start liquidity-migration-bybit-continuous-demo.service
+# Only the registered V8 driver may publish during calibration.
 systemctl status liquidity-migration-account-paper-execution.service
 systemctl status liquidity-migration-demo-liveness.timer
 systemctl list-units 'liquidity-migration-*'
@@ -251,6 +291,11 @@ journalctl -u liquidity-migration-account-execution.service -n 200 --no-pager
 ```
 
 Do not start the paper owner until its passing calibration receipt is installed.
+After V8, stop the demo owner, preserve the calibration authorization, install
+the verified twin receipt, set raw persistence `0` in both owner environments,
+and issue a new `operational` receipt at the well-known path before starting
+either owner. The create-only writer will not overwrite the calibration
+receipt; archive it into the private attempt evidence directory first.
 Do not issue `account-execution-deploy-ready` during live evidence collection.
 After targets and the venue are flat, stop producers, let both owners write
 final fresh health, and stop the owners. The owner-serialized read-only final

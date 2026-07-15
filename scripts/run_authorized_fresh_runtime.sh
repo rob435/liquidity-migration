@@ -78,11 +78,25 @@ case "$UNIT:$ENTRYPOINT" in
         ;;
 esac
 
-/opt/liquidity-migration/.venv/bin/python \
-    -m liquidity_migration.authorized_deploy_epoch verify-runtime \
-    --authorization /etc/liquidity-migration/account-execution-deploy-ready \
-    --repo-root /opt/liquidity-migration \
-    --output-directory /etc/liquidity-migration/fresh-deploy \
-    --unit "$UNIT"
+OPERATIONAL_AUTHORIZATION=/etc/liquidity-migration/account-execution-operational-ready
+CUTOVER_AUTHORIZATION=/etc/liquidity-migration/account-execution-deploy-ready
+if [ -e "$OPERATIONAL_AUTHORIZATION" ] && [ -e "$CUTOVER_AUTHORIZATION" ]; then
+    echo "refusing ambiguous runtime authority: both operational and research-cutover receipts exist" >&2
+    exit 2
+fi
+if [ -e "$OPERATIONAL_AUTHORIZATION" ]; then
+    /opt/liquidity-migration/.venv/bin/python \
+        -m liquidity_migration.operational_runtime_authority verify-runtime \
+        --receipt "$OPERATIONAL_AUTHORIZATION" \
+        --repo-root /opt/liquidity-migration \
+        --unit "$UNIT"
+else
+    /opt/liquidity-migration/.venv/bin/python \
+        -m liquidity_migration.authorized_deploy_epoch verify-runtime \
+        --authorization "$CUTOVER_AUTHORIZATION" \
+        --repo-root /opt/liquidity-migration \
+        --output-directory /etc/liquidity-migration/fresh-deploy \
+        --unit "$UNIT"
+fi
 
 exec "${COMMAND[@]}"

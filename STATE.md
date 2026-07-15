@@ -17,6 +17,30 @@ research decisions are in
 
 - Mainnet is not enabled. Changing that requires an explicit owner instruction
   and new evidence.
+- The owner has separated operational execution from optional research capture.
+  The registered 120-hour natural/raw-tape study remains prospective and may be
+  run later on another machine; it is no longer a prerequisite for demo/paper
+  operation and no natural evidence claim is being made. Runtime safety still
+  requires live sequence-aware L2, a bounded same-generation market-readiness
+  sidecar, exact decision-boundary books, and the canonical account journal.
+  The prospective runtime change makes bulk order-book/public-trade persistence
+  explicit: `1` for registered V8/natural evidence, `0` for permanent VPS
+  operation. The paper owner still requires a passing V8 execution-twin
+  calibration; that gate is not waived.
+- Candidate `0f05060ee30de819f270c3cb695a7f9b66fbebdd` passed its
+  2,957-test local and canonical pre-push gates. Its one exact-head Linux run
+  (`29403931189`) then failed only
+  `test_writer_rotates_by_utc_day_and_venue`: the test selected one of two
+  dated files through unspecified filesystem traversal order. The retained
+  result was 2,956 passes and one failure; it was not retried and the candidate
+  is spent. The prospective fix selects the two exact dated paths and asserts
+  their contents. A new candidate and one new exact-head run are required.
+- Read-only VPS inspection found the checkout clean at `98b3916a4a135` and all
+  execution units inactive. The 38-GB root filesystem has about 19 GB free.
+  Of 9.2 GB under the repository data root, 6.9 GB is prior bulk account-market
+  capture while the account journal is about 34 MB. The configured paper twin
+  calibration receipt is absent. Existing bytes are preserved; permanent
+  operational mode stops bulk capture growth rather than deleting history.
 - V7 is closed and spent. Its final `0.002 BTC` funding-hold close failed the
   unchanged four-second position-truth freshness rule; a separate canonical
   recovery target flattened the account, after which concurrent REST
@@ -155,16 +179,17 @@ research decisions are in
   strategy parity, and hedge/RMOM/liveness, CONTINUOUS adverse-limit mode, and
   LONG waits beyond 24 hours remain outside that runtime claim or in post-run
   replay.
-- The cutover acceptance gate is open: fresh rules and failed V4--V7 evidence
-  exist, but the prospective V8 follow-on has not been frozen into a clean exact
-  post-`344cd72` replacement candidate or passed its non-contacting
-  `candidate-ci` gate. V8
-  and its partial-fill gate have not run; there is no passing calibration
-  target/order/fill/P&L tape, second full registered-output natural-holdout reset, owner-first
-  readiness pair, 120-hour natural LONG/CONT tape, periodic clock series,
-  venue-accounting/final-flatness receipt, stopped-source seal, offline
-  replay/parity/sufficiency/drift result, fresh-deploy epoch, or full
-  historical/paper/demo comparison. The stopped and fresh epoch constructors
+- The research-promotion cutover gate remains open: fresh rules and failed
+  V4--V7 evidence exist, but V8 and its partial-fill gate have not run; there is
+  no passing calibration tape, 120-hour natural LONG/CONT tape, periodic clock
+  series, stopped-source seal, offline replay/parity/sufficiency/drift result,
+  fresh-deploy epoch, or historical/paper/demo promotion comparison. Those
+  missing artifacts still prohibit any natural/replay/promotion claim. They no
+  longer prohibit the separately owner-authorized demo/paper operational path.
+  That path instead requires one exact clean candidate, its complete local and
+  non-contacting Linux gates, verified demo flatness, V8 for the paper twin,
+  exact immutable runtime inputs, and a machine/commit-bound mode-`0600`
+  operational authorization. The stopped and fresh epoch constructors
   are integrity mechanisms in source, not evidence that either epoch exists.
   The earlier generic stopped-tree provenance implementation blocker is closed
   in source: target-replay manifest v2, event parity v3, captured-account replay
@@ -175,7 +200,7 @@ research decisions are in
   The target manifest assigns its completion time after replay construction,
   while dependency hashes and source reopening carry the causal provenance.
   None of these validators is a run artifact. The paper owner refuses startup
-  without a passing calibration. Full deploy requires a short-lived,
+  without a passing calibration. Research-promotion deploy requires a short-lived,
   mode-`0600` `account-execution-deploy-ready` authorization receipt that binds
   the exact clean commit and complete source-reopened gate set. No such receipt
   has been issued.
@@ -457,29 +482,26 @@ Strategy-overhaul status is still synthetic and outcome blind:
 
 ## Next actions
 
-1. Finish the replacement account-owner candidate and clean exact-candidate
-   Linux validation first. Then, still without deploying, run the registered
-   flat maintenance sequence: archive/reset the six roots for V8, run the fresh
-   V8 training epoch, materialize it through the compatibility `v7-archive`
-   surface **before** the second full
-   registered-output natural-holdout reset, start the paper owner alone and stop it cleanly, then
-   start the demo owner alone before any producer and collect the fixed 120-hour
-   natural LONG/CONT demo tapes. After T1, converge flat, stop the fleet,
-   capture venue accounting/funding and final flatness, and seal the stopped
-   source namespace before any offline historical/paper replay, structural
-   parity, sufficiency, or execution-twin drift analysis.
-   Write every derived analysis artifact to a separate root outside all 11
-   sealed paths; create the ten fresh deployment roots only after every analysis
-   gate passes, and keep those roots outside both namespaces. Do not substitute
-   the retired sleeve-projection reconciler or a V8 training sample for the
-   natural tape.
+1. Freeze the replacement account-owner candidate and pass its complete local,
+   pre-push, and one exact-head non-contacting Linux gate. Install that exact
+   commit while the VPS remains flat/stopped. Use the calibration-only
+   authorization to start the demo owner alone with raw capture enabled, then
+   run V8 exactly once. If V8 passes, stop the owner, preserve its receipt,
+   switch both owners to raw persistence `0`, issue the full operational
+   authorization, and start demo/paper owners before enabled target producers.
+   Verify bounded live-L2 readiness, account journals, venue flatness/working
+   orders, service health, and that bulk raw segments no longer grow. If V8
+   fails, preserve the failure and leave paper blocked; do not weaken or retry
+   it. The five-day natural study is deferred optional research and may be run
+   later only under its unchanged registered contract with raw persistence `1`.
 2. Let the owner-run Strategy Overhaul master plan continue on the big PC without
    coupling it to this VPS cutover. Ingest its immutable receipts only after the
    run finishes; a positive research result still does not change the live
    profile or authorize deployment.
-3. Keep `codex/account-execution-cutover` off `main` until the registered outcome
-   supports the cutover and the exact short-lived authorization exists. A
-   fast-forward of `main` is the checked deployment boundary, not cleanup.
+3. Keep `codex/account-execution-cutover` off `main`; the owner authorized only
+   exact-branch demo/paper VPS operation, not a `main` push. A future
+   research-promotion conclusion and `main` fast-forward remain separate
+   decisions.
    Delete the cutover branch only after that deployment verifies; delete any
    other branch only after proving it has no unique commit or dirty worktree.
    Use `docs/account_execution_completion_handoff.md` for a bounded continuation

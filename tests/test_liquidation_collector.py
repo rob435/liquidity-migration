@@ -44,9 +44,12 @@ def test_writer_rotates_by_utc_day_and_venue(tmp_path) -> None:
     assert w.written == 2
     # appends accumulate (no truncation)
     w.write([{"recv_ms": day1, "venue": "bybit", "symbol": "A", "side": "Buy", "qty": 1.0, "price": 2.0, "ts_ms": day1}])
-    byb = [p for p in tmp_path.rglob("*.jsonl") if "bybit" in str(p) and p.stem != ""][0]
-    lines = [json.loads(x) for x in byb.read_text(encoding="utf-8").splitlines() if x]
-    assert len(lines) >= 2
+    day1_path = tmp_path / files[0]
+    day2_path = tmp_path / files[1]
+    day1_lines = [json.loads(x) for x in day1_path.read_text(encoding="utf-8").splitlines() if x]
+    day2_lines = [json.loads(x) for x in day2_path.read_text(encoding="utf-8").splitlines() if x]
+    assert [row["recv_ms"] for row in day1_lines] == [day1, day1]
+    assert [row["recv_ms"] for row in day2_lines] == [day2]
 
 
 def test_writer_counts_rows_per_venue(tmp_path) -> None:

@@ -11,6 +11,7 @@ import pytest
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.market_capture import (
     OWNER_CAPTURE_READINESS_FILENAME,
+    OWNER_MARKET_READINESS_FILENAME,
     BybitRawPublicMarketStream,
     MarketCaptureConfig,
     SegmentedCaptureStore,
@@ -19,14 +20,19 @@ from liquidity_migration.market_capture import (
 )
 
 
-def _snapshot(*, update_id: int = 100, seq: int = 1_000) -> dict[str, object]:
+def _snapshot(
+    *,
+    update_id: int = 100,
+    seq: int = 1_000,
+    symbol: str = "BUSDT",
+) -> dict[str, object]:
     return {
-        "topic": "orderbook.50.BUSDT",
+        "topic": f"orderbook.50.{symbol}",
         "type": "snapshot",
         "ts": 1_800_000_000_000,
         "cts": 1_799_999_999_999,
         "data": {
-            "s": "BUSDT",
+            "s": symbol,
             "b": [["10.0", "2"], ["9.9", "3"]],
             "a": [["10.1", "4"], ["10.2", "5"]],
             "u": update_id,
@@ -114,6 +120,118 @@ def test_raw_snapshot_delta_capture_reconstructs_book_and_clock_offsets(tmp_path
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in tmp_path.rglob("*.jsonl"))
 
 
+def test_operational_mode_keeps_live_l2_and_decision_context_without_raw_segments(
+    tmp_path: Path,
+) -> None:
+    invocation_id = "a1" * 16
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(persist_raw_market=False),
+        owner_invocation_id=invocation_id,
+    )
+
+    snapshot = recorder.on_message(
+        _snapshot(),
+        local_receive_ts_ns=1_800_000_000_010_000_000,
+    )[0]
+    assert recorder.current_book("BUSDT") is not None
+    assert not list(tmp_path.rglob("segment-*.jsonl"))
+
+    market_sidecar = json.loads(
+        (tmp_path / OWNER_MARKET_READINESS_FILENAME).read_text(encoding="utf-8")
+    )
+    assert market_sidecar["record_id"] == snapshot["record_id"]
+    assert market_sidecar["book_healthy"] is True
+    assert market_sidecar["required_symbol_count"] == 1
+    assert market_sidecar["healthy_symbol_count"] == 1
+    assert market_sidecar["all_required_books_healthy"] is True
+    assert (
+        market_sidecar["oldest_required_receive_ts_ns"]
+        == snapshot["local_receive_ts_ns"]
+    )
+    assert market_sidecar["raw_market_persistence_enabled"] is False
+
+    context, book = recorder.capture_context(
+        symbol="BUSDT",
+        context_kind="account_service_decision",
+        reference_key="batch-1",
+    )
+    recorder.close()
+
+    rows = [
+        json.loads(line)
+        for path in tmp_path.rglob("segment-*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["kind"] for row in rows] == ["book_context"]
+    assert rows[0]["record_id"] == context["record_id"]
+    assert rows[0]["bids"] == [[level.price, level.qty] for level in book.bids]
+    assert rows[0]["asks"] == [[level.price, level.qty] for level in book.asks]
+
+
+def test_owner_market_readiness_covers_every_required_symbol_and_invalidates_changes(
+    tmp_path: Path,
+) -> None:
+    from liquidity_migration.account_owner_readiness import (
+        latest_market_readiness,
+        latest_market_receive_ts_ns,
+    )
+
+    invocation_id = "a1" * 16
+    first_receive_ns = 1_800_000_000_010_000_000
+    clock = VirtualClock(
+        current_wall_ns=first_receive_ns,
+        current_monotonic_ns=0,
+    )
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(persist_raw_market=False),
+        clock=clock,
+        owner_invocation_id=invocation_id,
+    )
+    recorder.set_required_symbols({"BUSDT", "ETHUSDT"})
+    recorder.on_message(
+        _snapshot(symbol="BUSDT"),
+        local_receive_ts_ns=first_receive_ns,
+    )
+
+    with pytest.raises(RuntimeError, match="healthy=1/2"):
+        latest_market_readiness(
+            tmp_path,
+            expected_invocation_id=invocation_id,
+        )
+
+    clock.advance_ns(1_000_000_000)
+    recorder.on_message(
+        _snapshot(symbol="ETHUSDT"),
+        local_receive_ts_ns=clock.wall_time_ns(),
+    )
+    sidecar = latest_market_readiness(
+        tmp_path,
+        expected_invocation_id=invocation_id,
+    )
+    assert sidecar.required_symbol_count == 2
+    assert sidecar.healthy_symbol_count == 2
+    assert sidecar.all_required_books_healthy is True
+    assert sidecar.oldest_required_receive_ts_ns == first_receive_ns
+    assert (
+        latest_market_receive_ts_ns(
+            tmp_path,
+            expected_invocation_id=invocation_id,
+        )
+        == first_receive_ns
+    )
+
+    recorder.set_required_symbols({"BUSDT", "ETHUSDT", "SOLUSDT"})
+    assert not (tmp_path / OWNER_MARKET_READINESS_FILENAME).exists()
+    with pytest.raises(ValueError, match="unavailable"):
+        latest_market_readiness(
+            tmp_path,
+            expected_invocation_id=invocation_id,
+        )
+    recorder.close()
+
+
 def test_regression_marks_book_unhealthy_until_fresh_snapshot(tmp_path: Path) -> None:
     recorder = SequenceAwareMarketRecorder(tmp_path, config=_config())
     recorder.on_message(_snapshot(), local_receive_ts_ns=1_800_000_000_010_000_000)
@@ -199,6 +317,7 @@ def test_owner_invocation_id_is_optional_and_persisted_on_every_owner_row(
     assert persisted
     assert all(row["owner_invocation_id"] == invocation_id for row in persisted)
     assert (tmp_path / "owner" / OWNER_CAPTURE_READINESS_FILENAME).is_file()
+    assert (tmp_path / "owner" / OWNER_MARKET_READINESS_FILENAME).is_file()
 
     standalone = SequenceAwareMarketRecorder(tmp_path / "standalone", config=_config())
     standalone_row = standalone.on_message(
@@ -208,6 +327,7 @@ def test_owner_invocation_id_is_optional_and_persisted_on_every_owner_row(
     standalone.close()
     assert "owner_invocation_id" not in standalone_row
     assert not (tmp_path / "standalone" / OWNER_CAPTURE_READINESS_FILENAME).exists()
+    assert not (tmp_path / "standalone" / OWNER_MARKET_READINESS_FILENAME).exists()
 
 
 def test_segment_store_returns_exact_completed_append_location(tmp_path: Path) -> None:
@@ -316,6 +436,27 @@ def test_raw_stream_subscribes_orderbook_and_trade_topics_without_pybit_rewrite(
     stream._on_message(socket, json.dumps(_snapshot()))
     assert seen[0]["type"] == "snapshot"
     assert seen[0]["_local_receive_ts_ns"] > 0
+
+
+def test_operational_stream_subscribes_only_to_required_orderbooks() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(json.loads(value))
+
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+    )
+    stream.update_symbols({"BUSDT"})
+    socket = Socket()
+    stream._on_open(socket)
+
+    assert socket.sent == [{"op": "subscribe", "args": ["orderbook.50.BUSDT"]}]
 
 
 def test_capture_rotates_segments_before_size_limit(tmp_path: Path) -> None:

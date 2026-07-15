@@ -23,7 +23,7 @@ EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-accou
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-account-execution.service main
 # Type=simple process start is not owner readiness. Hold every After=/Requires=
 # dependent producer until this systemd invocation has published the exact
-# route/head-bound HEALTHY projection and a later fresh raw capture row.
+# route/head-bound HEALTHY projection and fresh bounded live-L2 readiness.
 ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-account-execution.service readiness
 Restart=always
 RestartSec=2

@@ -20,6 +20,7 @@ MAX_DEMO_RULE_AGE_HOURS="${MAX_DEMO_RULE_AGE_HOURS:-168}"
 ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:-30}"
 ACCOUNT_TWIN_LATENCY_QUANTILE="${ACCOUNT_TWIN_LATENCY_QUANTILE:-p50}"
 ACCOUNT_TWIN_SLIPPAGE_QUANTILE="${ACCOUNT_TWIN_SLIPPAGE_QUANTILE:-p50}"
+ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-}"
 
 if [[ "${ACCOUNT_PAPER_KERNEL_REQUIRED:-}" != "1" ]]; then
     echo "ACCOUNT_PAPER_KERNEL_REQUIRED=1 is required for paper-kernel cutover." >&2
@@ -40,6 +41,15 @@ for required in "$ACCOUNT_SYMBOLS_FILE" "$ACCOUNT_DEMO_RULES_FILE" "$ACCOUNT_RIS
     fi
 done
 
+case "$ACCOUNT_RAW_MARKET_PERSISTENCE" in
+    1) raw_market_args=(--persist-raw-market) ;;
+    0) raw_market_args=(--no-persist-raw-market) ;;
+    *)
+        echo "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly set to 0 or 1." >&2
+        exit 2
+        ;;
+esac
+
 exec "$PYTHON_BIN" -m liquidity_migration.account_paper_runner \
     --account-root "$ACCOUNT_ROOT" \
     --inbox-root "$ACCOUNT_INTENT_INBOX_ROOT" \
@@ -52,4 +62,5 @@ exec "$PYTHON_BIN" -m liquidity_migration.account_paper_runner \
     --slippage-quantile "$ACCOUNT_TWIN_SLIPPAGE_QUANTILE" \
     --equity-usdt "$PAPER_EQUITY_USDT" \
     --max-demo-rule-age-hours "$MAX_DEMO_RULE_AGE_HOURS" \
-    --request-market-warmup-timeout-seconds "$ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS"
+    --request-market-warmup-timeout-seconds "$ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS" \
+    "${raw_market_args[@]}"

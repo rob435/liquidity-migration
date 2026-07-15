@@ -28,6 +28,63 @@ The receiving agent must re-verify every snapshot claim. It must not reset,
 switch away from, clean, or overwrite the dirty worktree merely because this
 document names a committed head.
 
+## Successor update — operational/raw-tape scope, 2026-07-15
+
+The owner subsequently made a narrower operational decision: the five-day raw
+market tape is optional research and may be collected on another machine. It
+does not alter trading logic and is no longer a prerequisite for running the
+demo/paper VPS. This does not reinterpret or pass the registered natural study;
+that study remains prospective under its unchanged 120-hour contract and must
+use raw persistence `1` if it is ever run.
+
+The operational boundary is different and remains strict. Both owners must
+consume live sequence-aware L2. A bounded, same-systemd-generation readiness
+sidecar and exact decision-boundary books remain durable, as does the canonical
+account journal. Only continuous bulk order-book/public-trade persistence is
+disabled. The paper owner still requires the unchanged passing V8 execution-
+twin calibration, because that evidence affects modeled paper fills rather
+than storage alone.
+
+Candidate `0f05060ee30de819f270c3cb695a7f9b66fbebdd` passed its complete local
+and pre-push gates with 2,957 tests. Its sole exact-head Linux run
+`29403931189` retained one nondeterministic existing test failure and 2,956
+passes. It was not retried and is spent. The prospective repair names both
+dated liquidation files explicitly. A new frozen candidate and every candidate
+gate remain required.
+
+The prospective implementation has two non-overlapping authorization profiles:
+
+- `calibration` binds one clean commit, machine, demo route, credentials,
+  roots, and immutable inputs; enables raw capture; and authorizes only the demo
+  account owner so V8 can bootstrap without paper or producers;
+- `operational` requires the passing twin receipt, binds both owner routes and
+  all immutable inputs, requires raw persistence `0`, and authorizes only the
+  nine checked demo/paper owner/producer/hedge/refresh/liveness units.
+
+Neither profile claims natural replay, parity, drift, alpha, promotion, or real
+money. Natural/fresh override files and simultaneous research/operational
+receipts fail closed. The exact checkout, environment files, runtime-root
+identities, config inputs, machine, and allowed unit are re-opened in the same
+wrapper process before each workload.
+
+For the current owner-authorized operational task, the older five-day
+ready-to-deploy definition below is now the optional research-promotion path,
+not the VPS startup prerequisite. The current truthful terminal outcome is
+either:
+
+- a new exact candidate passes the complete local/pre-push/noncontacting Linux
+  gates; V8 passes once; that same candidate is installed; full operational
+  authority is issued with raw persistence disabled; owners start before
+  producers; and demo/paper health, venue/account integrity, liveness, and
+  bounded storage behavior verify; or
+- a specific unchanged candidate, V8, venue, calibration, or runtime gate
+  fails, its evidence is preserved, unsafe services remain stopped/flat, and
+  the smallest prospective next decision is reported.
+
+The owner's permission includes demo/paper VPS installation and activation for
+this task. It still does not authorize `REAL_MONEY`, mainnet credentials, a
+`main` push, force-push, branch deletion, or fabricated/retried evidence.
+
 ## Successor update — 2026-07-15
 
 V7 is now closed and spent. Its final BTC funding-hold zero failed the

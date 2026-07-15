@@ -19,6 +19,16 @@ authenticate wall-clock execution. The target manifest assigns its completion
 time after replay construction, and the source-reopened dependency hashes carry
 the causal provenance.
 
+Owner scope decision on 2026-07-15, before V8 or any natural result: this
+five-day raw-tape holdout is deferred optional research and may be collected on
+another machine. It is no longer a prerequisite for demo/paper VPS operation.
+This changes no registered natural window, input, floor, comparison, stopping
+rule, or evidence interpretation. If the study is later activated, both owners
+must explicitly set `ACCOUNT_RAW_MARKET_PERSISTENCE=1` and every rule below
+still applies. Operational mode with bulk persistence disabled cannot be
+relabelled as this experiment and supplies no natural replay, drift, parity,
+promotion, or alpha conclusion.
+
 Prospective clarification at `2026-07-14T12:20:11Z`, before V7 or natural
 results: the V7 live paths will be reused by the mandatory second reset, so an
 explicit archive-source map must preserve and re-open the training bytes. V7

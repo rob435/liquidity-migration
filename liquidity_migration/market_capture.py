@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import stat
@@ -47,6 +48,10 @@ OWNER_CAPTURE_READINESS_KIND = "account_owner_capture_readiness"
 OWNER_CAPTURE_READINESS_SCHEMA_VERSION = 1
 OWNER_CAPTURE_READINESS_PUBLISH_INTERVAL_NS = 1_000_000_000
 MAX_OWNER_CAPTURE_RECORD_BYTES = 4 * 1024 * 1024
+OWNER_MARKET_READINESS_FILENAME = "account_owner_market_readiness.json"
+OWNER_MARKET_READINESS_KIND = "account_owner_market_readiness"
+OWNER_MARKET_READINESS_SCHEMA_VERSION = 2
+OWNER_MARKET_READINESS_PUBLISH_INTERVAL_NS = 1_000_000_000
 
 
 class MarketCaptureError(RuntimeError):
@@ -61,6 +66,7 @@ class MarketCaptureConfig:
     min_free_disk_bytes: int = 2 * 1024 * 1024 * 1024
     ring_records_per_symbol: int = 10_000
     strict_contiguous_update_ids: bool = False
+    persist_raw_market: bool = True
 
     def __post_init__(self) -> None:
         if self.depth not in {1, 50, 200, 1000}:
@@ -72,6 +78,8 @@ class MarketCaptureConfig:
             self.ring_records_per_symbol,
         ) <= 0:
             raise ValueError("capture storage limits must be positive")
+        if type(self.persist_raw_market) is not bool:
+            raise ValueError("persist_raw_market must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,8 +182,123 @@ class OwnerCaptureReadinessSidecar:
         return cls(**{key: payload[key] for key in expected})
 
 
+@dataclass(frozen=True, slots=True)
+class OwnerMarketReadinessSidecar:
+    """Bounded proof that one owner generation is receiving usable live L2.
+
+    This sidecar is deliberately independent of raw-frame persistence.  It is
+    atomically replaced at most once per second and therefore proves live market
+    ingestion without turning an operational owner into a bulk research-data
+    collector.
+    """
+
+    owner_invocation_id: str
+    local_receive_ts_ns: int
+    record_id: str
+    symbol: str
+    update_id: int
+    cross_sequence: int
+    book_healthy: bool
+    bid_price: float | None
+    ask_price: float | None
+    required_symbols_sha256: str
+    required_symbol_count: int
+    healthy_symbol_count: int
+    all_required_books_healthy: bool
+    oldest_required_receive_ts_ns: int | None
+    raw_market_persistence_enabled: bool
+    kind: str = OWNER_MARKET_READINESS_KIND
+    schema_version: int = OWNER_MARKET_READINESS_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.kind != OWNER_MARKET_READINESS_KIND:
+            raise ValueError("invalid owner-market readiness kind")
+        if self.schema_version != OWNER_MARKET_READINESS_SCHEMA_VERSION:
+            raise ValueError("unsupported owner-market readiness schema")
+        if type(self.owner_invocation_id) is not str or not self.owner_invocation_id:
+            raise ValueError("owner-market readiness invocation id is required")
+        if type(self.local_receive_ts_ns) is not int or self.local_receive_ts_ns <= 0:
+            raise ValueError("owner-market readiness receive timestamp must be positive")
+        if (
+            type(self.record_id) is not str
+            or len(self.record_id) != 24
+            or any(character not in "0123456789abcdef" for character in self.record_id)
+        ):
+            raise ValueError("owner-market readiness record id must be lowercase hexadecimal")
+        if type(self.symbol) is not str or not self.symbol or self.symbol != self.symbol.upper():
+            raise ValueError("owner-market readiness symbol must be non-empty uppercase text")
+        if type(self.update_id) is not int or self.update_id < 0:
+            raise ValueError("owner-market readiness update id must be non-negative")
+        if type(self.cross_sequence) is not int or self.cross_sequence < 0:
+            raise ValueError("owner-market readiness cross sequence must be non-negative")
+        if type(self.book_healthy) is not bool:
+            raise ValueError("owner-market readiness health must be a boolean")
+        if type(self.raw_market_persistence_enabled) is not bool:
+            raise ValueError("owner-market persistence mode must be a boolean")
+        if (
+            type(self.required_symbols_sha256) is not str
+            or len(self.required_symbols_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.required_symbols_sha256
+            )
+        ):
+            raise ValueError("owner-market required-symbol hash is invalid")
+        if (
+            type(self.required_symbol_count) is not int
+            or self.required_symbol_count <= 0
+        ):
+            raise ValueError("owner-market required-symbol count must be positive")
+        if (
+            type(self.healthy_symbol_count) is not int
+            or self.healthy_symbol_count < 0
+            or self.healthy_symbol_count > self.required_symbol_count
+        ):
+            raise ValueError("owner-market healthy-symbol count is invalid")
+        if type(self.all_required_books_healthy) is not bool:
+            raise ValueError("owner-market aggregate health must be a boolean")
+        aggregate_healthy = self.healthy_symbol_count == self.required_symbol_count
+        if self.all_required_books_healthy != aggregate_healthy:
+            raise ValueError("owner-market aggregate health fields disagree")
+        if self.all_required_books_healthy:
+            if (
+                type(self.oldest_required_receive_ts_ns) is not int
+                or self.oldest_required_receive_ts_ns <= 0
+            ):
+                raise ValueError(
+                    "healthy owner-market aggregate requires a positive oldest timestamp"
+                )
+        elif self.oldest_required_receive_ts_ns is not None:
+            raise ValueError(
+                "unhealthy owner-market aggregate cannot claim an oldest timestamp"
+            )
+        for label, value in (("bid", self.bid_price), ("ask", self.ask_price)):
+            if value is not None and (
+                isinstance(value, bool) or not math.isfinite(float(value)) or float(value) <= 0.0
+            ):
+                raise ValueError(f"owner-market readiness {label} must be positive and finite")
+        if self.book_healthy and (self.bid_price is None or self.ask_price is None or self.bid_price >= self.ask_price):
+            raise ValueError("healthy owner-market readiness requires an uncrossed top of book")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "OwnerMarketReadinessSidecar":
+        expected = set(cls.__dataclass_fields__)
+        missing = sorted(expected - set(payload))
+        unknown = sorted(set(payload) - expected)
+        if missing or unknown:
+            raise ValueError(f"owner-market readiness fields mismatch: missing={missing}, unknown={unknown}")
+        return cls(**{key: payload[key] for key in expected})
+
+
 def owner_capture_readiness_path(root: str | Path) -> Path:
     return Path(root).expanduser() / OWNER_CAPTURE_READINESS_FILENAME
+
+
+def owner_market_readiness_path(root: str | Path) -> Path:
+    return Path(root).expanduser() / OWNER_MARKET_READINESS_FILENAME
 
 
 def _atomic_write_owner_capture_readiness(
@@ -221,6 +344,61 @@ def _atomic_write_owner_capture_readiness(
         temporary.unlink(missing_ok=True)
         raise
     return path
+
+
+def _atomic_write_owner_market_readiness(
+    root: str | Path,
+    sidecar: OwnerMarketReadinessSidecar,
+) -> Path:
+    path = owner_market_readiness_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(temporary), flags, 0o600)
+        try:
+            data = canonical_json(sidecar.to_dict()) + b"\n"
+            view = memoryview(data)
+            offset = 0
+            while offset < len(data):
+                written = os.write(descriptor, view[offset:])
+                if written <= 0:
+                    raise OSError("owner-market readiness write made no progress")
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        directory_descriptor = os.open(
+            str(path.parent),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _remove_owner_market_readiness(root: str | Path) -> None:
+    """Durably invalidate an aggregate whose required-symbol set changed."""
+
+    path = owner_market_readiness_path(root)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    directory_descriptor = os.open(
+        str(path.parent),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
 
 
 @dataclass(slots=True)
@@ -441,7 +619,11 @@ def capture_record_id(record: Mapping[str, Any]) -> str:
 
 
 class SequenceAwareMarketRecorder:
-    """Parse raw Bybit public messages, persist them, and reconstruct L2."""
+    """Parse raw Bybit public messages and reconstruct L2.
+
+    Raw order-book/trade persistence is an explicit research mode.  Exact
+    decision-boundary book contexts remain durable in every mode.
+    """
 
     def __init__(
         self,
@@ -460,22 +642,115 @@ class SequenceAwareMarketRecorder:
         self.owner_invocation_id = owner_invocation_id
         self.store = SegmentedCaptureStore(root, config=self.config)
         self._last_readiness_publish_monotonic_ns: int | None = None
+        self._last_market_readiness_publish_monotonic_ns: int | None = None
+        self._required_symbols: set[str] = set()
         self.books: dict[str, BookReconstruction] = {}
         self.rings: dict[str, deque[dict[str, Any]]] = {}
         self._lock = threading.RLock()
 
-    def _persist(self, record: dict[str, Any]) -> dict[str, Any]:
+    def set_required_symbols(self, symbols: Iterable[str]) -> None:
+        required = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        if not required:
+            raise ValueError("owner-market required symbols must not be empty")
+        with self._lock:
+            if required == self._required_symbols:
+                return
+            self._required_symbols = required
+            self._last_market_readiness_publish_monotonic_ns = None
+            if self.owner_invocation_id is not None:
+                _remove_owner_market_readiness(self.store.root)
+
+    def _persist(
+        self,
+        record: dict[str, Any],
+        *,
+        persist_to_disk: bool,
+    ) -> dict[str, Any]:
         record["schema_version"] = 1
         if self.owner_invocation_id is not None:
             record["owner_invocation_id"] = self.owner_invocation_id
         record["record_id"] = capture_record_id(record)
         safe = json_safe(record)
-        location = self.store.append(safe)
-        self._publish_owner_readiness(safe, location=location)
+        if persist_to_disk:
+            location = self.store.append(safe)
+            self._publish_owner_readiness(safe, location=location)
         symbol = str(record.get("symbol") or "ACCOUNT")
         ring = self.rings.setdefault(symbol, deque(maxlen=self.config.ring_records_per_symbol))
         ring.append(dict(safe))
         return dict(safe)
+
+    def _publish_owner_market_readiness(
+        self,
+        record: Mapping[str, Any],
+        *,
+        state: BookReconstruction,
+    ) -> None:
+        invocation_id = self.owner_invocation_id
+        if invocation_id is None:
+            return
+        now_monotonic_ns = self.clock.monotonic_ns()
+        last_publish_ns = self._last_market_readiness_publish_monotonic_ns
+        if (
+            last_publish_ns is not None
+            and now_monotonic_ns - last_publish_ns < OWNER_MARKET_READINESS_PUBLISH_INTERVAL_NS
+        ):
+            return
+        bids = sorted(state.bids.items(), reverse=True)
+        asks = sorted(state.asks.items())
+        bid_price = bids[0][0] if bids else None
+        ask_price = asks[0][0] if asks else None
+        book_healthy = bool(state.healthy and bid_price is not None and ask_price is not None and bid_price < ask_price)
+        required_symbols = self._required_symbols or set(self.books)
+        healthy_states: list[BookReconstruction] = []
+        for required_symbol in sorted(required_symbols):
+            required_state = self.books.get(required_symbol)
+            if required_state is None or not required_state.healthy:
+                continue
+            required_bids = required_state.bids
+            required_asks = required_state.asks
+            if (
+                not required_bids
+                or not required_asks
+                or max(required_bids) >= min(required_asks)
+            ):
+                continue
+            healthy_states.append(required_state)
+        all_required_books_healthy = (
+            bool(required_symbols)
+            and len(healthy_states) == len(required_symbols)
+        )
+        oldest_required_receive_ts_ns = (
+            min(item.local_receive_ts_ns for item in healthy_states)
+            if all_required_books_healthy
+            else None
+        )
+        sidecar = OwnerMarketReadinessSidecar(
+            owner_invocation_id=invocation_id,
+            local_receive_ts_ns=int(record.get("local_receive_ts_ns") or 0),
+            record_id=str(record.get("record_id") or ""),
+            symbol=state.symbol,
+            update_id=state.update_id,
+            cross_sequence=state.cross_sequence,
+            book_healthy=book_healthy,
+            bid_price=bid_price,
+            ask_price=ask_price,
+            required_symbols_sha256=hashlib.sha256(
+                canonical_json(sorted(required_symbols))
+            ).hexdigest(),
+            required_symbol_count=len(required_symbols),
+            healthy_symbol_count=len(healthy_states),
+            all_required_books_healthy=all_required_books_healthy,
+            oldest_required_receive_ts_ns=oldest_required_receive_ts_ns,
+            raw_market_persistence_enabled=self.config.persist_raw_market,
+        )
+        # Latch before I/O so a post-replace fsync error cannot create an
+        # unbounded retry/write loop inside the same publication interval.
+        self._last_market_readiness_publish_monotonic_ns = now_monotonic_ns
+        _atomic_write_owner_market_readiness(self.store.root, sidecar)
 
     def _publish_owner_readiness(
         self,
@@ -598,7 +873,12 @@ class SequenceAwareMarketRecorder:
             "bids": bids,
             "asks": asks,
         }
-        return self._persist(record)
+        persisted = self._persist(
+            record,
+            persist_to_disk=self.config.persist_raw_market,
+        )
+        self._publish_owner_market_readiness(persisted, state=state)
+        return persisted
 
     def _on_trades(self, message: Mapping[str, Any], *, local_ns: int) -> list[dict[str, Any]]:
         raw_rows = message.get("data") or []
@@ -611,25 +891,30 @@ class SequenceAwareMarketRecorder:
                 continue
             symbol = str(row.get("s") or str(message.get("topic") or "").split(".")[-1]).upper()
             trade_ns = int(row.get("T") or 0) * 1_000_000
-            records.append(self._persist({
-                "kind": "public_trade",
-                "symbol": symbol,
-                "topic": str(message.get("topic") or ""),
-                "local_receive_ts_ns": local_ns,
-                "exchange_system_ts_ns": system_ns,
-                "exchange_trade_ts_ns": trade_ns,
-                "system_clock_offset_ns": local_ns - system_ns if system_ns else None,
-                "trade_clock_offset_ns": local_ns - trade_ns if trade_ns else None,
-                "cross_sequence": int(row.get("seq") or 0),
-                "trade_ids": [str(row.get("i") or "")],
-                "trade_id": str(row.get("i") or ""),
-                "side": str(row.get("S") or ""),
-                "price": float(row.get("p") or 0.0),
-                "qty": float(row.get("v") or 0.0),
-                "tick_direction": str(row.get("L") or ""),
-                "block_trade": bool(row.get("BT")),
-                "rpi_trade": bool(row.get("RPI")),
-            }))
+            records.append(
+                self._persist(
+                    {
+                        "kind": "public_trade",
+                        "symbol": symbol,
+                        "topic": str(message.get("topic") or ""),
+                        "local_receive_ts_ns": local_ns,
+                        "exchange_system_ts_ns": system_ns,
+                        "exchange_trade_ts_ns": trade_ns,
+                        "system_clock_offset_ns": local_ns - system_ns if system_ns else None,
+                        "trade_clock_offset_ns": local_ns - trade_ns if trade_ns else None,
+                        "cross_sequence": int(row.get("seq") or 0),
+                        "trade_ids": [str(row.get("i") or "")],
+                        "trade_id": str(row.get("i") or ""),
+                        "side": str(row.get("S") or ""),
+                        "price": float(row.get("p") or 0.0),
+                        "qty": float(row.get("v") or 0.0),
+                        "tick_direction": str(row.get("L") or ""),
+                        "block_trade": bool(row.get("BT")),
+                        "rpi_trade": bool(row.get("RPI")),
+                    },
+                    persist_to_disk=self.config.persist_raw_market,
+                )
+            )
         return records
 
     def capture_context(
@@ -648,22 +933,25 @@ class SequenceAwareMarketRecorder:
             if state is None or not state.has_snapshot:
                 raise MarketCaptureError(f"no reconstructed book for {symbol}")
             snapshot = state.snapshot(depth=depth or self.config.depth)
-            record = self._persist({
-                "kind": "book_context",
-                "context_kind": context_kind,
-                "reference_key": reference_key,
-                "symbol": symbol,
-                "local_receive_ts_ns": self.clock.wall_time_ns(),
-                "book_local_receive_ts_ns": state.local_receive_ts_ns,
-                "exchange_system_ts_ns": state.exchange_system_ts_ns,
-                "exchange_engine_ts_ns": state.exchange_engine_ts_ns,
-                "update_id": state.update_id,
-                "cross_sequence": state.cross_sequence,
-                "sequence_gap": not state.healthy,
-                "sequence_gap_reason": state.last_gap_reason,
-                "bids": [(level.price, level.qty) for level in snapshot.bids],
-                "asks": [(level.price, level.qty) for level in snapshot.asks],
-            })
+            record = self._persist(
+                {
+                    "kind": "book_context",
+                    "context_kind": context_kind,
+                    "reference_key": reference_key,
+                    "symbol": symbol,
+                    "local_receive_ts_ns": self.clock.wall_time_ns(),
+                    "book_local_receive_ts_ns": state.local_receive_ts_ns,
+                    "exchange_system_ts_ns": state.exchange_system_ts_ns,
+                    "exchange_engine_ts_ns": state.exchange_engine_ts_ns,
+                    "update_id": state.update_id,
+                    "cross_sequence": state.cross_sequence,
+                    "sequence_gap": not state.healthy,
+                    "sequence_gap_reason": state.last_gap_reason,
+                    "bids": [(level.price, level.qty) for level in snapshot.bids],
+                    "asks": [(level.price, level.qty) for level in snapshot.asks],
+                },
+                persist_to_disk=True,
+            )
             return record, snapshot
 
     def recent(self, symbol: str) -> tuple[dict[str, Any], ...]:
@@ -693,12 +981,16 @@ class BybitRawPublicMarketStream:
         *,
         testnet: bool = False,
         depth: int = 50,
+        include_public_trades: bool = True,
         on_message: Callable[[Mapping[str, Any]], Any],
         websocket_factory: Callable[..., Any] | None = None,
         reconnect_seconds: float = 2.0,
     ) -> None:
         self.url = TESTNET_PUBLIC_LINEAR_WS if testnet else MAINNET_PUBLIC_LINEAR_WS
         self.depth = depth
+        if type(include_public_trades) is not bool:
+            raise ValueError("include_public_trades must be a boolean")
+        self.include_public_trades = include_public_trades
         self.on_market_message = on_message
         self.reconnect_seconds = reconnect_seconds
         self._symbols: set[str] = set()
@@ -715,7 +1007,9 @@ class BybitRawPublicMarketStream:
     def _topics(self, symbols: Iterable[str]) -> list[str]:
         topics: list[str] = []
         for symbol in sorted({value.upper() for value in symbols if value}):
-            topics.extend((f"orderbook.{self.depth}.{symbol}", f"publicTrade.{symbol}"))
+            topics.append(f"orderbook.{self.depth}.{symbol}")
+            if self.include_public_trades:
+                topics.append(f"publicTrade.{symbol}")
         return topics
 
     def _send(self, operation: str, symbols: Iterable[str]) -> None:

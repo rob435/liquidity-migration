@@ -277,11 +277,12 @@ journal/read-only state caches, and finalizes each terminal reduce-batch Close
 and P&L in one serialized transaction. The two-second/four-second freshness
 rule and every V7 sample, size, clock, smoke, partial-fill, and abort threshold
 remain unchanged. V7 observations and recovery are excluded from every V8
-floor. Even a passing V8 supplies only the frozen training calibration needed
-for a fresh holdout and owner-only paper readiness check. Actual LONG/CONTINUOUS
-tapes, the fixed 120-hour sufficiency floor, out-of-sample twin drift,
-deterministic replay comparison, venue accounting, funding, final flatness, and
-cutover authorization remain separate gates.
+floor. A passing V8 supplies the calibration needed for the deterministic paper
+owner. It may also seed a later natural holdout, but that 120-hour raw-tape study
+is now optional research rather than an operational prerequisite. Actual
+LONG/CONTINUOUS natural tapes, sufficiency, out-of-sample twin drift,
+deterministic replay comparison, venue accounting, funding, and final flatness
+remain separate research gates and are not inferred from operation.
 
 The local candidate now contains source paths for exact-candidate freezing,
 natural runtime/config binding, periodic clock evidence, deterministic replay,
@@ -329,9 +330,25 @@ flatness and stopped sealing; only then offline replay and analysis in a
 separate derived-evidence root outside all 11 sealed paths and all 10 later
 deployment roots. The deterministic scheduling claim covers the registered
 active LONG/CONT natural market-order paths, not every timer, historical mode,
-or adverse-limit loop. No cutover branch may become `main`, deploy, or be
-deleted as housekeeping before every registered gate passes. The separate
-Strategy Overhaul master run on the big PC is neither an input nor an exception.
+or adverse-limit loop. No cutover branch may become `main`, be called research-
+promoted, or be deleted as housekeeping before every registered promotion gate
+passes. The separate Strategy Overhaul master run on the big PC is neither an
+input nor an exception.
+
+The owner subsequently separated operational retention from research capture
+before V8 or any natural result was seen. Candidate `0f05060` passed its 2,957-
+test local/pre-push gates, then its single exact-head Linux run retained one
+filesystem-order-dependent test failure and 2,956 passes. It was not retried
+and is spent; the prospective test fix selects exact dated files. Bulk raw L2
+and public-trade retention is now explicit and required (`1`) for V8/natural
+evidence, but disabled (`0`) for permanent demo/paper operation. Live L2,
+bounded same-generation readiness, exact decision books, and account journals
+remain mandatory. The five-day natural contract is deferred, unrun optional
+research; this is not a positive result or promotion. Exact-branch VPS
+operation is separately owner-authorized only after a new complete candidate
+gate, unchanged V8 pass for paper, verified flatness, and machine/commit/input-
+bound operational authority. `main`, mainnet, and real money remain
+unauthorized.
 
 ## Strategy-overhaul scout status
 

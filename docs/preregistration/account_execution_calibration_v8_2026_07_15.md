@@ -7,6 +7,16 @@ funding, or calibration result. Study mode is `forward_execution`; deployment
 is bounded Bybit demo only and authorization remains `unauthorized`. This is no
 alpha, LONG/CONTINUOUS parity, HFT, deployment, or real-money claim.
 
+Prospective runtime-binding clarification on 2026-07-15, before any V8 target
+or outcome: the demo route must explicitly set
+`ACCOUNT_RAW_MARKET_PERSISTENCE=1`. A machine/clean-commit/input-bound
+`calibration` authorization may start only the demo account owner; paper,
+ordinary producers, hedge, refresh, and liveness remain unauthorized for this
+epoch. This receipt supplies startup authority only and cannot satisfy any V8
+sample, clock, smoke, partial-fill, accounting, or result gate. After V8 closes,
+the owner must stop and preserve it before any permanent raw-disabled
+operational authorization is issued.
+
 ## Claim, action, and exposure boundary
 
 V8 asks whether one exact replacement candidate fixes the two V7 owner defects

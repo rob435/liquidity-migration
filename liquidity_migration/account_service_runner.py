@@ -206,6 +206,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--account-root", required=True)
     parser.add_argument("--inbox-root", required=True)
     parser.add_argument("--capture-root", required=True)
+    parser.add_argument(
+        "--persist-raw-market",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Persist every raw L2/trade frame for research replay. Live L2 "
+            "reconstruction and exact decision-book persistence remain enabled "
+            "when this is disabled."
+        ),
+    )
     parser.add_argument("--symbols-file", required=True)
     parser.add_argument("--demo-rules-file", required=True)
     parser.add_argument("--risk-policy-file", required=True)
@@ -322,14 +332,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     recorder = SequenceAwareMarketRecorder(
         args.capture_root,
-        config=MarketCaptureConfig(depth=50),
+        config=MarketCaptureConfig(
+            depth=50,
+            persist_raw_market=args.persist_raw_market,
+        ),
         owner_invocation_id=invocation_id,
     )
     public_stream = BybitRawPublicMarketStream(
         testnet=False,
         depth=50,
+        include_public_trades=args.persist_raw_market,
         on_message=recorder_callback(recorder),
     )
+    recorder.set_required_symbols(symbols)
     public_stream.start(symbols)
     execution_consumer = BybitAccountExecutionConsumer(
         kernel=kernel,
@@ -457,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
                     # Public capture needs no order-rule authority. Subscribe
                     # every pending symbol in parallel; the strict queue-head
                     # gate below decides when one request may be claimed.
+                    recorder.set_required_symbols(desired)
                     public_stream.update_symbols(desired)
                 last_symbol_refresh = now
             market_readiness = market_warmup_gate.evaluate(
