@@ -1,12 +1,14 @@
-"""Run the shared account kernel with the deterministic execution twin for paper."""
+"""Run the paper integration owner with an explicitly uncalibrated execution twin."""
 
 from __future__ import annotations
 
 import argparse
 import logging
 import math
+import os
 import time
 from pathlib import Path
+from typing import Mapping
 
 from .account_execution_config import (
     load_demo_rules,
@@ -35,21 +37,68 @@ from .account_service_bybit import (
     VerifiedBybitDemoRulesProvider,
 )
 from .deterministic_runtime import Clock, SystemClock
-from .execution_adapters import MarketOrderExecutionTwin
-from .execution_twin_calibration import (
-    execution_twin_config_from_calibration,
-    load_calibration_receipt,
+from .execution_adapters import (
+    INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
+    ExecutionTwinConfig,
+    LatencyProfile,
+    MarketOrderExecutionTwin,
 )
 from .market_capture import (
     BybitRawPublicMarketStream,
     MarketCaptureConfig,
     SequenceAwareMarketRecorder,
+    operational_market_symbols,
     recorder_callback,
     symbols_from_file,
 )
 from .protection_engine import AccountProtectionEngine
 
 _logger = logging.getLogger(__name__)
+
+PAPER_EXECUTION_BOOK_DEPTH = 50
+PAPER_INTEGRATION_EXECUTION_TWIN_CONFIG = ExecutionTwinConfig(
+    fee_bps=5.5,
+    latency=LatencyProfile(
+        decision_to_socket_ns=0,
+        order_entry_ns=0,
+        order_response_ns=0,
+        fill_spacing_ns=0,
+        submit_to_first_fill_ns=0,
+        fill_response_ns=0,
+    ),
+    max_decision_age_ns=250_000_000,
+    allow_partial_fills=True,
+    fill_partition_policy="book_level",
+    immutable_replay_book=True,
+    residual_adverse_slippage_bps=2.0,
+    visible_book_depth=PAPER_EXECUTION_BOOK_DEPTH,
+    model_scope=INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
+)
+
+_PRIVATE_EXCHANGE_ENVIRONMENT_KEYS = (
+    "BYBIT_DEMO_API_KEY",
+    "BYBIT_DEMO_API_SECRET",
+    "BYBIT_REAL_API_KEY",
+    "BYBIT_REAL_API_SECRET",
+)
+_FALSE_VALUES = {"", "0", "false", "no", "off"}
+
+
+def require_paper_runtime_isolation(
+    environment: Mapping[str, str] = os.environ,
+) -> None:
+    present = [key for key in _PRIVATE_EXCHANGE_ENVIRONMENT_KEYS if environment.get(key)]
+    if present:
+        raise RuntimeError(
+            "paper owner received private exchange credentials: " + ", ".join(present)
+        )
+    if environment.get("REAL_MONEY", "").strip().lower() not in _FALSE_VALUES:
+        raise RuntimeError("paper owner requires REAL_MONEY=false or unset")
+
+
+def _integration_only_health_detail(detail: str) -> str:
+    prefix = f"execution_model_scope={INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE}"
+    return "; ".join(part for part in (prefix, detail) if part)[:1000]
 
 
 class FixedCapitalSnapshotProvider:
@@ -102,7 +151,7 @@ def publish_paper_owner_health(
         requested_symbols_ready=requested_symbols_ready,
         invocation_id=invocation_id,
         last_batch_id=last_batch_id[:500],
-        detail=detail[:1000],
+        detail=_integration_only_health_detail(detail),
     )
     write_account_owner_health(account_root, health)
     return health
@@ -128,18 +177,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--risk-policy-file", required=True)
     parser.add_argument("--account-id", default="bybit-paper-unified")
     parser.add_argument("--equity-usdt", type=float, required=True)
-    parser.add_argument("--calibration-file", required=True)
-    parser.add_argument(
-        "--latency-quantile",
-        choices=("p50", "p75", "p95", "p99"),
-        default="p50",
-    )
-    parser.add_argument(
-        "--slippage-quantile",
-        choices=("p50", "p75", "p95", "p99"),
-        default="p50",
-    )
-    parser.add_argument("--max-decision-age-ms", type=float, default=250.0)
     parser.add_argument("--max-demo-rule-age-hours", type=float, default=168.0)
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
     parser.add_argument(
@@ -164,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         parser.error(str(exc))
+    require_paper_runtime_isolation()
     invocation_id = require_systemd_invocation_id()
 
     route = ensure_account_route(
@@ -180,13 +218,6 @@ def main(argv: list[str] | None = None) -> int:
         max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
     )
     policy = load_risk_policy(args.risk_policy_file)
-    twin_config = execution_twin_config_from_calibration(
-        load_calibration_receipt(args.calibration_file),
-        max_decision_age_ns=int(args.max_decision_age_ms * 1_000_000),
-        latency_quantile=args.latency_quantile,
-        slippage_quantile=args.slippage_quantile,
-        require_gate=True,
-    )
     symbols_path = Path(args.symbols_file).expanduser()
     symbols = symbols_from_file(symbols_path)
     if not symbols:
@@ -194,31 +225,32 @@ def main(argv: list[str] | None = None) -> int:
     missing = sorted(symbols - set(rules))
     if missing:
         raise RuntimeError(f"paper symbols lack demo-verified rules: {', '.join(missing)}")
+    live_symbols = operational_market_symbols(symbols)
 
     recorder = SequenceAwareMarketRecorder(
         args.capture_root,
         config=MarketCaptureConfig(
-            depth=50,
+            depth=PAPER_EXECUTION_BOOK_DEPTH,
             persist_raw_market=args.persist_raw_market,
         ),
         owner_invocation_id=invocation_id,
     )
     public_stream = BybitRawPublicMarketStream(
         testnet=False,
-        depth=50,
+        depth=PAPER_EXECUTION_BOOK_DEPTH,
         include_public_trades=args.persist_raw_market,
         on_message=recorder_callback(recorder),
     )
-    recorder.set_required_symbols(symbols)
-    public_stream.start(symbols)
+    recorder.set_required_symbols(live_symbols)
+    public_stream.start(live_symbols)
     kernel = AccountExecutionKernel(route.account_path, account_id=route.account_id)
     runtime_clock = SystemClock()
     market_provider = CapturedBybitMarketProvider(recorder)
     twin = MarketOrderExecutionTwin(
         books={},
         instrument_rules=rules,
-        config=twin_config,
-        name="paper",
+        config=PAPER_INTEGRATION_EXECUTION_TWIN_CONFIG,
+        name=f"paper_{INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE}",
         id_seed=f"{route.account_id}:paper-execution",
     )
     service = AccountExecutionService(
@@ -247,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     recovered = inbox.recover_processing()
     if recovered:
         _logger.warning("recovered %d paper intent(s) after restart", recovered)
-    last_symbol_refresh = time.monotonic()
+    last_symbol_refresh = float("-inf")
     last_health_write = float("-inf")
     last_health_signature: tuple[str, str, bool] | None = None
     last_batch_id = ""
@@ -259,21 +291,29 @@ def main(argv: list[str] | None = None) -> int:
             now = time.monotonic()
             loop_sequence += 1
             if now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25):
-                desired = symbols_from_file(symbols_path)
-                desired.update(inbox.requested_symbols())
                 current_state = kernel._state_ref()
-                desired.update(
+                component_target_symbols = {
                     str(target.get("symbol") or "").upper()
                     for target in current_state.component_targets.values()
                     if target.get("symbol") and float(target.get("signed_qty") or 0.0) != 0.0
-                )
-                desired.update(
+                }
+                nonflat_symbols = {
                     symbol
                     for symbol, position in current_state.positions.items()
                     if position.signed_qty != 0.0
+                }
+                desired = operational_market_symbols(
+                    symbols,
+                    queued=inbox.requested_symbols(),
+                    nonflat=nonflat_symbols,
+                    working=current_state.working_symbols(
+                        tolerance=policy.quantity_tolerance
+                    ),
+                    component_targets=component_target_symbols,
+                    convergence=(
+                        item.symbol for item in service.convergence_report().items
+                    ),
                 )
-                desired.update(current_state.working_symbols(tolerance=policy.quantity_tolerance))
-                desired.update(item.symbol for item in service.convergence_report().items)
                 missing = sorted(desired - set(rules))
                 if missing:
                     _logger.error("paper targets lack verified rules: %s", missing)

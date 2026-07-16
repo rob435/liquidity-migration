@@ -29,8 +29,8 @@ def entry_signal_expiry_rejection(
 ) -> str:
     """Return a terminal service rejection for an invalid/expired entry.
 
-    Zero targets are exits and deliberately never expire. Legacy non-entry
-    target revisions are left alone; explicit ``/entry/`` decisions fail
+    Zero targets are exits and deliberately never expire. Non-entry target
+    revisions are left alone; explicit ``/entry/`` decisions fail
     closed if they predate the canonical identity/validity fields.
     """
 

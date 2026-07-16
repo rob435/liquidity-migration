@@ -10,6 +10,8 @@ import pytest
 
 import liquidity_migration.continuous_demo_daemon as daemon_module
 import liquidity_migration.long_native_event_demo_daemon as base_daemon_module
+from liquidity_migration.account_intent_client import ExitFirstPublication
+from liquidity_migration.account_route import ensure_account_route
 from liquidity_migration.config import ResearchConfig
 from liquidity_migration.continuous_demo import (
     ContinuousDemoCycleConfig,
@@ -22,6 +24,8 @@ from liquidity_migration.continuous_demo_daemon import (
     _select_kline_stream_manager_factory,
 )
 from liquidity_migration.kline_follower import FollowerKlineStreamManager
+from liquidity_migration.execution_environment import account_id_for_environment
+from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
 
 
 def _target_config(tmp_path: Path, **overrides: Any) -> ContinuousDemoCycleConfig:
@@ -49,7 +53,7 @@ def _flat_payload() -> dict[str, Any]:
     }
 
 
-def test_constructs_as_one_target_planner_without_private_or_auxiliary_resources(
+def test_constructs_as_one_target_planner(
     tmp_path: Path,
 ) -> None:
     daemon = ContinuousDemoDaemon(
@@ -60,31 +64,6 @@ def test_constructs_as_one_target_planner_without_private_or_auxiliary_resources
 
     assert daemon._cycle_runner is run_continuous_demo_cycle
     assert daemon.interval_seconds == 60.0
-    for removed_name in (
-        "_target_only_route",
-        "router",
-        "_private_state_cache",
-        "_trade_router",
-        "_ws_stream",
-        "_seed_private_client",
-        "_open_ws",
-        "_close_ws",
-        "_ensure_trade_router",
-        "_send_telegram",
-        "_maybe_send_cycle_failure_telegram",
-        "_private_state_ws_health_ok",
-        "_protective_exit_thread",
-        "_protective_exit_loop",
-        "_run_protective_exit_check",
-        "_tick_event",
-        "_cycle_mutex",
-        "_ticker_update_count",
-        "_ticker_batch_wakes",
-        "_fill_nudges",
-        "_fill_nudge_errors",
-        "_reactivity_snapshot",
-    ):
-        assert not hasattr(daemon, removed_name)
     assert daemon._seed_thread is None
     assert daemon._reconcile_thread is None
 
@@ -94,10 +73,21 @@ def test_target_cycle_receives_only_public_state_and_panel_cache(
 ) -> None:
     seen: dict[str, Any] = {}
 
-    def cycle_runner(data_root: Path, **kwargs: Any) -> dict[str, Any]:
+    def cycle_runner(data_root: Path, **kwargs: Any) -> PublishedTargetCyclePayload:
         seen["data_root"] = data_root
         seen["kwargs"] = kwargs
-        return _flat_payload()
+        demo = kwargs["demo_config"]
+        route = ensure_account_route(
+            account_id=account_id_for_environment(demo.execution_environment),
+            environment=demo.execution_environment,
+            account_root=demo.account_execution_root,
+            inbox_root=demo.account_intent_inbox_root,
+        )
+        return PublishedTargetCyclePayload(
+            _flat_payload(),
+            publication=ExitFirstPublication((), (), ()),
+            route=route,
+        )
 
     daemon = ContinuousDemoDaemon(
         tmp_path / "continuous",
@@ -137,18 +127,6 @@ def test_public_ticker_updates_cache_without_requesting_an_extra_cycle(
 
     assert daemon._ticker_cache.symbol_count() == 1
     assert not daemon._bar_event.is_set()
-
-
-def test_removed_private_factory_kwargs_are_rejected_for_cont(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(TypeError, match="unexpected keyword argument 'ws_stream_factory'"):
-        ContinuousDemoDaemon(
-            tmp_path / "continuous",
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=_target_config(tmp_path),
-            ws_stream_factory=lambda *_args: None,
-        )
 
 
 @pytest.mark.parametrize(

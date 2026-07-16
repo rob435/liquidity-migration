@@ -1,5 +1,4 @@
 .DS_Store
-.Rhistory
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -12,23 +11,17 @@ __pycache__/
 .venv/
 venv/
 .env
-signals.sqlite3
-signals.sqlite3-shm
-signals.sqlite3-wal
-replay-signals.sqlite3
-smoke-replay.sqlite3
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3.gz
 .cache/
 .tmp/
 data/
-reports/
+reports/*
+!reports/autonomous-improvement/
+!reports/autonomous-improvement/**
 backtest-runs/
-# Continuous research outputs are local artifacts; keep the harness/scripts tracked.
-/research/continuous_fade/runs/
-/research/btc_month_regime_2026-07-04/
-*.sqlite3.gz
-backtest.sqlite3
-backtest-*.sqlite3
-prefetch.log
 graphify-out/cache/
 graphify-out/manifest.json
 graphify-out/cost.json
@@ -40,7 +33,6 @@ graphify-out/.graphify_root
 .claude/scheduled_tasks.lock
 # Per-machine Claude Code permissions (never shared)
 .claude/settings.local.json
-# Research run logs (large, rotated by the analyst, not source-of-truth)
+# Local logs and plots
 docs/*.log
-# Scratch plot outputs at repo root (use docs/ for plots that belong in source control)
 /equity_*.png

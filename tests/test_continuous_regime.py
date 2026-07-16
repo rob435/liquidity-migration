@@ -1,20 +1,12 @@
-"""BTC-vol regime-hedge overlay.
-
-Covers the shared intensity signal (continuous_regime) and its parity across the
-three consumers that must apply the IDENTICAL hedge object: the forward ledger,
-the live demo hedge manager, and the deployed-equity report. The non-negotiable
-properties are causality (no look-ahead), live<->backtest intensity parity, and
-intensity=off reducing byte-for-byte to the plain hedge.
-"""
+"""Causality and runtime/historical parity tests for the BTC-vol hedge regime."""
 
 from __future__ import annotations
 
 import math
 
-from liquidity_migration.continuous_forward_replay import (
-    FROZEN_FORWARD_CONFIG,
-    frozen_config_hash,
-    frozen_hedge_regime,
+from liquidity_migration.continuous_profile import (
+    ACTIVE_CONTINUOUS_CONFIG,
+    active_hedge_regime,
 )
 from liquidity_migration.continuous_rebalance import (
     ContinuousHedge2FState,
@@ -25,7 +17,7 @@ from liquidity_migration.continuous_rebalance import (
     compute_continuous_hedge_ratios_2f,
 )
 from liquidity_migration.continuous_regime import (
-    FROZEN_BTCVOL_REGIME,
+    ACTIVE_BTCVOL_REGIME,
     PCT_WARMUP,
     btcvol_intensity_series,
     latest_btcvol_intensity,
@@ -33,9 +25,9 @@ from liquidity_migration.continuous_regime import (
 
 MS_PER_DAY = 86_400_000
 T0 = 1_680_652_800_000  # 2023-04-05 00:00 UTC
-LAM = FROZEN_BTCVOL_REGIME["lam"]
-VOL_WINDOW = FROZEN_BTCVOL_REGIME["vol_window"]
-PCT_WINDOW = FROZEN_BTCVOL_REGIME["pct_window"]
+LAM = ACTIVE_BTCVOL_REGIME["lam"]
+VOL_WINDOW = ACTIVE_BTCVOL_REGIME["vol_window"]
+PCT_WINDOW = ACTIVE_BTCVOL_REGIME["pct_window"]
 
 
 def _pseudo_returns(n: int) -> list[float]:
@@ -54,6 +46,7 @@ def _days(n: int) -> list[int]:
 # ---------------------------------------------------------------------------
 # Signal properties
 # ---------------------------------------------------------------------------
+
 
 def test_intensity_bounds_and_mean_one_symmetry() -> None:
     n = 600
@@ -104,14 +97,9 @@ def test_intensity_deterministic() -> None:
     assert btcvol_intensity_series(days, rets) == btcvol_intensity_series(days, rets)
 
 
-# ---------------------------------------------------------------------------
-# Live <-> backtest parity (the same-object gate, errors-we-never-repeat #16)
-# ---------------------------------------------------------------------------
-
 def test_latest_matches_series_for_every_day() -> None:
     """The live manager's ``latest_btcvol_intensity(prior_returns)`` must equal the
-    backtest/forward ``btcvol_intensity_series(...)[today]`` for that same day, so
-    the live demo hedge and the forward ledger size the identical hedge."""
+    historical ``btcvol_intensity_series(...)[today]`` for that same day."""
     n = 360
     rets_list = _pseudo_returns(n)
     days = list(range(n))
@@ -134,20 +122,29 @@ def test_latest_handles_gaps_and_empty() -> None:
 # Engine wiring: intensity scales BOTH 2f legs; off == plain hedge
 # ---------------------------------------------------------------------------
 
+
 def _components(raw: list[float], days: list[int]) -> ContinuousRebalanceComponents:
     raw_by_day = {d: r for d, r in zip(days, raw)}
     return ContinuousRebalanceComponents(
-        days=days, raw_by_day=raw_by_day, gross_by_day=dict(raw_by_day),
-        cost_events={}, funding_by_day={}, active_gross_start={d: 0.0 for d in days},
+        days=days,
+        raw_by_day=raw_by_day,
+        gross_by_day=dict(raw_by_day),
+        cost_events={},
+        funding_by_day={},
+        active_gross_start={d: 0.0 for d in days},
         impact_exponent=0.5,
     )
 
 
 def _rule() -> ContinuousRebalanceRule:
     return ContinuousRebalanceRule(
-        realized_vol_window_days=90, target_daily_vol=0.045, max_scale=4.0,
-        drawdown_half_threshold=-0.04, drawdown_zero_threshold=None,
-        resize_cost_bps=10.0, strategy_momentum_window_days=0,
+        realized_vol_window_days=90,
+        target_daily_vol=0.045,
+        max_scale=4.0,
+        drawdown_half_threshold=-0.04,
+        drawdown_zero_threshold=None,
+        resize_cost_bps=10.0,
+        strategy_momentum_window_days=0,
     )
 
 
@@ -168,16 +165,13 @@ def test_intensity_none_is_byte_identical() -> None:
     comp = _components(raw, days)
     plain = apply_rebalance_rule(comp, _rule(), _hedge_rule(), h1, {}, h2, {})
     none_i = apply_rebalance_rule(comp, _rule(), _hedge_rule(), h1, {}, h2, {}, hedge_intensity=None)
-    ones = apply_rebalance_rule(
-        comp, _rule(), _hedge_rule(), h1, {}, h2, {}, hedge_intensity={d: 1.0 for d in days}
-    )
+    ones = apply_rebalance_rule(comp, _rule(), _hedge_rule(), h1, {}, h2, {}, hedge_intensity={d: 1.0 for d in days})
     assert plain.equals(none_i)
     assert plain.equals(ones)
 
 
-def test_live_twin_parity_with_intensity_two_leg() -> None:
-    """With the overlay ON, the live twin fed scale*intensity reproduces the engine's
-    per-leg ratios exactly — the demo book and the forward ledger stay one object."""
+def test_runtime_historical_parity_with_intensity_two_leg() -> None:
+    """The runtime calculator must reproduce historical per-leg ratios."""
     days, raw, h1, h2 = _two_factor_world(40)
     comp = _components(raw, days)
     hr = _hedge_rule()
@@ -199,15 +193,6 @@ def test_live_twin_parity_with_intensity_two_leg() -> None:
         assert math.isclose(live2, float(df["hedge_ratio_leg2"][i]), rel_tol=0, abs_tol=1e-15), i
 
 
-# ---------------------------------------------------------------------------
-# Frozen config: regime is hashed (turning it on voids the prior clock)
-# ---------------------------------------------------------------------------
-
-def test_regime_in_frozen_config_and_changes_hash() -> None:
-    assert frozen_hedge_regime() == FROZEN_BTCVOL_REGIME
-    assert FROZEN_FORWARD_CONFIG["hedge"]["regime"] == FROZEN_BTCVOL_REGIME
-    stripped = {
-        **FROZEN_FORWARD_CONFIG,
-        "hedge": {k: v for k, v in FROZEN_FORWARD_CONFIG["hedge"].items() if k != "regime"},
-    }
-    assert frozen_config_hash(stripped) != frozen_config_hash()
+def test_regime_is_embedded_in_active_config() -> None:
+    assert active_hedge_regime() == ACTIVE_BTCVOL_REGIME
+    assert ACTIVE_CONTINUOUS_CONFIG["hedge"]["regime"] == ACTIVE_BTCVOL_REGIME

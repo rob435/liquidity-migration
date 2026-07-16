@@ -34,7 +34,6 @@ def _capture_config() -> MarketCaptureConfig:
         segment_max_bytes=1_000_000,
         fsync_every_records=100,
         min_free_disk_bytes=1,
-        ring_records_per_symbol=100,
     )
 
 
@@ -98,7 +97,6 @@ def _ready_roots(
             segment_max_bytes=1_000_000,
             fsync_every_records=100,
             min_free_disk_bytes=1,
-            ring_records_per_symbol=100,
             persist_raw_market=persist_raw_market,
         ),
         owner_invocation_id=capture_invocation_id or invocation_id,
@@ -528,10 +526,10 @@ def test_owner_exec_start_post_binds_current_systemd_invocation_in_registered_wr
 ) -> None:
     text = (REPO_ROOT / "deploy" / "systemd" / unit_name).read_text(encoding="utf-8")
     assert (
-        "ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh "
+        "ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh "
         f"{unit_name} readiness"
     ) in text
 
-    wrapper = (REPO_ROOT / "scripts" / "run_authorized_fresh_runtime.sh").read_text(encoding="utf-8")
+    wrapper = (REPO_ROOT / "scripts" / "run_authorized_runtime.sh").read_text(encoding="utf-8")
     assert 'if [ "$#" -ne 2 ]; then' in wrapper
     assert '--expected-invocation-id "${INVOCATION_ID:?INVOCATION_ID is required}"' in wrapper

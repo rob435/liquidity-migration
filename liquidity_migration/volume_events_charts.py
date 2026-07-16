@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
-from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -58,7 +56,6 @@ def _monthly_returns(baskets: pl.DataFrame) -> pl.DataFrame:
 def _write_equity_benchmark_chart(
     output_dir: Path,
     *,
-    root: Path,
     equity: pl.DataFrame,
     raw_klines: pl.DataFrame,
     monthly: pl.DataFrame | None = None,
@@ -66,7 +63,6 @@ def _write_equity_benchmark_chart(
     title: str | None = None,
     subtitle: str | None = None,
     step: bool = True,
-    overlays: Sequence[OverlaySpec] | None = None,
     strategy_name: str = "Strategy",
     metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -76,8 +72,6 @@ def _write_equity_benchmark_chart(
     alongside its research report. ``title``/``subtitle`` override the chart
     header (e.g. an EXPLORATORY-grade sleeve marks its curve as such).
 
-    ``overlays`` layers extra normalised benchmark lines (a stock, an index, a
-    second strategy) after BTC — build them with :func:`price_overlay_from_csv`.
     ``strategy_name`` relabels the strategy line (e.g. ``"Strategy 3x"``).
     """
     strategy = _strategy_equity_series(equity)
@@ -92,14 +86,8 @@ def _write_equity_benchmark_chart(
         {"name": strategy_name, "color": (7, 14, 31), "alpha": 255, "width": 4, "points": strategy},
         {"name": "BTC", "color": (234, 88, 12), "alpha": 215, "width": 3, "points": btc},
     ]
-    overlay_series = _overlay_series_dicts(overlays or [])
-    series.extend(overlay_series)
     monthly_rows = _monthly_table_rows(equity=equity, monthly=monthly)
-    # "Trades" is honest only when the monthly frame actually carries a trades
-    # column; a frame with month+strategy_return alone has no trade counts, so the
-    # counts come from equity-row days and must be labelled "Days" — labelling them
-    # "Trades" reintroduces the equity-derived "11 trades, zero taken" lie this gate
-    # was added to kill (audit 2026-06-14, reports-charts-4).
+    # Label counts as trades only when the monthly input contains trade counts.
     has_real_monthly = (
         monthly is not None
         and not monthly.is_empty()
@@ -129,9 +117,7 @@ def _write_equity_benchmark_chart(
         "series": {
             "strategy": len(strategy),
             "btc": len(btc),
-            **{item["name"]: len(item["points"]) for item in overlay_series},
         },
-        "overlays": [item["name"] for item in overlay_series],
         "monthly_rows": len(monthly_rows),
         "metric_tiles": len(_chart_metric_tiles(metrics)),
         "legend_items": sum(1 for item in series if item["points"]),
@@ -153,18 +139,9 @@ def _remove_stale_chart_artifacts(output_dir: Path) -> None:
 def _chart_final_values(series: list[dict[str, Any]]) -> dict[str, float]:
     """Each series' legend multiple, measured at the LAST DATE COMMON to all series.
 
-    The legend invites a same-window benchmark comparison (subtitle: "normalised to
-    $1 at the strategy start"). Taking each series' own last point made the
-    comparison apples-to-oranges when BTC (or an overlay) ends before the strategy's
-    flat-extended end — the legend showed "Strategy 2.00x" (later date) next to
-    "BTC 1.20x" (earlier date), measured over different spans (audit 2026-06-14,
-    reports-charts-5). Anchor every series to the earliest series-end date so all
-    multiples are read over the same window; for the strategy that endpoint is in
-    its flat tail anyway, so its multiple is unchanged.
+    Anchor to the earliest series end so benchmark multiples share one window.
     """
-    # Do NOT assume points are date-sorted: OverlaySpec.points can be hand-supplied.
-    # Use the max parsed day per series for common_end, and pick the value at the
-    # largest day <= common_end (scan all, no early break). (audit-iter2 reports-exec-2)
+    # Pick each series' last value at or before the common boundary.
     finals: dict[str, float] = {}
     last_dates: list[date] = []
     for item in series:
@@ -515,12 +492,7 @@ def _monthly_table_rows(*, equity: pl.DataFrame, monthly: pl.DataFrame | None) -
     has_monthly_returns = (
         monthly is not None and not monthly.is_empty() and _has_columns(monthly, "month", "strategy_return")
     )
-    # Only take the trade-count fast-path when a real ``trades`` column is present.
-    # A monthly frame with month+strategy_return alone has NO trade counts — counting
-    # them as 0 under a "Trades" header asserts a count that does not exist; instead
-    # take returns from monthly and counts from per-month equity days (the caller
-    # labels the column "Days" since the trades column is absent) — audit 2026-06-14,
-    # reports-charts-4.
+    # Without a trades column, the fallback count is equity days and is labelled accordingly.
     if has_monthly_returns and monthly is not None and "trades" in monthly.columns:
         rows = [
             {
@@ -664,11 +636,7 @@ def _chart_opaque_fill(fill: tuple[int, ...]) -> tuple[int, int, int, int]:
 def _nice_axis(min_value: float, max_value: float, *, target_ticks: int) -> tuple[float, float, list[float]]:
     span = max(max_value - min_value, 1e-9)
     step = _nice_step(span / max(target_ticks - 1, 1))
-    # The floor clamps to 0 ONLY when the data is non-negative (the common case: a
-    # $1-normalised curve never drops below 0). When the data goes negative — a
-    # levered (e.g. 4x) equity curve blowing through zero on a day worse than
-    # -1/mult — the floor must follow the data so the wipeout is drawn, not hidden
-    # below the axis (audit 2026-06-14, reports-charts-3).
+    # Let the axis follow negative equity so a levered wipeout remains visible.
     floor_candidate = min_value - span * 0.05
     low = math.floor((floor_candidate if min_value < 0.0 else max(0.0, floor_candidate)) / step) * step
     high = math.ceil((max_value + span * 0.06) / step) * step
@@ -723,9 +691,7 @@ def _strategy_equity_series(equity: pl.DataFrame) -> list[dict[str, Any]]:
     if equity.is_empty() or not _has_columns(equity, "date", "equity"):
         return []
     rows = []
-    # audit2b: guard ts_ms before sorting on it — a date+equity frame without a
-    # ts_ms column passed the guard above then crashed at .sort("ts_ms"); fall
-    # back to the date ordering the chart already renders by.
+    # Some report frames have dates but no timestamp column.
     sort_key = "ts_ms" if _has_columns(equity, "ts_ms") else "date"
     for row in equity.sort(sort_key).select(["date", "equity"]).to_dicts():
         value = _float_or_nan(row.get("equity"))
@@ -791,99 +757,3 @@ def _normalised_price_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         return []
     base = cleaned[0]["value"]
     return [{"date": row["date"], "value": row["value"] / base} for row in cleaned]
-
-
-# --- modular benchmark overlays ------------------------------------------------
-# Any chart can layer extra normalised benchmark lines (a stock, an index, a second
-# strategy) on top of Strategy + BTC. An overlay is just a name + a normalised
-# {date,value} series; pass a list to _write_equity_benchmark_chart(overlays=...).
-# Colors auto-assign from the palette when left None, so callers usually only
-# supply a name + the source CSV (see price_overlay_from_csv).
-_OVERLAY_PALETTE: tuple[tuple[int, int, int], ...] = (
-    (13, 148, 136),   # teal
-    (124, 58, 237),   # violet
-    (217, 70, 239),   # fuchsia
-    (5, 150, 105),    # emerald
-    (202, 138, 4),    # amber
-)
-_OVERLAY_DATE_COLS = ("date", "day", "timestamp", "ts_ms")
-_OVERLAY_VALUE_COLS = ("value", "close", "adj_close", "adjclose", "price")
-
-
-@dataclass
-class OverlaySpec:
-    """One benchmark line to overlay on the official chart.
-
-    ``points`` is a normalised series ($1 at the strategy start) — build it with
-    :func:`price_overlay_from_csv` (CSV of date,close) or hand it any
-    ``[{date, value}]`` already passed through :func:`_normalised_price_series`.
-    ``color=None`` auto-assigns the next palette color.
-    """
-
-    name: str
-    points: list[dict[str, Any]] = field(default_factory=list)
-    color: tuple[int, int, int] | None = None
-    alpha: int = 230
-    width: int = 3
-
-
-def price_overlay_from_csv(
-    path: str | Path,
-    *,
-    name: str,
-    start: str,
-    end: str,
-    color: tuple[int, int, int] | None = None,
-    alpha: int = 230,
-    width: int = 3,
-    date_col: str | None = None,
-    value_col: str | None = None,
-) -> OverlaySpec:
-    """Load a price CSV into a normalised overlay clipped to ``[start, end]``.
-
-    Robust to schema: the date column is auto-detected from
-    (date/day/timestamp/ts_ms) and the value column from
-    (value/close/adj_close/price), or pass ``date_col``/``value_col`` explicitly.
-    Normalisation is to $1 at the first in-window point, matching Strategy/BTC.
-    """
-    df = pl.read_csv(Path(path).expanduser())
-    cols = {c.lower(): c for c in df.columns}
-    dcol = date_col or next((cols[c] for c in _OVERLAY_DATE_COLS if c in cols), None)
-    vcol = value_col or next((cols[c] for c in _OVERLAY_VALUE_COLS if c in cols), None)
-    if dcol is None or vcol is None:
-        raise ValueError(f"{path}: need a date and a value/close column, got {df.columns}")
-    if dcol.lower() == "ts_ms":
-        date_expr = pl.from_epoch(pl.col(dcol), "ms").dt.date().cast(pl.Utf8)
-    else:
-        date_expr = pl.col(dcol).cast(pl.Utf8).str.slice(0, 10)
-    frame = (
-        df.select(date=date_expr, value=pl.col(vcol).cast(pl.Float64, strict=False))
-        .filter((pl.col("date") >= start) & (pl.col("date") <= end) & pl.col("value").is_not_null())
-        .sort("date")
-    )
-    return OverlaySpec(
-        name=name,
-        points=_normalised_price_series(frame.to_dicts()),
-        color=color,
-        alpha=alpha,
-        width=width,
-    )
-
-
-def _overlay_series_dicts(overlays: Sequence[OverlaySpec]) -> list[dict[str, Any]]:
-    """Convert overlay specs to renderer series dicts, auto-coloring from the
-    palette where ``color is None`` and dropping overlays that have no points."""
-    out: list[dict[str, Any]] = []
-    palette_i = 0
-    for overlay in overlays:
-        if not overlay.points:
-            continue
-        color = overlay.color
-        if color is None:
-            color = _OVERLAY_PALETTE[palette_i % len(_OVERLAY_PALETTE)]
-            palette_i += 1
-        out.append(
-            {"name": overlay.name, "color": color, "alpha": overlay.alpha,
-             "width": overlay.width, "points": overlay.points}
-        )
-    return out

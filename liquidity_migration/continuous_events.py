@@ -1,54 +1,27 @@
-"""Execution-grade backtest for the CONTINUOUS liquidity-migration fade.
-
-Every prior continuous-fade result (P0 -> p1m) is an EXPLORATORY proxy: per-spell
-additive PnL, a mid-fill at the SAME close used to rank, a flat 15/30 bps cost with
-NO market impact, and no compounding. This module closes those gaps so the continuous
-book is measured under the shared execution-grade lifecycle machinery.
-
-It REPRODUCES the proxy SELECTION exactly (so it is auditable against p1d/p1j/p1k):
-  - 5 trailing closed-bar features (rv_168h, vov, dist_low, xsret7, xsret3),
-  - within-ts composite decile on the rmom-LOW half (causal day-floor lag1 join of
-    residual_momentum.parquet),
-  - short the top composite decile (D9), fresh spell entry (gap > 1h), liquid gate
-    (signal-bar hourly turnover_quote >= threshold).
-
-It runs that selection chronologically through per-position lifecycle state and,
-for market orders, a persistent shared account kernel. Stops, funding-to-exit,
-MAE/MFE, compounding equity, drawdown, and Sharpe use the same lifecycle
-accounting helpers. The three realism upgrades the proxy lacked are:
-  1. HONEST +1h entry -- fill at the bar AFTER the deciding bar's close. The proxy
-     filled at the same close it ranked on (execution look-ahead). entry_delay_hours=0
-     reproduces the proxy (validation only).
-  2. A real round-trip COST = 2*taker + 2*spread + 2*impact, where impact rises with
-     size and falls with liquidity: impact_bps = impact_coef_bps * participation^exp,
-     participation = position_notional / signal-bar hourly turnover. This is the
-     capacity-aware cost the p1c argument + the integrity gate demand.
-  3. COMPOUNDING equity + true concurrency (heap of exit-times, max_active cap) +
-     per-symbol cooldown, and the full artifact set (ledger, equity curve, splits,
-     drawdown, worst-day, config hash, run label).
-
-EXPLORATORY engine: impact coefficients are modeled, not venue-calibrated, and
-the selection params come from a heavily multiple-tested research arc.
-"""
+"""Historical equity engine for the active continuous short-fade profile."""
 from __future__ import annotations
 
 import bisect
 import hashlib
 import json
-import tempfile
-from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift, exact_duration_ms
+from ._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
 from .account_kernel import AccountRiskPolicy, verify_account_journal
 from .account_service import SleeveAdapterKind
 from .config import DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
+from .continuous_profile import (
+    CONTINUOUS_EQUITY_EVIDENCE_LABEL,
+    CONTINUOUS_HISTORY_START_DATE,
+    CONTINUOUS_PROFILE_ID,
+    CONTINUOUS_PROFILE_REVISION,
+)
 from .daily_feature_panel import _autodetect_dataset_names, _date_str_to_ms, _read_window
 from .storage import read_dataset_columns
 from .trade_lifecycle import (
@@ -56,8 +29,6 @@ from .trade_lifecycle import (
     _empty_trades,
     _funding_lookup,
     _indexed_price_bars_by_symbol,
-    _stop_price,
-    _take_profit_price,
     _collapse_interval_min,
     annualized_sharpe,
     derive_funding_interval_min,
@@ -65,146 +36,54 @@ from .trade_lifecycle import (
 )
 from .execution_adapters import ExecutionTwinConfig, LatencyProfile
 from .historical_account_replay import (
-    HistoricalAccountReplay,
     HistoricalAccountSession,
     HistoricalTargetDecision,
-    historical_cycles_from_decisions,
     historical_submission_feedback,
     neutralize_historical_decisions,
-    synthetic_historical_rules,
     synthetic_historical_rules_for_symbols,
 )
 from .strategy_targets import component_target_intent
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
-BTC_TREND_MODE_DAILY_PRIOR = "daily_prior"
-BTC_TREND_MODE_HOURLY_30D = "hourly_30d"
-BTC_TREND_MODE_HOURLY_EXACT_MONTH = "hourly_exact_month"
-BTC_TREND_MODE_SMART_MONTH = "smart_month"
-BTC_TREND_MODES = (
-    BTC_TREND_MODE_DAILY_PRIOR,
-    BTC_TREND_MODE_HOURLY_30D,
-    BTC_TREND_MODE_HOURLY_EXACT_MONTH,
-    BTC_TREND_MODE_SMART_MONTH,
-)
-BTC_EXACT_MONTH_DAYS = 365.25 / 12.0
-
-
-class BtcTrendConfig(Protocol):
-    """Read-only BTC-trend fields shared by historical and forward configs."""
-
-    @property
-    def btc_trend_mode(self) -> str: ...
-
-    @property
-    def btc_trend_lookback_days(self) -> int: ...
-
-    @property
-    def btc_trend_month_days(self) -> float: ...
-
-_RESEARCH_INPUT_CACHE_MAX = 4
-_RESEARCH_INPUT_CACHE: OrderedDict[tuple[str, str, str, int], dict[str, Any]] = OrderedDict()
 
 
 @dataclass(frozen=True, slots=True)
 class ContinuousEventConfig:
-    """Continuous-fade engine config. See module docstring + the pre-registration."""
+    """Inputs that still vary in the active continuous equity path."""
 
-    # Operational execution identity and venue leverage. They are independent
-    # from gross exposure; registered parity runs must set them explicitly.
+    profile_id: str = CONTINUOUS_PROFILE_ID
+    profile_revision: str = CONTINUOUS_PROFILE_REVISION
+    component_key: str = ""
     execution_strategy_id: str = ""
     execution_leverage: float = 1.0
-    start_date: str = "2023-04-01"
-    end_date: str = ""                    # "" = data-driven: clamp to the root's last available day
-    #                                       (end-exclusive, so the final full day is included). A
-    #                                       fixed past date silently truncated recent data as the
-    #                                       calendar advanced (cli-config-5).
-    # --- selection (ported from p1d._deciled_panel) ---
+    start_date: str = CONTINUOUS_HISTORY_START_DATE
+    end_date: str = ""
     side: str = "short"
-    decile: int = 9                       # short the top composite decile
-    rmom_quantile: float = 0.5            # rmom-LOW half: keep within-ts rmom rank <= this
-    feature_set: tuple[str, ...] = FEATURES  # composite features; all are trailing/causal
-    liq_turnover_min: float = 500_000.0   # liquid gate: signal-bar hourly turnover_quote (USD)
-    # --- execution ---
-    entry_delay_hours: int = 1            # bars AFTER the deciding bar's close (0 = proxy/look-ahead)
-    entry_adverse_limit_pct: float = 0.0  # research-only: wait for a better adverse limit; 0=market/close
-    entry_adverse_limit_wait_hours: int = 24  # max post-submit hours to wait for adverse limit fill
-    exit_mode: str = "fixed"              # "fixed" = hold_hours timer; "state" = hold while in the fade decile
-    exit_decile_buffer: int = 0            # state-mode hysteresis: D9/buffer=1 holds while decile >= D8
-    hold_hours: int = 12                  # fixed-mode hold horizon
-    max_hold_hours: int = 48              # state-mode cap (force exit if the name never leaves the decile)
-    rank_exit_threshold: float = 0.0      # 0=off; short exits when composite rank fraction falls below threshold
-    cooldown_hours: int = 0               # 0 -> fixed: hold_hours; state: 0 (spell-fresh already dedupes)
-    stop_loss_pct: float = 0.0            # 0 -> no stop (proxy parity)
-    stop_approach_frac: float = 0.0        # >0 cuts at frac * stop_loss_pct; live uses 0.8 of disaster stop
-    take_profit_pct: float = 0.0          # 0 -> no take-profit; short TP exits on favorable downside
-    stop_vol_mult: float = 0.0            # >0 -> vol-scaled stop = k * trailing hourly vol (overrides fixed
-    #                                       stop_loss_pct per-trade), clamped to [5%,50%]. 0 -> fixed stop.
-    stop_fill_mode: str = "bar_extreme_capped"
-    stop_slippage_cap_pct: float = 0.10
-    # --- sizing ---
-    gross_exposure: float = 0.5           # 0.5 / 25 = 2% per name (matches the p1j/p1k proxy)
+    decile: int = 9
+    rmom_quantile: float = 0.25
+    feature_set: tuple[str, ...] = ("max_ret168",)
+    liq_turnover_min: float = 500_000.0
+    entry_delay_hours: int = 1
+    hold_hours: int = 24
+    take_profit_pct: float = 0.12
+    gross_exposure: float = 0.5
     max_active: int = 25
-    # --- cost model: round_trip = 2*(taker+spread) + 2*impact ---
     taker_fee_bps: float = 5.5
     spread_bps: float = 2.5
     impact_coef_bps: float = 50.0
     impact_exponent: float = 0.5
     deploy_capital_usd: float = 1_000_000.0
-    flat_round_trip_bps: float | None = None   # override the cost model (proxy-parity validation)
-    round_trip_cost_multiplier: float = 1.0    # stress knob; 1.0 preserves the base cost model
-    # --- inherited-from-daily refinements (ablation knobs; default OFF = current baseline) ---
-    sizing_mode: str = "flat"             # "flat" (2% each) | "inverse_vol" (size by target_vol/rv, clamped)
-    target_vol_per_name: float = 0.02     # inverse_vol: per-name hourly-vol target
-    vol_weight_clamp: float = 3.0         # inverse_vol: clamp weight multiplier to [1/clamp, clamp]
-    # Risk-objective entry sizing. A 0.001 budget with shock=1.0 caps one
-    # symbol's loss under a +100% adverse gap at 0.10% of equity. This changes
-    # exposure before entry; it is not a stop or an assumed exit fill.
-    entry_disaster_loss_budget_frac: float = 0.0  # 0=off
-    entry_disaster_shock_frac: float = 1.0
-    # Aggregate live-notional shock budget. Applied independently to each
-    # component before ensemble weighting; with component weights summing to 1,
-    # the aggregate ensemble inherits the same cap.
-    entry_portfolio_heat_cap_frac: float = 0.0  # 0=off
-    age_days_min: int = 0                 # skip symbols younger than this (fresh-listing squeezers)
-    entry_max_ret168_max: float = 10.0    # skip entries with trailing 168h max 1h return above this; 10=off
-    entry_decel_lookback_h: int = 0       # 0=off; require close[t]/close[t-lookback]-1 <= entry_decel_max_ret
-    entry_decel_max_ret: float = 0.0      # fade-started confirmation: recent move must be <= this
-    market_min_ret_1d: float = -1.0       # skip entry if equal-weight market 1d return < this (-1 = off)
-    btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend"
-    btc_trend_lookback_days: int = 30     # prior BTC daily returns, excluding the signal day
-    btc_trend_mode: str = BTC_TREND_MODE_DAILY_PRIOR
-    btc_trend_month_days: float = BTC_EXACT_MONTH_DAYS
-    btc_trend_smart_tolerance: float = 0.01
-    entry_event_trigger: str = "none"      # hourly catalyst gate; "none" preserves continuous spell entries
-    failed_fade_hours: int = 0            # 0=off; cut a fade that hasn't worked after N hours
-    failed_fade_loss_pct: float = 0.0
-    failed_fade_min_mfe_pct: float = 0.0
-    breakeven_arm_pct: float = 0.0        # 0=off; once MFE>=this, exit if it returns to entry
-    mfe_giveback_trigger_pct: float = 0.0
-    mfe_giveback_retain_pct: float = 0.0
-    hash_exit_prob: float = 0.0           # Negative-control per-bar hash exit prob; 0=off
-    # Portfolio circuit breaker (correlated-squeeze defense): PAUSE new entries when >= N net-negative
-    # exits (the live sleeve's "adverse cover" footprint of a market-wide alt melt-up) have completed
-    # within the trailing entry_pause_window_hours. Causal: counts only exits that closed strictly
-    # before the candidate entry. 0 = OFF. Mirrors continuous_demo.entry_circuit_breaker_tripped so the
-    # engine validates the live knob (net_return<0 is the engine-side proxy for the live adverse set).
-    entry_pause_after_adverse_exits: int = 0
-    entry_pause_window_hours: int = 24
-    entry_crowding_max_fresh: int = 0     # 0=off; skip signal hours with more fresh candidates than this
-    entry_skip_external_size_multiplier_lte: float = 0.0  # 0=off; skip entries sized <= threshold by external hook
-    # --- funding / splits / universe ---
+    sizing_mode: str = "inverse_vol"
+    target_vol_per_name: float = 0.01
+    vol_weight_clamp: float = 2.0
+    age_days_min: int = 240
+    btc_trend_gate: str = "uptrend"
+    btc_trend_lookback_days: int = 30
+    entry_event_trigger: str = "none"
+    entry_crowding_max_fresh: int = 2
     use_funding: bool = True
-    split_date: str = "2025-06-01"        # early/recent boundary
+    split_date: str = "2025-06-01"
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
-
-    @property
-    def effective_cooldown_hours(self) -> int:
-        if self.cooldown_hours > 0:
-            return self.cooldown_hours
-        # state-mode entries are one-per-D9-spell and can't double-open, so no extra cooldown;
-        # fixed-mode uses hold_hours so a name can't re-enter mid-hold (matches the proxy).
-        return 0 if self.exit_mode == "state" else self.hold_hours
 
     @property
     def notional_weight(self) -> float:
@@ -212,10 +91,7 @@ class ContinuousEventConfig:
 
     def config_hash(self) -> str:
         material = asdict(self)
-        # Research identity is intentionally stable under execution-only
-        # routing and margin choices. Those fields remain explicit in report
-        # config and canonical target events; changing frozen research hashes
-        # would rewrite preregistered evidence without changing the signal.
+        # Execution routing and margin do not alter the historical signal.
         material.pop("execution_strategy_id", None)
         material.pop("execution_leverage", None)
         return hashlib.sha256(
@@ -232,13 +108,7 @@ def _iso_day(ts_ms: int) -> str:
 
 
 def _panel_cache_stale(cache_path: Path, rmom_path: Path) -> bool:
-    """The deciled-panel cache is keyed ONLY on rmom_quantile, so a refresh of the underlying
-    data — new klines → a rebuilt residual_momentum.parquet — must invalidate it. Without this
-    the cache silently serves a panel truncated to the OLD data end (observed 2026-06-03: the
-    continuous equity curve stuck at the prior data tail / May-27 after a fresh rebuild, because
-    the Jun-2 cache predated the refreshed klines+rmom). Treat the cache as stale whenever the
-    rmom panel is newer than it (a data refresh rebuilds rmom, bumping its mtime); fail safe to
-    'stale' if either file can't be stat'd so we rebuild rather than serve a possibly-stale panel."""
+    """Invalidate a panel when its RMOM input is missing or newer."""
     try:
         return (not rmom_path.exists()) or (cache_path.stat().st_mtime < rmom_path.stat().st_mtime)
     except OSError:
@@ -250,25 +120,8 @@ def _feature_tag(feature_set: tuple[str, ...]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
 
 
-def _root_max_kline_ms(root: Path) -> int | None:
-    """Max kline ``ts_ms`` available under ``root`` (None if no kline data)."""
-    kname = _autodetect_dataset_names(root)["klines_dataset"]
-    k = read_dataset_columns(root, kname, columns=["ts_ms"])
-    if k.is_empty() or "ts_ms" not in k.columns:
-        return None
-    return int(k["ts_ms"].max())
-
-
 def _listing_ts_by_symbol(root: Path) -> dict[str, int]:
-    """Per-symbol AUTHORITATIVE PIT listing timestamp: the first-ever kline ``ts_ms`` under the
-    root, read over the FULL dataset independent of any run window.
-
-    The age gate must measure listing age from a symbol's true first bar, not the first bar that
-    happens to land inside the padded read window (which is clamped to ``start_ms - pad_back`` and
-    makes any older symbol look exactly ``pad_back`` old at the window start). This mirrors the live
-    demo's ``universe.listing_age_days`` (Bybit launchTime) using the root's own data, so the
-    backtest age floor admits the same symbols near the window edge as the live sleeve does
-    (pit-engine-2)."""
+    """Return each symbol's first kline across the full root for the age gate."""
     kname = _autodetect_dataset_names(root)["klines_dataset"]
     k = read_dataset_columns(root, kname, columns=["symbol", "ts_ms"])
     if k.is_empty() or "symbol" not in k.columns or "ts_ms" not in k.columns:
@@ -277,27 +130,20 @@ def _listing_ts_by_symbol(root: Path) -> dict[str, int]:
     return {str(s): int(t) for s, t in first.iter_rows()}
 
 
-def _resolve_end_ms(root: Path, config: ContinuousEventConfig) -> int:
-    """End-exclusive window boundary in ms.
-
-    An explicit ``end_date`` is honored verbatim (frozen/forward runs pin it). An empty
-    ``end_date`` is the DATA-DRIVEN default: clamp to the day AFTER the root's last available
-    kline (end-exclusive, so the final full day is included), so a default research run never
-    silently omits the freshest data as the calendar advances (cli-config-5)."""
-    if config.end_date:
-        return _date_str_to_ms(config.end_date)
-    max_ts = _root_max_kline_ms(root)
-    if max_ts is None:
-        # No kline data to clamp against; fall back to start so the empty-root path returns empty.
-        return _date_str_to_ms(config.start_date)
-    return (max_ts // MS_PER_DAY) * MS_PER_DAY + MS_PER_DAY
+def _window_ms(config: ContinuousEventConfig) -> tuple[int, int]:
+    if not config.end_date:
+        raise ValueError("continuous equity requires an explicit end_date")
+    start_ms = _date_str_to_ms(config.start_date)
+    end_ms = _date_str_to_ms(config.end_date)
+    if end_ms <= start_ms:
+        raise ValueError("continuous equity end_date must be after start_date")
+    return start_ms, end_ms
 
 
-def _window_tag(config: ContinuousEventConfig, end_ms: int) -> str:
-    # When end_date is data-driven (""), bake the RESOLVED end into the cache key so two runs
-    # at different data ends never collide on the same cached panel.
-    end_part = config.end_date or f"auto{end_ms}"
-    return hashlib.sha256(f"{config.start_date}_{end_part}".encode("utf-8")).hexdigest()[:8]
+def _window_tag(config: ContinuousEventConfig) -> str:
+    return hashlib.sha256(
+        f"{config.start_date}_{config.end_date}".encode("utf-8")
+    ).hexdigest()[:8]
 
 
 def _exclude_tag(exclude_symbols: Any) -> str:
@@ -306,43 +152,30 @@ def _exclude_tag(exclude_symbols: Any) -> str:
     return hashlib.sha256("|".join(syms).encode("utf-8")).hexdigest()[:8]
 
 
-def _panel_cache_path(root: Path, config: ContinuousEventConfig, *, end_ms: int) -> Path:
-    window_tag = _window_tag(config, end_ms)
-    # audit2: fold the exclusion set into the cache key. The panel is built with
-    # `config.exclude_symbols` filtered out (build_continuous_panel below), but the
-    # old key omitted it — two runs differing ONLY in exclude_symbols collided on the
-    # same cached parquet and the second silently reused the first's (wrong-exclusion)
-    # panel. The empty-exclusion case (the live/default path) keeps its prior filename
-    # byte-for-byte, so no existing cache is invalidated; only non-empty exclusions get
-    # a distinct, correct key.
+def _panel_cache_path(root: Path, config: ContinuousEventConfig) -> Path:
+    window_tag = _window_tag(config)
+    # Exclusions are material because the panel is ranked cross-sectionally.
     excl_part = "" if not config.exclude_symbols else f"_excl{_exclude_tag(config.exclude_symbols)}"
     return root / (
-        # v4 invalidates panels built before provisional residual-momentum rows
-        # were excluded from live/research consumers.
         f"_continuous_engine_panel_v4_rmom{int(round(config.rmom_quantile * 100))}"
         f"_feat{_feature_tag(config.feature_set)}{excl_part}_{window_tag}.parquet"
     )
 
 
-# Max days the rmom table may lag the klines window's last day before the backtest panel build
-# refuses to run. residual_momentum[D] sums residual_return[D-9..D-3] (precompute shift(3)), so a
-# freshly rebuilt rmom legitimately trails the newest kline day by a couple of days; beyond that the
-# table is STALE and the left-join+null-filter would SILENTLY drop the newest dates from the panel
-# (the documented 2026-06-03 truncation). Matches the live watchdog's --max-rmom-stale-days default.
+# residual_momentum[D] sums residual_return[D-9..D-3], so a fresh table may
+# trail klines briefly. Beyond this bound the panel join would drop recent days.
 RMOM_COVERAGE_TOLERANCE_DAYS = 2
 
 
-def validated_stable_residual_momentum(
+def require_stable_residual_momentum(
     table: pl.DataFrame,
     *,
     source: str | Path,
 ) -> pl.DataFrame:
-    """Validate RMOM provenance/keys/values, then return stable rows only.
+    """Require valid RMOM provenance, keys, and values; return stable rows.
 
-    Duplicate keys multiply panel rows and NaN/Inf values can corrupt ranks. A
-    legacy table without provenance can expose its mutable tail. All three are
-    wrong-signal failures, so live callers degrade the raised error to no signal
-    while research and reconciliation fail loudly.
+    Duplicate keys multiply panel rows, invalid values corrupt ranks, and rows
+    without provisional-state provenance cannot be safely filtered.
     """
     required = {"symbol", "ts_ms", "residual_momentum", "is_provisional"}
     missing = sorted(required - set(table.columns))
@@ -386,10 +219,9 @@ def _assert_rmom_covers_window(
     """Fail loudly when residual_momentum lags the klines window instead of silently truncating.
 
     The decile build left-joins rmom on (symbol, day_ts) and filters to non-null rmom, so a
-    present-but-stale residual_momentum.parquet drops EVERY symbol on the newest days with no error
-    — understating recent exposure/return in decision evidence (equity curves, research panels).
-    The live daemon is guarded by max_rmom_day_ts / rmom_stale_days telemetry; this mirrors that
-    guard on the backtest path (pit-data-5)."""
+    stale table drops every symbol on recent days and understates exposure and
+    return. Runtime has an equivalent freshness guard.
+    """
     in_window = klines.filter(pl.col("ts_ms") >= start_ms)
     if in_window.is_empty() or rmom.is_empty() or "day_ts" not in rmom.columns:
         return
@@ -411,14 +243,14 @@ def build_continuous_panel(
 ) -> pl.DataFrame:
     """Build the deciled rmom-low panel: (symbol, ts_ms, decile, composite, turnover_quote).
 
-    PIT-causal: all 5 features are trailing closed-bar windows on `ts_ms`'s close (known at
+    PIT-causal: features are trailing closed-bar windows on `ts_ms`'s close (known at
     ts_ms+1h); the rmom join is a day-floor lag1 (residual_momentum[D] uses residuals <= D-1).
     This is the engine-owned decile panel builder; it computes realised fills
     downstream rather than carrying a forward-return proxy column.
     """
     root = Path(str(data_root)).expanduser()
-    start_ms, end_ms = _date_str_to_ms(config.start_date), _resolve_end_ms(root, config)
-    cache_path = _panel_cache_path(root, config, end_ms=end_ms)
+    start_ms, end_ms = _window_ms(config)
+    cache_path = _panel_cache_path(root, config)
     rmom_path = root / "residual_momentum.parquet"
     if cache and cache_path.exists() and not _panel_cache_stale(cache_path, rmom_path):
         return pl.read_parquet(cache_path)
@@ -437,11 +269,8 @@ def build_continuous_panel(
             f"POLARS_MAX_THREADS=8 python scripts/precompute_residual_momentum.py --root {root}"
         )
     rmom = pl.read_parquet(rmom_path)
-    # Provisional padded values are causal but can mature when a delayed
-    # forward-target residual arrives. They are append telemetry, not an
-    # approved trading signal; block them so live and research use only the
-    # registered stable shift-3 series.
-    rmom = validated_stable_residual_momentum(rmom, source=rmom_path)
+    # Provisional rows can change when delayed residuals arrive.
+    rmom = require_stable_residual_momentum(rmom, source=rmom_path)
     rmom = rmom.rename({"ts_ms": "day_ts"})
     _assert_rmom_covers_window(rmom, k, start_ms=start_ms, root=root)
     panel = compute_continuous_decile_panel(
@@ -538,10 +367,7 @@ def cross_sectional_decile(
     k = k.with_columns(
         pl.max_horizontal("feature_ts_ms", "rmom_data_available_ts_ms").alias("data_available_ts_ms")
     )
-    # Rank-fraction denominator (len-1) must be clamped to >=1: a ts_ms group that collapses to a
-    # single surviving symbol would otherwise divide by 0 -> NaN, and `filter(_rr <= q)` silently
-    # drops the lone candidate (NaN <= x is False) instead of ranking it at 0.0. Matches the
-    # singleton guard `_continuous_rank_lookup` already uses (max(height-1, 1)). See pit-signals-5.
+    # Clamp the rank denominator so a one-symbol timestamp ranks at zero.
     _rank_denom = pl.max_horizontal(pl.len().over("ts_ms") - 1, pl.lit(1))
     k = k.with_columns(
         ((pl.col("residual_momentum").rank().over("ts_ms") - 1) / _rank_denom).alias("_rr")
@@ -642,17 +468,7 @@ def compute_continuous_decile_panel(
 
 
 def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.DataFrame:
-    """Fresh (new D9 spell) entries on the liquid universe, ts-ordered.
-
-    "Fresh" is computed on the FULL target-decile membership timeline (a gap > 1h marks a new
-    spell), and the liquid gate is applied AFTER -- matching the proxy. Filtering liquid FIRST
-    would let illiquid hours inside one continuous spell open artificial gaps -> spurious fresh
-    entries (it inflated the count ~2x in the first cut).
-
-    Live state exits use hysteresis: enter on a fresh D9 catalyst, but keep the planned state
-    spell alive while the name remains within the configured hold band (D9/D8 for buffer=1).
-    The wider hold-band spell is used ONLY for state-exit timing; it does not create D8 entries.
-    """
+    """Fresh target-decile entries on the liquid universe, ordered by signal time."""
     if panel.is_empty():
         return panel
     d = panel.filter(pl.col("decile") == config.decile).sort(["symbol", "ts_ms"])
@@ -661,38 +477,12 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
     d = d.with_columns(
         ((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")) > MS_PER_HOUR).fill_null(True).alias("fresh")
     )
-    # spell id + the last consecutive in-decile hour of each spell (the STATE-exit timestamp:
-    # the name stops being a top-decile fade candidate after spell_end_ts).
-    d = d.with_columns(pl.col("fresh").cum_sum().over("symbol").alias("_spell"))
-    d = d.with_columns(pl.col("ts_ms").max().over(["symbol", "_spell"]).alias("spell_end_ts"))
     d = d.filter(pl.col("fresh")).filter(pl.col("turnover_quote") >= config.liq_turnover_min)
-    if config.exit_mode == "state" and config.exit_decile_buffer > 0 and not d.is_empty():
-        hold_min_decile = config.decile - max(0, int(config.exit_decile_buffer))
-        hold = panel.filter(pl.col("decile") >= hold_min_decile).sort(["symbol", "ts_ms"])
-        hold = hold.with_columns(
-            ((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")) > MS_PER_HOUR)
-            .fill_null(True)
-            .alias("_hold_fresh")
-        )
-        hold = hold.with_columns(pl.col("_hold_fresh").cum_sum().over("symbol").alias("_hold_spell"))
-        hold = hold.with_columns(
-            pl.col("ts_ms").max().over(["symbol", "_hold_spell"]).alias("hold_band_spell_end_ts")
-        )
-        d = (
-            d.drop("spell_end_ts")
-            .join(hold.select("symbol", "ts_ms", "hold_band_spell_end_ts"), on=["symbol", "ts_ms"], how="left")
-            .rename({"hold_band_spell_end_ts": "spell_end_ts"})
-        )
-    if config.entry_max_ret168_max < 10.0:
-        if "max_ret168" not in d.columns:
-            raise ValueError("entry_max_ret168_max requires max_ret168 in the continuous panel")
-        d = d.filter(pl.col("max_ret168") <= config.entry_max_ret168_max)
     keep_cols = [
         "symbol",
         "ts_ms",
         "composite",
         "turnover_quote",
-        "spell_end_ts",
         "signal_bar_close_ts_ms",
         "decision_ts_ms",
         "feature_ts_ms",
@@ -718,97 +508,17 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
     return d.select([c for c in keep_cols if c in d.columns]).sort(["ts_ms", "symbol"])
 
 
-def _symbol_priority_hash(symbol: str) -> int:
-    """Deterministic, market-content-free symbol hash for negative-control entry priority."""
-    return int(hashlib.sha256(symbol.encode("utf-8")).hexdigest()[:8], 16) % 1000
-
-
-def _apply_entry_order(entries: pl.DataFrame, entry_order: str) -> pl.DataFrame:
-    """Re-order candidates WITHIN each ``signal_ts`` by an entry-priority score,
-    leaving every gate / capacity / cooldown / sizing untouched. Reordering is causal (only same-ts
-    candidates ever swap; a later ts can never jump ahead of an earlier one). ``fcfs`` (default)
-    reproduces the frozen control's ``(ts_ms, symbol)`` order exactly.
-
-    - ``fcfs``: control order (symbol-alphabetical within ts).
-    - ``composite``: highest production composite first within ts (symbol tiebreak).
-    - ``symbol_hash``: ascending market-content-free symbol hash (negative control)."""
-    if entries.is_empty() or entry_order == "fcfs":
-        return entries
-    if entry_order == "composite":
-        return entries.sort(
-            ["ts_ms", "composite", "symbol"], descending=[False, True, False], nulls_last=True
-        )
-    if entry_order == "symbol_hash":
-        syms = entries["symbol"].unique().to_list()
-        hmap = pl.DataFrame(
-            {"symbol": syms, "_pri_hash": [_symbol_priority_hash(str(s)) for s in syms]}
-        )
-        return (
-            entries.join(hmap, on="symbol", how="left")
-            .sort(["ts_ms", "_pri_hash", "symbol"])
-            .drop("_pri_hash")
-        )
-    raise ValueError(f"unknown entry_order {entry_order!r}")
-
-
-def _continuous_rank_lookup(panel: pl.DataFrame, *, delay_ms: int) -> dict[tuple[str, int], float]:
-    """Composite rank by symbol and actionable bar-end timestamp for rank-decay exits."""
-    output: dict[tuple[str, int], float] = {}
-    if panel.is_empty() or "composite" not in panel.columns:
-        return output
-    for part in panel.select("symbol", "ts_ms", "composite").drop_nulls().sort(["ts_ms", "symbol"]).partition_by(
-        "ts_ms", maintain_order=True
-    ):
-        values = part.filter(pl.col("composite").is_finite()).sort("composite")
-        if values.height < 2:
-            continue
-        check_ts = int(values["ts_ms"][0]) + delay_ms
-        denom = max(values.height - 1, 1)
-        for rank, row in enumerate(values.to_dicts()):
-            output[(str(row["symbol"]), check_ts)] = rank / denom
-    return output
-
-
 def _round_trip_bps(
     config: ContinuousEventConfig, turnover_quote: float, *, notional_weight: float | None = None
 ) -> float:
-    """Round-trip cost (bps): 2*taker + 2*spread + 2*impact; impact is size/ADV-aware.
-
-    participation = position_notional / signal-bar hourly turnover (the ADV proxy).
-    A flat_round_trip_bps override bypasses the model for proxy-parity validation.
-    """
-    cost_multiplier = max(float(config.round_trip_cost_multiplier), 0.0)
-    if config.flat_round_trip_bps is not None:
-        return float(config.flat_round_trip_bps) * cost_multiplier
+    """Capacity-aware round-trip cost in basis points."""
     base = 2.0 * (config.taker_fee_bps + config.spread_bps)
     weight = config.notional_weight if notional_weight is None else float(notional_weight)
     notional = max(weight, 0.0) * config.deploy_capital_usd
     adv = max(float(turnover_quote), 1.0)
     participation = notional / adv
     impact = config.impact_coef_bps * (participation ** config.impact_exponent)
-    return (base + 2.0 * impact) * cost_multiplier
-
-
-def _market_daily_returns(klines: pl.DataFrame) -> dict[int, float]:
-    """Equal-weight cross-sectional mean daily return per day-floored ts (the alt-market regime gate).
-
-    The value for day D is D's FULL-day close-to-close return (known only at D's
-    final bar). The entry gate consumes it with a one-day causal lag (reads day
-    D-1 for an entry on day D), so an intraday entry never reads its own day's
-    not-yet-realised return.
-    """
-    # audit2c: gap-aware 1-day return. A plain shift(1).over("symbol") pairs a symbol's
-    # Nth PRESENT day, so across a delist/relist or archive gap it mislabels a multi-day
-    # close-to-close move as that day's 1-day return, biasing the equal-weight market
-    # regime gate. calendar_shift nulls the return on a post-gap day (it is excluded from
-    # the cross-sectional mean) and is byte-identical for a contiguous daily series.
-    dc = (
-        klines.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day"))
-        .group_by(["symbol", "day"]).agg(pl.col("close").last().alias("c")).sort(["symbol", "day"])
-        .with_columns((pl.col("c") / calendar_shift(pl.col("c"), 1, time_col="day") - 1.0).alias("r"))
-        .group_by("day").agg(pl.col("r").mean().alias("mkt")).drop_nulls()
-    )
-    return {int(r[0]): float(r[1]) for r in dc.iter_rows()}
+    return base + 2.0 * impact
 
 
 def _btc_trend_returns(klines: pl.DataFrame, *, lookback_days: int = 30) -> dict[int, float]:
@@ -845,128 +555,6 @@ def _btc_trend_returns(klines: pl.DataFrame, *, lookback_days: int = 30) -> dict
         days.append(day_i)
         rets.append(float(ret))
     return out
-
-
-def _btc_hourly_month_returns(klines: pl.DataFrame, *, lookback_ms: int) -> dict[int, float]:
-    """BTC return keyed by hourly signal bar, using only that confirmed bar close.
-
-    The key is the BTC kline ``ts_ms`` (the hour's bar start). The close is known at
-    ``ts_ms + 1h``, which is still before the existing continuous default entry
-    submit time. The source close is the latest BTC bar whose timestamp is <= the
-    exact cutoff. If the source is more than one hour older than the cutoff, the
-    value is treated as unavailable instead of smearing over an archive gap.
-    """
-    if lookback_ms <= 0:
-        raise ValueError(f"lookback_ms must be positive; got {lookback_ms}")
-    if klines.is_empty() or "symbol" not in klines.columns:
-        return {}
-    btc = (
-        klines.filter(pl.col("symbol") == "BTCUSDT")
-        .select("ts_ms", "close")
-        .sort("ts_ms")
-        .drop_nulls(["ts_ms", "close"])
-    )
-    if btc.is_empty():
-        return {}
-    ts = [int(v) for v in btc["ts_ms"].to_list()]
-    closes = [float(v) for v in btc["close"].to_list()]
-    out: dict[int, float] = {}
-    for idx, anchor_ts in enumerate(ts):
-        source_cutoff = int(anchor_ts) - int(lookback_ms)
-        source_idx = bisect.bisect_right(ts, source_cutoff) - 1
-        if source_idx < 0:
-            continue
-        source_ts = int(ts[source_idx])
-        if source_ts < source_cutoff - MS_PER_HOUR:
-            continue
-        source_close = float(closes[source_idx])
-        anchor_close = float(closes[idx])
-        if source_close > 0.0 and np.isfinite(source_close) and np.isfinite(anchor_close):
-            out[int(anchor_ts)] = anchor_close / source_close - 1.0
-    return out
-
-
-def _btc_smart_month_value(hourly_month_return: float, daily_prior_return: float, *, tolerance: float) -> float:
-    """Signed consensus score for the research smart-month BTC gate.
-
-    Positive means an uptrend gate passes. It tolerates a small disagreement
-    between the faster hourly exact-month return and the slower daily prior-N-day
-    return, but requires at least one leg to be positive. This is deliberately
-    low-capacity; it is a robustness hypothesis, not a classifier.
-    """
-    tol = max(float(tolerance), 0.0)
-    h = float(hourly_month_return)
-    d = float(daily_prior_return)
-    return max(min(h, d + tol), min(d, h + tol))
-
-
-def _btc_trend_return_lookup(
-    klines: pl.DataFrame,
-    *,
-    mode: str,
-    lookback_days: int,
-    month_days: float = BTC_EXACT_MONTH_DAYS,
-    smart_tolerance: float = 0.01,
-) -> dict[int, float]:
-    if mode == BTC_TREND_MODE_DAILY_PRIOR:
-        return _btc_trend_returns(klines, lookback_days=lookback_days)
-    if mode == BTC_TREND_MODE_HOURLY_30D:
-        return _btc_hourly_month_returns(klines, lookback_ms=exact_duration_ms(days=lookback_days))
-    if mode == BTC_TREND_MODE_HOURLY_EXACT_MONTH:
-        return _btc_hourly_month_returns(klines, lookback_ms=exact_duration_ms(days=month_days))
-    if mode == BTC_TREND_MODE_SMART_MONTH:
-        hourly = _btc_hourly_month_returns(klines, lookback_ms=exact_duration_ms(days=month_days))
-        daily = _btc_trend_returns(klines, lookback_days=lookback_days)
-        out: dict[int, float] = {}
-        for signal_ts, hourly_value in hourly.items():
-            day = (int(signal_ts) // MS_PER_DAY) * MS_PER_DAY
-            daily_value = daily.get(day)
-            if daily_value is None:
-                continue
-            out[int(signal_ts)] = _btc_smart_month_value(
-                float(hourly_value),
-                float(daily_value),
-                tolerance=smart_tolerance,
-            )
-        return out
-    raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {mode!r}")
-
-
-def _btc_trend_lookup_key(signal_ts_ms: int, *, mode: str) -> int:
-    if mode == BTC_TREND_MODE_DAILY_PRIOR:
-        return (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
-    return int(signal_ts_ms)
-
-
-def _btc_trend_lookback_duration_ms(config: BtcTrendConfig) -> int:
-    if config.btc_trend_mode == BTC_TREND_MODE_DAILY_PRIOR:
-        return int(config.btc_trend_lookback_days) * MS_PER_DAY
-    if config.btc_trend_mode == BTC_TREND_MODE_HOURLY_30D:
-        return exact_duration_ms(days=int(config.btc_trend_lookback_days))
-    if config.btc_trend_mode in (BTC_TREND_MODE_HOURLY_EXACT_MONTH, BTC_TREND_MODE_SMART_MONTH):
-        return exact_duration_ms(days=float(config.btc_trend_month_days))
-    raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {config.btc_trend_mode!r}")
-
-
-def _btc_trend_metadata(signal_ts_ms: int, config: ContinuousEventConfig) -> dict[str, int | str | None]:
-    mode = config.btc_trend_mode
-    if mode == BTC_TREND_MODE_DAILY_PRIOR:
-        signal_day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
-        return {
-            "btc_trend_mode": mode,
-            "btc_trend_lookback_duration_ms": _btc_trend_lookback_duration_ms(config),
-            "btc_trend_source_start_ts_ms": signal_day - int(config.btc_trend_lookback_days) * MS_PER_DAY,
-            "btc_trend_source_end_ts_ms": signal_day - MS_PER_DAY,
-            "btc_trend_data_available_ts_ms": signal_day,
-        }
-    duration = _btc_trend_lookback_duration_ms(config)
-    return {
-        "btc_trend_mode": mode,
-        "btc_trend_lookback_duration_ms": duration,
-        "btc_trend_source_start_ts_ms": int(signal_ts_ms) - duration,
-        "btc_trend_source_end_ts_ms": int(signal_ts_ms),
-        "btc_trend_data_available_ts_ms": int(signal_ts_ms) + MS_PER_HOUR,
-    }
 
 
 def _entry_vol(close_arr: "np.ndarray", entry_bar: int, window: int = 168, min_n: int = 48) -> float:
@@ -1034,137 +622,28 @@ def _assert_funding_one_per_settlement(
 
 
 def _build_lifecycle_config(config: ContinuousEventConfig) -> TradeLifecycleConfig:
-    """Translate the continuous-event config into the shared lifecycle config.
-
-    The optional exit ladder is off unless the config sets it.
-    Pure; lifted verbatim out of `_run_trades` so the setup reads in one place."""
+    """Translate active continuous settings into the shared lifecycle config."""
     return TradeLifecycleConfig(
         start_date=config.start_date, end_date=config.end_date,
         hold_days=max(1, round(config.hold_hours / 24)), take_profit_pct=max(config.take_profit_pct, 0.0),
-        failed_fade_exit_hours=config.failed_fade_hours,
-        failed_fade_loss_pct=config.failed_fade_loss_pct,
-        failed_fade_min_mfe_pct=config.failed_fade_min_mfe_pct,
-        failed_fade_close_location_min=0.0 if config.failed_fade_hours > 0 else 1.0,
-        breakeven_arm_pct=config.breakeven_arm_pct,
-        mfe_giveback_trigger_pct=config.mfe_giveback_trigger_pct,
-        mfe_giveback_retain_pct=config.mfe_giveback_retain_pct,
         side_mode="long_low_short_high",
-        rank_exit_enabled=config.rank_exit_threshold > 0.0,
-        rank_exit_threshold=config.rank_exit_threshold,
-        hash_exit_prob=config.hash_exit_prob,
     )
 
 
-def _compute_size_and_stop(
+def _notional_weight(
     config: ContinuousEventConfig,
     close_arr: Any,
     entry_bar: int,
-    *,
-    base_nw: float,
-    inverse_vol: bool,
-    clamp: float,
-    regime_size_mult: float,
-    stop_pct: float | None,
-) -> tuple[float, float | None]:
-    """Per-trade notional weight (flat or inverse-vol, then x regime size mult) and the effective
-    stop (k * trailing hourly vol clamped to [0.05, 0.50] when stop_vol_mult>0, else the fixed
-    stop). Pure; arithmetic expressions preserved verbatim so float ordering is identical to the
-    prior inline form."""
-    nw = base_nw
-    if inverse_vol:
+) -> float:
+    """Active flat or inverse-vol entry weight."""
+    if config.sizing_mode == "flat":
+        return config.notional_weight
+    if config.sizing_mode == "inverse_vol":
         rv = _entry_vol(close_arr, int(entry_bar))
+        clamp = max(config.vol_weight_clamp, 1.0)
         mult = min(max(config.target_vol_per_name / rv, 1.0 / clamp), clamp) if rv > 0 else 1.0
-        nw = base_nw * mult
-    nw *= regime_size_mult
-    trade_stop = stop_pct
-    if config.stop_vol_mult > 0.0:
-        sv = _entry_vol(close_arr, int(entry_bar))
-        trade_stop = min(max(config.stop_vol_mult * sv, 0.05), 0.50) if sv > 0 else stop_pct
-    return nw, trade_stop
-
-
-def _plan_exit(
-    *,
-    state_mode: bool,
-    spell_end: int,
-    entry_bar_end: int,
-    delay_ms: int,
-    max_hold_ms: int,
-    hold_ms: int,
-) -> int:
-    """Planned exit ts. State exit: cover when the name has left D9. spell_end is the last in-decile
-    hour (bar START), so spell_end + delay_ms (= +2h at entry_delay=1) is the close of the FIRST bar
-    the name is out of D9 — the same close at which "left-decile" becomes known. This close-on-
-    detection fill is INTENTIONAL and causal (deciding at a bar's close and filling at that close is
-    the convention every early-exit path in _simulate_indexed_trade uses for stop/TP/rank). It is
-    mildly asymmetric with the +1h entry gap, but the live book exits FASTER (tick-driven
-    left_decile / protective covers), so the backtest exit is not optimistic relative to live
-    (pit-engine-4). Clamped to >= entry+1h so a same-bar spell still holds at least one bar, and
-    capped at max_hold. Fixed-timer mode just holds hold_ms."""
-    if state_mode:
-        planned_exit = min(int(spell_end) + delay_ms, entry_bar_end + max_hold_ms)
-        return max(planned_exit, entry_bar_end + MS_PER_HOUR)
-    return entry_bar_end + hold_ms
-
-
-def _resolve_entry_fill(
-    config: ContinuousEventConfig,
-    bars: dict[str, Any],
-    *,
-    side: str,
-    order_submit_bar: int,
-    order_submit_ts_ms: int,
-) -> dict[str, Any] | None:
-    """Resolve the executable entry bar/price for the configured entry style.
-
-    Default continuous execution fills at the order-submit bar close. The
-    research-only adverse-limit mode submits after that close and therefore
-    scans only later bars; this avoids using an earlier same-bar high/low that a
-    live order could not have interacted with.
-    """
-    close_arr = bars["close"]
-    ref_price = float(close_arr[order_submit_bar])
-    if ref_price <= 0.0:
-        return None
-    adverse_pct = float(config.entry_adverse_limit_pct or 0.0)
-    if adverse_pct <= 0.0:
-        return {
-            "entry_bar": int(order_submit_bar),
-            "entry_bar_end_ts_ms": int(order_submit_ts_ms),
-            "entry_price_override": None,
-            "entry_reference_price": ref_price,
-            "entry_limit_price": None,
-            "entry_fill_mode": "bar_close",
-            "fill_window_start_ts_ms": int(order_submit_ts_ms),
-            "fill_window_end_ts_ms": int(order_submit_ts_ms),
-        }
-    wait_ms = exact_duration_ms(hours=max(config.entry_adverse_limit_wait_hours, 0))
-    if wait_ms <= 0:
-        return None
-    limit_price = ref_price * (1.0 + adverse_pct) if side == "short" else ref_price * (1.0 - adverse_pct)
-    bar_end_ts_arr = bars["bar_end_ts_ms"]
-    high_arr = bars["high"]
-    low_arr = bars["low"]
-    start_idx = bisect.bisect_right(bar_end_ts_arr, int(order_submit_ts_ms))
-    end_idx = bisect.bisect_right(bar_end_ts_arr, int(order_submit_ts_ms) + wait_ms)
-    for idx in range(start_idx, end_idx):
-        if side == "short":
-            touched = float(high_arr[idx]) >= limit_price
-        else:
-            touched = float(low_arr[idx]) <= limit_price
-        if touched:
-            fill_ts = int(bar_end_ts_arr[idx])
-            return {
-                "entry_bar": int(idx),
-                "entry_bar_end_ts_ms": fill_ts,
-                "entry_price_override": float(limit_price),
-                "entry_reference_price": ref_price,
-                "entry_limit_price": float(limit_price),
-                "entry_fill_mode": "adverse_limit",
-                "fill_window_start_ts_ms": int(order_submit_ts_ms),
-                "fill_window_end_ts_ms": fill_ts,
-            }
-    return None
+        return config.notional_weight * mult
+    raise ValueError(f"unsupported continuous sizing_mode {config.sizing_mode!r}")
 
 
 @dataclass(slots=True)
@@ -1176,11 +655,6 @@ class _ContinuousHistoricalOpen:
     next_bar_index: int
     end_bar_index: int
     component_id: str
-    stop_approach_on: bool
-    state_mode: bool
-    max_hold_ms: int
-    risk_metadata: dict[str, Any]
-    candidate_tape_index: int | None
     last_mark_price: float
 
 
@@ -1189,73 +663,27 @@ def _run_trades(
     symbol_bars: dict[str, Any],
     funding_lookup: dict[str, dict[str, Any]] | None,
     config: ContinuousEventConfig,
-    market_daily: dict[int, float] | None = None,
     btc_trend_daily: dict[int, float] | None = None,
-    rank_lookup: dict[tuple[str, int], float] | None = None,
-    candidate_sink: list[dict[str, Any]] | None = None,
-    size_mult_lookup: dict[tuple[str, int], float] | None = None,
-    admission_lookup: dict[tuple[str, int], bool] | None = None,
     listing_ts_by_symbol: dict[str, int] | None = None,
     kernel_decision_sink: list[HistoricalTargetDecision] | None = None,
     kernel_session: HistoricalAccountSession | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
-    """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
-    (age / fade-deceleration / market-context), size by the chosen rule, and advance each accepted
-    position through the shared chronological lifecycle state.
-
-    `candidate_sink` (default None) is the candidate-tape audit hook: when a list is supplied, every
-    candidate fed into this loop appends one decision row (selected OR the exact rejection reason,
-    in engine order) so the FULL eligible candidate set — not just executed trades — is recoverable
-    from the same code that makes the live decision. When it is None the loop is byte-identical to
-    the pre-hook engine (no work, no output change), so existing callers are unaffected.
-
-    Returns (trades, skip-counts)."""
+    """Run active candidates chronologically through sizing and account feedback."""
     if not np.isfinite(config.execution_leverage) or config.execution_leverage <= 0.0:
         raise ValueError("continuous execution_leverage must be finite and positive")
-    if kernel_session is not None and config.entry_adverse_limit_pct > 0.0:
-        raise ValueError(
-            "online historical account session currently supports market entries only"
-        )
     if entries.is_empty():
         return _empty_trades(), {}
-    # Optional exit ladder (off unless the config sets it).
     lifecycle = _build_lifecycle_config(config)
-    base_nw = config.notional_weight
-    inverse_vol = config.sizing_mode == "inverse_vol"
-    clamp = max(config.vol_weight_clamp, 1.0)
-    cooldown_ms = exact_duration_ms(hours=config.effective_cooldown_hours)
     hold_ms = exact_duration_ms(hours=config.hold_hours)
-    max_hold_ms = exact_duration_ms(hours=config.max_hold_hours)
+    cooldown_ms = hold_ms
     delay_ms = exact_duration_ms(hours=1 + config.entry_delay_hours)
-    decel_h = config.entry_decel_lookback_h
     age_min_ms = exact_duration_ms(days=config.age_days_min)
-    state_mode = config.exit_mode == "state"
-    stop_pct = config.stop_loss_pct if config.stop_loss_pct > 0.0 else None
-    pause_window_ms = exact_duration_ms(hours=config.entry_pause_window_hours)
-    breaker_on = config.entry_pause_after_adverse_exits > 0 and pause_window_ms > 0
     crowding_on = config.entry_crowding_max_fresh > 0
-    external_size_skip_lte = float(config.entry_skip_external_size_multiplier_lte)
-    if external_size_skip_lte < 0.0:
-        raise ValueError(
-            "entry_skip_external_size_multiplier_lte must be >= 0; "
-            f"got {external_size_skip_lte}"
-        )
-    external_size_skip_on = external_size_skip_lte > 0.0 and size_mult_lookup is not None
-    disaster_budget = float(config.entry_disaster_loss_budget_frac)
-    disaster_shock = float(config.entry_disaster_shock_frac)
-    portfolio_heat_cap = float(config.entry_portfolio_heat_cap_frac)
-    if disaster_budget < 0.0 or portfolio_heat_cap < 0.0 or disaster_shock < 0.0:
-        raise ValueError("disaster budget, portfolio heat cap, and shock fraction must be non-negative")
-    if (disaster_budget > 0.0 or portfolio_heat_cap > 0.0) and disaster_shock <= 0.0:
-        raise ValueError("entry_disaster_shock_frac must be positive when a risk budget is enabled")
-    disaster_budget_on = disaster_budget > 0.0
-    portfolio_heat_on = portfolio_heat_cap > 0.0
     signal_counts: dict[int, int] = {}
     if crowding_on:
         for ts in entries["ts_ms"].to_list():
             ts_i = int(ts)
             signal_counts[ts_i] = signal_counts.get(ts_i, 0) + 1
-    adverse_exit_ts: list[int] = []   # ASCENDING net-negative exit timestamps (circuit-breaker, causal)
     open_positions: dict[str, _ContinuousHistoricalOpen] = {}
     last_entry: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
@@ -1264,156 +692,21 @@ def _run_trades(
         raise ValueError(
             f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}"
         )
-    btc_mode = str(config.btc_trend_mode)
-    if btc_mode not in BTC_TREND_MODES:
-        raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {btc_mode!r}")
     btc_lookback_days = int(config.btc_trend_lookback_days)
     if btc_gate != "off" and btc_lookback_days < 1:
         raise ValueError(f"btc_trend_lookback_days must be >= 1; got {btc_lookback_days}")
-    btc_lookback_duration_ms = _btc_trend_lookback_duration_ms(config) if btc_gate != "off" else None
-    skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
-    skipped_admission = 0
+    skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_btc_trend = 0
     skipped_crowding = 0
-    skipped_external_size_multiplier = 0
-    skipped_entry_limit_unfilled = 0
-    skipped_portfolio_heat = 0
     skipped_account_kernel = 0
     pending_entry_ts_ms: int | None = None
     pending_entry_decisions: list[HistoricalTargetDecision] = []
     pending_entry_position_keys: list[str] = []
-    pending_entry_tape_indices: list[int] = []
     pending_prior_last_entry: dict[str, int | None] = {}
     last_advanced_ts_ms: int | None = None
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
     turns = entries["turnover_quote"].to_list()
-    spell_ends = entries["spell_end_ts"].to_list() if "spell_end_ts" in entries.columns else tss
-    entry_meta_rows = entries.to_dicts()
-    stop_approach_on = (
-        stop_pct is not None
-        and config.stop_approach_frac > 0.0
-        and config.stop_loss_pct > 0.0
-        and config.stop_vol_mult <= 0.0
-    )
-    stop_approach_pct = (
-        min(float(config.stop_loss_pct), float(config.stop_loss_pct) * float(config.stop_approach_frac))
-        if stop_approach_on else None
-    )
-    def _emit(
-        reason: str,
-        *,
-        entry_bar_end: int | None = None,
-        active_count: int | None = None,
-        regime_trend: float | None = None,
-        regime_size_mult: float | None = None,
-        notional_weight: float | None = None,
-        entry_volatility: float | None = None,
-        inverse_vol_multiplier: float | None = None,
-        external_size_multiplier: float | None = None,
-        pre_risk_notional_weight: float | None = None,
-        disaster_notional_cap: float | None = None,
-        portfolio_heat_before_frac: float | None = None,
-        portfolio_heat_after_frac: float | None = None,
-        risk_size_clamped: bool | None = None,
-        exit_ts_ms: int | None = None,
-        order_submit_ts_ms: int | None = None,
-        fill_window_start_ts_ms: int | None = None,
-        fill_window_end_ts_ms: int | None = None,
-        entry_reference_price: float | None = None,
-        entry_limit_price: float | None = None,
-        entry_fill_mode: str | None = None,
-        account_rejection_keys: tuple[str, ...] | None = None,
-    ) -> None:
-        if candidate_sink is None:
-            return
-        btc_meta = _btc_trend_metadata(int(sig_ts), config) if btc_gate != "off" else {}
-
-        def _meta_int(name: str) -> int | None:
-            value = cand_meta.get(name)
-            return int(value) if value is not None else None
-
-        def _meta_float(name: str) -> float | None:
-            value = cand_meta.get(name)
-            return float(value) if value is not None else None
-
-        order_ts = order_submit_ts_ms if order_submit_ts_ms is not None else entry_bar_end
-        fill_start_ts = (
-            fill_window_start_ts_ms
-            if fill_window_start_ts_ms is not None
-            else entry_bar_end if entry_bar_end is not None else order_ts
-        )
-        fill_end_ts = (
-            fill_window_end_ts_ms
-            if fill_window_end_ts_ms is not None
-            else entry_bar_end if entry_bar_end is not None else order_ts
-        )
-        candidate_sink.append(
-            {
-                "symbol": sym,
-                "signal_ts_ms": int(sig_ts),
-                "signal_bar_close_ts_ms": _meta_int("signal_bar_close_ts_ms"),
-                "decision_ts_ms": _meta_int("decision_ts_ms"),
-                "feature_ts_ms": _meta_int("feature_ts_ms"),
-                "data_available_ts_ms": _meta_int("data_available_ts_ms"),
-                "rmom_source_day_ts_ms": _meta_int("rmom_source_day_ts_ms"),
-                "rmom_data_available_ts_ms": _meta_int("rmom_data_available_ts_ms"),
-                "btc_trend_lookback_days": btc_lookback_days if btc_gate != "off" else None,
-                "btc_trend_mode": btc_meta.get("btc_trend_mode") if btc_gate != "off" else None,
-                "btc_trend_lookback_duration_ms": btc_lookback_duration_ms,
-                "btc_trend_source_start_ts_ms": btc_meta.get("btc_trend_source_start_ts_ms"),
-                "btc_trend_source_end_ts_ms": btc_meta.get("btc_trend_source_end_ts_ms"),
-                "btc_trend_data_available_ts_ms": btc_meta.get("btc_trend_data_available_ts_ms"),
-                "order_submit_ts_ms": int(order_ts) if order_ts is not None else None,
-                "fill_window_start_ts_ms": int(fill_start_ts) if fill_start_ts is not None else None,
-                "fill_window_end_ts_ms": int(fill_end_ts) if fill_end_ts is not None else None,
-                "composite": float(comp) if comp is not None else None,
-                "residual_momentum_value": _meta_float("residual_momentum"),
-                "residual_momentum_rank": _meta_float("residual_momentum_rank"),
-                "feature_rv_168h": _meta_float("rv_168h"),
-                "feature_vov": _meta_float("vov"),
-                "feature_dist_low": _meta_float("dist_low"),
-                "feature_xsret7": _meta_float("xsret7"),
-                "feature_xsret3": _meta_float("xsret3"),
-                "feature_ret1": _meta_float("ret1"),
-                "feature_max_ret168": _meta_float("max_ret168"),
-                "feature_prior6_ret1_max": _meta_float("prior6_ret1_max"),
-                "feature_giveback_from_prior6_high": _meta_float("giveback_from_prior6_high"),
-                "feature_turnover_spike_168h": _meta_float("turnover_spike_168h"),
-                "turnover_quote": float(turn) if turn is not None else None,
-                "liquidity_value": float(turn) if turn is not None else None,
-                "liquidity_rank": _meta_float("liquidity_rank"),
-                "volume_1h_quote": float(turn) if turn is not None else None,
-                "volume_24h_quote": _meta_float("turnover_24h"),
-                "volume_zscore": _meta_float("turnover_zscore_168h"),
-                "spell_end_ts_ms": int(spell_end) if spell_end is not None else None,
-                "entry_bar_end_ts_ms": int(entry_bar_end) if entry_bar_end is not None else None,
-                "entry_reference_price": entry_reference_price,
-                "entry_limit_price": entry_limit_price,
-                "entry_fill_mode": entry_fill_mode,
-                "account_rejection_keys": list(account_rejection_keys or ()),
-                "crowding_count": int(signal_counts.get(int(sig_ts), 0)) if crowding_on else None,
-                "active_count": active_count,
-                "btc_trend_gate": btc_gate,
-                "regime_trend": regime_trend,
-                "regime_size_mult": regime_size_mult,
-                "sizing_mode": config.sizing_mode,
-                "base_notional_weight": base_nw,
-                "entry_volatility": entry_volatility,
-                "inverse_vol_multiplier": inverse_vol_multiplier,
-                "external_size_multiplier": external_size_multiplier,
-                "pre_risk_notional_weight": pre_risk_notional_weight,
-                "disaster_notional_cap": disaster_notional_cap,
-                "portfolio_heat_before_frac": portfolio_heat_before_frac,
-                "portfolio_heat_after_frac": portfolio_heat_after_frac,
-                "risk_size_clamped": risk_size_clamped,
-                "notional_weight": notional_weight,
-                "exit_ts_ms": exit_ts_ms,
-                "selected": reason == "selected",
-                "reason": reason,
-            }
-        )
-
     def _submit_kernel_decisions(
         decisions: list[HistoricalTargetDecision],
     ) -> tuple[bool, tuple[str, ...], bool]:
@@ -1470,13 +763,6 @@ def _run_trades(
             skipped_account_kernel += len(pending_entry_decisions)
             for position_key in pending_entry_position_keys:
                 open_positions.pop(position_key, None)
-            if candidate_sink is not None:
-                for tape_index in pending_entry_tape_indices:
-                    candidate_sink[tape_index].update({
-                        "selected": False,
-                        "reason": "account_kernel_rejection",
-                        "account_rejection_keys": list(rejection_keys),
-                    })
             for symbol, prior in pending_prior_last_entry.items():
                 if prior is None:
                     last_entry.pop(symbol, None)
@@ -1485,24 +771,10 @@ def _run_trades(
         pending_entry_ts_ms = None
         pending_entry_decisions.clear()
         pending_entry_position_keys.clear()
-        pending_entry_tape_indices.clear()
         pending_prior_last_entry.clear()
 
     def _materialize_open(position: _ContinuousHistoricalOpen) -> dict[str, Any]:
-        trade = position.state.to_trade()
-        if position.stop_approach_on and trade.get("exit_reason") == "stop_loss":
-            trade["exit_reason"] = "stop_approach"
-        if (
-            position.state_mode
-            and trade.get("exit_reason") == "max_hold"
-            and position.state.planned_exit_ts_ms
-            < position.state.entry_ts_ms + position.max_hold_ms
-            and int(trade.get("exit_ts_ms") or 0) == position.state.planned_exit_ts_ms
-        ):
-            trade["exit_reason"] = "left_decile"
-        if position.risk_metadata:
-            trade.update(position.risk_metadata)
-        return trade
+        return position.state.to_trade()
 
     def _exit_decision(
         position: _ContinuousHistoricalOpen,
@@ -1535,12 +807,6 @@ def _run_trades(
         trade: dict[str, Any],
     ) -> None:
         rows.append(trade)
-        if position.candidate_tape_index is not None and candidate_sink is not None:
-            candidate_sink[position.candidate_tape_index]["exit_ts_ms"] = int(
-                trade["exit_ts_ms"]
-            )
-        if breaker_on and float(trade.get("net_return") or 0.0) < 0.0:
-            bisect.insort(adverse_exit_ts, int(trade["exit_ts_ms"]))
 
     def _advance_positions(through_ts_ms: int, *, final: bool = False) -> None:
         closed_keys: list[str] = []
@@ -1597,8 +863,7 @@ def _run_trades(
         for key in closed_keys:
             del open_positions[key]
 
-    for idx, (sym, sig_ts, comp, turn, spell_end) in enumerate(zip(syms, tss, comps, turns, spell_ends)):
-        cand_meta = entry_meta_rows[idx]
+    for idx, (sym, sig_ts, comp, turn) in enumerate(zip(syms, tss, comps, turns)):
         order_submit_ts = int(sig_ts) + delay_ms
         if pending_entry_ts_ms is not None and pending_entry_ts_ms != order_submit_ts:
             _flush_pending_entries()
@@ -1607,216 +872,50 @@ def _run_trades(
             last_advanced_ts_ms = order_submit_ts
         bars = symbol_bars.get(sym)
         if bars is None:
-            _emit("no_bar_symbol")
             skipped_no_bar += 1
             continue
-        cand_trend: float | None = None
         if crowding_on and signal_counts.get(int(sig_ts), 0) > config.entry_crowding_max_fresh:
-            _emit("crowding", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
             skipped_crowding += 1
             continue
-        # Circuit breaker: pause this entry if too many net-negative covers have CLOSED in the trailing
-        # window (a correlated alt-squeeze). Causal — adverse_exit_ts holds only exits already simulated,
-        # and the [entry_bar_end-window, entry_bar_end) slice counts only those that closed before now.
-        if breaker_on:
-            lo = bisect.bisect_left(adverse_exit_ts, order_submit_ts - pause_window_ms)
-            hi = bisect.bisect_left(adverse_exit_ts, order_submit_ts)
-            if hi - lo >= config.entry_pause_after_adverse_exits:
-                _emit("breaker", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
-                skipped_breaker += 1
-                continue
         if sym in last_entry and order_submit_ts - last_entry[sym] < cooldown_ms:
-            _emit("cooldown", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
             skipped_cooldown += 1
             continue
         if len(open_positions) >= config.max_active:
-            _emit("capacity", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
             skipped_capacity += 1
             continue
         order_submit_bar = bars["by_end"].get(order_submit_ts)
         if order_submit_bar is None:
-            _emit("no_bar_entry", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
             skipped_no_bar += 1
             continue
         close_arr = bars["close"]
-        # --- inherited selection gates (squeeze-defense) ---
         if age_min_ms > 0:
-            # Age against the symbol's AUTHORITATIVE PIT listing (first-ever bar under the root),
-            # NOT the first bar of the padded read window. The window's first bar is clamped to
-            # start_ms - pad_back, so a symbol genuinely listed long before the run would otherwise
-            # appear exactly pad_back old at the window start and be wrongly age-gated near every
-            # backtest edge — diverging from the live demo, which ages off universe.listing_age_days
-            # (Bybit launchTime). Falls back to the loaded first bar only when no listing is known.
             listing_ts = (listing_ts_by_symbol or {}).get(sym)
             if listing_ts is None:
                 listing_ts = int(bars["bar_end_ts_ms"][0])
             if (order_submit_ts - int(listing_ts)) < age_min_ms:
-                _emit("age", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
                 skipped_gate += 1
                 continue
-        regime_size_mult = 1.0
         if btc_gate != "off":
-            trend = (btc_trend_daily or {}).get(_btc_trend_lookup_key(int(sig_ts), mode=btc_mode))
+            signal_day = (int(sig_ts) // MS_PER_DAY) * MS_PER_DAY
+            trend = (btc_trend_daily or {}).get(signal_day)
             if trend is None:
-                _emit("btc_trend_unknown", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions))
                 skipped_btc_trend += 1
                 continue
-            cand_trend = float(trend)
             if btc_gate == "uptrend" and trend <= 0.0:
-                _emit("btc_trend", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
             if btc_gate == "downtrend" and trend > 0.0:
-                _emit("btc_trend", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
                 skipped_btc_trend += 1
                 continue
-        if decel_h > 0 and order_submit_bar - decel_h >= 0:
-            base_px = float(close_arr[order_submit_bar - decel_h])
-            recent_ret = (float(close_arr[order_submit_bar]) / base_px - 1.0) if base_px > 0 else 0.0
-            if recent_ret > config.entry_decel_max_ret:   # still ripping up -> not a confirmed fade
-                _emit("decel", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
-                skipped_gate += 1
-                continue
-        if config.market_min_ret_1d > -1.0 and market_daily is not None:
-            # Causal: read the PRIOR completed day's market return, NOT the entry
-            # day's own full-day close-to-close return (which only realises at the
-            # entry day's final bar and is future data at an intraday entry).
-            # Mirrors the current-day exclusion in _btc_trend_returns.
-            entry_day = (order_submit_ts // MS_PER_DAY) * MS_PER_DAY
-            mkt = market_daily.get(entry_day - MS_PER_DAY)
-            if mkt is not None and mkt < config.market_min_ret_1d:   # short into a weak tape = squeeze risk
-                _emit("market", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
-                skipped_gate += 1
-                continue
-        if admission_lookup is not None and not bool(admission_lookup.get((sym, int(sig_ts)), False)):
-            _emit("admission", order_submit_ts_ms=order_submit_ts, active_count=len(open_positions), regime_trend=cand_trend)
-            skipped_admission += 1
-            continue
-        external_size_multiplier = 1.0
-        if size_mult_lookup is not None:
-            external_size_multiplier = float(size_mult_lookup.get((sym, int(sig_ts)), 1.0))
-        if external_size_skip_on and external_size_multiplier <= external_size_skip_lte:
-            _emit(
-                "external_size_multiplier",
-                order_submit_ts_ms=order_submit_ts,
-                active_count=len(open_positions),
-                regime_trend=cand_trend,
-                regime_size_mult=regime_size_mult,
-                external_size_multiplier=external_size_multiplier,
-            )
-            skipped_external_size_multiplier += 1
-            continue
-        fill = _resolve_entry_fill(
-            config,
-            bars,
-            side=config.side,
-            order_submit_bar=int(order_submit_bar),
-            order_submit_ts_ms=order_submit_ts,
-        )
-        if fill is None:
-            ref_price = float(close_arr[order_submit_bar]) if int(order_submit_bar) < len(close_arr) else None
-            limit_price = (
-                ref_price * (1.0 + float(config.entry_adverse_limit_pct))
-                if ref_price is not None and config.side == "short"
-                else ref_price * (1.0 - float(config.entry_adverse_limit_pct)) if ref_price is not None else None
-            )
-            _emit(
-                "entry_limit_unfilled",
-                order_submit_ts_ms=order_submit_ts,
-                fill_window_start_ts_ms=order_submit_ts,
-                fill_window_end_ts_ms=order_submit_ts
-                + exact_duration_ms(hours=max(config.entry_adverse_limit_wait_hours, 0)),
-                active_count=len(open_positions),
-                regime_trend=cand_trend,
-                entry_reference_price=ref_price,
-                entry_limit_price=limit_price,
-                entry_fill_mode="adverse_limit",
-            )
-            skipped_entry_limit_unfilled += 1
-            continue
-        entry_bar = int(fill["entry_bar"])
-        entry_bar_end = int(fill["entry_bar_end_ts_ms"])
-        # --- sizing + stop + exit planning (verbatim logic, extracted to helpers) ---
-        entry_volatility = _entry_vol(close_arr, int(order_submit_bar))
-        inverse_vol_multiplier = (
-            min(max(config.target_vol_per_name / entry_volatility, 1.0 / clamp), clamp)
-            if inverse_vol and entry_volatility > 0 else 1.0
-        )
-        nw, trade_stop = _compute_size_and_stop(
-            config, close_arr, int(order_submit_bar),
-            base_nw=base_nw, inverse_vol=inverse_vol, clamp=clamp,
-            regime_size_mult=regime_size_mult, stop_pct=stop_approach_pct if stop_approach_on else stop_pct,
-        )
-        # Per-entry sizing hook (default None -> byte-identical): a causal,
-        # gross-neutral notional multiplier keyed by (symbol, signal_ts). Applied AFTER all
-        # selection gates, so entries/breadth/exits are unchanged; resize/impact cost is
-        # recomputed at the new size by _round_trip_bps below. trade_stop is independent of nw,
-        # so applying the multiplier after _compute_size_and_stop is numerically identical.
-        nw *= external_size_multiplier
-        pre_risk_nw = nw
-        disaster_notional_cap: float | None = None
-        risk_size_clamped = False
-        if disaster_budget_on:
-            disaster_notional_cap = disaster_budget / disaster_shock
-            if nw > disaster_notional_cap:
-                nw = disaster_notional_cap
-                risk_size_clamped = True
-        portfolio_heat_before_frac: float | None = None
-        portfolio_heat_after_frac: float | None = None
-        if portfolio_heat_on:
-            active_notional_weight = sum(
-                abs(position.state.notional_weight * position.state.position_weight)
-                for position in open_positions.values()
-            )
-            portfolio_heat_before_frac = active_notional_weight * disaster_shock
-            remaining_notional_weight = max(
-                (portfolio_heat_cap / disaster_shock) - active_notional_weight,
-                0.0,
-            )
-            if remaining_notional_weight <= 1e-15:
-                _emit(
-                    "portfolio_heat",
-                    order_submit_ts_ms=order_submit_ts,
-                    active_count=len(open_positions),
-                    regime_trend=cand_trend,
-                    regime_size_mult=regime_size_mult,
-                    external_size_multiplier=external_size_multiplier,
-                    pre_risk_notional_weight=pre_risk_nw,
-                    disaster_notional_cap=disaster_notional_cap,
-                    portfolio_heat_before_frac=portfolio_heat_before_frac,
-                    portfolio_heat_after_frac=portfolio_heat_before_frac,
-                    risk_size_clamped=risk_size_clamped,
-                )
-                skipped_portfolio_heat += 1
-                continue
-            if nw > remaining_notional_weight:
-                nw = remaining_notional_weight
-                risk_size_clamped = True
-            portfolio_heat_after_frac = (active_notional_weight + nw) * disaster_shock
-        planned_exit = _plan_exit(
-            state_mode=state_mode, spell_end=int(spell_end), entry_bar_end=entry_bar_end,
-            delay_ms=delay_ms, max_hold_ms=max_hold_ms, hold_ms=hold_ms,
-        )
+        entry_bar = int(order_submit_bar)
+        entry_bar_end = order_submit_ts
+        nw = _notional_weight(config, close_arr, entry_bar)
+        planned_exit = entry_bar_end + hold_ms
         round_trip = _round_trip_bps(config, turn, notional_weight=nw)
-        entry_price = (
-            float(fill["entry_price_override"])
-            if fill.get("entry_price_override") is not None
-            else float(close_arr[entry_bar])
-        )
+        entry_price = float(close_arr[entry_bar])
         next_bar_index = bisect.bisect_right(bars["ends"], entry_bar_end)
         end_bar_index = bisect.bisect_right(bars["ends"], planned_exit)
         if entry_price <= 0.0 or next_bar_index >= end_bar_index:
-            _emit(
-                "no_fill",
-                entry_bar_end=entry_bar_end,
-                order_submit_ts_ms=order_submit_ts,
-                fill_window_start_ts_ms=fill.get("fill_window_start_ts_ms"),
-                fill_window_end_ts_ms=fill.get("fill_window_end_ts_ms"),
-                active_count=len(open_positions),
-                entry_reference_price=fill.get("entry_reference_price"),
-                entry_limit_price=fill.get("entry_limit_price"),
-                entry_fill_mode=fill.get("entry_fill_mode"),
-            )
             skipped_no_bar += 1
             continue
         component_id = f"{_iso_day(entry_bar_end)}-{config.side[0]}-{sym}"
@@ -1834,21 +933,22 @@ def _run_trades(
             position_weight=1.0,
             config=lifecycle,
             round_trip_cost_bps=round_trip,
-            stop_price=_stop_price(
-                entry_price,
-                side=config.side,
-                stop_loss_pct=trade_stop or 0.0,
+            stop_price=None,
+            take_profit_price=(
+                None
+                if lifecycle.take_profit_pct <= 0.0
+                else entry_price
+                * (
+                    1.0 + lifecycle.take_profit_pct
+                    if config.side == "long"
+                    else 1.0 - lifecycle.take_profit_pct
+                )
             ),
-            take_profit_price=_take_profit_price(
-                entry_price,
-                side=config.side,
-                take_profit_pct=lifecycle.take_profit_pct,
-            ),
-            rank_lookup=rank_lookup or {},
+            rank_lookup={},
             event_decay_threshold=0.0,
             funding_lookup=funding_lookup if config.use_funding else None,
-            stop_fill_mode=config.stop_fill_mode,
-            stop_slippage_cap_pct=config.stop_slippage_cap_pct,
+            stop_fill_mode="bar_extreme_capped",
+            stop_slippage_cap_pct=0.10,
         )
         entry_decision: HistoricalTargetDecision | None = None
         if kernel_decision_sink is not None or kernel_session is not None:
@@ -1873,47 +973,12 @@ def _run_trades(
                         "source": "continuous_events_chronological_target",
                         "signal_ts_ms": int(sig_ts),
                         "signal_valid_until_ms": entry_bar_end + MS_PER_HOUR,
-                        "stop_loss_pct": float(trade_stop or 0.0),
                         "take_profit_pct": float(lifecycle.take_profit_pct),
-                        "max_hold_duration_ms": max_hold_ms,
+                        "max_hold_duration_ms": hold_ms,
                         "notional_weight": nw,
                     },
                 ),
             )
-        risk_metadata = {}
-        if disaster_budget_on or portfolio_heat_on:
-            risk_metadata = {
-                "pre_risk_notional_weight": pre_risk_nw,
-                "entry_disaster_notional_cap": disaster_notional_cap,
-                "entry_disaster_shock_frac": disaster_shock,
-                "entry_portfolio_heat_before_frac": portfolio_heat_before_frac,
-                "entry_portfolio_heat_after_frac": portfolio_heat_after_frac,
-                "entry_risk_size_clamped": risk_size_clamped,
-            }
-        candidate_tape_index = len(candidate_sink) if candidate_sink is not None else None
-        _emit(
-            "selected",
-            entry_bar_end=entry_bar_end,
-            order_submit_ts_ms=order_submit_ts,
-            fill_window_start_ts_ms=fill.get("fill_window_start_ts_ms"),
-            fill_window_end_ts_ms=fill.get("fill_window_end_ts_ms"),
-            active_count=len(open_positions),
-            regime_trend=cand_trend,
-            regime_size_mult=regime_size_mult,
-            notional_weight=nw,
-            entry_volatility=entry_volatility,
-            inverse_vol_multiplier=inverse_vol_multiplier,
-            external_size_multiplier=external_size_multiplier,
-            pre_risk_notional_weight=pre_risk_nw,
-            disaster_notional_cap=disaster_notional_cap,
-            portfolio_heat_before_frac=portfolio_heat_before_frac,
-            portfolio_heat_after_frac=portfolio_heat_after_frac,
-            risk_size_clamped=risk_size_clamped,
-            entry_reference_price=fill.get("entry_reference_price"),
-            entry_limit_price=fill.get("entry_limit_price"),
-            entry_fill_mode=fill.get("entry_fill_mode"),
-            exit_ts_ms=None,
-        )
         position_key = f"{component_id}/{int(sig_ts)}/{idx}"
         open_positions[position_key] = _ContinuousHistoricalOpen(
             state=state,
@@ -1921,11 +986,6 @@ def _run_trades(
             next_bar_index=next_bar_index,
             end_bar_index=end_bar_index,
             component_id=component_id,
-            stop_approach_on=stop_approach_on,
-            state_mode=state_mode,
-            max_hold_ms=max_hold_ms,
-            risk_metadata=risk_metadata,
-            candidate_tape_index=candidate_tape_index,
             last_mark_price=entry_price,
         )
         if entry_decision is not None:
@@ -1936,8 +996,6 @@ def _run_trades(
                     raise RuntimeError("entry decision batching crossed a wall timestamp")
                 pending_entry_decisions.append(entry_decision)
                 pending_entry_position_keys.append(position_key)
-                if candidate_tape_index is not None:
-                    pending_entry_tape_indices.append(candidate_tape_index)
                 if sym not in pending_prior_last_entry:
                     pending_prior_last_entry[sym] = last_entry.get(sym)
             else:
@@ -1950,13 +1008,8 @@ def _run_trades(
         "skipped_cooldown": skipped_cooldown,
         "skipped_no_bar": skipped_no_bar,
         "skipped_gate": skipped_gate,
-        "skipped_breaker": skipped_breaker,
         "skipped_btc_trend": skipped_btc_trend,
         "skipped_crowding": skipped_crowding,
-        "skipped_admission": skipped_admission,
-        "skipped_external_size_multiplier": skipped_external_size_multiplier,
-        "skipped_entry_limit_unfilled": skipped_entry_limit_unfilled,
-        "skipped_portfolio_heat": skipped_portfolio_heat,
         "skipped_account_kernel": skipped_account_kernel,
     }
     if not rows:
@@ -2029,7 +1082,7 @@ def _daily_pnl_metrics(equity: pl.DataFrame) -> dict[str, Any]:
     ts = equity["ts_ms"]
     years = max((int(ts[-1]) - int(ts[0])) / (365.25 * MS_PER_DAY), 1e-9)
     ann = total / years
-    # metrics-3: one shared Sharpe convention (ddof=1, sqrt(365.25)) across all reports.
+    # Shared report convention: sample standard deviation, annualized over 365.25 days.
     sharpe = annualized_sharpe(pnl)
     return {"total_return": total, "annualized_return": ann, "max_drawdown": maxdd,
             "mar": (ann / abs(maxdd)) if abs(maxdd) > 1e-9 else None,
@@ -2047,13 +1100,10 @@ def _portfolio_mtm_equity(trades: pl.DataFrame, klines: pl.DataFrame) -> pl.Data
     telescope to the trade's realized gross, so total return is unchanged; only the PATH (and thus DD
     and Sharpe) differ.
 
-    LEDGER-DAY SEMANTICS ARE LOAD-BEARING — do NOT calendar-fill this series. The persisted
-    `continuous_mtm_equity.csv` is the validated input of the ensemble rebalance pipeline
-    (`continuous_rebalance` vol/beta/momentum windows are defined over trailing LEDGER rows, and
-    `apply_rebalance_rule` hedges every input row). Zero-filling flat days dilutes the w90 vol
-    window (re-levering the whole validated path) and fabricates hedge PnL on days the book has
-    zero exposure — observed 2026-06-12: bybit deployed-ensemble total return shifted 103%→87%
-    from exactly this. Flat-tail/gap presentation belongs to the chart layer
+    Do not calendar-fill this computational series. Rebalance windows are defined over ledger
+    rows and the hedge is applied to every input row; inserting flat days changes volatility
+    scaling and fabricates hedge PnL while exposure is zero. Flat-tail presentation belongs to
+    the chart layer
     (`_extend_equity_flat_for_chart`, `_step_fill_daily`, monthly gap-fill)."""
     if trades.is_empty() or klines.is_empty():
         return _additive_equity(trades)  # empty-safe schema
@@ -2139,8 +1189,7 @@ def _write_equity_png(equity: pl.DataFrame, path: Path, *, title: str) -> None:
     try:
         import matplotlib
     except ImportError:
-        # matplotlib is an optional charting dependency (not in install_requires — the
-        # canonical *_equity_btc.png uses Pillow). A research-only PNG must never fail the run.
+        # The shared benchmark renderer still writes the standard chart.
         return
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
@@ -2153,7 +1202,7 @@ def _write_equity_png(equity: pl.DataFrame, path: Path, *, title: str) -> None:
     ax.set_ylabel("cumulative return (%)")
     ax.set_title(title)
     ax.grid(alpha=0.25)
-    ax.text(0.99, 0.02, "EXPLORATORY engine — NOT promotion evidence", transform=ax.transAxes,
+    ax.text(0.99, 0.02, "DESCRIPTIVE HISTORICAL EQUITY", transform=ax.transAxes,
             ha="right", va="bottom", fontsize=7, color="grey", style="italic")
     axd.fill_between(xs, [d * 100 for d in eq["drawdown"].to_list()], 0.0, color="#2c3e50", alpha=0.5)
     axd.set_ylabel("drawdown (%)")
@@ -2164,67 +1213,22 @@ def _write_equity_png(equity: pl.DataFrame, path: Path, *, title: str) -> None:
     plt.close(fig)
 
 
-def _research_input_cache_key(
-    root: Path, config: ContinuousEventConfig, entry_order: str, end_ms: int
-) -> tuple[str, str, str, int]:
-    return (str(root.resolve()), config.config_hash(), entry_order, int(end_ms))
-
-
-def _cache_research_inputs(cache_key: tuple[str, str, str, int], payload: dict[str, Any]) -> None:
-    _RESEARCH_INPUT_CACHE[cache_key] = payload
-    _RESEARCH_INPUT_CACHE.move_to_end(cache_key)
-    while len(_RESEARCH_INPUT_CACHE) > _RESEARCH_INPUT_CACHE_MAX:
-        _RESEARCH_INPUT_CACHE.popitem(last=False)
-
-
-def _prepare_research_inputs(
+def _prepare_inputs(
     root: Path,
     config: ContinuousEventConfig,
-    entry_order: str,
 ) -> dict[str, Any]:
-    start_ms, end_ms = _date_str_to_ms(config.start_date), _resolve_end_ms(root, config)
-    cache_key = _research_input_cache_key(root, config, entry_order, end_ms)
-    cached = _RESEARCH_INPUT_CACHE.get(cache_key)
-    if cached is not None:
-        _RESEARCH_INPUT_CACHE.move_to_end(cache_key)
-        return cached
-
+    start_ms, end_ms = _window_ms(config)
     panel = build_continuous_panel(root, config)
     entries = _fresh_entries(panel, config) if not panel.is_empty() else panel
-    if not entries.is_empty():
-        entries = _apply_entry_order(entries, entry_order)
 
     kname = _autodetect_dataset_names(root)["klines_dataset"]
     pad_fwd = exact_duration_ms(
-        hours=config.hold_hours
-        + config.entry_delay_hours
-        + max(config.entry_adverse_limit_wait_hours, 0)
-        + 4
+        hours=config.hold_hours + config.entry_delay_hours + 4
     )
-    # audit2c: also reserve >=2 warmup days when the equal-weight market gate is on, so the
-    # gate's one-day-lagged daily market return is available from the window's first day
-    # instead of failing OPEN (allowing entries) for the first ~2 days.
     btc_trend_lookback_days = max(int(config.btc_trend_lookback_days), 1)
-    pad_back = max(
-        exact_duration_ms(days=max(config.age_days_min, 0)),
-        exact_duration_ms(days=2) if config.market_min_ret_1d > -1.0 else 0,
-    )
+    pad_back = exact_duration_ms(days=max(config.age_days_min, 0))
     if config.btc_trend_gate != "off":
-        mode = str(config.btc_trend_mode)
-        if mode == BTC_TREND_MODE_DAILY_PRIOR:
-            pad_back = max(pad_back, exact_duration_ms(days=btc_trend_lookback_days + 1))
-        elif mode == BTC_TREND_MODE_HOURLY_30D:
-            pad_back = max(pad_back, exact_duration_ms(days=btc_trend_lookback_days) + MS_PER_HOUR)
-        elif mode == BTC_TREND_MODE_HOURLY_EXACT_MONTH:
-            pad_back = max(pad_back, exact_duration_ms(days=config.btc_trend_month_days) + MS_PER_HOUR)
-        elif mode == BTC_TREND_MODE_SMART_MONTH:
-            pad_back = max(
-                pad_back,
-                exact_duration_ms(days=config.btc_trend_month_days) + MS_PER_HOUR,
-                exact_duration_ms(days=btc_trend_lookback_days + 1),
-            )
-        else:
-            raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {mode!r}")
+        pad_back = max(pad_back, exact_duration_ms(days=btc_trend_lookback_days + 1))
     klines = _read_window(
         root, kname, start_ms=start_ms - pad_back, end_ms=end_ms + pad_fwd,
         columns=["ts_ms", "symbol", "open", "high", "low", "close"],
@@ -2244,32 +1248,15 @@ def _prepare_research_inputs(
         _assert_funding_one_per_settlement(funding, root=root, interval_by_symbol=funding_intervals)
         funding_lookup = _funding_lookup(funding, interval_by_symbol=funding_intervals)
 
-    market_daily = None
-    if config.market_min_ret_1d > -1.0 and not klines.is_empty():
-        market_daily = _market_daily_returns(klines)
-
     btc_trend_daily = None
     if config.btc_trend_gate != "off" and not klines.is_empty():
-        btc_trend_daily = _btc_trend_return_lookup(
-            klines,
-            mode=str(config.btc_trend_mode),
-            lookback_days=btc_trend_lookback_days,
-            month_days=float(config.btc_trend_month_days),
-            smart_tolerance=float(config.btc_trend_smart_tolerance),
-        )
-
-    rank_lookup = None
-    if config.rank_exit_threshold > 0.0 and not panel.is_empty():
-        rank_lookup = _continuous_rank_lookup(
-            panel,
-            delay_ms=exact_duration_ms(hours=1 + config.entry_delay_hours),
-        )
+        btc_trend_daily = _btc_trend_returns(klines, lookback_days=btc_trend_lookback_days)
 
     # Authoritative per-symbol PIT listing (first-ever bar under the root), read independently of the
     # run window so the age gate does not infer listing from the clamped window start (pit-engine-2).
     listing_ts_by_symbol = _listing_ts_by_symbol(root) if config.age_days_min > 0 else None
 
-    payload = {
+    return {
         "start_ms": start_ms,
         "end_ms": end_ms,
         "panel": panel,
@@ -2277,52 +1264,31 @@ def _prepare_research_inputs(
         "klines": klines,
         "symbol_bars": symbol_bars,
         "funding_lookup": funding_lookup,
-        "market_daily": market_daily,
         "btc_trend_daily": btc_trend_daily,
-        "rank_lookup": rank_lookup,
         "listing_ts_by_symbol": listing_ts_by_symbol,
     }
-    _cache_research_inputs(cache_key, payload)
-    return payload
 
 
-def run_continuous_event_research(
+def run_continuous_equity_component(
     data_root: str | Path,
     *,
-    config: ContinuousEventConfig | None = None,
-    report_dir: str | Path | None = None,
-    candidate_tape_path: str | Path | None = None,
-    entry_order: str = "fcfs",
-    size_mult_lookup: dict[tuple[str, int], float] | None = None,
-    admission_lookup: dict[tuple[str, int], bool] | None = None,
+    config: ContinuousEventConfig,
+    report_dir: str | Path,
 ) -> dict[str, Any]:
-    """Run the execution-grade continuous-fade backtest and (optionally) write artifacts.
-
-    When `candidate_tape_path` is set, the full eligible candidate set (selected + rejected,
-    with the exact engine reason) is written to that parquet for candidate-tape reconstruction. The
-    extra emission is purely additive: with `candidate_tape_path=None` the run is unchanged.
-
-    `entry_order` re-orders candidates WITHIN each signal timestamp by an
-    entry-priority score before the unchanged selection loop; `"fcfs"` (default) reproduces the
-    frozen control exactly. See `_apply_entry_order`.
-
-    `admission_lookup` is a research-only gate keyed by ``(symbol, signal_ts_ms)``. ``None``
-    preserves the control engine; when supplied, missing/false keys are rejected before sizing.
-    """
-    config = config or ContinuousEventConfig()
+    """Run one active continuous historical component and write its artifacts."""
     root = Path(str(data_root)).expanduser()
     if not root.is_dir():
         raise FileNotFoundError(f"Data root does not exist: {root}")
+    out_dir = Path(str(report_dir)).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    inputs = _prepare_research_inputs(root, config, entry_order)
+    inputs = _prepare_inputs(root, config)
     end_ms = int(inputs["end_ms"])
     entries = inputs["entries"]
     klines = inputs["klines"]
     symbol_bars = inputs["symbol_bars"]
     funding_lookup = inputs["funding_lookup"]
-    market_daily = inputs["market_daily"]
     btc_trend_daily = inputs["btc_trend_daily"]
-    rank_lookup = inputs["rank_lookup"]
     listing_ts_by_symbol = inputs["listing_ts_by_symbol"]
 
     lifecycle_strategy_id = config.kernel_strategy_id
@@ -2334,53 +1300,40 @@ def run_continuous_event_research(
         max_leverage=config.execution_leverage,
     )
     execution_config = ExecutionTwinConfig(
-        fee_bps=config.taker_fee_bps * config.round_trip_cost_multiplier,
+        fee_bps=config.taker_fee_bps,
         latency=LatencyProfile(0, 0, 0),
         max_decision_age_ns=0,
     )
-    temporary_lifecycle = None
-    if report_dir is not None:
-        lifecycle_root = Path(str(report_dir)).expanduser() / "common_kernel_execution"
-        lifecycle_root.mkdir(parents=True, exist_ok=True)
-    else:
-        temporary_lifecycle = tempfile.TemporaryDirectory(
-            prefix="liqmig-continuous-lifecycle-"
-        )
-        lifecycle_root = Path(temporary_lifecycle.name)
-    online_market_kernel = config.entry_adverse_limit_pct <= 0.0
-    online_session: HistoricalAccountSession | None = None
-    if online_market_kernel:
-        observed_ts_ns = max(
-            1,
-            min(
-                (
-                    int(bars["bar_end_ts_ms"][0]) * 1_000_000
-                    for bars in symbol_bars.values()
-                    if len(bars.get("bar_end_ts_ms", ())) > 0
-                ),
-                default=1,
+    lifecycle_root = out_dir / "common_kernel_execution"
+    lifecycle_root.mkdir(parents=True, exist_ok=True)
+    observed_ts_ns = max(
+        1,
+        min(
+            (
+                int(bars["bar_end_ts_ms"][0]) * 1_000_000
+                for bars in symbol_bars.values()
+                if len(bars.get("bar_end_ts_ms", ())) > 0
             ),
-        )
-        online_session = HistoricalAccountSession(
-            lifecycle_root,
-            account_id=lifecycle_strategy_id,
-            risk_policy=replay_policy,
-            instrument_rules=synthetic_historical_rules_for_symbols(
-                list(symbol_bars),
-                max_leverage=config.execution_leverage,
-                observed_ts_ns=observed_ts_ns,
-            ),
-            execution_config=execution_config,
-            id_seed=f"{lifecycle_strategy_id}:historical",
-        )
+            default=1,
+        ),
+    )
+    online_session = HistoricalAccountSession(
+        lifecycle_root,
+        account_id=lifecycle_strategy_id,
+        risk_policy=replay_policy,
+        instrument_rules=synthetic_historical_rules_for_symbols(
+            list(symbol_bars),
+            max_leverage=config.execution_leverage,
+            observed_ts_ns=observed_ts_ns,
+        ),
+        execution_config=execution_config,
+        id_seed=f"{lifecycle_strategy_id}:historical",
+    )
 
-    candidate_sink: list[dict[str, Any]] | None = [] if candidate_tape_path is not None else None
     kernel_decisions: list[HistoricalTargetDecision] = []
     if not entries.is_empty() and symbol_bars:
         trades, skips = _run_trades(
-            entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup,
-            candidate_sink=candidate_sink, size_mult_lookup=size_mult_lookup,
-            admission_lookup=admission_lookup,
+            entries, symbol_bars, funding_lookup, config, btc_trend_daily,
             listing_ts_by_symbol=listing_ts_by_symbol,
             kernel_decision_sink=kernel_decisions,
             kernel_session=online_session,
@@ -2394,7 +1347,7 @@ def run_continuous_event_research(
     mtm = _daily_pnl_metrics(mtm_equity)
 
     funding_mode = splits.get("full", {}).get("funding_mode", "missing")
-    run_label = "exploratory"  # engine-grade fills but modeled impact + research-tuned selection
+    run_label = CONTINUOUS_EQUITY_EVIDENCE_LABEL
 
     payload: dict[str, Any] = {
         "config": asdict(config),
@@ -2409,203 +1362,82 @@ def run_continuous_event_research(
         "metrics_mtm": mtm,                # portfolio mark-to-market (correlated-DD aware)
     }
 
-    if online_session is not None:
-        lifecycle_receipt = verify_account_journal(lifecycle_root)
-        lifecycle_receipt.update({
-            "batches": len(online_session.outputs),
-            "strategy_targets": len(kernel_decisions),
-            "final_state_hash": online_session.final_state_hash,
-            "evidence_label": "chronological_strategy_targets_through_live_common_account_kernel",
-            "historical_strategy_runtime_is_sequential": True,
-            "account_kernel_feedback_online": True,
-            "same_timestamp_strategy_batching": True,
-            "strategy_runtime_shared_across_environments": False,
-            "market_tape_shared_across_environments": False,
-            "venue_rule_parity": False,
-        })
-    else:
-        # Research-only adverse-limit entries are outside the current market-
-        # order twin. Their lifecycle is chronological, but kernel feedback is
-        # replayed afterward until a limit-order execution port is implemented.
-        replay_cycles = historical_cycles_from_decisions(
-            kernel_decisions,
-            equity_usdt=config.deploy_capital_usd,
-        )
-        lifecycle_result = HistoricalAccountReplay(
-            lifecycle_root,
-            account_id=lifecycle_strategy_id,
-            risk_policy=replay_policy,
-            instrument_rules=synthetic_historical_rules(kernel_decisions),
-            execution_config=execution_config,
-            id_seed=f"{lifecycle_strategy_id}:historical",
-        ).run(replay_cycles)
-        lifecycle_receipt = verify_account_journal(lifecycle_root)
-        lifecycle_receipt.update({
-            "batches": len(lifecycle_result.batches),
-            "strategy_targets": len(kernel_decisions),
-            "final_state_hash": lifecycle_result.final_state_hash,
-            "evidence_label": "chronological_limit_targets_postrun_common_kernel_replay",
-            "historical_strategy_runtime_is_sequential": True,
-            "account_kernel_feedback_online": False,
-            "same_timestamp_strategy_batching": True,
-            "strategy_runtime_shared_across_environments": False,
-            "market_tape_shared_across_environments": False,
-            "venue_rule_parity": False,
-        })
+    lifecycle_receipt = verify_account_journal(lifecycle_root)
+    lifecycle_receipt.update({
+        "batches": len(online_session.outputs),
+        "strategy_targets": len(kernel_decisions),
+        "final_state_hash": online_session.final_state_hash,
+        "evidence_label": "chronological_strategy_targets_through_common_account_kernel",
+        "historical_strategy_runtime_is_sequential": True,
+        "account_kernel_feedback_online": True,
+        "same_timestamp_strategy_batching": True,
+        "strategy_runtime_shared_across_environments": False,
+        "market_tape_shared_across_environments": False,
+        "venue_rule_parity": False,
+    })
 
-    if report_dir is not None:
-        payload["account_journal"] = lifecycle_receipt
-    else:
-        payload["canonical_lifecycle_validated"] = True
-        payload["canonical_lifecycle_events"] = lifecycle_receipt["events"]
-        payload["canonical_lifecycle_evidence_label"] = lifecycle_receipt["evidence_label"]
-    payload["canonical_common_kernel_parity"] = True
+    payload["account_journal"] = lifecycle_receipt
     payload["cross_environment_strategy_parity"] = False
-    if temporary_lifecycle is not None:
-        temporary_lifecycle.cleanup()
 
-    if candidate_tape_path is not None:
-        tape_path = Path(str(candidate_tape_path)).expanduser()
-        tape_path.parent.mkdir(parents=True, exist_ok=True)
-        tape_schema = {
-            "symbol": pl.Utf8,
-            "signal_ts_ms": pl.Int64,
-            "signal_bar_close_ts_ms": pl.Int64,
-            "decision_ts_ms": pl.Int64,
-            "feature_ts_ms": pl.Int64,
-            "data_available_ts_ms": pl.Int64,
-            "rmom_source_day_ts_ms": pl.Int64,
-            "rmom_data_available_ts_ms": pl.Int64,
-            "btc_trend_source_start_ts_ms": pl.Int64,
-            "btc_trend_lookback_days": pl.Int64,
-            "btc_trend_mode": pl.Utf8,
-            "btc_trend_lookback_duration_ms": pl.Int64,
-            "btc_trend_source_end_ts_ms": pl.Int64,
-            "btc_trend_data_available_ts_ms": pl.Int64,
-            "order_submit_ts_ms": pl.Int64,
-            "fill_window_start_ts_ms": pl.Int64,
-            "fill_window_end_ts_ms": pl.Int64,
-            "composite": pl.Float64,
-            "residual_momentum_value": pl.Float64,
-            "residual_momentum_rank": pl.Float64,
-            "feature_rv_168h": pl.Float64,
-            "feature_vov": pl.Float64,
-            "feature_dist_low": pl.Float64,
-            "feature_xsret7": pl.Float64,
-            "feature_xsret3": pl.Float64,
-            "feature_ret1": pl.Float64,
-            "feature_max_ret168": pl.Float64,
-            "feature_prior6_ret1_max": pl.Float64,
-            "feature_giveback_from_prior6_high": pl.Float64,
-            "feature_turnover_spike_168h": pl.Float64,
-            "turnover_quote": pl.Float64,
-            "liquidity_value": pl.Float64,
-            "liquidity_rank": pl.Float64,
-            "volume_1h_quote": pl.Float64,
-            "volume_24h_quote": pl.Float64,
-            "volume_zscore": pl.Float64,
-            "spell_end_ts_ms": pl.Int64,
-            "entry_bar_end_ts_ms": pl.Int64,
-            "entry_reference_price": pl.Float64,
-            "entry_limit_price": pl.Float64,
-            "entry_fill_mode": pl.Utf8,
-            "account_rejection_keys": pl.List(pl.Utf8),
-            "crowding_count": pl.Int64,
-            "active_count": pl.Int64,
-            "btc_trend_gate": pl.Utf8,
-            "regime_trend": pl.Float64,
-            "regime_size_mult": pl.Float64,
-            "sizing_mode": pl.Utf8,
-            "base_notional_weight": pl.Float64,
-            "entry_volatility": pl.Float64,
-            "inverse_vol_multiplier": pl.Float64,
-            "external_size_multiplier": pl.Float64,
-            "pre_risk_notional_weight": pl.Float64,
-            "disaster_notional_cap": pl.Float64,
-            "portfolio_heat_before_frac": pl.Float64,
-            "portfolio_heat_after_frac": pl.Float64,
-            "risk_size_clamped": pl.Boolean,
-            "notional_weight": pl.Float64,
-            "exit_ts_ms": pl.Int64,
-            "selected": pl.Boolean,
-            "reason": pl.Utf8,
-        }
-        tape_df = (
-            pl.DataFrame(candidate_sink).cast(tape_schema, strict=False)
-            if candidate_sink
-            else pl.DataFrame(schema=tape_schema)
+    # Empty component ledgers are valid inputs to the equity combiner.
+    trades.write_csv(out_dir / "continuous_trades.csv")
+    equity.write_csv(out_dir / "continuous_equity.csv")
+    mtm_equity.write_csv(out_dir / "continuous_mtm_equity.csv")
+    if not trades.is_empty():
+        # Charts render an extended copy so a book that goes flat near the end (e.g. the
+        # BTC-trend gate blocking all entries) draws as a flat line through the data
+        # boundary; the persisted CSVs above keep the computational ledger-day shape.
+        chart_boundary = end_ms - MS_PER_DAY
+        if not klines.is_empty():
+            chart_boundary = min(chart_boundary, (int(klines["ts_ms"].max()) // MS_PER_DAY) * MS_PER_DAY)
+        mtm_chart = _extend_equity_flat_for_chart(mtm_equity, through_ts_ms=chart_boundary)
+        _write_equity_png(
+            mtm_chart, out_dir / "continuous_mtm_equity.png",
+            title=(f"PORTFOLIO MARK-TO-MARKET — {config.side} D{config.decile} | hold {config.hold_hours}h "
+                   f"| MAR {mtm.get('mar')} DD {abs(mtm.get('max_drawdown') or 0)*100:.1f}%  [DESCRIPTIVE]"),
         )
-        tape_df.write_parquet(tape_path)
-        payload["candidate_tape_path"] = str(tape_path)
-        payload["n_candidates"] = int(tape_df.height)
-        payload["n_candidates_selected"] = int(tape_df.filter(pl.col("selected")).height) if tape_df.height else 0
-
-    if report_dir is not None:
-        out_dir = Path(str(report_dir)).expanduser()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        # Always write the ledger CSVs — even empty ones (a legitimately flat component):
-        # the forward-replay orchestrator/scout loads these by path, so a missing CSV on a
-        # zero-trade component used to hard-fail the whole venue (audit-iter4/5 deferred).
-        trades.write_csv(out_dir / "continuous_trades.csv")
-        equity.write_csv(out_dir / "continuous_equity.csv")
-        mtm_equity.write_csv(out_dir / "continuous_mtm_equity.csv")
-        if not trades.is_empty():
-            # Charts render an extended copy so a book that goes flat near the end (e.g. the
-            # BTC-trend gate blocking all entries) draws as a flat line through the data
-            # boundary; the persisted CSVs above keep the validated ledger-day shape.
-            chart_boundary = end_ms - MS_PER_DAY
-            if not klines.is_empty():
-                chart_boundary = min(chart_boundary, (int(klines["ts_ms"].max()) // MS_PER_DAY) * MS_PER_DAY)
-            mtm_chart = _extend_equity_flat_for_chart(mtm_equity, through_ts_ms=chart_boundary)
-            _write_equity_png(
-                mtm_chart, out_dir / "continuous_mtm_equity.png",
-                title=(f"PORTFOLIO MARK-TO-MARKET — {config.side} D{config.decile} | hold {config.hold_hours}h "
-                       f"({config.exit_mode}) | MAR {mtm.get('mar')} DD {abs(mtm.get('max_drawdown') or 0)*100:.1f}%  [EXPLORATORY]"),
+        _write_equity_png(
+            equity, out_dir / "continuous_equity.png",
+            title=(f"continuous fade {config.side} D{config.decile} | hold {config.hold_hours}h | "
+                   f"liq>=${int(config.liq_turnover_min/1000)}k | "
+                   f"MAR {splits.get('full', {}).get('mar')}  [DESCRIPTIVE]"),
+        )
+        # Use the shared strategy-vs-BTC renderer and monthly-return table.
+        try:
+            from .volume_events_charts import _write_equity_benchmark_chart
+            _date = pl.from_epoch("ts_ms", time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
+            eq_dated = mtm_chart.with_columns(_date)
+            btc_klines = (
+                klines.filter(pl.col("symbol") == "BTCUSDT").with_columns(_date)
+                if not klines.is_empty() else klines
             )
-            _write_equity_png(
-                equity, out_dir / "continuous_equity.png",
-                title=(f"continuous fade {config.side} D{config.decile} | hold {config.hold_hours}h | "
-                       f"liq>=${int(config.liq_turnover_min/1000)}k | stop {config.stop_loss_pct:.0%} | "
-                       f"MAR {splits.get('full', {}).get('mar')}  [EXPLORATORY]"),
+            # Real per-month aggregation: trade counts by ENTRY month (not equity rows — the
+            # shared renderer's None-fallback counts pl.len() of daily marks ≈ ~30/month) +
+            # MTM monthly return. Without this the table shows ~days, not the ~hundreds of
+            # trades/month a high-turnover book actually opens.
+            trades_m = (
+                trades.with_columns(pl.col("entry_date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
+                .group_by("month").agg(pl.len().alias("trades"))
             )
-            # Canonical strategy-vs-BTC PNG (same renderer + monthly-return table as the short/long
-            # sleeves) so the continuous curve is visually comparable; equity_curves.sh prefers the
-            # *_equity_btc.png. Marked EXPLORATORY (research-tuned selection + modeled impact).
-            try:
-                from .volume_events_charts import _write_equity_benchmark_chart
-                _date = pl.from_epoch("ts_ms", time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
-                eq_dated = mtm_chart.with_columns(_date)
-                btc_klines = (
-                    klines.filter(pl.col("symbol") == "BTCUSDT").with_columns(_date)
-                    if not klines.is_empty() else klines
-                )
-                # Real per-month aggregation: trade counts by ENTRY month (not equity rows — the
-                # shared renderer's None-fallback counts pl.len() of daily marks ≈ ~30/month) +
-                # MTM monthly return. Without this the table shows ~days, not the ~hundreds of
-                # trades/month a high-turnover book actually opens.
-                trades_m = (
-                    trades.with_columns(pl.col("entry_date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
-                    .group_by("month").agg(pl.len().alias("trades"))
-                )
-                monthly_df = (
-                    eq_dated.with_columns(pl.col("date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
-                    .group_by("month")
-                    .agg(((pl.col("basket_return") + 1.0).product() - 1.0).alias("strategy_return"))
-                    .join(trades_m, on="month", how="left")
-                    .with_columns(pl.col("trades").fill_null(0))
-                    .sort("month")
-                )
-                if not eq_dated.is_empty() and not btc_klines.is_empty():
-                    _write_equity_benchmark_chart(
-                        out_dir, root=root, equity=eq_dated, raw_klines=btc_klines, monthly=monthly_df,
-                        png_name="continuous_equity_btc.png",
+            monthly_df = (
+                eq_dated.with_columns(pl.col("date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
+                .group_by("month")
+                .agg(((pl.col("basket_return") + 1.0).product() - 1.0).alias("strategy_return"))
+                .join(trades_m, on="month", how="left")
+                .with_columns(pl.col("trades").fill_null(0))
+                .sort("month")
+            )
+            if not eq_dated.is_empty() and not btc_klines.is_empty():
+                _write_equity_benchmark_chart(
+                    out_dir, equity=eq_dated, raw_klines=btc_klines, monthly=monthly_df,
+                    png_name="continuous_equity_btc.png",
                         title=(f"Continuous-fade {config.side} D{config.decile} vs BTC | hold "
-                               f"{config.hold_hours}h ({config.exit_mode}) | MTM-MAR {mtm.get('mar')} "
-                               f"DD {abs(mtm.get('max_drawdown') or 0)*100:.1f}%  [EXPLORATORY]"),
-                    )
-            except Exception:  # noqa: BLE001 - chart failure must not fail the run
-                pass
-        (out_dir / "continuous_report.json").write_text(json.dumps(payload, indent=2, default=str))
-        payload["report_dir"] = str(out_dir)
+                               f"{config.hold_hours}h | MTM-MAR {mtm.get('mar')} "
+                               f"DD {abs(mtm.get('max_drawdown') or 0)*100:.1f}%  [DESCRIPTIVE]"),
+                )
+        except Exception:  # noqa: BLE001 - chart failure must not fail the run
+            pass
+    (out_dir / "continuous_report.json").write_text(json.dumps(payload, indent=2, default=str))
+    payload["report_dir"] = str(out_dir)
 
     return payload

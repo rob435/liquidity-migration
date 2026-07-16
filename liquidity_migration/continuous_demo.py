@@ -5,8 +5,7 @@ targets. The account owner alone owns venue orders, fills, positions, P&L,
 protection, and operator notifications. The backtest is a prior; forward demo
 and paper evidence are separate claims.
 
-The current deployed ensemble enters from the confirmed-bar +1h path, not the
-retired intra-hour entry. The decile pipeline is the SHARED, verified
+The active ensemble enters from the confirmed-bar +1h path. The decile pipeline is the shared
 `continuous_events.compute_continuous_decile_panel`.
 
 The sole `continuous_ensemble_v2` profile uses inverse-vol component entry
@@ -30,7 +29,6 @@ from ._common import (
     MS_PER_HOUR,
     coerce_int,
     exact_duration_ms,
-    exact_lookback_cutoff_ms,
     finite_float,
 )
 from .account_intent_client import (
@@ -44,8 +42,8 @@ from .account_owner_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
 )
-from .account_route import AccountRoute, require_account_route
-from .account_service import AccountIntentInbox, RequestedIntent, SleeveAdapterKind
+from .account_route import require_account_route
+from .account_service import RequestedIntent, SleeveAdapterKind
 from .account_strategy_state import (
     CanonicalReductionEvent,
     canonical_adverse_reduction_events,
@@ -64,20 +62,19 @@ from .continuous_btc_risk import (
     normalize_btc_risk_decision_evidence,
 )
 from .continuous_events import (
-    BTC_EXACT_MONTH_DAYS,
-    BTC_TREND_MODE_DAILY_PRIOR,
-    BTC_TREND_MODES,
     FEATURES,
-    _btc_trend_lookback_duration_ms,
-    _btc_trend_lookup_key,
-    _btc_trend_return_lookup,
+    _btc_trend_returns,
     _entry_event_expr,
     compute_continuous_decile_panel,
     cross_sectional_decile,
     per_symbol_timeseries_features,
-    validated_stable_residual_momentum,
+    require_stable_residual_momentum,
 )
-from .continuous_identity import continuous_trade_id as _continuous_trade_id_impl
+from .continuous_identity import continuous_trade_id
+from .continuous_profile import (
+    CONTINUOUS_PROFILE_ID,
+    CONTINUOUS_RUNTIME_COMPONENTS as CONTINUOUS_COMPONENTS,
+)
 from .event_demo_data import (
     _float,
     _kline_window,
@@ -96,47 +93,28 @@ from .strategy_targets import component_target_intent
 from .strategy_target_replay import PublishedTargetCyclePayload
 
 CONTINUOUS_STRATEGY_ID = "continuous_fade_v2"
-# --- v2 freeze boundary: the SINGLE source of truth for v2-forward reconcile ---
-# The 3-component `continuous_ensemble_v2` object froze on 2026-06-18 after the
-# component-set and risk-lifecycle reset. The active continuous ledgers were
-# hard-reset to this boundary; the daemon owns only the v2 strategy ids below.
-CONTINUOUS_V2_FORWARD_START = "2026-06-18T19:54:00Z"
-CONTINUOUS_V2_FORWARD_START_MS = 1_781_812_440_000
-CONTINUOUS_V2_PROFILE = "continuous_ensemble_v2"
-# Every v2 strategy id that may author a NEW continuous row (demo + paper).
-CONTINUOUS_V2_DEMO_STRATEGY_ID = CONTINUOUS_STRATEGY_ID  # continuous_fade_v2
-CONTINUOUS_V2_PAPER_STRATEGY_ID = CONTINUOUS_STRATEGY_ID + "_paper"  # continuous_fade_v2_paper
-CONTINUOUS_V2_STRATEGY_IDS = (
-    CONTINUOUS_V2_DEMO_STRATEGY_ID,
-    CONTINUOUS_V2_PAPER_STRATEGY_ID,
-)
+CONTINUOUS_V2_PROFILE = CONTINUOUS_PROFILE_ID
 BTC_TREND_SYMBOL = "BTCUSDT"
-CONTINUOUS_DEMO_PROFILES = (
-    "continuous_ensemble_v2",  # 2026-06-18 demo/paper lifecycle: inv-vol + rebalance off + TP/24h, no stop
-)
+CONTINUOUS_DEMO_PROFILES = (CONTINUOUS_V2_PROFILE,)
+
+
 @dataclass(frozen=True, slots=True)
 class ContinuousDemoCycleConfig:
-    """Live continuous-fade demo config (mirrors LongNativeDemoCycleConfig; sleeve-specific knobs)."""
+    """Continuous demo/paper target-producer configuration."""
 
-    # --- selection (must match the backtest engine's promoted/validated cell) ---
+    # --- code-defined active selection ---
     decile: int = 9  # short the top composite decile
     # rmom-LOW gate: keep the lowest-residual-momentum third within each ts.
     rmom_quantile: float = 0.33
     feature_set: tuple[str, ...] = FEATURES
     liq_turnover_min: float = 500_000.0  # liquid gate: signal-bar hourly turnover_quote (USD)
-    side: str = "short"
     # --- live state window ---
     lookback_days: int = 45  # confirmed-1h history pulled from the store for the features
     # --- execution / book ---
     max_active: int = 25
     max_new_entries_per_cycle: int = 5
     max_hold_hours: int = 48  # force-exit cap if a name never leaves the decile
-    # ENTRY TIMING (the alpha-sweep #1 finding, 2026-06-02): select ENTRIES from the CONFIRMED bar-close
-    # decile + this many hours' delay, NOT the live intra-hour decile cross. The engine validated the
-    # +1h point (d1) and it ~DOUBLES MAR vs intra-hour entry (d0) cross-venue — shorting intra-hour enters
-    # into the first-hour continuation/squeeze. 1 = the validated +1h entry (default). 0 = legacy intra-hour
-    # entry off the live decile. Kept as an integer knob for A/B tests only;
-    # the frozen v2 profile pins it to 1.
+    # The active profile selects from a confirmed close and enters one hour later.
     entry_confirm_delay_hours: int = 1
     entry_event_trigger: str = "none"  # opt-in confirmed-hour event gate: none | fresh_pop25 | popX_gbY | ...
     # The live profile is the uptrend-gated object. Keep the CLI/config
@@ -144,14 +122,6 @@ class ContinuousDemoCycleConfig:
     # available for diagnostics.
     btc_trend_gate: str = "uptrend"  # off | uptrend | downtrend; causal prior-30d BTC return gate.
     btc_trend_lookback_days: int = 30
-    btc_trend_mode: str = BTC_TREND_MODE_DAILY_PRIOR
-    btc_trend_month_days: float = BTC_EXACT_MONTH_DAYS
-    btc_trend_smart_tolerance: float = 0.01
-    # One signal window should normally produce at most one entry per symbol. The reentry_seq/id
-    # machinery remains for backwards compatibility and explicit experiments, but the default aligns
-    # live selection with the historical fresh-spell model and prevents cover-then-reopen churn inside
-    # the same confirmed deciding bar.
-    allow_same_signal_reentry: bool = False
     # Portfolio circuit breaker (correlated-squeeze defense): PAUSE new entries when the sleeve has had
     # >= entry_pause_after_adverse_exits adverse covers (stop_approach / failed_fade / any net-negative
     # cover — the footprint of a market-wide alt melt-up squeezing many shorts at once) within the last
@@ -161,27 +131,22 @@ class ContinuousDemoCycleConfig:
     # de-risking choice. Set entry_pause_after_adverse_exits=0 to disable.
     entry_pause_after_adverse_exits: int = 8
     entry_pause_window_minutes: int = 1440
-    age_days_min: int = 30  # skip fresh-listing squeezers (mild floor; engine-neutral, cheap insurance)
     entry_leverage: float = 2.0
     per_position_notional_pct_equity: float = 2.0  # base % before component, inverse-vol and rebalance scales
     sizing_mode: str = "flat"  # "flat" | "inverse_vol" (target_vol_per_name / rv_168h)
     target_vol_per_name: float = 0.02  # inverse-vol per-name hourly-vol target
     vol_weight_clamp: float = 3.0  # inverse-vol multiplier clamp [1/clamp, clamp]
-    # Current BTC-risk entry-size overlay. It improved MAR and drawdown on both
-    # venues while cutting Binance total return; keep that caveat in the
-    # decision log, not as repeated runtime policy text.
+    # Stateful accepted-decision BTC-risk entry-size overlay.
     entry_btc_risk_sizing_enabled: bool = False
     entry_btc_risk_arm_id: str = CTRL_BTC_RISK_70_90_35_ID
     entry_btc_risk_low: float = 0.70
     entry_btc_risk_high: float = 0.90
     entry_btc_risk_tail_mult: float = 0.35
     entry_btc_risk_min_prior: int = BTC_RISK_MIN_PRIOR
-    # Explicit deployment-scale multiplier.  Keep the registered/base profile at
-    # 1x and use this knob for demo/paper execution stress so the scale change is
-    # visible in configs and ledgers rather than hidden in the base 2% setting.
+    # Explicit demo/paper scale multiplier, recorded in configs and ledgers.
     notional_multiplier: float = 1.0
     workers: int = 8
-    # universe: 0/0 == match-the-backtest (full ~750-perp universe; the signal's liquid gate filters)
+    # 0/0 keeps the full resolved universe; the signal's liquidity gate filters it.
     universe_rank_end: int = 0
     universe_max_symbols: int = 0
     universe_min_turnover_24h: float = 0.0
@@ -195,23 +160,17 @@ class ContinuousDemoCycleConfig:
     # Canonical accepted-target journal used as the planning read model.  It is
     # inseparable from the inbox route to prevent split-brain open positions.
     account_execution_root: str | None = None
-    # Optional natural-evidence candidate population. The shared public-data
-    # resolver enforces it before signal selection in demo and paper alike.
+    # Optional frozen candidate population, enforced before signal selection in
+    # demo and paper alike.
     candidate_universe_file: str = ""
-    data_name: str = "continuous-demo-event"
-    strategy_profile: str = "continuous_ensemble_v2"
-    # --- continuous_ensemble_v2 3-component ensemble (the validated research object) ---
+    strategy_profile: str = CONTINUOUS_V2_PROFILE
+    # --- continuous_ensemble_v2 three-component active ensemble ---
     # (name, entry_event_trigger|"none", age_days_min, take_profit_pct, weight).
     # Non-empty => the cycle selects entries PER COMPONENT (each with its own event
     # trigger, age floor and account-owned TP) and sizes each entry by weight x the base
-    # per-position notional — the live form of combine_continuous_components on the
-    # frozen receipt weights (no re-estimation; R1 walk-forward falsifier).
-    ensemble_components: tuple[tuple[str, str, int, float, float], ...] = ()
+    # per-position notional.
+    ensemble_components: tuple[tuple[str, str, int, float, float], ...] = CONTINUOUS_COMPONENTS
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
-    # --- live panel cache (Tier 2): compute the trailing closed-bar features once per bar close,
-    # then refresh only the live-price term + re-rank on each wake. Provably np.allclose-equivalent
-    # to the full recompute (tested); the full recompute stays the always-available fallback. ---
-    live_panel_cache_enabled: bool = True
     # --- WS kline stream (same shape as the other sleeves) ---
     ws_klines_enabled: bool = True
     # Follow ANOTHER root's flushed WS kline snapshot (read-only) instead of running a
@@ -228,11 +187,11 @@ class ContinuousDemoCycleConfig:
     ws_klines_stale_reconnect_seconds: float = 180.0
 
 
-def continuous_dataset_names(config: ContinuousDemoCycleConfig) -> tuple[str, str, str]:
-    """(trades, orders, cycles) dataset names for the continuous demo/paper books."""
+def continuous_cycles_dataset(config: ContinuousDemoCycleConfig) -> str:
+    """Cycle-heartbeat dataset for the continuous demo or paper planner."""
     if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER:
-        return ("continuous_fade_paper_trades", "continuous_fade_paper_orders", "continuous_fade_paper_cycles")
-    return ("continuous_fade_demo_trades", "continuous_fade_demo_orders", "continuous_fade_demo_cycles")
+        return "continuous_fade_paper_cycles"
+    return "continuous_fade_demo_cycles"
 
 
 def _continuous_base_notional_pct_equity(config: ContinuousDemoCycleConfig) -> float:
@@ -300,13 +259,11 @@ def build_confirmed_entry_state(
     now_ts_ms: int,
     config: ContinuousDemoCycleConfig,
 ) -> pl.DataFrame:
-    """ENTRY decile from the CONFIRMED bar-close (no live in-progress bar) at the +Nh-validated deciding
-    bar — the alpha-sweep #1 fix. The engine validated entering 1h AFTER the deciding bar's close (d1),
-    which ~doubles MAR vs the live intra-hour cross (d0); shorting intra-hour walks into the first-hour
-    continuation/squeeze. So a name is an entry candidate iff it was in the top decile at the bar that
-    closed `entry_confirm_delay_hours` ago. NO synthetic live bar → fully PIT/confirmed. Returns the same
-    [symbol, decile, composite, turnover_quote] shape as build_live_continuous_state so the selector is a
-    drop-in. (Used for ENTRIES only; EXITS keep the live tick-driven state.)"""
+    """Return the entry decile from the configured confirmed deciding bar.
+
+    No synthetic in-progress bar is included. Entries use this state; exits use
+    the tick-updated state.
+    """
     delay = max(1, config.entry_confirm_delay_hours)
     if klines_recent.is_empty():
         return _empty_live_state()
@@ -380,7 +337,7 @@ class LivePanelCache:
     fallback in the cycle, so a cache bug degrades to "slower", never "wrong".
     """
 
-    __slots__ = ("_rmom_quantile", "_feature_set", "_exclude", "_cur_ts", "_sig", "_carry", "refreshes", "live_updates")
+    __slots__ = ("_rmom_quantile", "_feature_set", "_exclude", "_cur_ts", "_sig", "_carry")
 
     def __init__(
         self,
@@ -395,11 +352,6 @@ class LivePanelCache:
         self._cur_ts: int | None = None
         self._sig: tuple[int, int, int, int] | None = None
         self._carry: dict[str, dict[str, Any]] = {}
-        self.refreshes = 0
-        self.live_updates = 0
-
-    def confirmed_hour(self) -> int | None:
-        return self._cur_ts
 
     def _confirmed_signature(
         self,
@@ -473,7 +425,6 @@ class LivePanelCache:
         `build_live_continuous_state`)."""
         self._cur_ts = cur_ts
         self._carry = {}
-        self.refreshes += 1
         k = klines_recent.select("ts_ms", "symbol", "close", "turnover_quote").filter(pl.col("ts_ms") < cur_ts)
         exclude = self._exclude or config.exclude_symbols
         if exclude:
@@ -520,7 +471,6 @@ class LivePanelCache:
         SHARED cross-sectional decile. Mirrors the synthetic-bar arithmetic of
         `per_symbol_timeseries_features` exactly (rolling_std ddof=1, min_samples = non-null count,
         the `max>min` dist_low guard, positional return offsets)."""
-        self.live_updates += 1
         rows: list[dict[str, Any]] = []
         for symbol, c in self._carry.items():
             price = current_prices.get(symbol)
@@ -645,26 +595,14 @@ def plan_continuous_exits(
     duration_ms = exact_duration_ms(hours=config.max_hold_hours)
     exits: list[dict[str, Any]] = []
     for trade in open_trades:
-        entry_ts_ms = _row_ts_ms(trade, "entry_fill_ts_ms", "entry_ts_ms", "opened_at_ms")
+        entry_ts_ms = int(trade.get("entry_ts_ms") or 0)
         if entry_ts_ms <= 0:
             continue
-        planned_exit_ts_ms = _row_ts_ms(trade, "planned_exit_ts_ms") or entry_ts_ms + duration_ms
-        if now_ms < planned_exit_ts_ms:
+        max_hold_deadline_ts_ms = int(trade.get("max_hold_deadline_ts_ms") or entry_ts_ms + duration_ms)
+        if now_ms < max_hold_deadline_ts_ms:
             continue
         exits.append({**trade, "exit_reason": "max_hold", "exit_trigger_ts_ms": now_ms})
     return exits
-
-
-def _row_ts_ms(row: dict[str, Any], *keys: str) -> int:
-    for key in keys:
-        try:
-            value = int(row.get(key) or 0)
-        except (TypeError, ValueError):
-            value = 0
-        if value > 0:
-            return value
-    return 0
-
 
 def _recent_adverse_reduction_count(
     adverse_events: Sequence[CanonicalReductionEvent],
@@ -681,15 +619,9 @@ def _recent_adverse_reduction_count(
 
     if window_minutes <= 0:
         return 0
-    cutoff_ns = exact_lookback_cutoff_ms(
-        now_ms,
-        minutes=window_minutes,
-    ) * 1_000_000
+    cutoff_ns = (int(now_ms) - exact_duration_ms(minutes=window_minutes)) * 1_000_000
     now_ns = int(now_ms) * 1_000_000
-    return sum(
-        cutoff_ns <= int(event.local_receive_ts_ns) <= now_ns
-        for event in adverse_events
-    )
+    return sum(cutoff_ns <= int(event.local_receive_ts_ns) <= now_ns for event in adverse_events)
 
 
 def entry_circuit_breaker_tripped(
@@ -709,16 +641,6 @@ def entry_circuit_breaker_tripped(
     return count >= config.entry_pause_after_adverse_exits, count
 
 
-def _continuous_trade_id(strategy_id: str, symbol: str, signal_ts_ms: int, reentry_seq: int = 0) -> str:
-    """Deterministic continuous trade_id. seq=0 is byte-identical to the legacy
-    ``{strategy}-{symbol}-{signal_ts}`` form (existing rows unchanged); a same-signal-window re-entry
-    (after a cover within the deciding-bar hour) gets seq>0 -> a DISTINCT id, so the closed row is not
-    overwritten by storage's trade_id dedup (continuous-2 ledger data loss). A crash-retry of the SAME
-    open recomputes the same seq (the closed row count is unchanged) -> the same id+link -> idempotent.
-    Round-trips with the orderLinkId seq via decode_entry_order_link_id and legacy reconstruction."""
-    return _continuous_trade_id_impl(strategy_id, symbol, signal_ts_ms, reentry_seq)
-
-
 def _continuous_entry_candidates_with_signal_metadata(
     picks: list[dict[str, Any]],
     all_trades: pl.DataFrame,
@@ -726,29 +648,19 @@ def _continuous_entry_candidates_with_signal_metadata(
     signal_ts: int,
     strategy_id: str,
     price_by_symbol: dict[str, float],
-    allow_same_signal_reentry: bool,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Attach signal metadata and optionally block same-window re-entry.
-
-    ``continuous-2`` made same-window re-entry rows uniquely identifiable if they exist. The shipped
-    selector should still default to the historical fresh-spell behavior: one symbol, one entry for
-    a confirmed signal window. Explicit experiments can opt back into the seq-based path.
-    """
-    prior_by_symbol: dict[str, int] = {}
+    """Attach signal metadata and enforce one entry per symbol/signal window."""
+    prior_symbols: set[str] = set()
     if not all_trades.is_empty() and {"symbol", "signal_ts_ms"} <= set(all_trades.columns):
         frame = all_trades.filter(pl.col("signal_ts_ms") == signal_ts)
         if "strategy_id" in frame.columns:
             frame = frame.filter(pl.col("strategy_id") == strategy_id)
-        prior_by_symbol = {
-            str(r["symbol"]): int(r["_n"])
-            for r in frame.group_by("symbol").agg(pl.len().alias("_n")).iter_rows(named=True)
-        }
+        prior_symbols = {str(symbol) for symbol in frame.get_column("symbol").to_list()}
     candidates: list[dict[str, Any]] = []
     skipped_same_signal_reentry = 0
     for c in picks:
         sym = str(c["symbol"])
-        reentry_seq = prior_by_symbol.get(sym, 0)
-        if reentry_seq > 0 and not allow_same_signal_reentry:
+        if sym in prior_symbols:
             skipped_same_signal_reentry += 1
             continue
         candidates.append(
@@ -756,8 +668,7 @@ def _continuous_entry_candidates_with_signal_metadata(
                 **c,
                 "signal_ts_ms": signal_ts,
                 "live_price": price_by_symbol.get(sym, 0.0),
-                "reentry_seq": reentry_seq,
-                "trade_id": _continuous_trade_id(strategy_id, sym, signal_ts, reentry_seq),
+                "trade_id": continuous_trade_id(strategy_id, sym, signal_ts),
             }
         )
     return candidates, skipped_same_signal_reentry
@@ -769,30 +680,17 @@ def continuous_strategy_id(config: ContinuousDemoCycleConfig) -> str:
 
 
 def continuous_managed_strategy_ids(config: ContinuousDemoCycleConfig) -> tuple[str, ...]:
-    suffix = (
-        "_paper"
-        if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER
-        else ""
-    )
+    suffix = "_paper" if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER else ""
     return (CONTINUOUS_STRATEGY_ID + suffix,)
 
 
-def continuous_sleeve_name(config: ContinuousDemoCycleConfig) -> str:
-    return "continuous"
-
-
 def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> ContinuousDemoCycleConfig:
-    """Resolve named demo profiles into explicit knobs.
+    """Resolve the active demo/paper profile into explicit knobs.
 
-    ``continuous_ensemble_v2`` is the frozen 2026-06-18 demo/paper lifecycle:
-    three-component entry book, inverse-vol component sizing, daily vol-target
-    rebalance disabled, and TP/24h exits with no daemon or server stop.
-
-    ``promoted.continuous_profile()`` exposes the frozen portfolio object for
-    tooling. The deployed daemon lifecycle is ``continuous_ensemble_v2`` through
-    this resolver plus systemd/env.
+    It uses the shared three-component book, inverse-vol sizing, TP12, and a
+    24-hour maximum hold.
     """
-    if config.strategy_profile != "continuous_ensemble_v2":
+    if config.strategy_profile != CONTINUOUS_V2_PROFILE:
         return config
     return replace(
         config,
@@ -808,7 +706,7 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         sizing_mode="inverse_vol",
         target_vol_per_name=0.01,
         vol_weight_clamp=2.0,
-        # BTC-risk sizing overlay: after 50 prior live decisions, multiply all
+        # After 50 prior accepted decisions, multiply all
         # component entries for a `(symbol, signal_ts)` by 0.35 when the causal
         # V0 BTC-risk score is in [0.70, 0.90).
         entry_btc_risk_sizing_enabled=True,
@@ -817,14 +715,7 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         entry_btc_risk_high=0.90,
         entry_btc_risk_tail_mult=0.35,
         entry_btc_risk_min_prior=BTC_RISK_MIN_PRIOR,
-        # Component take-profit target: 12%. Bybit liked the wider TP; Binance
-        # drawdown/MAR rejected it as broad proof, so keep the caveat in the
-        # decision log.
-        ensemble_components=(
-            ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333),
-            ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222),
-            ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444),
-        ),
+        ensemble_components=CONTINUOUS_COMPONENTS,
     )
 
 
@@ -835,14 +726,9 @@ def _btc_trend_gate_value(
     config: ContinuousDemoCycleConfig | None = None,
 ) -> float | None:
     cfg = config or ContinuousDemoCycleConfig()
-    lookup = _btc_trend_return_lookup(
-        klines,
-        mode=str(cfg.btc_trend_mode),
-        lookback_days=max(int(cfg.btc_trend_lookback_days), 1),
-        month_days=float(cfg.btc_trend_month_days),
-        smart_tolerance=float(cfg.btc_trend_smart_tolerance),
-    )
-    return lookup.get(_btc_trend_lookup_key(int(signal_ts_ms), mode=str(cfg.btc_trend_mode)))
+    lookup = _btc_trend_returns(klines, lookback_days=max(int(cfg.btc_trend_lookback_days), 1))
+    signal_day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
+    return lookup.get(signal_day)
 
 
 def _btc_trend_gate_allows_value(gate: str, trend: float | None) -> bool:
@@ -950,15 +836,6 @@ def _btc_risk_policy(config: ContinuousDemoCycleConfig) -> dict[str, float | int
     }
 
 
-def _unresolved_continuous_entry_request_count(route: AccountRoute) -> int:
-    """Count crash-durable CONT entry batches not yet terminal in the inbox."""
-
-    return unresolved_target_snapshot(
-        AccountIntentInbox(route),
-        sleeve=SleeveAdapterKind.CONTINUOUS,
-    ).entry_request_count
-
-
 def _continuous_btc_risk_multiplier(config: ContinuousDemoCycleConfig, cand: dict[str, Any]) -> float:
     if not getattr(config, "entry_btc_risk_sizing_enabled", False):
         return 1.0
@@ -990,7 +867,6 @@ def _apply_btc_risk_sizing(
         "accepted_duplicates": 0,
         "accepted_ignored": 0,
         "accepted_authoritative_rows": 0,
-        "accepted_rewritten": 0,
         "unresolved_entry_requests": int(unresolved_entry_requests),
         "entry_blocked": False,
         "blocking_reason": "",
@@ -1018,7 +894,6 @@ def _apply_btc_risk_sizing(
         stats["accepted_duplicates"] = ingestion["duplicates"]
         stats["accepted_ignored"] = ingestion["ignored"]
         stats["accepted_authoritative_rows"] = ingestion["authoritative_rows"]
-        stats["accepted_rewritten"] = ingestion["rewritten"]
         stats["state_rows"] = sizer.rows
     except Exception as exc:  # noqa: BLE001 - malformed accepted state must fail closed
         _logger.exception("BTC-risk accepted-state synchronization failed; blocking new entries")
@@ -1082,10 +957,10 @@ def _btc_trend_gate_payload_fields(
 ) -> dict[str, Any]:
     return {
         "btc_trend_gate": config.btc_trend_gate,
-        "btc_trend_gate_mode": config.btc_trend_mode,
+        "btc_trend_gate_mode": "daily_prior",
         "btc_trend_gate_lookback_days": int(config.btc_trend_lookback_days),
         "btc_trend_gate_lookback_duration_ms": (
-            _btc_trend_lookback_duration_ms(config) if config.btc_trend_gate != "off" else None
+            int(config.btc_trend_lookback_days) * MS_PER_DAY if config.btc_trend_gate != "off" else None
         ),
         "btc_trend_gate_allows_entry": allows_entry,
         "btc_trend_gate_value": trend_value,
@@ -1113,7 +988,6 @@ def _btc_risk_sizing_payload_fields(stats: dict[str, Any]) -> dict[str, Any]:
         "btc_risk_sizing_accepted_duplicates": stats.get("accepted_duplicates", 0),
         "btc_risk_sizing_accepted_ignored": stats.get("accepted_ignored", 0),
         "btc_risk_sizing_accepted_authoritative_rows": stats.get("accepted_authoritative_rows", 0),
-        "btc_risk_sizing_accepted_rewritten": stats.get("accepted_rewritten", 0),
         "btc_risk_sizing_unresolved_entry_requests": stats.get("unresolved_entry_requests", 0),
         "btc_risk_sizing_entry_blocked": stats.get("entry_blocked", False),
         "btc_risk_sizing_blocking_reason": stats.get("blocking_reason", ""),
@@ -1240,7 +1114,9 @@ def _continuous_entry_target_intents(
         price = price_by_symbol.get(symbol, _float(candidate.get("live_price")))
         if not trade_id or not symbol or price <= 0.0:
             continue
-        component_weight = _float(candidate.get("component_weight")) or 1.0
+        component_weight = _float(candidate.get("component_weight"))
+        if component_weight <= 0.0:
+            raise ValueError("continuous entry candidate requires a positive component_weight")
         vol_weight_multiplier = _continuous_vol_weight_multiplier(demo, candidate.get("rv_168h"))
         btc_risk_multiplier = _continuous_btc_risk_multiplier(demo, candidate)
         btc_risk_evidence: dict[str, Any] | None = None
@@ -1265,18 +1141,10 @@ def _continuous_entry_target_intents(
             ):
                 raise ValueError("BTC-risk multiplier conflicts with decision evidence")
         target_notional = (
-            equity_usdt
-            * order_notional_frac
-            * component_weight
-            * vol_weight_multiplier
-            * btc_risk_multiplier
+            equity_usdt * order_notional_frac * component_weight * vol_weight_multiplier * btc_risk_multiplier
         )
         take_profit_pct = _float(candidate.get("take_profit_pct"))
-        max_hold_duration_ms = (
-            exact_duration_ms(hours=demo.max_hold_hours)
-            if demo.max_hold_hours > 0
-            else 0
-        )
+        max_hold_duration_ms = exact_duration_ms(hours=demo.max_hold_hours) if demo.max_hold_hours > 0 else 0
         intents.append(
             component_target_intent(
                 adapter_kind=SleeveAdapterKind.CONTINUOUS,
@@ -1313,7 +1181,7 @@ def _load_rmom_table(root: Path) -> pl.DataFrame | None:
         return None
     try:
         table = pl.read_parquet(path)
-        table = validated_stable_residual_momentum(table, source=path)
+        table = require_stable_residual_momentum(table, source=path)
         return table.rename({"ts_ms": "day_ts"})
     except Exception as exc:  # noqa: BLE001 - a corrupt rmom file must DEGRADE, not crash the cycle
         # A partially-written/corrupt parquet (mid-write crash, disk issue) or a
@@ -1367,8 +1235,6 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
         raise ValueError(f"unknown continuous strategy_profile {config.strategy_profile!r}")
     if config.btc_trend_gate not in ("off", "uptrend", "downtrend"):
         raise ValueError(f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {config.btc_trend_gate!r}")
-    if config.btc_trend_mode not in BTC_TREND_MODES:
-        raise ValueError(f"btc_trend_mode must be one of {BTC_TREND_MODES}; got {config.btc_trend_mode!r}")
     if config.btc_trend_gate != "off" and config.btc_trend_lookback_days < 1:
         raise ValueError("btc_trend_lookback_days must be >= 1 when btc_trend_gate is active")
     if config.sizing_mode not in ("flat", "inverse_vol"):
@@ -1386,6 +1252,8 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
             raise ValueError("vol_weight_clamp must be >= 1.0 for inverse_vol sizing")
     if not config.feature_set:
         raise ValueError("feature_set must contain at least one causal feature")
+    if not config.ensemble_components:
+        raise ValueError("continuous profile requires component entries")
     has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
     has_account_execution_root = bool(str(config.account_execution_root or "").strip())
     if has_account_inbox != has_account_execution_root:
@@ -1395,9 +1263,7 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
             raise ValueError("entry_event_trigger requires confirmed-bar entry timing")
         # Parse/validate now, before any order path or cycle work.
         _entry_event_expr(config.entry_event_trigger)
-    # audit-iter3: validate ensemble component triggers up front too (each component is
-    # run as entry_event_trigger=comp_trigger at cycle time). Fail fast on an unknown
-    # trigger string and require confirmed-bar timing so the event-feature columns exist.
+    # Validate every component trigger before cycle resources or target publication.
     for comp in config.ensemble_components:
         comp_trigger = comp[1]
         if comp_trigger != "none":
@@ -1460,7 +1326,7 @@ def run_continuous_demo_cycle(
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
     panel_cache: "LivePanelCache | None" = None,
-) -> dict[str, Any]:
+) -> PublishedTargetCyclePayload:
     """Plan one CONT cycle and publish immutable account targets.
 
     This process has no private venue client, order executor, fill model, trade
@@ -1481,7 +1347,7 @@ def run_continuous_demo_cycle(
     )
     strategy_id = continuous_strategy_id(demo)
     managed_strategy_ids = continuous_managed_strategy_ids(demo)
-    _trades_dataset, _orders_dataset, cycles_dataset = continuous_dataset_names(demo)
+    cycles_dataset = continuous_cycles_dataset(demo)
     root = Path(data_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     cycle_now_ms = int(now_ms if now_ms is not None else _utc_now_ms())
@@ -1494,9 +1360,7 @@ def run_continuous_demo_cycle(
             testnet=config.exchange.testnet,
         )
         candidate_universe = (
-            load_candidate_universe(demo.candidate_universe_file)
-            if demo.candidate_universe_file
-            else None
+            load_candidate_universe(demo.candidate_universe_file) if demo.candidate_universe_file else None
         )
         universe, symbols, tickers, ticker_source = _resolve_cycle_universe(
             public=public,
@@ -1552,7 +1416,7 @@ def run_continuous_demo_cycle(
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         live_state = pl.DataFrame()
         if rmom is not None and not klines.is_empty():
-            if panel_cache is not None and demo.live_panel_cache_enabled:
+            if panel_cache is not None:
                 try:
                     live_state = panel_cache.state(
                         klines,
@@ -1613,16 +1477,8 @@ def run_continuous_demo_cycle(
             canonical_trades,
             managed_strategy_ids,
         )
-        held_symbols = (
-            set(open_trades.get_column("symbol").to_list())
-            if not open_trades.is_empty()
-            else set()
-        )
-        reserved_symbols = (
-            set(reservations.get_column("symbol").to_list())
-            if not reservations.is_empty()
-            else set()
-        )
+        held_symbols = set(open_trades.get_column("symbol").to_list()) if not open_trades.is_empty() else set()
+        reserved_symbols = set(reservations.get_column("symbol").to_list()) if not reservations.is_empty() else set()
 
         exit_plans = plan_continuous_exits(
             open_trades.to_dicts(),
@@ -1673,71 +1529,44 @@ def run_continuous_demo_cycle(
             ),
         )
         if entry_health_ok and not entry_paused and entry_capacity > 0 and btc_trend_gate_allows_entry:
-            if demo.ensemble_components:
-                for component, trigger, age_days, take_profit_pct, component_weight in demo.ensemble_components:
-                    if len(candidates) >= entry_capacity:
-                        break
-                    component_config = replace(demo, entry_event_trigger=trigger)
-                    eligible = _continuous_age_eligible_symbols(
-                        universe,
-                        klines,
-                        age_days_min=age_days,
-                        now_ms=cycle_now_ms,
-                    )
-                    picks = select_continuous_entries(
-                        entry_state,
-                        held_symbols=reserved_symbols,
-                        cooldown_symbols=reserved_symbols,
-                        open_count=reservations.height + len(candidates),
-                        config=component_config,
-                        eligible_symbols=eligible,
-                    )
-                    component_candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
-                        picks,
-                        canonical_trades,
-                        signal_ts=signal_ts,
-                        strategy_id=strategy_id,
-                        price_by_symbol=price_by_symbol,
-                        allow_same_signal_reentry=demo.allow_same_signal_reentry,
-                    )
-                    skipped_same_signal_reentry += skipped
-                    for candidate in component_candidates:
-                        if len(candidates) >= entry_capacity:
-                            break
-                        candidates.append(
-                            {
-                                **candidate,
-                                "component": component,
-                                "component_weight": component_weight,
-                                "take_profit_pct": take_profit_pct,
-                                "trade_id": f"{candidate['trade_id']}-{component}",
-                            }
-                        )
-            else:
+            for component, trigger, age_days, take_profit_pct, component_weight in demo.ensemble_components:
+                if len(candidates) >= entry_capacity:
+                    break
+                component_config = replace(demo, entry_event_trigger=trigger)
                 eligible = _continuous_age_eligible_symbols(
                     universe,
                     klines,
-                    age_days_min=demo.age_days_min,
+                    age_days_min=age_days,
                     now_ms=cycle_now_ms,
                 )
                 picks = select_continuous_entries(
                     entry_state,
                     held_symbols=reserved_symbols,
                     cooldown_symbols=reserved_symbols,
-                    open_count=reservations.height,
-                    config=demo,
+                    open_count=reservations.height + len(candidates),
+                    config=component_config,
                     eligible_symbols=eligible,
                 )
-                candidates, skipped_same_signal_reentry = (
-                    _continuous_entry_candidates_with_signal_metadata(
-                        picks,
-                        canonical_trades,
-                        signal_ts=signal_ts,
-                        strategy_id=strategy_id,
-                        price_by_symbol=price_by_symbol,
-                        allow_same_signal_reentry=demo.allow_same_signal_reentry,
-                    )
+                component_candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
+                    picks,
+                    canonical_trades,
+                    signal_ts=signal_ts,
+                    strategy_id=strategy_id,
+                    price_by_symbol=price_by_symbol,
                 )
+                skipped_same_signal_reentry += skipped
+                for candidate in component_candidates:
+                    if len(candidates) >= entry_capacity:
+                        break
+                    candidates.append(
+                        {
+                            **candidate,
+                            "component": component,
+                            "component_weight": component_weight,
+                            "take_profit_pct": take_profit_pct,
+                            "trade_id": f"{candidate['trade_id']}-{component}",
+                        }
+                    )
 
         btc_risk_sizing_stats = _apply_btc_risk_sizing(
             candidates,
@@ -1762,24 +1591,17 @@ def run_continuous_demo_cycle(
         )
 
         unresolved_exit_suppressions = sum(
-            item.intent.target_key in unresolved_targets.target_keys
-            for item in exit_target_intents
+            item.intent.target_key in unresolved_targets.target_keys for item in exit_target_intents
         )
         unresolved_entry_suppressions = sum(
-            item.intent.target_key in unresolved_targets.target_keys
-            for item in entry_target_intents
+            item.intent.target_key in unresolved_targets.target_keys for item in entry_target_intents
         )
         exit_target_intents = [
-            item
-            for item in exit_target_intents
-            if item.intent.target_key not in unresolved_targets.target_keys
+            item for item in exit_target_intents if item.intent.target_key not in unresolved_targets.target_keys
         ]
-        exit_target_keys = {
-            item.intent.target_key for item in exit_target_intents
-        }
+        exit_target_keys = {item.intent.target_key for item in exit_target_intents}
         terminal_entry_attempt_suppressions = sum(
-            str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
-            in terminal_entry_attempts
+            str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") in terminal_entry_attempts
             for item in entry_target_intents
             if item.intent.target_key not in unresolved_targets.target_keys
         )
@@ -1787,19 +1609,13 @@ def run_continuous_demo_cycle(
             item
             for item in entry_target_intents
             if item.intent.target_key not in unresolved_targets.target_keys
-            and str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
-            not in terminal_entry_attempts
+            and str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") not in terminal_entry_attempts
             and item.intent.target_key not in exit_target_keys
         ]
 
-        target_keys = [
-            item.intent.target_key
-            for item in [*exit_target_intents, *entry_target_intents]
-        ]
+        target_keys = [item.intent.target_key for item in [*exit_target_intents, *entry_target_intents]]
         if len(set(target_keys)) != len(target_keys):
-            raise RuntimeError(
-                "continuous planner proposed duplicate component target keys"
-            )
+            raise RuntimeError("continuous planner proposed duplicate component target keys")
         publication = publish_exit_first_target_requests(
             target_publisher,
             batch_prefix=f"continuous-target/{strategy_id}/{cycle_now_ms}",
@@ -1839,20 +1655,8 @@ def run_continuous_demo_cycle(
                 for error in publication.errors
             ],
         }
-        singular_entry_request_id = (
-            publication.entry_request_ids[0]
-            if len(publication.entry_request_ids) == 1
-            else ""
-        )
-
-        live_d9 = (
-            int(live_state.filter(pl.col("decile") == demo.decile).height)
-            if not live_state.is_empty()
-            else 0
-        )
-        entry_health_reason = (
-            "account_owner_health_unavailable" if not entry_health_ok else ""
-        )
+        live_d9 = int(live_state.filter(pl.col("decile") == demo.decile).height) if not live_state.is_empty() else 0
+        entry_health_reason = "account_owner_health_unavailable" if not entry_health_ok else ""
         payload: dict[str, Any] = {
             "cycle_id": cycle_id,
             "ts_ms": cycle_now_ms,
@@ -1860,9 +1664,7 @@ def run_continuous_demo_cycle(
             "mode": f"{environment}_target",
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
-            "candidate_universe_artifact_sha256": (
-                candidate_universe.artifact_sha256 if candidate_universe else ""
-            ),
+            "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
             "feature_set": ",".join(demo.feature_set),
             "entry_leverage": demo.entry_leverage,
             "per_position_notional_pct_equity": demo.per_position_notional_pct_equity,
@@ -1884,14 +1686,10 @@ def run_continuous_demo_cycle(
             "equity_usdt": equity_usdt,
             "entry_targets_queued": published_entry_target_count,
             "exit_targets_queued": published_exit_target_count,
-            "target_intents_queued": (
-                published_entry_target_count + published_exit_target_count
-            ),
+            "target_intents_queued": (published_entry_target_count + published_exit_target_count),
             "account_target_route": True,
             "account_target_exit_request_ids": list(publication.exit_request_ids),
             "account_target_entry_request_ids": list(publication.entry_request_ids),
-            "account_target_entry_request_id": singular_entry_request_id,
-            "account_target_request_id": singular_entry_request_id,
             "account_target_publication_error_count": len(publication.errors),
             "account_target_requests_json": json.dumps(
                 account_target_requests,

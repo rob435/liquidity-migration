@@ -1,34 +1,19 @@
-# Shared per-sleeve kill-switch helpers - sourced by deploy_vps_live.sh + verify_vps_live.sh
+# Shared sleeve, systemd-manifest, and topology helpers.
 # so the sleeve->units mapping and the on/off predicate live in ONE place (no drift between
 # deploy and verify). Toggles come from deploy/sleeves.env (+ host override that can only
 # narrow an enabled repo sleeve to off). bash-3.2-safe (no associative arrays).
 # See deploy/sleeves.env for semantics.
-
-# Space-separated unit lists per strategy target producer. Canonical demo/paper
-# account owners are intentionally not sleeve-toggled: enabled producers require
-# them, and the owners exclusively reconcile and protect account positions.
-# Continuous is split into demo and deterministic-paper target producers.
-LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"
-CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"
-CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"
-# Timer the continuous sleeve owns (the daily rmom-gate refresh). It runs when either
-# continuous demo or continuous paper is on, because both need residual_momentum.parquet.
-CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"
-# The BTC/ETH hedge is a target-only continuous-demo add-on; the account owner
-# remains the only process allowed to submit its resulting venue orders.
-CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"
-CONTINUOUS_HEDGE_SERVICES="liquidity-migration-continuous-hedge.service"
 
 LM_HOST_SLEEVES_ENV="${LM_HOST_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.env}"
 LM_RESOLVED_SLEEVES_ENV="${LM_RESOLVED_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.resolved.env}"
 LM_SYSTEMD_UNIT_DIR="${LM_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}"
 
-# These units cross the fresh-epoch authorization boundary. Their complete
-# workload argv lives in run_authorized_fresh_runtime.sh; an operator/runtime
+# These units cross the operational authorization boundary. Their complete
+# workload argv lives in run_authorized_runtime.sh; an operator/runtime
 # drop-in or alternate fragment would otherwise be able to replace it after the
 # checked commit had passed review.
-LM_FRESH_EPOCH_GUARDED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service liquidity-migration-continuous-hedge.service liquidity-migration-continuous-rmom-refresh.service liquidity-migration-demo-liveness.service"
+LM_AUTHORIZED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service liquidity-migration-continuous-hedge.service liquidity-migration-continuous-rmom-refresh.service liquidity-migration-demo-liveness.service"
 
 lm_parse_sleeve_environment() {
     _lpe_file="$1"
@@ -123,20 +108,14 @@ lm_load_sleeve_toggles() {
     if ! sleeve_on "$_lm_repo_long"; then LONG_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_continuous"; then CONTINUOUS_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_continuous_paper"; then CONTINUOUS_PAPER_SLEEVE=off; fi
-    # Fallbacks if NEITHER file set a toggle (a stripped checkout): EVERY sleeve
-    # fails safe to OFF (audit 2026-06-12 round 3 - LONG previously failed OPEN,
-    # so an accidentally deleted/renamed sleeves.env would have enabled and
-    # restarted the long demo target producer against the operator's LONG=off
-    # intent). The committed deploy/sleeves.env is the real source of truth;
-    # these are last-resort. A missing config disables everything; it can never
-    # resurrect a sleeve.
+    # Missing toggles fail safe to off; a missing config cannot resurrect a sleeve.
     : "${LONG_SLEEVE:=off}"
     : "${CONTINUOUS_SLEEVE:=off}"
     : "${CONTINUOUS_PAPER_SLEEVE:=off}"
 }
 
 # sleeve_on <value> -> 0 (true) if the toggle means "run this sleeve".
-# An EMPTY/unset value is OFF (fail-safe, round 3) - callers load toggles first.
+# Empty or unset is off.
 sleeve_on() {
     case "${1:-off}" in
         on|ON|On|1|true|TRUE|yes|YES) return 0 ;;
@@ -162,7 +141,7 @@ lm_write_resolved_sleeve_toggles() {
             printf 'CONTINUOUS_HEDGE_TIMER=%s\n' "$CONTINUOUS_HEDGE_TIMER"
         fi
     } > "$_lr_tmp"
-    chmod 0644 "$_lr_tmp"
+    chmod 0600 "$_lr_tmp"
     mv "$_lr_tmp" "$LM_RESOLVED_SLEEVES_ENV"
 }
 
@@ -188,57 +167,6 @@ lm_verify_resolved_sleeve_toggles() {
             echo "verify failed: resolved CONTINUOUS_HEDGE_TIMER does not match computed hedge state" >&2
             return 1
         }
-    fi
-}
-
-apply_timer_enable() {
-    _ate_flag="$1"; shift
-    if sleeve_on "$_ate_flag"; then
-        for _ate_u in "$@"; do systemctl enable --now "$_ate_u"; done
-    else
-        echo "kill-switch: timer group OFF -> disable --now: $*" >&2
-        for _ate_u in "$@"; do systemctl disable --now "$_ate_u" 2>/dev/null || true; done
-    fi
-}
-
-verify_timer() {
-    _vt_flag="$1"; shift
-    if sleeve_on "$_vt_flag"; then
-        for _vt_u in "$@"; do
-            systemctl is-enabled --quiet "$_vt_u" || { echo "verify failed: $_vt_u timer not enabled" >&2; return 1; }
-            systemctl is-active --quiet "$_vt_u" || { echo "verify failed: $_vt_u timer not active" >&2; return 1; }
-        done
-    else
-        for _vt_u in "$@"; do
-            if systemctl is-active --quiet "$_vt_u" 2>/dev/null; then
-                echo "verify failed: $_vt_u timer is OFF in sleeves.env but still active" >&2; return 1
-            fi
-            if systemctl is-enabled --quiet "$_vt_u" 2>/dev/null; then
-                echo "verify failed: $_vt_u timer is OFF in sleeves.env but still enabled" >&2; return 1
-            fi
-        done
-    fi
-}
-
-apply_hedge_timer_enable() {
-    _ahte_flag="$1"
-    apply_timer_enable "$_ahte_flag" $CONTINUOUS_HEDGE_TIMERS
-    if ! sleeve_on "$_ahte_flag"; then
-        echo "kill-switch: hedge lifecycle OFF -> stop service: $CONTINUOUS_HEDGE_SERVICES" >&2
-        for _ahte_u in $CONTINUOUS_HEDGE_SERVICES; do systemctl stop "$_ahte_u" 2>/dev/null || true; done
-    fi
-}
-
-verify_hedge_timer_enable() {
-    _vhte_flag="$1"
-    verify_timer "$_vhte_flag" $CONTINUOUS_HEDGE_TIMERS
-    if ! sleeve_on "$_vhte_flag"; then
-        for _vhte_u in $CONTINUOUS_HEDGE_SERVICES; do
-            if systemctl is-active --quiet "$_vhte_u" 2>/dev/null; then
-                echo "verify failed: $_vhte_u service is OFF in sleeves.env but still active" >&2
-                return 1
-            fi
-        done
     fi
 }
 
@@ -321,7 +249,7 @@ lm_verify_no_unknown_liqmig_units() {
 # operator work. Instead deployment stops and names the conflicting path.
 lm_verify_guarded_unit_surfaces() {
     _lvgus_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    for _lvgus_unit in $LM_FRESH_EPOCH_GUARDED_UNITS; do
+    for _lvgus_unit in $LM_AUTHORIZED_UNITS; do
         _lvgus_source="$_lvgus_dir/systemd/$_lvgus_unit"
         _lvgus_installed="$LM_SYSTEMD_UNIT_DIR/$_lvgus_unit"
         if [ ! -f "$_lvgus_source" ] || [ ! -f "$_lvgus_installed" ]; then
@@ -354,7 +282,7 @@ lm_verify_guarded_unit_surfaces() {
         fi
         _lvgus_exec="$(systemctl show "$_lvgus_unit" --property=ExecStart --value --no-pager)" || return 1
         case "$_lvgus_exec" in
-            *"argv[]=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh $_lvgus_unit main ;"*) ;;
+            *"argv[]=/opt/liquidity-migration/scripts/run_authorized_runtime.sh $_lvgus_unit main ;"*) ;;
             *)
                 echo "verify failed: guarded unit has unexpected effective ExecStart: $_lvgus_unit -> $_lvgus_exec" >&2
                 return 1
@@ -364,7 +292,7 @@ lm_verify_guarded_unit_surfaces() {
             liquidity-migration-account-execution.service | liquidity-migration-account-paper-execution.service)
                 _lvgus_post="$(systemctl show "$_lvgus_unit" --property=ExecStartPost --value --no-pager)" || return 1
                 case "$_lvgus_post" in
-                    *"argv[]=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh $_lvgus_unit readiness ;"*) ;;
+                    *"argv[]=/opt/liquidity-migration/scripts/run_authorized_runtime.sh $_lvgus_unit readiness ;"*) ;;
                     *)
                         echo "verify failed: guarded owner has unexpected effective ExecStartPost: $_lvgus_unit -> $_lvgus_post" >&2
                         return 1
@@ -378,8 +306,7 @@ lm_verify_guarded_unit_surfaces() {
 # Install exactly the checked-in unit manifest without enabling or starting any
 # current service/timer. Unknown historical units are stopped and removed because
 # allowing a retired order mutator to survive this phase would defeat the point of
-# a single-owner cutover. This function deliberately does not read or create the
-# account-execution-capture-enabled authorization marker.
+# a single-owner topology. This function never creates runtime authorization.
 lm_install_current_systemd_units() {
     _licsu_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     for _licsu_required in \
@@ -398,52 +325,9 @@ lm_install_current_systemd_units() {
         cp "$_licsu_path" "$LM_SYSTEMD_UNIT_DIR/$(basename "$_licsu_path")"
     done
 
-    # Remove the named emergency mute from the current continuous producer. It
-    # suppressed stale-ledger spam before notification ownership moved to the
-    # account owner; retaining it would also suppress legitimate runner errors.
-    for _licsu_root in "$LM_SYSTEMD_UNIT_DIR" "$LM_RUNTIME_SYSTEMD_UNIT_DIR"; do
-        _licsu_quiet_dir="$_licsu_root/liquidity-migration-bybit-continuous-demo.service.d"
-        rm -f "$_licsu_quiet_dir/telegram-quiet.conf"
-        rmdir "$_licsu_quiet_dir" 2>/dev/null || true
-    done
-
     systemctl daemon-reload
     lm_cleanup_unknown_liqmig_units
     systemctl daemon-reload
     lm_verify_no_unknown_liqmig_units
     lm_verify_guarded_unit_surfaces
-}
-
-# apply_sleeve_enable <flag-value> <unit...> - on: `systemctl enable` each unit; off:
-# `systemctl disable --now` each (stops it + survives the deploy). Default on => identical
-# to the previous unconditional enables.
-apply_sleeve_enable() {
-    _ase_flag="$1"; shift
-    if sleeve_on "$_ase_flag"; then
-        for _ase_u in "$@"; do systemctl enable "$_ase_u"; done
-    else
-        echo "kill-switch: sleeve OFF -> disable --now: $*" >&2
-        for _ase_u in "$@"; do systemctl disable --now "$_ase_u" 2>/dev/null || true; done
-    fi
-}
-
-# verify_sleeve <flag-value> <unit...> - on: each unit must be active AND enabled; off: each
-# unit must NOT be active (the kill-switch actually stopped it). Returns 1 (fail-loud) on mismatch.
-verify_sleeve() {
-    _vs_flag="$1"; shift
-    if sleeve_on "$_vs_flag"; then
-        for _vs_u in "$@"; do
-            systemctl is-active --quiet "$_vs_u" || { echo "verify failed: $_vs_u not active" >&2; return 1; }
-            systemctl is-enabled --quiet "$_vs_u" || { echo "verify failed: $_vs_u not enabled" >&2; return 1; }
-        done
-    else
-        for _vs_u in "$@"; do
-            if systemctl is-active --quiet "$_vs_u" 2>/dev/null; then
-                echo "verify failed: $_vs_u is OFF in sleeves.env but still active" >&2; return 1
-            fi
-            if systemctl is-enabled --quiet "$_vs_u" 2>/dev/null; then
-                echo "verify failed: $_vs_u is OFF in sleeves.env but still enabled" >&2; return 1
-            fi
-        done
-    fi
 }

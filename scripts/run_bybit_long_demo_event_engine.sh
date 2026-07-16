@@ -3,8 +3,7 @@
 # forward-testing target producer. The shared account owner exclusively handles
 # venue credentials, order placement, fills, reconciliation, and Telegram.
 #
-# Hard gates: EXECUTION_ENVIRONMENT is explicit and requires its account-owner
-# route. Demo additionally requires an allowlisted strategy profile.
+# Hard gate: EXECUTION_ENVIRONMENT is explicit and requires its account-owner route.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,10 +25,6 @@ if [[ "$kernel_required" == "1" ]]; then
         echo "Kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
         exit 2
     fi
-    if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
-        echo "Kernel latch is set but account-execution-capture-enabled is absent." >&2
-        exit 2
-    fi
 fi
 case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
     1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
@@ -39,10 +34,6 @@ esac
 if [[ "$paper_kernel_required" == "1" ]]; then
     if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
         echo "Paper kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-    if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
-        echo "Paper kernel latch is set but account-execution-capture-enabled is absent." >&2
         exit 2
     fi
 fi
@@ -72,16 +63,13 @@ fi
 
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-long-demo-event}"
-STRATEGY_PROFILE="${STRATEGY_PROFILE:-LongV11aDivWeekendVol}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
 if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "INTERVAL_SECONDS must be a non-negative integer number of seconds." >&2
     exit 2
 fi
-# 100, not 90: the engine hard-validates lookback_days >= 95 (factor windows),
-# so the old 90 default crash-failed every bare manual run; the units set 100.
+# The engine requires at least 95 days for its factor windows.
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-100}"
-UNIVERSE_SIZE="${UNIVERSE_SIZE:-50}"  # div promotion 2026-05-30 (was 10); systemd unit also sets 50
 WORKERS="${WORKERS:-4}"
 NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-10}"
@@ -89,6 +77,7 @@ MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY="${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUI
 MAX_ORDER_NOTIONAL_PCT_EQUITY="${MAX_ORDER_NOTIONAL_PCT_EQUITY:-0}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
+KLINES_FOLLOW_ROOT="${KLINES_FOLLOW_ROOT:-}"
 WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
 WS_KLINES_LOOKBACK_DAYS="${WS_KLINES_LOOKBACK_DAYS:-100}"
 WS_KLINES_UNIVERSE_REFRESH_SECONDS="${WS_KLINES_UNIVERSE_REFRESH_SECONDS:-3600}"
@@ -119,62 +108,23 @@ target_route_args=(
     --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
     --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
 )
-case "${NATURAL_EVIDENCE_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON)
-        [[ "$EXECUTION_ENVIRONMENT" == "demo" ]] || {
-            echo "NATURAL_EVIDENCE_REQUIRED is demo-only." >&2
-            exit 2
-        }
-        [[ -n "${NATURAL_RUN_CONFIG:-}" ]] || {
-            echo "NATURAL_EVIDENCE_REQUIRED needs NATURAL_RUN_CONFIG." >&2
-            exit 2
-        }
-        [[ -f "$NATURAL_RUN_CONFIG" && ! -L "$NATURAL_RUN_CONFIG" ]] || {
-            echo "NATURAL_RUN_CONFIG must be a non-symlink regular file." >&2
-            exit 2
-        }
-        [[ -z "${STRATEGY_TARGET_CAPTURE_PATH:-}" && -z "${CANDIDATE_UNIVERSE_FILE:-}" ]] || {
-            echo "Natural tape/candidate paths come only from NATURAL_RUN_CONFIG." >&2
-            exit 2
-        }
-        target_route_args+=(
-            --natural-evidence-required
-            --natural-run-config "$NATURAL_RUN_CONFIG"
-        )
-        ;;
-    0|false|FALSE|no|NO|off|OFF|"")
-        [[ -z "${NATURAL_RUN_CONFIG:-}" ]] || {
-            echo "NATURAL_RUN_CONFIG requires NATURAL_EVIDENCE_REQUIRED=1." >&2
-            exit 2
-        }
-        if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
-            target_route_args+=(--strategy-target-capture-path "$STRATEGY_TARGET_CAPTURE_PATH")
-        fi
-        if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
-            target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
-        fi
-        ;;
-    *)
-        echo "NATURAL_EVIDENCE_REQUIRED has an invalid boolean value." >&2
-        exit 2
-        ;;
-esac
-if [[ "$EXECUTION_ENVIRONMENT" == "demo" ]]; then
-    # Configurable space-separated allowlist (was a hard-coded single profile).
-    # Default keeps the safe long-sleeve value; extend ALLOWED_TARGET_PROFILES
-    # to enable others without editing this script. Safe-by-default.
-    ALLOWED_TARGET_PROFILES="${ALLOWED_TARGET_PROFILES:-LongV11aDivWeekendVol}"
-    if [[ " $ALLOWED_TARGET_PROFILES " != *" $STRATEGY_PROFILE "* ]]; then
-        echo "STRATEGY_PROFILE=$STRATEGY_PROFILE not in ALLOWED_TARGET_PROFILES='$ALLOWED_TARGET_PROFILES'; refusing to publish targets." >&2
+if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
+    target_route_args+=(--strategy-target-capture-path "$STRATEGY_TARGET_CAPTURE_PATH")
+fi
+if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
+    target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
+fi
+if [[ -n "$KLINES_FOLLOW_ROOT" ]]; then
+    if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
+        echo "KLINES_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
         exit 2
     fi
+    target_route_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
 fi
-
-echo "long-native demo engine starting"
+echo "long-native target producer starting"
 echo "repo=$REPO_ROOT"
-echo "strategy_profile=$STRATEGY_PROFILE"
-echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1}"
-echo "per-position notional_multiplier=${NOTIONAL_MULTIPLIER}x entry_leverage=${ENTRY_LEVERAGE}x max_projected_im=${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY} universe_size=${UNIVERSE_SIZE}"
+echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1} klines_follow_root=$KLINES_FOLLOW_ROOT"
+echo "per-position notional_multiplier=${NOTIONAL_MULTIPLIER}x entry_leverage=${ENTRY_LEVERAGE}x max_projected_im=${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY}"
 
 mkdir -p "$DATA_ROOT/.locks"
 
@@ -187,7 +137,6 @@ if [[ "${USE_DAEMON:-1}" == "1" ]]; then
         --config "$CONFIG_PATH" \
         --data-root "$DATA_ROOT" \
         long-native-event-demo-cycle \
-        --universe-size "$UNIVERSE_SIZE" \
         --lookback-days "$LOOKBACK_DAYS" \
         --workers "$WORKERS" \
         --notional-multiplier "$NOTIONAL_MULTIPLIER" \
@@ -195,7 +144,6 @@ if [[ "${USE_DAEMON:-1}" == "1" ]]; then
         --max-projected-initial-margin-pct-equity "$MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY" \
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
-        --strategy-profile "$STRATEGY_PROFILE" \
         --daemon --interval-seconds "$INTERVAL_SECONDS" \
         "${target_route_args[@]}" \
         "${ws_klines_args[@]}"
@@ -209,7 +157,6 @@ while true; do
         --config "$CONFIG_PATH" \
         --data-root "$DATA_ROOT" \
         long-native-event-demo-cycle \
-        --universe-size "$UNIVERSE_SIZE" \
         --lookback-days "$LOOKBACK_DAYS" \
         --workers "$WORKERS" \
         --notional-multiplier "$NOTIONAL_MULTIPLIER" \
@@ -217,7 +164,6 @@ while true; do
         --max-projected-initial-margin-pct-equity "$MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY" \
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
-        --strategy-profile "$STRATEGY_PROFILE" \
         "${target_route_args[@]}" \
         "${ws_klines_args[@]}"
     status=$?

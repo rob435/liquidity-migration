@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal, ROUND_DOWN
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .deterministic_serialization import canonical_json, json_safe
 from .deterministic_runtime import Clock, DeterministicIds, SystemClock
@@ -76,20 +76,6 @@ class AccountEventType(StrEnum):
     # working exposure forever.
     ORDER_STATUS = "order_status"
     VENUE_SNAPSHOT = "venue_snapshot"
-
-
-CANONICAL_ACCOUNT_ORDER: tuple[AccountEventType, ...] = (
-    AccountEventType.MARKET_INPUT_REF,
-    AccountEventType.DECISION,
-    AccountEventType.TARGET,
-    AccountEventType.RISK_DECISION,
-    AccountEventType.ORDER_COMMAND,
-    AccountEventType.ACK,
-    AccountEventType.FILL,
-    AccountEventType.PROTECTION,
-    AccountEventType.CLOSE,
-    AccountEventType.PNL,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,34 +282,10 @@ class AccountState:
             and abs(self.orders[command_id].remaining_signed_qty) > tolerance
         )
 
-    def domain_dict(self) -> dict[str, Any]:
-        """Materialized domain state for inspection and explicit parity tools."""
-
-        return {
-            "latest_market_inputs": self.latest_market_inputs,
-            "decisions": self.decisions,
-            "target_proposals": self.target_proposals,
-            "component_target_desires": self.component_target_desires,
-            "component_target_desire_sequences": self.component_target_desire_sequences,
-            "component_targets": self.component_targets,
-            "aggregate_targets": self.aggregate_targets,
-            "risk_decisions": self.risk_decisions,
-            "orders": {key: asdict(value) for key, value in sorted(self.orders.items())},
-            "positions": {key: asdict(value) for key, value in sorted(self.positions.items())},
-            "executions": self.executions,
-            "protections": self.protections,
-            "closes": self.closes,
-            "pnl": self.pnl,
-            "venue_snapshots": self.venue_snapshots,
-            "processed_batches": sorted(self.processed_batches),
-            "events_applied": self.events_applied,
-        }
-
     def state_hash(self) -> str:
         # A transition hash is O(1) in journal length and is reproduced by the
-        # reducer.  Full normalized order/position hashes for environment parity
-        # remain in kernel_parity.py; hashing every historical map after every
-        # event made replay quadratic.
+        # reducer; hashing every historical map after every event made replay
+        # quadratic.
         return self.rolling_state_hash
 
 
@@ -352,14 +314,6 @@ class TargetBatchResult:
     commands: tuple[OrderCommand, ...]
     events: tuple[AccountEvent, ...]
     state_hash: str
-
-
-class AccountExecutionAdapter(Protocol):
-    """Port implemented by historical, paper, and demo execution adapters."""
-
-    name: str
-
-    def submit(self, command: OrderCommand, market_input: MarketInputRef) -> Iterable[Mapping[str, Any]]: ...
 
 
 def account_journal_path(root: str | Path) -> Path:
@@ -694,6 +648,10 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         snapshot_key = str(payload.get("snapshot_key") or "")
         if not snapshot_key:
             raise AccountTransitionError("venue snapshot requires snapshot_key")
+        # The immutable journal is the complete reconciliation history. The
+        # materialized state only needs current venue truth; retaining every
+        # checkpoint here made each later transaction copy an ever-growing map.
+        state.venue_snapshots.clear()
         state.venue_snapshots[snapshot_key] = dict(payload)
     state.events_applied += 1
     transition = {
@@ -720,25 +678,6 @@ def reduce_account_events(events: Sequence[AccountEvent]) -> AccountState:
             )
         apply_account_event(state, event)
     return state
-
-
-def _read_jsonl_projection_bytes(raw: bytes, *, label: str) -> list[AccountEvent]:
-    if raw and not raw.endswith(b"\n"):
-        raise AccountJournalIntegrityError(f"account journal has a truncated record: {label}")
-    events: list[AccountEvent] = []
-    for line_number, raw_line in enumerate(raw.splitlines(), start=1):
-        try:
-            events.append(AccountEvent.from_dict(json.loads(raw_line)))
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise AccountJournalIntegrityError(f"invalid account JSON line {line_number}: {exc}") from exc
-    return events
-
-
-def _read_jsonl_projection(root: str | Path) -> list[AccountEvent]:
-    path = account_journal_path(root)
-    if not path.exists():
-        return []
-    return _read_jsonl_projection_bytes(path.read_bytes(), label=str(path))
 
 
 def _transaction_hash(payload: Mapping[str, Any]) -> str:
@@ -816,35 +755,36 @@ def _verify_account_events(events: Sequence[AccountEvent], *, verify: bool) -> l
 def read_account_journal(root: str | Path, *, verify: bool = True) -> list[AccountEvent]:
     """Read the authoritative atomic transaction segments.
 
-    ``events.jsonl`` is a human/tooling projection.  New journals persist each
+    ``events.jsonl`` is a human/tooling projection. Journals persist each
     complete kernel transaction via fsync + atomic rename first, so a crash can
     expose either the prior state or the whole transaction, never half a target
-    batch.  Legacy JSONL-only roots remain readable.
+    batch. A projection without transaction segments is not authoritative and
+    requires an explicit account-root reset.
     """
 
     transaction_events = _read_transaction_events(root)
-    events = transaction_events if transaction_events is not None else _read_jsonl_projection(root)
-    return _verify_account_events(events, verify=verify)
+    if transaction_events is not None:
+        return _verify_account_events(transaction_events, verify=verify)
+    projection = account_journal_path(root)
+    if projection.exists() and projection.stat().st_size > 0:
+        raise AccountJournalIntegrityError(
+            "account journal has events.jsonl but no authoritative transaction segments; "
+            "reset the account root explicitly"
+        )
+    return []
 
 
 def read_account_journal_bytes(
     *,
     transaction_files: Sequence[tuple[str, bytes]] = (),
-    projection_data: bytes | None = None,
-    projection_label: str = "events.jsonl",
     verify: bool = True,
 ) -> list[AccountEvent]:
     """Verify one already-captured authoritative account-journal snapshot."""
 
     transaction_events = _read_transaction_event_bytes(transaction_files)
-    if transaction_events is not None:
-        events = transaction_events
-    else:
-        events = _read_jsonl_projection_bytes(
-            projection_data or b"",
-            label=projection_label,
-        )
-    return _verify_account_events(events, verify=verify)
+    if transaction_events is None:
+        raise AccountJournalIntegrityError("authoritative account transaction snapshot is empty")
+    return _verify_account_events(transaction_events, verify=verify)
 
 
 def verify_account_journal(root: str | Path) -> dict[str, Any]:
@@ -1097,12 +1037,10 @@ class AccountJournal:
                     raise AccountJournalIntegrityError("invalid cached account transaction signature")
                 transaction_count = storage_signature[2]
             elif existing:
-                # One-time migration of a legacy JSONL-only account root.  The
-                # verified immutable cache already establishes that no
-                # transaction store exists; do not reparse the whole history
-                # merely to rediscover its storage kind.
-                _write_transaction(self.root, existing)
-                transaction_count = 1
+                raise AccountJournalIntegrityError(
+                    "account events exist without authoritative transaction segments; "
+                    "reset the account root explicitly"
+                )
             prospective_state = copy.deepcopy(committed_state)
             builder_state = prospective_state if trusted_readonly_builder else copy.deepcopy(committed_state)
             specs = list(builder(builder_state))
@@ -1239,25 +1177,6 @@ def _target_batch_request_hash(
         "require_strict_risk_reduction": bool(require_strict_risk_reduction),
     }
     return hashlib.sha256(canonical_json(material)).hexdigest()
-
-
-def target_batch_request_hash(
-    *,
-    batch_id: str,
-    target_payloads: Sequence[Mapping[str, Any]],
-    command_symbols: set[str] | None,
-    require_strict_risk_reduction: bool,
-    request_content_hash: str | None,
-) -> str:
-    """Public verifier for the immutable request identity stored in risk events."""
-
-    return _target_batch_request_hash(
-        batch_id=batch_id,
-        target_payloads=target_payloads,
-        command_symbols=command_symbols,
-        require_strict_risk_reduction=require_strict_risk_reduction,
-        request_content_hash=request_content_hash,
-    )
 
 
 def _quantized_down(qty: float, step: float) -> float:
@@ -1500,9 +1419,18 @@ class AccountExecutionKernel:
             if batch_id in state.processed_batches:
                 prior = state.risk_decisions.get(batch_id) or {}
                 prior_request_hash = str(prior.get("request_hash") or "")
+                if len(prior_request_hash) != 64 or any(
+                    character not in "0123456789abcdef"
+                    for character in prior_request_hash
+                ):
+                    raise AccountJournalIntegrityError(
+                        f"batch id {batch_id!r} has no canonical request hash; "
+                        "reset the account root explicitly"
+                    )
                 if prior_request_hash != request_hash:
-                    detail = "legacy batch has no request hash" if not prior_request_hash else "request content changed"
-                    raise AccountJournalIntegrityError(f"batch id {batch_id!r} was reused but {detail}")
+                    raise AccountJournalIntegrityError(
+                        f"batch id {batch_id!r} was reused but request content changed"
+                    )
                 return []
             now_wall = self.clock.wall_time_ns()
             now_mono = self.clock.monotonic_ns()
@@ -1954,7 +1882,7 @@ class AccountExecutionKernel:
                 # rows can race while carrying the same durable acknowledgement.
                 # The first observation owns the semantic transition. Preserve
                 # a later HTTP request/response measurement as a supplemental
-                # fact so execution calibration does not lose valid timing.
+                # fact so execution timing evidence does not lose valid data.
                 try:
                     local_socket_send_ts_ns = int(normalized_metadata.get("local_socket_send_ts_ns") or 0)
                 except (TypeError, ValueError):

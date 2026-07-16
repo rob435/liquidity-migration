@@ -7,8 +7,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import SupportsFloat
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,62 +17,8 @@ class TelegramConfig:
     # Single in-process retry after a 429, honoring Telegram's retry_after up
     # to this cap. Most send sites are deliberately fire-once (the ledger stays
     # authoritative); a brief rate-limit wait inside the transport keeps a
-    # burst of alerts from silently dropping pages (round 4).
+    # burst of alerts from silently dropping pages.
     rate_limit_retry_cap_seconds: float = 5.0
-
-
-def _finite_float(value: object) -> float:
-    if value is None:
-        return 0.0
-    if not isinstance(value, (str, bytes, bytearray, SupportsFloat)):
-        return 0.0
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
-
-
-def format_usd(value: object, *, signed: bool = False) -> str:
-    amount = _finite_float(value)
-    if amount < 0:
-        return f"-${abs(amount):,.2f}"
-    sign = "+" if signed and amount > 0 else ""
-    return f"{sign}${amount:,.2f}"
-
-
-def format_pct(value: object, *, signed: bool = False) -> str:
-    pct = _finite_float(value)
-    sign = "+" if signed and pct > 0 else ""
-    return f"{sign}{pct:.2%}"
-
-
-def format_utc_time_ms(ts_ms: int) -> str:
-    return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
-
-
-def format_age_ms(*, now_ms: int, then_ms: int | None) -> str:
-    if not then_ms:
-        return "no recent cycle"
-    age_min = max(0.0, (now_ms - int(then_ms)) / 60_000.0)
-    if age_min < 2:
-        return "just now"
-    if age_min < 90:
-        return f"{age_min:.0f} min ago"
-    age_h = age_min / 60.0
-    if age_h < 48:
-        return f"{age_h:.1f}h ago"
-    return f"{age_h / 24.0:.1f}d ago"
-
-
-def telegram_configured(*, config: TelegramConfig | None = None) -> bool:
-    """True when the token + chat-id env vars are both present (a send can be
-    attempted). Lets callers distinguish "not configured" — a False return from
-    ``send_telegram_message`` that no retry will ever fix — from a transport
-    failure worth retrying. Callers can therefore avoid advancing notification
-    dedupe state when delivery was never configured."""
-    cfg = config or TelegramConfig()
-    return bool(os.environ.get(cfg.token_env)) and bool(os.environ.get(cfg.chat_id_env))
 
 
 def send_telegram_message(
@@ -120,9 +64,7 @@ def send_telegram_message(
         retry_after = _rate_limit_retry_seconds(exc, cap_seconds=cfg.rate_limit_retry_cap_seconds)
         if retry_after is None:
             raise
-        # audit2: release the first error response's socket/fp before retrying —
-        # HTTPError is itself a closeable file object and leaking it across the
-        # sleep+retry holds the connection open. Safe even when fp is None.
+        # Release the HTTPError response before sleeping and retrying.
         exc.close()
         time.sleep(retry_after)
         with urllib.request.urlopen(request, timeout=cfg.timeout_seconds) as response:
@@ -146,10 +88,7 @@ def _rate_limit_retry_seconds(exc: urllib.error.HTTPError, *, cap_seconds: float
         retry_after = float(raw or 1.0)
     except (TypeError, ValueError):
         retry_after = 1.0
-    # audit2: a header like "nan"/"inf" parses to a non-finite float; nan slips
-    # past the `> cap_seconds` check (nan comparisons are False) and reaches
-    # time.sleep(nan), which raises ValueError out of the retry path. Treat any
-    # non-finite value as a garbage header and fall back to the 1s default.
+    # Reject non-finite headers before they reach ``time.sleep``.
     if not math.isfinite(retry_after):
         retry_after = 1.0
     if retry_after > cap_seconds:

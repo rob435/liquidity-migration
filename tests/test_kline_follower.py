@@ -1,4 +1,4 @@
-"""Tests for the read-only kline follower (shared WS data plane across sleeves).
+"""Tests for the read-only kline follower (shared WS data planes across sleeves).
 
 The leader (continuous DEMO daemon) flushes its KlineStore to an atomic
 store.parquet snapshot; the follower (paper shadow) stat-polls that file and
@@ -24,6 +24,12 @@ from liquidity_migration.continuous_demo_daemon import (
 )
 from liquidity_migration.kline_follower import FollowerKlineStreamManager
 from liquidity_migration.kline_store import KlineStore
+from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
+from liquidity_migration.long_native_event_demo_daemon import (
+    _default_long_kline_stream_manager_factory,
+    _follower_long_kline_stream_manager_factory,
+    _select_long_kline_stream_manager_factory,
+)
 
 
 def _ws_bar(ts_ms: int, *, close: float = 100.0) -> dict:
@@ -59,7 +65,6 @@ def test_follower_recovers_leader_snapshot_and_serves_identical_klines(tmp_path:
         start_stats = follower.start()
         assert start_stats["mode"] == "follower"
         assert start_stats["snapshot_present"] is True
-        assert follower.is_started()
         assert follower.store().row_count() == leader.row_count()
         now = _hour_floor_now_ms()
         window = dict(start_ms=now - 10 * MS_PER_HOUR, end_ms=now + MS_PER_HOUR)
@@ -188,11 +193,13 @@ def test_follower_factory_refuses_circular_self_follow(tmp_path: Path) -> None:
 
 def test_run_script_refuses_circular_self_follow() -> None:
     repo = Path(__file__).resolve().parents[1]
-    script = (repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh").read_text(
-        encoding="utf-8"
-    )
-    assert 'if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]' in script
-    assert "circular self-follow" in script
+    for name in (
+        "run_bybit_continuous_demo_event_engine.sh",
+        "run_bybit_long_demo_event_engine.sh",
+    ):
+        script = (repo / "scripts" / name).read_text(encoding="utf-8")
+        assert 'if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]' in script
+        assert "circular self-follow" in script
 
 
 def test_daemon_factory_selection_prefers_explicit_then_follow_root() -> None:
@@ -212,12 +219,33 @@ def test_daemon_factory_selection_prefers_explicit_then_follow_root() -> None:
         is _default_continuous_kline_stream_manager_factory
     )
 
+    long_follow = LongNativeDemoCycleConfig(klines_follow_root="data/leader-root")
+    long_own = LongNativeDemoCycleConfig()
+    assert _select_long_kline_stream_manager_factory(long_follow, explicit) is explicit
+    assert (
+        _select_long_kline_stream_manager_factory(long_follow, None)
+        is _follower_long_kline_stream_manager_factory
+    )
+    assert (
+        _select_long_kline_stream_manager_factory(long_own, None)
+        is _default_long_kline_stream_manager_factory
+    )
+
 
 def test_follower_factory_builds_manager_on_the_leader_root(tmp_path: Path) -> None:
     cfg = ContinuousDemoCycleConfig(klines_follow_root=str(tmp_path))
     manager = _follower_continuous_kline_stream_manager_factory(None, cfg, tmp_path / "own-root")
     assert isinstance(manager, FollowerKlineStreamManager)
     assert manager.stats()["leader_root"] == str(tmp_path)
+
+    long_cfg = LongNativeDemoCycleConfig(klines_follow_root=str(tmp_path))
+    long_manager = _follower_long_kline_stream_manager_factory(
+        None,
+        long_cfg,
+        tmp_path / "long-own-root",
+    )
+    assert isinstance(long_manager, FollowerKlineStreamManager)
+    assert long_manager.stats()["leader_root"] == str(tmp_path)
 
 
 def test_signal_source_root_follows_the_leader_for_the_rmom_gate(tmp_path: Path) -> None:
@@ -254,6 +282,19 @@ def test_cli_klines_follow_root_parses_into_config(tmp_path: Path) -> None:
         ]
     )
     assert args_default.klines_follow_root == ""
+
+    long_args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "long-native-event-demo-cycle",
+            "--execution-environment",
+            "paper",
+            "--klines-follow-root",
+            "data/bybit-long-demo-event",
+        ]
+    )
+    assert long_args.klines_follow_root == "data/bybit-long-demo-event"
 
 
 def test_rmom_parquet_is_read_from_the_followed_root(tmp_path: Path) -> None:

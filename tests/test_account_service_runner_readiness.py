@@ -18,6 +18,7 @@ from liquidity_migration.account_market_readiness import (
     run_ready_request_or_converge,
 )
 from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
+from liquidity_migration.market_capture import operational_market_symbols
 from liquidity_migration.strategy_runtime import SleeveTargetIntent
 
 
@@ -234,6 +235,36 @@ def test_no_pending_request_is_ready_without_inventing_a_head(tmp_path: Path) ->
     assert readiness.symbols == ()
 
 
+def test_idle_owner_requires_only_one_stable_market_heartbeat() -> None:
+    allowlist = {f"COIN{index:03d}USDT" for index in range(515)} | {"BTCUSDT"}
+
+    required = operational_market_symbols(allowlist)
+
+    assert required == {"BTCUSDT"}
+    assert len(required) == 1
+    assert operational_market_symbols({"ZUSDT", "AUSDT"}) == {"AUSDT"}
+
+
+def test_owner_market_set_includes_every_pending_and_active_symbol() -> None:
+    required = operational_market_symbols(
+        {"BTCUSDT", "AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT"},
+        queued={"ausdt"},
+        nonflat={"BUSDT"},
+        working={"cusdt"},
+        component_targets={"DUSDT"},
+        convergence={"eusdt"},
+    )
+
+    assert required == {
+        "BTCUSDT",
+        "AUSDT",
+        "BUSDT",
+        "CUSDT",
+        "DUSDT",
+        "EUSDT",
+    }
+
+
 class _CycleService:
     def __init__(self) -> None:
         self.run_request_ids: list[str | None] = []
@@ -331,6 +362,8 @@ def test_demo_and_paper_owners_share_the_strict_expected_head_gate() -> None:
         source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
         assert "RequestedMarketWarmupGate" in source
         assert "run_ready_request_or_converge(" in source
+        assert "operational_market_symbols(" in source
+        assert "public_stream.start(live_symbols)" in source
         assert "public_stream.update_symbols(desired)" in source
 
 

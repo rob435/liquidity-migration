@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 from .bybit_market_data import BybitMarketData
 from .config import ResearchConfig
 from .continuous_demo import (
+    CONTINUOUS_V2_PROFILE,
     ContinuousDemoCycleConfig,
     LivePanelCache,
     apply_continuous_demo_profile,
@@ -36,9 +37,10 @@ from .continuous_demo import (
     run_continuous_demo_cycle,
 )
 from .execution_environment import execution_environment
-from .kline_follower import FollowerKlineStreamManager
+from .kline_follower import FollowerKlineStreamManager, build_kline_follower
 from .kline_stream_manager import KlineStreamManager
 from .long_native_event_demo_daemon import LongNativeDemoDaemon
+from .strategy_target_replay import PublishedTargetCyclePayload
 
 if TYPE_CHECKING:
     # Only referenced in the cast annotations below (the base daemon's config type); the continuous
@@ -93,19 +95,10 @@ def _follower_continuous_kline_stream_manager_factory(
     a circular self-follow: the follower writes nothing, so a daemon following its
     OWN root would read a snapshot nobody updates — a frozen store from day one."""
     del config
-    leader = Path(demo_config.klines_follow_root).expanduser()
-    try:
-        is_self_follow = leader.resolve() == Path(cache_root).expanduser().resolve()
-    except OSError:
-        is_self_follow = False
-    if is_self_follow:
-        raise ValueError(
-            f"klines_follow_root ({demo_config.klines_follow_root}) resolves to this "
-            "sleeve's own data root — a follower never writes the snapshot, so following "
-            "yourself yields a permanently frozen kline store. Set KLINES_FOLLOW_ROOT "
-            "only on the shadow sleeve, pointing at the LEADER's root."
-        )
-    return FollowerKlineStreamManager(leader_root=leader)
+    return build_kline_follower(
+        leader_root=demo_config.klines_follow_root,
+        follower_root=cache_root,
+    )
 
 
 def _select_kline_stream_manager_factory(
@@ -185,6 +178,9 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
     _sleeve_label = "continuous"
     _daemon_label = "continuous-fade"
 
+    def _strategy_profile_name(self) -> str:
+        return CONTINUOUS_V2_PROFILE
+
     def __init__(
         self,
         data_root: str | Path,
@@ -192,9 +188,8 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         config: ResearchConfig,
         demo_config: ContinuousDemoCycleConfig | None = None,
         interval_seconds: float = 60.0,
-        cycle_runner: Callable[..., dict[str, Any]] = run_continuous_demo_cycle,
+        cycle_runner: Callable[..., PublishedTargetCyclePayload] = run_continuous_demo_cycle,
         kline_stream_manager_factory: Callable[..., Any] | None = None,
-        event_driven_cycle: bool = True,
         **kwargs: Any,
     ) -> None:
         demo_config = apply_continuous_demo_profile(
@@ -215,17 +210,13 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
                     kline_stream_manager_factory,
                 ),
             ),
-            event_driven_cycle=event_driven_cycle,
+            event_driven_cycle=True,
             **kwargs,
         )
-        self._panel_cache: LivePanelCache | None = (
-            LivePanelCache(
-                rmom_quantile=demo_config.rmom_quantile,
-                feature_set=demo_config.feature_set,
-                exclude_symbols=demo_config.exclude_symbols,
-            )
-            if demo_config.live_panel_cache_enabled
-            else None
+        self._panel_cache = LivePanelCache(
+            rmom_quantile=demo_config.rmom_quantile,
+            feature_set=demo_config.feature_set,
+            exclude_symbols=demo_config.exclude_symbols,
         )
 
     def run(self) -> dict[str, Any]:

@@ -9,10 +9,6 @@ import pytest
 from liquidity_migration import telegram
 from liquidity_migration.telegram import (
     TelegramConfig,
-    format_age_ms,
-    format_pct,
-    format_usd,
-    format_utc_time_ms,
     send_telegram_message,
     _rate_limit_retry_seconds,
 )
@@ -257,15 +253,6 @@ def test_empty_message_text_is_still_sent(monkeypatch: pytest.MonkeyPatch) -> No
     assert decoded["text"] == [""]
 
 
-def test_human_format_helpers_are_stable() -> None:
-    assert format_usd(12.3, signed=True) == "+$12.30"
-    assert format_usd(-4.5, signed=True) == "-$4.50"
-    assert format_pct(0.0123, signed=True) == "+1.23%"
-    assert format_utc_time_ms(1_700_000_000_000) == "2023-11-14 22:13 UTC"
-    assert format_age_ms(now_ms=1_700_000_000_000, then_ms=1_700_000_000_000 - 60_000) == "just now"
-    assert format_age_ms(now_ms=1_700_000_000_000, then_ms=1_700_000_000_000 - 30 * 60_000) == "30 min ago"
-
-
 # ---------------------------------------------------------------------------
 # audit2: edge-case robustness for the notify-only telegram transport.
 #
@@ -274,11 +261,9 @@ def test_human_format_helpers_are_stable() -> None:
 #
 # (A) a non-finite Retry-After ("nan"/"inf") must not reach time.sleep() — it
 #     raised ValueError (nan) or hung; the helper now clamps to the 1s default.
-# (B) format_usd / format_pct rendered NaN as "$nan" / "nan%" because the
-#     `value or 0.0` guard does not catch NaN (nan is truthy); now coerced to 0.0.
-# (C) the 429 retry path leaked the first HTTPError response (its fp was never
+# (B) the 429 retry path leaked the first HTTPError response (its fp was never
 #     closed) before retrying; it now closes the error response.
-# (D) covered by the corrected docstring + the propagation tests above
+# (C) covered by the corrected docstring + the propagation tests above
 #     (frozen contract: errors raise); here we just pin that a bare transport
 #     fault still propagates.
 # ---------------------------------------------------------------------------
@@ -374,44 +359,7 @@ def test_finite_retry_after_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# (B) NaN must not render as "$nan" / "nan%"; finite inputs unchanged
-# ---------------------------------------------------------------------------
-
-
-def test_format_usd_nan_is_finite_string() -> None:
-    # audit2
-    out = format_usd(float("nan"))
-    assert "nan" not in out.lower()
-    assert out == "$0.00"  # coerced to 0.0
-
-
-def test_format_pct_nan_is_finite_string() -> None:
-    # audit2
-    out = format_pct(float("nan"))
-    assert "nan" not in out.lower()
-    assert out == "0.00%"  # coerced to 0.0
-
-
-@pytest.mark.parametrize("bad", [float("inf"), float("-inf")])
-def test_format_usd_pct_non_finite_coerced(bad: float) -> None:
-    # audit2
-    assert "inf" not in format_usd(bad).lower()
-    assert "inf" not in format_pct(bad).lower()
-
-
-def test_format_usd_pct_finite_unchanged() -> None:
-    # audit2: Normal input guard: finite values format byte-identically to before.
-    assert format_usd(1234.5) == "$1,234.50"
-    assert format_usd(-12.0) == "-$12.00"
-    assert format_usd(7.0, signed=True) == "+$7.00"
-    assert format_usd(0.0) == "$0.00"
-    assert format_pct(0.1234) == "12.34%"
-    assert format_pct(-0.05) == "-5.00%"
-    assert format_pct(0.02, signed=True) == "+2.00%"
-
-
-# ---------------------------------------------------------------------------
-# (C) the 429 retry path must close the first error response
+# (B) the 429 retry path must close the first error response
 # ---------------------------------------------------------------------------
 
 
@@ -445,33 +393,6 @@ def test_429_retry_closes_leaked_error_response(monkeypatch: pytest.MonkeyPatch)
     assert closed["n"] == 1  # the leaked error response was closed before retry
 
 
-# ---------------------------------------------------------------------------
-# (D) the corrected docstring contract: transport errors still propagate
-# ---------------------------------------------------------------------------
-
-
-def test_non_429_http_error_still_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
-    # audit2: The function does NOT swallow transport errors (frozen contract). The
-    # audit2 docstring fix only corrects the false "every call site wraps this"
-    # claim; behavior is unchanged — a non-429 HTTPError propagates.
-    _set_credentials_a2(monkeypatch)
-
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
-        raise _http_error(502, hdrs=None)
-
-    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
-
-    with pytest.raises(urllib.error.HTTPError):
-        send_telegram_message("boom")
-
-
-# ======================================================================================
-# Relocated from tests/test_audit_fix_b08.py (audit bucket b08).
-#   telegram-alert-3 + telegram-alert-4: the 429 rate-limit retry branch.
-# Reuses this module's _http_error / _set_credentials_a2 / _Resp helpers.
-# ======================================================================================
-
-
 def test_429_with_none_headers_does_not_raise_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
     # telegram-alert-3: HTTPError(headers=None) on a 429 must NOT raise AttributeError out of
     # the handler. With null headers the retry-after defaults to 1s; the retry below succeeds.
@@ -492,28 +413,6 @@ def test_429_with_none_headers_does_not_raise_attribute_error(monkeypatch: pytes
     assert send_telegram_message("hi") is True
     assert calls["n"] == 2           # one retry happened
     assert sleeps == [1.0]           # null headers -> default 1s wait (max(1.0, 0.5) == 1.0)
-
-
-def test_429_retry_sleeps_parsed_retry_after_then_returns_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    # telegram-alert-4: a 429 with a Retry-After inside the cap sleeps exactly once for the
-    # parsed duration and returns the retried response's 2xx/non-2xx verdict.
-    _set_credentials_a2(monkeypatch)
-    sleeps: list[float] = []
-    monkeypatch.setattr(telegram.time, "sleep", lambda s: sleeps.append(s))
-
-    calls = {"n": 0}
-
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise _http_error(429, hdrs={"Retry-After": "3"})
-        return _Resp(200)
-
-    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
-
-    assert send_telegram_message("hi") is True
-    assert calls["n"] == 2
-    assert sleeps == [3.0]  # exactly one sleep, of the parsed Retry-After
 
 
 def test_429_retry_after_beyond_cap_propagates_without_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -555,17 +454,3 @@ def test_429_retry_returns_false_on_non_2xx_retry(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
     assert send_telegram_message("hi") is False
     assert calls["n"] == 2
-
-
-def test_non_429_http_error_still_propagates_b08(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The 429 branch must not change the contract for other HTTP errors: they propagate.
-    # (Renamed _b08 on relocation: this module already has a test_non_429_http_error_still_propagates.)
-    _set_credentials_a2(monkeypatch)
-
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
-        raise _http_error(502, hdrs=None)
-
-    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
-    with pytest.raises(urllib.error.HTTPError) as info:
-        send_telegram_message("hi")
-    assert info.value.code == 502

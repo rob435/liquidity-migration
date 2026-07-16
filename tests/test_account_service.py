@@ -1145,13 +1145,13 @@ def test_retry_limit_exhaustion_blocks_health_immediately_and_stays_bounded(tmp_
     assert exhausted.items[0].status == "retry_exhausted"
     assert not exhausted.healthy
     with pytest.raises(RuntimeError, match="retry_exhausted"):
-        service.require_convergence_healthy()
+        exhausted.require_healthy()
 
     clock.advance_ns(400)
     overdue = service.convergence_report()
     assert not overdue.healthy
     with pytest.raises(RuntimeError, match="retry_exhausted"):
-        service.require_convergence_healthy()
+        overdue.require_healthy()
     assert service.run_once(inbox) is None
     assert adapter.submit_calls == 2
 

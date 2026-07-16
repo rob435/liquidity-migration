@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 
 import liquidity_migration.continuous_btc_risk as btc_risk_module
-from liquidity_migration.account_intent_client import AccountTargetPublisher
+from liquidity_migration.account_intent_client import AccountTargetPublisher, unresolved_target_snapshot
 from liquidity_migration.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
@@ -15,7 +15,7 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account_service import AccountIntentInbox
+from liquidity_migration.account_service import AccountIntentInbox, SleeveAdapterKind
 from liquidity_migration.account_route import AccountRoute, ensure_account_route
 from liquidity_migration.account_strategy_state import canonical_strategy_trade_rows
 from liquidity_migration.continuous_btc_risk import (
@@ -27,7 +27,6 @@ from liquidity_migration.continuous_demo import (
     ContinuousDemoCycleConfig,
     _apply_btc_risk_sizing,
     _continuous_entry_target_intents,
-    _unresolved_continuous_entry_request_count,
 )
 
 
@@ -70,6 +69,7 @@ def _candidate(symbol: str, signal_ts_ms: int, *, trade_id: str | None = None) -
         "symbol": symbol,
         "signal_ts_ms": signal_ts_ms,
         "live_price": 100.0,
+        "component_weight": 1.0,
         "take_profit_pct": 0.12,
     }
 
@@ -119,6 +119,26 @@ def _accepted_evidence_row(evidence: dict[str, object]) -> dict[str, object]:
     }
 
 
+def test_state_without_decision_receipt_is_rejected(tmp_path: Path) -> None:
+    state_path = tmp_path / "unreceipted.parquet"
+    pl.DataFrame(
+        [
+            {
+                "decision_key": f"AAAUSDT|{10 * DAY_MS}",
+                "symbol": "AAAUSDT",
+                "signal_ts_ms": 10 * DAY_MS,
+                **{name: 0.0 for name in BTC_RISK_COMPONENTS},
+                "btc_risk_score": 0.5,
+                "stack_mult": 1.0,
+                "score_warmup": False,
+            }
+        ]
+    ).write_parquet(state_path)
+
+    with pytest.raises(ValueError, match="missing decision evidence"):
+        BtcRiskLiveSizer(state_path, min_prior=0)
+
+
 def _accepted_evidence_chain(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
     source = BtcRiskLiveSizer(tmp_path / "authoritative-source.parquet", min_prior=0)
     first = _propose_evidence(
@@ -126,13 +146,15 @@ def _accepted_evidence_chain(tmp_path: Path) -> tuple[dict[str, object], dict[st
         symbol="AAAUSDT",
         signal_ts_ms=10 * DAY_MS,
     )
-    source.ingest_accepted_decisions([_accepted_evidence_row(first)])
+    source.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
     second = _propose_evidence(
         source,
         symbol="BBBUSDT",
         signal_ts_ms=11 * DAY_MS,
     )
-    source.ingest_accepted_decisions([_accepted_evidence_row(second)])
+    source.reconcile_authoritative_accepted_decisions(
+        [_accepted_evidence_row(first), _accepted_evidence_row(second)]
+    )
     return first, second
 
 
@@ -360,7 +382,10 @@ def test_pending_or_processing_entry_blocks_next_publication(
     if claimed:
         assert AccountIntentInbox(route).claim_next() is not None
 
-    unresolved = _unresolved_continuous_entry_request_count(route)
+    unresolved = unresolved_target_snapshot(
+        AccountIntentInbox(route),
+        sleeve=SleeveAdapterKind.CONTINUOUS,
+    ).entry_request_count
     assert unresolved == 1
     next_candidate = _candidate("BBBUSDT", 12 * DAY_MS)
     state_root = tmp_path / "blocked"
@@ -460,7 +485,9 @@ def test_receipt_chain_not_signal_time_controls_restart_order(tmp_path: Path) ->
         btc_context={20 * DAY_MS: {name: None for name in BTC_RISK_COMPONENTS}},
     )
     future_evidence = future_lookup[("AAAUSDT", 20 * DAY_MS)]["decision_evidence"]
-    source.ingest_accepted_decisions([{BTC_RISK_EVIDENCE_METADATA_KEY: future_evidence}])
+    source.reconcile_authoritative_accepted_decisions(
+        [{BTC_RISK_EVIDENCE_METADATA_KEY: future_evidence}]
+    )
     past_lookup, _ = source.score_decisions(
         [{"symbol": "BBBUSDT", "signal_ts_ms": 10 * DAY_MS}],
         btc_context={10 * DAY_MS: {name: None for name in BTC_RISK_COMPONENTS}},
@@ -471,7 +498,7 @@ def test_receipt_chain_not_signal_time_controls_restart_order(tmp_path: Path) ->
     sink = BtcRiskLiveSizer(sink_path, min_prior=0)
     # Deliberately reverse the rows: topology, not caller/signal order, must
     # recover the sole accepted chain.
-    result = sink.ingest_accepted_decisions(
+    result = sink.reconcile_authoritative_accepted_decisions(
         [
             {BTC_RISK_EVIDENCE_METADATA_KEY: past_evidence},
             {BTC_RISK_EVIDENCE_METADATA_KEY: future_evidence},
@@ -485,59 +512,6 @@ def test_receipt_chain_not_signal_time_controls_restart_order(tmp_path: Path) ->
     assert BtcRiskLiveSizer(sink_path, min_prior=0).rows == 2
 
 
-def test_pre_evidence_state_file_replays_and_upgrades_compatibly(tmp_path: Path) -> None:
-    state_path = tmp_path / "legacy.parquet"
-    legacy_schema = {
-        "decision_key": pl.String,
-        "symbol": pl.String,
-        "signal_ts_ms": pl.Int64,
-        **{name: pl.Float64 for name in BTC_RISK_COMPONENTS},
-        "btc_risk_score": pl.Float64,
-        "stack_mult": pl.Float64,
-        "score_warmup": pl.Boolean,
-    }
-    pl.DataFrame(
-        [
-            {
-                "decision_key": f"AAAUSDT|{10 * DAY_MS}",
-                "symbol": "AAAUSDT",
-                "signal_ts_ms": 10 * DAY_MS,
-                **{name: None for name in BTC_RISK_COMPONENTS},
-                "btc_risk_score": 0.5,
-                "stack_mult": 1.0,
-                "score_warmup": False,
-            }
-        ],
-        schema=legacy_schema,
-    ).write_parquet(state_path)
-
-    sizer = BtcRiskLiveSizer(state_path, min_prior=0)
-    duplicate, stats = sizer.score_decisions(
-        [{"symbol": "AAAUSDT", "signal_ts_ms": 10 * DAY_MS}],
-        btc_context={},
-    )
-    assert stats["duplicates"] == 1
-    assert duplicate[("AAAUSDT", 10 * DAY_MS)]["decision_evidence"]["evidence_hash"]
-
-    proposed, _ = sizer.score_decisions(
-        [{"symbol": "BBBUSDT", "signal_ts_ms": 11 * DAY_MS}],
-        btc_context={11 * DAY_MS: {name: None for name in BTC_RISK_COMPONENTS}},
-    )
-    sizer.ingest_accepted_decisions(
-        [
-            {
-                "symbol": "BBBUSDT",
-                "signal_ts_ms": 11 * DAY_MS,
-                BTC_RISK_EVIDENCE_METADATA_KEY: proposed[("BBBUSDT", 11 * DAY_MS)]["decision_evidence"],
-            }
-        ]
-    )
-    saved = pl.read_parquet(state_path)
-    assert saved.height == 2
-    assert saved["decision_evidence_json"].null_count() == 0
-    assert BtcRiskLiveSizer(state_path, min_prior=0).rows == 2
-
-
 def test_authoritative_empty_projection_accepts_empty_state(tmp_path: Path) -> None:
     sizer = BtcRiskLiveSizer(tmp_path / "empty.parquet", min_prior=0)
 
@@ -548,7 +522,6 @@ def test_authoritative_empty_projection_accepts_empty_state(tmp_path: Path) -> N
         "duplicates": 0,
         "ignored": 0,
         "authoritative_rows": 0,
-        "rewritten": 0,
     }
     assert sizer.rows == 0
     assert not sizer.state_path.exists()
@@ -568,7 +541,7 @@ def test_authoritative_empty_reset_rejects_persisted_state_and_blocks_scoring(
     first, _ = _accepted_evidence_chain(tmp_path)
     state_path = tmp_path / "persisted.parquet"
     sizer = BtcRiskLiveSizer(state_path, min_prior=0)
-    sizer.ingest_accepted_decisions([_accepted_evidence_row(first)])
+    sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
     last_good = state_path.read_bytes()
 
     with pytest.raises(ValueError, match="absent from complete authoritative"):
@@ -598,7 +571,7 @@ def test_authoritative_empty_reset_rejects_persisted_state_and_blocks_scoring(
 def test_authoritative_subset_of_persisted_chain_fails_closed(tmp_path: Path) -> None:
     first, second = _accepted_evidence_chain(tmp_path)
     sizer = BtcRiskLiveSizer(tmp_path / "persisted-full.parquet", min_prior=0)
-    sizer.ingest_accepted_decisions(
+    sizer.reconcile_authoritative_accepted_decisions(
         [
             _accepted_evidence_row(first),
             _accepted_evidence_row(second),
@@ -617,7 +590,7 @@ def test_authoritative_complete_replay_catches_up_persisted_prefix(
     first, second = _accepted_evidence_chain(tmp_path)
     state_path = tmp_path / "persisted-prefix.parquet"
     sizer = BtcRiskLiveSizer(state_path, min_prior=0)
-    sizer.ingest_accepted_decisions([_accepted_evidence_row(first)])
+    sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
 
     result = sizer.reconcile_authoritative_accepted_decisions(
         [
@@ -632,7 +605,6 @@ def test_authoritative_complete_replay_catches_up_persisted_prefix(
         "duplicates": 2,
         "ignored": 0,
         "authoritative_rows": 2,
-        "rewritten": 0,
     }
     assert pl.read_parquet(state_path)["decision_key"].to_list() == [
         f"AAAUSDT|{10 * DAY_MS}",
@@ -667,7 +639,7 @@ def test_authoritative_conflict_with_persisted_decision_fails_closed(
     first, _ = _accepted_evidence_chain(tmp_path)
     state_path = tmp_path / "conflict.parquet"
     sizer = BtcRiskLiveSizer(state_path, min_prior=0)
-    sizer.ingest_accepted_decisions([_accepted_evidence_row(first)])
+    sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
     conflicting_source = BtcRiskLiveSizer(tmp_path / "conflicting-source.parquet", min_prior=0)
     conflicting = _propose_evidence(
         conflicting_source,
@@ -684,83 +656,6 @@ def test_authoritative_conflict_with_persisted_decision_fails_closed(
         sizer.score_decisions([], btc_context={})
 
 
-def test_authoritative_empty_projection_rejects_synthesized_legacy_row(
-    tmp_path: Path,
-) -> None:
-    state_path = tmp_path / "legacy-authority.parquet"
-    legacy_schema = {
-        "decision_key": pl.String,
-        "symbol": pl.String,
-        "signal_ts_ms": pl.Int64,
-        **{name: pl.Float64 for name in BTC_RISK_COMPONENTS},
-        "btc_risk_score": pl.Float64,
-        "stack_mult": pl.Float64,
-        "score_warmup": pl.Boolean,
-    }
-    pl.DataFrame(
-        [
-            {
-                "decision_key": f"AAAUSDT|{10 * DAY_MS}",
-                "symbol": "AAAUSDT",
-                "signal_ts_ms": 10 * DAY_MS,
-                **{name: None for name in BTC_RISK_COMPONENTS},
-                "btc_risk_score": 0.5,
-                "stack_mult": 1.0,
-                "score_warmup": False,
-            }
-        ],
-        schema=legacy_schema,
-    ).write_parquet(state_path)
-    last_good = state_path.read_bytes()
-
-    with pytest.raises(ValueError, match="absent from complete authoritative"):
-        BtcRiskLiveSizer(state_path, min_prior=0).reconcile_authoritative_accepted_decisions([])
-
-    assert state_path.read_bytes() == last_good
-
-
-def test_authoritative_matching_receipt_rewrites_synthesized_legacy_row(
-    tmp_path: Path,
-) -> None:
-    state_path = tmp_path / "legacy-rewrite.parquet"
-    pl.DataFrame(
-        [
-            {
-                "decision_key": f"AAAUSDT|{10 * DAY_MS}",
-                "symbol": "AAAUSDT",
-                "signal_ts_ms": 10 * DAY_MS,
-                **{name: None for name in BTC_RISK_COMPONENTS},
-                "btc_risk_score": 0.5,
-                "stack_mult": 1.0,
-                "score_warmup": False,
-            }
-        ],
-        schema={
-            "decision_key": pl.String,
-            "symbol": pl.String,
-            "signal_ts_ms": pl.Int64,
-            **{name: pl.Float64 for name in BTC_RISK_COMPONENTS},
-            "btc_risk_score": pl.Float64,
-            "stack_mult": pl.Float64,
-            "score_warmup": pl.Boolean,
-        },
-    ).write_parquet(state_path)
-    sizer = BtcRiskLiveSizer(state_path, min_prior=0)
-    lookup, _ = sizer.score_decisions(
-        [{"symbol": "AAAUSDT", "signal_ts_ms": 10 * DAY_MS}],
-        btc_context={},
-    )
-    evidence = lookup[("AAAUSDT", 10 * DAY_MS)]["decision_evidence"]
-
-    result = sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(evidence)])
-
-    assert result["ingested"] == 0
-    assert result["rewritten"] == 1
-    saved = pl.read_parquet(state_path)
-    assert saved["decision_evidence_json"].null_count() == 0
-    assert saved["decision_evidence_json"][0]
-
-
 @pytest.mark.parametrize("failure_mode", ["file_fsync", "replace", "directory_fsync"])
 def test_state_save_failure_preserves_last_good_file_and_memory(
     tmp_path: Path,
@@ -774,7 +669,7 @@ def test_state_save_failure_preserves_last_good_file_and_memory(
         symbol="AAAUSDT",
         signal_ts_ms=10 * DAY_MS,
     )
-    sizer.ingest_accepted_decisions([_accepted_evidence_row(first)])
+    sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
     last_good = state_path.read_bytes()
     second = _propose_evidence(
         sizer,
@@ -815,11 +710,14 @@ def test_state_save_failure_preserves_last_good_file_and_memory(
         )
 
     with pytest.raises(OSError, match="injected"):
-        sizer.ingest_accepted_decisions([_accepted_evidence_row(second)])
+        sizer.reconcile_authoritative_accepted_decisions(
+            [_accepted_evidence_row(first), _accepted_evidence_row(second)]
+        )
 
     assert state_path.read_bytes() == last_good
     assert sizer.rows == 1
     assert BtcRiskLiveSizer(state_path, min_prior=0).rows == 1
+    sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
     retry = _propose_evidence(
         sizer,
         symbol="BBBUSDT",
@@ -840,7 +738,7 @@ def test_state_save_uses_a_new_temporary_path_for_each_attempt(
         symbol="AAAUSDT",
         signal_ts_ms=10 * DAY_MS,
     )
-    sizer.ingest_accepted_decisions([_accepted_evidence_row(first)])
+    sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
     second = _propose_evidence(
         sizer,
         symbol="BBBUSDT",
@@ -855,7 +753,10 @@ def test_state_save_uses_a_new_temporary_path_for_each_attempt(
     monkeypatch.setattr(btc_risk_module, "_fsync_file", record_and_fail)
     for _ in range(2):
         with pytest.raises(OSError, match="injected"):
-            sizer.ingest_accepted_decisions([_accepted_evidence_row(second)])
+            sizer.reconcile_authoritative_accepted_decisions(
+                [_accepted_evidence_row(first), _accepted_evidence_row(second)]
+            )
+        sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
 
     assert len(attempted_paths) == 2
     assert attempted_paths[0] != attempted_paths[1]

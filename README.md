@@ -1,34 +1,35 @@
 # liquidity-migration
 
-Research and demo/paper execution code for two crypto-perp systems:
+Research plus demo/paper execution for two crypto-perpetual profiles:
 
-- `continuous_ensemble_v2`: continuous fade book.
-- `LongV11aDivWeekendVol`: long-native v11a sleeve.
+- `continuous_ensemble_v2`
+- `LongV11aDivWeekendVol`
 
-The runtime surface defaults to demo/paper. Mainnet use requires an explicit
-owner action and a fresh evidence pack.
+The executable runtime is demo/paper only. Mainnet and `REAL_MONEY` remain
+unauthorized unless the owner gives a separate, narrow instruction naming the
+deployment and risk boundary.
 
-## Read First
+## Read first
 
-- [docs/governance.md](docs/governance.md) - evidence policy, claim scoping,
-  validation discipline, and authorization boundaries.
-- [STATE.md](STATE.md) - live state and immediate next work.
-- [docs/research_summary.md](docs/research_summary.md) - compact decision log.
-- [docs/promoted_trading_logic.md](docs/promoted_trading_logic.md) - active
-  profile lifecycle and runtime env boundary.
-- [docs/operations.md](docs/operations.md) - one safe entry point for VPS,
-  reconciliation, equity, research, tests, reset, and deploy operations.
-- [docs/preregistration/INDEX.md](docs/preregistration/INDEX.md) - active
-  anchors and closed research arcs.
+- [STATE.md](STATE.md) — last recorded operating state and next action.
+- [docs/account_execution.md](docs/account_execution.md) — execution ownership
+  and operational authorization.
+- [docs/account_journal.md](docs/account_journal.md) — authoritative account
+  transaction/event storage.
+- [docs/operations.md](docs/operations.md) — supported operator commands.
+- [docs/active_trading_logic.md](docs/active_trading_logic.md) — active
+  strategy profiles and reconstruction limits.
+- [docs/governance.md](docs/governance.md) — evidence and authorization policy.
+- [docs/research_summary.md](docs/research_summary.md) — compact decision log.
+- [docs/data_roots.md](docs/data_roots.md) and
+  [docs/pit_gate.md](docs/pit_gate.md) — research-data boundaries.
 
-## Map
+## Layout
 
-- `liquidity_migration/` - package, PIT/data builders, strategy engines,
-  execution helpers, and `python -m liquidity_migration`.
-- `scripts/` - deploy, reconcile, data, equity, and active research tools.
-- `tests/` - pytest suite.
-- `docs/` - methodology, data-root contracts, and compact research state.
-- `.codex/skills/` - canonical project workflows.
-- `.claude/skills/` - mechanical mirrors for Claude.
+- `liquidity_migration/` — package, strategies, account kernel, journals, and CLI.
+- `scripts/` — supported operations, deploy, data, and reporting entry points.
+- `deploy/` — systemd topology and strict environment handling.
+- `tests/` — executable contracts.
+- `.codex/skills/` — canonical project workflows; `.claude/skills/` mirrors them.
 
 Python 3.11+.

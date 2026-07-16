@@ -23,7 +23,10 @@ def _write_trades(path: Path, rows: list[dict[str, object]]) -> None:
 def test_monthly_trade_counts_dedupes_component_overlap(tmp_path: Path) -> None:
     output_root = tmp_path / "continuous"
     venue_root = output_root / "components" / "bybit"
-    cells = {refresh.CONTINUOUS_COMPONENT_SOURCES[name].cell for name in refresh.WINNER_WEIGHTS}
+    cells = {
+        refresh.ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[name].artifact_cell
+        for name in refresh.WINNER_WEIGHTS
+    }
     first, second = sorted(cells)[:2]
     duplicate = {
         "entry_ts_ms": 1_682_640_000_000,
@@ -86,71 +89,87 @@ def test_stats_sharpe_uses_sample_std() -> None:
     assert s is not None and isinstance(s, float)
 
 
-def test_deployed_equity_literals_match_frozen_config() -> None:
-    from liquidity_migration.continuous_forward_replay import (
-        FROZEN_FORWARD_CONFIG,
-        frozen_hedge_rule,
-        frozen_rebalance_rule,
+def test_deployed_equity_literals_match_active_config() -> None:
+    from liquidity_migration.continuous_profile import (
+        ACTIVE_CONTINUOUS_CONFIG,
+        active_hedge_rule,
+        active_rebalance_rule,
     )
     from liquidity_migration.continuous_rebalance import ContinuousHedgeRule
 
-    assert refresh.WINNER_WEIGHTS == FROZEN_FORWARD_CONFIG["weights"]
-    assert refresh.winner_rule() == frozen_rebalance_rule()
-    assert ContinuousHedgeRule(90, 60, 2.0, 5.0) == frozen_hedge_rule()
+    assert refresh.WINNER_WEIGHTS == ACTIVE_CONTINUOUS_CONFIG["weights"]
+    assert refresh.winner_rule() == active_rebalance_rule()
+    assert ContinuousHedgeRule(90, 60, 2.0, 5.0) == active_hedge_rule()
 
 
-def test_component_overrides_model_take_profit_and_leverage() -> None:
-    from liquidity_migration.continuous_events import ContinuousEventConfig
-
-    cfg = ContinuousEventConfig(take_profit_pct=0.10, gross_exposure=0.5)
-
-    out = refresh._with_optional_component_overrides(
-        cfg,
-        component_take_profit_pct=0.12,
-        backtest_leverage=5.0,
+def test_active_component_config_is_code_defined_tp12() -> None:
+    from liquidity_migration.continuous_profile import (
+        ACTIVE_CONTINUOUS_COMPONENT_BY_KEY,
+        CONTINUOUS_PROFILE_ID,
+        CONTINUOUS_PROFILE_REVISION,
     )
 
-    assert out.take_profit_pct == pytest.approx(0.12)
-    assert out.gross_exposure == pytest.approx(2.5)
+    for key, component in ACTIVE_CONTINUOUS_COMPONENT_BY_KEY.items():
+        cfg = refresh.active_component_config(
+            key,
+            start_date="2024-01-01",
+            end_date="2026-06-25",
+            backtest_leverage=5.0,
+        )
+        assert cfg.profile_id == CONTINUOUS_PROFILE_ID
+        assert cfg.profile_revision == CONTINUOUS_PROFILE_REVISION
+        assert cfg.component_key == key
+        assert cfg.entry_event_trigger == component.entry_event_trigger
+        assert cfg.age_days_min == component.age_days_min
+        assert cfg.take_profit_pct == pytest.approx(0.12)
+        assert cfg.btc_trend_gate == "uptrend"
+        assert cfg.gross_exposure == pytest.approx(2.5)
 
 
-def test_btc_trend_gate_override_changes_config_hash() -> None:
-    from liquidity_migration.continuous_events import ContinuousEventConfig
-
-    cfg = ContinuousEventConfig(btc_trend_gate="uptrend")
-    out = refresh._with_btc_trend_gate(cfg, "off")
-
-    assert out.btc_trend_gate == "off"
-    assert out.config_hash() != cfg.config_hash()
-
-
-def test_component_report_match_checks_tp_and_gross_exposure() -> None:
-    payload = {"config": {"start_date": "2023-04-01", "end_date": "2026-06-25", "take_profit_pct": 0.12, "gross_exposure": 2.5}}
+def test_component_report_match_checks_hash_and_gross_exposure() -> None:
+    payload = {
+        "config_hash": "active-hash",
+        "config": {"start_date": "2023-04-01", "end_date": "2026-06-25", "take_profit_pct": 0.12, "gross_exposure": 2.5}
+    }
 
     assert refresh.component_report_matches_window(
         payload,
         start_date="2023-04-01",
         end_date="2026-06-25",
-        component_take_profit_pct=0.12,
         expected_gross_exposure=2.5,
+        expected_config_hash="active-hash",
     )
     assert not refresh.component_report_matches_window(
         payload,
         start_date="2023-04-01",
         end_date="2026-06-25",
-        component_take_profit_pct=0.10,
         expected_gross_exposure=2.5,
+        expected_config_hash="wrong-hash",
     )
 
 
-def test_strict_btc_risk_lookup_refuses_executed_default(tmp_path: Path) -> None:
-    path = tmp_path / "continuous_trades.csv"
-    pl.DataFrame(
-        {"symbol": ["AAAUSDT"], "entry_signal_ts_ms": [1_700_000_000_000]}
-    ).write_csv(path)
+def test_non_active_component_receipt_is_rejected() -> None:
+    from liquidity_migration.continuous_profile import ACTIVE_CONTINUOUS_COMPONENT_BY_KEY
 
-    with pytest.raises(RuntimeError, match="missing 1 executed decision key"):
-        refresh._assert_size_lookup_complete(trades_path=path, size_mult_lookup={})
+    payloads = []
+    for component in ACTIVE_CONTINUOUS_COMPONENT_BY_KEY.values():
+        payloads.append(
+            {
+                "_component": component.artifact_cell,
+                "config": {
+                    "profile_id": "",
+                    "profile_revision": "",
+                    "component_key": component.key,
+                    "entry_event_trigger": component.entry_event_trigger,
+                    "age_days_min": component.age_days_min,
+                    "take_profit_pct": 0.10,
+                    "btc_trend_gate": "uptrend",
+                },
+            }
+        )
+
+    with pytest.raises(RuntimeError, match="not the code-defined active continuous component"):
+        refresh._assert_active_component_reports(payloads)
 
 
 def test_strict_hedge_inputs_refuse_missing_returns_and_funding(
@@ -169,60 +188,39 @@ def test_strict_hedge_inputs_refuse_missing_returns_and_funding(
 
     with pytest.raises(RuntimeError, match="strict bybit BTCUSDT hedge coverage failed"):
         refresh.instrument_inputs(
-            "bybit", days, "BTCUSDT", panel,
-            data_root=tmp_path, strict_coverage=True,
+            "bybit",
+            days,
+            "BTCUSDT",
+            panel,
+            data_root=tmp_path,
+            strict_coverage=True,
         )
 
 
-def test_run_venue_isolation_clears_process_research_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from liquidity_migration import continuous_events
-
-    continuous_events._RESEARCH_INPUT_CACHE[("stale", "hash", "fcfs", 1)] = {"stale": True}
-    out = tmp_path / "out"
-    venue_dir = out / "bybit"
-    venue_dir.mkdir(parents=True)
-    pl.DataFrame(
-        {"ts_ms": [1_700_000_000_000], "basket_return": [0.0], "equity": [1.0]}
-    ).write_csv(venue_dir / "continuous_equity.csv")
-    panel = pl.DataFrame(
-        {
-            "symbol": ["BTCUSDT"],
-            "date": ["2023-11-14"],
-            "d": [pl.Series(["2023-11-14"]).str.to_date()[0]],
-            "close": [35_000.0],
-            "turnover_quote": [1_000_000.0],
-        }
-    )
-    monkeypatch.setattr(refresh, "load_extended_panel", lambda *args, **kwargs: panel)
-    monkeypatch.setattr(refresh, "render_curves", lambda *args, **kwargs: None)
-    monkeypatch.setattr(refresh, "write_continuous_equity_report", lambda *args, **kwargs: None)
-
-    refresh.run_venue(
-        "bybit",
-        output_root=out,
-        end_date="2023-11-15",
-        render_only=True,
-        isolate_research_state=True,
-        chart_leverage=1.0,
-    )
-
-    assert not continuous_events._RESEARCH_INPUT_CACHE
-
-
 def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path) -> None:
+    from liquidity_migration.continuous_profile import (
+        ACTIVE_CONTINUOUS_COMPONENT_BY_KEY,
+        CONTINUOUS_HISTORICAL_RUN_LABEL,
+        CONTINUOUS_PROFILE_ID,
+        CONTINUOUS_PROFILE_REVISION,
+    )
+
     output_root = tmp_path / "continuous"
     out_dir = output_root / "bybit"
-    component_dir = output_root / "components" / "bybit" / "merged_signal"
-    component_dir.mkdir(parents=True)
     out_dir.mkdir(parents=True)
-    (component_dir / "continuous_report.json").write_text(
-        json.dumps(
-            {
+    for component in ACTIVE_CONTINUOUS_COMPONENT_BY_KEY.values():
+        component_dir = output_root / "components" / "bybit" / component.artifact_cell
+        component_dir.mkdir(parents=True)
+        (component_dir / "continuous_report.json").write_text(
+            json.dumps({
                 "config": {
-                    "take_profit_pct": 0.12,
-                    "btc_trend_gate": "off",
+                    "profile_id": CONTINUOUS_PROFILE_ID,
+                    "profile_revision": CONTINUOUS_PROFILE_REVISION,
+                    "component_key": component.key,
+                    "entry_event_trigger": component.entry_event_trigger,
+                    "age_days_min": component.age_days_min,
+                    "take_profit_pct": component.take_profit_pct,
+                    "btc_trend_gate": "uptrend",
                     "gross_exposure": 2.5,
                     "taker_fee_bps": 5.5,
                     "spread_bps": 2.5,
@@ -234,10 +232,9 @@ def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path
                 "n_trades": 3,
                 "funding_mode": "modeled",
                 "metrics": {"full": {"total_return": 0.02, "max_drawdown": -0.01}},
-            }
-        ),
-        encoding="utf-8",
-    )
+            }),
+            encoding="utf-8",
+        )
     df = pl.DataFrame(
         {
             "ts_ms": [1_700_000_000_000, 1_700_086_400_000],
@@ -257,19 +254,22 @@ def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path
         venue_summary=venue_summary,
         df=df,
         chart_leverage=1.0,
-        component_take_profit_pct=0.12,
-        btc_risk_sizing=True,
         backtest_leverage=5.0,
     )
 
     report = (out_dir / "continuous_equity_report.md").read_text(encoding="utf-8")
     summary = json.loads((out_dir / "continuous_equity_summary.json").read_text(encoding="utf-8"))
-    assert "Run label: exploratory" in report
+    assert "Run label: exploratory_historical_equity" in report
+    assert f"Strategy run label: {CONTINUOUS_HISTORICAL_RUN_LABEL}" in report
+    assert "Config authority: liquidity_migration.continuous_profile" in report
     assert "Data root:" in report
-    assert "BTC trend gate: off" in report
+    assert "BTC trend gate: uptrend" in report
     assert "## Cost Model" in report
     assert "OOS window:" in report
     assert summary["backtest_leverage"] == pytest.approx(5.0)
-    assert summary["btc_trend_gate"] == "off"
+    assert summary["strategy_profile"] == CONTINUOUS_PROFILE_ID
+    assert summary["profile_revision"] == CONTINUOUS_PROFILE_REVISION
+    assert summary["btc_trend_gate"] == "uptrend"
+    assert "btc_risk_sizing" not in summary
     assert summary["final_equity"] == pytest.approx(1.0302)
     assert summary["funding_modes"] == ["modeled"]

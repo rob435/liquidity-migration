@@ -1,41 +1,18 @@
-"""Precompute the PIT residual-momentum selection signal -> <root>/residual_momentum.parquet.
+"""Precompute the causal PIT residual-momentum selection signal.
 
-This is the offline half of the residual-momentum SELECTION gate (P3, operator-greenlit). It
-computes, per (symbol, ts_ms) on the daily grid, the trailing common4-factor-residual momentum
-known strictly before the decision (CAUSAL — see the timing proof below):
+For each symbol on the daily grid:
 
     residual_momentum[D] = sum_{d in [D-9, D-3]} residual_return[d]   (rolling_sum(7).shift(3))
 
-where residual_return[d] is the day-d residual from the validated 6-factor risk model's per-day
-cross-sectional regression restricted to the 4 always-present (klines/price) factors (common4 —
-funding/premium are 38.8% null on binance, see binance-derivative-metrics-missing).
+``residual_return[d]`` is fit to the forward return from first-bar close
+``d+1`` to ``d+2`` and is available around ``d+2 01:00 UTC``. The consumer
+reads day ``D`` at ``D 00:00 UTC``, so ``D-3`` is the newest computable term.
+The join uses the same trading-day convention, ``date(ts_ms - 1ms)``.
 
-CAUSALITY (fixed 2026-06-03 — was a confirmed look-ahead; STATE.md "rmom look-ahead unconfirmed"):
-the residual is fit against a FORWARD return (fit_factor_returns target_col='fwd_ret_1d' =
-first_bar_close[d+2]/first_bar_close[d+1] - 1, daily_feature_panel._attach_forward_returns), so
-residual_return[d] does NOT complete until first_bar_close[d+2] is available ≈ (d+2) 01:00 UTC. The
-LIVE continuous consumer wakes from 00:00 UTC of day D and reads residual_momentum[day D]; for that
-to be strictly PIT, the NEWEST summed residual_return must complete ≤ D 00:00 UTC, i.e. its index
-≤ D-3. Hence shift(3): residual_momentum[D] = sum residual_return[D-9..D-3], whose newest term
-residual_return[D-3] completes (D-1) 01:00 UTC < D 00:00 UTC. (The old shift(1) summed
-residual_return[D-1], which completes D+1 01:00 UTC — up to ~25h of future data: that was the bug.)
-The live/continuous join (continuous_events: floor to start-of-day D) is aligned
-to the same trading day (date(ts_ms-1ms)).
-
-Deployment note: the live continuous profile now uses the post-look-ahead shift(3)
-rmom table with `rmom_quantile=0.25`. Treat any further rmom latency or target
-change as a fresh research change requiring pre-registration.
-
-The continuous engine left-joins this on (symbol, daily-grid ts_ms) to add a
-`residual_momentum` column and keeps LOW residual-momentum names (short the
-idiosyncratically-weak candidates).
-
-When enabled, the continuous demo/paper sleeve joins this table on the CURRENT trading day's ts, so for the live
-refresh `--end` MUST advance to today — otherwise the daily systemd refresh keeps writing a table that
-ends in the past, the live join finds no row for today, the `is_not_null` filter empties the whole
-cross-section, and the sleeve silently emits zero signal. `--end` therefore defaults to TOMORROW (UTC)
-so today's `residual_momentum[today]` row is produced (the staleness fix is correct and independent of
-the look-ahead debt above; advancing `--end` only stops the table going stale).
+The active profile keeps the lowest residual-momentum quartile. Demo/paper
+consumers exact-join today's row, so the exclusive ``--end`` defaults to
+tomorrow UTC to emit it; a stale table would suppress the whole cross-section.
+Treat changes to this timing or target as new research.
 
 Dispatch: POLARS_MAX_THREADS=8 .venv/bin/python -u scripts/precompute_residual_momentum.py [--root PATH ...] [--start D] [--end D]
 """
@@ -68,28 +45,10 @@ START = "2023-03-01"
 COMMON4 = ["btc_beta", "xs_rank_ret_30d", "realized_vol_rank", "liquidity_rank"]
 DEFAULT_ROOTS = [SHARED / "bybit_full_pit", SHARED / "binance_full_pit"]
 
-# residual_momentum[D] = sum residual_return[D-9 .. D-3]: a rolling RMOM_WINDOW-day sum of the daily
-# factor residual, shifted RMOM_CAUSAL_SHIFT days. The shift is the causality guarantee: residual_return
-# is fit against a FORWARD return (fwd_ret_1d = first_bar_close[d+2]/first_bar_close[d+1]-1), so
-# residual_return[d] only completes ≈(d+2) 01:00 UTC. The live continuous consumer reads
-# residual_momentum[day D] from D 00:00 UTC, so the NEWEST summed residual_return must complete ≤ D
-# 00:00, i.e. its index ≤ D-3 -> shift 3 (residual_return[D-3] completes (D-1) 01:00 < D 00:00). See
-# the module docstring; pinned by test_residual_momentum_is_causal_shift3.
+# Shift three days so every residual in the day-D signal is computable by D 00:00 UTC.
 RMOM_WINDOW = 7
 RMOM_CAUSAL_SHIFT = 3
-# fit_factor_returns targets first-bar close[d+2] / first-bar close[d+1].
-# The newest residual used by RMOM[D] is d=D-shift, and its target is complete
-# at the first 1h bar close on d+2. These constants make the conservative A0
-# causal-computability timestamp mechanically derivable without pretending an
-# unrecorded historical cron publication time exists.
-RMOM_FORWARD_TARGET_COMPLETION_DAYS = 2
-RMOM_FIRST_BAR_CLOSE_OFFSET_HOURS = 1
 DEFAULT_APPEND_OVERLAP_DAYS = 14
-# Tables written before provenance existed can only be upgraded
-# conservatively. The provisional edge is bounded by the forward-target lag,
-# causal shift, and one preseeded day; treating the final five days per symbol
-# as mutable is intentionally wider than the observed one-day maturation.
-LEGACY_PROVISIONAL_TAIL_DAYS = RMOM_CAUSAL_SHIFT + 2
 
 
 def residual_momentum_expr() -> "pl.Expr":
@@ -111,10 +70,7 @@ def _default_end() -> str:
 
 
 def _resolve_klines_dataset(root: Path, override: str | None) -> str:
-    """Which kline store this root actually holds. Research full-PIT roots use ``klines_1h``; the
-    live demo/paper roots store their WS-driven klines under ``event_demo_klines_1h``. The risk-model
-    autodetect always assumes ``klines_1h``, so a refresh against a live root read zero klines and
-    silently wrote nothing (the 2026-06-02 continuous zero-signal blackout). Sniff the real dir."""
+    """Select the research or WS-driven kline dataset present in this root."""
     if override:
         return override
     if (root / "klines_1h").is_dir():
@@ -164,19 +120,10 @@ def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | N
         )
     _fr, resid = fit_factor_returns(panel, factor_cols=COMMON4)  # symbol, ts_ms, residual_return
     resid = resid.sort(["symbol", "ts_ms"]).select("symbol", "ts_ms", "residual_return")
-    # The LIVE join floors `now` to TODAY's day_ts and exact-matches residual_momentum[day_ts]; but
-    # residual_return[d] only completes at ≈(d+2) 01:00 UTC (forward-return target), so on a live root
-    # the raw table ends ~2 days behind today and the live decile then drops EVERY symbol (the
-    # is_not_null filter empties it -> the silent zero-signal blackout). residual_momentum[D] =
-    # sum residual_return[D-9 .. D-3] (shift(3)) is strictly causal (its newest term completes
-    # (D-1) 01:00 < D 00:00), so for any symbol still trading at the trailing edge we append
-    # null-residual rows from its last residual day through `end` (= tomorrow UTC) and let the SAME
-    # rolling_sum(7)+shift(3) carry the trailing real-residual sum onto today's (and tomorrow's,
-    # covering the 00:00->00:20 daily-refresh rollover) row. Polars rolling_sum ignores in-window
-    # nulls and counts only non-null obs against min_samples. A padded row whose newest required
-    # residual is not yet present is explicitly PROVISIONAL: its value is causal but can mature when
-    # that delayed residual arrives. Stable history remains immutable; provisional tail keys may be
-    # refreshed by the append path.
+    # Append null residual rows through the exclusive boundary so shift(3) emits
+    # today's exact-join key. Polars ignores those nulls inside the rolling sum.
+    # Tail rows remain provisional until every delayed input has matured; stable
+    # history is immutable while provisional keys may be refreshed.
     last_real = (
         resid.filter(pl.col("residual_return").is_not_null())
         .group_by("symbol")
@@ -208,30 +155,15 @@ def _write_signal_atomic(path: Path, sig: pl.DataFrame) -> None:
 
 
 def _validate_rmom_schema(sig: pl.DataFrame, *, path: Path) -> None:
-    required = {"symbol", "ts_ms", "residual_momentum"}
+    required = {"symbol", "ts_ms", "residual_momentum", "is_provisional"}
     missing = required.difference(sig.columns)
     if missing:
         raise RuntimeError(f"{path} missing required residual_momentum columns: {sorted(missing)}")
     dupes = sig.group_by(["symbol", "ts_ms"]).len().filter(pl.col("len") > 1)
     if not dupes.is_empty():
         raise RuntimeError(f"{path} has duplicate residual_momentum keys; refusing append: {dupes.head(5).to_dicts()}")
-    if "is_provisional" in sig.columns and sig.schema["is_provisional"] != pl.Boolean:
+    if sig.schema["is_provisional"] != pl.Boolean:
         raise RuntimeError(f"{path} is_provisional must be boolean")
-
-
-def _with_provisional_provenance(sig: pl.DataFrame) -> pl.DataFrame:
-    """Normalize provenance, conservatively upgrading a legacy three-column table."""
-    if "is_provisional" in sig.columns:
-        return sig.with_columns(pl.col("is_provisional").cast(pl.Boolean).fill_null(True))
-    return (
-        sig.with_columns(pl.col("ts_ms").max().over("symbol").alias("_legacy_symbol_max"))
-        .with_columns(
-            (pl.col("ts_ms") >= pl.col("_legacy_symbol_max") - LEGACY_PROVISIONAL_TAIL_DAYS * MS_PER_DAY).alias(
-                "is_provisional"
-            )
-        )
-        .drop("_legacy_symbol_max")
-    )
 
 
 def _assert_append_overlap_matches(
@@ -301,10 +233,8 @@ def _append_signal(
     if append_overlap_days < 1:
         raise ValueError("append_overlap_days must be positive")
     _validate_rmom_schema(existing, path=out_path)
-    existing = (
-        _with_provisional_provenance(existing)
-        .select(["symbol", "ts_ms", "residual_momentum", "is_provisional"])
-        .sort(["symbol", "ts_ms"])
+    existing = existing.select(["symbol", "ts_ms", "residual_momentum", "is_provisional"]).sort(
+        ["symbol", "ts_ms"]
     )
     if existing.is_empty():
         sig = _compute_signal(root, start=START, end=end, klines_dataset=klines_dataset)

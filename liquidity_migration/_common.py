@@ -21,11 +21,6 @@ MS_PER_MINUTE = 60_000
 MS_PER_HOUR = 3_600_000
 MS_PER_DAY = 86_400_000
 
-# Order statuses that are still in-flight (not terminal): execution and planning
-# code must not double-submit them or treat them as flat.
-PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
-
-
 def exact_duration_ms(
     *,
     milliseconds: Any = 0,
@@ -62,15 +57,6 @@ def exact_duration_ms(
     return int(integral)
 
 
-def exact_lookback_cutoff_ms(anchor_ts_ms: int, **duration: Any) -> int:
-    """Exact cutoff for timestamp lookbacks: ``anchor_ts_ms - duration``.
-
-    This intentionally does no UTC day/hour flooring. Callers doing daily-bar
-    features should use ``calendar_roll`` / ``calendar_shift`` instead.
-    """
-    return int(anchor_ts_ms) - exact_duration_ms(**duration)
-
-
 def is_weekend_ms(ts_ms: int) -> bool:
     """True when the UTC day containing ``ts_ms`` is Saturday or Sunday.
 
@@ -92,10 +78,7 @@ def finite_float(value: Any, *, default: float | None = None) -> float | None:
 
 
 def coerce_int(value: Any, *, default: int = 0) -> int:
-    """Coerce `value` to an int, returning `default` (0) on a missing/invalid value.
-
-    Shared single implementation for the trivial parse that reconciliation.py
-    previously re-defined as a private ``_int`` (quality-dup-9)."""
+    """Coerce ``value`` to int, returning ``default`` when invalid."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -111,16 +94,6 @@ def pct(value: Any, *, invalid: str = "") -> str:
 def safe_name(name: str, *, fallback: str = "auto") -> str:
     """Slugify `name` for use as a file or path component."""
     return re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(name).strip()).strip("-") or fallback
-
-
-def parse_date(value: str | None) -> date | None:
-    """Parse an ISO date/datetime string to a UTC `date`, or None if empty."""
-    if not value:
-        return None
-    text = str(value).replace("Z", "+00:00")
-    if "T" in text or "+" in text:
-        return datetime.fromisoformat(text).astimezone(UTC).date()
-    return date.fromisoformat(text[:10])
 
 
 def date_boundary_ms(value: str) -> int | None:

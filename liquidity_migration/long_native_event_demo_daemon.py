@@ -18,10 +18,11 @@ from typing import Any, Callable
 from .bybit_market_data import BybitMarketData, BybitPublicTickerStream
 from .config import ResearchConfig
 from .deterministic_runtime import Clock, SystemClock
+from .kline_follower import FollowerKlineStreamManager, build_kline_follower
 from .kline_stream_manager import KlineStreamManager
+from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME
 from .long_native_event_demo import (
     LongNativeDemoCycleConfig,
-    _long_demo_event_config,
     _validate_long_demo_config,
     format_long_demo_cycle_summary,
     run_long_native_demo_cycle,
@@ -37,11 +38,6 @@ from .strategy_event_outcome import JsonlStrategyEventDecisionTape
 from .strategy_target_replay import (
     JsonlTargetSchedulingCaptureTape,
     PublishedTargetCyclePayload,
-)
-from .natural_run_config import (
-    NaturalRunConfig,
-    load_natural_run_config,
-    validate_natural_runtime_binding,
 )
 
 
@@ -68,13 +64,8 @@ def _validate_long_daemon_startup(config: LongNativeDemoCycleConfig) -> None:
     has_account_execution_root = bool(str(config.account_execution_root or "").strip())
     if not has_account_inbox or not has_account_execution_root:
         raise ValueError(
-            "LONG daemon startup is target-only and requires account_intent_inbox_root "
-            "and account_execution_root"
+            "LONG daemon startup is target-only and requires account_intent_inbox_root and account_execution_root"
         )
-
-
-class StrategyEvidenceEpochError(RuntimeError):
-    """A durable natural-evidence event could not reach its complete outcome."""
 
 
 class LongNativeDemoDaemon:
@@ -88,6 +79,9 @@ class LongNativeDemoDaemon:
     # Sleeve identity used in cycle-failure logs. Subclasses override.
     _sleeve_label = "long"
 
+    def _strategy_profile_name(self) -> str:
+        return LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME
+
     def __init__(
         self,
         data_root: str | Path,
@@ -95,7 +89,7 @@ class LongNativeDemoDaemon:
         config: ResearchConfig,
         demo_config: LongNativeDemoCycleConfig | None = None,
         interval_seconds: float = 60.0,
-        cycle_runner: Callable[..., dict[str, Any]] = run_long_native_demo_cycle,
+        cycle_runner: Callable[..., PublishedTargetCyclePayload] = run_long_native_demo_cycle,
         kline_stream_manager: Any | None = None,
         kline_stream_manager_factory: Callable[[ResearchConfig, LongNativeDemoCycleConfig, Path], Any] | None = None,
         ticker_cache: TickerCache | None = None,
@@ -109,8 +103,6 @@ class LongNativeDemoDaemon:
         strategy_decision_recorder: JsonlStrategyEventDecisionTape | None = None,
         strategy_target_capture_path: str | Path | None = None,
         strategy_target_capture_recorder: JsonlTargetSchedulingCaptureTape | None = None,
-        natural_evidence_required: bool = False,
-        natural_run_config_path: str | Path | None = None,
     ) -> None:
         resolved_demo_config = demo_config or LongNativeDemoCycleConfig()
         long_target_producer = isinstance(resolved_demo_config, LongNativeDemoCycleConfig)
@@ -121,35 +113,6 @@ class LongNativeDemoDaemon:
             _validate_long_daemon_startup(resolved_demo_config)
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
-        if type(natural_evidence_required) is not bool:
-            raise TypeError("natural_evidence_required must be a bool")
-        natural_run_config: NaturalRunConfig | None = None
-        if natural_evidence_required:
-            if resolved_demo_config.execution_environment != "demo":
-                raise ValueError("natural evidence mode is demo-only")
-            if natural_run_config_path is None:
-                raise ValueError("natural evidence mode requires natural_run_config_path")
-            natural_run_config = load_natural_run_config(natural_run_config_path)
-            if not str(resolved_demo_config.candidate_universe_file or "").strip():
-                raise ValueError(
-                    "natural evidence mode requires candidate_universe_file"
-                )
-            if strategy_target_capture_path is None and strategy_target_capture_recorder is None:
-                raise ValueError(
-                    "natural evidence mode requires an explicit shared target capture"
-                )
-            natural_runtime = validate_natural_runtime_binding(
-                natural_run_config,
-                sleeve=self._sleeve_label,
-                execution_environment=resolved_demo_config.execution_environment,
-                data_root=data_root,
-                candidate_universe_path=resolved_demo_config.candidate_universe_file,
-                target_capture_path=strategy_target_capture_path,
-            )
-        elif natural_run_config_path is not None:
-            raise ValueError(
-                "natural_run_config_path is valid only when natural evidence is required"
-            )
         self.data_root = Path(data_root).expanduser()
         self.config = config
         self.demo_config = resolved_demo_config
@@ -157,49 +120,23 @@ class LongNativeDemoDaemon:
         self.interval_seconds = float(interval_seconds)
         self._cycle_runner = cycle_runner
         self._clock = clock or SystemClock()
-        self._natural_evidence_required = natural_evidence_required
-        self._natural_run_config = natural_run_config
-        self._natural_pre_window_skips = 0
-        self._natural_post_window_skips = 0
-        self._natural_pre_window_logged = False
-        self._natural_post_window_logged = False
-        recorder = strategy_event_recorder or JsonlStrategyEventTape(
-            natural_runtime.event_tape_path
-            if natural_run_config is not None
-            else self.data_root / "strategy_event_tape.jsonl"
-        )
-        self._event_clock: DeterministicEventClock[dict[str, Any] | None] = DeterministicEventClock(
+        recorder = strategy_event_recorder or JsonlStrategyEventTape(self.data_root / "strategy_event_tape.jsonl")
+        self._event_clock: DeterministicEventClock[PublishedTargetCyclePayload | None] = DeterministicEventClock(
             clock=self._clock,
             recorder=recorder,
         )
         self._decision_recorder = strategy_decision_recorder or JsonlStrategyEventDecisionTape(
-            natural_runtime.outcome_tape_path
-            if natural_run_config is not None
-            else self.data_root / "strategy_event_decision_tape.jsonl"
+            self.data_root / "strategy_event_decision_tape.jsonl"
         )
         if strategy_target_capture_path is not None and strategy_target_capture_recorder is not None:
-            raise ValueError(
-                "strategy_target_capture_path and strategy_target_capture_recorder are mutually exclusive"
-            )
-        self._target_capture_recorder = (
-            strategy_target_capture_recorder
-            or JsonlTargetSchedulingCaptureTape(
-                natural_run_config.target_capture_path
-                if natural_run_config is not None
-                else strategy_target_capture_path
-                or self.data_root / "strategy_target_scheduling_capture.jsonl"
-            )
+            raise ValueError("strategy_target_capture_path and strategy_target_capture_recorder are mutually exclusive")
+        self._target_capture_recorder = strategy_target_capture_recorder or JsonlTargetSchedulingCaptureTape(
+            strategy_target_capture_path or self.data_root / "strategy_target_scheduling_capture.jsonl"
         )
         self._strategy_evidence_errors = 0
-        self._strategy_event_source = (
-            f"{self._sleeve_label}:{self.demo_config.execution_environment}"
-        )
+        self._strategy_event_source = f"{self._sleeve_label}:{self.demo_config.execution_environment}"
         self._cycle_event_sequence = max(
-            (
-                event.source_sequence
-                for event in recorder.prior_events
-                if event.source == self._strategy_event_source
-            ),
+            (event.source_sequence for event in recorder.prior_events if event.source == self._strategy_event_source),
             default=0,
         )
         self._pending_cycle_kind = "startup"
@@ -222,8 +159,10 @@ class LongNativeDemoDaemon:
         # operator model and the 90-day lookback bootstrap is worth doing once
         # at startup rather than re-paying it.
         self._kline_stream_manager: Any | None = kline_stream_manager
-        self._kline_stream_manager_factory = kline_stream_manager_factory or _default_long_kline_stream_manager_factory
-        self._kline_stream_manager_failed = False
+        self._kline_stream_manager_factory = _select_long_kline_stream_manager_factory(
+            resolved_demo_config,
+            kline_stream_manager_factory,
+        )
         self._ticker_cache: TickerCache = ticker_cache if ticker_cache is not None else TickerCache()
         self._ticker_stream: Any | None = None
         # Serializes _ticker_stream open/close across the seed/reconcile/watchdog threads
@@ -279,48 +218,6 @@ class LongNativeDemoDaemon:
             if not isinstance(self.demo_config, LongNativeDemoCycleConfig):
                 raise TypeError("LONG daemon config changed to an incompatible type")
             _validate_long_daemon_startup(self.demo_config)
-        if self._natural_run_config is not None:
-            # Reopen the immutable config and all of its frozen sources at the
-            # last boundary before public-market resources or scheduling work.
-            reopened = load_natural_run_config(self._natural_run_config.path)
-            if reopened != self._natural_run_config:
-                raise ValueError("natural run config changed after daemon construction")
-            validate_natural_runtime_binding(
-                reopened,
-                sleeve=self._sleeve_label,
-                execution_environment=self.demo_config.execution_environment,
-                data_root=self.data_root,
-                candidate_universe_path=self.demo_config.candidate_universe_file,
-                target_capture_path=reopened.target_capture_path,
-            )
-            # Capture the values this process actually resolved, not merely the
-            # environment/unit files frozen before startup.  This remains ahead
-            # of every public-market client, manager, worker, and first event.
-            from .natural_effective_config import (
-                write_or_verify_effective_runtime_config,
-            )
-
-            strategy_config = (
-                _long_demo_event_config(self.demo_config.strategy_profile)
-                if self._long_target_producer
-                else None
-            )
-            write_or_verify_effective_runtime_config(
-                natural_run_config=reopened,
-                sleeve=self._sleeve_label,
-                research_config=self.config,
-                sleeve_config=self.demo_config,
-                strategy_config=strategy_config,
-                scheduling={
-                    "event_driven_cycle": self._event_driven_cycle,
-                    "interval_seconds": self.interval_seconds,
-                    "min_cycle_interval_seconds": self._min_cycle_interval_seconds,
-                    "state_cache_stale_seconds": self._state_cache_stale_seconds,
-                    "ticker_reconcile_interval_seconds": (
-                        self._ticker_reconcile_interval_seconds
-                    ),
-                },
-            )
         # Same reasoning as EventDemoDaemon.run: attach the package stderr
         # handler before bootstrap so the operator can see progress.
         _ensure_default_log_handler()
@@ -330,7 +227,7 @@ class LongNativeDemoDaemon:
             self.data_root,
             self.interval_seconds,
             self.demo_config.execution_environment,
-            self.demo_config.strategy_profile,
+            self._strategy_profile_name(),
             self.demo_config.notional_multiplier,
             self.demo_config.entry_leverage,
         )
@@ -338,7 +235,7 @@ class LongNativeDemoDaemon:
         # Wire the WS bar signal so the run loop fires on fresh data; if there's
         # no kline manager, fall back to the timer grid (no bar events arrive).
         if self._kline_stream_manager is not None:
-            if self._event_driven_cycle and hasattr(self._kline_stream_manager, "set_cycle_wake_event"):
+            if self._event_driven_cycle:
                 self._kline_stream_manager.set_cycle_wake_event(self._bar_event)
         elif self._event_driven_cycle:
             self._event_driven_cycle = False
@@ -399,8 +296,6 @@ class LongNativeDemoDaemon:
             "reconcile_errors": self._reconcile_errors,
             "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
             "strategy_evidence_errors": self._strategy_evidence_errors,
-            "natural_pre_window_skips": self._natural_pre_window_skips,
-            "natural_post_window_skips": self._natural_post_window_skips,
         }
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
@@ -413,27 +308,6 @@ class LongNativeDemoDaemon:
         """Dispatch a live arrival through the shared replay/event-clock path."""
 
         event_ts_ns = self._clock.wall_time_ns()
-        natural = self._natural_run_config
-        if natural is not None and event_ts_ns < natural.t0_ns:
-            self._natural_pre_window_skips += 1
-            if not self._natural_pre_window_logged:
-                _logger.info(
-                    "%s natural producer armed but not dispatching before T0=%d",
-                    self._sleeve_label,
-                    natural.t0_ns,
-                )
-                self._natural_pre_window_logged = True
-            return
-        if natural is not None and event_ts_ns >= natural.t1_ns:
-            self._natural_post_window_skips += 1
-            if not self._natural_post_window_logged:
-                _logger.info(
-                    "%s natural producer reached exclusive T1=%d; no further events will be dispatched",
-                    self._sleeve_label,
-                    natural.t1_ns,
-                )
-                self._natural_post_window_logged = True
-            return
         self._cycle_event_sequence += 1
         event = StrategyEvent(
             event_ts_ns=event_ts_ns,
@@ -443,28 +317,11 @@ class LongNativeDemoDaemon:
             kind=self._pending_cycle_kind,
             payload={
                 "execution_environment": self.demo_config.execution_environment,
-                "strategy_profile": self.demo_config.strategy_profile,
-                "natural_evidence_required": self._natural_evidence_required,
-                **(
-                    {
-                        "natural_freeze_id": natural.freeze_id,
-                        "natural_t0_ns": natural.t0_ns,
-                        "natural_t1_ns": natural.t1_ns,
-                    }
-                    if natural is not None
-                    else {}
-                ),
+                "strategy_profile": self._strategy_profile_name(),
             },
         )
         payload = self._event_clock.dispatch(event, self._execute_cycle_event)
-        if type(payload) is not PublishedTargetCyclePayload:
-            # Test/custom callbacks may retain the legacy plain-dict shape, but
-            # only the production typed result carries non-serialized durable
-            # publication receipts. Never infer evidence from dictionary keys.
-            if self._natural_evidence_required:
-                raise StrategyEvidenceEpochError(
-                    "natural evidence callback did not return typed durable publication receipts"
-                )
+        if payload is None:
             return
         try:
             capture = self._target_capture_recorder.append_from_cycle(
@@ -482,14 +339,10 @@ class LongNativeDemoDaemon:
                 self._sleeve_label,
                 exc,
             )
-            if self._natural_evidence_required:
-                raise StrategyEvidenceEpochError(
-                    "natural evidence target capture/outcome append failed"
-                ) from exc
 
-    def _execute_cycle_event(self, event: StrategyEvent) -> dict[str, Any] | None:
+    def _execute_cycle_event(self, event: StrategyEvent) -> PublishedTargetCyclePayload | None:
         cycle_started = time.monotonic()
-        payload: dict[str, Any] | None = None
+        payload: PublishedTargetCyclePayload | None = None
         kline_store = self._kline_stream_manager.store() if self._kline_stream_manager is not None else None
         cycle_kwargs: dict[str, Any] = {
             "kline_store": kline_store,
@@ -501,21 +354,20 @@ class LongNativeDemoDaemon:
             "now_ms": event.event_ts_ns // 1_000_000,
         }
         try:
-            payload = self._cycle_runner(
+            result = self._cycle_runner(
                 self.data_root,
                 config=self.config,
                 demo_config=self.demo_config,
                 **cycle_kwargs,
                 **self._extra_cycle_kwargs(),
             )
+            if type(result) is not PublishedTargetCyclePayload:
+                raise TypeError("cycle runner must return PublishedTargetCyclePayload")
+            payload = result
             self._cycles_run += 1
         except Exception as exc:  # noqa: BLE001
             self._cycle_errors += 1
             _logger.exception("%s cycle failed: %s", self._sleeve_label, exc)
-            if self._natural_evidence_required:
-                raise StrategyEvidenceEpochError(
-                    "natural evidence strategy callback failed"
-                ) from exc
         elapsed = time.monotonic() - cycle_started
         self._max_cycle_seconds = max(self._max_cycle_seconds, elapsed)
         if payload is not None and self._kline_stream_manager is not None:
@@ -524,12 +376,15 @@ class LongNativeDemoDaemon:
             except Exception as exc:  # noqa: BLE001
                 _logger.debug("kline_stream_manager stats fetch failed: %s", exc)
         if payload is not None:
-            payload.setdefault("ws_state", {
-                "ticker_cache": self._ticker_cache.stats(),
-                "reconciles_total": self._reconciles_total,
-                "reconcile_errors": self._reconcile_errors,
-                "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
-            })
+            payload.setdefault(
+                "ws_state",
+                {
+                    "ticker_cache": self._ticker_cache.stats(),
+                    "reconciles_total": self._reconciles_total,
+                    "reconcile_errors": self._reconcile_errors,
+                    "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
+                },
+            )
         if payload is not None:
             try:
                 print(self._format_cycle_summary(payload), flush=True)
@@ -700,8 +555,7 @@ class LongNativeDemoDaemon:
             self._ws_ticker_stale_ticks += 1
             if not self._ws_ticker_stale_warned:
                 _logger.warning(
-                    "long ticker WS silent for %.0fs (threshold %.0fs); "
-                    "cycle falls back to REST tickers",
+                    "long ticker WS silent for %.0fs (threshold %.0fs); cycle falls back to REST tickers",
                     ticker_silence,
                     threshold,
                 )
@@ -730,10 +584,9 @@ class LongNativeDemoDaemon:
             return
         if self._kline_stream_manager is not None:
             try:
-                self._safe_manager_start(self._kline_stream_manager)
+                self._kline_stream_manager.start(shutdown_event=self._shutdown)
             except Exception as exc:  # noqa: BLE001
                 _logger.exception("long kline_stream_manager start failed: %s", exc)
-                self._kline_stream_manager_failed = True
                 self._kline_stream_manager = None
             return
         try:
@@ -744,28 +597,17 @@ class LongNativeDemoDaemon:
             )
         except Exception as exc:  # noqa: BLE001
             _logger.exception("long kline_stream_manager factory failed; degrading: %s", exc)
-            self._kline_stream_manager_failed = True
             return
         try:
-            self._safe_manager_start(manager)
+            manager.start(shutdown_event=self._shutdown)
         except Exception as exc:  # noqa: BLE001
             _logger.exception("long kline_stream_manager.start failed; degrading: %s", exc)
-            self._kline_stream_manager_failed = True
             try:
                 manager.stop()
             except Exception:  # noqa: BLE001
                 pass
             return
         self._kline_stream_manager = manager
-
-    def _safe_manager_start(self, manager: Any) -> None:
-        """Pass the daemon's shutdown event through to manager.start()
-        so a SIGTERM mid-bootstrap exits responsively. Backwards-
-        compatible with manager stubs that don't accept the kwarg."""
-        try:
-            manager.start(shutdown_event=self._shutdown)
-        except TypeError:
-            manager.start()
 
     def _stop_kline_stream_manager(self) -> None:
         manager = self._kline_stream_manager
@@ -820,14 +662,11 @@ class LongNativeDemoDaemon:
             self._pending_cycle_kind = "timer"
 
 
-# The long sleeve actually trades the top-10 USDT-perps by 24h turnover
-# (LongNativeDemoCycleConfig.universe_size=10). Subscribing the kline
-# manager to the full 567-symbol universe blew the 1G systemd cap (1.15M
-# bars × ~230b = 280MB just for the store, plus polars frames + ticker
-# cache). Scope the manager to the top-50 by turnover — 5x headroom for
-# rank shifts between universe-refresh ticks, and the cycle's REST
-# fallback still covers anything that drops in unexpectedly.
-_LONG_KLINE_UNIVERSE_SIZE = 120  # ls-4: store must cover the 120-name median-rank superset; ~66MB — see RSS prereq
+# The strategy trades a 50-name median-turnover universe from a 120-name
+# 24h-turnover superset. Streaming the full venue universe breaches the small
+# VPS memory budget, so the manager follows that superset and retains REST
+# fallback for names that move into it between refreshes.
+_LONG_KLINE_UNIVERSE_SIZE = 120
 
 
 def _build_long_kline_universe(
@@ -839,7 +678,7 @@ def _build_long_kline_universe(
 
     Returned to KlineStreamManager._fetch_universe via the manager's
     ``universe_fetcher`` hook. Hourly refresh in the manager re-runs this,
-    so newly-promoted symbols join the bootstrap+WS stream within the
+    so newly admitted symbols join the bootstrap+WS stream within the
     refresh interval. Anything not in the manager's universe falls back
     to per-cycle REST on demand."""
     try:
@@ -889,6 +728,29 @@ def _default_long_kline_stream_manager_factory(
         stale_reconnect_seconds=demo_config.ws_klines_stale_reconnect_seconds,
         universe_fetcher=universe_fetcher,
     )
+
+
+def _follower_long_kline_stream_manager_factory(
+    config: ResearchConfig,
+    demo_config: LongNativeDemoCycleConfig,
+    cache_root: Path,
+) -> FollowerKlineStreamManager:
+    del config
+    return build_kline_follower(
+        leader_root=demo_config.klines_follow_root,
+        follower_root=cache_root,
+    )
+
+
+def _select_long_kline_stream_manager_factory(
+    demo_config: LongNativeDemoCycleConfig,
+    explicit: Callable[..., Any] | None,
+) -> Callable[..., Any]:
+    if explicit is not None:
+        return explicit
+    if demo_config.klines_follow_root:
+        return _follower_long_kline_stream_manager_factory
+    return _default_long_kline_stream_manager_factory
 
 
 def _default_long_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTickerStream:

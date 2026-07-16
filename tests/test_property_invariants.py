@@ -1,12 +1,4 @@
-"""Generative (stdlib-random) invariant tests for the core financial/PIT math.
-
-A new bug-finding method (continuous-audit-loop iter-8, 2026-06-18): rather than
-example-based tests, generate many random inputs and assert mathematical invariants
-that must hold for ANY input. This catches edge cases static review and fixed-fixture
-tests miss, and permanently hardens the net. Pure standard library — no new dependency
-(the repo's dev deps are intentionally minimal; `random.Random` is already used in the
-suite, e.g. test_r1_robustness).
-"""
+"""Randomized invariants for core financial and PIT math."""
 from __future__ import annotations
 
 import math

@@ -89,8 +89,6 @@ def test_owner_binds_route_before_any_runtime_resource(
             str(tmp_path / "rules.json"),
             "--risk-policy-file",
             str(tmp_path / "risk.json"),
-            "--calibration-file",
-            str(tmp_path / "calibration.json"),
             "--equity-usdt",
             "10000",
         ]
@@ -121,6 +119,41 @@ def test_owner_binds_route_before_any_runtime_resource(
         runner.main(argv)
 
     assert calls == ["route"]
+
+
+def test_paper_owner_rejects_private_credentials_before_route_or_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import liquidity_migration.account_paper_runner as runner
+
+    monkeypatch.setenv("INVOCATION_ID", "ab" * 16)
+    monkeypatch.setenv("REAL_MONEY", "false")
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "must-not-cross-paper-boundary")
+    monkeypatch.setattr(
+        runner,
+        "ensure_account_route",
+        lambda **_kwargs: pytest.fail("paper route opened before credential rejection"),
+    )
+    argv = [
+        "--account-root",
+        str(tmp_path / "account"),
+        "--inbox-root",
+        str(tmp_path / "inbox"),
+        "--capture-root",
+        str(tmp_path / "capture"),
+        "--symbols-file",
+        str(tmp_path / "symbols.json"),
+        "--demo-rules-file",
+        str(tmp_path / "rules.json"),
+        "--risk-policy-file",
+        str(tmp_path / "risk.json"),
+        "--equity-usdt",
+        "10000",
+    ]
+
+    with pytest.raises(RuntimeError, match="paper owner received private exchange credentials"):
+        runner.main(argv)
 
 
 def test_owner_initializes_deterministic_canonical_mirrors_and_reader_validates(

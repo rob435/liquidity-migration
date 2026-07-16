@@ -6,8 +6,6 @@ from typing import Any
 
 import pytest
 
-import liquidity_migration.long_native_event_demo_daemon as daemon_module
-import liquidity_migration.strategy_target_replay as replay_module
 from liquidity_migration.account_intent_client import (
     AccountTargetPublisher,
     ExitFirstPublication,
@@ -25,25 +23,17 @@ from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
 from liquidity_migration.long_native_event_demo_daemon import (
     LongNativeDemoDaemon,
-    StrategyEvidenceEpochError,
-)
-from liquidity_migration.natural_run_config import (
-    NaturalRunConfig,
-    NaturalSleeveRuntime,
 )
 from liquidity_migration.strategy_event_clock import JsonlStrategyEventTape, StrategyEvent
 from liquidity_migration.strategy_event_outcome import (
     JsonlStrategyEventDecisionTape,
     load_strategy_event_decision_tape,
 )
-from liquidity_migration.strategy_event_parity import build_strategy_event_parity_receipt
 from liquidity_migration.strategy_target_replay import (
     JsonlTargetSchedulingCaptureTape,
     PublishedTargetCyclePayload,
     capture_event_from_cycle,
-    load_offline_target_scheduling_replay_manifest,
     load_target_scheduling_capture,
-    run_offline_target_scheduling_replay,
 )
 
 
@@ -54,44 +44,6 @@ def _route(tmp_path: Path, *, environment: str = "demo") -> AccountRoute:
         account_root=tmp_path / "account",
         inbox_root=tmp_path / "inbox",
     )
-
-
-def _natural_runtime_config(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    root: Path,
-    candidate: Path,
-    capture: Path,
-) -> Path:
-    config_path = root / "natural-run-config.json"
-    config = NaturalRunConfig(
-        path=config_path,
-        freeze_manifest_path=root / "freeze.json",
-        freeze_manifest_file_sha256="a" * 64,
-        freeze_artifact_sha256="b" * 64,
-        freeze_id=f"natural-cutover-{'c' * 64}",
-        repository_root=root,
-        candidate_universe_path=candidate,
-        candidate_universe_file_sha256="d" * 64,
-        t0_ns=1,
-        t1_ns=10**20,
-        target_capture_path=capture,
-        sleeves={
-            "long": NaturalSleeveRuntime(
-                data_root=root,
-                event_tape_path=root / "strategy_event_tape.jsonl",
-                outcome_tape_path=root / "strategy_event_decision_tape.jsonl",
-            ),
-            "continuous": NaturalSleeveRuntime(
-                data_root=root,
-                event_tape_path=root / "strategy_event_tape.jsonl",
-                outcome_tape_path=root / "strategy_event_decision_tape.jsonl",
-            ),
-        },
-        artifact_sha256="e" * 64,
-    )
-    monkeypatch.setattr(daemon_module, "load_natural_run_config", lambda _path: config)
-    return config_path
 
 
 def _entry_intent(*, sleeve: SleeveAdapterKind = SleeveAdapterKind.LONG, suffix: str = "a"):
@@ -342,120 +294,6 @@ def test_daemon_callback_or_publication_failure_leaves_outcome_missing(
     assert publication_daemon._strategy_evidence_errors == 1
 
 
-def test_natural_evidence_mode_stops_after_callback_gap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    route = _route(tmp_path / "route")
-
-    def crash(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        raise RuntimeError("callback failed")
-
-    root = tmp_path / "natural-callback-failure"
-    candidate = tmp_path / "candidate.json"
-    capture = root / "shared-capture.jsonl"
-    config_path = _natural_runtime_config(
-        monkeypatch,
-        root=root,
-        candidate=candidate,
-        capture=capture,
-    )
-    daemon = LongNativeDemoDaemon(
-        root,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=LongNativeDemoCycleConfig(
-            execution_environment="demo",
-            account_intent_inbox_root=route.inbox_root,
-            account_execution_root=route.account_root,
-            candidate_universe_file=str(candidate),
-            ws_klines_enabled=False,
-        ),
-        cycle_runner=crash,
-        clock=VirtualClock(current_wall_ns=1_000_000_000),
-        strategy_target_capture_path=capture,
-        natural_evidence_required=True,
-        natural_run_config_path=config_path,
-    )
-
-    with pytest.raises(StrategyEvidenceEpochError, match="callback failed"):
-        daemon._run_one_cycle()
-    assert len(JsonlStrategyEventTape(root / "strategy_event_tape.jsonl").prior_events) == 1
-    assert load_strategy_event_decision_tape(
-        root / "strategy_event_decision_tape.jsonl"
-    )[0] == ()
-
-
-def test_natural_evidence_mode_stops_after_capture_or_outcome_gap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    route = _route(tmp_path / "route")
-    result = _published_cycle(route)
-
-    class FailingCapture:
-        def append_from_cycle(self, *_args: Any, **_kwargs: Any) -> None:
-            raise OSError("capture fsync failed")
-
-    common_config = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=route.inbox_root,
-        account_execution_root=route.account_root,
-        candidate_universe_file=str(tmp_path / "candidate.json"),
-        ws_klines_enabled=False,
-    )
-    capture_root = tmp_path / "natural-capture-failure"
-    capture_path = capture_root / "shared-capture.jsonl"
-    capture_config_path = _natural_runtime_config(
-        monkeypatch,
-        root=capture_root,
-        candidate=tmp_path / "candidate.json",
-        capture=capture_path,
-    )
-    capture_daemon = LongNativeDemoDaemon(
-        capture_root,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=common_config,
-        cycle_runner=lambda *_args, **_kwargs: result,
-        clock=VirtualClock(current_wall_ns=2_000_000_000),
-        strategy_target_capture_recorder=FailingCapture(),  # type: ignore[arg-type]
-        natural_evidence_required=True,
-        natural_run_config_path=capture_config_path,
-    )
-    with pytest.raises(StrategyEvidenceEpochError, match="capture/outcome"):
-        capture_daemon._run_one_cycle()
-
-    class FailingOutcome:
-        def append(self, *_args: Any, **_kwargs: Any) -> None:
-            raise OSError("outcome fsync failed")
-
-    outcome_root = tmp_path / "natural-outcome-failure"
-    outcome_capture = outcome_root / "shared-capture.jsonl"
-    outcome_config_path = _natural_runtime_config(
-        monkeypatch,
-        root=outcome_root,
-        candidate=tmp_path / "candidate.json",
-        capture=outcome_capture,
-    )
-    outcome_daemon = LongNativeDemoDaemon(
-        outcome_root,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=common_config,
-        cycle_runner=lambda *_args, **_kwargs: result,
-        clock=VirtualClock(current_wall_ns=3_000_000_000),
-        strategy_decision_recorder=FailingOutcome(),  # type: ignore[arg-type]
-        strategy_target_capture_path=outcome_capture,
-        natural_evidence_required=True,
-        natural_run_config_path=outcome_config_path,
-    )
-    with pytest.raises(StrategyEvidenceEpochError, match="capture/outcome"):
-        outcome_daemon._run_one_cycle()
-    captures, _ = load_target_scheduling_capture(
-        outcome_capture
-    )
-    assert len(captures) == 1
-    assert load_strategy_event_decision_tape(
-        outcome_root / "strategy_event_decision_tape.jsonl"
-    )[0] == ()
-
-
 def test_continuous_daemon_records_successful_no_target_cycle(
     tmp_path: Path,
 ) -> None:
@@ -501,226 +339,3 @@ def test_continuous_daemon_records_successful_no_target_cycle(
     assert outcomes[0].decision_keys == ()
     assert captures[0].sleeve == "continuous"
     assert captures[0].requests == ()
-
-
-def test_offline_replay_emits_three_comparator_ready_isolated_tape_sets(
-    tmp_path: Path,
-) -> None:
-    route = _route(tmp_path / "route")
-    capture_path = tmp_path / "frozen-capture.jsonl"
-    capture = JsonlTargetSchedulingCaptureTape(capture_path)
-    capture.append_from_cycle(_event(1), _published_cycle(route), sleeve="long")
-    capture.append_from_cycle(
-        _event(1, sleeve="continuous", timestamp=1_500_000_000),
-        _published_cycle(route, sleeve=SleeveAdapterKind.CONTINUOUS),
-        sleeve="continuous",
-    )
-    capture.append_from_cycle(
-        _event(2),
-        _published_cycle(route, with_entry=False),
-        sleeve="long",
-    )
-    frozen_bytes = capture_path.read_bytes()
-    output_root = tmp_path / "offline-replay"
-
-    manifest = run_offline_target_scheduling_replay(
-        capture_path,
-        output_root=output_root,
-    )
-
-    assert manifest["evidence_scope"] == "captured_account_target_scheduling_only"
-    assert manifest["schema_version"] == 2
-    assert manifest["created_ts_ns"] > 0
-    assert manifest["source_capture"]["capture_event_count"] == 3
-    assert set(manifest["source_capture"]) >= {
-        "device",
-        "inode",
-        "mtime_ns",
-        "mode",
-        "uid",
-        "nlink",
-    }
-    assert (
-        load_offline_target_scheduling_replay_manifest(
-            output_root / "replay_manifest.json"
-        )
-        == manifest
-    )
-    event_tapes = {
-        environment: output_root / environment / "strategy_event_tape.jsonl"
-        for environment in ("historical", "paper", "demo")
-    }
-    decision_tapes = {
-        environment: output_root / environment / "strategy_event_decision_tape.jsonl"
-        for environment in ("historical", "paper", "demo")
-    }
-    replay_inputs = {
-        environment: output_root / environment / "replay_input.jsonl"
-        for environment in ("historical", "paper", "demo")
-    }
-    assert all(path.read_bytes() == frozen_bytes for path in replay_inputs.values())
-    assert all(
-        len((output_root / environment / "scheduled_target_requests.jsonl").read_text().splitlines()) == 3
-        for environment in ("historical", "paper", "demo")
-    )
-    parity = build_strategy_event_parity_receipt(
-        event_tapes,
-        decision_tapes=decision_tapes,
-        replay_inputs=replay_inputs,
-        source_normalizations={
-            environment: {
-                f"long:{environment}": "long:replay",
-                f"continuous:{environment}": "continuous:replay",
-            }
-            for environment in ("historical", "paper", "demo")
-        },
-        replay_manifest=output_root / "replay_manifest.json",
-    )
-    assert parity["strategy_event_replay_gate_passed"] is True
-    assert parity["replay_provenance"]["deployment_valid"] is True
-    assert parity["replay_provenance"]["canonical_source_capture"] == manifest[
-        "source_capture"
-    ]
-    assert any(
-        outcome.decision_keys == ()
-        for outcome in load_strategy_event_decision_tape(decision_tapes["demo"])[0]
-    )
-    assert not (output_root / "demo" / "account_route.json").exists()
-
-
-def test_offline_replay_rejects_input_mutation_existing_or_account_route_output(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    route = _route(tmp_path / "route")
-    capture_path = tmp_path / "frozen-capture.jsonl"
-    JsonlTargetSchedulingCaptureTape(capture_path).append_from_cycle(
-        _event(1),
-        _published_cycle(route),
-        sleeve="long",
-    )
-
-    existing = tmp_path / "existing"
-    existing.mkdir()
-    with pytest.raises(ValueError, match="must not already exist"):
-        run_offline_target_scheduling_replay(capture_path, output_root=existing)
-    with pytest.raises(ValueError, match="account route root"):
-        run_offline_target_scheduling_replay(
-            capture_path,
-            output_root=route.account_path / "offline-child",
-        )
-
-    original_loader = replay_module.load_target_scheduling_capture_bytes
-    called = False
-
-    def mutating_loader(data: bytes):  # noqa: ANN202
-        nonlocal called
-        result = original_loader(data)
-        if not called:
-            called = True
-            capture_path.write_bytes(capture_path.read_bytes() + b"\n")
-        return result
-
-    monkeypatch.setattr(
-        replay_module,
-        "load_target_scheduling_capture_bytes",
-        mutating_loader,
-    )
-    with pytest.raises(ValueError, match="changed while replay was running"):
-        run_offline_target_scheduling_replay(
-            capture_path,
-            output_root=tmp_path / "mutated-output",
-        )
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    (
-        Path("historical/strategy_event_tape.jsonl"),
-        Path("paper/strategy_event_decision_tape.jsonl"),
-        Path("demo/scheduled_target_requests.jsonl"),
-        Path("historical/replay_input.jsonl"),
-    ),
-)
-def test_replay_manifest_loader_reopens_every_published_file(
-    tmp_path: Path,
-    relative_path: Path,
-) -> None:
-    route = _route(tmp_path / "route")
-    capture_path = tmp_path / "frozen-capture.jsonl"
-    JsonlTargetSchedulingCaptureTape(capture_path).append_from_cycle(
-        _event(1),
-        _published_cycle(route),
-        sleeve="long",
-    )
-    output_root = tmp_path / "offline-replay"
-    run_offline_target_scheduling_replay(capture_path, output_root=output_root)
-    changed = output_root / relative_path
-    changed.chmod(0o600)
-    changed.write_bytes(changed.read_bytes() + b"\n")
-
-    with pytest.raises(ValueError, match="changed after replay publication"):
-        load_offline_target_scheduling_replay_manifest(
-            output_root / "replay_manifest.json"
-        )
-
-
-def test_replay_manifest_semantically_rejects_rehashed_schedule_forgery(
-    tmp_path: Path,
-) -> None:
-    route = _route(tmp_path / "route")
-    capture_path = tmp_path / "frozen-capture.jsonl"
-    JsonlTargetSchedulingCaptureTape(capture_path).append_from_cycle(
-        _event(1),
-        _published_cycle(route),
-        sleeve="long",
-    )
-    output_root = tmp_path / "offline-replay"
-    run_offline_target_scheduling_replay(capture_path, output_root=output_root)
-    schedule_path = output_root / "demo" / "scheduled_target_requests.jsonl"
-    row = json.loads(schedule_path.read_text(encoding="utf-8"))
-    row["scheduled_event"]["source_event_id"] = "forged-source-event"
-    row["schedule_hash"] = replay_module._schedule_hash(  # noqa: SLF001
-        row["prior_schedule_hash"], row["scheduled_event"]
-    )
-    schedule_path.write_bytes(replay_module.canonical_json(row) + b"\n")
-
-    manifest_path = output_root / "replay_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["environments"]["demo"]["scheduled_targets"] = {
-        **replay_module._file_identity(schedule_path),  # noqa: SLF001
-        "event_count": 1,
-        "chain_hash": row["schedule_hash"],
-    }
-    manifest["artifact_sha256"] = replay_module._self_hash(manifest)  # noqa: SLF001
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    manifest_path.chmod(0o600)
-
-    with pytest.raises(ValueError, match="schedules do not reproduce"):
-        load_offline_target_scheduling_replay_manifest(manifest_path)
-
-
-def test_replay_manifest_rejects_source_capture_hardlink_alias(
-    tmp_path: Path,
-) -> None:
-    route = _route(tmp_path / "route")
-    capture_path = tmp_path / "frozen-capture.jsonl"
-    JsonlTargetSchedulingCaptureTape(capture_path).append_from_cycle(
-        _event(1),
-        _published_cycle(route),
-        sleeve="long",
-    )
-    output_root = tmp_path / "offline-replay"
-    run_offline_target_scheduling_replay(capture_path, output_root=output_root)
-    (tmp_path / "capture-alias.jsonl").hardlink_to(capture_path)
-
-    with pytest.raises(
-        ValueError,
-        match="non-empty regular file|singly linked|hard-linked",
-    ):
-        load_offline_target_scheduling_replay_manifest(
-            output_root / "replay_manifest.json"
-        )

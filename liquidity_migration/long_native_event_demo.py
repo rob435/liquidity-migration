@@ -5,10 +5,9 @@ fall-through). It publishes desired component targets to the single account owne
 it has no credentials, private account snapshot, order submission, fill recovery,
 or sleeve-local Telegram path.
 
-Human-readable source of truth for the full promoted/demo lifecycle, including
-where long differs from continuous, is ``docs/promoted_trading_logic.md``. Keep
-this module focused on live long execution mechanics and keep lifecycle prose in
-that doc.
+The human-readable active-profile guide, including where LONG differs from
+CONTINUOUS, is ``docs/active_trading_logic.md``. This module owns target-planning
+mechanics; the account owner owns execution and accounting.
 
 Operating model
 ---------------
@@ -26,14 +25,12 @@ Operating model
   is explicit opt-in and is rejected if projected full-book initial margin
   exceeds the configured safety ceiling.
 - At 3 days the cycle publishes a zero component target for the time-stop.
-- Planning reads the canonical account projection plus terminal legacy rows only
-  so historical cooldowns survive the cutover.
+- Planning reads only the canonical account projection.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -63,7 +60,6 @@ from .account_route import require_account_route
 from .account_service import RequestedIntent, SleeveAdapterKind
 from .account_strategy_state import (
     canonical_strategy_trade_rows,
-    replace_legacy_open_rows,
     target_reservation_rows,
     terminal_entry_attempt_keys,
 )
@@ -88,47 +84,25 @@ from .execution_environment import (
     account_id_for_environment,
     execution_environment,
 )
-from .long_native import LongNativeConfig, _classify_entry, _fc_atr_available, _vol_target_scale, build_long_features
-from .storage import exclusive_file_lock, read_dataset, write_dataset
-from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID, long_trade_id
+from .long_native import LongNativeConfig, _classify_entry, _vol_target_scale, build_long_features, long_v11a_profile
+from .storage import exclusive_file_lock, write_dataset
+from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME, long_trade_id
 from .strategy_targets import component_target_intent
 from .strategy_target_replay import PublishedTargetCyclePayload
 from .universe import build_current_universe_table
 
 
-_logger = logging.getLogger("liquidity_migration.long_native_event_demo")
-
-# The single promoted live profile. Per owner: profile name is `LongV11aDivWeekendVol`.
-LONG_DEMO_STRATEGY_PROFILES = ("LongV11aDivWeekendVol",)
-LONG_DEMO_STRATEGY_PROFILE_CHOICES = LONG_DEMO_STRATEGY_PROFILES
-
 # Signals older than this aren't acted on. Without this bound a missed-cycle
 # event would later trigger a stale fill long after the retrace window closed.
 SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
 
-# long-sleeve-2: the FC gate `today_volume_rank <= fc_top_volume_rank_max` ranks
-# turnover over WHATEVER symbols build_long_features saw — the full per-venue PIT
-# universe in the backtest, but only the ~universe_superset_size live superset in
-# the demo cycle (see the CONTRACT note in long_native.build_long_features). A
-# name ranked just inside the cutoff on the superset can fall outside it over the
-# full universe, so the live book can fire an FC candidate the backtest would not.
-# This is observability ONLY: when a fired candidate's live rank lands within this
-# margin of the cutoff (the rank-boundary band where the denominator difference can
-# flip membership), emit a telemetry line so the divergence is auditable. It does
-# NOT change which candidates fire or how they are sized.
-FC_VOLUME_RANK_TELEMETRY_MARGIN = 3
-
 
 @dataclass(frozen=True, slots=True)
 class LongNativeDemoCycleConfig:
-    # Universe: top-50 by trailing 90d turnover. MUST match the deployed strategy
-    # config (_v11a_long_native_config().universe_size) — div promotion 2026-05-30
-    # widened both 10->50. test_demo_universe_matches_strategy guards the sync.
-    universe_size: int = 50
-    universe_superset_size: int = 120  # ls-4: pool ranked by 90d-median turnover, truncated to universe_size
-    lookback_days: int = 100  # ls-4: so >=90 daily bars survive the trims and turnover_median_90d populates
+    universe_superset_size: int = 120  # ranked by 90-day median turnover
+    lookback_days: int = 100  # retain at least 90 daily bars after trimming
     workers: int = 8
-    # Per-position notional scaling. The default is the validated 1x research
+    # Per-position notional scaling. The default is the 1x research-profile
     # sizing; levered demo sizing must be passed explicitly and pass the
     # projected full-book initial-margin guard below.
     notional_multiplier: float = 1.0
@@ -151,12 +125,14 @@ class LongNativeDemoCycleConfig:
     # fails if a frozen symbol disappears and ignores post-freeze listings.
     candidate_universe_file: str = ""
     data_name: str = "long-native-event-demo"
-    strategy_profile: str = "LongV11aDivWeekendVol"
     # Daemon constructs a KlineStreamManager to feed an in-memory store. The
     # long sleeve's small universe makes this less critical than continuous, but
     # consistency simplifies operator mental model and lookback_days=90 makes
     # the bootstrap the dominant startup cost worth doing once.
     ws_klines_enabled: bool = True
+    # A co-located paper producer follows the demo producer's flushed snapshot
+    # read-only, avoiding a second 120-symbol, 100-day bootstrap and WS pool.
+    klines_follow_root: str = ""
     ws_klines_bootstrap_workers: int = 16
     ws_klines_lookback_days: int = 100  # ls-4: lockstep with lookback_days
     ws_klines_universe_refresh_seconds: float = 3600.0
@@ -165,133 +141,28 @@ class LongNativeDemoCycleConfig:
     ws_klines_stale_reconnect_seconds: float = 180.0
 
 
-def _long_demo_dataset_names(config: "LongNativeDemoCycleConfig") -> tuple[str, str]:
-    """Return the legacy terminal-history and cycle dataset names.
-
-    The account owner is the only order/fill authority. The producer still reads
-    terminal rows from the old sleeve dataset so cooldown history survives the
-    cutover; it never creates new local trade or order rows.
-    """
+def _long_cycle_dataset(config: "LongNativeDemoCycleConfig") -> str:
     if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER:
-        return "long_native_paper_trades", "long_native_paper_cycles"
-    return "long_native_demo_trades", "long_native_demo_cycles"
-
-
-def _v11a_long_native_config() -> LongNativeConfig:
-    """The v11a FC profile + `div` risk-engineering (PROMOTED 2026-05-30).
-
-    Base: v11a sniper-retrace 1%/6h fall-through FC config (from the
-    long_native_FC_v11a_retrace1pct_6h_fallthru research run). The `div`
-    risk-engineering overlay was promoted 2026-05-30 after cross-venue
-    confirmation (Bybit MAR 1.46->1.58, Binance 0.91->1.30, both DD lower,
-    trades ~2x): universe 10->50, max_concurrent 5->10, vol
-    targeting (vol_target_annual=0.60, floor 0.30, max_scale=1.25 — sizes the
-    book DOWN in high-BTC-vol regimes and up to 1.25x in calm ones). It is
-    risk-engineering, not a new signal; FC remains the alpha ceiling.
-    """
-    return LongNativeConfig(
-        execution_strategy_id=LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
-        execution_leverage=10.0,
-        universe_size=50,  # div (was 10): wider book diversifies idiosyncratic risk
-        universe_volume_window_days=90,
-        min_listing_history_days=30,
-        regime_symbol="BTCUSDT",
-        regime_sma_days=30,
-        # Patterns: FC only
-        enable_capitulation_rebound=False,
-        enable_volume_resurrection=False,
-        enable_funding_squeeze=False,
-        enable_oversold_bounce=False,
-        enable_uptrend_dip=False,
-        enable_fomo_chase=True,
-        # FC trigger
-        fc_min_day_return=0.15,
-        fc_top_volume_rank_max=10,
-        fc_min_close_location=0.7,
-        fc_eth_regime_required=True,
-        fc_btc_regime_required=True,
-        fc_close_loc_multi_day=0.6,
-        # FC v2 ATR cap
-        fc_max_atr_pct=0.12,
-        # FC v3 sigma-relative + multi-day triggers
-        fc_use_sigma_threshold=True,
-        fc_sigma_mult=2.5,
-        fc_enable_3d_trigger=True,
-        fc_enable_7d_trigger=True,
-        # FC v2 dynamic ATR exits
-        fc_use_atr_exits=True,
-        fc_atr_stop_mult=1.5,
-        fc_atr_tp_mult=4.0,
-        fc_max_hold_days=3,
-        # FC v11 sniper retrace
-        fc_use_sniper_entry=True,
-        fc_sniper_retrace_pct=0.01,
-        fc_sniper_deadline_hours=6,
-        fc_sniper_skip_on_no_retrace=False,  # fall through after deadline
-        # Portfolio
-        max_concurrent_positions=10,  # div (was 5): more concurrent slots for the wider book
-        cooldown_days=7,  # TA1 30d cooldown sweep-REJECTED for the long book (dMAR -0.28/-0.22)
-        entry_delay_hours=1,
-        gross_exposure=1.0,
-        sizing="vol_parity",
-        vol_estimate_window_days=30,
-        vol_floor_annual=0.30,
-        max_position_weight=0.30,
-        # Volatility targeting (Moreira-Muir): scale the book by
-        # vol_target/BTC-realized-vol, floored at 0.30 and capped at 1.25.
-        enable_vol_target=True,
-        vol_target_annual=0.60,
-        vol_target_max_scale=1.25,
-        vol_target_min_scale=0.30,
-        # Weekend size bonus.
-        # weekend bonus -> 1.5x Sat/Sun size: the sweep WINNER for the LONG book
-        # (long_regularity TA41: dMAR +0.25 bybit / +0.28 binance, Sharpe up on both).
-        # The 30d cooldown was sweep-rejected here (hurts both venues: dMAR -0.28/-0.22;
-        # it ships on the SHORT book instead — cooldown_days stays 7 above).
-        # In-sample-derived; sweep numbers are descriptive.
-        weekend_size_mult=1.5,
-        cost_multiplier=3.0,
-        require_full_pit_universe=False,
-    )
-
-
-def _long_demo_event_config(profile: str) -> LongNativeConfig:
-    if profile not in LONG_DEMO_STRATEGY_PROFILES:
-        raise ValueError(
-            f"Unknown long-native demo profile: {profile}. Choices: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}"
-        )
-    if profile == "LongV11aDivWeekendVol":
-        return _v11a_long_native_config()
-    raise ValueError(f"Unhandled long-native demo profile: {profile}")
-
-
-def _long_demo_strategy_id(profile: str) -> str:
-    if profile == "LongV11aDivWeekendVol":
-        return LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-    raise ValueError(f"Unknown long-native demo profile: {profile}")
+        return "long_native_paper_cycles"
+    return "long_native_demo_cycles"
 
 
 def _validate_long_demo_config(
     config: LongNativeDemoCycleConfig,
     strategy_config: LongNativeConfig | None = None,
 ) -> None:
-    strategy = strategy_config or _long_demo_event_config(config.strategy_profile)
-    if config.strategy_profile not in LONG_DEMO_STRATEGY_PROFILES:
-        raise ValueError(f"strategy_profile must be one of: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}")
+    strategy = strategy_config or long_v11a_profile()
     if config.lookback_days < 95:
         raise ValueError(
             "lookback_days must be at least 95 so turnover_median_90d "
             "(90d-median universe rank, min_samples=90) populates after the bar trims"
         )
-    if config.universe_size <= 0:
-        raise ValueError("universe_size must be positive")
-    if config.universe_superset_size < config.universe_size:
-        raise ValueError("universe_superset_size must be >= universe_size")
+    if config.universe_superset_size < strategy.universe_size:
+        raise ValueError("universe_superset_size must cover the strategy universe")
     if config.notional_multiplier <= 0.0:
         raise ValueError("notional_multiplier must be positive")
     if not 0.0 <= config.max_order_notional_pct_equity <= 10.0:
-        # Looser cap than the compatibility default (1.0); the long sleeve can legitimately
-        # exceed 100% per-position notional via leverage.
+        # The long sleeve may legitimately exceed 100% per-position notional via leverage.
         raise ValueError("max_order_notional_pct_equity must be in [0, 10]")
     if not 0.0 < config.wallet_balance_fraction <= 1.0:
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
@@ -299,12 +170,6 @@ def _validate_long_demo_config(
         raise ValueError("entry_leverage must be positive")
     if not 0.0 < config.max_projected_initial_margin_pct_equity <= 1.0:
         raise ValueError("max_projected_initial_margin_pct_equity must be in (0, 1]")
-    if abs(float(strategy.max_per_symbol_weight) - float(strategy.max_position_weight)) > 1e-12:
-        raise ValueError(
-            "long demo live sizing requires strategy.max_per_symbol_weight == "
-            "strategy.max_position_weight until the live order path explicitly "
-            "replicates the backtest per-symbol gross cap"
-        )
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
     margin_projection = projected_long_initial_margin_pct_equity(
@@ -354,13 +219,10 @@ def projected_long_initial_margin_pct_equity(
     strategy_config: LongNativeConfig,
 ) -> dict[str, float]:
     per_order_notional_pct = target_long_order_notional_pct_equity(demo_config, strategy_config)
-    worst_case_vol_scale = float(strategy_config.vol_target_max_scale) if strategy_config.enable_vol_target else 1.0
-    # audit2c: the LIVE per-position notional also multiplies by weekend_size_mult
-    # (1.5 on weekend entries) and the vol-parity position_weight (max 1.0 given the
-    # vol floor). Model both so the guard captures the true worst-case book IM
-    # instead of under-counting and approving a config that breaches the ceiling.
+    worst_case_vol_scale = float(strategy_config.vol_target_max_scale)
+    # Include the maximum weekend and volatility weights in the initial-margin bound.
     worst_case_weekend_mult = max(1.0, float(strategy_config.weekend_size_mult))
-    worst_case_position_weight = 1.0  # audit2c: vol-parity weight is bounded by 1.0 (vol floor)
+    worst_case_position_weight = 1.0
     worst_case_order_notional_pct = (
         per_order_notional_pct * worst_case_vol_scale * worst_case_weekend_mult * worst_case_position_weight
     )
@@ -383,8 +245,7 @@ def _compute_long_order_sizing(
     features: pl.DataFrame,
     now_ms: int | None = None,
 ) -> tuple[float, float]:
-    """Per-position notional fraction of equity after the de-risk-only vol-target scalar
-    (long-sleeve-9 extraction — numerically identical to the prior inline block).
+    """Per-position notional fraction after the de-risk-only volatility scalar.
 
     Applies the SAME de-risk-only vol-target scalar the backtest uses, so the live book
     sizes DOWN in high-BTC-vol regimes (never up). ``btc_rv_30`` is a trailing feature
@@ -416,10 +277,10 @@ def run_long_native_demo_cycle(
     kline_store: Any | None = None,
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
-) -> dict[str, Any]:
+) -> PublishedTargetCyclePayload:
     demo = demo_config or LongNativeDemoCycleConfig()
-    strategy = strategy_config or _long_demo_event_config(demo.strategy_profile)
-    strategy_id = _long_demo_strategy_id(demo.strategy_profile)
+    strategy = strategy_config or long_v11a_profile()
+    strategy_id = strategy.execution_strategy_id
     _validate_long_demo_config(demo, strategy)
     kernel_target_route = bool(str(demo.account_intent_inbox_root or "").strip())
     if not kernel_target_route:
@@ -434,7 +295,7 @@ def run_long_native_demo_cycle(
         account_root=Path(str(demo.account_execution_root)).expanduser(),
         inbox_root=Path(str(demo.account_intent_inbox_root)).expanduser(),
     )
-    trades_dataset, cycles_dataset = _long_demo_dataset_names(demo)
+    cycles_dataset = _long_cycle_dataset(demo)
 
     root = Path(data_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -479,9 +340,7 @@ def run_long_native_demo_cycle(
                 snapshot_ts_ms=cycle_now_ms,
                 context="LONG cycle",
             )
-            universe = universe.filter(
-                pl.col("symbol").is_in(list(candidate_universe.symbols))
-            )
+            universe = universe.filter(pl.col("symbol").is_in(list(candidate_universe.symbols)))
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
             raise RuntimeError("long-native demo cycle found no current tradable symbols after universe filters")
@@ -530,7 +389,7 @@ def run_long_native_demo_cycle(
                 .dt.strftime("%Y-%m-%d")
                 .alias("date")
             )
-        features = build_long_features(klines, funding=None, config=strategy)
+        features = build_long_features(klines, config=strategy)
         # ls-4: re-select in_universe on the latest bar to the top-N by 90d-MEDIAN turnover
         # (the key the backtest ranks on), now that _build_long_universe fetches a superset
         # instead of the 50-by-24h truncation that neutered the median gate. Keyed on
@@ -546,9 +405,8 @@ def run_long_native_demo_cycle(
             target_publisher.inbox,
             sleeve=SleeveAdapterKind.LONG,
         )
-        legacy_trades = read_dataset(root, trades_dataset)
         account_root = route.account_path
-        canonical_trades = canonical_strategy_trade_rows(
+        all_trades = canonical_strategy_trade_rows(
             account_root,
             sleeve=SleeveAdapterKind.LONG.value,
             strategy_ids=(strategy_id,),
@@ -559,9 +417,6 @@ def run_long_native_demo_cycle(
             strategy_ids=(strategy_id,),
             inbox=target_publisher.inbox,
         )
-        # Preserve only terminal local history for cooldowns. Accepted account
-        # targets are the sole active/pending planning state.
-        all_trades = replace_legacy_open_rows(legacy_trades, canonical_trades)
         margin_projection = projected_long_initial_margin_pct_equity(demo, strategy)
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
@@ -577,13 +432,10 @@ def run_long_native_demo_cycle(
             default_leverage=demo.entry_leverage,
         )
         unresolved_exit_suppressions = sum(
-            intent.intent.target_key in unresolved_targets.target_keys
-            for intent in exit_target_intents
+            intent.intent.target_key in unresolved_targets.target_keys for intent in exit_target_intents
         )
         exit_target_intents = [
-            intent
-            for intent in exit_target_intents
-            if intent.intent.target_key not in unresolved_targets.target_keys
+            intent for intent in exit_target_intents if intent.intent.target_key not in unresolved_targets.target_keys
         ]
         mark_stage("exit_targets")
 
@@ -593,7 +445,6 @@ def run_long_native_demo_cycle(
         # component notional without touching venue quantity/order state.
         candidates, skip_counts = _select_long_entry_candidates(
             features=features,
-            klines=klines,
             all_trades=all_trades,
             now_ms=cycle_now_ms,
             strategy=strategy,
@@ -621,12 +472,10 @@ def run_long_native_demo_cycle(
             strategy_id=strategy_id,
         )
         unresolved_entry_suppressions = sum(
-            intent.intent.target_key in unresolved_targets.target_keys
-            for intent in entry_target_intents
+            intent.intent.target_key in unresolved_targets.target_keys for intent in entry_target_intents
         )
         terminal_entry_suppressions = sum(
-            str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
-            in terminal_entry_attempts
+            str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") in terminal_entry_attempts
             for intent in entry_target_intents
             if intent.intent.target_key not in unresolved_targets.target_keys
         )
@@ -635,8 +484,7 @@ def run_long_native_demo_cycle(
             intent
             for intent in entry_target_intents
             if intent.intent.target_key not in unresolved_targets.target_keys
-            and str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
-            not in terminal_entry_attempts
+            and str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") not in terminal_entry_attempts
             and intent.intent.target_key not in exit_target_keys
         ]
         publication = publish_exit_first_target_requests(
@@ -647,9 +495,7 @@ def run_long_native_demo_cycle(
             created_ts_ns=cycle_now_ms * 1_000_000,
         )
         published_exit_intents = len(publication.exit_requests)
-        published_entry_intents = (
-            len(entry_target_intents) if publication.entry_request is not None else 0
-        )
+        published_entry_intents = len(entry_target_intents) if publication.entry_requests else 0
         account_target_requests = {
             "exit_request_ids": list(publication.exit_request_ids),
             "exit_requests": [
@@ -660,16 +506,15 @@ def run_long_native_demo_cycle(
                 }
                 for item in publication.exit_requests
             ],
-            "entry_request_id": publication.entry_request_id,
-            "entry_request": (
-                {}
-                if publication.entry_request is None
-                else {
-                    "request_id": publication.entry_request.request.request_id,
-                    "batch_id": publication.entry_request.request.batch_id,
-                    "intent_count": len(publication.entry_request.request.intents),
+            "entry_request_ids": list(publication.entry_request_ids),
+            "entry_requests": [
+                {
+                    "request_id": item.request.request_id,
+                    "batch_id": item.request.batch_id,
+                    "intent_count": len(item.request.intents),
                 }
-            ),
+                for item in publication.entry_requests
+            ],
             "publication_errors": [asdict(error) for error in publication.errors],
         }
         mark_stage("target_publish")
@@ -680,10 +525,8 @@ def run_long_native_demo_cycle(
             "sleeve": "long",
             "mode": f"{owner_environment}_target",
             "strategy_id": strategy_id,
-            "strategy_profile": demo.strategy_profile,
-            "candidate_universe_artifact_sha256": (
-                candidate_universe.artifact_sha256 if candidate_universe else ""
-            ),
+            "strategy_profile": LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME,
+            "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
             "symbols": len(symbols),
             "universe_fallback_24h": universe_fallback_24h,  # ls-4: cold-start 24h backfill count (0 = warm)
             "vol_target_scale": vol_target_scale,  # div: de-risk-only book scalar applied to live sizing
@@ -705,10 +548,7 @@ def run_long_native_demo_cycle(
             "target_intents_queued": published_exit_intents + published_entry_intents,
             "account_target_route": True,
             "account_target_exit_request_ids": list(publication.exit_request_ids),
-            "account_target_entry_request_id": publication.entry_request_id,
-            # Compatibility alias: it now names only the entry/follow-on
-            # publication; exit request IDs are always represented separately.
-            "account_target_request_id": publication.entry_request_id,
+            "account_target_entry_request_ids": list(publication.entry_request_ids),
             "account_target_publication_error_count": len(publication.errors),
             "unresolved_exit_target_suppressions": unresolved_exit_suppressions,
             "unresolved_entry_target_suppressions": unresolved_entry_suppressions,
@@ -803,10 +643,7 @@ def _apply_median_universe_selection(
     if features.is_empty() or "turnover_median_90d" not in features.columns:
         return features, 0
     # Re-select on the latest CLOSED bar, not the unconditional max: a daily feature
-    # row is stamped at the day END, so a still-forming UTC day (>=20 hourly bars by
-    # ~20:00 UTC) yields a FUTURE-stamped bar > snapshot_ts_ms. Entries fire from the
-    # latest closed bar (the entry path gates ts <= now_ms), so mutating membership /
-    # emitting telemetry on the future bar describes the wrong bar (audit-iter1 long-3).
+    # Daily rows are end-stamped; exclude a still-forming future-stamped day.
     closed = features.filter(pl.col("ts_ms") <= snapshot_ts_ms)
     if closed.is_empty():
         return features, 0
@@ -916,7 +753,6 @@ def _cooldown_until_long(trades: pl.DataFrame, *, cooldown_days: int) -> dict[st
 def _select_long_entry_candidates(
     *,
     features: pl.DataFrame,
-    klines: pl.DataFrame,
     all_trades: pl.DataFrame,
     now_ms: int,
     strategy: LongNativeConfig,
@@ -939,7 +775,6 @@ def _select_long_entry_candidates(
         "entry_delay": 0,
         "no_retrace_yet": 0,
         "no_live_price": 0,
-        "fc_atr_exit_fallback": 0,
     }
     if features.is_empty():
         skips["no_features"] = 1
@@ -953,9 +788,7 @@ def _select_long_entry_candidates(
 
     # Look at the last 2 closed daily bars so we catch a signal that fired
     # yesterday and is still in its 6h sniper window today.
-    # long-sleeve-1: a daily signal's ts_ms is the day-END stamp, so the current still-forming
-    # bar has a FUTURE ts. Require int(ts) <= now_ms (closed bar) — firing FC on a not-yet-closed
-    # bar is look-ahead vs the backtest's closed-bar signal (a no-look-ahead correctness gate).
+    # A daily signal is end-stamped, so require a closed bar at or before now.
     # Count stale drops only for actual recent FC signals. Old historical feature
     # rows without FC should not make a flat cycle look stale-signal blocked.
     closed_ts = sorted(int(ts) for ts in features["ts_ms"].unique().to_list() if ts is not None and int(ts) <= now_ms)
@@ -991,11 +824,6 @@ def _select_long_entry_candidates(
             if pattern != "fomo_chase":
                 # v11a is FC-only — defensive, in case strategy config drifts
                 continue
-            if not _fc_atr_available(row, strategy):
-                # FC entry will fall back to fixed-TP exits (the negative-EV bucket
-                # per the long v11a TP-tail dependency). Surface it as telemetry so a
-                # feature-window or data hiccup cannot silently mutate exit geometry.
-                skips["fc_atr_exit_fallback"] += 1
             symbol = str(row["symbol"])
             if symbol in open_symbols:
                 skips["already_open"] += 1
@@ -1035,28 +863,14 @@ def _select_long_entry_candidates(
                 max_position_weight=strategy.max_position_weight,
                 notional_weight=notional_weight,
             )
-            # long-sleeve-1: apply the deployed weekend size tilt in the LIVE path
-            # identically to the backtest (long_native.py:2141), keyed on the actual
-            # entry time (now_ms == entry_ts_ms here), via the SHARED is_weekend_ms
-            # helper so live and backtest can't drift. Without this the live demo
-            # sized Sat/Sun entries 1x while the promotion backtest sized them 1.5x,
-            # so the forward-demo arbiter measured a different profile than validated.
+            # Apply the profile's weekend tilt at the actual entry time using the
+            # same calendar helper as the research path.
             if strategy.weekend_size_mult != 1.0 and is_weekend_ms(now_ms):
                 position_weight = position_weight * strategy.weekend_size_mult
             candidate_score = _float(row.get("log_return"))
             volume_rank = _float(row.get("today_volume_rank")) or 1e9
-            # long-sleeve-2: observability-only rank-boundary telemetry. The
-            # candidate has already passed the FC gate (today_volume_rank <=
-            # fc_top_volume_rank_max) on the LIVE superset denominator; flag it when
-            # its rank is close enough to the cutoff that the full-universe backtest
-            # could have ranked it outside the top set. No selection/sizing change.
-            _log_fc_rank_boundary(
-                symbol=symbol,
-                today_volume_rank=volume_rank,
-                fc_top_volume_rank_max=strategy.fc_top_volume_rank_max,
-            )
             candidate = {
-                "trade_id": _long_trade_id(symbol=symbol, signal_ts_ms=int(ts)),
+                "trade_id": long_trade_id(symbol=symbol, signal_ts_ms=int(ts)),
                 "symbol": symbol,
                 "side": "long",
                 "pattern": pattern,
@@ -1105,44 +919,6 @@ def _select_long_entry_candidates(
     return deduped[:max_new_entries], skips
 
 
-def _fc_rank_is_near_boundary(
-    today_volume_rank: float, fc_top_volume_rank_max: int, *, margin: int = FC_VOLUME_RANK_TELEMETRY_MARGIN
-) -> bool:
-    """long-sleeve-2: True when a fired FC candidate's live volume rank sits in the
-    rank-boundary band [cutoff-margin, cutoff] where the live-vs-backtest rank
-    denominator difference (~superset live, full universe in backtest) can flip
-    whether the name is in the top-`fc_top_volume_rank_max` set. Pure predicate so
-    the live path stays observability-only and the boundary logic is unit-testable.
-    A candidate that fired already satisfies rank <= cutoff; we only care about the
-    upper band, not ranks comfortably inside it."""
-    if today_volume_rank is None:
-        return False
-    rank = float(today_volume_rank)
-    cutoff = float(fc_top_volume_rank_max)
-    if rank > cutoff:
-        return False  # would not have fired the FC gate; nothing to flag
-    return rank >= cutoff - float(margin)
-
-
-def _log_fc_rank_boundary(*, symbol: str, today_volume_rank: float, fc_top_volume_rank_max: int) -> None:
-    """long-sleeve-2: emit a cycle-telemetry line when a fired FC candidate's live
-    volume rank is within FC_VOLUME_RANK_TELEMETRY_MARGIN of the cutoff, so
-    live-vs-backtest rank-boundary divergence is auditable. Observability ONLY —
-    the caller has already decided to fire; this never gates or resizes."""
-    if not _fc_rank_is_near_boundary(today_volume_rank, fc_top_volume_rank_max):
-        return
-    _logger.info(
-        "long FC rank-boundary: %s today_volume_rank=%.0f within margin %d of "
-        "fc_top_volume_rank_max=%d (live rank is over the universe superset, NOT the "
-        "full backtest universe — this candidate could rank outside the backtest top "
-        "set; observability-only, long-sleeve-2)",
-        symbol,
-        float(today_volume_rank),
-        FC_VOLUME_RANK_TELEMETRY_MARGIN,
-        int(fc_top_volume_rank_max),
-    )
-
-
 def _vol_parity_weight(
     *,
     realized_vol: float,
@@ -1153,10 +929,6 @@ def _vol_parity_weight(
     vol_used = max(realized_vol, vol_floor)
     weight = min(vol_floor / vol_used, max_position_weight / notional_weight)
     return max(weight, 0.25)
-
-
-def _long_trade_id(*, symbol: str, signal_ts_ms: int) -> str:
-    return long_trade_id(symbol=symbol, signal_ts_ms=signal_ts_ms)
 
 
 def _plan_time_stop_exits(
@@ -1179,8 +951,8 @@ def _plan_time_stop_exits(
         symbol = str(trade.get("symbol", ""))
         if not symbol:
             continue
-        planned = int(trade.get("planned_exit_ts_ms") or 0)
-        if planned <= 0 or now_ms < planned:
+        deadline = int(trade.get("max_hold_deadline_ts_ms") or 0)
+        if deadline <= 0 or now_ms < deadline:
             continue
         qty = str(trade.get("qty") or "")
         if not qty or _float(qty) <= 0.0:
@@ -1192,7 +964,7 @@ def _plan_time_stop_exits(
                 "side": "long",
                 "qty": qty,
                 "exit_reason": "time_stop",
-                "planned_exit_ts_ms": planned,
+                "max_hold_deadline_ts_ms": deadline,
             }
         )
     return plans
@@ -1231,7 +1003,7 @@ def _long_exit_target_intents(
                     "source": "long_native_target_adapter",
                     "owner_sleeve": "long",
                     "prior_trade_id": trade_id,
-                    "planned_exit_ts_ms": int(_float(trade.get("planned_exit_ts_ms"))),
+                    "max_hold_deadline_ts_ms": int(_float(trade.get("max_hold_deadline_ts_ms"))),
                 },
             )
         )
@@ -1293,9 +1065,7 @@ def _long_entry_target_intents(
                     "take_profit_pct": take_profit_pct,
                     "max_hold_duration_ms": max_hold_duration_ms,
                     "signal_ts_ms": int(candidate.get("signal_ts_ms") or 0),
-                    "signal_valid_until_ms": (
-                        int(candidate.get("signal_ts_ms") or 0) + SIGNAL_FRESHNESS_MS
-                    ),
+                    "signal_valid_until_ms": (int(candidate.get("signal_ts_ms") or 0) + SIGNAL_FRESHNESS_MS),
                     "position_weight": _float(candidate.get("position_weight") or 1.0),
                     "max_hold_days": max_hold_days,
                     "pattern": str(candidate.get("pattern") or ""),
@@ -1314,8 +1084,7 @@ def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:
     """Concise target-producer status for stdout/journald."""
     if "cycle" not in payload:
         raise KeyError(
-            "format_long_demo_cycle_summary received a FLAT payload with no 'cycle' key; "
-            "wrong-sleeve formatter"
+            "format_long_demo_cycle_summary received a FLAT payload with no 'cycle' key; wrong-sleeve formatter"
         )
     cycle = payload["cycle"]
     health_error = str(cycle.get("account_owner_health_error") or "")

@@ -77,15 +77,6 @@ def _open_orders_all_kinds(client: Any) -> list[dict[str, Any]]:
     return list(grouped.values())
 
 
-def _require_flat(client: Any) -> None:
-    snapshot = _flatness_snapshot(client)
-    if not snapshot["flat"]:
-        raise RuntimeError(
-            "demo rule probe requires an entirely flat account with no open orders "
-            f"(positions={len(snapshot['positions'])}, orders={len(snapshot['open_orders'])})"
-        )
-
-
 def _flatness_snapshot(client: Any) -> dict[str, Any]:
     positions = [dict(row) for row in _active_positions(client)]
     orders = [dict(row) for row in _open_orders_all_kinds(client)]

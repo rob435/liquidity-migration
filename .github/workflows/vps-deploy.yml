@@ -1,120 +1,26 @@
-name: VPS Deploy
-
-# Host key was last rotated 2026-06-09 (operator full Hetzner rebuild of
-# 116.202.15.128) — pinned fingerprint default is in the
-# VPS_ED25519_FINGERPRINT env below.
-
-# Serialize deploys: two quick pushes to the SAME ref must not interleave their
-# remote scripts on the same box. No cancel-in-progress — a running deploy finishes;
-# the queued one then deploys the newer commit. Scoped by ref so the pull_request CI
-# runs (different refs) run independently and never serialize behind a main deploy.
-concurrency:
-  group: vps-deploy-${{ github.ref }}
-  cancel-in-progress: false
+name: CI and staged VPS operation
 
 on:
-  # Full ruff + pytest gate on every PR (the `ci` job below; the deploy steps are
-  # guarded on push/deploy so a PR never touches the box) — this is the server-side
-  # full-suite gate that the manually-installed local pre-push hook cannot guarantee
-  # on a fresh clone / --no-verify / GitHub web edit (audit 2026-06-12 round 4).
   pull_request:
   push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/vps-deploy.yml"
-      - "liquidity_migration/**"
-      - "deploy/systemd/*.service"
-      - "deploy/systemd/*.timer"
-      # Per-sleeve kill-switch source-of-truth: flipping a sleeve on/off here (or
-      # editing the shared sleeve lib) must trigger a redeploy so the toggle takes
-      # effect — deploy_vps_live.sh sources both at runtime to enable/disable sleeves.
-      - "deploy/sleeves.env"
-      - "deploy/lib_sleeves.sh"
-      # Deploy, verify, and console recovery all source this authority-bound
-      # fresh-root helper. A helper-only main commit must not leave the VPS on
-      # stale epoch-preparation logic.
-      - "deploy/lib_fresh_epoch.sh"
-      # Deploy, verify, and recovery parse owner-only systemd config through
-      # this data-only loader; never leave its validation logic stale on-host.
-      - "deploy/lib_systemd_environment.sh"
-      # The armed hedge timer reads these CSVs at every 00:35 UTC run; a
-      # warmstart-refresh commit (the operator-pending fix for the stale-blocked
-      # hedge) is otherwise a CSV-only push that deploys NOTHING — the box keeps
-      # the stale file and the hedge keeps paging (audit 2026-06-12 round 3).
-      - "deploy/hedge_warmstart/*.csv"
-      # Hand-list every script that is invoked directly or transitively by this
-      # workflow OR launched by a deployed systemd unit. A glob would auto-deploy
-      # anything new in scripts/, while tests pin this to a strict allowlist
-      # (see test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key).
-      # When adding a script that a unit calls, add it here too.
-      - "scripts/deploy_vps_live.sh"
-      - "scripts/print_vps_recovery_command.sh"
-      - "scripts/verify_vps_live.sh"
-      - "scripts/vps_console_recover_and_deploy.sh"
-      - "scripts/vps_restore_ssh_access.sh"
-      - "scripts/vps_rescue_restore_ssh_access.sh"
-      - "scripts/wait_for_vps_recovery_and_deploy.sh"
-      - "scripts/run_bybit_long_demo_event_engine.sh"
-      - "scripts/run_bybit_continuous_demo_event_engine.sh"
-      - "scripts/run_account_execution_service.sh"
-      - "scripts/run_account_paper_execution_service.sh"
-      - "scripts/run_authorized_fresh_runtime.sh"
-      - "scripts/run_continuous_hedge.sh"
-      - "scripts/run_continuous_hedge.py"
-      - "scripts/account_execution_cutover_authority.py"
-      - "scripts/check_bybit_order_permissions.py"
-      - "scripts/check_demo_liveness.py"
-      - "scripts/run_continuous_rmom_refresh.sh"
-      - "scripts/precompute_residual_momentum.py"
-      - "scripts/check_residual_momentum_gate.py"
-      # The checked deploy runs this smoke-test subset on the VPS before it
-      # restarts services. Test-only fixes to that gate must trigger a redeploy.
-      - "tests/test_runtime_scripts.py"
-      - "tests/test_promoted_profiles.py"
-      # Every daemon unit reads this config at startup — a config-only commit
-      # must trigger a deploy, else it sits inert on the box.
-      - "configs/volume_alpha.default.yaml"
-      # Dependency manifests: deploy_vps_live.sh refreshes the on-box venv when
-      # these change between deploys, so they must trigger a deploy.
-      - "pyproject.toml"
-      - "requirements.lock"
+    branches: [main]
   workflow_dispatch:
     inputs:
       mode:
-        description: Run exact-commit CI only, checked deployment, safe install preflight, or read-only verification.
+        description: Stopped install, authorized activation, or read-only verification.
         required: true
         default: verify
         type: choice
-        options:
-          - candidate-ci
-          - verify
-          - install-preflight
-          - deploy
-          - wait-deploy
-      wait_timeout_seconds:
-        description: Seconds to wait for VPS SSH before wait-deploy gives up.
-        required: false
-        default: "1800"
-        type: string
-      wait_interval_seconds:
-        description: Seconds between VPS SSH probes during wait-deploy.
-        required: false
-        default: "15"
-        type: string
+        options: [install, activate, verify]
 
 permissions:
   contents: read
 
+concurrency:
+  group: liquidity-migration-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # Server-side full gate. Until this existed, the ONLY ruff + full-suite check was
-  # the manually-installed local pre-push hook (scripts/git-hooks/pre-push): a
-  # `git push --no-verify`, a GitHub web edit, or a fresh clone that never copied the
-  # hook would push straight to main and auto-deploy to the order-submitting live demo
-  # box with no full-suite check — only the on-VPS smoke subset
-  # (tests/test_runtime_scripts.py + tests/test_promoted_profiles.py) ran. This job
-  # makes the full gate server-side and hook-independent; the deploy job `needs: ci`,
-  # so a failing ruff or pytest blocks the deploy (audit 2026-06-12 round 4).
   ci:
     runs-on: ubuntu-latest
     steps:
@@ -122,116 +28,50 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install dependencies
-        run: |
-          python -m pip install --disable-pip-version-check --no-deps \
-            --only-binary=:all: -r requirements.lock
-      - name: Ruff (lint gate)
-        run: python -m ruff check liquidity_migration tests scripts
-      - name: Pytest (full suite gate)
+      - name: Install locked dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check --no-deps
+          --only-binary=:all: -r requirements.lock
+      - name: Ruff
+        run: python -m ruff check liquidity_migration scripts tests
+      - name: Mypy
+        run: python -m mypy liquidity_migration
+      - name: Pytest
         run: python -m pytest -q
 
   vps:
-    # Gate every deploy/verify path on the full ruff + pytest suite (the same gate the
-    # local pre-push hook runs), so an uninstalled hook / --no-verify / web edit can no
-    # longer auto-deploy untested code to the live demo box (audit 2026-06-12 round 4).
+    if: github.event_name == 'workflow_dispatch'
     needs: ci
-    # Never touch the box on a pull_request — PRs only exercise the `ci` gate above.
-    # PRs never enter this job. The exact-candidate CI-only dispatch keeps the job
-    # local to the GitHub runner and skips every SSH/VPS step; other dispatches and
-    # main pushes retain the authenticated host path below.
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
       VPS_HOST: ${{ vars.VPS_HOST || '116.202.15.128' }}
       VPS_USER: ${{ vars.VPS_USER || 'root' }}
       VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4' }}
-      EXPECTED_TELEGRAM_CHAT_ID: ${{ vars.EXPECTED_TELEGRAM_CHAT_ID || '8388367561' }}
       GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU
     steps:
       - uses: actions/checkout@v4
-
-      - name: Confirm candidate CI-only boundary
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate-ci'
-        run: |
-          test "$GITHUB_REF_TYPE" = branch
-          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
-
-      - name: Configure SSH key
-        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'candidate-ci'
+      - name: Configure pinned SSH identity
         env:
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
         run: |
           test -n "$VPS_SSH_PRIVATE_KEY"
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
+          install -d -m 700 ~/.ssh
           printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
           chmod 600 ~/.ssh/vps_deploy_key
-
-      - name: Verify deploy key fingerprint
-        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'candidate-ci'
-        run: |
           ssh-keygen -y -f ~/.ssh/vps_deploy_key > ~/.ssh/vps_deploy_key.pub
-          ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 | tee ~/.ssh/vps_deploy_key.fingerprint
-          grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT" ~/.ssh/vps_deploy_key.fingerprint
-
-      - name: Pin VPS host key
-        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'candidate-ci'
-        run: |
-          # Pin the box's ed25519 host PUBLIC key directly instead of a live
-          # ssh-keyscan. GitHub runners can't reliably complete the keyscan key
-          # exchange to this box (banner arrives, KEX times out on the higher-
-          # latency path under SSH brute-force load); pinning the public key is
-          # also strictly MORE secure than a live TOFU scan, and is not secret.
-          # Fail-closed: the pinned key must still match the pinned fingerprint.
-          mkdir -p ~/.ssh; chmod 700 ~/.ssh
-          printf '%s\n' '116.202.15.128 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICf7380psA4UujIrKaLuxWINmEl7vmBAKLMa7CpL7Dvq' > ~/.ssh/known_hosts
+          ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 |
+            grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT"
+          printf '%s\n' \
+            '116.202.15.128 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICf7380psA4UujIrKaLuxWINmEl7vmBAKLMa7CpL7Dvq' \
+            > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           ssh-keygen -lf ~/.ssh/known_hosts | grep -F "$VPS_ED25519_FINGERPRINT"
-
-      - name: Checked deploy
-        if: github.event_name == 'push' || inputs.mode == 'deploy'
+      - name: Run staged VPS mode
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           EXPECTED_COMMIT="$GITHUB_SHA" \
-          EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
-          SSH_TARGET="$VPS_USER@$VPS_HOST" \
-          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
-          scripts/deploy_vps_live.sh
-
-      - name: Install current topology without authorization or startup
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'install-preflight'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          test "$GITHUB_REF_TYPE" = branch
-          INSTALL_PREFLIGHT_ONLY=1 \
           BRANCH="$GITHUB_REF_NAME" \
-          EXPECTED_COMMIT="$GITHUB_SHA" \
-          EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
           SSH_TARGET="$VPS_USER@$VPS_HOST" \
           SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
-          scripts/deploy_vps_live.sh
-
-      - name: Wait for SSH recovery then deploy
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'wait-deploy'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          EXPECTED_COMMIT="$GITHUB_SHA" \
-          EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
-          WAIT_TIMEOUT_SECONDS="${{ inputs.wait_timeout_seconds }}" \
-          WAIT_INTERVAL_SECONDS="${{ inputs.wait_interval_seconds }}" \
-          SSH_TARGET="$VPS_USER@$VPS_HOST" \
-          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
-          scripts/wait_for_vps_recovery_and_deploy.sh
-
-      - name: Read-only verify
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'
-        run: |
-          EXPECTED_COMMIT="$GITHUB_SHA" \
-          EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
-          SSH_TARGET="$VPS_USER@$VPS_HOST" \
-          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
-          scripts/verify_vps_live.sh
+          scripts/deploy_vps_live.sh "${{ inputs.mode }}"

@@ -55,7 +55,6 @@ class FeatureSpec:
 
     name: str
     builder: "Callable[[FeatureContext], pl.DataFrame]"
-    description: str = ""
 
 
 @dataclass
@@ -166,10 +165,8 @@ def _aggregate_daily_funding(funding: pl.DataFrame) -> pl.DataFrame:
         .group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                # audit2c: snap the day key to the 00:00-UTC day floor rather than
-                # the first intraday ts. The kline daily grid is on the day floor;
-                # using min(ts) risks an off-grid key on a gap-edge day (missing
-                # 00:00 bar) and a join miss / dropped day against that grid.
+                # Snap to the UTC day floor so a missing 00:00 bar cannot create
+                # an off-grid join key.
                 ((pl.col("ts_ms").min() // MS_PER_DAY) * MS_PER_DAY).alias("day_start_ms"),
                 pl.col(rate_col).sum().alias("funding_rate_1d_sum"),
                 pl.col(rate_col).last().alias("funding_rate_last"),
@@ -186,8 +183,7 @@ def _aggregate_daily_open_interest(open_interest: pl.DataFrame) -> pl.DataFrame:
         return open_interest
     has_value = "open_interest_value" in open_interest.columns
     aggs: list[pl.Expr] = [
-        # audit2c: snap the day key to the 00:00-UTC day floor (see
-        # _aggregate_daily_funding) so the OI daily row joins the kline grid.
+        # Use the UTC day floor to join the kline grid.
         ((pl.col("ts_ms").min() // MS_PER_DAY) * MS_PER_DAY).alias("day_start_ms"),
         pl.col("open_interest").last().alias("open_interest"),
     ]
@@ -219,9 +215,7 @@ def _aggregate_daily_premium(premium_index_1h: pl.DataFrame) -> pl.DataFrame:
         .group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                # audit2c: snap the day key to the 00:00-UTC day floor (see
-                # _aggregate_daily_funding) so the premium daily row joins the
-                # kline grid on a gap-edge day.
+                # Use the UTC day floor to join the kline grid on gap-edge days.
                 ((pl.col("ts_ms").min() // MS_PER_DAY) * MS_PER_DAY).alias("day_start_ms"),
                 pl.col("close").last().alias("premium_close"),
             ]
@@ -237,10 +231,8 @@ def _attach_daily_returns(daily_klines: pl.DataFrame) -> pl.DataFrame:
     Calendar-exact: the prior close is resolved by an explicit ``ts_ms - 1 day``
     join, NOT a positional ``shift(1)``. ``ts_ms`` is the uniform 00:00-UTC daily
     grid, so for a symbol with a missing day (delist->relist, data hole) a
-    positional shift would use the last PRESENT row and silently turn a
-    multi-calendar-day move into a "1d" return — the same gap-blindness the M4
-    forward-return join (``_attach_forward_returns``) was built to avoid. A gapped
-    row gets a null ``ret_1d`` (no D-1 partner) rather than a misaligned one.
+    positional shift would silently turn a multi-day move into a "1d" return.
+    A gapped row therefore receives null rather than a misaligned return.
     """
     if daily_klines.is_empty():
         return pl.DataFrame()
@@ -265,13 +257,11 @@ def _attach_daily_returns(daily_klines: pl.DataFrame) -> pl.DataFrame:
 def _xs_rank(df: pl.DataFrame, value_col: str, *, out_col: str) -> pl.DataFrame:
     """Cross-sectional average-tie rank fraction in [0, 1] per ts_ms.
 
-    Uses polars rank(method="average") normalised by the same-day count, NOT a
-    dense rank (audit2: the module docstring previously mislabelled this 'dense').
+    Uses ``rank(method="average")`` normalized by the same-day count, not a
+    dense rank.
     Larger value -> higher rank. Nulls stay null; their presence does not
     bias the ranks of the rest (rank is computed over non-null values).
     """
-    # _cs_count_partial (a windowed cum_sum) was computed then immediately dropped,
-    # never read — removed; the denominator is count().over('ts_ms') below (audit pass2 #20).
     return df.with_columns(
         pl.col(value_col)
         .rank(method="average", descending=False)
@@ -650,26 +640,26 @@ def _build_dist_from_30d_low(ctx: FeatureContext) -> pl.DataFrame:
 
 
 FEATURE_REGISTRY: dict[str, FeatureSpec] = {
-    "xs_rank_ret_1d": FeatureSpec("xs_rank_ret_1d", _make_xs_rank_ret_Nd(1), "Cross-sectional rank of 1d return"),
-    "xs_rank_ret_3d": FeatureSpec("xs_rank_ret_3d", _make_xs_rank_ret_Nd(3), "Cross-sectional rank of 3d return"),
-    "xs_rank_ret_7d": FeatureSpec("xs_rank_ret_7d", _make_xs_rank_ret_Nd(7), "Cross-sectional rank of 7d return"),
-    "xs_rank_ret_30d": FeatureSpec("xs_rank_ret_30d", _make_xs_rank_ret_Nd(30), "Cross-sectional rank of 30d return"),
-    "liquidity_rank": FeatureSpec("liquidity_rank", _build_liquidity_rank, "Cross-sectional rank by 7d trailing mean turnover (1 = highest)"),
-    "liquidity_rank_delta_7d": FeatureSpec("liquidity_rank_delta_7d", _make_liquidity_rank_delta(7), "Rank Δ vs 7d ago (positive = rank improved)"),
-    "liquidity_rank_delta_30d": FeatureSpec("liquidity_rank_delta_30d", _make_liquidity_rank_delta(30), "Rank Δ vs 30d ago"),
-    "turnover_delta_7d": FeatureSpec("turnover_delta_7d", _make_turnover_delta(7), "Today's turnover vs prior 7d mean, normalised"),
-    "turnover_delta_30d": FeatureSpec("turnover_delta_30d", _make_turnover_delta(30), "Today's turnover vs prior 30d mean"),
-    "funding_rate_z": FeatureSpec("funding_rate_z", _build_funding_rate_z, "Cross-sectional Z-score of today's funding rate sum"),
-    "funding_rate_delta_7d": FeatureSpec("funding_rate_delta_7d", _build_funding_rate_delta_7d, "7d funding sum minus prior-7d funding sum"),
-    "oi_delta_7d": FeatureSpec("oi_delta_7d", _build_oi_delta_7d, "7d OI change normalised by 30d ADV"),
-    "oi_to_adv": FeatureSpec("oi_to_adv", _build_oi_to_adv, "OI / 30d ADV (positioning intensity)"),
-    "premium_index_z": FeatureSpec("premium_index_z", _build_premium_index_z, "Cross-sectional Z of EOD premium-index close"),
-    "realized_vol_7d": FeatureSpec("realized_vol_7d", _build_realized_vol_7d, "Annualised 7d realized vol"),
-    "vol_of_vol_30d": FeatureSpec("vol_of_vol_30d", _build_vol_of_vol_30d, "30d stdev of |daily return|"),
-    "close_location_1d": FeatureSpec("close_location_1d", _build_close_location_1d, "(close - low) / (high - low) for today"),
-    "range_extension_30d": FeatureSpec("range_extension_30d", _build_range_extension_30d, "Today's range / prior 30d mean range"),
-    "dist_from_30d_high": FeatureSpec("dist_from_30d_high", _build_dist_from_30d_high, "(close - 30d high) / 30d high"),
-    "dist_from_30d_low": FeatureSpec("dist_from_30d_low", _build_dist_from_30d_low, "(close - 30d low) / 30d low"),
+    "xs_rank_ret_1d": FeatureSpec("xs_rank_ret_1d", _make_xs_rank_ret_Nd(1)),
+    "xs_rank_ret_3d": FeatureSpec("xs_rank_ret_3d", _make_xs_rank_ret_Nd(3)),
+    "xs_rank_ret_7d": FeatureSpec("xs_rank_ret_7d", _make_xs_rank_ret_Nd(7)),
+    "xs_rank_ret_30d": FeatureSpec("xs_rank_ret_30d", _make_xs_rank_ret_Nd(30)),
+    "liquidity_rank": FeatureSpec("liquidity_rank", _build_liquidity_rank),
+    "liquidity_rank_delta_7d": FeatureSpec("liquidity_rank_delta_7d", _make_liquidity_rank_delta(7)),
+    "liquidity_rank_delta_30d": FeatureSpec("liquidity_rank_delta_30d", _make_liquidity_rank_delta(30)),
+    "turnover_delta_7d": FeatureSpec("turnover_delta_7d", _make_turnover_delta(7)),
+    "turnover_delta_30d": FeatureSpec("turnover_delta_30d", _make_turnover_delta(30)),
+    "funding_rate_z": FeatureSpec("funding_rate_z", _build_funding_rate_z),
+    "funding_rate_delta_7d": FeatureSpec("funding_rate_delta_7d", _build_funding_rate_delta_7d),
+    "oi_delta_7d": FeatureSpec("oi_delta_7d", _build_oi_delta_7d),
+    "oi_to_adv": FeatureSpec("oi_to_adv", _build_oi_to_adv),
+    "premium_index_z": FeatureSpec("premium_index_z", _build_premium_index_z),
+    "realized_vol_7d": FeatureSpec("realized_vol_7d", _build_realized_vol_7d),
+    "vol_of_vol_30d": FeatureSpec("vol_of_vol_30d", _build_vol_of_vol_30d),
+    "close_location_1d": FeatureSpec("close_location_1d", _build_close_location_1d),
+    "range_extension_30d": FeatureSpec("range_extension_30d", _build_range_extension_30d),
+    "dist_from_30d_high": FeatureSpec("dist_from_30d_high", _build_dist_from_30d_high),
+    "dist_from_30d_low": FeatureSpec("dist_from_30d_low", _build_dist_from_30d_low),
 }
 
 
@@ -725,13 +715,7 @@ def _attach_forward_returns(
     if daily_klines.is_empty():
         return pl.DataFrame()
     df = daily_klines.sort(["symbol", "ts_ms"]).select(["symbol", "ts_ms", "first_bar_close"])
-    # M4: resolve entry/exit closes by CALENDAR offset (exact ts_ms + k days),
-    # not a positional row shift. ``ts_ms`` is the uniform 00:00-UTC daily grid,
-    # so for a symbol with a missing day (delist→relist, data hole) a positional
-    # shift would silently skip the gap and turn fwd_ret_3d into, e.g., a
-    # 5-calendar-day return — distorting the horizon and the IC. A join on the
-    # explicit target timestamp keeps every horizon calendar-correct and leaves
-    # the gapped row's forward return null (no partner) rather than misaligned.
+    # Resolve by exact calendar offset; gaps yield null instead of a longer horizon.
     lookup = df.select(
         pl.col("symbol"),
         pl.col("ts_ms").alias("_lookup_ts"),

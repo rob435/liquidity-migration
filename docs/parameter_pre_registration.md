@@ -1,66 +1,52 @@
 # Prospective Experiment Registration
 
-Registration protects confirmatory evidence from post-result story changes. It
-does not ban exploration and it does not make a poorly designed rule scientific.
-See `docs/governance.md` for the governing evidence policy.
+Register decision-influencing work before inspecting the affected outcomes.
+Exploration and debugging may remain unregistered only when labelled
+exploratory and excluded from later confirmatory claims. `docs/governance.md`
+is the governing policy.
 
-## When To Register
-
-Register before inspecting the affected outcomes when a run may:
-
-- accept, reject, rank, or retain a strategy/mechanism;
-- change a deployed, shadow, paper, or demo profile;
-- choose parameters, features, exits, sizing, costs, or fill assumptions for a
-  later claim;
-- spend a held-out or forward evaluation surface.
-
-Registration is optional for debugging, infrastructure checks, equivalence
-tests, data exploration, and hypothesis generation, provided their outputs are
-labelled exploratory and are not later presented as untouched confirmation.
-
-## Minimum Contract
+## Minimum contract
 
 Record:
 
-- Experiment ID, owner, date, and study mode.
-- Exact claim, intended decision, and plausible failure mechanism.
-- Data roots, venue/population scope, time boundary, and prior exposure status.
-- Effective independent sample unit and planned sample/event horizon.
-- Control/comparator and every variant allowed to influence selection.
-- Primary metric or utility rule, guardrails, thresholds with rationale, and
-  `supports` / `contradicts` / `inconclusive` outcomes.
-- Multiplicity/dependence treatment and any sequential stopping rule.
-- Material PIT, timing, fill, cost, funding, capacity, and accounting assumptions.
-- Exact command/config/code identity and expected artifact/receipt paths.
-- Conditions under which the precise claim may later be revisited.
+- experiment ID, owner, timestamp, and study mode;
+- exact claim, intended action, and plausible failure mechanism;
+- data roots, venue/population scope, end-exclusive boundary, and prior exposure;
+- effective sample unit, horizon or stopping rule, and tested variant set;
+- comparator, primary decision method, guardrails, and justified thresholds;
+- `supports`, `contradicts`, and `inconclusive` outcomes;
+- multiplicity/dependence treatment;
+- relevant PIT, timing, fill, cost, funding, capacity, and accounting assumptions;
+- exact code/config/data identities and expected artifact paths;
+- conditions that could justify a later, genuinely new test.
 
-Choose venues and metrics from the claim. Two venues are required for a
-portability claim or when the experiment contract names them, not by universal
-policy. A single-venue result stays single-venue.
+Choose venues and metrics from the claim. A venue-specific result stays
+venue-specific; multiple correlated venues are robustness evidence, not
+automatic independence.
 
-## After The Run
+## Compact skeleton
 
-Append, without rewriting the contract:
+```text
+ID / owner / registered time / study mode:
+Claim and intended decision:
+Prior exposure and untouched evaluation surface:
+Venue / population / data roots / [start, end):
+Sample unit / horizon / stopping rule:
+Control and complete tested set:
+Primary rule / guardrails / inconclusive outcome:
+Validity assumptions and required artifacts:
+Code / config / data identities:
+Permitted deviations before exposure:
+Explicit non-conclusions:
+```
 
-- artifact identities and paths;
-- all completed, failed, and aborted variants;
-- effect sizes, uncertainty, concentration, and material diagnostics;
-- deviations and whether they spend the evaluation data;
-- validity, result, scope, and justified next action;
-- code/config/data hashes needed for reconstruction.
+## After exposure
 
-## Amendments
+Append without rewriting the prospective contract: every completed, failed,
+skipped, and aborted cell; effect sizes and uncertainty; deviations and spent
+data; validity/result/scope; artifact identities; and the justified next action.
 
-- Amend freely before the affected outcome is inspected; retain the old text and
-  explain why the design changed.
-- After exposure, the original result and rule stay visible. A revised rule needs
-  a fresh evaluation surface or is exploratory on the spent data.
-- Do not convert an inconclusive or failed claim into a different success after
-  seeing results.
-- A failed test closes only the registered claim under its conditions. New data,
-  corrected implementation, or a genuinely different mechanism may justify a
-  new contract.
-
-Use `docs/preregistration/_template.md` for the compact receipt. Git history is a
-backup, not the sole artifact registry; decision-grade runs should also leave a
-content-addressed receipt with the run outputs.
+An exposed rule cannot be changed to rescue its result. A revision is
+prospective on a new surface or exploratory on spent data. Preserve the original
+contract in a content-addressed run artifact even if the repository later
+consolidates its human-readable summary.

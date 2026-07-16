@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from liquidity_migration.run_diagnostics import (
-    TAINTED,
     diagnose,
     is_tainted,
-    max_severity,
     render,
 )
 
@@ -40,7 +38,6 @@ def test_survivorship_is_tainted_not_just_a_label() -> None:
     )
     assert "PIT_SURVIVORSHIP" in _codes(ws)
     assert is_tainted(ws)
-    assert max_severity(ws) == TAINTED
     # The fix names the current membership rebuild path, not a retired wrapper.
     surv = next(w for w in ws if w.code == "PIT_SURVIVORSHIP")
     assert "archive-manifest" in surv.fix

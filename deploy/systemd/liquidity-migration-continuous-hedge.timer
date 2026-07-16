@@ -2,11 +2,7 @@
 Description=Periodic BTC+ETH target hedge reconciliation for the continuous demo book
 
 [Timer]
-# Entry/exit batches arrive hourly and can occur just after midnight.  A daily
-# 00:35 run left new exposure unhedged for almost 24h, while research applied the
-# hedge on every ledger day. Reconcile the idempotent target frequently; the
-# executor derives each leg's actual minimum from current Bybit instrument
-# filters (qty step, minimum quantity and minimum notional).
+# Reconcile frequently because component targets can change hourly.
 OnBootSec=2min
 OnUnitActiveSec=5min
 AccuracySec=30s

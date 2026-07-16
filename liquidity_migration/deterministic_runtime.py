@@ -1,18 +1,16 @@
-"""Deterministic runtime primitives for replay-sensitive execution code.
+"""Deterministic clocks and identifiers for replay-sensitive execution code.
 
 The execution kernel must not discover time, identity, or scheduling order from
-ambient process state.  Live adapters may use :class:`SystemClock`; historical
-and fault tests use :class:`VirtualClock` and :class:`VirtualScheduler`.
+ambient process state. Live adapters use :class:`SystemClock`; historical paths
+use :class:`VirtualClock`.
 """
 
 from __future__ import annotations
 
-import heapq
-import random
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol
+from dataclasses import dataclass
+from typing import Protocol
 
 
 class Clock(Protocol):
@@ -77,114 +75,3 @@ class DeterministicIds:
     def make(self, kind: str, *parts: object) -> str:
         material = "\x1f".join((self.seed, kind, *(str(part) for part in parts)))
         return str(uuid.uuid5(_ID_NAMESPACE, material))
-
-
-@dataclass(slots=True)
-class SeededRandom:
-    """Small explicit wrapper which prevents accidental global RNG use."""
-
-    seed: int | str
-    _random: random.Random = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._random = random.Random(self.seed)
-
-    def random(self) -> float:
-        return self._random.random()
-
-    def uniform(self, low: float, high: float) -> float:
-        return self._random.uniform(low, high)
-
-    def randint(self, low: int, high: int) -> int:
-        return self._random.randint(low, high)
-
-    def choice(self, values: list[Any]) -> Any:
-        if not values:
-            raise ValueError("cannot choose from an empty list")
-        return self._random.choice(values)
-
-    def state(self) -> object:
-        return self._random.getstate()
-
-    def restore(self, state: object) -> None:
-        self._random.setstate(state)  # type: ignore[arg-type]
-
-
-@dataclass(frozen=True, slots=True)
-class ScheduledTask:
-    due_monotonic_ns: int
-    ordinal: int
-    task_id: str
-    kind: str
-    payload: Mapping[str, Any]
-
-
-@dataclass(slots=True)
-class VirtualScheduler:
-    """Deterministic data scheduler; callers dispatch task kinds themselves.
-
-    It deliberately stores data instead of callbacks so a schedule can be
-    serialized, replayed, hashed, and reconstructed after a crash.
-    """
-
-    clock: VirtualClock
-    ids: DeterministicIds
-    _heap: list[tuple[int, int, ScheduledTask]] = field(default_factory=list, init=False, repr=False)
-    _next_ordinal: int = field(default=0, init=False)
-
-    def schedule_at(
-        self,
-        due_monotonic_ns: int,
-        *,
-        kind: str,
-        payload: Mapping[str, Any] | None = None,
-        task_key: str = "",
-    ) -> ScheduledTask:
-        if due_monotonic_ns < self.clock.monotonic_ns():
-            raise ValueError("cannot schedule a task in the virtual past")
-        ordinal = self._next_ordinal
-        self._next_ordinal += 1
-        task_id = self.ids.make("task", task_key or ordinal, due_monotonic_ns, kind)
-        task = ScheduledTask(
-            due_monotonic_ns=due_monotonic_ns,
-            ordinal=ordinal,
-            task_id=task_id,
-            kind=kind,
-            payload=dict(payload or {}),
-        )
-        heapq.heappush(self._heap, (due_monotonic_ns, ordinal, task))
-        return task
-
-    def schedule_after(
-        self,
-        delay_ns: int,
-        *,
-        kind: str,
-        payload: Mapping[str, Any] | None = None,
-        task_key: str = "",
-    ) -> ScheduledTask:
-        if delay_ns < 0:
-            raise ValueError("delay_ns cannot be negative")
-        return self.schedule_at(
-            self.clock.monotonic_ns() + delay_ns,
-            kind=kind,
-            payload=payload,
-            task_key=task_key,
-        )
-
-    def pop_due(self) -> list[ScheduledTask]:
-        due: list[ScheduledTask] = []
-        now = self.clock.monotonic_ns()
-        while self._heap and self._heap[0][0] <= now:
-            due.append(heapq.heappop(self._heap)[2])
-        return due
-
-    def advance_to_next(self) -> list[ScheduledTask]:
-        if not self._heap:
-            return []
-        due_ns = self._heap[0][0]
-        self.clock.advance_ns(due_ns - self.clock.monotonic_ns())
-        return self.pop_due()
-
-    def pending(self) -> tuple[ScheduledTask, ...]:
-        return tuple(row[2] for row in sorted(self._heap))

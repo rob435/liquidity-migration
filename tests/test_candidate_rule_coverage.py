@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 
+import liquidity_migration.operational_runtime_authority as runtime_authority
 from liquidity_migration.account_candidate_universe import (
     build_candidate_universe_artifact,
     load_candidate_universe,
@@ -15,8 +17,6 @@ from liquidity_migration.account_candidate_universe import (
 from liquidity_migration.candidate_rule_coverage import (
     REGISTERED_MAX_RULE_AGE_SECONDS,
     build_candidate_rule_coverage,
-    load_candidate_rule_coverage,
-    write_candidate_rule_coverage,
 )
 from liquidity_migration.artifact_snapshot import read_stable_file
 from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
@@ -32,7 +32,6 @@ from liquidity_migration.demo_rule_probe import (
     TRADE_HISTORY_SOURCE,
 )
 from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
-from scripts import verify_candidate_rule_coverage as coverage_script
 
 
 NOW_NS = 1_800_000_000_000_000_000
@@ -181,7 +180,7 @@ def _rules(
     return path
 
 
-def test_coverage_receipt_reopens_and_reproduces_sources(tmp_path: Path) -> None:
+def test_coverage_validation_reproduces_sources(tmp_path: Path) -> None:
     candidate = _candidate(tmp_path)
     rules = _rules(tmp_path, candidate)
     payload = build_candidate_rule_coverage(
@@ -190,14 +189,88 @@ def test_coverage_receipt_reopens_and_reproduces_sources(tmp_path: Path) -> None
         created_ts_ns=NOW_NS,
         validation_now_ns=NOW_NS + 1,
     )
-    receipt = write_candidate_rule_coverage(tmp_path / "coverage.json", payload)
-    loaded = load_candidate_rule_coverage(
-        receipt,
-        validation_now_ns=NOW_NS + 2,
+    assert payload["status"] == "passed"
+    assert payload["symbols"] == ["AAAUSDT"]
+    assert payload["coverage"]["missing"] == 0
+
+
+def test_operational_authority_accepts_byte_exact_private_paper_mirrors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path)
+    rules = _rules(tmp_path, candidate)
+    risk = tmp_path / "risk.json"
+    risk.write_text('{"max_leverage":2}\n', encoding="utf-8")
+    risk.chmod(0o600)
+    paper_config = tmp_path / "paper-config"
+    paper_config.mkdir()
+    paper_candidate = paper_config / "candidate.json"
+    paper_rules = paper_config / "rules.json"
+    paper_risk = paper_config / "risk.json"
+    for source, destination in (
+        (candidate, paper_candidate),
+        (rules, paper_rules),
+        (risk, paper_risk),
+    ):
+        shutil.copyfile(source, destination)
+        destination.chmod(0o600)
+    roots = {index: tmp_path / f"root-{index}" for index in range(6)}
+    for index, root in roots.items():
+        root.mkdir()
+        if index >= 3:
+            root.chmod(0o700)
+    values = {
+        "account-execution.env": {
+            "ACCOUNT_EXECUTION_KERNEL_REQUIRED": "1",
+            "ACCOUNT_RAW_MARKET_PERSISTENCE": "0",
+            "ACCOUNT_LIVENESS_SCOPE": "demo-paper",
+            "ACCOUNT_EXECUTION_ROOT": str(roots[0]),
+            "ACCOUNT_INTENT_INBOX_ROOT": str(roots[1]),
+            "ACCOUNT_CAPTURE_ROOT": str(roots[2]),
+            "ACCOUNT_SYMBOLS_FILE": str(candidate),
+            "CANDIDATE_UNIVERSE_FILE": str(candidate),
+            "ACCOUNT_DEMO_RULES_FILE": str(rules),
+            "ACCOUNT_RISK_POLICY_FILE": str(risk),
+        },
+        "account-paper-execution.env": {
+            "ACCOUNT_PAPER_KERNEL_REQUIRED": "1",
+            "ACCOUNT_RAW_MARKET_PERSISTENCE": "0",
+            "ACCOUNT_EXECUTION_ROOT": str(roots[3]),
+            "ACCOUNT_INTENT_INBOX_ROOT": str(roots[4]),
+            "ACCOUNT_PAPER_CAPTURE_ROOT": str(roots[5]),
+            "ACCOUNT_SYMBOLS_FILE": str(paper_candidate),
+            "CANDIDATE_UNIVERSE_FILE": str(paper_candidate),
+            "ACCOUNT_DEMO_RULES_FILE": str(paper_rules),
+            "ACCOUNT_RISK_POLICY_FILE": str(paper_risk),
+        },
+        "bybit-demo.env": {
+            "BYBIT_DEMO_API_KEY": "demo",
+            "BYBIT_DEMO_API_SECRET": "secret",
+            "REAL_MONEY": "false",
+        },
+        "sleeves.resolved.env": {
+            "LONG_SLEEVE": "on",
+            "CONTINUOUS_SLEEVE": "on",
+            "CONTINUOUS_PAPER_SLEEVE": "on",
+            "CONTINUOUS_HEDGE_TIMER": "on",
+        },
+    }
+    monkeypatch.setattr(runtime_authority, "_paper_user_id", os.geteuid)
+    monkeypatch.setattr(
+        "liquidity_migration.candidate_rule_coverage.time.time_ns",
+        lambda: NOW_NS + 1,
     )
-    assert loaded["status"] == "passed"
-    assert loaded["symbols"] == ["AAAUSDT"]
-    assert loaded["coverage"]["missing"] == 0
+
+    root_identities, input_snapshots = runtime_authority._validate_environments(
+        values,
+        profile=runtime_authority.OPERATIONAL_PROFILE,
+    )
+
+    assert len(root_identities) == 6
+    assert input_snapshots[
+        "account-paper-execution.env:ACCOUNT_DEMO_RULES_FILE"
+    ].data == rules.read_bytes()
 
 
 def test_coverage_rejects_weakened_rule_freshness_before_sources(
@@ -211,47 +284,18 @@ def test_coverage_rejects_weakened_rule_freshness_before_sources(
         )
 
 
-def test_coverage_script_rejects_weakened_rule_freshness_before_sources(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as raised:
-        coverage_script.main(
-            [
-                "--candidate-universe",
-                str(tmp_path / "missing-candidate.json"),
-                "--demo-rules",
-                str(tmp_path / "missing-rules.json"),
-                "--output",
-                str(tmp_path / "coverage.json"),
-                "--max-rule-age-hours",
-                "168.0001",
-            ]
-        )
-    assert raised.value.code == 2
-    assert "registered 604800-second maximum" in capsys.readouterr().err
-
-
-def test_coverage_loader_uses_supplied_source_snapshots(tmp_path: Path) -> None:
+def test_coverage_validation_uses_supplied_source_snapshots(tmp_path: Path) -> None:
     candidate = _candidate(tmp_path)
     rules = _rules(tmp_path, candidate)
-    payload = build_candidate_rule_coverage(
+    loaded = build_candidate_rule_coverage(
         candidate,
         rules,
         created_ts_ns=NOW_NS,
         validation_now_ns=NOW_NS + 1,
-    )
-    receipt = write_candidate_rule_coverage(tmp_path / "coverage.json", payload)
-
-    loaded = load_candidate_rule_coverage(
-        receipt,
-        validation_now_ns=NOW_NS + 2,
-        snapshot=read_stable_file(receipt, label="coverage"),
         candidate_snapshot=read_stable_file(candidate, label="candidate"),
         demo_rules_snapshot=read_stable_file(rules, label="rules"),
     )
-
-    assert loaded == payload
+    assert loaded["coverage"]["symbol_source_bound"] is True
 
 
 def test_coverage_rejects_extra_rule_or_wrong_source_binding(tmp_path: Path) -> None:
@@ -285,37 +329,3 @@ def test_coverage_rejects_legacy_boolean_only_acceptance_evidence(tmp_path: Path
             _rules(tmp_path, candidate, legacy_evidence=True),
             validation_now_ns=NOW_NS + 1,
         )
-
-
-def test_loaded_receipt_fails_after_source_mutation(tmp_path: Path) -> None:
-    candidate = _candidate(tmp_path)
-    rules = _rules(tmp_path, candidate)
-    receipt = write_candidate_rule_coverage(
-        tmp_path / "coverage.json",
-        build_candidate_rule_coverage(
-            candidate,
-            rules,
-            created_ts_ns=NOW_NS,
-            validation_now_ns=NOW_NS + 1,
-        ),
-    )
-    rules.write_text("{}\n", encoding="utf-8")
-    with pytest.raises(ValueError):
-        load_candidate_rule_coverage(receipt, validation_now_ns=NOW_NS + 2)
-
-
-def test_loaded_receipt_rejects_group_readable_file(tmp_path: Path) -> None:
-    candidate = _candidate(tmp_path)
-    rules = _rules(tmp_path, candidate)
-    receipt = write_candidate_rule_coverage(
-        tmp_path / "coverage.json",
-        build_candidate_rule_coverage(
-            candidate,
-            rules,
-            created_ts_ns=NOW_NS,
-            validation_now_ns=NOW_NS + 1,
-        ),
-    )
-    os.chmod(receipt, 0o640)
-    with pytest.raises(ValueError, match="mode 0600"):
-        load_candidate_rule_coverage(receipt, validation_now_ns=NOW_NS + 2)

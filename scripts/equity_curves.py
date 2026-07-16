@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""One command for official equity curves.
+"""One command for standard equity curves.
 
-LONG runs from the exact active profile in `liquidity_migration.promoted`.
+LONG runs from ``long_native.long_v11a_profile``.
 CONTINUOUS is reconstructed from the continuous entry book
-(`continuous_ensemble_v2`, frozen components, 2f hedge, BTC-vol regime) via the
-continuous refresh runner. Treat continuous output as demo/forward analysis, not
-a mainnet approval package.
+(`continuous_ensemble_v2`, code-defined TP12 components, 2f hedge, BTC-vol
+regime) via the continuous refresh runner. Its output is descriptive historical
+evidence, not runtime parity or deployment authorization.
 
-    bash scripts/equity_curves.sh                      # promoted LONG sleeve, last 3 years, bybit_full_pit
-    bash scripts/equity_curves.sh --sleeves continuous # research-stage continuous book
+    bash scripts/equity_curves.sh                      # LONG sleeve, last 3 years, bybit_full_pit
+    bash scripts/equity_curves.sh --sleeves continuous # active continuous profile
     bash scripts/equity_curves.sh --sleeves long,continuous
     bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
 
-Both active profiles live in ONE place: `liquidity_migration/promoted.py`
-(`long_profile`, `continuous_profile`). For continuous the forward demo remains the
-arbiter.
+The strategy modules own their active configurations. Forward demo provides
+separately scoped execution evidence.
 """
 from __future__ import annotations
 
@@ -28,12 +27,11 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration import promoted  # noqa: E402
 from liquidity_migration.config import load_config  # noqa: E402
+from liquidity_migration.continuous_profile import CONTINUOUS_HISTORICAL_RUN_LABEL  # noqa: E402
 
 DEFAULT_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_CONFIG = "configs/volume_alpha.default.yaml"
-DEFAULT_CONTINUOUS_FROZEN_FALLBACK = "~/SHARED_DATA/continuous_deployed_equity_refresh_2026-06-12"
 VALID_CONTINUOUS_VENUES = {"bybit", "binance"}
 
 
@@ -42,8 +40,7 @@ def _today() -> dt.date:
 
 
 def _shift_years(date: dt.date, years: int) -> dt.date:
-    # audit2: date.replace(year=...) raises ValueError for Feb 29 when the
-    # target year is not a leap year; clamp Feb 29 -> Feb 28 in that case.
+    # Clamp Feb 29 to Feb 28 when the target year is not a leap year.
     try:
         return date.replace(year=date.year - years)
     except ValueError:
@@ -59,12 +56,11 @@ def _run_long(
     pit_tol: float,
     long_notional: float | None = None,
 ) -> dict[str, Any]:
-    # long_native has its own PIT label (require_full_pit_universe=False -> it reports,
-    # does not abort); pit_tol does not apply to its engine.
+    # LONG records its own PIT pass/taint label; pit_tol does not apply.
     del pit_tol
-    from liquidity_migration.long_native import run_long_native_research
+    from liquidity_migration.long_native import long_v11a_profile, run_long_native_research
 
-    cfg = promoted.long_profile(start=start, end=end)
+    cfg = replace(long_v11a_profile(), start_date=start, end_date=end)
     if long_notional is not None:
         # Research convention is 1x; this option draws pure leverage on the same signal.
         cfg = replace(cfg, notional_multiplier=float(long_notional))
@@ -97,7 +93,7 @@ def _continuous_payload_from_summary(summary: dict[str, Any], *, report_dir: Pat
     if isinstance(one_x.get("sharpe_daily_ann"), (int, float)):
         normalized["sharpe_like"] = float(one_x["sharpe_daily_ann"])
     return {
-        "run_label": "continuous_demo_paper_research_stage",
+        "run_label": CONTINUOUS_HISTORICAL_RUN_LABEL,
         "summary": normalized,
         "continuous_summary": summary,
         "report_dir": str(report_dir),
@@ -107,19 +103,15 @@ def _continuous_payload_from_summary(summary: dict[str, Any], *, report_dir: Pat
 def _run_continuous(
     root: str,
     costs: Any,
-    start: str | None,  # audit2c: None preserves the frozen continuous start
+    start: str | None,  # None preserves the active profile's full history
     end: str,
     out: Path,
     pit_tol: float,
     *,
     venue: str | None = None,
     render_only: bool = False,
-    frozen_fallback: str | Path | None = None,
     chart_leverage: float | None = 4.0,
-    component_take_profit_pct: float | None = None,
-    btc_risk_sizing: bool = False,
     backtest_leverage: float = 1.0,
-    btc_trend_gate: str | None = None,
 ) -> dict[str, Any]:
     del costs, pit_tol
     scripts_dir = REPO / "scripts"
@@ -130,20 +122,15 @@ def _run_continuous(
 
     data_root = Path(root).expanduser()
     venue_name = _infer_venue_from_root(data_root, venue)
-    fallback = Path(frozen_fallback).expanduser() if frozen_fallback else None
     summary = continuous_refresh.run_venue(
         venue_name,
         output_root=out,
         start_date=start,
         end_date=end,
         render_only=render_only,
-        frozen_fallback=fallback,
         data_root=data_root,
         chart_leverage=chart_leverage,
-        component_take_profit_pct=component_take_profit_pct,
-        btc_risk_sizing=btc_risk_sizing,
         backtest_leverage=backtest_leverage,
-        btc_trend_gate=btc_trend_gate,
     )
     return _continuous_payload_from_summary(summary, report_dir=out / venue_name)
 
@@ -264,7 +251,7 @@ def _headline(payload: dict[str, Any]) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Official equity curves for LONG and the research-stage continuous book.",
+        description="Standard equity curves for the active LONG and CONTINUOUS profiles.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--sleeves", default="long", help="Comma list: long, continuous.")
@@ -284,11 +271,6 @@ def main() -> int:
         help="Re-render continuous PNGs/stats from an existing continuous_equity.csv; no component rerun.",
     )
     p.add_argument(
-        "--continuous-frozen-fallback",
-        default=DEFAULT_CONTINUOUS_FROZEN_FALLBACK,
-        help="Component-report fallback root used to recover frozen continuous configs.",
-    )
-    p.add_argument(
         "--continuous-chart-leverage",
         "--chart-leverage",
         dest="continuous_chart_leverage",
@@ -297,30 +279,13 @@ def main() -> int:
         help="Extra pure-leverage continuous chart to render alongside 1x. Use 1 to suppress the extra chart.",
     )
     p.add_argument(
-        "--continuous-component-take-profit-pct",
-        type=float,
-        default=None,
-        help="Override continuous component take_profit_pct before running the official component backtest.",
-    )
-    p.add_argument(
-        "--continuous-btc-risk-sizing",
-        action="store_true",
-        help="Apply the live CTRL_BTC_RISK_70_90_35 entry-size overlay in the continuous component backtest.",
-    )
-    p.add_argument(
         "--continuous-backtest-leverage",
         type=float,
         default=1.0,
         help="Modeled continuous leverage: scales component gross exposure before costs/funding and scales hedge cap.",
     )
-    p.add_argument(
-        "--continuous-btc-trend-gate",
-        choices=["downtrend", "off", "uptrend"],
-        default=None,
-        help="Override continuous BTC_TREND_GATE; omit to preserve each frozen source config.",
-    )
-    # audit2c: default --years to a sentinel so an unset window can preserve the
-    # frozen continuous start instead of forcing a rolling 3y override.
+    # Default --years to a sentinel so an unset window preserves the active
+    # profile's full history instead of forcing a rolling 3y override.
     p.add_argument(
         "--years",
         type=int,
@@ -341,9 +306,7 @@ def main() -> int:
 
     today = _today()
     end = args.end or (today + dt.timedelta(days=1)).isoformat()
-    # audit2c: only treat the window as explicit when the user passed --start or
-    # --years; otherwise the continuous path must inherit the frozen deployed
-    # start (None) rather than a rolling 3y override.
+    # Without an explicit window the continuous path uses its full active history.
     explicit_window = args.start is not None or args.years is not None
     years = 3 if args.years is None else args.years
     start = args.start or _shift_years(today, years).isoformat()
@@ -356,7 +319,7 @@ def main() -> int:
     for s in sleeves:
         out = out_root / s
         out.mkdir(parents=True, exist_ok=True)
-        heading = "promoted LONG profile" if s == "long" else "research-stage continuous demo book"
+        heading = "active LONG profile" if s == "long" else "active CONTINUOUS profile"
         print(f"=== {s.upper()} ({heading}) ===", flush=True)
         try:
             if s == "long":
@@ -370,8 +333,7 @@ def main() -> int:
                     long_notional=args.long_notional_multiplier,
                 )
             else:
-                # audit2c: pass the rolling/explicit start only when the user asked
-                # for a window; otherwise None preserves the frozen continuous start.
+                # Pass a start only when the user explicitly requests a window.
                 payload = _run_continuous(
                     root,
                     costs,
@@ -381,12 +343,8 @@ def main() -> int:
                     0.0,
                     venue=args.venue,
                     render_only=args.continuous_render_only,
-                    frozen_fallback=args.continuous_frozen_fallback,
                     chart_leverage=args.continuous_chart_leverage,
-                    component_take_profit_pct=args.continuous_component_take_profit_pct,
-                    btc_risk_sizing=args.continuous_btc_risk_sizing,
                     backtest_leverage=args.continuous_backtest_leverage,
-                    btc_trend_gate=args.continuous_btc_trend_gate,
                 )
         except Exception as exc:  # noqa: BLE001 - report per-sleeve, keep going
             print(f"  [X] {s} failed: {type(exc).__name__}: {exc}\n", flush=True)

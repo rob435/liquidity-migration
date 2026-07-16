@@ -45,15 +45,7 @@ class ArchiveFileNotFoundError(LookupError):
 
 
 class ArchiveDownloadIncompleteError(RuntimeError):
-    """A downloaded archive failed an integrity check (truncated body / corrupt
-    container) before it could be promoted to the canonical name.
-
-    archive-integrity-1/-3: ``urlopen(...).read()`` returns whatever arrived on a
-    clean mid-stream socket close WITHOUT raising, so a partial body that happens to
-    end on a valid CSV record boundary would silently become a thin kline day in the
-    full-PIT root (indistinguishable from a low-liquidity day, and the resume guard
-    treats the partition as already-covered). This is a TRANSIENT failure — the caller
-    retries it — distinct from the permanent ArchiveFileNotFoundError (404)."""
+    """A transient download failed a length or container-integrity check."""
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -72,11 +64,7 @@ def download_archive_bytes(url: str, *, timeout_seconds: int = DEFAULT_TIMEOUT_S
     try:
         with urlopen(url, timeout=timeout_seconds, context=context) as response:  # noqa: S310 - user-provided research archive URL
             body = response.read()
-            # archive-integrity-1: urlopen(...).read() returns the bytes received on a clean
-            # mid-stream socket close WITHOUT raising, so a truncated body would be promoted
-            # into the canonical full-PIT root as a silently-thin day. When the server
-            # advertised a Content-Length, assert the received count matches it and fail loud
-            # (transient -> the caller retries) rather than accept a short read.
+            # A clean mid-stream close may not raise; enforce advertised length.
             expected = _content_length(response)
             if expected is not None and len(body) != expected:
                 raise ArchiveDownloadIncompleteError(
@@ -90,8 +78,7 @@ def download_archive_bytes(url: str, *, timeout_seconds: int = DEFAULT_TIMEOUT_S
 
 
 def _content_length(response: object) -> int | None:
-    """Parse the response's Content-Length header to an int, or None when absent/unparseable.
-    Used to detect a truncated archive body before it is promoted (archive-integrity-1)."""
+    """Parse a non-negative Content-Length, or return None."""
     getheader = getattr(response, "getheader", None)
     raw = getheader("Content-Length") if callable(getheader) else None
     if raw is None:
@@ -169,14 +156,7 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
             if not {"timestamp", "size", "price", "trdMatchID"}.issubset(set(reader.fieldnames or ())):
                 raise ValueError("unsupported public trade archive schema")
             bars: dict[tuple[int, str], dict[str, float | int | str]] = {}
-            # Per-bar (open_trade_ts, close_trade_ts) so open/close track the
-            # EARLIEST/LATEST trade by timestamp, not by CSV row order. Bybit
-            # public-trade archives are ascending today (verified on the real
-            # full-PIT root), so this is byte-identical to the prior last-wins
-            # logic — but both sibling builders (_read_..._vectorized, ingestion.
-            # aggregate_trade_klines_1h) sort defensively, and this matches them
-            # so a future archive-format change can't silently swap open/close
-            # on the production streaming path (audit pass2 #1).
+            # Track earliest/latest trade timestamps instead of trusting CSV order.
             bar_ts: dict[tuple[int, str], tuple[int, int]] = {}
             for raw in reader:
                 raw_symbol = str(symbol or raw.get("symbol") or "").upper()
@@ -288,16 +268,12 @@ def _read_public_trade_archive_klines_1h_vectorized(file_path: Path, *, symbol: 
 
 
 def _archive_cache_is_complete(path: Path, *, expected_suffix: str | None = None) -> bool:
-    """archive-integrity-3: cheaply confirm a cached/just-written archive is COMPLETE before
-    it is re-served (or promoted), so the size-only guard cannot make corruption sticky. For a
-    compressed container (.gz/.zip) a clean truncation reliably fails to decompress, so we fully
-    drain it and reject on any error; for a plain .csv we can only confirm non-empty (a truncation
-    on a record boundary is undetectable without a manifest — the download-time Content-Length
-    check in download_archive_bytes is the defense there). Never raises: any failure -> False.
+    """Check a cached archive without raising.
 
-    ``expected_suffix`` overrides ``path.suffix`` for the format decision — required when
-    validating the fresh-download TEMP file, whose ``*.tmp`` name would otherwise skip the
-    gzip/zip drain and be treated as a plain CSV, silently disabling archive-integrity-4."""
+    Compressed files are drained to detect truncation; plain CSVs can only be
+    checked for non-emptiness. ``expected_suffix`` identifies temporary files
+    whose ``.tmp`` suffix would otherwise hide their container format.
+    """
     suffix = expected_suffix if expected_suffix is not None else path.suffix
     try:
         if not (path.exists() and path.stat().st_size > 0):
@@ -330,10 +306,7 @@ def download_public_trade_archive(
 ) -> Path:
     output = Path(destination)
     if output.exists() and output.stat().st_size > 0:
-        # archive-integrity-3: validate the cache hit instead of trusting size alone — a
-        # previously-written partial/corrupt archive must NOT be re-served forever. On a
-        # failed check, unlink and fall through to re-download (the recovery path the
-        # idempotent re-download was always meant to be).
+        # Validate cached containers; a non-empty corrupt file must be replaced.
         if _archive_cache_is_complete(output):
             return output
         _logger.warning("archive: cached archive failed integrity check, re-downloading: %s", output)
@@ -359,16 +332,7 @@ def download_public_trade_archive(
             _download_archive_to_path(url, temp_output, timeout_seconds=timeout_seconds)
             if output.exists() and output.stat().st_size > 0 and _archive_cache_is_complete(output):
                 return output
-            # archive-integrity-4: validate the FRESH download before promoting it to the
-            # canonical name. The check above only re-validates a pre-existing cache hit; the
-            # just-downloaded temp body was never gated, so a truncated/corrupt .gz that arrives
-            # without a Content-Length header (the curl backend, or a server omitting it, slips
-            # past the download_archive_bytes guard) would be replace()'d into the full-PIT root
-            # as a silently-thin day. Reject it the same way a corrupt cache is rejected: raise
-            # the TRANSIENT ArchiveDownloadIncompleteError so the loop re-fetches instead of
-            # writing a thin partition. The finally clause unlinks the corrupt temp file.
-            # Validate with the DESTINATION's suffix (.gz/.zip), not the temp's ".tmp"
-            # — else the gzip/zip drain is skipped and a truncated body is accepted.
+            # Validate the temporary body using the destination's container suffix.
             if not _archive_cache_is_complete(temp_output, expected_suffix=output.suffix):
                 raise ArchiveDownloadIncompleteError(
                     f"fresh download failed integrity check (truncated/corrupt body): {url}"
@@ -416,11 +380,7 @@ def _download_archive_to_path(url: str, output: Path, *, timeout_seconds: int) -
         )
         if result.returncode != 0:
             http_code = (result.stdout or "").strip()[-3:]
-            # Map the permanent 404 to the same typed error the urllib backend
-            # raises — otherwise a symbol that didn't trade on that date burned
-            # the full retry budget and ABORTED the multi-symbol build instead
-            # of being skipped (audit 2026-06-12 round 3). curl exit 22 = HTTP
-            # error with --fail.
+            # Match urllib's permanent-404 behavior; curl 22 means HTTP failure.
             if result.returncode == 22 and http_code == "404":
                 raise ArchiveFileNotFoundError(url)
             raise RuntimeError(

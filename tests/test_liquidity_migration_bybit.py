@@ -108,41 +108,6 @@ def test_bybit_private_client_constructs_demo_session(monkeypatch) -> None:
     assert client._client.kwargs["api_secret"] == "secret"
 
 
-def test_get_funding_settlements_follows_pagination_cursor(monkeypatch) -> None:
-    """H4: the funding total must not be truncated to the first 50-row page —
-    follow nextPageCursor to the end."""
-    pages = {
-        None: {
-            "retCode": 0,
-            "result": {"list": [{"funding": "1"}, {"funding": "2"}], "nextPageCursor": "page2"},
-        },
-        "page2": {
-            "retCode": 0,
-            "result": {"list": [{"funding": "3"}], "nextPageCursor": ""},
-        },
-    }
-
-    class FakeHTTP:
-        def __init__(self, **kwargs):
-            self.calls: list[dict] = []
-
-        def get_transaction_log(self, **params):
-            self.calls.append(params)
-            return pages[params.get("cursor")]
-
-    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
-
-    rows = client.get_funding_settlements(start_time_ms=1_000, end_time_ms=2_000)
-
-    assert [row["funding"] for row in rows] == ["1", "2", "3"]
-    # Two pages fetched: the cursor was followed exactly once.
-    assert len(client._client.calls) == 2
-    assert client._client.calls[0]["limit"] == 50
-    assert client._client.calls[0]["type"] == "SETTLEMENT"
-    assert client._client.calls[1]["cursor"] == "page2"
-
-
 def test_strict_accounting_queries_reject_malformed_payloads(monkeypatch) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -206,31 +171,6 @@ def test_get_closed_pnl_follows_pagination_cursor(monkeypatch) -> None:
     assert client._client.calls[0]["limit"] == 100
 
 
-def test_bybit_public_trade_stream_subscribes_symbols(monkeypatch) -> None:
-    class FakeWebSocket:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            self.trade_calls = []
-            self.closed = False
-
-        def trade_stream(self, **params):
-            self.trade_calls.append(params)
-
-        def exit(self):
-            self.closed = True
-
-    monkeypatch.setattr(bybit_market_data, "WebSocket", FakeWebSocket)
-
-    client = bybit_market_data.BybitPublicTradeStream(testnet=True)
-    callback = object()
-    client.subscribe_public_trades(["BTCUSDT", "ETHUSDT"], callback)
-    client.close()
-
-    assert client._client.kwargs == {"testnet": True, "channel_type": "linear"}
-    assert client._client.trade_calls == [{"symbol": ["BTCUSDT", "ETHUSDT"], "callback": callback}]
-    assert client._client.closed is True
-
-
 def test_bybit_public_ticker_stream_subscribes_symbols(monkeypatch) -> None:
     class FakeWebSocket:
         def __init__(self, **kwargs):
@@ -262,9 +202,6 @@ def test_bybit_private_websocket_stream_subscribes_private_topics(monkeypatch) -
             self.kwargs = kwargs
             self.calls = []
 
-        def position_stream(self, **params):
-            self.calls.append(("position", params))
-
         def order_stream(self, **params):
             self.calls.append(("order", params))
 
@@ -278,7 +215,6 @@ def test_bybit_private_websocket_stream_subscribes_private_topics(monkeypatch) -
 
     client = bybit.BybitPrivateWebSocketStream(api_key="key", api_secret="secret", demo=True)
     callback = object()
-    client.subscribe_positions(callback)
     client.subscribe_orders(callback)
     client.subscribe_executions(callback, fast=True)
 
@@ -290,7 +226,6 @@ def test_bybit_private_websocket_stream_subscribes_private_topics(monkeypatch) -
         "api_secret": "secret",
     }
     assert client._client.calls == [
-        ("position", {"callback": callback}),
         ("order", {"callback": callback}),
         ("fast_execution", {"callback": callback}),
     ]
@@ -2046,10 +1981,10 @@ def test_demo_mutation_guard_requires_live_credential_bound_lease(
             return {"retCode": 0, "result": {"orderId": "o1"}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    legacy = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
+    unleased = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
     with pytest.raises(RuntimeError, match="no canonical Bybit demo account mutation lease"):
-        legacy.place_order(orderLinkId="legacy-1", symbol="BUSDT", side="Buy", orderType="Market", qty="1")
-    assert legacy._client.calls == []
+        unleased.place_order(orderLinkId="unleased-1", symbol="BUSDT", side="Buy", orderType="Market", qty="1")
+    assert unleased._client.calls == []
 
     lease = held_demo_mutation_lease("k")
     owner = bybit.BybitPrivateClient(

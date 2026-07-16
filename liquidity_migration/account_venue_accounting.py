@@ -14,7 +14,6 @@ from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .account_kernel import (
     AccountEvent,
     AccountEventType,
-    account_journal_path,
     account_transactions_path,
     read_account_journal_bytes,
     reduce_account_events,
@@ -199,32 +198,22 @@ def _read_journal_snapshot(
         sorted(transaction_root.glob("*.json")) if transaction_root.is_dir() else []
     )
     snapshots: dict[str, StableFileSnapshot] = {}
-    if transaction_paths:
-        for path in transaction_paths:
-            label = f"transactions/{path.name}"
-            snapshots[label] = read_stable_file(
-                path,
-                label=f"venue-accounting journal {label}",
-                require_single_link=False,
-            )
-        events = read_account_journal_bytes(
-            transaction_files=[
-                (label.removeprefix("transactions/"), snapshots[label].data)
-                for label in sorted(snapshots)
-            ],
-            verify=True,
-        )
-    else:
-        projection = account_journal_path(root)
-        snapshots["events.jsonl"] = read_stable_file(
-            projection,
-            label="venue-accounting journal projection",
+    if not transaction_paths:
+        raise ValueError("account journal has no authoritative transaction segments")
+    for path in transaction_paths:
+        label = f"transactions/{path.name}"
+        snapshots[label] = read_stable_file(
+            path,
+            label=f"venue-accounting journal {label}",
             require_single_link=False,
         )
-        events = read_account_journal_bytes(
-            projection_data=snapshots["events.jsonl"].data,
-            verify=True,
-        )
+    events = read_account_journal_bytes(
+        transaction_files=[
+            (label.removeprefix("transactions/"), snapshots[label].data)
+            for label in sorted(snapshots)
+        ],
+        verify=True,
+    )
     return events, snapshots
 
 

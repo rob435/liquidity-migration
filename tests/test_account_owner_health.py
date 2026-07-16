@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import liquidity_migration.account_owner_health as owner_health_module
 from liquidity_migration.account_kernel import (
     AccountExecutionKernel,
     AccountRiskSnapshot,
@@ -146,10 +147,10 @@ def test_health_reader_rejects_symbolic_and_hard_link_aliases(tmp_path: Path) ->
 
 
 def test_reader_rejects_pre_generation_health_schema(tmp_path: Path) -> None:
-    legacy = _health().to_dict()
-    legacy["schema_version"] = 1
-    legacy.pop("invocation_id")
-    account_owner_health_path(tmp_path).write_text(json.dumps(legacy), encoding="utf-8")
+    old_payload = _health().to_dict()
+    old_payload["schema_version"] = 1
+    old_payload.pop("invocation_id")
+    account_owner_health_path(tmp_path).write_text(json.dumps(old_payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="missing fields: invocation_id"):
         read_account_owner_health(tmp_path)
@@ -212,6 +213,9 @@ def test_paper_publisher_binds_fixed_capital_to_current_kernel_state(tmp_path: P
     assert published.available_margin_usdt == 12_345.0
     assert published.invocation_id == TEST_ACCOUNT_OWNER_INVOCATION_ID
     assert published.status == AccountOwnerHealthStatus.BLOCKED
+    assert published.detail.startswith(
+        "execution_model_scope=integration_only_uncalibrated; "
+    )
     assert read_account_owner_health(tmp_path) == published
 
 
@@ -369,6 +373,47 @@ def test_journal_only_health_republish_restores_exact_head_binding(tmp_path: Pat
         now_ns=13_500,
         expected_account_id="demo-account",
     ) == rebound
+
+
+def test_recent_health_retries_one_concurrent_projection_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _health(loop_sequence=1)
+    second = _health(loop_sequence=2)
+    reads = iter((first, second, second, second))
+    monkeypatch.setattr(
+        owner_health_module,
+        "read_account_owner_health",
+        lambda _root: next(reads),
+    )
+
+    assert require_recent_account_owner_health(
+        tmp_path,
+        environment="paper",
+        max_age_ns=2_000,
+        now_ns=11_000,
+    ) == second
+
+
+def test_recent_health_rejects_sustained_projection_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sequence = iter(_health(loop_sequence=index) for index in range(1, 20))
+    monkeypatch.setattr(
+        owner_health_module,
+        "read_account_owner_health",
+        lambda _root: next(sequence),
+    )
+
+    with pytest.raises(RuntimeError, match="changed while binding"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="paper",
+            max_age_ns=2_000,
+            now_ns=11_000,
+        )
 
 
 def test_notification_position_truth_is_independent_of_native_protection_health(

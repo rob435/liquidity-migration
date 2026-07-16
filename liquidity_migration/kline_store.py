@@ -1,7 +1,7 @@
 """In-memory 1h kline store for the WS-driven kline-delivery path.
 
 The cross-sectional momentum strategy fires at daily-bar close; its alpha
-decays within ~1h. The legacy REST-pull path takes 3-4h to deliver fresh
+decays within ~1h. A full-universe REST pull takes hours to deliver fresh
 1h klines to the feature pipeline (one REST round-trip per ~400 universe
 symbols, rate-limited), so entries fire 3-4h after ready_ts and trade away
 most of the post-pump reversion edge.
@@ -125,22 +125,14 @@ class _Bar:
 
 
 def _parse_ws_kline_event(bar: Mapping[str, Any]) -> _Bar | None:
-    """Best-effort parse of a single bar dict from pybit's WS kline payload.
+    """Parse a single bar dict from pybit's WS kline payload.
 
     pybit forwards the venue's raw bar object in the ``data`` array of each
-    message; the canonical fields are camelCase strings (``start``, ``open``,
-    ``high``, ``low``, ``close``, ``volume``, ``turnover``). We also tolerate
-    underscored names and numerics, so the store can be fed by alternative
-    upstreams in tests without a translation shim.
+    message using ``start``, ``open``, ``high``, ``low``, ``close``, ``volume``,
+    and ``turnover``.
     """
 
-    def _pick(*names: str) -> Any:
-        for name in names:
-            if name in bar and bar[name] is not None:
-                return bar[name]
-        return None
-
-    raw_ts = _pick("start", "ts_ms", "startTime", "t")
+    raw_ts = bar.get("start")
     if raw_ts is None:
         return None
     try:
@@ -148,8 +140,8 @@ def _parse_ws_kline_event(bar: Mapping[str, Any]) -> _Bar | None:
     except (TypeError, ValueError):
         return None
 
-    def _coerce(*names: str) -> float | None:
-        raw = _pick(*names)
+    def _coerce(name: str) -> float | None:
+        raw = bar.get(name)
         if raw is None:
             return None
         try:
@@ -157,12 +149,12 @@ def _parse_ws_kline_event(bar: Mapping[str, Any]) -> _Bar | None:
         except (TypeError, ValueError):
             return None
 
-    open_ = _coerce("open", "o")
-    high = _coerce("high", "h")
-    low = _coerce("low", "l")
-    close = _coerce("close", "c")
-    volume = _coerce("volume", "volume_base", "v")
-    turnover = _coerce("turnover", "turnover_quote", "q")
+    open_ = _coerce("open")
+    high = _coerce("high")
+    low = _coerce("low")
+    close = _coerce("close")
+    volume = _coerce("volume")
+    turnover = _coerce("turnover")
     if None in (open_, high, low, close, volume, turnover):
         return None
     return _Bar(
@@ -225,7 +217,6 @@ class KlineStore:
         # invalidates the cache explicitly. A hit therefore provably reflects the
         # current store; a clone keeps the cached frame immutable to callers.
         self._window_cache: tuple[tuple, pl.DataFrame] | None = None
-        self._window_builds = 0
         # (version, oldest_ts_ms, row_count) cache for stats() — keyed on the
         # same _adds_total+_adds_evicted mutation version as _window_cache so a
         # hit provably reflects the current store (ws-dataplane-7). recovery
@@ -259,7 +250,6 @@ class KlineStore:
         self._flush_io_lock = threading.Lock()
         self._flushes_total = 0
         self._flush_errors = 0
-        self._last_flush_monotonic: float | None = None
         self._last_flush_rows = 0
         # Incremental newest-ts cache: maintained in _insert_bar / recovery
         # so _max_ts_with_new is O(1) instead of O(symbols * bars). At 567
@@ -506,7 +496,6 @@ class KlineStore:
         # store mutated during the build, the next read computes a newer version
         # and misses, so a stale frame is never served.)
         self._window_cache = (cache_key, frame)
-        self._window_builds += 1
         return frame.clone()
 
     def symbols_with_coverage_through(self, ts_ms: int) -> set[str]:
@@ -530,8 +519,8 @@ class KlineStore:
 
         Called by the manager after the universe is set so the store
         doesn't keep paying memory for symbols outside the active
-        universe (e.g. legacy data recovered from a prior daemon run
-        that subscribed a wider universe before scoping landed). Bars
+        universe (for example, data recovered from a prior daemon run
+        that subscribed a wider universe). Bars
         for kept symbols are preserved exactly; this is a set-trim,
         not an eviction-by-age."""
         keep = set(symbols)
@@ -573,10 +562,6 @@ class KlineStore:
             # insert and on recovery, so this is O(1). Returns None when the
             # store has never received any bars.
             return self._global_max_ts_ms if self._global_max_ts_ms > 0 else None
-
-    def oldest_ts_ms(self) -> int | None:
-        with self._lock:
-            return self._oldest_ts_ms_locked()
 
     def _oldest_ts_ms_locked(self) -> int | None:
         best: int | None = None
@@ -716,7 +701,6 @@ class KlineStore:
             with self._lock:
                 self._flushes_total += 1
                 self._last_flush_rows = 0
-                self._last_flush_monotonic = time.monotonic()
                 self._last_flush_version = version
             return 0
         temp_path: Path | None = None
@@ -757,7 +741,6 @@ class KlineStore:
         with self._lock:
             self._flushes_total += 1
             self._last_flush_rows = len(ts_col)
-            self._last_flush_monotonic = time.monotonic()
             self._last_flush_version = version
         return len(ts_col)
 
@@ -780,9 +763,16 @@ class KlineStore:
             return 0
         if frame.is_empty():
             return 0
-        missing = [name for name in _KLINE_SCHEMA if name not in frame.columns]
-        if missing:
-            _logger.warning("kline_store recovery file missing columns %s; ignoring", missing)
+        if set(frame.columns) != set(_KLINE_SCHEMA):
+            _logger.warning("kline_store recovery file has a non-canonical schema; ignoring")
+            return 0
+        try:
+            frame = frame.select(list(_KLINE_SCHEMA)).cast(_KLINE_SCHEMA, strict=True)
+        except (TypeError, ValueError, pl.exceptions.PolarsError) as exc:
+            _logger.warning("kline_store recovery schema validation failed; ignoring: %s", exc)
+            return 0
+        if frame.filter(pl.col("source") != WS_STORE_SOURCE).height:
+            _logger.warning("kline_store recovery file has a non-canonical source; ignoring")
             return 0
         with self._lock:
             recovered = 0
@@ -813,7 +803,7 @@ class KlineStore:
                         close=float(row["close"]),
                         volume_base=float(row["volume_base"]),
                         turnover_quote=float(row["turnover_quote"]),
-                        source=str(row.get("source") or WS_STORE_SOURCE),
+                        source=str(row["source"]),
                     )
                 except (TypeError, ValueError, KeyError):
                     continue

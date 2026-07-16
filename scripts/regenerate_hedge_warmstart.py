@@ -1,36 +1,26 @@
-"""Regenerate deploy/hedge_warmstart/{venue}_warmstart.csv from current data.
+"""Regenerate the immutable Bybit hedge model prior from historical data.
 
-THE refresh mechanism for the 2f hedge's beta warm-start (operator queue item:
-"regenerate the CSVs and define refresh cadence"). Cadence = run this script at
-every data-root refresh and commit the CSVs (they sit in the deploy paths
-filter, so the commit auto-deploys them to the live units).
+Run this after refreshing the data root and code-defined component equity.
 
-Construction (matches the engine the betas were banked on):
-- components = the three current frozen continuous_ensemble_v2 cells (the parity-verified rebuilt
-  ledgers; `scripts/rebuild_continuous_component_ledgers.py`) combined on the
-  frozen receipt weights;
+Construction:
+- components = the three code-defined ``continuous_ensemble_v2`` TP12 base
+  component ledgers combined at the active weights;
 - unit_ret[day] = gross + funding + scale-1 entry costs per LEDGER day (the
   scale-independent day return `apply_rebalance_rule` scales);
 - btc_ret/eth_ret = same-calendar-day daily close-to-close from klines_1h.
 
---validate compares the regenerated series against the existing CSV on
-overlapping dates and GATES the overwrite (semantics check; small diffs are the
-rebuilt-ledger vintage, e.g. p3 858 vs 857 trades). The warm-start CSV feeds the
-live 2f hedge beta (continuous_hedge_manager.load_warmstart_2f) and auto-deploys
-on commit, so a regression must not be written silently: if the max |delta_unit_ret|
-over the overlap exceeds --max-unit-drift, or the regeneration has FEWER rows
-than the banked CSV, the overwrite is REFUSED unless --force is given. --force
-keeps the manual escape hatch for a legitimate data-vintage shift.
+The overwrite gate compares overlapping unit returns and refuses excessive
+drift, a shorter series, or a disjoint replacement unless explicitly forced.
 
     POLARS_MAX_THREADS=8 PYTHONPATH=. .venv/bin/python \
-        scripts/regenerate_hedge_warmstart.py [--validate-only] [--days 200] \
-        [--venues bybit,binance] [--component-root PATH] \
+        scripts/regenerate_hedge_warmstart.py --component-root PATH \
+        [--validate-only] [--days 200] \
         [--max-unit-drift 1e-3] [--force]
 
 ``--component-root`` should point at the ``components`` directory emitted by
-the official continuous equity runner. This lets the live Bybit warm-start be
-rebuilt from the current TP/sizing object instead of silently falling back to
-the older consolidated receipt configs.
+the standard continuous equity runner. Those historical base-component
+artifacts intentionally do not reproduce the stateful accepted-decision
+BTC-risk sizing overlay used by the forward target producer.
 """
 
 from __future__ import annotations
@@ -50,9 +40,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import polars as pl  # noqa: E402
 
 from liquidity_migration.continuous_component_sources import (  # noqa: E402
-    CONTINUOUS_COMPONENT_SOURCES,
     ContinuousComponentSource,
     load_continuous_component_source,
+)
+from liquidity_migration.continuous_profile import (  # noqa: E402
+    ACTIVE_CONTINUOUS_COMPONENT_BY_KEY,
+    CONTINUOUS_EQUITY_EVIDENCE_LABEL,
+    CONTINUOUS_HISTORICAL_RUN_LABEL,
+    CONTINUOUS_HISTORY_START_DATE,
+    CONTINUOUS_PROFILE_ID,
+    CONTINUOUS_PROFILE_REVISION,
+    ACTIVE_CONTINUOUS_CONFIG,
 )
 from liquidity_migration.continuous_rebalance import (  # noqa: E402
     combine_continuous_components,
@@ -60,20 +58,10 @@ from liquidity_migration.continuous_rebalance import (  # noqa: E402
 )
 
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA")))
-ROOTS = {"bybit": SHARED / "bybit_full_pit", "binance": SHARED / "binance_full_pit"}
+ROOTS = {"bybit": SHARED / "bybit_full_pit"}
 OUT_DIR = Path(__file__).resolve().parent.parent / "deploy" / "hedge_warmstart"
-FALLBACK_COMPONENT_ROOT = Path(
-    os.environ.get(
-        "CONTINUOUS_COMPONENT_FALLBACK_ROOT",
-        str(SHARED / "continuous_deployed_equity_refresh_2026-06-12" / "components"),
-    )
-).expanduser()
-# Current three-component object frozen 2026-06-18; renorm = old/0.90.
-WINNER = {"turn3p3": 0.3333333333333333, "turn4p3": 0.2222222222222222, "turn4p5": 0.4444444444444444}
+WINNER = dict(ACTIVE_CONTINUOUS_CONFIG["weights"])
 MS_DAY = 86_400_000
-LIVE_COMPONENT_TAKE_PROFIT_PCT = 0.12
-LIVE_STRATEGY_RUN_LABEL = "continuous_demo_paper_research_stage"
-LIVE_START_DATE = "2023-04-01"
 MIN_OBJECT_REFERENCE_OVERLAP = 60
 
 
@@ -93,20 +81,20 @@ def _component_funding_failures_before(
     *,
     cutoff_day_ms: int,
 ) -> list[str]:
-    """Return component funding defects that can enter the warm-start tape.
+    """Return component funding defects that can enter the model prior.
 
-    An official run may aggregate to ``partial`` solely because its final rows
+    A standard run may aggregate to ``partial`` solely because its final rows
     represent positions that are still open today.  Those rows are excluded by
     ``regenerate``.  Any non-modeled trade whose exit day is already complete is
     a real historical coverage defect and remains a hard failure.
     """
     failures: list[str] = []
-    audited_cells: set[str] = set()
+    seen_cells: set[str] = set()
     for src in WINNER:
-        cell = CONTINUOUS_COMPONENT_SOURCES[src].cell
-        if cell in audited_cells:
+        cell = ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[src].artifact_cell
+        if cell in seen_cells:
             continue
-        audited_cells.add(cell)
+        seen_cells.add(cell)
         trades_path = component_root / venue / cell / "continuous_trades.csv"
         if not trades_path.exists():
             failures.append(f"missing component trades={trades_path}")
@@ -132,27 +120,27 @@ def _component_funding_failures_before(
 def _component_report_payloads(component_root: Path, venue: str) -> dict[str, dict]:
     payloads: dict[str, dict] = {}
     for src in WINNER:
-        cell = CONTINUOUS_COMPONENT_SOURCES[src].cell
+        cell = ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[src].artifact_cell
         if cell in payloads:
             continue
         report_path = component_root / venue / cell / "continuous_report.json"
         if not report_path.exists():
-            raise RuntimeError(f"missing official component report: {report_path}")
+            raise RuntimeError(f"missing component report: {report_path}")
         payloads[cell] = json.loads(report_path.read_text(encoding="utf-8"))
     return payloads
 
 
-def validate_live_component_root(
+def validate_current_component_root(
     component_root: Path,
     venue: str,
     *,
     cutoff_day_ms: int | None = None,
     as_of_date: dt.date | None = None,
 ) -> dict:
-    """Require an official current-object receipt before touching the live tape."""
+    """Require base-component artifacts from the code-defined active profile."""
     summary_path = component_root.parent / venue / "continuous_equity_summary.json"
     if not summary_path.exists():
-        raise RuntimeError(f"missing official continuous summary: {summary_path}")
+        raise RuntimeError(f"missing continuous equity summary: {summary_path}")
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     failures = []
     try:
@@ -160,14 +148,19 @@ def validate_live_component_root(
     except (OSError, ValueError, RuntimeError) as exc:
         component_payloads = {}
         failures.append(str(exc))
-    if payload.get("run_label") != "exploratory":
+    if payload.get("run_label") != CONTINUOUS_EQUITY_EVIDENCE_LABEL:
         failures.append(f"run_label={payload.get('run_label')!r}")
-    if payload.get("strategy_run_label") != LIVE_STRATEGY_RUN_LABEL:
+    if payload.get("strategy_run_label") != CONTINUOUS_HISTORICAL_RUN_LABEL:
         failures.append(f"strategy_run_label={payload.get('strategy_run_label')!r}")
-    if abs(float(payload.get("component_take_profit_pct") or 0.0) - LIVE_COMPONENT_TAKE_PROFIT_PCT) > 1e-12:
+    if payload.get("strategy_profile") != CONTINUOUS_PROFILE_ID:
+        failures.append(f"strategy_profile={payload.get('strategy_profile')!r}")
+    if payload.get("profile_revision") != CONTINUOUS_PROFILE_REVISION:
+        failures.append(f"profile_revision={payload.get('profile_revision')!r}")
+    expected_tp = next(
+        iter(ACTIVE_CONTINUOUS_COMPONENT_BY_KEY.values())
+    ).take_profit_pct
+    if abs(float(payload.get("component_take_profit_pct") or 0.0) - expected_tp) > 1e-12:
         failures.append(f"component_take_profit_pct={payload.get('component_take_profit_pct')!r}")
-    if payload.get("btc_risk_sizing") is not True:
-        failures.append(f"btc_risk_sizing={payload.get('btc_risk_sizing')!r}")
     if abs(float(payload.get("backtest_leverage") or 0.0) - 1.0) > 1e-12:
         failures.append(f"backtest_leverage={payload.get('backtest_leverage')!r}")
     if payload.get("btc_trend_gate") not in (None, "uptrend"):
@@ -192,16 +185,31 @@ def validate_live_component_root(
                     f"{current_date.isoformat()!r}"
                 )
 
+    expected_by_cell = {
+        profile.artifact_cell: profile
+        for profile in ACTIVE_CONTINUOUS_COMPONENT_BY_KEY.values()
+    }
     component_modes: list[str] = []
     for cell, component in component_payloads.items():
         cfg = component.get("config") or {}
-        if abs(float(cfg.get("take_profit_pct") or 0.0) - LIVE_COMPONENT_TAKE_PROFIT_PCT) > 1e-12:
+        profile = expected_by_cell[cell]
+        if cfg.get("profile_id") != CONTINUOUS_PROFILE_ID:
+            failures.append(f"{cell}: profile_id={cfg.get('profile_id')!r}")
+        if cfg.get("profile_revision") != CONTINUOUS_PROFILE_REVISION:
+            failures.append(f"{cell}: profile_revision={cfg.get('profile_revision')!r}")
+        if cfg.get("component_key") != profile.key:
+            failures.append(f"{cell}: component_key={cfg.get('component_key')!r}")
+        if cfg.get("entry_event_trigger") != profile.entry_event_trigger:
+            failures.append(f"{cell}: entry_event_trigger={cfg.get('entry_event_trigger')!r}")
+        if cfg.get("age_days_min") != profile.age_days_min:
+            failures.append(f"{cell}: age_days_min={cfg.get('age_days_min')!r}")
+        if abs(float(cfg.get("take_profit_pct") or 0.0) - profile.take_profit_pct) > 1e-12:
             failures.append(f"{cell}: take_profit_pct={cfg.get('take_profit_pct')!r}")
         if cfg.get("btc_trend_gate") != "uptrend":
             failures.append(f"{cell}: btc_trend_gate={cfg.get('btc_trend_gate')!r}")
         if cfg.get("use_funding") is not True:
             failures.append(f"{cell}: use_funding={cfg.get('use_funding')!r}")
-        if cfg.get("start_date") != LIVE_START_DATE:
+        if cfg.get("start_date") != CONTINUOUS_HISTORY_START_DATE:
             failures.append(f"{cell}: start_date={cfg.get('start_date')!r}")
         if summary_end_date and cfg.get("end_date") != summary_end_date:
             failures.append(f"{cell}: end_date={cfg.get('end_date')!r}")
@@ -223,7 +231,8 @@ def validate_live_component_root(
         )
     if failures:
         raise RuntimeError(
-            f"official component root is not the live TP12/BTC-risk object for {venue}: "
+            f"component root does not match the code-defined TP12 base historical profile for {venue}; "
+            "accepted-decision BTC-risk sizing is intentionally out of scope: "
             + ", ".join(failures)
         )
     return payload
@@ -246,9 +255,7 @@ def daily_returns(closes: dict[int, float]) -> dict[int, float]:
     days = sorted(closes)
     out: dict[int, float] = {}
     for prev, cur in zip(days, days[1:]):
-        # audit2: only emit a calendar-consecutive return; a missing UTC day
-        # would otherwise mislabel a multi-day move as one day (mirrors the
-        # gap-guarded twin in continuous_forward_replay_orchestrator.btc_inputs).
+        # Do not mislabel a multi-day move as a one-day return across a gap.
         if cur - prev == MS_DAY and closes[prev] > 0:
             out[cur] = closes[cur] / closes[prev] - 1.0
     return out
@@ -258,25 +265,16 @@ def load_component_for_warmstart(
     src: str,
     venue: str,
     *,
-    component_root: Path | None = None,
+    component_root: Path,
 ):
-    spec = CONTINUOUS_COMPONENT_SOURCES[src]
-    if component_root is not None:
-        return load_continuous_component_source(
-            ContinuousComponentSource(component_root, spec.cell),
-            venue,
-        )
-    try:
-        return load_continuous_component_source(spec, venue)
-    except FileNotFoundError as original_error:
-        fallback = ContinuousComponentSource(FALLBACK_COMPONENT_ROOT, spec.cell)
-        try:
-            return load_continuous_component_source(fallback, venue)
-        except FileNotFoundError:
-            raise original_error
+    cell = ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[src].artifact_cell
+    return load_continuous_component_source(
+        ContinuousComponentSource(component_root, cell),
+        venue,
+    )
 
 
-def unit_series(venue: str, *, component_root: Path | None = None) -> dict[int, float]:
+def unit_series(venue: str, *, component_root: Path) -> dict[int, float]:
     comps = {
         src: load_component_for_warmstart(src, venue, component_root=component_root)[0]
         for src in WINNER
@@ -294,7 +292,7 @@ def regenerate(
     venue: str,
     n_days: int,
     *,
-    component_root: Path | None = None,
+    component_root: Path,
     cutoff_day_ms: int | None = None,
 ) -> list[dict]:
     root = ROOTS[venue]
@@ -319,7 +317,7 @@ def regenerate(
 
 
 def validate(venue: str, rows: list[dict]) -> dict:
-    """Compare the regenerated series against the banked CSV on overlapping dates.
+    """Compare the regenerated series against the deployed CSV on overlapping dates.
 
     Returns a dict the overwrite gate consumes:
       max_drift : max |delta_unit_ret| over the overlap (0.0 when no CSV/overlap)
@@ -347,7 +345,7 @@ def compare_unit_rows(
     candidate_rows: list[dict],
     label: str,
 ) -> dict:
-    """Compare unit-return rows by date for an old tape or canonical object."""
+    """Compare unit-return rows by date."""
     old = {r["date"]: float(r["unit_ret"]) for r in reference_rows}
     new = {r["date"]: float(r["unit_ret"]) for r in candidate_rows}
     overlap = sorted(set(old) & set(new))
@@ -359,7 +357,7 @@ def compare_unit_rows(
     max_drift = max(diffs)
     print(
         f"  {label}: overlap {len(overlap)}d, max|delta_unit| {max_drift:.2e}, "
-        f"mean|delta| {statistics.mean(diffs):.2e} (vintage drift expected at ledger-rebuild scale)"
+        f"mean|delta| {statistics.mean(diffs):.2e}"
     )
     return {
         "max_drift": max_drift,
@@ -369,8 +367,8 @@ def compare_unit_rows(
     }
 
 
-def live_tape_metadata(component_root: Path, payload: dict) -> dict[str, str]:
-    """Self-contained freshness/provenance fields repeated in each CSV row."""
+def component_tape_metadata(component_root: Path, payload: dict) -> dict[str, str]:
+    """Self-contained causal-boundary/provenance fields repeated in each row."""
     end_date = dt.date.fromisoformat(str(payload["end_date"]))
     summary_path = component_root.parent / str(payload["venue"]) / "continuous_equity_summary.json"
     return {
@@ -382,8 +380,8 @@ def live_tape_metadata(component_root: Path, payload: dict) -> dict[str, str]:
 def overwrite_blocked(venue: str, report: dict, *, max_drift: float, force: bool) -> str | None:
     """Reason the overwrite must be refused, or None to allow it.
 
-    Guards the live 2f-hedge warm-start CSV (backfill-writers-5): a regenerated
-    series that diverges materially from the banked one, or that has FEWER rows
+    Guards the runtime 2f hedge model prior: a regenerated
+    series that diverges materially from the deployed one, or that has fewer rows
     (a short/regressed run), must not silently overwrite + auto-deploy. --force
     is the explicit escape hatch for a known-good data-vintage shift.
     """
@@ -401,10 +399,10 @@ def overwrite_blocked(venue: str, report: dict, *, max_drift: float, force: bool
 
 
 def object_replacement_blocked(report: dict, *, max_drift: float) -> str | None:
-    """Gate an intentional old-tape -> current-live-object replacement."""
+    """Gate an intentional component-object replacement."""
     if report["overlap"] < MIN_OBJECT_REFERENCE_OVERLAP:
         return (
-            f"canonical current-object overlap {report['overlap']}d < "
+            f"reference component overlap {report['overlap']}d < "
             f"required {MIN_OBJECT_REFERENCE_OVERLAP}d"
         )
     return overwrite_blocked("reference", report, max_drift=max_drift, force=False)
@@ -414,29 +412,22 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=200)
     ap.add_argument(
-        "--venues",
-        default=",".join(ROOTS),
-        help="comma-separated venues to refresh; use bybit for the deployed live hedge",
-    )
-    ap.add_argument(
         "--component-root",
-        default=None,
-        help="optional official-runner components directory containing <venue>/<cell>/ artifacts",
+        required=True,
+        help=(
+            "components directory from the standard equity runner; it contains base historical "
+            "TP12 artifacts, not accepted-decision BTC-risk overlay state"
+        ),
     )
     ap.add_argument(
         "--reference-component-root",
         default=None,
-        help="canonical prior TP12/BTC-risk components used to authorize an object replacement",
+        help="prior code-defined TP12 component root used to authorize an object replacement",
     )
     ap.add_argument(
-        "--replace-live-object",
+        "--replace-component-object",
         action="store_true",
-        help="replace an obsolete live tape only when --reference-component-root parity passes",
-    )
-    ap.add_argument(
-        "--allow-legacy-component-sources",
-        action="store_true",
-        help="allow historical source/fallback ledgers instead of an official current-object receipt",
+        help="replace an obsolete model prior only when --reference-component-root parity passes",
     )
     ap.add_argument("--validate-only", action="store_true")
     ap.add_argument("--max-unit-drift", type=float, default=1e-3,
@@ -446,40 +437,27 @@ def main() -> int:
                     help="Overwrite even when the drift/row-count gate would refuse (known-good "
                          "data-vintage shift).")
     args = ap.parse_args()
-    venues = [venue.strip() for venue in args.venues.split(",") if venue.strip()]
-    unknown = sorted(set(venues) - set(ROOTS))
-    if unknown:
-        ap.error(f"unknown venue(s): {', '.join(unknown)}")
-    component_root = Path(args.component_root).expanduser() if args.component_root else None
+    venues = ("bybit",)
+    component_root = Path(args.component_root).expanduser()
     reference_root = (
         Path(args.reference_component_root).expanduser()
         if args.reference_component_root
         else None
     )
-    if component_root is None and not args.allow_legacy_component_sources:
-        ap.error(
-            "--component-root is required for the live hedge tape; run the official continuous "
-            "equity workflow with TP12 + BTC-risk sizing first"
-        )
-    if args.replace_live_object and (component_root is None or reference_root is None):
-        ap.error("--replace-live-object requires --component-root and --reference-component-root")
-    if reference_root is not None and component_root is None:
-        ap.error("--reference-component-root requires --component-root")
+    if args.replace_component_object and reference_root is None:
+        ap.error("--replace-component-object requires --reference-component-root")
     refused = False
     for venue in venues:
-        live_payload = None
-        if component_root is not None:
-            live_payload = validate_live_component_root(component_root, venue)
+        component_payload = validate_current_component_root(component_root, venue)
         rows = regenerate(venue, args.days, component_root=component_root)
-        if component_root is not None and live_payload is not None:
-            metadata = live_tape_metadata(component_root, live_payload)
-            for row in rows:
-                row.update(metadata)
+        metadata = component_tape_metadata(component_root, component_payload)
+        for row in rows:
+            row.update(metadata)
         report = validate(venue, rows)
         last = rows[-1]["date"] if rows else "none"
         block = overwrite_blocked(venue, report, max_drift=args.max_unit_drift, force=args.force)
         if reference_root is not None:
-            validate_live_component_root(reference_root, venue)
+            validate_current_component_root(reference_root, venue)
             reference_rows = regenerate(
                 venue,
                 args.days,
@@ -488,20 +466,20 @@ def main() -> int:
             reference_report = compare_unit_rows(
                 reference_rows=reference_rows,
                 candidate_rows=rows,
-                label=f"[{venue}] canonical TP12/BTC-risk object",
+                label=f"[{venue}] code-defined TP12 base-component object",
             )
             reference_block = object_replacement_blocked(
                 reference_report,
                 max_drift=args.max_unit_drift,
             )
-            if args.replace_live_object:
+            if args.replace_component_object:
                 if reference_block is not None:
                     block = reference_block
                 else:
                     if block is not None:
                         print(
                             f"  [{venue}] deployed-tape drift is expected for the explicit "
-                            "old-object replacement; canonical current-object parity passed"
+                            "prior-object replacement; reference component parity passed"
                         )
                     block = None
         if args.validate_only:

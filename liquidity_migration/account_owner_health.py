@@ -31,6 +31,7 @@ TEST_ACCOUNT_OWNER_INVOCATION_ID = "00000000000000000000000000000001"
 # Risk-increasing target producers require a much tighter bound than the
 # operator-facing watchdog. Owners normally publish every five seconds.
 TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
+ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS = 3
 
 
 class AccountOwnerHealthStatus(StrEnum):
@@ -305,34 +306,36 @@ def require_recent_account_owner_health(
             label="expected account-owner invocation id",
         )
     )
-    health = read_account_owner_health(root)
-    if health.environment != environment:
-        raise RuntimeError(f"account-owner health environment is {health.environment}, expected {environment}")
-    if expected_generation is not None and health.invocation_id != expected_generation:
-        raise RuntimeError(
-            "account-owner health invocation id does not match the current systemd generation: "
-            f"health={health.invocation_id}, expected={expected_generation}"
-        )
-    if AccountOwnerHealthStatus(health.status) is not AccountOwnerHealthStatus.HEALTHY:
-        raise RuntimeError(f"account owner is blocked: {health.detail or 'no detail'}")
-    if not health.requested_symbols_ready:
-        raise RuntimeError("account owner has unready requested symbols")
-    observed_now = time.time_ns() if now_ns is None else int(now_ns)
-    age_ns = observed_now - health.observed_ts_ns
-    if age_ns < 0 or age_ns > max_age_ns:
-        raise RuntimeError(f"account-owner health is stale: age_ns={age_ns}")
-    if expected_account_id is not None and health.account_id != expected_account_id:
-        raise RuntimeError(
-            f"account-owner health account_id is {health.account_id!r}, "
-            f"expected {expected_account_id!r}"
-        )
-
     # The health file is an independently replaced operational projection. Read
     # it on both sides of the journal snapshot so a concurrent owner update
-    # cannot accidentally bind one heartbeat to a different journal head.
-    events = read_account_journal(root, verify=True)
-    stable_health = read_account_owner_health(root)
-    if stable_health != health:
+    # cannot bind one heartbeat to a different journal head. A normal heartbeat
+    # replacement is retried; sustained churn still fails closed.
+    for _attempt in range(ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS):
+        health = read_account_owner_health(root)
+        if health.environment != environment:
+            raise RuntimeError(f"account-owner health environment is {health.environment}, expected {environment}")
+        if expected_generation is not None and health.invocation_id != expected_generation:
+            raise RuntimeError(
+                "account-owner health invocation id does not match the current systemd generation: "
+                f"health={health.invocation_id}, expected={expected_generation}"
+            )
+        if AccountOwnerHealthStatus(health.status) is not AccountOwnerHealthStatus.HEALTHY:
+            raise RuntimeError(f"account owner is blocked: {health.detail or 'no detail'}")
+        if not health.requested_symbols_ready:
+            raise RuntimeError("account owner has unready requested symbols")
+        observed_now = time.time_ns() if now_ns is None else int(now_ns)
+        age_ns = observed_now - health.observed_ts_ns
+        if age_ns < 0 or age_ns > max_age_ns:
+            raise RuntimeError(f"account-owner health is stale: age_ns={age_ns}")
+        if expected_account_id is not None and health.account_id != expected_account_id:
+            raise RuntimeError(
+                f"account-owner health account_id is {health.account_id!r}, "
+                f"expected {expected_account_id!r}"
+            )
+        events = read_account_journal(root, verify=True)
+        if read_account_owner_health(root) == health:
+            break
+    else:
         raise RuntimeError("account-owner health changed while binding the journal head")
     journal_sequence = events[-1].sequence if events else 0
     journal_state_hash = events[-1].state_hash if events else GENESIS_HASH

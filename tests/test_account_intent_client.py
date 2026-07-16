@@ -247,7 +247,7 @@ def test_exit_publications_are_independent_and_failure_blocks_entry(tmp_path) ->
     assert publisher.attempted == [exit_a.intent.target_key, exit_b.intent.target_key]
     assert len(result.exit_requests) == 1
     assert result.exit_requests[0].request.intents[0] == exit_b
-    assert result.entry_request is None
+    assert result.entry_requests == ()
     assert [(error.stage, error.target_key) for error in result.errors] == [("exit", exit_a.intent.target_key)]
     queued = AccountIntentInbox(route).unresolved_requests()
     assert len(queued) == 1
@@ -287,9 +287,7 @@ def test_exit_first_success_uses_one_request_per_exit_then_one_entry_request(tmp
     assert len(set(result.exit_request_ids)) == 2
     assert len(result.entry_requests) == 1
     assert result.entry_requests[0].request.intents == entries
-    assert result.entry_request is result.entry_requests[0]
-    assert result.entry_request_id
-    assert result.entry_request_ids == (result.entry_request_id,)
+    assert result.entry_request_ids == (result.entry_requests[0].request.request_id,)
     for published in (*result.exit_requests, *result.entry_requests):
         _assert_strict_route_identity(published, route)
     queued = publisher.inbox.unresolved_requests()
@@ -331,11 +329,6 @@ def test_independent_entries_publish_one_request_each_in_caller_order(tmp_path) 
     ]
     for published in result.entry_requests:
         _assert_strict_route_identity(published, route)
-    with pytest.raises(RuntimeError, match="entry_request is ambiguous"):
-        _ = result.entry_request
-    with pytest.raises(RuntimeError, match="entry_request_id is ambiguous"):
-        _ = result.entry_request_id
-
     replay = publish_exit_first_target_requests(
         publisher,
         batch_prefix="continuous-target/cycle-independent",
@@ -472,7 +465,6 @@ def test_independent_entry_crash_after_durable_publish_recovers_by_target_key(tm
         created_ts_ns=1_700_000_000_100_000_000,
         independent_entry_requests=True,
     )
-    assert recovered.entry_request is recovered.entry_requests[0]
     assert recovered.entry_request_ids == (recovered.entry_requests[0].request.request_id,)
     final = unresolved_target_snapshot(
         crashing.inbox,

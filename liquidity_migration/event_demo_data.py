@@ -298,24 +298,11 @@ def _build_demo_universe(
     config: MarketUniverseConfig,
     snapshot_ts_ms: int,
 ) -> pl.DataFrame:
-    # In the unlimited-universe mode (universe_rank_end == universe_max_symbols
-    # == 0) used by the live continuous fade book, drop the 30-day age floor
-    # HERE: the continuous cycle re-applies its own listing-age gate downstream
-    # (`_continuous_age_eligible_symbols` in continuous_demo.py, off
-    # `listing_age_days` vs `age_days_min`), and that gate is the authoritative
-    # fresh-listing-squeezer defense — treating a null launch age as ineligible
-    # when age_days_min > 0. Filtering fresh listings twice (once here, once
-    # downstream) would just narrow the universe before the real gate runs.
-    # When the legacy narrow-universe is active the 30-day safety floor stays in
-    # place to mirror prior demo behaviour. The active age compensation is the
-    # continuous downstream gate referenced above.
-    unlimited_universe = (
-        config.universe_rank_end == 0 and config.universe_max_symbols == 0
-    )
-    min_age_days = 0 if unlimited_universe else 30
+    # Listing age belongs to the active component gate downstream. Applying a
+    # second implicit 30-day floor here would silently change that profile.
     universe_config = UniverseConfig(
         min_turnover_24h=config.universe_min_turnover_24h,
-        min_age_days=min_age_days,
+        min_age_days=0,
         rank_start=1,
         rank_end=config.universe_rank_end,
         max_symbols=config.universe_max_symbols,
@@ -428,7 +415,7 @@ def _download_recent_1h_klines(
          delivers a hot in-memory window in <50ms vs the REST burst's
          multi-second tail. Symbols not yet covered by the store fall through
          to the REST path below.
-      2. The on-disk compact + parquet caches (legacy REST-only fast path).
+      2. The on-disk compact + parquet caches used by the REST fallback.
       3. REST fetches for any remaining ranges.
     """
     stats = {
@@ -508,7 +495,7 @@ def _download_recent_1h_klines(
         return store_frame, stats
 
     # 2) On-disk caches still apply to symbols not yet in the store, so the
-    # legacy fast path is preserved for the bootstrap window.
+    # The compact cache remains useful during the bootstrap window.
     cached = _read_demo_kline_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms)
     if not cached.is_empty():
         stats["cache_rows"] = cached.height
@@ -889,112 +876,3 @@ def _dedupe_recent_klines(klines: pl.DataFrame) -> pl.DataFrame:
     if klines.is_empty():
         return _empty_klines()
     return klines.unique(subset=["ts_ms", "symbol"], keep="last").sort(["symbol", "ts_ms"])
-
-def _demo_feature_cache_paths(cache_root: Path) -> tuple[Path, Path]:
-    root = Path(cache_root).expanduser() / ".cache" / "event_demo_features"
-    return root / "latest.parquet", root / "latest.json"
-
-def _demo_feature_cache_fingerprint(klines: pl.DataFrame, universe: pl.DataFrame) -> dict[str, Any]:
-    """Cheap content fingerprint of the (klines, universe) feature-build inputs.
-
-    The demo loop ticks every ~60s but 1h klines only change when a bar closes,
-    so 59 of every 60 cycles feed _build_demo_features identical inputs. Counts
-    + min/max ts + column sums uniquely identify a kline set for this purpose:
-    the only between-cycle change is appended bars, and any appended bar moves
-    row count, max ts, and the sums together. One aggregation pass, sub-ms.
-
-    The universe is fingerprinted by row count plus the sum of WHOLE-day listing
-    ages. `listing_age_days` itself is `(snapshot_ts_ms - launch_time_ms)/day`,
-    which creeps up every single cycle — fingerprinting the raw float would miss
-    100% of the time. The feature build only consumes the age at day resolution
-    (symbol_age_days is an Int64 cast), and a membership change moves the kline
-    close/turnover sums anyway, so whole-day granularity is the correct key: it
-    holds steady across a trading hour and turns over only on a real day roll."""
-    k = klines.select(
-        pl.len().alias("rows"),
-        pl.col("ts_ms").min().alias("min_ts"),
-        pl.col("ts_ms").max().alias("max_ts"),
-        pl.col("symbol").n_unique().alias("symbols"),
-        pl.col("close").sum().alias("close_sum"),
-        pl.col("turnover_quote").sum().alias("turnover_sum"),
-    ).row(0)
-    fingerprint: dict[str, Any] = {
-        "kline_rows": int(k[0] or 0),
-        "kline_min_ts": int(k[1] or 0),
-        "kline_max_ts": int(k[2] or 0),
-        "kline_symbols": int(k[3] or 0),
-        "kline_close_sum": round(float(k[4] or 0.0), 6),
-        "kline_turnover_sum": round(float(k[5] or 0.0), 3),
-    }
-    if not universe.is_empty() and "listing_age_days" in universe.columns:
-        u = universe.select(
-            pl.len().alias("rows"),
-            pl.col("listing_age_days").cast(pl.Int64, strict=False).sum().alias("age_days_sum"),
-        ).row(0)
-        fingerprint["universe_rows"] = int(u[0] or 0)
-        fingerprint["universe_age_days_sum"] = int(u[1] or 0)
-    else:
-        fingerprint["universe_rows"] = int(universe.height)
-        fingerprint["universe_age_days_sum"] = 0
-    return fingerprint
-
-def _read_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any]) -> pl.DataFrame | None:
-    parquet_path, metadata_path = _demo_feature_cache_paths(cache_root)
-    if not parquet_path.exists() or not metadata_path.exists():
-        return None
-    try:
-        metadata_snapshot = read_stable_file(
-            metadata_path,
-            label="demo feature-cache metadata",
-            require_single_link=False,
-        )
-        metadata = json.loads(metadata_snapshot.data)
-    except (OSError, RuntimeError, json.JSONDecodeError, ValueError):
-        return None
-    if (
-        not isinstance(metadata, dict)
-        or set(metadata) != set(fingerprint) | {"parquet_sha256"}
-        or any(metadata.get(key) != value for key, value in fingerprint.items())
-    ):
-        return None
-    try:
-        parquet_snapshot = read_stable_file(
-            parquet_path,
-            label="demo feature-cache parquet",
-            require_single_link=False,
-        )
-        if metadata.get("parquet_sha256") != parquet_snapshot.sha256:
-            return None
-        return pl.read_parquet(io.BytesIO(parquet_snapshot.data))
-    except (OSError, RuntimeError, ValueError, pl.exceptions.PolarsError):
-        return None
-
-def _write_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any], features: pl.DataFrame) -> None:
-    if features.is_empty():
-        return
-    parquet_path, metadata_path = _demo_feature_cache_paths(cache_root)
-    parquet_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_parquet = parquet_path.with_name(f".{parquet_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        features.write_parquet(temp_parquet)
-        parquet_snapshot = read_stable_file(
-            temp_parquet,
-            label="staged demo feature-cache parquet",
-            require_single_link=False,
-        )
-        # Replace the parquet first, then the metadata: the metadata file is the
-        # commit marker. A crash between the two replaces leaves stale metadata
-        # paired with fresh data -> next read mismatches -> safe recompute.
-        temp_parquet.replace(parquet_path)
-        temp_metadata.write_text(
-            json.dumps(
-                {**fingerprint, "parquet_sha256": parquet_snapshot.sha256},
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
-        temp_metadata.replace(metadata_path)
-    except (OSError, pl.exceptions.PolarsError):
-        temp_parquet.unlink(missing_ok=True)
-        temp_metadata.unlink(missing_ok=True)

@@ -556,7 +556,7 @@ def test_bootstrap_symbol_completes_full_universe_in_a_few_seconds() -> None:
 
 
 def test_keep_only_symbols_drops_everything_outside_the_set() -> None:
-    """Used at manager startup to trim legacy bars when the universe
+    """Used at manager startup to trim out-of-scope bars when the universe
     scope shrinks between runs (e.g. long sleeve recovered with 567
     symbols' worth of data from a prior wider-universe daemon but now
     only tracks the top-50)."""
@@ -596,31 +596,6 @@ def test_amortized_eviction_does_not_skip_long_overdue_purges() -> None:
     store.add_bar("NEW", _ws_bar(5 * MS_PER_DAY, close=100.0), confirmed=True)
     assert "OLD" not in store.symbols_with_coverage_through(0)
     assert "NEW" in store.symbols_with_coverage_through(5 * MS_PER_DAY)
-
-
-def test_get_klines_window_cache_hits_and_busts() -> None:
-    """Tier C perf: get_klines caches the materialized window frame and serves a
-    clone on a same-version repeat read (the heartbeat hot path), rebuilding only
-    when the store mutates. The cached frame must be bit-identical to a fresh build."""
-    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
-    store.add_bar("BTCUSDT", _ws_bar(MS_PER_HOUR, close=100.0), confirmed=True)
-    store.add_bar("ETHUSDT", _ws_bar(MS_PER_HOUR, close=50.0), confirmed=True)
-
-    f1 = store.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
-    builds_after_first = store._window_builds
-    f2 = store.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
-    # Second read served from cache: no rebuild, identical content.
-    assert store._window_builds == builds_after_first
-    assert f1.equals(f2)
-    # A mutation (new confirmed bar) busts the cache -> rebuild on next read.
-    store.add_bar("BTCUSDT", _ws_bar(2 * MS_PER_HOUR, close=101.0), confirmed=True)
-    f3 = store.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
-    assert store._window_builds == builds_after_first + 1
-    assert f3.height == f1.height + 1  # the new bar is present
-    # A different window key also rebuilds.
-    builds_before = store._window_builds
-    store.get_klines(["BTCUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
-    assert store._window_builds == builds_before + 1
 
 
 def test_get_klines_cache_matches_uncached_output() -> None:

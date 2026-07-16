@@ -12,7 +12,6 @@ from liquidity_migration._common import (
     calendar_roll,
     calendar_shift,
     exact_duration_ms,
-    exact_lookback_cutoff_ms,
     is_weekend_ms,
 )
 
@@ -68,7 +67,7 @@ def test_exact_duration_ms_keeps_month_equivalent_precise() -> None:
     anchor = 1_700_000_123_456
 
     assert exact_duration_ms(days=365.25 / 12) == month_ms
-    assert exact_lookback_cutoff_ms(anchor, days=365.25 / 12) == anchor - month_ms
+    assert anchor - exact_duration_ms(days=365.25 / 12) == anchor - month_ms
 
 
 def test_exact_duration_ms_rejects_sub_millisecond_duration() -> None:

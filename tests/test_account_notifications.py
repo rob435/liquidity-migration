@@ -367,7 +367,7 @@ def test_hourly_summary_loss_alert_and_confirmed_close_are_low_noise(tmp_path: P
     assert "provisional (funding, venue closed-PnL, fees pending)" in flat.message
 
 
-def test_legacy_fill_pnl_without_new_statuses_stays_conservatively_provisional(
+def test_fill_pnl_without_reconciliation_status_stays_conservatively_provisional(
     tmp_path: Path,
 ) -> None:
     kernel, clock, *_ = _setup_open(tmp_path / "account")
@@ -378,7 +378,7 @@ def test_legacy_fill_pnl_without_new_statuses_stays_conservatively_provisional(
     )
     notifier.commit(notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy"))
     kernel.record_close(
-        close_key="legacy-reduction",
+        close_key="provisional-reduction",
         symbol="BUSDT",
         reason="take_profit",
         venue_flat=False,
@@ -386,8 +386,8 @@ def test_legacy_fill_pnl_without_new_statuses_stays_conservatively_provisional(
         local_receive_ts_ns=10,
     )
     kernel.record_pnl(
-        pnl_key="legacy-fill-pnl",
-        close_key="legacy-reduction",
+        pnl_key="provisional-fill-pnl",
+        close_key="provisional-reduction",
         symbol="BUSDT",
         gross_pnl_usdt=1.0,
         fee_usdt=0.0,
@@ -398,9 +398,9 @@ def test_legacy_fill_pnl_without_new_statuses_stays_conservatively_provisional(
         source="fill_reconstructed_provisional_funding",
         metadata={
             "funding_status": "pending_venue_reconciliation",
-            # Malformed legacy metadata must not render one component per
+            # Malformed metadata must not render one component per
             # character or accidentally imply a supported attribution.
-            "component_ids": "legacy-component",
+            "component_ids": "bad-component",
         },
     )
 
@@ -408,7 +408,7 @@ def test_legacy_fill_pnl_without_new_statuses_stays_conservatively_provisional(
 
     assert "✅ Reduced BUSDT · take profit" in update.message
     assert "provisional (funding, venue closed-PnL, fees pending)" in update.message
-    assert "component l, e, g" not in update.message
+    assert "component b, a, d" not in update.message
 
 
 def test_same_symbol_component_exit_reports_reduction_before_later_close(
@@ -863,31 +863,3 @@ def test_first_notification_run_does_not_replay_old_entry_risk_rejections(
     assert "Entry risk: 1 unresolved attempt(s)" in first.message
     assert "active reasons below min notional" in first.message
     assert len(first.next_state.entry_rejections) == 1
-
-
-def test_notification_schema_one_state_migrates_without_replaying(tmp_path: Path) -> None:
-    kernel, _, notifier, snapshot, policy = _setup_risk_notifications(tmp_path / "account")
-    legacy = json.loads(notifier.state_path.read_text())
-    legacy["schema_version"] = 1
-    for key in (
-        "entry_rejections",
-        "recent_entry_rejection_count",
-        "recent_entry_rejection_attempts",
-        "recent_entry_rejection_reasons",
-    ):
-        legacy.pop(key, None)
-    notifier.state_path.write_text(json.dumps(legacy))
-    _submit_entry_risk_decision(
-        kernel,
-        snapshot=snapshot,
-        loose_policy=policy,
-        batch_id="risk-after-v1",
-    )
-
-    update = notifier.prepare(midpoint_by_symbol={}, health="healthy")
-    notifier.commit(update)
-
-    migrated = json.loads(notifier.state_path.read_text())
-    assert "Entry blocked by account risk" in update.message
-    assert migrated["schema_version"] == 2
-    assert migrated["entry_rejections"]["attempt:trade-a"]["count"] == 1

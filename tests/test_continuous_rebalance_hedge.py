@@ -1,8 +1,7 @@
-"""Hedge-leg tests for the continuous rebalance engine (WP3 Stage-B).
+"""Hedge-leg tests for the continuous rebalance engine.
 
-Covers the backtest-integrity gates: causality at decision time, warm-start from
-live-equivalent state (min-obs), accounting reconciliation, gap close/reopen
-costs, and backward compatibility of the unhedged path.
+Covers decision-time causality, warm-start minimum observations, accounting
+reconciliation, gap close/reopen costs, and the no-hedge path.
 """
 
 from __future__ import annotations

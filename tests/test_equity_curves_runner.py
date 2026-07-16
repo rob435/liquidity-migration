@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
-from liquidity_migration import promoted
-
+from liquidity_migration.continuous_profile import CONTINUOUS_HISTORICAL_RUN_LABEL
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "equity_curves.py"
 SPEC = importlib.util.spec_from_file_location("equity_curves", MODULE_PATH)
@@ -15,14 +14,8 @@ equity_curves = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(equity_curves)
 
 
-def test_continuous_is_runner_sleeve_and_promoted_profile() -> None:
-    # CONTINUOUS is both an equity-tool runner sleeve AND (since the 2026-06-15
-    # registry) an active profile.
+def test_continuous_is_runner_sleeve() -> None:
     assert set(equity_curves.RUNNERS) == {"long", "continuous"}
-    assert promoted.PROFILES == {
-        "long": promoted.long_profile,
-        "continuous": promoted.continuous_profile,
-    }
 
 
 def test_continuous_venue_inference_from_root() -> None:
@@ -44,7 +37,7 @@ def test_continuous_payload_normalizes_percent_stats(tmp_path: Path) -> None:
         report_dir=tmp_path,
     )
 
-    assert payload["run_label"] == "continuous_demo_paper_research_stage"
+    assert payload["run_label"] == CONTINUOUS_HISTORICAL_RUN_LABEL
     assert payload["summary"] == {
         "total_return": 0.125,
         "max_drawdown": -0.04,
@@ -93,7 +86,6 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
 
     root = tmp_path / "bybit_full_pit"
     out = tmp_path / "reports"
-    fallback = tmp_path / "fallback"
     payload = equity_curves._run_continuous(
         str(root),
         costs=object(),
@@ -103,10 +95,7 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
         pit_tol=0.0,
         venue="bybit",
         render_only=True,
-        frozen_fallback=fallback,
         chart_leverage=2.5,
-        component_take_profit_pct=0.12,
-        btc_risk_sizing=True,
         backtest_leverage=5.0,
     )
 
@@ -116,13 +105,9 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
         "start_date": "2023-06-01",
         "end_date": "2026-06-12",
         "render_only": True,
-        "frozen_fallback": fallback,
         "data_root": root,
         "chart_leverage": 2.5,
-        "component_take_profit_pct": 0.12,
-        "btc_risk_sizing": True,
         "backtest_leverage": 5.0,
-        "btc_trend_gate": None,
     }
-    assert payload["run_label"] == "continuous_demo_paper_research_stage"
+    assert payload["run_label"] == CONTINUOUS_HISTORICAL_RUN_LABEL
     assert payload["summary"]["total_return"] == 0.1

@@ -1,9 +1,9 @@
 [Unit]
-Description=Periodic BTC+ETH 2f target hedge for the continuous demo account route
+Description=Periodic immutable-prior BTC+ETH target hedge for the continuous demo account route
 Wants=network-online.target
 Requires=liquidity-migration-account-execution.service
 After=network-online.target liquidity-migration-account-execution.service
-ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot
@@ -17,20 +17,13 @@ Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=0
 Environment=EXECUTION_ENVIRONMENT=demo
 Environment=TELEGRAM_ENABLED=0
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=HEDGE_VENUE=bybit
 Environment=PRIMARY_ROOT=data/bybit-continuous-demo-event
-# Banked BTC+ETH two-factor form (receipts continuous-hedge-{upgrade,2f-engine}-2026-06-10).
-Environment=HEDGE_MODE=2f
-# Explicit action boundary. Manual launches remain dry-run unless they set this
-# to execute; the account owner alone turns published targets into venue orders.
+Environment=HEDGE_MODEL_PRIOR=deploy/hedge_warmstart/bybit_warmstart.csv
 Environment=HEDGE_ACTION=execute
-# Hardening + memory-cap parity with the sibling units.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
 MemoryMax=512M
-# Late fresh-epoch demo route and PRIMARY_ROOT override.
-EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-continuous-hedge.service.env
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-continuous-hedge.service main
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-continuous-hedge.service main

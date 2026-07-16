@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# Mandatory pre-push gates (CLAUDE.md): ruff + the full pytest suite.
-# vps-deploy.yml DOES run a server-side ruff+pytest `ci` job that gates the deploy
-# (audit 2026-06-12 round 4), but it runs only after push; this hook is the LOCAL
-# gate that catches a bad commit BEFORE it pushes and triggers a live deploy.
-# Bypass with `git push --no-verify` if you truly need to (don't).
-#
-# CANONICAL SOURCE (round 4): this file is the tracked copy; .git/hooks/ is
-# untracked, so a fresh clone or second machine silently has NO gate. Install:
+# Tracked local Ruff + mypy + pytest gate. Remote CI still runs after push.
+# Install it explicitly because .git/hooks is untracked:
 #   cp scripts/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
 
 set -e
@@ -22,6 +16,9 @@ fi
 
 echo "[pre-push] ruff check..."
 "$PYTHON_BIN" -m ruff check liquidity_migration tests scripts
+
+echo "[pre-push] mypy..."
+"$PYTHON_BIN" -m mypy liquidity_migration
 
 PYTEST_BASETEMP="${PYTEST_BASETEMP:-}"
 if [[ -z "$PYTEST_BASETEMP" ]]; then

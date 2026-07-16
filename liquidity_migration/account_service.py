@@ -1066,7 +1066,6 @@ class AccountExecutionService:
         self.convergence_health_grace_ns = convergence_health_grace_ns
         self.convergence_retry_backoff_ns = convergence_retry_backoff_ns
         self.max_convergence_retries = max_convergence_retries
-        self.last_convergence_result: TargetBatchResult | None = None
         if (
             max_market_age_ns < 0
             or max_snapshot_age_ns < 0
@@ -1582,9 +1581,6 @@ class AccountExecutionService:
             items=tuple(plan.item for plan in self._convergence_plans()),
         )
 
-    def require_convergence_healthy(self) -> None:
-        self.convergence_report().require_healthy()
-
     def _submit_convergence_plan(
         self,
         plan: _ConvergencePlan,
@@ -1662,7 +1658,6 @@ class AccountExecutionService:
                 market_inputs=market_inputs,
                 adapter=self.execution_adapter,
             )
-        self.last_convergence_result = result
         return result
 
     def converge_once(self) -> TargetBatchResult | None:

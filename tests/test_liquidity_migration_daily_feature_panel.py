@@ -13,7 +13,6 @@ and risk-model consumers become invalid. These tests pin:
 """
 from __future__ import annotations
 
-import inspect
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -726,16 +725,3 @@ def test_turnover_delta_window_shrinks_across_a_gap_not_stretches() -> None:
     # null and turnover_delta_7d is null. The positional bug compared against days
     # {0,1,2} (28+ days stale) and produced a finite (0.0) delta.
     assert by_day[30] is None
-
-
-def test_calendar_helpers_are_imported_in_daily_feature_panel() -> None:
-    """The module must actually route through the gap-aware primitives; importing
-    them is the structural part of the fix (test-gaps-3)."""
-    import liquidity_migration.daily_feature_panel as fp
-
-    src = inspect.getsource(fp)
-    assert "calendar_shift" in src
-    assert "calendar_roll" in src
-    # No bare positional shift on the daily panel should survive in the N-day builders.
-    assert ".shift(n).over(\"symbol\")" not in src
-    assert ".shift(7).over(\"symbol\")" not in src

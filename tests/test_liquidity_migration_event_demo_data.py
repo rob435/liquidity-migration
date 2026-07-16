@@ -423,9 +423,7 @@ def test_download_recent_1h_klines_ignores_store_failure_gracefully(tmp_path: Pa
     assert stats["fetched_rows"] >= 1
 
 
-def test_download_recent_1h_klines_without_store_keeps_legacy_behavior(tmp_path: Path) -> None:
-    """Pre-existing call site (no kline_store) must behave identically to
-    before: cache + REST path, no new stats blow-up."""
+def test_download_recent_1h_klines_without_store_uses_rest(tmp_path: Path) -> None:
     market = FakeKlineMarket()
     output, stats = _download_recent_1h_klines(
         ["AAAUSDT"],
@@ -513,29 +511,6 @@ def test_resolve_ticker_snapshot_with_no_cache_uses_rest() -> None:
     assert rows[0]["symbol"] == "X"
 
 
-def test_event_demo_cycles_dataset_is_date_partitioned(tmp_path: Path) -> None:
-    """event_demo_cycles is append-only telemetry written every cycle. It must
-    be date-partitioned so the per-cycle write stays bounded to the current
-    day's rows instead of read+rewriting the whole (unbounded) dataset — and it
-    must still round-trip cleanly through read_dataset for the tribunal."""
-    day_ms = 24 * 60 * 60 * 1000
-    day1 = 1_700_000_000_000
-    day2 = day1 + day_ms
-    rows = [
-        {"cycle_id": "c1", "ts_ms": day1, "mode": "submit"},
-        {"cycle_id": "c2", "ts_ms": day1 + 60_000, "mode": "submit"},
-        {"cycle_id": "c3", "ts_ms": day2, "mode": "submit"},
-    ]
-    for row in rows:
-        write_dataset(pl.DataFrame([row]), tmp_path, "event_demo_cycles", partition_by=("date",))
-
-    date_parts = sorted(p.name for p in (tmp_path / "event_demo_cycles").glob("date=*"))
-    assert len(date_parts) == 2, f"expected one partition per day, got {date_parts}"
-
-    loaded = read_dataset(tmp_path, "event_demo_cycles")
-    assert sorted(loaded["cycle_id"].to_list()) == ["c1", "c2", "c3"]
-
-
 def test_demo_instruments_cache_serves_within_ttl(tmp_path: Path) -> None:
     """get_instruments_info is a large REST call but contract specs change ~daily.
     A second cycle inside the TTL must serve the cached frame, not refetch."""
@@ -594,16 +569,6 @@ def test_demo_cache_markers_bind_the_exact_parquet_bytes(tmp_path: Path) -> None
         end_ms=0,
     ).is_empty()
 
-    fingerprint = {"rows": 1}
-    features = pl.DataFrame({"symbol": ["AAAUSDT"], "score": [1.0]})
-    event_demo_data._write_demo_feature_cache(tmp_path, fingerprint, features)
-    feature_parquet, _feature_metadata = event_demo_data._demo_feature_cache_paths(
-        tmp_path
-    )
-    feature_parquet.write_bytes(feature_parquet.read_bytes() + b"changed")
-    assert event_demo_data._read_demo_feature_cache(tmp_path, fingerprint) is None
-
-
 def test_demo_instruments_falls_back_to_stale_cache_on_fetch_error(tmp_path: Path) -> None:
     """A transient instruments-endpoint outage must not fail the whole cycle —
     contract specs barely change, so a stale cache is safe to reuse."""
@@ -644,30 +609,6 @@ def test_build_demo_universe_match_backtest_mode_includes_all_trading_perps() ->
     assert "BANUSDT" in symbols
     assert "NEWUSDT" in symbols, "NEWUSDT (5 days old) must be included in match-the-backtest mode"
     assert "BUSDUSDT" not in symbols
-
-
-def test_build_demo_universe_legacy_mode_applies_30_day_age_floor() -> None:
-    """Narrow-universe demo (universe_rank_end > 0) keeps the 30-day age
-    safety floor that pre-dates the match-the-backtest unification —
-    documents the behavior delta so operators downgrading to legacy
-    mode know what they get."""
-    snapshot_ts_ms = 1_779_440_000_000  # NEWUSDT is only ~5 days old here
-    demo_config = _public_config(
-        universe_rank_end=400,
-        universe_max_symbols=400,
-        universe_min_turnover_24h=0.0,
-    )
-    universe = _build_demo_universe(
-        _make_instruments_frame(),
-        _make_tickers_frame(),
-        config=demo_config,
-        snapshot_ts_ms=snapshot_ts_ms,
-    )
-    symbols = set(universe["symbol"].to_list())
-    assert "BTCUSDT" in symbols
-    assert "BANUSDT" in symbols  # ~500 days old
-    assert "NEWUSDT" not in symbols, "Legacy narrow-universe mode keeps the 30-day age floor"
-
 
 
 # ---------------------------------------------------------------------------
@@ -819,32 +760,11 @@ def test_download_recent_1h_klines_prunes_stale_partitions_after_rest_write(tmp_
     assert read_dataset(tmp_path, "event_demo_klines_1h").height == 3
 
 
-# --------------------------------------------------------------------------
-# universe-pit-4 : _build_demo_universe doc-drift + age-floor behaviour
-# (relocated from the audit bucket b01)
-# --------------------------------------------------------------------------
-
-
 def _hour_floor_now_ms() -> int:
     return (int(time.time() * 1000) // MS_PER_HOUR) * MS_PER_HOUR
 
 
-def test_build_demo_universe_comment_no_longer_references_removed_strategy() -> None:
-    """universe-pit-4: the _build_demo_universe justification must not reference
-    the removed strategy's prior7_liquidity_rank null-exclusion. The live age
-    compensation is the continuous downstream gate; the comment must say so."""
-    import inspect
-
-    src = inspect.getsource(event_demo_data._build_demo_universe)
-    assert "prior7_liquidity_rank" not in src.split("Historical note")[0]
-    assert "_continuous_age_eligible_symbols" in src
-
-
-def test_build_demo_universe_unlimited_drops_age_floor(monkeypatch) -> None:
-    """universe-pit-4 guard: the actual behaviour the comment describes is
-    unchanged — unlimited-universe mode (rank_end == max_symbols == 0) drops the
-    local 30-day age floor (min_age_days=0) so the downstream continuous gate is
-    authoritative; the legacy narrow-universe mode keeps the 30-day floor."""
+def test_build_demo_universe_leaves_age_filter_to_component_profile(monkeypatch) -> None:
     captured: list[int] = []
 
     def spy_build(instruments, tickers, *, universe_config, snapshot_ts_ms):
@@ -861,12 +781,4 @@ def test_build_demo_universe_unlimited_drops_age_floor(monkeypatch) -> None:
     event_demo_data._build_demo_universe(
         empty, empty, config=unlimited, snapshot_ts_ms=_hour_floor_now_ms(),
     )
-    assert captured[-1] == 0  # age floor dropped in unlimited mode
-
-    narrow = _public_config(
-        universe_rank_end=200, universe_max_symbols=50,
-    )
-    event_demo_data._build_demo_universe(
-        empty, empty, config=narrow, snapshot_ts_ms=_hour_floor_now_ms(),
-    )
-    assert captured[-1] == 30  # legacy floor preserved
+    assert captured == [0]

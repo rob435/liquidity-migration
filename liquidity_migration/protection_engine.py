@@ -12,7 +12,6 @@ from .account_service import (
     RequestedIntent,
     SleeveAdapterKind,
 )
-from .execution_twin_account import protection_trigger_reason
 from .account_strategy_state import canonical_component_execution_anchors
 from .strategy_runtime import SleeveTargetIntent
 
@@ -96,7 +95,7 @@ class AccountProtectionEngine:
                 tick_size=rule.tick_size,
                 is_stop=False,
             )
-            reason = protection_trigger_reason(
+            reason = _protection_trigger_reason(
                 signed_qty=signed_qty,
                 mark_price=market.reference_price,
                 stop_price=stop,
@@ -194,6 +193,28 @@ class AccountProtectionEngine:
             )
             requests.append(request)
         return tuple(requests)
+
+
+def _protection_trigger_reason(
+    *,
+    signed_qty: float,
+    mark_price: float,
+    stop_price: float | None,
+    take_profit_price: float | None,
+) -> str:
+    if signed_qty == 0.0:
+        return ""
+    if stop_price is not None and stop_price > 0.0 and (
+        (signed_qty > 0.0 and mark_price <= stop_price)
+        or (signed_qty < 0.0 and mark_price >= stop_price)
+    ):
+        return "stop_loss"
+    if take_profit_price is not None and take_profit_price > 0.0 and (
+        (signed_qty > 0.0 and mark_price >= take_profit_price)
+        or (signed_qty < 0.0 and mark_price <= take_profit_price)
+    ):
+        return "take_profit"
+    return ""
 
 
 def _optional_fraction(value: object) -> float | None:

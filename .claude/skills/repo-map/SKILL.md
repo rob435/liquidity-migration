@@ -11,13 +11,12 @@ Start from the source that owns the question:
   environment/config.
 - Evidence policy: `docs/governance.md`.
 - Research decisions: `docs/research_summary.md` and raw run artifacts.
-- Active profile contract: `docs/promoted_trading_logic.md`, then the registry,
-  engine, daemon, and deploy overrides it cites.
+- Active profile contract: `docs/active_trading_logic.md`, then the strategy
+  modules, target producers, account owner, and deploy overrides it cites.
 - CLI ownership: `liquidity_migration/cli.py`, parser modules, and current
   `--help`.
-- Data/PIT: `storage.py`, `data_layer.py`, `ingestion.py`,
-  `archive_manifest.py`, `volume_events_pit.py`, `docs/data_roots.md`, and
-  `docs/pit_gate.md`.
+- Data/PIT: `storage.py`, `ingestion.py`, `archive_manifest.py`,
+  `volume_events_pit.py`, `docs/data_roots.md`, and `docs/pit_gate.md`.
 - Execution lifecycle: continuous/long target producers,
   `account_service.py`, `account_kernel.py`, `account_reconcile.py`,
   `trade_lifecycle.py`, the demo/paper account-owner launchers, and their tests.

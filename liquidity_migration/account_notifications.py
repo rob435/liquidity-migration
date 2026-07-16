@@ -194,7 +194,7 @@ class AccountNotificationEngine:
             payload = json.loads(self.state_path.read_bytes())
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return AccountNotificationState()
-        if not isinstance(payload, Mapping) or int(payload.get("schema_version") or 0) not in {1, 2}:
+        if not isinstance(payload, Mapping) or int(payload.get("schema_version") or 0) != NOTIFICATION_SCHEMA_VERSION:
             return AccountNotificationState()
         return AccountNotificationState(
             last_sequence=int(payload.get("last_sequence") or 0),

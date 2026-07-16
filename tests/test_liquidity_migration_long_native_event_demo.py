@@ -13,7 +13,6 @@ Covers:
 from __future__ import annotations
 
 import json
-import logging
 import math
 from dataclasses import replace
 from pathlib import Path
@@ -30,21 +29,15 @@ from liquidity_migration.account_route import (
     ensure_account_route,
 )
 from liquidity_migration.config import ResearchConfig
+from liquidity_migration.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
+from liquidity_migration.long_native import long_v11a_profile
 from liquidity_migration.long_native_event_demo import (
-    FC_VOLUME_RANK_TELEMETRY_MARGIN,
-    LONG_DEMO_STRATEGY_PROFILES,
     LongNativeDemoCycleConfig,
-    LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
-    _fc_rank_is_near_boundary,
-    _log_fc_rank_boundary,
     _count_long_target_reservations,
-    _long_demo_event_config,
-    _long_demo_strategy_id,
     _open_long_trades,
     _plan_time_stop_exits,
     _select_long_entry_candidates,
     _validate_long_demo_config,
-    _v11a_long_native_config,
     _vol_parity_weight,
     format_long_demo_cycle_summary,
     projected_long_initial_margin_pct_equity,
@@ -55,56 +48,27 @@ from liquidity_migration.strategy_target_replay import PublishedTargetCyclePaylo
 
 
 def test_v11a_config_matches_research_run() -> None:
-    cfg = _v11a_long_native_config()
-    # FC-only universe
-    assert cfg.enable_fomo_chase
-    assert not cfg.enable_capitulation_rebound
-    assert not cfg.enable_volume_resurrection
-    assert not cfg.enable_funding_squeeze
-    assert not cfg.enable_oversold_bounce
-    assert not cfg.enable_uptrend_dip
-    # div: uni50 (promoted 2026-05-30, was uni10)
+    cfg = long_v11a_profile()
     assert cfg.universe_size == 50
-    # sniper retrace
-    assert cfg.fc_use_sniper_entry
     assert cfg.fc_sniper_retrace_pct == pytest.approx(0.01)
     assert cfg.fc_sniper_deadline_hours == 6
-    assert cfg.fc_sniper_skip_on_no_retrace is False  # fall-through
-    # ATR exits
-    assert cfg.fc_use_atr_exits
     assert cfg.fc_atr_stop_mult == pytest.approx(1.5)
     assert cfg.fc_atr_tp_mult == pytest.approx(4.0)
     assert cfg.fc_max_atr_pct == pytest.approx(0.12)
     assert cfg.fc_max_hold_days == 3
-    # sigma + multi-day triggers
-    assert cfg.fc_use_sigma_threshold
     assert cfg.fc_sigma_mult == pytest.approx(2.5)
-    assert cfg.fc_enable_3d_trigger
-    assert cfg.fc_enable_7d_trigger
-    # Portfolio (div: max_concurrent 5->10)
     assert cfg.max_concurrent_positions == 10
     assert cfg.cooldown_days == 7
     assert cfg.entry_delay_hours == 1
     assert cfg.max_position_weight == pytest.approx(0.30)
-    assert cfg.max_per_symbol_weight == pytest.approx(cfg.max_position_weight)
-    assert cfg.sizing == "vol_parity"
-    # div risk-engineering (promoted 2026-05-30): de-risk-only volatility targeting
-    assert cfg.enable_vol_target
     assert cfg.vol_target_annual == pytest.approx(0.60)
-    assert cfg.vol_target_max_scale == pytest.approx(1.25)  # volup125, operator-promoted 2026-06-09
+    assert cfg.vol_target_max_scale == pytest.approx(1.25)
     assert cfg.vol_target_min_scale == pytest.approx(0.30)
-
-
-def test_demo_universe_matches_strategy() -> None:
-    # div promotion (2026-05-30) widened BOTH the strategy and the live-demo universe to 50.
-    # They MUST stay in sync — otherwise the live demo silently trades a different universe
-    # than the validated backtest. This guard exists because exactly that drift shipped once.
-    assert LongNativeDemoCycleConfig().universe_size == _v11a_long_native_config().universe_size == 50
 
 
 def test_demo_default_notional_multiplier_is_research_1x() -> None:
     demo = LongNativeDemoCycleConfig()
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     assert demo.notional_multiplier == pytest.approx(1.0)
     assert target_long_order_notional_pct_equity(demo, strategy) == pytest.approx(
         strategy.gross_exposure / strategy.max_concurrent_positions
@@ -112,7 +76,7 @@ def test_demo_default_notional_multiplier_is_research_1x() -> None:
 
 
 def test_projected_margin_guard_rejects_unsafe_levered_full_book() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     unsafe = LongNativeDemoCycleConfig(notional_multiplier=10.0)
     projection = projected_long_initial_margin_pct_equity(unsafe, strategy)
     # audit2c: worst case now also folds the 1.5x weekend tilt (and the <=1.0
@@ -123,7 +87,7 @@ def test_projected_margin_guard_rejects_unsafe_levered_full_book() -> None:
 
 
 def test_projected_margin_guard_allows_explicit_safe_levered_demo() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     # audit2c: the 4x config used to project exactly 0.50 and pass; once the 1.5x
     # weekend tilt is modeled it projects 0.75 and is correctly rejected. A 2x
     # config (0.10*2*1.25*1.5 = 0.375) is the new headroom-respecting "safe" case.
@@ -171,6 +135,8 @@ def test_long_config_has_no_direct_execution_or_telegram_fields() -> None:
         "record_dry_run",
         "account_type",
         "settle_coin",
+        "strategy_profile",
+        "universe_size",
     }
     assert retired.isdisjoint(LongNativeDemoCycleConfig.__dataclass_fields__)
     assert not hasattr(lnd, "_execute_long_entries")
@@ -187,42 +153,21 @@ def test_long_cycle_refuses_local_dry_run(tmp_path: Path) -> None:
         )
 
 
-def test_live_sizing_rejects_unmirrored_per_symbol_cap_drift() -> None:
-    strategy = replace(_v11a_long_native_config(), max_per_symbol_weight=0.10)
-    demo = LongNativeDemoCycleConfig(notional_multiplier=1.0)
-
-    with pytest.raises(ValueError, match="max_per_symbol_weight == strategy.max_position_weight"):
-        _validate_long_demo_config(demo, strategy)
-
-
 def test_vol_target_scale_volup125() -> None:
     """volup125 (operator-promoted 2026-06-09): the cap is 1.25 — mild scale-UP in calm
     regimes, de-risk unchanged. Receipt: long-volup-candidate-2026-06-09.md."""
     from liquidity_migration.long_native import _vol_target_scale
 
-    cfg = _v11a_long_native_config()  # enable_vol_target=True, annual=0.60, max=1.25, min=0.30
+    cfg = long_v11a_profile()
     assert _vol_target_scale(cfg, 0.30) == pytest.approx(1.25)  # calm -> mild lever-up, capped at 1.25
     assert _vol_target_scale(cfg, 0.60) == pytest.approx(1.0)  # at target -> 1.0
     assert _vol_target_scale(cfg, 1.20) == pytest.approx(0.5)  # storm -> de-risk to 0.5
     assert _vol_target_scale(cfg, 10.0) == pytest.approx(0.30)  # extreme -> floored at min_scale
     assert _vol_target_scale(cfg, None) == pytest.approx(1.0)  # missing rv -> neutral
-    off = replace(cfg, enable_vol_target=False)
-    assert _vol_target_scale(off, 1.20) == pytest.approx(1.0)  # disabled -> always 1.0
-
-
-def test_strategy_profile_resolution() -> None:
-    assert LONG_DEMO_STRATEGY_PROFILES == ("LongV11aDivWeekendVol",)
-    assert _long_demo_strategy_id("LongV11aDivWeekendVol") == LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-    with pytest.raises(ValueError):
-        _long_demo_strategy_id("nonexistent")
-    cfg = _long_demo_event_config("LongV11aDivWeekendVol")
-    assert cfg.enable_fomo_chase
-    with pytest.raises(ValueError):
-        _long_demo_event_config("nope")
 
 
 def test_per_position_notional_scales_by_multiplier() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     # Owner pick: 10x multiplier
     demo_10x = LongNativeDemoCycleConfig(notional_multiplier=10.0)
     base_per_position = strategy.gross_exposure / strategy.max_concurrent_positions
@@ -301,15 +246,13 @@ def _build_features_without_fc_signal(*, symbol: str, signal_ts_ms: int, signal_
 def test_sniper_retrace_enters_when_live_price_reaches_threshold() -> None:
     """signal_close=100, retrace_threshold=99 (1% below), live_price=98.5
     → entry fires with reason='sniper_retrace'."""
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000  # not too far in past
     now = signal_ts + 2 * MS_PER_HOUR  # 2h after signal, well inside 6h window
     features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
-    klines = pl.DataFrame()  # not used by _select_long_entry_candidates directly
     all_trades = pl.DataFrame()
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=klines,
         all_trades=all_trades,
         now_ms=now,
         strategy=strategy,
@@ -326,7 +269,7 @@ def test_sniper_retrace_enters_when_live_price_reaches_threshold() -> None:
 
 def test_sniper_retrace_respects_entry_delay_before_live_check() -> None:
     """Live v11a must not enter before the same first sniper hour the backtest uses."""
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     assert strategy.entry_delay_hours == 1
     signal_ts = 1_700_000_000_000
     now = signal_ts + MS_PER_HOUR // 2
@@ -334,7 +277,6 @@ def test_sniper_retrace_respects_entry_delay_before_live_check() -> None:
 
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=now,
         strategy=strategy,
@@ -348,14 +290,13 @@ def test_sniper_retrace_respects_entry_delay_before_live_check() -> None:
 
 
 def test_sniper_entry_delay_uses_exact_elapsed_hours() -> None:
-    strategy = replace(_v11a_long_native_config(), entry_delay_hours=1.5)
+    strategy = replace(long_v11a_profile(), entry_delay_hours=1.5)
     signal_ts = 1_700_000_123_456
     delay_ms = exact_duration_ms(hours=1.5)
     features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
 
     early, early_skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=signal_ts + delay_ms - 1,
         strategy=strategy,
@@ -364,7 +305,6 @@ def test_sniper_entry_delay_uses_exact_elapsed_hours() -> None:
     )
     on_boundary, boundary_skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=signal_ts + delay_ms,
         strategy=strategy,
@@ -395,14 +335,13 @@ def test_long_cooldown_until_uses_exact_elapsed_days() -> None:
 def test_sniper_falls_through_after_deadline_when_no_retrace() -> None:
     """signal_close=100, live_price=100.5 (no retrace), now>deadline
     → entry fires with reason='sniper_deadline_fallthru'."""
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     # Past 6h deadline but within 24h freshness bound
     now = signal_ts + 8 * MS_PER_HOUR
     features = _build_features_with_fc_signal(symbol="ETHUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     candidates, _ = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=now,
         strategy=strategy,
@@ -414,7 +353,7 @@ def test_sniper_falls_through_after_deadline_when_no_retrace() -> None:
 
 
 def test_long_candidates_rank_before_max_new_entries_truncation() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 2 * MS_PER_HOUR
     low = _build_features_with_fc_signal(symbol="LOWUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
@@ -434,7 +373,6 @@ def test_long_candidates_rank_before_max_new_entries_truncation() -> None:
     features = pl.concat([low, high], how="vertical_relaxed")
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=now,
         strategy=strategy,
@@ -446,13 +384,12 @@ def test_long_candidates_rank_before_max_new_entries_truncation() -> None:
 
 
 def test_sniper_waits_when_within_window_and_no_retrace() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 3 * MS_PER_HOUR  # inside window, no retrace yet
     features = _build_features_with_fc_signal(symbol="SOLUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=now,
         strategy=strategy,
@@ -464,13 +401,12 @@ def test_sniper_waits_when_within_window_and_no_retrace() -> None:
 
 
 def test_stale_signal_beyond_24h_is_dropped() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 36 * MS_PER_HOUR  # past 24h freshness bound
     features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=now,
         strategy=strategy,
@@ -485,7 +421,7 @@ def test_stale_signal_beyond_24h_is_dropped() -> None:
 
 
 def test_old_non_signal_history_does_not_count_as_stale_signal() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     fresh_ts = 1_700_000_000_000
     now = fresh_ts + 2 * MS_PER_HOUR
     old_non_signal = _build_features_without_fc_signal(
@@ -499,7 +435,6 @@ def test_old_non_signal_history_does_not_count_as_stale_signal() -> None:
     features = pl.concat([old_non_signal, fresh_non_signal], how="vertical_relaxed")
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=now,
         strategy=strategy,
@@ -512,7 +447,7 @@ def test_old_non_signal_history_does_not_count_as_stale_signal() -> None:
 
 
 def test_cooldown_blocks_re_entry() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 2 * MS_PER_HOUR
     features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
@@ -533,7 +468,6 @@ def test_cooldown_blocks_re_entry() -> None:
     )
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=all_trades,
         now_ms=now,
         strategy=strategy,
@@ -545,7 +479,7 @@ def test_cooldown_blocks_re_entry() -> None:
 
 
 def test_open_position_blocks_re_entry() -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 2 * MS_PER_HOUR
     features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
@@ -563,7 +497,6 @@ def test_open_position_blocks_re_entry() -> None:
     )
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=all_trades,
         now_ms=now,
         strategy=strategy,
@@ -578,7 +511,7 @@ def test_open_position_blocks_re_entry() -> None:
 def test_pending_long_target_reserves_entry_but_is_not_exit_or_pnl_open(
     target_action: str,
 ) -> None:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 2 * MS_PER_HOUR
     features = _build_features_with_fc_signal(
@@ -586,23 +519,24 @@ def test_pending_long_target_reserves_entry_but_is_not_exit_or_pnl_open(
         signal_ts_ms=signal_ts,
         signal_close=100.0,
     )
-    pending = pl.DataFrame([
-        {
-            "trade_id": "pending-1",
-            "sleeve": "long",
-            "strategy_id": "strategy",
-            "symbol": "BTCUSDT",
-            "side": "long",
-            "status": "target_pending",
-            "target_action": target_action,
-            "qty": "0.001",
-            "planned_exit_ts_ms": now - MS_PER_HOUR,
-        }
-    ])
+    pending = pl.DataFrame(
+        [
+            {
+                "trade_id": "pending-1",
+                "sleeve": "long",
+                "strategy_id": "strategy",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "status": "target_pending",
+                "target_action": target_action,
+                "qty": "0.001",
+                "max_hold_deadline_ts_ms": now - MS_PER_HOUR,
+            }
+        ]
+    )
 
     candidates, skips = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pending,
         now_ms=now,
         strategy=strategy,
@@ -614,33 +548,36 @@ def test_pending_long_target_reserves_entry_but_is_not_exit_or_pnl_open(
     assert skips["already_open"] == 1
     assert _count_long_target_reservations(pending) == 1
     assert _open_long_trades(pending).is_empty()
-    assert _plan_time_stop_exits(
-        pending,
-        now_ms=now,
-    ) == []
+    assert (
+        _plan_time_stop_exits(
+            pending,
+            now_ms=now,
+        )
+        == []
+    )
 
 
 def test_plan_time_stop_exits_only_for_expired_long_positions() -> None:
     now = 2_000_000_000_000
     trades = pl.DataFrame(
         [
-            {  # Past planned_exit_ts_ms → eligible
+            {  # Past max-hold deadline → eligible
                 "trade_id": "expired-1",
                 "sleeve": "long",
                 "symbol": "BTCUSDT",
                 "side": "long",
                 "status": "open",
                 "qty": "0.001",
-                "planned_exit_ts_ms": now - 1 * MS_PER_HOUR,
+                "max_hold_deadline_ts_ms": now - 1 * MS_PER_HOUR,
             },
-            {  # Future planned_exit_ts_ms → not eligible
+            {  # Future max-hold deadline → not eligible
                 "trade_id": "live-1",
                 "sleeve": "long",
                 "symbol": "ETHUSDT",
                 "side": "long",
                 "status": "open",
                 "qty": "0.01",
-                "planned_exit_ts_ms": now + 24 * MS_PER_HOUR,
+                "max_hold_deadline_ts_ms": now + 24 * MS_PER_HOUR,
             },
         ]
     )
@@ -660,7 +597,6 @@ def test_long_entry_excludes_incomplete_today_bar() -> None:
     future_bar = pl.DataFrame([{"symbol": "BTCUSDT", "ts_ms": now + MS_PER_HOUR, "close": 100.0}])
     candidates, skips = _select_long_entry_candidates(
         features=future_bar,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=now,
         strategy=LongNativeConfig(),
@@ -767,7 +703,7 @@ def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
     )
 
     demo = LongNativeDemoCycleConfig()
-    strategy = _long_demo_event_config(demo.strategy_profile)
+    strategy = long_v11a_profile()
     # ts_ms out of order with an interleaved null — the helper must sort then take the last non-null.
     features = pl.DataFrame({"ts_ms": [3, 1, 2], "btc_rv_30": [0.9, None, 0.4]})
     notional, scale = _compute_long_order_sizing(demo=demo, strategy=strategy, features=features)
@@ -790,7 +726,7 @@ def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> N
     )
 
     demo = LongNativeDemoCycleConfig()
-    strategy = _long_demo_event_config(demo.strategy_profile)
+    strategy = long_v11a_profile()
     now = 1_700_000_000_000
     current_day_start = now - (now % MS_PER_DAY)
     closed_day_end = current_day_start
@@ -823,7 +759,7 @@ def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists()
     )
 
     demo = LongNativeDemoCycleConfig()
-    strategy = _long_demo_event_config(demo.strategy_profile)
+    strategy = long_v11a_profile()
     now = 1_700_000_000_000
     current_day_start = now - (now % MS_PER_DAY)
     features = pl.DataFrame(
@@ -877,16 +813,14 @@ def test_long_entry_and_exit_adapters_share_stable_component_target_key() -> Non
     assert entry.leverage == 10.0
     assert entry.metadata["quantity_authority"] == "account_kernel_demo_rules"
     assert entry.metadata["entry_attempt_key"] == f"entry-attempt/{entry.target_key}"
-    assert entry.metadata["signal_valid_until_ms"] == (
-        candidate["signal_ts_ms"] + lnd.SIGNAL_FRESHNESS_MS
-    )
+    assert entry.metadata["signal_valid_until_ms"] == (candidate["signal_ts_ms"] + lnd.SIGNAL_FRESHNESS_MS)
     assert entry.metadata["stop_loss_pct"] == pytest.approx(0.03)
     assert entry.metadata["take_profit_pct"] == pytest.approx(0.08)
     assert entry.metadata["max_hold_duration_ms"] == 3 * lnd.MS_PER_DAY
     assert {
         "stop_price",
         "take_profit_price",
-        "planned_exit_ts_ms",
+        "max_hold_deadline_ts_ms",
     }.isdisjoint(entry.metadata)
 
     trades = pl.DataFrame(
@@ -895,7 +829,7 @@ def test_long_entry_and_exit_adapters_share_stable_component_target_key() -> Non
                 "trade_id": "long-trade-1",
                 "symbol": "ABCUSDT",
                 "entry_leverage": 10.0,
-                "planned_exit_ts_ms": now_ms,
+                "max_hold_deadline_ts_ms": now_ms,
             }
         ]
     )
@@ -914,7 +848,7 @@ def test_long_entry_and_exit_adapters_share_stable_component_target_key() -> Non
 
 
 def test_registered_long_profile_carries_live_kernel_identity_and_leverage() -> None:
-    strategy = _long_demo_event_config("LongV11aDivWeekendVol")
+    strategy = long_v11a_profile()
     assert strategy.execution_strategy_id == LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
     assert strategy.execution_leverage == 10.0
 
@@ -994,7 +928,7 @@ def test_guard_now_rejects_promoted_4x_config_that_used_to_pass() -> None:
     entry_leverage=10) with notional_multiplier=4.0 used to project EXACTLY 0.50
     full-book IM and pass the 50% ceiling. With the 1.5x weekend tilt modeled it
     projects 0.75 and must be rejected."""
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     assert strategy.gross_exposure == pytest.approx(1.0)
     assert strategy.max_concurrent_positions == 10
     assert strategy.weekend_size_mult == pytest.approx(1.5)
@@ -1022,7 +956,7 @@ def test_guard_models_weekend_and_unit_position_weight_factors() -> None:
 
     Pins each factor so a regression that drops the weekend tilt (the old bug) or
     the unit position-weight assumption fails here."""
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     demo = LongNativeDemoCycleConfig(notional_multiplier=4.0, entry_leverage=10.0)
     projection = projected_long_initial_margin_pct_equity(demo, strategy)
 
@@ -1039,7 +973,7 @@ def test_weekend_mult_one_low_multiplier_still_passes() -> None:
     """A config with weekend_size_mult=1.0 and a low multiplier is below the
     ceiling and must still be accepted (the guard only tightens where the live
     book is actually levered up by the weekend tilt)."""
-    strategy = replace(_v11a_long_native_config(), weekend_size_mult=1.0)
+    strategy = replace(long_v11a_profile(), weekend_size_mult=1.0)
     demo = LongNativeDemoCycleConfig(
         notional_multiplier=2.0,
         entry_leverage=10.0,
@@ -1061,7 +995,7 @@ def test_weekend_mult_below_one_does_not_relax_guard() -> None:
     """A weekend tilt < 1.0 would size DOWN, but a guard must never use it to
     relax the worst case below the no-tilt baseline — the max(1.0, ...) floor
     keeps the projection conservative."""
-    strategy = replace(_v11a_long_native_config(), weekend_size_mult=0.5)
+    strategy = replace(long_v11a_profile(), weekend_size_mult=0.5)
     demo = LongNativeDemoCycleConfig(notional_multiplier=4.0, entry_leverage=10.0)
     projection = projected_long_initial_margin_pct_equity(demo, strategy)
     # floor at 1.0 -> worst case stays 0.40 * 1.25 = 0.50, not 0.25.
@@ -1143,9 +1077,7 @@ def _ensure_owner_route(
     *,
     environment: str,
 ) -> AccountRoute:
-    account_id = (
-        "bybit-demo-unified" if environment == "demo" else "bybit-paper-unified"
-    )
+    account_id = "bybit-demo-unified" if environment == "demo" else "bybit-paper-unified"
     return ensure_account_route(
         account_id=account_id,
         environment=environment,
@@ -1217,7 +1149,7 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
     payload = _run_cycle(tmp_path / "long", demo)
 
     assert type(payload) is PublishedTargetCyclePayload
-    assert payload.publication.entry_request is not None
+    assert len(payload.publication.entry_requests) == 1
     assert payload.route.environment == "demo"
     assert payload["cycle"]["account_target_route"] is True
     assert payload["cycle"]["entry_targets_queued"] == 1
@@ -1225,7 +1157,7 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
     assert payload["cycle"]["account_state_source"] == "account_owner_health:demo"
     assert "entries_executed" not in payload["cycle"]
     assert "bybit_positions" not in payload
-    assert payload["account_target_requests"]["entry_request"]["intent_count"] == 1
+    assert payload["account_target_requests"]["entry_requests"][0]["intent_count"] == 1
     assert payload["account_target_requests"]["exit_request_ids"] == []
     pending = list((inbox / "pending").glob("*.json"))
     assert len(pending) == 1
@@ -1361,7 +1293,7 @@ def test_account_risk_rejected_exact_entry_attempt_is_not_republished(
         account_execution_root=str(account_root),
         ws_klines_enabled=False,
     )
-    strategy_id = _long_demo_strategy_id(demo.strategy_profile)
+    strategy_id = long_v11a_profile().execution_strategy_id
     route = _ensure_owner_route(account_root, inbox, environment="demo")
     proposed = lnd._long_entry_target_intents(
         candidates,
@@ -1384,19 +1316,21 @@ def test_account_risk_rejected_exact_entry_attempt_is_not_republished(
     result = kernel.submit_targets(
         batch_id="risk-rejected-entry",
         market_inputs=[MarketInputRef("book", "AAAUSDT", 1, 2, 99.0)],
-        targets=[DesiredTarget(
-            decision_key=proposed.decision_key,
-            target_key=proposed.target_key,
-            sleeve="long",
-            strategy_id=proposed.strategy_id,
-            component_id=proposed.component_id,
-            symbol="AAAUSDT",
-            signed_qty=1_000.0,
-            reference_price=99.0,
-            leverage=10.0,
-            reason=proposed.reason,
-            metadata=proposed.metadata,
-        )],
+        targets=[
+            DesiredTarget(
+                decision_key=proposed.decision_key,
+                target_key=proposed.target_key,
+                sleeve="long",
+                strategy_id=proposed.strategy_id,
+                component_id=proposed.component_id,
+                symbol="AAAUSDT",
+                signed_qty=1_000.0,
+                reference_price=99.0,
+                leverage=10.0,
+                reason=proposed.reason,
+                metadata=proposed.metadata,
+            )
+        ],
         risk_snapshot=AccountRiskSnapshot(10_000.0, 10_000.0, "wallet", 3),
         risk_policy=AccountRiskPolicy(100.0, 100.0, 100.0, 100.0, 10.0),
         instrument_rules={"AAAUSDT": InstrumentRules("AAAUSDT", 0.1, 0.1, 1.0)},
@@ -1432,7 +1366,7 @@ def test_service_expired_entry_receipt_suppresses_same_attempt_after_restart(
         ws_klines_enabled=False,
     )
     route = _ensure_owner_route(account_root, inbox_root, environment="demo")
-    strategy_id = _long_demo_strategy_id(demo.strategy_profile)
+    strategy_id = long_v11a_profile().execution_strategy_id
     proposed = lnd._long_entry_target_intents(
         candidates,
         demo=demo,
@@ -1457,10 +1391,7 @@ def test_service_expired_entry_receipt_suppresses_same_attempt_after_restart(
             request_hash=published.request.content_hash(),
             batch_id=published.request.batch_id,
             accepted=False,
-            rejection_keys=(
-                "account-service:entry-signal-expired:"
-                f"{proposed.intent.metadata['entry_attempt_key']}",
-            ),
+            rejection_keys=(f"account-service:entry-signal-expired:{proposed.intent.metadata['entry_attempt_key']}",),
             command_ids=(),
             execution_event_ids=(),
             final_state_hash="0" * 64,
@@ -1548,13 +1479,12 @@ _WED_NOW_MS = 1_680_696_000_000
 
 
 def _one_candidate_weight(now_ms: int) -> float:
-    strategy = _v11a_long_native_config()
+    strategy = long_v11a_profile()
     assert strategy.weekend_size_mult == 1.5, "v11a profile must carry the 1.5x weekend tilt"
     signal_ts = now_ms - 2 * MS_PER_HOUR  # fresh, same UTC day, retrace fired
     features = _fc_signal_features(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     candidates, _ = _select_long_entry_candidates(
         features=features,
-        klines=pl.DataFrame(),
         all_trades=pl.DataFrame(),
         now_ms=now_ms,
         strategy=strategy,
@@ -1573,37 +1503,6 @@ def test_live_weekend_size_tilt_matches_backtest() -> None:
     # backtest sizes Sat/Sun entries (long_native.py weekend_size_mult). Before the
     # fix the live path ignored weekend_size_mult, so both were equal.
     assert weekend_weight == pytest.approx(weekday_weight * 1.5)
-
-
-# long-sleeve-3: live per-trade net_return is NET of venue fees
-def test_fc_rank_near_boundary_predicate() -> None:
-    cutoff = 10
-    margin = FC_VOLUME_RANK_TELEMETRY_MARGIN
-    # Exactly at the cutoff -> in band.
-    assert _fc_rank_is_near_boundary(cutoff, cutoff) is True
-    # Within margin of the cutoff -> in band.
-    assert _fc_rank_is_near_boundary(cutoff - margin, cutoff) is True
-    assert _fc_rank_is_near_boundary(cutoff - 1, cutoff) is True
-    # Comfortably inside the top set -> NOT flagged.
-    assert _fc_rank_is_near_boundary(cutoff - margin - 1, cutoff) is False
-    assert _fc_rank_is_near_boundary(1, cutoff) is False
-    # Above the cutoff -> would not have fired the FC gate; not flagged.
-    assert _fc_rank_is_near_boundary(cutoff + 1, cutoff) is False
-    # Missing rank -> not flagged.
-    assert _fc_rank_is_near_boundary(None, cutoff) is False
-
-
-def test_log_fc_rank_boundary_emits_for_near_boundary_candidate(caplog) -> None:
-    with caplog.at_level(logging.INFO, logger="liquidity_migration.long_native_event_demo"):
-        _log_fc_rank_boundary(symbol="WIFUSDT", today_volume_rank=9, fc_top_volume_rank_max=10)
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any("rank-boundary" in m and "WIFUSDT" in m for m in msgs)
-
-
-def test_log_fc_rank_boundary_silent_for_comfortable_rank(caplog) -> None:
-    with caplog.at_level(logging.INFO, logger="liquidity_migration.long_native_event_demo"):
-        _log_fc_rank_boundary(symbol="ETHUSDT", today_volume_rank=2, fc_top_volume_rank_max=10)
-    assert caplog.records == []
 
 
 def test_median_universe_selection_targets_latest_closed_bar_not_future_bar() -> None:

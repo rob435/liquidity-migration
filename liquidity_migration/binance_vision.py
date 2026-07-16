@@ -1,6 +1,6 @@
 """Point-in-time Binance USD-M data-root maintenance from public archives.
 
-The current long/continuous research surface needs per-venue full-PIT roots that
+The registered LONG and CONTINUOUS profiles need per-venue full-PIT roots that
 include delisted, renamed, and migrated instruments. Reading live
 ``fapi.binance.com/exchangeInfo`` only returns currently listed symbols and is
 survivorship-biased and invalid under the backtest-integrity standard.
@@ -11,7 +11,7 @@ Binance full-PIT root's ``klines_1h`` + ``archive_trade_manifest`` datasets.
 
 CLI:
     python -m liquidity_migration.binance_vision build-binance-oos \\
-        --data-root ~/SHARED_DATA/binance_full_pit --end 2026-05-25
+        --data-root ~/SHARED_DATA/binance_full_pit --end YYYY-MM-DD
 
     python -m liquidity_migration.binance_vision filter-manifest \\
         --data-root ~/SHARED_DATA/bybit_full_pit        # generic coverage filter
@@ -68,10 +68,7 @@ def _s3_common_prefixes(prefix: str) -> list[str]:
         out.extend(found)
         if "<IsTruncated>true</IsTruncated>" not in xml:
             break
-        # Continue on IsTruncated, NOT on an empty page (DAT-7): a page that is empty
-        # of MATCHES but still truncated must advance, or the listing silently
-        # under-enumerates (a survivorship hole this module exists to prevent). Prefer
-        # S3's NextMarker; fall back to the last matched prefix; bail if neither.
+        # A truncated page must advance even when it contains no matching prefix.
         next_marker = re.search(r"<NextMarker>([^<]+)</NextMarker>", xml)
         if next_marker:
             marker = next_marker.group(1)
@@ -95,7 +92,7 @@ def _s3_keys(prefix: str) -> list[str]:
         out.extend(found)
         if "<IsTruncated>true</IsTruncated>" not in xml:
             break
-        # Continue on IsTruncated, not empty-page (DAT-7) — see _s3_common_prefixes.
+        # A truncated page must advance even when no key matched.
         next_marker = re.search(r"<NextMarker>([^<]+)</NextMarker>", xml)
         if next_marker:
             marker = next_marker.group(1)
@@ -226,15 +223,9 @@ def _fetch_expected_sha256(zip_url: str, *, timeout: int = 30) -> str | None:
 def _verify_download(raw: bytes, expected_sha256: str | None, content_length: int | None) -> None:
     """Fail-closed integrity gate for a downloaded archive body.
 
-    A byte-corrupt body that is still a structurally-valid zip would parse
-    silently into the PIT root and degrade the cross-venue OOS comparison, which
-    the M5 download-completeness gate (it only counts hard download FAILURES) does
-    NOT catch. Verify against the published SHA256 when available; otherwise fall
-    back to the advertised Content-Length; and with neither signal present, require
-    the raw body to at least be a non-empty, structurally-valid zip (audit2c — the
-    both-absent path was previously a no-op that let any garbage body through).
-    Raises on mismatch so the caller treats it as a retryable failure (and
-    ultimately a counted failed job)."""
+    Prefer the published SHA256, fall back to Content-Length, and otherwise
+    require a non-empty valid zip. Mismatches are retryable failed jobs.
+    """
     if expected_sha256 is not None:
         actual = hashlib.sha256(raw).hexdigest()
         if actual != expected_sha256:
@@ -242,10 +233,7 @@ def _verify_download(raw: bytes, expected_sha256: str | None, content_length: in
         return
     if content_length is not None and content_length != len(raw):
         raise ValueError(f"Content-Length mismatch: header {content_length} != body {len(raw)} bytes")
-    # audit2c: with neither a .CHECKSUM nor a Content-Length, the only remaining
-    # signal is the body itself — an empty or non-zip body is corrupt and must NOT
-    # pass the gate (the previous no-op let a truncated/garbage body into the PIT
-    # root). A genuine valid zip with no sidecar still passes.
+    # With no sidecar or length, validate the container itself.
     if content_length is None and expected_sha256 is None:
         if not raw or not zipfile.is_zipfile(io.BytesIO(raw)):
             raise ValueError(
@@ -259,17 +247,13 @@ def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict] 
 
     Verifies the body against the published ``.CHECKSUM`` SHA256 (or, when that
     sidecar is missing, the advertised Content-Length) BEFORE parsing, so a
-    corrupt-but-parseable archive is treated as a retryable failure rather than
-    silently entering the survivorship-complete PIT root (M5 only catches hard
-    download failures, not silent corruption).
+    corrupt-but-parseable archive is treated as a retryable failure.
 
     Returns the parsed rows on a successful fetch — possibly an EMPTY list for a
     valid month that genuinely holds no parseable bars (header-only/empty CSV).
-    Returns ``None`` only on a hard download/integrity failure. audit2b: the
-    caller must distinguish these — an empty-but-valid month is NOT a download
-    failure and must not be counted against the survivorship-completeness gate
-    (previously both returned [] and a valid-empty month was miscounted as a
-    failed job, spuriously inflating max_failure_ratio)."""
+    Returns ``None`` only on a hard download/integrity failure; callers must
+    distinguish it from an empty valid month.
+    """
     url = f"{VISION_FILES}/{MONTHLY_KLINES_PREFIX}{symbol}/1h/{symbol}-1h-{ym}.zip"
     for attempt in range(retries):
         try:
@@ -279,12 +263,12 @@ def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict] 
             content_length = int(header_len) if header_len is not None else None
             expected_sha256 = _fetch_expected_sha256(url)
             _verify_download(raw, expected_sha256, content_length)
-            return parse_month_csv(symbol, raw)  # audit2b: list (maybe empty) == success
+            return parse_month_csv(symbol, raw)
         except Exception:  # noqa: BLE001 - network/integrity; retry then give up
             if attempt == retries - 1:
-                return None  # audit2b: None signals a hard failure, distinct from []
+                return None
             time.sleep(0.5 * (attempt + 1))
-    return None  # audit2b: hard failure sentinel
+    return None
 
 
 def fetch_daily_klines(symbol: str, day: str, *, retries: int = 4) -> list[dict] | None:
@@ -540,13 +524,9 @@ def _assert_download_completeness(
 ) -> None:
     """Refuse to build a survivorship-biased OOS root.
 
-    A monthly archive file that fails all download retries (or a symbol whose S3
-    listing fails) currently just vanishes from the dataset — silently dropping
-    that (symbol, month/listing) from the PIT universe, exactly the survivorship
-    failure docs/backtesting_errors_we_never_repeat.md rules 1 & 12 forbid. Persist
-    the failed-jobs list for audit, then raise when the failure rate exceeds the
-    tolerance so a holey root can never be cited as OOS evidence. Reused for both
-    the discovery (listing) and download phases."""
+    Persist failed jobs and reject a failure ratio above the declared tolerance.
+    The same gate covers discovery and download phases.
+    """
     if artifact_path is not None:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_path.write_text(json.dumps([{"symbol": s, "month": m} for s, m in failed_jobs], indent=2))
@@ -585,7 +565,7 @@ def _persisted_kline_symbols(root: Path) -> set[str]:
 def build_binance_oos(
     data_root: str | Path,
     *,
-    end_date: str = "2023-05-01",
+    end_date: str,
     workers: int = 24,
     max_failure_ratio: float = 0.005,
     allow_degraded: bool = False,
@@ -595,9 +575,8 @@ def build_binance_oos(
     end_date is the exclusive upper bound on signal days (klines kept strictly
     before it). Writes klines_1h and a coverage-filtered archive_trade_manifest.
 
-    Fails (does NOT write) when more than ``max_failure_ratio`` of the monthly
-    archive files fail to download, so a holey, survivorship-biased universe is
-    never silently produced (M5).
+    Refuses to write when monthly download failures exceed
+    ``max_failure_ratio``.
 
     The klines_1h dataset is REWRITTEN clean (not appended) so a rerun that
     discovers a narrower universe — e.g. after a transient S3 listing shortfall —
@@ -639,10 +618,7 @@ def build_binance_oos(
         futs = {ex.submit(fetch_month_klines, s, m): (s, m) for s, m in jobs}
         for fut in as_completed(futs):
             rows = fut.result()
-            # audit2b: only None is a hard download failure; an empty list is a
-            # valid month with no parseable bars and must NOT be counted against
-            # the survivorship-completeness gate (previously both were [] and an
-            # empty-but-valid month spuriously inflated max_failure_ratio).
+            # None is failure; an empty list is a valid empty month.
             if rows is None:
                 failed_jobs.append(futs[fut])
             elif rows:
@@ -655,7 +631,7 @@ def build_binance_oos(
                 )
 
     failed = len(failed_jobs)
-    # Persist the failed-jobs list and refuse to write a holey root (M5).
+    # Persist failures before applying the completeness gate.
     _assert_download_completeness(
         failed_jobs,
         len(jobs),
@@ -706,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
 
     b = sub.add_parser("build-binance-oos", help="Build a Binance USD-M PIT OOS data root.")
     b.add_argument("--data-root", required=True)
-    b.add_argument("--end", default="2023-05-01", help="Exclusive signal-date upper bound YYYY-MM-DD.")
+    b.add_argument("--end", required=True, help="Exclusive signal-date upper bound YYYY-MM-DD.")
     b.add_argument("--workers", type=int, default=24)
     b.add_argument(
         "--allow-degraded",

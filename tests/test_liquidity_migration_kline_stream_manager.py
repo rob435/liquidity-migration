@@ -47,6 +47,7 @@ class _FakeMarketData:
         self._kline_factory = kline_factory
         self.kline_calls: list[str] = []
         self.instrument_calls = 0
+        self.rate_limiter = None
 
     def get_instruments_info(self) -> list[dict]:
         self.instrument_calls += 1
@@ -54,7 +55,7 @@ class _FakeMarketData:
 
     def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list:
         self.kline_calls.append(symbol)
-        return list(self._kline_factory(symbol, interval, start, end))
+        return [_raw_kline_row(row) for row in self._kline_factory(symbol, interval, start, end)]
 
 
 class _RecordingPool:
@@ -88,12 +89,6 @@ class _RecordingPool:
     def stats(self) -> dict:
         return {"connections": 1}
 
-    def subscribed_symbols(self) -> set[str]:
-        if not self.subscribed:
-            return set()
-        return set(self.subscribed[-1])
-
-
 def _bar_row(ts_ms: int, *, close: float = 100.0) -> dict:
     return {
         "ts_ms": ts_ms,
@@ -104,6 +99,20 @@ def _bar_row(ts_ms: int, *, close: float = 100.0) -> dict:
         "volume_base": 10.0,
         "turnover_quote": 1000.0,
     }
+
+
+def _raw_kline_row(row: dict | list) -> list:
+    if isinstance(row, list):
+        return row
+    return [
+        row["ts_ms"],
+        row["open"],
+        row["high"],
+        row["low"],
+        row["close"],
+        row["volume_base"],
+        row["turnover_quote"],
+    ]
 
 
 def _instruments_payload(symbols: list[str]) -> list[dict]:
@@ -500,20 +509,13 @@ def test_failed_bootstrap_records_error_but_does_not_block_start(tmp_path: Path)
         manager.stop()
 
 
-def test_kline_row_normalization_accepts_dict_and_list_shapes() -> None:
-    dict_row = {
-        "ts_ms": 1, "open": 1.0, "high": 2.0, "low": 0.5,
-        "close": 1.5, "volume_base": 10.0, "turnover_quote": 15.0,
-    }
+def test_kline_row_conversion_requires_bybit_array_shape() -> None:
     list_row = [1, "1.0", "2.0", "0.5", "1.5", "10.0", "15.0"]
-    a = _kline_row_to_bar_dict(dict_row)
-    b = _kline_row_to_bar_dict(list_row)
-    assert a["start"] == 1
-    assert b["start"] == 1
-    # Both contain the keys the parser expects.
-    for d in (a, b):
-        for key in ("start", "open", "high", "low", "close", "volume", "turnover"):
-            assert key in d
+    converted = _kline_row_to_bar_dict(list_row)
+    assert converted["start"] == 1
+    assert set(converted) == {"start", "open", "high", "low", "close", "volume", "turnover"}
+    with pytest.raises(ValueError, match="exactly seven"):
+        _kline_row_to_bar_dict(list_row[:-1])
 
 
 def test_refresh_thread_runs_periodically(tmp_path: Path) -> None:
@@ -722,8 +724,6 @@ def test_start_bootstraps_before_subscribing_pool(tmp_path: Path) -> None:
         def start_watchdog(self): pass
         def stop_watchdog(self): pass
         def stats(self): return {}
-        def subscribed_symbols(self): return set()
-
     pool = _OrderTrackingPool()
     market = _FakeMarketData(instruments_factory=_instruments, kline_factory=_klines)
     manager = KlineStreamManager(
@@ -846,7 +846,7 @@ class _Market:
 
     def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list:
         self.kline_calls.append(symbol)
-        return list(self._kline_factory(symbol, interval, start, end))
+        return [_raw_kline_row(row) for row in self._kline_factory(symbol, interval, start, end)]
 
 
 class _Pool:
@@ -1001,10 +1001,7 @@ class _PaginatingMarketData:
         for page in range(self._pages):
             if self.rate_limiter is not None:
                 self.rate_limiter.acquire()  # one acquire per HTTP page, like _get
-            bars.append({
-                "ts_ms": start + page * MS_PER_HOUR, "open": 1.0, "high": 1.0,
-                "low": 1.0, "close": 1.0, "volume_base": 1.0, "turnover_quote": 1.0,
-            })
+            bars.append([start + page * MS_PER_HOUR, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
         return bars
 
 
@@ -1100,7 +1097,7 @@ def test_refresh_bootstrap_honors_shutdown_promptly(tmp_path) -> None:
             return _instruments(self._n)
 
         def get_klines(self, symbol, interval, start, end):
-            return _slow_klines(symbol, interval, start, end)
+            return [_raw_kline_row(row) for row in _slow_klines(symbol, interval, start, end)]
 
     class _NoopPool:
         def subscribe(self, *a, **k): pass

@@ -11,7 +11,11 @@ from typing import Any, Callable, Mapping, Sequence
 from .account_kernel import AccountExecutionKernel, AccountRiskSnapshot, InstrumentRules, MarketInputRef
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
-from .execution_adapters import L2BookSnapshot, MarketOrderExecutionTwin
+from .execution_adapters import (
+    INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
+    L2BookSnapshot,
+    MarketOrderExecutionTwin,
+)
 from .market_capture import SequenceAwareMarketRecorder
 
 
@@ -69,9 +73,9 @@ class CapturedBybitMarketProvider:
 
 
 class CapturedPaperExecutionAdapter:
-    """Paper port using the exact book frozen at the decision boundary."""
+    """Uncalibrated integration port using the exact decision-boundary book."""
 
-    name = "paper_execution_twin"
+    name = f"paper_{INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE}"
 
     def __init__(
         self,

@@ -29,12 +29,37 @@ def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Pat
     out = _resolve_data_root("continuous-event-demo-cycle", missing)
     assert out == missing and missing.is_dir()  # daemon command -> self-provisioned
     with pytest.raises(FileNotFoundError):  # research command -> strict guard
-        _resolve_data_root("continuous-events", tmp_path / "absent_research_root")
+        _resolve_data_root("archive-manifest", tmp_path / "absent_research_root")
     noop = tmp_path / "noop_root"  # no-data-root command -> untouched
     assert _resolve_data_root("download-data", noop) == noop and not noop.exists()
 
 
-def test_cli_continuous_demo_rejects_retired_strategy_profile(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "fixed_flag",
+    (
+        "--strategy-profile",
+        "--feature-set",
+        "--entry-event-trigger",
+        "--sizing-mode",
+        "--target-vol-per-name",
+        "--vol-weight-clamp",
+        "--max-hold-hours",
+        "--decile",
+        "--rmom-quantile",
+        "--liq-turnover-min",
+        "--btc-trend-lookback-days",
+        "--btc-trend-mode",
+        "--btc-trend-month-days",
+        "--btc-trend-smart-tolerance",
+        "--allow-same-signal-reentry",
+        "--data-name",
+        "--no-event-driven-cycle",
+    ),
+)
+def test_cli_continuous_demo_rejects_fixed_profile_flags(
+    tmp_path: Path,
+    fixed_flag: str,
+) -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(
             [
@@ -43,8 +68,8 @@ def test_cli_continuous_demo_rejects_retired_strategy_profile(tmp_path: Path) ->
                 "continuous-event-demo-cycle",
                 "--execution-environment",
                 "demo",
-                "--strategy-profile",
-                "retired_continuous_profile",
+                fixed_flag,
+                "ignored",
             ]
         )
 
@@ -57,21 +82,12 @@ def test_cli_continuous_demo_target_only_parser(tmp_path: Path) -> None:
             "continuous-event-demo-cycle",
             "--execution-environment",
             "demo",
-            "--strategy-profile",
-            "continuous_ensemble_v2",
-            "--sizing-mode",
-            "inverse_vol",
-            "--target-vol-per-name",
-            "0.01",
-            "--vol-weight-clamp",
-            "2",
         ]
     )
 
-    assert args.strategy_profile == "continuous_ensemble_v2"
-    assert args.sizing_mode == "inverse_vol"
-    assert args.target_vol_per_name == 0.01
-    assert args.vol_weight_clamp == 2
+    assert args.execution_environment == "demo"
+    assert not hasattr(args, "strategy_profile")
+    assert not hasattr(args, "sizing_mode")
 
 
 def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) -> None:
@@ -82,85 +98,12 @@ def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) ->
             "continuous-event-demo-cycle",
             "--execution-environment",
             "demo",
-            "--strategy-profile",
-            "continuous_ensemble_v2",
         ]
     )
 
     assert args.btc_trend_gate == "uptrend"
-    assert args.btc_trend_mode == "daily_prior"
-    assert args.btc_trend_lookback_days == 30
-    assert args.btc_trend_month_days == 365.25 / 12
-    assert args.btc_trend_smart_tolerance == 0.01
-    assert args.feature_set == "max_ret168"
-    assert args.max_hold_hours == 24
     assert args.notional_multiplier == 1.0
-    assert args.sizing_mode == "inverse_vol"
-    assert args.target_vol_per_name == 0.01
-    assert args.vol_weight_clamp == 2.0
     assert args.workers == 4
-
-
-def test_cli_continuous_demo_has_no_retired_execution_controls(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "continuous-event-demo-cycle",
-            "--execution-environment",
-            "demo",
-        ]
-    )
-    for retired in (
-        "left_decile_exit_enabled",
-        "stop_loss_pct",
-        "stop_approach_frac",
-        "failed_fade_hours",
-        "failed_fade_loss_pct",
-        "failed_fade_min_mfe_pct",
-        "breakeven_arm_pct",
-        "fallback_equity_usdt",
-        "entry_order_type",
-        "exit_order_type",
-        "entry_private_ws_stale_seconds",
-        "entry_portfolio_heat_cap_frac",
-        "entry_portfolio_heat_shock_frac",
-        "entry_account_drawdown_kill_switch_frac",
-        "telegram",
-        "record_dry_run",
-        "daily_rebalance_enabled",
-    ):
-        assert not hasattr(args, retired)
-
-
-@pytest.mark.parametrize(
-    "retired_args",
-    [
-        ["--left-decile-exit-enabled"],
-        ["--stop-loss-pct", "0"],
-        ["--failed-fade-hours", "0"],
-        ["--fallback-equity-usdt", "10000"],
-        ["--entry-private-ws-stale-seconds", "300"],
-        ["--entry-portfolio-heat-cap-frac", "0"],
-        ["--telegram"],
-        ["--record-dry-run"],
-        ["--daily-rebalance-enabled"],
-    ],
-)
-def test_cli_continuous_demo_rejects_retired_execution_controls(
-    tmp_path: Path, retired_args: list[str]
-) -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(
-            [
-                "--data-root",
-                str(tmp_path),
-                "continuous-event-demo-cycle",
-                "--execution-environment",
-                "demo",
-                *retired_args,
-            ]
-        )
 
 
 def test_cli_continuous_demo_accepts_explicit_notional_multiplier(tmp_path: Path) -> None:
@@ -181,100 +124,27 @@ def test_cli_continuous_demo_accepts_explicit_notional_multiplier(tmp_path: Path
 
 def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:
     parser = build_parser()
-    continuous = parser.parse_args([
-        "--data-root", str(tmp_path), "continuous-event-demo-cycle",
-        "--execution-environment", "demo",
-    ])
-    long = parser.parse_args([
-        "--data-root", str(tmp_path), "long-native-event-demo-cycle",
-        "--execution-environment", "demo",
-    ])
-
-    assert continuous.workers == 4
-    assert long.workers == 4
-
-
-def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
+    continuous = parser.parse_args(
         [
             "--data-root",
             str(tmp_path),
-            "continuous-events",
-            "--take-profit-pct",
-            "0.08",
-            "--rank-exit-threshold",
-            "0.8",
-            "--entry-crowding-max-fresh",
-            "4",
-            "--stop-vol-mult",
-            "6",
-            "--sizing-mode",
-            "inverse_vol",
-            "--target-vol-per-name",
-            "0.015",
-            "--vol-weight-clamp",
-            "2.5",
-            "--age-days-min",
-            "300",
-            "--entry-max-ret168-max",
-            "0.2",
-            "--entry-decel-lookback-h",
-            "6",
-            "--entry-decel-max-ret",
-            "0.02",
-            "--market-min-ret-1d",
-            "-0.03",
-            "--btc-trend-lookback-days",
-            "20",
-            "--btc-trend-mode",
-            "hourly_exact_month",
-            "--btc-trend-month-days",
-            "30.4375",
-            "--btc-trend-smart-tolerance",
-            "0.02",
-            "--round-trip-cost-multiplier",
-            "2",
-            "--failed-fade-hours",
-            "6",
-            "--failed-fade-loss-pct",
-            "0.04",
-            "--failed-fade-min-mfe-pct",
-            "0.01",
-            "--breakeven-arm-pct",
-            "0.08",
-            "--mfe-giveback-trigger-pct",
-            "0.12",
-            "--mfe-giveback-retain-pct",
-            "0.4",
-            "--entry-skip-external-size-multiplier-lte",
-            "0.35",
+            "continuous-event-demo-cycle",
+            "--execution-environment",
+            "demo",
+        ]
+    )
+    long = parser.parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "long-native-event-demo-cycle",
+            "--execution-environment",
+            "demo",
         ]
     )
 
-    assert args.take_profit_pct == 0.08
-    assert args.rank_exit_threshold == 0.8
-    assert args.entry_crowding_max_fresh == 4
-    assert args.stop_vol_mult == 6
-    assert args.sizing_mode == "inverse_vol"
-    assert args.target_vol_per_name == 0.015
-    assert args.vol_weight_clamp == 2.5
-    assert args.age_days_min == 300
-    assert args.entry_max_ret168_max == 0.2
-    assert args.entry_decel_lookback_h == 6
-    assert args.entry_decel_max_ret == 0.02
-    assert args.market_min_ret_1d == -0.03
-    assert args.btc_trend_lookback_days == 20
-    assert args.btc_trend_mode == "hourly_exact_month"
-    assert args.btc_trend_month_days == 30.4375
-    assert args.btc_trend_smart_tolerance == 0.02
-    assert args.round_trip_cost_multiplier == 2
-    assert args.failed_fade_hours == 6
-    assert args.failed_fade_loss_pct == 0.04
-    assert args.failed_fade_min_mfe_pct == 0.01
-    assert args.breakeven_arm_pct == 0.08
-    assert args.mfe_giveback_trigger_pct == 0.12
-    assert args.mfe_giveback_retain_pct == 0.4
-    assert args.entry_skip_external_size_multiplier_lte == 0.35
+    assert continuous.workers == 4
+    assert long.workers == 4
 
 
 def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
@@ -293,18 +163,6 @@ def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
     assert CostConfig().base_entry_exit_cost_bps == pytest.approx(taker.base_entry_exit_cost_bps)
     # An explicit maker blend is still cheaper (and must be opted into explicitly).
     assert replace(CostConfig(), maker_fill_probability=0.60).base_entry_exit_cost_bps < taker.base_entry_exit_cost_bps
-
-
-def test_cli_archive_kline_default_requires_dense_utc_day(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "archive-download-klines",
-        ]
-    )
-
-    assert args.min_existing_bars == 1440
 
 
 def test_cli_archive_hourly_kline_default_resumes_written_partitions(tmp_path: Path) -> None:
@@ -365,27 +223,6 @@ def test_cli_binance_proxy_parses_defaults(tmp_path: Path) -> None:
     assert "mark_price_1h" in args.datasets
 
 
-def test_cli_data_layer_audit_parses_options(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "data-layer-audit",
-            "--name",
-            "coverage",
-            "--symbols",
-            "BTCUSDT,ETHUSDT",
-            "--min-full-coverage",
-            "0.9",
-        ]
-    )
-
-    assert args.command == "data-layer-audit"
-    assert args.name == "coverage"
-    assert args.symbols == "BTCUSDT,ETHUSDT"
-    assert args.min_full_coverage == 0.9
-
-
 def test_cli_long_native_explicit_paper_environment_propagates(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
@@ -401,9 +238,7 @@ def test_cli_long_native_explicit_paper_environment_propagates(tmp_path: Path) -
 
 def test_cli_long_native_requires_explicit_environment(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
-        build_parser().parse_args(
-            ["--data-root", str(tmp_path), "long-native-event-demo-cycle"]
-        )
+        build_parser().parse_args(["--data-root", str(tmp_path), "long-native-event-demo-cycle"])
 
 
 def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
@@ -418,45 +253,6 @@ def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
     )
     assert args.notional_multiplier == 1.0
     assert args.max_projected_initial_margin_pct_equity == 0.5
-    for retired in (
-        "fallback_equity_usdt",
-        "entry_order_type",
-        "exit_order_type",
-        "order_fill_confirm_seconds",
-        "order_fill_poll_interval_seconds",
-        "telegram",
-        "record_dry_run",
-    ):
-        assert not hasattr(args, retired)
-
-
-@pytest.mark.parametrize(
-    "retired_args",
-    [
-        ["--fallback-equity-usdt", "10000"],
-        ["--entry-order-type", "Market"],
-        ["--exit-order-type", "Market"],
-        ["--order-fill-confirm-seconds", "2"],
-        ["--order-fill-poll-interval-seconds", "0.2"],
-        ["--telegram"],
-        ["--record-dry-run"],
-    ],
-)
-def test_cli_long_native_rejects_retired_direct_execution_flags(
-    tmp_path: Path,
-    retired_args: list[str],
-) -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(
-            [
-                "--data-root",
-                str(tmp_path),
-                "long-native-event-demo-cycle",
-                "--execution-environment",
-                "demo",
-                *retired_args,
-            ]
-        )
 
 
 # --------------------------------------------------------------------------- #
@@ -530,11 +326,10 @@ def test_archive_manifest_normal_name_path_unchanged(monkeypatch, capsys, tmp_pa
     assert str(tmp_path / "reports" / "archive_manifest_bybit-public-trading.md") in out
 
 
-# audit2b: archive-download-klines (1m / 1h / 1h-api) — all share the raw-name bug
+# Archive hourly builders share report-name slugging.
 @pytest.mark.parametrize(
     ("command", "func_name", "stem"),
     [
-        ("archive-download-klines", "run_archive_klines_download", "archive_klines"),
         ("archive-download-klines-1h", "run_archive_hourly_klines_download", "archive_klines_1h"),
         (
             "archive-download-klines-1h-api",
@@ -584,7 +379,7 @@ def test_binance_proxy_end_help_documents_exclusive_boundary() -> None:
     assert "not included" in help_by_dest["end"].lower()
 
 
-# The target route is explicit; no order-submission compatibility flags remain.
+# The target route is explicit; there are no alternate order-submission flags.
 @pytest.mark.parametrize(
     "subcommand",
     ["long-native-event-demo-cycle", "continuous-event-demo-cycle"],
@@ -606,7 +401,7 @@ def test_validate_datasets_rejects_unknown_bybit_dataset() -> None:
     with pytest.raises(RuntimeError, match="funidng"):
         _validate_datasets({"klines_1h", "funidng"}, _KNOWN_BYBIT_DATASETS, venue="Bybit")
     # Every known token passes unchanged.
-    known = {"instruments", "klines_1h", "archive_klines_1m"}
+    known = {"instruments", "klines_1h"}
     assert _validate_datasets(known, _KNOWN_BYBIT_DATASETS, venue="Bybit") == known
 
 
@@ -677,12 +472,6 @@ def test_parse_symbols_strips_and_uppercases() -> None:
     assert _parse_symbols(None) == []
 
 
-# cli-config-7 (relocated from test_audit_int_iK): discover-universe must reject the
-# contradictory exclusion flags (--exclude-defaults vs --include-excluded) at parse
-# time instead of silently picking the include branch. The fix groups all four
-# exclusion flags into one argparse mutually-exclusive group in
-# cli_parsers._add_discover_universe_parser, while keeping the two legacy aliases
-# (--exclude-majors / --include-majors) hidden (argparse.SUPPRESS) for backward compat.
 def _parse_discover_universe(args):
     return build_parser().parse_args(["discover-universe", *args])
 
@@ -695,20 +484,6 @@ def test_exclude_defaults_alone_parses() -> None:
 
 def test_include_excluded_alone_parses() -> None:
     ns = _parse_discover_universe(["--include-excluded"])
-    assert ns.include_majors is True
-    assert ns.exclude_majors is False
-
-
-def test_legacy_exclude_majors_alias_still_works() -> None:
-    # Backward compat: the hidden --exclude-majors alias keeps setting exclude_majors.
-    ns = _parse_discover_universe(["--exclude-majors"])
-    assert ns.exclude_majors is True
-    assert ns.include_majors is False
-
-
-def test_legacy_include_majors_alias_still_works() -> None:
-    # Backward compat: the hidden --include-majors alias keeps setting include_majors.
-    ns = _parse_discover_universe(["--include-majors"])
     assert ns.include_majors is True
     assert ns.exclude_majors is False
 
@@ -727,41 +502,12 @@ def test_contradictory_exclude_and_include_is_parse_error() -> None:
     assert exc.value.code == 2
 
 
-def test_contradictory_legacy_aliases_is_parse_error() -> None:
-    # The contradiction is detected through the hidden aliases too.
-    with pytest.raises(SystemExit) as exc:
-        _parse_discover_universe(["--exclude-majors", "--include-majors"])
-    assert exc.value.code == 2
-
-
-def test_contradictory_mixed_public_and_alias_is_parse_error() -> None:
-    with pytest.raises(SystemExit) as exc:
-        _parse_discover_universe(["--include-excluded", "--exclude-majors"])
-    assert exc.value.code == 2
-
-
-def test_exclusion_aliases_remain_hidden_in_help() -> None:
-    # The legacy aliases stay argparse.SUPPRESS: they must not appear in the
-    # discover-universe help text, only the public flags do.
-    parser = build_parser()
-    discover_subparser = parser._subparsers._group_actions[0].choices["discover-universe"]
-    help_text = discover_subparser.format_help()
-    assert "--exclude-defaults" in help_text
-    assert "--include-excluded" in help_text
-    assert "--exclude-majors" not in help_text
-    assert "--include-majors" not in help_text
-
-
 def test_exclusion_flags_are_in_a_mutually_exclusive_group() -> None:
-    # Structural assertion: the four exclusion flags share one mutually-exclusive
-    # group so the conflict is enforced by argparse, not by ad-hoc runtime logic.
     parser = build_parser()
     discover_subparser = parser._subparsers._group_actions[0].choices["discover-universe"]
     target_options = {
         "--exclude-defaults",
-        "--exclude-majors",
         "--include-excluded",
-        "--include-majors",
     }
     for group in discover_subparser._mutually_exclusive_groups:
         group_options = {opt for action in group._group_actions for opt in action.option_strings}

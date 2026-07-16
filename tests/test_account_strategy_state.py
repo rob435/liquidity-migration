@@ -20,11 +20,8 @@ from liquidity_migration.account_strategy_state import (
     canonical_entry_attempts,
     canonical_reduction_events,
     canonical_strategy_trade_rows,
-    latest_account_equity_usdt,
-    latest_account_risk_snapshot,
-    replace_legacy_open_rows,
     target_reservation_rows,
-    terminal_risk_rejected_entry_attempt_keys,
+    terminal_entry_attempt_keys,
 )
 from liquidity_migration.continuous_btc_risk import BTC_RISK_EVIDENCE_METADATA_KEY
 from liquidity_migration.deterministic_runtime import VirtualClock
@@ -44,7 +41,6 @@ def _submit(
 ) -> TargetBatchResult:
     target_metadata: dict[str, object] = {
         "signal_ts_ms": 123,
-        "planned_exit_ts_ms": 999,
         "stop_price": 9.0,
         "take_profit_price": 12.0,
     }
@@ -249,14 +245,6 @@ def test_projection_waits_for_reconstructed_position_convergence(tmp_path: Path)
     assert projected["account_target_status"].to_list() == ["converged"]
     assert projected["exit_reason"].to_list() == ["time_stop"]
 
-    legacy = pl.DataFrame([
-        {"trade_id": "stale-open", "status": "open", "symbol": "OLDUSDT"},
-        {"trade_id": "old-closed", "status": "closed", "symbol": "OLDUSDT"},
-    ])
-    merged = replace_legacy_open_rows(legacy, projected)
-    assert set(merged["trade_id"].to_list()) == {"old-closed", "trade-1"}
-
-
 def test_target_reservations_include_pending_without_relabelling_it_open() -> None:
     rows = pl.DataFrame([
         {"trade_id": "filled", "status": "open"},
@@ -317,7 +305,7 @@ def test_entry_attempt_projection_includes_risk_rejections_without_trade_rows(
     assert canonical_strategy_trade_rows(
         root, sleeve="long", strategy_ids=("strategy",)
     ).is_empty()
-    assert terminal_risk_rejected_entry_attempt_keys(
+    assert terminal_entry_attempt_keys(
         root,
         sleeve="long",
         strategy_ids=("strategy",),
@@ -347,7 +335,7 @@ def test_new_signal_attempt_is_distinct_from_prior_risk_rejection(tmp_path: Path
         },
     )
 
-    terminal = terminal_risk_rejected_entry_attempt_keys(root, sleeve="long")
+    terminal = terminal_entry_attempt_keys(root, sleeve="long")
     assert entry_attempt_key(old_key) in terminal
     assert entry_attempt_key(new_key) not in terminal
 
@@ -384,7 +372,7 @@ def test_execution_rejection_remains_accepted_convergence_state_not_terminal_att
 
     attempts = canonical_entry_attempts(root, sleeve="long")
     assert len(attempts) == 1 and attempts[0].accepted
-    assert terminal_risk_rejected_entry_attempt_keys(root, sleeve="long") == frozenset()
+    assert terminal_entry_attempt_keys(root, sleeve="long") == frozenset()
     rows = canonical_strategy_trade_rows(root, sleeve="long")
     assert rows["status"].to_list() == ["target_pending"]
 
@@ -559,7 +547,7 @@ def test_convergence_retry_entry_uses_retry_fill_and_original_target_clock(
     assert row["entry_target_ts_ms"] == 1_000
     assert row["entry_ts_ms"] == 4_000
     assert row["target_reason"] == "entry"
-    assert row["planned_exit_ts_ms"] == 4_000 + 3_600_000
+    assert row["max_hold_deadline_ts_ms"] == 4_000 + 3_600_000
 
 
 def test_convergence_retry_close_uses_original_target_and_retry_terminal_fill(
@@ -869,43 +857,6 @@ def test_filled_component_remains_exit_visible_while_same_symbol_peer_is_pending
     ]
 
 
-def test_replacing_legacy_rows_twice_does_not_duplicate_pending_target(tmp_path: Path) -> None:
-    kernel = AccountExecutionKernel(tmp_path / "account", account_id="a")
-    _submit(kernel, batch="open", qty=2.0, reason="entry")
-    canonical = canonical_strategy_trade_rows(
-        tmp_path / "account", sleeve="long", strategy_ids=("strategy",)
-    )
-    assert canonical["status"].to_list() == ["target_pending"]
-
-    legacy = pl.DataFrame([
-        {"trade_id": "stale-open", "status": "open", "symbol": "OLDUSDT"},
-        {"trade_id": "stale-pending", "status": "target_pending", "symbol": "OLDUSDT"},
-        {"trade_id": "stale-submitted", "status": "submitted", "symbol": "OLDUSDT"},
-        {"trade_id": "stale-awaiting-pnl", "status": "awaiting_pnl", "symbol": "OLDUSDT"},
-        {"trade_id": "old-closed", "status": "closed", "symbol": "OLDUSDT"},
-    ])
-
-    first_cycle = replace_legacy_open_rows(legacy, canonical)
-    second_cycle = replace_legacy_open_rows(first_cycle, canonical)
-
-    assert second_cycle.select("trade_id", "status").to_dicts() == [
-        {"trade_id": "old-closed", "status": "closed"},
-        {"trade_id": "trade-1", "status": "target_pending"},
-    ]
-
-
-def test_latest_account_risk_snapshot_reads_owner_observation(tmp_path: Path) -> None:
-    kernel = AccountExecutionKernel(tmp_path / "account", account_id="a")
-    _submit(kernel, batch="open", qty=2.0, reason="entry")
-
-    snapshot = latest_account_risk_snapshot(tmp_path / "account")
-
-    assert snapshot["equity_usdt"] == 10_000.0
-    assert snapshot["available_margin_usdt"] == 9_000.0
-    assert latest_account_equity_usdt(tmp_path / "account") == 10_000.0
-    assert latest_account_equity_usdt(tmp_path / "missing") == 0.0
-
-
 def test_entry_fill_anchor_and_resize_preserve_original_lifecycle_clock(
     tmp_path: Path,
 ) -> None:
@@ -924,13 +875,11 @@ def test_entry_fill_anchor_and_resize_preserve_original_lifecycle_clock(
     assert pending.select(
         "entry_target_ts_ms",
         "entry_ts_ms",
-        "opened_at_ms",
         "max_hold_deadline_ts_ms",
         "account_lifecycle_attribution_status",
     ).to_dicts() == [{
         "entry_target_ts_ms": 1_000,
         "entry_ts_ms": None,
-        "opened_at_ms": None,
         "max_hold_deadline_ts_ms": None,
         "account_lifecycle_attribution_status": "pending_first_fill",
     }]
@@ -1060,38 +1009,11 @@ def test_mixed_direction_netted_batch_has_null_lifecycle_clocks(
         "attribution_review",
     ]
     assert rows["entry_ts_ms"].to_list() == [None, None]
-    assert rows["opened_at_ms"].to_list() == [None, None]
     assert rows["max_hold_deadline_ts_ms"].to_list() == [None, None]
     assert rows["account_lifecycle_attribution_status"].to_list() == [
         "ambiguous_aggregate_only",
         "ambiguous_aggregate_only",
     ]
-
-
-def test_legacy_target_deadline_is_only_a_duration_inference(tmp_path: Path) -> None:
-    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=1)
-    root = tmp_path / "account"
-    kernel = AccountExecutionKernel(root, account_id="a", clock=clock)
-    target_deadline_ms = 1_000 + 3_600_000
-    opened = _submit(
-        kernel,
-        batch="legacy-deadline-entry",
-        qty=2.0,
-        reason="entry",
-        metadata={"planned_exit_ts_ms": target_deadline_ms},
-    )
-    _ack_and_fill(
-        kernel,
-        opened,
-        fills=[("legacy-fill", 2.0, 10.0, 2_000_000_000)],
-    )
-
-    row = canonical_strategy_trade_rows(root, sleeve="long").to_dicts()[0]
-    assert row["target_planned_exit_ts_ms"] == target_deadline_ms
-    assert row["max_hold_duration_ms"] == 3_600_000
-    assert row["max_hold_duration_basis"] == "legacy_target_planned_exit_delta"
-    assert row["planned_exit_ts_ms"] == 2_000 + 3_600_000
-    assert row["max_hold_deadline_ts_ms"] != target_deadline_ms
 
 
 def test_terminal_group_reduction_projects_one_account_pnl_event(
@@ -1208,7 +1130,7 @@ def test_partial_entry_fill_opens_lifecycle_without_claiming_target_convergence(
     assert row["account_target_status"] == "pending"
     assert row["target_action"] == "open_or_resize"
     assert row["entry_ts_ms"] == 2_000
-    assert row["planned_exit_ts_ms"] == 2_000 + 3_600_000
+    assert row["max_hold_deadline_ts_ms"] == 2_000 + 3_600_000
 
 
 def test_positive_reduction_is_not_an_adverse_event(tmp_path: Path) -> None:

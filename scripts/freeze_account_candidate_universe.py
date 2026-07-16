@@ -34,9 +34,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
     parser.add_argument("--long-universe-superset-size", type=int, default=120)
-    parser.add_argument("--continuous-universe-rank-end", type=int, default=0)
-    parser.add_argument("--continuous-universe-max-symbols", type=int, default=0)
-    parser.add_argument("--continuous-min-turnover-24h", type=float, default=0.0)
     parser.add_argument(
         "--max-public-requests-per-second",
         type=int,
@@ -46,10 +43,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.long_universe_superset_size <= 0:
         parser.error("--long-universe-superset-size must be positive")
-    if args.continuous_universe_rank_end < 0 or args.continuous_universe_max_symbols < 0:
-        parser.error("CONT universe bounds must be non-negative")
-    if args.continuous_min_turnover_24h < 0.0:
-        parser.error("--continuous-min-turnover-24h must be non-negative")
     if args.max_public_requests_per_second <= 0:
         parser.error("--max-public-requests-per-second must be positive")
 
@@ -57,12 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         LongNativeDemoCycleConfig(),
         universe_superset_size=args.long_universe_superset_size,
     )
-    continuous_config = apply_continuous_demo_profile(replace(
-        ContinuousDemoCycleConfig(),
-        universe_rank_end=args.continuous_universe_rank_end,
-        universe_max_symbols=args.continuous_universe_max_symbols,
-        universe_min_turnover_24h=args.continuous_min_turnover_24h,
-    ))
+    continuous_config = apply_continuous_demo_profile(ContinuousDemoCycleConfig())
     limiter = BybitRestRateLimiter(
         max_requests=args.max_public_requests_per_second,
         per_seconds=1.0,

@@ -1,70 +1,58 @@
 ---
 name: run-strategy
-description: Construct and run current liquidity_migration CLI, data, audit, and forward commands safely. Use whenever invoking python -m liquidity_migration or scripts/ops.sh so the correct operational surface, data root, end-exclusive boundary, profile, PIT mode, and demo or paper safety checks are derived from current help and the active experiment contract. Never assume today's date, a dry run, cross-venue scope, or mainnet authority.
+description: Construct and run current liquidity_migration CLI, data, audit, and demo/paper operational commands safely. Use whenever invoking python -m liquidity_migration or scripts/ops.sh so data roots, end-exclusive boundaries, profiles, PIT modes, and mutation handshakes come from current help and code. Never assume today's date, a dry run, cross-venue scope, or mainnet authority.
 ---
 
 # Run repository commands safely
 
-Prefer the highest-level current surface that owns the task:
+Start with the current owning surface:
 
 ```bash
-scripts/ops.sh --help
+scripts/ops.sh help
 python -m liquidity_migration --help
 python -m liquidity_migration SUBCOMMAND --help
 ```
 
-Treat `--help`, the selected experiment contract, and current code as
-authoritative. Do not maintain or invent a static subcommand list.
+Do not maintain a static package-subcommand list.
 
-## Select the root and boundary
+## Select roots and boundaries
 
-- Use `~/SHARED_DATA/bybit_full_pit` and
-  `~/SHARED_DATA/binance_full_pit` as the normal research storage roots.
-- Use a venue because the claim or contract requires it. A second venue is a
-  robustness probe or portability test, not a universal gate.
-- Keep research roots separate from demo/paper ledger roots under `data/` or the
-  VPS. Never point an order-writing runtime at a research root.
-- Derive `--start` and end-exclusive `--end` from the active contract or task.
-  Do not silently substitute today's date for a frozen boundary.
-- Inspect current PIT and dataset coverage directly; root names do not prove
-  completeness.
+- Normal research roots are `~/SHARED_DATA/bybit_full_pit` and
+  `~/SHARED_DATA/binance_full_pit`; inspect actual coverage.
+- Keep research roots separate from VPS account, inbox, capture, and strategy roots.
+- Derive `--start` and end-exclusive `--end` from the task or prospective
+  contract; never silently use today's date.
+- Choose venues from the claim. A second venue is not a universal gate.
+- Use strict PIT only when the claim requires historical-universe coverage, and
+  label partial/current-universe diagnostics honestly.
 
-## Use canonical wrappers
+## Canonical wrappers
 
-- Account evidence: `scripts/ops.sh status` for read-only deployment state and
-  `scripts/ops.sh account-parity` for source-bound structural journal
-  comparison; apply the `pit-reconcile` skill. There is no current combined
-  PIT/model/runtime reconciliation command.
-- Equity curves: `scripts/ops.sh equity` or `scripts/equity_curves.sh`; apply
-  the `equity-curve` skill.
-- Current registered tail experiment: `scripts/ops.sh tail-plan` before
-  `tail-run`.
-- Data build/audit, reset, deploy, status, and tests: use the named
-  `scripts/ops.sh` command and preserve its explicit mutation handshake.
+- Deployment/account state: `scripts/ops.sh status`.
+- Stopped install and authorized activation:
+  `scripts/ops.sh deploy --execute install|activate`.
+- Operational receipt: `scripts/ops.sh operational-authority`; creation
+  requires `--execute issue`.
+- Account evidence: `scripts/ops.sh venue-accounting`; apply
+  `pit-reconcile`.
+- Ledger reset: `scripts/ops.sh reset`, dry-run unless `--execute`.
+- Equity curves: `scripts/ops.sh equity`; apply `equity-curve`.
+- Tests: `scripts/ops.sh test`.
+- Data builds: use the per-venue builders or current package command help.
 
-For a custom research run, use the preregistered dispatcher when one exists.
-Otherwise call the package runner with a saved config and reconstructable
-command; label ad hoc work exploratory.
+## Forward safety
 
-## Verify order behavior
+Demo is not a dry run: it changes the external demo account. Before a forward
+command, inspect `EXECUTION_ENVIRONMENT`, profile, credentials, confirmation,
+receipt, checkout, and `REAL_MONEY`. Use a true plan/dry-run mode when one
+exists.
 
-Never call a cycle “dry” merely because it targets demo. Before any forward
-command, inspect the explicit `EXECUTION_ENVIRONMENT=demo|paper`, confirmation,
-paper mode, profile, credentials, and `REAL_MONEY`. Use a true dry-run/plan mode
-when the command provides one.
+Mainnet is categorically separate. Never set `REAL_MONEY`, select mainnet
+credentials, or infer permission from broad repository work.
 
-Demo submission still changes an external demo account and requires task scope
-that includes running it. Mainnet is categorically separate: never set
-`REAL_MONEY`, select mainnet credentials, or infer permission from broad project
-authority.
+## Evidence
 
-## Apply evidence discipline
-
-- Use full PIT when a historical-universe claim requires it; a partial/current
-  universe can support only its declared narrower scope.
-- Include material funding and costs for net-performance claims; omit them only
-  when the claim does not depend on PnL and say so.
-- Apply `backtest-integrity` before a decision-influencing run and
-  `research-report` before interpreting the output.
-- Preserve exact commands, configs, hashes, logs, failures, and artifacts needed
-  by the claim.
+Preserve exact commands, configs, roots, code/data identities, warnings,
+failures, and artifacts. Include material funding and costs for net-performance
+claims. Apply `backtest-integrity` before decision-influencing research and
+`research-report` before interpreting it.

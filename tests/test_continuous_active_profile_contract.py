@@ -141,7 +141,7 @@ def _accepted_tail_evidence(
         btc_context=prior_context,
     )
     assert stats["scored"] == profile.entry_btc_risk_min_prior
-    sizer.ingest_accepted_decisions(
+    sizer.reconcile_authoritative_accepted_decisions(
         [
             {
                 BTC_RISK_EVIDENCE_METADATA_KEY: lookup[(str(row["symbol"]), int(row["signal_ts_ms"]))][
@@ -331,7 +331,7 @@ def test_active_component_targets_preserve_sizing_identity_and_tp(
         assert target.metadata["decision_reference_price"] == pytest.approx(100.0)
         assert {
             "take_profit_price",
-            "planned_exit_ts_ms",
+            "max_hold_deadline_ts_ms",
             "max_hold_ms",
             "stop_loss_pct",
             "stop_price",
@@ -411,12 +411,12 @@ def test_active_btc_size_evidence_mismatch_fails_closed(tmp_path: Path) -> None:
 def test_active_strategy_does_not_exit_before_24h() -> None:
     profile = _active_profile()
     now_ms = 2_000_000_000_000
-    entry_fill_ts_ms = now_ms - 23 * MS_PER_HOUR
+    entry_ts_ms = now_ms - 23 * MS_PER_HOUR
     trade = {
         "trade_id": "trade-before-max-hold",
         "symbol": SYMBOL,
         "entry_target_ts_ms": now_ms - 48 * MS_PER_HOUR,
-        "entry_fill_ts_ms": entry_fill_ts_ms,
+        "entry_ts_ms": entry_ts_ms,
     }
 
     exits = plan_continuous_exits(
@@ -454,7 +454,7 @@ def test_active_strategy_exits_at_exact_24h_for_max_hold_only() -> None:
         "trade_id": "trade-max-hold",
         "symbol": SYMBOL,
         "entry_target_ts_ms": now_ms - 48 * MS_PER_HOUR,
-        "entry_fill_ts_ms": now_ms - 24 * MS_PER_HOUR,
+        "entry_ts_ms": now_ms - 24 * MS_PER_HOUR,
     }
 
     exits = plan_continuous_exits(

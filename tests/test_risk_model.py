@@ -4,93 +4,16 @@ import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import numpy as np
 import polars as pl
 
 from liquidity_migration.risk_model import (
     _FACTOR_COLUMNS,
     build_factor_panel,
     compute_btc_beta,
-    decompose_strategy_pnl,
     fit_factor_returns,
-    residual_variance_capture,
 )
 
 _DAY = 86_400_000
-
-
-def _factor_panel(n_days: int, n_syms: int, *, signal_factor: str | None = None, seed: int = 0) -> pl.DataFrame:
-    """Synthetic factor-exposure panel with all _FACTOR_COLUMNS + fwd_ret_1d.
-
-    ``signal_factor=None`` => target is pure noise (factors carry no information);
-    otherwise target = 0.3 * that factor + noise (a real, detectable relation)."""
-    rng = np.random.default_rng(seed)
-    rows = []
-    for d in range(n_days):
-        ts = d * _DAY
-        for s in range(n_syms):
-            vals = {c: float(rng.normal()) for c in _FACTOR_COLUMNS}
-            vals["liquidity_rank"] = float(s + 1)
-            tgt = (0.3 * vals[signal_factor] if signal_factor else 0.0) + float(rng.normal() * 0.02)
-            rows.append({"symbol": f"S{s}", "ts_ms": ts, **vals, "fwd_ret_1d": tgt})
-    return pl.DataFrame(rows)
-
-
-def test_residual_variance_capture_noise_model_does_not_capture() -> None:
-    # The OLD check (residual_std < raw_std) is an in-sample R^2>=0 tautology that
-    # passes EVERY noise panel. The permutation null instead has a ~5% false-positive
-    # rate BY CONSTRUCTION, so assert the rate across many seeds is low (a broken /
-    # tautological gate would flag capture on every noise panel).
-    flags = []
-    for s in range(20):
-        panel = _factor_panel(45, 25, signal_factor=None, seed=100 + s)
-        vc = residual_variance_capture(panel, n_permutations=50, seed=s)
-        assert vc["residual_std_over_raw"] < 1.0  # in-sample tautology still holds
-        flags.append(vc["captures_real_variance"])
-    # Expected ~1/20 false positives; <=5 is a safe bound that still catches a gate
-    # that calls every noise model "real" (the bug A1 fixes). P(false fail) ~ 3e-4.
-    assert sum(flags) <= 5, f"noise false-positive rate too high: {sum(flags)}/20"
-
-
-def test_residual_variance_capture_real_signal_is_detected() -> None:
-    # A genuine factor->return relation must be detected on every realization.
-    for s in range(5):
-        panel = _factor_panel(45, 25, signal_factor="btc_beta", seed=200 + s)
-        vc = residual_variance_capture(panel, n_permutations=50, seed=s)
-        assert vc["captures_real_variance"] is True
-        assert vc["p_value"] < 0.05
-        assert vc["residual_std_over_raw"] < vc["null_ratio_p05"]  # beats the null's best
-
-
-def test_decompose_strategy_pnl_snaps_offgrid_entry_to_daily_grid() -> None:
-    # Engine ledger entries are +1h off the 00:00-UTC panel grid; they must still
-    # resolve (pre-fix they missed every lookup -> all-null -> inflated residual).
-    panel = _factor_panel(40, 20, signal_factor="btc_beta", seed=3)
-    fr, _resid = fit_factor_returns(panel)
-    loadings = panel.select(["symbol", "ts_ms", *_FACTOR_COLUMNS])
-    trades = pl.DataFrame({
-        "symbol": ["S1", "S2"],
-        "entry_ts_ms": [10 * _DAY + 3_600_000, 11 * _DAY + 3_600_000],
-        "hold_days": [2, 2],
-        "realized_return": [0.05, -0.03],
-    })
-    dec = decompose_strategy_pnl(trades, loadings, fr)
-    assert dec["resolved_fraction"] == 1.0
-    assert dec["n_unresolved"] == 0
-    assert dec["per_trade"]["explained"].drop_nulls().len() == 2
-
-
-def test_decompose_strategy_pnl_no_factor_returns_is_null_not_zero() -> None:
-    # Exposure resolves but no factor-return rows over the hold -> null (NOT 0.0,
-    # which would mis-book the whole realized return as residual alpha).
-    panel = _factor_panel(40, 20, signal_factor="btc_beta", seed=4)
-    loadings = panel.select(["symbol", "ts_ms", *_FACTOR_COLUMNS])
-    empty_fr = pl.DataFrame(schema={"ts_ms": pl.Int64, "factor": pl.String, "factor_return": pl.Float64})
-    trades = pl.DataFrame({"symbol": ["S1"], "entry_ts_ms": [10 * _DAY], "hold_days": [2], "realized_return": [0.05]})
-    dec = decompose_strategy_pnl(trades, loadings, empty_fr)
-    assert dec["n_unresolved"] == 1
-    assert dec["per_trade"]["explained"][0] is None
-    assert dec["per_trade"]["residual"][0] is None
 
 
 def _daily_returns(symbol_to_rets: dict[str, list[float]]) -> pl.DataFrame:
@@ -210,61 +133,6 @@ def test_fit_factor_returns_skips_thin_days_and_handles_empty() -> None:
     assert fr2.is_empty() and resid2.is_empty()
 
 
-def test_decompose_strategy_pnl_splits_explained_and_residual() -> None:
-    # 1 factor f1; trade A DECIDED on day 0 (signal_ts = end-of-day-0 = _DAY), enters the next
-    # morning, holds 2d, exposure 2.0, realized 0.10. Loadings are read at the DECISION day (day 0);
-    # factor returns day0=0.01, day1=0.02 -> cum 0.03 -> explained 2.0*0.03=0.06 -> residual 0.04.
-    loadings = pl.DataFrame([{"symbol": "A", "ts_ms": 0, "f1": 2.0}])
-    fr = pl.DataFrame([
-        {"ts_ms": 0, "factor": "f1", "factor_return": 0.01},
-        {"ts_ms": _DAY, "factor": "f1", "factor_return": 0.02},
-    ])
-    trades = pl.DataFrame([{
-        "symbol": "A", "signal_ts_ms": _DAY, "entry_ts_ms": _DAY + 3_600_000,
-        "hold_days": 2, "realized_return": 0.10,
-    }])
-    out = decompose_strategy_pnl(trades, loadings, fr, factor_cols=["f1"])
-    row = out["per_trade"].row(0, named=True)
-    assert abs(row["explained"] - 0.06) < 1e-9, row
-    assert abs(row["residual"] - 0.04) < 1e-9, row
-    assert out["n_trades"] == 1
-
-
-def test_decompose_strategy_pnl_snaps_to_decision_day_not_entry_day() -> None:
-    """risk-config-cli-1: the PnL decomposition must read factor loadings at the DECISION day D, not
-    the entry's calendar day D+1. The trade decides at D's EOD (signal_ts = 00:00 of D+1) and enters
-    +1h into D+1; reading load_map[(sym, D+1)] would be non-causal (look-ahead) AND shift the
-    factor-return window a day. With loadings ONLY at D and factor_return ONLY at D, the trade must
-    resolve (explained != None) via the decision-day key — both the signal_ts path and the
-    floor(entry)-1day fallback."""
-    loadings = pl.DataFrame([{"symbol": "A", "ts_ms": 0, "f1": 1.0}])           # only the DECISION day D=0
-    fr = pl.DataFrame([{"ts_ms": 0, "factor": "f1", "factor_return": 0.05}])    # only factor_return[D=0]
-    entry = _DAY + 3_600_000  # 01:00 of D+1
-    # (a) explicit signal_ts_ms -> decision day floor(signal_ts-1ms) = 0
-    out_sig = decompose_strategy_pnl(
-        pl.DataFrame([{"symbol": "A", "signal_ts_ms": _DAY, "entry_ts_ms": entry, "hold_days": 1, "realized_return": 0.08}]),
-        loadings, fr, factor_cols=["f1"],
-    )
-    assert out_sig["per_trade"].row(0, named=True)["explained"] is not None
-    assert abs(out_sig["per_trade"].row(0, named=True)["explained"] - 0.05) < 1e-9
-    # (b) legacy row without signal_ts_ms -> floor(entry)-1day = 0
-    out_fb = decompose_strategy_pnl(
-        pl.DataFrame([{"symbol": "A", "entry_ts_ms": entry, "hold_days": 1, "realized_return": 0.08}]),
-        loadings, fr, factor_cols=["f1"],
-    )
-    assert out_fb["per_trade"].row(0, named=True)["explained"] is not None
-    assert out_fb["n_unresolved"] == 0
-
-
-def test_decompose_strategy_pnl_missing_exposure_is_null() -> None:
-    loadings = pl.DataFrame(schema={"symbol": pl.String, "ts_ms": pl.Int64, "f1": pl.Float64})
-    fr = pl.DataFrame(schema={"ts_ms": pl.Int64, "factor": pl.String, "factor_return": pl.Float64})
-    trades = pl.DataFrame([{"symbol": "A", "entry_ts_ms": 0, "hold_days": 2, "realized_return": 0.1}])
-    out = decompose_strategy_pnl(trades, loadings, fr, factor_cols=["f1"])
-    assert out["per_trade"].row(0, named=True)["explained"] is None
-    assert out["residual_sharpe"] == 0.0
-
-
 def _load_precompute_module():
     import importlib.util
     import sys
@@ -303,11 +171,6 @@ def test_precompute_residual_momentum_reaches_today(tmp_path: Path) -> None:
         f"no residual_momentum row for today {today_floor}; max={sig['ts_ms'].max()} -> live gate blackout")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# pit-signals-4 — compute_btc_beta calendar window  (from audit b13)
-# Uses an explicit-day-index returns frame (vs the position-indexed _daily_returns
-# above), so the helper is named _daily_returns_dayidx to avoid the collision.
-# ──────────────────────────────────────────────────────────────────────────────
 def _daily_returns_dayidx(symbol_to_rets: dict[str, list[tuple[int, float]]]) -> pl.DataFrame:
     """symbol -> list of (day_index, ret_1d). Day index keys the 00:00-UTC grid."""
     rows = []
@@ -346,36 +209,3 @@ def test_btc_beta_gap_does_not_stretch_window_past_calendar_span() -> None:
     # itself) -> below min_periods -> null. A row-based window would have reached back
     # to the pre-gap block and produced a (stale) non-null beta.
     assert beta_200 is None, beta_200
-
-
-def test_decompose_strategy_pnl_zero_signal_ts_uses_entry_fallback() -> None:
-    """audit-iter6: signal_ts_ms==0 is the repo's 'unknown signal' sentinel — it must
-    take the entry-based fallback, not snap to a garbage negative day and drop the trade."""
-    loadings = pl.DataFrame([{"symbol": "A", "ts_ms": 0, "f1": 1.0}])
-    fr = pl.DataFrame([{"ts_ms": 0, "factor": "f1", "factor_return": 0.05}])
-    entry = _DAY + 3_600_000  # 01:00 of D+1 -> floor(entry)-1day == day 0
-    out = decompose_strategy_pnl(
-        pl.DataFrame([{"symbol": "A", "signal_ts_ms": 0, "entry_ts_ms": entry,
-                       "hold_days": 1, "realized_return": 0.08}]),
-        loadings, fr, factor_cols=["f1"],
-    )
-    assert out["n_unresolved"] == 0
-    assert out["per_trade"].row(0, named=True)["explained"] is not None
-
-
-def test_decompose_strategy_pnl_null_loading_in_present_row_is_unresolved() -> None:
-    """audit-iter6: a present loading ROW with a NULL required factor can't be fully
-    decomposed — mark unresolved rather than zeroing it (which would mis-book its share
-    as residual alpha and inflate the residual Sharpe)."""
-    loadings = pl.DataFrame(
-        [{"symbol": "A", "ts_ms": 0, "f1": None}],
-        schema={"symbol": pl.String, "ts_ms": pl.Int64, "f1": pl.Float64},
-    )
-    fr = pl.DataFrame([{"ts_ms": 0, "factor": "f1", "factor_return": 0.05}])
-    out = decompose_strategy_pnl(
-        pl.DataFrame([{"symbol": "A", "signal_ts_ms": _DAY, "entry_ts_ms": _DAY + 3_600_000,
-                       "hold_days": 1, "realized_return": 0.08}]),
-        loadings, fr, factor_cols=["f1"],
-    )
-    assert out["n_unresolved"] == 1
-    assert out["per_trade"].row(0, named=True)["explained"] is None

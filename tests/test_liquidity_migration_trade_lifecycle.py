@@ -7,7 +7,6 @@ hand-built polars fixtures whose right answer is known by inspection.
 """
 from __future__ import annotations
 
-import inspect
 import math
 
 import polars as pl
@@ -25,8 +24,6 @@ from liquidity_migration.trade_lifecycle import (
     _position_weight_stats,
     _rank_exit_hit,
     _side_return,
-    _stop_price,
-    _take_profit_price,
     _worst_rolling_equity_return,
     _worst_volume_day_return,
     build_equity_curve,
@@ -36,26 +33,6 @@ from liquidity_migration.trade_lifecycle import (
 
 MS_PER_HOUR = 3_600_000
 MS_PER_DAY = 24 * MS_PER_HOUR
-
-
-# --------------------------------------------------------------------------
-# Stop / take-profit price construction
-# --------------------------------------------------------------------------
-
-def test_stop_and_take_profit_prices_are_side_aware():
-    # Long: stop below entry, target above. Short: mirrored.
-    assert _stop_price(100.0, side="long", stop_loss_pct=0.08) == pytest.approx(92.0)
-    assert _stop_price(100.0, side="short", stop_loss_pct=0.08) == pytest.approx(108.0)
-    assert _take_profit_price(100.0, side="long", take_profit_pct=0.10) == pytest.approx(110.0)
-    assert _take_profit_price(100.0, side="short", take_profit_pct=0.10) == pytest.approx(90.0)
-
-
-def test_stop_and_take_profit_disabled_when_pct_non_positive():
-    # A zero/negative percentage means the protective order is not placed.
-    assert _stop_price(100.0, side="long", stop_loss_pct=0.0) is None
-    assert _stop_price(100.0, side="short", stop_loss_pct=-0.01) is None
-    assert _take_profit_price(100.0, side="long", take_profit_pct=0.0) is None
-    assert _take_profit_price(100.0, side="short", take_profit_pct=0.0) is None
 
 
 # --------------------------------------------------------------------------
@@ -722,19 +699,6 @@ def test_intrahold_stats_all_nonfinite_mae_reads_as_not_measured() -> None:
     assert stats["worst_weighted_intrahold_loss"] == 0.0
 
 
-# ---------------------------------------------------------------------------
-# Relocated from tests/test_audit_fix_b11.py (audit bucket b11).
-# ---------------------------------------------------------------------------
-
-
-# code-quality-2: dead _filter_universe removed
-def test_filter_universe_dead_function_removed() -> None:
-    assert not hasattr(tl, "_filter_universe"), (
-        "_filter_universe had zero call sites and re-implemented stale universe "
-        "filtering; it must stay deleted (code-quality-2)."
-    )
-
-
 # metrics-4: worst_day_return SUMS same-day baskets (matches build_equity_curve)
 def test_worst_volume_day_return_sums_multi_basket_day_matching_equity_curve() -> None:
     baskets = pl.DataFrame(
@@ -806,84 +770,3 @@ def test_funding_modeled_fraction_extremes_and_summary_wiring() -> None:
         pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), config=tl.TradeLifecycleConfig()
     )
     assert empty["funding_modeled_fraction"] == 0.0
-
-
-# cost-funding-4: entry-notional funding approximation is documented, not silent
-def test_funding_entry_notional_approximation_is_documented() -> None:
-    src = inspect.getsource(tl._IndexedTradeState.to_trade)
-    assert "cost-funding-4" in src
-    assert "marked notional" in src.lower()
-
-
-def test_indexed_wrapper_and_chronological_state_agree_field_by_field() -> None:
-    """Migration guard for the sequential CONT lifecycle cutover.
-
-    The legacy-compatible indexed wrapper and the independently stepped state
-    must make identical discrete decisions and numerically equal accounting
-    outputs, including matching NaN positions.
-    """
-
-    ends = [1_000, 2_000, 3_000, 4_000]
-    symbol_bars = {
-        "ends": ends,
-        "bar_end_ts_ms": ends,
-        "high": [100.5, 102.5, 104.0, 100.0],
-        "low": [99.5, 100.0, 101.0, 98.0],
-        "close": [100.0, 102.0, 103.5, 99.0],
-    }
-    config = TradeLifecycleConfig(take_profit_pct=0.03)
-    common = {
-        "symbol": "BUSDT",
-        "side": "long",
-        "score": 1.25,
-        "rank": 3,
-        "basket_id": "basket-1",
-        "signal_ts_ms": 500,
-        "planned_exit_ts_ms": 4_000,
-        "notional_weight": 0.2,
-        "position_weight": 0.75,
-        "config": config,
-        "round_trip_cost_bps": 15.0,
-        "rank_lookup": {},
-        "event_decay_threshold": 0.0,
-        "funding_lookup": None,
-        "stop_fill_mode": "stop",
-        "stop_slippage_cap_pct": 0.10,
-    }
-    wrapped = tl._simulate_indexed_trade(
-        **common,
-        entry_bar=0,
-        symbol_bars=symbol_bars,
-        stop_pct=0.08,
-    )
-    assert wrapped is not None
-
-    state = tl._IndexedTradeState(
-        **common,
-        entry_ts_ms=1_000,
-        entry_price=100.0,
-        stop_price=92.0,
-        take_profit_price=103.0,
-    )
-    for index in range(1, 4):
-        if state.on_bar(
-            high=float(symbol_bars["high"][index]),
-            low=float(symbol_bars["low"][index]),
-            close=float(symbol_bars["close"][index]),
-            bar_end_ts_ms=ends[index],
-        ):
-            break
-    if not state.closed:
-        state.close_at_boundary(close=99.0, bar_end_ts_ms=4_000)
-    stepped = state.to_trade()
-
-    assert set(wrapped) == set(stepped)
-    for key, expected in wrapped.items():
-        actual = stepped[key]
-        if isinstance(expected, float):
-            if math.isnan(expected):
-                assert isinstance(actual, float) and math.isnan(actual), key
-            else:
-                assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12), key
-        else:
-            assert actual == expected, key

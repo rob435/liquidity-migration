@@ -33,10 +33,6 @@ if [[ "$kernel_required" == "1" ]]; then
         echo "Kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
         exit 2
     fi
-    if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
-        echo "Kernel latch is set but account-execution-capture-enabled is absent." >&2
-        exit 2
-    fi
 fi
 case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
     1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
@@ -46,10 +42,6 @@ esac
 if [[ "$paper_kernel_required" == "1" ]]; then
     if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
         echo "Paper kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-    if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
-        echo "Paper kernel latch is set but account-execution-capture-enabled is absent." >&2
         exit 2
     fi
 fi
@@ -88,12 +80,6 @@ LOOKBACK_DAYS="${LOOKBACK_DAYS:-45}"
 WORKERS="${WORKERS:-4}"
 MAX_ACTIVE="${MAX_ACTIVE:-25}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
-MAX_HOLD_HOURS="${MAX_HOLD_HOURS:-24}"
-# Default lifecycle: 3-component ensemble, inverse-vol component sizing, and
-# fill-anchored TP/24h exits owned by the account execution service.
-STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v2}"
-FEATURE_SET="${FEATURE_SET:-max_ret168}"
-ENTRY_EVENT_TRIGGER="${ENTRY_EVENT_TRIGGER:-none}"
 # Default to the DEPLOYED gate (uptrend) so a dropped env line cannot silently
 # disable the 30d-BTC trend gate. The systemd units pin BTC_TREND_GATE explicitly;
 # set it to "off" there (demo + paper together) for a plumbing test.
@@ -101,56 +87,18 @@ BTC_TREND_GATE="${BTC_TREND_GATE:-uptrend}"
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-2}"
 NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"
 PER_POSITION_NOTIONAL_PCT_EQUITY="${PER_POSITION_NOTIONAL_PCT_EQUITY:-2}"
-SIZING_MODE="${SIZING_MODE:-inverse_vol}"
-TARGET_VOL_PER_NAME="${TARGET_VOL_PER_NAME:-0.01}"
-VOL_WEIGHT_CLAMP="${VOL_WEIGHT_CLAMP:-2}"
-LIQ_TURNOVER_MIN="${LIQ_TURNOVER_MIN:-500000}"
 
 target_route_args=(
     --execution-environment "$EXECUTION_ENVIRONMENT"
     --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
     --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
 )
-case "${NATURAL_EVIDENCE_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON)
-        [[ "$EXECUTION_ENVIRONMENT" == "demo" ]] || {
-            echo "NATURAL_EVIDENCE_REQUIRED is demo-only." >&2
-            exit 2
-        }
-        [[ -n "${NATURAL_RUN_CONFIG:-}" ]] || {
-            echo "NATURAL_EVIDENCE_REQUIRED needs NATURAL_RUN_CONFIG." >&2
-            exit 2
-        }
-        [[ -f "$NATURAL_RUN_CONFIG" && ! -L "$NATURAL_RUN_CONFIG" ]] || {
-            echo "NATURAL_RUN_CONFIG must be a non-symlink regular file." >&2
-            exit 2
-        }
-        [[ -z "${STRATEGY_TARGET_CAPTURE_PATH:-}" && -z "${CANDIDATE_UNIVERSE_FILE:-}" ]] || {
-            echo "Natural tape/candidate paths come only from NATURAL_RUN_CONFIG." >&2
-            exit 2
-        }
-        target_route_args+=(
-            --natural-evidence-required
-            --natural-run-config "$NATURAL_RUN_CONFIG"
-        )
-        ;;
-    0|false|FALSE|no|NO|off|OFF|"")
-        [[ -z "${NATURAL_RUN_CONFIG:-}" ]] || {
-            echo "NATURAL_RUN_CONFIG requires NATURAL_EVIDENCE_REQUIRED=1." >&2
-            exit 2
-        }
-        if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
-            target_route_args+=(--strategy-target-capture-path "$STRATEGY_TARGET_CAPTURE_PATH")
-        fi
-        if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
-            target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
-        fi
-        ;;
-    *)
-        echo "NATURAL_EVIDENCE_REQUIRED has an invalid boolean value." >&2
-        exit 2
-        ;;
-esac
+if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
+    target_route_args+=(--strategy-target-capture-path "$STRATEGY_TARGET_CAPTURE_PATH")
+fi
+if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
+    target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
+fi
 # KLINES_FOLLOW_ROOT: the paper shadow follows the demo root's flushed kline
 # snapshot (+rmom gate) read-only instead of running a second WS pool — one
 # shared market-data plane per box. Empty = this sleeve runs its own pool.
@@ -163,7 +111,7 @@ if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
     fi
     target_route_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
 fi
-echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS profile=$STRATEGY_PROFILE notional_x=$NOTIONAL_MULTIPLIER entry_leverage=$ENTRY_LEVERAGE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
+echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS notional_x=$NOTIONAL_MULTIPLIER entry_leverage=$ENTRY_LEVERAGE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \
@@ -172,17 +120,9 @@ exec "$PYTHON_BIN" -m liquidity_migration \
     --workers "$WORKERS" \
     --max-active "$MAX_ACTIVE" \
     --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
-    --max-hold-hours "$MAX_HOLD_HOURS" \
-    --strategy-profile "$STRATEGY_PROFILE" \
-    --feature-set "$FEATURE_SET" \
-    --entry-event-trigger "$ENTRY_EVENT_TRIGGER" \
     --btc-trend-gate "$BTC_TREND_GATE" \
     --entry-leverage "$ENTRY_LEVERAGE" \
     --notional-multiplier "$NOTIONAL_MULTIPLIER" \
     --per-position-notional-pct-equity "$PER_POSITION_NOTIONAL_PCT_EQUITY" \
-    --sizing-mode "$SIZING_MODE" \
-    --target-vol-per-name "$TARGET_VOL_PER_NAME" \
-    --vol-weight-clamp "$VOL_WEIGHT_CLAMP" \
-    --liq-turnover-min "$LIQ_TURNOVER_MIN" \
     --daemon --interval-seconds "$INTERVAL_SECONDS" \
     ${target_route_args[@]+"${target_route_args[@]}"}

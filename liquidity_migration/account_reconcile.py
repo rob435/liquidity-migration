@@ -20,6 +20,9 @@ from .deterministic_runtime import Clock, SystemClock
 NATIVE_ACTIVATION_CLOCK_TOLERANCE_NS = 5_000_000_000
 BYBIT_ACCOUNTING_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 DEFAULT_FUNDING_OVERLAP_MS = 24 * 60 * 60 * 1000
+# The watchdog requires a journaled venue fact younger than one minute. A
+# 30-second checkpoint leaves room for one delayed reconciliation cycle.
+VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS = 30 * 1_000_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +69,8 @@ class BybitAccountReconciler:
             clock=self.clock,
         )
         self.last_report: AccountReconciliationReport | None = None
+        self._last_journaled_semantic_hash: str | None = None
+        self._last_journal_checkpoint_monotonic_ns: int | None = None
 
     def reconcile_once(self) -> AccountReconciliationReport:
         pending_statuses = {"commanded", "acknowledged", "partially_filled"}
@@ -172,13 +177,11 @@ class BybitAccountReconciler:
         # before preceding REST recovery or journal work. Reduction admission
         # must age the venue fact itself.
         observed_ns = self.clock.wall_time_ns()
+        position_rows = _validated_venue_position_rows(raw_positions)
         venue_positions: dict[str, float] = {}
         active_sides: dict[str, set[str]] = {}
-        for row in raw_positions or []:
-            symbol = str(row.get("symbol") or "").upper()
-            side = str(row.get("side") or "").lower()
-            size = _finite_or_zero(row.get("size"))
-            if not symbol or size <= 0.0 or side not in {"buy", "sell"}:
+        for _row, symbol, side, size in position_rows:
+            if size == 0.0:
                 continue
             signed = size if side == "buy" else -size
             venue_positions[symbol] = math.fsum((venue_positions.get(symbol, 0.0), signed))
@@ -203,31 +206,50 @@ class BybitAccountReconciler:
                 )
         if not mismatches and self.native_protection_manager is not None:
             try:
-                self.native_protection_manager.reconcile_venue_positions(raw_positions or [])
+                self.native_protection_manager.reconcile_venue_positions(
+                    [row for row, _symbol, _side, _size in position_rows]
+                )
             except Exception as exc:  # noqa: BLE001 - protection failure makes the snapshot unhealthy
                 mismatches.append(f"native_protection:{type(exc).__name__}:{exc}")
-        snapshot_material = {
-            "observed_ts_ns": observed_ns,
+        snapshot_semantics = {
             "venue_positions": venue_positions,
             "reconstructed_positions": reconstructed,
             "mismatches": mismatches,
         }
+        snapshot_material = {
+            "observed_ts_ns": observed_ns,
+            **snapshot_semantics,
+        }
         snapshot_key = "bybit-demo-position:" + hashlib.sha256(canonical_json(snapshot_material)).hexdigest()[:20]
-        self.kernel.record_venue_snapshot(
-            snapshot_key=snapshot_key,
-            venue_positions=venue_positions,
-            reconstructed_positions=reconstructed,
-            mismatches=mismatches,
-            exchange_ts_ns=0,
-            local_receive_ts_ns=observed_ns,
-            metadata={
-                "pending_orders_checked": len(pending),
-                "execution_rows_observed": execution_rows,
-                "order_rows_observed": order_rows,
-                "position_rows_observed": len(raw_positions or []),
-                "source": "bybit_demo_rest_reconcile",
-            },
+        semantic_hash = hashlib.sha256(canonical_json(snapshot_semantics)).hexdigest()
+        checkpoint_monotonic_ns = self.clock.monotonic_ns()
+        last_checkpoint_ns = self._last_journal_checkpoint_monotonic_ns
+        checkpoint_due = (
+            last_checkpoint_ns is None
+            or checkpoint_monotonic_ns < last_checkpoint_ns
+            or checkpoint_monotonic_ns - last_checkpoint_ns
+            >= VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS
         )
+        # The in-process report is refreshed by every REST response. Persist
+        # semantic transitions immediately and only heartbeat unchanged truth.
+        if semantic_hash != self._last_journaled_semantic_hash or checkpoint_due:
+            self.kernel.record_venue_snapshot(
+                snapshot_key=snapshot_key,
+                venue_positions=venue_positions,
+                reconstructed_positions=reconstructed,
+                mismatches=mismatches,
+                exchange_ts_ns=0,
+                local_receive_ts_ns=observed_ns,
+                metadata={
+                    "pending_orders_checked": len(pending),
+                    "execution_rows_observed": execution_rows,
+                    "order_rows_observed": order_rows,
+                    "position_rows_observed": len(position_rows),
+                    "source": "bybit_demo_rest_reconcile",
+                },
+            )
+            self._last_journaled_semantic_hash = semantic_hash
+            self._last_journal_checkpoint_monotonic_ns = checkpoint_monotonic_ns
         report = AccountReconciliationReport(
             snapshot_key=snapshot_key,
             healthy=not mismatches,
@@ -637,6 +659,56 @@ def _finite_or_zero(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return output if math.isfinite(output) else 0.0
+
+
+def _validated_venue_position_rows(
+    value: Any,
+) -> tuple[tuple[Mapping[str, Any], str, str, float], ...]:
+    """Validate one complete authenticated Bybit position response.
+
+    An empty list is authoritative flatness. Any returned row must retain the
+    structural and numeric fields needed to prove that claim; malformed rows
+    cannot be normalized to zero because that would erase unknown exposure.
+    """
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise RuntimeError("Bybit demo position query returned a non-list payload")
+    output: list[tuple[Mapping[str, Any], str, str, float]] = []
+    for index, row in enumerate(value):
+        if not isinstance(row, Mapping):
+            raise RuntimeError(
+                f"Bybit demo position query returned a non-object row at index {index}"
+            )
+        raw_symbol = row.get("symbol")
+        symbol = raw_symbol.strip().upper() if type(raw_symbol) is str else ""
+        if not symbol:
+            raise RuntimeError(f"Bybit demo position row {index} lacks symbol")
+
+        raw_size = row.get("size")
+        if raw_size is None or type(raw_size) is bool:
+            raise RuntimeError(f"Bybit demo position row {index} size must be numeric")
+        try:
+            size = float(raw_size)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Bybit demo position row {index} size must be numeric"
+            ) from exc
+        if not math.isfinite(size):
+            raise RuntimeError(f"Bybit demo position row {index} size must be finite")
+        if size < 0.0:
+            raise RuntimeError(
+                f"Bybit demo position row {index} size must be non-negative"
+            )
+
+        raw_side = row.get("side")
+        side = raw_side.strip().lower() if type(raw_side) is str else "<invalid>"
+        allowed_sides = {"", "buy", "sell"} if size == 0.0 else {"buy", "sell"}
+        if side not in allowed_sides:
+            raise RuntimeError(
+                f"Bybit demo position row {index} has invalid side {raw_side!r}"
+            )
+        output.append((row, symbol, side, size))
+    return tuple(output)
 
 
 def _timestamp_ns(value: Any) -> int:

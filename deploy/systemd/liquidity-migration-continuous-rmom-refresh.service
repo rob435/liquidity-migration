@@ -1,25 +1,20 @@
 [Unit]
-Description=Refresh the continuous-fade rmom gate (residual_momentum.parquet) on enabled continuous roots
+Description=Refresh the shared continuous-fade RMOM gate
 Wants=network-online.target
 After=network-online.target
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot
 User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 Environment=POLARS_MAX_THREADS=8
 Environment=PYTHONDONTWRITEBYTECODE=1
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-# Late fresh-epoch CONTINUOUS_DEMO_DATA_ROOT and
-# CONTINUOUS_PAPER_DATA_ROOT overrides.
-EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-continuous-rmom-refresh.service.env
-# The continuous signal gates on residual_momentum.parquet; rebuild it daily from each
-# enabled continuous root's own kline store so the causal shift-3 trailing residual
-# sum is fresh for rmom[today]. The wrapper reads deploy/sleeves.env plus /etc
-# overrides, so paper-only evidence collection works while the target-publishing
-# demo sleeve remains off.
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-continuous-rmom-refresh.service main
+# Demo owns the bounded kline/RMOM plane; paper follows it read-only.
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-continuous-rmom-refresh.service main
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
@@ -27,6 +22,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
+UMask=0027
 ReadWritePaths=/opt/liquidity-migration
 
 [Install]

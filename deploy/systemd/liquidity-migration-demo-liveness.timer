@@ -8,8 +8,7 @@ Description=Run the liquidity-migration liveness + position-safety watchdog ever
 OnBootSec=2min
 OnUnitActiveSec=3min
 AccuracySec=15s
-# No Persistent= here: it applies to OnCalendar= timers only and was a no-op on
-# this purely monotonic schedule (round 4).
+# Persistent applies only to calendar timers, not this monotonic schedule.
 
 [Install]
 WantedBy=timers.target

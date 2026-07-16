@@ -168,11 +168,6 @@ def terminal_entry_attempt_keys(
         strategy_ids=tuple(strategy_ids),
     )
 
-
-# Compatibility for callers written before service-expiry receipts were added.
-terminal_risk_rejected_entry_attempt_keys = terminal_entry_attempt_keys
-
-
 @dataclass(frozen=True, slots=True)
 class _ComponentRevisionConvergence:
     """Execution evidence for the latest ordinary revision of one component.
@@ -263,36 +258,6 @@ class CanonicalReductionEvent:
     pnl_finalization_status: str
     adverse: bool
     adverse_basis: str
-
-
-def latest_account_risk_snapshot(account_root: str | Path) -> dict[str, Any]:
-    """Return the newest durable owner risk snapshot, or an empty mapping.
-
-    Risk decisions created for external protection do not contain a wallet
-    snapshot, so the reverse scan deliberately skips those events.
-    """
-
-    for event in reversed(read_account_journal(account_root, verify=True)):
-        if event.event_type != AccountEventType.RISK_DECISION.value:
-            continue
-        raw = event.payload.get("risk_snapshot")
-        if not isinstance(raw, Mapping):
-            continue
-        try:
-            equity = float(raw.get("equity_usdt") or 0.0)
-            available = float(raw.get("available_margin_usdt") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(equity) or not math.isfinite(available) or equity <= 0.0:
-            continue
-        return dict(raw)
-    return {}
-
-
-def latest_account_equity_usdt(account_root: str | Path) -> float:
-    """Return canonical owner-observed equity, or zero when none is durable."""
-
-    return float(latest_account_risk_snapshot(account_root).get("equity_usdt") or 0.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1401,9 +1366,6 @@ def canonical_strategy_trade_rows(
             if entry_fill_ts_ms is not None and duration_ms is not None
             else None
         )
-        original_target_deadline = _positive_int_or_none(
-            entry_metadata.get("planned_exit_ts_ms")
-        )
         row: dict[str, Any] = {
             "trade_id": str(entry_payload.get("component_id") or ""),
             "target_key": target_key,
@@ -1427,7 +1389,6 @@ def canonical_strategy_trade_rows(
                 entry_payload.get("reference_price") or 0.0
             ),
             "target_updated_ts_ms": latest_event.wall_ts_ns // 1_000_000,
-            "updated_at_ms": latest_event.wall_ts_ns // 1_000_000,
             "target_updated_sequence": latest_event.sequence,
             "account_target_batch_id": latest_event.correlation_id,
             "target_reference_price": target_reference_price,
@@ -1444,13 +1405,11 @@ def canonical_strategy_trade_rows(
             "exit_execution_batch_id": (
                 "" if anchor is None else anchor.close_execution_batch_id
             ),
-            "target_planned_exit_ts_ms": original_target_deadline,
             "target_key_reused_after_flat": bool(
                 lifecycle["target_key_reused_after_flat"]
             ),
             # Fill-plane lifecycle clocks and prices.
             "entry_ts_ms": entry_fill_ts_ms,
-            "opened_at_ms": entry_fill_ts_ms,
             "entry_price": None if anchor is None else anchor.entry_fill_vwap,
             "entry_first_fill_price": (
                 None if anchor is None else anchor.entry_first_fill_price
@@ -1530,9 +1489,6 @@ def canonical_strategy_trade_rows(
                 if duration_ms is None
                 else f"entry_first_fill_plus_{duration_basis}"
             ),
-            # Compatibility field consumed by current planners, now explicitly
-            # derived from fill time rather than accepted-target time.
-            "planned_exit_ts_ms": max_hold_deadline_ts_ms,
             "signal_ts_ms": int(entry_metadata.get("signal_ts_ms") or 0),
             **lifecycle["planning_metadata"],
         }
@@ -1548,7 +1504,6 @@ def canonical_strategy_trade_rows(
                 if duration_ms is None
                 else f"entry_first_fill_plus_{duration_basis}"
             ),
-            "planned_exit_ts_ms": max_hold_deadline_ts_ms,
         })
         if symbol not in symbol_convergence:
             position = state.positions.get(symbol)
@@ -1664,30 +1619,6 @@ def canonical_strategy_trade_rows(
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
 
 
-def replace_legacy_open_rows(
-    legacy: pl.DataFrame,
-    canonical: pl.DataFrame,
-) -> pl.DataFrame:
-    """Keep terminal legacy history and make canonical rows the only active set."""
-
-    if legacy.is_empty():
-        return canonical
-    terminal = (
-        legacy.filter(
-            pl.col("status")
-            .cast(pl.String)
-            .fill_null("")
-            .str.to_lowercase()
-            .is_in(("closed", "cancelled", "rejected", "failed"))
-        )
-        if "status" in legacy.columns
-        else legacy.head(0)
-    )
-    if canonical.is_empty():
-        return terminal
-    return pl.concat([terminal, canonical], how="diagonal_relaxed")
-
-
 def target_reservation_rows(rows: pl.DataFrame) -> pl.DataFrame:
     """Return lifecycles that must suppress a replacement strategy proposal.
 
@@ -1733,13 +1664,7 @@ def _positive_float_or_none(value: object) -> float | None:
 def _max_hold_duration_from_entry_target(
     entry_event: AccountEvent,
 ) -> tuple[int | None, str]:
-    """Return a duration, never an accepted-target absolute deadline.
-
-    New producers should publish an explicit duration.  Historical CONT targets
-    published only ``planned_exit_ts_ms`` computed from target creation time; we
-    may recover the intended duration as a clearly labelled legacy delta, then
-    apply that duration to the actual first fill.
-    """
+    """Return the explicit hold duration published by the target producer."""
 
     metadata = entry_event.payload.get("metadata") or {}
     if not isinstance(metadata, Mapping):
@@ -1753,13 +1678,6 @@ def _max_hold_duration_from_entry_target(
     days = _positive_float_or_none(metadata.get("max_hold_days"))
     if days is not None:
         return int(round(days * 24 * 60 * 60 * 1_000)), "metadata_max_hold_days"
-    target_deadline = _positive_int_or_none(metadata.get("planned_exit_ts_ms"))
-    target_ts_ms = entry_event.wall_ts_ns // 1_000_000
-    if target_deadline is not None and target_deadline > target_ts_ms:
-        return (
-            target_deadline - target_ts_ms,
-            "legacy_target_planned_exit_delta",
-        )
     return None, "unavailable"
 
 
@@ -1769,7 +1687,6 @@ def _planning_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "take_profit_price",
         "stop_loss_pct",
         "take_profit_pct",
-        "planned_exit_ts_ms",
         "max_hold_duration_ms",
         "max_hold_hours",
         "signal_ts_ms",

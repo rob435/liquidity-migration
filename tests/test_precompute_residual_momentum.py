@@ -299,7 +299,7 @@ def test_precompute_append_allows_provisional_tail_to_mature(
     _assert_existing_keys_allclose(stable_original, updated)
 
 
-def test_precompute_append_conservatively_upgrades_legacy_table(
+def test_precompute_append_refuses_table_without_provenance(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _patch_residual_inputs(monkeypatch)
@@ -310,13 +310,13 @@ def test_precompute_append_conservatively_upgrades_legacy_table(
     path = tmp_path / "residual_momentum.parquet"
     pl.read_parquet(path).drop("is_provisional").write_parquet(path)
 
-    MOD.precompute(
-        tmp_path, start="2025-01-01", end="2025-02-06",
-        klines_dataset="klines_1h", append=True, append_overlap_days=10,
-    )
-    upgraded = pl.read_parquet(path)
-    assert upgraded.schema["is_provisional"] == pl.Boolean
-    assert upgraded.filter(~pl.col("is_provisional")).height > 0
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="missing required residual_momentum columns"):
+        MOD.precompute(
+            tmp_path, start="2025-01-01", end="2025-02-06",
+            klines_dataset="klines_1h", append=True, append_overlap_days=10,
+        )
+    assert path.read_bytes() == before
 
 
 def test_precompute_append_refuses_overlap_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

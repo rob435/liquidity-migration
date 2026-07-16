@@ -449,9 +449,9 @@ class BybitPrivateClient:
 
         Bybit caps closed-PnL at <=100 rows/page; a symbol re-entered several
         times over the reconciliation lookback can exceed one page, so follow
-        ``nextPageCursor`` to the end (mirrors get_funding_settlements). Without
+        ``nextPageCursor`` to the end. Without
         this the backfill could miss the actual closing record for a re-entered
-        symbol (audit pass2 #6). Returns the result.list rows (empty on a missing
+        symbol. Returns the result.list rows (empty on a missing
         endpoint); ``max_pages`` bounds the loop defensively.
         """
         base_params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 100))}
@@ -485,40 +485,6 @@ class BybitPrivateClient:
             if not cursor:
                 break
         return rows
-
-    def get_funding_settlements(
-        self,
-        *,
-        start_time_ms: int,
-        end_time_ms: int,
-        limit: int = 50,
-        max_pages: int = 50,
-        strict: bool = False,
-    ) -> list[dict[str, Any]]:
-        """Funding-settlement rows from the account transaction log.
-
-        Used by the demo<->Bybit reconciliation (E6) to surface the short's
-        funding tailwind/drag — funding settles separately from closedPnl, so
-        without this it is invisible in the reconciliation. Each row carries a
-        signed account cash-flow (``funding``/``cashFlow``/``change``; positive =
-        the account received funding). Returns the result.list as-is (empty list
-        on a missing endpoint, mirroring get_closed_pnl).
-
-        Bybit caps the transaction log at 50 rows/page. Over a multi-day
-        reconciliation lookback a funding-active account easily exceeds one
-        page (funding settles every 8h per open position), so follow
-        ``nextPageCursor`` to the end. Without this the funding total — a
-        first-order driver of the short's edge — was silently truncated to
-        the first page. ``max_pages`` bounds the loop defensively.
-        """
-        return self.get_account_transactions(
-            transaction_type="SETTLEMENT",
-            start_time_ms=start_time_ms,
-            end_time_ms=end_time_ms,
-            limit=limit,
-            max_pages=max_pages,
-            strict=strict,
-        )
 
     def get_account_transactions(
         self,
@@ -715,9 +681,7 @@ class BybitPrivateClient:
                 # pybit (5.x) raises InvalidRequestError for a non-zero retCode BEFORE our
                 # retCode check ever runs, so the branch above never classified live venue
                 # rejects -- they were retried with backoff and the final raise dropped the
-                # retCode/retMsg (every ledgered error read a bare "failed after retries";
-                # live-measured 846ms on a cancel-nonexistent, audit 2026-06-12). Matched by
-                # class NAME so this needs no hard pybit import and survives module moves.
+                # retCode/retMsg. Match by class name to avoid a hard pybit dependency here.
                 if type(exc).__name__ == "InvalidRequestError" and not _is_rate_limit(exc):
                     raise BybitDataError(f"Bybit {method_name} failed: {exc}") from exc
                 if attempt + 1 >= self.retries:
@@ -789,9 +753,6 @@ class BybitPrivateWebSocketStream:
             api_secret=self.api_secret,
         )
 
-    def subscribe_positions(self, callback: Any) -> None:
-        self._client.position_stream(callback=callback)
-
     def subscribe_orders(self, callback: Any) -> None:
         self._client.order_stream(callback=callback)
 
@@ -800,12 +761,6 @@ class BybitPrivateWebSocketStream:
             self._client.fast_execution_stream(callback=callback)
             return
         self._client.execution_stream(callback=callback)
-
-    def subscribe_wallet(self, callback: Any) -> None:
-        """Subscribe to wallet balance pushes. Bybit pushes a per-account
-        snapshot every time a balance changes. Required for live equity
-        reads to bypass the per-cycle REST get_wallet_balance call."""
-        self._client.wallet_stream(callback=callback)
 
     def is_connected(self) -> bool | None:
         """Socket-level liveness of the private stream. pybit's WebSocket subclasses
@@ -829,5 +784,5 @@ class BybitPrivateWebSocketStream:
 # Order statuses that mean a probed orderLinkId is genuinely working at the venue
 # (so a WS-fallback resubmit should be suppressed). Terminal-bad statuses
 # (Rejected/Cancelled/Deactivated/Expired/PartiallyFilledCanceled) mean the submit
-# did NOT take effect and the order must be resubmitted (audit 2026-06-02 #45).
+# did not take effect and may be resubmitted.
 _PROBE_PRESENT_STATUSES = frozenset({"new", "partiallyfilled", "filled", "untriggered", "triggered"})

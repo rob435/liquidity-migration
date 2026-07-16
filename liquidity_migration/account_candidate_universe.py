@@ -1,4 +1,4 @@
-"""Freeze and enforce the natural-cutover strategy candidate population.
+"""Freeze and enforce the operational strategy candidate population.
 
 The artifact is deliberately a forward, point-in-time population contract.  It
 does not claim historical PIT membership.  LONG and CONT keep their own ranking

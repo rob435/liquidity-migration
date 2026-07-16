@@ -1,9 +1,9 @@
 [Unit]
-Description=liquidity-migration Bybit long-sleeve (LongV11aDivWeekendVol) demo event runner
+Description=liquidity-migration LONG demo target producer (LongV11aDivWeekendVol)
 Wants=network-online.target
 Requires=liquidity-migration-account-execution.service
 After=network-online.target liquidity-migration-account-execution.service
-ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=simple
@@ -13,46 +13,29 @@ WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/account-execution.env
-# Maintenance-only natural holdout activation. The owner-only optional file
-# must set both NATURAL_EVIDENCE_REQUIRED=1 and NATURAL_RUN_CONFIG=/absolute/path.
-EnvironmentFile=-/etc/liquidity-migration/natural-run.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-long-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=EXECUTION_ENVIRONMENT=demo
 Environment=TELEGRAM_ENABLED=0
-Environment=STRATEGY_PROFILE=LongV11aDivWeekendVol
 Environment=INTERVAL_SECONDS=60
 Environment=USE_DAEMON=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-# Per-position notional sizing defaults to the 1x research profile. Levered demo
-# sizing is explicit opt-in and must pass MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY.
 Environment=NOTIONAL_MULTIPLIER=1
 Environment=ENTRY_LEVERAGE=10
 Environment=MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY=0.5
 Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
-# div promotion 2026-05-30 (was 10): must match _v11a_long_native_config().universe_size
-Environment=UNIVERSE_SIZE=50
-# ls-4: >=95 so turnover_median_90d (90d-median rank, min_samples=90) populates after the
-# bar trims; _validate_long_demo_config hard-requires it. Was 90 (pre-ls-4) which tripped the
-# new guard and crash-failed every cycle. Lockstep with config default lookback_days=100.
+# The 90-day turnover rank requires at least 95 days after bar trimming.
 Environment=LOOKBACK_DAYS=100
 Environment=WORKERS=2
 Environment=WS_KLINES_ENABLED=1
-# Loaded after natural-run.env and every checked-in default. The fresh-epoch
-# file can therefore replace DATA_ROOT/account routes and clear
-# NATURAL_EVIDENCE_REQUIRED, NATURAL_RUN_CONFIG, STRATEGY_TARGET_CAPTURE_PATH,
-# and CANDIDATE_UNIVERSE_FILE without mutating the sealed natural environment.
-EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-bybit-long-demo.service.env
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-bybit-long-demo.service main
+Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-long-demo.service main
 Restart=always
 RestartSec=30
 KillMode=control-group
-# Bootstrap can take 60-120s on a cold start with a large kline universe.
-# 90s default would SIGKILL the daemon if shutdown lands mid-bootstrap.
-# Manager now respects shutdown_event, but keep margin for very slow REST.
 TimeoutStopSec=180
 Nice=5
 IOSchedulingClass=best-effort
@@ -61,12 +44,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
+UMask=0027
 ReadWritePaths=/opt/liquidity-migration
-# 7.6GB RAM + 4GB swap. Cap at 4G so a runaway leak can't consume all RAM
-# before systemd intervenes; normal operation sits well under 1G — the long-sleeve-4
-# 120-name x 100-day WS kline store adds only ~66MB, so 4G stays far more than enough
-# (do NOT lower toward the daemon's working set; a tight cap would OOM-restart-loop).
-MemoryMax=4G
+MemoryHigh=384M
+MemoryMax=640M
+MemorySwapMax=256M
 
 [Install]
 WantedBy=multi-user.target

@@ -1,59 +1,42 @@
 [Unit]
-Description=liquidity-migration continuous-fade paper target producer
+Description=liquidity-migration integration-only uncalibrated CONTINUOUS paper target producer
 Wants=network-online.target
 Requires=liquidity-migration-account-paper-execution.service
 After=network-online.target liquidity-migration-account-paper-execution.service
-ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=liquidity-migration-paper
+Group=liquidity-migration-paper
 WorkingDirectory=/opt/liquidity-migration
-EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/account-paper-execution.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
+Environment=REAL_MONEY=false
 Environment=DATA_ROOT=data/bybit-continuous-paper-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-# PAPER shadow of the continuous-demo sleeve: it publishes targets to the
-# deterministic paper account owner and never touches the venue.
+# Publishes component targets to the paper owner; it never touches the venue.
 Environment=EXECUTION_ENVIRONMENT=paper
 Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LOOKBACK_DAYS=45
 Environment=WORKERS=2
-# Every knob below MUST match the demo unit so the paper run is a true shadow.
+# Component selection and sizing match the demo producer. There is no paper
+# hedge service, so this unit alone is not full portfolio parity.
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
-Environment=MAX_HOLD_HOURS=24
-# Mirrors the demo continuous_ensemble_v2 target profile. The paper account
-# owner derives fill-anchored protection and lifecycle state.
-Environment=STRATEGY_PROFILE=continuous_ensemble_v2
-Environment=FEATURE_SET=max_ret168
-Environment=ENTRY_EVENT_TRIGGER=none
 Environment=BTC_TREND_GATE=uptrend
-# Exact sizing shadow of the demo stress epoch.  Exchange leverage changes
-# margin accounting; NOTIONAL_MULTIPLIER changes the simulated order quantity.
 Environment=ENTRY_LEVERAGE=10
 Environment=NOTIONAL_MULTIPLIER=10
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
-Environment=SIZING_MODE=inverse_vol
-Environment=TARGET_VOL_PER_NAME=0.01
-Environment=VOL_WEIGHT_CLAMP=2
-Environment=LIQ_TURNOVER_MIN=500000
-# Market-data plane (deploy-env-timers-3): this PAPER shadow runs its OWN kline pool. Do not set
-# KLINES_FOLLOW_ROOT here; paper may be enabled while demo is off, so following
-# demo's kline store can freeze paper execution while the unit appears healthy.
-# Use a conditional drop-in only if the paper lifecycle is explicitly tied to demo.
-# Two daemons x full-width default threadpools on a 2-core box just buys context
-# switching; pin to 1 — the daemon's own WORKERS parallelism is the intended knob.
+# Follow the demo producer's bounded public store read-only. Paper retains its
+# own strategy/journal roots and falls back to public REST for missing bars.
+Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
-# Late fresh-epoch account route and DATA_ROOT override.
-EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-bybit-continuous-paper.service.env
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-bybit-continuous-paper.service main
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-continuous-paper.service main
 Restart=always
 RestartSec=30
 KillMode=control-group
@@ -63,10 +46,21 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
-ReadWritePaths=/opt/liquidity-migration
-MemoryMax=4G
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+ReadOnlyPaths=/opt/liquidity-migration
+ReadWritePaths=/opt/liquidity-migration/data/bybit-account-paper /opt/liquidity-migration/data/bybit-account-paper-intents /opt/liquidity-migration/data/bybit-continuous-paper-event
+MemoryHigh=512M
+MemoryMax=768M
+MemorySwapMax=384M
 
 [Install]
 WantedBy=multi-user.target

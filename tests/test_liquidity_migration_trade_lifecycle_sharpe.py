@@ -1,8 +1,7 @@
 """Tests for the daily-aligned Sharpe in trade_lifecycle.
 
 `summarize_trade_backtest` emits a single `sharpe_like` annualised off the
-daily equity curve, forward-filled onto the calendar-day grid. There is no
-legacy basket-frequency value retained.
+daily equity curve, forward-filled onto the calendar-day grid.
 """
 from __future__ import annotations
 
@@ -111,7 +110,6 @@ def test_summarize_trade_backtest_emits_daily_sharpe_only() -> None:
     summary = summarize_trade_backtest(trades, baskets, equity, config=config)
 
     assert "sharpe_like" in summary
-    assert "sharpe_basket_frequency_legacy" not in summary
     assert math.isfinite(summary["sharpe_like"])
 
 

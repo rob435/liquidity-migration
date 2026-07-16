@@ -137,14 +137,13 @@ def test_paper_and_shared_config_do_not_load_demo_owner(module: str) -> None:
     assert proc.returncode == 0, f"{module}: {proc.stderr or proc.stdout}"
 
 
-def test_private_bybit_module_has_no_public_market_data_compatibility_exports() -> None:
+def test_private_bybit_module_does_not_export_public_market_data() -> None:
     private = importlib.import_module("liquidity_migration.bybit")
     public_names = {
         "INTERVAL_MS",
         "BybitKlineStreamPool",
         "BybitMarketData",
         "BybitPublicTickerStream",
-        "BybitPublicTradeStream",
         "BybitRestRateLimiter",
     }
     assert public_names.isdisjoint(private.__all__)

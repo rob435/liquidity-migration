@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections import defaultdict
 from typing import Mapping, Sequence
 
 from .account_kernel import (
@@ -20,7 +19,6 @@ from .account_kernel import (
     AccountRiskSnapshot,
     InstrumentRules,
     MarketInputRef,
-    TargetBatchResult,
 )
 from .account_service import RequestedIntent, SleeveAdapterKind
 from .deterministic_runtime import VirtualClock
@@ -74,13 +72,6 @@ class HistoricalReplayCycle:
             or any(character not in "0123456789abcdef" for character in self.request_content_hash)
         ):
             raise ValueError("historical replay request hash must be lowercase SHA-256")
-
-
-@dataclass(frozen=True, slots=True)
-class HistoricalReplayResult:
-    batches: tuple[TargetBatchResult, ...]
-    final_state_hash: str
-    event_tape_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,120 +161,6 @@ def neutralize_historical_decisions(
     return tuple(output)
 
 
-def historical_cycles_from_decisions(
-    decisions: Sequence[HistoricalTargetDecision],
-    *,
-    equity_usdt: float,
-) -> tuple[HistoricalReplayCycle, ...]:
-    """Group actual strategy decisions into atomic account-time batches."""
-
-    if equity_usdt <= 0.0:
-        raise ValueError("historical replay equity must be positive")
-    grouped: dict[int, list[HistoricalTargetDecision]] = defaultdict(list)
-    for decision in decisions:
-        grouped[decision.wall_ts_ns].append(decision)
-    cycles: list[HistoricalReplayCycle] = []
-    ordinal = 0
-    for wall_ts_ns in sorted(grouped):
-        ordered = sorted(
-            grouped[wall_ts_ns],
-            key=lambda item: (
-                0 if item.intent.intent.signed_notional_usdt == 0.0 else 1,
-                item.intent.intent.symbol,
-                item.intent.intent.target_key,
-                item.intent.intent.decision_key,
-            ),
-        )
-        layers: list[list[HistoricalTargetDecision]] = []
-        layer_keys: list[set[str]] = []
-        for item in ordered:
-            target_key = item.intent.intent.target_key
-            placed = False
-            for layer, keys in zip(layers, layer_keys):
-                if target_key not in keys:
-                    layer.append(item)
-                    keys.add(target_key)
-                    placed = True
-                    break
-            if not placed:
-                layers.append([item])
-                layer_keys.append({target_key})
-        for layer in layers:
-            ordinal += 1
-            books: dict[str, L2BookSnapshot] = {}
-            for item in layer:
-                symbol = item.intent.intent.symbol.upper()
-                price = float(item.reference_price)
-                prior = books.get(symbol)
-                if prior is not None and prior.bids[0].price != price:
-                    raise ValueError(
-                        "same-symbol decisions in one atomic historical batch must "
-                        f"share a reference price: {symbol} has "
-                        f"{prior.bids[0].price:g} and {price:g}"
-                    )
-                books[symbol] = L2BookSnapshot(
-                    symbol=symbol,
-                    sequence=ordinal,
-                    previous_sequence=ordinal - 1 if ordinal > 1 else None,
-                    exchange_ts_ns=wall_ts_ns,
-                    local_receive_ts_ns=wall_ts_ns,
-                    bids=(BookLevel(price, 1e15),),
-                    asks=(BookLevel(price, 1e15),),
-                )
-            batch_id = f"strategy-kernel/{wall_ts_ns}/{ordinal}"
-            cycles.append(HistoricalReplayCycle(
-                batch_id=batch_id,
-                wall_ts_ns=wall_ts_ns,
-                books=books,
-                intents=tuple(item.intent for item in layer),
-                risk_snapshot=AccountRiskSnapshot(
-                    equity_usdt,
-                    equity_usdt,
-                    f"historical-fixed:{equity_usdt:g}:{wall_ts_ns}:{ordinal}",
-                    wall_ts_ns,
-                ),
-            ))
-    return tuple(cycles)
-
-
-def synthetic_historical_rules(
-    decisions: Sequence[HistoricalTargetDecision],
-) -> dict[str, InstrumentRules]:
-    """Numerically fine execution rules for bar-only historical tapes.
-
-    These are explicitly synthetic and cannot support a venue-rule parity claim.
-    They prevent bar replay from inventing a local notional floor; demo/paper
-    parity must use demo-verified rules instead.
-    """
-
-    leverage_by_symbol: dict[str, float] = {}
-    observed_by_symbol: dict[str, int] = {}
-    for item in decisions:
-        symbol = item.intent.intent.symbol.upper()
-        leverage_by_symbol[symbol] = max(
-            leverage_by_symbol.get(symbol, 1.0),
-            float(item.intent.intent.leverage),
-            1.0,
-        )
-        observed_by_symbol[symbol] = max(
-            observed_by_symbol.get(symbol, 0), item.wall_ts_ns
-        )
-    return {
-        symbol: InstrumentRules(
-            symbol=symbol,
-            qty_step=1e-12,
-            min_qty=1e-12,
-            min_notional=0.0,
-            max_order_qty=1e15,
-            max_leverage=max_leverage,
-            source="synthetic_bar_replay_no_venue_rule_claim",
-            environment="historical_synthetic",
-            observed_ts_ns=observed_by_symbol[symbol],
-        )
-        for symbol, max_leverage in sorted(leverage_by_symbol.items())
-    }
-
-
 def synthetic_historical_rules_for_symbols(
     symbols: Sequence[str],
     *,
@@ -310,57 +187,13 @@ def synthetic_historical_rules_for_symbols(
     }
 
 
-class HistoricalAccountReplay:
-    """Causal common-kernel replay; only the execution adapter is simulated."""
-
-    def __init__(
-        self,
-        root: str | Path,
-        *,
-        account_id: str,
-        risk_policy: AccountRiskPolicy,
-        instrument_rules: Mapping[str, InstrumentRules],
-        execution_config: ExecutionTwinConfig,
-        id_seed: str,
-        execution_id_seed: str | None = None,
-    ) -> None:
-        self.root = Path(root)
-        self.account_id = account_id
-        self.risk_policy = risk_policy
-        self.instrument_rules = dict(instrument_rules)
-        self.execution_config = execution_config
-        self.id_seed = id_seed
-        self.execution_id_seed = execution_id_seed
-
-    def run(self, cycles: Sequence[HistoricalReplayCycle]) -> HistoricalReplayResult:
-        ordered = list(cycles)
-        if any(right.wall_ts_ns < left.wall_ts_ns for left, right in zip(ordered, ordered[1:])):
-            raise ValueError("historical replay cycles must be ordered by non-decreasing wall time")
-        session = HistoricalAccountSession(
-            self.root,
-            account_id=self.account_id,
-            risk_policy=self.risk_policy,
-            instrument_rules=self.instrument_rules,
-            execution_config=self.execution_config,
-            id_seed=self.id_seed,
-            execution_id_seed=self.execution_id_seed,
-        )
-        for cycle in ordered:
-            session.process_cycle(cycle)
-        return HistoricalReplayResult(
-            batches=tuple(output.target_result for output in session.outputs),
-            final_state_hash=session.final_state_hash,
-            event_tape_hash=session.event_tape_hash,
-        )
-
-
 class HistoricalAccountSession:
     """Persistent chronological historical port around the production kernel.
 
-    Unlike :class:`HistoricalAccountReplay`, this surface returns each cycle's
-    result immediately so strategy state can react to risk or execution facts
-    before producing its next decision. One execution twin is retained for the
-    whole session, preserving rate-limit and deterministic adapter state.
+    Returns each cycle's result immediately so strategy state can react to risk
+    or execution facts before producing its next decision. One execution twin
+    is retained for the whole session, preserving rate-limit and deterministic
+    adapter state.
     """
 
     def __init__(
@@ -636,11 +469,3 @@ class HistoricalAccountSession:
             )
             return kernel._state_ref().state_hash()
         return self.kernel._state_ref().state_hash()
-
-    @property
-    def event_tape_hash(self) -> str:
-        if self.event_clock is None:
-            return JsonlStrategyEventTape(
-                self.root / "strategy_event_tape.jsonl"
-            ).tape_hash
-        return self.event_clock.tape_hash

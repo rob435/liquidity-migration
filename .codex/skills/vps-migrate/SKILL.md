@@ -1,90 +1,124 @@
 ---
 name: vps-migrate
-description: Migrate or rebuild the demo and paper VPS and restore checked GitHub Actions deployment. Use for VPS replacement, IP or host-key changes, SSH recovery, deploy-key mismatch, workflow failures, or expected-commit drift. Derive all hosts, fingerprints, keys, workflow modes, and service state from current canonical files and provider or GitHub state; never rely on values embedded in a skill, enable real money, or destroy a dirty checkout without explicit approval.
+description: Migrate or recover the demo/paper VPS and restore checked GitHub Actions operation. Use for VPS replacement, IP or host-key changes, SSH recovery, deploy-key mismatch, staged workflow failures, or expected-commit drift. Derive hosts, fingerprints, keys, workflow modes, and service state from current canonical files and provider/GitHub state; never rely on values embedded in a skill, enable real money, or destroy a dirty checkout without explicit approval.
 ---
 
 # Migrate or recover the VPS
 
-Keep this workflow low-freedom because it crosses SSH, credentials, deploy, and
-running demo/paper services. Derive current values from:
+This workflow crosses SSH, credentials, deployment, and running demo/paper
+services. Derive current values from:
 
 - `.github/workflows/vps-deploy.yml`;
-- `scripts/deploy_vps_live.sh` and `scripts/verify_vps_live.sh`;
-- `scripts/wait_for_vps_recovery_and_deploy.sh`;
-- `scripts/print_vps_recovery_command.sh` and local recovery scripts;
-- `deploy/systemd/README.md`, units, and `deploy/sleeves.env`;
+- `scripts/deploy_vps_live.sh` with `install|activate|verify`;
+- `scripts/print_vps_recovery_command.sh` and the current SSH restore scripts;
+- `deploy/systemd/README.md`, unit files, and `deploy/sleeves.env`;
 - GitHub variables/secrets and the provider console.
 
-Do not copy IPs, host fingerprints, public keys, chat IDs, or fallback branches
-from old docs or this skill.
+Do not copy hosts, fingerprints, public keys, chat IDs, or branches from old
+receipts or this skill.
 
 ## Preflight
 
-1. Confirm the target host, provider state, repository, branch, and exact commit.
-2. Inspect local and remote worktree status without cleaning anything.
-3. Confirm the task authorizes deploy/recovery, not merely diagnosis.
-4. Verify that all credential paths remain demo/paper and `REAL_MONEY=false`.
-5. Read current script/workflow help and refusal conditions.
+1. Confirm the host, provider state, repository, branch, exact commit, and
+   intended mode.
+2. Inspect local and remote worktree state without cleaning it.
+3. Confirm the task authorizes recovery/deployment, not only diagnosis.
+4. Verify all credential paths remain demo/paper and `REAL_MONEY=false`.
+5. Read current workflow/script refusal conditions.
+6. Record whether the fleet is quiescent and whether an operational receipt
+   already exists.
 
-If the remote checkout is dirty, preserve and inspect its diff first. Do not use
-`CLEAN_DIRTY_CHECKOUT`, reset, overwrite, or delete files without explicit owner
-approval for that cleanup and a verified archive/patch.
+If the checkout is dirty, preserve and inspect its diff first. Do not reset,
+overwrite, or delete it without explicit cleanup authority and a verified
+archive/patch.
 
 ## Establish SSH identity
 
-- Obtain the new Ed25519 host fingerprint directly from the target and verify it
-  through the provider console or another trusted channel before updating pins.
-- Read the expected deploy-key fingerprint from the current workflow/scripts;
-  derive the supplied private key's public fingerprint locally without printing
+- Obtain the target's Ed25519 host fingerprint directly and verify it through the
+  provider console or another trusted channel before changing pins.
+- Derive a supplied private key's public fingerprint locally without printing
   the private key.
-- Distinguish host key, deploy key, and operator key. Rotate only the identity the
-  task calls for.
+- Distinguish host key, deploy key, and operator key. Rotate only the identity in
+  scope.
 - Update GitHub variables/secrets through the authorized interface. Never commit
-  private keys or environment secrets.
+  private keys or private environment files.
 
-## Recover from a trusted source
+## Restore access
 
-Prefer commands generated from a trusted local checkout at the exact target
-commit. Avoid unpinned branch-tip `curl | bash` recovery. If the provider console
-is required, use the repository's generator, inspect its output, and have the
-operator paste only the scoped recovery command.
-
-Confirm on the host:
-
-- the repository and intended commit exist;
-- demo environment and sleeve files are present with correct ownership/mode;
-- authorized keys match the verified identities;
-- no unexpected mainnet credential or `REAL_MONEY` setting is active.
-
-## Deploy and verify
-
-Use the checked deploy with an exact `EXPECTED_COMMIT`, then the read-only
-verifier. A verify-only workflow never repairs a stale checkout.
+Generate recovery material from a trusted checkout at the exact intended commit:
 
 ```bash
-EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST scripts/deploy_vps_live.sh
-EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST scripts/verify_vps_live.sh
+scripts/print_vps_recovery_command.sh COMMIT
+scripts/print_vps_recovery_command.sh --rescue-only COMMIT
 ```
 
-Use the current script syntax and environment names; the placeholders above are
-not literal values. Confirm the success marker, checked-out commit, resolved
-sleeves, credential mode, service/timer state, liveness, and reconciliation.
+Inspect the generated command before using the provider console. It embeds the
+restore script from the named Git object rather than fetching an unpinned branch
+tip.
 
-If the IP, host pin, or deploy identity changed permanently, update workflow,
-tests, script defaults, recovery material, and operator docs together. Run the
-focused runtime/deploy tests plus relevant lint before proposing a push.
+After SSH returns, confirm the repository/commit, strict environment-file
+ownership and modes, authorized keys, demo-only credential set, and absence of
+unexpected `REAL_MONEY` or mainnet variables.
+
+## Staged operation
+
+Installation, authorization, and activation are separate boundaries.
+
+```bash
+# Requires the whole project fleet stopped; installs but starts nothing.
+EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
+  scripts/deploy_vps_live.sh install
+
+# Configure/review the stopped host, then issue a new exact operational receipt
+# through scripts/ops.sh operational-authority --execute issue.
+
+# Reopens that receipt and starts only its allowed topology.
+EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
+  scripts/deploy_vps_live.sh activate
+
+# Read-only exact checkout/input/topology verification.
+EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
+  scripts/deploy_vps_live.sh verify
+```
+
+Use current script help and environment names; placeholders are not literal values.
+
+Install requires a clean checkout, target commit on the selected remote branch,
+and a quiescent fleet. It installs locked dependencies, validates code, installs
+the current unit manifest, disables all project units, writes resolved sleeve
+toggles, and starts nothing.
+
+Authority is create-only and binds the exact commit, machine, profile,
+environment bytes, runtime inputs, and root identities. Activation must follow
+without an intervening checkout or config edit. Verify never repairs drift.
+
+Confirm the success marker, exact commit, resolved sleeves, receipt profile,
+credential mode, service/timer state, owner-before-producer readiness, liveness,
+and journal/venue agreement appropriate to the task.
+
+## GitHub Actions
+
+The manual workflow exposes exactly `install`, `activate`, and `verify`.
+It runs CI first, configures the pinned SSH identity, and passes the workflow
+commit to the selected mode. A verify workflow cannot update a stale checkout;
+run install while stopped, issue new authority, then activate.
+
+If host/IP/deploy identity changes permanently, update workflow variables or
+pins, scripts, tests, recovery material, and operator docs together. Run the
+focused runtime/deploy tests and lint before proposing a push.
 
 ## Diagnose by symptom
 
-- Host-key failure: verify the new host independently, then update the host pin.
-- Deploy-key fingerprint failure: correct the secret or perform a complete,
-  intentional rotation across workflow, authorized keys, scripts, and tests.
-- Permission denied: verify user, authorized keys, file modes, and provider
-  console state.
-- Expected-commit mismatch: run checked deploy; do not pretend verify is deploy.
-- Dirty-checkout refusal: inspect, archive, and request cleanup authority.
-- CI-only failure: compare repository variables/secrets and workflow environment
-  with the successful local command without exposing secrets.
+- Host-key failure: independently verify the target, then update the pin.
+- Deploy-key mismatch: correct the secret or perform a complete intentional
+  rotation across workflow, authorized keys, scripts, and tests.
+- Permission denied: verify user, authorized keys, modes, and provider state.
+- Expected-commit mismatch: run stopped install; verify is not deploy.
+- Missing/invalid authority: keep the fleet stopped, correct reviewed inputs,
+  then issue a new receipt; never fabricate or edit one.
+- Dirty checkout: inspect and archive; request cleanup authority.
+- CI-only failure: compare workflow variables/secrets and environment with the
+  successful local command without exposing secrets.
 
 Never enable real-money trading as part of VPS recovery. Mainnet requires a
 separate control plane and exact owner authorization under `docs/governance.md`.

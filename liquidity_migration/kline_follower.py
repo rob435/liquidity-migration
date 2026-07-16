@@ -22,7 +22,7 @@ post-bar-close window where the snapshot trails the venue.
 
 Duck-types the ``KlineStreamManager`` surface the demo daemon consumes:
 ``start(shutdown_event=)`` / ``stop()`` / ``store()`` / ``stats()`` /
-``set_cycle_wake_event()`` / ``universe_symbols()`` / ``is_started()``.
+``set_cycle_wake_event()`` / ``universe_symbols()``.
 """
 from __future__ import annotations
 
@@ -77,8 +77,6 @@ class FollowerKlineStreamManager:
         self._cycle_wake_event: threading.Event | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._started = False
-        self._stopped = False
         self._last_sig: tuple[int, int] | None = None
         self._last_confirmed_ts_ms = 0
         self._refreshes = 0
@@ -96,9 +94,6 @@ class FollowerKlineStreamManager:
     def set_cycle_wake_event(self, event: threading.Event | None) -> None:
         self._cycle_wake_event = event
 
-    def is_started(self) -> bool:
-        return self._started and not self._stopped
-
     def start(self, *, shutdown_event: threading.Event | None = None) -> dict[str, Any]:
         """Initial snapshot read + start the poll thread. Never blocks on a
         bootstrap: a missing snapshot just means the poll loop keeps watching
@@ -109,7 +104,6 @@ class FollowerKlineStreamManager:
             target=self._poll_loop, name="kline-follower", daemon=True,
         )
         self._thread.start()
-        self._started = True
         _logger.info(
             "kline follower started leader=%s snapshot_present=%s rows=%d",
             self._leader_root, self._snapshot_path.exists(), self._store.row_count(),
@@ -122,7 +116,6 @@ class FollowerKlineStreamManager:
         }
 
     def stop(self) -> None:
-        self._stopped = True
         self._stop.set()
         thread = self._thread
         self._thread = None
@@ -261,3 +254,24 @@ class FollowerKlineStreamManager:
             except Exception as exc:  # noqa: BLE001 — follower must never kill the daemon
                 self._refresh_errors += 1
                 _logger.warning("kline follower refresh failed: %s", exc)
+
+
+def build_kline_follower(
+    *,
+    leader_root: str | Path,
+    follower_root: str | Path,
+) -> FollowerKlineStreamManager:
+    """Build a read-only follower and reject a frozen self-follow route."""
+
+    leader = Path(leader_root).expanduser()
+    follower = Path(follower_root).expanduser()
+    try:
+        is_self_follow = leader.resolve() == follower.resolve()
+    except OSError:
+        is_self_follow = False
+    if is_self_follow:
+        raise ValueError(
+            f"leader root ({leader}) resolves to this sleeve's own data root; "
+            "a follower never writes its source snapshot"
+        )
+    return FollowerKlineStreamManager(leader_root=leader)

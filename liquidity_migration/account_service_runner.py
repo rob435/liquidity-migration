@@ -60,6 +60,7 @@ from .market_capture import (
     BybitRawPublicMarketStream,
     MarketCaptureConfig,
     SequenceAwareMarketRecorder,
+    operational_market_symbols,
     recorder_callback,
     symbols_from_file,
 )
@@ -184,7 +185,7 @@ def owner_health_publish_decision(
 
     Reconciliation and private execution can advance the immutable journal more
     often than the ordinary health interval. Exact-head consumers must not have
-    to win a timing race against that deliberate audit traffic, so any new head
+    to win a timing race against journal traffic, so any new head
     republishes health. Journal-only refreshes reuse the last wallet snapshot;
     only a completed request, status change, or elapsed interval spends another
     wallet REST call.
@@ -299,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     missing_rules = sorted(symbols - set(rules))
     if missing_rules:
         raise RuntimeError(f"symbols lack verified demo rules: {', '.join(missing_rules)}")
+    live_symbols = operational_market_symbols(symbols)
 
     private_client = BybitPrivateClient(
         category="linear",
@@ -344,8 +346,8 @@ def main(argv: list[str] | None = None) -> int:
         include_public_trades=args.persist_raw_market,
         on_message=recorder_callback(recorder),
     )
-    recorder.set_required_symbols(symbols)
-    public_stream.start(symbols)
+    recorder.set_required_symbols(live_symbols)
+    public_stream.start(live_symbols)
     execution_consumer = BybitAccountExecutionConsumer(
         kernel=kernel,
         private_stream=private_stream,
@@ -420,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         _logger.warning("recovered %d account intent(s) left processing by a prior crash", recovered)
 
     last_reconcile = time.monotonic()
-    last_symbol_refresh = time.monotonic()
+    last_symbol_refresh = float("-inf")
     last_notification_poll = 0.0
     last_capital_refresh = float("-inf")
     last_health_signature: tuple[str, str, bool] | None = None
@@ -447,33 +449,39 @@ def main(argv: list[str] | None = None) -> int:
                     _logger.error("account funding reconcile blocked new intents")
                 last_reconcile = time.monotonic()
             if now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25):
-                desired = symbols_from_file(symbols_path)
-                desired.update(inbox.requested_symbols())
                 current_state = kernel._state_ref()
-                desired.update(
+                component_target_symbols = {
                     str(target.get("symbol") or "").upper()
                     for target in current_state.component_targets.values()
                     if target.get("symbol") and float(target.get("signed_qty") or 0.0) != 0.0
-                )
-                desired.update(
+                }
+                nonflat_symbols = {
                     symbol
                     for symbol, position in current_state.positions.items()
                     if position.signed_qty != 0.0
+                }
+                desired = operational_market_symbols(
+                    symbols,
+                    queued=inbox.requested_symbols(),
+                    nonflat=nonflat_symbols,
+                    working=current_state.working_symbols(
+                        tolerance=policy.quantity_tolerance
+                    ),
+                    component_targets=component_target_symbols,
+                    convergence=(
+                        item.symbol for item in service.convergence_report().items
+                    ),
                 )
-                desired.update(current_state.working_symbols(tolerance=policy.quantity_tolerance))
-                desired.update(item.symbol for item in service.convergence_report().items)
-                if desired:
-                    missing_rules = sorted(desired - set(rules))
-                    if missing_rules:
-                        _logger.error(
-                            "requested symbols lack verified demo rules: %s",
-                            missing_rules,
-                        )
-                    # Public capture needs no order-rule authority. Subscribe
-                    # every pending symbol in parallel; the strict queue-head
-                    # gate below decides when one request may be claimed.
-                    recorder.set_required_symbols(desired)
-                    public_stream.update_symbols(desired)
+                missing_rules = sorted(desired - set(rules))
+                if missing_rules:
+                    _logger.error(
+                        "requested symbols lack verified demo rules: %s",
+                        missing_rules,
+                    )
+                # Warm every queued symbol in parallel while the strict
+                # queue-head gate below preserves the registered 30s timeout.
+                recorder.set_required_symbols(desired)
+                public_stream.update_symbols(desired)
                 last_symbol_refresh = now
             market_readiness = market_warmup_gate.evaluate(
                 inbox=inbox,

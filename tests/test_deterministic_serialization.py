@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from liquidity_migration.canonical_journal import _canonical_json, _json_safe
 from liquidity_migration.deterministic_serialization import canonical_json, json_safe
 
 
@@ -39,8 +38,3 @@ def test_canonical_json_preserves_exact_normalization_and_bytes() -> None:
 def test_json_safe_normalizes_item_scalars_and_falls_back_to_text() -> None:
     assert json_safe(_Scalar(float("nan"))) is None
     assert json_safe(_BrokenScalar()) == "broken-scalar"
-
-
-def test_canonical_journal_legacy_helpers_are_exact_aliases() -> None:
-    assert _canonical_json is canonical_json
-    assert _json_safe is json_safe

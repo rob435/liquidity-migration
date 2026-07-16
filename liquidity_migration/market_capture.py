@@ -28,7 +28,6 @@ import shutil
 import stat
 import threading
 import time
-from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -64,7 +63,6 @@ class MarketCaptureConfig:
     segment_max_bytes: int = 128 * 1024 * 1024
     fsync_every_records: int = 250
     min_free_disk_bytes: int = 2 * 1024 * 1024 * 1024
-    ring_records_per_symbol: int = 10_000
     strict_contiguous_update_ids: bool = False
     persist_raw_market: bool = True
 
@@ -75,7 +73,6 @@ class MarketCaptureConfig:
             self.segment_max_bytes,
             self.fsync_every_records,
             self.min_free_disk_bytes,
-            self.ring_records_per_symbol,
         ) <= 0:
             raise ValueError("capture storage limits must be positive")
         if type(self.persist_raw_market) is not bool:
@@ -645,7 +642,6 @@ class SequenceAwareMarketRecorder:
         self._last_market_readiness_publish_monotonic_ns: int | None = None
         self._required_symbols: set[str] = set()
         self.books: dict[str, BookReconstruction] = {}
-        self.rings: dict[str, deque[dict[str, Any]]] = {}
         self._lock = threading.RLock()
 
     def set_required_symbols(self, symbols: Iterable[str]) -> None:
@@ -678,9 +674,6 @@ class SequenceAwareMarketRecorder:
         if persist_to_disk:
             location = self.store.append(safe)
             self._publish_owner_readiness(safe, location=location)
-        symbol = str(record.get("symbol") or "ACCOUNT")
-        ring = self.rings.setdefault(symbol, deque(maxlen=self.config.ring_records_per_symbol))
-        ring.append(dict(safe))
         return dict(safe)
 
     def _publish_owner_market_readiness(
@@ -954,10 +947,6 @@ class SequenceAwareMarketRecorder:
             )
             return record, snapshot
 
-    def recent(self, symbol: str) -> tuple[dict[str, Any], ...]:
-        with self._lock:
-            return tuple(dict(row) for row in self.rings.get(symbol.upper(), ()))
-
     def current_book(self, symbol: str, *, depth: int | None = None) -> L2BookSnapshot | None:
         with self._lock:
             state = self.books.get(symbol.upper())
@@ -1130,6 +1119,40 @@ def symbols_from_file(
         for token in line.replace(",", " ").split()
         if token
     }
+
+
+def operational_market_symbols(
+    allowlist: Iterable[str],
+    *,
+    queued: Iterable[str] = (),
+    nonflat: Iterable[str] = (),
+    working: Iterable[str] = (),
+    component_targets: Iterable[str] = (),
+    convergence: Iterable[str] = (),
+) -> set[str]:
+    """Return the bounded live-L2 set for an operational account owner.
+
+    The validated symbols file supplies one stable idle heartbeat. BTC is used
+    when available; otherwise the deterministic first allowlisted symbol keeps
+    liveness observable without subscribing the entire candidate universe.
+    Symbols with actual account work remain subscribed until that work clears.
+    """
+
+    allowed = {
+        str(symbol).strip().upper()
+        for symbol in allowlist
+        if str(symbol).strip()
+    }
+    if not allowed:
+        raise ValueError("operational market allowlist must not be empty")
+    required = {"BTCUSDT" if "BTCUSDT" in allowed else min(allowed)}
+    for symbols in (queued, nonflat, working, component_targets, convergence):
+        required.update(
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        )
+    return required
 
 
 def main(argv: list[str] | None = None) -> int:

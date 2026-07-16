@@ -30,6 +30,18 @@ from .account_kernel import (
 from .deterministic_runtime import DeterministicIds
 
 
+INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE = "integration_only_uncalibrated"
+
+
+def _is_finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 class ExecutionObservationType(StrEnum):
     ACK = "ack"
     FILL = "fill"
@@ -72,15 +84,90 @@ class L2BookSnapshot:
     sequence_gap: bool = False
     clock_offset_estimate_ns: int | None = None
 
+    def validation_error(self, *, expected_symbol: str | None = None) -> str:
+        """Return a stable fail-closed reason for an unusable L2 snapshot."""
+
+        if (
+            type(self.symbol) is not str
+            or not self.symbol
+            or self.symbol != self.symbol.strip().upper()
+        ):
+            return "invalid_book_symbol"
+        if expected_symbol is not None and self.symbol != expected_symbol:
+            return "book_symbol_mismatch"
+        if type(self.sequence) is not int or self.sequence <= 0:
+            return "invalid_book_sequence"
+        if self.previous_sequence is not None and (
+            type(self.previous_sequence) is not int
+            or self.previous_sequence < 0
+            or self.previous_sequence >= self.sequence
+        ):
+            return "invalid_book_previous_sequence"
+        if type(self.sequence_gap) is not bool:
+            return "invalid_book_sequence_gap_flag"
+        if self.sequence_gap:
+            return "book_sequence_gap"
+        if type(self.exchange_ts_ns) is not int or self.exchange_ts_ns <= 0:
+            return "invalid_book_exchange_timestamp"
+        if type(self.local_receive_ts_ns) is not int or self.local_receive_ts_ns <= 0:
+            return "invalid_book_local_timestamp"
+        if self.clock_offset_estimate_ns is not None and type(
+            self.clock_offset_estimate_ns
+        ) is not int:
+            return "invalid_book_clock_offset"
+        if not self.bids:
+            return "empty_book_bids"
+        if not self.asks:
+            return "empty_book_asks"
+
+        for side, levels in (("bid", self.bids), ("ask", self.asks)):
+            for level in levels:
+                if type(level) is not BookLevel:
+                    return f"invalid_{side}_level"
+                values = (level.price, level.qty)
+                if any(
+                    not _is_finite_number(value)
+                    for value in values
+                ):
+                    return f"non_finite_{side}_level"
+                if level.price <= 0.0 or level.qty <= 0.0:
+                    return f"non_positive_{side}_level"
+            try:
+                total_qty = math.fsum(level.qty for level in levels)
+            except OverflowError:
+                return f"non_finite_{side}_depth"
+            if not math.isfinite(total_qty):
+                return f"non_finite_{side}_depth"
+
+        if any(
+            left.price <= right.price
+            for left, right in zip(self.bids, self.bids[1:], strict=False)
+        ):
+            return "non_monotonic_book_bids"
+        if any(
+            left.price >= right.price
+            for left, right in zip(self.asks, self.asks[1:], strict=False)
+        ):
+            return "non_monotonic_book_asks"
+        if self.bids[0].price > self.asks[0].price:
+            return "crossed_book"
+        return ""
+
     def market_ref(self, *, input_key: str, source: str = "bybit_l2") -> MarketInputRef:
-        if not self.bids or not self.asks:
-            raise ValueError("a market reference requires non-empty bids and asks")
+        error = self.validation_error()
+        if error:
+            raise ValueError(f"cannot build market reference from invalid L2: {error}")
+        reference_price = self.bids[0].price / 2.0 + self.asks[0].price / 2.0
+        if not math.isfinite(reference_price) or reference_price <= 0.0:
+            raise ValueError(
+                "cannot build market reference from invalid L2: invalid_reference_price"
+            )
         return MarketInputRef(
             input_key=input_key,
             symbol=self.symbol,
             exchange_ts_ns=self.exchange_ts_ns,
             local_receive_ts_ns=self.local_receive_ts_ns,
-            reference_price=(self.bids[0].price + self.asks[0].price) / 2.0,
+            reference_price=reference_price,
             bid_price=self.bids[0].price,
             ask_price=self.asks[0].price,
             book_sequence=self.sequence,
@@ -127,6 +214,8 @@ class ExecutionTwinConfig:
     fill_partition_policy: str = "book_level"
     immutable_replay_book: bool = True
     residual_adverse_slippage_bps: float = 0.0
+    visible_book_depth: int = 50
+    model_scope: str = INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.fee_bps) or self.fee_bps < 0.0:
@@ -149,6 +238,10 @@ class ExecutionTwinConfig:
             raise ValueError("residual adverse slippage must be finite")
         if self.residual_adverse_slippage_bps <= -10_000.0:
             raise ValueError("residual adverse slippage would make a fill non-positive")
+        if self.visible_book_depth <= 0:
+            raise ValueError("visible_book_depth must be positive")
+        if not self.model_scope or self.model_scope.strip() != self.model_scope:
+            raise ValueError("execution-twin model_scope must be a non-empty canonical value")
 
 
 def _aligned(qty: float, step: float, *, tolerance: float = 1e-12) -> bool:
@@ -156,6 +249,53 @@ def _aligned(qty: float, step: float, *, tolerance: float = 1e-12) -> bool:
         return False
     units = Decimal(str(abs(qty))) / Decimal(str(step))
     return abs(float(units) - round(float(units))) <= tolerance
+
+
+def _market_input_validation_error(
+    market_input: MarketInputRef,
+    *,
+    expected_symbol: str,
+) -> str:
+    if (
+        type(market_input.symbol) is not str
+        or not market_input.symbol
+        or market_input.symbol != market_input.symbol.strip().upper()
+    ):
+        return "invalid_market_input_symbol"
+    if market_input.symbol != expected_symbol:
+        return "market_input_symbol_mismatch"
+    if type(market_input.exchange_ts_ns) is not int or market_input.exchange_ts_ns <= 0:
+        return "invalid_market_input_exchange_timestamp"
+    if (
+        type(market_input.local_receive_ts_ns) is not int
+        or market_input.local_receive_ts_ns <= 0
+    ):
+        return "invalid_market_input_local_timestamp"
+    if (
+        not _is_finite_number(market_input.reference_price)
+        or market_input.reference_price <= 0.0
+    ):
+        return "invalid_market_input_reference_price"
+    if market_input.book_sequence is not None and (
+        type(market_input.book_sequence) is not int or market_input.book_sequence <= 0
+    ):
+        return "invalid_market_input_sequence"
+    for label, price in (
+        ("bid", market_input.bid_price),
+        ("ask", market_input.ask_price),
+    ):
+        if price is not None and (
+            not _is_finite_number(price)
+            or price <= 0.0
+        ):
+            return f"invalid_market_input_{label}"
+    if (
+        market_input.bid_price is not None
+        and market_input.ask_price is not None
+        and market_input.bid_price > market_input.ask_price
+    ):
+        return "crossed_market_input"
+    return ""
 
 
 class MarketOrderExecutionTwin:
@@ -197,6 +337,8 @@ class MarketOrderExecutionTwin:
                 "reason": reason,
                 "local_socket_send_ts_ns": send_ts_ns,
                 "fill_partition_policy": self.config.fill_partition_policy,
+                "visible_book_depth": self.config.visible_book_depth,
+                "execution_model_scope": self.config.model_scope,
             },
         ),)
 
@@ -221,10 +363,23 @@ class MarketOrderExecutionTwin:
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
             )
-        if book.sequence_gap:
+        book_error = book.validation_error(expected_symbol=symbol)
+        if book_error:
             return self._rejection(
                 command,
-                reason="book_sequence_gap",
+                reason=book_error,
+                exchange_ts_ns=exchange_ack_ts_ns,
+                local_receive_ts_ns=local_ack_ts_ns,
+                send_ts_ns=send_ts_ns,
+            )
+        market_input_error = _market_input_validation_error(
+            market_input,
+            expected_symbol=symbol,
+        )
+        if market_input_error:
+            return self._rejection(
+                command,
+                reason=market_input_error,
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
@@ -283,11 +438,12 @@ class MarketOrderExecutionTwin:
                 )
             self._send_times_ns.append(send_ts_ns)
 
-        levels = book.asks if command.signed_qty > 0.0 else book.bids
-        valid_levels = tuple(
-            level for level in levels if level.qty > 0.0 and level.price > 0.0
+        levels = (
+            book.asks[: self.config.visible_book_depth]
+            if command.signed_qty > 0.0
+            else book.bids[: self.config.visible_book_depth]
         )
-        available = math.fsum(level.qty for level in valid_levels)
+        available = math.fsum(level.qty for level in levels)
         if available <= 0.0:
             return self._rejection(
                 command,
@@ -306,7 +462,7 @@ class MarketOrderExecutionTwin:
             )
         if (
             self.config.fill_partition_policy == "single_level_full_fill_or_reject"
-            and valid_levels[0].qty < command.qty - 1e-12
+            and levels[0].qty < command.qty - 1e-12
         ):
             return self._rejection(
                 command,
@@ -338,12 +494,14 @@ class MarketOrderExecutionTwin:
                 "fill_response_latency_ns": self.config.latency.fill_response_ns,
                 "immutable_replay_book": self.config.immutable_replay_book,
                 "fill_partition_policy": self.config.fill_partition_policy,
+                "visible_book_depth": self.config.visible_book_depth,
+                "execution_model_scope": self.config.model_scope,
             },
         )]
         remaining = command.qty
         executable = min(command.qty, available)
         fill_count = 0
-        for level in valid_levels:
+        for level in levels:
             if remaining <= 1e-12:
                 continue
             fill_qty = min(remaining, level.qty)
@@ -393,6 +551,8 @@ class MarketOrderExecutionTwin:
                     "unfilled_cancelled_qty": max(command.qty - executable, 0.0) if terminal else 0.0,
                     "immutable_replay_book": self.config.immutable_replay_book,
                     "fill_partition_policy": self.config.fill_partition_policy,
+                    "visible_book_depth": self.config.visible_book_depth,
+                    "execution_model_scope": self.config.model_scope,
                     "fee_observed": True,
                     "fee_status": "modeled_execution_fee",
                     "fee_source": "execution_twin_config.fee_bps",
@@ -418,6 +578,8 @@ class MarketOrderExecutionTwin:
             metadata={
                 "source": "execution_twin_order_status",
                 "fill_partition_policy": self.config.fill_partition_policy,
+                "visible_book_depth": self.config.visible_book_depth,
+                "execution_model_scope": self.config.model_scope,
             },
         ))
         return tuple(observations)

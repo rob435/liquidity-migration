@@ -7,7 +7,7 @@ from liquidity_migration import archive_manifest as am
 from liquidity_migration import archive_manifest as manifest_module
 from liquidity_migration.archive_manifest import (
     ArchiveHourlyKlineApiDownloadConfig,
-    ArchiveKlineDownloadConfig,
+    ArchiveHourlyKlineDownloadConfig,
     ARCHIVE_KLINE_SKIP_ROWS_ENV,
     V5_LISTING_SOURCE,
     V5_LISTING_URL_SENTINEL,
@@ -21,7 +21,6 @@ from liquidity_migration.archive_manifest import (
     _kline_partition_valid_bar_rows,
     _parse_bybit_api_kline_row,
     _parse_date,
-    _rows_by_date,
     _rows_by_symbol,
     _safe_name,
     _select_manifest_rows,
@@ -32,8 +31,8 @@ from liquidity_migration.archive_manifest import (
     parse_symbol_directories,
     parse_trade_archive_entries,
     previous_kline_close,
+    run_archive_hourly_klines_download,
     run_archive_hourly_klines_api_download,
-    run_archive_klines_download,
     synthesize_v5_listing_manifest_rows,
 )
 from liquidity_migration.storage import dataset_path, read_dataset, write_dataset
@@ -185,33 +184,6 @@ def test_parse_bybit_api_kline_row_rejects_unparseable_numbers() -> None:
     bad = ["1735689600000", "abc", "110", "99", "105", "2.5", "262.5"]
 
     assert _parse_bybit_api_kline_row(bad, symbol="BTCUSDT") is None
-
-
-# --- _rows_by_date / _rows_by_symbol --------------------------------------
-
-
-def test_rows_by_date_groups_contiguous_runs_preserving_order() -> None:
-    rows = [
-        {"date": "2025-01-01", "symbol": "A"},
-        {"date": "2025-01-01", "symbol": "B"},
-        {"date": "2025-01-02", "symbol": "A"},
-    ]
-
-    groups = _rows_by_date(rows)
-
-    assert [len(group) for group in groups] == [2, 1]
-    assert groups[0][1]["symbol"] == "B"
-
-
-def test_rows_by_date_splits_non_contiguous_same_date() -> None:
-    # The grouping only collapses adjacent dates; an unsorted input splits.
-    rows = [
-        {"date": "2025-01-01", "symbol": "A"},
-        {"date": "2025-01-02", "symbol": "A"},
-        {"date": "2025-01-01", "symbol": "C"},
-    ]
-
-    assert len(_rows_by_date(rows)) == 3
 
 
 def test_rows_by_symbol_groups_and_sorts_by_symbol_then_date() -> None:
@@ -400,25 +372,25 @@ def _write_partition(data_root, dataset: str, symbol: str, date: str, frame: pl.
 
 
 def test_kline_partition_file_exists_detects_written_partition(tmp_path) -> None:
-    assert not _kline_partition_file_exists(tmp_path, dataset="klines_1m", symbol="BTCUSDT", date="2025-01-01")
+    assert not _kline_partition_file_exists(tmp_path, dataset="klines_1h", symbol="BTCUSDT", date="2025-01-01")
 
-    _write_partition(tmp_path, "klines_1m", "BTCUSDT", "2025-01-01", pl.DataFrame({"ts_ms": [1], "close": [1.0]}))
+    _write_partition(tmp_path, "klines_1h", "BTCUSDT", "2025-01-01", pl.DataFrame({"ts_ms": [1], "close": [1.0]}))
 
-    assert _kline_partition_file_exists(tmp_path, dataset="klines_1m", symbol="BTCUSDT", date="2025-01-01")
+    assert _kline_partition_file_exists(tmp_path, dataset="klines_1h", symbol="BTCUSDT", date="2025-01-01")
 
 
 def test_kline_partition_bar_rows_counts_parquet_rows(tmp_path) -> None:
-    assert _kline_partition_bar_rows(tmp_path, dataset="klines_1m", symbol="X", date="2025-01-01") == 0
+    assert _kline_partition_bar_rows(tmp_path, dataset="klines_1h", symbol="X", date="2025-01-01") == 0
 
     _write_partition(
         tmp_path,
-        "klines_1m",
+        "klines_1h",
         "X",
         "2025-01-01",
         pl.DataFrame({"ts_ms": [1, 2, 3], "close": [1.0, 2.0, 3.0]}),
     )
 
-    assert _kline_partition_bar_rows(tmp_path, dataset="klines_1m", symbol="X", date="2025-01-01") == 3
+    assert _kline_partition_bar_rows(tmp_path, dataset="klines_1h", symbol="X", date="2025-01-01") == 3
 
 
 def test_kline_partition_valid_bar_rows_excludes_null_prices(tmp_path) -> None:
@@ -431,13 +403,13 @@ def test_kline_partition_valid_bar_rows_excludes_null_prices(tmp_path) -> None:
             "close": [1.0, 2.0, 3.0],
         }
     )
-    _write_partition(tmp_path, "klines_1m", "X", "2025-01-01", frame)
+    _write_partition(tmp_path, "klines_1h", "X", "2025-01-01", frame)
 
-    assert _kline_partition_valid_bar_rows(tmp_path, dataset="klines_1m", symbol="X", date="2025-01-01") == 2
+    assert _kline_partition_valid_bar_rows(tmp_path, dataset="klines_1h", symbol="X", date="2025-01-01") == 2
 
 
 def test_kline_partition_valid_bar_rows_zero_for_missing_partition(tmp_path) -> None:
-    assert _kline_partition_valid_bar_rows(tmp_path, dataset="klines_1m", symbol="X", date="2025-01-01") == 0
+    assert _kline_partition_valid_bar_rows(tmp_path, dataset="klines_1h", symbol="X", date="2025-01-01") == 0
 
 
 # --- previous_kline_close -------------------------------------------------
@@ -450,7 +422,7 @@ def test_previous_kline_close_returns_last_close_of_prior_day(tmp_path) -> None:
             "close": [99.5, 98.0],
         }
     )
-    _write_partition(tmp_path, "klines_1m", "BTCUSDT", "2025-01-01", prior)
+    _write_partition(tmp_path, "klines_1h", "BTCUSDT", "2025-01-01", prior)
 
     close = previous_kline_close(tmp_path, symbol="BTCUSDT", archive_date="2025-01-02")
 
@@ -464,7 +436,7 @@ def test_previous_kline_close_none_when_prior_day_missing(tmp_path) -> None:
 
 def test_previous_kline_close_none_when_prior_close_nonpositive(tmp_path) -> None:
     prior = pl.DataFrame({"ts_ms": [1_735_775_940_000], "close": [0.0]})
-    _write_partition(tmp_path, "klines_1m", "BTCUSDT", "2025-01-01", prior)
+    _write_partition(tmp_path, "klines_1h", "BTCUSDT", "2025-01-01", prior)
 
     assert previous_kline_close(tmp_path, symbol="BTCUSDT", archive_date="2025-01-02") is None
 
@@ -476,7 +448,7 @@ def test_previous_kline_close_skips_null_closes(tmp_path) -> None:
             "close": [98.0, None],
         }
     )
-    _write_partition(tmp_path, "klines_1m", "BTCUSDT", "2025-01-01", prior)
+    _write_partition(tmp_path, "klines_1h", "BTCUSDT", "2025-01-01", prior)
 
     # The latest row has a null close, so the prior non-null close is used.
     assert previous_kline_close(tmp_path, symbol="BTCUSDT", archive_date="2025-01-02") == 98.0
@@ -539,9 +511,9 @@ def _manifest_frame() -> pl.DataFrame:
 def test_select_manifest_rows_filters_date_window_and_sorts(tmp_path) -> None:
     # `--end` is end-exclusive (matches volume-events and docs/data_roots.md), so
     # end="2025-01-04" selects 01-02 and 01-03 but not 01-04.
-    config = ArchiveKlineDownloadConfig(start="2025-01-02", end="2025-01-04", missing_only=False)
+    config = ArchiveHourlyKlineDownloadConfig(start="2025-01-02", end="2025-01-04", missing_only=False)
 
-    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
+    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1h")
 
     assert [(row["date"], row["symbol"]) for row in rows] == [
         ("2025-01-02", "BTCUSDT"),
@@ -551,9 +523,9 @@ def test_select_manifest_rows_filters_date_window_and_sorts(tmp_path) -> None:
 
 def test_select_manifest_rows_end_is_exclusive(tmp_path) -> None:
     # Explicitly pin the exclusive boundary: end equal to a manifest date drops it.
-    config = ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-03", missing_only=False)
+    config = ArchiveHourlyKlineDownloadConfig(start="2025-01-01", end="2025-01-03", missing_only=False)
 
-    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
+    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1h")
 
     assert [(row["date"], row["symbol"]) for row in rows] == [
         ("2025-01-01", "BTCUSDT"),
@@ -563,27 +535,27 @@ def test_select_manifest_rows_end_is_exclusive(tmp_path) -> None:
 
 
 def test_select_manifest_rows_filters_by_symbol_case_insensitive(tmp_path) -> None:
-    config = ArchiveKlineDownloadConfig(symbols=("ethusdt",), missing_only=False)
+    config = ArchiveHourlyKlineDownloadConfig(symbols=("ethusdt",), missing_only=False)
 
-    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
+    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1h")
 
     assert [row["symbol"] for row in rows] == ["ETHUSDT"]
 
 
 def test_select_manifest_rows_respects_max_rows(tmp_path) -> None:
-    config = ArchiveKlineDownloadConfig(max_rows=2, missing_only=False)
+    config = ArchiveHourlyKlineDownloadConfig(max_rows=2, missing_only=False)
 
-    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
+    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1h")
 
     assert len(rows) == 2
 
 
 def test_select_manifest_rows_missing_only_drops_existing_partitions(tmp_path) -> None:
     # Pre-write one partition; missing_only with min_existing_bars<=1 drops it.
-    _write_partition(tmp_path, "klines_1m", "BTCUSDT", "2025-01-01", pl.DataFrame({"ts_ms": [1], "close": [1.0]}))
-    config = ArchiveKlineDownloadConfig(missing_only=True, min_existing_bars=1)
+    _write_partition(tmp_path, "klines_1h", "BTCUSDT", "2025-01-01", pl.DataFrame({"ts_ms": [1], "close": [1.0]}))
+    config = ArchiveHourlyKlineDownloadConfig(missing_only=True, min_existing_bars=1)
 
-    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
+    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1h")
 
     selected = {(row["date"], row["symbol"]) for row in rows}
     assert ("2025-01-01", "BTCUSDT") not in selected
@@ -591,17 +563,17 @@ def test_select_manifest_rows_missing_only_drops_existing_partitions(tmp_path) -
 
 
 def test_select_manifest_rows_missing_only_keeps_sparse_partitions(tmp_path) -> None:
-    # A 1-row partition is below the 1440-bar requirement, so it is reselected.
+    # A 1-row partition is below the dense 24-hour requirement, so it is reselected.
     _write_partition(
         tmp_path,
-        "klines_1m",
+        "klines_1h",
         "BTCUSDT",
         "2025-01-01",
         pl.DataFrame({"ts_ms": [1], "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0]}),
     )
-    config = ArchiveKlineDownloadConfig(missing_only=True, min_existing_bars=1440)
+    config = ArchiveHourlyKlineDownloadConfig(missing_only=True, min_existing_bars=24)
 
-    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
+    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1h")
 
     assert ("2025-01-01", "BTCUSDT") in {(row["date"], row["symbol"]) for row in rows}
 
@@ -610,9 +582,9 @@ def test_select_manifest_rows_applies_skip_list(tmp_path, monkeypatch) -> None:
     skip_file = tmp_path / "skip.csv"
     skip_file.write_text("2025-01-01,BTCUSDT\n", encoding="utf-8")
     monkeypatch.setenv(ARCHIVE_KLINE_SKIP_ROWS_ENV, str(skip_file))
-    config = ArchiveKlineDownloadConfig(missing_only=False)
+    config = ArchiveHourlyKlineDownloadConfig(missing_only=False)
 
-    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
+    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1h")
 
     assert ("2025-01-01", "BTCUSDT") not in {(row["date"], row["symbol"]) for row in rows}
     assert ("2025-01-02", "BTCUSDT") in {(row["date"], row["symbol"]) for row in rows}
@@ -646,9 +618,9 @@ def test_detect_universe_shrink_warns_and_names_dropped_symbols(tmp_path) -> Non
 # --- run_* error paths ----------------------------------------------------
 
 
-def test_run_archive_klines_download_raises_when_manifest_missing(tmp_path) -> None:
+def test_run_archive_hourly_klines_download_raises_when_manifest_missing(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="archive_trade_manifest is empty"):
-        run_archive_klines_download(tmp_path, config=ArchiveKlineDownloadConfig(name="fixture"))
+        run_archive_hourly_klines_download(tmp_path, config=ArchiveHourlyKlineDownloadConfig(name="fixture"))
 
 
 def test_run_archive_hourly_api_download_raises_when_manifest_missing(tmp_path) -> None:
@@ -836,11 +808,15 @@ def test_scrape_download_skips_v5_listing_without_fetch(tmp_path, monkeypatch) -
     monkeypatch.setattr(am, "download_public_trade_archive", _boom)
     row = {"symbol": "NEWUSDT", "date": "2024-01-01", "url": am.V5_LISTING_URL_SENTINEL,
            "source": am.V5_LISTING_SOURCE}
-    for fn in (am._download_one_archive_kline, am._download_one_archive_hourly_kline):
-        result = fn(tmp_path, row, missing_only=False, min_existing_bars=1,
-                    discard_archives_after_success=False)
-        assert result["status"] == "skipped_v5_listing"
-        assert result["status"] != "failed"  # the original bug recorded 'failed'
+    result = am._download_one_archive_hourly_kline(
+        tmp_path,
+        row,
+        missing_only=False,
+        min_existing_bars=1,
+        discard_archives_after_success=False,
+    )
+    assert result["status"] == "skipped_v5_listing"
+    assert result["status"] != "failed"  # the original bug recorded 'failed'
 
 
 def test_archive_klines_report_surfaces_skipped_count() -> None:

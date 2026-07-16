@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from liquidity_migration.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
@@ -20,7 +22,7 @@ from liquidity_migration.execution_adapters import (
     LatencyProfile,
     MarketOrderExecutionTwin,
 )
-from liquidity_migration.protection_engine import AccountProtectionEngine
+from liquidity_migration.protection_engine import AccountProtectionEngine, _protection_trigger_reason
 from liquidity_migration.strategy_runtime import (
     AccountKernelRuntime,
     AdaptedIntent,
@@ -31,6 +33,31 @@ from liquidity_migration.strategy_runtime import (
 
 RULES = {"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0, tick_size=0.1)}
 POLICY = AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 100.0, 10.0)
+
+
+@pytest.mark.parametrize(
+    ("qty", "mark", "stop", "take_profit", "expected"),
+    [
+        (1.0, 8.9, 9.0, 12.0, "stop_loss"),
+        (1.0, 12.1, 9.0, 12.0, "take_profit"),
+        (-1.0, 11.1, 11.0, 8.0, "stop_loss"),
+        (-1.0, 7.9, 11.0, 8.0, "take_profit"),
+        (1.0, 10.0, 9.0, 12.0, ""),
+    ],
+)
+def test_protection_trigger_direction(
+    qty: float,
+    mark: float,
+    stop: float,
+    take_profit: float,
+    expected: str,
+) -> None:
+    assert _protection_trigger_reason(
+        signed_qty=qty,
+        mark_price=mark,
+        stop_price=stop,
+        take_profit_price=take_profit,
+    ) == expected
 
 
 def _market(*, key: str, price: float, ts: int) -> MarketInputRef:

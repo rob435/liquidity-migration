@@ -3,42 +3,26 @@ Description=liquidity-migration account-kernel and strategy-input liveness watch
 Wants=network-online.target
 Requires=liquidity-migration-account-execution.service
 After=network-online.target liquidity-migration-account-execution.service
-ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot
 User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
-# Per-sleeve kill-switch toggles resolved by deploy/lib_sleeves.sh. Host overrides
-# can only turn a repo-on sleeve off; stale host "on" values cannot resurrect a
-# repo-disabled sleeve.
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/account-execution.env
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-# Late fresh-epoch roots for both owners, both captures, and every strategy
-# producer. The watchdog consumes these as parser defaults rather than pinning
-# paths in ExecStart.
-EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-demo-liveness.service.env
-# Hardening + memory-cap parity with the sibling units (round 4): handles
-# credentials and pings external URLs as root.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
 MemoryMax=512M
-# ACCOUNT_LIVENESS_SCOPE is bound by operational authorization. Demo-only mode
-# requires the demo owner/readiness/strategy surface and never pulls the blocked
-# paper owner into systemd; the full mode checks both owners. Strategy cycle/input
-# checks remain; retired sleeve-ledger, ws_risk, and combined-report checks do
-# not. Exits 0 always (a watchdog must never crash-loop).
-# New/resolved faults are Telegram-deduplicated; the six-hour cooldown prevents
-# repeated spam. Bybit credentials are removed from this process environment.
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-demo-liveness.service main
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-demo-liveness.service main
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal

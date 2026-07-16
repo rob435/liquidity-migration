@@ -6,8 +6,7 @@ protection authorities.  The checked operational authorization binds this
 process to either ``demo`` or ``demo-paper`` scope.  The checker requires every
 owner, live-L2 readiness sidecar, owner-health projection, and strategy input
 inside that scope plus a recent healthy canonical demo venue snapshot. It
-deliberately does not inspect retired sleeve ledgers, ``ws_risk``, or the old
-combined-book reporter.
+checks only the surviving account-owner and strategy-input surfaces.
 
 Strategy-daemon cycle and input checks remain because an execution owner cannot
 detect a hung signal scheduler or an empty/stale signal source.
@@ -17,8 +16,7 @@ immediately, a persisting one re-alerts at most every --cooldown-min, and a
 cleared one sends a one-line "resolved" note. --heartbeat-url (or the
 LIVENESS_HEARTBEAT_URL env var) is pinged on every healthy run so an EXTERNAL
 dead-man's-switch (e.g. healthchecks.io) catches a total box death the on-box
-watchdog cannot — NOTE: no URL is provisioned by default, so until the operator
-sets one this protection does not exist (audit 2026-06-12 round 3).
+watchdog cannot. No URL is provisioned by default.
 
 Reads TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID only when Telegram delivery is
 enabled. Exits 0 always (a watchdog must not crash-loop); failures to verify
@@ -28,14 +26,14 @@ degrade to an alert.
 from __future__ import annotations
 
 import argparse
-import csv
+import grp
 import json
 import os
 import subprocess
 import sys
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
@@ -44,10 +42,17 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration._common import exact_duration_ms  # noqa: E402
+from liquidity_migration.artifact_snapshot import read_stable_file  # noqa: E402
 from liquidity_migration.account_kernel import AccountEventType, read_account_journal  # noqa: E402
 from liquidity_migration.account_owner_health import require_recent_account_owner_health  # noqa: E402
 from liquidity_migration.account_owner_readiness import latest_market_readiness  # noqa: E402
+from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
+    HEDGE_MODEL_PRIOR_KIND,
+    load_hedge_model_prior,
+    require_usable_hedge_model_prior,
+)
 from liquidity_migration.storage import read_dataset  # noqa: E402
+from liquidity_migration.systemd_environment import parse_systemd_environment_bytes  # noqa: E402
 from liquidity_migration.telegram import send_telegram_message  # noqa: E402
 
 # Severity order for message framing only.
@@ -58,6 +63,7 @@ _DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution.service"
 _PAPER_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-paper-execution.service"
 _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT, _PAPER_ACCOUNT_OWNER_UNIT)
 _ACCOUNT_SCOPES = ("demo", "demo-paper")
+_PAPER_RUNTIME_GROUP = "liquidity-migration-paper"
 
 
 def _default_root(rel: str) -> str:
@@ -69,27 +75,45 @@ def _default_root(rel: str) -> str:
     return str(_REPO_ROOT / rel)
 
 
+def _paper_roots_from_environment(path: str | Path) -> tuple[Path, Path]:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("paper owner environment path must be absolute")
+    snapshot = read_stable_file(
+        candidate,
+        label="paper owner environment",
+        reject_empty=True,
+        require_mode=0o640,
+        require_owner=True,
+    )
+    try:
+        paper_gid = grp.getgrnam(_PAPER_RUNTIME_GROUP).gr_gid
+    except KeyError as exc:
+        raise ValueError(
+            f"paper runtime group is not provisioned: {_PAPER_RUNTIME_GROUP}"
+        ) from exc
+    if snapshot.metadata.st_gid != paper_gid:
+        raise ValueError("paper owner environment has the wrong runtime group")
+    values = parse_systemd_environment_bytes(
+        snapshot.data,
+        label=f"paper owner environment {snapshot.path}",
+    )
+    roots = (
+        Path(values.get("ACCOUNT_EXECUTION_ROOT", "")).expanduser(),
+        Path(values.get("ACCOUNT_PAPER_CAPTURE_ROOT", "")).expanduser(),
+    )
+    if any(not root.is_absolute() for root in roots):
+        raise ValueError("paper owner environment requires absolute account and capture roots")
+    return roots
+
+
 def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
-    """A sleeve is active unless its kill-switch toggle (deploy/sleeves.env, loaded into this
-    watchdog's env via the liveness service EnvironmentFile) is off. ``default`` is the
-    last-resort value when the toggle is UNSET; it mirrors deploy/lib_sleeves.sh exactly
-    (EVERY sleeve fails safe to off since audit 2026-06-12 round 3 — a missing config
-    must never resurrect an order-submitting sleeve), so this watchdog can never page
-    for a retired sleeve nor expect a disabled sleeve to be up on a stripped/manual
-    invocation. In production the EnvironmentFile always sets the toggle, so the
-    default only matters off-VPS."""
+    """Read a sleeve toggle, failing safe to the supplied default."""
     return os.environ.get(env_var, default).strip().lower() in {"on", "1", "true", "yes"}
 
 
 def _continuous_rmom_refresh_on() -> bool:
-    """Mirror deploy/lib_sleeves.sh ``continuous_rmom_refresh_on``: the daily rmom
-    refresh runs when EITHER the continuous demo or continuous paper sleeve is on,
-    because both follow residual_momentum.parquet.
-    The watchdog must monitor those units under the SAME predicate the deploy uses to
-    enable them — otherwise, when both continuous sleeves are off (the documented
-    LONG-only kill-switch), the deploy disables the timers (systemctl disable --now ->
-    'inactive') while the watchdog still expects them 'active' and pages CRITICAL on an
-    intentionally-disabled timer every run (audit 2026-06-12 round 4)."""
+    """Match the deploy predicate: either CONTINUOUS sleeve needs RMOM refresh."""
     return _sleeve_on("CONTINUOUS_SLEEVE", default="off") or _sleeve_on("CONTINUOUS_PAPER_SLEEVE", default="off")
 
 
@@ -129,27 +153,12 @@ def evaluate_cycle_liveness(
 def evaluate_unit_states(
     unit_states: dict[str, str], *, prior_not_active_timers: set[str] | None = None
 ) -> list[Alert]:
-    """SERVICES alert only on the TERMINAL systemd ``failed`` state; TIMERS alert
-    on anything not ``active``, with a one-interval debounce.
+    """Alert on failed services and debounce inactive timers for one interval.
 
-    A deploy (or any ``Restart=always`` recovery) walks a service through
-    activating -> active -> deactivating -> inactive -> activating, so alerting
-    on anything-not-active would fire on EVERY deploy. ``failed`` is the only
-    unambiguous "systemd gave up" state; a daemon that is merely down/hung/stopped
-    is caught (naturally debounced) by the per-data-root cycle-age check instead.
-
-    TIMERS are different: a timer essentially never enters ``failed`` — a stopped
-    or disabled timer reports ``inactive`` and its scheduled job (hedge, daily
-    reports) simply never fires again, silently and forever (audit 2026-06-12
-    round 3). A healthy monitored timer is ``active`` (waiting), so not-active IS
-    the alarm. But a deploy briefly walks a timer through activating/inactive, and
-    a watchdog run landing in that window would page a self-resolving false CRITICAL
-    (audit 2026-06-12 round 4). So a timer's FIRST not-active observation is a
-    debounced WARNING; it escalates to CRITICAL only when it is STILL not-active on
-    the next run (``prior_not_active_timers`` — the set of units that were not-active
-    last run, threaded from the persisted watchdog state). A genuinely-dead periodic/
-    hourly timer is delayed at most one ~3-min interval before it pages CRITICAL,
-    while a deploy-window blip never escalates past WARNING and self-resolves."""
+    Cycle freshness catches hung/stopped strategy services. Timers need an
+    explicit inactive check because a disabled timer otherwise stays silent;
+    the debounce avoids escalating a transient deploy transition.
+    """
     prior = prior_not_active_timers or set()
     alerts: list[Alert] = []
     for unit, state in sorted(unit_states.items()):
@@ -214,77 +223,28 @@ def evaluate_required_account_owner_states(
     return alerts
 
 
-def evaluate_hedge_warmstart_freshness(
-    *,
-    last_date: date | None,
-    now_date: date,
-    max_age_days: float,
-    book_nonflat: bool = False,
-) -> Alert | None:
-    """Alert before a stale beta source reaches its first material hedge plan.
-
-    The hedge runner fails a stale non-flat book even when its desired target is
-    below the venue's executable quantity/notional filters.
-    This independent check still matters while the book is flat: it surfaces the
-    unavailable protection before the next entry turns the condition critical.
-    """
-    if last_date is None:
-        return Alert(
-            key="hedge_warmstart_stale",
-            severity=CRITICAL if book_nonflat else WARNING,
-            message=(
-                "continuous hedge beta warm-start is missing or unreadable; the armed hedge "
-                "will block risk-increasing orders. Rebuild and validate the canonical "
-                "deploy/hedge_warmstart/bybit_warmstart.csv artifact."
-            ),
-        )
-    age_days = (now_date - last_date).days
-    if age_days > max_age_days:
-        return Alert(
-            key="hedge_warmstart_stale",
-            severity=CRITICAL if book_nonflat else WARNING,
-            message=(
-                f"continuous hedge beta warm-start is STALE: data through {last_date.isoformat()} "
-                f"({age_days}d old, max {max_age_days:g}d). The timer can look healthy while "
-                "every risk-increasing hedge order is blocked; refresh the canonical component "
-                "ledgers and warm-start before treating BTC+ETH protection as available."
-            ),
-        )
-    return None
-
-
-def _warmstart_last_date(path: Path) -> date | None:
-    observations: list[date] = []
-    data_boundaries: list[date] = []
-    try:
-        with path.open(encoding="utf-8", newline="") as fh:
-            for row in csv.DictReader(fh):
-                for key, target in (
-                    ("date", observations),
-                    ("data_through_date", data_boundaries),
-                ):
-                    raw = str(row.get(key) or "").strip()
-                    if not raw:
-                        continue
-                    try:
-                        target.append(date.fromisoformat(raw))
-                    except ValueError:
-                        continue
-    except OSError:
-        return None
-    return max(data_boundaries) if data_boundaries else (max(observations) if observations else None)
-
-
-def gather_hedge_warmstart_alerts(
-    *, warmstart_path: Path, now_ms: int, max_age_days: float, book_nonflat: bool = False
+def gather_hedge_model_prior_alerts(
+    *, model_prior_path: Path, now_ms: int, book_nonflat: bool = False
 ) -> list[Alert]:
-    alert = evaluate_hedge_warmstart_freshness(
-        last_date=_warmstart_last_date(warmstart_path),
-        now_date=datetime.fromtimestamp(now_ms / 1000, tz=UTC).date(),
-        max_age_days=max_age_days,
-        book_nonflat=book_nonflat,
-    )
-    return [alert] if alert else []
+    """Check immutable-prior integrity, not meaningless wall-clock freshness."""
+
+    try:
+        require_usable_hedge_model_prior(
+            load_hedge_model_prior(model_prior_path),
+            as_of_date=datetime.fromtimestamp(now_ms / 1000, tz=UTC).date(),
+        )
+    except (OSError, ValueError) as exc:
+        return [
+            Alert(
+                key="hedge_model_prior_invalid",
+                severity=CRITICAL if book_nonflat else WARNING,
+                message=(
+                    f"continuous hedge {HEDGE_MODEL_PRIOR_KIND} is unusable: {str(exc)[:300]}. "
+                    "The armed hedge will fail closed until the commit-owned artifact is repaired."
+                ),
+            )
+        ]
+    return []
 
 
 def evaluate_ws_staleness(
@@ -335,22 +295,11 @@ def evaluate_rmom_staleness(*, max_rmom_day_ts: int, now_ms: int, max_stale_days
     return None
 
 
-# State-key namespace for a PENDING resolved-note retry. Keeping it distinct from
-# the bare alert-cooldown key is the fix for the flapping-CRITICAL false-negative
-# (audit 2026-06-12 round 4): a failed resolved-note send used to re-stamp the bare
-# alert key with its OLD alert-era timestamp, which select_alerts_to_send then read
-# as a fresh cooldown and suppressed a genuine re-fire for the remaining cooldown
-# window — exactly when a flapping UNPROTECTED / DAEMON-DOWN page is needed most.
+# Pending resolved-note retries must not share alert cooldown keys.
 _RESOLVED_PREFIX = "resolved:"
-# State-key namespace recording which TIMERS were not-active last run, for the
-# one-interval timer-CRITICAL debounce (audit 2026-06-12 round 4). Like the resolved
-# namespace, these entries are bookkeeping only and must never arm the alert cooldown
-# or be mistaken for a stale active alert to resolve.
+# Records inactive timers for the one-interval escalation debounce.
 _PENDING_TIMER_PREFIX = "pending_timer:"
-# State-key namespace recording the rank of the last-sent severity per alert key, so a
-# WARNING -> CRITICAL escalation (e.g. the debounced timer alert escalating on its
-# second consecutive not-active run) is ALWAYS sent even inside the cooldown window —
-# a severity bump must never be silently swallowed by the cooldown (audit round 4).
+# Records last-sent severity so escalation bypasses the cooldown.
 _SEV_PREFIX = "sev:"
 _RESERVED_PREFIXES = (_RESOLVED_PREFIX, _PENDING_TIMER_PREFIX, _SEV_PREFIX)
 _SEVERITY_RANK = {WARNING: 1, CRITICAL: 2}
@@ -428,29 +377,8 @@ def _unit_states(units: list[str]) -> dict[str, str]:
     return states
 
 
-def _unit_enabled(unit: str) -> bool:
-    """systemctl is-enabled, fail-quiet (a watchdog must never crash)."""
-    try:
-        return (
-            subprocess.run(
-                ["systemctl", "is-enabled", "--quiet", unit],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).returncode
-            == 0
-        )
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _default_units_for_toggles() -> list[str]:
-    units = [
-        *_REQUIRED_ACCOUNT_OWNER_UNITS,
-        # Always-on forward-evidence collector (enabled by every deploy): a failed
-        # collector is unbuyable history silently lost — page on it (audit 2026-06-12).
-        "liquidity-migration-liquidation-collector.service",
-    ]
+    units = list(_REQUIRED_ACCOUNT_OWNER_UNITS)
     if _sleeve_on("LONG_SLEEVE"):
         units.extend(
             [
@@ -477,7 +405,7 @@ def _default_units_for_toggles() -> list[str]:
                 # oneshot leaves the timer active/waiting and would otherwise never
                 # page. is-active on a failed oneshot reports "failed", which
                 # evaluate_unit_states alerts on. The hedge timer
-                # rides $CONTINUOUS_SLEEVE alone (deploy_vps_live.sh:239), not the
+                # rides $CONTINUOUS_SLEEVE alone, not the
                 # rmom-refresh predicate, so it stays in this DEMO-only branch.
                 "liquidity-migration-continuous-hedge.service",
             ]
@@ -491,20 +419,14 @@ def _default_units_for_toggles() -> list[str]:
         )
     if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         units.append("liquidity-migration-bybit-continuous-paper.service")
-    # The depth collector is operator-gated (deploy installs but never enables
-    # it). When the operator HAS enabled it, monitor it like the liquidation
-    # leg — same unbuyable-history argument; it could reach terminal 'failed'
-    # with nothing paging (round 4).
-    if _unit_enabled("liquidity-migration-depth-collector.service"):
-        units.append("liquidity-migration-depth-collector.service")
     return units
 
 
 def _default_units_for_scope(account_scope: str) -> list[str]:
     """Narrow the existing toggle-derived inventory to the authorized owners.
 
-    The full ``demo-paper`` path deliberately preserves the historical unit
-    inventory.  ``demo`` removes every paper owner/producer and does not monitor
+    The full ``demo-paper`` path preserves the toggle-derived unit inventory.
+    ``demo`` removes every paper owner/producer and does not monitor
     the shared RMOM refresh solely because a disabled paper sleeve is on.
     """
 
@@ -517,8 +439,6 @@ def _default_units_for_scope(account_scope: str) -> list[str]:
         _PAPER_ACCOUNT_OWNER_UNIT,
         "liquidity-migration-bybit-long-paper.service",
         "liquidity-migration-bybit-continuous-paper.service",
-        "liquidity-migration-liquidation-collector.service",
-        "liquidity-migration-depth-collector.service",
     }
     if not _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
         paper_units.update(
@@ -571,84 +491,6 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
             pass
 
 
-def _venue_newest_mtime_ms(venue_dir: Path) -> int:
-    """Newest *.jsonl mtime (ms) under a single venue subdir, 0 if none/unreadable."""
-    try:
-        return max(
-            (int(p.stat().st_mtime * 1000) for p in venue_dir.glob("*.jsonl")),
-            default=0,
-        )
-    except OSError:
-        return 0
-
-
-def gather_liquidation_capture_alerts(*, liquidations_root: Path, now_ms: int, max_age_hours: float) -> list[Alert]:
-    """Freshness of the forward Bybit liquidation capture.
-
-    The collector unit can never reach systemd "failed" (Restart=always with
-    RestartSec=15 spaces starts beyond the default start-limit window), so a
-    crash-looping or hung-but-connected collector loses unbuyable history silently
-    forever (audit 2026-06-12 round 3).
-
-    Binance forward liquidation capture was removed from the deployed collector.
-    Old ``data/liquidations/binance`` files may remain on disk as historical data,
-    but they are intentionally ignored here. Freshness is checked only for Bybit,
-    the currently deployed venue. A fresh box that has never written anything emits
-    nothing (the unit check covers a dead service)."""
-    if not liquidations_root.exists():
-        return []
-    bybit_mtime_ms = _venue_newest_mtime_ms(liquidations_root / "bybit")
-    if bybit_mtime_ms <= 0:
-        return []  # nothing ever captured here (fresh box) — the unit check covers a dead service
-    age_h = (now_ms - bybit_mtime_ms) / 3_600_000.0
-    if age_h > max_age_hours:
-        return [
-            Alert(
-                key="liquidation_capture_stale:bybit",
-                severity=WARNING,
-                message=(
-                    f"Bybit liquidation capture STALE — newest JSONL {age_h:.1f}h old "
-                    f"(> {max_age_hours:.0f}h). The collector is alive-but-not-writing "
-                    f"(it cannot reach systemd 'failed'); check its journal. Every silent "
-                    f"hour is forward history lost."
-                ),
-            )
-        ]
-    return []
-
-
-def gather_depth_capture_alerts(*, depth_root: Path, now_ms: int, max_age_hours: float) -> list[Alert]:
-    """Freshness of the forward depth capture, gated on the operator having
-    enabled the collector (round 4 — it was monitored by nothing). Mirrors the
-    liquidation gather: a stale newest-JSONL mtime means capture stopped while
-    the unit looks alive; Bybit has no historical book data, so every silent
-    hour is deployed-venue capacity data lost forever."""
-    if not depth_root.exists() or not _unit_enabled("liquidity-migration-depth-collector.service"):
-        return []
-    try:
-        newest_mtime_ms = max(
-            (int(p.stat().st_mtime * 1000) for p in depth_root.glob("*/*.jsonl")),
-            default=0,
-        )
-    except OSError:
-        newest_mtime_ms = 0
-    if newest_mtime_ms <= 0:
-        return []  # nothing ever captured (collector just enabled) — the unit check covers a dead service
-    age_h = (now_ms - newest_mtime_ms) / 3_600_000.0
-    if age_h > max_age_hours:
-        return [
-            Alert(
-                key="depth_capture_stale",
-                severity=WARNING,
-                message=(
-                    f"depth capture STALE — newest JSONL {age_h:.1f}h old (> {max_age_hours:.0f}h) "
-                    f"with the collector enabled. Check its journal; Bybit book history is unbuyable."
-                ),
-            )
-        ]
-    return []
-
-
 def gather_continuous_alerts(
     *,
     continuous_root: Path,
@@ -691,11 +533,8 @@ def gather_continuous_alerts(
             )
             if rmom_alert:
                 alerts.append(rmom_alert)
-            # Zero universe / empty kline store is the SAME silent-zero-signal failure as a stale rmom
-            # gate but via a different upstream cause (discover/ingestion or WS-kline failure) the rmom
-            # guard does not see -- both produce zero candidates that read like a quiet market.
-            # Keys carry the {label} so the demo and paper gathers can't collide in
-            # the cooldown map and suppress each other (audit 2026-06-12 round 3).
+            # Empty universe or kline input can masquerade as a quiet market.
+            # Include the root label so demo and paper cooldown keys stay distinct.
             universe_n = row.get("universe_symbols")
             if universe_n is not None and int(universe_n) == 0:
                 alerts.append(
@@ -806,8 +645,8 @@ def gather_account_capture_alerts(
 def gather_account_health_alerts(
     *,
     account_root: Path,
-    now_ms: int,
     max_age_minutes: float,
+    now_ms: int | None = None,
 ) -> list[Alert]:
     """Require a fresh, healthy venue snapshot from the canonical account journal."""
 
@@ -838,7 +677,8 @@ def gather_account_health_alerts(
         key=lambda event: int(event.payload.get("local_receive_ts_ns") or event.wall_ts_ns),
     )
     observed_ns = int(latest.payload.get("local_receive_ts_ns") or latest.wall_ts_ns)
-    age_minutes = (now_ms - observed_ns / 1_000_000.0) / 60_000.0
+    observed_now_ms = _now_ms() if now_ms is None else now_ms
+    age_minutes = (observed_now_ms - observed_ns / 1_000_000.0) / 60_000.0
     if age_minutes < 0.0 or age_minutes > max_age_minutes:
         return [
             Alert(
@@ -867,18 +707,26 @@ def gather_account_owner_health_alerts(
     *,
     account_root: Path,
     environment: str,
-    now_ms: int,
     max_age_minutes: float,
+    now_ms: int | None = None,
 ) -> list[Alert]:
     """Require fresh process, capital, rule-readiness, and status evidence."""
 
     try:
-        require_recent_account_owner_health(
-            account_root,
-            environment=environment,
-            max_age_ns=max(1, int(max_age_minutes * 60 * 1_000_000_000)),
-            now_ns=now_ms * 1_000_000,
-        )
+        max_age_ns = max(1, int(max_age_minutes * 60 * 1_000_000_000))
+        if now_ms is None:
+            require_recent_account_owner_health(
+                account_root,
+                environment=environment,
+                max_age_ns=max_age_ns,
+            )
+        else:
+            require_recent_account_owner_health(
+                account_root,
+                environment=environment,
+                max_age_ns=max_age_ns,
+                now_ns=now_ms * 1_000_000,
+            )
     except (OSError, RuntimeError, ValueError) as exc:
         return [
             Alert(
@@ -894,9 +742,7 @@ def gather_account_owner_health_alerts(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    """Exposed for the unit↔argparse parity test: the demo-liveness unit once
-    passed an arg this script had dropped (--data-root, 2026-06-11 purge) and
-    the watchdog crash-looped with only the VPS journal noticing."""
+    """Build the parser used by the systemd argument-parity test."""
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--unit",
@@ -912,9 +758,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
-    # Roots stay str (NOT type=Path): argparse type=Path turns the documented '' skip
-    # sentinel into Path('.') — truthy and existing — so the skip never skipped and the
-    # gather ran against the repo CWD, paging a FALSE CRITICAL with an empty label.
+    # Keep roots as strings so the empty-string skip sentinel does not become Path('.').
     # Defaults are anchored at the repo dir via _default_root (NOT relative to the CWD)
     # so a manual/cron invocation from another directory cannot silently disable
     # account/capture/strategy safety gathers.
@@ -953,6 +797,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="canonical paper account root for owner-health evidence",
     )
     p.add_argument(
+        "--account-paper-environment-file",
+        default=os.environ.get("ACCOUNT_PAPER_EXECUTION_ENV_FILE") or "",
+        help="private paper-owner EnvironmentFile whose bound roots override paper root arguments",
+    )
+    p.add_argument(
         "--account-capture-root",
         default=os.environ.get("ACCOUNT_CAPTURE_ROOT") or _default_root("data/bybit-account-market-capture"),
         help="demo account-owner market/readiness and decision-context root",
@@ -976,38 +825,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="critical alert if owner or demo reconciliation health is older than this",
     )
     p.add_argument(
-        "--hedge-warmstart",
+        "--hedge-model-prior",
         default=_default_root("deploy/hedge_warmstart/bybit_warmstart.csv"),
-        help="canonical Bybit hedge beta warm-start; warned when stale while CONTINUOUS is on ('' to skip)",
-    )
-    p.add_argument(
-        "--max-hedge-warmstart-age-days",
-        type=float,
-        default=3.0,
-        help="warn when the hedge beta tape's validated data boundary is this many days stale",
-    )
-    p.add_argument(
-        "--liquidations-root",
-        default=_default_root("data/liquidations"),
-        help="forward Bybit liquidation-capture root for the newest-JSONL freshness check ('' to skip)",
-    )
-    p.add_argument(
-        "--max-liquidation-age-hours",
-        type=float,
-        default=3.0,
-        help="warn if the newest captured liquidation JSONL is older than this",
-    )
-    p.add_argument(
-        "--depth-root",
-        default=_default_root("data/depth"),
-        help="forward depth-capture root for the newest-JSONL freshness check; "
-        "only checked when the depth collector unit is enabled ('' to skip)",
-    )
-    p.add_argument(
-        "--max-depth-age-hours",
-        type=float,
-        default=3.0,
-        help="warn if the newest captured depth JSONL is older than this (enabled collector only)",
+        help="commit-owned immutable hedge model prior; validated while the hedge timer is on ('' to skip)",
     )
     p.add_argument(
         "--max-rmom-stale-days",
@@ -1053,25 +873,31 @@ def main() -> int:
     continuous_paper_root = Path(args.continuous_paper_root) if str(args.continuous_paper_root).strip() else None
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
     long_paper_root = Path(args.long_paper_root) if str(args.long_paper_root).strip() else None
-    liquidations_root = Path(args.liquidations_root) if str(args.liquidations_root).strip() else None
-    # audit2b: anchor the state-file fallback at the repo dir (NOT CWD), matching the
-    # _default_root root anchoring — when BOTH sleeve roots are explicitly skipped the
-    # cooldown/dedup state must still land in one stable location, else a manual/cron run
-    # from another CWD reads an empty state and re-pages every persisting condition.
+    paper_account_root = Path(args.account_paper_root)
+    paper_capture_root = Path(args.account_paper_capture_root)
+    paper_root_alert: Alert | None = None
+    if args.account_scope == "demo-paper" and str(args.account_paper_environment_file).strip():
+        try:
+            paper_account_root, paper_capture_root = _paper_roots_from_environment(
+                args.account_paper_environment_file
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            paper_root_alert = Alert(
+                key="paper_account_environment_invalid",
+                severity=CRITICAL,
+                message=f"paper owner environment roots are unavailable: {type(exc).__name__}: {str(exc)[:400]}",
+            )
+    # Keep cooldown state stable even when both sleeve roots are skipped.
     _state_root = continuous_root or long_root or (_REPO_ROOT / "data")
     state_file = args.state_file or (_state_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
 
-    # Load state up front: the timer-not-active debounce needs the PRIOR run's
-    # not-active timer set (pending_timer:* namespace) to distinguish a transient
-    # deploy-window blip from a persistently dead timer (audit 2026-06-12 round 4).
+    # Timer escalation depends on the prior run's inactive set.
     state = _load_state(state_file)
     prior_not_active_timers = {k[len(_PENDING_TIMER_PREFIX) :] for k in state if k.startswith(_PENDING_TIMER_PREFIX)}
 
-    # Per-sleeve kill-switch: skip an intentionally-off sleeve's DAEMON checks so a
-    # deliberately-retired daemon doesn't false-page as "down" — but stop/mismatch
-    # checks on residual open rows always run ("off" does not flatten). Unset-defaults
-    # mirror deploy/lib_sleeves.sh: LONG off (round-3 fail-safe change), CONTINUOUS off.
+    # Skip cycle checks for disabled sleeves, but still inspect residual open state:
+    # turning a sleeve off does not flatten it.
     unit_states = _unit_states(units)
     not_active_timers = {u for u, s in unit_states.items() if u.endswith(".timer") and s != "active"}
     owner_states = {
@@ -1093,6 +919,8 @@ def main() -> int:
             required_units=required_account_owner_units,
         )
     )
+    if paper_root_alert is not None:
+        alerts.append(paper_root_alert)
     alerts.extend(
         gather_account_capture_alerts(
             capture_root=Path(args.account_capture_root),
@@ -1100,10 +928,10 @@ def main() -> int:
             max_age_minutes=args.max_account_capture_age_min,
         )
     )
-    if args.account_scope == "demo-paper":
+    if args.account_scope == "demo-paper" and paper_root_alert is None:
         alerts.extend(
             gather_account_capture_alerts(
-                capture_root=Path(args.account_paper_capture_root),
+                capture_root=paper_capture_root,
                 now_ms=now_ms,
                 max_age_minutes=args.max_account_capture_age_min,
                 label="paper",
@@ -1112,7 +940,6 @@ def main() -> int:
     alerts.extend(
         gather_account_health_alerts(
             account_root=Path(args.account_root),
-            now_ms=now_ms,
             max_age_minutes=args.max_account_health_age_min,
         )
     )
@@ -1120,34 +947,15 @@ def main() -> int:
         gather_account_owner_health_alerts(
             account_root=Path(args.account_root),
             environment="demo",
-            now_ms=now_ms,
             max_age_minutes=args.max_account_health_age_min,
         )
     )
-    if args.account_scope == "demo-paper":
+    if args.account_scope == "demo-paper" and paper_root_alert is None:
         alerts.extend(
             gather_account_owner_health_alerts(
-                account_root=Path(args.account_paper_root),
+                account_root=paper_account_root,
                 environment="paper",
-                now_ms=now_ms,
                 max_age_minutes=args.max_account_health_age_min,
-            )
-        )
-    if args.account_scope == "demo-paper" and liquidations_root is not None:
-        alerts.extend(
-            gather_liquidation_capture_alerts(
-                liquidations_root=liquidations_root,
-                now_ms=now_ms,
-                max_age_hours=args.max_liquidation_age_hours,
-            )
-        )
-    depth_root = Path(args.depth_root) if str(args.depth_root).strip() else None
-    if args.account_scope == "demo-paper" and depth_root is not None:
-        alerts.extend(
-            gather_depth_capture_alerts(
-                depth_root=depth_root,
-                now_ms=now_ms,
-                max_age_hours=args.max_depth_age_hours,
             )
         )
     if continuous_root is not None:
@@ -1159,13 +967,12 @@ def main() -> int:
                 cycle_checks=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
             )
         )
-    hedge_warmstart = Path(args.hedge_warmstart) if str(args.hedge_warmstart).strip() else None
-    if hedge_warmstart is not None and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
+    hedge_model_prior = Path(args.hedge_model_prior) if str(args.hedge_model_prior).strip() else None
+    if hedge_model_prior is not None and _sleeve_on("CONTINUOUS_HEDGE_TIMER", default="off"):
         alerts.extend(
-            gather_hedge_warmstart_alerts(
-                warmstart_path=hedge_warmstart,
+            gather_hedge_model_prior_alerts(
+                model_prior_path=hedge_model_prior,
                 now_ms=now_ms,
-                max_age_days=args.max_hedge_warmstart_age_days,
             )
         )
     if (
@@ -1206,9 +1013,7 @@ def main() -> int:
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min
     )
-    # Persist the current not-active timer set for the next run's debounce decision:
-    # a timer must be observed not-active on two consecutive runs to escalate to
-    # CRITICAL, so a deploy-window blip self-resolves as a one-run WARNING (round 4).
+    # Escalate a timer only after two consecutive inactive observations.
     new_state = {k: v for k, v in new_state.items() if not k.startswith(_PENDING_TIMER_PREFIX)}
     for unit in not_active_timers:
         new_state[f"{_PENDING_TIMER_PREFIX}{unit}"] = now_ms
@@ -1224,12 +1029,7 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
             if not delivered:
-                # send_telegram_message returns False (no exception) when the
-                # TELEGRAM_* env is missing or the API answers non-2xx — previously
-                # invisible AND recorded as sent, so a CRITICAL alert was suppressed
-                # for the whole cooldown without ever reaching the operator (audit
-                # 2026-06-12). Surface it and DON'T advance this alert's cooldown:
-                # the next run retries.
+                # An undelivered alert must not advance its cooldown or severity.
                 print("(telegram send returned False — TELEGRAM_* env missing or API non-2xx; will retry next run)")
                 # Revert BOTH the cooldown stamp and the last-sent-severity marker to
                 # their pre-send values so an undelivered alert advances neither — the
@@ -1254,14 +1054,7 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
             if not delivered:
-                # Track the pending resolved-note retry under a SEPARATE namespace
-                # (resolved:<key>) so the next run re-detects the resolution and retries
-                # the note — a dropped "resolved" left the operator believing the
-                # condition was still active (audit 2026-06-12 r3). The distinct
-                # namespace is the round-4 fix: re-stamping the bare alert key here used
-                # to re-arm its alert-side cooldown, suppressing a genuine re-fire of a
-                # flapping safety condition for the remaining window. The stored value is
-                # a marker only; select_alerts_to_send ignores resolved:* for cooldown.
+                # Retry under a separate namespace so it cannot arm alert cooldown.
                 new_state[retry_key] = now_ms
                 print("(telegram send returned False — resolved note will retry next run)")
                 continue

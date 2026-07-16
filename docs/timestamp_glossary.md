@@ -1,9 +1,8 @@
 # Timestamp glossary
 
 The current execution authority is the account journal, not a mutable sleeve
-trade row. Keep event time, strategy-decision time and compatibility-projection
-time separate: they answer different questions and cannot be substituted for
-one another.
+trade row. Keep event time, strategy-decision time and projection time separate:
+they answer different questions and cannot be substituted for one another.
 
 ## Canonical account-event clocks
 
@@ -19,12 +18,11 @@ Fill and acknowledgement payloads also retain their specific venue and local
 receive timestamps. Use those fields for execution latency and TCA. Never infer
 a venue fill time from a strategy projection or from file-write time.
 
-## Strategy and compatibility timestamps
+## Strategy projection timestamps
 
 Sleeve target metadata retains strategy-decision timestamps. The canonical
 strategy read model joins those targets to execution anchors reconstructed from
-the account journal. Target clocks and fill clocks remain separate even when a
-legacy-shaped projection carries both.
+the account journal. Target clocks and fill clocks remain separate.
 
 ### `signal_ts_ms`
 
@@ -57,13 +55,6 @@ Archived pre-account-kernel sleeve roots used this name for an actual fill time
 or, in paper mode, a submit-time idealization. Do not combine those legacy rows
 with current target projections without labelling the semantic change.
 
-### `opened_at_ms`
-
-On the current strategy read model this mirrors `entry_ts_ms`: the first
-attributable fill's local receive time. Archived direct-execution roots used it
-for Bybit's reported `createdTime`. Venue fill time remains separately preserved
-on the canonical execution event.
-
 ### `entry_target_ts_ms`
 
 The wall time of the first accepted non-zero component target. This is the
@@ -76,7 +67,7 @@ The strategy-decided hold duration published with an entry target. New target
 producers publish a duration, not an absolute decision-time deadline. Historical
 target metadata may be interpreted only as a labelled duration delta.
 
-### `planned_exit_ts_ms`
+### `max_hold_deadline_ts_ms`
 
 On the current strategy read model this is derived as first attributable fill
 time plus `max_hold_duration_ms`. It stays null before a fill or when attribution
@@ -84,12 +75,9 @@ is ambiguous. The sleeve may publish a zero target after this boundary; the
 field does not assert when the account owner will fill the resulting aggregate
 order.
 
-`target_planned_exit_ts_ms` preserves any legacy absolute deadline from target
-metadata for audit only. It is not a lifecycle clock.
-
 ### `ts_ms`
 
-The wall-clock write/update time on legacy-shaped Parquet rows. It is useful for
+The wall-clock write/update time on target Parquet projections. It is useful for
 ordering local projection writes only. It is not an exchange timestamp and it
 is not authoritative over the journal sequence.
 
@@ -97,9 +85,8 @@ is not authoritative over the journal sequence.
 
 - `signal_ts_ms` must not be later than the strategy decision that cites it.
 - `entry_target_ts_ms` must not precede the signal decision that produced it.
-- `entry_ts_ms` and `opened_at_ms` remain null until an attributable fill and,
-  when present, identify the same first-fill clock.
-- `planned_exit_ts_ms` equals fill time plus the declared duration whenever both
+- `entry_ts_ms` remains null until an attributable fill.
+- `max_hold_deadline_ts_ms` equals fill time plus the declared duration whenever both
   are available; it is not derived from target acceptance.
 - Component stop/take-profit prices are derived from confirmed fill VWAP, never
   from a decision reference price.

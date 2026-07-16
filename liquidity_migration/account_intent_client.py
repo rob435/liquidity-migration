@@ -88,28 +88,6 @@ class ExitFirstPublication:
     def entry_request_ids(self) -> tuple[str, ...]:
         return tuple(item.request.request_id for item in self.entry_requests)
 
-    @property
-    def entry_request(self) -> PublishedTargetRequest | None:
-        """Return the sole entry receipt when the publication is singular.
-
-        The compatibility accessor deliberately fails for independent
-        multi-request publication. Returning either the first receipt or
-        ``None`` would misrepresent durable queue state to existing callers.
-        """
-
-        if len(self.entry_requests) > 1:
-            raise RuntimeError("entry_request is ambiguous; use entry_requests for independent entry publication")
-        return self.entry_requests[0] if self.entry_requests else None
-
-    @property
-    def entry_request_id(self) -> str:
-        """Return the sole entry request id when that identity is unambiguous."""
-
-        if len(self.entry_requests) > 1:
-            raise RuntimeError("entry_request_id is ambiguous; use entry_request_ids for independent entry publication")
-        return self.entry_request_ids[0] if self.entry_request_ids else ""
-
-
 class AccountTargetPublisher:
     """Publish immutable target batches without exposing execution authority."""
 

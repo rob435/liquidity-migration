@@ -1,16 +1,6 @@
-"""Named, backfillable backtest warnings — the single place that turns a run's
-integrity signals into loud, actionable messages.
+"""Turn completed-run integrity signals into actionable warnings.
 
-Why this exists
----------------
-For a long time a backtest's health was encoded in one opaque ``run_label``
-string (e.g. ``pit_membership_filtered_current_universe``) that you had to decode
-by hand against a skill doc, plus a separate ``funding_mode`` buried in the
-summary. Two failure modes followed: a run either hard-aborted on missing data,
-or it silently handed back a number that was survivorship-biased. Neither told
-you *what* was wrong or *how to fix it*.
-
-This module replaces that with a flat list of :class:`RunWarning`s. Each carries
+Each :class:`RunWarning` carries
 
 * ``code``      — a stable, greppable identifier (``FUNDING_MISSING``, ...)
 * ``severity``  — ``info`` < ``warn`` < ``tainted``
@@ -25,8 +15,6 @@ Here it is surfaced loudly rather than hidden. Data-gap warnings (funding, clipp
 are ``warn``/``info``: the run is still produced, the gap is named, and you can
 backfill it yourself.
 
-The legacy ``run_label`` is still emitted alongside these warnings for the
-decision tooling that keys on it; this module is the human-facing surface.
 """
 from __future__ import annotations
 
@@ -170,12 +158,6 @@ def diagnose(
 def is_tainted(warnings: list[RunWarning]) -> bool:
     """True when any warning marks the result survivorship/look-ahead biased."""
     return any(w.severity == TAINTED for w in warnings)
-
-
-def max_severity(warnings: list[RunWarning]) -> str:
-    if not warnings:
-        return INFO
-    return max((w.severity for w in warnings), key=lambda s: _SEVERITY_RANK.get(s, 0))
 
 
 def render(warnings: list[RunWarning], *, title: str = "backtest") -> str:

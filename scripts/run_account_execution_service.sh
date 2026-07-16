@@ -20,11 +20,7 @@ ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_T
 ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-}"
 
 if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
-    echo "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required for account-owner cutover." >&2
-    exit 2
-fi
-if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
-    echo "account-execution-capture-enabled is required for the demo account owner." >&2
+    echo "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required for the demo account owner." >&2
     exit 2
 fi
 if [[ -z "$ACCOUNT_ROOT" || -z "$ACCOUNT_INTENT_INBOX_ROOT" || -z "$ACCOUNT_CAPTURE_ROOT" ]]; then

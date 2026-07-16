@@ -1,131 +1,85 @@
 # Data Roots
 
-Canonical index of which data root to use (research full-PIT vs. live demo/paper
-vs. forward OOS). Whether a root is currently built/present is live state — see STATE.md.
+Research roots and operational account roots are different trust domains. Never
+point an order-writing runtime at a research root or use a demo ledger as a PIT
+population source.
 
-## The roots are data, not code
+## Research full-PIT roots
 
-The per-venue full-PIT roots (`~/SHARED_DATA/bybit_full_pit`,
-`~/SHARED_DATA/binance_full_pit`) are data, not code — not committed. If a root is
-ever lost, the rebuild scripts below are the recovery path. The canonical Binance
-funding dataset is `binance_full_pit/binance_usdm_funding`; verify its current
-window coverage from the run/audit rather than a historical rebuild claim. The old
-`binance_full_pit_strategy` side-root no longer exists on this box.
-
-## Per-venue full-PIT working datasets (intended state)
-
-The two per-venue roots are storage surfaces, not statistical splits. A study
-may reserve temporal holdouts, use walk-forward evaluation, or use only the
-target venue. Cross-venue comparison is valuable when portability is part of
-the claim, but agreement between correlated crypto venues is not independent
-OOS proof and disagreement is evidence to explain, not automatically an
-artefact.
+The normal per-venue working roots are:
 
 ```text
-~/SHARED_DATA/bybit_full_pit       Bybit USDT linear perpetuals, ~2021-01..today
-                                   source: public.bybit.com/trading archive
-                                   + Bybit v5 kline REST (manifest-gated 1h/5m)
-                                   + Bybit v5 REST funding/OI/mark/index/premium
-
-~/SHARED_DATA/binance_full_pit     Binance USD-M perpetuals, ~2019-09..today
-                                   source: data.binance.vision monthly/daily archives
-                                   (canonical 1h/5m klines)
-                                   + Binance fapi REST funding/OI/mark/index/premium
-                                   + taker_flow_1h
+~/SHARED_DATA/bybit_full_pit
+~/SHARED_DATA/binance_full_pit
 ```
 
-Both roots are perpetuals-only by construction. The build scripts assert
-USDT-quoted symbols and fail loudly if any non-USDT symbol slips through.
+They are mutable local datasets, not committed artifacts and not statistical
+holdouts by themselves. Inspect actual manifest, kline, funding, and ancillary
+coverage for every claim; a directory name does not prove completeness.
 
-Rebuild on any machine (idempotent, resumable):
+The supported resumable builders are:
 
 ```bash
-bash scripts/build_full_pit_roots.sh        # full pipeline
-# Or the per-venue stages individually:
-bash scripts/archive_pre_rebuild_reports.sh
-bash scripts/build_full_pit_bybit.sh
-bash scripts/build_full_pit_binance.sh
-bash scripts/verify_full_pit_rebuild.sh
+BYBIT_START=YYYY-MM-DD BYBIT_END=YYYY-MM-DD \
+  bash scripts/build_full_pit_bybit.sh
+
+BINANCE_START=YYYY-MM-DD BINANCE_END=YYYY-MM-DD \
+  bash scripts/build_full_pit_binance.sh
 ```
 
-These roots are **not committed** (data, not code).
+All `END` values are exclusive. The Bybit builder combines archive-observed
+membership with explicitly labelled current-listing inference, downloads
+manifest-gated 1h klines, and adds funding/OI/mark/index/premium data. The
+Binance builder uses USD-M archive klines plus the current-month daily tail and
+adds funding/OI/mark/index/premium/taker flow. Read each script before a large
+run; defaults and upstream availability can change.
 
-## Evaluation surfaces and data exposure
+For a targeted Bybit manifest rebuild:
 
-A root spanning full available history does not mean every row must be used for
-design. Historical windows can be held out prospectively for a genuinely new
-claim. For the current strategies, much of both histories has already influenced
-research, so new paper/demo epochs are often the cleanest remaining prospective
-surface.
+```bash
+python -m liquidity_migration --data-root ROOT archive-manifest \
+  --start YYYY-MM-DD --end YYYY-MM-DD
+```
 
-Forward data stays untouched only until it is inspected or used to change the
-profile, threshold, stopping decision, or clock. Preserve immutable epochs and
-all reset/change points. A new clock does not erase the evidentiary exposure of
-earlier ledgers. See `docs/governance.md`.
+Use command help for targeted kline/data downloads. Preserve the exact command,
+root identity, source labels, boundary, warnings, config, and output receipt for
+decision-influencing work.
 
-## Demo + paper operational roots
+## Population and exposure limits
 
-The repository account-kernel layout uses separate operational roots **on the
-VPS** (these are not local research roots). Exact host paths come from
-`/etc/liquidity-migration/account-{,paper-}execution.env`; the canonical layout
-is:
+“Full PIT” means full coverage under the repository's declared manifest
+contract. It does not prove venue facts the sources never observed. Bybit
+current-listing-derived tail rows remain inference; they are not archive
+observations. See `docs/pit_gate.md`.
+
+A full-history root can still support a prospectively held-out time window, but
+only if that window has not influenced design. Once inspected or used to adapt
+the system, it is spent. Cross-venue agreement is robustness evidence when the
+claim needs it, not automatic independence.
+
+## Operational roots
+
+Exact VPS paths come from the strict files:
 
 ```text
-/opt/liquidity-migration/data/bybit-account-execution       # demo account journal + projections + owner health
-/opt/liquidity-migration/data/bybit-account-intents         # atomic demo target-request inbox
-/opt/liquidity-migration/data/bybit-account-market-capture  # raw demo-owner L2 capture
-/opt/liquidity-migration/data/bybit-account-paper           # paper account journal + projections + owner health
-/opt/liquidity-migration/data/bybit-account-paper-intents   # atomic paper target-request inbox
-/opt/liquidity-migration/data/bybit-account-paper-market-capture # independent raw paper L2 capture
-
-/opt/liquidity-migration/data/bybit-long-demo-event          # LONG signals, market cache and cycle telemetry
-/opt/liquidity-migration/data/bybit-long-paper-event         # LONG paper signals, market cache and cycle telemetry
-/opt/liquidity-migration/data/bybit-continuous-demo-event    # CONTINUOUS signals, market cache and cycle telemetry
-/opt/liquidity-migration/data/bybit-continuous-paper-event   # CONTINUOUS paper signals, market cache and cycle telemetry
+/etc/liquidity-migration/account-execution.env
+/etc/liquidity-migration/account-paper-execution.env
 ```
 
-The account roots, not mutable sleeve trade rows, are execution and accounting
-authority. Demo and paper sleeves publish absolute component targets to their
-respective inboxes. The demo account owner alone mutates Bybit; the paper owner
-alone advances the deterministic execution twin. Raw captures are intentionally
-independent so a healthy demo feed cannot hide a dead paper feed.
+Each route names a separate account journal root, target inbox, and market
+capture. Demo and paper roots must be absolute, real, owner-controlled,
+pairwise-disjoint, and non-nested. Strategy roots hold signal inputs, caches,
+and cycle telemetry; they are not position or P&L authority.
 
-Which sleeves are requested at any moment is `deploy/sleeves.env`; what is
-actually running is systemd state plus the resolved host environment and the
-read-only verifier. Turning a sleeve off stops new strategy decisions but does
-not delete canonical account history or imply that its existing target is flat.
+The demo account owner alone mutates Bybit. The paper owner alone advances the
+deterministic paper account. Their canonical journals own lifecycle and
+accounting state; Parquet views are rebuildable projections.
 
-VPS ledger history restarted from a clean slate at the 2026-06-09 full rebuild
-(all prior demo/paper history lost — see STATE.md). The research roots and VPS
-roots remain fully independent.
-Do not point any live account or sleeve root at a research root. Sleeve roots
-retain forward signal inputs, caches and cycle telemetry; compatibility
-Parquet views are not position or P&L authority. The account journal and its
-rebuildable projections own that state.
+`deploy/sleeves.env` sets the repository ceiling for target producers and the
+generated resolved file records effective host toggles. Turning a producer off
+does not erase its last accepted target or prove the account flat.
 
-Each sleeve has a target-publishing paper shadow on its own decision root
-(long: `data/bybit-long-paper-event`, continuous:
-`data/bybit-continuous-paper-event`) with the same profile, universe and cadence.
-The shared paper owner fills accepted aggregate targets against captured L2,
-subject to the same verified instrument rules and account kernel as demo.
-Comparing the paper and demo account journals measures model-versus-demo
-execution differences without pretending that the old sleeve-local idealized
-fill ledgers are authoritative.
-
-Use `scripts/ops.sh account-parity` for structural comparison of historical,
-paper and demo account journals. It records hashes and refuses empty journals,
-but it does not by itself prove shared market-tape or strategy-scheduler parity;
-see `docs/account_execution_cutover.md`.
-
-The former `scripts/reconcile.sh` and sleeve-local `reconcile-*` commands were
-retired on 2026-07-13. They read compatibility projections rather than the
-account journal and could therefore produce agreement without validating the
-current owner. Historical reports from those tools remain historical evidence;
-they are not a current operational gate. Use the exact research command for a
-new model/PIT claim, and use the account cutover acceptance checklist for a
-runtime claim.
-
-Do not use ad hoc current-universe or temporary recent roots for a historical
-universe claim. They remain useful for explicitly scoped diagnostics. A live
-`exchangeInfo` snapshot is not a historical membership source; see
-`docs/pit_gate.md` and `docs/governance.md`.
+Use `scripts/ops.sh status` for the bound runtime topology and
+`scripts/ops.sh venue-accounting` for a named stopped demo accounting interval.
+PIT validity remains a separate research check; there is no command that turns
+PIT coverage plus a live ledger into strategy or deployment proof.

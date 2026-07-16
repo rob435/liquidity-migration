@@ -129,12 +129,6 @@ class BybitRestRateLimiter:
                 "throttled_seconds": round(self._throttled_seconds, 3),
             }
 
-    def reset_stats(self) -> None:
-        with self._lock:
-            self._throttle_events = 0
-            self._throttled_seconds = 0.0
-
-
 INTERVAL_MS = {
     "1": 60_000,
     "3": 3 * 60_000,
@@ -198,8 +192,8 @@ class BybitMarketData:
         max_pages: int = 50,
         require_complete: bool = False,
     ) -> list[dict[str, Any]]:
-        # Bound the cursor walk (mirrors get_closed_pnl / get_funding_settlements /
-        # _cursor_result_list): a Bybit response that returns a stable, non-empty
+        # Bound the cursor walk (mirrors other paginated account/public reads):
+        # a Bybit response that returns a stable, non-empty
         # nextPageCursor would otherwise loop forever, hanging whatever thread
         # called it (each _get is bounded by pybit's 10s, but the loop is not).
         # 50 pages * 1000 rows comfortably covers the full linear universe; we
@@ -237,7 +231,7 @@ class BybitMarketData:
         )
         return rows
 
-    def get_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[dict[str, Any]]:
+    def get_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[list[Any]]:
         interval_ms = INTERVAL_MS[interval] if interval in INTERVAL_MS else int(interval) * 60_000
         rows_by_ts: dict[int, Any] = {}
         cursor = start
@@ -343,17 +337,9 @@ class BybitMarketData:
         end = int(params["endTime"])
         cursor_end = end
         limit = int(params.get("limit", 200))
-        # A prior FULL page (len == limit) is the only reason this loop continues
-        # to a second request, so it means "more rows are expected below `oldest`".
-        # An empty/no-timestamp page that follows such a full page is therefore a
-        # suspicious mid-range hole, not a genuine end-of-data: if we just `break`
-        # we return a truncated frame, and _download_symbol_dataset (downloaders.py)
-        # sees frame.height>0 and writes the FULL-requested-range completeness
-        # marker -> a permanent, silent coverage gap in funding/open_interest that
-        # _marked_complete never re-fetches (audit ingestion-1). Raise instead so
-        # the fetch fails and the symbol-range is retried rather than marked done.
-        # A first-page empty (cursor_end still == end, no full page yet) is the
-        # legitimate "no data in range" case and must NOT raise.
+        # An empty page after a full page is a mid-range hole, not end-of-data;
+        # fail so the requested range is not marked complete. An empty first page
+        # remains a legitimate no-data result.
         prior_full_page = False
         while cursor_end >= start:
             request_params = {**params, "startTime": start, "endTime": cursor_end}
@@ -467,46 +453,6 @@ class BybitMarketData:
                 "backoff_events": backoff_events,
                 "last_error": self.last_error,
             }
-
-    def reset_stats(self) -> None:
-        with self._stats_lock:
-            self.logical_calls = 0
-            self.http_calls = 0
-            self.retry_events = 0
-            self.rate_limit_events = 0
-            self.error_events = 0
-            self.slow_calls = 0
-            self.total_call_ms = 0.0
-            self.slow_call_ms = 0.0
-            self.last_error = ""
-
-
-@dataclass(slots=True)
-class BybitPublicTradeStream:
-    category: str = "linear"
-    testnet: bool = False
-    _client: Any = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        if WebSocket is None:
-            raise RuntimeError("pybit is required for BybitPublicTradeStream")
-        _patch_pybit_daemon_ping_timer()
-        self._client = WebSocket(testnet=self.testnet, channel_type=self.category)
-
-    def subscribe_public_trades(self, symbols: str | list[str], callback: Any) -> None:
-        if isinstance(symbols, str):
-            symbol_arg: str | list[str] = symbols
-        else:
-            symbol_arg = list(symbols)
-        self._client.trade_stream(symbol=symbol_arg, callback=callback)
-
-    def close(self) -> None:
-        for name in ("exit", "close", "stop"):
-            method = getattr(self._client, name, None)
-            if callable(method):
-                method()
-                return
-
 
 @dataclass(slots=True)
 class BybitPublicTickerStream:
@@ -970,14 +916,8 @@ class BybitKlineStreamPool:
             raise RuntimeError("internal error: on_bar callback not set")
 
         def _callback(message: dict[str, Any]) -> None:
-            # Concurrency note (audit-iter1 data-io-3): these counters and
-            # last_message_monotonic are written lock-free here from this connection's
-            # SINGLE pybit WS thread, and read (possibly one tick stale) under
-            # self._lock by stats()/check_stale_connections(). Single-writer means no
-            # lost update; the staleness math tolerates a sub-tick visibility lag. Do
-            # NOT wrap these writes in self._lock — that acquires the pool RLock on the
-            # hot per-bar path. If a free-threaded build ever needs stronger ordering,
-            # use a per-connection lock or atomics, not the shared pool lock.
+            # Each connection has one writer. Readers may see a sub-tick-old value;
+            # avoid the shared pool lock on this hot path.
             state.message_count += 1
             state.last_message_monotonic = time.monotonic()
             on_bar = self._on_bar
@@ -1272,11 +1212,6 @@ class BybitKlineStreamPool:
                 "stale_warnings_total": self._stale_warnings_total,
                 "per_connection": per_conn,
             }
-
-    def subscribed_symbols(self) -> set[str]:
-        with self._lock:
-            return set(self._symbol_to_connection)
-
 
 def _symbol_from_kline_topic(topic: str) -> str | None:
     """Extract the symbol component from a kline topic ``kline.60.SYMBOL``."""

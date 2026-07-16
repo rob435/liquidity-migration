@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID = "long_native_v11a_div_weekend_vol"
+LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME = "LongV11aDivWeekendVol"
 
 
 def long_trade_id(*, symbol: str, signal_ts_ms: int) -> str:

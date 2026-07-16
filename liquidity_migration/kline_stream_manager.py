@@ -89,8 +89,7 @@ class KlineStreamManager:
     # Per-IP REST budget the bootstrap (and cycle REST fallback) must stay under.
     # get_klines paginates: a >1000-bar lookback issues 2+ HTTP calls per symbol,
     # so the limiter has to be wired into the market client (one acquire per HTTP
-    # call), NOT acquired once per symbol — otherwise the effective rate is ~2x the
-    # budget and triggers the 429 storm this exists to prevent (audit ratelimit-rest-1).
+    # call), not acquired once per symbol, or pagination can exceed the budget.
     bootstrap_rest_max_requests: int = 12
     bootstrap_rest_per_seconds: float = 1.0
     flush_interval_seconds: float = 30.0
@@ -115,13 +114,12 @@ class KlineStreamManager:
     _universe_refreshes: int = field(init=False, repr=False, default=0)
     _universe_refresh_errors: int = field(init=False, repr=False, default=0)
     _last_universe_refresh_ms: int = field(init=False, repr=False, default=0)
-    _start_time_monotonic: float = field(init=False, repr=False, default=0.0)
     _lock: threading.RLock = field(init=False, repr=False)
     # Cycle-wake signal: an Event the daemon's run loop waits on, set when a
     # NEW confirmed bar boundary lands (first symbol to deliver a new hour),
     # so the daemon fires its cycle the instant fresh data arrives (WS-event-
-    # driven) instead of polling on a wall-clock timer. None = not wired
-    # (legacy timer path / tests).
+    # driven) instead of polling on a wall-clock timer. None means the daemon
+    # has not wired its event yet.
     _cycle_wake_event: threading.Event | None = field(init=False, repr=False, default=None)
     _max_confirmed_ts_ms: int = field(init=False, repr=False, default=0)
     # Shared REST limiter wired onto the market client so EACH paginated _get
@@ -152,14 +150,12 @@ class KlineStreamManager:
         # get_klines HTTP call (not just one-per-symbol) is throttled under the
         # per-IP budget. The bootstrap market client is built with no limiter
         # (acquire() would otherwise be a no-op), so the manager owns it. Respect a
-        # limiter the caller already attached, and tolerate a market stub that has
-        # no rate_limiter attribute (test fakes) — the limiter still exists for the
-        # manual-acquire-free contract, it just isn't wired onto a stub client.
+        # limiter the caller already attached.
         self._bootstrap_limiter = BybitRestRateLimiter(
             max_requests=self.bootstrap_rest_max_requests,
             per_seconds=self.bootstrap_rest_per_seconds,
         )
-        if getattr(self.market_data, "rate_limiter", "absent") is None:
+        if self.market_data.rate_limiter is None:
             self.market_data.rate_limiter = self._bootstrap_limiter
         if self.pool is None:
             self.pool = BybitKlineStreamPool(
@@ -181,9 +177,6 @@ class KlineStreamManager:
         cycles. Safe to call before or after start()."""
         self._cycle_wake_event = event
 
-    def is_started(self) -> bool:
-        return self._started and not self._stopped
-
     def start(self, *, shutdown_event: threading.Event | None = None) -> dict[str, Any]:
         """Start the manager: recover, bootstrap, subscribe WS, start threads.
 
@@ -204,7 +197,6 @@ class KlineStreamManager:
         if self._started:
             return self._start_stats(blocked=False)
         self._started = True
-        self._start_time_monotonic = time.monotonic()
         recovered = self._store.recover_from_disk()
         if recovered:
             _logger.info("kline_store recovered %d rows from flush file", recovered)
@@ -213,7 +205,7 @@ class KlineStreamManager:
             self._universe = set(universe)
         # Trim the recovered store to the active universe — a prior
         # daemon run may have subscribed a wider universe (e.g. before
-        # universe scoping landed on the long sleeve), and those legacy
+        # universe scoping landed on the long sleeve), and those out-of-scope
         # bars would otherwise sit in memory for 90 days waiting on
         # retain_days eviction. Skipped when the universe is empty so
         # a transient REST blip on the universe fetch doesn't blow the
@@ -223,7 +215,7 @@ class KlineStreamManager:
             dropped = self._store.keep_only_symbols(self._universe)
             if dropped:
                 _logger.info(
-                    "kline_store trimmed %d legacy rows outside the %d-symbol universe",
+                    "kline_store trimmed %d rows outside the %d-symbol universe",
                     dropped, len(self._universe),
                 )
         if shutdown_event is not None and shutdown_event.is_set():
@@ -280,9 +272,8 @@ class KlineStreamManager:
         """Synchronously re-fetch the universe + diff against the pool.
 
         Exposed for tests and operator-triggered manual refresh."""
-        # audit2b: snapshot the error counter so the empty-set guard below does
-        # not double-count an error _fetch_universe already counted (the default
-        # fetcher increments on its own REST exception path).
+        # Snapshot the counter so the empty-set guard does not double-count a
+        # fetch error already recorded by the default fetcher.
         errors_before_fetch = self._universe_refresh_errors
         new_universe = set(self._fetch_universe())
         # An empty fetch is almost always a transient REST failure (the
@@ -300,10 +291,7 @@ class KlineStreamManager:
                 "universe refresh returned empty set; keeping existing %d subscriptions",
                 size,
             )
-            # audit2b: only count the error here if _fetch_universe did NOT
-            # already count it (default-fetcher REST exception). A custom
-            # fetcher returning [] or a default fetch that simply filters to
-            # empty is still counted exactly once.
+            # Count an empty custom/default result exactly once.
             if self._universe_refresh_errors == errors_before_fetch:
                 self._universe_refresh_errors += 1
             self._last_universe_refresh_ms = _utc_now_ms()
@@ -322,9 +310,7 @@ class KlineStreamManager:
         # Event in as the shutdown signal so a SIGTERM mid-refresh-bootstrap (which
         # sets _refresh_stop in stop()) cancels the in-flight REST worker pool
         # promptly instead of leaving an orphaned 16-worker pool hammering the
-        # venue for up to bootstrap_timeout_seconds after the daemon believes it
-        # stopped (audit ws-pool-1). This is the one bootstrap path that previously
-        # bypassed the shutdown_event hardening on the start() path.
+        # venue after the daemon reports stopped.
         if additions:
             self._bootstrap_universe(
                 additions, label="universe-refresh", shutdown_event=self._refresh_stop,
@@ -403,8 +389,7 @@ class KlineStreamManager:
         # _on_bar runs on N pybit WS threads (one per pooled connection), so the
         # high-water-mark compare-and-set must be atomic — an unlocked read-modify-
         # write could lose a boundary advance under the hourly multi-connection
-        # burst (audit 2026-06-02 #22). Set the Event OUTSIDE the lock (it is
-        # thread-safe and we must not hold the lock across it).
+        # burst. Set the thread-safe Event outside the lock.
         wake = False
         with self._lock:
             if self._max_confirmed_ts_ms < bar_ts <= _utc_now_ms() + MS_PER_HOUR:
@@ -629,15 +614,15 @@ def _default_universe_filter(rows: list[dict[str, Any]]) -> list[str]:
     symbols: list[str] = []
     for row in rows:
         status = row.get("status")
-        quote = row.get("quoteCoin") or row.get("quote_coin")
-        settle = row.get("settleCoin") or row.get("settle_coin")
-        contract_type = row.get("contractType") or row.get("contract_type")
-        is_prelisting = bool(row.get("isPreListing") or row.get("is_prelisting"))
+        quote = row.get("quoteCoin")
+        settle = row.get("settleCoin")
+        contract_type = row.get("contractType")
+        is_prelisting = bool(row.get("isPreListing"))
         if status != "Trading" or is_prelisting:
             continue
         if quote != "USDT" or settle != "USDT":
             continue
-        if contract_type not in (None, "LinearPerpetual", "Linear", "linear"):
+        if contract_type != "LinearPerpetual":
             continue
         symbol = row.get("symbol")
         if isinstance(symbol, str) and symbol:
@@ -645,23 +630,10 @@ def _default_universe_filter(rows: list[dict[str, Any]]) -> list[str]:
     return sorted(set(symbols))
 
 
-def _kline_row_to_bar_dict(row: dict[str, Any]) -> dict[str, Any]:
-    """The cycle's _normalize_klines output is the canonical shape, but
-    REST returns lists. ``BybitMarketData.get_klines`` already returns rows
-    as the venue's list[str] form via the raw payload. We convert into the
-    store's expected dict (matching the WS bar shape) here."""
-    if isinstance(row, dict):
-        # Already-normalised — _normalize_klines path.
-        return {
-            "start": row.get("ts_ms"),
-            "open": row.get("open"),
-            "high": row.get("high"),
-            "low": row.get("low"),
-            "close": row.get("close"),
-            "volume": row.get("volume_base"),
-            "turnover": row.get("turnover_quote"),
-        }
-    # pybit raw list shape: [ts, open, high, low, close, volume, turnover]
+def _kline_row_to_bar_dict(row: list[Any]) -> dict[str, Any]:
+    """Convert Bybit's seven-field REST array to the WS bar shape."""
+    if len(row) != 7:
+        raise ValueError("Bybit kline row must contain exactly seven fields")
     return {
         "start": row[0],
         "open": row[1],

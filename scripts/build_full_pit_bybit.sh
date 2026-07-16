@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # Build the unified Bybit full-PIT data root.
-#
-# Replaces the two-root patchwork (bybit_fullpit_1h + bybit_oos_pre2023)
-# with a single root spanning from BYBIT_START (default 2021-01-01) to today.
+# Window: BYBIT_START (default 2021-01-01) to end-exclusive BYBIT_END.
 #
 # Stages:
-#   [1/5] archive-manifest               — PIT (symbol, date) membership
-#   [2/5] archive-download-klines-1h-api — 1h klines via Bybit v5 (manifest-gated)
-#   [3/5] filter-manifest                — drop rows with <20h kline coverage
-#   [4/5] download-data ancillaries      — funding, OI, mark/index/premium
-#   [5/5] download-data raw trades       — for signed-flow construction (optional)
+#   [1/4] archive-manifest               — PIT (symbol, date) membership
+#   [2/4] archive-download-klines-1h-api — 1h klines via Bybit v5 (manifest-gated)
+#   [3/4] filter-manifest                — drop rows with <20h kline coverage
+#   [4/4] download-data ancillaries      — funding, OI, mark/index/premium
 #
 # Perps-only by construction:
 #   * `archive-manifest` scans https://public.bybit.com/trading/ which only
@@ -93,7 +90,7 @@ if bad:
 print(",".join(syms))
 PY
 )
-# audit2b: empty symbol list must count as 0, not 1 (a blank line is not a symbol)
+# A blank symbol list has zero members.
 if [ -z "$SYMBOLS" ]; then
   N_SYMBOLS=0
 else

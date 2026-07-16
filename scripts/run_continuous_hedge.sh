@@ -40,11 +40,6 @@ if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]
     echo "ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT are required." >&2
     exit 2
 fi
-if [[ ! -e /etc/liquidity-migration/account-execution-capture-enabled ]]; then
-    echo "account-execution-capture-enabled is required for the hedge target publisher." >&2
-    exit 2
-fi
-VENUE="${HEDGE_VENUE:-bybit}"
 PRIMARY_ROOT="${PRIMARY_ROOT:-data/bybit-continuous-demo-event}"
 case "${CONTINUOUS_HEDGE_TIMER:-off}" in
     on|ON|On|1|true|TRUE|yes|YES) ;;
@@ -55,7 +50,6 @@ case "${CONTINUOUS_HEDGE_TIMER:-off}" in
 esac
 args=(
     --execution-environment "$EXECUTION_ENVIRONMENT"
-    --venue "$VENUE"
     --primary-root "$PRIMARY_ROOT"
 )
 case "${HEDGE_ACTION:-dry-run}" in

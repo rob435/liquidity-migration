@@ -1,617 +1,67 @@
-# Research Program State
+# Operational State
 
-Last updated: 2026-07-15.
+Updated from authenticated and systemd checks at 2026-07-16 00:40 UTC. These
+facts describe the installed commit named below, not the uncommitted cleanup.
 
-This is a descriptive live operating page, not research policy. Durable
-research decisions are in
-`docs/research_summary.md`; dated experiment anchors are indexed in
-`docs/preregistration/INDEX.md`.
+## Verified pre-cutover host state
 
-## Operational headline
+- Installed and authorized commit:
+  `2d42c7b78bd4945d65eb90f6a3e33d1b2e901cf2`, profile
+  `demo-operational`.
+- Demo owner and demo LONG/CONTINUOUS producers were active. Paper was excluded
+  by both the old receipt and the host sleeve override. Bulk collectors and raw
+  account-market persistence were off.
+- Authenticated Bybit demo reads showed zero non-flat positions and zero regular
+  or conditional orders before the owner was recycled.
+- The installed owner had rebuilt a 2.75 GiB resident set and pushed the 4 GiB
+  host into 2 GiB of swap. The cause is the installed commit's per-symbol raw
+  record retention, not account exposure. Recycling the proved-flat owner
+  restored about 3.1 GiB available memory and reduced swap use to 42 MiB.
+- The cleanup commit is not yet installed or authorized. It removes that raw
+  retention, bounds live-L2 subscriptions to active work, checkpoints unchanged
+  reconciliation truth, fixes the liveness timestamp race, and adds per-service
+  memory ceilings.
+- The tracked hedge history is an immutable model prior through 2026-07-09,
+  not a live-extended tape. Activation checks its schema, provenance, causal
+  boundary, and estimator sufficiency; elapsed wall time does not invalidate it.
+  Its coefficients can drift and are not current calibration or performance evidence.
+- Paper has not yet been started under the isolated account-owner topology.
+- Mainnet, `REAL_MONEY`, and real-money credentials remain unauthorized.
 
-| Sleeve | Mode | Current state |
-| --- | --- | --- |
-| `continuous_ensemble_v2` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
-| `LongV11aDivWeekendVol` | Bybit demo + paper | Maintenance-stopped; target-only unit installed but not started |
-| Shared account execution | demo + paper | Demo owner stopped and local/venue flat after failed V7 plus canonical recovery; V4--V7 evidence retained; paper never started |
+Historical candidate, rule-probe, reset, and flatness receipts are evidence for
+their exact old commits only. They do not authorize this changed tree.
 
-- Mainnet is not enabled. Changing that requires an explicit owner instruction
-  and new evidence.
-- The owner has separated operational execution from optional research capture.
-  The registered 120-hour natural/raw-tape study remains prospective and may be
-  run later on another machine; it is no longer a prerequisite for demo/paper
-  operation and no natural evidence claim is being made. Runtime safety still
-  requires live sequence-aware L2, a bounded same-generation market-readiness
-  sidecar, exact decision-boundary books, and the canonical account journal.
-  The prospective runtime change makes bulk order-book/public-trade persistence
-  explicit: `1` for registered V8/natural evidence, `0` for permanent VPS
-  operation. The paper owner still requires a passing V8 execution-twin
-  calibration; that gate is not waived.
-- Replacement candidate `b501be38a4caade21efd3607fcfcbdd1c892ec28`
-  passed all 2,971 local/pre-push tests and its single exact-head Linux run
-  (`29413772911`), installed cleanly, and passed the fresh rule/reset/clock/
-  demo-owner readiness gates. V8 then closed before publication because its
-  fixed `160 USDT` request was below BTC's unchanged `160.15725 USDT`
-  quantization-safe minimum. No V8 target, order, fill, event tape, or run
-  receipt exists. Authenticated venue/local flatness passed, all units stopped,
-  and the temporary authority was retired. Paper remains blocked and V8 cannot
-  be resized or retried. A distinct prospective `demo-operational` profile is
-  being implemented to run only the raw-disabled demo owner/producers/hedge/
-  refresh/liveness surface; it cannot authorize paper or satisfy V8.
-  Permanent operational authorization additionally requires one immutable
-  candidate-universe artifact to serve as the owner symbol file and both demo
-  producers' population ceiling, then reopens the demo-rule receipt to prove
-  exact, source-bound rule coverage. The old three-symbol V8 files do not meet
-  that operational invariant.
-- Demo-operational candidate
-  `1690093011b35d0693f76ca754d0c28c12f9d8e1` passed repository Ruff,
-  all 2,979 local/pre-push tests, and its single exact-head noncontacting Linux
-  run (`29429929636`). Its stopped-fleet install preflight also passed after a
-  separately retained first candidate exposed and repaired an empty-unit-list
-  parser defect. The installed candidate froze one self-hashed 620-symbol
-  public-demo population, then its first credentialed full-population rule
-  probe failed on `0GUSDT` before authorization or service startup. The exact
-  PostOnly order was accepted at 9.97376 USDT and cancelled with no execution,
-  but the asynchronous order-history surface remained empty for all 100
-  bounded polls over 30 seconds. Cleanup and final authenticated flatness
-  passed. The private failure receipt is retained at
-  `/var/lib/liquidity-migration/cutover-evidence/demo-operational-1690093-OgYr5Iyg/demo-rules-demo-operational.json.failed-1784131354681439580.json`
-  with artifact SHA-256
-  `091207fbdbda0935d296e96d8deb272bb2347ac9b91ff38a074d606f715a00b4`.
-  A later read-only exact-identity query observed that same order as
-  `Cancelled`, with zero cumulative quantity/value and no executions. The
-  prospective repair inspects both official order-history and recent
-  real-time closed-order surfaces on every poll, requires two terminal
-  confirmations plus empty execution history, and fails on any identity,
-  status, or fill contradiction. It does not relabel or overwrite the failed
-  receipt. The VPS remains flat, stopped, and unauthorized.
-- Replacement candidate
-  `38f11d070d6a5d0a99bd76e52f139586df0c8aab` repaired the delayed-history
-  verifier, passed repository Ruff and all 2,987 local/pre-push tests, passed
-  exact-head noncontacting Linux run `29432072223`, and passed stopped-fleet
-  install-preflight run `29432605744` including 174 host smoke tests. Its fresh
-  620-symbol freeze self-hashes to
-  `c1fc7f03409de4df4aee024e25af9716a66fe905614dbcfc8c2b6a88ad1895ef`.
-  The one full-population probe advanced through 20 verified crypto rules, then
-  failed on `AAOIUSDT` when Bybit returned `110126` because the account had not
-  signed the separate agreement required for that stock perpetual. Cleanup and
-  final authenticated flatness passed; no authority or service startup
-  occurred. The retained private failure receipt self-hashes to
-  `76b52c589c4142674ef542390eba272e7acb3c90cb82c2202db5539dee46e610`.
-  Source replay then proved the population bug: the linear endpoint now mixed
-  100 `stock` and four `commodity` perps into this repository's crypto-perp
-  universe. No agreement was signed. The prospective schema-v3 repair retains
-  and hashes all 728 instrument rows, records every product-type exclusion, and
-  removes non-crypto or unknown `symbolType` rows before liquidity ranking.
-  Replaying it on the retained source changes the operational population from
-  620 to 516 symbols by removing exactly those 104 non-crypto rows; all 120
-  `innovation` crypto rows remain eligible. This is an intended domain
-  correction, not a refactor or alpha result. The VPS remains flat, stopped,
-  paper-disabled, and unauthorized.
-- Candidate `181027b0853db9e543e30504211d701c7c95fc86` passed all 2,970 local
-  tests, the canonical pre-push gate, and its single exact-head noncontacting
-  Linux run (`29411462086`). It installed cleanly on the stopped VPS, and the
-  guarded reset archived the prior 6.9-GB raw root into an independently
-  reopened 877-MB archive while proving zero demo positions/orders and creating
-  six fresh roots. The first credentialed schema-v3 rule probe then failed
-  before owner startup or any V8 target: BUSDT terminal cancellation history
-  appeared only once at the five-second boundary, while the gate requires two
-  confirmations. Cleanup and final flatness passed. Candidate `181027b` is
-  spent; a prospective replacement extends only the bounded read-only history
-  observation window to 30 seconds/100 polls without weakening identity,
-  no-fill, rate, cleanup, or flatness evidence.
-- Candidate `0f05060ee30de819f270c3cb695a7f9b66fbebdd` passed its
-  2,957-test local and canonical pre-push gates. Its one exact-head Linux run
-  (`29403931189`) then failed only
-  `test_writer_rotates_by_utc_day_and_venue`: the test selected one of two
-  dated files through unspecified filesystem traversal order. The retained
-  result was 2,956 passes and one failure; it was not retried and the candidate
-  is spent. The prospective fix selects the two exact dated paths and asserts
-  their contents. A new candidate and one new exact-head run are required.
-- The VPS retains the verified old-root archive outside the checkout and has
-  about 25 GB free after replacing the archived live raw root with the fresh
-  V8 epoch. The configured paper twin calibration receipt is still absent.
-  Existing bytes remain preserved; permanent operational mode stops bulk
-  capture growth rather than deleting history.
-- V7 is closed and spent. Its final `0.002 BTC` funding-hold close failed the
-  unchanged four-second position-truth freshness rule; a separate canonical
-  recovery target flattened the account, after which concurrent REST
-  finalization exposed a second immutable-Close collision. Final proof found
-  journal integrity at 6,804 events, zero local/venue positions, zero regular or
-  conditional orders, and no active project unit. Paper and ordinary producers
-  never started. V8 was registered as a corrected-defect successor with the
-  exact V7 sample/risk/clock/decision rules and no V7 sample reuse; it later
-  closed at its immutable prepublication size gate as recorded above.
-- Flat maintenance began at `2026-07-13T22:53:17Z`. Immediately before the
-  stop, the VPS was clean at `5f6d9986d935`, the demo key was order-capable,
-  and Bybit reported zero active positions, regular orders, and conditional
-  orders. Every `liquidity-migration-*` unit was then stopped. The post-stop
-  venue query was still flat, and the before/after unit inventories plus
-  checksums are retained under
-  `/var/lib/liquidity-migration/cutover-evidence/20260713T225317Z`.
-- Read-only post-failure host inspection proved the checkout clean on branch
-  `codex/account-execution-cutover` at old runtime commit
-  `98b3916a4a135df3508f051f2354bc2346904690`. Candidate
-  `c7d6509d3a21c75db77ed9486129a3cc4cfaa591` passed 2,950 local tests and an
-  exact-head non-contacting Ubuntu candidate-CI run, but it was never installed
-  and does not repair the V7 defects. Replacement candidate
-  `54536f194d91bcabb5fe8f47310c6a09928ecf12` repaired those defects and passed
-  2,954 local tests plus exact-head non-contacting Ubuntu candidate CI, but a
-  first public-demo capacity diagnostic then exposed one noncanonical
-  ticker-only Bybit row that made candidate-universe construction fail before
-  output. It was not retried or installed and is also spent. The prospective
-  schema-v2 repair keeps and hashes the raw row, records it explicitly as
-  outside candidate evaluation, and preserves strict validation for every
-  instrument-mappable row. First schema-v2 candidate
-  `344cd727b0d89380dd8bf4e7aaa112bfe5b3d885` passed repository Ruff and all
-  2,956 tests in its registered local suite. Its canonical pre-push gate then
-  failed before network update because the tracked hook put pytest's basetemp
-  below `.git/tmp`; nine existing Strategy Overhaul source-snapshot tests
-  correctly reject any output root inside the repository. The result was 2,947
-  passes, one failure, and eight setup errors. The candidate was not pushed or
-  installed and is spent. The prospective hook repair moves and validates the
-  basetemp outside the repository without changing any alpha test or rule. A
-  new clean replacement candidate and all applicable gates are required before
-  staging V8. This remains maintenance work, not deployment.
-- The guarded all-sleeve reset completed at `2026-07-13T23:43:14Z`. It re-proved
-  venue flatness, archived 12 legacy projections/roots plus preserved risk
-  state to a verified 335-MB archive with SHA-256
-  `07e76e35e688fb6f20e17c78ea9bc8489144c852f4c99fcb9964d887c06c6d6a`,
-  rebuilt compatibility projections from preserved canonical journals, and
-  created six fresh empty demo/paper account, inbox, and capture roots. Every
-  unit was inactive before reset and remained inactive afterward.
-- A first 20-USDT rule-probe ceiling failed before order submission because
-  current BTC minimum quantity exceeded it. The failure is retained rather
-  than hidden. A second flat-account 200-USDT feasibility probe passed with
-  observed minima `BTCUSDT=62.1029`, `ETHUSDT=17.6703`, and `BUSDT=5.05579`
-  USDT and no residual order/position. That invalidated the original $30 plan.
-  Static inspection then closed the $80 v2 before startup because BTC
-  quantity-step rounding erased its executable buffer. V3 fixed $160 and a
-  quantization-safe 2.5-times-minimum preflight, but its first clock receipt
-  failed the fixed 50-ms error ceiling. Persistent diagnostics showed the
-  official demo endpoint path itself is roughly 169 ms RTT, so no blind retry
-  was attempted. V4 retained $160 and registered one preconnected session with
-  a disclosed 100-ms worst-case error ceiling. Its fresh schema-v2 clock
-  receipt passed with an 84.805-ms maximum midpoint-error estimate.
-- The committed account-execution overhaul has one append-only account
-  kernel, atomic cross-sleeve target aggregation/risk, deterministic scheduling
-  and fault injection, sequence-aware L2 capture, a market-order execution twin,
-  target-only LONG/CONTINUOUS/hedge/risk adapters, and fail-closed paper/demo
-  owner launchers. Component lifecycle clocks and protection now start from
-  attributable confirmed fills, not accepted targets or decision prices;
-  account/symbol reduction P&L is counted once per canonical batch. Telegram
-  separates venue position truth from local reconstruction and labels
-  L2-midpoint P&L as an estimate. The runtime now requires one explicit
-  `demo|paper` environment, and the unreachable sleeve-direct execution modules
-  are deleted. The demo owner also recovers strict Bybit funding-settlement rows,
-  and a new owner-serialized read-only receipt can reconcile stopped-journal
-  target/order/fill lineage, fees, closed P&L, funding, and pre/post flatness.
-  Commit `b82a378cfcf0` is published and was recorded as staged on the VPS. Its
-  bounded calibration driver, retained-stop transition, and independent public
-  clock-offset receipt passed 2,428 local tests and 142 remote Linux smoke
-  tests. The demo owner started alone, created the route, stayed healthy/flat,
-  and captured all three L2 books.
-  V4 then emitted one canonical BTC target and received a real `0.002 BTC`
-  fill. It failed immediately rather than accepting a result: REST position
-  truth temporarily preceded private-fill journal propagation, and the REST
-  ACK/private-fill race exposed a second-observer immutable-ACK collision. A
-  separate canonical recovery-zero target closed the position; final evidence
-  proved local and venue flatness plus no open orders, and the owner was
-  stopped. V4 is spent and cannot be resumed or counted. Commit `c113d78014e0`
-  then passed 2,424 local tests, repository-wide Ruff, scoped mypy, and 142
-  remote Linux smoke tests. A second guarded reset archived the failed V4 epoch
-  to a 6.0-MB archive with SHA-256
-  `56cb3787d12b9c6e72bb684e59b37e3c6fbdc62fded8db32612da293bf629f7c`
-  and created another six fresh roots. V5's fresh clock receipt passed with an
-  84.668-ms maximum midpoint-error estimate. Its first BTC open and close each
-  filled `0.002 BTC`; the journal recorded both fees and a provisional
-  `-0.13755984 USDT` reduction P&L. V5 still aborted: after the zero target
-  removed the component owner but before its reduce-only fill updated the
-  position, native-protection sync misclassified the canonical in-flight close
-  as ownerless. Final self-hashed evidence proved local/venue flatness and no
-  open orders, and the owner was stopped. V5 is spent. Commit `b82a378cfcf0`
-  then passed 2,428 local tests, repository-wide Ruff, scoped mypy, and 142
-  remote Linux smoke tests. A third guarded reset archived V5 under SHA-256
-  `bdcb6399c255863eef648b7424ca9121ef46c49726a1b98dff026d3d74969c0f`.
-  V6's fresh clock gate passed at 84.664-ms maximum error. Its retained-stop
-  repair worked across four real closes, but event 9 opened `+0.08 ETH` and the
-  next between-step gate failed because health stayed one journal sequence
-  behind reconciliation's newer snapshot. The exact V6 error was
-  `health=201, journal=202`; the producer stopped without lowering the gate.
-  One separately labelled canonical recovery command closed ETH. Self-hashed
-  evidence proved local/venue flatness, zero orders, and a genuine stopped
-  health/journal match at sequence 367. V6 is spent. Paper and ordinary
-  producers were never started. The V7 change republished owner health after
-  every journal-head change while reusing the last wallet snapshot for
-  journal-only refreshes; exact-head validation and every numerical gate remain
-  unchanged. V7 subsequently completed the fixed round-trip sequence and
-  opened its registered BTC funding hold, but its final exact zero failed
-  because direct position truth was 9--20 seconds old after slow journal/funding
-  work. The failed receipt has plan hash
-  `57aac4431f792c72ef0d406f86573729412ca63e912c179574d9b8c126be7af6`
-  and self-hash
-  `5b502b9194e6dc38b80560ac8a487e193eeb367f55d350b527effb281ee746da`.
-  A separate HEDGE-authored recovery zero closed BTC; concurrent REST
-  redelivery then exposed changed immutable Close content and the recovery
-  owner failed closed. Final local/venue flatness and stopped-state proof
-  passed. V7 cannot be resumed or counted.
+## Intended runtime
 
-  V8 retained the exact fixed plan and thresholds. Its replacement source runs
-  funding recovery before direct position reconciliation,
-  timestamps truth after the REST response, reuses verified journal/read-only
-  state caches, and commits terminal reduce-batch Close/P&L atomically. No age,
-  retry, risk, or evidence threshold was relaxed. Candidate `b501be3` passed the
-  source/candidate/runtime preconditions, but the immutable size preflight
-  closed V8 before any target as recorded above.
-- Historical CONTINUOUS market orders and LONG standard, bounded sniper, and
-  provisional triggers now consume risk/execution feedback through a persistent
-  common-kernel session before later decisions. Historical, paper, and demo now
-  share an ordered hash-chained event-clock boundary and callback time for the
-  registered active LONG/CONT natural market-order paths. This is not literal
-  parity for every timer or mode: arrival/selection adapters are not yet full
-  strategy parity, and hedge/RMOM/liveness, CONTINUOUS adverse-limit mode, and
-  LONG waits beyond 24 hours remain outside that runtime claim or in post-run
-  replay.
-- The research-promotion cutover gate remains open: fresh rules and failed
-  V4--V8 evidence exist, but V8 produced no execution sample or partial-fill
-  result; there is
-  no passing calibration tape, 120-hour natural LONG/CONT tape, periodic clock
-  series, stopped-source seal, offline replay/parity/sufficiency/drift result,
-  fresh-deploy epoch, or historical/paper/demo promotion comparison. Those
-  missing artifacts still prohibit any natural/replay/promotion claim. They no
-  longer prohibit a separately owner-authorized demo-only operational path.
-  That path requires one exact clean candidate, its complete local and
-  non-contacting Linux gates, verified demo flatness, exact immutable runtime
-  inputs, raw persistence `0`, paper disabled, and a machine/commit-bound
-  mode-`0600` authorization. Full demo/paper operation still requires a new
-  prospective paper-calibration decision. The stopped and fresh epoch constructors
-  are integrity mechanisms in source, not evidence that either epoch exists.
-  The earlier generic stopped-tree provenance implementation blocker is closed
-  in source: target-replay manifest v2, event parity v3, captured-account replay
-  v3, comparison scope v3, kernel receipt v4, natural sufficiency v3, and the
-  authority aggregate v4 now form a source-reopening path/hash dependency chain
-  with derived-output disjointness checks. Their local timestamps enforce
-  declared internal chronology; they are not authenticated wall-clock proof.
-  The target manifest assigns its completion time after replay construction,
-  while dependency hashes and source reopening carry the causal provenance.
-  None of these validators is a run artifact. The paper owner refuses startup
-  without a passing calibration. Research-promotion deploy requires a short-lived,
-  mode-`0600` `account-execution-deploy-ready` authorization receipt that binds
-  the exact clean commit and complete source-reopened gate set. No such receipt
-  has been issued.
-- The owner reports that the Strategy Overhaul master plan is currently running
-  on the big PC for alpha research. That workload is separate from this
-  execution cutover; no big-PC result or artifact has been ingested or judged in
-  this workspace, and it grants no deployment authority.
-- The 2026-07-12 flatness snapshots, reset archives, XRP minimum-order probe,
-  hedge smoke, and commit `6f2bde773` statements below are historical receipts.
-  They do not describe the currently audited VPS checkout or satisfy this new
-  account-owner cutover.
-- An external liveness dead-man URL is still not provisioned. The on-box timer
-  works, but an off-box heartbeat should be added before any mainnet discussion.
+The intended cutover mode is `operational`: demo and isolated paper account
+owners, enabled demo/paper LONG and CONTINUOUS producers, continuous demo
+hedge/RMOM timers, and demo-paper liveness. Its commit-owned paper model is
+explicitly `integration_only_uncalibrated`; paper is neither performance
+evidence nor full hedged-portfolio parity. Both profiles require raw bulk market persistence
+disabled; live L2 readiness, decision books, canonical journals,
+reconciliation, and protection remain mandatory.
 
-## 1000TAGUSDT incident
+Paper runs as a non-login user without demo/mainnet credentials, with private
+state roots, byte-identical isolated candidate/rule/risk inputs, narrow
+read-only access to shared public snapshots, and hard memory/swap ceilings.
+Those controls bound failure; they do not prove that all six persistent workers
+fit the 4 GiB host. Activation therefore requires a multi-cycle resource soak.
 
-Entry equity was `$10,039.6785`. Venue executions and account records reconcile
-as follows:
+## Required next sequence
 
-| Layer | Base | Sniper | Total |
-| --- | ---: | ---: | ---: |
-| Price PnL | -$72.44380000 | -$15.10110000 | -$87.54490000 |
-| Trading fees | -$0.29927414 | -$0.05532786 | -$0.35460200 |
-| Before funding | -$72.74307414 | -$15.15642786 | -$87.89950200 |
-| Six funding credits | — | — | +$0.20271274 |
-| Bybit account Closed-PnL | — | — | **-$87.69678926** |
+1. Bind the validated cleanup to one exact clean commit.
+2. While the fleet is quiescent, run the stopped `install` phase for that commit.
+3. Recheck environment files, roots, candidate universe, rules, risk policy,
+   sleeve toggles, authenticated demo flatness, and hedge model-prior identity.
+4. Issue a new create-only operational authorization for the exact installed
+   commit, machine, profile, environment bytes, runtime inputs, and root identities.
+5. Run `activate`, then the read-only `verify` path. Owners start before producers;
+   any mismatch fails closed.
 
-The final loss was 0.873502% of entry equity. The local sniper ledger is not
-venue authority because the shared-symbol exit was historically attributed to
-the wrong leg. Full reconstruction and decisions:
-`docs/incidents/2026-07-10-1000tag.md`.
+Commands and required handshakes are in `docs/operations.md`. Architecture and
+claim limits are in `docs/account_execution.md`.
 
-This event does not establish that a fixed stop helps. Full portfolio replays
-of 20%, 40%, and 80% adverse stops reduced MAR on both venues. What it does
-establish is that a demo-only add-on without paper/backtest parity, an explicit
-loss budget, or reliable component attribution was unjustified.
+## Research state
 
-## Continuous target
-
-- Baseline clock: `2026-06-18T19:54:00Z`.
-- Components: p3 `1/3`, p4p3 `2/9`, p4p5 `4/9`.
-- Entry: stable causal rmom q25, inverse-vol sizing (`target=0.01`, clamp `2`),
-  prior-day BTC uptrend gate, and `CTRL_BTC_RISK_70_90_35` sizing.
-- Portfolio: max 25 active shorts, max 5 new per cycle, BTC+ETH hedge, BTC-vol
-  regime, daily rebalance off.
-- Exit: component TP12 and durable 24-hour max hold.
-- Removed from the future runtime: the demo-only adverse-limit add-on. Disabled:
-  fixed/server stop, left-decile, stop-approach, failed-fade, breakeven,
-  re-entry cooldown, portfolio heat overlay, account drawdown overlay.
-
-The adverse-limit config, placement, cleanup, notification, CLI, launcher and
-unit wiring are absent from the future target-only runtime. Historical links and
-ledger rows remain readable for attribution. This cleanup deletion is safe only
-behind the account-owner startup gates: a new journal requires venue-flat
-positions and zero regular or conditional orders; restarts accept only exact
-journal-owned working orders or verified journal-backed native protection.
-The TP12 and max-hold runtime now anchor to confirmed fill VWAP/time. This is an
-intentional forward-runtime semantic correction, not a byte-parity refactor;
-deployment requires a new archived/reset demo-paper epoch and fresh acceptance
-evidence.
-
-## Hedge availability and limits
-
-- The tape is built from the exact live TP12 + BTC-risk-sizing object on the
-  stable-only RMOM engine, with modeled funding, 200 observations, and a
-  validated data boundary of `2026-07-09`. On `2026-07-12` it is three days old,
-  inside the armed manager's maximum age. The official Bybit 1x receipt remains
-  `exploratory`: +24.36% return, -1.20% max drawdown, MAR 6.22. It is an
-  operational beta input, not new alpha or promotion evidence.
-- The three historical BUSDT shorts were not left unhedged by an inactive timer.
-  Their combined gross short fraction was only 1.02%; every five-minute manager
-  pass computed a `$2.73` BTC target and `$0.00` ETH target. The then-active $25
-  strategy floor suppressed it, but removing that floor would still not have
-  produced a BTC order: the contemporaneous 0.001 BTC quantity step required
-  roughly `$64.18` at the venue.
-- The arbitrary $25 hedge floor is now removed. Every nonzero desired target is
-  planned and the executor reports the desired/current delta plus the live
-  per-leg `qtyStep`, `minOrderQty`, `minNotionalValue`, and effective executable
-  minimum. The contemporaneous effective minimums were about `$64.18` BTC and
-  `$18.21` ETH; suitable alt contracts can execute close to `$5`.
-- A bounded deployed-code smoke at `2026-07-12T20:41Z` proved the actual venue
-  lifecycle. The manager bought 0.001 BTC at Bybit's confirmed `64172.5` fill,
-  persisted it as `continuous_addon`, produced no transient untracked-position
-  alert, then sold the same 0.001 BTC reduce-only at `64169.9`. Bybit finished
-  with zero positions and zero open orders. This is demo execution evidence, not
-  evidence that the hedge improves returns.
-- The manager now reconciles the idempotent BTC/ETH target every five minutes,
-  not only at 00:35 UTC. A stale non-flat book fails even when the desired order
-  is below the venue's executable filters, and liveness treats stale beta with
-  open positions as critical. The CSV carries its validated data-through boundary and source
-  summary SHA-256, so a quiet no-trade gap is not mistaken for stale data.
-- Hedge intent is durable before the venue mutation. Immediate execution-history
-  lag falls back to terminal Bybit order history; a genuinely unreadable fill is
-  labelled provisional and later venue reconciliation replaces rather than
-  double-adds it. The reset workflow writes a verified-flat boundary before the
-  hedge timer restarts, so a controlled clean slate no longer fails as unknown
-  ledger state.
-- This hedge covers portfolio beta only. It would not have protected the
-  idiosyncratic 1000TAGUSDT squeeze and is not a substitute for the registered
-  ex-ante loss-budget or granular adverse-state work.
-
-## Historical deployed safety release
-
-- Side- and component-aware WS risk reconciliation, orphan adoption, side-flip
-  handling, false-empty protection, quantity-conserving Closed-PnL allocation,
-  and cost-source provenance.
-- Durable planned exit deadlines and restart recovery for CONTINUOUS and LONG.
-- Stable-only residual momentum with exact schema, duplicate/non-finite guards,
-  and no provisional rows entering signals.
-- Wallet-only equity high-water persistence separated from entry-health
-  snapshots, so a non-wallet snapshot defect cannot erase risk memory.
-- Guarded ledger reset: dry-run default, explicit execute, flat/no-orders check,
-  REAL_MONEY refusal, writer quiescence, credential binding, lock, archive hash,
-  fsync, allowlist deletion, retained high-water state, and a post-delete
-  verified-flat cycle boundary before hedge restart.
-- Hedge submissions persist intent before venue mutation, recover delayed fills
-  from order history, label unresolved fills provisionally, and reconcile them
-  without quantity double-counting. Untracked-position alerts honor the same
-  90-second grace already used by adoption/exit actions.
-- Reconciliation fails on stale remote market planes, separates open exposure
-  from historical notional, and labels local price PnL/fees/venue allocations
-  without pretending funding is present.
-- LONG selected-entry rejections are durable; deterministic alerts are
-  restart-safe and rate-limited by stable rejection class.
-- The current local `scripts/ops.sh` surface covers status, structural
-  account-journal parity, equity, reset, research plans, tests, and checked
-  deploy. Its obsolete sleeve-projection reconcile routes are removed; the
-  deployed release remains unchanged until an authorized cutover.
-- Continuous hedge target reconciliation is five-minute and fail-loud on stale
-  non-flat state; the source tape is self-describing and hash-bound to its
-  official current-object summary.
-
-## Historical clean ledger boundary
-
-- The `2026-07-12T22:47:28Z` all-sleeve reset is the canonical migration
-  boundary. It first refused while a real TUSDT demo short and its TP order were
-  still open. The position was then closed through an idempotent reduce-only
-  demo order, Bybit was re-proven flat, and the guarded reset completed.
-- Reset no longer deletes lifecycle authority. It bootstraps legacy rows into
-  the journal, records the verified-flat venue boundary, archives generated
-  views, removes only allowlisted projections/epoch telemetry, then rebuilds
-  trade/order/TCA views by replay.
-- Continuous demo replay contains one closed TUSDT row, 16 verified journal
-  events, and two TCA rows (entry and close). Continuous paper retains its
-  pre-boundary simulated row as `awaiting_pnl`, which is excluded from exposure
-  and new close attempts. LONG, hedge, and shared compatibility roots are flat.
-- The earlier execution/reconciliation evidence remains recoverable from both
-  the journal and dated archives. A clean forward boundary does not erase or
-  upgrade that historical evidence.
-
-## Long v11a research read
-
-Latest internal refresh through the 2026-06-23 signal day:
-
-| Venue | Trades | Return | Max DD | Sharpe-like |
-| --- | ---: | ---: | ---: | ---: |
-| Bybit | 188 | +32.87% | -3.46% | 1.98 |
-| Binance | 190 | +27.59% | -4.00% | 1.46 |
-
-The object survives best-month removal, 2x/3x cost stress, worst-12-month
-windows, and the matched symbol null on both venues. The material dependency is
-unchanged: removing take-profit exits flips both venues negative. Treat the
-small forward sample as execution evidence, not validation.
-
-## Research and data readiness
-
-- `continuous-tail-survival-2026-07-10.md` registers only control plus
-  0.10%/0.15%/0.25% ex-ante +100%-loss budgets. No heavy run has executed.
-  Signals end 2026-07-10 exclusive; exit-path kline/funding data ends 2026-07-12
-  exclusive. Both venues, full stable-rmom history, exact funding cadence, and
-  byte-bound full-PIT receipts are required for a positive verdict.
-- `continuous-granular-adverse-risk-2026-07-10.md` registers the separate
-  executable adverse-state mechanism study. No treatment run has executed.
-- Current canonical roots are not granular-ready. Bybit has no canonical
-  `klines_5m` dataset in the current root; Binance’s legacy granular files are
-  stale before the current PIT tail. The old 2026-06-27 5m validation artifact
-  is not current-root readiness.
-- Strict bounded audit: Bybit 2026-07-03..09 has 4,288 PIT symbol-days; 5m is
-  missing, funding is complete on 14.16%, OI has 607 partial days and no
-  complete hourly days, and premium content is invalid under the new contract.
-  Binance 2026-06-26..07-02 has 5,292 PIT symbol-days; legacy 5m/metrics have no
-  complete current-window days, bookDepth is missing, and funding/OI/premium/
-  taker-flow completeness is 83.79%/79.48%/83.79%/83.31%.
-- Forward Bybit depth/liquidation capture may inform later shadow diagnostics;
-  it cannot fill historical treatment features.
-
-Strategy-overhaul status is still synthetic and outcome blind:
-
-- The CONTINUOUS raw population builder now validates a narrow OHLCV source
-  projection and restarts rolling history after any interior hourly gap. Its
-  diagnostic S02 wrapper emits the exact registry-typed 196-field projection,
-  requires separate exact warmup/source and retained signal-window key
-  inventories, and derives stable RMOM[D]'s causal-computability time as
-  `D - 1 day + 1 hour` from the frozen shift-3 target construction.
-  Provisional RMOM rows remain unavailable. This is an offline causality bound,
-  not a claim about historical publication, ingestion, or operational latency.
-  CONTINUOUS S03 and S04 are separate exact typed projections with anchor/parity
-  and path-completeness checks.
-- LONG now requires the exact runtime v11a config at every stage, canonicalizes
-  the signal key, validates global hourly keys and consumed OHLC geometry,
-  checks the daily close against the exact signal-hour close, reconstructs
-  stage-owned values before accepting downstream input, and refuses non-frozen
-  horizons on the registered S04 path. Its S02 wrapper validates supplied
-  population/age, recomputes rank metadata, and emits exactly 138 fields. A
-  separate outcome-blind builder now reconstructs availability, BTC/ETH regime,
-  and configured BTC-month sidecars from raw hourly OHLC, preserves unavailable
-  context as null, and parity-checks the production fallbacks. S03 emits exactly
-  30 fields; S04 consumes exact S02+S03 and emits exactly 71 fields after geometry
-  reconstruction.
-- A central schema projector enforces exact order, dtypes, non-null fields, and
-  unique registered keys. Registry v4 distinguishes
-  `builder`/`passthrough`/`adapter`/`projection`/`missing`/
-  `semantic_mismatch`; no current field remains marked missing or semantically
-  mismatched, while six receipt/provenance blockers remain explicit. This is
-  structural software evidence, not a canonical child freeze.
-- Phase 0 now binds an internally replayable dirty source snapshot, a selected
-  observed-environment identity, mechanically derived config/scope/component
-  artifacts, normalized venue-local map rows, and actual file-byte hashes. Git
-  objects, import hooks/`sys.path`, unsigned provenance labels/receipts, and
-  external map review strings are not authenticated. Required-dataset source
-  labels now reject obvious venue/root swaps, identical or overlapping physical
-  venue roots are refused, external maps remain diagnostic/untrusted, and
-  `root_lineage.json` preserves the missing canonical-lineage blocker. The root snapshot is
-  explicitly `BYTE_SNAPSHOT_ONLY`: it does not prove registered scope, earliest
-  history, Phase-0 semantics, or S01 readiness. The diagnostic stage byte-binding
-  utility lets S00 bind only config/source/environment before S01 exists; S01
-  then adds root/PIT/map/population identities and starts the downstream run
-  identity. Artifact schema, row count, key hash, and outcome blindness remain
-  explicitly unverified caller declarations. Construction requires the config
-  identity to equal the exact repository-derived canonical object; later
-  archival byte verification intentionally does not reinterpret old declarations
-  through the mutable current schema registry or config factories. That generic
-  byte utility does not validate stage semantics or transitive provenance. It
-  remains a diagnostic primitive, not a canonical S00-S04 semantic chain; no
-  real root has entered either the byte or semantic stage-receipt path.
-- A full-window outcome-blind Phase-0 inventory ran on the local workstation
-  roots and wrote diagnostic bundle
-  `strategy-overhaul-phase0-bccefdfc38ae9fda3c17` (`receipt.json` SHA-256
-  `ed5fb3687280db691dcda5e32e00005a8dd48dd2fb403c2f48fe6cb69a81bb03`).
-  It exited 2 with `NOT_READY`; an immediate strict re-execution returned
-  successfully before the reporting wrapper failed to serialize immutable
-  mappings. The run read no OHLCV/RMOM numeric values or outcomes and authorized
-  no S01, outcome, deployment, or real-money action. Binance lacks the seven
-  daily manifest/kline partitions 2026-07-03 through 2026-07-09, all 471,321
-  Binance manifest pairs lack persisted observation provenance, and Binance RMOM
-  has no `is_provisional`. Bybit covers the registered window but 360 kline rows
-  have no source label. The run also exposed an overly narrow Bybit source-label
-  sanity registry: `bybit_public_trades` and `bybit_rest` are venue-compatible
-  production labels but were classified incompatible. That software defect is
-  prospective; it does not rewrite this receipt. Both roots lack canonical
-  authenticated root-lineage receipts, the auto map was therefore bundled but
-  not consumed, and S02 config parity was `UNWIRED` in this exact run. No real
-  S02 feature tape, S03 entry artifact, S04 path-label artifact, or outcome
-  analysis has run.
-- After that receipt was verified, the narrow canonical Binance daily-tail
-  builder repaired 2026-07-03..09 on the local root: 5,628 archive jobs,
-  129,088 appended hourly rows, 245 recorded 404s, zero hard failures, and a
-  coverage-derived 593,757-row manifest with non-null
-  `binance_vision_archive` source/membership provenance. A post-build key/schema
-  audit found all seven required date directories, zero duplicate
-  `(symbol,date,url)` keys, and zero null source labels. This intentionally
-  changed the root after the `NOT_READY` receipt; that receipt is historical and
-  a new Phase-0 identity is required for current-root evidence.
-- Prospectively, current source now derives S02 config parity as `WIRED` for all
-  11 targets from consumer-owned validators, rather than a handwritten checked
-  set. Canonical sorted source/expected-population JSONL and a strict receipt
-  bind config/root/PIT/full manifest-pair/map identities; only the full
-  reconstructing verifier can construct the object accepted by either S02
-  builder. A separate Parquet/Arrow semantic verifier checks the current
-  registry, registered scope, config exclusions, exact S02 population and LONG
-  ages, selected S02-S04 invariants, and transitive parent identities. These are
-  synthetic implementation results only. They do not rewrite the historical
-  `UNWIRED` receipt, prove supplied root/PIT completeness or authenticity,
-  authenticate RMOM/LONG sidecar provenance, instantiate a real stage chain, or
-  authorize outcomes, deployment, or real money. The population and semantic
-  paths remain all-in-memory and the three population files are installed
-  atomically per file rather than transactionally as one directory bundle; the
-  big-PC run path therefore still needs memory/atomicity validation.
-
-## Next actions
-
-1. Freeze the replacement demo-operational candidate and pass its complete
-   local, pre-push, and one exact-head non-contacting Linux gate. Install that
-   exact commit while the VPS remains flat/stopped. Freeze one current full
-   candidate population, obtain one exact source-bound demo-rule receipt, and
-   bind that artifact as both `ACCOUNT_SYMBOLS_FILE` and
-   `CANDIDATE_UNIVERSE_FILE`. Set raw persistence `0`, demo-scoped liveness,
-   and the paper sleeve off; then issue demo-operational authority. Start the
-   demo owner before demo producers and timers. Verify live-L2 readiness,
-   account-journal/venue integrity, service and timer health, bounded storage,
-   and that bulk raw segments do not grow while every paper unit remains
-   stopped and unauthorized. V8 is closed and must not be retried. The five-day
-   natural study is deferred optional research and may run later only under its
-   unchanged registered contract with raw persistence `1`.
-2. Let the owner-run Strategy Overhaul master plan continue on the big PC without
-   coupling it to this VPS cutover. Ingest its immutable receipts only after the
-   run finishes; a positive research result still does not change the live
-   profile or authorize deployment.
-3. Keep `codex/account-execution-cutover` off `main`; the owner authorized only
-   exact-branch demo/paper VPS operation, not a `main` push. A future
-   research-promotion conclusion and `main` fast-forward remain separate
-   decisions.
-   Delete the cutover branch only after that deployment verifies; delete any
-   other branch only after proving it has no unique commit or dirty worktree.
-   Use `docs/account_execution_completion_handoff.md` for a bounded continuation
-   across agent sessions. Defer the aggressive cleanup described in
-   `docs/repository_cleanup_handoff.md` until the cutover is verified deployed
-   or explicitly closed; run it from a separate clean branch/worktree rather
-   than changing the frozen evidence candidate.
-4. Build and audit granular datasets before running the adverse-state study.
-   Do not infer missing sub-hour data from 1h bars.
-5. Preserve the verified local `NOT_READY` Phase-0 bundle above as diagnostic
-   evidence; do not overwrite or promote it. Capture the prospective source-label
-   and now-`WIRED` consumer implementation in a new identity, then use
-   `scripts/ops.sh overhaul-plan`
-   for the shallow preflight and `scripts/ops.sh overhaul-phase0` for a new
-   content-addressed inventory after the roots are refreshed. The remaining
-   seven-day Binance gap is 2026-07-03..09. No new big-PC result has been
-   ingested here. Big-PC location does not make a receipt authoritative; its artifacts must
-   pass the same internal re-execution checks, while upstream authenticity and
-   canonical root lineage remain separate evidence requirements.
-   Non-executable finite child templates and the proposed v4 six-artifact schema
-   registry exist, but the mismatch ledger above remains blocking, so canonical
-   child contracts/manifests remain absent. Refresh the roots and produce a
-   semantically verified S00 evidence bundle before binding the
-   population/config/RMOM-source
-   identities or running any real tape or label stage.
-
-## Canonical references
-
-- `docs/operations.md` — operator commands.
-- `docs/promoted_trading_logic.md` — active profile/runtime contract.
-- `docs/research_summary.md` — durable evidence and decisions.
-- `docs/data_roots.md` and `docs/pit_gate.md` — data/PIT contracts.
-- `docs/preregistration/INDEX.md` — active experiments and closed arcs.
-- `docs/account_execution_completion_handoff.md` — bounded continuation prompt
-  and efficient candidate-validation cadence.
-- `docs/repository_cleanup_handoff.md` — deferred evidence-driven deletion
-  campaign.
+No confirmatory experiment is active. The canonical cancellation and retired
+evidence record is `docs/research_summary.md`; it grants no runtime authority.

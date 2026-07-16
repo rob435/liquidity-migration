@@ -24,7 +24,6 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # Every active sibling produced by the public-data + chart/PIT + CLI splits.
 _SPLIT_SIBLINGS = [
     "event_demo_data",
-    "order_link_id",
     "volume_events_charts",
     "volume_events_pit",
     "cli_parsers",

@@ -1,6 +1,6 @@
 ---
 name: equity-curve
-description: Produce and interpret the repository-standard equity curves for the registered LONG and CONTINUOUS profiles. Use scripts/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
+description: Produce and interpret the repository-standard equity curves for the active LONG and CONTINUOUS profiles. Use scripts/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
 ---
 
 # Produce equity curves
@@ -27,16 +27,15 @@ contract. Do not assume a default window is OOS or that both venues are required
 
 ## Understand the reconstruction
 
-- `long` loads the registered LONG profile and runs the long-native research
+- `long` loads the active LONG profile and runs the long-native research
   engine.
-- `continuous` reconstructs the registered continuous component book and hedge
+- `continuous` reconstructs the active continuous component book and hedge
   through `scripts/continuous_deployed_equity_refresh.py`.
 - Neither curve is automatically a literal daemon replay. Capacity, live state,
   netting, optional overlays, order lifecycle, and deploy environment can differ.
-  Read `docs/promoted_trading_logic.md` and the emitted config before claiming
+  Read `docs/active_trading_logic.md` and the emitted config before claiming
   parity.
-- Registry names in `liquidity_migration/promoted.py` are compatibility/runtime
-  names; they confer no evidence status.
+- Runtime profile names confer no evidence status.
 
 ## Handle leverage correctly
 
@@ -69,5 +68,5 @@ State:
 - validity, study mode, and justified conclusion under `docs/governance.md`.
 
 Ad hoc plots are allowed for diagnostics when clearly labelled non-standard and
-not compared as official outputs. If a recurring citable need is missing, add a
-tested option to the wrapper rather than creating a second unofficial format.
+not compared as standard outputs. If a recurring citable need is missing, add a
+tested option to the wrapper rather than creating a second format.

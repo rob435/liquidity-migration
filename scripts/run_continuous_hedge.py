@@ -1,20 +1,17 @@
-"""Periodic target-hedge runner for a continuous demo or paper book.
+"""Periodic target-hedge runner for a bound continuous account route.
 
-Computes the current two-leg hedge target from the warm-start series and the
-canonical account state. Dry-run prints the decision; ``--execute`` publishes an
-absolute target batch to the single account owner. This process never calls the
-venue private API and never writes a compatibility trade ledger.
+Computes the current two-leg hedge target from a commit-owned immutable model
+prior and canonical account state. Dry-run prints the decision; ``--execute``
+publishes an absolute target batch to the single account owner. This process
+never calls the venue private API and never writes a sleeve-local trade ledger.
 
-The environment is mandatory and selects one bound account route. Dry-run is
-the safe action default. Publishing is blocked from increasing
-hedge exposure while the warm-start is stale; risk-reducing targets still proceed.
-HEDGE_MODE=btc falls back to the single-leg WP3 form.
+The deployed service is demo-only, although the CLI requires an explicit
+demo/paper route. Dry-run is the default. The historical prior is not extended
+with live returns and its age is not a runtime-freshness signal; missing,
+malformed, future-dated, or estimator-inadequate prior data fails closed.
 
-Exit-code contract (paging): an armed (``--execute``) run that is blocked or whose
-target publication fails exits NONZERO, so
-the systemd oneshot lands in `failed` and the liveness watchdog pages the
-operator. Dry-run statuses and genuine no-action runs always exit 0. (Before
-2026-06-12 a blocked armed run exited 0 and the book sat unhedged silently.)
+An armed run that is blocked or fails publication exits nonzero so the systemd
+oneshot fails and liveness can alert. Dry runs and genuine no-action runs exit 0.
 
 Usage:
     .venv/bin/python scripts/run_continuous_hedge.py --execution-environment demo
@@ -24,12 +21,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -56,16 +52,17 @@ from liquidity_migration.account_strategy_state import (  # noqa: E402
     target_reservation_rows,
 )
 from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
+    HEDGE_MODEL_PRIOR_KIND,
+    HEDGE_MODEL_PRIOR_LIMITATIONS,
     HEDGE_SYMBOL,
     HEDGE_SYMBOL_2,
     ContinuousHedgeConfig,
     HedgeDecision2F,
-    compute_hedge_decision,
+    HedgeModelPrior,
     compute_hedge_decision_2f,
-    load_warmstart_2f,
+    load_hedge_model_prior,
+    require_usable_hedge_model_prior,
 )
-
-MAX_WARMSTART_STALE_DAYS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +86,7 @@ def _publish_hedge_target_batch(
     targets: list[HedgeDesiredTarget],
     *,
     cfg: ContinuousHedgeConfig,
+    model_prior: HedgeModelPrior,
     route: AccountRoute,
     now_ms: int,
     leverage: float,
@@ -111,6 +109,7 @@ def _publish_hedge_target_batch(
         metadata = {
             "source": "continuous_hedge_target_runner",
             "target_notional_usdt": float(target.target_notional_usdt),
+            **model_prior.provenance(),
         }
         if plan is not None:
             metadata.update(
@@ -156,9 +155,7 @@ def _publish_hedge_target_batch(
             f"{item.stage}:{item.target_key}:{item.error_type}:{item.message}" for item in publication.errors
         )
         raise OSError(f"hedge target publication failed: {details}")
-    request_ids = [*publication.exit_request_ids]
-    if publication.entry_request_id:
-        request_ids.append(publication.entry_request_id)
+    request_ids = [*publication.exit_request_ids, *publication.entry_request_ids]
     if not request_ids:
         raise RuntimeError("hedge target publication produced no durable request")
     return {
@@ -184,7 +181,7 @@ def _current_account_hedge_qty(
     strategy_id: str,
     symbol: str = HEDGE_SYMBOL,
 ) -> float:
-    """Read the accepted hedge target, never a sleeve compatibility ledger."""
+    """Read the accepted hedge target, never a sleeve-local trade ledger."""
 
     rows = canonical_strategy_trade_rows(
         account_root,
@@ -244,31 +241,6 @@ def _account_continuous_book_state(
     )
 
 
-def _warmstart_last_date(path: Path) -> date | None:
-    if not path.exists():
-        return None
-    last_observation: date | None = None
-    data_through: date | None = None
-    with path.open(encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh):
-            for key, current in (("date", last_observation), ("data_through_date", data_through)):
-                raw = row.get(key)
-                if not raw:
-                    continue
-                try:
-                    parsed = date.fromisoformat(raw)
-                except ValueError:
-                    continue
-                if current is None or parsed > current:
-                    if key == "date":
-                        last_observation = parsed
-                    else:
-                        data_through = parsed
-    # New tapes carry the validated signal-data boundary.  Fall back to the
-    # latest unit observation for legacy four-column CSVs.
-    return data_through or last_observation
-
-
 def _latest_close(primary_root: Path, symbol: str) -> float:
     store = primary_root / ".cache" / "ws_klines" / "store.parquet"
     if not store.exists():
@@ -297,7 +269,6 @@ def _plan_json(plan) -> dict | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--venue", default="bybit", choices=["bybit", "binance"])
     ap.add_argument(
         "--execution-environment",
         required=True,
@@ -305,7 +276,16 @@ def main() -> int:
         help="bound account-owner environment; there is no implicit default",
     )
     ap.add_argument("--primary-root", default="data/bybit-continuous-demo-event")
-    ap.add_argument("--warmstart", default="")
+    ap.add_argument(
+        "--model-prior",
+        default=os.environ.get("HEDGE_MODEL_PRIOR", "deploy/hedge_warmstart/bybit_warmstart.csv"),
+        help="strict immutable historical hedge model prior",
+    )
+    ap.add_argument(
+        "--validate-model-prior-only",
+        action="store_true",
+        help="validate model-prior integrity and estimator sufficiency without reading account state",
+    )
     ap.add_argument("--btc-price", type=float, default=0.0, help="override; else read from kline store")
     ap.add_argument("--eth-price", type=float, default=0.0, help="override; else read from kline store")
     ap.add_argument(
@@ -340,6 +320,40 @@ def main() -> int:
     if args.account_health_max_age_seconds <= 0.0:
         ap.error("--account-health-max-age-seconds must be positive")
 
+    model_prior_path = Path(args.model_prior)
+    if not model_prior_path.is_absolute():
+        model_prior_path = REPO / model_prior_path
+    as_of_date = datetime.now(timezone.utc).date()
+    try:
+        model_prior = require_usable_hedge_model_prior(
+            load_hedge_model_prior(model_prior_path),
+            as_of_date=as_of_date,
+        )
+    except (OSError, ValueError) as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "model_prior_invalid",
+                    "model_prior_kind": HEDGE_MODEL_PRIOR_KIND,
+                    "error": str(exc)[:300],
+                }
+            )
+        )
+        return 1
+    model_prior_age_days = (as_of_date - model_prior.data_through_date).days
+    if args.validate_model_prior_only:
+        print(
+            json.dumps(
+                {
+                    "status": "model_prior_valid",
+                    **model_prior.provenance(),
+                    "model_prior_age_days_informational": model_prior_age_days,
+                    "model_prior_limitations": HEDGE_MODEL_PRIOR_LIMITATIONS,
+                }
+            )
+        )
+        return 0
+
     if not args.account_root or not args.account_inbox_root:
         print(
             json.dumps(
@@ -351,12 +365,7 @@ def main() -> int:
         )
         return 1
 
-    warmstart = args.warmstart or f"deploy/hedge_warmstart/{args.venue}_warmstart.csv"
-    hedge_mode = os.environ.get("HEDGE_MODE", "2f")
-    cfg = ContinuousHedgeConfig(
-        warmstart_csv=warmstart,
-        hedge_mode=hedge_mode,
-    )
+    cfg = ContinuousHedgeConfig()
     primary_root = REPO / args.primary_root
     account_root = Path(args.account_root).expanduser()
     if not account_root.is_absolute():
@@ -372,24 +381,9 @@ def main() -> int:
     )
     account_root = account_route.account_path
 
-    warmstart_path = REPO / warmstart if not Path(warmstart).is_absolute() else Path(warmstart)
-    # Single loader for all three columns: unit/btc/eth rows are skipped together
-    # (iff float(unit_ret) raises), so a malformed unit_ret can never desync the
-    # eth column from the unit/btc pair (audit 2026-06-12).
-    warm_unit, warm_btc, warm_eth = load_warmstart_2f(warmstart_path)
-    if len(warm_unit) < 60:
-        print(json.dumps({"status": "no_warmstart", "rows": len(warm_unit)}))
-        # An ARMED run with no usable warm-start cannot hedge — fail the oneshot
-        # so the watchdog pages; a dry-run stays a quiet no-op.
-        return 1 if args.execute else 0
-    warmstart_last = _warmstart_last_date(warmstart_path)
-    warmstart_age_days = None if warmstart_last is None else (datetime.now(timezone.utc).date() - warmstart_last).days
-    warmstart_stale = warmstart_age_days is None or warmstart_age_days > MAX_WARMSTART_STALE_DAYS
-
-    unit = list(warm_unit)
-    btc = list(warm_btc)
-    eth: list[float | None] = list(warm_eth) + [None] * max(0, len(unit) - len(warm_eth))
-    eth = eth[: len(unit)]
+    unit = list(model_prior.unit_returns)
+    btc = list(model_prior.btc_returns)
+    eth = list(model_prior.eth_returns)
 
     btc_price = args.btc_price or _latest_close(primary_root, HEDGE_SYMBOL)
     eth_price = args.eth_price or _latest_close(primary_root, HEDGE_SYMBOL_2)
@@ -419,13 +413,11 @@ def main() -> int:
     )
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    n_eth = sum(1 for e in warm_eth if e is not None)
-    use_2f = hedge_mode == "2f" and n_eth >= 60
     out: dict = {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "venue": args.venue,
+        "venue": "bybit",
         "execution_environment": args.execution_environment,
-        "hedge_mode": "2f" if use_2f else "btc",
+        "hedge_mode": "2f",
         "mode": "target_publish" if args.execute else "dry_run",
         "btc_price": btc_price,
         "eth_price": eth_price,
@@ -435,15 +427,11 @@ def main() -> int:
         "gross_short_frac_known": live_book.gross_short_frac_known,
         "gross_short_frac_source": live_book.gross_short_frac_source,
         "pending_hedge_symbols": sorted(pending_hedge_symbols),
-        "warmstart_last_date": None if warmstart_last is None else warmstart_last.isoformat(),
-        "warmstart_data_through_date": None if warmstart_last is None else warmstart_last.isoformat(),
-        "warmstart_age_days": warmstart_age_days,
-        "warmstart_stale": warmstart_stale,
+        **model_prior.provenance(),
+        "model_prior_age_days_informational": model_prior_age_days,
+        "model_prior_limitations": HEDGE_MODEL_PRIOR_LIMITATIONS,
         "history_days": len(unit),
     }
-    plans = []
-    desired_targets: list[HedgeDesiredTarget] = []
-
     def read_current_hedge_qty(symbol: str = HEDGE_SYMBOL) -> float:
         return _current_account_hedge_qty(
             account_root,
@@ -451,92 +439,46 @@ def main() -> int:
             symbol=symbol,
         )
 
-    if use_2f:
-        decision: HedgeDecision2F = compute_hedge_decision_2f(
-            cfg,
-            unit_returns=unit,
-            btc_returns=btc,
-            eth_returns=eth,
-            live_gross_short_frac=live_book.gross_short_frac,
-            btc_price=btc_price,
-            eth_price=eth_price,
-            current_btc_qty=read_current_hedge_qty(),
-            current_eth_qty=read_current_hedge_qty(HEDGE_SYMBOL_2),
-            equity_usdt=equity,
-        )
-        out.update(
-            {
-                "ratio_btc": round(decision.ratio_btc, 5),
-                "ratio_eth": round(decision.ratio_eth, 5),
-                "target_btc_usdt": round(decision.target_btc_usdt, 2),
-                "target_eth_usdt": round(decision.target_eth_usdt, 2),
-                "n_obs_joint": decision.n_obs_joint,
-                "fell_back_to_btc": decision.fell_back_to_btc,
-                "plan_btc": _plan_json(decision.plan_btc),
-                "plan_eth": _plan_json(decision.plan_eth),
-            }
-        )
-        # audit2c: report the EFFECTIVE hedge mode. The use_2f gate is a coarse
-        # full-series ETH pre-filter; the engine measures joint obs over the trailing
-        # beta window and falls back to a single-leg BTC hedge when that window is
-        # ETH-thin. Reflect that fallback here so hedge_mode is not misleadingly "2f"
-        # when the book was actually hedged BTC-only (fell_back_to_btc carries the detail).
-        if decision.fell_back_to_btc:
-            out["hedge_mode"] = "btc"
-        plans = [p for p in (decision.plan_btc, decision.plan_eth) if p is not None]
-        desired_targets = [
-            HedgeDesiredTarget(
-                symbol=HEDGE_SYMBOL,
-                target_notional_usdt=decision.target_btc_usdt,
-                reason="scheduled_hedge_target_refresh",
-                plan=decision.plan_btc,
-            ),
-            HedgeDesiredTarget(
-                symbol=HEDGE_SYMBOL_2,
-                target_notional_usdt=decision.target_eth_usdt,
-                reason="scheduled_hedge_target_refresh",
-                plan=decision.plan_eth,
-            ),
-        ]
-    else:
-        current_hedge_qty = read_current_hedge_qty()
-        single = compute_hedge_decision(
-            cfg,
-            unit_returns=unit,
-            btc_returns=btc,
-            live_gross_short_frac=live_book.gross_short_frac,
-            btc_price=btc_price,
-            current_hedge_qty=current_hedge_qty,
-            equity_usdt=equity,
-        )
-        # A mode flip to BTC-only explicitly targets ETH to zero. The account
-        # owner performs the close and attributes its confirmed fill.
-        unmanaged_eth_qty = read_current_hedge_qty(HEDGE_SYMBOL_2)
-        out.update(
-            {
-                "hedge_ratio_equity_frac": round(single.hedge_ratio_equity_frac, 5),
-                "target_notional_usdt": round(single.target_notional_usdt, 2),
-                "current_hedge_qty": round(current_hedge_qty, 8),
-                "current_notional_usdt": round(single.current_notional_usdt, 2),
-                "n_obs": single.n_obs,
-                "plan": _plan_json(single.plan),
-                "unmanaged_eth_qty": round(unmanaged_eth_qty, 8),
-            }
-        )
-        plans = [single.plan] if single.plan is not None else []
-        desired_targets = [
-            HedgeDesiredTarget(
-                symbol=HEDGE_SYMBOL,
-                target_notional_usdt=single.target_notional_usdt,
-                reason="scheduled_hedge_target_refresh",
-                plan=single.plan,
-            ),
-            HedgeDesiredTarget(
-                symbol=HEDGE_SYMBOL_2,
-                target_notional_usdt=0.0,
-                reason="btc_only_mode_close_eth",
-            ),
-        ]
+    decision: HedgeDecision2F = compute_hedge_decision_2f(
+        cfg,
+        unit_returns=unit,
+        btc_returns=btc,
+        eth_returns=eth,
+        live_gross_short_frac=live_book.gross_short_frac,
+        btc_price=btc_price,
+        eth_price=eth_price,
+        current_btc_qty=read_current_hedge_qty(),
+        current_eth_qty=read_current_hedge_qty(HEDGE_SYMBOL_2),
+        equity_usdt=equity,
+    )
+    out.update(
+        {
+            "ratio_btc": round(decision.ratio_btc, 5),
+            "ratio_eth": round(decision.ratio_eth, 5),
+            "target_btc_usdt": round(decision.target_btc_usdt, 2),
+            "target_eth_usdt": round(decision.target_eth_usdt, 2),
+            "n_obs_joint": decision.n_obs_joint,
+            "fell_back_to_btc": decision.fell_back_to_btc,
+            "plan_btc": _plan_json(decision.plan_btc),
+            "plan_eth": _plan_json(decision.plan_eth),
+        }
+    )
+    if decision.fell_back_to_btc:
+        out["hedge_mode"] = "btc_fallback"
+    desired_targets = [
+        HedgeDesiredTarget(
+            symbol=HEDGE_SYMBOL,
+            target_notional_usdt=decision.target_btc_usdt,
+            reason="scheduled_hedge_target_refresh",
+            plan=decision.plan_btc,
+        ),
+        HedgeDesiredTarget(
+            symbol=HEDGE_SYMBOL_2,
+            target_notional_usdt=decision.target_eth_usdt,
+            reason="scheduled_hedge_target_refresh",
+            plan=decision.plan_eth,
+        ),
+    ]
 
     if health_error:
         out["status"] = "execute_blocked_account_owner_unhealthy" if args.execute else "dry_run_account_owner_unhealthy"
@@ -554,20 +496,16 @@ def main() -> int:
         # never submit orders sized off it (it would buy a hedge against a book
         # whose exposure nobody measured).
         out["status"] = "execute_blocked_book_state_unknown"
-    elif args.execute and use_2f and eth_price <= 0.0:
+    elif args.execute and eth_price <= 0.0:
         # In 2f mode a dead ETH price silently drops the ETH leg; an armed run must
         # surface it instead of part-hedging.
         out["status"] = "execute_blocked_eth_price_unavailable"
     elif args.execute:
         # Kernel route: publish absolute targets, including no-change targets, so
-        # convergence never depends on the sleeve's compatibility ledger. Do
+        # convergence never depends on a sleeve-local trade ledger. Do
         # not refresh a target that is already pending when the planner sees no
         # quantity change: accepting that duplicate would advance the desire
-        # revision and restart the owner's convergence generation/age. A stale
-        # beta estimate may only lower exposure: omit target legs whose local
-        # plan would increase risk, while still atomically publishing any
-        # risk-reducing siblings.
-        plan_by_symbol = {plan.symbol.upper(): plan for plan in plans}
+        # revision and restart the owner's convergence generation/age.
         pending_unchanged_targets = [
             target
             for target in desired_targets
@@ -576,24 +514,14 @@ def main() -> int:
         refreshable_targets = [target for target in desired_targets if target not in pending_unchanged_targets]
         if pending_unchanged_targets:
             out["pending_target_refresh_skips"] = sorted(target.symbol.upper() for target in pending_unchanged_targets)
-        if warmstart_stale:
-            blocked_add_legs = [plan for plan in plans if not plan.reduce_only]
-            submittable_targets = [
-                target
-                for target in refreshable_targets
-                if not ((plan := plan_by_symbol.get(target.symbol.upper())) is not None and not plan.reduce_only)
-            ]
-        else:
-            blocked_add_legs = []
-            submittable_targets = list(refreshable_targets)
-        if blocked_add_legs:
-            out["blocked_legs"] = [_plan_json(plan) for plan in blocked_add_legs]
+        submittable_targets = list(refreshable_targets)
         if submittable_targets:
             leverage = float(os.environ.get("HEDGE_ENTRY_LEVERAGE") or os.environ.get("ENTRY_LEVERAGE") or 10.0)
             try:
                 queued = _publish_hedge_target_batch(
                     submittable_targets,
                     cfg=cfg,
+                    model_prior=model_prior,
                     route=account_route,
                     now_ms=now_ms,
                     leverage=leverage,
@@ -603,15 +531,11 @@ def main() -> int:
                 out["publish_error"] = str(exc)[:300]
             else:
                 out["queued"] = queued
-                out["status"] = "target_queued_partial_blocked_stale_warmstart" if blocked_add_legs else "target_queued"
+                out["status"] = "target_queued"
         else:
-            out["status"] = (
-                "execute_blocked_stale_warmstart" if blocked_add_legs or warmstart_stale else "execute_no_action"
-            )
-    elif use_2f and eth_price <= 0.0:
+            out["status"] = "execute_no_action"
+    elif eth_price <= 0.0:
         out["status"] = "dry_run_eth_price_unavailable"
-    elif warmstart_stale:
-        out["status"] = "dry_run_stale_warmstart"
     else:
         out["status"] = "dry_run_ok"
     print(json.dumps(out))
@@ -622,8 +546,6 @@ def main() -> int:
         "execute_blocked_btc_price_unavailable",
         "execute_blocked_book_state_unknown",
         "execute_blocked_eth_price_unavailable",
-        "execute_blocked_stale_warmstart",
-        "target_queued_partial_blocked_stale_warmstart",
         "target_publish_failed",
     }
     return 1 if args.execute and out["status"] in failing_statuses else 0

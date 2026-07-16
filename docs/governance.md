@@ -149,9 +149,9 @@ or all forward data permanently pristine.
   matter; no metric is universally primary.
 - Give thresholds an economic, operational, or statistical rationale. Arbitrary
   constants inherited from an older experiment are not policy.
-- `scripts/r1_robustness.py` and `scripts/apply_decision_rule.py` implement
-  historical decision presets. Use them only when the active experiment names
-  that preset, or as clearly labelled diagnostics.
+- Historical artifacts may contain legacy decision presets and labels. They are
+  binding only when the active experiment prospectively names the exact rule;
+  otherwise treat them as clearly labelled diagnostics.
 - Predeclare how many variants, symbols, segments, and metrics will influence
   selection. Address dependence and effective trials; showing only the winner is
   invalid selection evidence.

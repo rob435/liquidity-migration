@@ -52,7 +52,7 @@ from liquidity_migration.continuous_demo import (
     apply_continuous_demo_profile,
     build_confirmed_entry_state,
     build_live_continuous_state,
-    continuous_dataset_names,
+    continuous_cycles_dataset,
     continuous_managed_strategy_ids,
     continuous_strategy_id,
     entry_circuit_breaker_tripped,
@@ -420,7 +420,7 @@ def test_pending_targets_reserve_capacity_but_are_not_open_positions() -> None:
     assert open_positions["trade_id"].to_list() == ["filled"]
 
 
-def test_same_signal_entry_is_suppressed_by_default_and_can_be_sequenced() -> None:
+def test_same_signal_entry_is_suppressed() -> None:
     strategy_id = "continuous_fade_v2"
     signal_ts_ms = 1_700_000_000_000
     prior = pl.DataFrame(
@@ -442,24 +442,10 @@ def test_same_signal_entry_is_suppressed_by_default_and_can_be_sequenced() -> No
         signal_ts=signal_ts_ms,
         strategy_id=strategy_id,
         price_by_symbol={"WIFUSDT": 100.0},
-        allow_same_signal_reentry=False,
-    )
-    allowed, allowed_skips = _continuous_entry_candidates_with_signal_metadata(
-        picks,
-        prior,
-        signal_ts=signal_ts_ms,
-        strategy_id=strategy_id,
-        price_by_symbol={"WIFUSDT": 100.0},
-        allow_same_signal_reentry=True,
     )
 
     assert blocked == []
     assert skipped == 1
-    assert allowed_skips == 0
-    assert allowed[0]["reentry_seq"] == 1
-    assert allowed[0]["trade_id"] == (
-        f"{strategy_id}-WIFUSDT-{signal_ts_ms}-1"
-    )
 
 
 def test_max_hold_is_anchored_to_first_fill_not_target_acceptance() -> None:
@@ -474,13 +460,13 @@ def test_max_hold_is_anchored_to_first_fill_not_target_acceptance() -> None:
         "trade_id": "not-due",
         "symbol": "B",
         "entry_target_ts_ms": now_ms - 48 * MS_PER_HOUR,
-        "entry_fill_ts_ms": now_ms - 23 * MS_PER_HOUR,
+        "entry_ts_ms": now_ms - 23 * MS_PER_HOUR,
     }
     due = {
         "trade_id": "due",
         "symbol": "C",
         "entry_target_ts_ms": now_ms - 48 * MS_PER_HOUR,
-        "entry_fill_ts_ms": now_ms - 24 * MS_PER_HOUR,
+        "entry_ts_ms": now_ms - 24 * MS_PER_HOUR,
     }
 
     exits = plan_continuous_exits(
@@ -504,8 +490,8 @@ def test_explicit_fill_anchored_deadline_is_respected_exactly() -> None:
     trade = {
         "trade_id": "deadline",
         "symbol": "A",
-        "entry_fill_ts_ms": now_ms - MS_PER_HOUR,
-        "planned_exit_ts_ms": now_ms,
+        "entry_ts_ms": now_ms - MS_PER_HOUR,
+        "max_hold_deadline_ts_ms": now_ms,
     }
 
     assert plan_continuous_exits(
@@ -568,7 +554,7 @@ def test_target_intents_preserve_component_identity_and_duration_metadata() -> N
     assert {
         "take_profit_price",
         "max_hold_ms",
-        "planned_exit_ts_ms",
+        "max_hold_deadline_ts_ms",
         "stop_loss_pct",
         "stop_price",
     }.isdisjoint(entry.metadata)
@@ -681,8 +667,9 @@ def test_account_publication_is_exit_first_and_component_entries_are_independent
             *publication.entry_requests,
         )
     )
-    with pytest.raises(RuntimeError, match="ambiguous"):
-        _ = publication.entry_request_id
+    assert publication.entry_request_ids == tuple(
+        item.request.request_id for item in publication.entry_requests
+    )
 
     claimed = [publisher.inbox.claim_next() for _ in range(3)]
     requests = [item[1] for item in claimed if item is not None]
@@ -726,7 +713,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
                 "strategy_id": strategy_id,
                 "symbol": "OLDUSDT",
                 "status": "open",
-                "entry_fill_ts_ms": now_ms - 25 * MS_PER_HOUR,
+                "entry_ts_ms": now_ms - 25 * MS_PER_HOUR,
                 "entry_leverage": 10.0,
             }
         ]
@@ -972,24 +959,16 @@ def test_notional_multiplier_scales_exposure_and_is_validated(tmp_path: Path) ->
             )
 
 
-def test_dataset_names_keep_demo_and_paper_telemetry_separate() -> None:
-    demo = continuous_dataset_names(
+def test_cycles_datasets_keep_demo_and_paper_telemetry_separate() -> None:
+    demo = continuous_cycles_dataset(
         ContinuousDemoCycleConfig(execution_environment="demo")
     )
-    paper = continuous_dataset_names(
+    paper = continuous_cycles_dataset(
         ContinuousDemoCycleConfig(execution_environment="paper")
     )
 
-    assert demo == (
-        "continuous_fade_demo_trades",
-        "continuous_fade_demo_orders",
-        "continuous_fade_demo_cycles",
-    )
-    assert paper == (
-        "continuous_fade_paper_trades",
-        "continuous_fade_paper_orders",
-        "continuous_fade_paper_cycles",
-    )
+    assert demo == "continuous_fade_demo_cycles"
+    assert paper == "continuous_fade_paper_cycles"
 
 
 @pytest.mark.parametrize(
@@ -1056,7 +1035,7 @@ def test_btc_risk_multiplier_uses_only_a_positive_causal_decision() -> None:
     ) == pytest.approx(1.0)
 
 
-def test_rmom_loader_degrades_on_absent_corrupt_or_legacy_data(
+def test_rmom_loader_degrades_on_absent_corrupt_or_unprovenanced_data(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "residual_momentum.parquet"
@@ -1218,10 +1197,6 @@ def test_live_panel_cache_matches_full_recompute_and_reuses_carry() -> None:
             rtol=1e-6,
         )
 
-    assert cache.refreshes == 1
-    assert cache.live_updates == 3
-
-
 def test_live_panel_cache_invalidates_on_corrected_confirmed_bar() -> None:
     klines, rmom, start, n_bars = _dispersed_synth()
     config = ContinuousDemoCycleConfig()
@@ -1266,7 +1241,6 @@ def test_live_panel_cache_invalidates_on_corrected_confirmed_bar() -> None:
         config=config,
     )
 
-    assert cache.refreshes == 2
     cached_deciles = _decile_map(cached)
     reference_deciles = _decile_map(reference)
     assert {

@@ -801,10 +801,6 @@ class BybitNativeProtectionManager:
         return abs(trigger - active_stop) <= max(rule.tick_size / 2.0, 1e-12)
 
     @_serialized_manager_method
-    def is_verified_native_execution(self, row: Mapping[str, Any]) -> bool:
-        return bool(self.native_execution_identity_evidence(row))
-
-    @_serialized_manager_method
     def native_execution_identity_evidence(self, row: Mapping[str, Any]) -> str:
         symbol = str(row.get("symbol") or "").upper()
         active = self.active(symbol)

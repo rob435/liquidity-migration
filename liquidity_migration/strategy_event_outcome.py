@@ -161,10 +161,6 @@ class JsonlStrategyEventDecisionTape:
     def tape_hash(self) -> str:
         return self._tape_hash
 
-    @property
-    def prior_outcomes(self) -> tuple[StrategyEventDecisionOutcome, ...]:
-        return self._outcomes
-
     def append(self, event_id: str, decision_keys: Sequence[str]) -> StrategyEventDecisionOutcome:
         outcome = StrategyEventDecisionOutcome(
             event_id=event_id,

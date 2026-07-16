@@ -1,9 +1,9 @@
 [Unit]
-Description=liquidity-migration Bybit continuous-fade demo sleeve (sub-hourly, ticker-driven)
+Description=liquidity-migration Bybit continuous-fade demo target producer
 Wants=network-online.target
 Requires=liquidity-migration-account-execution.service
 After=network-online.target liquidity-migration-account-execution.service
-ConditionPathExists=/etc/liquidity-migration/account-execution-capture-enabled
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=simple
@@ -13,15 +13,10 @@ WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/account-execution.env
-# Maintenance-only natural holdout activation. The owner-only optional file
-# must set both NATURAL_EVIDENCE_REQUIRED=1 and NATURAL_RUN_CONFIG=/absolute/path.
-EnvironmentFile=-/etc/liquidity-migration/natural-run.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-continuous-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-# Target-publishing demo unit. The mandatory account execution owner is the only
-# process allowed to mutate the venue or reconcile account fills.
 Environment=EXECUTION_ENVIRONMENT=demo
 Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -29,39 +24,19 @@ Environment=LOOKBACK_DAYS=45
 Environment=WORKERS=2
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
-Environment=MAX_HOLD_HOURS=24
-# continuous_ensemble_v2 resolves component TP percentages, BTC-risk sizing,
-# and fill-anchored 24h max-hold targets. The account owner owns protection.
-Environment=STRATEGY_PROFILE=continuous_ensemble_v2
-Environment=FEATURE_SET=max_ret168
-Environment=ENTRY_EVENT_TRIGGER=none
 Environment=BTC_TREND_GATE=uptrend
-# Demo-only forward execution stress: 10x exchange leverage supplies margin and
-# NOTIONAL_MULTIPLIER=10 actually scales order quantity.  The registered 1x
-# research object remains unchanged; results from this epoch are execution and
-# lifecycle evidence at 10x scale, not 1x alpha validation.
+# Demo execution stress: leverage changes margin; the notional multiplier
+# changes target quantity. This is execution evidence at 10x exposure scale.
 Environment=ENTRY_LEVERAGE=10
 Environment=NOTIONAL_MULTIPLIER=10
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
-Environment=SIZING_MODE=inverse_vol
-Environment=TARGET_VOL_PER_NAME=0.01
-Environment=VOL_WEIGHT_CLAMP=2
-Environment=LIQ_TURNOVER_MIN=500000
-# Two daemons x full-width default threadpools on a 2-core box just buys context
-# switching; pin to 1 — the daemon's own WORKERS parallelism is the intended knob.
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
-# Loaded after natural-run.env and every checked-in default. The fresh-epoch
-# file can therefore replace DATA_ROOT/account routes and clear
-# NATURAL_EVIDENCE_REQUIRED, NATURAL_RUN_CONFIG, STRATEGY_TARGET_CAPTURE_PATH,
-# and CANDIDATE_UNIVERSE_FILE without mutating the sealed natural environment.
-EnvironmentFile=-/etc/liquidity-migration/fresh-deploy/liquidity-migration-bybit-continuous-demo.service.env
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_fresh_runtime.sh liquidity-migration-bybit-continuous-demo.service main
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-continuous-demo.service main
 Restart=always
 RestartSec=30
 KillMode=control-group
-# Cold-start bootstrap of the broad kline universe can take 60-120s.
 TimeoutStopSec=180
 Nice=5
 IOSchedulingClass=best-effort
@@ -70,11 +45,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
+UMask=0027
 ReadWritePaths=/opt/liquidity-migration
-# Broad full demo linear-perpetual kline store + per-cycle cross-section
-# recompute. Cap at 4G; normal operation sits well under 1G. A separately
-# declared strategy change would be required to narrow the live universe.
-MemoryMax=4G
+MemoryHigh=640M
+MemoryMax=896M
+MemorySwapMax=384M
 
 [Install]
 WantedBy=multi-user.target

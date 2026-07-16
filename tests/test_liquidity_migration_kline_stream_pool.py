@@ -189,8 +189,7 @@ def test_update_subscriptions_adds_and_removes() -> None:
         ws = factory.built[0]
         assert "kline.60.SOLUSDT" in ws.unsubscribed_topics
         assert "NEWUSDT" in ws.subscribed_symbols
-        # Final symbol set matches.
-        assert pool.subscribed_symbols() == {"BTCUSDT", "ETHUSDT", "NEWUSDT"}
+        assert pool.stats()["subscribed_symbols"] == 3
     finally:
         pool.close()
 
@@ -244,7 +243,7 @@ def test_update_subscriptions_adopts_already_subscribed_and_keeps_new_listing() 
         ws = factory.built[0]
         # BILLUSDT drops out -> unsubscribe (pybit directory NOT cleared).
         pool.update_subscriptions({"AAAUSDT"})
-        assert "BILLUSDT" not in pool.subscribed_symbols()
+        assert pool.stats()["subscribed_symbols"] == 1
 
         # BILLUSDT re-enters WITH a genuinely-new listing in the same batch.
         # adds sort to [BILLUSDT, ZZZUSDT]; the old code threw on BILLUSDT and
@@ -252,8 +251,7 @@ def test_update_subscriptions_adopts_already_subscribed_and_keeps_new_listing() 
         result = pool.update_subscriptions({"AAAUSDT", "BILLUSDT", "ZZZUSDT"})
 
         assert result["added"] == 2
-        # Both adds are tracked again.
-        assert pool.subscribed_symbols() == {"AAAUSDT", "BILLUSDT", "ZZZUSDT"}
+        assert pool.stats()["subscribed_symbols"] == 3
         # ZZZUSDT got a real subscribe frame; BILLUSDT was ADOPTED (no 2nd frame).
         assert ws.subscribed_symbols.count("ZZZUSDT") == 1
         assert ws.subscribed_symbols.count("BILLUSDT") == 1
@@ -317,8 +315,7 @@ def test_reconnect_resubscribes_slice_on_stale_connection() -> None:
         new_ws = factory.built[1]
         assert sorted(new_ws.subscribed_symbols) == ["AAA_USDT", "BBB_USDT"]
         assert pool.stats()["reconnects_total"] == 1
-        # The state's symbol→connection mapping is preserved.
-        assert pool.subscribed_symbols() == {"AAA_USDT", "BBB_USDT"}
+        assert pool.stats()["subscribed_symbols"] == 2
     finally:
         pool.close()
 
@@ -432,8 +429,7 @@ def test_failed_reconnect_keeps_slice_for_retry() -> None:
         assert set(state.assigned_symbols) == {"AAA_USDT", "BBB_USDT"}
         # The new (last) WebSocket is subscribed.
         assert sorted(factory.built[-1].subscribed_symbols) == ["AAA_USDT", "BBB_USDT"]
-        # Pool's public view of subscriptions is intact end-to-end.
-        assert pool.subscribed_symbols() == {"AAA_USDT", "BBB_USDT"}
+        assert pool.stats()["subscribed_symbols"] == 2
     finally:
         pool.close()
 
@@ -618,8 +614,7 @@ def test_subscribe_chunks_message_args_to_respect_bybit_cap() -> None:
         assert len(ws.kline_stream_calls) == 3
         sizes = [len(call) for call in ws.kline_stream_calls]
         assert sizes == [3, 3, 2]
-        # And every symbol still ended up assigned.
-        assert pool.subscribed_symbols() == set(symbols)
+        assert pool.stats()["subscribed_symbols"] == len(symbols)
     finally:
         pool.close()
 

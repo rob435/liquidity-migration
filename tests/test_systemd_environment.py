@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import grp
 import os
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from liquidity_migration.systemd_environment import (
+    load_group_systemd_environment,
     load_private_systemd_environment,
     parse_systemd_environment_bytes,
     selected_environment_payload,
@@ -57,6 +59,20 @@ def test_private_loader_requires_absolute_owner_only_regular_file(tmp_path: Path
         load_private_systemd_environment(path)
     with pytest.raises(ValueError, match="must be absolute"):
         load_private_systemd_environment(Path("private.env"))
+
+
+def test_group_loader_requires_named_group_and_exact_0640(tmp_path: Path) -> None:
+    path = tmp_path / "paper.env"
+    path.write_text("KEY=value\n", encoding="utf-8")
+    path.chmod(0o640)
+    group_name = grp.getgrgid(path.stat().st_gid).gr_name
+
+    assert load_group_systemd_environment(path, group_name=group_name) == {
+        "KEY": "value"
+    }
+    path.chmod(0o600)
+    with pytest.raises(ValueError, match="mode 0640"):
+        load_group_systemd_environment(path, group_name=group_name)
 
 
 def test_selected_payload_is_nul_delimited_and_omits_missing_keys() -> None:

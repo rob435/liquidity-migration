@@ -25,7 +25,7 @@ from liquidity_migration.account_kernel import (
 )
 from liquidity_migration.bybit_errors import BybitRequestRejected, BybitSubmissionUncertain
 from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
-from liquidity_migration.deterministic_runtime import DeterministicIds, SeededRandom, VirtualClock, VirtualScheduler
+from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.execution_adapters import (
     BookLevel,
     ExecutionObservation,
@@ -34,11 +34,6 @@ from liquidity_migration.execution_adapters import (
     L2BookSnapshot,
     LatencyProfile,
     MarketOrderExecutionTwin,
-)
-from liquidity_migration.fault_injection import DeliveryFaultPolicy, DeterministicFaultInjector, TapeMessage
-from liquidity_migration.kernel_parity import (
-    compare_kernel_journals,
-    verify_kernel_parity_receipt,
 )
 from liquidity_migration.strategy_runtime import (
     AccountKernelRuntime,
@@ -768,7 +763,7 @@ def test_duplicate_batch_reuses_first_evaluation_when_snapshots_change(
     assert read_account_journal(tmp_path) == before
 
 
-def test_every_persisted_boundary_replays_to_its_recorded_state_hash(tmp_path: Path) -> None:
+def test_projection_without_transaction_segments_requires_explicit_reset(tmp_path: Path) -> None:
     kernel = _kernel(tmp_path / "source")
     kernel.submit_targets(
         batch_id="crash-boundaries",
@@ -781,15 +776,13 @@ def test_every_persisted_boundary_replays_to_its_recorded_state_hash(tmp_path: P
         risk_policy=_policy(),
         instrument_rules=_rules(),
     )
-    source_lines = account_journal_path(tmp_path / "source").read_bytes().splitlines(keepends=True)
-    for boundary in range(1, len(source_lines) + 1):
-        crash_root = tmp_path / f"crash-{boundary}"
-        path = account_journal_path(crash_root)
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b"".join(source_lines[:boundary]))
-        events = read_account_journal(crash_root)
-        assert events[-1].sequence == boundary
-        assert _kernel(crash_root).state().state_hash() == events[-1].state_hash
+    projection_root = tmp_path / "projection-only"
+    path = account_journal_path(projection_root)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(account_journal_path(tmp_path / "source").read_bytes())
+
+    with pytest.raises(AccountJournalIntegrityError, match="reset the account root explicitly"):
+        read_account_journal(projection_root)
 
 
 def test_atomic_transaction_segments_remain_authoritative_if_jsonl_projection_is_torn(tmp_path: Path) -> None:
@@ -946,6 +939,32 @@ def test_cached_transaction_append_does_not_rescan_immutable_history(
     assert "second-cached-append" in kernel._state_ref().venue_snapshots
 
 
+def test_materialized_state_keeps_only_latest_venue_snapshot(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    for sequence in (1, 2):
+        kernel.record_venue_snapshot(
+            snapshot_key=f"snapshot-{sequence}",
+            venue_positions={},
+            reconstructed_positions={},
+            mismatches=[],
+            exchange_ts_ns=sequence,
+            local_receive_ts_ns=sequence,
+        )
+
+    snapshot_events = [
+        event
+        for event in kernel.journal.events()
+        if event.event_type == AccountEventType.VENUE_SNAPSHOT.value
+    ]
+    assert [event.payload["snapshot_key"] for event in snapshot_events] == [
+        "snapshot-1",
+        "snapshot-2",
+    ]
+    assert list(kernel.state().venue_snapshots) == ["snapshot-2"]
+
+
 def test_account_journal_failed_write_does_not_publish_prospective_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -990,22 +1009,6 @@ def test_account_journal_failed_write_does_not_publish_prospective_state(
     assert read_account_journal(tmp_path) == committed_events
     assert observed_state.state_hash() == committed_hash
     assert "prospective" not in observed_state.venue_snapshots
-
-
-def test_virtual_scheduler_and_seeded_random_are_reproducible() -> None:
-    def run() -> tuple[list[tuple[str, int]], list[float]]:
-        clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
-        scheduler = VirtualScheduler(clock=clock, ids=DeterministicIds("scheduler-test"))
-        scheduler.schedule_after(20, kind="reconcile", task_key="r1")
-        scheduler.schedule_after(10, kind="ws_event", task_key="w1")
-        scheduler.schedule_after(10, kind="timer", task_key="t1")
-        tasks = []
-        while scheduler.pending():
-            tasks.extend((task.task_id, task.due_monotonic_ns) for task in scheduler.advance_to_next())
-        rng = SeededRandom("fault-seed")
-        return tasks, [rng.random() for _ in range(4)]
-
-    assert run() == run()
 
 
 def test_account_risk_revalues_existing_components_at_current_market_input(tmp_path: Path) -> None:
@@ -1159,7 +1162,7 @@ def test_execution_twin_walks_book_and_terminal_partial_fill_has_no_phantom_work
 def test_execution_twin_rejects_sequence_gap_before_fill(tmp_path: Path) -> None:
     kernel = _kernel(tmp_path)
     book = _book(gap=True)
-    market = book.market_ref(input_key="gapped-book")
+    market = _market(key="gapped-book")
     result = kernel.submit_targets(
         batch_id="gap-reject",
         market_inputs=[market],
@@ -1640,30 +1643,16 @@ def test_dropped_ack_reordered_duplicate_fills_recover_deterministically(tmp_pat
             instrument_rules=_rules(),
         )
         raw_observations = tuple(_twin(name="fault-source", book=_book(ask_qty=1.0)).submit(result.commands[0], market))
-        messages = [
-            TapeMessage(
-                message_id=f"observation-{index}",
-                channel="ack" if str(observation.observation_type) == "ack" else "fill",
-                event_ts_ns=observation.exchange_ts_ns,
-                payload=asdict(observation),
-            )
-            for index, observation in enumerate(raw_observations)
+        # Simulate a lost create ack plus reordered, duplicate private fills.
+        fills = [
+            asdict(observation)
+            for observation in reversed(raw_observations)
+            if str(observation.observation_type) == "fill"
         ]
-        # Drop every unprotected message (the create ack), duplicate every fill,
-        # and add seeded delays which can reorder the executions.
-        deliveries = DeterministicFaultInjector(
-            seed="ws-fault-seed",
-            policy=DeliveryFaultPolicy(
-                drop_probability=1.0,
-                duplicate_probability=1.0,
-                max_delay_ns=50,
-                max_duplicates=1,
-                never_drop_channels=("fill",),
-            ),
-        ).transform(messages)
+        deliveries = fills + list(reversed(fills))
         driver = KernelExecutionDriver(kernel)
         for delivery in deliveries:
-            driver.ingest([delivery.payload])
+            driver.ingest([delivery])
         state = kernel.state()
         assert state.positions["BUSDT"].signed_qty == pytest.approx(2.0)
         assert len(state.executions) == 2
@@ -1672,22 +1661,6 @@ def test_dropped_ack_reordered_duplicate_fills_recover_deterministically(tmp_pat
         return [event.to_dict() for event in read_account_journal(root)]
 
     assert run(tmp_path / "one") == run(tmp_path / "two")
-
-
-def test_seeded_rest_execution_timer_race_has_one_repeatable_delivery_order() -> None:
-    tape = [
-        TapeMessage("execution-1", "execution", 1_000, {"kind": "execution"}),
-        TapeMessage("rest-1", "rest_snapshot", 1_000, {"kind": "rest_snapshot"}),
-        TapeMessage("timer-1", "timer", 1_000, {"kind": "timer"}),
-    ]
-    policy = DeliveryFaultPolicy(duplicate_probability=0.5, max_delay_ns=100, max_duplicates=1)
-    first = DeterministicFaultInjector(seed=73, policy=policy).transform(tape)
-    second = DeterministicFaultInjector(seed=73, policy=policy).transform(tape)
-    assert first == second
-    assert {message.channel for message in first} >= {"execution", "rest_snapshot", "timer"}
-    assert [message.delivery_ts_ns for message in first] == sorted(message.delivery_ts_ns for message in first)
-
-
 def test_sleeve_adapters_only_propose_targets_and_runtime_nets_them_once(tmp_path: Path) -> None:
     kernel = _kernel(tmp_path)
     market = _market()
@@ -1836,173 +1809,3 @@ def test_notional_adapter_rounds_quantity_to_venue_step_without_hidden_notional_
     assert target.signed_qty == pytest.approx(2.0)
     assert target.metadata["raw_signed_qty"] == pytest.approx(20.0 / 9.95)
     assert target.metadata["quantity_rounding"] == "toward_zero_to_venue_step"
-
-
-def test_explicit_parity_gate_checks_scoped_strategy_to_order_plan(tmp_path: Path) -> None:
-    roots = {name: tmp_path / name for name in ("historical", "paper", "demo")}
-    for root in roots.values():
-        kernel = _kernel(root, account_id="gate-account")
-        market = _book().market_ref(input_key="gate-book")
-        result = kernel.submit_targets(
-            batch_id="gate-batch",
-            market_inputs=[market],
-            targets=[_target(decision="gate-d", key="continuous/main/BUSDT", sleeve="continuous", qty=-2.0)],
-            risk_snapshot=_snapshot(),
-            risk_policy=_policy(),
-            instrument_rules=_rules(),
-        )
-        KernelExecutionDriver(kernel).execute_batch(
-            result,
-            market_inputs={"BUSDT": market},
-            adapter=_twin(name=root.name),
-        )
-    report = compare_kernel_journals(
-        roots,
-        comparison_batch_ids=["gate-batch"],
-        quantity_tolerance=1e-12,
-    )
-    assert report.passed
-    assert report.decision_keys_identical
-    assert report.risk_acceptance_and_rejection_keys_identical
-    assert report.quantity_values_within_tolerance
-    assert report.semantic_commands_identical
-    assert report.command_id_mapping_one_to_one
-
-    # Demo can carry extra venue-truth evidence without invalidating the
-    # normalized order/position parity trace.
-    _kernel(roots["demo"], account_id="gate-account").record_venue_snapshot(
-        snapshot_key="demo-snapshot-1",
-        venue_positions={"BUSDT": -2.0},
-        reconstructed_positions={"BUSDT": -2.0},
-        mismatches=(),
-        exchange_ts_ns=0,
-        local_receive_ts_ns=1_500_000_000,
-    )
-    assert compare_kernel_journals(
-        roots,
-        comparison_batch_ids=["gate-batch"],
-        quantity_tolerance=1e-12,
-    ).passed
-
-    demo_kernel = _kernel(roots["demo"], account_id="gate-account")
-    demo_order = next(iter(demo_kernel.state().orders.values()))
-    supplemental = demo_kernel.journal.transact(
-        lambda _state: [
-            account_kernel_module.AccountEventSpec(
-                event_type=AccountEventType.ACK_OBSERVATION,
-                idempotency_key="parity-only-ack-observation",
-                correlation_id=demo_order.batch_id,
-                causation_id=demo_order.command_id,
-                account_id="gate-account",
-                sleeve="account_execution",
-                symbol=demo_order.symbol,
-                wall_ts_ns=1_500_000_000,
-                monotonic_ns=0,
-                payload={
-                    "command_id": demo_order.command_id,
-                    "accepted": True,
-                    "venue_order_id": demo_order.venue_order_id,
-                    "exchange_ts_ns": 1_400_000_000,
-                    "local_ack_ts_ns": 1_500_000_000,
-                    "rejection_key": "",
-                    "metadata": {"local_socket_send_ts_ns": 1_300_000_000},
-                    "observation_kind": "http_create_response_timing",
-                },
-            )
-        ],
-        trusted_readonly_builder=True,
-    )
-    assert supplemental[0].event_type == AccountEventType.ACK_OBSERVATION.value
-    assert compare_kernel_journals(
-        roots,
-        comparison_batch_ids=["gate-batch"],
-        quantity_tolerance=1e-12,
-    ).passed
-
-    different = tmp_path / "different"
-    kernel = _kernel(different, account_id="gate-account")
-    kernel.submit_targets(
-        batch_id="gate-batch",
-        market_inputs=[_market()],
-        targets=[_target(decision="gate-d", key="continuous/main/BUSDT", sleeve="continuous", qty=-1.9)],
-        risk_snapshot=_snapshot(),
-        risk_policy=_policy(),
-        instrument_rules=_rules(),
-    )
-    failed = compare_kernel_journals(
-        {"historical": roots["historical"], "paper": roots["paper"], "demo": different},
-        comparison_batch_ids=["gate-batch"],
-        quantity_tolerance=1e-12,
-    )
-    assert not failed.passed
-    assert not failed.quantity_values_within_tolerance
-    with pytest.raises(RuntimeError, match="parity failed"):
-        failed.require_passed()
-
-
-def test_parity_gate_refuses_empty_journals(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="account root is missing"):
-        compare_kernel_journals(
-            {
-                "historical": tmp_path / "historical",
-                "paper": tmp_path / "paper",
-                "demo": tmp_path / "demo",
-            },
-            comparison_batch_ids=["missing"],
-            quantity_tolerance=1e-12,
-        )
-
-
-def test_parity_operator_rejects_legacy_self_hashed_receipt() -> None:
-    legacy = {
-        "schema_version": 1,
-        "report": {"passed": True},
-        "artifact_sha256": "0" * 64,
-    }
-    with pytest.raises(ValueError, match="schema v1 is not deploy-valid"):
-        verify_kernel_parity_receipt(legacy)
-
-
-def test_parity_gate_does_not_claim_demo_execution_equality(tmp_path: Path) -> None:
-    roots = {name: tmp_path / name for name in ("historical", "paper", "demo")}
-    for name, root in roots.items():
-        kernel = _kernel(root, account_id="execution-rejection-gate")
-        market = _market()
-        result = kernel.submit_targets(
-            batch_id="rejected-execution",
-            market_inputs=[market],
-            targets=[
-                _target(
-                    decision="reject-d",
-                    key="continuous/main/BUSDT",
-                    sleeve="continuous",
-                    qty=-2.0,
-                )
-            ],
-            risk_snapshot=_snapshot(),
-            risk_policy=_policy(),
-            instrument_rules=_rules(),
-        )
-        command = result.commands[0]
-        KernelExecutionDriver(kernel).ingest(
-            [
-                {
-                    "observation_type": "ack",
-                    "command_id": command.command_id,
-                    "exchange_ts_ns": 1_200_000_000,
-                    "local_receive_ts_ns": 1_205_000_000,
-                    "accepted": False,
-                    "rejection_key": f"execution:rejected-{name}",
-                }
-            ]
-        )
-
-    report = compare_kernel_journals(
-        roots,
-        comparison_batch_ids=["rejected-execution"],
-        quantity_tolerance=1e-12,
-    )
-    assert report.passed
-    assert report.decision_keys_identical
-    assert report.risk_acceptance_and_rejection_keys_identical
-    assert report.historical_paper_normalized_modeled_execution_exact is False

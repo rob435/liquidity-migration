@@ -1,23 +1,21 @@
-"""Live 2f hedge-manager tests (BTC+ETH legs; 2026-06-10 wiring).
-
-Covers: 2f decision parity with the research live twin, joint cap, ETH-history
-fallback to single-leg BTC, per-leg plan generation, warm-start eth_ret loading,
-and per-symbol trade-row/link construction.
-"""
+"""Tests for the active BTC+ETH continuous hedge manager."""
 
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 
 from liquidity_migration.continuous_hedge_manager import (
-    FROZEN_HEDGE_RULE,
+    ACTIVE_HEDGE_RULE,
     HEDGE_SYMBOL,
     HEDGE_SYMBOL_2,
     ContinuousHedgeConfig,
     compute_hedge_decision_2f,
-    load_warmstart_2f,
+    load_hedge_model_prior,
+    require_usable_hedge_model_prior,
 )
 from liquidity_migration.continuous_rebalance import (
     ContinuousHedge2FState,
@@ -45,7 +43,7 @@ def test_2f_decision_matches_live_twin_ratios() -> None:
     # so the twin must be fed the same intensity to match (base target_scale = 1.0).
     intensity = latest_btcvol_intensity(btc)
     r1, r2 = compute_continuous_hedge_ratios_2f(
-        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), FROZEN_HEDGE_RULE, intensity
+        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), ACTIVE_HEDGE_RULE, intensity
     )
     assert math.isclose(d.diagnostics["hedge_intensity"], intensity, rel_tol=0, abs_tol=1e-15)
     assert math.isclose(d.ratio_btc, r1, rel_tol=0, abs_tol=1e-15)
@@ -68,7 +66,7 @@ def test_2f_total_cap_scales_legs_proportionally() -> None:
     assert d.ratio_btc + d.ratio_eth <= 0.10 + 1e-12
     # proportional: ratio of legs preserved vs the uncapped twin
     r1, r2 = compute_continuous_hedge_ratios_2f(
-        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), FROZEN_HEDGE_RULE, 1.0
+        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), ACTIVE_HEDGE_RULE, 1.0
     )
     if r2 > 0 and d.ratio_eth > 0:
         assert math.isclose(d.ratio_btc / d.ratio_eth, r1 / r2, rel_tol=1e-9)
@@ -90,42 +88,89 @@ def test_2f_falls_back_to_btc_when_eth_history_thin() -> None:
     assert d.plan_eth is None
 
 
-def test_load_warmstart_2f_reads_eth_column(tmp_path) -> None:
+def test_load_hedge_model_prior_reads_eth_column_and_provenance(tmp_path) -> None:
     p = tmp_path / "w.csv"
+    source_hash = "a" * 64
     p.write_text(
-        "date,unit_ret,btc_ret,eth_ret\n"
-        "2025-07-11,0.001,0.01,0.02\n"
-        "2025-07-12,-0.002,,\n",
+        "date,unit_ret,btc_ret,eth_ret,data_through_date,source_summary_sha256\n"
+        f"2025-07-11,0.001,0.01,0.02,2025-07-12,{source_hash}\n"
+        f"2025-07-12,-0.002,,,2025-07-12,{source_hash}\n",
         encoding="utf-8",
     )
-    unit, btc, eth = load_warmstart_2f(p)
-    assert unit == [0.001, -0.002]
-    assert btc == [0.01, None]
-    assert eth == [0.02, None]
+    prior = load_hedge_model_prior(p)
+    assert prior.unit_returns == (0.001, -0.002)
+    assert prior.btc_returns == (0.01, None)
+    assert prior.eth_returns == (0.02, None)
+    assert prior.data_through_date == date(2025, 7, 12)
+    assert prior.source_summary_sha256 == source_hash
+    assert len(prior.artifact_sha256) == 64
 
 
-def test_load_warmstart_2f_backward_compatible_without_eth(tmp_path) -> None:
+def test_load_hedge_model_prior_rejects_unprovenanced_schema(tmp_path) -> None:
     p = tmp_path / "w.csv"
     p.write_text("date,unit_ret,btc_ret\n2025-07-11,0.001,0.01\n", encoding="utf-8")
-    unit, btc, eth = load_warmstart_2f(p)
-    assert unit == [0.001]
-    assert btc == [0.01]
-    assert eth == [None]
+    with pytest.raises(ValueError, match="unexpected schema"):
+        load_hedge_model_prior(p)
 
 
-# ==========================================================================
-# Relocated from test_audit_fix_b14.py (hedge-1 — 2026-06-14 audit bucket b14).
-# Reuses the module-level _two_factor_series helper (identical to the batch's
-# _hedge_unit_series).
-# ==========================================================================
+def test_shipped_model_prior_is_canonical_and_usable() -> None:
+    path = Path(__file__).resolve().parent.parent / "deploy" / "hedge_warmstart" / "bybit_warmstart.csv"
+    prior = require_usable_hedge_model_prior(
+        load_hedge_model_prior(path),
+        as_of_date=date(2026, 7, 16),
+    )
+    assert len(prior.unit_returns) >= 90
+    assert len(prior.unit_returns) == len(prior.btc_returns) == len(prior.eth_returns)
+    assert sum(value is not None for value in prior.btc_returns) >= 60
+    assert sum(value is not None for value in prior.eth_returns) >= 60
+    assert prior.provenance()["model_prior_live_extension"] is False
+
+
+def test_model_prior_runtime_gate_rejects_future_and_too_short_inputs(tmp_path) -> None:
+    source_hash = "a" * 64
+    start = date(2026, 1, 1)
+    rows = [
+        f"{(start + timedelta(days=index)).isoformat()},0.001,0.01,0.02,2026-02-28,{source_hash}"
+        for index in range(59)
+    ]
+    p = tmp_path / "short.csv"
+    p.write_text(
+        "date,unit_ret,btc_ret,eth_ret,data_through_date,source_summary_sha256\n"
+        + "\n".join(rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    prior = load_hedge_model_prior(p)
+    with pytest.raises(ValueError, match="59 usable rows"):
+        require_usable_hedge_model_prior(prior, as_of_date=date(2026, 3, 2))
+
+    shipped = Path(__file__).resolve().parent.parent / "deploy" / "hedge_warmstart" / "bybit_warmstart.csv"
+    with pytest.raises(ValueError, match="must end before"):
+        require_usable_hedge_model_prior(
+            load_hedge_model_prior(shipped),
+            as_of_date=date(2026, 7, 9),
+        )
+
+
+def test_model_prior_parser_rejects_malformed_rows_instead_of_skipping(tmp_path) -> None:
+    p = tmp_path / "malformed.csv"
+    p.write_text(
+        "date,unit_ret,btc_ret,eth_ret,data_through_date,source_summary_sha256\n"
+        f"2026-07-09,not-a-number,0.01,0.02,2026-07-09,{'a' * 64}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid unit_ret"):
+        load_hedge_model_prior(p)
+
+
+def test_active_hedge_rule_derives_from_profile() -> None:
+    from liquidity_migration.continuous_profile import active_hedge_rule
+
+    assert ACTIVE_HEDGE_RULE == active_hedge_rule()
 
 
 def test_2f_falls_back_when_trailing_window_eth_thin_but_full_history_deep() -> None:
-    """hedge-1: the EXACT shape the original full-series count missed — ETH present
-    for the OLD half of the history (full joint >= beta_min_obs) but None for the
-    recent beta-window half (window joint < beta_min_obs). The trailing-window beta
-    is (0,0); the fallback MUST fire (single-leg BTC) instead of leaving the book
-    silently unhedged. The original full-series gate did NOT fire here."""
+    """A deep full history must not hide a sparse trailing ETH window."""
     n = 200
     unit, btc, eth_full = _two_factor_series(n)
     # ETH known for the first 100 rows, None for the last 100 (the beta window).
@@ -133,7 +178,7 @@ def test_2f_falls_back_when_trailing_window_eth_thin_but_full_history_deep() -> 
 
     # Full-series joint count is large (>= beta_min_obs); the windowed count is 0.
     full_joint = sum(1 for b, e in zip(btc, eth) if b is not None and e is not None)
-    assert full_joint >= FROZEN_HEDGE_RULE.beta_min_obs  # the trap condition
+    assert full_joint >= ACTIVE_HEDGE_RULE.beta_min_obs
 
     cfg = ContinuousHedgeConfig()
     d = compute_hedge_decision_2f(
@@ -141,8 +186,6 @@ def test_2f_falls_back_when_trailing_window_eth_thin_but_full_history_deep() -> 
         live_gross_short_frac=0.5, btc_price=50_000.0, eth_price=3_000.0,
         current_btc_qty=0.0, current_eth_qty=0.0, equity_usdt=10_000.0,
     )
-    # Bug behaviour: no fallback, ratio_btc == ratio_eth == 0 (book unhedged).
-    # Fixed behaviour: fall back to single-leg BTC with a non-zero hedge.
     assert d.fell_back_to_btc, "2f hedge silently went to zero (no fallback)"
     assert d.ratio_btc > 0.0
     assert d.ratio_eth == 0.0
@@ -151,9 +194,8 @@ def test_2f_falls_back_when_trailing_window_eth_thin_but_full_history_deep() -> 
     assert d.n_obs_joint == 0
 
 
-def test_2f_full_window_still_matches_live_twin() -> None:
-    """hedge-1 guardrail: when the trailing window IS ETH-complete the windowed
-    gate must NOT spuriously fall back — the decision still matches the live twin."""
+def test_2f_full_window_matches_shared_rule() -> None:
+    """An ETH-complete trailing window must not spuriously fall back."""
     unit, btc, eth = _two_factor_series(120)
     cfg = ContinuousHedgeConfig(max_hedge_equity_frac=10.0)
     d = compute_hedge_decision_2f(
@@ -163,9 +205,9 @@ def test_2f_full_window_still_matches_live_twin() -> None:
     )
     intensity = latest_btcvol_intensity(btc)
     r1, r2 = compute_continuous_hedge_ratios_2f(
-        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), FROZEN_HEDGE_RULE, intensity,
+        ContinuousHedge2FState(tuple(unit), tuple(btc), tuple(eth)), ACTIVE_HEDGE_RULE, intensity,
     )
     assert not d.fell_back_to_btc
     assert d.ratio_btc == pytest.approx(r1, abs=1e-15)
     assert d.ratio_eth == pytest.approx(r2, abs=1e-15)
-    assert d.n_obs_joint >= FROZEN_HEDGE_RULE.beta_min_obs
+    assert d.n_obs_joint >= ACTIVE_HEDGE_RULE.beta_min_obs

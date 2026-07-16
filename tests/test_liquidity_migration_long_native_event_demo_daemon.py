@@ -2,16 +2,34 @@
 
 from __future__ import annotations
 
-from inspect import signature
 from pathlib import Path
 
 import pytest
 
 import liquidity_migration.long_native_event_demo_daemon as daemon_module
+from liquidity_migration.account_intent_client import ExitFirstPublication
+from liquidity_migration.account_route import ensure_account_route
 from liquidity_migration.config import ResearchConfig
 from liquidity_migration.deterministic_runtime import VirtualClock
+from liquidity_migration.execution_environment import account_id_for_environment
 from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
 from liquidity_migration.long_native_event_demo_daemon import LongNativeDemoDaemon
+from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
+
+
+def _published_payload(data_root: Path, kwargs: dict, payload: dict) -> PublishedTargetCyclePayload:
+    demo = kwargs["demo_config"]
+    route = ensure_account_route(
+        account_id=account_id_for_environment(demo.execution_environment),
+        environment=demo.execution_environment,
+        account_root=demo.account_execution_root,
+        inbox_root=demo.account_intent_inbox_root,
+    )
+    return PublishedTargetCyclePayload(
+        payload,
+        publication=ExitFirstPublication((), (), ()),
+        route=route,
+    )
 
 
 def _stub_long_cycle_runner(seen: list[dict]):
@@ -19,19 +37,27 @@ def _stub_long_cycle_runner(seen: list[dict]):
         seen.append({"data_root": str(data_root), "kwargs": kwargs})
         # The long formatter expects the nested-`cycle` payload shape (see the
         # iter-5 fail-fast guard); return it so _format_cycle_summary succeeds.
-        return {"cycle": {"cycle_id": "c1", "mode": "demo_target"}, "report_dir": str(data_root)}
+        return _published_payload(
+            Path(data_root),
+            kwargs,
+            {"cycle": {"cycle_id": "c1", "mode": "demo_target"}, "report_dir": str(data_root)},
+        )
 
     return _runner
 
 
-def test_daemon_has_no_private_execution_surface_and_cycle_is_public_only(
+def test_daemon_cycle_receives_public_state_only(
     tmp_path: Path,
 ) -> None:
     seen: dict[str, object] = {}
 
     def cycle_runner(data_root, **kwargs):  # noqa: ANN001, ANN202
         seen["kwargs"] = kwargs
-        return {"cycle": {"cycle_id": "c1", "mode": "demo_target"}, "report_dir": str(data_root)}
+        return _published_payload(
+            Path(data_root),
+            kwargs,
+            {"cycle": {"cycle_id": "c1", "mode": "demo_target"}, "report_dir": str(data_root)},
+        )
 
     daemon = LongNativeDemoDaemon(
         tmp_path,
@@ -49,45 +75,6 @@ def test_daemon_has_no_private_execution_surface_and_cycle_is_public_only(
 
     daemon._run_one_cycle()
 
-    removed_constructor_kwargs = {
-        "ws_gap_threshold_seconds",
-        "ws_stream_factory",
-        "telegram_sender",
-        "private_state_cache",
-        "state_cache_seeder",
-        "startup_telegram",
-        "shutdown_telegram",
-        "order_submit_mode",
-        "ws_trade_timeout_seconds",
-        "trade_router",
-        "trade_router_factory",
-    }
-    assert removed_constructor_kwargs.isdisjoint(
-        signature(LongNativeDemoDaemon).parameters
-    )
-    for removed_name in (
-        "router",
-        "_ws_stream",
-        "_private_state_cache",
-        "_trade_router",
-        "_seed_private_client",
-        "_open_ws",
-        "_close_ws",
-        "_ensure_trade_router",
-        "_send_telegram",
-        "_maybe_send_cycle_failure_telegram",
-        "_private_state_ws_health_ok",
-    ):
-        assert not hasattr(daemon, removed_name)
-    for removed_module_name in (
-        "BybitPrivateClient",
-        "BybitPrivateWebSocketStream",
-        "BybitTradeRouter",
-        "ExecutionEventRouter",
-        "PrivateStateCache",
-        "resolve_demo_credentials",
-    ):
-        assert not hasattr(daemon_module, removed_module_name)
     kwargs = seen["kwargs"]
     assert isinstance(kwargs, dict)
     assert {"private_client", "private_state_cache", "execution_event_router"}.isdisjoint(kwargs)
@@ -117,22 +104,6 @@ def test_daemon_cache_seed_is_public_only(tmp_path: Path) -> None:
     daemon._refresh_public_ticker_cache()
 
     assert [row["symbol"] for row in daemon._ticker_cache.snapshot_list()] == ["BTCUSDT"]
-
-
-def test_daemon_rejects_removed_private_execution_kwargs(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="unexpected keyword argument 'trade_router'"):
-        LongNativeDemoDaemon(
-            tmp_path,
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=LongNativeDemoCycleConfig(
-                execution_environment="demo",
-                account_intent_inbox_root=str(tmp_path / "inbox"),
-                account_execution_root=str(tmp_path / "account"),
-                ws_klines_enabled=False,
-            ),
-            cycle_runner=_stub_long_cycle_runner([]),
-            trade_router=object(),  # type: ignore[call-arg]
-        )
 
 
 def test_public_ticker_liveness_telemetry_tracks_silence_and_recovery(
@@ -199,14 +170,18 @@ def test_run_drains_one_cycle_and_tears_down_public_resources_in_order(
         def stop(self) -> None:
             events.append("kline_stop")
 
-    def cycle_runner(data_root, **_kwargs):  # noqa: ANN001, ANN202
+    def cycle_runner(data_root, **kwargs):  # noqa: ANN001, ANN202
         assert data_root == tmp_path
         events.append("cycle")
         holder["daemon"].request_shutdown()
-        return {
-            "cycle": {"cycle_id": "c1", "mode": "demo_target"},
-            "report_dir": str(data_root),
-        }
+        return _published_payload(
+            Path(data_root),
+            kwargs,
+            {
+                "cycle": {"cycle_id": "c1", "mode": "demo_target"},
+                "report_dir": str(data_root),
+            },
+        )
 
     daemon = LongNativeDemoDaemon(
         tmp_path,

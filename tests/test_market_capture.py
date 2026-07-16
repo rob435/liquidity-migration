@@ -47,7 +47,6 @@ def _config(**overrides: object) -> MarketCaptureConfig:
         "segment_max_bytes": 1_000_000,
         "fsync_every_records": 1,
         "min_free_disk_bytes": 1,
-        "ring_records_per_symbol": 100,
     }
     values.update(overrides)
     return MarketCaptureConfig(**values)

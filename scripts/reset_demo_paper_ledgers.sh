@@ -32,8 +32,8 @@ usage() {
   cat <<'EOF'
 Usage: scripts/reset_demo_paper_ledgers.sh [options]
 
-Archive and rebuild demo + paper account state and strategy trade/order
-projections. Canonical account journals begin a new epoch only after the venue
+Archive and rebuild demo + paper account state and strategy telemetry.
+Canonical account journals begin a new epoch only after the venue
 flatness guard; the prior journals remain in the verified archive.
 Default mode is a read-only preview. Mutation requires --execute.
 
@@ -61,18 +61,13 @@ After a continuous reset it writes fresh demo + paper cycle heartbeats. The demo
 heartbeat records the venue-verified flat boundary; the paper heartbeat records
 that the old deterministic epoch was archived and not carried forward.
 
-Legacy strategy trade/order ledgers are rebuildable projections of their
-canonical journals. The account-owner roots, intent inboxes, and raw captures
-are a separate execution epoch: execute archives them in full, verifies the
-archive, then creates fresh empty directories. It never discards execution
-history without a durable archive. Demo reset additionally requires venue-flat
-proof; paper reset explicitly retires the archived simulated epoch without
-pretending the demo proof applies to it.
+The account-owner roots, intent inboxes, raw captures, and strategy telemetry
+are archived in full before a fresh epoch is created. Demo reset additionally
+requires venue-flat proof; paper reset explicitly retires the archived
+simulated epoch without pretending the demo proof applies to it.
 
-The command never removes configs, .locks, canonical_journal/, residual_momentum.parquet, root-level
-market-data datasets, or continuous_account_equity_state.json. The equity state is
-snapshotted into the archive but retained live so a ledger reset cannot erase the
-account drawdown high-water. It never cancels orders or closes positions: execute
+The command never removes configs, .locks, residual_momentum.parquet, or root-level
+market-data datasets. It never cancels orders or closes positions: execute
 refuses until the configured Bybit demo account is already flat with no open orders.
 Execute also refuses if another reset holds the process lock or if any submit-armed
 systemd unit does not load the same resolved credential env file. Tests may override
@@ -136,6 +131,8 @@ PAPER_ACCOUNT_ENV_FILE="${ACCOUNT_PAPER_EXECUTION_ENV_FILE:-/etc/liquidity-migra
 SETTLE_SECONDS="${LEDGER_RESET_SETTLE_SECONDS:-3}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 LOCK_FILE="${LEDGER_RESET_LOCK_FILE:-/run/lock/liquidity-migration-ledger-reset.lock}"
+PAPER_RUNTIME_USER=liquidity-migration-paper
+PAPER_RUNTIME_GROUP=liquidity-migration-paper
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -335,7 +332,7 @@ ACCOUNT_STATE_TARGETS=(
 )
 
 # Account-owner state is an independently reset execution epoch. Refuse route
-# layouts that overlap each other or any strategy/legacy root: otherwise a
+# layouts that overlap each other or any strategy root: otherwise a
 # seemingly narrow account reset could recursively erase a preserved canonical
 # journal, cache, config, or an unselected sleeve. The normal deployment uses six
 # sibling roots, so overlap indicates a bad env file rather than a supported
@@ -355,8 +352,6 @@ reserved = [
         "data/bybit-long-paper-event",
         "data/bybit-continuous-demo-event",
         "data/bybit-continuous-paper-event",
-        "data/bybit-continuous-hedge-event",
-        "data/bybit-demo-event",
     )
 ]
 
@@ -376,11 +371,9 @@ for index, left in enumerate(account_paths):
             raise SystemExit(1)
 PY
 
-# Parse and canonicalise sleeve selection. "all" also retires the obsolete
-# shared compatibility root; continuous retires the obsolete hedge ledger root.
+# Parse and canonicalise sleeve selection.
 SELECT_LONG=0
 SELECT_CONTINUOUS=0
-RETIRE_LEGACY_SHARED=0
 normalised_sleeves="$(printf '%s' "$SLEEVES_RAW" | tr ',' ' ')"
 [[ -n "${normalised_sleeves//[[:space:]]/}" ]] || die "--sleeves must not be empty"
 for sleeve in $normalised_sleeves; do
@@ -388,7 +381,6 @@ for sleeve in $normalised_sleeves; do
     all)
       SELECT_LONG=1
       SELECT_CONTINUOUS=1
-      RETIRE_LEGACY_SHARED=1
       ;;
     long)
       SELECT_LONG=1
@@ -407,78 +399,41 @@ done
 SELECTED_SLEEVES=()
 (( SELECT_LONG )) && SELECTED_SLEEVES+=("long")
 (( SELECT_CONTINUOUS )) && SELECTED_SLEEVES+=("continuous")
-(( RETIRE_LEGACY_SHARED )) && SELECTED_SLEEVES+=("retire-shared-compat")
 
 # Static allowlist of generated projections/epoch telemetry. The canonical
 # journal is intentionally absent: no caller-supplied path can delete it.
 LONG_LEDGER_TARGETS=(
-  data/bybit-long-demo-event/long_native_demo_trades
-  data/bybit-long-demo-event/long_native_demo_orders
   data/bybit-long-demo-event/long_native_demo_cycles
   data/bybit-long-demo-event/strategy_event_tape.jsonl
   data/bybit-long-demo-event/strategy_event_decision_tape.jsonl
   data/bybit-long-demo-event/strategy_target_scheduling_capture.jsonl
-  data/bybit-long-demo-event/natural-effective-runtime-config.json
-  data/bybit-long-paper-event/long_native_paper_trades
-  data/bybit-long-paper-event/long_native_paper_orders
   data/bybit-long-paper-event/long_native_paper_cycles
   data/bybit-long-paper-event/strategy_event_tape.jsonl
   data/bybit-long-paper-event/strategy_event_decision_tape.jsonl
   data/bybit-long-paper-event/strategy_target_scheduling_capture.jsonl
 )
 CONTINUOUS_LEDGER_TARGETS=(
-  data/bybit-continuous-demo-event/continuous_fade_demo_trades
-  data/bybit-continuous-demo-event/continuous_fade_demo_orders
   data/bybit-continuous-demo-event/continuous_fade_demo_cycles
-  data/bybit-continuous-demo-event/continuous_risk_events.jsonl
-  data/bybit-continuous-demo-event/continuous_lifecycle_events.jsonl
   data/bybit-continuous-demo-event/strategy_event_tape.jsonl
   data/bybit-continuous-demo-event/strategy_event_decision_tape.jsonl
   data/bybit-continuous-demo-event/strategy_target_scheduling_capture.jsonl
-  data/bybit-continuous-demo-event/natural-effective-runtime-config.json
-  data/bybit-continuous-paper-event/continuous_fade_paper_trades
-  data/bybit-continuous-paper-event/continuous_fade_paper_orders
   data/bybit-continuous-paper-event/continuous_fade_paper_cycles
-  data/bybit-continuous-paper-event/continuous_risk_events.jsonl
-  data/bybit-continuous-paper-event/continuous_lifecycle_events.jsonl
   data/bybit-continuous-paper-event/strategy_event_tape.jsonl
   data/bybit-continuous-paper-event/strategy_event_decision_tape.jsonl
   data/bybit-continuous-paper-event/strategy_target_scheduling_capture.jsonl
 )
-NATURAL_RUNTIME_TARGETS=(data/bybit-natural-account-cutover)
-LEGACY_CONTINUOUS_TARGETS=(data/bybit-continuous-hedge-event)
-LEGACY_SHARED_TARGETS=(data/bybit-demo-event)
 LONG_ROOTS=(data/bybit-long-demo-event data/bybit-long-paper-event)
 CONTINUOUS_ROOTS=(
   data/bybit-continuous-demo-event
   data/bybit-continuous-paper-event
 )
-CANONICAL_SPECS=()
-if (( SELECT_LONG )); then
-  CANONICAL_SPECS+=(
-    "data/bybit-long-demo-event|long_native_demo_trades|long_native_demo_orders|demo|long"
-    "data/bybit-long-paper-event|long_native_paper_trades|long_native_paper_orders|paper|long"
-  )
-fi
-if (( SELECT_CONTINUOUS )); then
-  CANONICAL_SPECS+=(
-    "data/bybit-continuous-demo-event|continuous_fade_demo_trades|continuous_fade_demo_orders|demo|continuous"
-    "data/bybit-continuous-paper-event|continuous_fade_paper_trades|continuous_fade_paper_orders|paper|continuous"
-  )
-fi
-CONTINUOUS_PRESERVED_AUDIT_TARGETS=(
-  data/bybit-continuous-demo-event/continuous_account_equity_state.json
-  data/bybit-continuous-paper-event/continuous_account_equity_state.json
-)
 
 OUT=()
 (( SELECT_LONG )) && append_unique "${LONG_LEDGER_TARGETS[@]}"
 if (( SELECT_CONTINUOUS )); then
-  append_unique "${CONTINUOUS_LEDGER_TARGETS[@]}" "${LEGACY_CONTINUOUS_TARGETS[@]}"
+  append_unique "${CONTINUOUS_LEDGER_TARGETS[@]}"
 fi
-(( RETIRE_LEGACY_SHARED )) && append_unique "${LEGACY_SHARED_TARGETS[@]}"
 append_unique "${ACCOUNT_STATE_TARGETS[@]}"
-append_unique "${NATURAL_RUNTIME_TARGETS[@]}"
 TARGETS=("${OUT[@]}")
 
 OUT=()
@@ -516,17 +471,6 @@ refresh_existing_targets() {
 }
 refresh_existing_targets
 
-# Account drawdown is an account-level risk memory, not a disposable ledger.
-# Snapshot it at the reset boundary for auditability but deliberately do not add
-# it to TARGETS/EXISTING_TARGETS: removing it would make the next cycle seed its
-# high-water from the post-loss balance and report a false zero drawdown.
-PRESERVED_AUDIT_TARGETS=()
-if (( SELECT_CONTINUOUS )); then
-  for target in "${CONTINUOUS_PRESERVED_AUDIT_TARGETS[@]}"; do
-    [[ -e "$target" || -L "$target" ]] && PRESERVED_AUDIT_TARGETS+=("$target")
-  done
-fi
-
 # The archive must never sit inside anything that will be added to the archive,
 # whether that path is reset or retained live. Besides losing the recovery copy,
 # tar could consume its own growing output. Canonical journals may be created by
@@ -543,11 +487,7 @@ print(pathlib.Path(sys.argv[1]).resolve(strict=False))
 ' "$1"
 }
 archive_compare="$(canonical_path "$ARCHIVE_DIR")"
-ARCHIVE_INPUT_PATHS=("${TARGETS[@]}" "${PRESERVED_AUDIT_TARGETS[@]}")
-for root in "${SELECTED_ROOTS[@]}"; do
-  ARCHIVE_INPUT_PATHS+=("$root/canonical_journal")
-done
-for target in "${ARCHIVE_INPUT_PATHS[@]}"; do
+for target in "${TARGETS[@]}"; do
   target_compare="$(canonical_path "$target")"
   case "$archive_compare/" in
     "$target_compare/"*)
@@ -636,12 +576,7 @@ for target in "${EXISTING_TARGETS[@]}"; do
   echo "    - $target (${size:-size unknown})"
 done
 
-echo "  preserved risk-state snapshots: ${#PRESERVED_AUDIT_TARGETS[@]}"
-for target in "${PRESERVED_AUDIT_TARGETS[@]}"; do
-  echo "    - $target (archived, retained live)"
-done
-
-echo "  preserved by default: strategy canonical_journal/, configs/, .locks/, reports/, .cache/, residual_momentum.parquet, root-level market data, account-equity high-water state"
+echo "  preserved by default: configs/, .locks/, reports/, .cache/, residual_momentum.parquet, root-level market data"
 (( INCLUDE_REPORTS )) && echo "  selected exception: reports/ will be archived and reset"
 (( INCLUDE_CACHES )) && echo "  selected exception: .cache/ will be archived and reset; expect market-data bootstrap"
 echo "  quiesced units: ${#STOP_UNITS[@]} (all shared-account writers plus maintenance readers/timers)"
@@ -1143,78 +1078,11 @@ print("  demo-account-flat-ok positions=0 open_orders=0")
 PY
 )
 
-# Import any pre-journal rows before touching projections. Demo rows receive the
-# venue-flat fact proven immediately above and become awaiting_pnl without a
-# fabricated close. Paper rows receive a distinct archived-epoch fact and become
-# inactive; no demo venue observation or realized P&L is attributed to them.
-echo
-echo "Bootstrapping and verifying canonical journals ..."
-"$PYTHON" - --prepare-canonical-reset "${CANONICAL_SPECS[@]}" <<'PY'
-import datetime as dt
-import sys
-from pathlib import Path
-
-from liquidity_migration.canonical_journal import (
-    journal_path,
-    rebuild_all_registered_projections,
-    record_archived_paper_epoch_reset,
-    record_verified_flat_snapshot,
-    verify_journal,
-)
-from liquidity_migration.lifecycle_bridge import bootstrap_legacy_ledgers
-
-
-now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
-reset_id = f"ledger-rebuild-{now_ms}"
-for raw in sys.argv[2:]:
-    root_raw, trades, orders, mode, sleeve = raw.split("|", 4)
-    root = Path(root_raw)
-    root.mkdir(parents=True, exist_ok=True)
-    bootstrap_legacy_ledgers(
-        root,
-        trade_dataset=trades,
-        order_dataset=orders,
-        mode=mode,
-        sleeve=sleeve,
-        now_ms=now_ms,
-    )
-    if mode == "demo":
-        record_verified_flat_snapshot(
-            root,
-            now_ms=now_ms,
-            verification_id=f"{reset_id}:demo-venue-flat",
-            source="reset_workflow_demo_positions_and_open_orders_flat",
-        )
-        boundary = "demo_venue_flat"
-    elif mode == "paper":
-        record_archived_paper_epoch_reset(
-            root,
-            now_ms=now_ms,
-            reset_id=f"{reset_id}:paper-epoch-archived",
-            source="reset_workflow_archived_deterministic_paper_epoch",
-        )
-        boundary = "paper_epoch_archived"
-    else:
-        raise ValueError(f"unsupported reset mode: {mode}")
-    rebuild_all_registered_projections(root)
-    receipt = verify_journal(root)
-    print(
-        f"  canonical-ok root={root} events={receipt['events']} "
-        f"trades={receipt['trades']} boundary={boundary} path={journal_path(root)}"
-    )
-PY
-
 # The preview inventory was collected while producers were still running.
-# Refresh after quiescence and bootstrap so an inbox/capture/projection created
+# Refresh after quiescence so an inbox, capture, or projection created
 # during that interval cannot survive into the fresh epoch merely because its
 # path did not exist during planning.
 refresh_existing_targets
-
-# Snapshot each now-existing journal in the archive while retaining it live.
-for root in "${SELECTED_ROOTS[@]}"; do
-  canonical="$root/canonical_journal"
-  [[ -e "$canonical" ]] && PRESERVED_AUDIT_TARGETS+=("$canonical")
-done
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 suffix=""
@@ -1255,15 +1123,12 @@ fi
   for target in "${EXISTING_TARGETS[@]}"; do
     echo "target=$target"
   done
-  for target in "${PRESERVED_AUDIT_TARGETS[@]}"; do
-    echo "preserved_risk_state=$target"
-  done
 } > "$MANIFEST_PATH"
 
 echo
-echo "Archiving ${#EXISTING_TARGETS[@]} reset target(s) and ${#PRESERVED_AUDIT_TARGETS[@]} preserved risk-state snapshot(s) ..."
+echo "Archiving ${#EXISTING_TARGETS[@]} reset target(s) ..."
 tar -czf "$ARCHIVE_PATH" \
-  -C "$PWD" "${EXISTING_TARGETS[@]}" "${PRESERVED_AUDIT_TARGETS[@]}" \
+  -C "$PWD" "${EXISTING_TARGETS[@]}" \
   -C "$MANIFEST_DIR" ledger-reset-manifest.txt
 tar -tzf "$ARCHIVE_PATH" >/dev/null
 archive_size="$(du -sh "$ARCHIVE_PATH" 2>/dev/null | cut -f1 || true)"
@@ -1317,35 +1182,8 @@ for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
   echo "  created $target"
 done
 
-echo
-echo "Rebuilding trade/order projections from canonical journals ..."
-"$PYTHON" - --rebuild-canonical-projections "${CANONICAL_SPECS[@]}" <<'PY'
-import sys
-from pathlib import Path
-
-from liquidity_migration.canonical_journal import rebuild_all_registered_projections, verify_journal
-
-
-seen: set[Path] = set()
-for raw in sys.argv[2:]:
-    root = Path(raw.split("|", 1)[0])
-    if root in seen:
-        continue
-    seen.add(root)
-    counts = rebuild_all_registered_projections(root)
-    receipt = verify_journal(root)
-    print(f"  projection-rebuild-ok root={root} events={receipt['events']} rows={counts}")
-PY
-
-# A continuous reset deliberately removes both the trades and cycles datasets.
-# The hedge manager treats that exact shape as UNKNOWN (correct for an arbitrary
-# missing ledger) and its already-enabled OnBootSec timer can fire before the
-# restarted continuous daemon writes its first cycle, producing a false failed
-# hedge run immediately after a reset that just proved the account flat. Record a
-# new-epoch boundary heartbeat while every writer is still quiesced. This is not
-# restored trading history: it is the durable post-reset fact established by the
-# flat-account guard above, and it lets the hedge manager distinguish a controlled
-# flat reset from corrupt/missing state without weakening its fail-closed default.
+# Seed the continuous cycle stream with the verified reset boundary so liveness
+# monitoring has an explicit new-epoch fact before the producer restarts.
 if (( SELECT_CONTINUOUS )); then
   echo
   echo "Writing post-reset demo-flat and paper-archive boundary heartbeats ..."
@@ -1402,6 +1240,47 @@ for root, dataset, mode in (
     write_dataset(pl.DataFrame([row]), root, dataset, append=True)
 print("  reset-boundary-heartbeats-ok demo_venue_flat=1 paper_epoch_archived=1")
 PY
+fi
+
+# Reset runs as root while every writer is stopped. Restore the deployment's
+# ownership boundary before any paper process is restarted, including files
+# just written by the reset heartbeat above.
+id -u "$PAPER_RUNTIME_USER" >/dev/null 2>&1 \
+  || die "paper runtime user is not provisioned: $PAPER_RUNTIME_USER"
+[[ "$(id -gn "$PAPER_RUNTIME_USER")" == "$PAPER_RUNTIME_GROUP" ]] \
+  || die "paper runtime user has the wrong primary group"
+for root in \
+  "$PAPER_ACCOUNT_ROOT" "$PAPER_ACCOUNT_INBOX_ROOT" "$PAPER_ACCOUNT_CAPTURE_ROOT" \
+  data/bybit-long-paper-event data/bybit-continuous-paper-event; do
+  [[ -e "$root" ]] || continue
+  [[ ! -L "$root" ]] || die "paper runtime root became a symlink: $root"
+  chown -R "$PAPER_RUNTIME_USER:$PAPER_RUNTIME_GROUP" "$root"
+  find "$root" -type d -exec chmod 0700 {} +
+  find "$root" -type f -exec chmod 0600 {} +
+done
+for root in data/bybit-long-demo-event data/bybit-continuous-demo-event; do
+  [[ -e "$root" ]] || continue
+  [[ ! -L "$root" ]] || die "demo market root became a symlink: $root"
+  chown "root:$PAPER_RUNTIME_GROUP" "$root"
+  chmod 2710 "$root"
+  mkdir -p "$root/.cache/ws_klines"
+  chown "root:$PAPER_RUNTIME_GROUP" "$root/.cache" "$root/.cache/ws_klines"
+  chmod 2710 "$root/.cache"
+  chmod 2750 "$root/.cache/ws_klines"
+  snapshot="$root/.cache/ws_klines/store.parquet"
+  if [[ -e "$snapshot" ]]; then
+    [[ -f "$snapshot" && ! -L "$snapshot" ]] \
+      || die "demo kline snapshot became non-regular: $snapshot"
+    chown "root:$PAPER_RUNTIME_GROUP" "$snapshot"
+    chmod 0640 "$snapshot"
+  fi
+done
+rmom_path=data/bybit-continuous-demo-event/residual_momentum.parquet
+if [[ -e "$rmom_path" ]]; then
+  [[ -f "$rmom_path" && ! -L "$rmom_path" ]] \
+    || die "shared RMOM input became non-regular: $rmom_path"
+  chown "root:$PAPER_RUNTIME_GROUP" "$rmom_path"
+  chmod 0640 "$rmom_path"
 fi
 
 FAILURE_RECOVERY_ALLOWED=0
@@ -1470,9 +1349,8 @@ echo "  archive sha256: $archive_sha"
 echo "  archive digest: $SHA_PATH"
 [[ -z "$RECEIPT_PATH" ]] || echo "  structured reset receipt: $RECEIPT_PATH"
 echo "  archived/reset targets: ${#EXISTING_TARGETS[@]}"
-echo "  strategy journals: preserved; compatibility projections rebuilt by replay"
 echo "  account journals/inboxes/captures: archived; fresh empty epoch created"
-echo "  boundary truth: demo venue-flat verified; prior paper epoch archived, not venue-verified"
+echo "  boundary truth: demo venue-flat verified; prior paper epoch archived"
 if (( LEAVE_STOPPED )); then
   echo "  service state: all managed units stopped and verified"
 else

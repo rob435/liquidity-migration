@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Build the unified Binance full-PIT data root.
-#
-# Replaces binance_oos_pit with a single root spanning Binance USDM
-# perpetuals launch (≈2019-09) to today.
+# Window: BINANCE_START (default 2019-09-01) to end-exclusive BINANCE_END.
 #
 # Stages:
 #   [1/3] binance_vision build-binance-oos  — monthly klines + PIT manifest

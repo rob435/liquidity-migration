@@ -8,7 +8,13 @@ from typing import Any
 import pytest
 
 import liquidity_migration.account_service_runner as account_service_runner_module
-from liquidity_migration.account_kernel import AccountState, InstrumentRules, OrderCommand, OrderState
+from liquidity_migration.account_kernel import (
+    AccountState,
+    InstrumentRules,
+    MarketInputRef,
+    OrderCommand,
+    OrderState,
+)
 from liquidity_migration.account_execution_config import load_demo_rules, load_risk_policy
 from liquidity_migration.account_service_bybit import (
     BybitDemoAccountSnapshotProvider,
@@ -20,6 +26,10 @@ from liquidity_migration.account_service_bybit import (
 )
 from liquidity_migration.account_service_runner import (
     require_order_submit_permission,
+)
+from liquidity_migration.account_paper_runner import (
+    PAPER_EXECUTION_BOOK_DEPTH,
+    PAPER_INTEGRATION_EXECUTION_TWIN_CONFIG,
 )
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.deterministic_serialization import canonical_json
@@ -34,8 +44,11 @@ from liquidity_migration.demo_rule_probe import (
     TRADE_HISTORY_SOURCE,
 )
 from liquidity_migration.execution_adapters import (
+    INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
+    BookLevel,
     ExecutionObservationType,
     ExecutionTwinConfig,
+    L2BookSnapshot,
     LatencyProfile,
     MarketOrderExecutionTwin,
 )
@@ -71,7 +84,6 @@ def _capture_config() -> MarketCaptureConfig:
         segment_max_bytes=1_000_000,
         fsync_every_records=1,
         min_free_disk_bytes=1,
-        ring_records_per_symbol=100,
     )
 
 
@@ -148,7 +160,238 @@ def test_paper_adapter_executes_against_exact_captured_decision_book(tmp_path: P
     assert observations[0].observation_type == ExecutionObservationType.ACK
     assert observations[1].observation_type == ExecutionObservationType.FILL
     assert observations[1].price == 10.1
+    assert adapter.name == "paper_integration_only_uncalibrated"
+    assert all(
+        observation.metadata["execution_model_scope"]
+        == INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
+        for observation in observations
+    )
     recorder.close()
+
+
+def _valid_execution_book(*, symbol: str = "BUSDT") -> L2BookSnapshot:
+    return L2BookSnapshot(
+        symbol=symbol,
+        sequence=10,
+        previous_sequence=9,
+        exchange_ts_ns=900,
+        local_receive_ts_ns=1_000,
+        bids=(BookLevel(10.0, 0.4), BookLevel(9.9, 0.8)),
+        asks=(BookLevel(10.1, 0.4), BookLevel(10.2, 0.8)),
+    )
+
+
+def _execution_command(*, side: str, command_id: str = "command-1") -> OrderCommand:
+    signed_qty = 1.0 if side == "Buy" else -1.0
+    return OrderCommand(
+        command_id=command_id,
+        batch_id="batch-1",
+        symbol="BUSDT",
+        side=side,
+        qty=1.0,
+        signed_qty=signed_qty,
+        reduce_only=False,
+        reference_price=10.05,
+        target_signed_qty=signed_qty,
+        chunk_index=0,
+        chunk_count=1,
+        created_ts_ns=1_000,
+    )
+
+
+def _execution_twin(book: L2BookSnapshot) -> MarketOrderExecutionTwin:
+    return MarketOrderExecutionTwin(
+        books={"BUSDT": book},
+        instrument_rules={
+            "BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)
+        },
+        config=ExecutionTwinConfig(
+            fee_bps=5.5,
+            latency=LatencyProfile(0, 0, 0),
+            max_decision_age_ns=250_000_000,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("side", "expected_prices"),
+    [
+        ("Buy", [10.1, 10.2]),
+        ("Sell", [10.0, 9.9]),
+    ],
+)
+def test_execution_twin_walks_valid_book_for_buy_and_sell(
+    side: str,
+    expected_prices: list[float],
+) -> None:
+    book = _valid_execution_book()
+    observations = tuple(
+        _execution_twin(book).submit(
+            _execution_command(side=side),
+            book.market_ref(input_key=f"{side.lower()}-book"),
+        )
+    )
+
+    fills = [
+        observation
+        for observation in observations
+        if observation.observation_type == ExecutionObservationType.FILL
+    ]
+    assert [fill.price for fill in fills] == expected_prices
+    assert [abs(fill.signed_qty) for fill in fills] == pytest.approx([0.4, 0.6])
+    assert all(
+        observation.metadata["fill_partition_policy"] == "book_level"
+        and observation.metadata["execution_model_scope"]
+        == INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
+        for observation in observations
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"bids": ()}, "empty_book_bids"),
+        ({"asks": ()}, "empty_book_asks"),
+        (
+            {"bids": (BookLevel(float("nan"), 1.0),)},
+            "non_finite_bid_level",
+        ),
+        (
+            {"asks": (BookLevel(10.1, 0.0),)},
+            "non_positive_ask_level",
+        ),
+        (
+            {"bids": (BookLevel(9.9, 1.0), BookLevel(10.0, 1.0))},
+            "non_monotonic_book_bids",
+        ),
+        (
+            {"asks": (BookLevel(10.2, 1.0), BookLevel(10.1, 1.0))},
+            "non_monotonic_book_asks",
+        ),
+        (
+            {"bids": (BookLevel(10.2, 1.0),)},
+            "crossed_book",
+        ),
+        ({"sequence": 0}, "invalid_book_sequence"),
+        ({"previous_sequence": 10}, "invalid_book_previous_sequence"),
+        ({"exchange_ts_ns": 0}, "invalid_book_exchange_timestamp"),
+        ({"local_receive_ts_ns": 0}, "invalid_book_local_timestamp"),
+        ({"sequence_gap": True}, "book_sequence_gap"),
+    ],
+)
+def test_execution_twin_rejects_malformed_l2_without_sanitizing_levels(
+    overrides: dict[str, Any],
+    reason: str,
+) -> None:
+    fields: dict[str, Any] = {
+        "symbol": "BUSDT",
+        "sequence": 10,
+        "previous_sequence": 9,
+        "exchange_ts_ns": 900,
+        "local_receive_ts_ns": 1_000,
+        "bids": (BookLevel(10.0, 0.4), BookLevel(9.9, 0.8)),
+        "asks": (BookLevel(10.1, 0.4), BookLevel(10.2, 0.8)),
+    }
+    book = L2BookSnapshot(**{**fields, **overrides})
+    market = _valid_execution_book().market_ref(input_key="valid-market")
+    observations = tuple(
+        _execution_twin(book).submit(
+            _execution_command(side="Buy"),
+            market,
+        )
+    )
+
+    assert len(observations) == 1
+    rejection = observations[0]
+    assert rejection.observation_type == ExecutionObservationType.ACK
+    assert rejection.accepted is False
+    assert rejection.rejection_key.endswith(f":{reason}")
+    assert rejection.metadata["execution_model_scope"] == (
+        INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
+    )
+    with pytest.raises(ValueError, match=reason):
+        book.market_ref(input_key="invalid-market")
+
+
+def test_execution_twin_rejects_book_and_market_symbol_mismatches() -> None:
+    market = _valid_execution_book().market_ref(input_key="valid-market")
+    wrong_book = _valid_execution_book(symbol="ETHUSDT")
+    book_rejection = tuple(
+        _execution_twin(wrong_book).submit(
+            _execution_command(side="Buy", command_id="wrong-book"),
+            market,
+        )
+    )[0]
+    assert book_rejection.rejection_key.endswith(":book_symbol_mismatch")
+
+    wrong_market = MarketInputRef(
+        input_key="wrong-market",
+        symbol="ETHUSDT",
+        exchange_ts_ns=900,
+        local_receive_ts_ns=1_000,
+        reference_price=10.05,
+        book_sequence=10,
+    )
+    market_rejection = tuple(
+        _execution_twin(_valid_execution_book()).submit(
+            _execution_command(side="Sell", command_id="wrong-market"),
+            wrong_market,
+        )
+    )[0]
+    assert market_rejection.rejection_key.endswith(":market_input_symbol_mismatch")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"exchange_ts_ns": 0}, "invalid_market_input_exchange_timestamp"),
+        ({"local_receive_ts_ns": 0}, "invalid_market_input_local_timestamp"),
+        ({"reference_price": float("nan")}, "invalid_market_input_reference_price"),
+        ({"book_sequence": 0}, "invalid_market_input_sequence"),
+        (
+            {"bid_price": 10.2, "ask_price": 10.1},
+            "crossed_market_input",
+        ),
+    ],
+)
+def test_execution_twin_rejects_unusable_market_reference(
+    overrides: dict[str, Any],
+    reason: str,
+) -> None:
+    fields: dict[str, Any] = {
+        "input_key": "market-input",
+        "symbol": "BUSDT",
+        "exchange_ts_ns": 900,
+        "local_receive_ts_ns": 1_000,
+        "reference_price": 10.05,
+        "bid_price": 10.0,
+        "ask_price": 10.1,
+        "book_sequence": 10,
+    }
+    market = MarketInputRef(**{**fields, **overrides})
+    rejection = tuple(
+        _execution_twin(_valid_execution_book()).submit(
+            _execution_command(side="Buy"),
+            market,
+        )
+    )[0]
+
+    assert rejection.accepted is False
+    assert rejection.rejection_key.endswith(f":{reason}")
+    assert rejection.metadata["execution_model_scope"] == (
+        INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
+    )
+
+
+def test_paper_execution_model_is_commit_owned_and_explicitly_uncalibrated() -> None:
+    config = PAPER_INTEGRATION_EXECUTION_TWIN_CONFIG
+
+    assert config.fee_bps == 5.5
+    assert config.residual_adverse_slippage_bps == 2.0
+    assert config.visible_book_depth == PAPER_EXECUTION_BOOK_DEPTH == 50
+    assert config.max_decision_age_ns == 250_000_000
+    assert config.latency == LatencyProfile(0, 0, 0)
+    assert config.model_scope == INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
 
 
 def test_demo_snapshot_provider_refuses_mainnet_and_reads_equity_available_margin() -> None:

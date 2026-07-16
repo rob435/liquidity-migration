@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -124,76 +125,27 @@ def test_required_account_owners_must_be_active() -> None:
     )
 
 
-def test_gather_liquidation_capture_alerts_freshness(tmp_path) -> None:
-    """The collector unit can never reach systemd 'failed' (RestartSec spaces starts
-    beyond the start-limit window), so capture death must be caught by JSONL
-    freshness (audit 2026-06-12 round 3). The deployed capture is Bybit-only."""
-    import os
+def test_hedge_model_prior_liveness_checks_integrity_not_age(tmp_path) -> None:
+    now_ms = int(datetime(2026, 7, 16, tzinfo=UTC).timestamp() * 1000)
+    shipped = REPO_ROOT / "deploy" / "hedge_warmstart" / "bybit_warmstart.csv"
 
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "liquidations"
-    # Missing root / nothing ever captured -> no alert.
-    assert M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3) == []
-    (root / "bybit").mkdir(parents=True)
-    assert M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3) == []
+    assert M.gather_hedge_model_prior_alerts(model_prior_path=shipped, now_ms=now_ms) == []
 
-    f = root / "bybit" / "2024-01-01.jsonl"
-    f.write_text("{}\n")
-    fresh_s = (now_ms - 30 * MIN) / 1000.0
-    os.utime(f, (fresh_s, fresh_s))
-    assert M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3) == []
-
-    stale_s = (now_ms - 5 * HOUR) / 1000.0
-    os.utime(f, (stale_s, stale_s))
-    alerts = M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3)
-    assert [a.key for a in alerts] == ["liquidation_capture_stale:bybit"]
-    assert alerts[0].severity == M.WARNING
-
-
-def test_hedge_warmstart_freshness_warns_before_first_blocked_plan(tmp_path) -> None:
-    from datetime import date
-
-    stale = M.evaluate_hedge_warmstart_freshness(
-        last_date=date(2026, 5, 23),
-        now_date=date(2026, 7, 10),
-        max_age_days=3,
+    missing = M.gather_hedge_model_prior_alerts(
+        model_prior_path=tmp_path / "missing.csv",
+        now_ms=now_ms,
     )
-    assert stale is not None
-    assert stale.key == "hedge_warmstart_stale"
-    assert stale.severity == M.WARNING
-    assert "48d old" in stale.message
-    assert "risk-increasing hedge order is blocked" in stale.message
+    assert len(missing) == 1
+    assert missing[0].key == "hedge_model_prior_invalid"
+    assert missing[0].severity == M.WARNING
+    assert "fail closed" in missing[0].message
 
-    critical = M.evaluate_hedge_warmstart_freshness(
-        last_date=date(2026, 5, 23),
-        now_date=date(2026, 7, 10),
-        max_age_days=3,
+    critical = M.gather_hedge_model_prior_alerts(
+        model_prior_path=tmp_path / "missing.csv",
+        now_ms=now_ms,
         book_nonflat=True,
     )
-    assert critical is not None and critical.severity == M.CRITICAL
-
-    assert (
-        M.evaluate_hedge_warmstart_freshness(
-            last_date=date(2026, 7, 8),
-            now_date=date(2026, 7, 10),
-            max_age_days=3,
-        )
-        is None
-    )
-
-    csv_path = tmp_path / "warmstart.csv"
-    csv_path.write_text(
-        "date,unit_ret,btc_ret,eth_ret\n2026-07-08,0,0,0\n2026-07-09,0,0,0\n",
-        encoding="utf-8",
-    )
-    assert M._warmstart_last_date(csv_path) == date(2026, 7, 9)
-
-    receipt_csv = tmp_path / "warmstart-with-boundary.csv"
-    receipt_csv.write_text(
-        "date,unit_ret,btc_ret,eth_ret,data_through_date,source_summary_sha256\n2026-06-01,0,0,0,2026-07-09,abc\n",
-        encoding="utf-8",
-    )
-    assert M._warmstart_last_date(receipt_csv) == date(2026, 7, 9)
+    assert critical[0].severity == M.CRITICAL
 
 
 def test_ws_staleness_threshold() -> None:
@@ -431,6 +383,38 @@ def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> N
     assert "BTCUSDT" in unhealthy[0].message
 
 
+def test_account_health_production_time_is_read_adjacent(tmp_path, monkeypatch) -> None:
+    from liquidity_migration.account_kernel import AccountExecutionKernel
+
+    outer_now_ms = 1_000 * HOUR
+    published_ms = outer_now_ms + 84
+    root = tmp_path / "concurrent-reconciliation"
+    AccountExecutionKernel(root, account_id="demo").record_venue_snapshot(
+        snapshot_key="concurrent",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=(),
+        exchange_ts_ns=0,
+        local_receive_ts_ns=published_ms * 1_000_000,
+    )
+    monkeypatch.setattr(M, "_now_ms", lambda: published_ms + 1)
+
+    assert (
+        M.gather_account_health_alerts(
+            account_root=root,
+            max_age_minutes=1,
+        )
+        == []
+    )
+    explicit_future = M.gather_account_health_alerts(
+        account_root=root,
+        max_age_minutes=1,
+        now_ms=outer_now_ms,
+    )
+    assert [alert.key for alert in explicit_future] == ["account_health_stale"]
+    assert "-0.0 min old" in explicit_future[0].message
+
+
 def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_path) -> None:
     from liquidity_migration.account_owner_health import (
         TEST_ACCOUNT_OWNER_INVOCATION_ID,
@@ -480,6 +464,55 @@ def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_pat
         max_age_minutes=1,
     )
     assert [alert.key for alert in wrong_environment] == ["account_owner_health:paper"]
+
+
+def test_account_owner_health_production_time_is_read_adjacent(tmp_path, monkeypatch) -> None:
+    from liquidity_migration import account_owner_health as owner_health_module
+    from liquidity_migration.account_owner_health import (
+        TEST_ACCOUNT_OWNER_INVOCATION_ID,
+        AccountOwnerHealth,
+        write_account_owner_health,
+    )
+
+    outer_now_ms = 1_000 * HOUR
+    published_ns = outer_now_ms * 1_000_000 + 84_000_000
+    demo_root = tmp_path / "demo"
+    write_account_owner_health(
+        demo_root,
+        AccountOwnerHealth(
+            owner="account_execution",
+            environment="demo",
+            account_id="demo",
+            status="healthy",
+            observed_ts_ns=published_ns,
+            loop_sequence=1,
+            journal_sequence=0,
+            journal_state_hash="0" * 64,
+            equity_usdt=10_000.0,
+            available_margin_usdt=9_000.0,
+            requested_symbols_ready=True,
+            invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
+        ),
+    )
+    monkeypatch.setattr(owner_health_module.time, "time_ns", lambda: published_ns + 1_000_000)
+
+    assert (
+        M.gather_account_owner_health_alerts(
+            account_root=demo_root,
+            environment="demo",
+            max_age_minutes=1,
+        )
+        == []
+    )
+
+    explicit_future = M.gather_account_owner_health_alerts(
+        account_root=demo_root,
+        environment="demo",
+        max_age_minutes=1,
+        now_ms=outer_now_ms,
+    )
+    assert [alert.key for alert in explicit_future] == ["account_owner_health:demo"]
+    assert "age_ns=-84000000" in explicit_future[0].message
 
 
 def test_gather_continuous_alerts_warns_on_empty_inputs(tmp_path) -> None:
@@ -613,8 +646,6 @@ def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
 
 
 def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
-    monkeypatch.setenv("SHORT_SLEEVE", "off")
-    monkeypatch.setenv("SHORT_PAPER_SLEEVE", "off")
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
@@ -623,11 +654,6 @@ def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
 
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
     assert M._PAPER_ACCOUNT_OWNER_UNIT in units
-    assert "liquidity-migration-bybit-risk.service" not in units
-    assert "liquidity-migration-combined-book-report.service" not in units
-    assert "liquidity-migration-combined-book-report.timer" not in units
-    assert "liquidity-migration-bybit-demo.service" not in units
-    assert "liquidity-migration-bybit-paper.service" not in units
     assert "liquidity-migration-bybit-long-demo.service" in units
     assert "liquidity-migration-bybit-long-paper.service" in units
     assert "liquidity-migration-bybit-continuous-demo.service" in units
@@ -646,9 +672,6 @@ def test_default_unit_monitoring_is_always_account_kernel_only(monkeypatch) -> N
 
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
     assert M._PAPER_ACCOUNT_OWNER_UNIT in units
-    assert "liquidity-migration-bybit-risk.service" not in units
-    assert "liquidity-migration-combined-book-report.service" not in units
-    assert "liquidity-migration-combined-book-report.timer" not in units
     assert "liquidity-migration-bybit-long-demo.service" in units
     assert "liquidity-migration-bybit-continuous-demo.service" in units
 
@@ -667,11 +690,28 @@ def test_demo_account_scope_excludes_every_paper_owner_and_producer(monkeypatch)
     assert "liquidity-migration-bybit-continuous-demo.service" in units
     assert "liquidity-migration-bybit-continuous-paper.service" not in units
     assert "liquidity-migration-continuous-rmom-refresh.timer" in units
-    assert "liquidity-migration-liquidation-collector.service" not in units
-    assert "liquidity-migration-depth-collector.service" not in units
-
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
     assert "liquidity-migration-continuous-rmom-refresh.timer" not in (M._default_units_for_scope("demo"))
+
+
+def test_paper_liveness_roots_come_from_group_readable_owner_environment(
+    tmp_path, monkeypatch
+) -> None:
+    account = tmp_path / "paper-account"
+    capture = tmp_path / "paper-capture"
+    environment = tmp_path / "account-paper-execution.env"
+    environment.write_text(
+        f"ACCOUNT_EXECUTION_ROOT={account}\nACCOUNT_PAPER_CAPTURE_ROOT={capture}\n",
+        encoding="utf-8",
+    )
+    environment.chmod(0o640)
+    monkeypatch.setattr(
+        M.grp,
+        "getgrnam",
+        lambda _name: type("Group", (), {"gr_gid": environment.stat().st_gid})(),
+    )
+
+    assert M._paper_roots_from_environment(environment) == (account, capture)
 
 
 def test_demo_account_scope_skips_paper_health_and_capture_gathers(tmp_path, monkeypatch) -> None:
@@ -707,11 +747,7 @@ def test_demo_account_scope_skips_paper_health_and_capture_gathers(tmp_path, mon
             "",
             "--long-paper-root",
             "",
-            "--hedge-warmstart",
-            "",
-            "--liquidations-root",
-            "",
-            "--depth-root",
+            "--hedge-model-prior",
             "",
             "--state-file",
             str(tmp_path / "state.json"),
@@ -767,10 +803,6 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
             "",
             "--long-root",
             "",
-            "--liquidations-root",
-            "",
-            "--depth-root",
-            "",
             "--state-file",
             str(state_file),
         ],
@@ -804,10 +836,6 @@ def _run_both_roots_skipped(monkeypatch) -> None:
             "--continuous-paper-root",
             "",
             "--long-root",
-            "",
-            "--liquidations-root",
-            "",
-            "--depth-root",
             "",
         ],
     )
@@ -855,10 +883,6 @@ def test_explicit_state_file_unchanged(tmp_path, monkeypatch) -> None:
             "",
             "--long-root",
             "",
-            "--liquidations-root",
-            "",
-            "--depth-root",
-            "",
             "--state-file",
             str(explicit),
         ],
@@ -885,10 +909,6 @@ def test_continuous_root_still_drives_default_state_dir(tmp_path, monkeypatch) -
             "--continuous-paper-root",
             "",
             "--long-root",
-            "",
-            "--liquidations-root",
-            "",
-            "--depth-root",
             "",
         ],
     )
@@ -918,7 +938,6 @@ def test_rmom_timer_not_monitored_when_continuous_off(monkeypatch) -> None:
         "liquidity-migration-continuous-rmom-refresh.timer",
     ):
         assert u not in units, u
-    assert "liquidity-migration-combined-book-report.timer" not in units
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
     assert M._PAPER_ACCOUNT_OWNER_UNIT in units
     # Long sleeve units still present.
@@ -972,13 +991,11 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
     parser = M.build_arg_parser()
     args = parser.parse_args([])
     for attr in (
-        "liquidations_root",
-        "depth_root",
         "continuous_root",
         "continuous_paper_root",
         "long_root",
         "long_paper_root",
-        "hedge_warmstart",
+        "hedge_model_prior",
         "account_root",
         "account_paper_root",
         "account_capture_root",
@@ -1015,106 +1032,6 @@ def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
     assert args.account_paper_root == roots["ACCOUNT_PAPER_EXECUTION_ROOT"]
     assert args.account_capture_root == roots["ACCOUNT_CAPTURE_ROOT"]
     assert args.account_paper_capture_root == roots["ACCOUNT_PAPER_CAPTURE_ROOT"]
-
-
-def test_depth_collector_unit_monitored_only_when_operator_enabled(monkeypatch) -> None:
-    unit = "liquidity-migration-depth-collector.service"
-    monkeypatch.setattr(M, "_unit_enabled", lambda name: name == unit)
-
-    units = M._default_units_for_toggles()
-
-    assert unit in units
-
-    monkeypatch.setattr(M, "_unit_enabled", lambda _name: False)
-
-    assert unit not in M._default_units_for_toggles()
-
-
-def test_depth_capture_stale_alert_is_gated_by_enabled_collector(tmp_path, monkeypatch) -> None:
-    import os
-
-    unit = "liquidity-migration-depth-collector.service"
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "depth"
-    bybit = root / "bybit"
-    bybit.mkdir(parents=True)
-    path = bybit / "2026-06-24.jsonl"
-    path.write_text("{}\n")
-    stale_s = (now_ms - 6 * HOUR) / 1000.0
-    os.utime(path, (stale_s, stale_s))
-
-    monkeypatch.setattr(M, "_unit_enabled", lambda _name: False)
-
-    assert M.gather_depth_capture_alerts(depth_root=root, now_ms=now_ms, max_age_hours=3) == []
-
-    monkeypatch.setattr(M, "_unit_enabled", lambda name: name == unit)
-
-    alerts = M.gather_depth_capture_alerts(depth_root=root, now_ms=now_ms, max_age_hours=3)
-    assert len(alerts) == 1
-    assert alerts[0].key == "depth_capture_stale"
-    assert alerts[0].severity == M.WARNING
-    assert "Bybit book history is unbuyable" in alerts[0].message
-
-    fresh_s = (now_ms - 10 * MIN) / 1000.0
-    os.utime(path, (fresh_s, fresh_s))
-    assert M.gather_depth_capture_alerts(depth_root=root, now_ms=now_ms, max_age_hours=3) == []
-
-
-def test_retired_binance_liquidation_files_are_ignored(tmp_path) -> None:
-    """The deployed liquidation collector is Bybit-only; stale historical Binance
-    files left on disk must not page after the Binance leg is removed."""
-    import os
-
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "liquidations"
-    (root / "bybit").mkdir(parents=True)
-    (root / "binance").mkdir(parents=True)
-
-    byb = root / "bybit" / "2024-01-01.jsonl"
-    byb.write_text("{}\n")
-    bin_ = root / "binance" / "2024-01-01.jsonl"
-    bin_.write_text("{}\n")
-
-    fresh_s = (now_ms - 10 * MIN) / 1000.0
-    stale_s = (now_ms - 6 * HOUR) / 1000.0
-    os.utime(byb, (fresh_s, fresh_s))
-    os.utime(bin_, (stale_s, stale_s))
-
-    alerts = M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3)
-    assert alerts == []
-
-
-def test_missing_bybit_liquidation_files_do_not_alarm_on_fresh_box(tmp_path) -> None:
-    """A fresh box that has not written Bybit liquidation rows yet emits no alert;
-    the unit active check covers a dead service."""
-    import os
-
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "liquidations"
-    (root / "binance").mkdir(parents=True)
-    bin_ = root / "binance" / "2024-01-01.jsonl"
-    bin_.write_text("{}\n")
-    stale_s = (now_ms - 6 * HOUR) / 1000.0
-    os.utime(bin_, (stale_s, stale_s))
-
-    assert M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3) == []
-
-
-def test_stale_bybit_pages_even_if_binance_exists(tmp_path) -> None:
-    """Only the deployed Bybit leg is monitored for liquidation freshness."""
-    import os
-
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "liquidations"
-    stale_s = (now_ms - 6 * HOUR) / 1000.0
-    for venue in ("bybit", "binance"):
-        (root / venue).mkdir(parents=True)
-        f = root / venue / "2024-01-01.jsonl"
-        f.write_text("{}\n")
-        os.utime(f, (stale_s, stale_s))
-
-    keys = {a.key for a in M.gather_liquidation_capture_alerts(liquidations_root=root, now_ms=now_ms, max_age_hours=3)}
-    assert keys == {"liquidation_capture_stale:bybit"}
 
 
 def test_timer_not_active_debounced_warning_then_critical() -> None:
@@ -1211,10 +1128,6 @@ def test_main_deploy_window_timer_blip_warns_then_self_resolves(tmp_path, monkey
         "",
         "--long-root",
         "",
-        "--liquidations-root",
-        "",
-        "--depth-root",
-        "",
         "--state-file",
         str(state_file),
     ]
@@ -1254,10 +1167,6 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
         "--continuous-paper-root",
         "",
         "--long-root",
-        "",
-        "--liquidations-root",
-        "",
-        "--depth-root",
         "",
         "--state-file",
         str(state_file),

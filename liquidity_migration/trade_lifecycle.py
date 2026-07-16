@@ -81,9 +81,8 @@ def build_equity_curve(baskets: pl.DataFrame) -> pl.DataFrame:
 
 def annualized_sharpe(daily_returns: "np.ndarray | list[float]", *, ann_days: float = 365.25) -> float:
     """Canonical annualised Sharpe = mean / std(ddof=1) * sqrt(ann_days) over a daily
-    return series — the SINGLE convention shared by trade_lifecycle, continuous_events,
-    and continuous_forward_replay so cross-report Sharpes are directly comparable
-    (metrics-3). Returns 0.0 for fewer than 2 finite points or zero variance. Callers
+    return series — the convention shared by trade_lifecycle and continuous_events.
+    Returns 0.0 for fewer than 2 finite points or zero variance. Callers
     pass the daily series (the equity-based sites forward-fill the calendar grid first)."""
     arr = np.asarray(
         [float(x) for x in daily_returns if x is not None and math.isfinite(float(x))], dtype=float
@@ -109,19 +108,12 @@ def _daily_sharpe(equity: pl.DataFrame) -> float:
     """
     if equity.is_empty() or "equity" not in equity.columns:
         return 0.0
-    # audit-iter1 (event-demo-1): forward-fill on TRUE calendar days via the shared
-    # _daily_equity_values helper (snaps each row to dt.date(), reindexes onto a
-    # pl.date_range). The previous hand-rolled grid stepped MS_PER_DAY off the FIRST
-    # exit's intra-day wall-clock time and compared it against per-date exit
-    # timestamps (each `exit_ts_ms.max()`, an arbitrary intra-day time), so on
-    # non-midnight exits it mis-bucketed days — injecting spurious 0%-return days and
-    # distorting sharpe_like (which feeds scripts/apply_decision_rule's three-tier
-    # gate). Tests only used midnight-aligned exits, so the bug was invisible.
+    # Forward-fill on calendar days; exit timestamps need not be midnight-aligned.
     values = np.asarray(_daily_equity_values(equity), dtype=float)
     if values.size < 2:
         return 0.0
     daily_ret = np.diff(values) / values[:-1]
-    # metrics-3: one shared Sharpe convention (ddof=1, sqrt(365.25)) across all reports.
+    # Use the shared daily Sharpe convention across reports.
     return annualized_sharpe(daily_ret)
 
 
@@ -202,21 +194,11 @@ def summarize_trade_backtest(
 
 
 def _intrahold_and_gross_stats(trades: pl.DataFrame) -> dict[str, float]:
-    """Intra-hold adverse-excursion (H2) + realized-gross (M3) diagnostics.
+    """Return per-position adverse excursion and realized-gross diagnostics.
 
-    H2: the realised-PnL-at-exit drawdown ignores how far a position ran against
-    us DURING the hold. ``mae`` is each trade's max adverse excursion (<=0); these
-    surface that hidden intra-hold risk. NOTE — these are PER-POSITION excursions:
-    a true portfolio mark-to-market drawdown (which compounds CONCURRENT open
-    positions and re-calibrates the pre-registered DD gate thresholds) is strictly
-    deeper and is its own pre-registered sub-phase
-    (docs/research_summary.md). Treat
-    ``worst_weighted_intrahold_loss`` as a LOWER BOUND on portfolio intra-hold DD.
-
-    M3: ``realized_gross_mean``/``_max`` is the per-basket sum of position gross
-    shares (``notional_weight``). risk_equal sizing lets gross float, so a
-    cell-vs-control MAR delta can partly reflect different gross rather than better
-    risk-adjustment — surfacing realised gross makes that confound auditable.
+    ``worst_weighted_intrahold_loss`` is not portfolio mark-to-market drawdown;
+    concurrent positions can make the latter deeper. Realized gross exposes
+    sizing differences that can otherwise confound strategy comparisons.
     """
     out = {
         "worst_trade_mae": 0.0,
@@ -283,14 +265,8 @@ def _funding_mode_summary(trades: pl.DataFrame) -> str:
 def _funding_modeled_fraction(trades: pl.DataFrame) -> float:
     """Fraction of traded gross notional whose funding was fully modeled.
 
-    cost-funding-3: ``funding_mode`` collapses to "partial" for ANY mix of
-    modeled/missing/partial trades, so the 3-state summary cannot tell a
-    coverage-edge book (one newly-listed alt lacking funding data) from a book
-    where half the notional was charged ZERO funding. This weights each trade's
-    funding coverage by its absolute notional so a downstream gate can require a
-    minimum coverage fraction instead of treating any non-all-missing book as
-    acceptable. A symbol absent from the funding dataset reads ``funding_mode ==
-    'missing'`` (zero funding charged) and so drops the modeled fraction.
+    The coarse ``partial`` label cannot show materiality, so weight coverage by
+    absolute trade notional. Missing funding contributes zero modeled coverage.
 
     Returns 1.0 for a fully-modeled book and 0.0 for an empty / all-missing one;
     weight falls back to equal-per-trade when ``notional_weight`` is unavailable.
@@ -314,12 +290,7 @@ def _funding_modeled_fraction(trades: pl.DataFrame) -> float:
 def _worst_volume_day_return(baskets: pl.DataFrame) -> float:
     if baskets.is_empty() or "exit_date" not in baskets.columns:
         return 0.0
-    # Same-day baskets are SUMMED (not compounded) to match build_equity_curve,
-    # which adds same-exit-day fractional slices and only compounds across days
-    # (see its docstring). Compounding here invented a different "day return"
-    # definition than the curve that produces total_return / max_drawdown, so on
-    # multi-basket days the reported worst_day_return did not correspond to any
-    # actual single-day move of that equity curve (metrics-4).
+    # Match the equity curve: sum same-day baskets and compound across days.
     daily = baskets.group_by("exit_date").agg(pl.col("basket_return").sum().alias("day_return"))
     return float(daily["day_return"].min()) if not daily.is_empty() else 0.0
 
@@ -562,16 +533,9 @@ def _funding_lookup(
         .agg(pl.col("ts_ms").min().alias("start_ts_ms"), pl.col("ts_ms").max().alias("end_ts_ms"))
         .to_dicts()
     }
-    # Collapse rows belonging to the SAME settlement. Both venues' funding-history endpoints emit ONE
-    # row per settlement, so distinct ts_ms ARE distinct settlements: the default is an exact-stamp
-    # dedup (which also drops overlapping-fetch duplicates) that counts EVERY settlement. The old code
-    # bucketed by the stored funding_interval_min, which _normalize_binance_funding hardcoded to 8h
-    # (and the Bybit funding-history endpoint omits -> also 8h); for a real 4h-settling alt that 8h
-    # window merged two distinct settlements into one and charged HALF the funding, inflating
-    # short-strategy MAR (audit funding-undercount, fixed 2026-06-03). A caller that holds the
-    # AUTHORITATIVE per-symbol settlement interval (e.g. instruments.fundingInterval) may pass
-    # interval_by_symbol to additionally collapse genuine intra-interval SNAPSHOT rows — an operation
-    # only valid with the true interval; symbols absent from the map fall back to exact-stamp dedup.
+    # Distinct timestamps are settlements by default. A caller with a verified
+    # per-symbol interval may additionally collapse intra-interval snapshots;
+    # unmapped symbols retain exact-timestamp de-duplication.
     if interval_by_symbol:
         interval_df = pl.DataFrame(
             {
@@ -595,11 +559,7 @@ def _funding_lookup(
     output: dict[str, dict[str, Any]] = {}
     for key, part in rows.partition_by("symbol", as_dict=True, maintain_order=True).items():
         symbol = str(key[0] if isinstance(key, tuple) else key)
-        # Store parallel sorted lists so _perp_funding_return can slice the
-        # in-window events in O(log n) via bisect instead of an O(n) scan per
-        # trade. ts_list is already sorted by the upstream `.sort(["symbol","ts_ms"])`.
-        # Column .to_list() avoids building per-row dicts twice (was two full
-        # part.to_dicts() passes); identical values/order (audit pass2 #19).
+        # Parallel sorted lists permit O(log n) window lookup via bisect.
         ts_list = [int(x) for x in part["ts_ms"].to_list()]
         rate_list = [float(x) for x in part[rate_col].to_list()]
         if ts_list:
@@ -697,18 +657,6 @@ def _bar_excursion(entry_price: float, *, side: str, high: float, low: float) ->
 def _side_return(entry_price: float, exit_price: float, *, side: str) -> float:
     simple = exit_price / entry_price - 1.0
     return simple if side == "long" else -simple
-
-
-def _stop_price(entry_price: float, *, side: str, stop_loss_pct: float) -> float | None:
-    if stop_loss_pct <= 0.0:
-        return None
-    return entry_price * (1.0 - stop_loss_pct) if side == "long" else entry_price * (1.0 + stop_loss_pct)
-
-
-def _take_profit_price(entry_price: float, *, side: str, take_profit_pct: float) -> float | None:
-    if take_profit_pct <= 0.0:
-        return None
-    return entry_price * (1.0 + take_profit_pct) if side == "long" else entry_price * (1.0 - take_profit_pct)
 
 
 def _empty_trades() -> pl.DataFrame:
@@ -988,9 +936,7 @@ class _IndexedTradeState:
             entry_ts_ms=self.entry_ts_ms,
             exit_ts_ms=self.exit_ts_ms,
         )
-        # cost-funding-4: funding is applied to entry notional. It does not
-        # reconstruct marked notional at each funding timestamp; reports must
-        # retain that approximation rather than imply venue-exact funding P&L.
+        # Funding uses entry notional, not mark-to-market notional at settlement.
         effective_weight = self.notional_weight * self.position_weight
         funding_return = abs(effective_weight) * raw_funding_return
         cost_return = -abs(effective_weight) * self.round_trip_cost_bps / 10_000.0
@@ -1029,90 +975,6 @@ class _IndexedTradeState:
             "bars_held": self.bars_held,
             "hold_hours": (self.exit_ts_ms - self.entry_ts_ms) / MS_PER_HOUR,
         }
-
-
-def _simulate_indexed_trade(
-    *,
-    symbol: str,
-    side: str,
-    score: float,
-    rank: int,
-    basket_id: str,
-    signal_ts_ms: int,
-    entry_bar: int,
-    symbol_bars: dict[str, Any],
-    planned_exit_ts_ms: int,
-    notional_weight: float,
-    position_weight: float = 1.0,
-    config: TradeLifecycleConfig,
-    round_trip_cost_bps: float,
-    stop_pct: float | None,
-    rank_lookup: dict[tuple[str, int], float],
-    event_decay_threshold: float,
-    funding_lookup: dict[str, dict[str, Any]] | None,
-    stop_fill_mode: str = "stop",
-    stop_slippage_cap_pct: float = 0.10,
-    entry_price_override: float | None = None,
-) -> dict[str, Any] | None:
-    bar_end_ts_arr = symbol_bars["bar_end_ts_ms"]
-    high_arr = symbol_bars["high"]
-    low_arr = symbol_bars["low"]
-    close_arr = symbol_bars["close"]
-    entry_ts_ms = int(bar_end_ts_arr[entry_bar])
-    entry_price = float(entry_price_override) if entry_price_override is not None else float(close_arr[entry_bar])
-    if entry_price <= 0.0:
-        return None
-    ends = symbol_bars["ends"]
-    start = bisect_right(ends, entry_ts_ms)
-    end = bisect_right(ends, planned_exit_ts_ms)
-    if start >= end:
-        return None
-
-    state = _IndexedTradeState(
-        symbol=symbol,
-        side=side,
-        score=score,
-        rank=rank,
-        basket_id=basket_id,
-        signal_ts_ms=signal_ts_ms,
-        entry_ts_ms=entry_ts_ms,
-        entry_price=entry_price,
-        planned_exit_ts_ms=planned_exit_ts_ms,
-        notional_weight=notional_weight,
-        position_weight=position_weight,
-        config=config,
-        round_trip_cost_bps=round_trip_cost_bps,
-        stop_price=_stop_price(entry_price, side=side, stop_loss_pct=stop_pct or 0.0),
-        take_profit_price=_take_profit_price(
-            entry_price,
-            side=side,
-            take_profit_pct=config.take_profit_pct,
-        ),
-        rank_lookup=rank_lookup,
-        event_decay_threshold=event_decay_threshold,
-        funding_lookup=funding_lookup,
-        stop_fill_mode=stop_fill_mode,
-        stop_slippage_cap_pct=stop_slippage_cap_pct,
-    )
-    for idx in range(start, end):
-        bar_high = float(high_arr[idx])
-        bar_low = float(low_arr[idx])
-        bar_close = float(close_arr[idx])
-        bar_end_ts_ms_val = int(bar_end_ts_arr[idx])
-        if state.on_bar(
-            high=bar_high,
-            low=bar_low,
-            close=bar_close,
-            bar_end_ts_ms=bar_end_ts_ms_val,
-        ):
-            break
-    if not state.closed:
-        last_idx = end - 1
-        state.close_at_boundary(
-            close=float(close_arr[last_idx]),
-            bar_end_ts_ms=int(bar_end_ts_arr[last_idx]),
-        )
-    return state.to_trade()
 
 
 def _failed_fade_exit_hit(

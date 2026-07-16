@@ -1,9 +1,7 @@
 """Causal BTC-risk entry-size overlay for the continuous demo book.
 
 ``CTRL_BTC_RISK_70_90_35`` sizes entries to 35% after warm-up when the causal
-BTC-risk score is in ``[0.70, 0.90)``. The evidence improved MAR/drawdown on
-both venues while cutting Binance total return, so keep the caveat local to the
-decision log instead of spreading policy boilerplate through runtime code.
+BTC-risk score is in ``[0.70, 0.90)``.
 """
 
 from __future__ import annotations
@@ -402,7 +400,6 @@ class BtcRiskLiveSizer:
         self._rows: list[dict[str, Any]] = []
         self._state_hash = _BTC_RISK_STATE_GENESIS_HASH
         self._dirty = False
-        self._has_synthesized_legacy_rows = False
         self._authoritative_reconciliation_error: str | None = None
         self.load()
 
@@ -432,11 +429,8 @@ class BtcRiskLiveSizer:
         self._rows = []
         self.state = ExpandingBtcRiskState(min_prior=self.state.min_prior)
         self._state_hash = _BTC_RISK_STATE_GENESIS_HASH
-        self._has_synthesized_legacy_rows = False
-        # Parquet row order is the accepted receipt-chain order.  Legacy files
-        # were already written in deterministic signal/symbol order; retaining
-        # their file order gives a one-time compatible prefix without
-        # reordering later receipts that may be accepted out of signal order.
+        # Parquet row order is the accepted receipt-chain order. Retain it so
+        # later receipts accepted out of signal-time order still replay exactly.
         for row in rows:
             symbol = str(row.get("symbol") or "").upper()
             signal_ts_ms = int(row.get("signal_ts_ms") or 0)
@@ -454,42 +448,26 @@ class BtcRiskLiveSizer:
             )
             evidence_json = row.get("decision_evidence_json")
             if evidence_json is None or str(evidence_json).strip() == "":
-                # Pre-receipt state files are replayed causally and upgraded in
-                # memory.  The original raw observations remain the authority;
-                # the synthesized receipt is persisted on the next accepted
-                # decision without changing historical ordering or scores.
-                evidence = self._build_evidence(
-                    decision_key=decision_key,
-                    symbol=symbol,
-                    signal_ts_ms=signal_ts_ms,
-                    raw_values=raw_values,
-                    score=score,
-                    predecessor_state_hash=self._state_hash,
-                    result_state_hash=result_state_hash,
-                )
-                self._validate_legacy_result_columns(row, evidence)
-                self._has_synthesized_legacy_rows = True
-            else:
-                try:
-                    raw_evidence = json.loads(evidence_json) if isinstance(evidence_json, str) else evidence_json
-                except (TypeError, json.JSONDecodeError) as exc:
-                    raise ValueError("BTC-risk state contains unreadable decision evidence") from exc
-                evidence = normalize_btc_risk_decision_evidence(
-                    raw_evidence,
-                    expected_arm_id=self.arm_id,
-                    expected_policy=self.policy,
-                )
-                self._validate_evidence(
-                    evidence,
-                    decision_key=decision_key,
-                    symbol=symbol,
-                    signal_ts_ms=signal_ts_ms,
-                    raw_values=raw_values,
-                    score=score,
-                    predecessor_state_hash=self._state_hash,
-                    result_state_hash=result_state_hash,
-                )
-                self._validate_legacy_result_columns(row, evidence)
+                raise ValueError("BTC-risk state row is missing decision evidence")
+            try:
+                raw_evidence = json.loads(evidence_json) if isinstance(evidence_json, str) else evidence_json
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("BTC-risk state contains unreadable decision evidence") from exc
+            evidence = normalize_btc_risk_decision_evidence(
+                raw_evidence,
+                expected_arm_id=self.arm_id,
+                expected_policy=self.policy,
+            )
+            self._validate_evidence(
+                evidence,
+                decision_key=decision_key,
+                symbol=symbol,
+                signal_ts_ms=signal_ts_ms,
+                raw_values=raw_values,
+                score=score,
+                predecessor_state_hash=self._state_hash,
+                result_state_hash=result_state_hash,
+            )
             normalized_row = {
                 "decision_key": decision_key,
                 "symbol": symbol,
@@ -546,29 +524,6 @@ class BtcRiskLiveSizer:
         if left_value is None or right is None:
             return left_value is None and right is None
         return math.isclose(left_value, right, rel_tol=1e-12, abs_tol=1e-12)
-
-    def _validate_legacy_result_columns(
-        self,
-        row: Mapping[str, Any],
-        evidence: Mapping[str, Any],
-    ) -> None:
-        result = evidence["result"]
-        for column, expected in (
-            ("btc_risk_score", result["btc_risk_score"]),
-            ("stack_mult", result["stack_mult"]),
-        ):
-            if (
-                column in row
-                and row.get(column) is not None
-                and not self._equal_optional_float(row.get(column), expected)
-            ):
-                raise ValueError(f"BTC-risk state {column} conflicts with causal replay")
-        if (
-            "score_warmup" in row
-            and row.get("score_warmup") is not None
-            and bool(row.get("score_warmup")) != result["score_warmup"]
-        ):
-            raise ValueError("BTC-risk state score_warmup conflicts with causal replay")
 
     def _validate_evidence(
         self,
@@ -722,13 +677,11 @@ class BtcRiskLiveSizer:
             self._state_hash,
             self._rows,
             self._dirty,
-            self._has_synthesized_legacy_rows,
         )
         self.state = candidate_state
         self._state_hash = candidate_state_hash
         self._rows = candidate_rows
         self._dirty = True
-        self._has_synthesized_legacy_rows = False
         try:
             self.save()
         except BaseException:
@@ -737,7 +690,6 @@ class BtcRiskLiveSizer:
                 self._state_hash,
                 self._rows,
                 self._dirty,
-                self._has_synthesized_legacy_rows,
             ) = previous
             raise
 
@@ -828,67 +780,16 @@ class BtcRiskLiveSizer:
             "state_rows": len(self._rows),
         }
 
-    def ingest_accepted_decisions(self, rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-        """Commit receipts exposed by accepted account target projections only.
-
-        This API is incremental and intentionally preserves persisted history.
-        Runtime callers whose projection is the complete canonical authority
-        must use :meth:`reconcile_authoritative_accepted_decisions` instead.
-
-        The whole unseen chain is validated against a cloned predecessor state
-        before any file write.  Duplicate component rows/restarts are no-ops;
-        conflicting evidence or a stale concurrently proposed predecessor
-        aborts the complete ingestion batch.
-        """
-
-        evidence_by_key, ignored, duplicate_rows = self._normalize_accepted_evidence_rows(rows)
-        persisted_by_key = self._persisted_evidence_by_key()
-        unseen: list[dict[str, Any]] = []
-        replayed = 0
-        for decision_key, evidence in evidence_by_key.items():
-            persisted = persisted_by_key.get(decision_key)
-            if persisted is None:
-                unseen.append(evidence)
-                continue
-            if persisted["evidence_hash"] != evidence["evidence_hash"]:
-                raise ValueError("accepted BTC-risk evidence conflicts with persisted decision")
-            replayed += 1
-
-        if not unseen:
-            return {
-                "ingested": 0,
-                "duplicates": duplicate_rows + replayed,
-                "ignored": ignored,
-            }
-
-        candidate_state, candidate_state_hash, new_rows = self._replay_evidence_chain(
-            {evidence["decision_key"]: evidence for evidence in unseen},
-            candidate_state=self.state.clone(),
-            candidate_state_hash=self._state_hash,
-        )
-        self._commit_replayed_state(
-            candidate_state=candidate_state,
-            candidate_state_hash=candidate_state_hash,
-            candidate_rows=[*self._rows, *new_rows],
-        )
-        return {
-            "ingested": len(new_rows),
-            "duplicates": duplicate_rows + replayed,
-            "ignored": ignored,
-        }
-
     def reconcile_authoritative_accepted_decisions(
         self,
         rows: Iterable[Mapping[str, Any]],
     ) -> dict[str, int]:
         """Reconcile against a complete canonical set of accepted receipts.
 
-        Unlike incremental ingestion, the supplied evidence is replayed from
-        genesis and is treated as the entire authority for this arm. Persisted
-        decisions missing from that set, including receipts synthesized from a
-        legacy pre-evidence file, are an error. A failed reconciliation blocks
-        subsequent scoring on this instance until a complete authoritative
-        reconciliation succeeds.
+        The supplied evidence is replayed from genesis and treated as the
+        entire authority for this arm. Persisted decisions missing from that
+        set are an error. A failed reconciliation blocks subsequent scoring on
+        this instance until a complete reconciliation succeeds.
         """
 
         self._authoritative_reconciliation_error = "authoritative reconciliation did not complete"
@@ -914,8 +815,7 @@ class BtcRiskLiveSizer:
                     )
 
             ingested = len(evidence_by_key) - len(persisted_by_key)
-            rewrite_legacy = self._has_synthesized_legacy_rows
-            if ingested or rewrite_legacy:
+            if ingested:
                 self._commit_replayed_state(
                     candidate_state=candidate_state,
                     candidate_state_hash=candidate_state_hash,
@@ -930,7 +830,6 @@ class BtcRiskLiveSizer:
             "duplicates": duplicate_rows + len(persisted_by_key),
             "ignored": ignored,
             "authoritative_rows": len(evidence_by_key),
-            "rewritten": int(rewrite_legacy),
         }
 
     def save(self) -> None:
@@ -986,6 +885,5 @@ class BtcRiskLiveSizer:
                 except OSError:
                     pass
             self._dirty = False
-            self._has_synthesized_legacy_rows = False
         finally:
             _unlink_quietly(temporary_path)

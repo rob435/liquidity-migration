@@ -252,9 +252,7 @@ def format_universe_report(payload: dict[str, Any]) -> str:
         "|---:|---|---:|---:|---:|---:|",
     ]
     for row in payload["universe"][:50]:
-        # Render a genuinely-missing field as 'n/a', not 0: `or 0` conflated None
-        # (no data) with a real 0.0, so a partial ticker fetch looked like hard data
-        # in the committed audit report. (audit-iter2 risk-factor-3)
+        # Distinguish missing data from a genuine zero.
         turnover = row.get("turnover_24h")
         age = row.get("listing_age_days")
         oi = row.get("open_interest_value")

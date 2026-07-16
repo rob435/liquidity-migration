@@ -119,34 +119,6 @@ def _full_pit_universe_pass(
     )
 
 
-def _full_pit_universe_error(
-    klines: pl.DataFrame,
-    archive_manifest: pl.DataFrame,
-    *,
-    kline_covered_date_symbols: set[tuple[str, str]] | None = None,
-) -> str:
-    manifest_symbols = _symbol_set(archive_manifest)
-    kline_symbols = _symbol_set(klines)
-    missing_symbols = sorted(manifest_symbols - kline_symbols)
-    required_date_symbols = _required_pit_date_symbols(klines, archive_manifest)
-    if kline_covered_date_symbols is None:
-        kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
-    missing_date_symbols = sorted(required_date_symbols - kline_covered_date_symbols)
-    if not manifest_symbols:
-        return (
-            "The full-PIT gate requires archive membership by default, but archive_trade_manifest is empty. "
-            "Run archive-manifest and archive-download-klines-1h first; an explicitly biased diagnostic may set "
-            "require_full_pit_universe=False in the run config."
-        )
-    return (
-        "The full-PIT gate requires a complete tradable universe by default, but klines_1h does not cover every archive manifest symbol/date. "
-        f"manifest_symbols={len(manifest_symbols)} kline_symbols={len(kline_symbols)} missing_symbols={len(missing_symbols)} "
-        f"required_date_symbols={len(required_date_symbols)} kline_covered_date_symbols={len(kline_covered_date_symbols)} "
-        f"missing_date_symbols={len(missing_date_symbols)} missing_symbol_sample={missing_symbols[:20]} "
-        f"missing_date_symbol_sample={missing_date_symbols[:20]} (note: pre-listing manifest entries before a symbol's first kline are NOT required — these are genuine gaps from a symbol's first traded day onward). Finish archive-download-klines-1h before running evidence-grade backtests."
-    )
-
-
 def _covered_kline_date_symbol_set(klines: pl.DataFrame, *, min_hourly_bars: int = 20) -> set[tuple[str, str]]:
     if klines.is_empty() or not _has_columns(klines, "date", "symbol"):
         return set()

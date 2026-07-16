@@ -5,84 +5,65 @@ description: Assess methodology integrity for backtests, research runs, strategy
 
 # Assess backtest integrity
 
-Read `docs/governance.md` and the relevant parts of
-`docs/backtesting_errors_we_never_repeat.md` before acting. Treat the active
-experiment contract, raw artifacts, code, and data provenance as evidence;
-never treat a label or prior verdict as authority.
+Read `docs/governance.md` and the relevant failure modes in
+`docs/backtesting_errors_we_never_repeat.md`. Treat the active prospective
+contract, raw artifacts, code, and data provenance as evidence; labels and old
+verdicts are not authority.
 
-## Start with the claim
+## Define the claim
 
-State:
+State the proposition, intended decision, venue, population, period, mechanism,
+operating scale, study mode, and which outcomes have already been inspected.
+Apply checks proportional to that claim.
 
-- the exact proposition and intended decision;
-- venue, population, period, mechanism, and operating scale;
-- study mode: exploratory, confirmatory, or forward execution;
-- which outcomes have already been inspected.
+## Hard validity
 
-Apply only checks relevant to that claim. A feature-timestamp audit, an
-entry-agreement reconciliation, and a net-performance backtest need different
-artifacts and cost assumptions.
-
-## Check hard validity
-
-- **Causality:** verify decision, availability, order, fill, exit-activation,
-  and state-initialization times. Stress uncertain latency.
+- **Causality:** verify decision, availability, order, fill, exit-activation, and
+  state-initialization times. Stress uncertain latency.
 - **Population:** require PIT membership when historical universe selection
-  matters. Inspect manifest provenance; a current-listing-derived row is not an
-  archive observation.
+  matters. Distinguish archive observations from current-listing inference.
 - **Execution:** model feasible orders, fills, venue mechanics, capacity, and
   material costs for performance claims.
-- **State:** initialize adaptive exits, cooldowns, baskets, hedges, and risk
-  memory when the forward system could first know them.
+- **State:** initialize exits, cooldowns, baskets, hedges, and risk memory only
+  when the forward system could know them.
 - **Accounting:** reconcile positions, cash/equity, fees, funding, netting,
-  flips, and lifecycle events at the granularity the claim needs.
-- **Reconstruction:** retain data/code/config identity, tested variants,
-  effective sample unit, exposure history, and source artifacts.
+  flips, and lifecycle events at the granularity required by the claim.
+- **Reconstruction:** retain root, code, config, tested-set, exposure, and
+  artifact identities.
 - **Anomalies:** stop relying on affected output until impossible prices,
   synchronization, missing rows, or forward drift are explained.
 
-Classify the affected claim as `valid`, `limited`, or `invalid`. Keep useful
-diagnostics even when they cannot support the larger claim.
+Classify validity as `valid`, `limited`, or `invalid` for the exact claim.
+A useful diagnostic may survive even when a larger claim does not.
 
-## Check inference
+## Inference
 
-- Compare against a declared control or counterfactual.
-- Disclose the full tested set, repeated peeks, dependence, and effective trials.
-- Track which windows are spent; do not relabel reused data OOS.
-- Use holdouts, walk-forward, purging/embargo, cross-venue tests, or forward
-  epochs only when they fit the claim.
-- Treat a second correlated venue as robustness evidence, not automatic
-  independence. Require it when portability or the experiment contract does.
-- Report effect sizes, uncertainty, concentration, fragility, and practical
-  scale—not only a threshold verdict.
-- Keep the preregistered rule after viewing outcomes. Any revised rule is
-  prospective or exploratory on the spent data.
+Use a declared comparator and disclose every variant that influenced selection.
+Track spent windows; renaming reused data does not restore independence. Choose
+holdouts, walk-forward, purging, venues, metrics, and thresholds from the claim,
+not repository folklore. A second correlated crypto venue is robustness
+evidence, not automatic independence.
 
-Legacy analyzers such as `scripts/r1_robustness.py` and
-`scripts/apply_decision_rule.py` implement historical policies. Use them as a
-binding verdict only when the selected experiment explicitly names that preset.
+Report effect size, uncertainty, concentration, fragility, and practical scale.
+After outcomes are viewed, keep the registered rule. Revisions are prospective
+on a new evaluation surface or exploratory on spent data.
 
-## Report an evidence card
+Historical artifacts may encode old metric presets. Apply one only when the
+active contract prospectively names that exact rule; otherwise label it as a
+diagnostic.
 
-Return or write:
+## Evidence card
 
-- claim;
-- validity and reasons;
-- study mode;
-- result: supports, contradicts, or inconclusive;
-- scope and non-generalizable boundaries;
-- deployment mode and authorization state;
-- effect size/uncertainty and material debts;
+Report:
+
+- claim, validity, study mode, and result;
+- venue/population/period/scale scope;
+- comparator, tested set, exposure status, and uncertainty;
+- PIT/timing/fill/cost/capacity/accounting limits;
 - artifact and identity references;
+- deployment mode and authorization state;
 - justified next action and explicit non-conclusions.
 
-Compatibility run labels (`invalid`, `exploratory`, `biased_benchmark`,
-`candidate`, `paper_ready`) may still appear in artifacts. Report them verbatim,
-but do not let one label collapse the evidence card or authorize deployment.
-
-## Preserve the safety boundary
-
-Never infer mainnet authority from a research result or broad repository
-permission. Real-money work needs the exact evidence, controls, code/config,
-limits, expiry, and separate owner authorization required by
-`docs/governance.md`.
+Research quality never grants mainnet authority. Real money requires a separate
+owner instruction naming the deployment, capital/risk limits, controls, and
+expiry under `docs/governance.md`.

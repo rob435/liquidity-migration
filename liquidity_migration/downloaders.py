@@ -1,29 +1,24 @@
 from __future__ import annotations
 
 import gc
-import math  # audit2b: guard non-finite taker volumes before the imbalance ratio
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeGuard
-from urllib.parse import urlparse
 
 import polars as pl
 
-from .archive import ArchiveFileNotFoundError, download_public_trade_archive, read_public_trade_archive
-from .archive_manifest import previous_kline_close  # audit2c: seed densify carry-forward like the canonical PIT builder
 from .binance import BinanceDataError, BinanceUSDMData, _recent_history_start
 from .bybit_market_data import BybitMarketData
 from .config import ResearchConfig
-from .ingestion import aggregate_trade_klines_1m, densify_trade_klines_1m, normalize_funding_history
+from .ingestion import normalize_funding_history
 from .storage import dataset_path, write_dataset
 
 
 REST_DATASETS = {
     "instruments",
-    "klines_1m",
     "klines_1h",
-    "klines_5m",
     "funding",
     "open_interest",
     "mark_price_1h",
@@ -32,9 +27,7 @@ REST_DATASETS = {
     "ticker_snapshots",
 }
 PER_SYMBOL_REST_DATASETS = {
-    "klines_1m",
     "klines_1h",
-    "klines_5m",
     "funding",
     "open_interest",
     "mark_price_1h",
@@ -68,7 +61,6 @@ def download_market_data(
     start_ms: int,
     end_ms: int,
     datasets: set[str],
-    archive_url_template: str | None = None,
     workers: int = 1,
     open_interest_interval: str = "1h",
 ) -> dict[str, Path]:
@@ -87,8 +79,7 @@ def download_market_data(
         outputs["ticker_snapshots"] = write_dataset(tickers, data_root, "ticker_snapshots")
 
     per_symbol_rest = datasets & PER_SYMBOL_REST_DATASETS
-    archive_requested = "archive_klines_1m" in datasets
-    if per_symbol_rest and workers > 1 and not archive_requested:
+    if per_symbol_rest and workers > 1:
         max_workers = max(1, min(workers, len(symbols)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -127,36 +118,6 @@ def download_market_data(
                     open_interest_interval=open_interest_interval,
                 )
             )
-        if archive_requested and archive_url_template:
-            for date in _dates_between(start_ms, end_ms):
-                url = archive_url_template.format(symbol=symbol, date=date)
-                local_path = Path(data_root) / "archives" / symbol / _archive_filename(url, date)
-                if _archive_outputs_exist(data_root, symbol=symbol, date=date):
-                    print(f"archive_klines_1m: {symbol} {date} cached", flush=True)
-                    outputs["klines_1m"] = dataset_path(data_root, "klines_1m")
-                    continue
-                print(f"archive_klines_1m: {symbol} {date}", flush=True)
-                try:
-                    archive_path = download_public_trade_archive(url, local_path)
-                except ArchiveFileNotFoundError:
-                    # 404 — symbol didn't trade on this date (commonly because
-                    # it listed later). Permanent miss; skip and continue.
-                    print(f"archive_klines_1m: {symbol} {date} skipped (archive 404)", flush=True)
-                    continue
-                trades = read_public_trade_archive(archive_path, symbol=symbol)
-                klines_1m = aggregate_trade_klines_1m(trades)
-                # audit2c: densify the sparse 1m bars onto the full 1440-row grid with a
-                # carry-forward seed, matching archive_manifest._download_one_archive_kline —
-                # the raw aggregate output left gap-y bars diverging from the canonical builder.
-                klines_1m = densify_trade_klines_1m(
-                    klines_1m,
-                    archive_date=date,
-                    initial_price=previous_kline_close(data_root, symbol=symbol, archive_date=date, dataset="klines_1m"),
-                )
-                outputs["klines_1m"] = write_dataset(klines_1m, data_root, "klines_1m", append=False)
-                del trades, klines_1m
-                gc.collect()
-
     return outputs
 
 
@@ -172,12 +133,7 @@ def download_binance_usdm_proxy_data(
     period: str = "1h",
     max_failure_ratio: float = 0.05,
 ) -> dict[str, Path]:
-    # Refuse to silently build a survivorship-biased proxy root: the per-symbol
-    # skip below is deliberate (a single timeout must not abort a 200-symbol build,
-    # and a re-run retries it), but a HIGH failure ratio means many symbols are
-    # missing — the exact survivorship gap docs/backtesting_errors_we_never_repeat.md
-    # forbids. Accumulate failures and assert completeness like binance_vision
-    # (audit pass2 #17). 5% tolerance: lenient for transient single-symbol drops.
+    # Allow isolated retries but reject a failure ratio that would bias the root.
     from .binance_vision import _assert_download_completeness
     resolved = {_resolve_binance_dataset_name(item) for item in datasets}
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
@@ -207,14 +163,7 @@ def download_binance_usdm_proxy_data(
                 try:
                     outputs.update(future.result())
                 except (BinanceDataError, IndexError, KeyError, ValueError) as exc:
-                    # Per-symbol failure — log + skip rather than aborting the whole
-                    # multi-hundred-symbol build. Covers transport errors (BinanceDataError)
-                    # AND a malformed/truncated payload row that raises IndexError/KeyError/
-                    # ValueError out of the client paging or the normalizers (those parse
-                    # paths run OUTSIDE the BinanceDataError conversion) — DAT-5. Routing
-                    # them through _assert_download_completeness preserves the survivorship
-                    # gate instead of letting one bad row kill the build under set -e.
-                    # Re-running the script retries this symbol (markers gate finished ones).
+                    # Record transport or parsing failures for the completeness gate.
                     failed.append((symbol, ""))
                     print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
         _assert_download_completeness(
@@ -241,8 +190,7 @@ def download_binance_usdm_proxy_data(
                 )
             )
         except (BinanceDataError, IndexError, KeyError, ValueError) as exc:
-            # See the threaded branch above (DAT-5): a malformed payload row must be
-            # recorded + routed through the survivorship gate, not abort the build.
+            # Match the threaded path: record the symbol for completeness gating.
             failed.append((symbol, ""))
             print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
     _assert_download_completeness(
@@ -267,21 +215,6 @@ def _download_rest_symbol_datasets(
 ) -> dict[str, Path]:
     local_client = client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
     outputs: dict[str, Path] = {}
-    if "klines_1m" in datasets:
-        outputs["klines_1m"] = _download_symbol_dataset(
-            data_root,
-            dataset="klines_1m",
-            symbol=symbol,
-            index=index,
-            total=total,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            fetch=lambda s, e: _normalize_klines(
-                symbol,
-                local_client.get_klines(symbol, "1", s, e),
-                source="bybit_rest",
-            ),
-        )
     if "klines_1h" in datasets:
         outputs["klines_1h"] = _download_symbol_dataset(
             data_root,
@@ -294,21 +227,6 @@ def _download_rest_symbol_datasets(
             fetch=lambda s, e: _normalize_klines(
                 symbol,
                 local_client.get_klines(symbol, "60", s, e),
-                source="bybit_rest",
-            ),
-        )
-    if "klines_5m" in datasets:
-        outputs["klines_5m"] = _download_symbol_dataset(
-            data_root,
-            dataset="klines_5m",
-            symbol=symbol,
-            index=index,
-            total=total,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            fetch=lambda s, e: _normalize_klines(
-                symbol,
-                local_client.get_klines(symbol, "5", s, e),
                 source="bybit_rest",
             ),
         )
@@ -578,36 +496,15 @@ def _download_symbol_dataset(
     label = "downloading tail" if tail_only else "downloading"
     print(f"{dataset}: {index}/{total} {symbol} {label} [{effective_start_ms}..{end_ms})", flush=True)
     rows = fetch(effective_start_ms, end_ms)
-    # infer_schema_length=None scans ALL rows to pick the dtype. Default is
-    # 100, which is too tight for Bybit/Binance REST payloads where a field
-    # can be int-looking (e.g. "0") in the first 100 rows then turn float
-    # (e.g. "0.034552") in row 101. Observed 2026-05-25 on Binance funding
-    # — full PIT rebuild crashed mid-symbol with "could not append value
-    # 0.034552 of type f64 to the builder". Cheap to scan: payloads are
-    # ~thousands of rows, polars handles it in ms.
+    # Scan all rows because numeric string representation can change after row 100.
     frame = pl.DataFrame(rows, infer_schema_length=None)
     if postprocess is not None and not frame.is_empty():
         frame = postprocess(frame)
     output = write_dataset(frame, data_root, dataset)
-    # Write the marker for the FULL requested range, not the effective tail.
-    # That way the next refresh sees "this range is fully covered" via a
-    # direct lookup (no glob scan), and the tail-only path will only fire
-    # when the requested end_ms moves forward again.
-    #
-    # BUT never claim a never-before-covered range complete on an EMPTY fetch: a
-    # symbol that lists mid-window (pre-listing []), a transient empty REST
-    # response, or a provider hiccup that returns [] instead of raising would
-    # otherwise be marked complete and SKIPPED FOREVER (permanent silent coverage
-    # gap). A zero-row *tail* extension (tail_only) is legitimate (no new data past
-    # the existing coverage), so still mark that; only a fresh empty range is held
-    # back for retry next run.
-    # DEPLOY NOTE (data-download-1): the Binance OI-hist / taker-flow endpoints only
-    # serve a rolling ~30-day window — get_open_interest_hist / get_taker_buy_sell_volume
-    # clamp `start` to max(start, now-30d) internally. Previously the marker was written
-    # for the FULL requested [start_ms, end_ms], so the uncovered pre-30d span was claimed
-    # complete and SKIPPED FOREVER (permanent silent coverage gap). When clamp_window_days
-    # is set we key the marker start on that same clamp, so the uncovered prefix stays
-    # unmarked and is re-attempted (and re-clamped — cheap, bounded) next run.
+    # Mark the requested range, not only the fetched tail.
+    # Do not mark a fresh empty range complete; a later retry may recover data.
+    # Tail extensions may be empty. For rolling-window endpoints, bind the marker
+    # to the same clamped start so an unavailable prefix is never claimed covered.
     marker_start_ms = start_ms
     if clamp_window_days is not None:
         marker_start_ms = max(start_ms, _recent_history_start(effective_start_ms, end_ms, days=clamp_window_days))
@@ -790,9 +687,7 @@ def _normalize_binance_funding(symbol: str, rows: list[dict]) -> list[dict]:
 
 
 def _normalize_binance_open_interest(symbol: str, rows: list[dict], *, period: str) -> list[dict]:
-    # _float_or_none: a row MISSING a field yields null (genuinely-missing data the OI feature frame
-    # drops via drop_nulls) rather than a fabricated 0.0 that would corrupt the OI-change series and
-    # show up as a spurious 0->next-value jump (data-download-7).
+    # Preserve missing fields as null rather than fabricating zero OI.
     return [
         {
             "ts_ms": int(row["timestamp"]),
@@ -809,14 +704,10 @@ def _normalize_binance_open_interest(symbol: str, rows: list[dict], *, period: s
 def _normalize_binance_taker_flow(symbol: str, rows: list[dict], *, period: str) -> list[dict]:
     output = []
     for row in rows:
-        # An ABSENT buy/sell field is genuinely-missing data, not a real zero — a fabricated 0 would
-        # corrupt the signed-volume / imbalance series (data-download-7). A malformed row (either side
-        # missing) emits nulls for the derived fields rather than a spurious 0.
+        # Missing/malformed sides emit null derived values, not fabricated zeros.
         buy_volume = _float_or_none(row.get("buyVol"))
         sell_volume = _float_or_none(row.get("sellVol"))
-        # audit2b: a NaN/inf or negative volume is malformed (volumes are non-negative & finite); it
-        # slips past the None check and would yield a fabricated 0.0 imbalance (total <= 0 branch) or a
-        # NaN ratio. Treat it as missing data and emit null derived fields, same as an absent field.
+        # Volumes must be finite and non-negative.
         if not _is_valid_volume(buy_volume) or not _is_valid_volume(sell_volume):
             output.append(
                 {
@@ -877,13 +768,7 @@ def _funding_interval_min(funding_interval_hour: Any) -> int:
 
 
 def _normalize_open_interest(symbol: str, rows: list[dict], *, interval_time: str = "1h") -> list[dict]:
-    # _float_or_none: an ABSENT field is genuinely-missing data (dropped downstream),
-    # NOT a fabricated 0.0 that survives the is_finite() filter in
-    # long_native.build_long_features and corrupts oi_chg_*d with a spurious
-    # 0->next-value -100% jump (and an inf on the following real value). Mirrors the
-    # Binance sibling _normalize_binance_open_interest (data-download-7). The
-    # open_interest fallback for open_interest_value only applies when openInterest
-    # is genuinely present, so a missing field stays null rather than coalescing.
+    # Preserve missing values as null; fall back to quantity only when present.
     output = []
     for row in rows:
         open_interest = _float_or_none(row.get("openInterest"))
@@ -969,37 +854,11 @@ def _normalize_instruments(rows: list[dict]) -> pl.DataFrame:
     return pl.DataFrame(normalized)
 
 
-def _dates_between(start_ms: int, end_ms: int) -> list[str]:
-    start = datetime.fromtimestamp(start_ms / 1000, tz=UTC).date()
-    end = datetime.fromtimestamp((end_ms - 1) / 1000, tz=UTC).date()
-    dates = []
-    current = start
-    while current <= end:
-        dates.append(current.isoformat())
-        current += timedelta(days=1)
-    return dates
-
-
-def _archive_filename(url: str, fallback_stem: str) -> str:
-    name = Path(urlparse(url).path).name
-    return name or f"{fallback_stem}.csv.gz"
-
-
-def _archive_outputs_exist(data_root: str | Path, *, symbol: str, date: str) -> bool:
-    return _partition_exists(data_root, dataset="klines_1m", symbol=symbol, date=date)
-
-
-def _partition_exists(data_root: str | Path, *, dataset: str, symbol: str, date: str) -> bool:
-    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
-    return part.exists() and part.stat().st_size > 0
-
-
 def _float_or_none(value) -> float | None:
     return float(value) if value not in (None, "") else None
 
 
 def _is_valid_volume(value: float | None) -> TypeGuard[float]:
-    # audit2b: a taker volume is usable only if it is present, finite, and non-negative.
     return value is not None and math.isfinite(value) and value >= 0.0
 
 

@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""Deployed continuous-ensemble equity on the June-extended PIT roots.
+"""Historical equity for the code-defined active continuous profile.
 
-Re-runs the EXACT frozen continuous_ensemble_v2 component configs (loaded from the
-2026-06-07 source receipts; only `end_date` is overridden) against the
-refreshed per-venue full-PIT roots, then reproduces the deployed book:
-continuous_ensemble_v2 three-component inverse-vol ensemble with daily rebalance
-disabled, retained rebalance params w90/tv0.045/max4/ddh-0.04, and the banked 2f
-BTC+ETH hedge. It also writes the official strategy-vs-BTC chart.
-
-IN-SAMPLE RESEARCH refresh (data-boundary extension, zero parameter changes;
-the window is spent; forward demo is the arbiter) — not a promotion claim.
+The three component triggers, weights, age gates, and 12% take profits come
+from ``liquidity_migration.continuous_profile``. Generated reports are outputs,
+not configuration inputs. The output remains descriptive
+historical evidence, not forward-runtime parity or deployment authorization.
 
     PYTHONIOENCODING=utf-8 POLARS_MAX_THREADS=6 .venv/bin/python \
-        scripts/continuous_deployed_equity_refresh.py
+        scripts/continuous_deployed_equity_refresh.py --end-date YYYY-MM-DD
 
 `--render-only` re-renders the per-venue PNGs (and summary stats) from the
 already-written `continuous_equity*.csv` without re-running components,
@@ -27,10 +22,9 @@ import json
 import os
 import sys
 import time
-from collections import defaultdict
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -39,24 +33,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from liquidity_migration.continuous_component_sources import (  # noqa: E402
-    CONTINUOUS_COMPONENT_SOURCES,
     ContinuousComponentSource,
     load_continuous_component_source,
 )
-from liquidity_migration.continuous_btc_risk import (  # noqa: E402
-    BTC_RISK_MIN_PRIOR,
-    CTRL_BTC_RISK_70_90_35_ID,
-    BtcRiskLiveSizer,
-    btc_context_by_day,
-)
-from liquidity_migration.continuous_forward_replay import (  # noqa: E402
-    FROZEN_FORWARD_CONFIG,
-    frozen_hedge_regime,
-    frozen_rebalance_rule,
+from liquidity_migration.continuous_profile import (  # noqa: E402
+    ACTIVE_CONTINUOUS_COMPONENT_BY_KEY,
+    CONTINUOUS_EQUITY_EVIDENCE_LABEL,
+    CONTINUOUS_HISTORICAL_RUN_LABEL,
+    CONTINUOUS_PROFILE_ID,
+    CONTINUOUS_PROFILE_REVISION,
+    ACTIVE_CONTINUOUS_CONFIG,
+    active_hedge_regime,
+    active_rebalance_rule,
 )
 from liquidity_migration.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
-    run_continuous_event_research,
+    run_continuous_equity_component,
 )
 from liquidity_migration.continuous_rebalance import (  # noqa: E402
     ContinuousHedgeRule,
@@ -69,21 +61,20 @@ from liquidity_migration.volume_events_charts import _write_equity_benchmark_cha
 
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA"))).expanduser()
 PANEL_COLUMNS = ["symbol", "ts_ms", "date", "close", "turnover_quote"]
-WINNER_WEIGHTS = dict(FROZEN_FORWARD_CONFIG["weights"])
+WINNER_WEIGHTS = dict(ACTIVE_CONTINUOUS_CONFIG["weights"])
 ANN = 365.25
 FUNDING_ROOT = {
     "bybit": SHARED / "bybit_full_pit" / "funding",
     "binance": SHARED / "binance_full_pit" / "binance_usdm_funding",
 }
-VALID_BTC_TREND_GATES = {"off", "uptrend", "downtrend"}
 
 
 def winner_rule():
-    return frozen_rebalance_rule()
+    return active_rebalance_rule()
 
 
-def deployed_hedge_intensity(days: list[int], btc_ret: dict[int, float]) -> dict[int, float] | None:
-    regime = frozen_hedge_regime()
+def active_hedge_intensity(days: list[int], btc_ret: dict[int, float]) -> dict[int, float] | None:
+    regime = active_hedge_regime()
     if not regime:
         return None
     return btcvol_intensity_series(days, btc_ret, regime["lam"], regime["vol_window"], regime["pct_window"])
@@ -116,94 +107,39 @@ def stats(df: pl.DataFrame) -> dict[str, Any]:
     }
 
 
-def config_from_report(path: Path) -> ContinuousEventConfig:
-    raw = json.loads(path.read_text(encoding="utf-8"))["config"]
-    allowed = {f.name for f in fields(ContinuousEventConfig)}
-    kwargs = {key: value for key, value in raw.items() if key in allowed}
-    for tuple_key in ("feature_set", "exclude_symbols"):
-        value = kwargs.get(tuple_key)
-        if isinstance(value, list):
-            kwargs[tuple_key] = tuple(value)
-    return ContinuousEventConfig(**kwargs)
-
-
-def _with_optional_component_overrides(
+def _with_backtest_leverage(
     cfg: ContinuousEventConfig,
     *,
-    component_take_profit_pct: float | None = None,
     backtest_leverage: float = 1.0,
 ) -> ContinuousEventConfig:
     if backtest_leverage <= 0.0:
         raise ValueError("--backtest-leverage must be positive")
-    updates: dict[str, Any] = {}
-    if component_take_profit_pct is not None:
-        updates["take_profit_pct"] = float(component_take_profit_pct)
-    if abs(float(backtest_leverage) - 1.0) > 1e-12:
-        updates["gross_exposure"] = float(cfg.gross_exposure) * float(backtest_leverage)
-    return replace(cfg, **updates) if updates else cfg
-
-
-def _with_btc_trend_gate(cfg: ContinuousEventConfig, btc_trend_gate: str | None) -> ContinuousEventConfig:
-    if btc_trend_gate is None:
+    if abs(float(backtest_leverage) - 1.0) <= 1e-12:
         return cfg
-    if btc_trend_gate not in VALID_BTC_TREND_GATES:
-        raise ValueError(
-            f"--btc-trend-gate must be one of {', '.join(sorted(VALID_BTC_TREND_GATES))}; "
-            f"got {btc_trend_gate!r}"
-        )
-    return replace(cfg, btc_trend_gate=btc_trend_gate)
+    return replace(cfg, gross_exposure=float(cfg.gross_exposure) * float(backtest_leverage))
 
 
-def _combined_config_transform(
-    config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None,
-    *,
-    btc_trend_gate: str | None,
-) -> Callable[[ContinuousEventConfig], ContinuousEventConfig] | None:
-    if config_transform is None and btc_trend_gate is None:
-        return None
-
-    def transform(cfg: ContinuousEventConfig) -> ContinuousEventConfig:
-        if config_transform is not None:
-            cfg = config_transform(cfg)
-        return _with_btc_trend_gate(cfg, btc_trend_gate)
-
-    return transform
-
-
-def frozen_config(
+def active_component_config(
     component: str,
-    venue: str,
     *,
     end_date: str,
     start_date: str | None = None,
-    fallback_root: Path | None = None,
-    component_take_profit_pct: float | None = None,
     backtest_leverage: float = 1.0,
 ) -> ContinuousEventConfig:
-    spec = CONTINUOUS_COMPONENT_SOURCES[component]
-    report_path = spec.root / venue / spec.cell / "continuous_report.json"
-    if not report_path.exists() and fallback_root is not None:
-        # The 2026-06-07 one-off receipt dirs were consolidated away (STATE.md: git history
-        # is the archive). A prior refresh's component report carries the same frozen config
-        # verbatim (its runner overrode only end_date), so it is an equivalent source.
-        report_path = fallback_root / "components" / venue / spec.cell / "continuous_report.json"
-    if not report_path.exists():
-        raise FileNotFoundError(f"missing frozen source report: {report_path}")
-    cfg = replace(config_from_report(report_path), end_date=end_date)
+    spec = ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[component]
+    cfg = ContinuousEventConfig(
+        component_key=component,
+        end_date=end_date,
+        entry_event_trigger=spec.entry_event_trigger,
+        age_days_min=spec.age_days_min,
+        take_profit_pct=spec.take_profit_pct,
+    )
     if start_date is not None:
         cfg = replace(cfg, start_date=start_date)
-    return _with_optional_component_overrides(
-        cfg,
-        component_take_profit_pct=component_take_profit_pct,
-        backtest_leverage=backtest_leverage,
-    )
+    return _with_backtest_leverage(cfg, backtest_leverage=backtest_leverage)
 
 
-# The frozen feature-panel filename is a CACHE key, not a hard dependency. It was
-# only ever a cached daily rollup of the same klines_1h partitions, so when it is
-# absent on a root we rebuild it on demand (and cache it back) instead of crashing
-# with a FileNotFoundError — the brittleness that blocked both venues on 2026-06-15.
-FROZEN_PANEL_NAME = "feature_panel_2026-05-27.parquet"
+PANEL_CACHE_NAME = "continuous_daily_panel.parquet"
 # Daily-panel build floor: ample warm-up for the 2023-04 continuous inception and
 # the trailing-250d regime percentile of trailing-30d BTC vol.
 PANEL_BUILD_START = "2022-01-01"
@@ -227,9 +163,7 @@ def _klines_daily_agg(root: Path, date_str: str) -> pl.DataFrame | None:
 def _daily_panel_from_klines(root: Path, *, start_date: str, end_date: str) -> pl.DataFrame:
     """Build the daily close/turnover panel directly from klines_1h over [start, end).
 
-    This is the on-demand replacement for the frozen feature-panel parquet: the
-    frozen file was identical to this rollup (close=last, turnover_quote=sum per
-    symbol/date), so building it removes the hard-coded-filename dependency.
+    The result is close=last and turnover_quote=sum per symbol/date.
     """
     d = dt.date.fromisoformat(start_date)
     boundary = dt.date.fromisoformat(end_date)
@@ -247,22 +181,18 @@ def _daily_panel_from_klines(root: Path, *, start_date: str, end_date: str) -> p
 
 
 def load_extended_panel(venue: str, *, end_date: str, root: Path | None = None) -> pl.DataFrame:
-    """Daily close/turnover panel through end_date, robust to a missing frozen file.
+    """Load the daily panel cache, extending or rebuilding it from hourly bars.
 
-    If the cached frozen panel parquet is present, use it + a kline-partition tail
-    from its last date + 1 through end_date (the fast path). If it is ABSENT, build
-    the whole panel from the klines_1h partitions (the same rollup the frozen file
-    held) and cache it back so later runs hit the fast path — no more hard
-    FileNotFoundError on a root that simply never received the frozen snapshot.
+    The end boundary is exclusive. Missing caches rebuild without changing the
+    panel definition.
     """
     root = root if root is not None else SHARED / f"{venue}_full_pit"
     boundary = dt.date.fromisoformat(end_date)
-    frozen = root / FROZEN_PANEL_NAME
+    cache_path = root / PANEL_CACHE_NAME
     dups = 0
-    fp = pl.read_parquet(frozen, columns=PANEL_COLUMNS) if frozen.exists() else None
+    fp = pl.read_parquet(cache_path, columns=PANEL_COLUMNS) if cache_path.exists() else None
     if fp is not None:
-        # Clip the cached panel to the requested end_date (exclusive): a frozen panel
-        # built to a LATER date must not leak rows past --end-date (audit-iter3).
+        # Never serve cached rows at or beyond the requested boundary.
         fp = fp.filter(pl.col("date") < boundary.isoformat())
     if fp is not None and not fp.is_empty():
         n_before = fp.height
@@ -280,22 +210,18 @@ def load_extended_panel(venue: str, *, end_date: str, root: Path | None = None) 
         if tail_frames:
             frames.append(pl.concat(tail_frames))
         panel = pl.concat(frames).sort(["symbol", "date"])
-        source = "frozen+tail"
+        source = "cache+tail"
     else:
-        panel = _daily_panel_from_klines(root, start_date=PANEL_BUILD_START, end_date=end_date).sort(
-            ["symbol", "date"]
-        )
+        panel = _daily_panel_from_klines(root, start_date=PANEL_BUILD_START, end_date=end_date).sort(["symbol", "date"])
         source = "klines"
-        # Cache it as the frozen snapshot (close=last/turnover=sum, with a ts_ms per
-        # row) so subsequent runs take the fast path. Best-effort: a read-only root
-        # just keeps rebuilding.
+        # Best-effort cache; a read-only root simply rebuilds on its next run.
         try:
             cache = panel.with_columns(
                 (pl.col("date").str.to_date().cast(pl.Datetime("ms")).dt.timestamp("ms")).alias("ts_ms")
             ).select(PANEL_COLUMNS)
-            cache.write_parquet(frozen)
+            cache.write_parquet(cache_path)
         except Exception as exc:  # noqa: BLE001 - caching is best-effort, never fatal
-            print(f"[{venue}] WARN: could not cache rebuilt panel to {frozen}: {exc}", flush=True)
+            print(f"[{venue}] WARN: could not cache rebuilt panel to {cache_path}: {exc}", flush=True)
     panel = panel.with_columns(pl.col("date").str.to_date().alias("d"))
     print(
         f"[{venue}] daily panel rows={panel.height} source={source} dup_ts_rows_collapsed={dups} "
@@ -349,7 +275,8 @@ def instrument_inputs(
     strict_coverage: bool = False,
 ) -> tuple[dict[int, float], dict[int, float]]:
     p = (
-        panel.filter(pl.col("symbol") == symbol).sort("d")
+        panel.filter(pl.col("symbol") == symbol)
+        .sort("d")
         .with_columns(pl.col("close").shift(1).alias("prev"), pl.col("d").shift(1).alias("d_prev"))
         .filter(((pl.col("d") - pl.col("d_prev")).dt.total_days() == 1) & (pl.col("prev") > 0))
         .with_columns((pl.col("close") / pl.col("prev") - 1.0).alias("ret"))
@@ -368,16 +295,17 @@ def instrument_inputs(
             fund[day] = float(pl.read_parquet(part, columns=["funding_rate"])["funding_rate"].sum())
         else:
             missing += 1
-    # Surface funding-coverage gaps: a missing partition silently defaults to zero
-    # funding for the hedge legs, which a wholly-missing/mis-resolved root would hide
-    # (audit-iter3 backlog scripts). Diagnostic only — no numeric change.
+    # Surface gaps because missing hedge funding partitions default to zero.
     if missing:
-        print(f"[{venue}] {symbol} funding coverage: {len(days) - missing}/{len(days)} days; "
-              f"{missing} defaulted to zero", flush=True)
+        print(
+            f"[{venue}] {symbol} funding coverage: {len(days) - missing}/{len(days)} days; {missing} defaulted to zero",
+            flush=True,
+        )
     if strict_coverage:
         missing_returns = sorted(set(int(day) for day in days) - set(rets))
         missing_funding = sorted(set(int(day) for day in days) - set(fund))
         if missing_returns or missing_funding:
+
             def _sample(values: list[int]) -> list[str]:
                 return [
                     dt.datetime.fromtimestamp(value / 1000, tz=dt.timezone.utc).date().isoformat()
@@ -392,45 +320,11 @@ def instrument_inputs(
     return rets, fund
 
 
-def _assert_size_lookup_complete(
-    *,
-    trades_path: Path,
-    size_mult_lookup: dict[tuple[str, int], float],
-) -> None:
-    """Refuse the research-only BTC-risk path when any executed key defaulted to 1.
-
-    The underlying engine deliberately keeps a backwards-compatible ``1.0``
-    default for general callers. Registered experiments need a stricter contract:
-    every executed treatment row must have been scored by its own endogenous
-    decision tape.
-    """
-    if not trades_path.exists():
-        raise FileNotFoundError(f"strict BTC-risk lookup check needs {trades_path}")
-    trades = pl.read_csv(trades_path)
-    if trades.is_empty():
-        return
-    required = {"symbol", "entry_signal_ts_ms"}
-    if not required.issubset(trades.columns):
-        raise RuntimeError(f"strict BTC-risk lookup check missing columns {required - set(trades.columns)}")
-    missing = sorted(
-        {
-            (str(symbol), int(signal_ts))
-            for symbol, signal_ts in trades.select("symbol", "entry_signal_ts_ms").iter_rows()
-            if (str(symbol), int(signal_ts)) not in size_mult_lookup
-        }
-    )
-    if missing:
-        raise RuntimeError(
-            f"strict BTC-risk lookup missing {len(missing)} executed decision key(s); sample={missing[:5]}"
-        )
-
-
 def component_report_matches_window(
     payload: dict[str, Any],
     *,
     start_date: str | None,
     end_date: str,
-    component_take_profit_pct: float | None = None,
     expected_gross_exposure: float | None = None,
     expected_config_hash: str | None = None,
 ) -> bool:
@@ -441,138 +335,17 @@ def component_report_matches_window(
         return False
     if start_date is not None and str(cfg.get("start_date")) != start_date:
         return False
-    if component_take_profit_pct is not None:
-        if abs(float(cfg.get("take_profit_pct") or 0.0) - float(component_take_profit_pct)) > 1e-12:
-            return False
     if expected_gross_exposure is not None:
         if abs(float(cfg.get("gross_exposure") or 0.0) - float(expected_gross_exposure)) > 1e-12:
             return False
     return True
 
 
-def _btc_klines(root: Path) -> pl.DataFrame:
-    return (
-        pl.scan_parquet(str(root / "klines_1h" / "**" / "*.parquet"))
-        .filter(pl.col("symbol") == "BTCUSDT")
-        .select("ts_ms", "close")
-        .collect()
-        .sort("ts_ms")
-    )
-
-
-def _component_decision_rows(
-    *,
-    output_root: Path,
-    venue: str,
-) -> tuple[list[dict[str, Any]], dict[tuple[str, int], int]]:
-    component_count: dict[tuple[str, int], int] = defaultdict(int)
-    rows_by_key: dict[tuple[str, int], dict[str, Any]] = {}
-    for component in WINNER_WEIGHTS:
-        spec = CONTINUOUS_COMPONENT_SOURCES[component]
-        trades_path = output_root / "components" / venue / spec.cell / "continuous_trades.csv"
-        if not trades_path.exists():
-            continue
-        trades = pl.read_csv(trades_path)
-        if trades.is_empty():
-            continue
-        for row in trades.select("symbol", "entry_signal_ts_ms").iter_rows(named=True):
-            symbol = str(row["symbol"])
-            signal_ts = int(row["entry_signal_ts_ms"])
-            key = (symbol, signal_ts)
-            component_count[key] += 1
-            rows_by_key.setdefault(key, {"symbol": symbol, "signal_ts_ms": signal_ts})
-    rows = sorted(rows_by_key.values(), key=lambda r: (int(r["signal_ts_ms"]), str(r["symbol"])))
-    return rows, component_count
-
-
-def btc_risk_size_lookup(
-    venue: str,
-    *,
-    decision_component_root: Path,
-    output_root: Path,
-    data_root: Path,
-) -> tuple[dict[tuple[str, int], float], dict[str, Any]]:
-    """Score CTRL_BTC_RISK_70_90_35 chronologically across ensemble decisions."""
-    decisions, component_count = _component_decision_rows(output_root=decision_component_root, venue=venue)
-    context = btc_context_by_day(_btc_klines(data_root))
-    sizer = BtcRiskLiveSizer(
-        output_root / "btc_risk" / venue / "btc_risk_sizing_state.parquet",
-        low=0.70,
-        high=0.90,
-        tail_mult=0.35,
-        min_prior=BTC_RISK_MIN_PRIOR,
-    )
-    by_ts: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for row in decisions:
-        by_ts[int(row["signal_ts_ms"])].append(row)
-
-    rows: list[dict[str, Any]] = []
-    lookup: dict[tuple[str, int], float] = {}
-    stack_values: list[float] = []
-    tail_selected = 0
-    warmup = 0
-    for signal_ts in sorted(by_ts):
-        scored, _cycle = sizer.score_decisions(by_ts[signal_ts], btc_context=context)
-        for (symbol, ts), score in sorted(scored.items(), key=lambda item: (item[0][1], item[0][0])):
-            mult = float(score.get("stack_mult", 1.0))
-            lookup[(symbol, int(ts))] = mult
-            stack_values.append(mult)
-            tail_selected += int(bool(score.get("tail_selected")))
-            warmup += int(bool(score.get("score_warmup")))
-            rows.append(
-                {
-                    "venue": venue,
-                    "symbol": symbol,
-                    "signal_ts_ms": int(ts),
-                    "signal_date": dt.datetime.fromtimestamp(int(ts) / 1000, tz=dt.timezone.utc).date().isoformat(),
-                    "component_count": component_count.get((symbol, int(ts)), 0),
-                    "btc_risk_score": score.get("btc_risk_score"),
-                    "score_warmup": bool(score.get("score_warmup")),
-                    "tail_selected": bool(score.get("tail_selected")),
-                    "stack_mult": mult,
-                    "prior_decision_count": score.get("prior_decision_count"),
-                }
-            )
-    sizer.save()
-    out_csv = output_root / "btc_risk" / venue / "btc_risk_multipliers.csv"
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    if rows:
-        pl.DataFrame(rows).write_csv(out_csv)
-    else:
-        out_csv.write_text("", encoding="utf-8")
-    return lookup, {
-        "arm_id": CTRL_BTC_RISK_70_90_35_ID,
-        "decision_keys": len(decisions),
-        "tail_selected": tail_selected,
-        "warmup": warmup,
-        "min_stack_mult": float(min(stack_values)) if stack_values else 1.0,
-        "mean_stack_mult": float(sum(stack_values) / len(stack_values)) if stack_values else 1.0,
-        "multipliers_csv": str(out_csv),
-    }
-
-
-def load_btc_risk_size_lookup(root: Path, venue: str) -> tuple[dict[tuple[str, int], float], dict[str, Any]]:
-    path = root / "btc_risk" / venue / "btc_risk_multipliers.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"missing BTC-risk multiplier cache: {path}")
-    df = pl.read_csv(path)
-    lookup = {
-        (str(row["symbol"]), int(row["signal_ts_ms"])): float(row["stack_mult"])
-        for row in df.to_dicts()
-    }
-    return lookup, {
-        "arm_id": CTRL_BTC_RISK_70_90_35_ID,
-        "decision_keys": len(lookup),
-        "multipliers_csv": str(path),
-        "reused_from": str(root),
-    }
-
-
 def monthly_trade_counts(*, output_root: Path, venue: str) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for component in WINNER_WEIGHTS:
-        spec = CONTINUOUS_COMPONENT_SOURCES[component]
-        trades_path = output_root / "components" / venue / spec.cell / "continuous_trades.csv"
+        spec = ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[component]
+        trades_path = output_root / "components" / venue / spec.artifact_cell / "continuous_trades.csv"
         if not trades_path.exists():
             continue
         trades = pl.read_csv(trades_path)
@@ -648,18 +421,20 @@ def _component_report_rows(payloads: list[dict[str, Any]]) -> list[dict[str, Any
     rows: list[dict[str, Any]] = []
     for payload in payloads:
         cfg = payload.get("config") or {}
-        metrics = ((payload.get("metrics") or {}).get("full") or {})
+        metrics = (payload.get("metrics") or {}).get("full") or {}
         rows.append(
             {
                 "component": payload.get("_component"),
+                "component_key": cfg.get("component_key"),
+                "profile_id": cfg.get("profile_id"),
+                "profile_revision": cfg.get("profile_revision"),
                 "config_hash": payload.get("config_hash"),
                 "trades": payload.get("n_trades"),
                 "funding_mode": payload.get("funding_mode"),
                 "take_profit_pct": cfg.get("take_profit_pct"),
                 "btc_trend_gate": cfg.get("btc_trend_gate"),
-                "btc_trend_mode": cfg.get("btc_trend_mode"),
+                "btc_trend_mode": "daily_prior",
                 "btc_trend_lookback_days": cfg.get("btc_trend_lookback_days"),
-                "btc_trend_month_days": cfg.get("btc_trend_month_days"),
                 "gross_exposure": cfg.get("gross_exposure"),
                 "total_return_pct": None
                 if metrics.get("total_return") is None
@@ -670,6 +445,42 @@ def _component_report_rows(payloads: list[dict[str, Any]]) -> list[dict[str, Any
             }
         )
     return rows
+
+
+def _assert_active_component_reports(payloads: list[dict[str, Any]]) -> None:
+    expected = {
+        component.artifact_cell: component
+        for component in ACTIVE_CONTINUOUS_COMPONENT_BY_KEY.values()
+    }
+    actual = {str(payload.get("_component") or "") for payload in payloads}
+    if actual != set(expected):
+        raise RuntimeError(
+            "active continuous component reports are incomplete or unexpected: "
+            f"expected={sorted(expected)} actual={sorted(actual)}"
+        )
+    for payload in payloads:
+        cell = str(payload["_component"])
+        component = expected[cell]
+        cfg = payload.get("config") or {}
+        checks = {
+            "profile_id": (cfg.get("profile_id"), CONTINUOUS_PROFILE_ID),
+            "profile_revision": (cfg.get("profile_revision"), CONTINUOUS_PROFILE_REVISION),
+            "component_key": (cfg.get("component_key"), component.key),
+            "entry_event_trigger": (cfg.get("entry_event_trigger"), component.entry_event_trigger),
+            "age_days_min": (cfg.get("age_days_min"), component.age_days_min),
+            "take_profit_pct": (cfg.get("take_profit_pct"), component.take_profit_pct),
+            "btc_trend_gate": (cfg.get("btc_trend_gate"), "uptrend"),
+        }
+        mismatches = [
+            f"{name}={actual_value!r} expected {expected_value!r}"
+            for name, (actual_value, expected_value) in checks.items()
+            if actual_value != expected_value
+        ]
+        if mismatches:
+            raise RuntimeError(
+                f"{cell} is not the code-defined active continuous component: "
+                + "; ".join(mismatches)
+            )
 
 
 def write_continuous_equity_report(
@@ -683,26 +494,25 @@ def write_continuous_equity_report(
     venue_summary: dict[str, Any],
     df: pl.DataFrame,
     chart_leverage: float | None,
-    component_take_profit_pct: float | None,
-    btc_risk_sizing: bool,
     backtest_leverage: float,
     market_data_end_date: str | None = None,
 ) -> None:
     payloads = _component_report_payloads(output_root, venue)
+    _assert_active_component_reports(payloads)
     component_rows = _component_report_rows(payloads)
     first_payload = payloads[0] if payloads else {}
     first_cfg = first_payload.get("config") or {}
     stats_1x = venue_summary.get("1x") or stats(df)
-    inferred_tp = component_take_profit_pct
-    if inferred_tp is None and first_cfg.get("take_profit_pct") is not None:
-        inferred_tp = float(first_cfg["take_profit_pct"])
+    inferred_tp = float(first_cfg["take_profit_pct"])
     btc_trend_gate = first_cfg.get("btc_trend_gate")
-    btc_trend_mode = first_cfg.get("btc_trend_mode")
     funding_modes = sorted({str(row.get("funding_mode")) for row in component_rows if row.get("funding_mode")})
     final_equity = None if df.is_empty() else float(df["equity"][-1])
     summary = {
-        "run_label": "exploratory",
-        "strategy_run_label": "continuous_demo_paper_research_stage",
+        "run_label": CONTINUOUS_EQUITY_EVIDENCE_LABEL,
+        "strategy_run_label": CONTINUOUS_HISTORICAL_RUN_LABEL,
+        "strategy_profile": CONTINUOUS_PROFILE_ID,
+        "profile_revision": CONTINUOUS_PROFILE_REVISION,
+        "config_authority": "liquidity_migration.continuous_profile.ACTIVE_CONTINUOUS_COMPONENTS",
         "venue": venue,
         "data_root": str(data_root),
         "output_dir": str(out_dir),
@@ -712,10 +522,8 @@ def write_continuous_equity_report(
         "window": stats_1x.get("window"),
         "component_take_profit_pct": inferred_tp,
         "btc_trend_gate": btc_trend_gate,
-        "btc_trend_mode": btc_trend_mode,
+        "btc_trend_mode": "daily_prior",
         "btc_trend_lookback_days": first_cfg.get("btc_trend_lookback_days"),
-        "btc_trend_month_days": first_cfg.get("btc_trend_month_days"),
-        "btc_risk_sizing": btc_risk_sizing,
         "backtest_leverage": backtest_leverage,
         "chart_leverage": chart_leverage,
         "final_equity": final_equity,
@@ -734,7 +542,6 @@ def write_continuous_equity_report(
             "equity_curve": str(out_dir / "continuous_equity.csv"),
             "monthly": str(out_dir / "continuous_monthly.csv"),
             "png": str(out_dir / "continuous_equity_btc.png"),
-            "btc_risk_multipliers": str(output_root / "btc_risk" / venue / "btc_risk_multipliers.csv"),
         },
     }
     (out_dir / "continuous_equity_summary.json").write_text(
@@ -759,6 +566,7 @@ def write_continuous_equity_report(
                 dd="-" if row.get("max_drawdown_pct") is None else f"{float(row['max_drawdown_pct']):.2f}%",
             )
         )
+
     def fmt_stat(key: str, suffix: str = "") -> str:
         value = stats_1x.get(key)
         return "n/a" if value is None else f"{float(value):.2f}{suffix}"
@@ -767,8 +575,10 @@ def write_continuous_equity_report(
         [
             "# Continuous Equity Report",
             "",
-            "Run label: exploratory",
-            "Strategy run label: continuous_demo_paper_research_stage",
+            f"Run label: {CONTINUOUS_EQUITY_EVIDENCE_LABEL}",
+            f"Strategy run label: {CONTINUOUS_HISTORICAL_RUN_LABEL}",
+            f"Active profile: {CONTINUOUS_PROFILE_ID} ({CONTINUOUS_PROFILE_REVISION})",
+            "Config authority: liquidity_migration.continuous_profile",
             f"Venue: {venue}",
             f"Data root: {data_root}",
             f"Window: {stats_1x.get('window')}",
@@ -778,12 +588,11 @@ def write_continuous_equity_report(
             "## Method",
             "",
             (
-                "Official equity-curve runner: scripts/equity_curves.sh -> "
+                "Standard equity-curve runner: scripts/equity_curves.sh -> "
                 "scripts/equity_curves.py -> scripts/continuous_deployed_equity_refresh.py."
             ),
             f"Component TP: {inferred_tp}",
             f"BTC trend gate: {btc_trend_gate}",
-            f"BTC-risk sizing: {btc_risk_sizing}",
             f"Modeled backtest leverage: {backtest_leverage:g}x",
             f"Chart leverage: {chart_leverage:g}x" if chart_leverage is not None else "Chart leverage: none",
             "",
@@ -811,11 +620,11 @@ def write_continuous_equity_report(
             (
                 "Split metrics: component reports retain their configured split_date and full/early/recent "
                 "metrics where available; this equity curve is a diagnostic portfolio render, not a new "
-                "promotion split study."
+                "confirmatory experiment."
             ),
             (
-                "OOS window: none for this run. Forward demo/paper epochs are prospective only while their "
-                "profile, clock, and stopping rule remain frozen and unspent (docs/governance.md)."
+                "OOS window: none for this run. Forward demo/paper data supports only separately scoped "
+                "claims whose profile, clock, and stopping rule were fixed before observation."
             ),
             "",
             "## Components",
@@ -828,7 +637,6 @@ def write_continuous_equity_report(
             f"Monthly: {out_dir / 'continuous_monthly.csv'}",
             f"PNG: {out_dir / 'continuous_equity_btc.png'}",
             f"Summary JSON: {out_dir / 'continuous_equity_summary.json'}",
-            f"BTC-risk multipliers: {output_root / 'btc_risk' / venue / 'btc_risk_multipliers.csv'}",
             "",
         ]
     )
@@ -841,69 +649,44 @@ def run_components(
     output_root: Path,
     end_date: str,
     start_date: str | None = None,
-    frozen_fallback: Path | None = None,
     data_root: Path | None = None,
-    component_take_profit_pct: float | None = None,
     backtest_leverage: float = 1.0,
-    size_mult_lookup: dict[tuple[str, int], float] | None = None,
-    config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
-    write_candidate_tape: bool = False,
-    strict_size_lookup: bool = False,
 ) -> dict[str, Any]:
     data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
     for component in WINNER_WEIGHTS:
-        spec = CONTINUOUS_COMPONENT_SOURCES[component]
-        cell_dir = output_root / "components" / venue / spec.cell
+        spec = ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[component]
+        cell_dir = output_root / "components" / venue / spec.artifact_cell
         report_path = cell_dir / "continuous_report.json"
-        cfg = frozen_config(
+        cfg = active_component_config(
             component,
-            venue,
             end_date=end_date,
             start_date=start_date,
-            fallback_root=frozen_fallback,
-            component_take_profit_pct=component_take_profit_pct,
             backtest_leverage=backtest_leverage,
         )
-        if config_transform is not None:
-            cfg = config_transform(cfg)
-        candidate_tape_path = cell_dir / "candidate_tape.parquet" if write_candidate_tape else None
         t0 = time.time()
-        if report_path.exists() and size_mult_lookup is None:
+        if report_path.exists():
             payload = json.loads(report_path.read_text(encoding="utf-8"))
             resumed = component_report_matches_window(
                 payload,
                 start_date=start_date,
                 end_date=end_date,
-                component_take_profit_pct=component_take_profit_pct,
                 expected_gross_exposure=float(cfg.gross_exposure),
                 expected_config_hash=cfg.config_hash(),
             )
-            if candidate_tape_path is not None and not candidate_tape_path.exists():
-                resumed = False
             if not resumed:
-                payload = run_continuous_event_research(
+                payload = run_continuous_equity_component(
                     data_root,
                     config=cfg,
                     report_dir=cell_dir,
-                    candidate_tape_path=candidate_tape_path,
                 )
         else:
-            payload = run_continuous_event_research(
+            payload = run_continuous_equity_component(
                 data_root,
                 config=cfg,
                 report_dir=cell_dir,
-                size_mult_lookup=size_mult_lookup,
-                candidate_tape_path=candidate_tape_path,
             )
             resumed = False
-        if strict_size_lookup:
-            if size_mult_lookup is None:
-                raise ValueError("strict_size_lookup requires size_mult_lookup")
-            _assert_size_lookup_complete(
-                trades_path=cell_dir / "continuous_trades.csv",
-                size_mult_lookup=size_mult_lookup,
-            )
         meta[component] = {
             "config_hash": payload["config_hash"],
             "n_trades": payload["n_trades"],
@@ -931,8 +714,6 @@ def render_curves(
     monthly_trades: pl.DataFrame,
     leverage: float | None = 4.0,
     backtest_leverage: float = 1.0,
-    btc_risk_sizing: bool = False,
-    btc_trend_gate: str | None = None,
 ) -> None:
     for mult in chart_leverages(leverage):
         tag = "" if mult == 1.0 else f"_{mult:g}x"
@@ -960,24 +741,24 @@ def render_curves(
             )
         else:
             name = "Continuous" if mult == 1.0 else f"Continuous {mult:g}x chart"
-        sub = "IN-SAMPLE RESEARCH refresh to June 2026 data (window spent; forward demo is the arbiter) — not a promotion claim"
+        sub = (
+            f"Code-defined {CONTINUOUS_PROFILE_ID} ({CONTINUOUS_PROFILE_REVISION}); "
+            "descriptive historical equity, not runtime parity or deployment authorization"
+        )
         if abs(float(backtest_leverage) - 1.0) > 1e-12:
             sub += f" | modeled backtest leverage {backtest_leverage:g}x: component notional/costs/funding and hedge cap scaled"
-        if btc_trend_gate is not None:
-            sub += f" | BTC trend gate {btc_trend_gate}"
         if mult != 1.0:
             sub += f" | {mult:g}x = pure leverage on the same returns; margin/liquidation NOT modeled"
         title_modeled = "" if abs(float(backtest_leverage) - 1.0) <= 1e-12 else f", modeled {backtest_leverage:g}x"
         title_chart = "" if mult == 1.0 else f", {mult:g}x chart"
         meta = _write_equity_benchmark_chart(
             out_dir,
-            root=out_dir,
             equity=equity,
             raw_klines=raw_klines,
             monthly=monthly,
             png_name=f"continuous_equity_btc{tag}.png",
             title=(
-                "CONTINUOUS deployed - continuous_ensemble_v2 ensemble + 2f hedge"
+                f"CONTINUOUS active - {CONTINUOUS_PROFILE_ID} TP12 ensemble + 2f hedge"
                 f"{title_modeled}{title_chart} [{venue}] - refreshed to {end_date}"
             ),
             subtitle=sub,
@@ -990,7 +771,10 @@ def render_curves(
         if abs(float(backtest_leverage) - 1.0) > 1e-12:
             log_label = f"modeled {backtest_leverage:g}x / chart {summary_key}"
         print(f"[{venue}] {log_label} {json.dumps(venue_summary[summary_key])}", flush=True)
-        print(f"[{venue}] png: {out_dir / f'continuous_equity_btc{tag}.png'} ({'ok' if meta else 'CHART FAILED'})", flush=True)
+        print(
+            f"[{venue}] png: {out_dir / f'continuous_equity_btc{tag}.png'} ({'ok' if meta else 'CHART FAILED'})",
+            flush=True,
+        )
 
 
 def run_venue(
@@ -1000,37 +784,18 @@ def run_venue(
     end_date: str,
     start_date: str | None = None,
     render_only: bool = False,
-    frozen_fallback: Path | None = None,
     data_root: Path | None = None,
     chart_leverage: float | None = 4.0,
-    component_take_profit_pct: float | None = None,
-    btc_risk_sizing: bool = False,
     backtest_leverage: float = 1.0,
-    btc_trend_gate: str | None = None,
-    config_transform: Callable[[ContinuousEventConfig], ContinuousEventConfig] | None = None,
-    write_candidate_tape: bool = False,
-    btc_risk_lookup_root: Path | None = None,
     exit_data_end_date: str | None = None,
     strict_hedge_coverage: bool = False,
-    strict_btc_risk_lookup: bool = False,
-    isolate_research_state: bool = False,
 ) -> dict[str, Any]:
     out_dir = output_root / venue
     out_dir.mkdir(parents=True, exist_ok=True)
     if exit_data_end_date is not None and exit_data_end_date < end_date:
         raise ValueError("exit_data_end_date must be >= the signal end_date")
     market_data_end_date = exit_data_end_date or end_date
-    if isolate_research_state:
-        # This process-local cache is keyed by config/root path, not root content.
-        # Registered runs fingerprint roots externally and clear it between every
-        # cell/venue so an in-place root refresh cannot reuse stale prepared inputs.
-        from liquidity_migration import continuous_events as _continuous_events
-
-        _continuous_events._RESEARCH_INPUT_CACHE.clear()
-    effective_config_transform = _combined_config_transform(config_transform, btc_trend_gate=btc_trend_gate)
     if render_only:
-        if btc_trend_gate is not None:
-            raise ValueError("--render-only cannot apply --btc-trend-gate; rerun components")
         csv_path = out_dir / "continuous_equity.csv"
         if not csv_path.exists():
             raise FileNotFoundError(f"--render-only needs an existing {csv_path}")
@@ -1038,77 +803,58 @@ def run_venue(
         panel = load_extended_panel(venue, end_date=market_data_end_date, root=data_root)
         venue_summary: dict[str, Any] = {}
     else:
-        size_lookup = None
-        btc_risk_meta = None
-        if btc_risk_sizing:
-            if btc_risk_lookup_root is not None:
-                size_lookup, btc_risk_meta = load_btc_risk_size_lookup(btc_risk_lookup_root, venue)
-            else:
-                decision_root = output_root / "_btc_risk_decision_components"
-                run_components(
-                    venue,
-                    output_root=decision_root,
-                    end_date=end_date,
-                    start_date=start_date,
-                    frozen_fallback=frozen_fallback,
-                    data_root=data_root,
-                    component_take_profit_pct=component_take_profit_pct,
-                    backtest_leverage=1.0,
-                    config_transform=effective_config_transform,
-                )
-                root_for_context = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
-                size_lookup, btc_risk_meta = btc_risk_size_lookup(
-                    venue,
-                    decision_component_root=decision_root,
-                    output_root=output_root,
-                    data_root=root_for_context,
-                )
         component_meta = run_components(
             venue,
             output_root=output_root,
             end_date=end_date,
             start_date=start_date,
-            frozen_fallback=frozen_fallback,
             data_root=data_root,
-            component_take_profit_pct=component_take_profit_pct,
             backtest_leverage=backtest_leverage,
-            size_mult_lookup=size_lookup,
-            config_transform=effective_config_transform,
-            write_candidate_tape=write_candidate_tape,
-            strict_size_lookup=strict_btc_risk_lookup,
         )
         pieces = {}
         for component in WINNER_WEIGHTS:
-            spec = CONTINUOUS_COMPONENT_SOURCES[component]
-            refreshed = ContinuousComponentSource(output_root / "components", spec.cell)
+            spec = ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[component]
+            refreshed = ContinuousComponentSource(output_root / "components", spec.artifact_cell)
             comp, _n, _cfg = load_continuous_component_source(refreshed, venue)
             pieces[component] = comp
         combined = combine_continuous_components(pieces, WINNER_WEIGHTS)
         panel = load_extended_panel(venue, end_date=market_data_end_date, root=data_root)
         btc_ret, btc_fund = instrument_inputs(
-            venue, combined.days, "BTCUSDT", panel,
-            data_root=data_root, strict_coverage=strict_hedge_coverage,
+            venue,
+            combined.days,
+            "BTCUSDT",
+            panel,
+            data_root=data_root,
+            strict_coverage=strict_hedge_coverage,
         )
         eth_ret, eth_fund = instrument_inputs(
-            venue, combined.days, "ETHUSDT", panel,
-            data_root=data_root, strict_coverage=strict_hedge_coverage,
+            venue,
+            combined.days,
+            "ETHUSDT",
+            panel,
+            data_root=data_root,
+            strict_coverage=strict_hedge_coverage,
         )
         df = apply_rebalance_rule(
-            combined, winner_rule(), ContinuousHedgeRule(90, 60, 2.0 * float(backtest_leverage), 5.0),
-            btc_ret, btc_fund, eth_ret, eth_fund,
-            hedge_intensity=deployed_hedge_intensity(combined.days, btc_ret),
+            combined,
+            winner_rule(),
+            ContinuousHedgeRule(90, 60, 2.0 * float(backtest_leverage), 5.0),
+            btc_ret,
+            btc_fund,
+            eth_ret,
+            eth_fund,
+            hedge_intensity=active_hedge_intensity(combined.days, btc_ret),
         )
         panel_last = dt.date.fromisoformat(str(panel["date"].max()))
         df = pad_flat_tail(df, through_date=panel_last)
         venue_summary = {
             "components": component_meta,
-            "component_take_profit_pct": component_take_profit_pct,
-            "btc_risk_sizing": btc_risk_meta,
+            "strategy_profile": CONTINUOUS_PROFILE_ID,
+            "profile_revision": CONTINUOUS_PROFILE_REVISION,
             "backtest_leverage": backtest_leverage,
             "signal_end_date": end_date,
             "market_data_end_date": market_data_end_date,
             "strict_hedge_coverage": strict_hedge_coverage,
-            "strict_btc_risk_lookup": strict_btc_risk_lookup,
         }
     raw_klines = (
         panel.filter(pl.col("symbol") == "BTCUSDT")
@@ -1119,13 +865,15 @@ def run_venue(
         .select(["symbol", "date", "ts_ms", "close"])
     )
     render_curves(
-        venue, out_dir=out_dir, df=df, raw_klines=raw_klines,
-        end_date=market_data_end_date, venue_summary=venue_summary,
+        venue,
+        out_dir=out_dir,
+        df=df,
+        raw_klines=raw_klines,
+        end_date=market_data_end_date,
+        venue_summary=venue_summary,
         monthly_trades=monthly_trade_counts(output_root=output_root, venue=venue),
         leverage=chart_leverage,
         backtest_leverage=backtest_leverage,
-        btc_risk_sizing=btc_risk_sizing,
-        btc_trend_gate=btc_trend_gate,
     )
     write_continuous_equity_report(
         venue=venue,
@@ -1137,8 +885,6 @@ def run_venue(
         venue_summary=venue_summary,
         df=df,
         chart_leverage=chart_leverage,
-        component_take_profit_pct=component_take_profit_pct,
-        btc_risk_sizing=btc_risk_sizing,
         backtest_leverage=backtest_leverage,
         market_data_end_date=market_data_end_date,
     )
@@ -1147,13 +893,17 @@ def run_venue(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--end-date", default="2026-06-12", help="engine end boundary (exclusive at date midnight UTC)")
+    parser.add_argument(
+        "--end-date",
+        required=True,
+        help="engine end boundary, exclusive at UTC midnight",
+    )
     parser.add_argument(
         "--start-date",
         default=None,
-        help="Optional engine start boundary. Omit to preserve each frozen component's original start.",
+        help="Optional engine start boundary. Omit for the active profile's full history.",
     )
-    parser.add_argument("--output-root", default=str(SHARED / "continuous_deployed_equity_refresh_2026-06-12"))
+    parser.add_argument("--output-root", default=str(SHARED / "continuous_equity"))
     parser.add_argument("--venues", nargs="+", default=["bybit", "binance"])
     parser.add_argument(
         "--data-root",
@@ -1161,13 +911,9 @@ def main() -> int:
         help="Optional per-venue full-PIT root override; requires exactly one --venues entry.",
     )
     parser.add_argument(
-        "--render-only", action="store_true",
+        "--render-only",
+        action="store_true",
         help="re-render PNGs + stats from existing per-venue continuous_equity.csv (no engine runs)",
-    )
-    parser.add_argument(
-        "--frozen-fallback",
-        default=str(SHARED / "continuous_deployed_equity_refresh_2026-06-12"),
-        help="components root whose continuous_report.json configs stand in for the consolidated 2026-06-07 receipts",
     )
     parser.add_argument(
         "--chart-leverage",
@@ -1175,23 +921,11 @@ def main() -> int:
         default=4.0,
         help="Extra pure-leverage continuous chart to render alongside 1x. Use 1 to suppress the extra chart.",
     )
-    parser.add_argument("--component-take-profit-pct", type=float, default=None)
-    parser.add_argument(
-        "--btc-risk-sizing",
-        action="store_true",
-        help=f"Apply {CTRL_BTC_RISK_70_90_35_ID} entry-size multipliers.",
-    )
     parser.add_argument(
         "--backtest-leverage",
         type=float,
         default=1.0,
         help="Modeled backtest leverage: scales component gross exposure before costs/funding and scales hedge cap.",
-    )
-    parser.add_argument(
-        "--btc-trend-gate",
-        choices=sorted(VALID_BTC_TREND_GATES),
-        default=None,
-        help="Override component BTC_TREND_GATE; omit to preserve each frozen source config.",
     )
     args = parser.parse_args()
     data_root = Path(args.data_root).expanduser() if args.data_root else None
@@ -1202,15 +936,14 @@ def main() -> int:
     summary: dict[str, Any] = {"start_date": args.start_date, "end_date": args.end_date}
     for venue in args.venues:
         summary[venue] = run_venue(
-            venue, output_root=output_root, end_date=args.end_date,
+            venue,
+            output_root=output_root,
+            end_date=args.end_date,
             start_date=args.start_date,
-            render_only=args.render_only, frozen_fallback=Path(args.frozen_fallback).expanduser(),
+            render_only=args.render_only,
             data_root=data_root,
             chart_leverage=args.chart_leverage,
-            component_take_profit_pct=args.component_take_profit_pct,
-            btc_risk_sizing=args.btc_risk_sizing,
             backtest_leverage=args.backtest_leverage,
-            btc_trend_gate=args.btc_trend_gate,
         )
     if not args.render_only:
         (output_root / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")

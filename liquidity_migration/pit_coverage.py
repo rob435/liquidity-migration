@@ -199,11 +199,6 @@ class CoverageStatus:
         """The manifest cannot PIT-validate the most recent daily-close signal."""
         return not self.manifest_covers_latest_signal
 
-    @property
-    def has_per_symbol_manifest_lag(self) -> bool:
-        return bool(self.per_symbol_manifest_lags)
-
-
 def _per_symbol_manifest_lags(
     *,
     manifest_dir: Path,
@@ -301,8 +296,8 @@ def format_coverage(status: CoverageStatus) -> str:
             "to refresh PIT membership (download-data does NOT touch the manifest),"
         )
         lines.append(
-            "           or set require_full_pit_universe=False in the run config for a clearly "
-            "current-universe diagnostic that cannot support a historical-universe claim."
+            "           Until the manifest is refreshed, any current-universe diagnostic "
+            "cannot support a historical-universe claim."
         )
     if status.manifest_lag_vs_klines_days is not None and status.manifest_lag_vs_klines_days > 0:
         lines.append(

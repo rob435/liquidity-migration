@@ -65,74 +65,21 @@ def _thread_lock_for(lock_path: Path) -> threading.Lock:
         return lock
 
 
-def _unlink_with_retry(lock_path: Path, *, retries: int = 40, delay: float = 0.05) -> None:
-    """Unlink a lock file with retries on Windows PermissionError (WinError 32).
-
-    Windows raises ``PermissionError: [WinError 32] The process cannot
-    access the file because it is being used by another process`` whenever
-    ANY process holds the file open — including the brief windows when
-    another process is mid-``_read_lock_text_safe`` reading our payload to
-    check liveness. With many parallel sweep workers all contending on the
-    same dataset lock, those windows overlap with the lock holder's release
-    and naively-`.unlink()`-only-catching-FileNotFoundError crashes the
-    whole subprocess (and propagates failure to the orchestrator).
-
-    The retry loop tolerates this transient contention. If retries exhaust,
-    the file is left in place — the next acquire's stale-detection (dead
-    pid via _lock_owner_is_dead) will clean it up, so no permanent leak.
-    Defaults: 40 retries × 50ms ≈ 2s, double the 1s ``_read_lock_text_safe``
-    timeout the contending readers wait."""
-    for _ in range(retries):
-        try:
-            lock_path.unlink()
-            return
-        except FileNotFoundError:
-            return
-        except PermissionError:
-            time.sleep(delay)
-    # Last resort: leave the file. The next acquire's stale-detection
-    # path is the safety net.
-
-
 DATASETS = {
     "instruments",
-    "klines_1m",
     "klines_1h",
-    "klines_5m",
     "funding",
     "open_interest",
     "mark_price_1h",
     "index_price_1h",
     "premium_index_1h",
-    # Read-only legacy: the download path was deleted with the signed_flow
-    # cleanup (validated as not-an-edge, commit 6e5e977). Kept ONLY so old
-    # research roots that still hold a signed_flow_1h directory stay readable
-    # by ad-hoc tooling.
-    "signed_flow_1h",
     "ticker_snapshots",
     "archive_trade_manifest",
     "universe_current",
     "event_demo_klines_1h",
-    "event_demo_trades",
-    "event_demo_orders",
-    "event_demo_cycles",
-    "long_native_demo_trades",
-    "long_native_demo_orders",
     "long_native_demo_cycles",
-    # Compatibility paper-projection ledger for LONG. Same schema as the old
-    # demo ledger; optional strategy-row recording models signal-price fills.
-    # Canonical deterministic paper execution lives in the account journal.
-    "long_native_paper_trades",
-    "long_native_paper_orders",
     "long_native_paper_cycles",
-    # Continuous-fade compatibility strategy ledgers. Canonical demo and paper
-    # execution/accounting now live in their respective account journals; these
-    # datasets remain for projection diagnostics and historical reconciliation.
-    "continuous_fade_demo_trades",
-    "continuous_fade_demo_orders",
     "continuous_fade_demo_cycles",
-    "continuous_fade_paper_trades",
-    "continuous_fade_paper_orders",
     "continuous_fade_paper_cycles",
     "binance_usdm_klines_1h",
     "binance_usdm_mark_price_1h",
@@ -145,33 +92,19 @@ DATASETS = {
 
 DATASET_KEYS = {
     "instruments": ("symbol",),
-    "klines_1m": ("ts_ms", "symbol"),
     "klines_1h": ("ts_ms", "symbol"),
-    "klines_5m": ("ts_ms", "symbol"),
     "funding": ("ts_ms", "symbol"),
     "open_interest": ("ts_ms", "symbol"),
     "mark_price_1h": ("ts_ms", "symbol"),
     "index_price_1h": ("ts_ms", "symbol"),
     "premium_index_1h": ("ts_ms", "symbol"),
-    "signed_flow_1h": ("ts_ms", "symbol"),
     "ticker_snapshots": ("ts_ms", "symbol"),
     "archive_trade_manifest": ("symbol", "date", "url"),
     "universe_current": ("snapshot_ts_ms", "symbol"),
     "event_demo_klines_1h": ("ts_ms", "symbol"),
-    "event_demo_trades": ("trade_id",),
-    "event_demo_orders": ("order_link_id",),
-    "event_demo_cycles": ("cycle_id",),
-    "long_native_demo_trades": ("trade_id",),
-    "long_native_demo_orders": ("order_link_id",),
     "long_native_demo_cycles": ("cycle_id",),
-    "long_native_paper_trades": ("trade_id",),
-    "long_native_paper_orders": ("order_link_id",),
     "long_native_paper_cycles": ("cycle_id",),
-    "continuous_fade_demo_trades": ("trade_id",),
-    "continuous_fade_demo_orders": ("order_link_id",),
     "continuous_fade_demo_cycles": ("cycle_id",),
-    "continuous_fade_paper_trades": ("trade_id",),
-    "continuous_fade_paper_orders": ("order_link_id",),
     "continuous_fade_paper_cycles": ("cycle_id",),
     "binance_usdm_klines_1h": ("ts_ms", "symbol"),
     "binance_usdm_mark_price_1h": ("ts_ms", "symbol"),
@@ -275,24 +208,12 @@ def exclusive_file_lock(
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
-                # POSIX-style "file already exists" — fall through to the
-                # liveness / staleness / wait logic below.
-                pass
-            except PermissionError:
-                # Windows-specific: when another process is mid-unlink the
-                # file enters "delete-pending" state. A concurrent O_CREAT|O_EXCL
-                # then raises PermissionError [Errno 13] / EACCES instead of
-                # FileExistsError, even though the semantically-correct answer
-                # is "the file exists, try again". Treat exactly like
-                # FileExistsError so the same recovery / wait path runs.
-                # Observed in Phase 0 dispatch: control cell crashed on lock
-                # acquire of funding.lock while another worker was releasing it.
                 pass
             else:
                 # Got the lock fresh — break out of the wait loop.
                 break
             if _lock_owner_is_dead(lock_path):
-                _unlink_with_retry(lock_path)
+                lock_path.unlink(missing_ok=True)
                 continue
             try:
                 age = time.time() - lock_path.stat().st_mtime
@@ -304,10 +225,10 @@ def exclusive_file_lock(
                 and age > invalid_lock_stale_seconds
             )
             if invalid_lock_stale:
-                _unlink_with_retry(lock_path)
+                lock_path.unlink(missing_ok=True)
                 continue
             if stale_seconds > 0 and age > stale_seconds:
-                _unlink_with_retry(lock_path)
+                lock_path.unlink(missing_ok=True)
                 continue
             time.sleep(max(poll_seconds, 0.0))
         # Capture the inode of the file WE created (fd is still open here, before
@@ -317,9 +238,10 @@ def exclusive_file_lock(
         # and admit a second concurrent writer (CROS-1).
         try:
             _owned = os.fstat(fd)
-            owned_key: tuple[int, int] | None = (_owned.st_dev, _owned.st_ino)
         except OSError:
-            owned_key = None  # can't fstat -> fall back to legacy unlink-by-path
+            os.close(fd)
+            raise
+        owned_key = (_owned.st_dev, _owned.st_ino)
         # CROS-1b (audit 2026-06-09): (dev, ino) equality is NOT proof the path is
         # still OUR lock — ext4/overlayfs can hand a freed inode straight to a
         # successor's lock file created at the same path. A per-acquisition token
@@ -336,48 +258,33 @@ def exclusive_file_lock(
             yield
         finally:
             _unregister_owned_token(owned_token)
-            if owned_key is None:
-                _unlink_with_retry(lock_path)  # legacy path (fstat failed)
-            else:
-                try:
-                    cur = os.stat(lock_path)
-                    release_ours = (cur.st_dev, cur.st_ino) == owned_key
-                except FileNotFoundError:
-                    release_ours = False  # already gone -> nothing to unlink
-                except OSError:
-                    release_ours = True  # can't inode-check (e.g. Windows delete-pending) -> preserve legacy self-heal
-                if release_ours:
-                    # Inode matched — confirm the payload token before unlinking
-                    # (inode-reuse defense, CROS-1b). An unreadable file keeps
-                    # release_ours=True: failing to remove our own lock would
-                    # strand waiters until stale eviction.
-                    text = _read_lock_text_safe(lock_path)
-                    if text is not None:
-                        try:
-                            release_ours = json.loads(text).get("token") == owned_token
-                        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
-                            release_ours = False  # foreign/corrupt payload -> not ours
-                if release_ours:
-                    _unlink_with_retry(lock_path)
+            try:
+                cur = os.stat(lock_path)
+                release_ours = (cur.st_dev, cur.st_ino) == owned_key
+            except FileNotFoundError:
+                release_ours = False  # already gone -> nothing to unlink
+            except OSError:
+                release_ours = False
+            if release_ours:
+                # Inode matched — confirm the payload token before unlinking
+                # (inode-reuse defense, CROS-1b).
+                text = _read_lock_text_safe(lock_path)
+                if text is None:
+                    release_ours = False
+                else:
+                    try:
+                        release_ours = json.loads(text).get("token") == owned_token
+                    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                        release_ours = False  # foreign/corrupt payload -> not ours
+            if release_ours:
+                lock_path.unlink(missing_ok=True)
 
 
-def _read_lock_text_safe(lock_path: Path, timeout: float = 1.0) -> str | None:
-    """Read the lock file text with a hard timeout. Returns None if the read
-    blocks (e.g. Windows 'delete-pending' state where another thread of this
-    same process unlinked the file but a handle keeps it half-alive — the
-    naive Path.read_text() hangs in Path.open() forever). The outer lock
-    loop treats None as 'unreadable, assume stale' and self-heals."""
-    import threading
-    box: list[str | None] = [None]
-    def _read() -> None:
-        try:
-            box[0] = lock_path.read_text(encoding="utf-8")
-        except Exception:
-            pass
-    t = threading.Thread(target=_read, daemon=True)
-    t.start()
-    t.join(timeout)
-    return box[0]
+def _read_lock_text_safe(lock_path: Path) -> str | None:
+    try:
+        return lock_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _pid_started_after(pid: int, created_ts: float) -> bool | None:
@@ -415,10 +322,6 @@ def _pid_started_after(pid: int, created_ts: float) -> bool | None:
 def _lock_owner_is_dead(lock_path: Path) -> bool:
     text = _read_lock_text_safe(lock_path)
     if text is None:
-        # File missing OR read hung (Windows delete-pending). Either way it
-        # is safe to treat the owner as dead — the next iteration's unlink
-        # is a no-op when the file is gone, and breaks delete-pending stalls
-        # when it isn't.
         return True
     try:
         payload = json.loads(text)
@@ -427,7 +330,13 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
         token = payload.get("token")
     except (json.JSONDecodeError, TypeError, ValueError):
         return False
-    if pid <= 0:
+    if (
+        pid <= 0
+        or created_ts <= 0.0
+        or type(token) is not str
+        or len(token) != 32
+        or any(character not in "0123456789abcdef" for character in token)
+    ):
         return False
     if pid == os.getpid():
         # Normally a lock bearing our own pid is our own LIVE lock -> not dead.
@@ -438,10 +347,6 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
         # The per-acquisition token disambiguates: if the payload's token is one
         # WE currently own it is genuinely our live lock; otherwise it is a
         # predecessor that merely reused our pid and is dead -> evictable. A
-        # legacy payload with no token is conservatively treated as our own live
-        # lock (token is None -> not live-owned only when a token field exists).
-        if token is None:
-            return False
         return not _token_is_live_owned(token)
     try:
         os.kill(pid, 0)
@@ -454,18 +359,7 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
     except OverflowError:
         return True
     except OSError:
-        # Windows: os.kill(pid, 0) on a non-signalable pid raises a bare OSError
-        # whose winerror varies by pid value / Python build — 87
-        # ERROR_INVALID_PARAMETER for an unknown pid, 11 ERROR_BAD_FORMAT for an
-        # out-of-range pid (observed on Python 3.13 / Windows for pid
-        # 2_147_483_647). POSIX dead pids raise ProcessLookupError and
-        # live-but-foreign pids raise PermissionError — both handled above. ANY
-        # other OSError here means the pid is not a signalable live process, so
-        # treat the owner as dead; otherwise stale-lock recovery never fires and
-        # every read/write_dataset blocks until the 6h stale timeout (the
-        # sweep-hang we keep hitting). Safe on POSIX too: a live *owned* pid makes
-        # os.kill succeed (no exception), so it is never misclassified as dead.
-        return True
+        return False
     # os.kill succeeded -> a live, signalable process holds this pid. It may be a
     # REUSED pid (the original owner was killed without cleanup); if the live process
     # started after the lock was created, the real owner is dead -> evict (CROS-2).
@@ -475,15 +369,21 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
 def _lock_payload_is_invalid(lock_path: Path) -> bool:
     text = _read_lock_text_safe(lock_path)
     if text is None:
-        # File missing or read hung — treat as invalid so the outer loop
-        # can unlink and retry (self-heals Windows delete-pending stalls).
         return True
     try:
         payload = json.loads(text)
         pid = int(payload.get("pid") or 0)
+        created_ts = float(payload.get("created") or 0.0)
+        token = payload.get("token")
     except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
         return True
-    return pid <= 0
+    return (
+        pid <= 0
+        or created_ts <= 0.0
+        or type(token) is not str
+        or len(token) != 32
+        or any(character not in "0123456789abcdef" for character in token)
+    )
 
 
 def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:
@@ -496,35 +396,10 @@ def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:
     )
 
 
-# reconcile-ledger-5 / quality-dup-5: the demo/paper trade+order ledgers were
-# written with partition_by=() -> a single monolithic part.parquet that the live
-# compatibility hot paths read-modify-rewrite under the lock, making both writes
-# and repeated reconciliation reads O(history). Bucket
-# these ledgers by calendar month so each write/read touches only the current
-# month. The bucket column MUST be derived from a per-row IMMUTABLE timestamp:
-# dedup in _write_part is per-part-file, so a row that changes buckets across an
-# update leaves a stale copy in the old bucket (a phantom OPEN trade on the
-# netted account). For TRADE ledgers the stable source is entry_ts_ms (the exit
-# reconcile path rewrites ts_ms=now_ms but preserves entry_ts_ms); for ORDER
-# ledgers it is ts_ms (set once at creation, preserved on in-place update).
+# Continuous cycle heartbeats are wide and written every minute, so partition
+# them monthly instead of rewriting an unbounded monolith.
 _LEDGER_MONTH_COL = "_ledger_month"
 LEDGER_BUCKET_SOURCE: dict[str, str] = {
-    "event_demo_trades": "entry_ts_ms",
-    "event_demo_orders": "ts_ms",
-    "long_native_demo_trades": "entry_ts_ms",
-    "long_native_demo_orders": "ts_ms",
-    "long_native_paper_trades": "entry_ts_ms",
-    "long_native_paper_orders": "ts_ms",
-    "continuous_fade_demo_trades": "entry_ts_ms",
-    "continuous_fade_demo_orders": "ts_ms",
-    "continuous_fade_paper_trades": "entry_ts_ms",
-    "continuous_fade_paper_orders": "ts_ms",
-    # Cycle heartbeat rows (~1440/day, wide payload, written every ~60s on the
-    # order-submitting cycle path while holding the dataset lock): without a
-    # bucket the per-cycle write read-concat-rewrote the WHOLE history monolith
-    # — the same unbounded-growth class reconcile-ledger-5 fixed for trades/
-    # orders (round 4). Cycle rows are append-once (cycle_id-keyed, never
-    # updated), so ts_ms is immutable and bucket-stable.
     "continuous_fade_demo_cycles": "ts_ms",
     "continuous_fade_paper_cycles": "ts_ms",
 }
@@ -532,9 +407,9 @@ LEDGER_BUCKET_SOURCE: dict[str, str] = {
 
 def _with_ledger_month(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
     """Add the int yyyymm _ledger_month partition column for a bucketed ledger
-    dataset, derived from its registered IMMUTABLE timestamp source. Rows whose
-    source ts is missing/null/<=0 fall into bucket 0 (legacy/unknown) so a
-    malformed row never crashes the write. A no-op for datasets not in
+    dataset, derived from its registered timestamp source. Rows whose source ts
+    is missing/null/<=0 fall into bucket 0 so a malformed row never crashes the
+    write. A no-op for datasets not in
     LEDGER_BUCKET_SOURCE or when the source column is absent."""
     src = LEDGER_BUCKET_SOURCE.get(dataset)
     if src is None or src not in df.columns or df.is_empty():
@@ -549,25 +424,6 @@ def _with_ledger_month(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
         .fill_null(0)
         .alias(_LEDGER_MONTH_COL)
     )
-
-
-def _recent_ledger_month_dirs(path: Path, months_back: int) -> list[Path]:
-    """The most-recent ``months_back`` _ledger_month=* bucket dirs plus the
-    legacy bucket (_ledger_month=0) -- the open-trade tail not yet migrated.
-    Used by the windowed reconcile read."""
-    dirs = [p for p in path.glob(f"{_LEDGER_MONTH_COL}=*") if p.is_dir()]
-
-    def _month_of(p: Path) -> int:
-        try:
-            return int(p.name.split("=", 1)[1])
-        except (IndexError, ValueError):
-            return 0
-
-    nonzero = sorted((p for p in dirs if _month_of(p) > 0), key=_month_of)
-    recent = nonzero[-months_back:] if months_back > 0 else nonzero
-    legacy = [p for p in dirs if _month_of(p) == 0]
-    return recent + legacy
-
 
 # storage-concurrency-4: how stale an orphaned `.*.tmp` part file must be before
 # the sweep removes it. The temp file only exists for the brief window between
@@ -612,8 +468,7 @@ def _sweep_orphaned_tmp_parts(
         except FileNotFoundError:
             continue
         except OSError:
-            # Best-effort cleanup: a transient stat/unlink failure (e.g. Windows
-            # delete-pending) must never break the write that triggered the sweep.
+            # Best-effort cleanup must not break the write that triggered it.
             continue
 
 
@@ -763,23 +618,15 @@ def read_dataset_columns(
                 files = [f for f in sorted(path.glob("**/*.parquet")) if _partition_date_ge(f, since_date)]
         else:
             files = sorted(path.glob("**/*.parquet"))
-        return _collect_ledger_files(files, dataset=dataset, columns=columns)
+        return _collect_files(files, columns=columns)
 
 
-def _collect_ledger_files(
+def _collect_files(
     files: list[Path],
     *,
-    dataset: str,
     columns: list[str] | None,
 ) -> pl.DataFrame:
-    """Union a set of parquet part files into one frame, transparently dropping the
-    internal _ledger_month partition column so the returned frame is schema-identical
-    to the legacy monolithic layout. For a bucketed ledger this unions the legacy
-    part.parquet (if any) with the new _ledger_month=* buckets; a cross-bucket
-    unique() (scoped to bucketed ledgers ONLY — non-ledger datasets keep the legacy
-    no-read-dedup behavior to avoid a full-frame unique on every big-dataset read)
-    guarantees a key present in BOTH the legacy file and a migrated bucket (the
-    migration window) is never double-counted on read."""
+    """Union parquet parts and hide the internal month-partition column."""
     if not files:
         return pl.DataFrame()
     file_paths = [str(file) for file in files]
@@ -800,60 +647,15 @@ def _collect_ledger_files(
         pl.exceptions.ComputeError,
         pl.exceptions.ShapeError,
     ):
-        # Month-bucketing spreads schema-drifting ledger rows (different writers /
-        # eras add columns) across bucket files, so a unified scan_parquet can hit
-        # SchemaError, ColumnNotFoundError, Schema/StructFieldNotFoundError, or a
-        # ComputeError/ShapeError when the merged scan can't reconcile column shapes.
-        # The legacy monolith never did (one diagonal_relaxed-merged file). Fall back
-        # to per-file read + diagonal concat, which tolerates the drift (ledgers are
-        # small, so the no-pushdown cost is nil). A genuinely torn/unreadable file
-        # still raises out of the per-file read below -- fail-loud, not masked.
+        # Schema can evolve across partitions. Fall back to per-file reads plus
+        # diagonal concat; genuinely unreadable files still fail loudly.
         frames = [pl.read_parquet(file) for file in file_paths]
         out = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
         if _LEDGER_MONTH_COL in out.columns:
             out = out.drop(_LEDGER_MONTH_COL)
         if columns is not None and not out.is_empty():
             out = out.select([col for col in columns if col in out.columns])
-    # Cross-bucket dedup, scoped to the month-bucketed ledgers: per-part-file dedup
-    # in _write_part does not span the legacy monolith + a migrated bucket during the
-    # migration window. Coalesce on the dataset key, preferring the freshest
-    # updated_at_ms (mirrors _write_part recency), so a key in both is never doubled.
-    if dataset in LEDGER_BUCKET_SOURCE and not out.is_empty():
-        keys = [c for c in DATASET_KEYS.get(dataset, ()) if c in out.columns]
-        if keys:
-            if "updated_at_ms" in out.columns:
-                # maintain_order=True mirrors _write_part: an UNSTABLE sort can
-                # reorder rows that share a null/equal updated_at_ms (preflight ->
-                # final continuous order rows), letting a stale preflight win the
-                # cross-bucket dedup and resurrecting the double-book class.
-                out = out.sort("updated_at_ms", nulls_last=False, maintain_order=True)
-            out = out.unique(subset=keys, keep="last")
     return out
-
-
-def read_ledger_window(
-    data_root: str | Path,
-    dataset: str,
-    *,
-    months_back: int = 3,
-) -> pl.DataFrame:
-    """Windowed read of a month-bucketed ledger: only the most-recent ``months_back``
-    month buckets plus the legacy monolith / _ledger_month=0 tail. Reconciliation
-    reads no longer scale with the whole-history ledger: they need open trades and
-    recently touched orders, and an open trade
-    older than the window is still served by the always-included legacy tail until the
-    migration drains it. Falls back to the full read for a non-bucketed dataset."""
-    path = dataset_path(data_root, dataset)
-    if not path.exists():
-        return pl.DataFrame()
-    with exclusive_file_lock(dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01):
-        bucket_dirs = _recent_ledger_month_dirs(path, months_back)
-        if not bucket_dirs:
-            files = sorted(path.glob("**/*.parquet"))
-        else:
-            legacy = sorted(path.glob("part.parquet"))
-            files = legacy + sorted(f for d in bucket_dirs for f in d.glob("**/*.parquet"))
-        return _collect_ledger_files(files, dataset=dataset, columns=None)
 
 
 def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> None:
@@ -869,18 +671,8 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
         output = pl.concat([existing, output], how="diagonal_relaxed")
     keys = [col for col in DATASET_KEYS.get(dataset, ()) if col in output.columns]
     if keys:
-        # Dedup by the dataset's natural keys. When rows carry updated_at_ms
-        # (trades/orders), keep the freshest VERSION rather than whichever row
-        # happened to be written last: historical roots may contain rows from
-        # multiple writers, so write order is not a reliable proxy for recency.
-        # Sort ascending (nulls — legacy rows with
-        # no updated_at_ms — first) so the max updated_at_ms lands last and
-        # unique(keep="last") wins it; among ties / nulls the concat order
-        # (existing then new) still lets a same-version new row win.
-        # maintain_order=True is load-bearing: continuous order rows (preflight ->
-        # final) often share a null/equal updated_at_ms, and an UNSTABLE sort may
-        # reorder ties — letting a stale preflight win the dedup and resurrecting
-        # the double-book class (audit 2026-06-12 round 3 hardening).
+        # Dedup by natural key. If rows are versioned, the freshest version wins;
+        # ties retain append order so the new row wins.
         if "updated_at_ms" in output.columns:
             output = output.sort("updated_at_ms", nulls_last=False, maintain_order=True)
         output = output.unique(subset=keys, keep="last")
@@ -896,9 +688,6 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
         # rewrite, that file is the only copy of the bucket's whole history
         # (the demo-forward evidence record). Cost is negligible at ledger
         # write rates.
-        # O_RDWR, not O_RDONLY: Windows fsync (_commit) requires a WRITABLE
-        # descriptor — a read-only fd raises EBADF and broke every dataset
-        # write on the dev box (208 test failures, 2026-06-12).
         fd = os.open(temp_path, os.O_RDWR)
         try:
             os.fsync(fd)
@@ -911,10 +700,8 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
         # new inode) is only durable after fsync of the containing directory fd.
         # Without it a hard power loss after replace() can revert the name to the
         # OLD inode, losing the most recent ledger update on a read-modify-rewrite
-        # single-copy part file. Directory fsync is a no-op / unsupported on
-        # Windows (O_RDONLY on a dir raises), so failures here are swallowed:
-        # contents durability (the file-fsync) is the important guarantee and is
-        # already met; this only tightens rename durability where the OS allows.
+        # single-copy part file. Unsupported directory fsync failures are
+        # swallowed; file-content durability is already established above.
         try:
             dir_fd = os.open(str(path.parent), os.O_RDONLY)
             try:

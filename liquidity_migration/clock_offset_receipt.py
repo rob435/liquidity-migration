@@ -310,7 +310,7 @@ def verify_clock_offset_receipt(
 
 
 def write_clock_offset_receipt(path: str | Path, receipt: Mapping[str, Any]) -> Path:
-    """Atomically create a private calibration input without overwriting evidence."""
+    """Atomically create a private timing input without overwriting evidence."""
 
     output = Path(path).expanduser()
     if not output.is_absolute():

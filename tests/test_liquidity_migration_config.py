@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -88,10 +87,7 @@ def test_ensure_data_root_exists(tmp_path: Path) -> None:
         ensure_data_root_exists(tmp_path / "missing")
 
 
-# audit2b defect 1: load_config silently dropped unconsumed top-level YAML
-# blocks (e.g. the committed `trade_flow` block). It must surface them via a
-# warning rather than ignoring them silently.
-def test_unconsumed_top_level_block_is_warned(tmp_path: Path, caplog) -> None:
+def test_unconsumed_top_level_block_is_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -104,36 +100,8 @@ universe:
         encoding="utf-8",
     )
 
-    with caplog.at_level(logging.WARNING, logger="liquidity_migration.config"):
-        config = load_config(config_path)
-
-    # The unconsumed block is surfaced...
-    assert any("trade_flow" in rec.getMessage() for rec in caplog.records)
-    assert any("unconsumed" in rec.getMessage() for rec in caplog.records)
-    # ...but loading still succeeds and the consumed keys are honoured.
-    assert config.universe.rank_start == 1
-
-
-# audit2b defect 1 (negative): a config whose only blocks ARE consumed must NOT
-# emit the unconsumed-keys warning (normal-input-unchanged guard).
-def test_fully_consumed_config_emits_no_warning(tmp_path: Path, caplog) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
-exchange:
-  name: bybit
-universe:
-  rank_start: 1
-cost_model:
-  maker_fee_bps: 2.0
-""",
-        encoding="utf-8",
-    )
-
-    with caplog.at_level(logging.WARNING, logger="liquidity_migration.config"):
+    with pytest.raises(TypeError, match="Unknown top-level config keys.*trade_flow"):
         load_config(config_path)
-
-    assert not any("unconsumed" in rec.getMessage() for rec in caplog.records)
 
 
 # audit2b defect 2: _merge_dataclass now applies the same numeric coercion that

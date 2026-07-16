@@ -13,7 +13,10 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account_reconcile import BybitAccountReconciler
+from liquidity_migration.account_reconcile import (
+    VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS,
+    BybitAccountReconciler,
+)
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.venue_protection import BybitNativeProtectionManager
 
@@ -149,6 +152,77 @@ def test_dual_side_venue_position_fails_closed_for_net_position_kernel(tmp_path:
     assert report.mismatches == ("BUSDT:dual_side_position_not_supported",)
 
 
+@pytest.mark.parametrize(
+    ("venue_positions", "error"),
+    [
+        (None, "returned a non-list payload"),
+        ({"symbol": "BUSDT"}, "returned a non-list payload"),
+        ([None], "returned a non-object row at index 0"),
+        ([{"symbol": "", "side": "Buy", "size": "1"}], "row 0 lacks symbol"),
+        ([{"symbol": "BUSDT", "side": "Buy", "size": None}], "row 0 size must be numeric"),
+        ([{"symbol": "BUSDT", "side": "Buy", "size": "not-a-number"}], "row 0 size must be numeric"),
+        ([{"symbol": "BUSDT", "side": "Buy", "size": "NaN"}], "row 0 size must be finite"),
+        ([{"symbol": "BUSDT", "side": "Buy", "size": "Infinity"}], "row 0 size must be finite"),
+        ([{"symbol": "BUSDT", "side": "Buy", "size": "-1"}], "row 0 size must be non-negative"),
+        ([{"symbol": "BUSDT", "side": "", "size": "1"}], "row 0 has invalid side"),
+        ([{"symbol": "BUSDT", "side": "Both", "size": "1"}], "row 0 has invalid side"),
+        ([{"symbol": "BUSDT", "side": "Both", "size": "0"}], "row 0 has invalid side"),
+    ],
+)
+def test_malformed_venue_position_snapshot_fails_closed(
+    tmp_path: Path,
+    venue_positions: object,
+    error: str,
+) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="strict-position-response", clock=clock)
+
+    class MalformedClient:
+        demo = True
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return venue_positions
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=MalformedClient(),
+        instrument_rules={},
+        clock=clock,
+    )
+
+    with pytest.raises(RuntimeError, match=error):
+        reconciler.reconcile_once()
+
+    assert reconciler.last_report is None
+    assert not kernel.state().venue_snapshots
+
+
+def test_canonical_zero_venue_position_row_is_valid_flat_truth(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="canonical-flat-position", clock=clock)
+
+    class FlatClient:
+        demo = True
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return [{"symbol": "BUSDT", "side": "", "size": "0"}]
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=FlatClient(),
+        instrument_rules={},
+        clock=clock,
+    )
+
+    report = reconciler.reconcile_once()
+
+    assert report.healthy
+    assert report.venue_positions == {}
+    assert report.mismatches == ()
+
+
 def test_position_truth_timestamp_is_taken_after_rest_response(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=0)
     kernel = AccountExecutionKernel(tmp_path, account_id="fresh-position-truth", clock=clock)
@@ -172,6 +246,85 @@ def test_position_truth_timestamp_is_taken_after_rest_response(tmp_path: Path) -
 
     assert report.observed_ts_ns == clock.wall_time_ns()
     reconciler.require_recent_healthy(max_age_ns=0)
+
+
+def test_noop_reconciliation_is_fresh_without_growing_journal_until_checkpoint(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=10)
+    kernel = AccountExecutionKernel(tmp_path, account_id="bounded-reconcile", clock=clock)
+
+    class FlatClient:
+        demo = True
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return []
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=FlatClient(),
+        instrument_rules={},
+        clock=clock,
+    )
+
+    first = reconciler.reconcile_once()
+    clock.advance_ns(2_000_000_000)
+    second = reconciler.reconcile_once()
+
+    snapshots = [
+        event
+        for event in kernel.journal.events()
+        if event.event_type == "venue_snapshot"
+    ]
+    assert len(snapshots) == 1
+    assert second.observed_ts_ns > first.observed_ts_ns
+    reconciler.require_recent_healthy(max_age_ns=0)
+
+    clock.advance_ns(VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS)
+    reconciler.reconcile_once()
+
+    snapshots = [
+        event
+        for event in kernel.journal.events()
+        if event.event_type == "venue_snapshot"
+    ]
+    assert len(snapshots) == 2
+
+
+def test_reconciliation_semantic_change_is_journaled_immediately(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=10)
+    kernel = AccountExecutionKernel(tmp_path, account_id="changed-reconcile", clock=clock)
+
+    class MutableClient:
+        demo = True
+        venue_positions: list[dict[str, str]] = []
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return self.venue_positions
+
+    client = MutableClient()
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    reconciler.reconcile_once()
+    clock.advance_ns(1)
+    client.venue_positions = [{"symbol": "BUSDT", "side": "Buy", "size": "1"}]
+
+    changed = reconciler.reconcile_once()
+
+    snapshots = [
+        event
+        for event in kernel.journal.events()
+        if event.event_type == "venue_snapshot"
+    ]
+    assert len(snapshots) == 2
+    assert not changed.healthy
+    assert list(kernel.state().venue_snapshots) == [changed.snapshot_key]
 
 
 def test_rest_reconcile_recovers_native_stop_execution_missed_by_ws(tmp_path: Path) -> None:

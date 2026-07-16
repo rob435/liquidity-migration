@@ -1,7 +1,4 @@
-"""Daily-rebalance accounting for the continuous-fade research candidate.
-
-This module is the package-level implementation of the decomposed accounting
-that the scout script uses:
+"""Portfolio accounting for the active continuous historical equity path.
 
 1. split the fixed-notional MTM ledger into gross MTM, entry cost, funding, and
    active-open gross;
@@ -9,8 +6,9 @@ that the scout script uses:
 3. re-price entry impact at the scaled notional;
 4. charge turnover for resizing already-open exposure.
 
-It is still a research/backtest accounting engine, not a live order router.
+This module does not route orders.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -35,9 +33,7 @@ class ContinuousRebalanceRule:
     strategy_momentum_window_days: int = 180
     strategy_momentum_min_return: float = 0.02
     strategy_momentum_scale_when_below: float = 0.0
-    # Kill switch for the daily volatility adjuster. enabled=False forces the
-    # daily scale to 1.0 so signal/exit research is not confounded by the
-    # path-dependent rebalance. Default True preserves prior behavior.
+    # enabled=False fixes the daily scale at 1.0.
     enabled: bool = True
 
 
@@ -211,7 +207,7 @@ def scaled_entry_cost(events: list[tuple[float, float, float]], scale: float, im
     total = 0.0
     for old_w, fixed_bps, impact_bps in events:
         new_w = old_w * scale
-        new_bps = fixed_bps + impact_bps * (scale ** impact_exponent)
+        new_bps = fixed_bps + impact_bps * (scale**impact_exponent)
         total -= new_w * new_bps / 10_000.0
     return total
 
@@ -253,101 +249,6 @@ def compute_continuous_rebalance_scale(
             scale *= max(float(rule.strategy_momentum_scale_when_below), 0.0)
 
     return max(float(scale), 0.0)
-
-
-def plan_continuous_rebalance_resizes(
-    open_trades: list[dict[str, Any]],
-    *,
-    price_by_symbol: dict[str, float],
-    equity_usdt: float,
-    base_notional_pct_equity: float,
-    target_scale: float,
-    min_resize_notional_usdt: float = 5.0,
-    exclude_trade_id_suffixes: tuple[str, ...] = (),
-    component_tags_requiring_weight: tuple[str, ...] = (),
-) -> list[ContinuousRebalanceResizePlan]:
-    """Plan resize orders needed to match a daily rebalance scale.
-
-    The continuous demo ledger stores one row per open short. The promoted
-    research rule scales the per-name base notional, so each open row targets:
-
-    ``equity * base_notional_pct_equity / 100 * target_scale
-    * component_weight * vol_weight_multiplier``
-
-    where ``component_weight`` is the row's own entry-sizing weight (ensemble
-    components enter at 0.10-0.40 of base; legacy single-component rows default
-    to 1.0) and ``vol_weight_multiplier`` preserves inverse-vol entry sizing
-    from the ledger row (legacy/flat rows default to 1.0). Rows whose trade_id
-    ends with one of ``exclude_trade_id_suffixes`` is never resized. The current
-    caller retains ``-snipe`` only as a read-safety guard for archived
-    adverse-limit children; no future runtime creates those rows.
-
-    Positive delta means increase the short with a non-reduce-only Sell. Negative
-    delta means reduce the short with a reduce-only Buy. This planner deliberately
-    does not round to venue qty steps or submit orders; the live executor must
-    apply contract filters immediately before placement.
-    """
-    base = max(_finite_float(equity_usdt), 0.0) * max(_finite_float(base_notional_pct_equity), 0.0) / 100.0
-    scale = max(_finite_float(target_scale), 0.0)
-    floor = max(_finite_float(min_resize_notional_usdt), 0.0)
-    plans: list[ContinuousRebalanceResizePlan] = []
-
-    for trade in open_trades:
-        symbol = str(trade.get("symbol") or "")
-        if not symbol:
-            continue
-        trade_id = str(trade.get("trade_id") or "")
-        if any(suffix and trade_id.endswith(suffix) for suffix in exclude_trade_id_suffixes):
-            continue
-        price = _finite_float(price_by_symbol.get(symbol))
-        qty = abs(_finite_float(trade.get("qty")))
-        if price <= 0.0 or qty <= 0.0:
-            continue
-        weight = _finite_float(trade.get("component_weight"))
-        if weight <= 0.0:
-            # Fail safe: a row whose trade_id carries a recognized ensemble
-            # component suffix but no positive component_weight (a crash-recovery
-            # adoption/reconcile row whose weight stamp was lost) must be SKIPPED,
-            # not defaulted to 1.0 — defaulting resizes a 0.10-0.40x component
-            # entry to FULL base notional (the round-3 CRITICAL re-entering
-            # through the recovery door; round 4).
-            if any(tag and trade_id.endswith(f"-{tag}") for tag in component_tags_requiring_weight):
-                continue
-            weight = 1.0
-        vol_mult = _finite_float(trade.get("vol_weight_multiplier"))
-        if vol_mult <= 0.0:
-            vol_mult = 1.0
-        target = base * scale * weight * vol_mult
-        current = qty * price
-        delta = target - current
-        if abs(delta) < floor:
-            continue
-        if delta > 0.0:
-            side = "Sell"
-            reduce_only = False
-            order_qty = delta / price
-            reason = "rebalance_increase"
-        else:
-            side = "Buy"
-            reduce_only = True
-            order_qty = min(qty, abs(delta) / price)
-            reason = "rebalance_reduce"
-        if order_qty <= 0.0:
-            continue
-        plans.append(
-            ContinuousRebalanceResizePlan(
-                trade_id=trade_id,
-                symbol=symbol,
-                side=side,
-                reduce_only=reduce_only,
-                qty=order_qty,
-                current_notional_usdt=current,
-                target_notional_usdt=target,
-                delta_notional_usdt=delta,
-                reason=reason,
-            )
-        )
-    return plans
 
 
 def compute_hedge_beta(
@@ -494,9 +395,7 @@ def compute_continuous_hedge_ratios_2f(
     if not (len(raw) == len(h1) == len(h2)):
         raise ValueError("prior_raw_returns and both prior_hedge_returns must be aligned")
     b1, b2 = compute_hedge_betas_2f(raw, h1, h2, len(raw), hedge_rule)
-    return _capped_hedge_legs(
-        b1, b2, max(float(target_scale), 0.0), float(hedge_rule.hedge_cap), True, True
-    )
+    return _capped_hedge_legs(b1, b2, max(float(target_scale), 0.0), float(hedge_rule.hedge_cap), True, True)
 
 
 def compute_continuous_hedge_ratio(
@@ -532,7 +431,7 @@ def plan_continuous_hedge_resize(
     The hedge leg is a long (opposite of the short book): positive delta means
     increase the long with a non-reduce-only Buy; negative delta means trim it
     with a reduce-only Sell capped at the current position. Venue qty/step
-    filters are the executor's job, as in ``plan_continuous_rebalance_resizes``.
+    filters are the executor's job.
     """
     px = _finite_float(price)
     qty = max(_finite_float(current_qty), 0.0)
@@ -626,10 +525,7 @@ def apply_rebalance_rule(
             components.impact_exponent,
         )
         resize_cost = (
-            -abs(scale - prev_scale)
-            * components.active_gross_start.get(day, 0.0)
-            * rule.resize_cost_bps
-            / 10_000.0
+            -abs(scale - prev_scale) * components.active_gross_start.get(day, 0.0) * rule.resize_cost_bps / 10_000.0
         )
         basket_return = gross + funding + entry_cost + resize_cost
 
@@ -741,22 +637,3 @@ def apply_rebalance_rule(
         schema=schema,
         orient="row",
     ).with_columns((pl.col("equity") / pl.col("equity").cum_max() - 1.0).alias("drawdown"))
-
-
-def rebalance_rule_id(rule: ContinuousRebalanceRule) -> str:
-    ddh = "off" if rule.drawdown_half_threshold is None else f"{rule.drawdown_half_threshold:g}"
-    ddz = "off" if rule.drawdown_zero_threshold is None else f"{rule.drawdown_zero_threshold:g}"
-    if rule.strategy_momentum_window_days <= 0:
-        trend = "off"
-    else:
-        trend = (
-            f"tw{rule.strategy_momentum_window_days}"
-            f"_tm{rule.strategy_momentum_min_return:g}"
-            f"_ts{rule.strategy_momentum_scale_when_below:g}"
-        )
-    return (
-        f"w{rule.realized_vol_window_days}"
-        f"_tv{rule.target_daily_vol:g}"
-        f"_max{rule.max_scale:g}"
-        f"_ddh{ddh}_ddz{ddz}_{trend}"
-    )
