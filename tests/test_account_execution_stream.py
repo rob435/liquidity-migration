@@ -406,8 +406,13 @@ def test_private_stream_supervisor_unknown_liveness_blocks_without_rebuild(tmp_p
 
 def test_execution_before_create_ack_infers_ack_then_records_fill(tmp_path: Path) -> None:
     kernel, command_id = _command(tmp_path)
-    consumer = BybitAccountExecutionConsumer(kernel=kernel)
+    observed_executions: list[str] = []
+    consumer = BybitAccountExecutionConsumer(
+        kernel=kernel,
+        fill_observer=observed_executions.append,
+    )
     consumer.on_execution(_execution(command_id), local_receive_ts_ns=1_210_000_000)
+    consumer.on_execution(_execution(command_id), local_receive_ts_ns=1_220_000_000)
     state = kernel.state()
     assert state.orders[command_id].status == "partially_filled"
     assert state.orders[command_id].venue_order_id == "venue-1"
@@ -422,6 +427,7 @@ def test_execution_before_create_ack_infers_ack_then_records_fill(tmp_path: Path
     assert metadata["order_qty"] == "2"
     assert metadata["leaves_qty"] == "1"
     assert metadata["message_creation_ts_ns"] == 1_201_000_000
+    assert observed_executions == ["exec-1"]
 
 
 def test_missing_execution_fee_is_persisted_as_pending_not_final_zero(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@ from liquidity_migration.deterministic_serialization import canonical_json
 from liquidity_migration.trade_diagnostics import (
     build_execution_diagnostics,
     build_trade_diagnostic_manifest,
+    load_post_fill_markouts,
     load_required_book_contexts,
 )
 
@@ -89,7 +90,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     events = read_account_journal(account_root, verify=True)
     contexts, lookup = load_required_book_contexts(capture_root, events)
-    diagnostics = build_execution_diagnostics(events, contexts)
+    markout_schedules, markout_observations, markout_lookup = (
+        load_post_fill_markouts(capture_root, events)
+    )
+    diagnostics = build_execution_diagnostics(
+        events,
+        contexts,
+        markout_schedules=markout_schedules,
+        markout_observations=markout_observations,
+    )
     commit = _git("rev-parse", "HEAD")
     manifest = build_trade_diagnostic_manifest(
         events=events,
@@ -99,6 +108,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         account_root=str(account_root),
         capture_root=str(capture_root),
         context_lookup=lookup,
+        markout_schedules=markout_schedules,
+        markout_observations=markout_observations,
+        markout_lookup=markout_lookup,
     )
     manifest["source"]["git_dirty"] = dirty
 

@@ -776,9 +776,11 @@ def test_manual_reduction_is_adopted_without_native_stop_label(tmp_path: Path) -
     kernel, clock = _open_position(tmp_path, signed_qty=-2.0)
     manager, _client = _manager(kernel, clock)
     manager.sync("BUSDT")
+    observed_executions: list[str] = []
     consumer = BybitAccountExecutionConsumer(
         kernel=kernel,
         native_protection_manager=manager,
+        fill_observer=observed_executions.append,
         clock=clock,
     )
 
@@ -824,6 +826,7 @@ def test_manual_reduction_is_adopted_without_native_stop_label(tmp_path: Path) -
     assert execution["metadata"]["closed_size"] == "2"
     assert execution["metadata"]["order_type"] == "Market"
     assert execution["metadata"]["message_creation_ts_ns"] == 2_201_000_000
+    assert observed_executions == ["manual-fill"]
     assert any(
         protection["status"] == "external_reduction_flat"
         and protection["metadata"]["external_native_protection"] is False

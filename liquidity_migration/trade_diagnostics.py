@@ -19,16 +19,26 @@ from typing import Any, Mapping, Sequence, cast
 
 import polars as pl
 
+from .artifact_snapshot import read_stable_file
 from .account_kernel import (
     AccountEvent,
     AccountEventType,
     reduce_account_events,
 )
 from .deterministic_serialization import canonical_json
-from .market_capture import capture_record_id
+from .market_capture import (
+    DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS,
+    capture_record_id,
+)
 
 
-TRADE_DIAGNOSTIC_SCHEMA_VERSION = 1
+TRADE_DIAGNOSTIC_SCHEMA_VERSION = 2
+MARKOUT_HORIZON_LABELS = {
+    1_000_000_000: "1s",
+    15_000_000_000: "15s",
+    60_000_000_000: "1m",
+    300_000_000_000: "5m",
+}
 
 
 class TradeDiagnosticError(RuntimeError):
@@ -128,6 +138,30 @@ EXECUTION_DIAGNOSTIC_SCHEMA = pl.Schema(
         "book_walk_residual_bps": pl.Float64,
         "fee_bps": pl.Float64,
         "all_in_arrival_bps": pl.Float64,
+        "markout_1s_status": pl.String,
+        "markout_1s_bps": pl.Float64,
+        "post_fill_adverse_1s_bps": pl.Float64,
+        "markout_1s_coverage": pl.Float64,
+        "markout_1s_actual_horizon_ns": pl.Int64,
+        "markout_1s_source_records_json": pl.String,
+        "markout_15s_status": pl.String,
+        "markout_15s_bps": pl.Float64,
+        "post_fill_adverse_15s_bps": pl.Float64,
+        "markout_15s_coverage": pl.Float64,
+        "markout_15s_actual_horizon_ns": pl.Int64,
+        "markout_15s_source_records_json": pl.String,
+        "markout_1m_status": pl.String,
+        "markout_1m_bps": pl.Float64,
+        "post_fill_adverse_1m_bps": pl.Float64,
+        "markout_1m_coverage": pl.Float64,
+        "markout_1m_actual_horizon_ns": pl.Int64,
+        "markout_1m_source_records_json": pl.String,
+        "markout_5m_status": pl.String,
+        "markout_5m_bps": pl.Float64,
+        "post_fill_adverse_5m_bps": pl.Float64,
+        "markout_5m_coverage": pl.Float64,
+        "markout_5m_actual_horizon_ns": pl.Int64,
+        "markout_5m_source_records_json": pl.String,
         "markout_status": pl.String,
         "missing_reasons_json": pl.String,
         "source_event_ids_json": pl.String,
@@ -386,6 +420,261 @@ def _maker_summary(fills: Sequence[AccountEvent]) -> tuple[float | None, str]:
     return fraction, "complete" if len(observed) == len(fills) else "partial"
 
 
+def _markout_horizon_metrics(
+    fills: Sequence[AccountEvent],
+    *,
+    schedules: Mapping[str, Mapping[str, Any]],
+    observations: Mapping[tuple[str, int], Mapping[str, Any]],
+    horizon_ns: int,
+) -> dict[str, Any]:
+    label = MARKOUT_HORIZON_LABELS[horizon_ns]
+    prefix = f"markout_{label}"
+    if not fills:
+        return {
+            f"{prefix}_status": "no_fills",
+            f"{prefix}_bps": None,
+            f"post_fill_adverse_{label}_bps": None,
+            f"{prefix}_coverage": None,
+            f"{prefix}_actual_horizon_ns": None,
+            f"{prefix}_source_records_json": "[]",
+        }
+
+    total_qty = math.fsum(
+        abs(_finite(fill.payload.get("signed_qty"), label="markout fill quantity"))
+        for fill in fills
+    )
+    observed: list[tuple[float, float, int, str]] = []
+    unavailable: set[str] = set()
+    for fill in fills:
+        payload = fill.payload
+        execution_id = str(payload.get("execution_id") or "")
+        command_id = str(payload.get("command_id") or "")
+        fill_qty = _finite(payload.get("signed_qty"), label="markout fill quantity")
+        fill_price = _positive(payload.get("price"), label="markout fill price")
+        fill_exchange_ts_ns = int(payload.get("exchange_ts_ns") or 0)
+        fill_local_ts_ns = int(payload.get("local_receive_ts_ns") or 0)
+        schedule = schedules.get(execution_id)
+        schedule_accepted = False
+        schedule_max_lateness_ns = 0
+        if schedule is None:
+            unavailable.add("not_registered")
+        else:
+            if (
+                schedule.get("schema_version") != 1
+                or str(schedule.get("kind") or "")
+                != "post_fill_markout_schedule"
+                or str(schedule.get("record_id") or "")
+                != capture_record_id(schedule)
+                or str(schedule.get("execution_id") or "") != execution_id
+                or str(schedule.get("command_id") or "") != command_id
+                or str(schedule.get("symbol") or "").upper() != fill.symbol
+                or not math.isclose(
+                    _finite(schedule.get("signed_qty"), label="schedule signed quantity"),
+                    fill_qty,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+                or not math.isclose(
+                    _positive(schedule.get("fill_price"), label="schedule fill price"),
+                    fill_price,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+                or int(schedule.get("fill_exchange_ts_ns") or 0)
+                != fill_exchange_ts_ns
+                or int(schedule.get("fill_local_receive_ts_ns") or 0)
+                != fill_local_ts_ns
+            ):
+                raise TradeDiagnosticError(
+                    f"post-fill schedule contradicts execution {execution_id!r}"
+                )
+            raw_horizons = schedule.get("target_horizons_ns")
+            if not isinstance(raw_horizons, list) or any(
+                type(value) is not int or value <= 0 for value in raw_horizons
+            ):
+                raise TradeDiagnosticError(
+                    f"post-fill schedule has invalid horizons for {execution_id!r}"
+                )
+            if raw_horizons != sorted(set(raw_horizons)):
+                raise TradeDiagnosticError(
+                    f"post-fill schedule has non-canonical horizons for {execution_id!r}"
+                )
+            schedule_status = str(schedule.get("schedule_status") or "")
+            if schedule_status not in {"accepted", "rejected_capacity"}:
+                raise TradeDiagnosticError(
+                    f"post-fill schedule has invalid status for {execution_id!r}"
+                )
+            schedule_max_lateness_ns = int(
+                schedule.get("max_lateness_ns") or 0
+            )
+            if (
+                schedule_max_lateness_ns < 0
+                or int(schedule.get("local_receive_ts_ns") or 0)
+                < fill_local_ts_ns
+                or int(schedule.get("pending_limit") or 0) <= 0
+            ):
+                raise TradeDiagnosticError(
+                    f"post-fill schedule has invalid bounds for {execution_id!r}"
+                )
+            schedule_accepted = (
+                schedule_status == "accepted"
+                and horizon_ns in raw_horizons
+            )
+            if not schedule_accepted:
+                unavailable.add("registration_rejected_or_horizon_missing")
+
+        record = observations.get((execution_id, horizon_ns))
+        if record is None:
+            if schedule_accepted:
+                unavailable.add("scheduled_no_observation")
+            continue
+        if not schedule_accepted:
+            raise TradeDiagnosticError(
+                f"post-fill observation lacks an accepted schedule for {execution_id!r}"
+            )
+        if (
+            record.get("schema_version") != 1
+            or str(record.get("kind") or "") != "post_fill_markout"
+            or str(record.get("record_id") or "") != capture_record_id(record)
+            or str(record.get("execution_id") or "") != execution_id
+            or str(record.get("command_id") or "") != command_id
+            or str(record.get("symbol") or "").upper() != fill.symbol
+            or int(record.get("target_horizon_ns") or 0) != horizon_ns
+            or not math.isclose(
+                _finite(record.get("signed_qty"), label="markout signed quantity"),
+                fill_qty,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            or not math.isclose(
+                _positive(record.get("fill_price"), label="markout fill price"),
+                fill_price,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            or int(record.get("fill_exchange_ts_ns") or 0) != fill_exchange_ts_ns
+            or int(record.get("fill_local_receive_ts_ns") or 0) != fill_local_ts_ns
+            or int(record.get("max_lateness_ns") or 0)
+            != schedule_max_lateness_ns
+            or int(record.get("target_local_receive_ts_ns") or 0)
+            != fill_local_ts_ns + horizon_ns
+        ):
+            raise TradeDiagnosticError(
+                f"post-fill observation contradicts execution {execution_id!r}"
+            )
+        actual_horizon_ns = int(record.get("actual_horizon_ns") or 0)
+        record_local_ts_ns = int(record.get("local_receive_ts_ns") or 0)
+        observation_lateness_ns = int(
+            record.get("observation_lateness_ns") or 0
+        )
+        if (
+            actual_horizon_ns != record_local_ts_ns - fill_local_ts_ns
+            or actual_horizon_ns < horizon_ns
+            or observation_lateness_ns != actual_horizon_ns - horizon_ns
+            or int(record.get("book_local_receive_ts_ns") or 0)
+            != record_local_ts_ns
+        ):
+            raise TradeDiagnosticError(
+                f"post-fill horizon is invalid for {execution_id!r}"
+            )
+        status = str(record.get("markout_status") or "")
+        if status == "missing":
+            missing_reason = str(record.get("missing_reason") or "")
+            if (
+                record.get("markout_midpoint") is not None
+                or not missing_reason
+                or observation_lateness_ns <= schedule_max_lateness_ns
+            ):
+                raise TradeDiagnosticError(
+                    f"missing post-fill observation is not explicit for {execution_id!r}"
+                )
+            unavailable.add(missing_reason)
+            continue
+        if (
+            status != "observed_healthy"
+            or bool(record.get("sequence_gap"))
+            or str(record.get("missing_reason") or "")
+            or observation_lateness_ns > schedule_max_lateness_ns
+        ):
+            raise TradeDiagnosticError(
+                f"post-fill observation has invalid status for {execution_id!r}"
+            )
+        bids = _levels(record, "bids", descending=True)
+        asks = _levels(record, "asks", descending=False)
+        if bids[0][0] >= asks[0][0]:
+            raise TradeDiagnosticError(
+                f"post-fill observed book is crossed for {execution_id!r}"
+            )
+        midpoint = bids[0][0] / 2.0 + asks[0][0] / 2.0
+        recorded_midpoint = _positive(
+            record.get("markout_midpoint"),
+            label="markout midpoint",
+        )
+        if not math.isclose(
+            midpoint,
+            recorded_midpoint,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise TradeDiagnosticError(
+                f"post-fill midpoint contradicts its book for {execution_id!r}"
+            )
+        direction = 1.0 if fill_qty > 0.0 else -1.0
+        markout_bps = (
+            10_000.0 * direction * (midpoint - fill_price) / fill_price
+        )
+        observed.append(
+            (
+                abs(fill_qty),
+                markout_bps,
+                actual_horizon_ns,
+                str(record.get("record_id") or ""),
+            )
+        )
+
+    observed_qty = math.fsum(item[0] for item in observed)
+    coverage = observed_qty / total_qty if total_qty > 0.0 else None
+    markout = (
+        math.fsum(qty * value for qty, value, _actual, _record_id in observed)
+        / observed_qty
+        if observed_qty > 0.0
+        else None
+    )
+    actual = (
+        int(
+            round(
+                math.fsum(qty * value for qty, _mark, value, _record_id in observed)
+                / observed_qty
+            )
+        )
+        if observed_qty > 0.0
+        else None
+    )
+    if coverage is not None and math.isclose(
+        coverage,
+        1.0,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        result_status = "complete"
+    elif observed:
+        result_status = "partial"
+    elif len(unavailable) == 1:
+        result_status = next(iter(unavailable))
+    else:
+        result_status = "incomplete_mixed"
+    return {
+        f"{prefix}_status": result_status,
+        f"{prefix}_bps": markout,
+        f"post_fill_adverse_{label}_bps": -markout if markout is not None else None,
+        f"{prefix}_coverage": coverage,
+        f"{prefix}_actual_horizon_ns": actual,
+        f"{prefix}_source_records_json": _json_list(
+            item[3] for item in observed
+        ),
+    }
+
+
 def _terminal_status(
     status_events: Sequence[AccountEvent],
     *,
@@ -409,6 +698,9 @@ def _terminal_status(
 def build_execution_diagnostics(
     events: Sequence[AccountEvent],
     book_contexts: Mapping[str, Mapping[str, Any]],
+    *,
+    markout_schedules: Mapping[str, Mapping[str, Any]] | None = None,
+    markout_observations: Mapping[tuple[str, int], Mapping[str, Any]] | None = None,
 ) -> pl.DataFrame:
     """Build one deterministic row per canonical order command.
 
@@ -419,6 +711,8 @@ def build_execution_diagnostics(
     """
 
     reduce_account_events(events)
+    markout_schedules = markout_schedules or {}
+    markout_observations = markout_observations or {}
     market_by_batch_symbol: dict[tuple[str, str], AccountEvent] = {}
     targets_by_batch_symbol: dict[tuple[str, str], list[AccountEvent]] = defaultdict(list)
     acks_by_command: dict[str, list[AccountEvent]] = defaultdict(list)
@@ -600,6 +894,34 @@ def build_execution_diagnostics(
             if arrival_shortfall is not None and fee_bps is not None
             else None
         )
+        markout_metrics: dict[str, Any] = {}
+        markout_horizon_statuses: list[str] = []
+        for horizon_ns in DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS:
+            horizon_metrics = _markout_horizon_metrics(
+                fills,
+                schedules=markout_schedules,
+                observations=markout_observations,
+                horizon_ns=horizon_ns,
+            )
+            markout_metrics.update(horizon_metrics)
+            markout_horizon_statuses.append(
+                str(
+                    horizon_metrics[
+                        f"markout_{MARKOUT_HORIZON_LABELS[horizon_ns]}_status"
+                    ]
+                )
+            )
+        if not fills:
+            markout_status = "no_fills"
+        elif all(value == "complete" for value in markout_horizon_statuses):
+            markout_status = "complete"
+        elif any(
+            value in {"complete", "partial"}
+            for value in markout_horizon_statuses
+        ):
+            markout_status = "partial"
+        else:
+            markout_status = "incomplete"
 
         market_exchange_ts_ns = _int_or_none(market_payload.get("exchange_ts_ns"))
         market_local_ts_ns = _int_or_none(market_payload.get("local_receive_ts_ns"))
@@ -618,7 +940,15 @@ def build_execution_diagnostics(
             missing_reasons.add(f"fee:{fee_coverage}")
         if maker_fraction is None:
             missing_reasons.add(f"maker:{maker_coverage}")
-        missing_reasons.add("markout:not_captured")
+        for horizon_ns, status in zip(
+            DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS,
+            markout_horizon_statuses,
+            strict=True,
+        ):
+            if status != "complete":
+                missing_reasons.add(
+                    f"markout_{MARKOUT_HORIZON_LABELS[horizon_ns]}:{status}"
+                )
 
         source_events = [
             *(event.event_id for event in target_events),
@@ -724,7 +1054,8 @@ def build_execution_diagnostics(
                 "book_walk_residual_bps": walk_residual,
                 "fee_bps": fee_bps,
                 "all_in_arrival_bps": all_in,
-                "markout_status": "not_captured",
+                **markout_metrics,
+                "markout_status": markout_status,
                 "missing_reasons_json": _json_list(missing_reasons),
                 "source_event_ids_json": _json_list(source_events),
             }
@@ -809,6 +1140,19 @@ def _locator_record(
     return _load_context_line(raw, expected_id=record_id)
 
 
+def _read_stable_capture_segment(path: Path) -> bytes:
+    try:
+        return read_stable_file(
+            path,
+            label="trade-diagnostic capture segment",
+            require_single_link=False,
+        ).data
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise TradeDiagnosticError(
+            f"capture segment cannot be read as stable evidence: {path}"
+        ) from exc
+
+
 def load_required_book_contexts(
     capture_root: str | Path,
     events: Sequence[AccountEvent],
@@ -841,7 +1185,7 @@ def load_required_book_contexts(
     if missing and root.is_dir():
         for path in sorted(root.rglob("segment-*.jsonl")):
             scanned_files += 1
-            data = path.read_bytes()
+            data = _read_stable_capture_segment(path)
             if data and not data.endswith(b"\n"):
                 raise TradeDiagnosticError(f"capture segment has a partial line: {path}")
             for raw in data.splitlines(keepends=True):
@@ -871,6 +1215,97 @@ def load_required_book_contexts(
     }
 
 
+def load_post_fill_markouts(
+    capture_root: str | Path,
+    events: Sequence[AccountEvent],
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[tuple[str, int], dict[str, Any]],
+    dict[str, Any],
+]:
+    """Load bounded markout schedules/observations for canonical executions."""
+
+    execution_ids = {
+        str(event.payload.get("execution_id") or "")
+        for event in events
+        if event.event_type == AccountEventType.FILL.value
+        and str(event.payload.get("execution_id") or "")
+    }
+    root = Path(capture_root).expanduser().resolve()
+    schedules: dict[str, dict[str, Any]] = {}
+    observations: dict[tuple[str, int], dict[str, Any]] = {}
+    scanned_files = 0
+    scanned_bytes = 0
+    if root.is_dir() and execution_ids:
+        for path in sorted(root.rglob("segment-*.jsonl")):
+            scanned_files += 1
+            data = _read_stable_capture_segment(path)
+            scanned_bytes += len(data)
+            if data and not data.endswith(b"\n"):
+                raise TradeDiagnosticError(f"capture segment has a partial line: {path}")
+            for raw in data.splitlines():
+                try:
+                    record = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise TradeDiagnosticError(
+                        f"capture segment has invalid JSON: {path}"
+                    ) from exc
+                if not isinstance(record, dict):
+                    raise TradeDiagnosticError(
+                        f"capture segment row is not an object: {path}"
+                    )
+                kind = str(record.get("kind") or "")
+                if kind not in {
+                    "post_fill_markout_schedule",
+                    "post_fill_markout",
+                }:
+                    continue
+                execution_id = str(record.get("execution_id") or "")
+                if execution_id not in execution_ids:
+                    continue
+                record_id = str(record.get("record_id") or "")
+                if not record_id or record_id != capture_record_id(record):
+                    raise TradeDiagnosticError(
+                        f"post-fill capture record has invalid identity: {record_id!r}"
+                    )
+                if kind == "post_fill_markout_schedule":
+                    prior = schedules.get(execution_id)
+                    if prior is not None and prior != record:
+                        raise TradeDiagnosticError(
+                            f"execution {execution_id!r} has conflicting markout schedules"
+                        )
+                    schedules[execution_id] = record
+                    continue
+                horizon_ns = _int_or_none(record.get("target_horizon_ns"))
+                if horizon_ns is None or horizon_ns <= 0:
+                    raise TradeDiagnosticError(
+                        f"execution {execution_id!r} has an invalid markout horizon"
+                    )
+                key = (execution_id, horizon_ns)
+                prior = observations.get(key)
+                if prior is not None and prior != record:
+                    raise TradeDiagnosticError(
+                        f"execution {execution_id!r} has conflicting {horizon_ns}ns markouts"
+                    )
+                observations[key] = record
+    accepted_schedules = {
+        execution_id
+        for execution_id, record in schedules.items()
+        if str(record.get("schedule_status") or "") == "accepted"
+    }
+    return schedules, observations, {
+        "required_executions": len(execution_ids),
+        "scheduled_executions": len(schedules),
+        "accepted_schedules": len(accepted_schedules),
+        "rejected_schedules": len(schedules) - len(accepted_schedules),
+        "observation_records": len(observations),
+        "missing_schedule_execution_ids": sorted(execution_ids - set(schedules)),
+        "required_horizons_ns": list(DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS),
+        "scanned_files": scanned_files,
+        "scanned_bytes": scanned_bytes,
+    }
+
+
 def build_trade_diagnostic_manifest(
     *,
     events: Sequence[AccountEvent],
@@ -880,11 +1315,16 @@ def build_trade_diagnostic_manifest(
     account_root: str,
     capture_root: str,
     context_lookup: Mapping[str, Any],
+    markout_schedules: Mapping[str, Mapping[str, Any]] | None = None,
+    markout_observations: Mapping[tuple[str, int], Mapping[str, Any]] | None = None,
+    markout_lookup: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic reconstruction manifest for a diagnostic table."""
 
     state = reduce_account_events(events)
     rows = diagnostics.to_dicts()
+    markout_schedules = markout_schedules or {}
+    markout_observations = markout_observations or {}
     journal_command_ids = {
         str(event.payload.get("command_id") or "")
         for event in events
@@ -916,6 +1356,14 @@ def build_trade_diagnostic_manifest(
         }
     )
     contexts = [book_contexts[record_id] for record_id in used_ids if record_id in book_contexts]
+    markout_evidence = {
+        "schedules": [
+            markout_schedules[key] for key in sorted(markout_schedules)
+        ],
+        "observations": [
+            markout_observations[key] for key in sorted(markout_observations)
+        ],
+    }
     null_counts = diagnostics.null_count().to_dicts()[0] if diagnostics.width else {}
     manifest: dict[str, Any] = {
         "kind": "trade_diagnostic_manifest",
@@ -934,6 +1382,12 @@ def build_trade_diagnostic_manifest(
                 canonical_json({"contexts": contexts})
             ).hexdigest(),
             "context_lookup": dict(context_lookup),
+            "markout_schedules": len(markout_schedules),
+            "markout_observations": len(markout_observations),
+            "markout_evidence_sha256": hashlib.sha256(
+                canonical_json(markout_evidence)
+            ).hexdigest(),
+            "markout_lookup": dict(markout_lookup or {}),
         },
         "output": {
             "rows": diagnostics.height,
@@ -955,7 +1409,7 @@ def build_trade_diagnostic_manifest(
             "no paper calibration conclusion",
             "no strategy promotion or sizing conclusion",
             "no deployment or real-money authorization",
-            "no post-fill markout conclusion until bounded markouts are captured",
+            "post-fill conclusions require the reported horizon-specific coverage",
         ],
     }
     manifest["manifest_payload_sha256"] = hashlib.sha256(canonical_json(manifest)).hexdigest()

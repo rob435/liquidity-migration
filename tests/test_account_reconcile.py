@@ -101,10 +101,12 @@ class Client(_NoOpenOrdersClient):
 def test_rest_reconcile_recovers_dropped_execution_then_matches_venue_truth(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
     kernel, command_id = _kernel(tmp_path, clock)
+    observed_executions: list[str] = []
     reconciler = BybitAccountReconciler(
         kernel=kernel,
         client=Client(command_id),
         instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        fill_observer=observed_executions.append,
         clock=clock,
     )
     report = reconciler.reconcile_once()
@@ -113,6 +115,7 @@ def test_rest_reconcile_recovers_dropped_execution_then_matches_venue_truth(tmp_
     assert report.order_rows_observed == 1
     assert kernel.state().positions["BUSDT"].signed_qty == pytest.approx(1.0)
     assert kernel.state().orders[command_id].status == "partially_filled_cancelled"
+    assert observed_executions == ["exec-rest-1"]
     assert kernel.state().venue_snapshots[report.snapshot_key]["healthy"] is True
     reconciler.require_recent_healthy(max_age_ns=1)
     reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=1)

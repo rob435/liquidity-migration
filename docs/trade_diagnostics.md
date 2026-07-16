@@ -62,6 +62,25 @@ current taker-heavy Bybit route, required operational markouts are 1 s, 15 s,
 clock bounds make it honest. Strategy labels at 1 h, 6 h, 24 h, and 72 h remain
 separate from TCA.
 
+The demo owner implements those four clocks as bounded observability. The
+private WebSocket and REST-reconciliation consumers notify only newly committed
+canonical fills, placing each execution ID on a bounded queue. The owner loop
+later resolves the immutable fill and writes one schedule into the existing
+capture root. Public order-book updates capture the first healthy book at or
+after each target, within a stored five-second operational lateness bound.
+If that bound expires, the record is terminally missing with a reason and null
+midpoint. The requested horizon, actual horizon, lateness, sequence state, book,
+fill identity, and source record ID remain explicit. At most 8,192 horizon tasks
+can be pending. One owner-loop drain and one public-book update handle at most
+128 registrations or marks respectively, and task symbols remain subscribed
+only until the tasks clear.
+
+The five-second bound caps owner resources; it is not a claim-validity
+threshold. Analysis reports quantity-weighted markout coverage for every
+horizon and cannot silently drop late, gapped, restarted, unregistered, or
+capacity-rejected fills. Paper is still uncalibrated integration evidence and
+does not acquire execution-quality authority from the same public books.
+
 ## Required command-level fields
 
 ### Identity and lineage
@@ -117,8 +136,11 @@ explicit reason. They are never zero.
 
 ## Decision funnel
 
-Capture one row before alpha gates for every symbol-time in the declared source
-population. Preserve:
+Capture one row before alpha gates for every declared source-population key.
+The default decision unit remains `(sleeve, symbol, signal_ts)`; when components
+have genuinely different gate definitions, the source row also carries
+`component_scope` while retaining the shared decision-unit key so component
+rows are never counted as independent ideas. Preserve:
 
 - causal feature availability and population/PIT provenance;
 - every named gate's boolean or missing state;
@@ -130,6 +152,24 @@ population. Preserve:
 This table measures attrition and lets diagnostics distinguish “no signal” from
 “signal blocked by data, capacity, execution, or risk.” It must not embed future
 path values. Future labels join later by stable key.
+
+The implementation must not append the same unchanged rejection every minute.
+At the strategy owner, retain one immutable pre-gate source row and only gate
+state transitions for repeated evaluations. The read-only projector folds those
+events into one final row per source key with first evaluation, first rejection,
+terminal disposition, evaluation count, and first/last timestamps.
+
+- LONG sources are closed feature rows keyed by symbol and daily `ts_ms`, before
+  `_classify_entry`; dynamic retrace, cooldown, capacity, health, unresolved
+  target, terminal-attempt, and publication gates become transitions.
+- CONTINUOUS sources are `entry_state` symbol/hour rows before decile/liquidity
+  filters, with component scope for trigger/age differences; shared health,
+  adverse-pause, BTC-trend/risk, capacity, reentry, unresolved-target, and
+  publication gates remain separately named.
+
+The prospective epoch must freeze source-population and transition semantics
+before this writer is added. Otherwise a convenient logging grain would become
+an undeclared statistical sample and repeat the retired artifact mistake.
 
 ## Analysis standard
 
@@ -164,6 +204,11 @@ The verified journal and capture root remain sources and are not copied into the
 run. Intermediate partitions are resumable working state, not duplicated final
 artifacts. Charts and Markdown are regenerated from the tables; only the compact
 evidence card and decision are committed to the research summary.
+
+Claim-bearing exports use a quiescent, frozen read-only capture snapshot. The
+projector descriptor-checks every scanned segment and refuses a segment that
+changes during its read, but that is not a substitute for a filesystem or
+operator snapshot boundary around the complete root.
 
 If a claim does not need a listed table, omit it. Adding an artifact requires a
 named claim, consumer, and deletion/retention rule.

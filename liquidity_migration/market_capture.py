@@ -28,6 +28,7 @@ import shutil
 import stat
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -51,6 +52,16 @@ OWNER_MARKET_READINESS_FILENAME = "account_owner_market_readiness.json"
 OWNER_MARKET_READINESS_KIND = "account_owner_market_readiness"
 OWNER_MARKET_READINESS_SCHEMA_VERSION = 2
 OWNER_MARKET_READINESS_PUBLISH_INTERVAL_NS = 1_000_000_000
+DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS = (
+    1_000_000_000,
+    15_000_000_000,
+    60_000_000_000,
+    300_000_000_000,
+)
+DEFAULT_POST_FILL_MARKOUT_MAX_LATENESS_NS = 5_000_000_000
+MAX_PENDING_POST_FILL_MARKOUTS = 8_192
+MAX_RECENT_POST_FILL_SCHEDULES = 8_192
+MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE = 128
 
 
 class MarketCaptureError(RuntimeError):
@@ -89,6 +100,20 @@ class CaptureAppendLocation:
     record_sha256: str
     segment_device: int
     segment_inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class PendingPostFillMarkout:
+    execution_id: str
+    command_id: str
+    symbol: str
+    signed_qty: float
+    fill_price: float
+    fill_exchange_ts_ns: int
+    fill_local_receive_ts_ns: int
+    target_horizon_ns: int
+    target_local_receive_ts_ns: int
+    max_lateness_ns: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,6 +637,22 @@ def capture_record_id(record: Mapping[str, Any]) -> str:
             "trade_ids",
         )
     }
+    # These record kinds may share one market arrival across several fills and
+    # horizons. Their causal key must distinguish those observations without
+    # changing the established identity of legacy raw/decision records.
+    if str(record.get("kind") or "") in {
+        "post_fill_markout_schedule",
+        "post_fill_markout",
+    }:
+        material.update(
+            {
+                "execution_id": record.get("execution_id"),
+                "command_id": record.get("command_id"),
+                "target_horizon_ns": record.get("target_horizon_ns"),
+                "target_horizons_ns": record.get("target_horizons_ns"),
+                "max_lateness_ns": record.get("max_lateness_ns"),
+            }
+        )
     return hashlib.sha256(canonical_json(material)).hexdigest()[:24]
 
 
@@ -642,7 +683,140 @@ class SequenceAwareMarketRecorder:
         self._last_market_readiness_publish_monotonic_ns: int | None = None
         self._required_symbols: set[str] = set()
         self.books: dict[str, BookReconstruction] = {}
+        self._post_fill_schedules: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._pending_post_fill_markouts: dict[
+            tuple[str, int], PendingPostFillMarkout
+        ] = {}
         self._lock = threading.RLock()
+
+    def register_post_fill_markouts(
+        self,
+        *,
+        execution_id: str,
+        command_id: str,
+        symbol: str,
+        signed_qty: float,
+        fill_price: float,
+        fill_exchange_ts_ns: int,
+        fill_local_receive_ts_ns: int,
+        horizons_ns: Iterable[int] = DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS,
+        max_lateness_ns: int = DEFAULT_POST_FILL_MARKOUT_MAX_LATENESS_NS,
+    ) -> dict[str, Any]:
+        """Register one bounded, non-authoritative post-fill observation set."""
+
+        execution_id = str(execution_id).strip()
+        command_id = str(command_id).strip()
+        symbol = str(symbol).strip().upper()
+        try:
+            signed_qty = float(signed_qty)
+            fill_price = float(fill_price)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("post-fill schedule has non-numeric fill facts") from exc
+        fill_exchange_ts_ns = int(fill_exchange_ts_ns)
+        fill_local_receive_ts_ns = int(fill_local_receive_ts_ns)
+        normalized_horizons = tuple(sorted({int(value) for value in horizons_ns}))
+        max_lateness_ns = int(max_lateness_ns)
+        if (
+            not execution_id
+            or not command_id
+            or not symbol
+            or not math.isfinite(signed_qty)
+            or signed_qty == 0.0
+            or not math.isfinite(fill_price)
+            or fill_price <= 0.0
+            or fill_local_receive_ts_ns <= 0
+            or fill_exchange_ts_ns < 0
+            or not normalized_horizons
+            or any(value <= 0 for value in normalized_horizons)
+            or max_lateness_ns < 0
+        ):
+            raise ValueError("post-fill schedule has invalid identity, fill, or horizon facts")
+
+        material = {
+            "execution_id": execution_id,
+            "command_id": command_id,
+            "symbol": symbol,
+            "signed_qty": signed_qty,
+            "fill_price": fill_price,
+            "fill_exchange_ts_ns": fill_exchange_ts_ns,
+            "fill_local_receive_ts_ns": fill_local_receive_ts_ns,
+            "target_horizons_ns": list(normalized_horizons),
+            "max_lateness_ns": max_lateness_ns,
+        }
+        with self._lock:
+            prior = self._post_fill_schedules.get(execution_id)
+            if prior is not None:
+                if prior["material"] != material:
+                    raise MarketCaptureError(
+                        f"post-fill execution {execution_id!r} changed schedule facts"
+                    )
+                self._post_fill_schedules.move_to_end(execution_id)
+                return dict(prior["record"])
+            accepted = (
+                len(self._pending_post_fill_markouts) + len(normalized_horizons)
+                <= MAX_PENDING_POST_FILL_MARKOUTS
+            )
+            registered_ns = max(
+                self.clock.wall_time_ns(),
+                fill_local_receive_ts_ns,
+                1,
+            )
+            schedule = self._persist(
+                {
+                    "kind": "post_fill_markout_schedule",
+                    "symbol": symbol,
+                    "local_receive_ts_ns": registered_ns,
+                    **material,
+                    "schedule_status": "accepted" if accepted else "rejected_capacity",
+                    "pending_limit": MAX_PENDING_POST_FILL_MARKOUTS,
+                },
+                persist_to_disk=True,
+            )
+            self._post_fill_schedules[execution_id] = {
+                "material": material,
+                "record": schedule,
+            }
+            if accepted:
+                for horizon_ns in normalized_horizons:
+                    self._pending_post_fill_markouts[(execution_id, horizon_ns)] = (
+                        PendingPostFillMarkout(
+                            execution_id=execution_id,
+                            command_id=command_id,
+                            symbol=symbol,
+                            signed_qty=signed_qty,
+                            fill_price=fill_price,
+                            fill_exchange_ts_ns=fill_exchange_ts_ns,
+                            fill_local_receive_ts_ns=fill_local_receive_ts_ns,
+                            target_horizon_ns=horizon_ns,
+                            target_local_receive_ts_ns=(
+                                fill_local_receive_ts_ns + horizon_ns
+                            ),
+                            max_lateness_ns=max_lateness_ns,
+                        )
+                    )
+            self._trim_post_fill_schedule_cache()
+            return dict(schedule)
+
+    def _trim_post_fill_schedule_cache(self) -> None:
+        """Bound recent idempotency state without evicting live schedules."""
+
+        if len(self._post_fill_schedules) <= MAX_RECENT_POST_FILL_SCHEDULES:
+            return
+        pending_execution_ids = {
+            execution_id
+            for execution_id, _horizon_ns in self._pending_post_fill_markouts
+        }
+        for execution_id in tuple(self._post_fill_schedules):
+            if len(self._post_fill_schedules) <= MAX_RECENT_POST_FILL_SCHEDULES:
+                break
+            if execution_id not in pending_execution_ids:
+                self._post_fill_schedules.pop(execution_id, None)
+
+    def pending_post_fill_symbols(self) -> set[str]:
+        with self._lock:
+            return {
+                task.symbol for task in self._pending_post_fill_markouts.values()
+            }
 
     def set_required_symbols(self, symbols: Iterable[str]) -> None:
         required = {
@@ -811,7 +985,15 @@ class SequenceAwareMarketRecorder:
         topic = str(message.get("topic") or "")
         with self._lock:
             if topic.startswith("orderbook."):
-                return [self._on_orderbook(message, local_ns=local_ns)]
+                persisted = self._on_orderbook(message, local_ns=local_ns)
+                symbol = str(persisted.get("symbol") or "").upper()
+                return [
+                    persisted,
+                    *self._capture_due_post_fill_markouts(
+                        symbol=symbol,
+                        local_ns=local_ns,
+                    ),
+                ]
             if topic.startswith("publicTrade."):
                 return self._on_trades(message, local_ns=local_ns)
             return []
@@ -892,6 +1074,92 @@ class SequenceAwareMarketRecorder:
         )
         self._publish_owner_market_readiness(persisted, state=state)
         return persisted
+
+    def _capture_due_post_fill_markouts(
+        self,
+        *,
+        symbol: str,
+        local_ns: int,
+    ) -> list[dict[str, Any]]:
+        state = self.books.get(symbol)
+        if state is None:
+            return []
+        due = sorted(
+            (
+                task
+                for task in self._pending_post_fill_markouts.values()
+                if task.symbol == symbol
+                and task.target_local_receive_ts_ns <= local_ns
+            ),
+            key=lambda task: (
+                task.target_local_receive_ts_ns,
+                task.execution_id,
+                task.target_horizon_ns,
+            ),
+        )[:MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE]
+        if not due:
+            return []
+        bids = sorted(state.bids.items(), reverse=True)[: self.config.depth]
+        asks = sorted(state.asks.items())[: self.config.depth]
+        crossed = bool(bids and asks and bids[0][0] >= asks[0][0])
+        healthy = bool(state.healthy and bids and asks and not crossed)
+        output: list[dict[str, Any]] = []
+        for task in due:
+            lateness_ns = local_ns - task.target_local_receive_ts_ns
+            if not healthy and lateness_ns <= task.max_lateness_ns:
+                continue
+            if healthy and lateness_ns <= task.max_lateness_ns:
+                status = "observed_healthy"
+                missing_reason = ""
+                midpoint = bids[0][0] / 2.0 + asks[0][0] / 2.0
+            else:
+                status = "missing"
+                midpoint = None
+                if lateness_ns > task.max_lateness_ns:
+                    missing_reason = "healthy_book_not_observed_before_lateness_bound"
+                elif crossed:
+                    missing_reason = "crossed_book"
+                elif not state.has_snapshot:
+                    missing_reason = "no_snapshot"
+                else:
+                    missing_reason = state.last_gap_reason or "sequence_unhealthy"
+            record = self._persist(
+                {
+                    "kind": "post_fill_markout",
+                    "symbol": symbol,
+                    "local_receive_ts_ns": local_ns,
+                    "book_local_receive_ts_ns": state.local_receive_ts_ns,
+                    "exchange_system_ts_ns": state.exchange_system_ts_ns,
+                    "exchange_engine_ts_ns": state.exchange_engine_ts_ns,
+                    "update_id": state.update_id,
+                    "cross_sequence": state.cross_sequence,
+                    "sequence_gap": not state.healthy,
+                    "sequence_gap_reason": state.last_gap_reason,
+                    "bids": bids,
+                    "asks": asks,
+                    "execution_id": task.execution_id,
+                    "command_id": task.command_id,
+                    "signed_qty": task.signed_qty,
+                    "fill_price": task.fill_price,
+                    "fill_exchange_ts_ns": task.fill_exchange_ts_ns,
+                    "fill_local_receive_ts_ns": task.fill_local_receive_ts_ns,
+                    "target_horizon_ns": task.target_horizon_ns,
+                    "target_local_receive_ts_ns": task.target_local_receive_ts_ns,
+                    "actual_horizon_ns": local_ns - task.fill_local_receive_ts_ns,
+                    "observation_lateness_ns": lateness_ns,
+                    "max_lateness_ns": task.max_lateness_ns,
+                    "markout_status": status,
+                    "missing_reason": missing_reason,
+                    "markout_midpoint": midpoint,
+                },
+                persist_to_disk=True,
+            )
+            output.append(record)
+            self._pending_post_fill_markouts.pop(
+                (task.execution_id, task.target_horizon_ns),
+                None,
+            )
+        return output
 
     def _on_trades(self, message: Mapping[str, Any], *, local_ns: int) -> list[dict[str, Any]]:
         raw_rows = message.get("data") or []
@@ -1172,6 +1440,7 @@ def operational_market_symbols(
     working: Iterable[str] = (),
     component_targets: Iterable[str] = (),
     convergence: Iterable[str] = (),
+    markouts: Iterable[str] = (),
 ) -> set[str]:
     """Return the bounded live-L2 set for an operational account owner.
 
@@ -1189,7 +1458,14 @@ def operational_market_symbols(
     if not allowed:
         raise ValueError("operational market allowlist must not be empty")
     required = {"BTCUSDT" if "BTCUSDT" in allowed else min(allowed)}
-    for symbols in (queued, nonflat, working, component_targets, convergence):
+    for symbols in (
+        queued,
+        nonflat,
+        working,
+        component_targets,
+        convergence,
+        markouts,
+    ):
         required.update(
             str(symbol).strip().upper()
             for symbol in symbols

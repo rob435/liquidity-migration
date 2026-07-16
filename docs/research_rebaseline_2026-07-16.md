@@ -83,6 +83,26 @@ independent orders or decisions. Their contrast with 21 trade rows is another
 reason to derive diagnostics from canonical command IDs, execution IDs, unique
 decisions, and waves rather than projection row counts.
 
+## Big-PC transfer boundary
+
+The useful Big-PC work is in current history, principally through `719952d`
+(`fix(data): preserve overhaul lessons`) and `d4ecac2` (`fix(data): salvage
+overhaul invariants`), with the selective transfer recorded in
+`docs/strategy_overhaul_migration_audit.md`. What merged was code/data
+integrity work, failure lessons, two retained diagnostics, and four explicitly
+untested estimands—not a completed strategy outcome.
+
+The later structural Phase-0 receipt was `READY` only with
+`outcome_run_authorized=false`. Phase B completed events 00--04 of nine and
+stopped before an S02 signal tape, S03 entry anchor, S04 labels, terminal
+receipt, estimate, PnL, or verdict. Its Binance 812-symbol/3,248-job and Bybit
+624-symbol/2,480-manifest counts are acquisition diagnostics. The defensible
+empirical carryovers are narrower: CONTINUOUS component ledgers collapse from
+2,279/2,152 rows to 896/872 unique Bybit/Binance decisions, and four clean
+Bybit component pairs showed 129.80/141.65/170.73 bps mean/median/worst adverse
+entry drift with 5.50--11.00 bps fees. Four fills cannot calibrate a model, but
+they do contradict the old roughly 20--23 bps round-trip model as calibrated.
+
 ## Diagnostic coverage and gaps
 
 | Capability | Current evidence | Gap to close |

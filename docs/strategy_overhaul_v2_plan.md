@@ -85,6 +85,12 @@ Exit criteria:
 - the output is a single deterministic command table plus one manifest;
 - focused tests, Ruff, and mypy pass.
 
+Status: complete on the research branch. The command table remains diagnostic
+only and has not been built from a registered real epoch. From the rebaseline
+base through the Phase-1 commit, package and developer-script changes were
+1,218 additions and 32 deletions, or 1,186 net, inside the 1,500-line pre-table
+stop-loss.
+
 ## Phase 2 — Bounded forward observability
 
 Add only the observations the canonical sources cannot currently answer:
@@ -108,6 +114,24 @@ Exit criteria:
 - every observed/missing mark is reconstructable and no strategy target depends
   on a future label;
 - a deployment is not implied; operational authorization remains separate.
+
+Status: the bounded demo markout path and command-table join are implemented on
+the research branch. They preserve actual lag and explicit missingness, keep
+capture I/O off the private fill-accounting path, and retain symbols only while
+bounded tasks are pending. Per-owner-loop registration work and per-book-update
+mark writes are each capped at 128. The pre-gate decision funnel and
+claim-specific path labels are not implemented. Nothing in this phase is
+deployed.
+
+Bounded engineering measurement, not an SLA: five local Python 3.13.5 runs on
+2026-07-16 registered 100 synthetic fills and persisted 100 schedules plus 400
+markout records with raw-market persistence disabled and
+`fsync_every_records=250`. Median deferred registration time was 19.7 ms,
+median capture time across all four horizon batches was 79.6 ms, median total
+time was 98.8 ms, median bytes written was 363.1 KiB, and maximum traced Python
+allocation was 0.60 MB. Every run emitted all 400 marks and left no symbol
+pending. This measures local code/storage overhead only; it says nothing about
+venue delivery, production load, or deployment safety.
 
 ## Phase 3 — Exploratory diagnostic read
 
@@ -186,11 +210,13 @@ and owner authority.
 
 ## Immediate work queue
 
-1. Finish the Phase-1 command-level projector and Bybit metadata retention.
-2. Run it only on deterministic fixtures until a real diagnostic-epoch contract
-   binds the VPS roots and exposure boundary.
-3. Design the bounded markout sampler and pre-gate funnel at their existing
-   owners; reject any design that requires a parallel event platform.
-4. Register the first exploratory epoch, export canonical read-only evidence,
-   and produce the diagnostic evidence card.
-5. Only then write the first alpha thesis preregistration.
+1. Freeze the first exploratory diagnostic-epoch contract, including the LONG
+   and CONTINUOUS source-population and gate-transition semantics, before adding
+   a funnel writer or inspecting outcomes.
+2. Implement the minimal row-level funnel at the existing candidate owners to
+   that frozen contract; keep the command/markout projector on deterministic
+   fixtures until separately authorized demo evidence exists.
+3. Separately authorize the demo epoch, bind its canonical VPS roots and
+   exposure boundary, export a frozen read-only snapshot, and produce the
+   diagnostic evidence card.
+4. Only then write the first alpha thesis preregistration.

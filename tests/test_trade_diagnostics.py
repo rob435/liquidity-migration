@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Sequence
 from pathlib import Path
 
 import polars as pl
@@ -9,6 +10,8 @@ import pytest
 import scripts.build_trade_diagnostics as diagnostic_script
 
 from liquidity_migration.account_kernel import (
+    AccountEvent,
+    AccountEventType,
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -17,6 +20,7 @@ from liquidity_migration.account_kernel import (
     MarketInputRef,
     read_account_journal,
 )
+from liquidity_migration.deterministic_serialization import canonical_json
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.market_capture import (
     MarketCaptureConfig,
@@ -28,6 +32,7 @@ from liquidity_migration.trade_diagnostics import (
     TradeDiagnosticError,
     build_execution_diagnostics,
     build_trade_diagnostic_manifest,
+    load_post_fill_markouts,
     load_required_book_contexts,
 )
 
@@ -214,6 +219,76 @@ def _journal(
     return read_account_journal(root, verify=True)
 
 
+def _synthetic_markout_evidence(
+    events: Sequence[AccountEvent],
+) -> tuple[dict[str, dict[str, object]], dict[tuple[str, int], dict[str, object]]]:
+    horizons = (1_000_000_000, 15_000_000_000, 60_000_000_000, 300_000_000_000)
+    schedules: dict[str, dict[str, object]] = {}
+    observations: dict[tuple[str, int], dict[str, object]] = {}
+    fills = [
+        event
+        for event in events
+        if event.event_type == AccountEventType.FILL.value
+    ]
+    for fill in fills:
+        payload = fill.payload
+        execution_id = str(payload["execution_id"])
+        command_id = str(payload["command_id"])
+        fill_local_ns = int(payload["local_receive_ts_ns"])
+        schedule: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "post_fill_markout_schedule",
+            "symbol": fill.symbol,
+            "local_receive_ts_ns": fill_local_ns + 1,
+            "execution_id": execution_id,
+            "command_id": command_id,
+            "signed_qty": payload["signed_qty"],
+            "fill_price": payload["price"],
+            "fill_exchange_ts_ns": payload["exchange_ts_ns"],
+            "fill_local_receive_ts_ns": fill_local_ns,
+            "target_horizons_ns": list(horizons),
+            "max_lateness_ns": 50_000_000,
+            "schedule_status": "accepted",
+            "pending_limit": 8_192,
+        }
+        schedule["record_id"] = capture_record_id(schedule)
+        schedules[execution_id] = schedule
+        for index, horizon_ns in enumerate(horizons, start=1):
+            actual_horizon_ns = horizon_ns + 20_000_000
+            record: dict[str, object] = {
+                "schema_version": 1,
+                "kind": "post_fill_markout",
+                "symbol": fill.symbol,
+                "local_receive_ts_ns": fill_local_ns + actual_horizon_ns,
+                "book_local_receive_ts_ns": fill_local_ns + actual_horizon_ns,
+                "exchange_system_ts_ns": 0,
+                "exchange_engine_ts_ns": 0,
+                "update_id": 200 + index,
+                "cross_sequence": 2_000 + index,
+                "sequence_gap": False,
+                "sequence_gap_reason": "",
+                "bids": [[100.2, 2.0]],
+                "asks": [[100.4, 2.0]],
+                "execution_id": execution_id,
+                "command_id": command_id,
+                "signed_qty": payload["signed_qty"],
+                "fill_price": payload["price"],
+                "fill_exchange_ts_ns": payload["exchange_ts_ns"],
+                "fill_local_receive_ts_ns": fill_local_ns,
+                "target_horizon_ns": horizon_ns,
+                "target_local_receive_ts_ns": fill_local_ns + horizon_ns,
+                "actual_horizon_ns": actual_horizon_ns,
+                "observation_lateness_ns": 20_000_000,
+                "max_lateness_ns": 50_000_000,
+                "markout_status": "observed_healthy",
+                "missing_reason": "",
+                "markout_midpoint": 100.3,
+            }
+            record["record_id"] = capture_record_id(record)
+            observations[(execution_id, horizon_ns)] = record
+    return schedules, observations
+
+
 def test_command_diagnostics_use_unique_decision_grain_and_exact_book(tmp_path: Path) -> None:
     context = _context()
     events = _journal(tmp_path / "account", context=context)
@@ -252,7 +327,9 @@ def test_command_diagnostics_use_unique_decision_grain_and_exact_book(tmp_path: 
     assert row["exchange_fill_span_ns"] == 10_000_000
     assert row["feed_delivery_plus_clock_offset_ns"] == 100_000_000
     assert row["fill_delivery_plus_clock_offset_ns"] == 20_000_000
-    assert row["markout_status"] == "not_captured"
+    assert row["markout_status"] == "incomplete"
+    assert row["markout_1s_status"] == "not_registered"
+    assert row["markout_1s_coverage"] == 0.0
 
     manifest = build_trade_diagnostic_manifest(
         events=events,
@@ -336,6 +413,101 @@ def test_sequence_gap_is_explicit_and_not_used_for_tca(tmp_path: Path) -> None:
     assert row["decision_mid"] is None
     assert row["arrival_shortfall_bps"] is None
     assert "decision_book:sequence_gap" in row["missing_reasons_json"]
+
+
+def test_markouts_are_fill_weighted_at_execution_coverage_grain(
+    tmp_path: Path,
+) -> None:
+    context = _context()
+    events = _journal(tmp_path / "account", context=context)
+    schedules, observations = _synthetic_markout_evidence(events)
+
+    row = build_execution_diagnostics(
+        events,
+        {str(context["record_id"]): context},
+        markout_schedules=schedules,
+        markout_observations=observations,
+    ).to_dicts()[0]
+
+    first = 10_000.0 * (100.3 - 100.1) / 100.1
+    second = 10_000.0 * (100.3 - 100.2) / 100.2
+    expected = 0.4 * first + 0.6 * second
+    assert row["markout_status"] == "complete"
+    assert row["markout_1s_status"] == "complete"
+    assert row["markout_1s_coverage"] == 1.0
+    assert row["markout_1s_actual_horizon_ns"] == 1_020_000_000
+    assert row["markout_1s_bps"] == pytest.approx(expected)
+    assert row["post_fill_adverse_1s_bps"] == pytest.approx(-expected)
+    assert len(json.loads(row["markout_1s_source_records_json"])) == 2
+
+
+def test_markout_observation_must_match_registered_lateness_bound(
+    tmp_path: Path,
+) -> None:
+    context = _context()
+    events = _journal(tmp_path / "account", context=context)
+    schedules, observations = _synthetic_markout_evidence(events)
+    key = next(iter(observations))
+    changed = dict(observations[key])
+    changed["max_lateness_ns"] = 60_000_000
+    changed["record_id"] = capture_record_id(changed)
+    observations[key] = changed
+
+    with pytest.raises(TradeDiagnosticError, match="contradicts execution"):
+        build_execution_diagnostics(
+            events,
+            {str(context["record_id"]): context},
+            markout_schedules=schedules,
+            markout_observations=observations,
+        )
+
+
+def test_missing_markout_cannot_precede_the_registered_lateness_bound(
+    tmp_path: Path,
+) -> None:
+    context = _context()
+    events = _journal(tmp_path / "account", context=context)
+    schedules, observations = _synthetic_markout_evidence(events)
+    key = next(iter(observations))
+    changed = dict(observations[key])
+    changed["markout_status"] = "missing"
+    changed["missing_reason"] = "synthetic_missing"
+    changed["markout_midpoint"] = None
+    changed["record_id"] = capture_record_id(changed)
+    observations[key] = changed
+
+    with pytest.raises(TradeDiagnosticError, match="not explicit"):
+        build_execution_diagnostics(
+            events,
+            {str(context["record_id"]): context},
+            markout_schedules=schedules,
+            markout_observations=observations,
+        )
+
+
+def test_post_fill_loader_recovers_only_canonical_execution_records(
+    tmp_path: Path,
+) -> None:
+    context = _context()
+    events = _journal(tmp_path / "account", context=context)
+    schedules, observations = _synthetic_markout_evidence(events)
+    capture_root = tmp_path / "capture"
+    segment = capture_root / "BUSDT" / "1970-01-01" / "segment-000000.jsonl"
+    segment.parent.mkdir(parents=True)
+    records = [*schedules.values(), *observations.values()]
+    segment.write_bytes(b"".join(canonical_json(record) + b"\n" for record in records))
+
+    loaded_schedules, loaded_observations, report = load_post_fill_markouts(
+        capture_root,
+        events,
+    )
+
+    assert loaded_schedules == schedules
+    assert loaded_observations == observations
+    assert report["required_executions"] == 2
+    assert report["accepted_schedules"] == 2
+    assert report["observation_records"] == 8
+    assert report["missing_schedule_execution_ids"] == []
 
 
 def test_context_identity_mismatch_fails_projection(tmp_path: Path) -> None:
@@ -452,6 +624,13 @@ def test_builder_publishes_only_atomic_manifest_and_command_table(
     assert manifest["source"]["git_dirty"] is True
     assert manifest["output"]["rows"] == 1
     assert manifest["files"]["execution_tca.parquet"]["bytes"] > 0
+    assert manifest["source"]["markout_lookup"]["required_executions"] == 2
+    assert len(
+        manifest["source"]["markout_lookup"][
+            "missing_schedule_execution_ids"
+        ]
+    ) == 2
+    assert len(manifest["source"]["markout_evidence_sha256"]) == 64
 
     with pytest.raises(FileExistsError, match="already exists"):
         diagnostic_script.main(

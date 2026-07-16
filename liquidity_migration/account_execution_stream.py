@@ -104,12 +104,14 @@ class BybitAccountExecutionConsumer:
         kernel: AccountExecutionKernel,
         private_stream: Any | None = None,
         native_protection_manager: Any | None = None,
+        fill_observer: Callable[[str], Any] | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.kernel = kernel
         self.driver = KernelExecutionDriver(kernel)
         self.private_stream = private_stream
         self.native_protection_manager = native_protection_manager
+        self.fill_observer = fill_observer
         self.clock = clock or SystemClock()
         self.events: queue.Queue[tuple[str, Mapping[str, Any], int]] = queue.Queue()
         self.pending_terminal: dict[str, PendingTerminalStatus] = {}
@@ -123,6 +125,17 @@ class BybitAccountExecutionConsumer:
             for event in read_account_journal(kernel.journal.root)
             if event.event_type == AccountEventType.ORDER_STATUS.value
         }
+
+    def _notify_committed_fill(self, execution_id: str) -> None:
+        if self.fill_observer is None or not execution_id:
+            return
+        try:
+            self.fill_observer(execution_id)
+        except Exception:  # noqa: BLE001 - diagnostics cannot block fill ownership
+            _logger.exception(
+                "post-fill observer failed after canonical execution=%s",
+                execution_id,
+            )
 
     def _enqueue(self, kind: str, message: Mapping[str, Any]) -> None:
         self.events.put((kind, message, self.clock.wall_time_ns()))
@@ -221,8 +234,9 @@ class BybitAccountExecutionConsumer:
                 if self.native_protection_manager is not None:
                     if not self.native_protection_manager.is_position_execution(row):
                         continue
+                    adopted_events: tuple[Any, ...] = ()
                     try:
-                        self.native_protection_manager.adopt_execution(
+                        adopted_events = self.native_protection_manager.adopt_execution(
                             row,
                             local_receive_ts_ns=local_receive_ts_ns,
                             message_creation_ts_ns=message_creation_ts_ns,
@@ -233,6 +247,11 @@ class BybitAccountExecutionConsumer:
                         # account-owned stop just because one is also active.
                         _logger.error("unadopted external execution: %s", exc)
                         self.native_protection_manager.note_adoption_failure(row, exc)
+                    for event in adopted_events:
+                        if event.event_type == AccountEventType.FILL.value:
+                            self._notify_committed_fill(
+                                str(event.payload.get("execution_id") or "")
+                            )
                     venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
                     adopted_state = self.kernel.state()
                     adopted_command_id = _command_id_for_row(row, adopted_state)
@@ -273,7 +292,12 @@ class BybitAccountExecutionConsumer:
                 ),
             ))
         if observations:
-            self.driver.ingest(observations)
+            committed_events = self.driver.ingest(observations)
+            for event in committed_events:
+                if event.event_type == AccountEventType.FILL.value:
+                    self._notify_committed_fill(
+                        str(event.payload.get("execution_id") or "")
+                    )
             if self.native_protection_manager is not None:
                 completion_observations: dict[str, ExecutionObservation] = {}
                 for observation in observations:

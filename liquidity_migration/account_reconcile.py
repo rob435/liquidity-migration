@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .account_execution_stream import BybitAccountExecutionConsumer
 from .account_service_bybit import inspect_bybit_demo_order_ownership
@@ -53,6 +53,7 @@ class BybitAccountReconciler:
         client: Any,
         instrument_rules: Mapping[str, InstrumentRules],
         native_protection_manager: Any | None = None,
+        fill_observer: Callable[[str], Any] | None = None,
         clock: Clock | None = None,
         settle_coin: str = "USDT",
     ) -> None:
@@ -67,6 +68,7 @@ class BybitAccountReconciler:
         self.consumer = BybitAccountExecutionConsumer(
             kernel=kernel,
             native_protection_manager=native_protection_manager,
+            fill_observer=fill_observer,
             clock=self.clock,
         )
         self.last_report: AccountReconciliationReport | None = None

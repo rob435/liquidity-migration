@@ -175,6 +175,212 @@ def test_operational_mode_keeps_live_l2_and_decision_context_without_raw_segment
     assert json.loads(raw) == rows[0]
 
 
+def test_post_fill_markouts_capture_healthy_and_bounded_missing_books(
+    tmp_path: Path,
+) -> None:
+    fill_local_ns = 10_000_000_000
+    clock = VirtualClock(current_wall_ns=fill_local_ns, current_monotonic_ns=0)
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(persist_raw_market=False),
+        clock=clock,
+    )
+    recorder.on_message(_snapshot(), local_receive_ts_ns=fill_local_ns - 1)
+
+    schedule = recorder.register_post_fill_markouts(
+        execution_id="execution-1",
+        command_id="command-1",
+        symbol="BUSDT",
+        signed_qty=1.0,
+        fill_price=10.1,
+        fill_exchange_ts_ns=fill_local_ns - 20_000_000,
+        fill_local_receive_ts_ns=fill_local_ns,
+        horizons_ns=(1_000_000_000, 15_000_000_000),
+        max_lateness_ns=100_000_000,
+    )
+    assert schedule["schedule_status"] == "accepted"
+    assert recorder.pending_post_fill_symbols() == {"BUSDT"}
+
+    healthy_ns = fill_local_ns + 1_020_000_000
+    healthy_rows = recorder.on_message(
+        {
+            "topic": "orderbook.50.BUSDT",
+            "type": "delta",
+            "ts": 11_020,
+            "cts": 11_019,
+            "data": {
+                "s": "BUSDT",
+                "b": [["10.0", "2.5"]],
+                "a": [["10.1", "4.5"]],
+                "u": 101,
+                "seq": 1_001,
+            },
+        },
+        local_receive_ts_ns=healthy_ns,
+    )
+    assert len(healthy_rows) == 2
+    healthy_mark = healthy_rows[1]
+    assert healthy_mark["kind"] == "post_fill_markout"
+    assert healthy_mark["target_horizon_ns"] == 1_000_000_000
+    assert healthy_mark["actual_horizon_ns"] == 1_020_000_000
+    assert healthy_mark["observation_lateness_ns"] == 20_000_000
+    assert healthy_mark["markout_status"] == "observed_healthy"
+    assert healthy_mark["markout_midpoint"] == pytest.approx(10.05)
+
+    due_ns = fill_local_ns + 15_000_000_000
+    gapped_rows = recorder.on_message(
+        {
+            "topic": "orderbook.50.BUSDT",
+            "type": "delta",
+            "ts": 25_000,
+            "cts": 24_999,
+            "data": {
+                "s": "BUSDT",
+                "b": [],
+                "a": [],
+                "u": 102,
+                "seq": 900,
+            },
+        },
+        local_receive_ts_ns=due_ns,
+    )
+    assert len(gapped_rows) == 1
+    assert recorder.pending_post_fill_symbols() == {"BUSDT"}
+
+    missing_rows = recorder.on_message(
+        {
+            "topic": "orderbook.50.BUSDT",
+            "type": "delta",
+            "ts": 25_101,
+            "cts": 25_100,
+            "data": {
+                "s": "BUSDT",
+                "b": [],
+                "a": [],
+                "u": 103,
+                "seq": 901,
+            },
+        },
+        local_receive_ts_ns=due_ns + 101_000_000,
+    )
+    assert len(missing_rows) == 2
+    missing_mark = missing_rows[1]
+    assert missing_mark["target_horizon_ns"] == 15_000_000_000
+    assert missing_mark["markout_status"] == "missing"
+    assert missing_mark["markout_midpoint"] is None
+    assert missing_mark["missing_reason"] == (
+        "healthy_book_not_observed_before_lateness_bound"
+    )
+    assert recorder.pending_post_fill_symbols() == set()
+    assert len({schedule["record_id"], healthy_mark["record_id"], missing_mark["record_id"]}) == 3
+    recorder.close()
+
+
+def test_post_fill_markout_capacity_rejection_is_durable_and_non_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "liquidity_migration.market_capture.MAX_PENDING_POST_FILL_MARKOUTS",
+        1,
+    )
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(persist_raw_market=False),
+        clock=VirtualClock(current_wall_ns=10_000_000_000, current_monotonic_ns=0),
+    )
+
+    schedule = recorder.register_post_fill_markouts(
+        execution_id="execution-capacity",
+        command_id="command-capacity",
+        symbol="BUSDT",
+        signed_qty=1.0,
+        fill_price=10.1,
+        fill_exchange_ts_ns=9_990_000_000,
+        fill_local_receive_ts_ns=10_000_000_000,
+        horizons_ns=(1_000_000_000, 15_000_000_000),
+    )
+
+    assert schedule["schedule_status"] == "rejected_capacity"
+    assert schedule["pending_limit"] == 1
+    assert recorder.pending_post_fill_symbols() == set()
+    persisted = [
+        json.loads(line)
+        for path in tmp_path.rglob("segment-*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert persisted == [
+        {
+            key: value
+            for key, value in schedule.items()
+            if not key.startswith("capture_")
+        }
+    ]
+    recorder.close()
+
+
+def test_post_fill_marks_are_capped_per_book_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "liquidity_migration.market_capture.MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE",
+        1,
+    )
+    fill_local_ns = 10_000_000_000
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(persist_raw_market=False),
+        clock=VirtualClock(current_wall_ns=fill_local_ns, current_monotonic_ns=0),
+    )
+    for execution_id in ("execution-a", "execution-b"):
+        recorder.register_post_fill_markouts(
+            execution_id=execution_id,
+            command_id=f"command-{execution_id}",
+            symbol="BUSDT",
+            signed_qty=1.0,
+            fill_price=10.1,
+            fill_exchange_ts_ns=fill_local_ns - 20_000_000,
+            fill_local_receive_ts_ns=fill_local_ns,
+            horizons_ns=(1_000_000_000,),
+            max_lateness_ns=100_000_000,
+        )
+
+    first = recorder.on_message(
+        _snapshot(update_id=100, seq=1_000),
+        local_receive_ts_ns=fill_local_ns + 1_000_000_000,
+    )
+    pending_after_first = recorder.pending_post_fill_symbols()
+    second = recorder.on_message(
+        {
+            "topic": "orderbook.50.BUSDT",
+            "type": "delta",
+            "ts": 11_001,
+            "cts": 11_000,
+            "data": {
+                "s": "BUSDT",
+                "b": [],
+                "a": [],
+                "u": 101,
+                "seq": 1_001,
+            },
+        },
+        local_receive_ts_ns=fill_local_ns + 1_001_000_000,
+    )
+
+    assert [row["kind"] for row in first] == [
+        "orderbook_snapshot",
+        "post_fill_markout",
+    ]
+    assert pending_after_first == {"BUSDT"}
+    assert recorder.pending_post_fill_symbols() == set()
+    assert [row["kind"] for row in second] == [
+        "orderbook_delta",
+        "post_fill_markout",
+    ]
+    recorder.close()
+
+
 def test_current_book_observation_orders_wall_time_after_locked_snapshot(
     tmp_path: Path,
 ) -> None:

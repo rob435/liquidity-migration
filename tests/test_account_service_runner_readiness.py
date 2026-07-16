@@ -305,12 +305,13 @@ def test_idle_owner_requires_only_one_stable_market_heartbeat() -> None:
 
 def test_owner_market_set_includes_every_pending_and_active_symbol() -> None:
     required = operational_market_symbols(
-        {"BTCUSDT", "AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT"},
+        {"BTCUSDT", "AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT", "FUSDT"},
         queued={"ausdt"},
         nonflat={"BUSDT"},
         working={"cusdt"},
         component_targets={"DUSDT"},
         convergence={"eusdt"},
+        markouts={"fusdt"},
     )
 
     assert required == {
@@ -320,6 +321,7 @@ def test_owner_market_set_includes_every_pending_and_active_symbol() -> None:
         "CUSDT",
         "DUSDT",
         "EUSDT",
+        "FUSDT",
     }
 
 

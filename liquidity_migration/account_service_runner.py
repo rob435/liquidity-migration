@@ -69,6 +69,7 @@ from .market_capture import (
     symbols_from_file,
 )
 from .protection_engine import AccountProtectionEngine
+from .post_fill_markouts import PostFillMarkoutObserver
 from .venue_protection import AccountHealthChain, BybitNativeProtectionManager
 
 _logger = logging.getLogger(__name__)
@@ -379,10 +380,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     recorder.set_required_symbols(live_symbols)
     public_stream.start(live_symbols)
+    markout_observer = PostFillMarkoutObserver(
+        kernel=kernel,
+        recorder=recorder,
+    )
     execution_consumer = BybitAccountExecutionConsumer(
         kernel=kernel,
         private_stream=private_stream,
         native_protection_manager=native_protection,
+        fill_observer=markout_observer.notify,
     )
     execution_consumer.start()
     private_stream_supervisor = PrivateExecutionStreamSupervisor(
@@ -396,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         client=private_client,
         instrument_rules=rules,
         native_protection_manager=native_protection,
+        fill_observer=markout_observer.notify,
     )
     # Bootstrap venue truth before the service can claim any request. Existing
     # venue exposure with an empty kernel is a hard mismatch, never auto-adopted.
@@ -479,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             now = time.monotonic()
             loop_sequence += 1
+            markout_observer.drain()
             if now - last_reconcile >= max(args.reconcile_seconds, 0.1):
                 report, funding_report = _run_reconciliation_cycle(
                     reconciler=reconciler,
@@ -516,6 +524,7 @@ def main(argv: list[str] | None = None) -> int:
                     convergence=(
                         item.symbol for item in service.convergence_report().items
                     ),
+                    markouts=recorder.pending_post_fill_symbols(),
                 )
                 missing_rules = sorted(desired - set(rules))
                 if missing_rules:
