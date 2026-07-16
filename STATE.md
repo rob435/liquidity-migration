@@ -2,21 +2,19 @@
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, generation-bound strategy receipts, and watchdog evidence
-at 2026-07-16 16:44 UTC. These facts describe the deployed implementation
+at 2026-07-16 17:54 UTC. These facts describe the deployed implementation
 commit below; a later documentation-only receipt may leave the branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `bd5e97343d89e823b978080aff00a7551a89a63e`, profile `operational`, receipt
-  SHA-256 `5d3159aeae55623ffff4491819126f9c9eae541d6f29ec99c9d8024324911120`.
+  `6c27b5e6052d517d31196a154548becb75a0ab62`, profile `operational`, receipt
+  SHA-256 `b4d86d0b63044385563176bc521cb996f404556b190b7cbad33db7e29e2da3bb`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
-  liveness. A stdout-only watchdog run during current-generation cold start and
-  a second run after completed-cycle publication each reported zero active
-  alerts across all ten monitored units. The first scheduled systemd run under
-  the new exact authority also exited zero with no active alert at 16:44 UTC.
+  liveness. An on-demand watchdog run under the new exact authority exited zero
+  at 17:53 UTC with no active alert across all ten monitored units.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -27,15 +25,16 @@ commit below; a later documentation-only receipt may leave the branch ahead.
 ## Verified health and resource state
 
 - Authenticated Bybit demo reads before install showed zero non-flat positions
-  and zero regular or conditional orders. After activation the demo owner's
-  fresh authenticated REST reconciliation again observed zero venue positions,
-  zero all-kind or conditional orders, and zero mismatches. Demo and paper
-  journals hash-verified with zero working orders, non-flat positions, or
-  nonzero aggregate targets.
+  and zero regular or conditional orders. A second authenticated read after
+  activation again observed zero non-flat venue positions and zero all-kind or
+  conditional orders. Demo and paper journals hash-verified with zero working
+  orders, non-flat positions, or nonzero aggregate targets.
 - Demo and paper owners publish healthy generation-bound status. Demo
-  reconciliation is healthy with zero mismatches; live-L2 and owner-health ages
-  are measured in seconds. With no active work, each owner subscribes only to
-  the idle BTC book.
+  reconciliation is healthy with zero mismatches; both reported exact
+  queue-head readiness, zero restarts, and fresh owner health after activation.
+  The demo inbox had zero pending, processing, or failed requests. Live-L2 and
+  owner-health ages are measured in seconds. With no active work, each owner
+  subscribes only to the idle BTC book.
 - All four target producers have current-generation completed-cycle receipts
   bound to their exact durable cycle. LONG demo/paper reported 231,787 current
   kline rows; CONTINUOUS demo/paper reported 371,056. Completion-age liveness
@@ -59,6 +58,14 @@ commit below; a later documentation-only receipt may leave the branch ahead.
 
 ## Incident interpretation
 
+- The 16:50 and 17:05 `future_book` alerts were local read/update races, not
+  future venue timestamps. The owner sampled wall time before acquiring the
+  recorder snapshot, so a concurrent WebSocket update could publish a newer
+  local receive timestamp between those operations. Book freshness now pairs a
+  locked snapshot with the recorder's wall-time observation; the same ordering
+  is used for notification midpoints. A real backward wall-clock step remains
+  fail-closed, and deterministic regression coverage reproduces the former
+  interleaving.
 - The reported negative owner-health ages were not future venue data or clock
   drift. Strategy event time was reused after concurrent owner heartbeats.
   Operational freshness now samples adjacent wall time while strategy/PIT time
