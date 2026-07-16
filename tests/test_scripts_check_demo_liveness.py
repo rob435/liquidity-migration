@@ -836,6 +836,160 @@ def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alar
     assert alerts == []
 
 
+def test_current_generation_completion_time_is_sampled_after_receipt_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.strategy_cycle_health import (
+        StrategyCycleHealth,
+        write_strategy_cycle_health,
+    )
+
+    outer_now = 1_000 * HOUR
+    completed_ms = outer_now + 6_000
+    cycle_ts = outer_now - MIN
+    root = tmp_path / "bybit-continuous-demo-event"
+    root.mkdir()
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "completed-during-watchdog-run",
+                    "ts_ms": cycle_ts,
+                    "max_rmom_day_ts": outer_now,
+                    "universe_symbols": 10,
+                    "kline_store_rows": 100,
+                }
+            ]
+        ),
+        root,
+        "continuous_fade_demo_cycles",
+        partition_by=(),
+    )
+    write_strategy_cycle_health(
+        root,
+        StrategyCycleHealth(
+            sleeve="continuous",
+            environment="demo",
+            cycle_id="completed-during-watchdog-run",
+            cycle_ts_ms=cycle_ts,
+            completed_ts_ns=completed_ms * 1_000_000,
+            invocation_id=CURRENT_INVOCATION_ID,
+            ws_kline_store_rows=100,
+        ),
+    )
+    runtime = M.UnitRuntime(
+        invocation_id=CURRENT_INVOCATION_ID,
+        active_age_minutes=20.0,
+    )
+    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2)
+    monkeypatch.setattr(M, "_now_ms", lambda: completed_ms + 1)
+
+    assert (
+        M.gather_continuous_alerts(
+            continuous_root=root,
+            args=args,
+            unit_runtime=runtime,
+        )
+        == []
+    )
+
+    stale_outer_sample = M.gather_continuous_alerts(
+        continuous_root=root,
+        now_ms=outer_now,
+        args=args,
+        unit_runtime=runtime,
+    )
+    assert [alert.key for alert in stale_outer_sample] == [f"liveness:{root.name}"]
+    assert "0.1 min future-dated" in stale_outer_sample[0].message
+
+
+def test_completion_receipt_is_observed_before_cycle_dataset(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.strategy_cycle_health import (
+        StrategyCycleHealth,
+        write_strategy_cycle_health,
+    )
+
+    now = 1_000 * HOUR
+    old_cycle_ts = now - 2 * MIN
+    new_cycle_ts = now - MIN
+    root = tmp_path / "bybit-continuous-demo-event"
+    root.mkdir()
+    old_row = {
+        "cycle_id": "already-completed",
+        "ts_ms": old_cycle_ts,
+        "max_rmom_day_ts": now,
+        "universe_symbols": 10,
+        "kline_store_rows": 100,
+    }
+    new_row = {**old_row, "cycle_id": "concurrent-completion", "ts_ms": new_cycle_ts}
+    write_dataset(
+        pl.DataFrame([old_row]),
+        root,
+        "continuous_fade_demo_cycles",
+        partition_by=(),
+    )
+    write_strategy_cycle_health(
+        root,
+        StrategyCycleHealth(
+            sleeve="continuous",
+            environment="demo",
+            cycle_id="already-completed",
+            cycle_ts_ms=old_cycle_ts,
+            completed_ts_ns=(now - MIN) * 1_000_000,
+            invocation_id=CURRENT_INVOCATION_ID,
+            ws_kline_store_rows=100,
+        ),
+    )
+    original_read_dataset = M.read_dataset
+
+    def read_while_next_cycle_completes(*args, **kwargs):
+        captured = original_read_dataset(*args, **kwargs)
+        write_dataset(
+            pl.DataFrame([old_row, new_row]),
+            root,
+            "continuous_fade_demo_cycles",
+            partition_by=(),
+        )
+        write_strategy_cycle_health(
+            root,
+            StrategyCycleHealth(
+                sleeve="continuous",
+                environment="demo",
+                cycle_id="concurrent-completion",
+                cycle_ts_ms=new_cycle_ts,
+                completed_ts_ns=now * 1_000_000,
+                invocation_id=CURRENT_INVOCATION_ID,
+                ws_kline_store_rows=100,
+            ),
+        )
+        return captured
+
+    monkeypatch.setattr(M, "read_dataset", read_while_next_cycle_completes)
+
+    assert (
+        M.gather_continuous_alerts(
+            continuous_root=root,
+            now_ms=now,
+            args=SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2),
+            unit_runtime=M.UnitRuntime(
+                invocation_id=CURRENT_INVOCATION_ID,
+                active_age_minutes=20.0,
+            ),
+        )
+        == []
+    )
+
+
 def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> None:
     import polars as pl
 

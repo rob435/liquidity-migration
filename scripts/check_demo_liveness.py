@@ -610,15 +610,23 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
             pass
 
 
-def _bind_completed_cycle(
+def _observe_completed_cycle(
     *,
     root: Path,
-    cycles: pl.DataFrame | None,
+    cycles_dataset: str,
     runtime: UnitRuntime,
     sleeve: str,
     environment: str,
 ) -> tuple[CompletedCycleObservation | None, str]:
-    """Bind one completion receipt to systemd and its exact causal output row."""
+    """Observe a receipt before binding it to its exact durable output row.
+
+    Producers publish the cycle dataset before the completion receipt.  Reading
+    in that same order lets a concurrent producer update advance the receipt
+    after the watchdog has snapshotted the dataset, creating an impossible
+    cross-generation pair.  Receipt-first observation preserves the causal
+    publication order: its referenced cycle was already durable before the
+    receipt could be read.
+    """
 
     invocation_id = runtime.invocation_id
     if invocation_id is None:
@@ -633,6 +641,10 @@ def _bind_completed_cycle(
         return None, (
             f"completion receipt scope mismatch: {health.sleeve}/{health.environment} != {sleeve}/{environment}"
         )
+    try:
+        cycles = read_dataset(root, cycles_dataset)
+    except Exception as exc:  # noqa: BLE001 — watchdog reports unreadable evidence
+        return None, f"durable cycle output is unreadable: {type(exc).__name__}: {exc}"
     if cycles is None or cycles.is_empty() or "cycle_id" not in cycles.columns or "ts_ms" not in cycles.columns:
         return None, "durable cycle output is unavailable"
     matching = cycles.filter((pl.col("cycle_id") == health.cycle_id) & (pl.col("ts_ms") == health.cycle_ts_ms))
@@ -647,7 +659,7 @@ def _bind_completed_cycle(
 def gather_continuous_alerts(
     *,
     continuous_root: Path,
-    now_ms: int,
+    now_ms: int | None = None,
     args: argparse.Namespace,
     cycles_dataset: str = "continuous_fade_demo_cycles",
     cycle_checks: bool = True,
@@ -664,26 +676,15 @@ def gather_continuous_alerts(
     label = continuous_root.name
     alerts: list[Alert] = []
     if cycle_checks:
-        try:
-            cyc = read_dataset(continuous_root, cycles_dataset)
-        except Exception:  # noqa: BLE001 — watchdog never crashes
-            cyc = pl.DataFrame()
-        if cyc is not None and not cyc.is_empty() and "mode" in cyc.columns:
-            cyc = cyc.filter(pl.col("mode").fill_null("") != "ledger_reset_boundary")
-        latest_row = (
-            cyc.sort("ts_ms").tail(1).to_dicts()[0]
-            if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
-            else None
-        )
         observation: CompletedCycleObservation | None = None
         row: dict[str, Any] | None
         liveness_ts_ms: int | None
         generation_bound = unit_runtime is not None and unit_runtime.invocation_id is not None
         if generation_bound:
             assert unit_runtime is not None
-            observation, detail = _bind_completed_cycle(
+            observation, detail = _observe_completed_cycle(
                 root=continuous_root,
-                cycles=cyc,
+                cycles_dataset=cycles_dataset,
                 runtime=unit_runtime,
                 sleeve="continuous",
                 environment=environment,
@@ -699,13 +700,25 @@ def gather_continuous_alerts(
             row = observation.row
             liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
         else:
+            try:
+                cyc = read_dataset(continuous_root, cycles_dataset)
+            except Exception:  # noqa: BLE001 — watchdog never crashes
+                cyc = pl.DataFrame()
+            if cyc is not None and not cyc.is_empty() and "mode" in cyc.columns:
+                cyc = cyc.filter(pl.col("mode").fill_null("") != "ledger_reset_boundary")
+            latest_row = (
+                cyc.sort("ts_ms").tail(1).to_dicts()[0]
+                if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
+                else None
+            )
             row = latest_row
             liveness_ts_ms = (
                 int(latest_row["ts_ms"]) if latest_row is not None and latest_row.get("ts_ms") is not None else None
             )
+        observed_now_ms = _now_ms() if now_ms is None else now_ms
         live = evaluate_cycle_liveness(
             latest_cycle_ts_ms=liveness_ts_ms,
-            now_ms=now_ms,
+            now_ms=observed_now_ms,
             max_age_minutes=args.max_cycle_age_min,
             label=label,
         )
@@ -714,7 +727,7 @@ def gather_continuous_alerts(
         if row is not None:
             rmom_alert = evaluate_rmom_staleness(
                 max_rmom_day_ts=int(row.get("max_rmom_day_ts") or 0),
-                now_ms=now_ms,
+                now_ms=observed_now_ms,
                 max_stale_days=args.max_rmom_stale_days,
                 label=label,
             )
@@ -758,7 +771,7 @@ def gather_continuous_alerts(
 def gather_long_alerts(
     *,
     long_root: Path,
-    now_ms: int,
+    now_ms: int | None = None,
     args: argparse.Namespace,
     cycle_checks: bool = True,
     cycles_dataset: str = "long_native_demo_cycles",
@@ -771,23 +784,14 @@ def gather_long_alerts(
     label = long_root.name
     alerts: list[Alert] = []
     if cycle_checks:
-        try:
-            cyc = read_dataset(long_root, cycles_dataset)
-        except Exception:  # noqa: BLE001 — watchdog never crashes
-            cyc = pl.DataFrame()
-        latest_row = (
-            cyc.sort("ts_ms").tail(1).to_dicts()[0]
-            if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
-            else None
-        )
         row: dict[str, Any] | None
         liveness_ts_ms: int | None
         generation_bound = unit_runtime is not None and unit_runtime.invocation_id is not None
         if generation_bound:
             assert unit_runtime is not None
-            observation, detail = _bind_completed_cycle(
+            observation, detail = _observe_completed_cycle(
                 root=long_root,
-                cycles=cyc,
+                cycles_dataset=cycles_dataset,
                 runtime=unit_runtime,
                 sleeve="long",
                 environment=environment,
@@ -803,13 +807,23 @@ def gather_long_alerts(
             row = observation.row
             liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
         else:
+            try:
+                cyc = read_dataset(long_root, cycles_dataset)
+            except Exception:  # noqa: BLE001 — watchdog never crashes
+                cyc = pl.DataFrame()
+            latest_row = (
+                cyc.sort("ts_ms").tail(1).to_dicts()[0]
+                if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
+                else None
+            )
             row = latest_row
             liveness_ts_ms = (
                 int(latest_row["ts_ms"]) if latest_row is not None and latest_row.get("ts_ms") is not None else None
             )
+        observed_now_ms = _now_ms() if now_ms is None else now_ms
         live = evaluate_cycle_liveness(
             latest_cycle_ts_ms=liveness_ts_ms,
-            now_ms=now_ms,
+            now_ms=observed_now_ms,
             max_age_minutes=args.max_cycle_age_min,
             label=label,
         )
@@ -818,7 +832,10 @@ def gather_long_alerts(
         if row is not None and row.get("kline_store_max_ts_ms") is not None:
             store_max = int(row.get("kline_store_max_ts_ms") or 0)
             ws = evaluate_ws_staleness(
-                store_max_ts_ms=store_max, now_ms=now_ms, max_lag_hours=args.max_ws_lag_hours, label=label
+                store_max_ts_ms=store_max,
+                now_ms=observed_now_ms,
+                max_lag_hours=args.max_ws_lag_hours,
+                label=label,
             )
             if ws:
                 alerts.append(ws)
@@ -828,7 +845,7 @@ def gather_long_alerts(
 def gather_account_capture_alerts(
     *,
     capture_root: Path,
-    now_ms: int,
+    now_ms: int | None = None,
     max_age_minutes: float,
     label: str = "",
     expected_owner_uid: int | None = None,
@@ -862,7 +879,8 @@ def gather_account_capture_alerts(
                 ),
             )
         ]
-    age_minutes = (now_ms - newest_ms) / 60_000.0
+    observed_now_ms = _now_ms() if now_ms is None else now_ms
+    age_minutes = (observed_now_ms - newest_ms) / 60_000.0
     if age_minutes > max_age_minutes:
         return [
             Alert(
@@ -1165,7 +1183,6 @@ def main() -> int:
     alerts.extend(
         gather_account_capture_alerts(
             capture_root=Path(args.account_capture_root),
-            now_ms=now_ms,
             max_age_minutes=args.max_account_capture_age_min,
         )
     )
@@ -1173,7 +1190,6 @@ def main() -> int:
         alerts.extend(
             gather_account_capture_alerts(
                 capture_root=paper_capture_root,
-                now_ms=now_ms,
                 max_age_minutes=args.max_account_capture_age_min,
                 label="paper",
                 expected_owner_uid=paper_owner_uid,
@@ -1208,7 +1224,6 @@ def main() -> int:
         alerts.extend(
             gather_continuous_alerts(
                 continuous_root=continuous_root,
-                now_ms=now_ms,
                 args=args,
                 cycle_checks=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
                 environment="demo",
@@ -1231,7 +1246,6 @@ def main() -> int:
         alerts.extend(
             gather_continuous_alerts(
                 continuous_root=continuous_paper_root,
-                now_ms=now_ms,
                 args=args,
                 cycles_dataset="continuous_fade_paper_cycles",
                 environment="paper",
@@ -1242,7 +1256,6 @@ def main() -> int:
         alerts.extend(
             gather_long_alerts(
                 long_root=long_root,
-                now_ms=now_ms,
                 args=args,
                 cycle_checks=_sleeve_on("LONG_SLEEVE"),
                 environment="demo",
@@ -1253,7 +1266,6 @@ def main() -> int:
         alerts.extend(
             gather_long_alerts(
                 long_root=long_paper_root,
-                now_ms=now_ms,
                 args=args,
                 cycles_dataset="long_native_paper_cycles",
                 environment="paper",
