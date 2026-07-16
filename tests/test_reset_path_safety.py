@@ -341,6 +341,41 @@ def test_paper_normalization_bounds_open_directory_cache_for_wide_tree(
     assert maximum_open <= 3
 
 
+def test_paper_normalization_bounds_open_directory_cache_across_many_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = tmp_path / "data"
+    roots: list[Path] = []
+    for index in range(128):
+        root = anchor / f"paper-{index:03d}"
+        (root / ".locks").mkdir(parents=True)
+        roots.append(root)
+
+    original_directory_fd = safety._ApplyContext.directory_fd
+    maximum_open = 0
+
+    def observe_open_count(
+        context: safety._ApplyContext,
+        relative_parts: tuple[str, ...],
+    ) -> int:
+        nonlocal maximum_open
+        descriptor = original_directory_fd(context, relative_parts)
+        maximum_open = max(maximum_open, len(context.open_directories))
+        return descriptor
+
+    monkeypatch.setattr(safety._ApplyContext, "directory_fd", observe_open_count)
+
+    normalize_paper_runtime_roots(
+        anchor,
+        roots,
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+
+    assert maximum_open <= 3
+
+
 def test_paper_normalization_batch_rejects_symlink_before_permissions_change(
     tmp_path: Path,
 ) -> None:

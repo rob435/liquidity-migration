@@ -863,74 +863,81 @@ def normalize_paper_runtime_roots(
     created_lock_entries: dict[tuple[str, ...], _Entry] = {}
     created_root_entries: dict[tuple[str, ...], _Entry] = {}
     created_root_descriptors: dict[tuple[str, ...], int] = {}
-    root_handles: dict[tuple[str, ...], int] = {}
     try:
         for target in plan.targets:
-            if not target.exists:
-                _assert_missing_target(context, target)
-                if not create_missing:
+            try:
+                if not target.exists:
+                    _assert_missing_target(context, target)
+                    if not create_missing:
+                        continue
+                    anchor_fd = context.directory_fd(())
+                    root_fd, created_root = _create_bound_directory(
+                        parent_fd=anchor_fd,
+                        name=target.relative_parts[0],
+                        path=target.path,
+                        relative_parts=target.relative_parts,
+                        anchor_entry=plan.anchor_entry,
+                    )
+                    created_root_entries[target.relative_parts] = created_root
+                    created_root_descriptors[target.relative_parts] = root_fd
+                else:
+                    root_fd = context.directory_fd(target.relative_parts)
+                lock_parts = (*target.relative_parts, ".locks")
+                if lock_parts in context.directory_plans:
                     continue
-                anchor_fd = context.directory_fd(())
-                root_fd, created_root = _create_bound_directory(
-                    parent_fd=anchor_fd,
-                    name=target.relative_parts[0],
-                    path=target.path,
-                    relative_parts=target.relative_parts,
-                    anchor_entry=plan.anchor_entry,
-                )
-                created_root_entries[target.relative_parts] = created_root
-                created_root_descriptors[target.relative_parts] = root_fd
-            else:
-                root_fd = context.directory_fd(target.relative_parts)
-            root_handles[target.relative_parts] = root_fd
-            lock_parts = (*target.relative_parts, ".locks")
-            if lock_parts in context.directory_plans:
-                continue
-            try:
-                os.mkdir(".locks", 0o700, dir_fd=root_fd)
-                lock_fd = os.open(".locks", _directory_open_flags(), dir_fd=root_fd)
-            except OSError as exc:
-                raise RuntimeError(f"paper lock namespace changed before creation: {target.path / '.locks'}") from exc
-            try:
-                opened = os.fstat(lock_fd)
-                current = _entry_metadata(root_fd, ".locks")
-                mount_id = _mount_id_for_fd(lock_fd)
-                if (
-                    not stat.S_ISDIR(opened.st_mode)
-                    or (opened.st_dev, opened.st_ino, _file_type(opened.st_mode))
-                    != (current.st_dev, current.st_ino, _file_type(current.st_mode))
-                    or opened.st_dev != plan.anchor_entry.device
-                    or mount_id != plan.anchor_entry.mount_id
-                ):
-                    raise RuntimeError(f"paper lock namespace changed during creation: {target.path / '.locks'}")
-                _set_descriptor_permissions(
-                    lock_fd,
-                    uid=uid,
-                    gid=gid,
-                    mode=0o700,
-                    path=target.path / ".locks",
-                )
-                rebound = _entry_metadata(root_fd, ".locks")
-                if (
-                    (rebound.st_dev, rebound.st_ino, _file_type(rebound.st_mode))
-                    != (opened.st_dev, opened.st_ino, stat.S_IFDIR)
-                    or rebound.st_uid != uid
-                    or rebound.st_gid != gid
-                    or stat.S_IMODE(rebound.st_mode) != 0o700
-                ):
-                    raise RuntimeError(f"paper lock namespace changed during normalization: {target.path / '.locks'}")
-                os.fsync(lock_fd)
-                os.fsync(root_fd)
-                normalized_lock = os.fstat(lock_fd)
-                created_lock_entries[lock_parts] = _snapshot(
-                    path=target.path / ".locks",
-                    relative_parts=lock_parts,
-                    metadata=normalized_lock,
-                    mount_id=_mount_id_for_fd(lock_fd),
-                )
+                try:
+                    os.mkdir(".locks", 0o700, dir_fd=root_fd)
+                    lock_fd = os.open(".locks", _directory_open_flags(), dir_fd=root_fd)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"paper lock namespace changed before creation: {target.path / '.locks'}"
+                    ) from exc
+                try:
+                    opened = os.fstat(lock_fd)
+                    current = _entry_metadata(root_fd, ".locks")
+                    mount_id = _mount_id_for_fd(lock_fd)
+                    if (
+                        not stat.S_ISDIR(opened.st_mode)
+                        or (opened.st_dev, opened.st_ino, _file_type(opened.st_mode))
+                        != (current.st_dev, current.st_ino, _file_type(current.st_mode))
+                        or opened.st_dev != plan.anchor_entry.device
+                        or mount_id != plan.anchor_entry.mount_id
+                    ):
+                        raise RuntimeError(
+                            f"paper lock namespace changed during creation: {target.path / '.locks'}"
+                        )
+                    _set_descriptor_permissions(
+                        lock_fd,
+                        uid=uid,
+                        gid=gid,
+                        mode=0o700,
+                        path=target.path / ".locks",
+                    )
+                    rebound = _entry_metadata(root_fd, ".locks")
+                    if (
+                        (rebound.st_dev, rebound.st_ino, _file_type(rebound.st_mode))
+                        != (opened.st_dev, opened.st_ino, stat.S_IFDIR)
+                        or rebound.st_uid != uid
+                        or rebound.st_gid != gid
+                        or stat.S_IMODE(rebound.st_mode) != 0o700
+                    ):
+                        raise RuntimeError(
+                            f"paper lock namespace changed during normalization: {target.path / '.locks'}"
+                        )
+                    os.fsync(lock_fd)
+                    os.fsync(root_fd)
+                    normalized_lock = os.fstat(lock_fd)
+                    created_lock_entries[lock_parts] = _snapshot(
+                        path=target.path / ".locks",
+                        relative_parts=lock_parts,
+                        metadata=normalized_lock,
+                        mount_id=_mount_id_for_fd(lock_fd),
+                    )
+                finally:
+                    os.close(lock_fd)
+                created_locks.add(lock_parts)
             finally:
-                os.close(lock_fd)
-            created_locks.add(lock_parts)
+                context.release_transient_directories()
 
         regular_entries = [entry for entry in plan.entries if entry.file_type == stat.S_IFREG]
         for entry in regular_entries:
@@ -952,7 +959,7 @@ def normalize_paper_runtime_roots(
             created_root_entries[target.relative_parts] = _normalize_created_directory(
                 parent_fd=context.directory_fd(()),
                 name=target.relative_parts[0],
-                descriptor=root_handles[target.relative_parts],
+                descriptor=created_root_descriptors[target.relative_parts],
                 planned=planned_created_root,
                 uid=uid,
                 gid=gid,
