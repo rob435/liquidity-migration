@@ -32,10 +32,12 @@ import os
 import pwd
 import subprocess
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -45,7 +47,10 @@ sys.path.insert(0, str(_REPO_ROOT))
 from liquidity_migration._common import exact_duration_ms  # noqa: E402
 from liquidity_migration.artifact_snapshot import read_stable_file  # noqa: E402
 from liquidity_migration.account_kernel import AccountEventType, read_account_journal  # noqa: E402
-from liquidity_migration.account_owner_health import require_recent_account_owner_health  # noqa: E402
+from liquidity_migration.account_owner_health import (  # noqa: E402
+    require_recent_account_owner_health,
+    validate_systemd_invocation_id,
+)
 from liquidity_migration.account_owner_readiness import latest_market_readiness  # noqa: E402
 from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
     HEDGE_MODEL_PRIOR_KIND,
@@ -53,6 +58,10 @@ from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
     require_usable_hedge_model_prior,
 )
 from liquidity_migration.storage import read_dataset  # noqa: E402
+from liquidity_migration.strategy_cycle_health import (  # noqa: E402
+    StrategyCycleHealth,
+    read_strategy_cycle_health,
+)
 from liquidity_migration.systemd_environment import parse_systemd_environment_bytes  # noqa: E402
 from liquidity_migration.telegram import send_telegram_message  # noqa: E402
 
@@ -66,6 +75,11 @@ _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT, _PAPER_ACCOUNT_OWNER_
 _ACCOUNT_SCOPES = ("demo", "demo-paper")
 _PAPER_RUNTIME_USER = "liquidity-migration-paper"
 _PAPER_RUNTIME_GROUP = "liquidity-migration-paper"
+_LONG_DEMO_UNIT = "liquidity-migration-bybit-long-demo.service"
+_LONG_PAPER_UNIT = "liquidity-migration-bybit-long-paper.service"
+_CONTINUOUS_DEMO_UNIT = "liquidity-migration-bybit-continuous-demo.service"
+_CONTINUOUS_PAPER_UNIT = "liquidity-migration-bybit-continuous-paper.service"
+_QUEUE_HEAD_STARTUP_DETAIL_PREFIX = "account owner is blocked: waiting for queue-head market data:"
 
 
 def _default_root(rel: str) -> str:
@@ -91,9 +105,7 @@ def _paper_roots_from_environment(path: str | Path) -> tuple[Path, Path]:
     try:
         paper_gid = grp.getgrnam(_PAPER_RUNTIME_GROUP).gr_gid
     except KeyError as exc:
-        raise ValueError(
-            f"paper runtime group is not provisioned: {_PAPER_RUNTIME_GROUP}"
-        ) from exc
+        raise ValueError(f"paper runtime group is not provisioned: {_PAPER_RUNTIME_GROUP}") from exc
     if snapshot.metadata.st_gid != paper_gid:
         raise ValueError("paper owner environment has the wrong runtime group")
     values = parse_systemd_environment_bytes(
@@ -126,6 +138,22 @@ class Alert:
     message: str
 
 
+@dataclass(frozen=True)
+class UnitRuntime:
+    """Current systemd generation metadata used only for bounded startup logic."""
+
+    invocation_id: str | None
+    active_age_minutes: float | None
+
+
+@dataclass(frozen=True)
+class CompletedCycleObservation:
+    """A completion projection bound back to its durable causal cycle row."""
+
+    health: StrategyCycleHealth
+    row: dict[str, Any]
+
+
 # --------------------------------------------------------------------------- #
 # Pure decision logic (unit-tested; no I/O)
 # --------------------------------------------------------------------------- #
@@ -140,6 +168,14 @@ def evaluate_cycle_liveness(
             message=f"{label}: no cycle reports found — daemon may have never started.",
         )
     age_min = (now_ms - latest_cycle_ts_ms) / 60_000.0
+    if age_min < 0.0:
+        return Alert(
+            key=f"liveness:{label}",
+            severity=CRITICAL,
+            message=(
+                f"{label}: latest cycle is {-age_min:.1f} min future-dated; scheduler liveness evidence is invalid."
+            ),
+        )
     if age_min > max_age_minutes:
         return Alert(
             key=f"liveness:{label}",
@@ -150,6 +186,30 @@ def evaluate_cycle_liveness(
             ),
         )
     return None
+
+
+def _within_startup_grace(
+    runtime: UnitRuntime | None,
+    *,
+    max_age_minutes: float,
+) -> bool:
+    """True only for a known current service generation inside a finite grace."""
+
+    if runtime is None or runtime.invocation_id is None:
+        return False
+    age = runtime.active_age_minutes
+    return age is not None and 0.0 <= age <= max_age_minutes
+
+
+def _unverified_generation_cycle_alert(*, label: str, detail: str) -> Alert:
+    return Alert(
+        key=f"liveness:{label}",
+        severity=CRITICAL,
+        message=(
+            f"{label}: DAEMON DOWN/HUNG — no verified completed cycle for the "
+            f"current service generation ({detail[:300]})."
+        ),
+    )
 
 
 def evaluate_unit_states(
@@ -225,9 +285,7 @@ def evaluate_required_account_owner_states(
     return alerts
 
 
-def gather_hedge_model_prior_alerts(
-    *, model_prior_path: Path, now_ms: int, book_nonflat: bool = False
-) -> list[Alert]:
+def gather_hedge_model_prior_alerts(*, model_prior_path: Path, now_ms: int, book_nonflat: bool = False) -> list[Alert]:
     """Check immutable-prior integrity, not meaningless wall-clock freshness."""
 
     try:
@@ -379,13 +437,72 @@ def _unit_states(units: list[str]) -> dict[str, str]:
     return states
 
 
+def _boottime_ns() -> int | None:
+    """Return Linux CLOCK_BOOTTIME without inventing a wall-clock substitute."""
+
+    clock_id = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock_id is None:
+        return None
+    try:
+        return time.clock_gettime_ns(clock_id)
+    except (OSError, ValueError):
+        return None
+
+
+def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
+    """Read generation id and monotonic active age for systemd services.
+
+    Missing or malformed metadata does not create a grace period.  The caller
+    falls back to the legacy causal-cycle check, so this observer never turns a
+    systemd query failure into an unbounded suppression.
+    """
+
+    boot_ns = _boottime_ns()
+    metadata: dict[str, UnitRuntime] = {}
+    for unit in dict.fromkeys(unit for unit in units if unit.endswith(".service")):
+        try:
+            result = subprocess.run(
+                [
+                    "systemctl",
+                    "show",
+                    unit,
+                    "--property=InvocationID",
+                    "--property=ActiveEnterTimestampMonotonic",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            values = {
+                key: value for line in result.stdout.splitlines() if "=" in line for key, value in [line.split("=", 1)]
+            }
+            raw_invocation_id = values.get("InvocationID") or None
+            invocation_id = validate_systemd_invocation_id(raw_invocation_id) if raw_invocation_id is not None else None
+            active_enter_us = int(values.get("ActiveEnterTimestampMonotonic") or "0")
+            active_age_minutes: float | None = None
+            if boot_ns is not None and active_enter_us > 0:
+                age_ns = boot_ns - active_enter_us * 1_000
+                if age_ns >= 0:
+                    active_age_minutes = age_ns / 60_000_000_000.0
+            metadata[unit] = UnitRuntime(
+                invocation_id=invocation_id,
+                active_age_minutes=active_age_minutes,
+            )
+        except (OSError, subprocess.SubprocessError, ValueError):
+            metadata[unit] = UnitRuntime(
+                invocation_id=None,
+                active_age_minutes=None,
+            )
+    return metadata
+
+
 def _default_units_for_toggles() -> list[str]:
     units = list(_REQUIRED_ACCOUNT_OWNER_UNITS)
     if _sleeve_on("LONG_SLEEVE"):
         units.extend(
             [
-                "liquidity-migration-bybit-long-demo.service",
-                "liquidity-migration-bybit-long-paper.service",
+                _LONG_DEMO_UNIT,
+                _LONG_PAPER_UNIT,
             ]
         )
     if _continuous_rmom_refresh_on():
@@ -401,7 +518,7 @@ def _default_units_for_toggles() -> list[str]:
     if _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
         units.extend(
             [
-                "liquidity-migration-bybit-continuous-demo.service",
+                _CONTINUOUS_DEMO_UNIT,
                 "liquidity-migration-continuous-hedge.timer",
                 # The SERVICE too, not just the timer: a failed target-publisher
                 # oneshot leaves the timer active/waiting and would otherwise never
@@ -420,7 +537,7 @@ def _default_units_for_toggles() -> list[str]:
             ]
         )
     if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
-        units.append("liquidity-migration-bybit-continuous-paper.service")
+        units.append(_CONTINUOUS_PAPER_UNIT)
     return units
 
 
@@ -439,8 +556,8 @@ def _default_units_for_scope(account_scope: str) -> list[str]:
         return units
     paper_units = {
         _PAPER_ACCOUNT_OWNER_UNIT,
-        "liquidity-migration-bybit-long-paper.service",
-        "liquidity-migration-bybit-continuous-paper.service",
+        _LONG_PAPER_UNIT,
+        _CONTINUOUS_PAPER_UNIT,
     }
     if not _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
         paper_units.update(
@@ -493,6 +610,40 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
             pass
 
 
+def _bind_completed_cycle(
+    *,
+    root: Path,
+    cycles: pl.DataFrame | None,
+    runtime: UnitRuntime,
+    sleeve: str,
+    environment: str,
+) -> tuple[CompletedCycleObservation | None, str]:
+    """Bind one completion receipt to systemd and its exact causal output row."""
+
+    invocation_id = runtime.invocation_id
+    if invocation_id is None:
+        return None, "current systemd invocation id is unavailable"
+    try:
+        health = read_strategy_cycle_health(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"completion receipt unavailable: {type(exc).__name__}: {exc}"
+    if health.invocation_id != invocation_id:
+        return None, "completion receipt belongs to a prior service generation"
+    if health.sleeve != sleeve or health.environment != environment:
+        return None, (
+            f"completion receipt scope mismatch: {health.sleeve}/{health.environment} != {sleeve}/{environment}"
+        )
+    if cycles is None or cycles.is_empty() or "cycle_id" not in cycles.columns or "ts_ms" not in cycles.columns:
+        return None, "durable cycle output is unavailable"
+    matching = cycles.filter((pl.col("cycle_id") == health.cycle_id) & (pl.col("ts_ms") == health.cycle_ts_ms))
+    if matching.is_empty():
+        return None, "completion receipt does not match a durable causal cycle row"
+    return CompletedCycleObservation(
+        health=health,
+        row=matching.tail(1).to_dicts()[0],
+    ), ""
+
+
 def gather_continuous_alerts(
     *,
     continuous_root: Path,
@@ -500,6 +651,8 @@ def gather_continuous_alerts(
     args: argparse.Namespace,
     cycles_dataset: str = "continuous_fade_demo_cycles",
     cycle_checks: bool = True,
+    environment: str = "demo",
+    unit_runtime: UnitRuntime | None = None,
 ) -> list[Alert]:
     """Check the continuous strategy scheduler and its causal signal inputs.
 
@@ -516,21 +669,49 @@ def gather_continuous_alerts(
         except Exception:  # noqa: BLE001 — watchdog never crashes
             cyc = pl.DataFrame()
         if cyc is not None and not cyc.is_empty() and "mode" in cyc.columns:
-            cyc = cyc.filter(
-                pl.col("mode").fill_null("") != "ledger_reset_boundary"
-            )
-        latest_ts = (
-            int(cyc.select(pl.col("ts_ms").max()).item())
+            cyc = cyc.filter(pl.col("mode").fill_null("") != "ledger_reset_boundary")
+        latest_row = (
+            cyc.sort("ts_ms").tail(1).to_dicts()[0]
             if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
             else None
         )
+        observation: CompletedCycleObservation | None = None
+        row: dict[str, Any] | None
+        liveness_ts_ms: int | None
+        generation_bound = unit_runtime is not None and unit_runtime.invocation_id is not None
+        if generation_bound:
+            assert unit_runtime is not None
+            observation, detail = _bind_completed_cycle(
+                root=continuous_root,
+                cycles=cyc,
+                runtime=unit_runtime,
+                sleeve="continuous",
+                environment=environment,
+            )
+            if observation is None:
+                if _within_startup_grace(
+                    unit_runtime,
+                    max_age_minutes=args.max_cycle_age_min,
+                ):
+                    return alerts
+                alerts.append(_unverified_generation_cycle_alert(label=label, detail=detail))
+                return alerts
+            row = observation.row
+            liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
+        else:
+            row = latest_row
+            liveness_ts_ms = (
+                int(latest_row["ts_ms"]) if latest_row is not None and latest_row.get("ts_ms") is not None else None
+            )
         live = evaluate_cycle_liveness(
-            latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
+            latest_cycle_ts_ms=liveness_ts_ms,
+            now_ms=now_ms,
+            max_age_minutes=args.max_cycle_age_min,
+            label=label,
         )
         if live:
             alerts.append(live)
-        if cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns:
-            row = cyc.sort("ts_ms").tail(1).to_dicts()[0]
+        if row is not None:
             rmom_alert = evaluate_rmom_staleness(
                 max_rmom_day_ts=int(row.get("max_rmom_day_ts") or 0),
                 now_ms=now_ms,
@@ -550,13 +731,25 @@ def gather_continuous_alerts(
                         message=f"{label}: continuous sleeve resolved an EMPTY universe (discover/ingestion failure?); zero candidates -- looks like a quiet market.",
                     )
                 )
-            kline_rows = row.get("kline_store_rows")
+            kline_rows = (
+                observation.health.ws_kline_store_rows
+                if observation is not None and observation.health.ws_kline_store_rows is not None
+                else row.get("kline_store_rows")
+            )
             if kline_rows is not None and int(kline_rows) == 0:
+                detail = (
+                    "current WS kline store is EMPTY"
+                    if observation is not None
+                    else "latest cycle used zero WS kline rows"
+                )
                 alerts.append(
                     Alert(
                         key=f"continuous_kline_store_empty:{label}",
                         severity=WARNING,
-                        message=f"{label}: continuous sleeve WS kline store is EMPTY (kline_store_rows=0); zero candidates -- looks like a quiet market.",
+                        message=(
+                            f"{label}: continuous sleeve {detail} (rows=0); "
+                            "public REST fallback may be carrying the cycle."
+                        ),
                     )
                 )
     return alerts
@@ -569,6 +762,8 @@ def gather_long_alerts(
     args: argparse.Namespace,
     cycle_checks: bool = True,
     cycles_dataset: str = "long_native_demo_cycles",
+    environment: str = "demo",
+    unit_runtime: UnitRuntime | None = None,
 ) -> list[Alert]:
     """Check the LONG strategy scheduler and WS input freshness only."""
     if not long_root.exists():
@@ -580,18 +775,48 @@ def gather_long_alerts(
             cyc = read_dataset(long_root, cycles_dataset)
         except Exception:  # noqa: BLE001 — watchdog never crashes
             cyc = pl.DataFrame()
-        latest_ts = (
-            int(cyc.select(pl.col("ts_ms").max()).item())
+        latest_row = (
+            cyc.sort("ts_ms").tail(1).to_dicts()[0]
             if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
             else None
         )
+        row: dict[str, Any] | None
+        liveness_ts_ms: int | None
+        generation_bound = unit_runtime is not None and unit_runtime.invocation_id is not None
+        if generation_bound:
+            assert unit_runtime is not None
+            observation, detail = _bind_completed_cycle(
+                root=long_root,
+                cycles=cyc,
+                runtime=unit_runtime,
+                sleeve="long",
+                environment=environment,
+            )
+            if observation is None:
+                if _within_startup_grace(
+                    unit_runtime,
+                    max_age_minutes=args.max_cycle_age_min,
+                ):
+                    return alerts
+                alerts.append(_unverified_generation_cycle_alert(label=label, detail=detail))
+                return alerts
+            row = observation.row
+            liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
+        else:
+            row = latest_row
+            liveness_ts_ms = (
+                int(latest_row["ts_ms"]) if latest_row is not None and latest_row.get("ts_ms") is not None else None
+            )
         live = evaluate_cycle_liveness(
-            latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
+            latest_cycle_ts_ms=liveness_ts_ms,
+            now_ms=now_ms,
+            max_age_minutes=args.max_cycle_age_min,
+            label=label,
         )
         if live:
             alerts.append(live)
-        if cyc is not None and not cyc.is_empty() and "kline_store_max_ts_ms" in cyc.columns:
-            store_max = int(cyc.select(pl.col("kline_store_max_ts_ms").max()).item() or 0)
+        if row is not None and row.get("kline_store_max_ts_ms") is not None:
+            store_max = int(row.get("kline_store_max_ts_ms") or 0)
             ws = evaluate_ws_staleness(
                 store_max_ts_ms=store_max, now_ms=now_ms, max_lag_hours=args.max_ws_lag_hours, label=label
             )
@@ -719,6 +944,8 @@ def gather_account_owner_health_alerts(
     environment: str,
     max_age_minutes: float,
     now_ms: int | None = None,
+    startup_grace_minutes: float = 0.0,
+    unit_runtime: UnitRuntime | None = None,
 ) -> list[Alert]:
     """Require fresh process, capital, rule-readiness, and status evidence."""
 
@@ -738,6 +965,18 @@ def gather_account_owner_health_alerts(
                 now_ns=now_ms * 1_000_000,
             )
     except (OSError, RuntimeError, ValueError) as exc:
+        if (
+            type(exc) is RuntimeError
+            and str(exc).startswith(_QUEUE_HEAD_STARTUP_DETAIL_PREFIX)
+            and _within_startup_grace(
+                unit_runtime,
+                max_age_minutes=startup_grace_minutes,
+            )
+        ):
+            # The owner remains blocked and target producers still fail closed.
+            # Suppress only the observer page while this generation establishes
+            # its dynamic queue-head L2 subscription.
+            return []
         return [
             Alert(
                 key=f"account_owner_health:{environment}",
@@ -774,26 +1013,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # account/capture/strategy safety gathers.
     p.add_argument(
         "--continuous-root",
-        default=os.environ.get("CONTINUOUS_DEMO_DATA_ROOT")
-        or _default_root("data/bybit-continuous-demo-event"),
+        default=os.environ.get("CONTINUOUS_DEMO_DATA_ROOT") or _default_root("data/bybit-continuous-demo-event"),
         help="continuous-fade sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
         "--continuous-paper-root",
-        default=os.environ.get("CONTINUOUS_PAPER_DATA_ROOT")
-        or _default_root("data/bybit-continuous-paper-event"),
+        default=os.environ.get("CONTINUOUS_PAPER_DATA_ROOT") or _default_root("data/bybit-continuous-paper-event"),
         help="continuous-fade paper root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
         "--long-root",
-        default=os.environ.get("LONG_DEMO_DATA_ROOT")
-        or _default_root("data/bybit-long-demo-event"),
+        default=os.environ.get("LONG_DEMO_DATA_ROOT") or _default_root("data/bybit-long-demo-event"),
         help="long-native sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
         "--long-paper-root",
-        default=os.environ.get("LONG_PAPER_DATA_ROOT")
-        or _default_root("data/bybit-long-paper-event"),
+        default=os.environ.get("LONG_PAPER_DATA_ROOT") or _default_root("data/bybit-long-paper-event"),
         help="long-native paper sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
@@ -866,9 +1101,7 @@ def main() -> int:
     args = build_arg_parser().parse_args()
 
     required_account_owner_units = (
-        (_DEMO_ACCOUNT_OWNER_UNIT,)
-        if args.account_scope == "demo"
-        else _REQUIRED_ACCOUNT_OWNER_UNITS
+        (_DEMO_ACCOUNT_OWNER_UNIT,) if args.account_scope == "demo" else _REQUIRED_ACCOUNT_OWNER_UNITS
     )
 
     units = list(
@@ -912,16 +1145,11 @@ def main() -> int:
     # Skip cycle checks for disabled sleeves, but still inspect residual open state:
     # turning a sleeve off does not flatten it.
     unit_states = _unit_states(units)
+    runtime_units = list(dict.fromkeys([*units, *_default_units_for_scope(args.account_scope)]))
+    unit_runtime = _unit_runtime_metadata(runtime_units)
     not_active_timers = {u for u, s in unit_states.items() if u.endswith(".timer") and s != "active"}
-    owner_states = {
-        unit: unit_states.get(unit, "unknown")
-        for unit in required_account_owner_units
-    }
-    non_owner_states = {
-        unit: state
-        for unit, state in unit_states.items()
-        if unit not in required_account_owner_units
-    }
+    owner_states = {unit: unit_states.get(unit, "unknown") for unit in required_account_owner_units}
+    non_owner_states = {unit: state for unit, state in unit_states.items() if unit not in required_account_owner_units}
     alerts = evaluate_unit_states(
         non_owner_states,
         prior_not_active_timers=prior_not_active_timers,
@@ -962,6 +1190,8 @@ def main() -> int:
             account_root=Path(args.account_root),
             environment="demo",
             max_age_minutes=args.max_account_health_age_min,
+            startup_grace_minutes=args.max_cycle_age_min,
+            unit_runtime=unit_runtime.get(_DEMO_ACCOUNT_OWNER_UNIT),
         )
     )
     if args.account_scope == "demo-paper" and paper_root_alert is None:
@@ -970,6 +1200,8 @@ def main() -> int:
                 account_root=paper_account_root,
                 environment="paper",
                 max_age_minutes=args.max_account_health_age_min,
+                startup_grace_minutes=args.max_cycle_age_min,
+                unit_runtime=unit_runtime.get(_PAPER_ACCOUNT_OWNER_UNIT),
             )
         )
     if continuous_root is not None:
@@ -979,6 +1211,8 @@ def main() -> int:
                 now_ms=now_ms,
                 args=args,
                 cycle_checks=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
+                environment="demo",
+                unit_runtime=unit_runtime.get(_CONTINUOUS_DEMO_UNIT),
             )
         )
     hedge_model_prior = Path(args.hedge_model_prior) if str(args.hedge_model_prior).strip() else None
@@ -1000,6 +1234,8 @@ def main() -> int:
                 now_ms=now_ms,
                 args=args,
                 cycles_dataset="continuous_fade_paper_cycles",
+                environment="paper",
+                unit_runtime=unit_runtime.get(_CONTINUOUS_PAPER_UNIT),
             )
         )
     if long_root is not None:
@@ -1009,19 +1245,19 @@ def main() -> int:
                 now_ms=now_ms,
                 args=args,
                 cycle_checks=_sleeve_on("LONG_SLEEVE"),
+                environment="demo",
+                unit_runtime=unit_runtime.get(_LONG_DEMO_UNIT),
             )
         )
-    if (
-        args.account_scope == "demo-paper"
-        and long_paper_root is not None
-        and _sleeve_on("LONG_SLEEVE")
-    ):
+    if args.account_scope == "demo-paper" and long_paper_root is not None and _sleeve_on("LONG_SLEEVE"):
         alerts.extend(
             gather_long_alerts(
                 long_root=long_paper_root,
                 now_ms=now_ms,
                 args=args,
                 cycles_dataset="long_native_paper_cycles",
+                environment="paper",
+                unit_runtime=unit_runtime.get(_LONG_PAPER_UNIT),
             )
         )
     to_send, resolved, new_state = select_alerts_to_send(

@@ -29,6 +29,18 @@ requisite, uphold, or wants edge to the demo owner. Its only lifecycle edges are
 `Wants`/`After` for network readiness; the matching timer triggers it and the
 receipt path condition gates execution.
 
+Strategy cycle `ts_ms` remains the causal scheduling input and is not an
+operational completion timestamp. After cycle output, target capture, and the
+decision outcome are durable, each producer atomically publishes a private
+completion projection bound to systemd's current `INVOCATION_ID`. The watchdog
+uses that receipt for age and current WS-store size, and binds it back to the
+exact causal cycle row. A prior service generation cannot mask a hung restart.
+Before the first receipt, only the current generation receives the same bounded
+ten-minute grace as the cycle SLA. The account owner remains fail-closed during
+that window; the observer suppresses only its exact initial queue-head L2
+subscription transition, never missing, stale, reconciliation, or capital
+health failures.
+
 ## Deployment lifecycle
 
 GitHub dispatches share one repository-wide VPS concurrency group, independent

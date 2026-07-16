@@ -24,6 +24,8 @@ def _load():
 M = _load()
 HOUR = 3_600_000
 MIN = 60_000
+CURRENT_INVOCATION_ID = "78" * 16
+PRIOR_INVOCATION_ID = "9a" * 16
 
 
 def _stub_account_authority(monkeypatch) -> None:
@@ -42,6 +44,7 @@ def _stub_account_authority(monkeypatch) -> None:
     monkeypatch.setattr(M, "gather_account_capture_alerts", lambda **_kwargs: [])
     monkeypatch.setattr(M, "gather_account_health_alerts", lambda **_kwargs: [])
     monkeypatch.setattr(M, "gather_account_owner_health_alerts", lambda **_kwargs: [])
+    monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
 
 
 def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
@@ -54,6 +57,13 @@ def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
     assert stale is not None and stale.severity == M.CRITICAL and "DOWN" in stale.message
     missing = M.evaluate_cycle_liveness(latest_cycle_ts_ms=None, now_ms=now, max_age_minutes=10, label="demo")
     assert missing is not None and missing.severity == M.CRITICAL
+    future = M.evaluate_cycle_liveness(
+        latest_cycle_ts_ms=now + MIN,
+        now_ms=now,
+        max_age_minutes=10,
+        label="demo",
+    )
+    assert future is not None and "future-dated" in future.message
 
 
 def test_rmom_staleness_empty_fresh_and_stale() -> None:
@@ -84,6 +94,28 @@ def test_unit_states_alert_only_on_terminal_failed() -> None:
     alerts = M.evaluate_unit_states(states)
     assert {a.key for a in alerts} == {"unit:e.service"}
     assert alerts[0].severity == M.CRITICAL
+
+
+def test_unit_runtime_metadata_uses_systemd_generation_and_boottime(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(M, "_boottime_ns", lambda: 65 * 60_000_000_000)
+    monkeypatch.setattr(
+        M.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=(f"InvocationID={CURRENT_INVOCATION_ID}\nActiveEnterTimestampMonotonic=3600000000\n")
+        ),
+    )
+
+    runtime = M._unit_runtime_metadata(["producer.service", "ignored.timer"])
+
+    assert runtime == {
+        "producer.service": M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=5.0,
+        )
+    }
 
 
 def test_unit_states_timers_alert_on_not_active() -> None:
@@ -322,12 +354,15 @@ def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
     recorder.close()
     receive_ms = receive_ns // 1_000_000
     assert M.gather_account_capture_alerts(capture_root=capture, now_ms=receive_ms + 2 * MIN, max_age_minutes=3) == []
-    assert M.gather_account_capture_alerts(
-        capture_root=capture,
-        now_ms=receive_ms + 2 * MIN,
-        max_age_minutes=3,
-        expected_owner_uid=(capture / "account_owner_market_readiness.json").stat().st_uid,
-    ) == []
+    assert (
+        M.gather_account_capture_alerts(
+            capture_root=capture,
+            now_ms=receive_ms + 2 * MIN,
+            max_age_minutes=3,
+            expected_owner_uid=(capture / "account_owner_market_readiness.json").stat().st_uid,
+        )
+        == []
+    )
     wrong_owner = M.gather_account_capture_alerts(
         capture_root=capture,
         now_ms=receive_ms + 2 * MIN,
@@ -571,6 +606,55 @@ def test_account_owner_health_production_time_is_read_adjacent(tmp_path, monkeyp
     assert "age_ns=-84000000" in explicit_future[0].message
 
 
+def test_queue_head_market_data_block_is_suppressed_only_during_startup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    def queue_head_block(*_args, **_kwargs) -> None:
+        raise RuntimeError("account owner is blocked: waiting for queue-head market data: ETHUSDT:stale_book")
+
+    monkeypatch.setattr(M, "require_recent_account_owner_health", queue_head_block)
+    starting = M.UnitRuntime(
+        invocation_id=CURRENT_INVOCATION_ID,
+        active_age_minutes=8.0,
+    )
+    assert (
+        M.gather_account_owner_health_alerts(
+            account_root=tmp_path,
+            environment="demo",
+            max_age_minutes=1,
+            startup_grace_minutes=10,
+            unit_runtime=starting,
+        )
+        == []
+    )
+
+    expired = M.gather_account_owner_health_alerts(
+        account_root=tmp_path,
+        environment="demo",
+        max_age_minutes=1,
+        startup_grace_minutes=10,
+        unit_runtime=M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=10.01,
+        ),
+    )
+    assert [alert.key for alert in expired] == ["account_owner_health:demo"]
+
+    def other_block(*_args, **_kwargs) -> None:
+        raise RuntimeError("account owner is blocked: reconciliation mismatch")
+
+    monkeypatch.setattr(M, "require_recent_account_owner_health", other_block)
+    unrelated = M.gather_account_owner_health_alerts(
+        account_root=tmp_path,
+        environment="demo",
+        max_age_minutes=1,
+        startup_grace_minutes=10,
+        unit_runtime=starting,
+    )
+    assert [alert.key for alert in unrelated] == ["account_owner_health:demo"]
+
+
 def test_gather_continuous_alerts_warns_on_empty_inputs(tmp_path) -> None:
     """A zero universe/store remains a strategy-input failure."""
     import argparse
@@ -681,6 +765,207 @@ def test_gather_continuous_paper_alerts_uses_paper_cycle_dataset(tmp_path) -> No
     assert "continuous_kline_store_empty:bybit-continuous-paper-event" in keys
 
 
+def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alarm(
+    tmp_path,
+) -> None:
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.strategy_cycle_health import (
+        StrategyCycleHealth,
+        write_strategy_cycle_health,
+    )
+
+    now = 1_000 * HOUR
+    root = tmp_path / "bybit-continuous-paper-event"
+    root.mkdir()
+    completed_cycle_ts = now - 20 * MIN
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "completed",
+                    "ts_ms": completed_cycle_ts,
+                    "max_rmom_day_ts": now,
+                    "universe_symbols": 10,
+                    # This is cycle coverage at its causal start, not the
+                    # manager's store size after the seven-minute cold cycle.
+                    "kline_store_rows": 0,
+                },
+                {
+                    # A newer output may be durable while its capture/outcome
+                    # append is still in flight. It must not outrank the last
+                    # fully evidenced completion receipt.
+                    "cycle_id": "evidence-in-flight",
+                    "ts_ms": now - MIN,
+                    "max_rmom_day_ts": 0,
+                    "universe_symbols": 0,
+                    "kline_store_rows": 0,
+                },
+            ]
+        ),
+        root,
+        "continuous_fade_paper_cycles",
+        partition_by=(),
+    )
+    write_strategy_cycle_health(
+        root,
+        StrategyCycleHealth(
+            sleeve="continuous",
+            environment="paper",
+            cycle_id="completed",
+            cycle_ts_ms=completed_cycle_ts,
+            completed_ts_ns=(now - MIN) * 1_000_000,
+            invocation_id=CURRENT_INVOCATION_ID,
+            ws_kline_store_rows=383_711,
+        ),
+    )
+
+    alerts = M.gather_continuous_alerts(
+        continuous_root=root,
+        now_ms=now,
+        args=SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2),
+        cycles_dataset="continuous_fade_paper_cycles",
+        environment="paper",
+        unit_runtime=M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=20.0,
+        ),
+    )
+
+    assert alerts == []
+
+
+def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> None:
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+
+    now = 1_000 * HOUR
+    root = tmp_path / "bybit-continuous-demo-event"
+    root.mkdir()
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "prior-generation",
+                    "ts_ms": now - 60 * MIN,
+                    "max_rmom_day_ts": now,
+                    "universe_symbols": 10,
+                    "kline_store_rows": 100,
+                }
+            ]
+        ),
+        root,
+        "continuous_fade_demo_cycles",
+        partition_by=(),
+    )
+    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2)
+
+    assert (
+        M.gather_continuous_alerts(
+            continuous_root=root,
+            now_ms=now,
+            args=args,
+            unit_runtime=M.UnitRuntime(
+                invocation_id=CURRENT_INVOCATION_ID,
+                active_age_minutes=8.0,
+            ),
+        )
+        == []
+    )
+
+    expired = M.gather_continuous_alerts(
+        continuous_root=root,
+        now_ms=now,
+        args=args,
+        unit_runtime=M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=10.01,
+        ),
+    )
+    assert [alert.key for alert in expired] == [f"liveness:{root.name}"]
+    assert "current service generation" in expired[0].message
+
+
+def test_prior_generation_or_stale_completion_cannot_mask_hung_daemon(
+    tmp_path,
+) -> None:
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.strategy_cycle_health import (
+        StrategyCycleHealth,
+        write_strategy_cycle_health,
+    )
+
+    now = 1_000 * HOUR
+    root = tmp_path / "bybit-long-demo-event"
+    root.mkdir()
+    cycle_ts = now - 60 * MIN
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "long-cycle",
+                    "ts_ms": cycle_ts,
+                    "kline_store_max_ts_ms": now - HOUR,
+                }
+            ]
+        ),
+        root,
+        "long_native_demo_cycles",
+        partition_by=(),
+    )
+    write_strategy_cycle_health(
+        root,
+        StrategyCycleHealth(
+            sleeve="long",
+            environment="demo",
+            cycle_id="long-cycle",
+            cycle_ts_ms=cycle_ts,
+            completed_ts_ns=(now - MIN) * 1_000_000,
+            invocation_id=PRIOR_INVOCATION_ID,
+            ws_kline_store_rows=100,
+        ),
+    )
+    args = SimpleNamespace(max_cycle_age_min=10, max_ws_lag_hours=6)
+    runtime = M.UnitRuntime(
+        invocation_id=CURRENT_INVOCATION_ID,
+        active_age_minutes=20.0,
+    )
+
+    prior = M.gather_long_alerts(
+        long_root=root,
+        now_ms=now,
+        args=args,
+        unit_runtime=runtime,
+    )
+    assert [alert.key for alert in prior] == [f"liveness:{root.name}"]
+    assert "prior service generation" in prior[0].message
+
+    write_strategy_cycle_health(
+        root,
+        StrategyCycleHealth(
+            sleeve="long",
+            environment="demo",
+            cycle_id="long-cycle",
+            cycle_ts_ms=cycle_ts,
+            completed_ts_ns=(now - 11 * MIN) * 1_000_000,
+            invocation_id=CURRENT_INVOCATION_ID,
+            ws_kline_store_rows=100,
+        ),
+    )
+    stale = M.gather_long_alerts(
+        long_root=root,
+        now_ms=now,
+        args=args,
+        unit_runtime=runtime,
+    )
+    assert [alert.key for alert in stale] == [f"liveness:{root.name}"]
+    assert "11.0 min ago" in stale[0].message
+
+
 def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
     """The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
     unset-default mirrors deploy/lib_sleeves.sh: EVERY sleeve fails safe to OFF
@@ -718,6 +1003,51 @@ def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     assert "liquidity-migration-bybit-continuous-paper.service" not in units
 
 
+def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    captured_runtime_units: list[str] = []
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setenv("LONG_SLEEVE", "off")
+    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
+    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
+    monkeypatch.setattr(
+        M,
+        "_unit_states",
+        lambda units: {unit: "active" for unit in units},
+    )
+
+    def capture_runtime(units: list[str]) -> dict[str, object]:
+        captured_runtime_units.extend(units)
+        return {}
+
+    monkeypatch.setattr(M, "_unit_runtime_metadata", capture_runtime)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_demo_liveness.py",
+            "--account-scope",
+            "demo",
+            "--unit",
+            "operator-extra.timer",
+            "--continuous-root",
+            "",
+            "--continuous-paper-root",
+            "",
+            "--long-root",
+            "",
+            "--long-paper-root",
+            "",
+            "--state-file",
+            str(tmp_path / "state.json"),
+        ],
+    )
+
+    assert M.main() == 0
+    assert M._CONTINUOUS_DEMO_UNIT in captured_runtime_units
+
+
 def test_default_unit_monitoring_is_always_account_kernel_only(monkeypatch) -> None:
     monkeypatch.delenv("ACCOUNT_EXECUTION_KERNEL_REQUIRED", raising=False)
     monkeypatch.setenv("LONG_SLEEVE", "on")
@@ -750,9 +1080,7 @@ def test_demo_account_scope_excludes_every_paper_owner_and_producer(monkeypatch)
     assert "liquidity-migration-continuous-rmom-refresh.timer" not in (M._default_units_for_scope("demo"))
 
 
-def test_paper_liveness_roots_come_from_group_readable_owner_environment(
-    tmp_path, monkeypatch
-) -> None:
+def test_paper_liveness_roots_come_from_group_readable_owner_environment(tmp_path, monkeypatch) -> None:
     account = tmp_path / "paper-account"
     capture = tmp_path / "paper-capture"
     environment = tmp_path / "account-paper-execution.env"

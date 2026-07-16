@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .account_owner_health import validate_systemd_invocation_id
 from .bybit_market_data import BybitMarketData, BybitPublicTickerStream
 from .config import ResearchConfig
 from .deterministic_runtime import Clock, SystemClock
@@ -27,7 +28,7 @@ from .long_native_event_demo import (
     format_long_demo_cycle_summary,
     run_long_native_demo_cycle,
 )
-from .ws_state_cache import TickerCache
+from .strategy_cycle_health import StrategyCycleHealth, write_strategy_cycle_health
 from .strategy_event_clock import (
     DeterministicEventClock,
     JsonlStrategyEventTape,
@@ -39,6 +40,7 @@ from .strategy_target_replay import (
     JsonlTargetSchedulingCaptureTape,
     PublishedTargetCyclePayload,
 )
+from .ws_state_cache import TickerCache
 
 
 _logger = logging.getLogger("liquidity_migration.long_native_event_demo_daemon")
@@ -103,6 +105,8 @@ class LongNativeDemoDaemon:
         strategy_decision_recorder: JsonlStrategyEventDecisionTape | None = None,
         strategy_target_capture_path: str | Path | None = None,
         strategy_target_capture_recorder: JsonlTargetSchedulingCaptureTape | None = None,
+        strategy_invocation_id: str | None = None,
+        completion_clock_ns: Callable[[], int] = time.time_ns,
     ) -> None:
         resolved_demo_config = demo_config or LongNativeDemoCycleConfig()
         long_target_producer = isinstance(resolved_demo_config, LongNativeDemoCycleConfig)
@@ -134,6 +138,19 @@ class LongNativeDemoDaemon:
             strategy_target_capture_path or self.data_root / "strategy_target_scheduling_capture.jsonl"
         )
         self._strategy_evidence_errors = 0
+        self._strategy_health_errors = 0
+        invocation_id = (
+            strategy_invocation_id if strategy_invocation_id is not None else os.environ.get("INVOCATION_ID")
+        )
+        self._strategy_invocation_id = (
+            validate_systemd_invocation_id(
+                invocation_id,
+                label="strategy producer INVOCATION_ID",
+            )
+            if invocation_id is not None
+            else None
+        )
+        self._completion_clock_ns = completion_clock_ns
         self._strategy_event_source = f"{self._sleeve_label}:{self.demo_config.execution_environment}"
         self._cycle_event_sequence = max(
             (event.source_sequence for event in recorder.prior_events if event.source == self._strategy_event_source),
@@ -296,6 +313,7 @@ class LongNativeDemoDaemon:
             "reconcile_errors": self._reconcile_errors,
             "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
             "strategy_evidence_errors": self._strategy_evidence_errors,
+            "strategy_health_errors": self._strategy_health_errors,
         }
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
@@ -339,6 +357,68 @@ class LongNativeDemoDaemon:
                 self._sleeve_label,
                 exc,
             )
+            return
+        try:
+            self._publish_cycle_health(payload)
+        except Exception as exc:  # noqa: BLE001 - watchdog will fail closed after startup grace
+            self._strategy_health_errors += 1
+            _logger.exception(
+                "%s strategy completion health publication failed: %s",
+                self._sleeve_label,
+                exc,
+            )
+
+    def _publish_cycle_health(self, payload: PublishedTargetCyclePayload) -> None:
+        """Publish non-causal completion time after all strategy evidence is durable."""
+
+        invocation_id = self._strategy_invocation_id
+        if invocation_id is None:
+            # Direct/local daemon use has no service generation to bind.  The
+            # systemd runtime always supplies INVOCATION_ID and is the only path
+            # consumed by the VPS watchdog.
+            return
+        cycle_payload: Any = payload if self._sleeve_label == "continuous" else payload.get("cycle")
+        if not isinstance(cycle_payload, dict):
+            raise ValueError("completed cycle payload is missing its cycle object")
+        cycle_id = cycle_payload.get("cycle_id")
+        cycle_ts_ms = cycle_payload.get("ts_ms")
+        if type(cycle_id) is not str or not cycle_id:
+            raise ValueError("completed cycle payload has no cycle_id")
+        if type(cycle_ts_ms) is not int or cycle_ts_ms <= 0:
+            raise ValueError("completed cycle payload has no positive causal ts_ms")
+        write_strategy_cycle_health(
+            self.data_root,
+            StrategyCycleHealth(
+                sleeve=self._sleeve_label,
+                environment=str(self.demo_config.execution_environment),
+                cycle_id=cycle_id,
+                cycle_ts_ms=cycle_ts_ms,
+                completed_ts_ns=self._completion_clock_ns(),
+                invocation_id=invocation_id,
+                ws_kline_store_rows=self._current_ws_kline_store_rows(),
+            ),
+        )
+
+    def _current_ws_kline_store_rows(self) -> int | None:
+        """Return the manager's actual current store size, not cycle REST coverage."""
+
+        manager = self._kline_stream_manager
+        if manager is None:
+            return None
+        try:
+            stats = manager.stats()
+        except Exception as exc:  # noqa: BLE001 - optional telemetry must not erase completion
+            _logger.debug("kline store row-count fetch failed: %s", exc)
+            return None
+        if not isinstance(stats, dict):
+            return None
+        store = stats.get("store")
+        if not isinstance(store, dict):
+            return None
+        rows = store.get("rows")
+        if type(rows) is not int or rows < 0:
+            return None
+        return rows
 
     def _execute_cycle_event(self, event: StrategyEvent) -> PublishedTargetCyclePayload | None:
         cycle_started = time.monotonic()

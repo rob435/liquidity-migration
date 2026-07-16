@@ -29,6 +29,10 @@ from liquidity_migration.strategy_event_outcome import (
     JsonlStrategyEventDecisionTape,
     load_strategy_event_decision_tape,
 )
+from liquidity_migration.strategy_cycle_health import (
+    read_strategy_cycle_health,
+    strategy_cycle_health_path,
+)
 from liquidity_migration.strategy_target_replay import (
     JsonlTargetSchedulingCaptureTape,
     PublishedTargetCyclePayload,
@@ -98,9 +102,7 @@ def _event(sequence: int, *, sleeve: str = "long", timestamp: int | None = None)
         kind="startup" if sequence == 1 else "timer",
         payload={
             "execution_environment": "demo",
-            "strategy_profile": (
-                "LongV11aDivWeekendVol" if sleeve == "long" else "continuous_ensemble_v2"
-            ),
+            "strategy_profile": ("LongV11aDivWeekendVol" if sleeve == "long" else "continuous_ensemble_v2"),
         },
     )
 
@@ -127,9 +129,7 @@ def test_capture_is_built_from_verified_durable_requests_and_explicit_empty_cycl
     )
 
     assert len(first.requests) == 1
-    assert first.requests[0].request.to_dict()["intents"][0]["intent"]["decision_key"] == (
-        "long-target/cycle/entry/a"
-    )
+    assert first.requests[0].request.to_dict()["intents"][0]["intent"]["decision_key"] == ("long-target/cycle/entry/a")
     assert first.decision_keys == ("long-target/cycle/entry/a",)
     assert first.requests[0].arrival_sequence > 0
     assert first.requests[0].durable_queue_state == "processing"
@@ -222,12 +222,8 @@ def test_long_daemon_appends_post_callback_outcome_only_from_durable_publication
     daemon._run_one_cycle()
 
     events = JsonlStrategyEventTape(root / "strategy_event_tape.jsonl").prior_events
-    outcomes, _ = load_strategy_event_decision_tape(
-        root / "strategy_event_decision_tape.jsonl"
-    )
-    captures, _ = load_target_scheduling_capture(
-        root / "strategy_target_scheduling_capture.jsonl"
-    )
+    outcomes, _ = load_strategy_event_decision_tape(root / "strategy_event_decision_tape.jsonl")
+    captures, _ = load_target_scheduling_capture(root / "strategy_target_scheduling_capture.jsonl")
     assert len(events) == len(outcomes) == len(captures) == 1
     assert outcomes[0].event_id == events[0].event_id
     assert outcomes[0].decision_keys == ("long-target/cycle/entry/a",)
@@ -257,9 +253,7 @@ def test_daemon_callback_or_publication_failure_leaves_outcome_missing(
     )
     callback_daemon._run_one_cycle()
     assert len(JsonlStrategyEventTape(callback_root / "strategy_event_tape.jsonl").prior_events) == 1
-    assert load_strategy_event_decision_tape(
-        callback_root / "strategy_event_decision_tape.jsonl"
-    )[0] == ()
+    assert load_strategy_event_decision_tape(callback_root / "strategy_event_decision_tape.jsonl")[0] == ()
 
     successful = _published_cycle(route)
     failed_result = PublishedTargetCyclePayload(
@@ -285,12 +279,8 @@ def test_daemon_callback_or_publication_failure_leaves_outcome_missing(
         clock=VirtualClock(current_wall_ns=2_000_000_000),
     )
     publication_daemon._run_one_cycle()
-    assert load_strategy_event_decision_tape(
-        publication_root / "strategy_event_decision_tape.jsonl"
-    )[0] == ()
-    assert load_target_scheduling_capture(
-        publication_root / "strategy_target_scheduling_capture.jsonl"
-    )[0] == ()
+    assert load_strategy_event_decision_tape(publication_root / "strategy_event_decision_tape.jsonl")[0] == ()
+    assert load_target_scheduling_capture(publication_root / "strategy_target_scheduling_capture.jsonl")[0] == ()
     assert publication_daemon._strategy_evidence_errors == 1
 
 
@@ -330,12 +320,132 @@ def test_continuous_daemon_records_successful_no_target_cycle(
 
     daemon._run_one_cycle()
 
-    outcomes, _ = load_strategy_event_decision_tape(
-        root / "strategy_event_decision_tape.jsonl"
-    )
-    captures, _ = load_target_scheduling_capture(
-        root / "strategy_target_scheduling_capture.jsonl"
-    )
+    outcomes, _ = load_strategy_event_decision_tape(root / "strategy_event_decision_tape.jsonl")
+    captures, _ = load_target_scheduling_capture(root / "strategy_target_scheduling_capture.jsonl")
     assert outcomes[0].decision_keys == ()
     assert captures[0].sleeve == "continuous"
     assert captures[0].requests == ()
+
+
+def test_continuous_daemon_publishes_post_evidence_completion_health(
+    tmp_path: Path,
+) -> None:
+    invocation_id = "34" * 16
+    route = _route(tmp_path / "route", environment="paper")
+    result = PublishedTargetCyclePayload(
+        {
+            "cycle_id": "continuous-target-health-1000",
+            "ts_ms": 1_000,
+            "mode": "paper_target",
+            "universe_symbols": 10,
+        },
+        publication=ExitFirstPublication((), (), ()),
+        route=route,
+    )
+
+    class _KlineManager:
+        def store(self) -> None:
+            return None
+
+        def stats(self) -> dict[str, object]:
+            return {"store": {"rows": 383_711}}
+
+    root = tmp_path / "continuous-paper"
+    daemon = ContinuousDemoDaemon(
+        root,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=ContinuousDemoCycleConfig(
+            execution_environment="paper",
+            account_intent_inbox_root=route.inbox_root,
+            account_execution_root=route.account_root,
+            ws_klines_enabled=False,
+        ),
+        cycle_runner=lambda *_args, **_kwargs: result,
+        kline_stream_manager=_KlineManager(),
+        clock=VirtualClock(current_wall_ns=1_000_000_000),
+        strategy_invocation_id=invocation_id,
+        completion_clock_ns=lambda: 2_000_000_000,
+    )
+
+    daemon._run_one_cycle()
+
+    health = read_strategy_cycle_health(root)
+    assert health.cycle_id == "continuous-target-health-1000"
+    assert health.cycle_ts_ms == 1_000
+    assert health.completed_ts_ns == 2_000_000_000
+    assert health.invocation_id == invocation_id
+    assert health.environment == "paper"
+    assert health.ws_kline_store_rows == 383_711
+    assert (
+        load_strategy_event_decision_tape(root / "strategy_event_decision_tape.jsonl")[0][0].event_id
+        == JsonlStrategyEventTape(root / "strategy_event_tape.jsonl").prior_events[0].event_id
+    )
+
+
+def test_completion_health_never_precedes_evidence_and_cannot_invalidate_it(
+    tmp_path: Path,
+) -> None:
+    invocation_id = "56" * 16
+    route = _route(tmp_path / "route")
+    successful = _published_cycle(
+        route,
+        with_entry=False,
+        payload={
+            "cycle": {
+                "cycle_id": "long-target-health-1000",
+                "ts_ms": 1_000,
+                "mode": "demo_target",
+            }
+        },
+    )
+    failed_publication = PublishedTargetCyclePayload(
+        successful,
+        publication=ExitFirstPublication(
+            (),
+            (),
+            (TargetPublicationError("entry", "", "OSError", "failed"),),
+        ),
+        route=route,
+    )
+    evidence_failure_root = tmp_path / "evidence-failure"
+    evidence_failure = LongNativeDemoDaemon(
+        evidence_failure_root,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=LongNativeDemoCycleConfig(
+            execution_environment="demo",
+            account_intent_inbox_root=route.inbox_root,
+            account_execution_root=route.account_root,
+            ws_klines_enabled=False,
+        ),
+        cycle_runner=lambda *_args, **_kwargs: failed_publication,
+        strategy_invocation_id=invocation_id,
+    )
+
+    evidence_failure._run_one_cycle()
+
+    assert evidence_failure._strategy_evidence_errors == 1
+    assert not strategy_cycle_health_path(evidence_failure_root).exists()
+
+    projection_failure_root = tmp_path / "projection-failure"
+    projection_failure = LongNativeDemoDaemon(
+        projection_failure_root,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=LongNativeDemoCycleConfig(
+            execution_environment="demo",
+            account_intent_inbox_root=route.inbox_root,
+            account_execution_root=route.account_root,
+            ws_klines_enabled=False,
+        ),
+        cycle_runner=lambda *_args, **_kwargs: successful,
+        strategy_invocation_id=invocation_id,
+        completion_clock_ns=lambda: 0,
+    )
+
+    projection_failure._run_one_cycle()
+
+    assert projection_failure._strategy_evidence_errors == 0
+    assert projection_failure._strategy_health_errors == 1
+    assert (
+        len(load_strategy_event_decision_tape(projection_failure_root / "strategy_event_decision_tape.jsonl")[0]) == 1
+    )
+    assert not strategy_cycle_health_path(projection_failure_root).exists()
