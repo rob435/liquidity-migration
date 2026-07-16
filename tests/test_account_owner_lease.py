@@ -271,6 +271,64 @@ def test_prepare_refuses_parent_and_regular_file_mount_boundaries(
     assert path.read_text(encoding="utf-8") == "external evidence\n"
 
 
+def test_explicit_private_parent_mount_boundary_is_pinned_for_lease_lifetime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("the private-parent mount-boundary opt-in is non-root only")
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
+    path = parent / "owner.lock"
+    private_mount_id = 202
+
+    def owner_bind_mount(descriptor: int) -> int:
+        metadata = os.fstat(descriptor)
+        identity = (metadata.st_dev, metadata.st_ino)
+        if identity == parent_identity:
+            return private_mount_id
+        if path.exists() and identity == (path.stat().st_dev, path.stat().st_ino):
+            return private_mount_id
+        return 101
+
+    monkeypatch.setattr(lease_module, "_lease_mount_id_for_fd", owner_bind_mount)
+    lease = AccountOwnerLease(
+        path,
+        allow_private_parent_mount_boundary=True,
+    )
+
+    lease.acquire()
+    assert lease.held is True
+
+    private_mount_id = 303
+    assert lease.held is False
+    lease.close()
+
+
+def test_root_cannot_opt_into_private_parent_mount_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
+    path = parent / "owner.lock"
+
+    def owner_bind_mount(descriptor: int) -> int:
+        metadata = os.fstat(descriptor)
+        return 202 if (metadata.st_dev, metadata.st_ino) == parent_identity else 101
+
+    monkeypatch.setattr(lease_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(lease_module, "_lease_mount_id_for_fd", owner_bind_mount)
+    with pytest.raises(RuntimeError, match="not owner-controlled"):
+        AccountOwnerLease(
+            path,
+            allow_private_parent_mount_boundary=True,
+        ).acquire()
+    assert not path.exists()
+
+
 def test_canonical_prepare_allows_trusted_dedicated_run_lock_mount_but_rejects_untrusted_anchor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -335,6 +393,8 @@ def test_acquire_refuses_parent_replacement_before_returning_prepared_fd(
         checked_path: Path,
         descriptor: int,
         prepared: lease_module.PreparedAccountOwnerLease,
+        *,
+        allow_private_parent_mount_boundary: bool = False,
     ) -> None:
         nonlocal replaced
         if not replaced:
@@ -344,7 +404,12 @@ def test_acquire_refuses_parent_replacement_before_returning_prepared_fd(
             replacement = parent / path.name
             replacement.write_text("replacement metadata\n", encoding="utf-8")
             replacement.chmod(0o600)
-        original_validate(checked_path, descriptor, prepared)
+        original_validate(
+            checked_path,
+            descriptor,
+            prepared,
+            allow_private_parent_mount_boundary=allow_private_parent_mount_boundary,
+        )
 
     monkeypatch.setattr(lease_module, "_validate_prepared_account_owner_lease", replace_parent)
 
@@ -371,6 +436,8 @@ def test_acquire_revalidates_leaf_after_flock_before_truncating_metadata(
         checked_path: Path,
         descriptor: int,
         prepared: lease_module.PreparedAccountOwnerLease,
+        *,
+        allow_private_parent_mount_boundary: bool = False,
     ) -> None:
         nonlocal validations
         validations += 1
@@ -378,7 +445,12 @@ def test_acquire_revalidates_leaf_after_flock_before_truncating_metadata(
             path.rename(displaced)
             path.write_text("replacement metadata\n", encoding="utf-8")
             path.chmod(0o600)
-        original_validate(checked_path, descriptor, prepared)
+        original_validate(
+            checked_path,
+            descriptor,
+            prepared,
+            allow_private_parent_mount_boundary=allow_private_parent_mount_boundary,
+        )
 
     monkeypatch.setattr(
         lease_module,

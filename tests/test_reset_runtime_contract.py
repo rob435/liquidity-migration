@@ -81,6 +81,18 @@ def test_reset_holds_process_and_account_leases_across_archive() -> None:
     assert "failure recovery" in text
 
 
+def test_paper_runner_and_reset_share_historical_owner_lease_path() -> None:
+    runner = (
+        SCRIPT.parents[1] / "liquidity_migration" / "account_paper_runner.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'PAPER_ACCOUNT_LEASE_PATH="$PWD/$PAPER_ACCOUNT_ROOT/account_execution_owner.lock"'
+        in _text()
+    )
+    assert 'requested_route.account_path / "account_execution_owner.lock"' in runner
+
+
 def test_reset_prepares_and_opens_account_leases_without_path_truncation() -> None:
     text = _text()
     demo = text[text.index("acquire_demo_account_lease()") : text.index("release_demo_account_lease()")]

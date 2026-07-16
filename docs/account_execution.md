@@ -31,8 +31,11 @@ account/inbox route manifests. A losing owner therefore cannot initialize route
 manifests before discovering the active owner. The demo lease is the
 authenticated Bybit user-wide capability under
 `/run/lock/liquidity-migration`; the paper lease is local to its canonical
-account root. Both retain the same validated single-link inode for the process
-lifetime, and route mismatch still fails closed after acquisition.
+account root. The paper owner accepts the intentional private-parent mount
+boundary created by systemd `ReadWritePaths`; this is a non-root-only opt-in,
+and the exact parent and leaf mount identities are still pinned and revalidated
+for the lease lifetime. Both owners retain the same validated single-link inode,
+and route mismatch still fails closed after acquisition.
 
 ## Data flow
 

@@ -212,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     lease = AccountOwnerLease(
-        requested_route.account_path / "account_execution_owner.lock"
+        requested_route.account_path / "account_execution_owner.lock",
+        allow_private_parent_mount_boundary=True,
     )
     lease.acquire()
     try:

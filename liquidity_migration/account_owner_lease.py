@@ -304,6 +304,7 @@ def _require_private_lease_parent(
     parent: Path,
     *,
     normalize_mode: bool,
+    allow_private_parent_mount_boundary: bool = False,
 ) -> os.stat_result:
     metadata = _validate_lease_directory_chain(chain, parent)
     _require_canonical_demo_anchor(chain, parent)
@@ -313,9 +314,18 @@ def _require_private_lease_parent(
     parent_mount_id = _lease_mount_id_for_fd(chain.parent_fd)
     ancestor_mount_id = _lease_mount_id_for_fd(chain.descriptors[-2])
     mode = stat.S_IMODE(metadata.st_mode)
+    accepted_private_mount_boundary = (
+        allow_private_parent_mount_boundary
+        and parent != _CANONICAL_DEMO_LEASE_DIRECTORY
+        and os.geteuid() != 0
+        and metadata.st_uid == os.geteuid()
+    )
     if (
         metadata.st_dev != ancestor.st_dev
-        or parent_mount_id != ancestor_mount_id
+        or (
+            parent_mount_id != ancestor_mount_id
+            and not accepted_private_mount_boundary
+        )
         or mode & 0o700 != 0o700
         or mode & 0o022
         or (os.geteuid() != 0 and metadata.st_uid != os.geteuid())
@@ -404,10 +414,17 @@ def _validate_prepared_account_owner_lease(
     path: Path,
     descriptor: int,
     prepared: PreparedAccountOwnerLease,
+    *,
+    allow_private_parent_mount_boundary: bool = False,
 ) -> None:
     chain = _open_lease_directory_chain(path.parent, allow_create_parent=False)
     try:
-        parent = _require_private_lease_parent(chain, path.parent, normalize_mode=False)
+        parent = _require_private_lease_parent(
+            chain,
+            path.parent,
+            normalize_mode=False,
+            allow_private_parent_mount_boundary=allow_private_parent_mount_boundary,
+        )
         leaf, mount_id = _require_lease_leaf(
             path=path,
             descriptor=descriptor,
@@ -433,11 +450,20 @@ def _validate_prepared_account_owner_lease(
         chain.close()
 
 
-def _open_prepared_account_owner_lease(path: Path) -> tuple[int, PreparedAccountOwnerLease]:
+def _open_prepared_account_owner_lease(
+    path: Path,
+    *,
+    allow_private_parent_mount_boundary: bool = False,
+) -> tuple[int, PreparedAccountOwnerLease]:
     chain = _open_lease_directory_chain(path.parent, allow_create_parent=True)
     descriptor = -1
     try:
-        parent = _require_private_lease_parent(chain, path.parent, normalize_mode=True)
+        parent = _require_private_lease_parent(
+            chain,
+            path.parent,
+            normalize_mode=True,
+            allow_private_parent_mount_boundary=allow_private_parent_mount_boundary,
+        )
         try:
             descriptor = os.open(path.name, _lease_file_open_flags(), 0o600, dir_fd=chain.parent_fd)
         except OSError as exc:
@@ -477,7 +503,12 @@ def _open_prepared_account_owner_lease(path: Path) -> tuple[int, PreparedAccount
     finally:
         chain.close()
     try:
-        _validate_prepared_account_owner_lease(path, descriptor, prepared)
+        _validate_prepared_account_owner_lease(
+            path,
+            descriptor,
+            prepared,
+            allow_private_parent_mount_boundary=allow_private_parent_mount_boundary,
+        )
     except BaseException:
         os.close(descriptor)
         raise
@@ -700,10 +731,18 @@ class AccountOwnerLease:
     as Bybit mutation authority; venue mutation requires the subclass below.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        allow_private_parent_mount_boundary: bool = False,
+    ) -> None:
         # Keep the lexical path rather than resolving it: a symlink must be
         # refused, not normalized into an apparently canonical lease target.
         self.path = Path(os.path.abspath(Path(path).expanduser()))
+        self._allow_private_parent_mount_boundary = (
+            allow_private_parent_mount_boundary
+        )
         self._file: Any | None = None
         self._holder_pid: int | None = None
         self._lease_identity: tuple[int, int] | None = None
@@ -724,7 +763,14 @@ class AccountOwnerLease:
             return False
         try:
             descriptor_metadata = os.fstat(handle.fileno())
-            _validate_prepared_account_owner_lease(self.path, handle.fileno(), prepared)
+            _validate_prepared_account_owner_lease(
+                self.path,
+                handle.fileno(),
+                prepared,
+                allow_private_parent_mount_boundary=(
+                    self._allow_private_parent_mount_boundary
+                ),
+            )
         except (OSError, RuntimeError, ValueError):
             return False
         return (
@@ -741,7 +787,12 @@ class AccountOwnerLease:
             if self.held:
                 return
             raise RuntimeError("account execution owner lease belongs to another process")
-        descriptor, prepared = _open_prepared_account_owner_lease(self.path)
+        descriptor, prepared = _open_prepared_account_owner_lease(
+            self.path,
+            allow_private_parent_mount_boundary=(
+                self._allow_private_parent_mount_boundary
+            ),
+        )
         try:
             handle = os.fdopen(descriptor, "r+", encoding="utf-8")
         except BaseException:
@@ -761,7 +812,14 @@ class AccountOwnerLease:
             handle.close()
             raise
         try:
-            _validate_prepared_account_owner_lease(self.path, handle.fileno(), prepared)
+            _validate_prepared_account_owner_lease(
+                self.path,
+                handle.fileno(),
+                prepared,
+                allow_private_parent_mount_boundary=(
+                    self._allow_private_parent_mount_boundary
+                ),
+            )
         except BaseException:
             handle.close()
             raise

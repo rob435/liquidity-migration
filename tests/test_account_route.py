@@ -126,8 +126,14 @@ def test_owner_acquires_lease_before_route_initialization(
         ]
 
         class FakePaperLease:
-            def __init__(self, path: Path) -> None:
+            def __init__(
+                self,
+                path: Path,
+                *,
+                allow_private_parent_mount_boundary: bool = False,
+            ) -> None:
                 assert path == account_root.resolve() / "account_execution_owner.lock"
+                assert allow_private_parent_mount_boundary is True
                 calls.append("lease-created")
 
             def acquire(self) -> None:
