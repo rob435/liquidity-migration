@@ -1,67 +1,69 @@
 # Operational State
 
-Updated from authenticated and systemd checks at 2026-07-16 00:40 UTC. These
-facts describe the installed commit named below, not the uncommitted cleanup.
+Updated from authenticated venue reads, exact-receipt verification, systemd,
+and cgroup evidence at 2026-07-16 09:54 UTC. These facts describe the deployed
+commit below; unrelated uncommitted workspace changes are not covered.
 
-## Verified pre-cutover host state
+## Live authority and topology
 
 - Installed and authorized commit:
-  `2d42c7b78bd4945d65eb90f6a3e33d1b2e901cf2`, profile
-  `demo-operational`.
-- Demo owner and demo LONG/CONTINUOUS producers were active. Paper was excluded
-  by both the old receipt and the host sleeve override. Bulk collectors and raw
-  account-market persistence were off.
-- Authenticated Bybit demo reads showed zero non-flat positions and zero regular
-  or conditional orders before the owner was recycled.
-- The installed owner had rebuilt a 2.75 GiB resident set and pushed the 4 GiB
-  host into 2 GiB of swap. The cause is the installed commit's per-symbol raw
-  record retention, not account exposure. Recycling the proved-flat owner
-  restored about 3.1 GiB available memory and reduced swap use to 42 MiB.
-- The cleanup commit is not yet installed or authorized. It removes that raw
-  retention, bounds live-L2 subscriptions to active work, checkpoints unchanged
-  reconciliation truth, fixes the liveness timestamp race, and adds per-service
-  memory ceilings.
-- The tracked hedge history is an immutable model prior through 2026-07-09,
-  not a live-extended tape. Activation checks its schema, provenance, causal
-  boundary, and estimator sufficiency; elapsed wall time does not invalidate it.
-  Its coefficients can drift and are not current calibration or performance evidence.
-- Paper has not yet been started under the isolated account-owner topology.
+  `db0b172cbc6ace21a67920802d94b1daf7065724`, profile `operational`, receipt
+  SHA-256 `4fe332d45f1b61ce84927452f517daf5e599d62b621af059bef9be9ff5d272e4`.
+- Active with zero restarts: demo and isolated-paper account owners plus demo
+  and paper LONG and CONTINUOUS target producers.
+- Active timers: continuous hedge, residual-momentum refresh, and demo-paper
+  liveness. The first post-cutover watchdog pass reported zero active alerts
+  across all ten monitored units.
+- Bulk collectors are removed and raw account-market persistence is disabled.
+  Live L2 readiness and exact decision-book capture remain enabled.
+- Paper runs as the non-login `liquidity-migration-paper` user with private
+  state, no demo/mainnet credentials, and byte-identical isolated candidate,
+  rule, and risk inputs.
 - Mainnet, `REAL_MONEY`, and real-money credentials remain unauthorized.
 
-Historical candidate, rule-probe, reset, and flatness receipts are evidence for
-their exact old commits only. They do not authorize this changed tree.
+## Verified health and resource state
 
-## Intended runtime
+- Authenticated Bybit demo reads immediately before the final cutover showed
+  zero non-flat positions and zero regular or conditional orders.
+- Demo and paper owners publish healthy generation-bound status. Demo
+  reconciliation is healthy with zero mismatches; live-L2 and owner-health ages
+  are measured in seconds. With no active work, each owner subscribes only to
+  the idle BTC book.
+- All four target producers have completed healthy cycles. Paper is explicitly
+  `integration_only_uncalibrated`; its cycles are routing/lifecycle evidence,
+  not performance or fill-quality evidence.
+- The prior demo owner retained raw depth for the full universe, reached about
+  2.75 GiB resident memory, and stalled reconciliation through swap pressure.
+  The bounded owner remains near 93 MiB after cutover.
+- Live cgroup evidence found the first LONG demo soft threshold below its
+  working set. Soft thresholds were retuned from measured footprints while all
+  hard maxima remained unchanged. Full memory-pressure averages are now below
+  one percent, with no `memory.max`, OOM, or restart events; the 4 GiB host had
+  about 2.2 GiB available at the latest sample.
+- A pre-evidence BTC-risk state file was rejected rather than migrated. With
+  zero authoritative CONTINUOUS trade rows and zero pending requests, it was
+  archived at
+  `/var/lib/liquidity-migration/retired-state/20260716T0948Z-btc-risk-pre-evidence/`
+  with SHA-256
+  `be80dc76002dc8a0c943798e23b58c29f3894e83f9d6d7a72414008df1d9f146`.
 
-The intended cutover mode is `operational`: demo and isolated paper account
-owners, enabled demo/paper LONG and CONTINUOUS producers, continuous demo
-hedge/RMOM timers, and demo-paper liveness. Its commit-owned paper model is
-explicitly `integration_only_uncalibrated`; paper is neither performance
-evidence nor full hedged-portfolio parity. Both profiles require raw bulk market persistence
-disabled; live L2 readiness, decision books, canonical journals,
-reconciliation, and protection remain mandatory.
+## Incident interpretation
 
-Paper runs as a non-login user without demo/mainnet credentials, with private
-state roots, byte-identical isolated candidate/rule/risk inputs, narrow
-read-only access to shared public snapshots, and hard memory/swap ceilings.
-Those controls bound failure; they do not prove that all six persistent workers
-fit the 4 GiB host. Activation therefore requires a multi-cycle resource soak.
+- The reported negative owner-health ages were not future venue data or clock
+  drift. Strategy event time was reused after concurrent owner heartbeats.
+  Operational freshness now samples adjacent wall time while strategy/PIT time
+  remains unchanged.
+- The stale L2/reconciliation alerts were genuine symptoms of the old owner's
+  unbounded memory retention. Dynamic subscriptions and bounded state removed
+  that cause.
+- Activation-time paper/cycle alerts were cold-start and cross-owner-reader
+  defects. Paper ownership is now verified against its explicit runtime UID,
+  reset-boundary rows are not treated as strategy cycles, and liveness has one
+  bounded cold-start window before returning to its three-minute cadence.
 
-## Required next sequence
+## Evidence boundary
 
-1. Bind the validated cleanup to one exact clean commit.
-2. While the fleet is quiescent, run the stopped `install` phase for that commit.
-3. Recheck environment files, roots, candidate universe, rules, risk policy,
-   sleeve toggles, authenticated demo flatness, and hedge model-prior identity.
-4. Issue a new create-only operational authorization for the exact installed
-   commit, machine, profile, environment bytes, runtime inputs, and root identities.
-5. Run `activate`, then the read-only `verify` path. Owners start before producers;
-   any mismatch fails closed.
-
-Commands and required handshakes are in `docs/operations.md`. Architecture and
-claim limits are in `docs/account_execution.md`.
-
-## Research state
-
-No confirmatory experiment is active. The canonical cancellation and retired
-evidence record is `docs/research_summary.md`; it grants no runtime authority.
+The tracked hedge history is an immutable sizing-only model prior through
+2026-07-09. It is not live-extended calibration or performance evidence. No
+confirmatory research experiment is active, and no runtime status or paper
+result authorizes research promotion or real-money deployment.
