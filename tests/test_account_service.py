@@ -421,6 +421,13 @@ def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -
             assert params == {"settle_coin": "USDT"}
             return [{"symbol": "BUSDT", "side": "Buy", "size": "2"}]
 
+        def get_open_orders(self, **params: object) -> list[dict[str, str]]:
+            assert params in (
+                {"settle_coin": "USDT"},
+                {"settle_coin": "USDT", "order_filter": "StopOrder"},
+            )
+            return []
+
     client = LostResponseClient()
     first_service = _service(root, BybitDemoExecutionAdapter(client))
     with pytest.raises(BybitSubmissionUncertain, match="HTTP response lost"):

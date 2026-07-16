@@ -5,8 +5,8 @@
 #   * no flag means DRY RUN (no service or file mutation)
 #   * --execute is required to stop services, archive, and rebuild projections
 #   * concurrent execute attempts are refused by a nonblocking process lock
-#   * execute holds the authenticated demo-account lease from quiescence through
-#     archive/reset, then releases it only for the owner-first restart handoff
+#   * execute holds both account-owner leases from quiescence through
+#     archive/reset, then releases them only for the owner-first restart handoff
 #   * REAL_MONEY/mainnet configuration is refused
 #   * the demo owner must load the same resolved demo credential env file
 #   * canonical demo/paper account roots, inboxes, and captures are archived
@@ -27,6 +27,15 @@
 # directories and can force a slow market-data bootstrap. residual_momentum.parquet
 # and root-level kline datasets are still preserved.
 set -euo pipefail
+
+# Maintenance executes as root on the VPS.  Do not let an inherited interactive
+# PATH replace systemctl, Git, archive, or filesystem utilities with lookalikes.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+RESET_SCRIPT_DIRECTORY="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RESET_REPOSITORY_DIRECTORY="$(cd -P -- "$RESET_SCRIPT_DIRECTORY/.." && pwd)"
+MAINTENANCE_LOCK_HELPER="$RESET_REPOSITORY_DIRECTORY/liquidity_migration/maintenance_lock.py"
 
 usage() {
   cat <<'EOF'
@@ -66,15 +75,15 @@ are archived in full before a fresh epoch is created. Demo reset additionally
 requires venue-flat proof; paper reset explicitly retires the archived
 simulated epoch without pretending the demo proof applies to it.
 
-The command never removes configs, .locks, residual_momentum.parquet, or root-level
-market-data datasets. It never cancels orders or closes positions: execute
+The command never removes configs, persistent lock inodes, residual_momentum.parquet,
+or root-level market-data datasets. It never cancels orders or closes positions: execute
 refuses until the configured Bybit demo account is already flat with no open orders.
-Execute also refuses if another reset holds the process lock or if any submit-armed
-systemd unit does not load the same resolved credential env file. Tests may override
-the default /run/lock/liquidity-migration-ledger-reset.lock with
-LEDGER_RESET_LOCK_FILE. The authenticated demo-account lock path has no operator
+Execute also refuses if another deploy/reset maintenance operation holds the shared
+host lock or if any submit-armed systemd unit does not load the same resolved
+credential env file. The authenticated demo-account lock path has no operator
 override; it is derived from Bybit `userID` through the same repository helper as
-the owner, rule probe, and venue-accounting command.
+the owner, rule probe, and venue-accounting command. The canonical paper-owner
+lease is likewise held while its local epoch is cleared in place.
 EOF
 }
 
@@ -125,14 +134,61 @@ LEAVE_STOPPED=0
 RECEIPT_PATH=""
 RECEIPT_CANDIDATE_COMMIT=""
 RESET_STARTED_TS_NS=""
+EXECUTED_CANDIDATE_COMMIT=""
 ENV_FILE="/etc/liquidity-migration/bybit-demo.env"
 ACCOUNT_ENV_FILE="${ACCOUNT_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-execution.env}"
 PAPER_ACCOUNT_ENV_FILE="${ACCOUNT_PAPER_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-paper-execution.env}"
 SETTLE_SECONDS="${LEDGER_RESET_SETTLE_SECONDS:-3}"
-SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
-LOCK_FILE="${LEDGER_RESET_LOCK_FILE:-/run/lock/liquidity-migration-ledger-reset.lock}"
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-/usr/bin/systemctl}"
+MAINTENANCE_LOCK_DIR=/run/liquidity-migration
+MAINTENANCE_LOCK_FILE="$MAINTENANCE_LOCK_DIR/maintenance.lock"
+LEGACY_DEPLOY_LOCK_FILE="$MAINTENANCE_LOCK_DIR/deploy.lock"
+LEGACY_RESET_LOCK_FILE=/run/lock/liquidity-migration-ledger-reset.lock
 PAPER_RUNTIME_USER=liquidity-migration-paper
 PAPER_RUNTIME_GROUP=liquidity-migration-paper
+
+acquire_host_maintenance_locks() {
+  # fd 9 is the canonical cross-operation mutex. fds 6 and 5 bridge old
+  # deployed scripts so a rolling migration cannot overlap this reset with a
+  # legacy deploy/reset. Acquire before reading the checkout, deployed env,
+  # route, Git, service, credential, or root state; retain all fds to EXIT.
+  local lock_python helper_output
+  local maintenance_device maintenance_inode deploy_device deploy_inode reset_device reset_inode
+  lock_python=/usr/bin/python3
+  [[ -x "$lock_python" ]] \
+    || die "/usr/bin/python3 is required for descriptor-safe maintenance locking"
+  [[ -f "$MAINTENANCE_LOCK_HELPER" && ! -L "$MAINTENANCE_LOCK_HELPER" ]] \
+    || die "maintenance lock helper must be a real repository file: $MAINTENANCE_LOCK_HELPER"
+  helper_output="$(
+    "$lock_python" "$MAINTENANCE_LOCK_HELPER" prepare-host
+  )" || die "cannot prepare persistent host maintenance locks safely"
+  IFS=$'\t' read -r \
+    maintenance_device maintenance_inode deploy_device deploy_inode reset_device reset_inode \
+    <<< "$helper_output"
+  for value in \
+    "$maintenance_device" "$maintenance_inode" "$deploy_device" \
+    "$deploy_inode" "$reset_device" "$reset_inode"; do
+    [[ "$value" =~ ^[0-9]+$ ]] || die "maintenance lock helper returned invalid identity metadata"
+  done
+
+  # Read-only shell opens cannot truncate a planted target. The helper has
+  # already descriptor-created each leaf; the inherited-fd command below
+  # rejects any replacement between preparation and these opens.
+  if ! { exec 9<"$MAINTENANCE_LOCK_FILE"; }; then
+    die "cannot open shared maintenance lock without truncation: $MAINTENANCE_LOCK_FILE"
+  fi
+  if ! { exec 6<"$LEGACY_DEPLOY_LOCK_FILE"; }; then
+    die "cannot open legacy deploy lock without truncation: $LEGACY_DEPLOY_LOCK_FILE"
+  fi
+  if ! { exec 5<"$LEGACY_RESET_LOCK_FILE"; }; then
+    die "cannot open legacy reset lock without truncation: $LEGACY_RESET_LOCK_FILE"
+  fi
+  "$lock_python" "$MAINTENANCE_LOCK_HELPER" acquire-inherited \
+    --lock 9 "$MAINTENANCE_LOCK_FILE" "$maintenance_device" "$maintenance_inode" \
+    --lock 6 "$LEGACY_DEPLOY_LOCK_FILE" "$deploy_device" "$deploy_inode" \
+    --lock 5 "$LEGACY_RESET_LOCK_FILE" "$reset_device" "$reset_inode" \
+    || die "another maintenance operation is active or a lock path changed"
+}
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -208,8 +264,129 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
+if [[ "$MODE" == "execute" ]]; then
+  acquire_host_maintenance_locks
+fi
+
 [[ -d liquidity_migration && -d data ]] \
   || die "run from the repo root (expected liquidity_migration/ and data/)"
+[[ "$(pwd -P)" == "$RESET_REPOSITORY_DIRECTORY" ]] \
+  || die "run from the repository containing this reset script: $RESET_REPOSITORY_DIRECTORY"
+
+clean_candidate_git() {
+  local index_path="$1"
+  shift
+  local clean_environment=(
+    "PATH=/usr/bin:/bin"
+    "HOME=/nonexistent"
+    "LANG=C"
+    "LC_ALL=C"
+    "GIT_CONFIG_NOSYSTEM=1"
+    "GIT_NO_REPLACE_OBJECTS=1"
+  )
+  [[ -z "$index_path" ]] \
+    || clean_environment+=("GIT_INDEX_FILE=$index_path")
+  [[ -d "$PWD/.git" && ! -L "$PWD/.git" ]] \
+    || die "execute requires a real checkout .git directory"
+  /usr/bin/env -i \
+    "${clean_environment[@]}" \
+    /usr/bin/git --no-optional-locks \
+      --git-dir="$PWD/.git" \
+      --work-tree="$PWD" \
+      -c "safe.directory=$PWD" \
+      -c core.fsmonitor=false \
+      -c core.filemode=true \
+      -C "$PWD" \
+      "$@"
+}
+
+clean_candidate_checkout_status() {
+  local expected_commit="$1"
+  local temporary_directory temporary_index refresh_status diff_status untracked
+  temporary_directory="$(
+    mktemp -d "${TMPDIR:-/tmp}/liqmig-reset-index.XXXXXX"
+  )" || return 2
+  chmod 0700 "$temporary_directory" || {
+    rmdir "$temporary_directory" 2>/dev/null || true
+    return 2
+  }
+  temporary_index="$temporary_directory/index"
+  if ! clean_candidate_git "$temporary_index" read-tree "$expected_commit" >/dev/null; then
+    rm -f -- "$temporary_index"
+    rmdir "$temporary_directory" 2>/dev/null || true
+    return 2
+  fi
+  if clean_candidate_git "$temporary_index" update-index --refresh >/dev/null; then
+    refresh_status=0
+  else
+    refresh_status=$?
+  fi
+  if (( refresh_status > 1 )); then
+    rm -f -- "$temporary_index"
+    rmdir "$temporary_directory" 2>/dev/null || true
+    return 2
+  fi
+  if clean_candidate_git "$temporary_index" diff-index --quiet "$expected_commit" --; then
+    diff_status=0
+  else
+    diff_status=$?
+  fi
+  if (( diff_status > 1 )); then
+    rm -f -- "$temporary_index"
+    rmdir "$temporary_directory" 2>/dev/null || true
+    return 2
+  fi
+  untracked="$(
+    clean_candidate_git "$temporary_index" \
+      ls-files --others --exclude-standard
+  )" || {
+    rm -f -- "$temporary_index"
+    rmdir "$temporary_directory" 2>/dev/null || true
+    return 2
+  }
+  rm -f -- "$temporary_index"
+  rmdir "$temporary_directory" 2>/dev/null || return 2
+  (( refresh_status == 0 )) || echo "tracked worktree metadata differs from HEAD"
+  (( diff_status == 0 )) || echo "tracked worktree differs from HEAD"
+  [[ -z "$untracked" ]] || printf '%s\n' "$untracked"
+}
+
+bind_clean_candidate_checkout() {
+  local status
+  EXECUTED_CANDIDATE_COMMIT="$(
+    clean_candidate_git "" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true
+  )"
+  [[ "$EXECUTED_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+    || die "execute requires a repository checkout with one full Git HEAD"
+  status="$(
+    clean_candidate_checkout_status "$EXECUTED_CANDIDATE_COMMIT" 2>/dev/null
+  )" || die "cannot verify execute checkout cleanliness"
+  [[ -z "$status" ]] || die "execute requires an exact clean candidate checkout"
+  [[ "$(clean_candidate_git "" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)" \
+      == "$EXECUTED_CANDIDATE_COMMIT" ]] \
+    || die "repository HEAD changed while candidate cleanliness was bound"
+}
+
+verify_clean_candidate_checkout() {
+  local current status
+  current="$(
+    clean_candidate_git "" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true
+  )"
+  [[ "$current" == "$EXECUTED_CANDIDATE_COMMIT" ]] \
+    || die "repository HEAD changed during the reset"
+  status="$(
+    clean_candidate_checkout_status "$EXECUTED_CANDIDATE_COMMIT" 2>/dev/null
+  )" || die "cannot recheck execute checkout cleanliness"
+  [[ -z "$status" ]] || die "execute checkout changed during the reset"
+  [[ "$(clean_candidate_git "" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)" \
+      == "$EXECUTED_CANDIDATE_COMMIT" ]] \
+    || die "repository HEAD changed during candidate cleanliness recheck"
+}
+
+if [[ "$MODE" == "execute" ]]; then
+  bind_clean_candidate_checkout
+fi
+
 [[ -n "$ARCHIVE_DIR" ]] || die "--archive-dir must not be empty"
 ARCHIVE_DIR="${ARCHIVE_DIR%/}"
 [[ -n "$ARCHIVE_DIR" ]] || ARCHIVE_DIR="/"
@@ -321,6 +498,9 @@ DEMO_ACCOUNT_CAPTURE_ROOT="$(repo_data_path "$DEMO_ACCOUNT_CAPTURE_ROOT")" || di
 PAPER_ACCOUNT_ROOT="$(repo_data_path "$PAPER_ACCOUNT_ROOT")" || die "invalid paper account root"
 PAPER_ACCOUNT_INBOX_ROOT="$(repo_data_path "$PAPER_ACCOUNT_INBOX_ROOT")" || die "invalid paper account inbox root"
 PAPER_ACCOUNT_CAPTURE_ROOT="$(repo_data_path "$PAPER_ACCOUNT_CAPTURE_ROOT")" || die "invalid paper account capture root"
+PAPER_ACCOUNT_LEASE_PATH="$PWD/$PAPER_ACCOUNT_ROOT/account_execution_owner.lock"
+[[ "$PAPER_ACCOUNT_LEASE_PATH" == /* && "$PAPER_ACCOUNT_LEASE_PATH" != *$'\n'* ]] \
+  || die "canonical paper-account lease path is invalid"
 
 ACCOUNT_STATE_TARGETS=(
   "$DEMO_ACCOUNT_ROOT"
@@ -494,6 +674,11 @@ for target in "${TARGETS[@]}"; do
       die "--archive-dir must be outside reset targets (archive '$ARCHIVE_DIR', target '$target')"
       ;;
   esac
+  case "$target_compare/" in
+    "$archive_compare/"*)
+      die "--archive-dir must not contain reset targets (archive '$ARCHIVE_DIR', target '$target')"
+      ;;
+  esac
 done
 
 # The account is shared, so every target producer and both account owners must
@@ -545,9 +730,7 @@ if [[ -n "$RECEIPT_PATH" ]]; then
     || die "--receipt requires --leave-stopped so no owner can write the fresh roots before receipt creation"
   [[ "$RECEIPT_PATH" == /* && "$RECEIPT_PATH" != *$'\n'* ]] \
     || die "--receipt must be one absolute path"
-  RECEIPT_CANDIDATE_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
-  [[ "$RECEIPT_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
-    || die "--receipt requires a repository checkout with one full Git HEAD"
+  RECEIPT_CANDIDATE_COMMIT="$EXECUTED_CANDIDATE_COMMIT"
   receipt_preflight_args=(
     preflight
     --output "$RECEIPT_PATH"
@@ -572,8 +755,9 @@ echo "  leave managed units stopped: $LEAVE_STOPPED"
 echo "  canonical account state: ${ACCOUNT_STATE_TARGETS[*]}"
 echo "  existing targets: ${#EXISTING_TARGETS[@]}"
 for target in "${EXISTING_TARGETS[@]}"; do
-  size="$(du -sh "$target" 2>/dev/null | awk '{print $1}' || true)"
-  echo "    - $target (${size:-size unknown})"
+  # Do not recursively inspect an unvalidated target during preview. Execute
+  # performs descriptor/mount preflight after every writer is quiescent.
+  echo "    - $target (present; size not traversed during preview)"
 done
 
 echo "  preserved by default: configs/, .locks/, reports/, .cache/, residual_momentum.parquet, root-level market data"
@@ -600,7 +784,8 @@ fi
 # successful no-op here would make a missing epoch indistinguishable from a
 # completed reset.
 [[ -r "$ENV_FILE" ]] || die "demo env file is missing or unreadable: $ENV_FILE"
-command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1 || die "systemctl command not found: $SYSTEMCTL_BIN"
+[[ "$SYSTEMCTL_BIN" == /* && -x "$SYSTEMCTL_BIN" && ! -L "$SYSTEMCTL_BIN" ]] \
+  || die "systemctl must be one absolute non-symlink executable: $SYSTEMCTL_BIN"
 
 PYTHON="$PWD/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
@@ -617,28 +802,6 @@ credential_api_secret="$(systemd_env_value "$ENV_FILE" BYBIT_DEMO_API_SECRET)"
 validate_real_money_value "$ENV_FILE" "${credential_real_money:-__unset__}"
 [[ -n "$credential_api_key" && -n "$credential_api_secret" ]] \
   || die "missing BYBIT_DEMO_API_KEY/BYBIT_DEMO_API_SECRET in $ENV_FILE"
-
-# Keep fd 9 open for the entire execute process. BSD/Linux flock locks are tied
-# to this inherited open-file description, so the lock remains held while the
-# EXIT trap performs failure recovery and restarts previously-active services.
-[[ -n "$LOCK_FILE" ]] || die "LEDGER_RESET_LOCK_FILE must not be empty"
-lock_parent="${LOCK_FILE%/*}"
-[[ "$lock_parent" != "$LOCK_FILE" ]] || lock_parent="."
-[[ -d "$lock_parent" ]] || die "ledger-reset lock directory does not exist: $lock_parent"
-if ! { exec 9>"$LOCK_FILE"; }; then
-  die "cannot open ledger-reset process lock: $LOCK_FILE"
-fi
-if ! "$PYTHON" -c '
-import fcntl
-import sys
-
-try:
-    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    raise SystemExit(1)
-' 9; then
-  die "another demo/paper ledger reset is already executing (lock: $LOCK_FILE)"
-fi
 
 # This read-only authenticated call resolves the venue account before any
 # service mutation. The ordinary module constructor has no path override; the
@@ -853,55 +1016,40 @@ RESTART_COMPLETE=0
 FAILURE_RECOVERY_ALLOWED=1
 MANIFEST_DIR=""
 DEMO_ACCOUNT_LEASE_HELD=0
+PAPER_ACCOUNT_LEASE_HELD=0
+DEMO_ACCOUNT_LEASE_RECEIPT=()
+PAPER_ACCOUNT_LEASE_RECEIPT=()
 
 acquire_demo_account_lease() {
-  local lock_parent previous_umask rc
+  local helper_output lease_device lease_inode lease_uid lease_gid lease_mount_id
+  local parent_device parent_inode parent_uid parent_gid parent_mount_id extra rc value
 
-  lock_parent="${DEMO_ACCOUNT_LEASE_PATH%/*}"
-  [[ "$lock_parent" != "$DEMO_ACCOUNT_LEASE_PATH" ]] || lock_parent="."
-  if ! mkdir -p -- "$lock_parent"; then
-    die "cannot create canonical demo-account lease directory: $lock_parent"
-  fi
-
-  previous_umask="$(umask)"
-  umask 077
+  helper_output="$(
+    "$PYTHON" -m liquidity_migration.account_owner_lease \
+      prepare "$DEMO_ACCOUNT_LEASE_PATH"
+  )" || die "cannot prepare canonical demo-account lease safely"
+  [[ "$helper_output" != *$'\n'* ]] \
+    || die "demo-account lease helper returned multiline identity metadata"
+  IFS=$'\t' read -r \
+    lease_device lease_inode lease_uid lease_gid lease_mount_id \
+    parent_device parent_inode parent_uid parent_gid parent_mount_id extra \
+    <<< "$helper_output"
+  [[ -z "$extra" ]] || die "demo-account lease helper returned extra identity metadata"
+  DEMO_ACCOUNT_LEASE_RECEIPT=(
+    "$lease_device" "$lease_inode" "$lease_uid" "$lease_gid" "$lease_mount_id"
+    "$parent_device" "$parent_inode" "$parent_uid" "$parent_gid" "$parent_mount_id"
+  )
+  for value in "${DEMO_ACCOUNT_LEASE_RECEIPT[@]}"; do
+    [[ "$value" =~ ^[0-9]+$ ]] \
+      || die "demo-account lease helper returned invalid identity metadata"
+  done
   if ! { exec 8<>"$DEMO_ACCOUNT_LEASE_PATH"; }; then
-    umask "$previous_umask"
-    die "cannot open canonical demo-account lease: $DEMO_ACCOUNT_LEASE_PATH (no alternate path is allowed)"
+    die "cannot open canonical demo-account lease without truncation: $DEMO_ACCOUNT_LEASE_PATH"
   fi
-  umask "$previous_umask"
 
-  if "$PYTHON" -c '
-import fcntl
-import json
-import os
-import sys
-import time
-
-
-fd = int(sys.argv[1])
-path = sys.argv[2]
-try:
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    raise SystemExit(73)
-except OSError as exc:
-    print(f"cannot lock {path}: {exc}", file=sys.stderr)
-    raise SystemExit(74)
-os.fchmod(fd, 0o600)
-metadata = {
-    "environment": "demo",
-    "pid": os.getppid(),
-    "role": "ledger_reset",
-    "started_at_ns": time.time_ns(),
-    "venue": "bybit",
-}
-payload = (json.dumps(metadata, sort_keys=True) + "\n").encode("utf-8")
-os.ftruncate(fd, 0)
-os.lseek(fd, 0, os.SEEK_SET)
-os.write(fd, payload)
-os.fsync(fd)
-' 8 "$DEMO_ACCOUNT_LEASE_PATH"; then
+  if "$PYTHON" -m liquidity_migration.account_owner_lease acquire-inherited \
+    8 "$DEMO_ACCOUNT_LEASE_PATH" "${DEMO_ACCOUNT_LEASE_RECEIPT[@]}" \
+    demo ledger_reset; then
     DEMO_ACCOUNT_LEASE_HELD=1
     echo "  canonical demo-account lease acquired for flatness/archive/reset: $DEMO_ACCOUNT_LEASE_PATH"
     return 0
@@ -922,6 +1070,59 @@ release_demo_account_lease() {
     exec 8>&-
     DEMO_ACCOUNT_LEASE_HELD=0
     echo "  canonical demo-account lease released for owner-first restart handoff ($context)"
+  fi
+}
+
+acquire_paper_account_lease() {
+  local helper_output lease_device lease_inode lease_uid lease_gid lease_mount_id
+  local parent_device parent_inode parent_uid parent_gid parent_mount_id extra rc value
+
+  helper_output="$(
+    "$PYTHON" -m liquidity_migration.account_owner_lease \
+      prepare "$PAPER_ACCOUNT_LEASE_PATH"
+  )" || die "cannot prepare canonical paper-account lease safely"
+  [[ "$helper_output" != *$'\n'* ]] \
+    || die "paper-account lease helper returned multiline identity metadata"
+  IFS=$'\t' read -r \
+    lease_device lease_inode lease_uid lease_gid lease_mount_id \
+    parent_device parent_inode parent_uid parent_gid parent_mount_id extra \
+    <<< "$helper_output"
+  [[ -z "$extra" ]] || die "paper-account lease helper returned extra identity metadata"
+  PAPER_ACCOUNT_LEASE_RECEIPT=(
+    "$lease_device" "$lease_inode" "$lease_uid" "$lease_gid" "$lease_mount_id"
+    "$parent_device" "$parent_inode" "$parent_uid" "$parent_gid" "$parent_mount_id"
+  )
+  for value in "${PAPER_ACCOUNT_LEASE_RECEIPT[@]}"; do
+    [[ "$value" =~ ^[0-9]+$ ]] \
+      || die "paper-account lease helper returned invalid identity metadata"
+  done
+  if ! { exec 7<>"$PAPER_ACCOUNT_LEASE_PATH"; }; then
+    die "cannot open canonical paper-account lease without truncation: $PAPER_ACCOUNT_LEASE_PATH"
+  fi
+
+  if "$PYTHON" -m liquidity_migration.account_owner_lease acquire-inherited \
+    7 "$PAPER_ACCOUNT_LEASE_PATH" "${PAPER_ACCOUNT_LEASE_RECEIPT[@]}" \
+    paper ledger_reset; then
+    PAPER_ACCOUNT_LEASE_HELD=1
+    echo "  canonical paper-account lease acquired for archive/reset: $PAPER_ACCOUNT_LEASE_PATH"
+    return 0
+  else
+    rc="$?"
+  fi
+
+  exec 7>&-
+  if [[ "$rc" == "73" ]]; then
+    die "canonical paper-account lease is already held: $PAPER_ACCOUNT_LEASE_PATH"
+  fi
+  die "cannot acquire canonical paper-account lease: $PAPER_ACCOUNT_LEASE_PATH"
+}
+
+release_paper_account_lease() {
+  local context="$1"
+  if (( PAPER_ACCOUNT_LEASE_HELD )); then
+    exec 7>&-
+    PAPER_ACCOUNT_LEASE_HELD=0
+    echo "  canonical paper-account lease released for owner-first restart handoff ($context)"
   fi
 }
 
@@ -973,17 +1174,57 @@ restart_previously_active() {
   return "$failed"
 }
 
+stop_all_managed_units_after_failed_handoff() {
+  local unit failed=0
+  echo "Stopping every managed unit after the failed reset handoff ..." >&2
+  # STOP_UNITS is deliberately ordered downstream-before-owner. Repeating the
+  # full stop sequence is safe when a unit never restarted and closes the
+  # partial-topology case where an earlier start succeeded before a later one
+  # failed.
+  for unit in "${STOP_UNITS[@]}"; do
+    if "$SYSTEMCTL_BIN" stop "$unit"; then
+      echo "  stopped $unit" >&2
+    else
+      echo "  FAILED to stop $unit" >&2
+      failed=1
+    fi
+  done
+  for unit in "${STOP_UNITS[@]}"; do
+    if "$SYSTEMCTL_BIN" is-active --quiet "$unit"; then
+      echo "  STILL ACTIVE after failed handoff: $unit" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
 cleanup() {
   local rc="$?"
-  trap - EXIT INT TERM
+  trap - EXIT
+  # Once cleanup owns the handoff, a second interactive/service signal must
+  # not interrupt the fail-closed stop sequence. SIGKILL remains inherently
+  # untrappable, but INT/TERM are deferred by ignoring them until exit.
+  trap '' INT TERM
   [[ -z "$MANIFEST_DIR" ]] || rm -rf -- "$MANIFEST_DIR"
   if (( SERVICES_STOPPED )) && (( ! RESTART_COMPLETE )); then
-    release_demo_account_lease "failure recovery"
     if (( FAILURE_RECOVERY_ALLOWED )) && (( ! LEAVE_STOPPED )); then
+      release_paper_account_lease "failure recovery"
+      release_demo_account_lease "failure recovery"
       echo "Reset did not complete; attempting to restore pre-reset service state." >&2
-      restart_previously_active "failure recovery" || true
+      if ! restart_previously_active "failure recovery"; then
+        echo "Failure recovery produced a partial topology; failing closed." >&2
+        if ! stop_all_managed_units_after_failed_handoff; then
+          echo "CRITICAL: at least one managed unit could not be stopped." >&2
+        fi
+      fi
     else
-      echo "Reset handoff did not complete; refusing an automatic retry. Managed units remain stopped." >&2
+      if stop_all_managed_units_after_failed_handoff; then
+        echo "Reset handoff did not complete; managed units are stopped and verified." >&2
+      else
+        echo "CRITICAL: reset handoff failed and at least one managed unit remains active." >&2
+      fi
+      release_paper_account_lease "failed stopped handoff"
+      release_demo_account_lease "failed stopped handoff"
     fi
   fi
   exit "$rc"
@@ -1006,7 +1247,52 @@ for unit in "${STOP_UNITS[@]}"; do
 done
 echo "  quiescence verified"
 
+# Bind every filesystem tree before either account lease can create, chown,
+# truncate, or write a lock leaf. Paper/demo-specific policies additionally
+# reject unsafe cache/lock components, while the strict account pass rejects a
+# final root symlink as well as symlinks anywhere below an account root.
+id -u "$PAPER_RUNTIME_USER" >/dev/null 2>&1 \
+  || die "paper runtime user is not provisioned: $PAPER_RUNTIME_USER"
+[[ "$(id -gn "$PAPER_RUNTIME_USER")" == "$PAPER_RUNTIME_GROUP" ]] \
+  || die "paper runtime user has the wrong primary group"
+PAPER_RUNTIME_UID="$(id -u "$PAPER_RUNTIME_USER")"
+PAPER_RUNTIME_GID="$(id -g "$PAPER_RUNTIME_USER")"
+
+account_preflight_args=(preflight --anchor "$PWD/data" --reject-symlinks)
+for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
+  account_preflight_args+=(--target "$PWD/$target")
+done
+"$PYTHON" -m liquidity_migration.reset_path_safety \
+  "${account_preflight_args[@]}" \
+  || die "account root descriptor/mount preflight failed before owner leases"
+
+paper_preflight_args=(preflight-paper --anchor "$PWD/data")
+for root in \
+  "$PAPER_ACCOUNT_ROOT" "$PAPER_ACCOUNT_INBOX_ROOT" "$PAPER_ACCOUNT_CAPTURE_ROOT" \
+  data/bybit-long-paper-event data/bybit-continuous-paper-event; do
+  paper_preflight_args+=(--root "$PWD/$root")
+done
+"$PYTHON" -m liquidity_migration.reset_path_safety \
+  "${paper_preflight_args[@]}" \
+  || die "paper runtime descriptor/mount preflight failed before owner leases"
+
+"$PYTHON" -m liquidity_migration.reset_path_safety preflight-demo \
+  --anchor "$PWD/data" \
+  --root "$PWD/data/bybit-long-demo-event" \
+  --root "$PWD/data/bybit-continuous-demo-event" \
+  --continuous-root "$PWD/data/bybit-continuous-demo-event" \
+  || die "demo runtime descriptor/mount preflight failed before owner leases"
+
+reset_tree_preflight_args=(preflight --anchor "$PWD/data")
+for target in "${SELECTED_ROOTS[@]}" "${EXISTING_TARGETS[@]}"; do
+  reset_tree_preflight_args+=(--target "$PWD/$target")
+done
+"$PYTHON" -m liquidity_migration.reset_path_safety \
+  "${reset_tree_preflight_args[@]}" \
+  || die "reset target descriptor/mount preflight failed before owner leases"
+
 acquire_demo_account_lease
+acquire_paper_account_lease
 
 echo
 echo "Checking demo/mainnet boundary and flat-account precondition ..."
@@ -1087,22 +1373,13 @@ refresh_existing_targets
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 suffix=""
 [[ -z "$LABEL" ]] || suffix="-$LABEL"
-mkdir -p -- "$ARCHIVE_DIR"
-archive_base="$ARCHIVE_DIR/ledger-reset-$STAMP$suffix"
-ARCHIVE_PATH="$archive_base.tar.gz"
-archive_counter=2
-while [[ -e "$ARCHIVE_PATH" ]]; do
-  ARCHIVE_PATH="$archive_base-$archive_counter.tar.gz"
-  archive_counter=$((archive_counter + 1))
-done
+archive_stem="ledger-reset-$STAMP$suffix"
 umask 077
 
 MANIFEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ledger-reset-manifest.XXXXXX")"
 MANIFEST_PATH="$MANIFEST_DIR/ledger-reset-manifest.txt"
-git_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-if [[ -n "$RECEIPT_PATH" && "$git_head" != "$RECEIPT_CANDIDATE_COMMIT" ]]; then
-  die "repository HEAD changed after the reset receipt preflight"
-fi
+verify_clean_candidate_checkout
+git_head="$EXECUTED_CANDIDATE_COMMIT"
 {
   echo "ledger_reset_utc=$STAMP"
   echo "git_head=$git_head"
@@ -1127,60 +1404,131 @@ fi
 
 echo
 echo "Archiving ${#EXISTING_TARGETS[@]} reset target(s) ..."
-tar -czf "$ARCHIVE_PATH" \
-  -C "$PWD" "${EXISTING_TARGETS[@]}" \
-  -C "$MANIFEST_DIR" ledger-reset-manifest.txt
-tar -tzf "$ARCHIVE_PATH" >/dev/null
-archive_size="$(du -sh "$ARCHIVE_PATH" 2>/dev/null | cut -f1 || true)"
-if command -v sha256sum >/dev/null 2>&1; then
-  archive_sha="$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-  archive_sha="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
-else
-  die "no SHA-256 tool is available; refusing to remove ledgers without a durable archive digest"
+archive_create_args=(
+  create
+  --repository "$PWD"
+  --archive-directory "$ARCHIVE_DIR"
+  --stem "$archive_stem"
+  --manifest "$MANIFEST_PATH"
+)
+for target in "${EXISTING_TARGETS[@]}"; do
+  archive_create_args+=(--target "$target")
+done
+ARCHIVE_PATH=""
+SHA_PATH=""
+archive_sha=""
+archive_size=""
+archive_device=""
+archive_inode=""
+if ! IFS=$'\t' read -r \
+  ARCHIVE_PATH SHA_PATH archive_sha archive_size archive_device archive_inode \
+  < <(
+    "$PYTHON" -m liquidity_migration.account_reset_archive \
+      "${archive_create_args[@]}"
+  ); then
+  die "descriptor-bound reset archive publication failed"
 fi
-SHA_PATH="$ARCHIVE_PATH.sha256"
-printf '%s  %s\n' "$archive_sha" "$(basename "$ARCHIVE_PATH")" > "$SHA_PATH"
-# Durability boundary: close+fsync both archive artifacts and their directory
-# before deleting any live ledger. A successful tar listing alone does not prove
-# the bytes reached stable storage after a power loss.
-"$PYTHON" -c '
-import os
-import pathlib
-import sys
-
-for raw in sys.argv[1:]:
-    fd = os.open(raw, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-parent = pathlib.Path(sys.argv[1]).resolve().parent
-fd = os.open(parent, os.O_RDONLY)
-try:
-    os.fsync(fd)
-finally:
-    os.close(fd)
-' "$ARCHIVE_PATH" "$SHA_PATH"
-echo "  archive verified: $ARCHIVE_PATH (${archive_size:-size unknown})"
+[[ "$ARCHIVE_PATH" == /* && "$SHA_PATH" == /* ]] \
+  || die "reset archive publisher returned invalid paths"
+[[ "$archive_sha" =~ ^[0-9a-f]{64}$ ]] \
+  || die "reset archive publisher returned an invalid digest"
+for value in "$archive_size" "$archive_device" "$archive_inode"; do
+  [[ "$value" =~ ^[0-9]+$ ]] \
+    || die "reset archive publisher returned invalid identity metadata"
+done
+echo "  archive verified: $ARCHIVE_PATH ($archive_size bytes)"
 echo "  sha256: $archive_sha"
 echo "  digest sidecar: $SHA_PATH"
 
-echo
-echo "Removing only archived generated projections and epoch telemetry ..."
-for target in "${EXISTING_TARGETS[@]}"; do
-  rm -rf -- "$target"
-  [[ ! -e "$target" && ! -L "$target" ]] || die "failed to remove target: $target"
-  echo "  removed $target"
-done
+verify_clean_candidate_checkout
+"$PYTHON" -m liquidity_migration.account_reset_archive verify \
+  --repository "$PWD" \
+  --archive "$ARCHIVE_PATH" \
+  --sidecar "$SHA_PATH" \
+  --sha256 "$archive_sha" \
+  --device "$archive_device" \
+  --inode "$archive_inode" \
+  --size "$archive_size" \
+  || die "reset archive changed before live-state removal"
+
+# From the first live-state removal onward, a failure leaves every managed unit
+# stopped for explicit recovery. Restarting owners into a partially cleared
+# epoch would be worse than an outage, even though the durable archive exists.
+FAILURE_RECOVERY_ALLOWED=0
 
 echo
-echo "Creating fresh empty canonical account roots, inboxes, and captures ..."
-for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
-  mkdir -p -- "$target"
-  chmod 0700 "$target"
-  echo "  created $target"
+echo "Removing only archived generated projections and epoch telemetry ..."
+"$PYTHON" - \
+  "$DEMO_ACCOUNT_LEASE_PATH" "${DEMO_ACCOUNT_LEASE_RECEIPT[@]}" \
+  "$PAPER_ACCOUNT_LEASE_PATH" "${PAPER_ACCOUNT_LEASE_RECEIPT[@]}" \
+  -- "${ACCOUNT_STATE_TARGETS[@]}" <<'PY'
+from pathlib import Path
+import sys
+
+from liquidity_migration.account_epoch_reset import (
+    clear_account_epoch_roots_preserving_locks,
+)
+from liquidity_migration.account_owner_lease import (
+    PreparedAccountOwnerLease,
+    revalidate_inherited_account_owner_lease,
+)
+
+
+def parse_receipt(arguments: list[str], offset: int) -> tuple[PreparedAccountOwnerLease, int]:
+    path = Path(arguments[offset])
+    values = [int(value, 10) for value in arguments[offset + 1 : offset + 11]]
+    if len(values) != 10:
+        raise SystemExit("account-owner lease receipt is incomplete before epoch clear")
+    return (
+        PreparedAccountOwnerLease(
+            path=path,
+            device=values[0],
+            inode=values[1],
+            uid=values[2],
+            gid=values[3],
+            mount_id=values[4],
+            parent_device=values[5],
+            parent_inode=values[6],
+            parent_uid=values[7],
+            parent_gid=values[8],
+            parent_mount_id=values[9],
+        ),
+        offset + 11,
+    )
+
+
+demo_receipt, offset = parse_receipt(sys.argv, 1)
+paper_receipt, offset = parse_receipt(sys.argv, offset)
+if offset >= len(sys.argv) or sys.argv[offset] != "--":
+    raise SystemExit("account-owner lease receipt boundary is invalid before epoch clear")
+revalidate_inherited_account_owner_lease(8, demo_receipt)
+revalidate_inherited_account_owner_lease(7, paper_receipt)
+
+results = clear_account_epoch_roots_preserving_locks(sys.argv[offset + 1 :])
+for result in results:
+    print(
+        f"  cleared {result.root} removed_entries={result.removed_entries} "
+        f"preserved_lock_files={len(result.preserved_lock_files)}"
+    )
+PY
+generic_remove_args=(remove --anchor "$PWD/data")
+for target in "${EXISTING_TARGETS[@]}"; do
+  account_state_target=0
+  for account_root in "${ACCOUNT_STATE_TARGETS[@]}"; do
+    if [[ "$target" == "$account_root" ]]; then
+      account_state_target=1
+      break
+    fi
+  done
+  if (( account_state_target )); then
+    echo "  preserving persistent locks while clearing $target in place"
+    continue
+  fi
+  generic_remove_args+=(--target "$PWD/$target")
 done
+"$PYTHON" -m liquidity_migration.reset_path_safety \
+  "${generic_remove_args[@]}" \
+  || die "descriptor-rooted generated-target removal failed"
 
 # Seed the continuous cycle stream with the verified reset boundary so liveness
 # monitoring has an explicit new-epoch fact before the producer restarts.
@@ -1242,49 +1590,44 @@ print("  reset-boundary-heartbeats-ok demo_venue_flat=1 paper_epoch_archived=1")
 PY
 fi
 
-# Reset runs as root while every writer is stopped. Restore the deployment's
-# ownership boundary before any paper process is restarted, including files
-# just written by the reset heartbeat above.
-id -u "$PAPER_RUNTIME_USER" >/dev/null 2>&1 \
-  || die "paper runtime user is not provisioned: $PAPER_RUNTIME_USER"
-[[ "$(id -gn "$PAPER_RUNTIME_USER")" == "$PAPER_RUNTIME_GROUP" ]] \
-  || die "paper runtime user has the wrong primary group"
+# Reset runs as root while every writer is stopped. Restore both private
+# account trees and the deliberately shared demo-cache boundary through held
+# descriptors; no recursive pathname chown/find traversal is allowed here.
+ROOT_RUNTIME_UID="$(id -u root)"
+ROOT_RUNTIME_GID="$(id -g root)"
+demo_account_normalize_args=(
+  normalize-paper --anchor "$PWD/data"
+  --uid "$ROOT_RUNTIME_UID" --gid "$ROOT_RUNTIME_GID"
+)
+for root in "$DEMO_ACCOUNT_ROOT" "$DEMO_ACCOUNT_INBOX_ROOT" "$DEMO_ACCOUNT_CAPTURE_ROOT"; do
+  demo_account_normalize_args+=(--root "$PWD/$root")
+done
+"$PYTHON" -m liquidity_migration.reset_path_safety \
+  "${demo_account_normalize_args[@]}" \
+  || die "descriptor-rooted demo account permission normalization failed"
+
+paper_normalize_args=(
+  normalize-paper --anchor "$PWD/data"
+  --uid "$PAPER_RUNTIME_UID" --gid "$PAPER_RUNTIME_GID"
+)
 for root in \
   "$PAPER_ACCOUNT_ROOT" "$PAPER_ACCOUNT_INBOX_ROOT" "$PAPER_ACCOUNT_CAPTURE_ROOT" \
   data/bybit-long-paper-event data/bybit-continuous-paper-event; do
-  [[ -e "$root" ]] || continue
-  [[ ! -L "$root" ]] || die "paper runtime root became a symlink: $root"
-  chown -R "$PAPER_RUNTIME_USER:$PAPER_RUNTIME_GROUP" "$root"
-  find "$root" -type d -exec chmod 0700 {} +
-  find "$root" -type f -exec chmod 0600 {} +
+  paper_normalize_args+=(--root "$PWD/$root")
 done
-for root in data/bybit-long-demo-event data/bybit-continuous-demo-event; do
-  [[ -e "$root" ]] || continue
-  [[ ! -L "$root" ]] || die "demo market root became a symlink: $root"
-  chown "root:$PAPER_RUNTIME_GROUP" "$root"
-  chmod 2710 "$root"
-  mkdir -p "$root/.cache/ws_klines"
-  chown "root:$PAPER_RUNTIME_GROUP" "$root/.cache" "$root/.cache/ws_klines"
-  chmod 2710 "$root/.cache"
-  chmod 2750 "$root/.cache/ws_klines"
-  snapshot="$root/.cache/ws_klines/store.parquet"
-  if [[ -e "$snapshot" ]]; then
-    [[ -f "$snapshot" && ! -L "$snapshot" ]] \
-      || die "demo kline snapshot became non-regular: $snapshot"
-    chown "root:$PAPER_RUNTIME_GROUP" "$snapshot"
-    chmod 0640 "$snapshot"
-  fi
-done
-rmom_path=data/bybit-continuous-demo-event/residual_momentum.parquet
-if [[ -e "$rmom_path" ]]; then
-  [[ -f "$rmom_path" && ! -L "$rmom_path" ]] \
-    || die "shared RMOM input became non-regular: $rmom_path"
-  chown "root:$PAPER_RUNTIME_GROUP" "$rmom_path"
-  chmod 0640 "$rmom_path"
-fi
+"$PYTHON" -m liquidity_migration.reset_path_safety \
+  "${paper_normalize_args[@]}" \
+  || die "descriptor-rooted paper runtime permission normalization failed"
 
-FAILURE_RECOVERY_ALLOWED=0
-release_demo_account_lease "normal completion"
+"$PYTHON" -m liquidity_migration.reset_path_safety normalize-demo \
+  --anchor "$PWD/data" \
+  --root "$PWD/data/bybit-long-demo-event" \
+  --root "$PWD/data/bybit-continuous-demo-event" \
+  --continuous-root "$PWD/data/bybit-continuous-demo-event" \
+  --uid "$ROOT_RUNTIME_UID" \
+  --gid "$PAPER_RUNTIME_GID" \
+  || die "descriptor-rooted shared demo cache normalization failed"
+
 if (( LEAVE_STOPPED )); then
   echo
   echo "Leaving every managed unit stopped for explicit owner-first staging ..."
@@ -1295,6 +1638,8 @@ if (( LEAVE_STOPPED )); then
     echo "  inactive: $unit"
   done
 else
+  release_paper_account_lease "normal completion"
+  release_demo_account_lease "normal completion"
   restart_previously_active "normal completion"
   if (( SETTLE_SECONDS > 0 )); then
     echo "Waiting ${SETTLE_SECONDS}s before final service verification ..."
@@ -1307,8 +1652,6 @@ else
     fi
   done
 fi
-RESTART_COMPLETE=1
-SERVICES_STOPPED=0
 
 if [[ -n "$RECEIPT_PATH" ]]; then
   receipt_create_args=(
@@ -1319,6 +1662,7 @@ if [[ -n "$RECEIPT_PATH" ]]; then
     --archive "$(canonical_path "$ARCHIVE_PATH")"
     --sha256-sidecar "$(canonical_path "$SHA_PATH")"
     --output "$RECEIPT_PATH"
+    --systemctl-bin "$SYSTEMCTL_BIN"
     --leave-stopped
     --demo-account-root "$(canonical_path "$DEMO_ACCOUNT_ROOT")"
     --demo-inbox-root "$(canonical_path "$DEMO_ACCOUNT_INBOX_ROOT")"
@@ -1341,6 +1685,13 @@ if [[ -n "$RECEIPT_PATH" ]]; then
   "$PYTHON" -m liquidity_migration.account_reset_receipt "${receipt_create_args[@]}" \
     || die "completed reset could not produce its structured success receipt"
 fi
+
+if (( LEAVE_STOPPED )); then
+  release_paper_account_lease "post-receipt stopped handoff"
+  release_demo_account_lease "post-receipt stopped handoff"
+fi
+RESTART_COMPLETE=1
+SERVICES_STOPPED=0
 
 echo
 echo "Ledger reset complete."

@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import stat
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +210,20 @@ def _git_repository(path: Path) -> tuple[Path, str]:
     return path, commit
 
 
+def _commit_all(repository: Path, message: str) -> str:
+    subprocess.run(["git", "-C", str(repository), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", message],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -286,8 +302,11 @@ def _fixture(
             mode=0o640,
         ),
     }
+    paper_group_id = environment_paths["account-paper-execution.env"].stat().st_gid
+    assert environment_paths["sleeves.resolved.env"].stat().st_gid == paper_group_id
     monkeypatch.setattr(authority, "_paper_user_id", os.geteuid)
-    monkeypatch.setattr(authority, "_paper_group_id", os.getegid)
+    monkeypatch.setattr(authority, "_paper_group_id", lambda: paper_group_id)
+    monkeypatch.setattr(authority, "_authorization_owner_uid", os.geteuid)
     monkeypatch.setattr(
         authority,
         "REQUIRED_ENVIRONMENT_PATHS",
@@ -698,7 +717,12 @@ def test_git_checks_trust_only_the_explicit_repository(
 ) -> None:
     repository = (tmp_path / "shared checkout").resolve()
     repository.mkdir()
+    (repository / ".git").mkdir()
     observed: dict[str, Any] = {}
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "decoy.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "decoy-worktree"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "decoy-index"))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "decoy-system-config"))
 
     def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         observed["command"] = command
@@ -708,16 +732,304 @@ def test_git_checks_trust_only_the_explicit_repository(
     monkeypatch.setattr(authority.subprocess, "run", fake_run)
 
     assert authority._git_output(repository, "rev-parse", "HEAD") == "verified"
-    assert observed["command"] == [
-        "git",
-        "-c",
-        f"safe.directory={repository}",
-        "-C",
-        str(repository),
-        "rev-parse",
-        "HEAD",
-    ]
-    assert observed["environment"]["GIT_OPTIONAL_LOCKS"] == "0"
+    command = observed["command"]
+    environment = observed["environment"]
+    assert command[0] == "/usr/bin/git"
+    assert "--no-optional-locks" in command
+    assert f"safe.directory={repository}" in command
+    assert f"--git-dir={repository / '.git'}" in command
+    assert f"--work-tree={repository}" in command
+    assert command[-2:] == ["rev-parse", "HEAD"]
+    assert environment == authority._git_environment()
+    assert environment["HOME"] == "/nonexistent"
+    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
+    assert "GIT_DIR" not in environment
+    assert "GIT_WORK_TREE" not in environment
+    assert "GIT_INDEX_FILE" not in environment
+    assert "GIT_CONFIG_SYSTEM" not in environment
+
+
+def test_clean_checkout_ignores_ambient_repository_redirection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit = _git_repository(tmp_path / "authorized")
+    decoy = tmp_path / "decoy"
+    subprocess.run(["git", "clone", "-q", str(repository), str(decoy)], check=True)
+    (repository / "tracked.txt").write_text("modified runtime code\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(decoy / ".git" / "index"))
+
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+
+@pytest.mark.parametrize("flag", ["--skip-worktree", "--assume-unchanged"])
+def test_clean_checkout_uses_private_index_instead_of_mutable_index_flags(
+    tmp_path: Path,
+    flag: str,
+) -> None:
+    repository, commit = _git_repository(tmp_path / "authorized")
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", flag, "tracked.txt"],
+        check=True,
+    )
+    (repository / "tracked.txt").write_text("hidden tracked edit\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+
+def test_clean_checkout_ignores_git_replacement_objects(tmp_path: Path) -> None:
+    repository, original = _git_repository(tmp_path / "authorized")
+    tracked = repository / "tracked.txt"
+    tracked.write_text("replacement tree\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qam", "replacement"],
+        check=True,
+    )
+    replacement = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(repository), "checkout", "-q", original], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "replace", original, replacement],
+        check=True,
+    )
+    tracked.write_text("replacement tree\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, original)
+
+
+def test_clean_checkout_compares_raw_bytes_despite_clean_filter(tmp_path: Path) -> None:
+    repository, _commit = _git_repository(tmp_path / "authorized")
+    (repository / ".gitattributes").write_text(
+        "tracked.txt filter=mask\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "config",
+            "filter.mask.clean",
+            "printf 'candidate\\n'",
+        ],
+        check=True,
+    )
+    commit = _commit_all(repository, "filtered candidate")
+    (repository / "tracked.txt").write_text(
+        "malicious runtime\n",
+        encoding="utf-8",
+    )
+
+    filtered_diff = subprocess.run(
+        ["git", "-C", str(repository), "diff", "--quiet", "--", "tracked.txt"],
+        check=False,
+    )
+    assert filtered_diff.returncode == 0
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+
+def test_clean_checkout_never_executes_repo_local_clean_filter(tmp_path: Path) -> None:
+    repository, _commit = _git_repository(tmp_path / "authorized")
+    sentinel = tmp_path / "filter-ran"
+    filter_script = tmp_path / "clean-filter.sh"
+    filter_script.write_text(
+        f"#!/bin/sh\n: > {shlex.quote(str(sentinel))}\ncat\n",
+        encoding="utf-8",
+    )
+    filter_script.chmod(0o755)
+    (repository / ".gitattributes").write_text(
+        "tracked.txt filter=audit\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "config",
+            "filter.audit.clean",
+            shlex.quote(str(filter_script)),
+        ],
+        check=True,
+    )
+    commit = _commit_all(repository, "audited filter")
+    assert sentinel.exists()
+    sentinel.unlink()
+
+    assert authority.require_clean_authorized_checkout(repository, commit) == commit
+    assert not sentinel.exists()
+
+
+def test_clean_checkout_rejects_crlf_hidden_by_text_attributes(tmp_path: Path) -> None:
+    repository, _commit = _git_repository(tmp_path / "authorized")
+    (repository / ".gitattributes").write_text(
+        "tracked.txt text eol=lf\n",
+        encoding="utf-8",
+    )
+    commit = _commit_all(repository, "normalized text")
+    (repository / "tracked.txt").write_bytes(b"candidate\r\n")
+
+    filtered_diff = subprocess.run(
+        ["git", "-C", str(repository), "diff", "--quiet", "--", "tracked.txt"],
+        check=False,
+    )
+    assert filtered_diff.returncode == 0
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+
+def test_clean_checkout_compares_git_executable_mode(tmp_path: Path) -> None:
+    repository, commit = _git_repository(tmp_path / "authorized")
+    tracked = repository / "tracked.txt"
+    tracked.chmod(stat.S_IMODE(tracked.stat().st_mode) | stat.S_IXUSR)
+
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+
+def test_clean_checkout_compares_symlink_type_and_target_bytes(tmp_path: Path) -> None:
+    repository, _commit = _git_repository(tmp_path / "authorized")
+    link = repository / "runtime-link"
+    link.symlink_to("target-a")
+    commit = _commit_all(repository, "tracked symlink")
+    assert authority.require_clean_authorized_checkout(repository, commit) == commit
+
+    link.unlink()
+    link.write_bytes(b"target-a")
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+    link.unlink()
+    link.symlink_to("target-b")
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+
+def test_clean_checkout_parses_nul_delimited_tree_paths(tmp_path: Path) -> None:
+    repository, _commit = _git_repository(tmp_path / "authorized")
+    unusual = repository / "runtime\nmodule.py"
+    unusual.write_text("expected\n", encoding="utf-8")
+    commit = _commit_all(repository, "unusual tracked path")
+    assert authority.require_clean_authorized_checkout(repository, commit) == commit
+
+    unusual.write_text("modified\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        b"100644 blob " + b"a" * 40 + b"\ttracked.txt",
+        b"100644 blob " + b"a" * 40 + b"\t.git/config\0",
+    ],
+)
+def test_commit_tree_parser_rejects_unterminated_or_git_admin_paths(
+    manifest: bytes,
+) -> None:
+    with pytest.raises(ValueError, match="tree (output|path)"):
+        authority._parse_commit_tree(manifest)
+
+
+def test_clean_checkout_rejects_gitlinks_fail_closed(tmp_path: Path) -> None:
+    repository, _commit = _git_repository(tmp_path / "authorized")
+    _git_repository(repository / "dependency")
+    commit = _commit_all(repository, "embedded repository")
+
+    with pytest.raises(ValueError, match="unsupported gitlink"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+
+def test_clean_checkout_rechecks_early_entry_metadata_after_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit = _git_repository(tmp_path / "authorized")
+    real_output = authority._git_output_bytes
+    manifest_reads = 0
+
+    def mutate_after_manifest(repo_root: Path, *args: str) -> bytes:
+        nonlocal manifest_reads
+        output = real_output(repo_root, *args)
+        manifest_reads += 1
+        if manifest_reads == 2:
+            (repository / "tracked.txt").write_text(
+                "changed after initial scan\n",
+                encoding="utf-8",
+            )
+        return output
+
+    monkeypatch.setattr(authority, "_git_output_bytes", mutate_after_manifest)
+
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+    assert manifest_reads == 2
+
+
+def test_clean_checkout_rechecks_untracked_files_after_raw_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit = _git_repository(tmp_path / "authorized")
+    late_untracked = repository / "late_runtime_override.py"
+    real_compare = authority._compare_raw_authorized_tree
+
+    def create_untracked_after_raw_scan(repo_root: Path, candidate: str) -> None:
+        real_compare(repo_root, candidate)
+        late_untracked.write_text("raise SystemExit('unexpected')\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        authority,
+        "_compare_raw_authorized_tree",
+        create_untracked_after_raw_scan,
+    )
+
+    with pytest.raises(ValueError, match="authorized checkout is dirty"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+    assert late_untracked.exists()
+
+
+def test_clean_checkout_rejects_head_change_during_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit = _git_repository(tmp_path / "authorized")
+    real_output = authority._git_output
+    head_reads = 0
+
+    def changing_head(
+        repo_root: Path,
+        *args: str,
+        index_file: Path | None = None,
+    ) -> str:
+        nonlocal head_reads
+        result = real_output(repo_root, *args, index_file=index_file)
+        if args == ("rev-parse", "--verify", "HEAD^{commit}"):
+            head_reads += 1
+            if head_reads == 2:
+                return "f" * 40
+        return result
+
+    monkeypatch.setattr(authority, "_git_output", changing_head)
+
+    with pytest.raises(ValueError, match="HEAD changed"):
+        authority.require_clean_authorized_checkout(repository, commit)
+
+    assert head_reads == 2
 
 
 def test_verify_rejects_replaced_runtime_root(
@@ -762,3 +1074,362 @@ def test_receipt_is_private_canonical_and_exclusive(
         _issue(tmp_path, repository, commit, machine_id)
     assert receipt.read_bytes() == original
     assert os.stat(receipt).st_nlink == 1
+
+
+def test_issue_reopens_bound_inputs_before_publication_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit, machine_id, paths = _fixture(tmp_path, monkeypatch)
+    real_self_hash = authority._self_hash
+    mutated = False
+
+    def mutate_after_capture(payload: dict[str, Any]) -> str:
+        nonlocal mutated
+        digest = real_self_hash(payload)
+        if (
+            not mutated
+            and payload.get("kind") == authority.KIND
+            and payload.get("artifact_sha256") == ""
+        ):
+            mutated = True
+            paths["symbols"].write_text("ETHUSDT\n", encoding="utf-8")
+        return digest
+
+    monkeypatch.setattr(authority, "_self_hash", mutate_after_capture)
+
+    with pytest.raises(
+        ValueError,
+        match="differs from its validated demo source|changed after operational authorization",
+    ):
+        _issue(tmp_path, repository, commit, machine_id)
+
+    receipt = tmp_path / "etc" / "account-execution-operational-ready"
+    assert mutated is True
+    assert not receipt.exists()
+    assert not list(receipt.parent.glob(".operational-authority-stage-*"))
+
+
+def test_issue_rechecks_bound_inputs_after_final_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit, machine_id, paths = _fixture(tmp_path, monkeypatch)
+    receipt = tmp_path / "etc" / "account-execution-operational-ready"
+    receipt.parent.mkdir(exist_ok=True)
+    checks = 0
+
+    def mutate_after_first_source_check() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            paths["rules"].write_text('{"schema_version":2}\n', encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="differs from its validated demo source|changed after operational authorization",
+    ):
+        authority.issue_operational_authorization(
+            receipt_path=receipt,
+            expected_commit=commit,
+            repo_root=repository,
+            machine_id_path=machine_id,
+            authorization_reference="owner authorization",
+            owner_acknowledgement=authority.OWNER_ACKNOWLEDGEMENT,
+            final_publication_check=mutate_after_first_source_check,
+        )
+
+    assert checks == 2
+    assert not receipt.exists()
+    assert not list(receipt.parent.glob(".operational-authority-stage-*"))
+
+
+def test_post_link_authority_check_observes_only_unloadable_mode_0400(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit, machine_id, _paths = _fixture(tmp_path, monkeypatch)
+    receipt = tmp_path / "etc" / "account-execution-operational-ready"
+    receipt.parent.mkdir(exist_ok=True)
+    checks = 0
+
+    def final_check() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            metadata = receipt.stat()
+            assert stat.S_IMODE(metadata.st_mode) == 0o400
+            assert metadata.st_nlink == 1
+            with pytest.raises(ValueError, match="mode 0600 or 0640"):
+                authority._load_receipt(receipt)
+            raise RuntimeError("synthetic late authority failure")
+
+    with pytest.raises(RuntimeError, match="synthetic late authority failure"):
+        authority.issue_operational_authorization(
+            receipt_path=receipt,
+            expected_commit=commit,
+            repo_root=repository,
+            machine_id_path=machine_id,
+            authorization_reference="owner authorization",
+            owner_acknowledgement=authority.OWNER_ACKNOWLEDGEMENT,
+            final_publication_check=final_check,
+        )
+
+    assert checks == 3
+    assert not receipt.exists()
+    assert not list(receipt.parent.glob(".operational-authority-stage-*"))
+
+
+def test_receipt_loader_rejects_oversized_artifact_before_json_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = tmp_path / "oversized-receipt"
+    receipt.write_bytes(b"{" + b"x" * authority._MAX_RECEIPT_SIZE + b"}")
+    receipt.chmod(0o600)
+    monkeypatch.setattr(authority, "_authorization_owner_uid", os.geteuid)
+
+    with pytest.raises(ValueError, match="size limit"):
+        authority._load_receipt(receipt)
+
+
+def test_receipt_loader_requires_root_ownership(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("non-root ownership rejection requires an unprivileged test user")
+    receipt = tmp_path / "user-owned-receipt"
+    receipt.write_text("{}\n", encoding="utf-8")
+    receipt.chmod(0o600)
+
+    with pytest.raises(ValueError, match="owned by root"):
+        authority._load_receipt(receipt)
+
+
+def test_direct_issue_api_requires_authorization_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(authority.os, "geteuid", lambda: 1234)
+    monkeypatch.setattr(authority, "_authorization_owner_uid", lambda: 0)
+
+    with pytest.raises(RuntimeError, match="issuance requires root"):
+        authority.issue_operational_authorization(
+            receipt_path=tmp_path / "receipt",
+            expected_commit="a" * 40,
+            repo_root=tmp_path,
+            machine_id_path=tmp_path / "machine-id",
+            authorization_reference="owner authorization",
+            owner_acknowledgement=authority.OWNER_ACKNOWLEDGEMENT,
+        )
+
+
+def test_managed_unit_inactivity_observer_checks_exact_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+    systemctl = Path("/trusted/systemctl")
+    monkeypatch.setattr(
+        authority,
+        "_trusted_executable",
+        lambda path, *, label: path,
+    )
+
+    def fake_run(
+        command: list[str],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        assert command[0] == str(systemctl)
+        assert kwargs["env"] == {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
+        observed.append(command[-1])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="LoadState=loaded\nActiveState=inactive\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(authority.subprocess, "run", fake_run)
+
+    authority.require_managed_units_inactive(systemctl_path=systemctl)
+
+    assert observed == list(authority.ISSUANCE_QUIESCENCE_UNITS)
+    assert len(observed) == 12
+    assert set(authority.AUTHORIZED_UNITS).issubset(observed)
+    assert set(observed) - set(authority.AUTHORIZED_UNITS) == {
+        "liquidity-migration-demo-liveness.timer",
+        "liquidity-migration-continuous-hedge.timer",
+        "liquidity-migration-continuous-rmom-refresh.timer",
+    }
+
+
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        ("LoadState=not-found\nActiveState=inactive\n", "not exactly loaded"),
+        ("LoadState=loaded\nActiveState=active\n", "not inactive"),
+        ("LoadState=loaded\nActiveState=failed\n", "not inactive"),
+        ("LoadState=loaded\n", "incomplete state"),
+    ],
+)
+def test_managed_unit_inactivity_observer_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        authority,
+        "_trusted_executable",
+        lambda path, *, label: path,
+    )
+    monkeypatch.setattr(
+        authority.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=stdout,
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        authority.require_managed_units_inactive(
+            systemctl_path=Path("/trusted/systemctl")
+        )
+
+
+def test_issue_cli_enters_production_guard_and_supplies_inactivity_check(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def held_lock():
+        events.append("lock-enter")
+        try:
+            yield
+        finally:
+            events.append("lock-exit")
+
+    def fake_issue(**kwargs: Any) -> dict[str, Any]:
+        events.append("issue")
+        assert events == ["lock-enter", "issue"]
+        assert kwargs["final_publication_check"] is authority.require_managed_units_inactive
+        return {"status": "passed"}
+
+    monkeypatch.setattr(authority.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(authority, "_production_maintenance_guard", held_lock)
+    monkeypatch.setattr(authority, "issue_operational_authorization", fake_issue)
+
+    result = authority.main(
+        [
+            "issue",
+            "--receipt",
+            "/etc/liquidity-migration/receipt",
+            "--expected-commit",
+            "a" * 40,
+            "--repo-root",
+            "/opt/liquidity-migration",
+            "--authorization-reference",
+            "owner task",
+            "--owner-acknowledgement",
+            authority.OWNER_ACKNOWLEDGEMENT,
+        ]
+    )
+
+    assert result == 0
+    assert events == ["lock-enter", "issue", "lock-exit"]
+    assert json.loads(capsys.readouterr().out) == {"status": "passed"}
+
+
+def test_issue_cli_refuses_missing_preimport_lock_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    issued = False
+
+    def fake_issue(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal issued
+        issued = True
+        return {"status": "passed"}
+
+    monkeypatch.setattr(authority.os, "geteuid", lambda: 0)
+    monkeypatch.delenv(authority._INHERITED_MAINTENANCE_LOCK_MARKER, raising=False)
+    monkeypatch.setattr(authority, "issue_operational_authorization", fake_issue)
+
+    result = authority.main(
+        [
+            "issue",
+            "--receipt",
+            "/etc/liquidity-migration/receipt",
+            "--expected-commit",
+            "a" * 40,
+            "--repo-root",
+            "/opt/liquidity-migration",
+            "--authorization-reference",
+            "owner task",
+            "--owner-acknowledgement",
+            authority.OWNER_ACKNOWLEDGEMENT,
+        ]
+    )
+
+    assert result == 2
+    assert issued is False
+    assert "pre-import maintenance locks from scripts/ops.sh" in capsys.readouterr().err
+
+
+def test_production_guard_revalidates_preimport_inherited_locks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = tmp_path / "maintenance.lock"
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    descriptor = os.open(lock, os.O_RDONLY)
+    observed: dict[str, Any] = {}
+    try:
+        monkeypatch.setattr(
+            authority,
+            "_INHERITED_MAINTENANCE_LOCKS",
+            ((descriptor, lock),),
+        )
+        monkeypatch.setenv(
+            authority._INHERITED_MAINTENANCE_LOCK_MARKER,
+            str(descriptor),
+        )
+
+        def acquire(records: list[tuple[int, Path, int, int]], **kwargs: Any) -> None:
+            observed["records"] = records
+            observed["kwargs"] = kwargs
+
+        monkeypatch.setattr(authority, "acquire_inherited_locks", acquire)
+
+        with authority._production_maintenance_guard():
+            observed["held"] = True
+
+        metadata = lock.stat()
+        assert observed["records"] == [
+            (descriptor, lock, metadata.st_dev, metadata.st_ino)
+        ]
+        assert observed["kwargs"] == {
+            "expected_uid": 0,
+            "expected_gid": 0,
+            "require_mount_ids": True,
+        }
+        assert observed["held"] is True
+    finally:
+        os.close(descriptor)
+
+
+def test_production_guard_rejects_forged_inherited_lock_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(authority._INHERITED_MAINTENANCE_LOCK_MARKER, "9,8")
+
+    with pytest.raises(RuntimeError, match="marker is invalid"):
+        authority._production_maintenance_guard()

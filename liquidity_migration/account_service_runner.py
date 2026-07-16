@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
-from .account_execution_stream import BybitAccountExecutionConsumer
+from .account_execution_stream import (
+    BybitAccountExecutionConsumer,
+    PrivateExecutionStreamSupervisor,
+)
 from .account_execution_config import (
     load_demo_rules,
     load_risk_policy,
@@ -30,7 +34,7 @@ from .account_reconcile import (
     BybitAccountFundingReconciler,
     BybitAccountReconciler,
 )
-from .account_route import ensure_account_route
+from .account_route import derive_account_route, ensure_account_route
 from .account_notifications import AccountNotificationEngine
 from .account_owner_health import (
     AccountOwnerHealth,
@@ -247,9 +251,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--notification-state", default="")
     parser.add_argument("--notification-poll-seconds", type=float, default=1.0)
     parser.add_argument("--health-interval-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--private-ws-reconnect-seconds",
+        type=float,
+        default=180.0,
+        help=(
+            "Continuously-disconnected bound and reconnect-attempt cooldown for "
+            "the private execution/order websocket."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.health_interval_seconds <= 0.0:
         parser.error("--health-interval-seconds must be positive")
+    if (
+        not math.isfinite(args.private_ws_reconnect_seconds)
+        or args.private_ws_reconnect_seconds <= 0.0
+    ):
+        parser.error("--private-ws-reconnect-seconds must be positive and finite")
     try:
         args.max_demo_rule_age_hours = require_registered_demo_rule_max_age_hours(
             args.max_demo_rule_age_hours
@@ -263,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     invocation_id = require_systemd_invocation_id()
 
-    route = ensure_account_route(
+    requested_route = derive_account_route(
         account_id=args.account_id,
         environment="demo",
         account_root=args.account_root,
@@ -288,6 +306,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     owner_lease = DemoAccountMutationLease(demo_identity)
     owner_lease.acquire()
+    try:
+        route = ensure_account_route(
+            account_id=requested_route.account_id,
+            environment=requested_route.environment,
+            account_root=requested_route.account_root,
+            inbox_root=requested_route.inbox_root,
+        )
+    except BaseException:
+        owner_lease.close()
+        raise
     rules = load_demo_rules(
         args.demo_rules_file,
         max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
@@ -325,13 +353,16 @@ def main(argv: list[str] | None = None) -> int:
         kernel=kernel,
         native_order_verifier=native_protection.is_verified_native_order,
     )
-    private_stream = BybitPrivateWebSocketStream(
-        category="linear",
-        testnet=False,
-        demo=True,
-        api_key=api_key,
-        api_secret=api_secret,
-    )
+    def build_private_stream() -> BybitPrivateWebSocketStream:
+        return BybitPrivateWebSocketStream(
+            category="linear",
+            testnet=False,
+            demo=True,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+
+    private_stream = build_private_stream()
     recorder = SequenceAwareMarketRecorder(
         args.capture_root,
         config=MarketCaptureConfig(
@@ -354,6 +385,12 @@ def main(argv: list[str] | None = None) -> int:
         native_protection_manager=native_protection,
     )
     execution_consumer.start()
+    private_stream_supervisor = PrivateExecutionStreamSupervisor(
+        consumer=execution_consumer,
+        stream_factory=build_private_stream,
+        reconnect_after_seconds=args.private_ws_reconnect_seconds,
+        reconnect_cooldown_seconds=args.private_ws_reconnect_seconds,
+    )
     reconciler = BybitAccountReconciler(
         kernel=kernel,
         client=private_client,
@@ -382,7 +419,12 @@ def main(argv: list[str] | None = None) -> int:
         ]
     )
     health_chain = AccountHealthChain(
-        (reconciler, funding_reconciler, native_protection)
+        (
+            private_stream_supervisor,
+            reconciler,
+            funding_reconciler,
+            native_protection,
+        )
     )
     snapshot_provider = BybitDemoAccountSnapshotProvider(private_client)
     service = AccountExecutionService(
@@ -448,6 +490,9 @@ def main(argv: list[str] | None = None) -> int:
                 if not funding_report.healthy:
                     _logger.error("account funding reconcile blocked new intents")
                 last_reconcile = time.monotonic()
+            private_stream_status = private_stream_supervisor.check(
+                now_monotonic=now
+            )
             if now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25):
                 current_state = kernel._state_ref()
                 component_target_symbols = {
@@ -510,12 +555,26 @@ def main(argv: list[str] | None = None) -> int:
             reconcile_healthy = bool(latest_reconcile_report is not None and latest_reconcile_report.healthy)
             health_status = (
                 AccountOwnerHealthStatus.HEALTHY
-                if requested_symbols_ready and reconcile_healthy
+                if (
+                    requested_symbols_ready
+                    and reconcile_healthy
+                    and private_stream_status is True
+                )
                 else AccountOwnerHealthStatus.BLOCKED
             )
-            health_detail = symbol_health_detail
+            health_details = [
+                symbol_health_detail if not requested_symbols_ready else "",
+            ]
             if not reconcile_healthy and latest_reconcile_report is not None:
-                health_detail = "account reconciliation mismatch: " + "; ".join(latest_reconcile_report.mismatches)
+                health_details.append(
+                    "account reconciliation mismatch: "
+                    + "; ".join(latest_reconcile_report.mismatches)
+                )
+            if private_stream_status is not True:
+                health_details.append(private_stream_supervisor.health_detail)
+            health_detail = "; ".join(
+                detail for detail in health_details if detail
+            )[:1000]
             receipt = None
             try:
                 receipt = run_ready_request_or_converge(

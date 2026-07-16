@@ -33,6 +33,8 @@ graphify-out/.graphify_root
 .claude/scheduled_tasks.lock
 # Per-machine Claude Code permissions (never shared)
 .claude/settings.local.json
+# Per-machine Codex permissions (never shared)
+.codex/config.toml
 # Local logs and plots
 docs/*.log
 /equity_*.png

@@ -5,10 +5,16 @@ from __future__ import annotations
 import hashlib
 import math
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 
-from .account_kernel import AccountExecutionKernel, AccountRiskSnapshot, InstrumentRules, MarketInputRef
+from .account_kernel import (
+    AccountExecutionKernel,
+    AccountRiskSnapshot,
+    AccountState,
+    InstrumentRules,
+    MarketInputRef,
+)
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import (
@@ -132,6 +138,21 @@ class BybitDemoAccountSnapshotProvider:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class UnownedBybitDemoOrder:
+    symbol: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class BybitDemoOrderOwnershipSnapshot:
+    journal_events_applied: int
+    all_kinds_rows_observed: int
+    conditional_rows_observed: int
+    unique_orders_observed: int
+    unowned_orders: tuple[UnownedBybitDemoOrder, ...]
+
+
 def _validated_open_order_rows(value: Any, *, query_name: str) -> tuple[Mapping[str, Any], ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise RuntimeError(f"Bybit demo {query_name} open-order query returned a non-list payload")
@@ -141,31 +162,62 @@ def _validated_open_order_rows(value: Any, *, query_name: str) -> tuple[Mapping[
             raise RuntimeError(
                 f"Bybit demo {query_name} open-order query returned a non-object row at index {index}"
             )
+        symbol = row.get("symbol")
+        if type(symbol) is not str or not symbol.strip():
+            raise RuntimeError(
+                f"Bybit demo {query_name} open-order row {index} lacks symbol"
+            )
+        order_id = row.get("orderId") or row.get("order_id")
+        order_link_id = row.get("orderLinkId") or row.get("order_link_id")
+        if not (
+            (type(order_id) is str and bool(order_id.strip()))
+            or (type(order_link_id) is str and bool(order_link_id.strip()))
+        ):
+            raise RuntimeError(
+                f"Bybit demo {query_name} open-order row {index} lacks durable order identity"
+            )
         rows.append(row)
     return tuple(rows)
 
 
 def _open_order_identity(row: Mapping[str, Any]) -> str:
-    order_id = str(row.get("orderId") or row.get("order_id") or "")
+    order_id = str(row.get("orderId") or row.get("order_id") or "").strip()
     if order_id:
         return f"order:{order_id}"
-    order_link_id = str(row.get("orderLinkId") or row.get("order_link_id") or "")
+    order_link_id = str(
+        row.get("orderLinkId") or row.get("order_link_id") or ""
+    ).strip()
     if order_link_id:
         return f"link:{order_link_id}"
     return "anonymous:" + hashlib.sha256(canonical_json(dict(row))).hexdigest()
 
 
 def _kernel_working_order_owns_row(state: Any, row: Mapping[str, Any]) -> bool:
-    order_link_id = str(row.get("orderLinkId") or row.get("order_link_id") or "")
-    venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
+    symbol = str(row.get("symbol") or "").strip().upper()
+    order_link_id = str(
+        row.get("orderLinkId") or row.get("order_link_id") or ""
+    ).strip()
+    venue_order_id = str(
+        row.get("orderId") or row.get("order_id") or ""
+    ).strip()
     for command_id in state.working_order_ids:
         order = state.orders.get(command_id)
         if order is None:
             raise RuntimeError(f"account kernel working-order index references missing command {command_id}")
-        if order_link_id and order_link_id == command_id:
-            return True
-        if venue_order_id and order.venue_order_id and venue_order_id == order.venue_order_id:
-            return True
+        link_matches = bool(order_link_id and order_link_id == command_id)
+        venue_id_matches = bool(
+            venue_order_id
+            and order.venue_order_id
+            and venue_order_id == order.venue_order_id
+        )
+        if not link_matches and not venue_id_matches:
+            continue
+        if not symbol or order.symbol.upper() != symbol:
+            raise RuntimeError(
+                "venue open-order identity matches a kernel command on a different symbol: "
+                f"command={command_id} kernel={order.symbol} venue={symbol or '<missing>'}"
+            )
+        return True
     return False
 
 
@@ -179,12 +231,95 @@ def _describe_open_order(
         or row.get("stopOrderType")
         or row.get("stop_order_type")
     )
-    symbol = str(row.get("symbol") or "<missing-symbol>").upper()
-    order_id = str(row.get("orderId") or row.get("order_id") or "<missing>")
-    order_link_id = str(row.get("orderLinkId") or row.get("order_link_id") or "<missing>")
+    symbol = str(row.get("symbol") or "<missing-symbol>").strip().upper()
+    order_id = str(
+        row.get("orderId") or row.get("order_id") or "<missing>"
+    ).strip()
+    order_link_id = str(
+        row.get("orderLinkId") or row.get("order_link_id") or "<missing>"
+    ).strip()
     return (
         f"{'conditional' if conditional else 'regular'} {symbol} "
         f"orderId={order_id} orderLinkId={order_link_id}"
+    )
+
+
+def _open_order_symbol(
+    variants: Sequence[tuple[str, Mapping[str, Any]]],
+) -> str:
+    symbols = {
+        str(row.get("symbol") or "").strip().upper()
+        for _source, row in variants
+        if str(row.get("symbol") or "")
+    }
+    if len(symbols) > 1:
+        raise RuntimeError(
+            "Bybit demo duplicated one open-order identity across conflicting symbols"
+        )
+    return next(iter(symbols), "")
+
+
+def inspect_bybit_demo_order_ownership(
+    *,
+    client: Any,
+    state: AccountState,
+    native_order_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> BybitDemoOrderOwnershipSnapshot:
+    """Read all regular/conditional venue orders and classify durable ownership."""
+
+    if not bool(getattr(client, "demo", False)):
+        raise ValueError("venue-order ownership inspection refuses a non-demo client")
+
+    def read(query_name: str, **params: Any) -> tuple[Mapping[str, Any], ...]:
+        try:
+            value = client.get_open_orders(settle_coin="USDT", **params)
+        except Exception as exc:
+            raise RuntimeError(
+                "Bybit demo could not prove venue order ownership: "
+                f"{query_name} open-order query failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        return _validated_open_order_rows(value, query_name=query_name)
+
+    all_kinds = read("all-kinds")
+    conditional = read("conditional", order_filter="StopOrder")
+    grouped: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
+    for source, rows in (("all-kinds", all_kinds), ("conditional", conditional)):
+        for row in rows:
+            grouped.setdefault(_open_order_identity(row), []).append((source, row))
+
+    unowned: list[UnownedBybitDemoOrder] = []
+    for variants in grouped.values():
+        symbol = _open_order_symbol(variants)
+        description = _describe_open_order(variants)
+        if state.events_applied == 0:
+            unowned.append(
+                UnownedBybitDemoOrder(symbol=symbol, description=description)
+            )
+            continue
+        if any(_kernel_working_order_owns_row(state, row) for _source, row in variants):
+            continue
+        native_owned = False
+        if native_order_verifier is not None:
+            try:
+                native_owned = any(
+                    native_order_verifier(row) for _source, row in variants
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Bybit demo could not verify native-protection order ownership: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+        if not native_owned:
+            unowned.append(
+                UnownedBybitDemoOrder(symbol=symbol, description=description)
+            )
+
+    return BybitDemoOrderOwnershipSnapshot(
+        journal_events_applied=state.events_applied,
+        all_kinds_rows_observed=len(all_kinds),
+        conditional_rows_observed=len(conditional),
+        unique_orders_observed=len(grouped),
+        unowned_orders=tuple(unowned),
     )
 
 
@@ -205,58 +340,26 @@ def require_bybit_demo_order_ownership(
     identify; this function never cancels or adopts an order.
     """
 
-    if not bool(getattr(client, "demo", False)):
-        raise ValueError("venue-order ownership gate refuses a non-demo client")
-
-    def read(query_name: str, **params: Any) -> tuple[Mapping[str, Any], ...]:
-        try:
-            value = client.get_open_orders(settle_coin="USDT", **params)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Bybit demo startup could not prove venue order ownership: "
-                f"{query_name} open-order query failed: {type(exc).__name__}: {exc}"
-            ) from exc
-        return _validated_open_order_rows(value, query_name=query_name)
-
-    all_kinds = read("all-kinds")
-    conditional = read("conditional", order_filter="StopOrder")
-    grouped: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
-    for source, rows in (("all-kinds", all_kinds), ("conditional", conditional)):
-        for row in rows:
-            grouped.setdefault(_open_order_identity(row), []).append((source, row))
-
-    if not grouped:
+    state = kernel.state()
+    snapshot = inspect_bybit_demo_order_ownership(
+        client=client,
+        state=state,
+        native_order_verifier=native_order_verifier,
+    )
+    if not snapshot.unowned_orders:
         return
 
-    state = kernel.state()
-    if state.events_applied == 0:
-        row_summary = "; ".join(
-            _describe_open_order(variants) for variants in grouped.values()
-        )
+    row_summary = "; ".join(
+        order.description for order in snapshot.unowned_orders
+    )
+    if snapshot.journal_events_applied == 0:
         raise RuntimeError(
             "Bybit demo startup refused venue orders with an empty/new account journal: "
             + row_summary
         )
-
-    unowned: list[str] = []
-    for variants in grouped.values():
-        if any(_kernel_working_order_owns_row(state, row) for _source, row in variants):
-            continue
-        native_owned = False
-        if native_order_verifier is not None:
-            try:
-                native_owned = any(native_order_verifier(row) for _source, row in variants)
-            except Exception as exc:
-                raise RuntimeError(
-                    "Bybit demo startup could not verify native-protection order ownership: "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
-        if not native_owned:
-            unowned.append(_describe_open_order(variants))
-    if unowned:
-        raise RuntimeError(
-            "Bybit demo startup refused unowned venue order(s): " + "; ".join(unowned)
-        )
+    raise RuntimeError(
+        "Bybit demo startup refused unowned venue order(s): " + row_summary
+    )
 
 
 def instrument_rules_from_bybit_row(

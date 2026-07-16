@@ -52,7 +52,16 @@ def _kernel(tmp_path: Path, clock: VirtualClock) -> tuple[AccountExecutionKernel
     return kernel, command_id
 
 
-class Client:
+class _NoOpenOrdersClient:
+    def get_open_orders(self, **params: object):
+        assert params in (
+            {"settle_coin": "USDT"},
+            {"settle_coin": "USDT", "order_filter": "StopOrder"},
+        )
+        return []
+
+
+class Client(_NoOpenOrdersClient):
     demo = True
 
     def __init__(self, command_id: str, *, venue_positions: list[dict[str, str]] | None = None) -> None:
@@ -132,7 +141,7 @@ def test_dual_side_venue_position_fails_closed_for_net_position_kernel(tmp_path:
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
     kernel = AccountExecutionKernel(tmp_path, account_id="dual", clock=clock)
 
-    class DualClient:
+    class DualClient(_NoOpenOrdersClient):
         demo = True
 
         def get_positions(self, **_params: object):
@@ -177,7 +186,7 @@ def test_malformed_venue_position_snapshot_fails_closed(
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
     kernel = AccountExecutionKernel(tmp_path, account_id="strict-position-response", clock=clock)
 
-    class MalformedClient:
+    class MalformedClient(_NoOpenOrdersClient):
         demo = True
 
         def get_positions(self, **params: object):
@@ -202,7 +211,7 @@ def test_canonical_zero_venue_position_row_is_valid_flat_truth(tmp_path: Path) -
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
     kernel = AccountExecutionKernel(tmp_path, account_id="canonical-flat-position", clock=clock)
 
-    class FlatClient:
+    class FlatClient(_NoOpenOrdersClient):
         demo = True
 
         def get_positions(self, **params: object):
@@ -223,11 +232,248 @@ def test_canonical_zero_venue_position_row_is_valid_flat_truth(tmp_path: Path) -
     assert report.mismatches == ()
 
 
+@pytest.mark.parametrize("conditional", [False, True])
+def test_reconciliation_detects_unowned_order_appearing_after_clean_start(
+    tmp_path: Path,
+    conditional: bool,
+) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="continuous-order-ownership", clock=clock)
+
+    class MutableOrderClient:
+        demo = True
+
+        def __init__(self) -> None:
+            self.all_kinds: list[dict[str, str]] = []
+            self.conditional: list[dict[str, str]] = []
+            self.open_order_calls: list[dict[str, object]] = []
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return []
+
+        def get_open_orders(self, **params: object):
+            self.open_order_calls.append(dict(params))
+            if params.get("order_filter") == "StopOrder":
+                return list(self.conditional)
+            return list(self.all_kinds)
+
+    client = MutableOrderClient()
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={},
+        clock=clock,
+    )
+    assert reconciler.reconcile_once().healthy
+
+    row = {
+        "symbol": "BUSDT",
+        "orderId": "post-start-stray",
+        "orderLinkId": "manual-order",
+        "orderStatus": "Untriggered" if conditional else "New",
+        "stopOrderType": "StopLoss" if conditional else "",
+        "triggerPrice": "0.1" if conditional else "",
+    }
+    client.all_kinds = [row]
+    client.conditional = [row] if conditional else []
+    clock.advance_ns(1)
+
+    report = reconciler.reconcile_once()
+
+    assert not report.healthy
+    assert len(report.mismatches) == 1
+    assert report.mismatches[0].startswith("BUSDT:unowned_venue_order:")
+    assert ("conditional" if conditional else "regular") in report.mismatches[0]
+    with pytest.raises(RuntimeError, match="position truth contradicts reduction"):
+        reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=0)
+    assert client.open_order_calls == [
+        {"settle_coin": "USDT"},
+        {"settle_coin": "USDT", "order_filter": "StopOrder"},
+        {"settle_coin": "USDT"},
+        {"settle_coin": "USDT", "order_filter": "StopOrder"},
+    ]
+
+
+def test_reconciliation_blocks_when_open_order_snapshot_is_unknown(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="unknown-order-ownership", clock=clock)
+
+    class FailedOrderClient:
+        demo = True
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return []
+
+        def get_open_orders(self, **params: object):
+            if params.get("order_filter") == "StopOrder":
+                raise RuntimeError("conditional query unavailable")
+            return []
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=FailedOrderClient(),
+        instrument_rules={},
+        clock=clock,
+    )
+
+    report = reconciler.reconcile_once()
+
+    assert not report.healthy
+    assert len(report.mismatches) == 1
+    assert report.mismatches[0].startswith("venue_order_ownership:inspection_failed:")
+    with pytest.raises(RuntimeError, match="position truth contradicts reduction"):
+        reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=0)
+
+
+def test_reconciliation_accepts_exact_kernel_owned_open_order(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+
+    class OwnedOrderClient:
+        demo = True
+
+        def get_trade_history(self, **params: object):
+            assert params["order_link_id"] == command_id
+            return []
+
+        def get_order_history(self, **params: object):
+            assert params["order_link_id"] == command_id
+            return []
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return []
+
+        def get_open_orders(self, **params: object):
+            if params.get("order_filter") == "StopOrder":
+                return []
+            return [{
+                "symbol": "BUSDT",
+                "orderId": "venue-1",
+                "orderLinkId": command_id,
+                "orderStatus": "New",
+            }]
+
+    report = BybitAccountReconciler(
+        kernel=kernel,
+        client=OwnedOrderClient(),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    ).reconcile_once()
+
+    assert report.healthy
+    assert report.mismatches == ()
+
+
+@pytest.mark.parametrize(
+    ("venue_symbol", "error"),
+    [
+        ("", "lacks symbol"),
+        ("ETHUSDT", "different symbol"),
+    ],
+)
+def test_reconciliation_rejects_malformed_kernel_order_identity_match(
+    tmp_path: Path,
+    venue_symbol: str,
+    error: str,
+) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+
+    class ContradictoryOrderClient:
+        demo = True
+
+        def get_trade_history(self, **_params: object):
+            return []
+
+        def get_order_history(self, **_params: object):
+            return []
+
+        def get_positions(self, **_params: object):
+            return []
+
+        def get_open_orders(self, **params: object):
+            if params.get("order_filter") == "StopOrder":
+                return []
+            return [{
+                "symbol": venue_symbol,
+                "orderId": "venue-1",
+                "orderLinkId": command_id,
+                "orderStatus": "New",
+            }]
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=ContradictoryOrderClient(),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+
+    report = reconciler.reconcile_once()
+
+    assert not report.healthy
+    assert report.mismatches[0].startswith("venue_order_ownership:inspection_failed:")
+    assert error in report.mismatches[0]
+    with pytest.raises(RuntimeError, match="position truth contradicts reduction"):
+        reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=0)
+
+
+def test_reconciliation_accepts_journal_verified_native_open_order(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="verified-native-order", clock=clock)
+    kernel.record_venue_snapshot(
+        snapshot_key="prior-clean-snapshot",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=1,
+    )
+    row = {
+        "symbol": "BUSDT",
+        "orderId": "native-stop-1",
+        "orderLinkId": "",
+        "orderStatus": "Untriggered",
+        "stopOrderType": "StopLoss",
+        "triggerPrice": "0.1",
+    }
+
+    class NativeOrderClient:
+        demo = True
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return []
+
+        def get_open_orders(self, **params: object):
+            return [row] if params.get("order_filter") == "StopOrder" else [row]
+
+    class VerifiedNativeManager:
+        def reconcile_venue_positions(self, rows: object) -> None:
+            assert rows == []
+
+        def is_verified_native_order(self, candidate: object) -> bool:
+            return candidate == row
+
+    report = BybitAccountReconciler(
+        kernel=kernel,
+        client=NativeOrderClient(),
+        instrument_rules={},
+        native_protection_manager=VerifiedNativeManager(),
+        clock=clock,
+    ).reconcile_once()
+
+    assert report.healthy
+    assert report.mismatches == ()
+
+
 def test_position_truth_timestamp_is_taken_after_rest_response(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=0)
     kernel = AccountExecutionKernel(tmp_path, account_id="fresh-position-truth", clock=clock)
 
-    class DelayedPositionClient:
+    class DelayedPositionClient(_NoOpenOrdersClient):
         demo = True
 
         def get_positions(self, **params: object):
@@ -254,7 +500,7 @@ def test_noop_reconciliation_is_fresh_without_growing_journal_until_checkpoint(
     clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=10)
     kernel = AccountExecutionKernel(tmp_path, account_id="bounded-reconcile", clock=clock)
 
-    class FlatClient:
+    class FlatClient(_NoOpenOrdersClient):
         demo = True
 
         def get_positions(self, **params: object):
@@ -296,7 +542,7 @@ def test_reconciliation_semantic_change_is_journaled_immediately(tmp_path: Path)
     clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=10)
     kernel = AccountExecutionKernel(tmp_path, account_id="changed-reconcile", clock=clock)
 
-    class MutableClient:
+    class MutableClient(_NoOpenOrdersClient):
         demo = True
         venue_positions: list[dict[str, str]] = []
 
@@ -368,7 +614,7 @@ def test_rest_reconcile_recovers_native_stop_execution_missed_by_ws(tmp_path: Pa
         local_receive_ts_ns=1_625_000_000,
     )
 
-    class NativeClient:
+    class NativeClient(_NoOpenOrdersClient):
         demo = True
 
         def set_trading_stop(self, **_params: object):
@@ -511,7 +757,7 @@ def test_rest_reconcile_queries_adopted_native_order_by_venue_id(
         "stopOrderType": "StopLoss",
     }]}, local_receive_ts_ns=2_100_000_000)
 
-    class RecoveryClient:
+    class RecoveryClient(_NoOpenOrdersClient):
         demo = True
 
         def get_trade_history(self, **params: object):

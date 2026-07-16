@@ -82,8 +82,12 @@ def read_stable_file(
     require_mode: int | None = None,
     require_owner: bool = False,
     require_single_link: bool = True,
+    max_bytes: int | None = None,
 ) -> StableFileSnapshot:
     """Read one stable regular-file snapshot without following the final link."""
+
+    if max_bytes is not None and max_bytes < 0:
+        raise ValueError(f"{label} maximum size must be nonnegative")
 
     candidate = Path(path).expanduser()
     try:
@@ -117,12 +121,21 @@ def read_stable_file(
             raise ValueError(f"{label} must have mode {require_mode:04o}: {candidate}")
         if require_owner and before_descriptor.st_uid != os.geteuid():
             raise ValueError(f"{label} must be owned by the current user: {candidate}")
+        if max_bytes is not None and before_descriptor.st_size > max_bytes:
+            raise ValueError(f"{label} exceeds the {max_bytes}-byte size limit: {candidate}")
 
         chunks: list[bytes] = []
+        bytes_read = 0
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, (max_bytes - bytes_read) + 1)
+            chunk = os.read(descriptor, read_size)
             if not chunk:
                 break
+            bytes_read += len(chunk)
+            if max_bytes is not None and bytes_read > max_bytes:
+                raise ValueError(f"{label} exceeds the {max_bytes}-byte size limit: {candidate}")
             chunks.append(chunk)
         after_descriptor = os.fstat(descriptor)
     finally:

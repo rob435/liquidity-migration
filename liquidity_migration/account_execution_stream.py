@@ -6,8 +6,9 @@ import logging
 import math
 import queue
 import threading
+import time
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .account_kernel import (
     AccountEventType,
@@ -114,6 +115,8 @@ class BybitAccountExecutionConsumer:
         self.pending_native_terminal: dict[str, PendingTerminalStatus] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._stream_lock = threading.RLock()
+        self._closed = False
         self._terminal_recorded = {
             str(event.payload.get("command_id") or "") + ":" + str(event.payload.get("status") or "")
             for event in read_account_journal(kernel.journal.root)
@@ -123,16 +126,65 @@ class BybitAccountExecutionConsumer:
     def _enqueue(self, kind: str, message: Mapping[str, Any]) -> None:
         self.events.put((kind, message, self.clock.wall_time_ns()))
 
+    def _subscribe(self, private_stream: Any) -> None:
+        private_stream.subscribe_executions(
+            lambda message: self._enqueue("execution", message)
+        )
+        private_stream.subscribe_orders(lambda message: self._enqueue("order", message))
+
     def start(self) -> None:
-        if self.private_stream is None:
-            raise RuntimeError("private stream is required")
         if self._thread is not None and self._thread.is_alive():
             return
-        self.private_stream.subscribe_executions(lambda message: self._enqueue("execution", message))
-        self.private_stream.subscribe_orders(lambda message: self._enqueue("order", message))
+        with self._stream_lock:
+            if self.private_stream is None:
+                raise RuntimeError("private stream is required")
+            self._closed = False
+            self._subscribe(self.private_stream)
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="account-execution-consumer", daemon=True)
         self._thread.start()
+
+    def prepare_private_stream(self, private_stream: Any) -> None:
+        """Subscribe a candidate without changing the currently published stream."""
+
+        if private_stream is None:
+            raise RuntimeError("replacement private stream is required")
+        with self._stream_lock:
+            if self._closed:
+                raise RuntimeError("execution consumer is closed")
+            if private_stream is self.private_stream:
+                raise RuntimeError("replacement private stream must be a new instance")
+        # Provider construction/subscription may perform network I/O.  Keep it
+        # outside the publication lock so owner-loop health checks and shutdown
+        # remain responsive while a replacement handshake is in flight.
+        self._subscribe(private_stream)
+
+    def publish_private_stream(
+        self,
+        private_stream: Any,
+        *,
+        expected_current: Any,
+    ) -> None:
+        """Atomically publish a ready candidate and retire its exact predecessor."""
+
+        with self._stream_lock:
+            if self._closed:
+                raise RuntimeError("execution consumer is closed")
+            current = self.private_stream
+            if current is not expected_current:
+                raise RuntimeError("private stream changed during replacement handshake")
+            self.private_stream = private_stream
+        if current is not None:
+            close = getattr(current, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - replacement is already subscribed and published
+                    _logger.warning("retired private execution stream close failed", exc_info=True)
+
+    def current_private_stream(self) -> Any | None:
+        with self._stream_lock:
+            return self.private_stream
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -417,7 +469,209 @@ class BybitAccountExecutionConsumer:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
-        if self.private_stream is not None:
-            close = getattr(self.private_stream, "close", None)
+        with self._stream_lock:
+            self._closed = True
+            private_stream = self.private_stream
+            self.private_stream = None
+        if private_stream is not None:
+            close = getattr(private_stream, "close", None)
             if callable(close):
                 close()
+
+
+class PrivateExecutionStreamSupervisor:
+    """Block health on a dead private stream and rebuild it without auth storms."""
+
+    def __init__(
+        self,
+        *,
+        consumer: BybitAccountExecutionConsumer,
+        stream_factory: Callable[[], Any],
+        reconnect_after_seconds: float = 180.0,
+        reconnect_cooldown_seconds: float = 180.0,
+        candidate_ready_timeout_seconds: float = 10.0,
+        candidate_ready_poll_seconds: float = 0.05,
+    ) -> None:
+        reconnect_after = float(reconnect_after_seconds)
+        reconnect_cooldown = float(reconnect_cooldown_seconds)
+        candidate_ready_timeout = float(candidate_ready_timeout_seconds)
+        candidate_ready_poll = float(candidate_ready_poll_seconds)
+        if not math.isfinite(reconnect_after) or reconnect_after <= 0.0:
+            raise ValueError("private stream reconnect bound must be positive and finite")
+        if not math.isfinite(reconnect_cooldown) or reconnect_cooldown <= 0.0:
+            raise ValueError("private stream reconnect cooldown must be positive and finite")
+        if (
+            not math.isfinite(candidate_ready_timeout)
+            or candidate_ready_timeout <= 0.0
+        ):
+            raise ValueError("private stream candidate-ready timeout must be positive and finite")
+        if not math.isfinite(candidate_ready_poll) or candidate_ready_poll <= 0.0:
+            raise ValueError("private stream candidate-ready poll must be positive and finite")
+        self.consumer = consumer
+        self.stream_factory = stream_factory
+        self.reconnect_after_seconds = reconnect_after
+        self.reconnect_cooldown_seconds = reconnect_cooldown
+        self.candidate_ready_timeout_seconds = candidate_ready_timeout
+        self.candidate_ready_poll_seconds = candidate_ready_poll
+        self.not_ready_since: float | None = None
+        self.last_reconnect_attempt = float("-inf")
+        self.connection_status: bool | None = None
+        self.reconnect_attempts = 0
+        self.reconnect_successes = 0
+        self.last_error = ""
+        self._rebuild_results: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._rebuild_thread: threading.Thread | None = None
+
+    @staticmethod
+    def _connected(stream: Any | None) -> bool | None:
+        if stream is None:
+            return False
+        probe = getattr(stream, "is_ready", None)
+        if not callable(probe):
+            probe = getattr(stream, "is_connected", None)
+        if not callable(probe):
+            return None
+        try:
+            value = probe()
+        except Exception:  # noqa: BLE001 - probe failures become blocked health, never loop failures
+            return None
+        return value if type(value) is bool else None
+
+    @property
+    def health_detail(self) -> str:
+        if self.connection_status is False:
+            stream = self.consumer.current_private_stream()
+            try:
+                provider_detail = getattr(stream, "readiness_detail", "")
+                if callable(provider_detail):
+                    provider_detail = provider_detail()
+            except Exception:  # noqa: BLE001 - detail must not break health publication
+                provider_detail = ""
+            detail = str(provider_detail or "private execution websocket is disconnected")
+        elif self.connection_status is None:
+            detail = "private execution websocket liveness is unavailable"
+        else:
+            return ""
+        if self.last_error:
+            detail += f": {self.last_error}"
+        if self.rebuild_in_progress:
+            detail += "; rebuild in progress"
+        return detail[:1000]
+
+    @property
+    def rebuild_in_progress(self) -> bool:
+        thread = self._rebuild_thread
+        return thread is not None and thread.is_alive()
+
+    def require_recent_healthy(self, *, max_age_ns: int) -> None:
+        del max_age_ns  # an active local socket probe is stronger than cached age
+        # Admission can follow reconciliation/protection work after the loop's
+        # supervisory check. Probe again here so a disconnect in that interval
+        # cannot inherit the earlier healthy observation.
+        self.connection_status = self._connected(
+            self.consumer.current_private_stream()
+        )
+        if self.connection_status is not True:
+            raise RuntimeError(self.health_detail)
+
+    def _rebuild(self) -> None:
+        replacement: Any | None = None
+        current = self.consumer.current_private_stream()
+        try:
+            replacement = self.stream_factory()
+            self.consumer.prepare_private_stream(replacement)
+            deadline = time.monotonic() + self.candidate_ready_timeout_seconds
+            while True:
+                # Do not discard a stream that recovered while its candidate
+                # was authenticating/subscribing in the background.
+                if self._connected(current) is True:
+                    close = getattr(replacement, "close", None)
+                    if callable(close):
+                        close()
+                    self._rebuild_results.put(("recovered", ""))
+                    return
+                if self._connected(replacement) is True:
+                    break
+                if time.monotonic() >= deadline:
+                    detail = getattr(replacement, "readiness_detail", "")
+                    raise RuntimeError(
+                        "replacement private stream did not become ready"
+                        + (f": {detail}" if detail else "")
+                    )
+                time.sleep(self.candidate_ready_poll_seconds)
+            self.consumer.publish_private_stream(
+                replacement,
+                expected_current=current,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced into blocked health by the owner loop
+            if replacement is not None and replacement is not self.consumer.current_private_stream():
+                close = getattr(replacement, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 - retain the original rebuild error
+                        pass
+            error = f"private stream rebuild failed: {type(exc).__name__}: {exc}"[:500]
+            self._rebuild_results.put(("failed", error))
+            return
+        self._rebuild_results.put(("replaced", ""))
+
+    def _consume_rebuild_results(self) -> None:
+        while True:
+            try:
+                outcome, error = self._rebuild_results.get_nowait()
+            except queue.Empty:
+                return
+            self._rebuild_thread = None
+            if outcome in {"replaced", "recovered"}:
+                if outcome == "replaced":
+                    self.reconnect_successes += 1
+                # The replacement gets its own continuous-down grace period if
+                # it is already false on the next owner tick. Recovery also
+                # starts a fresh continuous-down interval if it drops again.
+                self.not_ready_since = None
+                self.last_error = ""
+            else:
+                self.last_error = error
+                _logger.error(error)
+
+    def check(self, *, now_monotonic: float) -> bool | None:
+        now = float(now_monotonic)
+        if not math.isfinite(now):
+            raise ValueError("private stream health clock must be finite")
+        self._consume_rebuild_results()
+        stream = self.consumer.current_private_stream()
+        connected = self._connected(stream)
+        self.connection_status = connected
+        if connected is True:
+            self.not_ready_since = None
+            self.last_error = ""
+            return True
+        if connected is None:
+            # Older/opaque clients cannot be rebuilt safely from an ambiguous
+            # signal, but unknown mutation-stream health still fails closed.
+            return None
+        if self.not_ready_since is None:
+            self.not_ready_since = now
+        not_ready_for = now - self.not_ready_since
+        if not_ready_for <= self.reconnect_after_seconds:
+            return False
+        if now - self.last_reconnect_attempt <= self.reconnect_cooldown_seconds:
+            return False
+        if self.rebuild_in_progress:
+            return False
+
+        self.last_reconnect_attempt = now
+        self.reconnect_attempts += 1
+        _logger.warning(
+            "private execution websocket not ready %.1fs; rebuilding attempt=%d",
+            not_ready_for,
+            self.reconnect_attempts,
+        )
+        self._rebuild_thread = threading.Thread(
+            target=self._rebuild,
+            name="account-private-stream-rebuild",
+            daemon=True,
+        )
+        self._rebuild_thread.start()
+        return False

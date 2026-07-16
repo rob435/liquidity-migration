@@ -70,6 +70,10 @@ scope.
 
 ## Navigation And Skills
 
+- Start broad repository work from `docs/repository_map.md` and run
+  `scripts/dev.sh doctor --json` when local Git, dependency, skill-mirror, or
+  Graphify state matters. Use `scripts/dev.sh check` for the full local quality
+  gate; it has no operational authority.
 - Use `graphify-out/GRAPH_REPORT.md` and `graphify query/path/explain` when they
   materially help a cross-module or architecture question. Verify graph claims
   against source and tests. Update Graphify only after architecture-affecting

@@ -14,12 +14,6 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="$(command -v python3 || command -v python)"
 fi
 
-echo "[pre-push] ruff check..."
-"$PYTHON_BIN" -m ruff check liquidity_migration tests scripts
-
-echo "[pre-push] mypy..."
-"$PYTHON_BIN" -m mypy liquidity_migration
-
 PYTEST_BASETEMP="${PYTEST_BASETEMP:-}"
 if [[ -z "$PYTEST_BASETEMP" ]]; then
     PYTEST_TMP_ROOT="${TMPDIR:-/tmp}"
@@ -41,7 +35,8 @@ case "$PYTEST_BASETEMP" in
         ;;
 esac
 
-echo "[pre-push] pytest -q (basetemp=$PYTEST_BASETEMP)..."
-"$PYTHON_BIN" -m pytest -q --basetemp "$PYTEST_BASETEMP"
+echo "[pre-push] repository gate (basetemp=$PYTEST_BASETEMP)..."
+PYTHON="$PYTHON_BIN" \
+    "$REPO_ROOT/scripts/dev.sh" check --basetemp "$PYTEST_BASETEMP"
 
 echo "[pre-push] OK — pushing."

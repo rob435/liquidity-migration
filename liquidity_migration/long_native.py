@@ -52,7 +52,7 @@ from ._common import _date_range, _exclude_symbols, _iso_date, _iso_month
 from .volume_events_charts import _write_equity_benchmark_chart
 from .volume_events_pit import (
     _covered_kline_date_symbol_set,
-    _full_pit_universe_pass,
+    _full_pit_universe_coverage,
     _pit_manifest_metadata,
 )
 
@@ -150,9 +150,12 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
     archive_manifest = _exclude_symbols(archive_manifest, cfg.exclude_symbols)
 
     pit_covered_date_symbols = _covered_kline_date_symbol_set(klines)
-    full_pit_universe_pass = _full_pit_universe_pass(
-        klines, archive_manifest, kline_covered_date_symbols=pit_covered_date_symbols
+    pit_coverage = _full_pit_universe_coverage(
+        klines,
+        archive_manifest,
+        kline_covered_date_symbols=pit_covered_date_symbols,
     )
+    full_pit_universe_pass = pit_coverage.passed
 
     features = build_long_features(klines, config=cfg)
     features = _filter_signal_window(features, start=cfg.start_date, end=cfg.end_date)
@@ -172,6 +175,7 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
         ),
         "full_pit_universe_pass": full_pit_universe_pass,
         "pit_covered_date_symbols": pit_covered_date_symbols,
+        "pit_required_date_symbols": pit_coverage.required_date_symbols,
     }
 
 
@@ -402,6 +406,7 @@ def run_long_native_research(
     funding_lookup = inputs["funding_lookup"]
     full_pit_universe_pass = inputs["full_pit_universe_pass"]
     pit_covered_date_symbols = inputs["pit_covered_date_symbols"]
+    pit_required_date_symbols = inputs["pit_required_date_symbols"]
 
     lifecycle_strategy_id = _long_kernel_strategy_id(cfg, costs)
     lifecycle_root = output_dir / "common_kernel_execution"
@@ -539,6 +544,7 @@ def run_long_native_research(
             klines,
             full_pit_universe_pass=full_pit_universe_pass,
             kline_covered_date_symbols=pit_covered_date_symbols,
+            required_pit_date_symbols=pit_required_date_symbols,
         ),
         "cost_model": {
             **asdict(costs),

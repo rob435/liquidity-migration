@@ -20,6 +20,7 @@ from liquidity_migration.binance_vision import (
     _assert_download_completeness,
     parse_month_csv,
     rewrite_manifest_to_coverage,
+    validate_pit_manifest_coverage,
 )
 from liquidity_migration.storage import read_dataset, write_dataset
 
@@ -161,6 +162,108 @@ def test_rewrite_manifest_to_coverage_drops_thin_and_uncovered(tmp_path):
     out = read_dataset(root, "archive_trade_manifest")
     pairs = {(r["symbol"], r["date"]) for r in out.iter_rows(named=True)}
     assert pairs == {("AAAUSDT", "2024-01-01"), ("BBBUSDT", "2024-01-01")}
+
+
+def test_validate_manifest_rejects_missing_current_listing_tail_without_rewrite(
+    tmp_path,
+):
+    root = tmp_path / "root"
+    jan01 = 1704067200000
+    jan02 = jan01 + 24 * MS_PER_HOUR
+    _write_klines(root, "AAAUSDT", jan01, 24)
+    _write_klines(root, "AAAUSDT", jan02, 24)
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2024-01-01",
+                "url": "archive-1",
+                "source": "bybit_public_trading_archive",
+            },
+            {
+                "symbol": "AAAUSDT",
+                "date": "2024-01-02",
+                "url": "archive-2",
+                "source": "bybit_public_trading_archive",
+            },
+            {
+                "symbol": "AAAUSDT",
+                "date": "2024-01-03",
+                "url": "bybit_v5_listing",
+                "source": "bybit_v5_listing",
+            },
+        ]
+    )
+    write_dataset(
+        manifest,
+        root,
+        "archive_trade_manifest",
+        partition_by=("date",),
+    )
+
+    with pytest.raises(RuntimeError, match="2024-01-03/AAAUSDT"):
+        validate_pit_manifest_coverage(root)
+
+    persisted = read_dataset(root, "archive_trade_manifest").sort(
+        ["date", "symbol", "url"]
+    )
+    assert persisted.to_dicts() == manifest.sort(["date", "symbol", "url"]).to_dicts()
+
+
+def test_validate_manifest_preserves_archive_only_phantom_boundaries(tmp_path):
+    root = tmp_path / "root"
+    jan02 = 1704153600000
+    jan03 = jan02 + 24 * MS_PER_HOUR
+    _write_klines(root, "AAAUSDT", jan02, 24)
+    _write_klines(root, "AAAUSDT", jan03, 24)
+    manifest = pl.DataFrame(
+        {
+            "symbol": ["AAAUSDT"] * 4,
+            "date": ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
+            "url": ["pre", "live-1", "live-2", "post"],
+            "source": ["bybit_public_trading_archive"] * 4,
+        }
+    )
+    write_dataset(
+        manifest,
+        root,
+        "archive_trade_manifest",
+        partition_by=("date",),
+    )
+
+    summary = validate_pit_manifest_coverage(root)
+
+    assert summary["full_pit_universe_pass"] is True
+    assert summary["required_date_symbols"] == 2
+    assert summary["missing_required_date_symbols"] == 0
+    assert read_dataset(root, "archive_trade_manifest").height == 4
+
+
+def test_coverage_rewrite_refuses_independent_bybit_membership(tmp_path):
+    root = tmp_path / "root"
+    jan01 = 1704067200000
+    _write_klines(root, "AAAUSDT", jan01, 24)
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2024-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/day.csv.gz",
+                "source": "bybit_public_trading_archive",
+            }
+        ]
+    )
+    write_dataset(
+        manifest,
+        root,
+        "archive_trade_manifest",
+        partition_by=("date",),
+    )
+
+    with pytest.raises(RuntimeError, match="refusing to rewrite independently sourced"):
+        rewrite_manifest_to_coverage(root)
+
+    assert read_dataset(root, "archive_trade_manifest").to_dicts() == manifest.to_dicts()
 
 
 def test_rewrite_manifest_to_coverage_extends_stale_manifest_tail(tmp_path):

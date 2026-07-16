@@ -29,7 +29,8 @@ BINANCE_START=YYYY-MM-DD BINANCE_END=YYYY-MM-DD \
 
 All `END` values are exclusive. The Bybit builder combines archive-observed
 membership with explicitly labelled current-listing inference, downloads
-manifest-gated 1h klines, and adds funding/OI/mark/index/premium data. The
+manifest-gated 1h klines, validates coverage without deleting missing expected
+membership, and adds funding/OI/mark/index/premium data. The
 Binance builder uses USD-M archive klines plus the current-month daily tail and
 adds funding/OI/mark/index/premium/taker flow. Read each script before a large
 run; defaults and upstream availability can change.
@@ -74,6 +75,49 @@ and cycle telemetry; they are not position or P&L authority.
 The demo account owner alone mutates Bybit. The paper owner alone advances the
 deterministic paper account. Their canonical journals own lifecycle and
 accounting state; Parquet views are rebuildable projections.
+
+### Persistent local locks
+
+Dataset and account filesystem mutexes use persistent `flock(2)` leaves. Lock
+file contents are ignored for ownership; the kernel flock on the open file
+description, not a PID, timestamp, or payload, determines whether the mutex is
+held. Normal release and crash recovery never unlink the canonical leaf. Old
+JSON or empty leaves are adopted in place and restricted to mode `0600` after
+safe acquisition.
+
+The protocol requires a local POSIX filesystem with working advisory flock
+semantics and cooperative repository clients. Each real, non-group/world-
+writable lock directory is the ownership authority for its leaves. Paper
+`.locks` directories and leaves are owned by `liquidity-migration-paper`;
+stopped-fleet root reset processes may open them, and a root-first leaf is
+prepared with the directory owner before it becomes visible. Deployment
+pre-creates paper `.locks` directories as mode `0700`, and reset restores that
+boundary before restarting paper services.
+
+Host maintenance and account-owner leases follow the same persistent-inode
+rule. Their parent namespaces and leaves are opened with no-follow descriptors,
+checked for single-link ownership and Linux mount identity. Normal owners retain
+the validated descriptor directly. During reset, the maintenance and
+account-owner lease identities are handed to the shell without truncation and
+revalidated around acquisition; account-lease metadata is written only after
+the inherited descriptor still matches the prepared path and holds the kernel
+flock.
+
+These are advisory, cooperative local-filesystem locks, not protection against
+a hostile privileged process. The Bash descriptor handoff cannot itself request
+`O_NOFOLLOW`; private/root-controlled parent namespaces and the helper's
+post-open identity validation are therefore part of the boundary. That
+validation detects a replacement but cannot undo an open-time side effect from
+a special file planted by an actor already able to mutate the protected
+namespace.
+
+Never delete a canonical lock as “stale.” The current guarded reset preserves
+them; only a separately designed full-root retirement may remove one while every
+possible client is stopped under a stronger operational boundary. The retired
+create/PID/unlink protocol and the persistent-flock protocol cannot safely
+coexist. Explicitly forking inside a held critical section is unsupported;
+fork/exec helpers and forks from other threads are cleaned up by the storage
+at-fork handler.
 
 `deploy/sleeves.env` sets the repository ceiling for target producers and the
 generated resolved file records effective host toggles. Turning a producer off

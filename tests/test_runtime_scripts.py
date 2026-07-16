@@ -156,6 +156,28 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
         assert "place_order" not in text
 
 
+def test_liveness_observer_never_activates_or_orders_after_monitored_owner() -> None:
+    fragment = _unit("liquidity-migration-demo-liveness.service")
+    owner = "liquidity-migration-account-execution.service"
+    lifecycle_directives = {
+        "After",
+        "Before",
+        "BindsTo",
+        "PartOf",
+        "Requisite",
+        "Requires",
+        "Upholds",
+        "Wants",
+    }
+    for line in fragment.splitlines():
+        directive, separator, _value = line.partition("=")
+        if separator and directive in lifecycle_directives:
+            assert owner not in line
+
+    assert "Wants=network-online.target" in fragment
+    assert "After=network-online.target" in fragment
+
+
 def test_demo_and_paper_strategy_units_share_decision_knobs() -> None:
     long_demo = _environment("liquidity-migration-bybit-long-demo.service")
     long_paper = _environment("liquidity-migration-bybit-long-paper.service")
@@ -234,8 +256,14 @@ def test_install_provisions_a_credential_fenced_paper_runtime_boundary() -> None
     assert "allowed_tuning" in boundary
     assert "CANDIDATE_UNIVERSE_FILE" in boundary
     assert "BYBIT_DEMO_API_KEY" in boundary
-    assert "chown -R \"$PAPER_RUNTIME_USER:$PAPER_RUNTIME_GROUP\"" in boundary
-    assert "store.parquet" in boundary
+    assert "reset_path_safety preflight-paper" in boundary
+    assert "reset_path_safety preflight-demo" in boundary
+    assert "reset_path_safety normalize-paper" in boundary
+    assert "reset_path_safety normalize-demo" in boundary
+    assert boundary.count("--create-missing") >= 2
+    assert "chown -R" not in boundary
+    assert 'test -w "$root/.locks"' in boundary
+    assert "--continuous-root" in boundary
     assert "find \"$root\" -type f -exec chmod 0640" not in boundary
     assert "test ! -r \"$path\"" in boundary
     assert "test ! -w \"$root\"" in boundary
@@ -313,6 +341,65 @@ def test_workflow_runs_ci_on_push_and_only_manual_staged_vps_modes() -> None:
     assert "if: github.event_name == 'workflow_dispatch'" in workflow
     assert "options: [install, activate, verify]" in workflow
     assert 'scripts/deploy_vps_live.sh "${{ inputs.mode }}"' in workflow
+
+
+def test_workflow_serializes_vps_operations_across_refs() -> None:
+    workflow = _read(".github/workflows/vps-deploy.yml")
+    vps_job = workflow[workflow.index("  vps:") :]
+    assert re.search(
+        r"(?m)^    concurrency:\n"
+        r"      group: liquidity-migration-vps\n"
+        r"      cancel-in-progress: false$",
+        vps_job,
+    )
+
+
+def test_remote_deploy_entrypoint_serializes_every_mode() -> None:
+    deploy = _read(DEPLOY)
+    lock = deploy[
+        deploy.index("acquire_maintenance_locks()") : deploy.rindex('case "$MODE" in')
+    ]
+    assert "maintenance_lock_helper prepare-host" in lock
+    assert "maintenance_lock_helper acquire-inherited" in lock
+    assert 'exec 9<"$lock_dir/maintenance.lock"' in lock
+    assert 'exec 8<"$lock_dir/deploy.lock"' in lock
+    assert 'exec 7</run/lock/liquidity-migration-ledger-reset.lock' in lock
+    assert 'exec 9>"' not in lock
+    assert deploy.index(
+        "acquire_maintenance_locks\n",
+        deploy.index("acquire_maintenance_locks()"),
+    ) < deploy.rindex('case "$MODE" in')
+    transmission = deploy[: deploy.index("read -r -a SSH_ARGS")]
+    assert '"$EXPECTED_COMMIT:liquidity_migration/maintenance_lock.py"' in transmission
+    assert '/usr/bin/git --no-pager --git-dir="$LOCAL_REPOSITORY/.git"' in transmission
+    assert 'cat-file -t "$EXPECTED_COMMIT"' in transmission
+    assert "GIT_NO_REPLACE_OBJECTS=1" in transmission
+    assert "EXPECTED_COMMIT is not a local commit object" in transmission
+    assert "MAINTENANCE_LOCK_HELPER_B64" in transmission
+    assert "../liquidity_migration/maintenance_lock.py" not in transmission
+    remote = deploy[deploy.index("set -euo pipefail", deploy.index("cat <<'REMOTE_SCRIPT'")) :]
+    assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH" in remote[:200]
+    assert "GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1" in remote
+    assert "HOME=/nonexistent" in remote
+    assert '--git-dir="$REPO_DIR/.git" --work-tree="$REPO_DIR"' in remote
+    assert "-c core.fsmonitor=false -c core.filemode=true -c core.hooksPath=/dev/null" in remote
+    clean = remote[remote.index("clean_checkout_status()") : remote.index("require_quiescent()")]
+    for command in (
+        'read-tree "$expected_commit"',
+        "update-index --refresh",
+        'diff-index --quiet "$expected_commit" --',
+        "ls-files --others --exclude-standard",
+    ):
+        assert command in clean
+    assert 'GIT_INDEX_FILE="$index_path"' in remote
+    assert "/run/liquidity-migration/deploy-index.XXXXXX" in clean
+    assert clean.count('/bin/rm -f -- "$temporary_index"') >= 4
+    assert clean.count('safe_git rev-parse HEAD') == 2
+    install = remote[remote.index("install_mode()") : remote.index("activate_mode()")]
+    assert 'require_clean_checkout_at "$installed_head" "install"' in install
+    assert "safe_git checkout" in install
+    assert "safe_git merge-base" in install
+    assert "\n    git checkout" not in install
 
 
 def test_dependency_contract_has_one_source_and_exact_runtime_pins() -> None:

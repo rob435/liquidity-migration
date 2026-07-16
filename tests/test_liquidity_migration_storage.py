@@ -1,13 +1,49 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
+import stat
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
 import polars as pl
+import pytest
 
+from liquidity_migration import storage
 from liquidity_migration.storage import dataset_lock_path, dataset_path, exclusive_file_lock, read_dataset, write_dataset
+
+
+def _hold_exclusive_file_lock(path: str, acquired, release) -> None:
+    with exclusive_file_lock(path, stale_seconds=600, poll_seconds=0.005):
+        acquired.set()
+        if not release.wait(timeout=10.0):
+            raise RuntimeError("timed out waiting to release test lock")
+
+
+def _hold_lock_until_abrupt_exit(path: str, acquired, exit_now) -> None:
+    with exclusive_file_lock(path, poll_seconds=0.005):
+        acquired.set()
+        if not exit_now.wait(timeout=10.0):
+            raise RuntimeError("timed out waiting for abrupt lock-holder exit")
+        os._exit(17)
+
+
+def _flock_stress_worker(path: str, barrier, active, overlaps, iterations: int) -> None:
+    for _ in range(iterations):
+        barrier.wait(timeout=10.0)
+        with exclusive_file_lock(path, poll_seconds=0.0005):
+            with active.get_lock():
+                if active.value:
+                    overlaps.value += 1
+                active.value += 1
+            time.sleep(0.0005)
+            with active.get_lock():
+                active.value -= 1
+        barrier.wait(timeout=10.0)
 
 
 def test_incremental_parquet_writes_merge_existing_partition(tmp_path: Path) -> None:
@@ -103,19 +139,39 @@ def test_read_dataset_handles_schema_evolution_across_partitions(tmp_path: Path)
     assert stored.filter(pl.col("symbol") == "ETHUSDT").row(0, named=True)["mark_price"] == 99.5
 
 
-def test_exclusive_file_lock_cleans_up_lock_file(tmp_path: Path) -> None:
+def test_exclusive_file_lock_persists_same_single_link_inode(tmp_path: Path) -> None:
     lock_path = dataset_lock_path(tmp_path, "klines_1h")
 
     with exclusive_file_lock(lock_path, poll_seconds=0.0):
         assert lock_path.exists()
+        first = lock_path.stat()
 
-    assert not lock_path.exists()
+    assert lock_path.exists()
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        second = lock_path.stat()
+
+    assert (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+    assert second.st_nlink == 1
+    assert stat.S_IMODE(second.st_mode) == 0o600
 
 
-def test_exclusive_file_lock_recovers_dead_pid_lock_even_without_stale_timeout(tmp_path: Path) -> None:
+def test_exclusive_file_lock_adopts_legacy_payload_without_unlink(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     lock_path = dataset_lock_path(tmp_path, "klines_1h")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text(json.dumps({"pid": 2_147_483_647, "created": 1}), encoding="utf-8")
+    legacy = json.dumps({"pid": 2_147_483_647, "created": 1})
+    lock_path.write_text(legacy, encoding="utf-8")
+    inode = lock_path.stat().st_ino
+    real_unlink = Path.unlink
+
+    def reject_lock_unlink(path: Path, *args, **kwargs) -> None:
+        if path == lock_path:
+            raise AssertionError("persistent lock acquisition must not unlink")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", reject_lock_unlink)
 
     with exclusive_file_lock(
         lock_path,
@@ -123,10 +179,9 @@ def test_exclusive_file_lock_recovers_dead_pid_lock_even_without_stale_timeout(t
         poll_seconds=0.0,
         invalid_lock_stale_seconds=0.0,
     ):
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
-        assert payload["pid"] != 2_147_483_647
+        assert lock_path.read_text(encoding="utf-8") == legacy
 
-    assert not lock_path.exists()
+    assert lock_path.stat().st_ino == inode
 
 
 def test_thread_lock_for_returns_same_lock_per_path() -> None:
@@ -142,12 +197,24 @@ def test_thread_lock_for_returns_same_lock_per_path() -> None:
     assert _thread_lock_for(path_a) is not _thread_lock_for(path_b)
 
 
-def test_exclusive_file_lock_recovers_malformed_lock_after_grace_without_stale_timeout(tmp_path: Path) -> None:
+def test_exclusive_file_lock_never_unlinks_malformed_legacy_leaf(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     lock_path = dataset_lock_path(tmp_path, "klines_1h")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text("", encoding="utf-8")
     old_ts = time.time() - 10.0
     os.utime(lock_path, (old_ts, old_ts))
+    inode = lock_path.stat().st_ino
+    real_unlink = Path.unlink
+
+    def reject_lock_unlink(path: Path, *args, **kwargs) -> None:
+        if path == lock_path:
+            raise AssertionError("malformed legacy content is not lock ownership")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", reject_lock_unlink)
 
     with exclusive_file_lock(
         lock_path,
@@ -155,10 +222,388 @@ def test_exclusive_file_lock_recovers_malformed_lock_after_grace_without_stale_t
         poll_seconds=0.0,
         invalid_lock_stale_seconds=0.01,
     ):
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
-        assert payload["pid"] == os.getpid()
+        assert lock_path.read_bytes() == b""
 
-    assert not lock_path.exists()
+    assert lock_path.stat().st_ino == inode
+
+
+def test_exclusive_file_lock_never_age_evicts_live_owner(tmp_path: Path) -> None:
+    lock_path = tmp_path / "live-owner.lock"
+    context = multiprocessing.get_context("spawn")
+    holder_acquired = context.Event()
+    release_holder = context.Event()
+    holder = context.Process(
+        target=_hold_exclusive_file_lock,
+        args=(str(lock_path), holder_acquired, release_holder),
+    )
+    contender_started = threading.Event()
+    contender_entered = threading.Event()
+    contender_errors: list[BaseException] = []
+
+    def contend() -> None:
+        contender_started.set()
+        try:
+            with exclusive_file_lock(lock_path, stale_seconds=0.05, poll_seconds=0.005):
+                contender_entered.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            contender_errors.append(exc)
+
+    contender = threading.Thread(target=contend, daemon=True)
+    overlapped = False
+    holder.start()
+    try:
+        assert holder_acquired.wait(timeout=5.0)
+        old_ts = time.time() - 10.0
+        os.utime(lock_path, (old_ts, old_ts))
+        contender.start()
+        assert contender_started.wait(timeout=1.0)
+        overlapped = contender_entered.wait(timeout=0.25)
+    finally:
+        release_holder.set()
+        holder.join(timeout=5.0)
+        if contender.ident is not None:
+            contender.join(timeout=5.0)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(timeout=5.0)
+
+    assert holder.exitcode == 0
+    assert not contender.is_alive()
+    assert not contender_errors
+    assert contender_entered.is_set()
+    assert not overlapped, "a valid live-owner lock was evicted solely because of age"
+
+
+def test_exclusive_file_lock_multiprocess_stress_has_no_overlap(tmp_path: Path) -> None:
+    lock_path = tmp_path / "stress.lock"
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    active = context.Value("i", 0)
+    overlaps = context.Value("i", 0)
+    iterations = 100
+    workers = [
+        context.Process(
+            target=_flock_stress_worker,
+            args=(str(lock_path), barrier, active, overlaps, iterations),
+        )
+        for _ in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=15.0)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(timeout=5.0)
+
+    assert [worker.exitcode for worker in workers] == [0, 0]
+    assert overlaps.value == 0
+    assert active.value == 0
+
+
+def test_exclusive_file_lock_reopens_if_path_changes_after_flock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lock_path = tmp_path / "replaced.lock"
+    lock_path.touch(mode=0o600)
+    real_flock = storage.fcntl.flock
+    calls = 0
+
+    def replace_after_first_flock(fd: int, operation: int) -> None:
+        nonlocal calls
+        real_flock(fd, operation)
+        calls += 1
+        if calls == 1:
+            lock_path.unlink()
+            lock_path.touch(mode=0o600)
+
+    monkeypatch.setattr(storage.fcntl, "flock", replace_after_first_flock)
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        assert calls == 2
+        assert lock_path.stat().st_nlink == 1
+
+    assert lock_path.exists()
+
+
+def test_lock_owner_policy_allows_root_only_for_directory_owner() -> None:
+    paper_uid = 991
+
+    assert storage._lock_owner_allowed(paper_uid, effective_uid=paper_uid)
+    assert storage._lock_owner_allowed(paper_uid, effective_uid=0)
+    assert not storage._lock_owner_allowed(paper_uid, effective_uid=992)
+
+
+def test_root_first_lock_creation_inherits_lock_directory_owner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lock_path = tmp_path / ".locks" / "root-first.lock"
+    lock_path.parent.mkdir(mode=0o700)
+    expected = lock_path.parent.stat()
+    real_fchown = os.fchown
+    ownership_calls: list[tuple[int, int]] = []
+
+    def observe_fchown(fd: int, uid: int, gid: int) -> None:
+        ownership_calls.append((uid, gid))
+        real_fchown(fd, uid, gid)
+
+    monkeypatch.setattr(storage.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(storage.os, "fchown", observe_fchown)
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        actual = lock_path.stat()
+        assert (actual.st_uid, actual.st_gid) == (expected.st_uid, expected.st_gid)
+
+    assert (expected.st_uid, expected.st_gid) in ownership_calls
+
+
+def test_root_bootstrap_of_dataset_lock_directory_inherits_root_owner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data_root = tmp_path / "paper-root"
+    data_root.mkdir(mode=0o700)
+    expected = data_root.stat()
+    lock_path = data_root / ".locks" / "dataset.lock"
+    real_fchown = os.fchown
+    ownership_calls: list[tuple[int, int]] = []
+
+    def observe_fchown(fd: int, uid: int, gid: int) -> None:
+        ownership_calls.append((uid, gid))
+        real_fchown(fd, uid, gid)
+
+    monkeypatch.setattr(storage.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(storage.os, "fchown", observe_fchown)
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        directory = lock_path.parent.stat()
+        leaf = lock_path.stat()
+        assert (directory.st_uid, directory.st_gid) == (expected.st_uid, expected.st_gid)
+        assert leaf.st_uid == directory.st_uid
+
+    assert (expected.st_uid, expected.st_gid) in ownership_calls
+
+
+def test_exclusive_file_lock_rejects_symlinked_lock_directory(tmp_path: Path) -> None:
+    real_directory = tmp_path / "real-locks"
+    real_directory.mkdir(mode=0o700)
+    symlinked_directory = tmp_path / ".locks"
+    symlinked_directory.symlink_to(real_directory, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="lock directory"):
+        with exclusive_file_lock(symlinked_directory / "unsafe.lock", poll_seconds=0.0):
+            pytest.fail("symlinked lock directory was admitted")
+
+
+def test_exclusive_file_lock_rejects_writable_lock_directory(tmp_path: Path) -> None:
+    lock_directory = tmp_path / ".locks"
+    lock_directory.mkdir(mode=0o700)
+    lock_directory.chmod(0o770)
+
+    with pytest.raises(RuntimeError, match="must not be group/world writable"):
+        with exclusive_file_lock(lock_directory / "unsafe.lock", poll_seconds=0.0):
+            pytest.fail("group-writable lock directory was admitted")
+
+
+def test_exclusive_file_lock_reopens_if_directory_changes_after_flock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lock_directory = tmp_path / ".locks"
+    lock_directory.mkdir(mode=0o700)
+    lock_path = lock_directory / "directory-race.lock"
+    lock_path.touch(mode=0o600)
+    retired_directory = tmp_path / "retired-locks"
+    real_flock = storage.fcntl.flock
+    calls = 0
+
+    def replace_directory_after_first_flock(fd: int, operation: int) -> None:
+        nonlocal calls
+        real_flock(fd, operation)
+        calls += 1
+        if calls == 1:
+            lock_directory.rename(retired_directory)
+            lock_directory.mkdir(mode=0o700)
+            lock_path.touch(mode=0o600)
+
+    monkeypatch.setattr(storage.fcntl, "flock", replace_directory_after_first_flock)
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        assert calls == 2
+        assert lock_path.parent.samefile(lock_directory)
+
+    assert (retired_directory / lock_path.name).exists()
+
+
+def test_exclusive_file_lock_recovers_internal_alias_left_after_publication(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "recover.lock"
+    alias = tmp_path / f".{lock_path.name}.create-{'a' * 32}"
+    alias.touch(mode=0o600)
+    os.link(alias, lock_path)
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        assert lock_path.stat().st_nlink == 1
+        assert not alias.exists()
+
+
+def test_exclusive_file_lock_cleans_old_unpublished_internal_alias(tmp_path: Path) -> None:
+    lock_path = tmp_path / "orphan.lock"
+    alias = tmp_path / f".{lock_path.name}.create-{'b' * 32}"
+    alias.touch(mode=0o600)
+    old_ts = time.time() - storage._LOCK_CREATE_ORPHAN_SECONDS - 1.0
+    os.utime(alias, (old_ts, old_ts))
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        assert lock_path.exists()
+
+    assert not alias.exists()
+
+
+def test_old_unpublished_alias_cleanup_does_not_trust_creator_uid(tmp_path: Path) -> None:
+    alias = tmp_path / f".lock.create-{'c' * 32}"
+    alias.touch(mode=0o600)
+    old_ts = time.time() - storage._LOCK_CREATE_ORPHAN_SECONDS - 1.0
+    os.utime(alias, (old_ts, old_ts))
+    values = list(alias.stat())
+    values[4] = os.geteuid() + 1
+    foreign_owner = os.stat_result(values)
+
+    assert storage._lock_create_orphan_removable(foreign_owner, cutoff=time.time())
+
+
+def test_old_unpublished_alias_is_cleaned_when_canonical_already_exists(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "canonical.lock"
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        pass
+    alias = tmp_path / f".{lock_path.name}.create-{'d' * 32}"
+    alias.touch(mode=0o600)
+    old_ts = time.time() - storage._LOCK_CREATE_ORPHAN_SECONDS - 1.0
+    os.utime(alias, (old_ts, old_ts))
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        assert lock_path.exists()
+
+    assert not alias.exists()
+
+
+def test_fresh_unpublished_alias_is_swept_when_cached_expiry_arrives(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage._LOCK_CREATE_SWEEP_CACHE.clear()
+    lock_path = tmp_path / "cached-expiry.lock"
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        pass
+    alias = tmp_path / f".{lock_path.name}.create-{'e' * 32}"
+    alias.touch(mode=0o600)
+    base = time.time()
+    os.utime(alias, (base, base))
+    monkeypatch.setattr(storage.time, "time", lambda: base)
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        assert alias.exists()
+    directory_signature = lock_path.parent.stat().st_mtime_ns
+
+    monkeypatch.setattr(
+        storage.time,
+        "time",
+        lambda: base + storage._LOCK_CREATE_ORPHAN_SECONDS + 1.0,
+    )
+    assert lock_path.parent.stat().st_mtime_ns == directory_signature
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        pass
+
+    assert not alias.exists()
+
+
+def test_concurrent_orphan_sweep_missing_name_is_benign(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lock_path = tmp_path / "sweep-race.lock"
+    alias = tmp_path / f".{lock_path.name}.create-{'f' * 32}"
+    alias.touch(mode=0o600)
+    old_ts = time.time() - storage._LOCK_CREATE_ORPHAN_SECONDS - 1.0
+    os.utime(alias, (old_ts, old_ts))
+    real_unlink = os.unlink
+    raced = False
+
+    def remove_then_report_missing(path, *, dir_fd=None) -> None:
+        nonlocal raced
+        if path == alias.name and dir_fd is not None and not raced:
+            raced = True
+            real_unlink(path, dir_fd=dir_fd)
+            raise FileNotFoundError(path)
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(storage.os, "unlink", remove_then_report_missing)
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        assert lock_path.exists()
+
+    assert raced
+    assert not alias.exists()
+
+
+def test_exclusive_file_lock_fork_child_does_not_inherit_parent_mutex(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "fork.lock"
+    source = f"""
+import os
+import select
+import threading
+
+from liquidity_migration.storage import exclusive_file_lock
+
+lock_path = {str(lock_path)!r}
+read_fd, write_fd = os.pipe()
+child_status = []
+
+def fork_and_wait():
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            with exclusive_file_lock(lock_path, poll_seconds=0.005):
+                os.write(write_fd, b"1")
+        except BaseException:
+            os._exit(72)
+        os._exit(0)
+    os.close(write_fd)
+    _, status = os.waitpid(pid, 0)
+    child_status.append(os.waitstatus_to_exitcode(status))
+
+with exclusive_file_lock(lock_path, poll_seconds=0.005):
+    worker = threading.Thread(target=fork_and_wait)
+    worker.start()
+    ready, _, _ = select.select([read_fd], [], [], 0.2)
+    if ready:
+        raise SystemExit(70)
+
+worker.join(timeout=5.0)
+if worker.is_alive():
+    raise SystemExit(71)
+ready, _, _ = select.select([read_fd], [], [], 1.0)
+if not ready or os.read(read_fd, 1) != b"1" or child_status != [0]:
+    raise SystemExit(73)
+"""
+    result = subprocess.run(
+        [sys.executable, "-W", "ignore::DeprecationWarning", "-c", source],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_concurrent_cycle_writers_do_not_lose_or_tear_rows(tmp_path: Path) -> None:
@@ -245,7 +690,7 @@ def test_non_ledger_dataset_is_not_month_bucketed(tmp_path: Path) -> None:
 
 
 def test_exclusive_file_lock_release_does_not_delete_successor_lock(tmp_path: Path) -> None:
-    """CROS-1: if our lock is stale-evicted and a successor recreates the path with a NEW
+    """CROS-1: if an external unlink lets a successor recreate the path with a NEW
     inode while we're still in the critical section, release must NOT delete the successor's
     lock (an unconditional unlink-by-path would admit a second concurrent writer)."""
     lock = tmp_path / "x.lock"
@@ -258,60 +703,12 @@ def test_exclusive_file_lock_release_does_not_delete_successor_lock(tmp_path: Pa
     assert os.stat(lock).st_ino == successor_ino
 
 
-def test_exclusive_file_lock_release_unlinks_its_own_lock(tmp_path: Path) -> None:
-    """CROS-1 happy path: a normal release (no eviction) still removes our own lock."""
+def test_exclusive_file_lock_release_keeps_its_persistent_inode(tmp_path: Path) -> None:
     lock = tmp_path / "z.lock"
     with exclusive_file_lock(lock, stale_seconds=600):
-        assert lock.exists()
-    assert not lock.exists()
-
-
-def test_lock_owner_is_dead_evicts_reused_pid(tmp_path: Path, monkeypatch) -> None:
-    """CROS-2: a live-but-REUSED pid (started after the lock's created ts) is treated as
-    dead so the stale lock self-heals immediately instead of waiting out the stale timeout.
-    An unknown start time (non-Linux / no /proc) stays conservative (owner alive)."""
-    import subprocess
-    import sys
-
-    from liquidity_migration import storage
-
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(15)"])
-    try:
-        lock = tmp_path / "y.lock"
-        lock.write_text(
-            json.dumps(
-                {
-                    "pid": proc.pid,
-                    "created": time.time() - 100,
-                    "token": "0123456789abcdef" * 2,
-                }
-            ),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(storage, "_pid_started_after", lambda pid, _created: True)
-        assert storage._lock_owner_is_dead(lock) is True
-        monkeypatch.setattr(storage, "_pid_started_after", lambda pid, _created: None)
-        assert storage._lock_owner_is_dead(lock) is False
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=3)
-
-
-def test_pid_started_after_guards_and_current_process() -> None:
-    import sys
-    from liquidity_migration import storage
-
-    assert storage._pid_started_after(os.getpid(), 0.0) is None  # created<=0 -> unknown
-    if sys.platform.startswith("linux"):
-        assert storage._pid_started_after(os.getpid(), 1.0) is True  # we started after epoch 1
-        assert storage._pid_started_after(os.getpid(), time.time() + 1e9) is False
-    else:
-        assert storage._pid_started_after(os.getpid(), 1.0) is None  # no /proc -> unknown
+        inode = lock.stat().st_ino
+    assert lock.exists()
+    assert lock.stat().st_ino == inode
 
 
 def test_funding_resolves_to_binance_usdm_funding_without_symlink(tmp_path: Path) -> None:
@@ -355,9 +752,6 @@ def test_missing_funding_everywhere_returns_empty(tmp_path: Path) -> None:
 # pit-data-6 / storage-concurrency-2 / -4 / -5: funding-fallback gating, the
 # reused-pid stale singleton-lock eviction, orphaned `.*.tmp` sweeping, and the
 # parent-dir fsync after the atomic rename. Each FAILs on the original bug.
-import threading  # noqa: E402
-
-from liquidity_migration import storage  # noqa: E402
 from liquidity_migration.storage import resolve_dataset_name as _b10_resolve_dataset_name  # noqa: E402
 
 
@@ -428,67 +822,53 @@ def test_pitdata6_pure_binance_root_still_resolves_fallback(tmp_path: Path) -> N
     assert read_dataset(tmp_path, "funding").height == 1
 
 
-def test_storageconcurrency2_reused_pid_stale_lock_is_dead(tmp_path: Path) -> None:
-    """A crashed daemon leaves a VALID-JSON lock bearing its pid + token. If a
-    fast restart reuses the SAME pid, the successor reads pid==os.getpid() and,
-    on a stale_seconds=0 singleton lock, would wedge forever (the age-eviction
-    and None-self-heal paths are both disabled). The per-acquisition token is the
-    tiebreaker: a token NOT in this process's live-owned set means the lock is a
-    predecessor that merely reused our pid -> the owner is dead. Before the fix
-    _lock_owner_is_dead short-circuited to False (alive) on pid==getpid()."""
-    lock_path = dataset_lock_path(tmp_path, "klines_1h")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # Plant a readable, valid-JSON lock with OUR pid but a foreign token (a dead
-    # predecessor that reused our pid). _read_lock_text_safe returns the real text
-    # here (NOT monkeypatched), so the None self-heal path cannot fire.
-    lock_path.write_text(
-        json.dumps({"pid": os.getpid(), "created": time.time(), "token": "deadbeef" * 4}),
-        encoding="utf-8",
-    )
-    assert storage._lock_owner_is_dead(lock_path) is True
-
-    # A live-owned token (one we currently hold) must still read as ALIVE.
-    live_token = os.urandom(16).hex()
-    storage._register_owned_token(live_token)
-    try:
-        lock_path.write_text(
-            json.dumps({"pid": os.getpid(), "created": time.time(), "token": live_token}),
-            encoding="utf-8",
-        )
-        assert storage._lock_owner_is_dead(lock_path) is False
-    finally:
-        storage._unregister_owned_token(live_token)
-
-    # Tokenless payloads are invalid and must age through the explicit invalid-
-    # lock grace path rather than being adopted as current ownership evidence.
-    lock_path.write_text(json.dumps({"pid": os.getpid(), "created": time.time()}), encoding="utf-8")
-    assert storage._lock_owner_is_dead(lock_path) is False
-    assert storage._lock_payload_is_invalid(lock_path) is True
-
-
-def test_storageconcurrency2_acquire_recovers_over_reused_pid_lock(tmp_path: Path) -> None:
-    """End-to-end: exclusive_file_lock with stale_seconds=0 (the singleton-guard
-    config) must ACQUIRE over a reused-pid foreign-token lock instead of wedging.
-    Run in a thread with a join timeout so a regression cannot hang the suite."""
+def test_exclusive_file_lock_recovers_after_abrupt_holder_exit(tmp_path: Path) -> None:
     lock_path = dataset_lock_path(tmp_path, "funding")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text(
-        json.dumps({"pid": os.getpid(), "created": time.time(), "token": "f00dface" * 4}),
-        encoding="utf-8",
+    context = multiprocessing.get_context("spawn")
+    acquired = context.Event()
+    exit_now = context.Event()
+    holder = context.Process(
+        target=_hold_lock_until_abrupt_exit,
+        args=(str(lock_path), acquired, exit_now),
     )
+    holder.start()
+    assert acquired.wait(timeout=5.0)
+    inode = lock_path.stat().st_ino
 
-    acquired = threading.Event()
+    exit_now.set()
+    holder.join(timeout=5.0)
+    assert holder.exitcode == 17
 
-    def _acquire() -> None:
-        with exclusive_file_lock(lock_path, stale_seconds=0, poll_seconds=0.0):
-            acquired.set()
+    started = time.monotonic()
+    with exclusive_file_lock(lock_path, poll_seconds=0.005):
+        assert lock_path.stat().st_ino == inode
+    assert time.monotonic() - started < 1.0
 
-    worker = threading.Thread(target=_acquire, daemon=True)
-    worker.start()
-    worker.join(timeout=5.0)
-    assert acquired.is_set(), "acquire wedged on a reused-pid stale singleton lock"
-    # Lock is released (our acquisition owned it, foreign token replaced on write).
-    assert not lock_path.exists()
+
+@pytest.mark.parametrize("leaf_kind", ["symlink", "hardlink", "directory", "fifo"])
+def test_exclusive_file_lock_refuses_aliased_or_nonregular_leaf(
+    tmp_path: Path,
+    leaf_kind: str,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("do-not-touch", encoding="utf-8")
+    target.chmod(0o644)
+    lock_path = tmp_path / "unsafe.lock"
+    if leaf_kind == "symlink":
+        lock_path.symlink_to(target)
+    elif leaf_kind == "hardlink":
+        os.link(target, lock_path)
+    elif leaf_kind == "directory":
+        lock_path.mkdir()
+    else:
+        os.mkfifo(lock_path)
+
+    with pytest.raises(RuntimeError, match="lock path"):
+        with exclusive_file_lock(lock_path, poll_seconds=0.0):
+            pytest.fail("unsafe lock leaf was admitted")
+
+    assert target.read_text(encoding="utf-8") == "do-not-touch"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
 
 def test_storageconcurrency4_orphaned_tmp_swept_on_next_write(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@
 # Stages:
 #   [1/4] archive-manifest               — PIT (symbol, date) membership
 #   [2/4] archive-download-klines-1h-api — 1h klines via Bybit v5 (manifest-gated)
-#   [3/4] filter-manifest                — drop rows with <20h kline coverage
+#   [3/4] validate-manifest              — fail on missing required klines without erasing membership
 #   [4/4] download-data ancillaries      — funding, OI, mark/index/premium
 #
 # Perps-only by construction:
@@ -70,11 +70,11 @@ echo "[2/4] Bybit — 1h klines via v5 kline API (category=$CATEGORY, manifest-g
     --start "$START" --end "$END" --workers "$KLINE_WORKERS"
 
 echo
-echo "[3/4] Bybit — filter manifest to ≥20-bar coverage"
+echo "[3/4] Bybit — validate independent manifest against ≥20-bar kline coverage"
 "$PYTHON_BIN" -m liquidity_migration.binance_vision \
-  filter-manifest --data-root "$ROOT"
+  validate-manifest --data-root "$ROOT"
 
-# Derive the symbol list from the filtered manifest. Required by download-data.
+# Derive the symbol list from the validated independent manifest. Required by download-data.
 # Perps-only guard: any symbol not USDT-quoted fails the build loudly rather
 # than silently slipping spot or inverse symbols into the ancillary datasets.
 SYMBOLS=$(ROOT="$ROOT" "$PYTHON_BIN" - <<'PY'

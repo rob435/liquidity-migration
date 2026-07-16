@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -415,6 +416,12 @@ def _require_unbound_root_empty(root: Path, *, role: str) -> None:
 
 def _meaningful_unbound_artifacts(root: Path) -> tuple[str, ...]:
     artifacts: list[str] = []
+    try:
+        root_metadata = root.lstat()
+    except OSError as exc:
+        raise AccountRouteCutoverRequiredError(
+            f"cannot inspect unbound account route root {root}: {exc}"
+        ) from exc
 
     def visit(directory: Path) -> None:
         try:
@@ -426,9 +433,16 @@ def _meaningful_unbound_artifacts(root: Path) -> tuple[str, ...]:
             for entry in entries:
                 path = Path(entry.path)
                 relative = path.relative_to(root)
+                metadata = entry.stat(follow_symlinks=False)
                 if _is_route_initializer_scaffolding(
                     relative,
-                    is_regular_file=entry.is_file(follow_symlinks=False),
+                    is_regular_file=stat.S_ISREG(metadata.st_mode),
+                ):
+                    continue
+                if _is_persistent_lock_scaffolding(
+                    relative,
+                    metadata=metadata,
+                    root_uid=root_metadata.st_uid,
                 ):
                     continue
                 if entry.is_dir(follow_symlinks=False):
@@ -444,6 +458,26 @@ def _meaningful_unbound_artifacts(root: Path) -> tuple[str, ...]:
     return tuple(sorted(artifacts))
 
 
+def _is_persistent_lock_scaffolding(
+    relative: Path,
+    *,
+    metadata: os.stat_result,
+    root_uid: int,
+) -> bool:
+    """A persistent mutex inode is infrastructure, not prior account state."""
+    in_lock_namespace = (
+        len(relative.parts) > 1
+        and relative.parts[0] == ACCOUNT_ROUTE_LOCK_DIRECTORY
+    )
+    return (
+        (relative.name.endswith(".lock") or in_lock_namespace)
+        and stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and metadata.st_uid == root_uid
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+    )
+
+
 def _is_route_initializer_scaffolding(
     relative: Path,
     *,
@@ -451,8 +485,6 @@ def _is_route_initializer_scaffolding(
 ) -> bool:
     if not is_regular_file:
         return False
-    if relative == Path(ACCOUNT_ROUTE_LOCK_DIRECTORY) / ACCOUNT_ROUTE_LOCK_FILENAME:
-        return True
     return (
         relative.parent == Path(".")
         and relative.name.startswith(f".{ACCOUNT_ROUTE_FILENAME}.")

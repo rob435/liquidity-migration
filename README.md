@@ -23,6 +23,8 @@ deployment and risk boundary.
 - [docs/research_summary.md](docs/research_summary.md) — compact decision log.
 - [docs/data_roots.md](docs/data_roots.md) and
   [docs/pit_gate.md](docs/pit_gate.md) — research-data boundaries.
+- [docs/repository_map.md](docs/repository_map.md) — subsystem ownership,
+  entry points, and validation paths.
 
 ## Layout
 
@@ -31,5 +33,14 @@ deployment and risk boundary.
 - `deploy/` — systemd topology and strict environment handling.
 - `tests/` — executable contracts.
 - `.codex/skills/` — canonical project workflows; `.claude/skills/` mirrors them.
+
+## Developer workflow
+
+Use `scripts/dev.sh doctor` for a read-only environment/worktree diagnostic and
+`scripts/dev.sh check` for the full local Ruff, mypy, and pytest gate. These
+commands never contact a venue or grant operational authority. Operator and
+research commands remain under `scripts/ops.sh` and the task-specific skills.
+Coordination locks and reset receipts do not by themselves grant operational or
+mainnet authority; their exact limits are in `docs/operations.md`.
 
 Python 3.11+.

@@ -29,7 +29,7 @@ from .account_owner_health import (
     write_account_owner_health,
 )
 from .account_owner_lease import AccountOwnerLease
-from .account_route import ensure_account_route
+from .account_route import derive_account_route, ensure_account_route
 from .account_service import AccountExecutionService, AccountIntentInbox
 from .account_service_bybit import (
     CapturedBybitMarketProvider,
@@ -204,15 +204,27 @@ def main(argv: list[str] | None = None) -> int:
     require_paper_runtime_isolation()
     invocation_id = require_systemd_invocation_id()
 
-    route = ensure_account_route(
+    requested_route = derive_account_route(
         account_id=args.account_id,
         environment="paper",
         account_root=args.account_root,
         inbox_root=args.inbox_root,
     )
 
-    lease = AccountOwnerLease(route.account_path / "account_execution_owner.lock")
+    lease = AccountOwnerLease(
+        requested_route.account_path / "account_execution_owner.lock"
+    )
     lease.acquire()
+    try:
+        route = ensure_account_route(
+            account_id=requested_route.account_id,
+            environment=requested_route.environment,
+            account_root=requested_route.account_root,
+            inbox_root=requested_route.inbox_root,
+        )
+    except BaseException:
+        lease.close()
+        raise
     rules = load_demo_rules(
         args.demo_rules_file,
         max_age_seconds=args.max_demo_rule_age_hours * 3600.0,

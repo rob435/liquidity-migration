@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_execution_stream import BybitAccountExecutionConsumer
+from liquidity_migration.account_execution_stream import (
+    BybitAccountExecutionConsumer,
+    PrivateExecutionStreamSupervisor,
+)
 from liquidity_migration.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
@@ -14,6 +19,42 @@ from liquidity_migration.account_kernel import (
     MarketInputRef,
 )
 from liquidity_migration.deterministic_runtime import VirtualClock
+
+
+class _PrivateStream:
+    def __init__(
+        self,
+        connected: bool | None,
+        *,
+        fail_order_subscription: bool = False,
+        subscription_started: threading.Event | None = None,
+        subscription_release: threading.Event | None = None,
+    ) -> None:
+        self.connected = connected
+        self.fail_order_subscription = fail_order_subscription
+        self.subscription_started = subscription_started
+        self.subscription_release = subscription_release
+        self.execution_subscriptions = 0
+        self.order_subscriptions = 0
+        self.close_calls = 0
+
+    def is_connected(self) -> bool | None:
+        return self.connected
+
+    def subscribe_executions(self, _callback) -> None:
+        self.execution_subscriptions += 1
+        if self.subscription_started is not None:
+            self.subscription_started.set()
+        if self.subscription_release is not None:
+            self.subscription_release.wait(timeout=2.0)
+
+    def subscribe_orders(self, _callback) -> None:
+        self.order_subscriptions += 1
+        if self.fail_order_subscription:
+            raise RuntimeError("order subscription failed")
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 def _command(tmp_path: Path) -> tuple[AccountExecutionKernel, str]:
@@ -58,6 +99,299 @@ def _execution(command_id: str, *, exec_id: str = "exec-1", qty: str = "1") -> d
         "side": "Buy",
         "seq": "7",
     }]}
+
+
+def _started_consumer(tmp_path: Path, stream: _PrivateStream) -> BybitAccountExecutionConsumer:
+    kernel, _command_id = _command(tmp_path)
+    consumer = BybitAccountExecutionConsumer(kernel=kernel, private_stream=stream)
+    consumer.start()
+    return consumer
+
+
+def _poll_supervisor(
+    supervisor: PrivateExecutionStreamSupervisor,
+    *,
+    now_monotonic: float,
+    until,
+) -> bool | None:
+    deadline = time.monotonic() + 2.0
+    status: bool | None = None
+    while time.monotonic() < deadline:
+        status = supervisor.check(now_monotonic=now_monotonic)
+        if until(status):
+            return status
+        time.sleep(0.005)
+    pytest.fail("private stream supervisor did not settle before the test deadline")
+
+
+def test_private_stream_supervisor_blocks_then_rebuilds_and_resubscribes(tmp_path: Path) -> None:
+    old_stream = _PrivateStream(False)
+    replacement = _PrivateStream(True)
+    consumer = _started_consumer(tmp_path, old_stream)
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=lambda: replacement,
+        reconnect_after_seconds=180.0,
+        reconnect_cooldown_seconds=180.0,
+    )
+    try:
+        assert supervisor.check(now_monotonic=10.0) is False
+        with pytest.raises(RuntimeError, match="private execution websocket is disconnected"):
+            supervisor.require_recent_healthy(max_age_ns=1)
+        assert supervisor.check(now_monotonic=189.9) is False
+        assert supervisor.check(now_monotonic=190.1) is False
+        assert _poll_supervisor(
+            supervisor,
+            now_monotonic=190.1,
+            until=lambda status: status is True,
+        ) is True
+        assert consumer.private_stream is replacement
+        assert old_stream.close_calls == 1
+        assert replacement.execution_subscriptions == 1
+        assert replacement.order_subscriptions == 1
+        supervisor.require_recent_healthy(max_age_ns=1)
+    finally:
+        consumer.close()
+
+
+def test_private_stream_supervisor_never_rebuilds_quiet_connected_socket(tmp_path: Path) -> None:
+    stream = _PrivateStream(True)
+    consumer = _started_consumer(tmp_path, stream)
+    factory_calls = 0
+
+    def factory() -> _PrivateStream:
+        nonlocal factory_calls
+        factory_calls += 1
+        return _PrivateStream(True)
+
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=factory,
+        reconnect_after_seconds=1.0,
+        reconnect_cooldown_seconds=1.0,
+    )
+    try:
+        assert supervisor.check(now_monotonic=0.0) is True
+        assert supervisor.check(now_monotonic=10_000.0) is True
+        assert factory_calls == 0
+    finally:
+        consumer.close()
+
+
+def test_private_stream_admission_reprobes_instead_of_trusting_cached_health(
+    tmp_path: Path,
+) -> None:
+    stream = _PrivateStream(True)
+    consumer = _started_consumer(tmp_path, stream)
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=lambda: _PrivateStream(True),
+        reconnect_after_seconds=1.0,
+        reconnect_cooldown_seconds=1.0,
+    )
+    try:
+        assert supervisor.check(now_monotonic=0.0) is True
+        stream.connected = False
+
+        with pytest.raises(RuntimeError, match="private execution websocket is disconnected"):
+            supervisor.require_recent_healthy(max_age_ns=1_000_000_000)
+    finally:
+        consumer.close()
+
+
+def test_private_stream_supervisor_prefers_ack_readiness_over_socket_liveness(
+    tmp_path: Path,
+) -> None:
+    class _SocketWithoutSubscriptions(_PrivateStream):
+        readiness_detail = "private execution websocket awaits positive subscription ACKs: order"
+
+        def is_ready(self) -> bool:
+            return False
+
+    stream = _SocketWithoutSubscriptions(True)
+    consumer = _started_consumer(tmp_path, stream)
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=lambda: _PrivateStream(True),
+        reconnect_after_seconds=1.0,
+        reconnect_cooldown_seconds=1.0,
+    )
+    try:
+        assert supervisor.check(now_monotonic=0.0) is False
+        assert "awaits positive subscription ACKs" in supervisor.health_detail
+        with pytest.raises(RuntimeError, match="positive subscription ACKs"):
+            supervisor.require_recent_healthy(max_age_ns=1_000_000_000)
+    finally:
+        consumer.close()
+
+
+def test_private_stream_supervisor_retries_failed_subscription_after_cooldown(tmp_path: Path) -> None:
+    old_stream = _PrivateStream(False)
+    failed_stream = _PrivateStream(True, fail_order_subscription=True)
+    replacement = _PrivateStream(True)
+    replacements = iter((failed_stream, replacement))
+    consumer = _started_consumer(tmp_path, old_stream)
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=lambda: next(replacements),
+        reconnect_after_seconds=5.0,
+        reconnect_cooldown_seconds=5.0,
+    )
+    try:
+        assert supervisor.check(now_monotonic=0.0) is False
+        assert supervisor.check(now_monotonic=5.1) is False
+        _poll_supervisor(
+            supervisor,
+            now_monotonic=5.1,
+            until=lambda _status: bool(supervisor.last_error),
+        )
+        assert supervisor.reconnect_attempts == 1
+        assert "order subscription failed" in supervisor.last_error
+        assert failed_stream.close_calls == 1
+        assert consumer.private_stream is old_stream
+        assert supervisor.check(now_monotonic=9.9) is False
+        assert supervisor.reconnect_attempts == 1
+        assert supervisor.check(now_monotonic=10.2) is False
+        assert _poll_supervisor(
+            supervisor,
+            now_monotonic=10.2,
+            until=lambda status: status is True,
+        ) is True
+        assert supervisor.reconnect_attempts == 2
+        assert supervisor.reconnect_successes == 1
+        assert consumer.private_stream is replacement
+    finally:
+        consumer.close()
+
+
+def test_private_stream_supervisor_keeps_old_stream_when_candidate_never_ready(
+    tmp_path: Path,
+) -> None:
+    old_stream = _PrivateStream(False)
+    candidate = _PrivateStream(False)
+    consumer = _started_consumer(tmp_path, old_stream)
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=lambda: candidate,
+        reconnect_after_seconds=1.0,
+        reconnect_cooldown_seconds=1.0,
+        candidate_ready_timeout_seconds=0.03,
+        candidate_ready_poll_seconds=0.005,
+    )
+    try:
+        assert supervisor.check(now_monotonic=0.0) is False
+        assert supervisor.check(now_monotonic=1.1) is False
+        _poll_supervisor(
+            supervisor,
+            now_monotonic=1.1,
+            until=lambda _status: bool(supervisor.last_error),
+        )
+
+        assert "did not become ready" in supervisor.last_error
+        assert consumer.private_stream is old_stream
+        assert old_stream.close_calls == 0
+        assert candidate.close_calls == 1
+        assert supervisor.reconnect_successes == 0
+    finally:
+        consumer.close()
+
+
+def test_private_stream_supervisor_discards_candidate_when_old_stream_recovers(
+    tmp_path: Path,
+) -> None:
+    old_stream = _PrivateStream(False)
+    candidate = _PrivateStream(False)
+    consumer = _started_consumer(tmp_path, old_stream)
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=lambda: candidate,
+        reconnect_after_seconds=1.0,
+        reconnect_cooldown_seconds=1.0,
+        candidate_ready_timeout_seconds=0.5,
+        candidate_ready_poll_seconds=0.005,
+    )
+    try:
+        assert supervisor.check(now_monotonic=0.0) is False
+        assert supervisor.check(now_monotonic=1.1) is False
+        deadline = time.monotonic() + 1.0
+        while candidate.order_subscriptions == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert candidate.order_subscriptions == 1
+
+        old_stream.connected = True
+        assert _poll_supervisor(
+            supervisor,
+            now_monotonic=1.2,
+            until=lambda status: status is True and not supervisor.rebuild_in_progress,
+        ) is True
+
+        assert consumer.private_stream is old_stream
+        assert old_stream.close_calls == 0
+        assert candidate.close_calls == 1
+        assert supervisor.reconnect_successes == 0
+    finally:
+        consumer.close()
+
+
+def test_private_stream_rebuild_does_not_block_owner_during_subscription(
+    tmp_path: Path,
+) -> None:
+    old_stream = _PrivateStream(False)
+    subscription_started = threading.Event()
+    subscription_release = threading.Event()
+    replacement = _PrivateStream(
+        True,
+        subscription_started=subscription_started,
+        subscription_release=subscription_release,
+    )
+    consumer = _started_consumer(tmp_path, old_stream)
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=lambda: replacement,
+        reconnect_after_seconds=1.0,
+        reconnect_cooldown_seconds=1.0,
+    )
+    try:
+        assert supervisor.check(now_monotonic=0.0) is False
+        assert supervisor.check(now_monotonic=1.1) is False
+        assert subscription_started.wait(timeout=1.0)
+
+        started = time.monotonic()
+        assert supervisor.check(now_monotonic=1.2) is False
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.1
+        assert supervisor.rebuild_in_progress
+        assert "rebuild in progress" in supervisor.health_detail
+    finally:
+        subscription_release.set()
+        consumer.close()
+
+
+def test_private_stream_supervisor_unknown_liveness_blocks_without_rebuild(tmp_path: Path) -> None:
+    stream = _PrivateStream(None)
+    consumer = _started_consumer(tmp_path, stream)
+    factory_calls = 0
+
+    def factory() -> _PrivateStream:
+        nonlocal factory_calls
+        factory_calls += 1
+        return _PrivateStream(True)
+
+    supervisor = PrivateExecutionStreamSupervisor(
+        consumer=consumer,
+        stream_factory=factory,
+        reconnect_after_seconds=1.0,
+        reconnect_cooldown_seconds=1.0,
+    )
+    try:
+        assert supervisor.check(now_monotonic=0.0) is None
+        assert supervisor.check(now_monotonic=10_000.0) is None
+        with pytest.raises(RuntimeError, match="liveness is unavailable"):
+            supervisor.require_recent_healthy(max_age_ns=1)
+        assert factory_calls == 0
+    finally:
+        consumer.close()
 
 
 def test_execution_before_create_ack_infers_ack_then_records_fill(tmp_path: Path) -> None:

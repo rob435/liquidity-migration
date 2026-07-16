@@ -19,6 +19,8 @@ state from current sources. Skills are task runbooks, not general memory.
 
 ## Commands
 
+- Repository diagnostics: `scripts/dev.sh doctor` (add `--json` for tools).
+- Full local quality gate: `scripts/dev.sh check`.
 - Routine operations: `scripts/ops.sh --help`.
 - Package CLI: `python -m liquidity_migration --help` and the selected
   subcommand's `--help`.

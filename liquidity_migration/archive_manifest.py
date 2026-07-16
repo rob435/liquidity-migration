@@ -745,17 +745,8 @@ def _download_api_hourly_group(
 
     pending_dates = {str(row["date"]) for row in pending_rows}
     by_date: dict[str, list[dict[str, Any]]] = {row_date: [] for row_date in pending_dates}
-    start_date = date.fromisoformat(str(pending_rows[0]["date"])[:10])
-    end_date = date.fromisoformat(str(pending_rows[-1]["date"])[:10])
     chunk_hours = max(1, min(int(config.limit), 1000))
-    cursor = datetime.combine(start_date, datetime.min.time(), tzinfo=UTC)
-    # `end_dt` is the START timestamp of the final 1-hour bar on end_date
-    # (i.e. 23:00 UTC, same day — NOT next day). The loop condition is
-    # `cursor <= end_dt`, and the step `cursor = chunk_end + 1h` covers
-    # the full inclusive day [00:00..23:00] for any chunk_hours.
-    end_dt = datetime.combine(end_date, datetime.min.time(), tzinfo=UTC) + timedelta(hours=23)
-    while cursor <= end_dt:
-        chunk_end = min(end_dt, cursor + timedelta(hours=chunk_hours - 1))
+    for cursor, chunk_end in _missing_date_request_windows(pending_dates, max_hours=chunk_hours):
         rows_from_api = _fetch_bybit_api_klines(
             config,
             symbol=symbol,
@@ -771,7 +762,6 @@ def _download_api_hourly_group(
                 by_date.setdefault(row_date, []).append(parsed)
         if config.request_sleep_seconds > 0.0:
             time.sleep(config.request_sleep_seconds)
-        cursor = chunk_end + timedelta(hours=1)
 
     pending_by_date = {str(row["date"]): row for row in pending_rows}
     for row_date in sorted(pending_dates):
@@ -812,6 +802,45 @@ def _download_api_hourly_group(
             ),
         )
     return [results_by_date[str(row["date"])] for row in sorted_rows]
+
+
+def _missing_date_request_windows(
+    date_strings: set[str],
+    *,
+    max_hours: int,
+) -> list[tuple[datetime, datetime]]:
+    days = sorted({date.fromisoformat(value[:10]) for value in date_strings})
+    if not days:
+        return []
+    intervals = [
+        (
+            datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+            datetime.combine(day, datetime.min.time(), tzinfo=UTC) + timedelta(hours=23),
+        )
+        for day in days
+    ]
+    request_hours = max(1, int(max_hours))
+    windows: list[tuple[datetime, datetime]] = []
+    interval_index = 0
+    cursor = intervals[0][0]
+    while interval_index < len(intervals):
+        capacity_end = cursor + timedelta(hours=request_hours - 1)
+        last_included = interval_index
+        request_end = min(intervals[last_included][1], capacity_end)
+        candidate = interval_index + 1
+        while candidate < len(intervals) and intervals[candidate][0] <= capacity_end:
+            last_included = candidate
+            request_end = min(intervals[candidate][1], capacity_end)
+            candidate += 1
+        windows.append((cursor, request_end))
+        if intervals[last_included][1] > capacity_end:
+            interval_index = last_included
+            cursor = capacity_end + timedelta(hours=1)
+            continue
+        interval_index = last_included + 1
+        if interval_index < len(intervals):
+            cursor = intervals[interval_index][0]
+    return windows
 
 
 def _fetch_bybit_api_klines(

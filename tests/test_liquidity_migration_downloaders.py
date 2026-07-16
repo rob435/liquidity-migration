@@ -25,6 +25,7 @@ from liquidity_migration.downloaders import (
     _resolve_binance_dataset_name,
     parse_date_ms,
 )
+from liquidity_migration.storage import read_dataset
 
 
 # --- _normalize_klines (Bybit kline arrays) ---------------------------------
@@ -552,6 +553,66 @@ def test_download_symbol_dataset_empty_fresh_fetch_is_not_marked_complete(tmp_pa
     # The marker was withheld on the first empty fetch, so the second run re-fetched
     # (instead of skipping the symbol forever).
     assert calls == [(10, 20), (10, 20)]
+
+
+def test_download_symbol_dataset_empty_tail_is_retryable(tmp_path) -> None:
+    _write_marker(
+        tmp_path,
+        dataset="funding",
+        symbol="BTCUSDT",
+        start_ms=10,
+        end_ms=20,
+    )
+    calls: list[tuple[int, int]] = []
+    responses = [
+        [],
+        [
+            {
+                "ts_ms": 25,
+                "symbol": "BTCUSDT",
+                "funding_rate": 0.0001,
+                "funding_interval_min": 480,
+            }
+        ],
+    ]
+
+    def _fetch(start: int, end: int) -> list[dict]:
+        calls.append((start, end))
+        return responses.pop(0)
+
+    requested_marker = _marker_path(
+        tmp_path,
+        dataset="funding",
+        symbol="BTCUSDT",
+        start_ms=10,
+        end_ms=30,
+    )
+    _download_symbol_dataset(
+        tmp_path,
+        dataset="funding",
+        symbol="BTCUSDT",
+        index=1,
+        total=1,
+        start_ms=10,
+        end_ms=30,
+        fetch=_fetch,
+    )
+    assert not requested_marker.exists()
+
+    _download_symbol_dataset(
+        tmp_path,
+        dataset="funding",
+        symbol="BTCUSDT",
+        index=1,
+        total=1,
+        start_ms=10,
+        end_ms=30,
+        fetch=_fetch,
+    )
+
+    assert calls == [(20, 30), (20, 30)]
+    assert requested_marker.exists()
+    assert read_dataset(tmp_path, "funding")["ts_ms"].to_list() == [25]
 
 
 def test_download_symbol_dataset_fetches_tail_only_on_extended_end(tmp_path) -> None:

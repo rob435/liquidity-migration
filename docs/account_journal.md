@@ -70,10 +70,26 @@ There is no separate journal CLI or parallel lifecycle journal.
 
 The guarded reset does not edit journal history to manufacture flatness. It
 first stops unsafe writers and proves the demo venue flat with no open orders,
-then archives and verifies the prior account root before creating a new empty
-account epoch. The old journal remains evidence in that archive. Paper reset
-retires its deterministic epoch explicitly and never borrows the demo flatness
-claim.
+then archives and verifies the prior account root before clearing epoch payload
+in place. Persistent owner, route, journal, inbox, and dataset lock inodes stay
+intact; they are synchronization infrastructure, not carried-forward account
+state. Before either lease is written, descriptor-rooted preflight rejects
+symlinked parents, hardlinks, special files, and Linux bind/mount boundaries.
+The clear binds every root, ancestor, directory, and preserved lock identity as
+one batch, then performs a final exact rescan; any late or redirected entry seen
+by that rescan makes the reset fail. Archive creation and the final pre-clear
+check bind the recovery artifact to one exclusively created inode and SHA-256
+sidecar rather than reopening a predictable output path. The old journal
+remains evidence in that archive. Paper reset retires its deterministic epoch
+explicitly and never borrows the demo flatness claim.
+
+This is a fail-closed epoch transition, not an atomic transaction across six
+filesystem roots. The archive output is descriptor-bound, while the tar input
+walk remains pathname-based under the stopped-fleet and owner-lease boundary.
+Once the first unlink occurs, an I/O failure or unmanaged writer can leave a
+partial clear; the reset then leaves all managed units stopped rather than
+claiming rollback or restarting into mixed epochs. A non-cooperating writer
+after the final rescan is outside what descriptor validation can exclude.
 
 Mainnet authorization, alpha, and strategy equivalence are outside what a valid
 journal can prove.

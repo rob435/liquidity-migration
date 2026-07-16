@@ -34,6 +34,15 @@ python -m liquidity_migration --data-root ROOT archive-manifest \
 `END` is exclusive. `download-data` does not refresh the manifest unless its
 explicit refresh option is used; inspect the emitted coverage warning.
 
+The canonical Bybit root keeps this expected-membership manifest independent of
+observed klines. `scripts/build_full_pit_bybit.sh` runs the non-mutating
+`validate-manifest` step and fails when a required pair lacks coverage. The
+generic `filter-manifest` command is only for roots whose archive klines are
+themselves the declared membership source (the Binance Vision construction); it
+refuses provenance-bearing Bybit manifests. Deleting an uncovered Bybit
+membership row would make the gate self-certifying and destroy the repair
+evidence.
+
 ## Trading-day convention
 
 A daily-close signal is stamped at 00:00 UTC after the bar it summarizes. The
@@ -73,8 +82,9 @@ root name.
 ## Workflow
 
 1. State the claim's population, venue, and end-exclusive boundary.
-2. Inspect the selected root's manifest and kline coverage, including per-symbol
-   tail gaps and `source` provenance.
+2. Inspect the selected root's expected manifest and kline coverage, including
+   per-symbol tail gaps and `source` provenance. Do not conform the expected
+   manifest to the observed klines.
 3. Rebuild only the missing surface using current command help.
 4. Run the exact research command and preserve its PIT status, warnings, and
    population treatment.

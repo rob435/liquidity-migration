@@ -22,8 +22,32 @@ This topology is demo/paper only. It never authorizes mainnet.
 The hedge, RMOM, and liveness services are invoked by their matching timers.
 Target producers and auxiliary services have private API, mainnet,
 `REAL_MONEY`, and unnecessary Telegram variables explicitly removed.
+The liveness unit is deliberately independent of account-owner activation: a
+stopped or failed owner is an observation to alert on, never a dependency to
+start or wait for. Its unit has no ordering, requirement, binding, part-of,
+requisite, uphold, or wants edge to the demo owner. Its only lifecycle edges are
+`Wants`/`After` for network readiness; the matching timer triggers it and the
+receipt path condition gates execution.
 
 ## Deployment lifecycle
+
+GitHub dispatches share one repository-wide VPS concurrency group, independent
+of the selected Git ref. The remote deploy entrypoint also holds a non-blocking
+host-local advisory lock for the complete `install`, `activate`, or `verify`
+operation. Operational-authority issuance joins that boundary: its supported
+operator route flocks the canonical maintenance inode and the legacy deploy and
+reset inodes before opening the checkout or importing deployed Python, then the
+helper and issuer revalidate those inherited descriptors. A concurrent
+cooperating operation therefore fails closed before reading or changing
+deployed state.
+
+Deploy Git commands do not inherit caller `GIT_*` variables, user/system Git
+configuration, replacement objects, external index selection, or hooks. The
+exact helper is extracted from the requested local commit with an explicit Git
+directory/work tree and minimal environment; the remote checkout uses the same
+isolation, a private temporary index for cleanliness, and `HEAD` checks before
+and after comparison. This protects commit selection from ordinary
+Git-environment drift, not from a compromised host.
 
 ### Install
 
@@ -56,6 +80,33 @@ scripts/ops.sh operational-authority --execute issue \
 Use `operational` only for an intended demo+paper fleet. The paper execution
 model is commit-owned and explicitly `integration_only_uncalibrated`; receipt
 details are in `docs/account_execution.md`.
+
+The root-only issuer requires the exact nine services and three timers in this
+manifest to be loaded and inactive. It checks once before source capture, once
+after validating a private staging receipt, and once after linking that same
+inode at the final name but before committing it. Every later phase also
+reopens the machine, bound environments, inputs, roots, and checkout. Git runs
+with a fixed executable and minimal environment, explicit Git directory and
+work tree, disabled replacement objects, a private temporary index, and
+bracketing `HEAD` checks. A separate descriptor-rooted raw-byte and Git-mode
+comparison to every commit blob prevents clean filters, attributes, or
+line-ending normalization from hiding tracked changes; gitlinks fail closed.
+The supported `scripts/ops.sh` issuer supplies locks before Python import. Raw
+module issuance refuses to run without that inherited handoff.
+
+Receipt publication is bounded to 1 MiB and uses a root-owned, descriptor-bound
+mode-`0400` staging inode. It links the same inode create-only at the final path,
+removes the staging link, and keeps the single-link final file at mode `0400`
+through both final systemd/source checks. Only `fchmod` to demo mode `0600` or
+demo+paper mode `0640` commits authority. `ConditionPathExists` alone is not a
+grant: the runtime wrapper rejects a precommit mode-`0400` file before `exec`.
+
+A hard kill may leave a hidden mode-`0400` staging sibling or an invalid
+mode-`0400` final file; a kill after mode commit may leave a valid receipt before
+the command reports success. Preserve and verify either state before deliberate
+cleanup. This is cooperative, point-in-time host authorization. Advisory locks
+and systemd inspection do not detect an unmanaged manual process or constrain a
+hostile privileged actor, and the receipt is not signed or WORM evidence.
 
 ### Activate and verify
 
@@ -114,5 +165,17 @@ subset after failure. Preserve the receipt, journal, unit state, and logs; stop
 unsafe writers; then diagnose from the exact installed commit.
 
 The guarded reset is dry-run by default and refuses mutation until Bybit demo is
-flat with no orders. It archives and fsyncs the old epoch before creating new
-account/inbox/capture roots. See `docs/operations.md`.
+flat with no orders. It publishes the old epoch through an exclusively created,
+descriptor-bound archive and sidecar, fsyncs them, and rechecks the exact
+archive identity and digest before clearing account/inbox/capture payload.
+Account, paper, and shared-demo filesystem trees are preflighted and normalized
+through held descriptors; mount boundaries and unsafe aliases fail closed, and
+no root recursive pathname ownership traversal is used.
+With `--leave-stopped --receipt`, the creator validates a hidden mode-`0400`
+staging inode, independently rechecks every managed unit inactive, and links the
+same inode create-only at the final name. It repeats the unit and source checks
+while that final name is still non-loadable mode `0400`; only then does mode
+`0600` commit success. Post-commit work fsyncs and revalidates the artifact
+identity rather than making another systemd claim. The receipt is point-in-time
+epoch evidence only; it does not authorize activation.
+See `docs/operations.md`.

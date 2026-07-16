@@ -402,3 +402,30 @@ def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> N
         assert isinstance(invocation_keywords[0], ast.Name)
         assert invocation_keywords[0].id == "invocation_id"
         assert "invocation_id = require_systemd_invocation_id()" in source
+
+
+def test_demo_owner_supervises_private_execution_stream_before_admission() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    source = (repo / "liquidity_migration" / "account_service_runner.py").read_text(
+        encoding="utf-8"
+    )
+    loop = source[source.index("        while True:") :]
+    health_chain = source[
+        source.index("health_chain = AccountHealthChain(") : source.index(
+            "snapshot_provider =", source.index("health_chain = AccountHealthChain(")
+        )
+    ]
+
+    assert "private_stream_supervisor = PrivateExecutionStreamSupervisor(" in source
+    assert "private_stream_supervisor" in health_chain
+    assert loop.index("private_stream_supervisor.check(") < loop.index(
+        "run_ready_request_or_converge("
+    )
+    assert "private_stream_status is True" in loop
+    assert "private_stream_supervisor.health_detail" in loop
+
+    wrapper = (repo / "scripts" / "run_account_execution_service.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"' in wrapper
+    assert '--private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS"' in wrapper

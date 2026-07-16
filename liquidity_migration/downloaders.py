@@ -464,10 +464,13 @@ def _download_symbol_dataset(
         partition key so overlaps are harmless.
       * Else fetch the requested full range.
 
-    Coverage IS implicit-only — markers index attempts, storage is the source
-    of truth for rows. Deleting a dataset directory while keeping markers will
-    silently produce a stale skip on the next refresh; the operator must wipe
-    both `_download_markers/` and the dataset partition in that case.
+    Markers record successful non-empty fetch coverage, not attempts. An empty
+    provider response is not authoritative proof that the interval contains no
+    data, so it never advances coverage; an existing prefix remains available
+    for the next tail-only retry. Storage is the source of truth for rows.
+    Deleting a dataset directory while keeping markers will silently produce a
+    stale skip on the next refresh; the operator must wipe both
+    `_download_markers/` and the dataset partition in that case.
     """
     output = dataset_path(data_root, dataset)
 
@@ -501,17 +504,22 @@ def _download_symbol_dataset(
     if postprocess is not None and not frame.is_empty():
         frame = postprocess(frame)
     output = write_dataset(frame, data_root, dataset)
-    # Mark the requested range, not only the fetched tail.
-    # Do not mark a fresh empty range complete; a later retry may recover data.
-    # Tail extensions may be empty. For rolling-window endpoints, bind the marker
-    # to the same clamped start so an unavailable prefix is never claimed covered.
+    # Mark the requested range, not only the fetched tail, but only after a
+    # non-empty response was durably written. Empty fresh or tail responses may
+    # be transient and cannot prove coverage. For rolling-window endpoints, bind
+    # the marker to the same clamped start so an unavailable prefix is never
+    # claimed covered.
     marker_start_ms = start_ms
     if clamp_window_days is not None:
         marker_start_ms = max(start_ms, _recent_history_start(effective_start_ms, end_ms, days=clamp_window_days))
-    if frame.height > 0 or tail_only:
+    if frame.height > 0:
         _mark_complete(_marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=marker_start_ms, end_ms=end_ms, suffix=marker_suffix))
     else:
-        print(f"{dataset}: {index}/{total} {symbol} EMPTY fresh fetch — marker withheld for retry", flush=True)
+        empty_scope = "tail" if tail_only else "fresh"
+        print(
+            f"{dataset}: {index}/{total} {symbol} EMPTY {empty_scope} fetch — marker withheld for retry",
+            flush=True,
+        )
     print(f"{dataset}: {index}/{total} {symbol} rows={frame.height}", flush=True)
     del rows, frame
     gc.collect()

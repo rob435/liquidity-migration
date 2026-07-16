@@ -38,20 +38,32 @@ def _rewrite_canonical(path: Path, payload: dict[str, object]) -> None:
 
 
 @pytest.mark.parametrize("runner_name", ["demo", "paper"])
-def test_owner_binds_route_before_any_runtime_resource(
+def test_owner_acquires_lease_before_route_initialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     runner_name: str,
 ) -> None:
     monkeypatch.setenv("INVOCATION_ID", "ab" * 16)
+    monkeypatch.setenv("REAL_MONEY", "false")
+    for key in (
+        "BYBIT_DEMO_API_KEY",
+        "BYBIT_DEMO_API_SECRET",
+        "BYBIT_REAL_API_KEY",
+        "BYBIT_REAL_API_SECRET",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    account_root = tmp_path / "account"
+    inbox_root = tmp_path / "inbox"
+    calls: list[str] = []
+
     if runner_name == "demo":
         import liquidity_migration.account_service_runner as runner
 
         argv = [
             "--account-root",
-            str(tmp_path / "account"),
+            str(account_root),
             "--inbox-root",
-            str(tmp_path / "inbox"),
+            str(inbox_root),
             "--capture-root",
             str(tmp_path / "capture"),
             "--symbols-file",
@@ -63,10 +75,30 @@ def test_owner_binds_route_before_any_runtime_resource(
             "--disaster-stop-fraction",
             "0.25",
         ]
-        resource_names = (
-            "DemoAccountMutationLease",
-            "resolve_demo_credentials",
-            "BybitPrivateClient",
+
+        class FakeDemoLease:
+            def __init__(self, _identity: object) -> None:
+                calls.append("lease-created")
+
+            def acquire(self) -> None:
+                assert not account_root.exists()
+                assert not inbox_root.exists()
+                calls.append("lease-acquired")
+
+            def close(self) -> None:
+                calls.append("lease-closed")
+
+        monkeypatch.setattr(runner, "validate_demo_order_permission", lambda **_kwargs: None)
+        monkeypatch.setattr(runner, "resolve_demo_credentials", lambda: ("demo-key", "demo-secret"))
+        monkeypatch.setattr(runner, "BybitPrivateClient", lambda **_kwargs: object())
+        monkeypatch.setattr(
+            runner,
+            "require_order_submit_permission",
+            lambda _client: {"apiKey": "demo-key", "userID": "123"},
+        )
+        monkeypatch.setattr(runner, "DemoAccountMutationLease", FakeDemoLease)
+        later_resources = (
+            "load_demo_rules",
             "AccountExecutionKernel",
             "SequenceAwareMarketRecorder",
             "BybitRawPublicMarketStream",
@@ -78,9 +110,9 @@ def test_owner_binds_route_before_any_runtime_resource(
 
         argv = [
             "--account-root",
-            str(tmp_path / "account"),
+            str(account_root),
             "--inbox-root",
-            str(tmp_path / "inbox"),
+            str(inbox_root),
             "--capture-root",
             str(tmp_path / "capture"),
             "--symbols-file",
@@ -92,8 +124,22 @@ def test_owner_binds_route_before_any_runtime_resource(
             "--equity-usdt",
             "10000",
         ]
-        resource_names = (
-            "AccountOwnerLease",
+
+        class FakePaperLease:
+            def __init__(self, path: Path) -> None:
+                assert path == account_root.resolve() / "account_execution_owner.lock"
+                calls.append("lease-created")
+
+            def acquire(self) -> None:
+                assert not account_root.exists()
+                assert not inbox_root.exists()
+                calls.append("lease-acquired")
+
+            def close(self) -> None:
+                calls.append("lease-closed")
+
+        monkeypatch.setattr(runner, "AccountOwnerLease", FakePaperLease)
+        later_resources = (
             "load_demo_rules",
             "AccountExecutionKernel",
             "SequenceAwareMarketRecorder",
@@ -102,23 +148,40 @@ def test_owner_binds_route_before_any_runtime_resource(
             "AccountIntentInbox",
         )
 
-    calls: list[str] = []
+    actual_derive = runner.derive_account_route
+
+    def derive_route(**kwargs: object) -> object:
+        calls.append("route-derived")
+        route = actual_derive(**kwargs)
+        assert not account_root.exists()
+        assert not inbox_root.exists()
+        return route
 
     def reject_route(**_kwargs: object) -> None:
-        calls.append("route")
+        assert "lease-acquired" in calls
+        calls.append("route-initialization")
         raise RuntimeError("route identity rejected")
 
     def unexpected_resource(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("runtime resource initialized before account route")
+        pytest.fail("runtime resource initialized before the leased account route")
 
+    monkeypatch.setattr(runner, "derive_account_route", derive_route)
     monkeypatch.setattr(runner, "ensure_account_route", reject_route)
-    for name in resource_names:
+    for name in later_resources:
         monkeypatch.setattr(runner, name, unexpected_resource)
 
     with pytest.raises(RuntimeError, match="route identity rejected"):
         runner.main(argv)
 
-    assert calls == ["route"]
+    assert calls == [
+        "route-derived",
+        "lease-created",
+        "lease-acquired",
+        "route-initialization",
+        "lease-closed",
+    ]
+    assert not account_root.exists()
+    assert not inbox_root.exists()
 
 
 def test_paper_owner_rejects_private_credentials_before_route_or_resources(
@@ -276,16 +339,79 @@ def test_unbound_empty_directory_layout_and_route_temp_are_safe_to_initialize(
         account_root=account_root,
         inbox_root=inbox_root,
     )
+    assert require_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=account_root,
+        inbox_root=inbox_root,
+    ) == route
 
-    assert (
-        require_account_route(
-            account_id="bybit-demo-unified",
-            environment="demo",
+
+def test_unbound_persistent_lock_skeleton_is_safe_to_initialize(tmp_path: Path) -> None:
+    account_root = tmp_path / "account"
+    inbox_root = tmp_path / "inbox"
+    lock_paths = (
+        account_root / "account_execution_owner.lock",
+        account_root / "account_journal" / "journal.lock",
+        account_root / ".locks" / "account_route.lock",
+        inbox_root / ".locks" / "account_route.lock",
+        inbox_root / ".locks" / "account_intent_inbox.lock",
+        inbox_root / ".locks" / f".account_intent_inbox.lock.create-{'a' * 32}",
+    )
+    for path in lock_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(mode=0o600)
+        path.chmod(0o600)
+    identities = {path: (path.stat().st_dev, path.stat().st_ino) for path in lock_paths}
+
+    route = ensure_account_route(
+        account_id="bybit-paper-unified",
+        environment="paper",
+        account_root=account_root,
+        inbox_root=inbox_root,
+    )
+
+    assert require_account_route(
+        account_id="bybit-paper-unified",
+        environment="paper",
+        account_root=account_root,
+        inbox_root=inbox_root,
+    ) == route
+    assert {
+        path: (path.stat().st_dev, path.stat().st_ino) for path in lock_paths
+    } == identities
+
+
+@pytest.mark.parametrize("unsafe_kind", ["hardlink", "mode", "symlink"])
+def test_unbound_unsafe_lock_leaf_still_requires_cutover(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    account_root = tmp_path / "account"
+    inbox_root = tmp_path / "inbox"
+    lock_path = account_root / "account_journal" / "journal.lock"
+    lock_path.parent.mkdir(parents=True)
+    if unsafe_kind == "symlink":
+        target = tmp_path / "target.lock"
+        target.touch(mode=0o600)
+        lock_path.symlink_to(target)
+    else:
+        lock_path.touch(mode=0o600)
+        if unsafe_kind == "hardlink":
+            os.link(lock_path, tmp_path / "alias.lock")
+        else:
+            lock_path.chmod(0o644)
+
+    with pytest.raises(
+        AccountRouteCutoverRequiredError,
+        match=r"account_journal/journal\.lock.*explicit route cutover",
+    ):
+        ensure_account_route(
+            account_id="bybit-paper-unified",
+            environment="paper",
             account_root=account_root,
             inbox_root=inbox_root,
         )
-        == route
-    )
 
 
 def test_producer_validation_is_read_only_when_route_is_missing(tmp_path: Path) -> None:

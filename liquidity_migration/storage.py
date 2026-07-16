@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import fcntl
 import os
+import stat
 import threading
 import time
 from contextlib import contextmanager
@@ -11,48 +12,65 @@ from typing import Iterator
 import polars as pl
 
 
-# Per-process thread-lock per dataset path. The file-based lock that follows
-# only serializes ACROSS processes; within a single process, multiple worker
-# threads contending on the file lock can wedge because they all write the
-# same pid into the lock file and then read it back as "my own pid -> still
-# alive somewhere -> keep waiting" even when the actual holder has silently
-# dropped the file via an unlink race. This per-process lock ensures only
-# one thread of this process ever enters the file-lock acquire/release dance.
+# Per-process thread-lock per dataset path. POSIX flock semantics are process
+# friendly but do not provide the intended exclusion between separate opens in
+# every same-process/thread pattern, so serialize threads explicitly as well.
 _DATASET_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _DATASET_THREAD_LOCKS_GUARD = threading.Lock()
 _DATASET_TMP_SWEEP_LAST: dict[str, float] = {}
 _DATASET_TMP_SWEEP_GUARD = threading.Lock()
 
-
-# storage-concurrency-2: per-acquisition tokens currently OWNED by THIS live
-# process. _lock_owner_is_dead short-circuits a pid==os.getpid() payload to
-# "alive" so a process never evicts its own live lock. But a singleton lock
-# taken with stale_seconds=0 has no age-eviction
-# backstop: if the daemon crashes holding the lock and systemd restarts it
-# within RestartSec and the kernel hands the SAME pid back (Linux pids cycle to
-# pid_max), the new process reads its dead predecessor's pid==getpid() and would
-# block forever. The token written into every payload (line ~286) is the
-# tiebreaker: a token NOT in this set is from a previous incarnation that merely
-# reused our pid, so the owner is genuinely dead and the lock is evictable.
-_LIVE_OWNED_TOKENS: set[str] = set()
-_LIVE_OWNED_TOKENS_GUARD = threading.Lock()
-
-
-def _register_owned_token(token: str) -> None:
-    with _LIVE_OWNED_TOKENS_GUARD:
-        _LIVE_OWNED_TOKENS.add(token)
+# Every opened/waiting/held flock descriptor is registered across its complete
+# lifetime. The at-fork barrier closes inherited descriptors in the child and
+# resets thread mutexes that may have been held by vanished parent threads.
+_ACTIVE_FLOCK_FDS: set[int] = set()
+_ACTIVE_FLOCK_FDS_GUARD = threading.Lock()
+_LOCK_CREATE_SUFFIX_BYTES = 16
+_LOCK_CREATE_ORPHAN_SECONDS = 600.0
+_LOCK_CREATE_SWEEP_CACHE: dict[
+    str,
+    tuple[tuple[int, int, int], float | None],
+] = {}
+_LOCK_CREATE_SWEEP_GUARD = threading.Lock()
 
 
-def _unregister_owned_token(token: str) -> None:
-    with _LIVE_OWNED_TOKENS_GUARD:
-        _LIVE_OWNED_TOKENS.discard(token)
+def _before_fork() -> None:
+    _ACTIVE_FLOCK_FDS_GUARD.acquire()
 
 
-def _token_is_live_owned(token: str | None) -> bool:
-    if not token:
-        return False
-    with _LIVE_OWNED_TOKENS_GUARD:
-        return token in _LIVE_OWNED_TOKENS
+def _after_fork_parent() -> None:
+    _ACTIVE_FLOCK_FDS_GUARD.release()
+
+
+def _after_fork_child() -> None:
+    global _ACTIVE_FLOCK_FDS
+    global _ACTIVE_FLOCK_FDS_GUARD
+    global _DATASET_THREAD_LOCKS
+    global _DATASET_THREAD_LOCKS_GUARD
+    global _DATASET_TMP_SWEEP_GUARD
+    global _LOCK_CREATE_SWEEP_GUARD
+
+    for fd in tuple(_ACTIVE_FLOCK_FDS):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _ACTIVE_FLOCK_FDS = set()
+    _ACTIVE_FLOCK_FDS_GUARD = threading.Lock()
+    _DATASET_THREAD_LOCKS = {}
+    _DATASET_THREAD_LOCKS_GUARD = threading.Lock()
+    _DATASET_TMP_SWEEP_LAST.clear()
+    _DATASET_TMP_SWEEP_GUARD = threading.Lock()
+    _LOCK_CREATE_SWEEP_CACHE.clear()
+    _LOCK_CREATE_SWEEP_GUARD = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_parent,
+        after_in_child=_after_fork_child,
+    )
 
 
 def _thread_lock_for(lock_path: Path) -> threading.Lock:
@@ -196,194 +214,436 @@ def exclusive_file_lock(
     poll_seconds: float = 0.05,
     invalid_lock_stale_seconds: float = 30.0,
 ) -> Iterator[None]:
+    """Serialize a critical section across threads and local POSIX processes.
+
+    The lock leaf is persistent and never unlinked during normal operation.
+    Kernel ``flock`` ownership ends automatically on descriptor close or process
+    death, so recovery never infers liveness from a pathname, PID, payload, or
+    wall-clock age. ``stale_seconds`` and ``invalid_lock_stale_seconds`` remain
+    compatibility no-ops; ``poll_seconds`` still controls nonblocking wait
+    cadence.
+
+    This protocol requires a local flock-capable filesystem and a quiescent
+    migration from the retired create/unlink implementation. Explicitly forking
+    inside the yielded critical section is unsupported; fork/exec helpers and
+    forks from other threads are cleaned up by the module's at-fork handler.
+    """
+    del stale_seconds, invalid_lock_stale_seconds
     lock_path = Path(path).expanduser()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # Acquire the per-process thread-lock FIRST so only one thread of this
-    # process can be in the file-lock body at a time. The file-lock below
-    # then only serializes across processes, which is its real job and what
-    # it actually handles correctly.
+    _ensure_lock_directory(lock_path)
+    poll = max(float(poll_seconds), 0.0)
     with _thread_lock_for(lock_path):
-        fd: int | None = None
-        while fd is None:
+        fd = -1
+        directory_key: tuple[int, int] | None = None
+        acquisition_pid = os.getpid()
+        while True:
             try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                pass
-            else:
-                # Got the lock fresh — break out of the wait loop.
-                break
-            if _lock_owner_is_dead(lock_path):
-                lock_path.unlink(missing_ok=True)
+                fd, directory_key = _open_registered_lock_fd(lock_path)
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        time.sleep(poll)
+                        continue
+                    break
+                _recover_internal_lock_alias(lock_path, fd, directory_key=directory_key)
+                _validate_lock_fd_path(lock_path, fd, directory_key=directory_key)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+                    os.fchmod(fd, 0o600)
+                _validate_lock_fd_path(lock_path, fd, directory_key=directory_key)
+            except _LockPathChanged:
+                _close_registered_lock_fd(fd, acquisition_pid=acquisition_pid)
+                fd = -1
+                directory_key = None
+                time.sleep(poll)
                 continue
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-            except OSError:
-                age = 0.0
-            invalid_lock_stale = (
-                _lock_payload_is_invalid(lock_path)
-                and invalid_lock_stale_seconds >= 0
-                and age > invalid_lock_stale_seconds
-            )
-            if invalid_lock_stale:
-                lock_path.unlink(missing_ok=True)
-                continue
-            if stale_seconds > 0 and age > stale_seconds:
-                lock_path.unlink(missing_ok=True)
-                continue
-            time.sleep(max(poll_seconds, 0.0))
-        # Capture the inode of the file WE created (fd is still open here, before
-        # os.fdopen consumes it) so release only unlinks OUR lock. If our lock is
-        # stale-evicted mid-critical-section and a successor recreates the path with a
-        # new inode, an unconditional unlink-by-path would delete the SUCCESSOR's lock
-        # and admit a second concurrent writer (CROS-1).
+            except BaseException:
+                _close_registered_lock_fd(fd, acquisition_pid=acquisition_pid)
+                fd = -1
+                directory_key = None
+                raise
+            break
         try:
-            _owned = os.fstat(fd)
-        except OSError:
-            os.close(fd)
-            raise
-        owned_key = (_owned.st_dev, _owned.st_ino)
-        # CROS-1b (audit 2026-06-09): (dev, ino) equality is NOT proof the path is
-        # still OUR lock — ext4/overlayfs can hand a freed inode straight to a
-        # successor's lock file created at the same path. A per-acquisition token
-        # in the payload is the tiebreaker the inode check can't provide.
-        owned_token = os.urandom(16).hex()
-        # Register the token as live-owned BEFORE writing the payload: once the
-        # bytes are on disk a concurrent _lock_owner_is_dead read could observe
-        # our pid+token, and it must find the token live (not a reused-pid
-        # ghost). Registering first closes that window.
-        _register_owned_token(owned_token)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps({"pid": os.getpid(), "created": time.time(), "token": owned_token}))
             yield
         finally:
-            _unregister_owned_token(owned_token)
-            try:
-                cur = os.stat(lock_path)
-                release_ours = (cur.st_dev, cur.st_ino) == owned_key
-            except FileNotFoundError:
-                release_ours = False  # already gone -> nothing to unlink
-            except OSError:
-                release_ours = False
-            if release_ours:
-                # Inode matched — confirm the payload token before unlinking
-                # (inode-reuse defense, CROS-1b).
-                text = _read_lock_text_safe(lock_path)
-                if text is None:
-                    release_ours = False
-                else:
-                    try:
-                        release_ours = json.loads(text).get("token") == owned_token
-                    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
-                        release_ours = False  # foreign/corrupt payload -> not ours
-            if release_ours:
-                lock_path.unlink(missing_ok=True)
+            _close_registered_lock_fd(fd, acquisition_pid=acquisition_pid)
 
 
-def _read_lock_text_safe(lock_path: Path) -> str | None:
+class _LockPathChanged(RuntimeError):
+    """The opened lock inode stopped being the persistent path while waiting."""
+
+
+def _lock_owner_allowed(owner_uid: int, *, effective_uid: int | None = None) -> bool:
+    """Root may observe an owner-controlled lock; other users may only use their own."""
+    current_uid = os.geteuid() if effective_uid is None else int(effective_uid)
+    return current_uid == 0 or int(owner_uid) == current_uid
+
+
+def _required_directory_flags() -> int:
     try:
-        return lock_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    except AttributeError as exc:  # pragma: no cover - supported deployment platforms are POSIX
+        raise RuntimeError("secure file locking requires O_DIRECTORY, O_NOFOLLOW, and O_CLOEXEC") from exc
 
 
-def _pid_started_after(pid: int, created_ts: float) -> bool | None:
-    """True if the live process ``pid`` started strictly AFTER ``created_ts`` (epoch
-    seconds) — i.e. the lock's pid was REUSED by a newer process, so the original
-    lock owner is actually dead. None when the start time can't be determined
-    (non-Linux / no /proc), so the caller stays conservative and does NOT evict on a
-    pid that os.kill reports as live. Linux-only via /proc/<pid>/stat; never raises
-    (CROS-2: os.kill(pid,0) alone false-positives "alive" on a reused pid)."""
-    if created_ts <= 0.0:
-        return None
+def _open_lock_directory(lock_path: Path) -> tuple[int, os.stat_result]:
     try:
-        with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
-            # comm (field 2) may contain spaces/parens; split on the LAST ") " so the
-            # remaining whitespace-split fields start at field 3 (state).
-            after_comm = fh.read().rsplit(") ", 1)[1].split()
-        starttime_ticks = float(after_comm[19])  # field 22 (starttime), 0-indexed from field 3
-        btime = 0.0
-        with open("/proc/stat", encoding="ascii") as fh:
-            for line in fh:
-                if line.startswith("btime "):
-                    btime = float(line.split()[1])
-                    break
-        if btime <= 0.0:
-            return None
-        clk = os.sysconf("SC_CLK_TCK")
-        if clk <= 0:
-            return None
-        proc_start_epoch = btime + starttime_ticks / clk
-        return proc_start_epoch > created_ts + 1.0  # 1s slack vs clock granularity
-    except Exception:  # noqa: BLE001 - any /proc parsing failure -> "unknown", stay conservative
-        return None
-
-
-def _lock_owner_is_dead(lock_path: Path) -> bool:
-    text = _read_lock_text_safe(lock_path)
-    if text is None:
-        return True
+        directory_fd = os.open(lock_path.parent, _required_directory_flags())
+    except OSError as exc:
+        raise RuntimeError(f"cannot safely open lock directory {lock_path.parent}: {exc}") from exc
     try:
-        payload = json.loads(text)
-        pid = int(payload.get("pid") or 0)
-        created_ts = float(payload.get("created") or 0.0)
-        token = payload.get("token")
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return False
-    if (
-        pid <= 0
-        or created_ts <= 0.0
-        or type(token) is not str
-        or len(token) != 32
-        or any(character not in "0123456789abcdef" for character in token)
-    ):
-        return False
-    if pid == os.getpid():
-        # Normally a lock bearing our own pid is our own LIVE lock -> not dead.
-        # But after a crash+fast-restart the kernel can hand the same pid to the
-        # successor (Linux pids cycle to pid_max). The successor would then read
-        # its dead predecessor's pid==getpid() and, with no age backstop on a
-        # stale_seconds=0 singleton lock, block forever (storage-concurrency-2).
-        # The per-acquisition token disambiguates: if the payload's token is one
-        # WE currently own it is genuinely our live lock; otherwise it is a
-        # predecessor that merely reused our pid and is dead -> evictable. A
-        return not _token_is_live_owned(token)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        # Foreign live pid — but it could be a REUSED pid whose original (dead) owner
-        # held this lock. If the live pid started after the lock was created, evict.
-        return _pid_started_after(pid, created_ts) is True
-    except OverflowError:
-        return True
-    except OSError:
-        return False
-    # os.kill succeeded -> a live, signalable process holds this pid. It may be a
-    # REUSED pid (the original owner was killed without cleanup); if the live process
-    # started after the lock was created, the real owner is dead -> evict (CROS-2).
-    return _pid_started_after(pid, created_ts) is True
+        descriptor = os.fstat(directory_fd)
+        current = os.lstat(lock_path.parent)
+        if not stat.S_ISDIR(descriptor.st_mode) or not stat.S_ISDIR(current.st_mode):
+            raise RuntimeError(f"lock directory must be a real directory: {lock_path.parent}")
+        if (descriptor.st_dev, descriptor.st_ino) != (current.st_dev, current.st_ino):
+            raise _LockPathChanged(f"lock directory changed while acquiring: {lock_path.parent}")
+        if descriptor.st_mode & 0o022:
+            raise RuntimeError(f"lock directory must not be group/world writable: {lock_path.parent}")
+        if not _lock_owner_allowed(descriptor.st_uid):
+            raise RuntimeError(f"lock directory must be owned by the current user: {lock_path.parent}")
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    return directory_fd, descriptor
 
 
-def _lock_payload_is_invalid(lock_path: Path) -> bool:
-    text = _read_lock_text_safe(lock_path)
-    if text is None:
-        return True
+def _ensure_lock_directory(lock_path: Path) -> None:
+    """Create a secure lock directory, inheriting a dataset root owner for root observers.
+
+    Operational dataset locks live below ``ROOT/.locks``. When euid 0 is the
+    first reader of a paper-owned root, that directory must still belong to the
+    paper runtime. Deployment pre-creates it; this bootstrap/repair path covers
+    fresh roots and an interrupted bootstrap without making path contents an
+    ownership authority.
+    """
+    directory = lock_path.parent
+    inherited_owner: tuple[int, int] | None = None
+    if directory.name == ".locks" and directory.parent.exists():
+        try:
+            parent = os.lstat(directory.parent)
+        except OSError as exc:
+            raise RuntimeError(f"cannot inspect lock root {directory.parent}: {exc}") from exc
+        if not stat.S_ISDIR(parent.st_mode):
+            raise RuntimeError(f"lock root must be a real directory: {directory.parent}")
+        inherited_owner = (parent.st_uid, parent.st_gid)
+
     try:
-        payload = json.loads(text)
-        pid = int(payload.get("pid") or 0)
-        created_ts = float(payload.get("created") or 0.0)
-        token = payload.get("token")
-    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
-        return True
+        os.mkdir(directory, 0o700)
+        created = True
+    except FileExistsError:
+        created = False
+    except FileNotFoundError:
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        created = True
+    except OSError as exc:
+        raise RuntimeError(f"cannot create lock directory {directory}: {exc}") from exc
+
+    directory_fd, descriptor = _open_lock_directory(lock_path)
+    try:
+        if (
+            os.geteuid() == 0
+            and inherited_owner is not None
+            and (descriptor.st_uid, descriptor.st_gid) != inherited_owner
+        ):
+            os.fchown(directory_fd, *inherited_owner)
+            os.fchmod(directory_fd, 0o700)
+            descriptor = os.fstat(directory_fd)
+        elif created:
+            os.fchmod(directory_fd, 0o700)
+        if inherited_owner is not None and descriptor.st_uid != inherited_owner[0]:
+            raise RuntimeError(
+                f"lock directory owner does not match its data root: {directory}"
+            )
+    finally:
+        os.close(directory_fd)
+
+
+def _validate_lock_fd_identity(
+    lock_path: Path,
+    fd: int,
+    *,
+    directory_fd: int,
+    directory: os.stat_result,
+) -> os.stat_result:
+    descriptor = os.fstat(fd)
+    if not stat.S_ISREG(descriptor.st_mode):
+        raise RuntimeError(f"lock path must be a regular file: {lock_path}")
+    if descriptor.st_nlink == 0:
+        raise _LockPathChanged(f"lock path was removed while acquiring: {lock_path}")
+    try:
+        current = os.stat(lock_path.name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise _LockPathChanged(f"lock path disappeared while acquiring: {lock_path}") from exc
+    if not stat.S_ISREG(current.st_mode):
+        raise RuntimeError(f"lock path must resolve to a regular file: {lock_path}")
+    if (current.st_dev, current.st_ino) != (descriptor.st_dev, descriptor.st_ino):
+        raise _LockPathChanged(f"lock path changed inode while acquiring: {lock_path}")
+    if descriptor.st_uid != directory.st_uid:
+        raise RuntimeError(f"lock path owner must match its lock directory: {lock_path}")
+    return descriptor
+
+
+def _validate_lock_fd_path(
+    lock_path: Path,
+    fd: int,
+    *,
+    directory_key: tuple[int, int] | None = None,
+) -> None:
+    directory_fd, directory = _open_lock_directory(lock_path)
+    try:
+        current_key = (directory.st_dev, directory.st_ino)
+        if directory_key is not None and current_key != directory_key:
+            raise _LockPathChanged(f"lock directory changed while acquiring: {lock_path.parent}")
+        descriptor = _validate_lock_fd_identity(
+            lock_path,
+            fd,
+            directory_fd=directory_fd,
+            directory=directory,
+        )
+        if descriptor.st_nlink != 1:
+            raise RuntimeError(f"lock path must have exactly one hard link: {lock_path}")
+    finally:
+        os.close(directory_fd)
+
+
+def _lock_create_prefix(lock_name: str) -> str:
+    return f".{lock_name}.create-"
+
+
+def _is_lock_create_alias(lock_name: str, candidate: str) -> bool:
+    prefix = _lock_create_prefix(lock_name)
+    suffix = candidate[len(prefix):] if candidate.startswith(prefix) else ""
     return (
-        pid <= 0
-        or created_ts <= 0.0
-        or type(token) is not str
-        or len(token) != 32
-        or any(character not in "0123456789abcdef" for character in token)
+        len(suffix) == _LOCK_CREATE_SUFFIX_BYTES * 2
+        and all(character in "0123456789abcdef" for character in suffix)
     )
+
+
+def _matching_internal_aliases(
+    *,
+    directory_fd: int,
+    lock_name: str,
+    descriptor: os.stat_result,
+) -> list[str]:
+    aliases: list[str] = []
+    for candidate in os.listdir(directory_fd):
+        if not _is_lock_create_alias(lock_name, candidate):
+            continue
+        try:
+            current = os.stat(candidate, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if (current.st_dev, current.st_ino) == (descriptor.st_dev, descriptor.st_ino):
+            aliases.append(candidate)
+    return aliases
+
+
+def _recover_internal_lock_alias(
+    lock_path: Path,
+    fd: int,
+    *,
+    directory_key: tuple[int, int],
+) -> None:
+    descriptor = os.fstat(fd)
+    if descriptor.st_nlink == 1:
+        return
+    directory_fd, directory = _open_lock_directory(lock_path)
+    try:
+        if (directory.st_dev, directory.st_ino) != directory_key:
+            raise _LockPathChanged(f"lock directory changed while acquiring: {lock_path.parent}")
+        _validate_lock_fd_identity(
+            lock_path,
+            fd,
+            directory_fd=directory_fd,
+            directory=directory,
+        )
+        aliases = _matching_internal_aliases(
+            directory_fd=directory_fd,
+            lock_name=lock_path.name,
+            descriptor=descriptor,
+        )
+        if descriptor.st_nlink != 1 + len(aliases):
+            raise RuntimeError(f"lock path has an unexplained hard link: {lock_path}")
+        for alias in aliases:
+            os.unlink(alias, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _cleanup_old_lock_create_orphans(
+    *,
+    directory_fd: int,
+    lock_name: str,
+) -> float | None:
+    now = time.time()
+    cutoff = now - _LOCK_CREATE_ORPHAN_SECONDS
+    next_sweep_at: float | None = None
+    for candidate in os.listdir(directory_fd):
+        if not _is_lock_create_alias(lock_name, candidate):
+            continue
+        try:
+            current = os.stat(candidate, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if _lock_create_orphan_removable(current, cutoff=cutoff):
+            # The name belongs to our private staging namespace and the trusted
+            # directory owner controls unlink. A root creator can die before
+            # fchown, leaving exactly this uid-mismatched, unpublished inode.
+            try:
+                os.unlink(candidate, dir_fd=directory_fd)
+            except FileNotFoundError:
+                # Another process can sweep the same orphan before either one
+                # has acquired the canonical lock. Both outcomes are clean.
+                pass
+        elif stat.S_ISREG(current.st_mode) and current.st_nlink == 1:
+            eligible_at = current.st_mtime + _LOCK_CREATE_ORPHAN_SECONDS
+            if next_sweep_at is None or eligible_at < next_sweep_at:
+                next_sweep_at = eligible_at
+    return next_sweep_at
+
+
+def _lock_create_orphan_removable(current: os.stat_result, *, cutoff: float) -> bool:
+    return (
+        stat.S_ISREG(current.st_mode)
+        and current.st_nlink == 1
+        and current.st_mtime < cutoff
+    )
+
+
+def _sweep_lock_create_orphans_if_directory_changed(
+    *,
+    lock_path: Path,
+    directory_fd: int,
+    directory: os.stat_result,
+) -> None:
+    signature = (directory.st_dev, directory.st_ino, directory.st_mtime_ns)
+    key = str(lock_path)
+    with _LOCK_CREATE_SWEEP_GUARD:
+        now = time.time()
+        cached = _LOCK_CREATE_SWEEP_CACHE.get(key)
+        if cached is not None and cached[0] == signature:
+            next_sweep_at = cached[1]
+            if next_sweep_at is None or now <= next_sweep_at:
+                return
+        next_sweep_at = _cleanup_old_lock_create_orphans(
+            directory_fd=directory_fd,
+            lock_name=lock_path.name,
+        )
+        # Cache the signature observed before scanning. If another process
+        # changes the directory during/after the scan, the next acquisition
+        # sees a different signature and scans again rather than missing it.
+        _LOCK_CREATE_SWEEP_CACHE[key] = (signature, next_sweep_at)
+
+
+def _close_registered_fd_while_guarded(fd: int) -> None:
+    _ACTIVE_FLOCK_FDS.discard(fd)
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _open_registered_lock_fd(lock_path: Path) -> tuple[int, tuple[int, int]]:
+    flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    with _ACTIVE_FLOCK_FDS_GUARD:
+        while True:
+            directory_fd, directory = _open_lock_directory(lock_path)
+            directory_key = (directory.st_dev, directory.st_ino)
+            try:
+                _sweep_lock_create_orphans_if_directory_changed(
+                    lock_path=lock_path,
+                    directory_fd=directory_fd,
+                    directory=directory,
+                )
+                try:
+                    fd = os.open(lock_path.name, flags, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    alias = _lock_create_prefix(lock_path.name) + os.urandom(
+                        _LOCK_CREATE_SUFFIX_BYTES
+                    ).hex()
+                    try:
+                        fd = os.open(
+                            alias,
+                            flags | os.O_CREAT | os.O_EXCL,
+                            0o600,
+                            dir_fd=directory_fd,
+                        )
+                    except OSError as exc:
+                        raise RuntimeError(f"cannot safely stage lock path {lock_path}: {exc}") from exc
+                    _ACTIVE_FLOCK_FDS.add(fd)
+                    published = False
+                    try:
+                        os.fchown(fd, directory.st_uid, directory.st_gid)
+                        os.fchmod(fd, 0o600)
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        staged = os.fstat(fd)
+                        current_alias = os.stat(alias, dir_fd=directory_fd, follow_symlinks=False)
+                        if (
+                            not stat.S_ISREG(staged.st_mode)
+                            or staged.st_nlink != 1
+                            or (staged.st_dev, staged.st_ino)
+                            != (current_alias.st_dev, current_alias.st_ino)
+                            or staged.st_uid != directory.st_uid
+                        ):
+                            raise RuntimeError(f"staged lock path changed before publication: {lock_path}")
+                        try:
+                            os.link(
+                                alias,
+                                lock_path.name,
+                                src_dir_fd=directory_fd,
+                                dst_dir_fd=directory_fd,
+                                follow_symlinks=False,
+                            )
+                        except FileExistsError:
+                            pass
+                        else:
+                            published = True
+                        os.unlink(alias, dir_fd=directory_fd)
+                        if published:
+                            _validate_lock_fd_identity(
+                                lock_path,
+                                fd,
+                                directory_fd=directory_fd,
+                                directory=directory,
+                            )
+                            return fd, directory_key
+                    except BaseException:
+                        try:
+                            os.unlink(alias, dir_fd=directory_fd)
+                        except OSError:
+                            pass
+                        _close_registered_fd_while_guarded(fd)
+                        raise
+                    _close_registered_fd_while_guarded(fd)
+                    continue
+                except OSError as exc:
+                    raise RuntimeError(f"cannot safely open lock path {lock_path}: {exc}") from exc
+                _ACTIVE_FLOCK_FDS.add(fd)
+                try:
+                    _validate_lock_fd_identity(
+                        lock_path,
+                        fd,
+                        directory_fd=directory_fd,
+                        directory=directory,
+                    )
+                except BaseException:
+                    _close_registered_fd_while_guarded(fd)
+                    raise
+                return fd, directory_key
+            finally:
+                os.close(directory_fd)
+
+
+def _close_registered_lock_fd(fd: int, *, acquisition_pid: int) -> None:
+    if fd < 0 or os.getpid() != acquisition_pid:
+        # The child at-fork hook already closed inherited descriptors. Avoid a
+        # second close against an fd number the child may since have reused.
+        return
+    with _ACTIVE_FLOCK_FDS_GUARD:
+        if fd not in _ACTIVE_FLOCK_FDS:
+            return
+        _close_registered_fd_while_guarded(fd)
 
 
 def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:

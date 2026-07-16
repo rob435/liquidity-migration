@@ -19,10 +19,20 @@ venue credentials and do not submit, adopt, repair, or close venue orders.
 - The continuous hedge publishes demo targets; it never calls the venue.
 - RMOM refresh owns only its causal input file.
 - Liveness reads canonical health and strategy inputs and may notify; it has no
-  Bybit credential.
+  Bybit credential and no systemd activation/order dependency on the owner it
+  observes.
 
 The account journal is authoritative. Parquet, reports, notifications, and
 strategy read models are projections or telemetry. See `docs/account_journal.md`.
+
+Each owner derives its requested route without filesystem mutation, acquires
+its persistent account-owner lease, and only then ensures or creates the paired
+account/inbox route manifests. A losing owner therefore cannot initialize route
+manifests before discovering the active owner. The demo lease is the
+authenticated Bybit user-wide capability under
+`/run/lock/liquidity-migration`; the paper lease is local to its canonical
+account root. Both retain the same validated single-link inode for the process
+lifetime, and route mismatch still fails closed after acquisition.
 
 ## Data flow
 
@@ -89,6 +99,18 @@ No guarded unit may run without the create-only receipt at:
 /etc/liquidity-migration/account-execution-operational-ready
 ```
 
+The supported issuer is root-only and holds the canonical host maintenance
+lock plus the legacy deploy and reset leaves from before the deployed checkout
+is opened or imported until receipt publication returns. After the shell opens
+those inherited descriptors, both the installed helper and the issuer validate
+their exact root-owned, single-link inode and Linux mount identities. This
+excludes cooperating deploy and reset operations across a rolling lock-protocol
+upgrade.
+Raw `python -m liquidity_migration.operational_runtime_authority issue` is not a
+supported substitute: it has already imported checkout code before it can lock,
+so it refuses issuance without the exact pre-import descriptor handoff from
+`scripts/ops.sh`. Direct `verify` and `verify-runtime` remain read-only paths.
+
 The issuer and verifier bind:
 
 - one exact clean Git commit and repository path;
@@ -104,11 +126,45 @@ The issuer and verifier bind:
 - `paper_execution_model_scope=integration_only_uncalibrated` for
   `operational` (and `not_applicable_no_paper` for `demo-operational`).
 
-Any changed byte, root identity, checkout, machine, or profile fails
-verification. Runtime verification also rejects mainnet variables, ambiguous
-`REAL_MONEY`, unauthorized units, alternate unit fragments/drop-ins, and
-unregistered command lines. The exact workload argv is owned by
-`scripts/run_authorized_runtime.sh` in the authorized commit.
+Every byte and recorded identity field of a bound environment or runtime-input
+file, every raw tracked regular-file or symlink byte and Git mode, every bound
+root identity, the exact checkout commit, the normalized machine identity, and
+the profile must still match. Runtime verification also rejects mainnet
+variables, ambiguous `REAL_MONEY`, unauthorized units, alternate unit
+fragments/drop-ins, and unregistered command lines. The exact workload argv is
+owned by `scripts/run_authorized_runtime.sh` in the authorized commit.
+
+Issuance requires the exact nine guarded services and three triggering timers
+to be loaded and inactive. The trusted, fixed-environment systemd observation
+runs before source capture and at both later precommit phases. Git verification
+uses an isolated temporary index and explicit, minimally configured Git
+directory/work-tree command, so ambient `GIT_*` variables, replacement refs,
+and ordinary index flags cannot redirect or hide the tracked comparison. It
+also walks the exact commit tree and hashes raw descriptor-read worktree bytes
+and symlink targets against each blob, independently of clean filters,
+line-ending normalization, or attributes; unsupported gitlinks fail closed.
+Non-ignored untracked paths are rejected, while ignored paths remain outside
+this claim. At both precommit phases the issuer also reopens the machine
+identity, environment files, runtime inputs, and roots and compares them with
+the receipt payload.
+
+The 1 MiB-bounded receipt is first written and fsynced as a root-owned mode-`0400`
+staging inode. That same inode is linked create-only at the final name and the
+staging link is removed; it remains mode `0400`, single-linked, and invalid to
+consumer receipt loaders through the final source and systemd checks. Descriptor
+`fchmod` to profile mode `0600` or `0640` is the authority commit, and no
+semantic check follows it. Thus the systemd path condition is only an existence
+precheck: `verify-runtime` still rejects an interrupted mode-`0400` final file
+before executing the registered command.
+
+A hard interruption may leave a randomized hidden mode-`0400` staging file or
+an invalid mode-`0400` final file. An interruption after the permission commit
+may instead leave a valid receipt even if the issuer did not print success.
+Preserve and inspect such artifacts before deliberate cleanup or reissue. The
+protocol assumes a cooperative root-controlled host: systemd cannot identify
+manual processes and advisory locks cannot constrain clients that ignore them.
+It is local point-in-time authorization, not continuous monitoring, signed
+attestation, WORM evidence, or mainnet authority.
 
 Authorization follows stopped installation and precedes activation. It cannot
 be inferred from test success, a research result, a notification, or an old
@@ -170,7 +226,23 @@ fills and reconciliation, and prove venue/journal flatness first.
 
 The runtime fails health closed on stale market data, missing rules, rejected or
 unresolved commands, journal corruption, position/order mismatch, missing
-native protection, unsafe root/config changes, or authorization drift.
+native protection, or a private execution/order WebSocket that lacks any of:
+socket liveness, positive authentication, or positive acknowledgements for both
+execution and order subscriptions. Private-stream readiness is probed on every
+owner-loop iteration and again at exposure-increasing admission. Any failed or
+unconfirmed condition blocks owner health and new exposure immediately; after
+`ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS` continuously not ready, the owner builds
+and subscribes one replacement in a background thread. Every authentication
+generation must obtain fresh subscription acknowledgements; old ACKs do not
+survive an internal reconnect. Attempts use the same configured value as a
+cooldown to avoid authentication storms. A candidate gets ten seconds to prove
+readiness in the background; the prior stream remains published until that
+proof succeeds, and a recovered prior stream wins over the candidate. REST
+reconciliation and strict risk-reducing requests remain available while the
+handshake runs. An unavailable/ambiguous socket probe fails health closed but is
+not enough evidence to destroy and recreate a possibly live authenticated
+connection.
+Unsafe root/config changes and authorization drift also fail health closed.
 
 Do not repair a failed activation by hand-starting units, editing the receipt,
 adding a systemd override, or deleting journal evidence. Preserve the exact

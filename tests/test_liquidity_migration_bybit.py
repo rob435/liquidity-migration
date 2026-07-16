@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import threading
@@ -201,15 +202,53 @@ def test_bybit_private_websocket_stream_subscribes_private_topics(monkeypatch) -
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             self.calls = []
+            self.auth = True
+            self.connected = True
+            self.subscriptions = {}
+            self.control_messages = []
+
+        def _subscribe(self, topic, call):
+            req_id = f"req-{len(self.subscriptions) + 1}"
+            self.subscriptions[req_id] = json.dumps(
+                {"op": "subscribe", "req_id": req_id, "args": [topic]}
+            )
+            self.calls.append(call)
+
+        def _process_subscription_message(self, message):
+            self.control_messages.append(message)
+
+        def _process_auth_message(self, message):
+            self.auth = message.get("success") is True
+
+        def acknowledge(self, topic, *, success=True, reason=""):
+            req_id = next(
+                req_id
+                for req_id, raw in self.subscriptions.items()
+                if topic in json.loads(raw)["args"]
+            )
+            self._process_subscription_message(
+                {
+                    "op": "subscribe",
+                    "req_id": req_id,
+                    "success": success,
+                    "ret_msg": reason,
+                }
+            )
+
+        def is_connected(self):
+            return self.connected
 
         def order_stream(self, **params):
-            self.calls.append(("order", params))
+            self._subscribe("order", ("order", params))
 
         def execution_stream(self, **params):
-            self.calls.append(("execution", params))
+            self._subscribe("execution", ("execution", params))
 
         def fast_execution_stream(self, **params):
-            self.calls.append(("fast_execution", params))
+            self._subscribe("execution.fast", ("fast_execution", params))
+
+        def exit(self):
+            self.connected = False
 
     monkeypatch.setattr(bybit, "WebSocket", FakeWebSocket)
 
@@ -217,6 +256,14 @@ def test_bybit_private_websocket_stream_subscribes_private_topics(monkeypatch) -
     callback = object()
     client.subscribe_orders(callback)
     client.subscribe_executions(callback, fast=True)
+
+    assert client.is_connected() is True
+    assert client.is_ready() is False
+    assert "positive subscription ACKs" in client.readiness_detail
+    client._client.acknowledge("order")
+    assert client.is_ready() is False
+    client._client.acknowledge("execution.fast")
+    assert client.is_ready() is True
 
     assert client._client.kwargs == {
         "testnet": False,
@@ -229,6 +276,76 @@ def test_bybit_private_websocket_stream_subscribes_private_topics(monkeypatch) -
         ("order", {"callback": callback}),
         ("fast_execution", {"callback": callback}),
     ]
+
+    # A new authentication generation must re-prove both subscription ACKs;
+    # stale acknowledgements from the prior socket are not health evidence.
+    client._client._process_auth_message({"op": "auth", "success": True})
+    assert client.is_ready() is False
+
+
+def test_private_websocket_negative_subscription_ack_stays_unhealthy(
+    monkeypatch,
+) -> None:
+    class FakeWebSocket:
+        def __init__(self, **_kwargs):
+            self.auth = True
+            self.connected = True
+            self.subscriptions = {}
+
+        def _process_subscription_message(self, _message):
+            pass
+
+        def _process_auth_message(self, message):
+            self.auth = message.get("success") is True
+
+        def _subscribe(self, topic):
+            req_id = f"req-{topic}"
+            self.subscriptions[req_id] = json.dumps(
+                {"op": "subscribe", "req_id": req_id, "args": [topic]}
+            )
+
+        def order_stream(self, **_params):
+            self._subscribe("order")
+
+        def execution_stream(self, **_params):
+            self._subscribe("execution")
+
+        def is_connected(self):
+            return self.connected
+
+        def acknowledge(self, topic, *, success, reason=""):
+            self._process_subscription_message(
+                {
+                    "op": "subscribe",
+                    "req_id": f"req-{topic}",
+                    "success": success,
+                    "ret_msg": reason,
+                }
+            )
+
+        def exit(self):
+            self.connected = False
+
+    monkeypatch.setattr(bybit, "WebSocket", FakeWebSocket)
+    stream = bybit.BybitPrivateWebSocketStream(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+    )
+    stream.subscribe_executions(object())
+    stream.subscribe_orders(object())
+
+    stream._client.acknowledge("execution", success=True)
+    stream._client.acknowledge(
+        "order",
+        success=False,
+        reason="permission denied",
+    )
+
+    assert stream.is_connected() is True
+    assert stream.is_ready() is False
+    assert "subscription rejected for order" in stream.readiness_detail
+    assert "permission denied" in stream.readiness_detail
 
 
 def test_bybit_pybit_ping_timer_patch_uses_daemon_timer(monkeypatch) -> None:
@@ -516,6 +633,54 @@ def test_bybit_private_client_paginates_open_orders(monkeypatch) -> None:
         {"category": "linear", "limit": 50, "settleCoin": "USDT"},
         {"category": "linear", "limit": 50, "settleCoin": "USDT", "cursor": "p2"},
     ]
+
+
+def test_bybit_private_client_rejects_truncated_open_order_pagination(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.open_order_calls = []
+
+        def get_open_orders(self, **params):
+            self.open_order_calls.append(params)
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [{"orderId": f"o{len(self.open_order_calls)}"}],
+                    "nextPageCursor": f"p{len(self.open_order_calls) + 1}",
+                },
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    with pytest.raises(bybit.BybitDataError, match="refusing an incomplete result"):
+        client.get_open_orders(settle_coin="USDT", max_pages=2)
+
+    assert len(client._client.open_order_calls) == 2
+
+
+def test_bybit_private_client_rejects_non_advancing_open_order_cursor(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.open_order_calls = []
+
+        def get_open_orders(self, **params):
+            self.open_order_calls.append(params)
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [{"orderId": "o1"}],
+                    "nextPageCursor": "stuck",
+                },
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    with pytest.raises(bybit.BybitDataError, match="non-advancing pagination cursor"):
+        client.get_open_orders(settle_coin="USDT")
+
+    assert len(client._client.open_order_calls) == 2
 
 
 def test_bybit_private_client_paginates_positions(monkeypatch) -> None:

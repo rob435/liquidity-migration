@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from .account_execution_stream import BybitAccountExecutionConsumer
+from .account_service_bybit import inspect_bybit_demo_order_ownership
 from .account_kernel import (
     AccountEvent,
     AccountEventType,
@@ -43,7 +44,7 @@ class AccountReconciliationReport:
 
 
 class BybitAccountReconciler:
-    """Recover dropped WS facts, then compare one clean REST position snapshot."""
+    """Recover dropped WS facts, then verify REST order and position truth."""
 
     def __init__(
         self,
@@ -211,10 +212,54 @@ class BybitAccountReconciler:
                 )
             except Exception as exc:  # noqa: BLE001 - protection failure makes the snapshot unhealthy
                 mismatches.append(f"native_protection:{type(exc).__name__}:{exc}")
+        order_ownership = None
+        try:
+            order_ownership = inspect_bybit_demo_order_ownership(
+                client=self.client,
+                state=self.kernel._state_ref(),
+                native_order_verifier=(
+                    self.native_protection_manager.is_verified_native_order
+                    if self.native_protection_manager is not None
+                    else None
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown venue orders block health, not the owner loop
+            mismatches.append(
+                "venue_order_ownership:inspection_failed:"
+                f"{type(exc).__name__}:{exc}"
+            )
+        else:
+            for unowned_order in order_ownership.unowned_orders:
+                mismatch = f"unowned_venue_order:{unowned_order.description}"
+                mismatches.append(
+                    f"{unowned_order.symbol}:{mismatch}"
+                    if unowned_order.symbol
+                    else f"venue_order_ownership:{mismatch}"
+                )
+        ownership_semantics = (
+            {
+                "status": (
+                    "verified"
+                    if not order_ownership.unowned_orders
+                    else "unowned"
+                ),
+                "all_kinds_rows_observed": order_ownership.all_kinds_rows_observed,
+                "conditional_rows_observed": order_ownership.conditional_rows_observed,
+                "unique_orders_observed": order_ownership.unique_orders_observed,
+            }
+            if order_ownership is not None
+            else {
+                "status": "unknown",
+                "all_kinds_rows_observed": 0,
+                "conditional_rows_observed": 0,
+                "unique_orders_observed": 0,
+            }
+        )
         snapshot_semantics = {
             "venue_positions": venue_positions,
             "reconstructed_positions": reconstructed,
             "mismatches": mismatches,
+            "venue_order_ownership": ownership_semantics,
         }
         snapshot_material = {
             "observed_ts_ns": observed_ns,
@@ -245,6 +290,7 @@ class BybitAccountReconciler:
                     "execution_rows_observed": execution_rows,
                     "order_rows_observed": order_rows,
                     "position_rows_observed": len(position_rows),
+                    "venue_order_ownership": ownership_semantics,
                     "source": "bybit_demo_rest_reconcile",
                 },
             )
@@ -296,7 +342,11 @@ class BybitAccountReconciler:
         if age_ns < 0 or age_ns > max_age_ns:
             raise RuntimeError(f"account reconciliation is stale: age_ns={age_ns}")
         state = self.kernel._state_ref()
-        contradictions: list[str] = []
+        contradictions = [
+            mismatch
+            for mismatch in report.mismatches
+            if mismatch.startswith("venue_order_ownership:")
+        ]
         for raw_symbol in symbols:
             symbol = str(raw_symbol).upper()
             direct_mismatches = [

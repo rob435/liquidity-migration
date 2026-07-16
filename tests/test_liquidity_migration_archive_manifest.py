@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 import polars as pl
 
@@ -692,6 +694,96 @@ def test_download_api_hourly_group_caches_existing_partition_without_fetch(tmp_p
     assert len(results) == 1
     assert results[0]["status"] == "cached"
     assert results[0]["bar_rows"] == 1
+
+
+def test_download_api_hourly_group_skips_long_completed_spans(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+
+    def fake_fetch(_config, *, symbol: str, start_ms: int, end_ms: int):
+        assert symbol == "AAAUSDT"
+        calls.append((start_ms, end_ms))
+        return [[str(start_ms), "1", "1", "1", "1", "1", "1"]]
+
+    monkeypatch.setattr(manifest_module, "_fetch_bybit_api_klines", fake_fetch)
+    config = ArchiveHourlyKlineApiDownloadConfig(
+        missing_only=False,
+        name="sparse-gaps",
+    )
+    rows = [
+        {"symbol": "AAAUSDT", "date": "2020-01-01", "url": "u1"},
+        {"symbol": "AAAUSDT", "date": "2025-12-31", "url": "u2"},
+    ]
+
+    results = manifest_module._download_api_hourly_group(tmp_path, rows, config)
+
+    assert len(calls) == 2
+    assert [result["status"] for result in results] == ["downloaded", "downloaded"]
+    assert [result["date"] for result in results] == ["2020-01-01", "2025-12-31"]
+
+
+def test_download_api_hourly_group_packs_nearby_gaps_without_extra_calls(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+    required_ms = [
+        int(datetime(2025, 1, day, tzinfo=UTC).timestamp() * 1000)
+        for day in (1, 3)
+    ]
+
+    def fake_fetch(_config, *, symbol: str, start_ms: int, end_ms: int):
+        assert symbol == "AAAUSDT"
+        calls.append((start_ms, end_ms))
+        return [
+            [str(ts_ms), "1", "1", "1", "1", "1", "1"]
+            for ts_ms in required_ms
+            if start_ms <= ts_ms <= end_ms
+        ]
+
+    monkeypatch.setattr(manifest_module, "_fetch_bybit_api_klines", fake_fetch)
+    config = ArchiveHourlyKlineApiDownloadConfig(missing_only=False, name="nearby-gaps")
+    rows = [
+        {"symbol": "AAAUSDT", "date": "2025-01-01", "url": "u1"},
+        {"symbol": "AAAUSDT", "date": "2025-01-03", "url": "u2"},
+    ]
+
+    results = manifest_module._download_api_hourly_group(tmp_path, rows, config)
+
+    expected_start = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    expected_end = int(datetime(2025, 1, 3, 23, tzinfo=UTC).timestamp() * 1000)
+    assert calls == [(expected_start, expected_end)]
+    assert [result["status"] for result in results] == ["downloaded", "downloaded"]
+
+
+def test_missing_date_request_windows_cover_required_hours_without_extra_calls() -> None:
+    limits = (1, 5, 23, 24, 25, 47, 48, 49, 100, 1000)
+    candidate_days = tuple(range(1, 9))
+
+    for mask in range(1, 1 << len(candidate_days)):
+        selected_days = tuple(day for index, day in enumerate(candidate_days) if mask & (1 << index))
+        date_strings = {f"2025-01-{day:02d}" for day in selected_days}
+        required_hours = {
+            datetime(2025, 1, day, hour, tzinfo=UTC)
+            for day in selected_days
+            for hour in range(24)
+        }
+        span_hours = (selected_days[-1] - selected_days[0] + 1) * 24
+
+        for limit in limits:
+            windows = manifest_module._missing_date_request_windows(date_strings, max_hours=limit)
+            covered_hours = {
+                start + timedelta(hours=offset)
+                for start, end in windows
+                for offset in range(int((end - start).total_seconds() // 3600) + 1)
+            }
+
+            assert required_hours <= covered_hours
+            assert len(windows) <= (span_hours + limit - 1) // limit
+            assert all(int((end - start).total_seconds() // 3600) + 1 <= limit for start, end in windows)
+            assert all(previous[1] < current[0] for previous, current in zip(windows, windows[1:], strict=False))
 
 
 # --- v5 instruments-info supplement ----------------------------------------

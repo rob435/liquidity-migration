@@ -63,6 +63,15 @@ def test_read_stable_file_rejects_hard_links_by_default(tmp_path: Path) -> None:
         read_stable_file(path, label="evidence")
 
 
+def test_read_stable_file_enforces_a_descriptor_size_bound(tmp_path: Path) -> None:
+    path = tmp_path / "evidence.json"
+    path.write_bytes(b"bounded\n")
+
+    assert read_stable_file(path, label="evidence", max_bytes=8).data == b"bounded\n"
+    with pytest.raises(ValueError, match="7-byte size limit"):
+        read_stable_file(path, label="evidence", max_bytes=7)
+
+
 def test_rename_noreplace_preserves_an_existing_evidence_directory(
     tmp_path: Path,
 ) -> None:

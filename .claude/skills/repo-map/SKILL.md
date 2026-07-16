@@ -5,6 +5,11 @@ description: Orient in the liquidity-migration codebase, locate ownership, and t
 
 # Navigate the repository
 
+Read `docs/repository_map.md` for stable subsystem ownership and entry points.
+Before broad work, run `scripts/dev.sh doctor --json` when selected-Python,
+worktree, dependency-lock, skill-mirror, or Graphify state could affect the
+result. Treat diagnostics as local facts, never as runtime authorization.
+
 Start from the source that owns the question:
 
 - Runtime state: `STATE.md`, `deploy/sleeves.env`, systemd units, and current
@@ -51,3 +56,7 @@ Identify definition, callers, data shapes, configuration sources, persistence,
 runtime overrides, tests, and external effects. For cross-module changes, state
 which layer owns the invariant and avoid duplicating it into skills or status
 docs.
+
+Use `scripts/dev.sh test` for focused tests and `scripts/dev.sh check` for the
+full local Ruff, mypy, and pytest gate. Add claim-specific validation when the
+task concerns research, PIT, accounting, deployment, or live-runtime parity.

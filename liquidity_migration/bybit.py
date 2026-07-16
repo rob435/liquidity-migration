@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -415,17 +417,28 @@ class BybitPrivateClient:
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
-        for _ in range(max(1, int(max_pages))):
+        seen_cursors: set[str] = set()
+        page_limit = max(1, int(max_pages))
+        for _ in range(page_limit):
             params = dict(base_params)
             if cursor:
                 params["cursor"] = cursor
             payload = self._call(method_name, **params)
             result = payload.get("result", {})
             rows.extend(result.get("list", []))
-            cursor = result.get("nextPageCursor") or None
-            if not cursor:
-                break
-        return rows
+            next_cursor = str(result.get("nextPageCursor") or "")
+            if not next_cursor:
+                return rows
+            if next_cursor in seen_cursors:
+                raise BybitDataError(
+                    f"Bybit {method_name} returned a non-advancing pagination cursor"
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        raise BybitDataError(
+            f"Bybit {method_name} pagination exceeded max_pages={page_limit}; "
+            "refusing an incomplete result"
+        )
 
     def get_closed_pnl(
         self,
@@ -734,6 +747,11 @@ class BybitPrivateWebSocketStream:
     api_key: str | None = None
     api_secret: str | None = None
     _client: Any = field(init=False, repr=False)
+    _control_lock: Any = field(init=False, repr=False)
+    _acked_topics: set[str] = field(init=False, repr=False)
+    _last_control_error: str = field(init=False, repr=False)
+
+    _EXPECTED_TOPICS = frozenset({"execution", "order"})
 
     def __post_init__(self) -> None:
         if not self.demo or self.testnet:
@@ -744,6 +762,9 @@ class BybitPrivateWebSocketStream:
             raise RuntimeError("pybit is required for BybitPrivateWebSocketStream")
         if not self.api_key or not self.api_secret:
             raise RuntimeError("Bybit private websocket stream requires API key and secret")
+        self._control_lock = threading.RLock()
+        self._acked_topics = set()
+        self._last_control_error = ""
         _patch_pybit_daemon_ping_timer()
         self._client = WebSocket(
             testnet=self.testnet,
@@ -752,15 +773,139 @@ class BybitPrivateWebSocketStream:
             api_key=self.api_key,
             api_secret=self.api_secret,
         )
+        self._install_control_ack_tracking()
+
+    @staticmethod
+    def _account_topic(topic: str) -> str:
+        if topic == "order":
+            return "order"
+        if topic == "execution" or topic.startswith("execution."):
+            return "execution"
+        return ""
+
+    def _ack_topics(self, message: Mapping[str, Any]) -> set[str]:
+        request_id = str(message.get("req_id") or "")
+        subscriptions = getattr(self._client, "subscriptions", None)
+        if not request_id or not isinstance(subscriptions, Mapping):
+            return set()
+        raw = subscriptions.get(request_id)
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return set()
+        if not isinstance(payload, Mapping):
+            return set()
+        args = payload.get("args")
+        if not isinstance(args, list):
+            return set()
+        return {
+            account_topic
+            for value in args
+            if (account_topic := self._account_topic(str(value)))
+        }
+
+    def _observe_subscription_ack(self, message: Mapping[str, Any]) -> None:
+        success = message.get("success")
+        if type(success) is not bool:
+            return
+        topics = self._ack_topics(message)
+        response = str(
+            message.get("ret_msg")
+            or message.get("retMsg")
+            or "venue returned no reason"
+        )
+        with self._control_lock:
+            if success:
+                self._acked_topics.update(topics)
+                if self._EXPECTED_TOPICS.issubset(self._acked_topics):
+                    self._last_control_error = ""
+                return
+            self._acked_topics.difference_update(topics)
+            topic_text = ",".join(sorted(topics)) or "uncorrelated"
+            self._last_control_error = (
+                f"private websocket subscription rejected for {topic_text}: {response}"
+            )[:500]
+
+    def _observe_auth_ack(self, message: Mapping[str, Any]) -> None:
+        success = message.get("success")
+        is_error = message.get("type") == "error"
+        if type(success) is not bool and not is_error:
+            return
+        with self._control_lock:
+            # Every authenticated connection generation must prove its own
+            # resubscription acknowledgements; old ACKs cannot cross a reconnect.
+            self._acked_topics.clear()
+            if success is True and not is_error:
+                self._last_control_error = ""
+                return
+            response = str(
+                message.get("ret_msg")
+                or message.get("retMsg")
+                or message
+            )
+            self._last_control_error = (
+                f"private websocket authentication rejected: {response}"
+            )[:500]
+
+    def _install_control_ack_tracking(self) -> None:
+        subscription_handler = getattr(
+            self._client,
+            "_process_subscription_message",
+            None,
+        )
+        auth_handler = getattr(self._client, "_process_auth_message", None)
+        if (
+            not callable(subscription_handler)
+            or not callable(auth_handler)
+            or not hasattr(self._client, "auth")
+        ):
+            _close_ws_client(self._client)
+            raise RuntimeError(
+                "pinned pybit private websocket lacks control-ack hooks"
+            )
+
+        def tracked_subscription(message: Mapping[str, Any]) -> Any:
+            self._observe_subscription_ack(message)
+            return subscription_handler(message)
+
+        def tracked_auth(message: Mapping[str, Any]) -> Any:
+            self._observe_auth_ack(message)
+            return auth_handler(message)
+
+        self._client._process_subscription_message = tracked_subscription
+        self._client._process_auth_message = tracked_auth
+
+    def _mark_subscription_pending(self, topic: str) -> None:
+        with self._control_lock:
+            self._acked_topics.discard(topic)
+            self._last_control_error = ""
 
     def subscribe_orders(self, callback: Any) -> None:
-        self._client.order_stream(callback=callback)
+        self._mark_subscription_pending("order")
+        try:
+            self._client.order_stream(callback=callback)
+        except Exception as exc:
+            with self._control_lock:
+                self._last_control_error = (
+                    f"private websocket order subscription failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:500]
+            raise
 
     def subscribe_executions(self, callback: Any, *, fast: bool = False) -> None:
-        if fast and hasattr(self._client, "fast_execution_stream"):
-            self._client.fast_execution_stream(callback=callback)
-            return
-        self._client.execution_stream(callback=callback)
+        self._mark_subscription_pending("execution")
+        try:
+            if fast and hasattr(self._client, "fast_execution_stream"):
+                self._client.fast_execution_stream(callback=callback)
+                return
+            self._client.execution_stream(callback=callback)
+        except Exception as exc:
+            with self._control_lock:
+                self._last_control_error = (
+                    f"private websocket execution subscription failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:500]
+            raise
 
     def is_connected(self) -> bool | None:
         """Socket-level liveness of the private stream. pybit's WebSocket subclasses
@@ -776,6 +921,36 @@ class BybitPrivateWebSocketStream:
             return bool(probe())
         except Exception:  # noqa: BLE001 - a liveness probe must never raise into the cycle
             return None
+
+    def is_ready(self) -> bool | None:
+        """Require socket, positive authentication, and both mutation-topic ACKs."""
+
+        connected = self.is_connected()
+        if connected is not True:
+            return connected
+        if getattr(self._client, "auth", None) is not True:
+            return False
+        with self._control_lock:
+            return self._EXPECTED_TOPICS.issubset(self._acked_topics)
+
+    @property
+    def readiness_detail(self) -> str:
+        connected = self.is_connected()
+        if connected is False:
+            return "private execution websocket is disconnected"
+        if connected is None:
+            return "private execution websocket liveness is unavailable"
+        with self._control_lock:
+            error = self._last_control_error
+            missing = sorted(self._EXPECTED_TOPICS - self._acked_topics)
+        if getattr(self._client, "auth", None) is not True:
+            return error or "private execution websocket authentication is not confirmed"
+        if missing:
+            return error or (
+                "private execution websocket awaits positive subscription ACKs: "
+                + ", ".join(missing)
+            )
+        return ""
 
     def close(self) -> None:
         _close_ws_client(self._client)

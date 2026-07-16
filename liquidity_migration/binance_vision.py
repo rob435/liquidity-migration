@@ -13,8 +13,8 @@ CLI:
     python -m liquidity_migration.binance_vision build-binance-oos \\
         --data-root ~/SHARED_DATA/binance_full_pit --end YYYY-MM-DD
 
-    python -m liquidity_migration.binance_vision filter-manifest \\
-        --data-root ~/SHARED_DATA/bybit_full_pit        # generic coverage filter
+    python -m liquidity_migration.binance_vision validate-manifest \\
+        --data-root ~/SHARED_DATA/bybit_full_pit
 """
 
 from __future__ import annotations
@@ -37,7 +37,16 @@ from urllib.error import HTTPError
 
 import polars as pl
 
+from .archive_manifest import (
+    ARCHIVE_SCRAPE_SOURCE,
+    V5_LISTING_SOURCE,
+    V5_LISTING_URL_SENTINEL,
+)
 from .storage import read_dataset, write_dataset
+from .volume_events_pit import (
+    _covered_kline_date_symbol_set,
+    _full_pit_universe_coverage,
+)
 
 # S3 listing endpoint enumerates objects; the plain host serves the files.
 VISION_S3 = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
@@ -416,8 +425,111 @@ def topup_binance_daily_klines(
 
 
 # --------------------------------------------------------------------------
-# Manifest coverage filter (generic — also used for the Bybit OOS root)
+# Manifest coverage validation and coverage-derived manifest maintenance
 # --------------------------------------------------------------------------
+
+
+def validate_pit_manifest_coverage(
+    data_root: str | Path,
+    *,
+    min_hourly_bars: int = MIN_HOURLY_BARS,
+) -> dict[str, int | bool]:
+    """Validate independent membership against klines without rewriting either.
+
+    The expected-membership manifest is evidence, not output to be conformed to
+    whatever klines happened to download. Missing required rows therefore fail
+    and remain present for diagnosis and retry.
+    """
+
+    root = Path(data_root).expanduser()
+    klines = read_dataset(root, "klines_1h")
+    if klines.is_empty():
+        raise RuntimeError(f"klines_1h is empty under {root}")
+    if "date" not in klines.columns:
+        if "ts_ms" not in klines.columns:
+            raise RuntimeError("klines_1h lacks both date and ts_ms")
+        klines = klines.with_columns(
+            pl.from_epoch(pl.col("ts_ms"), time_unit="ms")
+            .dt.strftime("%Y-%m-%d")
+            .alias("date")
+        )
+    manifest = read_dataset(root, "archive_trade_manifest")
+    if manifest.is_empty():
+        raise RuntimeError(f"archive_trade_manifest is empty under {root}")
+
+    required_bars = max(int(min_hourly_bars), 1)
+    covered = _covered_kline_date_symbol_set(
+        klines,
+        min_hourly_bars=required_bars,
+    )
+    assessment = _full_pit_universe_coverage(
+        klines,
+        manifest,
+        kline_covered_date_symbols=covered,
+    )
+    summary: dict[str, int | bool] = {
+        "full_pit_universe_pass": assessment.passed,
+        "manifest_symbols": len(assessment.manifest_symbols),
+        "kline_symbols": len(assessment.kline_symbols),
+        "required_date_symbols": len(assessment.required_date_symbols),
+        "covered_date_symbols": len(assessment.covered_date_symbols),
+        "missing_symbols": len(assessment.missing_symbols),
+        "missing_required_date_symbols": len(
+            assessment.missing_required_date_symbols
+        ),
+    }
+    if assessment.passed:
+        return summary
+
+    problems: list[str] = []
+    if not assessment.manifest_symbols:
+        problems.append("manifest has no symbols")
+    if assessment.missing_symbols:
+        sample = ",".join(sorted(assessment.missing_symbols)[:10])
+        problems.append(
+            f"{len(assessment.missing_symbols)} manifest symbol(s) have no klines "
+            f"(sample: {sample})"
+        )
+    if not assessment.required_date_symbols:
+        problems.append("manifest has no required symbol-days")
+    if assessment.missing_required_date_symbols:
+        sample = ",".join(
+            f"{day}/{symbol}"
+            for day, symbol in sorted(
+                assessment.missing_required_date_symbols
+            )[:10]
+        )
+        problems.append(
+            f"{len(assessment.missing_required_date_symbols)} required symbol-day(s) "
+            f"lack >={required_bars} hourly bars (sample: {sample})"
+        )
+    raise RuntimeError(
+        "PIT manifest/kline validation failed; independent manifest left unchanged: "
+        + "; ".join(problems)
+    )
+
+
+def _has_independent_bybit_membership(manifest: pl.DataFrame) -> bool:
+    predicates: list[pl.Expr] = []
+    if "source" in manifest.columns:
+        predicates.append(
+            pl.col("source").is_in([ARCHIVE_SCRAPE_SOURCE, V5_LISTING_SOURCE])
+        )
+    if "url" in manifest.columns:
+        predicates.extend(
+            [
+                pl.col("url") == V5_LISTING_URL_SENTINEL,
+                pl.col("url").str.starts_with(
+                    "https://public.bybit.com/trading/"
+                ),
+            ]
+        )
+    if not predicates:
+        return False
+    predicate = predicates[0]
+    for extra in predicates[1:]:
+        predicate = predicate | extra
+    return not manifest.filter(predicate.fill_null(False)).is_empty()
 
 
 def rewrite_manifest_to_coverage(
@@ -429,9 +541,11 @@ def rewrite_manifest_to_coverage(
     """Rewrite ``archive_trade_manifest`` so it lists only (symbol, date) pairs
     that actually have >= min_hourly_bars hourly klines.
 
-    The strategy's full-PIT check requires every manifest symbol/date to be
-    covered by klines; raw archive manifests can list partial days. Returns the
-    surviving row count. Reusable for any Bybit-shaped data root.
+    Returns the surviving row count. This is valid only when the kline archive
+    itself is the membership source, as in the Binance Vision builder.
+    Independently sourced Bybit membership must use
+    :func:`validate_pit_manifest_coverage`; conforming it to observed klines
+    would erase the very gaps it is meant to detect.
 
     ``archive_membership_source`` is required when the caller itself obtained
     the bars from a known archive and wants to make that observation provenance
@@ -458,6 +572,15 @@ def rewrite_manifest_to_coverage(
         .select(["date", "symbol"])
     )
     existing = read_dataset(root, "archive_trade_manifest")
+    if (
+        archive_membership_source is None
+        and not existing.is_empty()
+        and _has_independent_bybit_membership(existing)
+    ):
+        raise RuntimeError(
+            "refusing to rewrite independently sourced Bybit PIT membership to "
+            "observed kline coverage; use validate-manifest"
+        )
     synthetic_url = archive_membership_source or "kline_coverage"
     if existing.is_empty():
         manifest = covered.with_columns(pl.lit(synthetic_url).alias("url"))
@@ -690,9 +813,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Permit overwriting an existing klines_1h with a strictly narrower discovered universe.",
     )
 
-    f = sub.add_parser("filter-manifest", help="Rewrite archive_trade_manifest to kline coverage.")
+    f = sub.add_parser(
+        "filter-manifest",
+        help=(
+            "Rewrite a coverage-derived archive_trade_manifest "
+            "(refuses independent Bybit membership)."
+        ),
+    )
     f.add_argument("--data-root", required=True)
     f.add_argument("--min-hourly-bars", type=int, default=MIN_HOURLY_BARS)
+
+    v = sub.add_parser(
+        "validate-manifest",
+        help="Validate independent PIT membership against klines without rewriting it.",
+    )
+    v.add_argument("--data-root", required=True)
+    v.add_argument("--min-hourly-bars", type=int, default=MIN_HOURLY_BARS)
 
     d = sub.add_parser(
         "topup-daily-klines",
@@ -717,6 +853,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.mode == "filter-manifest":
         n = rewrite_manifest_to_coverage(args.data_root, min_hourly_bars=args.min_hourly_bars)
         print(f"archive_trade_manifest rewritten: {n:,} covered symbol-days under {args.data_root}")
+    elif args.mode == "validate-manifest":
+        summary = validate_pit_manifest_coverage(
+            args.data_root,
+            min_hourly_bars=args.min_hourly_bars,
+        )
+        print(json.dumps(summary, sort_keys=True))
     elif args.mode == "topup-daily-klines":
         symbols = tuple(symbol.strip() for symbol in args.symbols.split(",") if symbol.strip())
         summary = topup_binance_daily_klines(

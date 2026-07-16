@@ -25,7 +25,7 @@ if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
     echo "EXPECTED_COMMIT must be a full lowercase 40-character commit" >&2
     exit 2
 fi
-if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+if ! /usr/bin/git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
     echo "BRANCH is not a valid Git branch" >&2
     exit 2
 fi
@@ -38,6 +38,36 @@ if [ "$MODE" = install ] && [ -z "$GITHUB_TOKEN" ] \
     GITHUB_TOKEN="$(gh auth token --hostname github.com 2>/dev/null || true)"
 fi
 
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+LOCAL_REPOSITORY="$(cd -P -- "$SCRIPT_DIRECTORY/.." && pwd)"
+[[ -d "$LOCAL_REPOSITORY/.git" && ! -L "$LOCAL_REPOSITORY/.git" ]] || {
+    echo "deploy must run from a checkout with a real .git directory" >&2
+    exit 1
+}
+LOCAL_GIT=(
+    /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent LANG=C LC_ALL=C
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1
+    /usr/bin/git --no-pager --git-dir="$LOCAL_REPOSITORY/.git"
+    --work-tree="$LOCAL_REPOSITORY" -c core.fsmonitor=false -c core.filemode=true
+    -C "$LOCAL_REPOSITORY"
+)
+if [ "$("${LOCAL_GIT[@]}" cat-file -t "$EXPECTED_COMMIT" 2>/dev/null || true)" != commit ]; then
+    echo "EXPECTED_COMMIT is not a local commit object: $EXPECTED_COMMIT" >&2
+    exit 1
+fi
+if ! MAINTENANCE_LOCK_HELPER_B64="$(
+    "${LOCAL_GIT[@]}" show \
+        "$EXPECTED_COMMIT:liquidity_migration/maintenance_lock.py" \
+    | /usr/bin/python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))'
+)"; then
+    echo "expected commit does not contain the maintenance lock helper: $EXPECTED_COMMIT" >&2
+    exit 1
+fi
+[[ -n "$MAINTENANCE_LOCK_HELPER_B64" ]] || {
+    echo "expected commit returned an empty maintenance lock helper" >&2
+    exit 1
+}
+
 read -r -a SSH_ARGS <<< "$SSH_OPTS"
 {
     printf 'MODE=%q\n' "$MODE"
@@ -49,10 +79,79 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
     printf 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS=%q\n' "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS"
     printf 'RMOM_BOOTSTRAP_RETRY_SECONDS=%q\n' "$RMOM_BOOTSTRAP_RETRY_SECONDS"
-    cat <<'REMOTE_SCRIPT'
+    printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
+	cat <<'REMOTE_SCRIPT'
 set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 fail() { echo "deploy failed: $*" >&2; exit 1; }
+
+GIT_ENV=(
+    /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent LANG=C LC_ALL=C
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1
+)
+GIT_COMMAND=(
+    /usr/bin/git --no-pager --no-optional-locks
+    --git-dir="$REPO_DIR/.git" --work-tree="$REPO_DIR"
+    -c "safe.directory=$REPO_DIR"
+    -c core.fsmonitor=false -c core.filemode=true -c core.hooksPath=/dev/null
+    -C "$REPO_DIR"
+)
+
+safe_git() {
+    "${GIT_ENV[@]}" "${GIT_COMMAND[@]}" "$@"
+}
+
+safe_git_with_index() {
+    local index_path="$1"
+    shift
+    "${GIT_ENV[@]}" GIT_INDEX_FILE="$index_path" "${GIT_COMMAND[@]}" "$@"
+}
+
+acquire_maintenance_locks() {
+    local lock_dir=/run/liquidity-migration helper_output
+    local maintenance_device maintenance_inode deploy_device deploy_inode reset_device reset_inode
+    # maintenance.lock is the canonical cross-operation mutex. The two retired
+    # leaves stay nested during migration so this version also excludes an old
+    # deploy or reset process that started from the previously installed code.
+    helper_output="$(maintenance_lock_helper prepare-host)" \
+        || fail "cannot prepare persistent host maintenance locks safely"
+    IFS=$'\t' read -r \
+        maintenance_device maintenance_inode deploy_device deploy_inode reset_device reset_inode \
+        <<< "$helper_output"
+    for value in \
+        "$maintenance_device" "$maintenance_inode" "$deploy_device" \
+        "$deploy_inode" "$reset_device" "$reset_inode"; do
+        [[ "$value" =~ ^[0-9]+$ ]] \
+            || fail "maintenance lock helper returned invalid identity metadata"
+    done
+    exec 9<"$lock_dir/maintenance.lock" \
+        || fail "cannot open canonical maintenance lock without truncation"
+    exec 8<"$lock_dir/deploy.lock" \
+        || fail "cannot open legacy deploy lock without truncation"
+    exec 7</run/lock/liquidity-migration-ledger-reset.lock \
+        || fail "cannot open legacy reset lock without truncation"
+    maintenance_lock_helper acquire-inherited \
+        --lock 9 "$lock_dir/maintenance.lock" "$maintenance_device" "$maintenance_inode" \
+        --lock 8 "$lock_dir/deploy.lock" "$deploy_device" "$deploy_inode" \
+        --lock 7 /run/lock/liquidity-migration-ledger-reset.lock "$reset_device" "$reset_inode" \
+        || fail "another maintenance operation is active or a lock path changed"
+}
+
+maintenance_lock_helper() {
+    /usr/bin/python3 -c '
+import base64
+import sys
+
+encoded = sys.argv[1]
+arguments = sys.argv[2:]
+source = base64.b64decode(encoded, validate=True)
+sys.argv = ["maintenance_lock.py", *arguments]
+namespace = {"__file__": "<transmitted-maintenance-lock-helper>", "__name__": "__main__"}
+exec(compile(source, namespace["__file__"], "exec"), namespace)
+' "$MAINTENANCE_LOCK_HELPER_B64" "$@"
+}
 
 PAPER_RUNTIME_USER=liquidity-migration-paper
 PAPER_RUNTIME_GROUP=liquidity-migration-paper
@@ -233,38 +332,35 @@ PY
     chown root:"$PAPER_RUNTIME_GROUP" /etc/liquidity-migration/sleeves.resolved.env
     chmod 0640 /etc/liquidity-migration/sleeves.resolved.env
 
+    paper_uid="$(id -u "$PAPER_RUNTIME_USER")"
+    paper_gid="$(id -g "$PAPER_RUNTIME_USER")"
+    root_uid="$(id -u root)"
+
+    paper_path_args=()
     for root in \
         "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
         "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT"; do
-        [ ! -L "$root" ] || fail "paper runtime root must not be a symlink: $root"
-        install -d -o "$PAPER_RUNTIME_USER" -g "$PAPER_RUNTIME_GROUP" -m 0700 "$root"
-        chown -R "$PAPER_RUNTIME_USER:$PAPER_RUNTIME_GROUP" "$root"
-        find "$root" -type d -exec chmod 0700 {} +
-        find "$root" -type f -exec chmod 0600 {} +
+        paper_path_args+=(--root "$root")
     done
-    for root in "$LONG_DEMO_ROOT" "$CONTINUOUS_DEMO_ROOT"; do
-        [ ! -L "$root" ] || fail "demo market root must not be a symlink: $root"
-        install -d -o root -g "$PAPER_RUNTIME_GROUP" -m 2710 "$root"
-        install -d -o root -g "$PAPER_RUNTIME_GROUP" -m 2710 "$root/.cache"
-        install -d -o root -g "$PAPER_RUNTIME_GROUP" -m 2750 \
-            "$root/.cache/ws_klines"
-        if [ -e "$root/.cache/ws_klines/store.parquet" ]; then
-            [ -f "$root/.cache/ws_klines/store.parquet" ] \
-                && [ ! -L "$root/.cache/ws_klines/store.parquet" ] \
-                || fail "demo kline snapshot must be a real regular file: $root"
-            chown root:"$PAPER_RUNTIME_GROUP" \
-                "$root/.cache/ws_klines/store.parquet"
-            chmod 0640 "$root/.cache/ws_klines/store.parquet"
-        fi
-    done
-    if [ -e "$CONTINUOUS_DEMO_ROOT/residual_momentum.parquet" ]; then
-        [ -f "$CONTINUOUS_DEMO_ROOT/residual_momentum.parquet" ] \
-            && [ ! -L "$CONTINUOUS_DEMO_ROOT/residual_momentum.parquet" ] \
-            || fail "shared RMOM input must be a real regular file"
-        chown root:"$PAPER_RUNTIME_GROUP" \
-            "$CONTINUOUS_DEMO_ROOT/residual_momentum.parquet"
-        chmod 0640 "$CONTINUOUS_DEMO_ROOT/residual_momentum.parquet"
-    fi
+    "$PYTHON" -m liquidity_migration.reset_path_safety preflight-paper \
+        --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
+        || fail "paper runtime descriptor/mount preflight failed"
+    "$PYTHON" -m liquidity_migration.reset_path_safety preflight-demo \
+        --anchor "$REPO_DIR/data" \
+        --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
+        --continuous-root "$CONTINUOUS_DEMO_ROOT" \
+        || fail "demo runtime descriptor/mount preflight failed"
+
+    "$PYTHON" -m liquidity_migration.reset_path_safety normalize-paper \
+        --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
+        --uid "$paper_uid" --gid "$paper_gid" --create-missing \
+        || fail "descriptor-rooted paper runtime normalization failed"
+    "$PYTHON" -m liquidity_migration.reset_path_safety normalize-demo \
+        --anchor "$REPO_DIR/data" \
+        --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
+        --continuous-root "$CONTINUOUS_DEMO_ROOT" \
+        --uid "$root_uid" --gid "$paper_gid" --create-missing \
+        || fail "descriptor-rooted shared demo cache normalization failed"
     chown root:root \
         /etc/liquidity-migration/account-execution.env \
         /etc/liquidity-migration/bybit-demo.env
@@ -292,6 +388,8 @@ verify_paper_runtime_boundary() {
         "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT"; do
         runuser -u "$PAPER_RUNTIME_USER" -- test -w "$root" \
             || fail "paper runtime cannot write its explicit state root: $root"
+        runuser -u "$PAPER_RUNTIME_USER" -- test -w "$root/.locks" \
+            || fail "paper runtime cannot write its persistent lock directory: $root/.locks"
     done
     for root in "$LONG_DEMO_ROOT" "$CONTINUOUS_DEMO_ROOT"; do
         runuser -u "$PAPER_RUNTIME_USER" -- \
@@ -320,14 +418,74 @@ verify_paper_runtime_boundary() {
 }
 
 require_checkout() {
-    [ -d "$REPO_DIR/.git" ] || fail "missing Git checkout: $REPO_DIR"
+    [ -d "$REPO_DIR/.git" ] && [ ! -L "$REPO_DIR/.git" ] \
+        || fail "missing trusted Git checkout: $REPO_DIR"
     cd "$REPO_DIR"
 }
 
+clean_checkout_status() {
+    local expected_commit="$1"
+    local temporary_directory temporary_index refresh_status diff_status untracked
+    temporary_directory="$(
+        /usr/bin/mktemp -d /run/liquidity-migration/deploy-index.XXXXXX
+    )" || return 2
+    /bin/chmod 0700 "$temporary_directory" || {
+        /bin/rmdir "$temporary_directory" 2>/dev/null || true
+        return 2
+    }
+    temporary_index="$temporary_directory/index"
+    if ! safe_git_with_index "$temporary_index" read-tree "$expected_commit" >/dev/null; then
+        /bin/rm -f -- "$temporary_index"
+        /bin/rmdir "$temporary_directory" 2>/dev/null || true
+        return 2
+    fi
+    if safe_git_with_index "$temporary_index" update-index --refresh >/dev/null; then
+        refresh_status=0
+    else
+        refresh_status=$?
+    fi
+    if (( refresh_status > 1 )); then
+        /bin/rm -f -- "$temporary_index"
+        /bin/rmdir "$temporary_directory" 2>/dev/null || true
+        return 2
+    fi
+    if safe_git_with_index "$temporary_index" diff-index --quiet "$expected_commit" --; then
+        diff_status=0
+    else
+        diff_status=$?
+    fi
+    if (( diff_status > 1 )); then
+        /bin/rm -f -- "$temporary_index"
+        /bin/rmdir "$temporary_directory" 2>/dev/null || true
+        return 2
+    fi
+    untracked="$(
+        safe_git_with_index "$temporary_index" ls-files --others --exclude-standard
+    )" || {
+        /bin/rm -f -- "$temporary_index"
+        /bin/rmdir "$temporary_directory" 2>/dev/null || true
+        return 2
+    }
+    /bin/rm -f -- "$temporary_index"
+    /bin/rmdir "$temporary_directory" 2>/dev/null || return 2
+    (( refresh_status == 0 )) || echo "tracked worktree metadata differs from expected commit"
+    (( diff_status == 0 )) || echo "tracked worktree differs from expected commit"
+    [[ -z "$untracked" ]] || printf '%s\n' "$untracked"
+}
+
+require_clean_checkout_at() {
+    local expected_commit="$1" context="$2" status
+    [ "$(safe_git rev-parse HEAD)" = "$expected_commit" ] \
+        || fail "checkout moved before $context"
+    status="$(clean_checkout_status "$expected_commit")" \
+        || fail "cannot inspect checkout independently of its index before $context"
+    [ -z "$status" ] || fail "checkout is dirty before $context: $status"
+    [ "$(safe_git rev-parse HEAD)" = "$expected_commit" ] \
+        || fail "checkout moved while verifying $context"
+}
+
 require_clean_head() {
-    [ "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT" ] \
-        || fail "checkout is not at expected commit $EXPECTED_COMMIT"
-    [ -z "$(git status --porcelain)" ] || fail "checkout is dirty"
+    require_clean_checkout_at "$EXPECTED_COMMIT" "exact-commit operation"
 }
 
 require_quiescent() {
@@ -343,12 +501,14 @@ git_fetch() {
     if [ -n "$GITHUB_TOKEN" ] && [[ "$REPO_URL" == https://github.com/* ]]; then
         local auth
         auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+        "${GIT_ENV[@]}" \
         GIT_CONFIG_COUNT=1 \
         GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
         GIT_CONFIG_VALUE_0="AUTHORIZATION: Basic $auth" \
-        GIT_TERMINAL_PROMPT=0 git "$@"
+        GIT_TERMINAL_PROMPT=0 \
+        "${GIT_COMMAND[@]}" "$@"
     else
-        GIT_TERMINAL_PROMPT=0 git "$@"
+        "${GIT_ENV[@]}" GIT_TERMINAL_PROMPT=0 "${GIT_COMMAND[@]}" "$@"
     fi
 }
 
@@ -363,21 +523,23 @@ invalidate_operational_authorization() {
 }
 
 install_mode() {
+    local installed_head
     require_checkout
     require_quiescent
-    [ -z "$(git status --porcelain)" ] || fail "checkout is dirty before install"
+    installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
+    require_clean_checkout_at "$installed_head" "install"
 
-    if git remote get-url "$REMOTE" >/dev/null 2>&1; then
-        git remote set-url "$REMOTE" "$REPO_URL"
+    if safe_git remote get-url "$REMOTE" >/dev/null 2>&1; then
+        safe_git remote set-url "$REMOTE" "$REPO_URL"
     else
-        git remote add "$REMOTE" "$REPO_URL"
+        safe_git remote add "$REMOTE" "$REPO_URL"
     fi
     git_fetch fetch "$REMOTE" "refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH"
-    git cat-file -e "$EXPECTED_COMMIT^{commit}" 2>/dev/null \
+    safe_git cat-file -e "$EXPECTED_COMMIT^{commit}" 2>/dev/null \
         || fail "expected commit is unavailable"
-    git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH" \
+    safe_git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH" \
         || fail "expected commit is not on $REMOTE/$BRANCH"
-    git checkout -B "$BRANCH" "$EXPECTED_COMMIT"
+    safe_git checkout -B "$BRANCH" "$EXPECTED_COMMIT"
     require_clean_head
     unset GITHUB_TOKEN
 
@@ -614,6 +776,7 @@ activate_mode() {
     verify_topology
 }
 
+acquire_maintenance_locks
 case "$MODE" in
     install) install_mode ;;
     activate) activate_mode ;;
