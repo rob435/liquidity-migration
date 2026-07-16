@@ -26,3 +26,26 @@ def test_builder_validates_independent_manifest_without_filtering_it() -> None:
 
     assert manifest < klines < validation < ancillary
     assert "filter-manifest --data-root" not in text
+    assert "validate_bybit_manifest_provenance" in text
+
+
+def test_help_and_unknown_arguments_cannot_start_a_build() -> None:
+    help_result = subprocess.run(
+        ["bash", str(SCRIPT), "--help"],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    refused = subprocess.run(
+        ["bash", str(SCRIPT), "unexpected"],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert help_result.returncode == 0
+    assert "Configuration is environment-only" in help_result.stdout
+    assert refused.returncode == 2
+    assert "accepts no positional arguments" in refused.stderr

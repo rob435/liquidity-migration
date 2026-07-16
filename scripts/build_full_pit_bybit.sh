@@ -21,8 +21,28 @@
 # See: docs/data_roots.md
 #
 # Usage:  bash scripts/build_full_pit_bybit.sh
-# Resumable: each stage skips work already done.
+# Rerunnable: download stages reuse valid existing partitions where their
+# owners support it.
 set -euo pipefail
+
+usage() {
+  printf '%s\n' \
+    'Usage: bash scripts/build_full_pit_bybit.sh' \
+    '' \
+    'Configuration is environment-only; positional arguments are refused.' \
+    'Key variables: BYBIT_FULL_ROOT, BYBIT_START, BYBIT_END, BYBIT_CATEGORY,' \
+    'MANIFEST_WORKERS, KLINE_WORKERS, ANCILLARY_WORKERS.'
+}
+
+if [ "$#" -ne 0 ]; then
+  if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+    usage
+    exit 0
+  fi
+  echo "FATAL: build_full_pit_bybit.sh accepts no positional arguments" >&2
+  usage >&2
+  exit 2
+fi
 
 ROOT="${BYBIT_FULL_ROOT:-$HOME/SHARED_DATA/bybit_full_pit}"
 START="${BYBIT_START:-2021-01-01}"
@@ -32,6 +52,9 @@ MANIFEST_WORKERS="${MANIFEST_WORKERS:-16}"
 KLINE_WORKERS="${KLINE_WORKERS:-8}"
 ANCILLARY_WORKERS="${ANCILLARY_WORKERS:-4}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
+
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
 
 if [ "$CATEGORY" != "linear" ]; then
   echo "FATAL: BYBIT_CATEGORY must be 'linear' (USDT perpetuals). Got: $CATEGORY" >&2
@@ -80,8 +103,15 @@ echo "[3/4] Bybit — validate independent manifest against ≥20-bar kline cove
 SYMBOLS=$(ROOT="$ROOT" "$PYTHON_BIN" - <<'PY'
 import os, pathlib, sys
 import polars as pl
+from liquidity_migration.archive_manifest import validate_bybit_manifest_provenance
+
 root = pathlib.Path(os.environ["ROOT"]).expanduser()
 df = pl.read_parquet(str(root / "archive_trade_manifest" / "**" / "*.parquet"))
+try:
+    validate_bybit_manifest_provenance(df)
+except RuntimeError as exc:
+    print(f"FATAL: {exc}", file=sys.stderr)
+    sys.exit(2)
 syms = sorted(df["symbol"].unique().to_list())
 bad = [s for s in syms if not s.endswith("USDT")]
 if bad:

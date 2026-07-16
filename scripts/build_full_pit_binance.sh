@@ -17,15 +17,40 @@
 # See: docs/data_roots.md
 #
 # Usage:  bash scripts/build_full_pit_binance.sh
-# Resumable: each stage skips work already done.
+# Rerunnable: the monthly pair rebuilds in sibling staging; later stages reuse
+# valid existing partitions where their owners support it.
 set -euo pipefail
+
+usage() {
+  printf '%s\n' \
+    'Usage: bash scripts/build_full_pit_binance.sh' \
+    '' \
+    'Configuration is environment-only; positional arguments are refused.' \
+    'Key variables: BINANCE_FULL_ROOT, BINANCE_START, BINANCE_END,' \
+    'BINANCE_WORKERS, BINANCE_JOB_BATCH_SIZE, BINANCE_MAX_FAILURE_RATIO.'
+}
+
+if [ "$#" -ne 0 ]; then
+  if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+    usage
+    exit 0
+  fi
+  echo "FATAL: build_full_pit_binance.sh accepts no positional arguments" >&2
+  usage >&2
+  exit 2
+fi
 
 ROOT="${BINANCE_FULL_ROOT:-$HOME/SHARED_DATA/binance_full_pit}"
 START="${BINANCE_START:-2019-09-01}"
 END="${BINANCE_END:-$(date -u +%Y-%m-%d)}"
 VISION_WORKERS="${BINANCE_WORKERS:-24}"
+JOB_BATCH_SIZE="${BINANCE_JOB_BATCH_SIZE:-48}"
+MAX_FAILURE_RATIO="${BINANCE_MAX_FAILURE_RATIO:-0}"
 ANCILLARY_WORKERS="${ANCILLARY_WORKERS:-4}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
+
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
 
 cd "$(dirname "$0")/.."
 mkdir -p "$ROOT"
@@ -47,13 +72,15 @@ echo "Binance full PIT build  (USD-M perpetuals only)"
 echo "  root:    $ROOT"
 echo "  window:  $START → $END (exclusive)"
 echo "  daily:   $DAILY_START → $END (exclusive)"
-echo "  workers: vision=$VISION_WORKERS ancillary=$ANCILLARY_WORKERS"
+echo "  workers: vision=$VISION_WORKERS batch=$JOB_BATCH_SIZE ancillary=$ANCILLARY_WORKERS"
+echo "  max monthly failure ratio: $MAX_FAILURE_RATIO"
 echo "=============================================================="
 
 echo
 echo "[1/3] Binance — full PIT root from data.binance.vision USD-M monthly archives"
 "$PYTHON_BIN" -m liquidity_migration.binance_vision \
-  build-binance-oos --data-root "$ROOT" --end "$END" --workers "$VISION_WORKERS"
+  build-binance-oos --data-root "$ROOT" --end "$END" --workers "$VISION_WORKERS" \
+  --job-batch-size "$JOB_BATCH_SIZE" --max-failure-ratio "$MAX_FAILURE_RATIO"
 
 echo
 echo "[2/3] Binance — daily archive tail for the month not guaranteed by monthly ZIPs"
@@ -66,12 +93,18 @@ echo "[2/3] Binance — daily archive tail for the month not guaranteed by month
 SYMBOLS=$(ROOT="$ROOT" "$PYTHON_BIN" - <<'PY'
 import os, pathlib, sys
 import polars as pl
+from liquidity_migration.binance_vision import validate_usdm_usdt_symbols
+
 root = pathlib.Path(os.environ["ROOT"]).expanduser()
 df = pl.read_parquet(str(root / "archive_trade_manifest" / "**" / "*.parquet"))
-syms = sorted(df["symbol"].unique().to_list())
-bad = [s for s in syms if not s.endswith("USDT")]
-if bad:
-    print(f"FATAL: non-USDT symbols in Binance manifest: {bad[:5]}...", file=sys.stderr)
+try:
+    syms = validate_usdm_usdt_symbols(
+        df["symbol"].unique().to_list(),
+        source="canonical Binance manifest",
+        ignore_non_usdt_entries=False,
+    )
+except RuntimeError as exc:
+    print(f"FATAL: {exc}", file=sys.stderr)
     sys.exit(2)
 print(",".join(syms))
 PY

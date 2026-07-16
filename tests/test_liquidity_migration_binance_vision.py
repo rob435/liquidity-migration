@@ -113,6 +113,63 @@ def test_fetch_daily_klines_returns_empty_for_archive_404(monkeypatch) -> None:
     assert bv.fetch_daily_klines("AAAUSDT", "2024-01-01", retries=1) == []
 
 
+def test_s3_listing_parser_retains_unicode_items_and_exact_pagination() -> None:
+    prefix = bv.MONTHLY_KLINES_PREFIX
+    symbol = "\u5e01\u5b89\u4eba\u751fUSDT"
+    page = bv.parse_s3_listing_page(
+        (
+            "<ListBucketResult>"
+            f"<CommonPrefixes><Prefix>{prefix}{symbol}/</Prefix></CommonPrefixes>"
+            "<CommonPrefixes><Prefix>unrelated/value/</Prefix></CommonPrefixes>"
+            "<IsTruncated>true</IsTruncated>"
+            f"<NextMarker>{prefix}{symbol}/&amp;cursor</NextMarker>"
+            "</ListBucketResult>"
+        ).encode(),
+        prefix=prefix,
+        listing_kind="common_prefixes",
+    )
+
+    assert page.items == (symbol,)
+    assert page.is_truncated is True
+    assert page.next_marker == f"{prefix}{symbol}/&cursor"
+
+
+def test_s3_listing_walk_advances_across_truncated_empty_match_page(monkeypatch) -> None:
+    prefix = bv.DAILY_KLINES_PREFIX
+    payloads = [
+        (
+            "<ListBucketResult><IsTruncated>true</IsTruncated>"
+            "<NextMarker>advance-even-without-match</NextMarker></ListBucketResult>"
+        ).encode(),
+        (
+            f"<ListBucketResult><CommonPrefixes><Prefix>{prefix}BTCUSDT/</Prefix>"
+            "</CommonPrefixes><IsTruncated>false</IsTruncated></ListBucketResult>"
+        ).encode(),
+    ]
+    urls: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        urls.append(url)
+        return payloads[len(urls) - 1]
+
+    monkeypatch.setattr(bv, "_fetch_s3_listing_bytes", fetch)
+
+    assert bv._s3_common_prefixes(prefix) == ["BTCUSDT"]
+    assert len(urls) == 2
+    assert "marker=advance-even-without-match" in urls[1]
+
+
+def test_s3_listing_walk_rejects_truncated_page_that_cannot_advance(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bv,
+        "_fetch_s3_listing_bytes",
+        lambda _url: b"<ListBucketResult><IsTruncated>true</IsTruncated></ListBucketResult>",
+    )
+
+    with pytest.raises(RuntimeError, match="no continuation marker"):
+        bv._s3_keys(bv.MONTHLY_KLINES_PREFIX)
+
+
 def test_list_usdm_usdt_daily_symbols_retains_canonical_unicode(monkeypatch) -> None:
     unicode_symbol = "\u5e01\u5b89\u4eba\u751fUSDT"
     monkeypatch.setattr(
@@ -838,3 +895,91 @@ def test_build_binance_oos_clean_rewrite_drops_stale_partitions(tmp_path, monkey
     klines = read_dataset(root, "klines_1h")
     assert set(klines["symbol"].unique().to_list()) == {"AAAUSDT"}
     assert not (root / "klines_1h" / "date=2024-01-01" / "symbol=BBBUSDT").exists()
+
+
+def test_monthly_job_rejects_cross_month_or_cross_symbol_rows() -> None:
+    row = {
+        "ts_ms": 1704067200000,
+        "symbol": "AAAUSDT",
+        "open": 1.0,
+        "high": 1.0,
+        "low": 1.0,
+        "close": 1.0,
+        "volume_base": 1.0,
+        "turnover_quote": 1.0,
+        "source": "test",
+    }
+    with pytest.raises(RuntimeError, match="another symbol"):
+        bv._normalize_monthly_job_frame(
+            [{**row, "symbol": "BBBUSDT"}],
+            symbol="AAAUSDT",
+            month="2024-01",
+            end_ms=1800000000000,
+        )
+    with pytest.raises(RuntimeError, match="out-of-month"):
+        bv._normalize_monthly_job_frame(
+            [row],
+            symbol="AAAUSDT",
+            month="2024-02",
+            end_ms=1,
+        )
+
+
+def test_build_refuses_incomplete_publication_before_discovery(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / bv._INCOMPLETE_PUBLICATION_MARKER).write_text("{}", encoding="utf-8")
+
+    def _forbidden_discovery(**_kwargs):
+        raise AssertionError("discovery must not run while publication state is unresolved")
+
+    monkeypatch.setattr(bv, "discover", _forbidden_discovery)
+    with pytest.raises(RuntimeError, match="incomplete publication marker"):
+        bv.build_binance_oos(root, end_date="2024-02-01", workers=1)
+
+
+def test_transactional_publish_restores_both_prior_datasets_on_mid_swap_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    staging = tmp_path / "staging"
+    backup = tmp_path / "backup"
+    root.mkdir()
+    staging.mkdir()
+    for dataset in bv._TRANSACTIONAL_DATASETS:
+        (root / dataset).mkdir()
+        (root / dataset / "generation.txt").write_text("old", encoding="utf-8")
+        (staging / dataset).mkdir()
+        (staging / dataset / "generation.txt").write_text("new", encoding="utf-8")
+
+    marker = root / bv._INCOMPLETE_PUBLICATION_MARKER
+
+    def _test_marker(path, _payload):
+        path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(bv, "_write_exclusive_json", _test_marker)
+    monkeypatch.setattr(bv, "_fsync_directory", lambda _path: None)
+    original_rename = bv._rename_publication_tree
+    moves = 0
+
+    def _fail_fourth_move(source, destination):
+        nonlocal moves
+        moves += 1
+        if moves == 4:
+            raise OSError("injected second-dataset publication failure")
+        original_rename(source, destination)
+
+    monkeypatch.setattr(bv, "_rename_publication_tree", _fail_fourth_move)
+    with pytest.raises(OSError, match="injected"):
+        bv._publish_staged_binance_datasets(
+            root,
+            staging,
+            backup,
+            marker_path=marker,
+            after_publish=lambda: None,
+        )
+
+    assert not marker.exists()
+    for dataset in bv._TRANSACTIONAL_DATASETS:
+        assert (root / dataset / "generation.txt").read_text(encoding="utf-8") == "old"

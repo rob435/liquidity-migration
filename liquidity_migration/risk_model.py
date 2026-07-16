@@ -32,6 +32,16 @@ _FACTOR_COLUMNS = [
     "funding_rate_z", "liquidity_rank", "premium_index_z",
 ]
 
+# Exact price-only factor set consumed by the operational residual-momentum
+# owner. Keep this public so callers cannot drift onto a different regressor
+# set.
+COMMON4_FACTOR_COLUMNS = (
+    "btc_beta",
+    "xs_rank_ret_30d",
+    "realized_vol_rank",
+    "liquidity_rank",
+)
+
 BTC_BETA_WINDOW = 60      # trailing trading-day window for the rolling OLS beta
 BTC_BETA_MIN_PERIODS = 30
 

@@ -17,7 +17,7 @@ They are mutable local datasets, not committed artifacts and not statistical
 holdouts by themselves. Inspect actual manifest, kline, funding, and ancillary
 coverage for every claim; a directory name does not prove completeness.
 
-The supported resumable builders are:
+The supported builders are:
 
 ```bash
 BYBIT_START=YYYY-MM-DD BYBIT_END=YYYY-MM-DD \
@@ -32,8 +32,20 @@ membership with explicitly labelled current-listing inference, downloads
 manifest-gated 1h klines, validates coverage without deleting missing expected
 membership, and adds funding/OI/mark/index/premium data. The
 Binance builder uses USD-M archive klines plus the current-month daily tail and
-adds funding/OI/mark/index/premium/taker flow. Read each script before a large
-run; defaults and upstream availability can change.
+adds funding/OI/mark/index/premium/taker flow. Its monthly rebuild keeps at most
+`BINANCE_JOB_BATCH_SIZE` completed jobs in a scheduling batch (default 48),
+stages `klines_1h` and `archive_trade_manifest` as a pair, verifies the persisted
+pair, and publishes both under their dataset locks. A normal mid-publication
+failure restores the prior pair. A process interruption can leave
+`.binance_vision_publish_incomplete.json`; a later rebuild refuses before
+network access or mutation. Inspect the marker's staging and backup paths and
+recover deliberately rather than deleting it as "stale."
+
+The shell builder defaults `BINANCE_MAX_FAILURE_RATIO=0`, so a single failed
+monthly download aborts the build. Both values are environment overrides and
+are recorded in the shell invocation. Both full-PIT scripts reject positional
+arguments rather than silently ignoring a mistyped boundary. Read each script
+before a large run; defaults and upstream availability can change.
 
 `symbol=` partition components use canonical UTF-8 percent encoding from
 `liquidity_migration/symbol_codec.py`; ordinary ASCII symbols are unchanged.
@@ -59,7 +71,10 @@ decision-influencing work.
 “Full PIT” means full coverage under the repository's declared manifest
 contract. It does not prove venue facts the sources never observed. Bybit
 current-listing-derived tail rows remain inference; they are not archive
-observations. See `docs/pit_gate.md`.
+observations. Bybit manifest rows carry `membership_source`,
+`membership_inferred`, `first_archive_observed_date`, and
+`membership_provenance_limitation`; kline coverage is not silently upgraded to
+independent population evidence. See `docs/pit_gate.md`.
 
 A full-history root can still support a prospectively held-out time window, but
 only if that window has not influenced design. Once inspected or used to adapt

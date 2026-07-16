@@ -116,17 +116,37 @@ hole.
 
 ## Untested Backlog, Not Findings
 
-The retired contracts named four focal questions but never evaluated them:
+The retired contracts named four focal questions but never evaluated them. The
+portable content is the bounded estimand, not the surrounding artifact graph:
 
-- whether CONTINUOUS D9 adds association beyond the current pump/turnover state;
-- whether the CONTINUOUS BTC-uptrend gate separates paths among otherwise
-  eligible events;
-- whether LONG's joint BTC+ETH regime separates paths from any-off states; and
-- whether LONG's exact 1%/six-hour retrace policy improves on a common
-  next-close anchor.
+- `C-H1`: among otherwise current-static-eligible CONTINUOUS trigger events in
+  production deciles D7--D9, estimate the conditional association of D9 versus
+  D7/D8 with the 24-hour short-directional path after categorical controls for
+  focal return, turnover spike, and lagged 168-hour maximum return.
+- `C-H2`: among otherwise current-static-eligible D9 CONTINUOUS trigger events,
+  estimate the conditional association of BTC-uptrend pass versus fail with the
+  same 24-hour short-directional path and controls.
+- `L-H1`: among LONG signals passing every other current static gate, estimate
+  the association of joint BTC+ETH regime pass (`11`) versus any-off
+  (`00`/`01`/`10`) with the common-next-close 72-hour long return, using the
+  frozen trigger, liquidity, volatility, close-location, and age controls.
+- `L-H2`: among exact classifier-eligible LONG signals for which both paths are
+  complete, estimate the unweighted paired mean of implemented 1% close-retrace/
+  six-hour-fall-through 72-hour return minus common-next-close 72-hour return.
+  Equal post-entry horizons end at different clock times, so this is a timing
+  policy association, not a pure fill-price effect.
 
 They are untested ideas, not positive, negative, or inconclusive results. Any
-revisit needs a new current-code registration and a fresh exposure ledger.
+revisit needs a new current-code registration and a fresh exposure ledger. The
+original dependence rule used unique decisions, simultaneous waves, and
+retained 28-day calendar blocks; component rows are not independent. Venues are
+separate correlated robustness surfaces, never pooled as independent
+replications. If the same two-hypothesis-by-two-venue family is revisited, its
+frozen maximum is four primary tests per sleeve and its family-alpha 0.05 rule
+uses 98.75% intervals even if one venue is unavailable.
+
+The file-level transfer classification is recorded in
+`docs/strategy_overhaul_migration_audit.md`.
 
 ## External Tombstone
 

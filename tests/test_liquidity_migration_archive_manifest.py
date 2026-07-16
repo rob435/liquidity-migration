@@ -272,7 +272,16 @@ def test_empty_manifest_has_expected_schema_and_no_rows() -> None:
     manifest = _empty_manifest()
 
     assert manifest.is_empty()
-    assert manifest.columns == ["symbol", "date", "url", "source"]
+    assert manifest.columns == [
+        "date",
+        "symbol",
+        "url",
+        "source",
+        "membership_source",
+        "membership_inferred",
+        "first_archive_observed_date",
+        "membership_provenance_limitation",
+    ]
     assert manifest.schema["date"] == pl.String
 
 
@@ -794,6 +803,119 @@ def test_missing_date_request_windows_cover_required_hours_without_extra_calls()
 # reached the universe, plus the archive's ~24h current-day publishing lag.
 
 
+def test_parse_v5_listing_page_is_pure_and_retains_exact_cursor() -> None:
+    page = am.parse_v5_trading_perp_listing_page(
+        {
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "status": "Trading",
+                        "contractType": "LinearPerpetual",
+                        "launchTime": "1700000000000",
+                    },
+                    {
+                        "symbol": "ETHUSDC",
+                        "status": "Trading",
+                        "contractType": "LinearPerpetual",
+                        "launchTime": "1700000000001",
+                    },
+                    {
+                        "symbol": "OLDUSDT",
+                        "status": "Settled",
+                        "contractType": "LinearPerpetual",
+                        "launchTime": "1600000000000",
+                    },
+                ],
+                "nextPageCursor": "opaque-cursor==",
+            },
+        }
+    )
+
+    assert page.listings == (("BTCUSDT", 1_700_000_000_000),)
+    assert page.next_cursor == "opaque-cursor=="
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"retCode": 10001, "result": {"list": []}}, "retCode=0"),
+        ({"retCode": 0, "result": {"list": [], "nextPageCursor": " bad "}}, "cursor"),
+    ],
+)
+def test_parse_v5_listing_page_rejects_noncanonical_terminal_state(
+    payload,
+    message: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        am.parse_v5_trading_perp_listing_page(payload)
+
+
+def test_stamp_bybit_manifest_provenance_preserves_distinct_source_classes() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "date": "2025-01-01",
+                "symbol": "AAAUSDT",
+                "url": "https://public.bybit.com/trading/AAAUSDT/a.csv.gz",
+                "source": am.ARCHIVE_SCRAPE_SOURCE,
+            },
+            {
+                "date": "2025-01-02",
+                "symbol": "AAAUSDT",
+                "url": am.V5_LISTING_URL_SENTINEL,
+                "source": am.V5_LISTING_SOURCE,
+            },
+            {
+                "date": "2025-01-03",
+                "symbol": "BBBUSD",
+                "url": "kline_coverage",
+                "source": am.V5_KLINE_COVERAGE_SOURCE,
+            },
+        ]
+    )
+
+    stamped = am.stamp_bybit_manifest_provenance(frame)
+    rows = stamped.sort(["date", "symbol"]).to_dicts()
+    am.validate_bybit_manifest_provenance(stamped)
+
+    assert rows[0]["membership_inferred"] is False
+    assert rows[0]["first_archive_observed_date"] == "2025-01-01"
+    assert rows[1]["membership_inferred"] is True
+    assert rows[1]["first_archive_observed_date"] is None
+    assert rows[2]["membership_inferred"] is None
+    assert "unresolved population provenance" in rows[2]["membership_provenance_limitation"]
+
+
+def test_stamp_bybit_manifest_provenance_refuses_unattributed_source() -> None:
+    frame = pl.DataFrame(
+        [{"date": "2025-01-01", "symbol": "AAAUSDT", "url": "u", "source": "guess"}]
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported/unattributed"):
+        am.stamp_bybit_manifest_provenance(frame)
+
+
+def test_validate_bybit_manifest_provenance_rejects_contradictory_class() -> None:
+    valid = am.stamp_bybit_manifest_provenance(
+        pl.DataFrame(
+            [
+                {
+                    "date": "2025-01-01",
+                    "symbol": "AAAUSDT",
+                    "url": am.V5_LISTING_URL_SENTINEL,
+                    "source": am.V5_LISTING_SOURCE,
+                }
+            ]
+        )
+    )
+    corrupt = valid.with_columns(pl.lit(False).alias("membership_inferred"))
+
+    with pytest.raises(RuntimeError, match="contradict"):
+        am.validate_bybit_manifest_provenance(corrupt)
+
+
 def test_synthesize_v5_listing_skips_symbol_dates_already_in_archive() -> None:
     # BTCUSDT has scrape coverage on 2024-01-01..03; the supplement adds
     # nothing for those days but still backfills BANUSDT in full.
@@ -928,7 +1050,7 @@ def _manifest(rows: list[tuple[str, str, str]]) -> pl.DataFrame:
             "symbol": [s for s, _, _ in rows],
             "date": [d for _, d, _ in rows],
             "url": [u for _, _, u in rows],
-            "source": ["scrape"] * len(rows),
+            "source": [am.ARCHIVE_SCRAPE_SOURCE] * len(rows),
         }
     )
 

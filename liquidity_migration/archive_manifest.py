@@ -6,6 +6,7 @@ import os
 import re
 import ssl
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -39,6 +40,18 @@ DEFAULT_BYBIT_V5_INSTRUMENTS_URL = "https://api.bybit.com/v5/market/instruments-
 V5_LISTING_URL_SENTINEL = "bybit_v5_listing"
 V5_LISTING_SOURCE = "bybit_v5_listing"
 ARCHIVE_SCRAPE_SOURCE = "bybit_public_trading_archive"
+V5_KLINE_COVERAGE_SOURCE = "bybit_v5_kline_coverage"
+
+_BYBIT_MANIFEST_PROVENANCE_COLUMNS = (
+    "date",
+    "symbol",
+    "url",
+    "source",
+    "membership_source",
+    "membership_inferred",
+    "first_archive_observed_date",
+    "membership_provenance_limitation",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +126,14 @@ class ArchiveHourlyKlineApiDownloadConfig:
     name: str = "bybit-v5-market-klines-1h"
 
 
+@dataclass(frozen=True, slots=True)
+class ParsedV5InstrumentPage:
+    """Pure interpretation of one Bybit instruments-info response page."""
+
+    listings: tuple[tuple[str, int], ...]
+    next_cursor: str | None
+
+
 class _HrefParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -130,6 +151,70 @@ def fetch_directory_html(url: str, *, timeout_seconds: int = DEFAULT_TIMEOUT_SEC
     context = ssl.create_default_context(cafile=certifi.where())
     with urlopen(url, timeout=timeout_seconds, context=context) as response:  # noqa: S310 - official public research archive
         return response.read().decode("utf-8", errors="replace")
+
+
+def parse_v5_trading_perp_listing_page(
+    payload: bytes | str | Mapping[str, Any],
+    *,
+    quote_suffix: str = "USDT",
+) -> ParsedV5InstrumentPage:
+    """Parse one instruments-info page without turning API failure into emptiness."""
+
+    if isinstance(payload, bytes):
+        try:
+            decoded: Any = json.loads(payload.decode("utf-8", errors="strict"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Bybit instruments-info page is not valid UTF-8 JSON") from exc
+    elif isinstance(payload, str):
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Bybit instruments-info page is not valid JSON") from exc
+    elif isinstance(payload, Mapping):
+        decoded = dict(payload)
+    else:
+        raise TypeError("Bybit instruments-info payload must be bytes, str, or a mapping")
+
+    if not isinstance(decoded, dict) or decoded.get("retCode") != 0:
+        raise RuntimeError("Bybit instruments-info page did not return retCode=0")
+    result = decoded.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("Bybit instruments-info page lacks a result object")
+    rows = result.get("list")
+    if not isinstance(rows, list):
+        raise RuntimeError("Bybit instruments-info result.list is not an array")
+
+    suffix = quote_suffix.upper()
+    listings: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol", "")).upper()
+        if not symbol or not symbol.endswith(suffix):
+            continue
+        if str(row.get("status", "")) != "Trading":
+            continue
+        if "perp" not in str(row.get("contractType", "")).lower():
+            continue
+        launch_raw = row.get("launchTime")
+        try:
+            launch_ms = int(str(launch_raw)) if launch_raw not in (None, "", "0") else 0
+        except (TypeError, ValueError):
+            launch_ms = 0
+        if launch_ms > 0:
+            listings[symbol] = launch_ms
+
+    cursor_raw = result.get("nextPageCursor")
+    if cursor_raw in (None, ""):
+        cursor = None
+    elif not isinstance(cursor_raw, str) or cursor_raw != cursor_raw.strip():
+        raise RuntimeError("Bybit instruments-info cursor is malformed")
+    else:
+        cursor = cursor_raw
+    return ParsedV5InstrumentPage(
+        listings=tuple(sorted(listings.items())),
+        next_cursor=cursor,
+    )
 
 
 def fetch_v5_trading_perp_listings(
@@ -150,9 +235,9 @@ def fetch_v5_trading_perp_listings(
     Network failures are caller's responsibility — this is read-only research
     data, callers can swallow and degrade gracefully.
     """
-    suffix = quote_suffix.upper()
     listings: dict[str, int] = {}
     cursor: str | None = None
+    seen_cursors: set[str] = set()
     context = ssl.create_default_context(cafile=certifi.where())
     while True:
         params: dict[str, str] = {"category": category, "limit": "1000"}
@@ -160,32 +245,17 @@ def fetch_v5_trading_perp_listings(
             params["cursor"] = cursor
         url = f"{base_url}?{urlencode(params)}"
         with urlopen(url, timeout=timeout_seconds, context=context) as response:  # noqa: S310 - public bybit REST
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
-        result = payload.get("result", {}) if isinstance(payload, dict) else {}
-        rows = result.get("list") or []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            symbol = str(row.get("symbol", "")).upper()
-            if not symbol or not symbol.endswith(suffix):
-                continue
-            if str(row.get("status", "")) != "Trading":
-                continue
-            contract_type = str(row.get("contractType", "")).lower()
-            if "perp" not in contract_type:
-                # Filter inverse, delivery, futures — keep linear perps + perpetual flavours.
-                continue
-            launch_raw = row.get("launchTime")
-            try:
-                launch_ms = int(launch_raw) if launch_raw not in (None, "", "0") else 0  # type: ignore[arg-type]  # launchTime from REST JSON; guarded for None/"" + try/except below
-            except (TypeError, ValueError):
-                launch_ms = 0
-            if launch_ms <= 0:
-                continue
-            listings[symbol] = launch_ms
-        cursor = result.get("nextPageCursor") or None
+            page = parse_v5_trading_perp_listing_page(
+                response.read(),
+                quote_suffix=quote_suffix,
+            )
+        listings.update(dict(page.listings))
+        cursor = page.next_cursor
         if not cursor:
             break
+        if cursor in seen_cursors:
+            raise RuntimeError("Bybit instruments-info pagination repeated a cursor")
+        seen_cursors.add(cursor)
     return listings
 
 
@@ -312,6 +382,158 @@ def parse_trade_archive_entries(
     return sorted(rows, key=lambda row: (row["date"], row["symbol"], row["url"]))
 
 
+def stamp_bybit_manifest_provenance(
+    manifest: pl.DataFrame,
+) -> pl.DataFrame:
+    """Attach source-specific membership provenance without upgrading weak evidence."""
+
+    if manifest.is_empty():
+        return pl.DataFrame(
+            schema={
+                "date": pl.String,
+                "symbol": pl.String,
+                "url": pl.String,
+                "source": pl.String,
+                "membership_source": pl.String,
+                "membership_inferred": pl.Boolean,
+                "first_archive_observed_date": pl.String,
+                "membership_provenance_limitation": pl.String,
+            }
+        )
+    required = {"date", "symbol", "url", "source"}
+    missing = required - set(manifest.columns)
+    if missing:
+        raise RuntimeError(f"Bybit manifest lacks provenance inputs: {sorted(missing)}")
+
+    frame = manifest.with_columns(
+        pl.col("date").cast(pl.String, strict=True),
+        pl.col("symbol").cast(pl.String, strict=True),
+        pl.col("url").cast(pl.String, strict=True),
+        pl.when(pl.col("source").is_null() & (pl.col("url") == "kline_coverage"))
+        .then(pl.lit(V5_KLINE_COVERAGE_SOURCE))
+        .otherwise(pl.col("source"))
+        .cast(pl.String, strict=False)
+        .alias("source"),
+    )
+    known_sources = {
+        ARCHIVE_SCRAPE_SOURCE,
+        V5_LISTING_SOURCE,
+        V5_KLINE_COVERAGE_SOURCE,
+    }
+    observed_sources = set(frame["source"].drop_nulls().unique().to_list())
+    if frame["source"].null_count() or not observed_sources <= known_sources:
+        unsupported = sorted(str(value) for value in observed_sources - known_sources)
+        raise RuntimeError(
+            "Bybit manifest contains unsupported/unattributed provenance; "
+            f"refusing to fabricate it: {unsupported}"
+        )
+
+    first_public = (
+        frame.filter(pl.col("source") == ARCHIVE_SCRAPE_SOURCE)
+        .group_by("symbol")
+        .agg(pl.col("date").min().alias("__first_public_archive_date"))
+    )
+    frame = frame.join(first_public, on="symbol", how="left", validate="m:1")
+    frame = frame.with_columns(
+        pl.col("source").alias("membership_source"),
+        pl.when(pl.col("source") == ARCHIVE_SCRAPE_SOURCE)
+        .then(pl.lit(False, dtype=pl.Boolean))
+        .when(pl.col("source") == V5_LISTING_SOURCE)
+        .then(pl.lit(True, dtype=pl.Boolean))
+        .otherwise(pl.lit(None, dtype=pl.Boolean))
+        .alias("membership_inferred"),
+        pl.when(pl.col("source") == ARCHIVE_SCRAPE_SOURCE)
+        .then(pl.col("__first_public_archive_date"))
+        .otherwise(pl.lit(None, dtype=pl.String))
+        .alias("first_archive_observed_date"),
+        pl.when(pl.col("source") == ARCHIVE_SCRAPE_SOURCE)
+        .then(
+            pl.lit(
+                "direct public trade-archive directory observation; local labels "
+                "are not cryptographic publisher authentication"
+            )
+        )
+        .when(pl.col("source") == V5_LISTING_SOURCE)
+        .then(
+            pl.lit(
+                "membership inferred from v5 instruments-info and launch time; "
+                "not a public trade-archive observation"
+            )
+        )
+        .otherwise(
+            pl.lit(
+                "direct v5 kline coverage with unresolved population provenance; "
+                "coverage is not an independently complete universe"
+            )
+        )
+        .alias("membership_provenance_limitation"),
+    ).drop("__first_public_archive_date")
+
+    trailing = [
+        column
+        for column in frame.columns
+        if column not in _BYBIT_MANIFEST_PROVENANCE_COLUMNS
+    ]
+    return frame.select([*_BYBIT_MANIFEST_PROVENANCE_COLUMNS, *trailing]).sort(
+        ["date", "symbol", "url"]
+    )
+
+
+def validate_bybit_manifest_provenance(manifest: pl.DataFrame) -> None:
+    """Reject rows whose evidence-class fields contradict one another."""
+
+    required = set(_BYBIT_MANIFEST_PROVENANCE_COLUMNS)
+    missing = sorted(required - set(manifest.columns))
+    if missing:
+        raise RuntimeError(f"Bybit manifest lacks provenance columns: {missing}")
+    if manifest.schema["membership_inferred"] != pl.Boolean:
+        raise RuntimeError("Bybit manifest membership_inferred must be Boolean")
+    source = pl.col("source")
+    first_observed = pl.col("first_archive_observed_date")
+    limitation = pl.col("membership_provenance_limitation")
+    nonblank_first = first_observed.is_not_null() & (
+        first_observed.cast(pl.String).str.strip_chars() != ""
+    )
+    nonblank_limitation = limitation.is_not_null() & (
+        limitation.cast(pl.String).str.strip_chars() != ""
+    )
+    valid_class = (
+        (
+            (source == ARCHIVE_SCRAPE_SOURCE)
+            & pl.col("membership_inferred").eq(False)
+            & nonblank_first
+        )
+        | (
+            (source == V5_LISTING_SOURCE)
+            & pl.col("membership_inferred").eq(True)
+            & first_observed.is_null()
+        )
+        | (
+            (source == V5_KLINE_COVERAGE_SOURCE)
+            & pl.col("membership_inferred").is_null()
+            & first_observed.is_null()
+        )
+    )
+    valid = (
+        (pl.col("membership_source") == source)
+        & nonblank_limitation
+        & valid_class
+    ).fill_null(False)
+    invalid = manifest.filter(~valid).select(
+        "date",
+        "symbol",
+        "source",
+        "membership_source",
+        "membership_inferred",
+        "first_archive_observed_date",
+    )
+    if not invalid.is_empty():
+        raise RuntimeError(
+            "Bybit manifest provenance fields contradict their evidence class; "
+            f"first invalid rows: {invalid.head(5).to_dicts()}"
+        )
+
+
 def build_archive_trade_manifest(
     *,
     base_url: str = DEFAULT_BYBIT_PUBLIC_TRADING_URL,
@@ -402,7 +624,7 @@ def build_archive_trade_manifest(
         "(delisted/non-Trading — survivorship-relevant)",
         len(scrape_symbols), len(trading_symbols), len(delisted_only),
     )
-    return pl.DataFrame(combined).sort(["date", "symbol", "url"])
+    return stamp_bybit_manifest_provenance(pl.DataFrame(combined))
 
 
 def run_archive_manifest(
@@ -471,7 +693,9 @@ def run_archive_manifest(
             )
         # Per-date writes replace partitions, so union prior rows before a narrow
         # rebuild to avoid erasing other symbols' historical membership.
-        to_persist = _union_with_persisted_manifest(data_root, manifest)
+        to_persist = stamp_bybit_manifest_provenance(
+            _union_with_persisted_manifest(data_root, manifest)
+        )
         write_dataset(to_persist, data_root, "archive_trade_manifest", partition_by=("date",), append=False)
     return payload
 
@@ -1270,14 +1494,7 @@ def _delete_local_archive(data_root: Path, archive_path: Path) -> tuple[bool, st
 
 
 def _empty_manifest() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "symbol": pl.Series([], dtype=pl.String),
-            "date": pl.Series([], dtype=pl.String),
-            "url": pl.Series([], dtype=pl.String),
-            "source": pl.Series([], dtype=pl.String),
-        }
-    )
+    return stamp_bybit_manifest_provenance(pl.DataFrame())
 
 
 def _empty_download_results() -> pl.DataFrame:

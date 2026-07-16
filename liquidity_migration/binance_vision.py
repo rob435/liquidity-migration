@@ -21,19 +21,25 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import io
 import json
+import os
 import re
+import secrets
 import shutil
 import sys
 import time
 import urllib.parse
 import urllib.request
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.error import HTTPError
 
 import polars as pl
@@ -43,6 +49,8 @@ from .archive_manifest import (
     V5_LISTING_SOURCE,
     V5_LISTING_URL_SENTINEL,
 )
+from .deterministic_serialization import canonical_json
+from . import storage as storage_module
 from .storage import read_dataset, write_dataset
 from .symbol_codec import (
     SymbolIdentityError,
@@ -65,6 +73,19 @@ DAILY_KLINES_PREFIX = "data/futures/um/daily/klines/"
 # A (symbol, date) partition needs at least this many hourly bars to count as a
 # tradable PIT day — matches volume_events._covered_kline_date_symbol_set.
 MIN_HOURLY_BARS = 20
+_TRANSACTIONAL_DATASETS = ("klines_1h", "archive_trade_manifest")
+_INCOMPLETE_PUBLICATION_MARKER = ".binance_vision_publish_incomplete.json"
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedS3ListingPage:
+    """Pure interpretation of one Binance S3 listing page."""
+
+    listing_kind: Literal["common_prefixes", "keys"]
+    prefix: str
+    items: tuple[str, ...]
+    is_truncated: bool
+    next_marker: str | None
 
 
 def validate_usdm_usdt_symbols(
@@ -90,27 +111,101 @@ def validate_usdm_usdt_symbols(
 # --------------------------------------------------------------------------
 
 
+def parse_s3_listing_page(
+    payload: bytes | str,
+    *,
+    prefix: str,
+    listing_kind: Literal["common_prefixes", "keys"],
+) -> ParsedS3ListingPage:
+    """Parse one captured S3 page and retain the exact pagination state."""
+
+    if not isinstance(prefix, str) or not prefix or prefix != prefix.strip():
+        raise RuntimeError("Binance S3 listing prefix must be a non-blank trimmed string")
+    if listing_kind not in {"common_prefixes", "keys"}:
+        raise ValueError("listing_kind must be common_prefixes or keys")
+    if isinstance(payload, bytes):
+        try:
+            xml = payload.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("Binance S3 listing is not UTF-8 XML") from exc
+    elif isinstance(payload, str):
+        xml = payload
+    else:
+        raise TypeError("Binance S3 listing payload must be bytes or str")
+
+    if listing_kind == "common_prefixes":
+        raw_items = [
+            html.unescape(value)
+            for value in re.findall(r"<Prefix>([^<]+)</Prefix>", xml)
+        ]
+        items: list[str] = []
+        for value in raw_items:
+            if not value.startswith(prefix) or not value.endswith("/"):
+                continue
+            relative = value[len(prefix) : -1]
+            if relative and "/" not in relative:
+                items.append(relative)
+    else:
+        items = [
+            html.unescape(value)
+            for value in re.findall(r"<Key>([^<]+)</Key>", xml)
+        ]
+
+    truncated_match = re.search(
+        r"<IsTruncated>\s*(true|false)\s*</IsTruncated>",
+        xml,
+        flags=re.IGNORECASE,
+    )
+    if truncated_match is None:
+        raise RuntimeError("Binance S3 listing lacks IsTruncated")
+    marker_match = re.search(r"<NextMarker>([^<]*)</NextMarker>", xml)
+    next_marker = (
+        html.unescape(marker_match.group(1))
+        if marker_match and marker_match.group(1)
+        else None
+    )
+    return ParsedS3ListingPage(
+        listing_kind=listing_kind,
+        prefix=prefix,
+        items=tuple(items),
+        is_truncated=truncated_match.group(1).lower() == "true",
+        next_marker=next_marker,
+    )
+
+
+def _fetch_s3_listing_bytes(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310 - public archive
+        return response.read()
+
+
 def _s3_common_prefixes(prefix: str) -> list[str]:
     """One-level subdirectory names under an S3 prefix (paginated)."""
     out: list[str] = []
     marker = ""
+    seen_markers: set[str] = set()
     while True:
         url = f"{VISION_S3}/?delimiter=/&prefix={urllib.parse.quote(prefix)}"
         if marker:
             url += f"&marker={urllib.parse.quote(marker)}"
-        xml = urllib.request.urlopen(url, timeout=30).read().decode()  # noqa: S310 - public archive
-        found = re.findall(rf"<Prefix>{re.escape(prefix)}([^/]+)/</Prefix>", xml)
+        page = parse_s3_listing_page(
+            _fetch_s3_listing_bytes(url),
+            prefix=prefix,
+            listing_kind="common_prefixes",
+        )
+        found = list(page.items)
         out.extend(found)
-        if "<IsTruncated>true</IsTruncated>" not in xml:
+        if not page.is_truncated:
             break
-        # A truncated page must advance even when it contains no matching prefix.
-        next_marker = re.search(r"<NextMarker>([^<]+)</NextMarker>", xml)
-        if next_marker:
-            marker = next_marker.group(1)
+        if page.next_marker:
+            next_marker = page.next_marker
         elif found:
-            marker = f"{prefix}{found[-1]}/"
+            next_marker = f"{prefix}{found[-1]}/"
         else:
-            break
+            raise RuntimeError("truncated Binance S3 prefix page has no continuation marker")
+        if next_marker == marker or next_marker in seen_markers:
+            raise RuntimeError("Binance S3 prefix pagination did not advance")
+        seen_markers.add(next_marker)
+        marker = next_marker
     return out
 
 
@@ -118,23 +213,30 @@ def _s3_keys(prefix: str) -> list[str]:
     """All object keys under an S3 prefix (paginated)."""
     out: list[str] = []
     marker = ""
+    seen_markers: set[str] = set()
     while True:
         url = f"{VISION_S3}/?prefix={urllib.parse.quote(prefix)}"
         if marker:
             url += f"&marker={urllib.parse.quote(marker)}"
-        xml = urllib.request.urlopen(url, timeout=30).read().decode()  # noqa: S310 - public archive
-        found = re.findall(r"<Key>([^<]+)</Key>", xml)
+        page = parse_s3_listing_page(
+            _fetch_s3_listing_bytes(url),
+            prefix=prefix,
+            listing_kind="keys",
+        )
+        found = list(page.items)
         out.extend(found)
-        if "<IsTruncated>true</IsTruncated>" not in xml:
+        if not page.is_truncated:
             break
-        # A truncated page must advance even when no key matched.
-        next_marker = re.search(r"<NextMarker>([^<]+)</NextMarker>", xml)
-        if next_marker:
-            marker = next_marker.group(1)
+        if page.next_marker:
+            next_marker = page.next_marker
         elif found:
-            marker = found[-1]
+            next_marker = found[-1]
         else:
-            break
+            raise RuntimeError("truncated Binance S3 key page has no continuation marker")
+        if next_marker == marker or next_marker in seen_markers:
+            raise RuntimeError("Binance S3 key pagination did not advance")
+        seen_markers.add(next_marker)
+        marker = next_marker
     return out
 
 
@@ -688,6 +790,355 @@ def rewrite_manifest_to_coverage(
 FAILED_JOBS_ARTIFACT = "binance_vision_failed_jobs.json"
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_publication_directories(*paths: Path) -> None:
+    for path in paths:
+        if path.is_dir() and not path.is_symlink():
+            _fsync_directory(path)
+
+
+def _write_exclusive_json(path: Path, payload: dict[str, object]) -> None:
+    """Durably publish a small marker without replacing prior evidence."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(canonical_json(payload) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        from .artifact_snapshot import rename_noreplace
+
+        rename_noreplace(temporary, path, label="Binance publication marker")
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _normalize_monthly_job_frame(
+    rows: Sequence[dict[str, object]],
+    *,
+    symbol: str,
+    month: str,
+    end_ms: int,
+) -> pl.DataFrame:
+    """Validate one archive object's identity before it reaches staging."""
+
+    if not rows:
+        return pl.DataFrame()
+    required = {
+        "ts_ms",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume_base",
+        "turnover_quote",
+        "source",
+    }
+    frame = pl.DataFrame(rows)
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise RuntimeError(f"Binance monthly job {symbol}:{month} lost columns: {missing}")
+    if frame["symbol"].cast(pl.String).unique().to_list() != [symbol]:
+        raise RuntimeError(f"Binance monthly job {symbol}:{month} returned another symbol")
+    frame = frame.select(
+        pl.col("ts_ms").cast(pl.Int64, strict=True),
+        pl.col("symbol").cast(pl.String, strict=True),
+        pl.col("open").cast(pl.Float64, strict=True),
+        pl.col("high").cast(pl.Float64, strict=True),
+        pl.col("low").cast(pl.Float64, strict=True),
+        pl.col("close").cast(pl.Float64, strict=True),
+        pl.col("volume_base").cast(pl.Float64, strict=True),
+        pl.col("turnover_quote").cast(pl.Float64, strict=True),
+        pl.col("source").cast(pl.String, strict=True),
+    )
+    observed_months = (
+        frame.select(
+            pl.from_epoch("ts_ms", time_unit="ms").dt.strftime("%Y-%m").alias("month")
+        )
+        .get_column("month")
+        .unique()
+        .to_list()
+    )
+    if observed_months != [month]:
+        raise RuntimeError(
+            f"Binance monthly job {symbol}:{month} contains out-of-month timestamps: "
+            f"{observed_months}"
+        )
+    frame = frame.filter(pl.col("ts_ms") < end_ms)
+    if frame.is_empty():
+        return frame
+    return frame.unique(subset=["ts_ms", "symbol"], keep="last").sort(
+        ["symbol", "ts_ms"]
+    )
+
+
+def _flush_monthly_frames(staging_root: Path, frames: list[pl.DataFrame]) -> int:
+    if not frames:
+        return 0
+    batch = pl.concat(frames, how="vertical_relaxed").unique(
+        subset=["ts_ms", "symbol"],
+        keep="last",
+    )
+    write_dataset(
+        batch,
+        staging_root,
+        "klines_1h",
+        partition_by=("date", "symbol"),
+        append=True,
+    )
+    frames.clear()
+    return batch.height
+
+
+def _write_staged_binance_manifest(staging_root: Path) -> int:
+    kline_glob = str(staging_root / "klines_1h" / "**" / "*.parquet")
+    covered = (
+        pl.scan_parquet(kline_glob)
+        .group_by(["date", "symbol"])
+        .agg(pl.len().alias("hourly_bars"))
+        .filter(pl.col("hourly_bars") >= MIN_HOURLY_BARS)
+        .select("date", "symbol")
+        .sort(["date", "symbol"])
+        .collect(engine="streaming")
+    )
+    if covered.is_empty():
+        raise RuntimeError("staged Binance build has no >=20-bar symbol-days")
+    first_observed = covered.group_by("symbol").agg(
+        pl.col("date").min().alias("first_archive_observed_date")
+    )
+    manifest = covered.join(first_observed, on="symbol", how="left", validate="m:1").with_columns(
+        pl.lit("kline_coverage").alias("url"),
+        pl.lit("binance_vision_archive").alias("source"),
+        pl.lit("binance_vision_archive").alias("membership_source"),
+        pl.lit(False, dtype=pl.Boolean).alias("membership_inferred"),
+    ).select(
+        "date",
+        "symbol",
+        "url",
+        "source",
+        "membership_source",
+        "membership_inferred",
+        "first_archive_observed_date",
+    )
+    write_dataset(
+        manifest,
+        staging_root,
+        "archive_trade_manifest",
+        partition_by=("date",),
+        append=False,
+    )
+    return manifest.height
+
+
+def _verify_staged_binance_datasets(
+    root: Path,
+    *,
+    expected_kline_rows: int,
+    expected_manifest_rows: int,
+) -> dict[str, int]:
+    """Verify the staged pair from persisted Parquet, not in-memory inputs."""
+
+    kline_glob = str(root / "klines_1h" / "**" / "*.parquet")
+    manifest_glob = str(root / "archive_trade_manifest" / "**" / "*.parquet")
+    klines = pl.scan_parquet(kline_glob)
+    required_kline_columns = {
+        "date",
+        "symbol",
+        "ts_ms",
+        "open",
+        "high",
+        "low",
+        "close",
+    }
+    missing = required_kline_columns - set(klines.collect_schema().names())
+    if missing:
+        raise RuntimeError(f"staged Binance klines lost columns: {sorted(missing)}")
+    kline_stats = klines.select(
+        pl.len().alias("rows"),
+        pl.struct("ts_ms", "symbol").n_unique().alias("unique_keys"),
+        pl.col("symbol").n_unique().alias("symbols"),
+    ).collect(engine="streaming").row(0, named=True)
+    if kline_stats["rows"] != expected_kline_rows:
+        raise RuntimeError("staged Binance kline row count differs from validated downloads")
+    if kline_stats["unique_keys"] != kline_stats["rows"]:
+        raise RuntimeError("staged Binance klines contain duplicate symbol/timestamp keys")
+
+    expected_pairs = (
+        klines.group_by(["date", "symbol"])
+        .agg(pl.len().alias("hourly_bars"))
+        .filter(pl.col("hourly_bars") >= MIN_HOURLY_BARS)
+        .select("date", "symbol")
+        .sort(["date", "symbol"])
+        .collect(engine="streaming")
+    )
+    manifest = pl.scan_parquet(manifest_glob)
+    required_manifest_columns = {
+        "date",
+        "symbol",
+        "url",
+        "source",
+        "membership_source",
+        "membership_inferred",
+        "first_archive_observed_date",
+    }
+    missing = required_manifest_columns - set(manifest.collect_schema().names())
+    if missing:
+        raise RuntimeError(f"staged Binance manifest lost columns: {sorted(missing)}")
+    observed_pairs = manifest.select("date", "symbol").sort(
+        ["date", "symbol"]
+    ).collect(engine="streaming")
+    if observed_pairs.height != expected_manifest_rows or not observed_pairs.equals(
+        expected_pairs
+    ):
+        raise RuntimeError("staged Binance manifest does not match covered kline keys")
+    provenance = manifest.select(
+        pl.col("source").unique().sort(),
+        pl.col("membership_source").unique().sort(),
+        pl.col("membership_inferred").unique().sort(),
+    ).collect(engine="streaming")
+    if (
+        provenance["source"].to_list() != ["binance_vision_archive"]
+        or provenance["membership_source"].to_list() != ["binance_vision_archive"]
+        or provenance["membership_inferred"].to_list() != [False]
+    ):
+        raise RuntimeError("staged Binance manifest provenance changed")
+    return {
+        "kline_rows": int(kline_stats["rows"]),
+        "symbols": int(kline_stats["symbols"]),
+        "manifest_rows": observed_pairs.height,
+    }
+
+
+def _rename_publication_tree(source: Path, destination: Path) -> None:
+    if source.is_symlink() or destination.exists() or destination.is_symlink():
+        raise RuntimeError(f"unsafe Binance publication move: {source} -> {destination}")
+    source.rename(destination)
+
+
+def _publish_staged_binance_datasets(
+    root: Path,
+    staging_root: Path,
+    backup_root: Path,
+    *,
+    marker_path: Path,
+    after_publish: Callable[[], object],
+) -> object:
+    """Publish the verified dataset pair and roll back ordinary failures.
+
+    The durable marker remains after a process kill or incomplete rollback so a
+    later build refuses before network or mutation instead of guessing which
+    generation is canonical.
+    """
+
+    if marker_path.exists() or marker_path.is_symlink():
+        raise RuntimeError(
+            f"Binance build REFUSED: incomplete publication marker exists at {marker_path}"
+        )
+    backup_root.mkdir(parents=False)
+    prior_presence = {
+        dataset: (root / dataset).is_dir() for dataset in _TRANSACTIONAL_DATASETS
+    }
+    try:
+        _write_exclusive_json(
+            marker_path,
+            {
+                "schema_version": 1,
+                "artifact_type": "binance_vision_incomplete_publication",
+                "data_root": str(root.resolve()),
+                "staging_root": str(staging_root.resolve()),
+                "backup_root": str(backup_root.resolve()),
+                "datasets": list(_TRANSACTIONAL_DATASETS),
+                "prior_presence": prior_presence,
+            },
+        )
+    except FileExistsError as exc:
+        # A concurrent publisher won the no-replace marker race. This staging
+        # generation never touched live data and is not referenced by its marker.
+        shutil.rmtree(staging_root, ignore_errors=True)
+        shutil.rmtree(backup_root, ignore_errors=True)
+        raise RuntimeError(
+            f"Binance build REFUSED: another publication owns {marker_path}"
+        ) from exc
+
+    backed_up: list[str] = []
+    published: list[str] = []
+    result: object = None
+    with ExitStack() as locks:
+        for dataset in sorted(_TRANSACTIONAL_DATASETS):
+            locks.enter_context(
+                storage_module.exclusive_file_lock(
+                    storage_module.dataset_lock_path(root, dataset),
+                    stale_seconds=21_600,
+                    poll_seconds=0.01,
+                )
+            )
+        try:
+            for dataset in _TRANSACTIONAL_DATASETS:
+                live = root / dataset
+                if live.exists():
+                    _rename_publication_tree(live, backup_root / dataset)
+                    backed_up.append(dataset)
+            for dataset in _TRANSACTIONAL_DATASETS:
+                staged = staging_root / dataset
+                if not staged.is_dir():
+                    raise RuntimeError(f"verified staging dataset disappeared: {staged}")
+                _rename_publication_tree(staged, root / dataset)
+                published.append(dataset)
+            result = after_publish()
+        except BaseException as publish_error:
+            rollback_root = staging_root / "_rolled_back_new_publication"
+            rollback_root.mkdir(exist_ok=True)
+            rollback_errors: list[str] = []
+            for dataset in reversed(published):
+                live = root / dataset
+                if live.exists():
+                    try:
+                        _rename_publication_tree(live, rollback_root / dataset)
+                    except (OSError, RuntimeError) as exc:
+                        rollback_errors.append(f"could not quarantine new {dataset}: {exc}")
+            for dataset in reversed(backed_up):
+                backup = backup_root / dataset
+                if backup.exists():
+                    try:
+                        _rename_publication_tree(backup, root / dataset)
+                    except (OSError, RuntimeError) as exc:
+                        rollback_errors.append(f"could not restore prior {dataset}: {exc}")
+            for dataset, was_present in prior_presence.items():
+                if (root / dataset).is_dir() != was_present:
+                    rollback_errors.append(f"prior presence invariant failed for {dataset}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "Binance publication failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from publish_error
+            _fsync_publication_directories(
+                root,
+                staging_root,
+                staging_root / "_rolled_back_new_publication",
+                backup_root,
+            )
+            marker_path.unlink(missing_ok=True)
+            _fsync_directory(marker_path.parent)
+            raise
+    _fsync_publication_directories(root, staging_root, backup_root)
+    marker_path.unlink()
+    _fsync_directory(marker_path.parent)
+    return result
+
+
 def _assert_download_completeness(
     failed_jobs: list[tuple[str, str]],
     total_jobs: int,
@@ -745,6 +1196,7 @@ def build_binance_oos(
     *,
     end_date: str,
     workers: int = 24,
+    job_batch_size: int = 48,
     max_failure_ratio: float = 0.005,
     allow_degraded: bool = False,
 ) -> dict:
@@ -767,6 +1219,19 @@ def build_binance_oos(
     corruption.
     """
     root = Path(data_root).expanduser()
+    if root.is_symlink():
+        raise RuntimeError(f"Binance data root must not be a symlink: {root}")
+    if root.exists() and not root.is_dir():
+        raise RuntimeError(f"Binance data root must be a directory: {root}")
+    marker_path = root / _INCOMPLETE_PUBLICATION_MARKER
+    if marker_path.exists() or marker_path.is_symlink():
+        raise RuntimeError(
+            f"Binance build REFUSED: incomplete publication marker exists at {marker_path}"
+        )
+    if workers <= 0 or job_batch_size <= 0:
+        raise ValueError("workers and job_batch_size must be positive")
+    if not 0.0 <= max_failure_ratio <= 1.0:
+        raise ValueError("max_failure_ratio must be between 0 and 1")
     end_ms = int(pl.Series([end_date]).str.to_datetime().dt.timestamp("ms")[0])
     max_month = end_date[:7]
 
@@ -781,6 +1246,8 @@ def build_binance_oos(
         raise RuntimeError("Binance Vision build inventory changed during symbol normalization")
     inventory = {symbol: discovered[symbol] for symbol in validated_symbols}
     jobs = [(sym, ym) for sym, months in inventory.items() for ym in months]
+    if len(jobs) != len(set(jobs)):
+        raise RuntimeError("Binance Vision discovery returned duplicate symbol/month jobs")
     print(f"[binance_vision] {len(inventory)} symbols, {len(jobs)} monthly files to fetch", file=sys.stderr)
 
     # Universe-shrink gate: a rerun that discovers symbols NOT covering a prior
@@ -797,64 +1264,103 @@ def build_binance_oos(
             f"Pass allow_degraded=True to overwrite with the narrower universe."
         )
 
-    all_rows: list[dict] = []
+    root.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(8)
+    staging_root = root.parent / f".{root.name}.binance-oos-staging-{token}"
+    backup_root = root.parent / f".{root.name}.binance-oos-backup-{token}"
+    staging_root.mkdir(parents=False)
     failed_jobs: list[tuple[str, str]] = []
+    pending_frames: list[pl.DataFrame] = []
+    staged_rows = 0
     done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(fetch_month_klines, s, m): (s, m) for s, m in jobs}
-        for fut in as_completed(futs):
-            rows = fut.result()
-            # None is failure; an empty list is a valid empty month.
-            if rows is None:
-                failed_jobs.append(futs[fut])
-            elif rows:
-                all_rows.extend(rows)
-            done += 1
-            if done % 500 == 0:
-                print(
-                    f"[binance_vision]  {done}/{len(jobs)} files, {len(all_rows):,} rows, {len(failed_jobs)} failed",
-                    file=sys.stderr,
-                )
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for offset in range(0, len(jobs), job_batch_size):
+                scheduled = jobs[offset : offset + job_batch_size]
+                futures = {
+                    ex.submit(fetch_month_klines, symbol, month): (symbol, month)
+                    for symbol, month in scheduled
+                }
+                for future in as_completed(futures):
+                    symbol, month = futures[future]
+                    rows = future.result()
+                    # None is failure; an empty list is a valid empty month.
+                    if rows is None:
+                        failed_jobs.append((symbol, month))
+                    elif rows:
+                        frame = _normalize_monthly_job_frame(
+                            rows,
+                            symbol=symbol,
+                            month=month,
+                            end_ms=end_ms,
+                        )
+                        if not frame.is_empty():
+                            pending_frames.append(frame)
+                            if len(pending_frames) >= job_batch_size:
+                                staged_rows += _flush_monthly_frames(
+                                    staging_root,
+                                    pending_frames,
+                                )
+                    done += 1
+                    if done % 500 == 0:
+                        print(
+                            f"[binance_vision]  {done}/{len(jobs)} files, "
+                            f"{staged_rows:,}+ staged rows, {len(failed_jobs)} failed",
+                            file=sys.stderr,
+                        )
+        staged_rows += _flush_monthly_frames(staging_root, pending_frames)
 
-    failed = len(failed_jobs)
-    # Persist failures before applying the completeness gate.
-    _assert_download_completeness(
-        failed_jobs,
-        len(jobs),
-        max_failure_ratio=max_failure_ratio,
-        artifact_path=root / FAILED_JOBS_ARTIFACT,
-    )
+        failed = len(failed_jobs)
+        _assert_download_completeness(
+            failed_jobs,
+            len(jobs),
+            max_failure_ratio=max_failure_ratio,
+            artifact_path=root / FAILED_JOBS_ARTIFACT,
+        )
+        if staged_rows <= 0:
+            raise RuntimeError("no klines downloaded from data.binance.vision")
 
-    if not all_rows:
-        raise RuntimeError("no klines downloaded from data.binance.vision")
-    df = (
-        pl.DataFrame(all_rows)
-        .filter(pl.col("ts_ms") < end_ms)
-        .unique(subset=["ts_ms", "symbol"], keep="last")
-        .sort(["symbol", "ts_ms"])
-    )
-    print(f"[binance_vision] writing klines_1h: {df.height:,} rows, {df['symbol'].n_unique()} symbols", file=sys.stderr)
-    # Clean rewrite: clear any prior klines_1h so stale symbol/date partitions from
-    # a previous (wider) build cannot survive into the new universe. append=False
-    # alone would only overwrite partitions present in df; a removed symbol's
-    # partition dir would persist, so the directory is dropped first.
-    kdst = root / "klines_1h"
-    if kdst.exists():
-        shutil.rmtree(kdst)
-    write_dataset(df, root, "klines_1h", partition_by=("date", "symbol"), append=False)
-
-    manifest_rows = rewrite_manifest_to_coverage(
-        root,
-        archive_membership_source="binance_vision_archive",
-    )
-    print(f"[binance_vision] archive_trade_manifest: {manifest_rows:,} covered symbol-days", file=sys.stderr)
-    return {
-        "data_root": str(root),
-        "symbols": df["symbol"].n_unique(),
-        "kline_rows": df.height,
-        "manifest_rows": manifest_rows,
-        "failed_files": failed,
-    }
+        manifest_rows = _write_staged_binance_manifest(staging_root)
+        staged_stats = _verify_staged_binance_datasets(
+            staging_root,
+            expected_kline_rows=staged_rows,
+            expected_manifest_rows=manifest_rows,
+        )
+        print(
+            f"[binance_vision] staged klines_1h: {staged_stats['kline_rows']:,} rows, "
+            f"{staged_stats['symbols']} symbols",
+            file=sys.stderr,
+        )
+        published = _publish_staged_binance_datasets(
+            root,
+            staging_root,
+            backup_root,
+            marker_path=marker_path,
+            after_publish=lambda: _verify_staged_binance_datasets(
+                root,
+                expected_kline_rows=staged_rows,
+                expected_manifest_rows=manifest_rows,
+            ),
+        )
+        if not isinstance(published, dict):
+            raise RuntimeError("Binance publication verification returned no statistics")
+        print(
+            f"[binance_vision] archive_trade_manifest: {manifest_rows:,} covered symbol-days",
+            file=sys.stderr,
+        )
+        return {
+            "data_root": str(root),
+            "symbols": int(published["symbols"]),
+            "kline_rows": int(published["kline_rows"]),
+            "manifest_rows": int(published["manifest_rows"]),
+            "failed_files": failed,
+        }
+    finally:
+        # Preserve both generations only when a process-level publication marker
+        # says the canonical pair may need operator recovery.
+        if not marker_path.exists():
+            shutil.rmtree(staging_root, ignore_errors=True)
+            shutil.rmtree(backup_root, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
@@ -870,6 +1376,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--data-root", required=True)
     b.add_argument("--end", required=True, help="Exclusive signal-date upper bound YYYY-MM-DD.")
     b.add_argument("--workers", type=int, default=24)
+    b.add_argument("--job-batch-size", type=int, default=48)
+    b.add_argument("--max-failure-ratio", type=float, default=0.005)
     b.add_argument(
         "--allow-degraded",
         action="store_true",
@@ -910,6 +1418,8 @@ def main(argv: list[str] | None = None) -> int:
             args.data_root,
             end_date=args.end,
             workers=args.workers,
+            job_batch_size=args.job_batch_size,
+            max_failure_ratio=args.max_failure_ratio,
             allow_degraded=args.allow_degraded,
         )
         print(summary)

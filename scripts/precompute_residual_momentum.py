@@ -36,13 +36,17 @@ except (AttributeError, ValueError):
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 import polars as pl  # noqa: E402
-from liquidity_migration.risk_model import build_factor_panel, fit_factor_returns  # noqa: E402
+from liquidity_migration.risk_model import (  # noqa: E402
+    COMMON4_FACTOR_COLUMNS,
+    build_factor_panel,
+    fit_factor_returns,
+)
 from liquidity_migration.daily_feature_panel import MS_PER_DAY, _date_str_to_ms  # noqa: E402
 
 SHARED = Path.home() / "SHARED_DATA"
 # pad the panel start so the trailing residual window is warm at the first traded signal day
 START = "2023-03-01"
-COMMON4 = ["btc_beta", "xs_rank_ret_30d", "realized_vol_rank", "liquidity_rank"]
+COMMON4 = list(COMMON4_FACTOR_COLUMNS)
 DEFAULT_ROOTS = [SHARED / "bybit_full_pit", SHARED / "binance_full_pit"]
 
 # Shift three days so every residual in the day-D signal is computable by D 00:00 UTC.
@@ -104,6 +108,54 @@ def _append_trailing_pad(resid: pl.DataFrame, *, end: str) -> pl.DataFrame:
     return pl.concat([resid, pad], how="vertical")
 
 
+def residual_momentum_from_residuals(
+    resid: pl.DataFrame,
+    *,
+    end: str,
+) -> pl.DataFrame:
+    """Apply the canonical shift-3 window and explicit provisional-state owner."""
+
+    required = {"symbol", "ts_ms", "residual_return"}
+    missing = sorted(required - set(resid.columns))
+    if missing:
+        raise ValueError(f"residual owner input missing columns: {missing}")
+    resid = resid.select(
+        pl.col("symbol").cast(pl.String, strict=True),
+        pl.col("ts_ms").cast(pl.Int64, strict=True),
+        pl.col("residual_return").cast(pl.Float64, strict=True),
+    ).sort(["symbol", "ts_ms"])
+    if resid.is_empty():
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.String,
+                "ts_ms": pl.Int64,
+                "residual_momentum": pl.Float64,
+                "is_provisional": pl.Boolean,
+            }
+        )
+    last_real = (
+        resid.filter(pl.col("residual_return").is_not_null())
+        .group_by("symbol")
+        .agg(pl.col("ts_ms").max().alias("_last_real_ts_ms"))
+    )
+    resid = _append_trailing_pad(resid, end=end)
+    return (
+        resid.sort(["symbol", "ts_ms"])
+        .join(last_real, on="symbol", how="left")
+        .with_columns(residual_momentum_expr())
+        .with_columns(
+            (
+                (pl.col("ts_ms") - RMOM_CAUSAL_SHIFT * MS_PER_DAY)
+                > pl.col("_last_real_ts_ms")
+            )
+            .fill_null(True)
+            .alias("is_provisional")
+        )
+        .select("symbol", "ts_ms", "residual_momentum", "is_provisional")
+        .drop_nulls("residual_momentum")
+    )
+
+
 def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | None = None) -> pl.DataFrame:
     kname = _resolve_klines_dataset(root, klines_dataset)
     print(f"[{root.name}] build factor panel + common4 residuals [{start}..{end}) (klines={kname}) ...", flush=True)
@@ -124,24 +176,7 @@ def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | N
     # today's exact-join key. Polars ignores those nulls inside the rolling sum.
     # Tail rows remain provisional until every delayed input has matured; stable
     # history is immutable while provisional keys may be refreshed.
-    last_real = (
-        resid.filter(pl.col("residual_return").is_not_null())
-        .group_by("symbol")
-        .agg(pl.col("ts_ms").max().alias("_last_real_ts_ms"))
-    )
-    resid = _append_trailing_pad(resid, end=end)
-    return (
-        resid.sort(["symbol", "ts_ms"])
-        .join(last_real, on="symbol", how="left")
-        .with_columns(residual_momentum_expr())
-        .with_columns(
-            ((pl.col("ts_ms") - RMOM_CAUSAL_SHIFT * MS_PER_DAY) > pl.col("_last_real_ts_ms"))
-            .fill_null(True)
-            .alias("is_provisional")
-        )
-        .select("symbol", "ts_ms", "residual_momentum", "is_provisional")
-        .drop_nulls("residual_momentum")
-    )
+    return residual_momentum_from_residuals(resid, end=end)
 
 
 def _write_signal_atomic(path: Path, sig: pl.DataFrame) -> None:

@@ -69,6 +69,35 @@ def test_residual_momentum_does_not_read_future_residuals() -> None:
     assert _apply(base)[d_decision] == _apply(poisoned)[d_decision]
 
 
+def test_residual_owner_exposes_stable_and_provisional_tail_explicitly() -> None:
+    start_ms = MOD._date_str_to_ms("2025-01-01")
+    resid = pl.DataFrame(
+        {
+            "symbol": ["AAA"] * 10,
+            "ts_ms": [start_ms + day * DAY_MS for day in range(10)],
+            "residual_return": [float(day) for day in range(10)],
+        }
+    )
+
+    output = MOD.residual_momentum_from_residuals(resid, end="2025-01-15")
+    last_real = start_ms + 9 * DAY_MS
+    stable = output.filter(pl.col("ts_ms") <= last_real + 3 * DAY_MS)
+    provisional = output.filter(pl.col("ts_ms") > last_real + 3 * DAY_MS)
+
+    assert not stable.is_empty()
+    assert stable["is_provisional"].to_list() == [False] * stable.height
+    assert not provisional.is_empty()
+    assert provisional["is_provisional"].to_list() == [True] * provisional.height
+
+
+def test_residual_owner_rejects_incomplete_input_contract() -> None:
+    with pytest.raises(ValueError, match="missing columns"):
+        MOD.residual_momentum_from_residuals(
+            pl.DataFrame({"symbol": ["AAA"], "ts_ms": [0]}),
+            end="2025-01-02",
+        )
+
+
 def _fake_factor_panel(start: str, end: str, *, offset: float = 0.0) -> pl.DataFrame:
     start_ms = MOD._date_str_to_ms(start)
     end_ms = MOD._date_str_to_ms(end)

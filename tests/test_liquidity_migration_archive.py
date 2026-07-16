@@ -212,8 +212,18 @@ def test_run_archive_manifest_refuses_degraded_write_without_override(tmp_path, 
     # rebuild (healthy v5) with a narrower scrape.
     write_dataset(
         pl.DataFrame([
-            {"symbol": "BTCUSDT", "date": "2025-01-01", "url": "u", "source": "s"},
-            {"symbol": "GONEUSDT", "date": "2025-01-01", "url": "u", "source": "s"},
+            {
+                "symbol": "BTCUSDT",
+                "date": "2025-01-01",
+                "url": "u",
+                "source": manifest_module.ARCHIVE_SCRAPE_SOURCE,
+            },
+            {
+                "symbol": "GONEUSDT",
+                "date": "2025-01-01",
+                "url": "u",
+                "source": manifest_module.ARCHIVE_SCRAPE_SOURCE,
+            },
         ]),
         tmp_path, "archive_trade_manifest", partition_by=("date",), append=False,
     )
