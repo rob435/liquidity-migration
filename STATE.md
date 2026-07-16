@@ -2,19 +2,19 @@
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, generation-bound strategy receipts, and watchdog evidence
-at 2026-07-16 17:54 UTC. These facts describe the deployed implementation
+at 2026-07-16 18:40 UTC. These facts describe the deployed implementation
 commit below; a later documentation-only receipt may leave the branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `6c27b5e6052d517d31196a154548becb75a0ab62`, profile `operational`, receipt
-  SHA-256 `b4d86d0b63044385563176bc521cb996f404556b190b7cbad33db7e29e2da3bb`.
+  `c8251fffd4777a53c153a7798c4c722563b1d93e`, profile `operational`, receipt
+  SHA-256 `59fbb9d7e28b5fb9b31386ff3d7a5e60c0d0164566ff24355c5c64c918fe1a02`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
   liveness. An on-demand watchdog run under the new exact authority exited zero
-  at 17:53 UTC with no active alert across all ten monitored units.
+  at 18:39 UTC with no active alert across all ten monitored units.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -24,11 +24,10 @@ commit below; a later documentation-only receipt may leave the branch ahead.
 
 ## Verified health and resource state
 
-- Authenticated Bybit demo reads before install showed zero non-flat positions
-  and zero regular or conditional orders. A second authenticated read after
-  activation again observed zero non-flat venue positions and zero all-kind or
-  conditional orders. Demo and paper journals hash-verified with zero working
-  orders, non-flat positions, or nonzero aggregate targets.
+- Authenticated Bybit demo reads after producer quiescence and again after
+  activation showed zero non-flat positions and zero regular or conditional
+  orders. Demo and paper owners report healthy current-generation state; demo
+  reconciliation reports zero mismatches.
 - Demo and paper owners publish healthy generation-bound status. Demo
   reconciliation is healthy with zero mismatches; both reported exact
   queue-head readiness, zero restarts, and fresh owner health after activation.
@@ -36,8 +35,8 @@ commit below; a later documentation-only receipt may leave the branch ahead.
   owner-health ages are measured in seconds. With no active work, each owner
   subscribes only to the idle BTC book.
 - All four target producers have current-generation completed-cycle receipts
-  bound to their exact durable cycle. LONG demo/paper reported 231,787 current
-  kline rows; CONTINUOUS demo/paper reported 371,056. Completion-age liveness
+  bound to their exact durable cycle. LONG demo/paper reported 231,839 current
+  kline rows; CONTINUOUS demo/paper reported 371,833. Completion-age liveness
   was clean after publication. Paper is explicitly
   `integration_only_uncalibrated`; its cycles are routing/lifecycle evidence,
   not performance or fill-quality evidence.
@@ -58,6 +57,15 @@ commit below; a later documentation-only receipt may leave the branch ahead.
 
 ## Incident interpretation
 
+- The 17:20 `latest cycle is 0.1 min future-dated` page was another local
+  watchdog read race, not future scheduler data or a stopped producer. The
+  watchdog sampled one run-wide wall time before other health gathers, while a
+  concurrent cycle could publish its completion receipt before the later
+  strategy read. It also read the cycle dataset before the receipt, allowing a
+  concurrent publication to form an impossible cross-snapshot pair. Strategy
+  liveness now observes the receipt before its already-durable causal dataset
+  and samples wall time after that observation. True future timestamps remain
+  critical; deterministic tests reproduce both former interleavings.
 - The 16:50 and 17:05 `future_book` alerts were local read/update races, not
   future venue timestamps. The owner sampled wall time before acquiring the
   recorder snapshot, so a concurrent WebSocket update could publish a newer
