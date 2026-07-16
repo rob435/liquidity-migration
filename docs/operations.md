@@ -16,6 +16,7 @@ and require explicit task scope. Unknown safety-critical state fails closed.
 | --- | --- |
 | `status` | Read-only verification of the exact authorized checkout and active topology. |
 | `equity` | Repository-standard descriptive equity curves. |
+| `research-refresh` | Plan, run, resume, or reconcile the offline market-data/features/backtest workflow. |
 | `reset` | Remote ledger/archive preview; mutation requires `--execute`. |
 | `clock-offset --execute` | Capture a VPS/Bybit public-clock receipt. |
 | `operational-authority` | Verify the current operational receipt. |
@@ -325,6 +326,9 @@ scripts/ops.sh venue-accounting --help
 
 # Descriptive curves, not promotion evidence.
 scripts/ops.sh equity --help
+
+# Offline append-first data/features/backtest plan; no mutation in plan mode.
+scripts/ops.sh research-refresh plan --end YYYY-MM-DD
 
 # Tests.
 scripts/ops.sh test -q

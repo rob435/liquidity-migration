@@ -23,6 +23,8 @@ deployment and risk boundary.
 - [docs/research_summary.md](docs/research_summary.md) — compact decision log.
 - [docs/data_roots.md](docs/data_roots.md) and
   [docs/pit_gate.md](docs/pit_gate.md) — research-data boundaries.
+- [docs/research_refresh.md](docs/research_refresh.md) — append-first data,
+  benchmark, resume, and demo/paper/backtest reconciliation workflow.
 - [docs/repository_map.md](docs/repository_map.md) — subsystem ownership,
   entry points, and validation paths.
 
@@ -42,5 +44,9 @@ commands never contact a venue or grant operational authority. Operator and
 research commands remain under `scripts/ops.sh` and the task-specific skills.
 Coordination locks and reset receipts do not by themselves grant operational or
 mainnet authority; their exact limits are in `docs/operations.md`.
+
+Plan the current research refresh with
+`scripts/ops.sh research-refresh plan --end YYYY-MM-DD`; replace `plan` with
+`run` only after checking the printed end-exclusive boundary and data mode.
 
 Python 3.11+.

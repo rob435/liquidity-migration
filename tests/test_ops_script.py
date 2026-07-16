@@ -66,6 +66,7 @@ def test_help_lists_only_current_operator_routes() -> None:
     for command in (
         "status",
         "equity",
+        "research-refresh",
         "reset",
         "clock-offset",
         "operational-authority",

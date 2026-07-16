@@ -374,7 +374,11 @@ def main() -> int:
             print(f"  {s:11} [X] {r['error'][:80]}")
         else:
             print(f"  {s:11} {r.get('run_label', '-'):42} {r.get('png') or '(no png)'}")
-    return 0
+    # This script is also an orchestration boundary. Printing a per-sleeve
+    # failure while returning success made CI and refresh drivers accept a
+    # partial benchmark as complete. Preserve the useful keep-going behavior,
+    # then fail the process if any requested cell failed.
+    return 1 if any(result.get("error") for result in results.values()) else 0
 
 
 if __name__ == "__main__":

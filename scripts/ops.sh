@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One thin operator-facing router for the surviving demo/paper operations.
+# One thin operator-facing router for the surviving demo/paper and research operations.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,6 +26,7 @@ Usage: scripts/ops.sh <command> [arguments]
 Safe operator commands:
   status [ARGS...]             read-only VPS verification
   equity [ARGS...]             standard descriptive equity curves
+  research-refresh [ARGS...]   append-first data/features/backtest workflow
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
   clock-offset --execute [...] capture VPS-vs-Bybit public clock evidence
   operational-authority [ARGS...]
@@ -220,6 +221,9 @@ case "$command" in
     ;;
   equity)
     exec bash "$ROOT_DIR/scripts/equity_curves.sh" "$@"
+    ;;
+  research-refresh)
+    exec bash "$ROOT_DIR/scripts/research_refresh.sh" "$@"
     ;;
   reset)
     remote_reset "$@"

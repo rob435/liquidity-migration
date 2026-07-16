@@ -67,4 +67,27 @@
 
 ## Outcome log
 
-Not exposed under this contract at registration time.
+### Pre-outcome tooling amendment — 2026-07-16 21:45:31 UTC
+
+Before inspecting any refreshed-tail strategy result, the owner requested one
+repeatable data/feature/backtest workflow with append-first routine operation.
+The registered four-cell run remains in `canonical` data mode: both full-PIT
+builders are invoked over their original full-history boundaries, no degraded
+manifest override is permitted, every selected dataset must reach 2026-07-15,
+and the benchmark window, profiles, costs, leverage, cells, and interpretation
+rule above are unchanged. The new tail mode is for separately labelled routine
+refreshes and is not evidence for this registered full rebuild.
+
+The run may use a descendant of the registered code commit whose intervening
+diff is limited to the orchestration/reconciliation utility, its documentation
+and tests, and making the existing equity wrapper return nonzero when any
+requested sleeve fails. Those changes do not alter strategy, cost, feature,
+data-builder, or numerical backtest semantics. The exact clean descendant and
+artifact hashes will be captured by the immutable run manifest. The full local
+gate passed before this amendment: 1,944 tests passed, one skipped, with Ruff
+and package-wide mypy clean.
+
+One canonical Bybit attempt was interrupted after manifest/kline work and
+before ancillary completion. Its partial data state is retained and will be
+resumed/revalidated by the exact canonical command; no refreshed-tail strategy
+performance was inspected from that attempt.

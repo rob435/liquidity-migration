@@ -111,3 +111,34 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
     }
     assert payload["run_label"] == CONTINUOUS_HISTORICAL_RUN_LABEL
     assert payload["summary"]["total_return"] == 0.1
+
+
+def test_main_returns_nonzero_when_a_requested_sleeve_fails(monkeypatch, tmp_path: Path) -> None:
+    def fail_long(*_args, **_kwargs):
+        raise RuntimeError("deliberate cell failure")
+
+    monkeypatch.setattr(equity_curves, "_run_long", fail_long)
+    monkeypatch.setattr(
+        equity_curves,
+        "load_config",
+        lambda _path: SimpleNamespace(costs=object()),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "equity_curves",
+            "--sleeves",
+            "long",
+            "--root",
+            str(tmp_path / "root"),
+            "--out",
+            str(tmp_path / "reports"),
+            "--start",
+            "2023-07-16",
+            "--end",
+            "2026-07-16",
+        ],
+    )
+
+    assert equity_curves.main() == 1
