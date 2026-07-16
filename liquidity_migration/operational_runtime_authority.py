@@ -102,8 +102,18 @@ _INPUT_KEYS: dict[str, tuple[str, ...]] = {
 
 
 def _git_output(repo_root: Path, *args: str) -> str:
+    # Runtime users intentionally do not own the shared, root-installed
+    # checkout. Trust only the already-resolved repository passed to this
+    # verifier; never mutate a user/global Git configuration or use a wildcard.
     result = subprocess.run(
-        ["git", "-C", str(repo_root), *args],
+        [
+            "git",
+            "-c",
+            f"safe.directory={repo_root}",
+            "-C",
+            str(repo_root),
+            *args,
+        ],
         check=False,
         capture_output=True,
         text=True,

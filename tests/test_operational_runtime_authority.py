@@ -691,6 +691,35 @@ def test_verify_rejects_dirty_checkout(
         )
     (repository / "untracked.txt").unlink()
 
+
+def test_git_checks_trust_only_the_explicit_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = (tmp_path / "shared checkout").resolve()
+    repository.mkdir()
+    observed: dict[str, Any] = {}
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        observed["command"] = command
+        observed["environment"] = kwargs["env"]
+        return subprocess.CompletedProcess(command, 0, stdout="verified\n", stderr="")
+
+    monkeypatch.setattr(authority.subprocess, "run", fake_run)
+
+    assert authority._git_output(repository, "rev-parse", "HEAD") == "verified"
+    assert observed["command"] == [
+        "git",
+        "-c",
+        f"safe.directory={repository}",
+        "-C",
+        str(repository),
+        "rev-parse",
+        "HEAD",
+    ]
+    assert observed["environment"]["GIT_OPTIONAL_LOCKS"] == "0"
+
+
 def test_verify_rejects_replaced_runtime_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
