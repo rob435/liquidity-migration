@@ -30,6 +30,11 @@ def _stub_account_authority(monkeypatch) -> None:
     """Keep unrelated main-loop tests focused on cooldown/timer behavior."""
 
     monkeypatch.setattr(
+        M.pwd,
+        "getpwnam",
+        lambda _name: type("User", (), {"pw_uid": Path.cwd().stat().st_uid})(),
+    )
+    monkeypatch.setattr(
         M,
         "evaluate_required_account_owner_states",
         lambda _states, **_kwargs: [],
@@ -317,6 +322,19 @@ def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
     recorder.close()
     receive_ms = receive_ns // 1_000_000
     assert M.gather_account_capture_alerts(capture_root=capture, now_ms=receive_ms + 2 * MIN, max_age_minutes=3) == []
+    assert M.gather_account_capture_alerts(
+        capture_root=capture,
+        now_ms=receive_ms + 2 * MIN,
+        max_age_minutes=3,
+        expected_owner_uid=(capture / "account_owner_market_readiness.json").stat().st_uid,
+    ) == []
+    wrong_owner = M.gather_account_capture_alerts(
+        capture_root=capture,
+        now_ms=receive_ms + 2 * MIN,
+        max_age_minutes=3,
+        expected_owner_uid=(capture / "account_owner_market_readiness.json").stat().st_uid + 1,
+    )
+    assert [alert.key for alert in wrong_owner] == ["account_capture_missing"]
     stale = M.gather_account_capture_alerts(capture_root=capture, now_ms=receive_ms + 4 * MIN, max_age_minutes=3)
     assert [alert.key for alert in stale] == ["account_capture_stale"]
     paper = M.gather_account_capture_alerts(
@@ -327,6 +345,44 @@ def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
     )
     assert [alert.key for alert in paper] == ["account_capture_missing_paper"]
     assert "paper account execution" in paper[0].message
+
+
+def test_continuous_reset_boundary_is_not_a_signal_cycle(tmp_path) -> None:
+    import argparse
+
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+
+    now = 1_000 * HOUR
+    root = tmp_path / "bybit-continuous-demo-event"
+    root.mkdir()
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "ledger-reset",
+                    "ts_ms": now,
+                    "mode": "ledger_reset_boundary",
+                }
+            ]
+        ),
+        root,
+        "continuous_fade_demo_cycles",
+        partition_by=(),
+    )
+    args = argparse.Namespace(
+        max_cycle_age_min=10,
+        max_rmom_stale_days=2.0,
+    )
+
+    alerts = M.gather_continuous_alerts(
+        continuous_root=root,
+        now_ms=now,
+        args=args,
+    )
+
+    assert [alert.key for alert in alerts] == [f"liveness:{root.name}"]
 
 
 def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> None:

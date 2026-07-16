@@ -3,9 +3,9 @@ Description=Run the liquidity-migration liveness + position-safety watchdog ever
 
 [Timer]
 # Fast cadence: a down daemon / unprotected position must surface in minutes,
-# not the hourly entry-health window. First run shortly after boot, then every
-# 3 minutes regardless of how long the previous run took.
-OnBootSec=2min
+# not the hourly entry-health window. Give cold-start data bootstraps one full
+# cycle-age window, then run every 3 minutes regardless of prior run duration.
+OnActiveSec=10min
 OnUnitActiveSec=3min
 AccuracySec=15s
 # Persistent applies only to calendar timers, not this monotonic schedule.

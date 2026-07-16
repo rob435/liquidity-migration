@@ -352,7 +352,6 @@ def run_long_native_demo_cycle(
                 route.account_path,
                 environment=owner_environment,
                 max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-                now_ns=cycle_now_ms * 1_000_000,
                 expected_account_id=route.account_id,
             )
         except (OSError, RuntimeError, ValueError) as exc:

@@ -46,9 +46,9 @@ ProtectSystem=full
 ProtectHome=false
 UMask=0027
 ReadWritePaths=/opt/liquidity-migration
-MemoryHigh=384M
+MemoryHigh=576M
 MemoryMax=640M
-MemorySwapMax=256M
+MemorySwapMax=384M
 
 [Install]
 WantedBy=multi-user.target

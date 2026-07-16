@@ -54,7 +54,7 @@ LockPersonality=true
 UMask=0077
 ReadOnlyPaths=/opt/liquidity-migration
 ReadWritePaths=/opt/liquidity-migration/data/bybit-account-paper /opt/liquidity-migration/data/bybit-account-paper-intents /opt/liquidity-migration/data/bybit-long-paper-event
-MemoryHigh=512M
+MemoryHigh=640M
 MemoryMax=768M
 MemorySwapMax=384M
 

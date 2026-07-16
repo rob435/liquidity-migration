@@ -29,6 +29,7 @@ import argparse
 import grp
 import json
 import os
+import pwd
 import subprocess
 import sys
 import urllib.request
@@ -63,6 +64,7 @@ _DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution.service"
 _PAPER_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-paper-execution.service"
 _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT, _PAPER_ACCOUNT_OWNER_UNIT)
 _ACCOUNT_SCOPES = ("demo", "demo-paper")
+_PAPER_RUNTIME_USER = "liquidity-migration-paper"
 _PAPER_RUNTIME_GROUP = "liquidity-migration-paper"
 
 
@@ -513,6 +515,10 @@ def gather_continuous_alerts(
             cyc = read_dataset(continuous_root, cycles_dataset)
         except Exception:  # noqa: BLE001 — watchdog never crashes
             cyc = pl.DataFrame()
+        if cyc is not None and not cyc.is_empty() and "mode" in cyc.columns:
+            cyc = cyc.filter(
+                pl.col("mode").fill_null("") != "ledger_reset_boundary"
+            )
         latest_ts = (
             int(cyc.select(pl.col("ts_ms").max()).item())
             if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
@@ -600,6 +606,7 @@ def gather_account_capture_alerts(
     now_ms: int,
     max_age_minutes: float,
     label: str = "",
+    expected_owner_uid: int | None = None,
 ) -> list[Alert]:
     """Detect an owner that is active/restarting but no longer ingesting L2.
 
@@ -611,7 +618,10 @@ def gather_account_capture_alerts(
     suffix = f"_{label}" if label else ""
     owner_label = f"{label} account execution" if label else "account execution"
     try:
-        readiness = latest_market_readiness(capture_root)
+        readiness = latest_market_readiness(
+            capture_root,
+            expected_owner_uid=expected_owner_uid,
+        )
         oldest_required_ns = readiness.oldest_required_receive_ts_ns
         if oldest_required_ns is None:
             raise RuntimeError("required live-L2 receive timestamp is unavailable")
@@ -875,17 +885,20 @@ def main() -> int:
     long_paper_root = Path(args.long_paper_root) if str(args.long_paper_root).strip() else None
     paper_account_root = Path(args.account_paper_root)
     paper_capture_root = Path(args.account_paper_capture_root)
+    paper_owner_uid: int | None = None
     paper_root_alert: Alert | None = None
-    if args.account_scope == "demo-paper" and str(args.account_paper_environment_file).strip():
+    if args.account_scope == "demo-paper":
         try:
-            paper_account_root, paper_capture_root = _paper_roots_from_environment(
-                args.account_paper_environment_file
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
+            paper_owner_uid = pwd.getpwnam(_PAPER_RUNTIME_USER).pw_uid
+            if str(args.account_paper_environment_file).strip():
+                paper_account_root, paper_capture_root = _paper_roots_from_environment(
+                    args.account_paper_environment_file
+                )
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
             paper_root_alert = Alert(
                 key="paper_account_environment_invalid",
                 severity=CRITICAL,
-                message=f"paper owner environment roots are unavailable: {type(exc).__name__}: {str(exc)[:400]}",
+                message=f"paper owner identity/environment roots are unavailable: {type(exc).__name__}: {str(exc)[:400]}",
             )
     # Keep cooldown state stable even when both sleeve roots are skipped.
     _state_root = continuous_root or long_root or (_REPO_ROOT / "data")
@@ -935,6 +948,7 @@ def main() -> int:
                 now_ms=now_ms,
                 max_age_minutes=args.max_account_capture_age_min,
                 label="paper",
+                expected_owner_uid=paper_owner_uid,
             )
         )
     alerts.extend(

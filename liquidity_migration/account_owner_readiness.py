@@ -105,8 +105,17 @@ def _stable_signature(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _stable_private_sidecar(path: Path, *, label: str = "capture") -> bytes:
+def _stable_private_sidecar(
+    path: Path,
+    *,
+    label: str = "capture",
+    expected_owner_uid: int | None = None,
+) -> bytes:
     """Read the small atomically replaced sidecar without following aliases."""
+
+    owner_uid = os.geteuid() if expected_owner_uid is None else expected_owner_uid
+    if type(owner_uid) is not int or owner_uid < 0:
+        raise ValueError("expected readiness sidecar owner uid must be non-negative")
 
     try:
         before_path = path.lstat()
@@ -133,7 +142,7 @@ def _stable_private_sidecar(path: Path, *, label: str = "capture") -> bytes:
         if (
             not stat.S_ISREG(before_descriptor.st_mode)
             or stat.S_IMODE(before_descriptor.st_mode) != 0o600
-            or before_descriptor.st_uid != os.geteuid()
+            or before_descriptor.st_uid != owner_uid
             or before_descriptor.st_nlink != 1
         ):
             raise ValueError(f"account owner {label} readiness sidecar must be private and singly linked")
@@ -177,9 +186,17 @@ def _read_owner_capture_sidecar(root: Path) -> OwnerCaptureReadinessSidecar:
         raise ValueError(f"invalid account owner capture readiness sidecar: {exc}") from exc
 
 
-def _read_owner_market_sidecar(root: Path) -> OwnerMarketReadinessSidecar:
+def _read_owner_market_sidecar(
+    root: Path,
+    *,
+    expected_owner_uid: int | None = None,
+) -> OwnerMarketReadinessSidecar:
     path = owner_market_readiness_path(root)
-    data = _stable_private_sidecar(path, label="market")
+    data = _stable_private_sidecar(
+        path,
+        label="market",
+        expected_owner_uid=expected_owner_uid,
+    )
     try:
         payload = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -380,11 +397,15 @@ def latest_market_readiness(
     capture_root: str | Path,
     *,
     expected_invocation_id: str | None = None,
+    expected_owner_uid: int | None = None,
 ) -> OwnerMarketReadinessSidecar:
     """Verify and return bounded live-L2 readiness independent of raw storage."""
 
     root = _absolute_directory(capture_root, label="account capture root")
-    sidecar = _read_owner_market_sidecar(root)
+    sidecar = _read_owner_market_sidecar(
+        root,
+        expected_owner_uid=expected_owner_uid,
+    )
     if expected_invocation_id is not None:
         expected_generation = validate_systemd_invocation_id(
             expected_invocation_id,
@@ -409,10 +430,12 @@ def latest_market_receive_ts_ns(
     capture_root: str | Path,
     *,
     expected_invocation_id: str | None = None,
+    expected_owner_uid: int | None = None,
 ) -> int:
     sidecar = latest_market_readiness(
         capture_root,
         expected_invocation_id=expected_invocation_id,
+        expected_owner_uid=expected_owner_uid,
     )
     timestamp = sidecar.oldest_required_receive_ts_ns
     if timestamp is None:
@@ -456,8 +479,8 @@ def require_account_owner_ready(
         expected_invocation_id,
         label="expected account-owner invocation id",
     )
-    observed_now = time.time_ns() if now_ns is None else int(now_ns)
-    if observed_now <= 0:
+    explicit_now = None if now_ns is None else int(now_ns)
+    if explicit_now is not None and explicit_now <= 0:
         raise ValueError("account-owner readiness observation time must be positive")
 
     account = _absolute_directory(account_root, label="account root")
@@ -475,7 +498,7 @@ def require_account_owner_ready(
         account,
         environment=selected,
         max_age_ns=max_age_ns,
-        now_ns=observed_now,
+        now_ns=explicit_now,
         expected_account_id=account_id,
         expected_invocation_id=expected_generation,
     )
@@ -486,7 +509,8 @@ def require_account_owner_ready(
     market_ts_ns = market_sidecar.oldest_required_receive_ts_ns
     if market_ts_ns is None:
         raise RuntimeError("account owner required live-L2 timestamp is unavailable")
-    market_age_ns = observed_now - market_ts_ns
+    market_now_ns = time.time_ns() if explicit_now is None else explicit_now
+    market_age_ns = market_now_ns - market_ts_ns
     if market_age_ns < 0 or market_age_ns > max_age_ns:
         raise RuntimeError(f"account owner live market is stale: age_ns={market_age_ns}")
     # Generation identifiers, not cross-thread wall-clock ordering, bind these

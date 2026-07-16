@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1092,7 +1093,7 @@ def _write_owner_health(
     *,
     environment: str,
     equity_usdt: float = 10_000.0,
-    now_ms: int = 1_700_000_300_000,
+    now_ms: int | None = None,
 ) -> None:
     from liquidity_migration.account_kernel import read_account_journal
     from liquidity_migration.account_owner_health import (
@@ -1114,7 +1115,9 @@ def _write_owner_health(
             environment=environment,
             account_id=route.account_id,
             status="healthy",
-            observed_ts_ns=now_ms * 1_000_000,
+            observed_ts_ns=(
+                time.time_ns() if now_ms is None else now_ms * 1_000_000
+            ),
             loop_sequence=1,
             journal_sequence=journal[-1].sequence if journal else 0,
             journal_state_hash=journal[-1].state_hash if journal else "0" * 64,
@@ -1145,6 +1148,14 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
         environment="demo",
         equity_usdt=12_345.0,
     )
+    real_health_check = lnd.require_recent_account_owner_health
+    owner_health_call: dict[str, Any] = {}
+
+    def owner_health(*args: Any, **kwargs: Any) -> Any:
+        owner_health_call.update(kwargs)
+        return real_health_check(*args, **kwargs)
+
+    monkeypatch.setattr(lnd, "require_recent_account_owner_health", owner_health)
 
     payload = _run_cycle(tmp_path / "long", demo)
 
@@ -1155,6 +1166,7 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
     assert payload["cycle"]["entry_targets_queued"] == 1
     assert payload["cycle"]["equity_usdt"] == pytest.approx(12_345.0)
     assert payload["cycle"]["account_state_source"] == "account_owner_health:demo"
+    assert "now_ns" not in owner_health_call
     assert "entries_executed" not in payload["cycle"]
     assert "bybit_positions" not in payload
     assert payload["account_target_requests"]["entry_requests"][0]["intent_count"] == 1

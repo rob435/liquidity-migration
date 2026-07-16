@@ -753,6 +753,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         }
     )
     captured: dict[str, Any] = {}
+    owner_health_call: dict[str, Any] = {}
     frozen_candidate = SimpleNamespace(
         path=candidate_path,
         artifact_sha256="a" * 64,
@@ -794,11 +795,11 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         "build_confirmed_entry_state",
         lambda *_args, **_kwargs: state,
     )
-    monkeypatch.setattr(
-        module,
-        "require_recent_account_owner_health",
-        lambda *_args, **_kwargs: SimpleNamespace(equity_usdt=10_000.0),
-    )
+    def owner_health(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        owner_health_call.update(kwargs)
+        return SimpleNamespace(equity_usdt=10_000.0)
+
+    monkeypatch.setattr(module, "require_recent_account_owner_health", owner_health)
     monkeypatch.setattr(
         module,
         "canonical_strategy_trade_rows",
@@ -852,6 +853,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     assert payload["account_target_route"] is True
     assert payload["candidate_universe_artifact_sha256"] == "a" * 64
     assert candidate_loads == 1
+    assert "now_ns" not in owner_health_call
 
 
 def test_cross_wired_account_route_fails_before_cycle_resources(tmp_path: Path) -> None:

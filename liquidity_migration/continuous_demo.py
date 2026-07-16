@@ -1379,7 +1379,6 @@ def run_continuous_demo_cycle(
                 account_route.account_path,
                 environment=environment,
                 max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-                now_ns=cycle_now_ms * 1_000_000,
                 expected_account_id=account_route.account_id,
             )
         except (OSError, RuntimeError, ValueError) as exc:

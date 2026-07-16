@@ -112,18 +112,26 @@ def test_only_demo_owner_inherits_demo_credentials() -> None:
 
 def test_persistent_demo_and_paper_workers_have_small_box_memory_limits() -> None:
     expected = {
-        "liquidity-migration-account-execution.service": "MemoryMax=512M",
-        "liquidity-migration-bybit-continuous-demo.service": "MemoryMax=896M",
-        "liquidity-migration-bybit-long-demo.service": "MemoryMax=640M",
-        "liquidity-migration-account-paper-execution.service": "MemoryMax=384M",
-        "liquidity-migration-bybit-continuous-paper.service": "MemoryMax=768M",
-        "liquidity-migration-bybit-long-paper.service": "MemoryMax=768M",
+        "liquidity-migration-account-execution.service": ("384M", "512M", "256M"),
+        "liquidity-migration-account-paper-execution.service": ("256M", "384M", "256M"),
+        "liquidity-migration-bybit-continuous-demo.service": ("768M", "896M", "384M"),
+        "liquidity-migration-bybit-long-demo.service": ("576M", "640M", "384M"),
+        "liquidity-migration-bybit-continuous-paper.service": ("640M", "768M", "384M"),
+        "liquidity-migration-bybit-long-paper.service": ("640M", "768M", "384M"),
     }
-    for unit, limit in expected.items():
+    for unit, (high, maximum, swap) in expected.items():
         fragment = _unit(unit)
-        assert limit in fragment
-        assert "MemoryHigh=" in fragment
-        assert "MemorySwapMax=" in fragment
+        assert f"MemoryHigh={high}" in fragment
+        assert f"MemoryMax={maximum}" in fragment
+        assert f"MemorySwapMax={swap}" in fragment
+
+
+def test_liveness_timer_has_one_bounded_activation_grace() -> None:
+    timer = _unit("liquidity-migration-demo-liveness.timer")
+
+    assert "OnActiveSec=10min" in timer
+    assert "OnUnitActiveSec=3min" in timer
+    assert "OnBootSec=" not in timer
 
 
 def test_producers_require_owner_readiness_and_never_hold_private_order_authority() -> None:

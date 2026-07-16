@@ -47,7 +47,7 @@ ProtectSystem=full
 ProtectHome=false
 UMask=0027
 ReadWritePaths=/opt/liquidity-migration
-MemoryHigh=640M
+MemoryHigh=768M
 MemoryMax=896M
 MemorySwapMax=384M
 

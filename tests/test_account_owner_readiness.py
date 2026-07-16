@@ -157,6 +157,55 @@ def test_owner_readiness_does_not_require_bulk_raw_market_persistence(
     assert (capture / OWNER_MARKET_READINESS_FILENAME).is_file()
 
 
+def test_market_readiness_accepts_only_the_explicit_owner_uid(
+    tmp_path: Path,
+) -> None:
+    _account, _inbox, capture = _ready_roots(tmp_path)
+    owner_uid = (capture / OWNER_MARKET_READINESS_FILENAME).stat().st_uid
+
+    assert (
+        readiness.latest_market_readiness(
+            capture,
+            expected_owner_uid=owner_uid,
+        ).symbol
+        == "BTCUSDT"
+    )
+    with pytest.raises(ValueError, match="private and singly linked"):
+        readiness.latest_market_readiness(
+            capture,
+            expected_owner_uid=owner_uid + 1,
+        )
+
+
+def test_production_readiness_uses_adjacent_operational_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account, inbox, capture = _ready_roots(tmp_path)
+    real_health_check = readiness.require_recent_account_owner_health
+    observed: dict[str, object] = {}
+
+    def health_check(*args: object, **kwargs: object) -> AccountOwnerHealth:
+        observed["caller_now_ns"] = kwargs["now_ns"]
+        kwargs["now_ns"] = NOW_NS
+        return real_health_check(*args, **kwargs)
+
+    monkeypatch.setattr(readiness, "require_recent_account_owner_health", health_check)
+    monkeypatch.setattr(readiness.time, "time_ns", lambda: NOW_NS)
+
+    receipt = readiness.require_account_owner_ready(
+        environment="demo",
+        account_root=account,
+        inbox_root=inbox,
+        capture_root=capture,
+        expected_invocation_id=CURRENT_INVOCATION_ID,
+        max_age_ns=2_000_000,
+    )
+
+    assert observed["caller_now_ns"] is None
+    assert receipt.market_age_ns == 500_000
+
+
 def test_readiness_rejects_weakened_freshness_bound_before_files(
     tmp_path: Path,
 ) -> None:
