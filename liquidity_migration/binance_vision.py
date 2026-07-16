@@ -30,6 +30,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
@@ -43,6 +44,13 @@ from .archive_manifest import (
     V5_LISTING_URL_SENTINEL,
 )
 from .storage import read_dataset, write_dataset
+from .symbol_codec import (
+    SymbolIdentityError,
+    decode_symbol_partition,
+    normalize_binance_usdm_symbol,
+    normalize_binance_usdm_symbols,
+    quote_url_symbol,
+)
 from .volume_events_pit import (
     _covered_kline_date_symbol_set,
     _full_pit_universe_coverage,
@@ -57,6 +65,24 @@ DAILY_KLINES_PREFIX = "data/futures/um/daily/klines/"
 # A (symbol, date) partition needs at least this many hourly bars to count as a
 # tradable PIT day — matches volume_events._covered_kline_date_symbol_set.
 MIN_HOURLY_BARS = 20
+
+
+def validate_usdm_usdt_symbols(
+    symbols: Sequence[object],
+    *,
+    source: str,
+    ignore_non_usdt_entries: bool,
+) -> list[str]:
+    """Return a unique, path-safe USD-M symbol set without dropping Unicode."""
+
+    try:
+        return normalize_binance_usdm_symbols(
+            symbols,
+            source=source,
+            ignore_non_usdt_entries=ignore_non_usdt_entries,
+        )
+    except SymbolIdentityError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 # --------------------------------------------------------------------------
@@ -114,18 +140,25 @@ def _s3_keys(prefix: str) -> list[str]:
 
 def list_usdm_usdt_symbols() -> list[str]:
     """Every USDT-quoted USD-M perp symbol that ever appears in the monthly archive."""
-    symbols = _s3_common_prefixes(MONTHLY_KLINES_PREFIX)
-    return sorted(s for s in symbols if s.endswith("USDT"))
+    return validate_usdm_usdt_symbols(
+        _s3_common_prefixes(MONTHLY_KLINES_PREFIX),
+        source="Binance Vision monthly symbol discovery",
+        ignore_non_usdt_entries=True,
+    )
 
 
 def list_usdm_usdt_daily_symbols() -> list[str]:
     """Every USDT-quoted USD-M perp symbol that appears in the daily archive."""
-    symbols = _s3_common_prefixes(DAILY_KLINES_PREFIX)
-    return sorted(s for s in symbols if re.fullmatch(r"[A-Z0-9]+USDT", s))
+    return validate_usdm_usdt_symbols(
+        _s3_common_prefixes(DAILY_KLINES_PREFIX),
+        source="Binance Vision daily symbol discovery",
+        ignore_non_usdt_entries=True,
+    )
 
 
 def list_symbol_months(symbol: str, *, max_month: str) -> list[str]:
     """Sorted YYYY-MM list of 1h-kline months available for a symbol, capped at max_month."""
+    symbol = normalize_binance_usdm_symbol(symbol)
     prefix = f"{MONTHLY_KLINES_PREFIX}{symbol}/1h/"
     months: list[str] = []
     for key in _s3_keys(prefix):
@@ -150,7 +183,11 @@ def discover(
     are tolerated; a failure rate above ``max_listing_failure_ratio`` still aborts so
     a silently under-enumerated (survivorship-biased) universe is never built.
     """
-    symbols = list_usdm_usdt_symbols()
+    symbols = validate_usdm_usdt_symbols(
+        list_usdm_usdt_symbols(),
+        source="Binance Vision monthly discovery inventory",
+        ignore_non_usdt_entries=False,
+    )
     result: dict[str, list[str]] = {}
     failed_listings: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -263,7 +300,11 @@ def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict] 
     Returns ``None`` only on a hard download/integrity failure; callers must
     distinguish it from an empty valid month.
     """
-    url = f"{VISION_FILES}/{MONTHLY_KLINES_PREFIX}{symbol}/1h/{symbol}-1h-{ym}.zip"
+    encoded_symbol = quote_url_symbol(symbol)
+    url = (
+        f"{VISION_FILES}/{MONTHLY_KLINES_PREFIX}{encoded_symbol}/1h/"
+        f"{encoded_symbol}-1h-{ym}.zip"
+    )
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - public archive
@@ -286,7 +327,11 @@ def fetch_daily_klines(symbol: str, day: str, *, retries: int = 4) -> list[dict]
     A genuine archive 404 is a permanent no-file condition and returns an empty
     list. ``None`` is reserved for transient/integrity failures after retries.
     """
-    url = f"{VISION_FILES}/{DAILY_KLINES_PREFIX}{symbol}/1h/{symbol}-1h-{day}.zip"
+    encoded_symbol = quote_url_symbol(symbol)
+    url = (
+        f"{VISION_FILES}/{DAILY_KLINES_PREFIX}{encoded_symbol}/1h/"
+        f"{encoded_symbol}-1h-{day}.zip"
+    )
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - public archive
@@ -337,9 +382,14 @@ def topup_binance_daily_klines(
     and rewrites PIT membership from actual kline coverage afterwards.
     """
     root = Path(data_root).expanduser()
-    selected = tuple(dict.fromkeys(symbol.upper() for symbol in symbols if symbol.strip()))
-    if not selected:
-        selected = tuple(list_usdm_usdt_daily_symbols())
+    requested = tuple(dict.fromkeys(symbol.upper() for symbol in symbols if symbol.strip()))
+    selected = tuple(
+        validate_usdm_usdt_symbols(
+            requested or tuple(list_usdm_usdt_daily_symbols()),
+            source="Binance Vision daily top-up inventory",
+            ignore_non_usdt_entries=False,
+        )
+    )
     days = _days_between(start, end)
     jobs = [(symbol, day) for symbol in selected for day in days]
     if not jobs:
@@ -681,7 +731,12 @@ def _persisted_kline_symbols(root: Path) -> set[str]:
             continue
         for sym_dir in date_dir.iterdir():
             if sym_dir.name.startswith("symbol="):
-                symbols.add(sym_dir.name.split("=", 1)[1])
+                try:
+                    symbols.add(decode_symbol_partition(sym_dir.name.split("=", 1)[1]))
+                except SymbolIdentityError as exc:
+                    raise RuntimeError(
+                        f"unsafe/non-canonical Binance symbol partition: {sym_dir}"
+                    ) from exc
     return symbols
 
 
@@ -716,7 +771,15 @@ def build_binance_oos(
     max_month = end_date[:7]
 
     print(f"[binance_vision] discovering symbols/months <= {max_month} ...", file=sys.stderr)
-    inventory = discover(max_month=max_month, workers=min(workers, 16))
+    discovered = discover(max_month=max_month, workers=min(workers, 16))
+    validated_symbols = validate_usdm_usdt_symbols(
+        tuple(discovered),
+        source="Binance Vision monthly build inventory",
+        ignore_non_usdt_entries=False,
+    )
+    if set(validated_symbols) != set(discovered):
+        raise RuntimeError("Binance Vision build inventory changed during symbol normalization")
+    inventory = {symbol: discovered[symbol] for symbol in validated_symbols}
     jobs = [(sym, ym) for sym, months in inventory.items() for ym in months]
     print(f"[binance_vision] {len(inventory)} symbols, {len(jobs)} monthly files to fetch", file=sys.stderr)
 

@@ -35,6 +35,14 @@ Binance builder uses USD-M archive klines plus the current-month daily tail and
 adds funding/OI/mark/index/premium/taker flow. Read each script before a large
 run; defaults and upstream availability can change.
 
+`symbol=` partition components use canonical UTF-8 percent encoding from
+`liquidity_migration/symbol_codec.py`; ordinary ASCII symbols are unchanged.
+Consumers that inspect directory names must use the matching decoder rather
+than treating the component as the exchange symbol. Unsupported, ambiguous, or
+path-like identifiers fail before root mutation. This retains valid Unicode
+venue symbols without allowing two upstream identifiers to collapse onto one
+local path.
+
 For a targeted Bybit manifest rebuild:
 
 ```bash

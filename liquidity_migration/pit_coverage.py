@@ -26,6 +26,8 @@ from pathlib import Path
 
 import polars as pl
 
+from .symbol_codec import SymbolIdentityError, decode_symbol_partition
+
 _DATE_DIR_RE = re.compile(r"date=(\d{4}-\d{2}-\d{2})")
 _SYMBOL_DIR_RE = re.compile(r"symbol=([^\\/]+)")
 
@@ -81,7 +83,10 @@ def _symbol_from_path(path: Path) -> str | None:
     for part in path.parts:
         m = _SYMBOL_DIR_RE.fullmatch(part)
         if m:
-            return m.group(1)
+            try:
+                return decode_symbol_partition(m.group(1))
+            except SymbolIdentityError:
+                return None
     return None
 
 

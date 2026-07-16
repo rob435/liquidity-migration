@@ -24,6 +24,7 @@ from ._common import safe_name
 from .archive import download_public_trade_archive, read_public_trade_archive_klines_1h
 from .ingestion import densify_trade_klines_1h
 from .storage import dataset_path, read_dataset, write_dataset
+from .symbol_codec import encode_symbol_partition
 
 
 DEFAULT_BYBIT_PUBLIC_TRADING_URL = "https://public.bybit.com/trading/"
@@ -1169,12 +1170,14 @@ def _download_result(
 
 
 def _kline_partition_file_exists(data_root: str | Path, *, dataset: str, symbol: str, date: str) -> bool:
-    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
+    encoded = encode_symbol_partition(symbol)
+    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={encoded}" / "part.parquet"
     return part.exists() and part.stat().st_size > 0
 
 
 def _kline_partition_bar_rows(data_root: str | Path, *, dataset: str = "klines_1h", symbol: str, date: str) -> int:
-    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
+    encoded = encode_symbol_partition(symbol)
+    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={encoded}" / "part.parquet"
     if not part.exists() or part.stat().st_size <= 0:
         return 0
     try:
@@ -1184,7 +1187,8 @@ def _kline_partition_bar_rows(data_root: str | Path, *, dataset: str = "klines_1
 
 
 def _kline_partition_valid_bar_rows(data_root: str | Path, *, dataset: str = "klines_1h", symbol: str, date: str) -> int:
-    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
+    encoded = encode_symbol_partition(symbol)
+    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={encoded}" / "part.parquet"
     if not part.exists() or part.stat().st_size <= 0:
         return 0
     try:
@@ -1224,7 +1228,8 @@ def _metadata_valid_price_rows(part: Path) -> int | None:
 
 def previous_kline_close(data_root: str | Path, *, symbol: str, archive_date: str, dataset: str = "klines_1h") -> float | None:
     previous_date = (date.fromisoformat(archive_date[:10]) - timedelta(days=1)).isoformat()
-    part = dataset_path(data_root, dataset) / f"date={previous_date}" / f"symbol={symbol}" / "part.parquet"
+    encoded = encode_symbol_partition(symbol)
+    part = dataset_path(data_root, dataset) / f"date={previous_date}" / f"symbol={encoded}" / "part.parquet"
     if not part.exists() or part.stat().st_size <= 0:
         return None
     try:

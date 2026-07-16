@@ -14,6 +14,7 @@ import polars as pl
 import pytest
 
 from liquidity_migration import storage
+from liquidity_migration.symbol_codec import encode_symbol_partition
 from liquidity_migration.storage import dataset_lock_path, dataset_path, exclusive_file_lock, read_dataset, write_dataset
 
 
@@ -84,6 +85,20 @@ def test_incremental_parquet_writes_replace_duplicate_keys(tmp_path: Path) -> No
 
     assert stored.height == 1
     assert stored["buy_quote"][0] == 125.0
+
+
+def test_unicode_symbol_partition_is_canonical_and_round_trips(tmp_path: Path) -> None:
+    symbol = "\u5e01\u5b89\u4eba\u751fUSDT"
+    frame = pl.DataFrame(
+        [{"ts_ms": 1_704_067_200_000, "symbol": symbol, "funding_rate": 0.001}]
+    )
+
+    write_dataset(frame, tmp_path, "funding")
+
+    encoded = encode_symbol_partition(symbol)
+    part = tmp_path / "funding" / "date=2024-01-01" / f"symbol={encoded}" / "part.parquet"
+    assert part.is_file()
+    assert read_dataset(tmp_path, "funding")["symbol"].to_list() == [symbol]
 
 
 def test_continuous_cycle_datasets_registered_and_roundtrip(tmp_path: Path) -> None:

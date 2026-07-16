@@ -7,6 +7,7 @@ import datetime as dt
 import polars as pl
 
 from liquidity_migration import pit_coverage as pc
+from liquidity_migration.symbol_codec import encode_symbol_partition
 
 
 def _mk(root, dataset, dates, *, symbol="FOOUSDT"):
@@ -61,6 +62,16 @@ def test_symbols_on_date_handles_date_first_and_symbol_first_layouts(tmp_path):
     part.mkdir(parents=True)
     (part / "part.parquet").touch()
     assert pc._symbols_on_date(symbol_first, dt.date(2026, 5, 30)) == {"BARUSDT"}
+
+
+def test_symbols_on_date_decodes_canonical_unicode_partition(tmp_path):
+    symbol = "\u5e01\u5b89\u4eba\u751fUSDT"
+    encoded = encode_symbol_partition(symbol)
+    part = tmp_path / "dataset" / "date=2026-05-30" / f"symbol={encoded}"
+    part.mkdir(parents=True)
+    (part / "part.parquet").touch()
+
+    assert pc._symbols_on_date(tmp_path / "dataset", dt.date(2026, 5, 30)) == {symbol}
 
 
 def test_symbols_on_date_reads_date_level_manifest_parquet(tmp_path):

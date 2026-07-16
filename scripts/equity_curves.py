@@ -29,6 +29,10 @@ sys.path.insert(0, str(REPO))
 
 from liquidity_migration.config import load_config  # noqa: E402
 from liquidity_migration.continuous_profile import CONTINUOUS_HISTORICAL_RUN_LABEL  # noqa: E402
+from liquidity_migration.symbol_codec import (  # noqa: E402
+    SymbolIdentityError,
+    decode_symbol_partition,
+)
 
 DEFAULT_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_CONFIG = "configs/volume_alpha.default.yaml"
@@ -217,7 +221,10 @@ def _delisted_traded(out: Path, root: str) -> int | None:
     recent: set[str] = set()
     for d in sorted(os.listdir(kroot))[-30:]:
         for s in glob.glob(os.path.join(kroot, d, "symbol=*")):
-            recent.add(s.split("symbol=")[-1])
+            try:
+                recent.add(decode_symbol_partition(s.split("symbol=")[-1]))
+            except SymbolIdentityError:
+                continue
     return len(syms - recent)
 
 

@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated 2026-07-15. This is a decision log, not policy or deployment authority.
+Updated 2026-07-16. This is a decision log, not policy or deployment authority.
 Apply `docs/governance.md` and inspect the named artifacts before relying on a
 claim. Current host state belongs in `STATE.md`.
 
@@ -101,10 +101,20 @@ The strategy-overhaul Phase-0 diagnostic bundle
 `strategy-overhaul-phase0-bccefdfc38ae9fda3c17` has receipt SHA-256
 `ed5fb3687280db691dcda5e32e00005a8dd48dd2fb403c2f48fe6cb69a81bb03`.
 It returned `NOT_READY`, inspected no outcomes, and established only limited
-internal reconstruction under its captured environment. The workflow and code
-were retired after the operator judged the audit not useful. The external
-receipt remains a tombstone; it supports no population, alpha, promotion,
-deployment, or real-money conclusion.
+internal reconstruction under its captured environment.
+
+A later current-source structural Phase-0 bundle,
+`strategy-overhaul-phase0-8d6314fec8717954be9a`, returned `READY` with
+`outcome_run_authorized=false`; its receipt SHA-256 is
+`93308a9661a8dc4b2520afccbdda05f67d12ab5b7116655b8514c614bc74a8fa`.
+The subsequent Phase-B run
+`strategy-overhaul-phase-b-ebcfdad2b9cd2809ccefc7e2` completed only events
+00--04 of nine and published no completion receipt, S02 feature tape, S03 entry
+artifact, S04 labels, or outcome. The workflow and code were then retired. Both
+Phase-0 receipts and the partial Phase-B directory are tombstones; they support
+no population, alpha, promotion, deployment, or real-money conclusion. Durable
+diagnostics and reusable constraints are recorded in
+`docs/strategy_overhaul_lessons.md`.
 
 No confirmatory research contract is active. New decision-influencing work must
 register a new claim, exposure boundary, tested set, rule, and artifact plan

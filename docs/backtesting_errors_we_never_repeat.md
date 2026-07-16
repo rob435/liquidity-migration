@@ -118,6 +118,29 @@ their source.
 28. **Administrative truth.** Names such as promoted, frozen, approved, or closed
     can anchor judgment. Inspect the evidence and implemented behavior instead.
 
+29. **Pseudoreplication.** Nested components, repeated legs, or several rows from
+    one decision are not independent observations. Declare the unique decision,
+    simultaneous wave, and calendar/cluster unit before computing uncertainty.
+
+30. **Missing-as-zero diagnostics.** Unmeasured MAE, MFE, cost, funding, or path
+    values are missing evidence, not favorable zeros. Preserve null provenance
+    and exclude or bound it according to the claim.
+
+31. **Post-filter observability.** A candidate tape emitted only after major
+    gates cannot audit the claimed source population or gate attrition. Capture
+    the pre-gate population with first rejection and missingness.
+
+32. **Capture/materialization drift.** Discovery objects, terminal raw keys,
+    materialized partition keys, and independently replayed expected keys must
+    agree at the grain used by the claim. A mismatch invalidates population
+    completeness until explained and repaired.
+
+33. **Verification-system displacement.** Receipt, schema, and provenance
+    machinery can be internally rigorous while never reaching the decision it
+    was built to support. Timebox infrastructure, require claim-bearing
+    milestones, and retire unused machinery rather than treating artifact
+    volume as progress.
+
 ## Applying The Taxonomy
 
 The relevant checks depend on the claim:

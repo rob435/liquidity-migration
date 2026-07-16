@@ -44,7 +44,7 @@ deploy references, and tests.
 | Venue execution boundary | `account_service_bybit.py`, `account_execution_stream.py`, `bybit_execution_adapter.py`, `bybit_market_data.py`, `execution_adapters.py` | Account-service Bybit, execution-stream, market-data-boundary, and adapter-facing tests |
 | Market capture and liveness | `market_capture.py`, `ws_state_cache.py`, `account_owner_health.py`, `account_owner_readiness.py`, `run_diagnostics.py` | Capture, cache, owner health/readiness, diagnostics, and liveness-script tests |
 | Operations and deployment | `scripts/ops.sh`, guarded runtime/deploy scripts, `deploy/systemd/`, `.github/workflows/vps-deploy.yml` | Runtime-script and ops tests; `docs/operations.md`, `deploy/systemd/README.md`, `STATE.md` |
-| Research integrity and reporting | Research modules, `scripts/equity_curves.*`, preregistrations, raw run artifacts | `docs/governance.md`, `docs/research_summary.md`, applicable research skills and report tests |
+| Research integrity and reporting | Research modules, `scripts/equity_curves.*`, preregistrations, raw run artifacts | `docs/governance.md`, `docs/research_summary.md`, `docs/strategy_overhaul_lessons.md`, applicable research skills and report tests |
 
 Prefixes are a discovery aid, not proof of ownership. Open the definition,
 callers, persistence format, runtime configuration, and focused tests before a

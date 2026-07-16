@@ -11,6 +11,8 @@ from typing import Iterator
 
 import polars as pl
 
+from .symbol_codec import encode_symbol_partition
+
 
 # Per-process thread-lock per dataset path. POSIX flock semantics are process
 # friendly but do not provide the intended exclusion between separate opens in
@@ -808,7 +810,8 @@ def _write_dataset_unlocked(
         key_tuple = key if isinstance(key, tuple) else (key,)
         part_path = path
         for col, value in zip(partition_cols, key_tuple):
-            part_path = part_path / f"{col}={value}"
+            rendered = encode_symbol_partition(value) if col == "symbol" else str(value)
+            part_path = part_path / f"{col}={rendered}"
         part_path.mkdir(parents=True, exist_ok=True)
         _write_part(part, part_path / "part.parquet", dataset=dataset, append=append)
     return path

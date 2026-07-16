@@ -57,6 +57,7 @@ from liquidity_migration.continuous_rebalance import (  # noqa: E402
 )
 from liquidity_migration.continuous_regime import btcvol_intensity_series  # noqa: E402
 from liquidity_migration.storage import resolve_dataset_name  # noqa: E402
+from liquidity_migration.symbol_codec import encode_symbol_partition  # noqa: E402
 from liquidity_migration.volume_events_charts import _write_equity_benchmark_chart  # noqa: E402
 
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA"))).expanduser()
@@ -290,7 +291,7 @@ def instrument_inputs(
     missing = 0
     for day in days:
         date = dt.datetime.fromtimestamp(day / 1000, tz=dt.timezone.utc).date().isoformat()
-        part = root / f"date={date}" / f"symbol={symbol}"
+        part = root / f"date={date}" / f"symbol={encode_symbol_partition(symbol)}"
         if part.exists():
             fund[day] = float(pl.read_parquet(part, columns=["funding_rate"])["funding_rate"].sum())
         else:

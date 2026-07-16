@@ -23,6 +23,11 @@ from liquidity_migration.binance_vision import (
     validate_pit_manifest_coverage,
 )
 from liquidity_migration.storage import read_dataset, write_dataset
+from liquidity_migration.symbol_codec import (
+    SymbolIdentityError,
+    encode_symbol_partition,
+    normalize_binance_usdm_symbols,
+)
 
 MS_PER_HOUR = 3_600_000
 
@@ -108,14 +113,56 @@ def test_fetch_daily_klines_returns_empty_for_archive_404(monkeypatch) -> None:
     assert bv.fetch_daily_klines("AAAUSDT", "2024-01-01", retries=1) == []
 
 
-def test_list_usdm_usdt_daily_symbols_filters_non_ascii_archive_dirs(monkeypatch) -> None:
+def test_list_usdm_usdt_daily_symbols_retains_canonical_unicode(monkeypatch) -> None:
+    unicode_symbol = "\u5e01\u5b89\u4eba\u751fUSDT"
     monkeypatch.setattr(
         bv,
         "_s3_common_prefixes",
-        lambda prefix: ["BTCUSDT", "1000PEPEUSDT", "币安人生USDT", "ETHUSDC", "badusdt"],
+        lambda prefix: ["BTCUSDT", "1000PEPEUSDT", unicode_symbol, "ETHUSDC", "badusdt"],
     )
 
-    assert bv.list_usdm_usdt_daily_symbols() == ["1000PEPEUSDT", "BTCUSDT"]
+    assert bv.list_usdm_usdt_daily_symbols() == [
+        "1000PEPEUSDT",
+        "BTCUSDT",
+        unicode_symbol,
+    ]
+
+
+def test_fetch_daily_klines_percent_encodes_unicode_symbol(monkeypatch) -> None:
+    symbol = "\u5e01\u5b89\u4eba\u751fUSDT"
+    observed: list[str] = []
+
+    def _not_found(url, timeout=60):
+        observed.append(url)
+        raise HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(bv.urllib.request, "urlopen", _not_found)
+
+    assert bv.fetch_daily_klines(symbol, "2026-07-10", retries=1) == []
+    assert observed and symbol not in observed[0]
+    assert "%E5%B8%81%E5%AE%89%E4%BA%BA%E7%94%9FUSDT" in observed[0]
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "../BTCUSDT",
+        "BTC/USDT",
+        "BTC\\USDT",
+        "BTC\x00USDT",
+        "BTC USDT",
+        "\uff22\uff34\uff23USDT",
+        "%2FUSDT",
+        ".USDT",
+    ],
+)
+def test_symbol_codec_rejects_unsafe_or_confusable_identifiers(unsafe: str) -> None:
+    with pytest.raises(SymbolIdentityError):
+        normalize_binance_usdm_symbols(
+            [unsafe],
+            source="adversarial test",
+            ignore_non_usdt_entries=False,
+        )
 
 
 def _write_klines(root, symbol, date_ms, n_bars):
@@ -704,6 +751,38 @@ def test_persisted_kline_symbols_reads_partition_dirs(tmp_path) -> None:
     assert bv._persisted_kline_symbols(root) == {"AAAUSDT", "BBBUSDT"}
     # No prior build -> empty set, not a crash.
     assert bv._persisted_kline_symbols(tmp_path / "absent") == set()
+
+
+def test_persisted_kline_symbols_decodes_unicode_partition(tmp_path) -> None:
+    root = tmp_path / "root"
+    symbol = "\u5e01\u5b89\u4eba\u751fUSDT"
+    _write_klines(root, symbol, 1704067200000, 24)
+
+    encoded = encode_symbol_partition(symbol)
+    assert (root / "klines_1h" / "date=2024-01-01" / f"symbol={encoded}").is_dir()
+    assert bv._persisted_kline_symbols(root) == {symbol}
+
+
+def test_build_rejects_unsafe_discovered_symbol_before_fetch_or_mutation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    fetch_called = False
+    monkeypatch.setattr(bv, "discover", lambda **_kwargs: {"../AAAUSDT": ["2024-01"]})
+
+    def _forbidden_fetch(_symbol, _month):
+        nonlocal fetch_called
+        fetch_called = True
+        raise AssertionError("archive fetch must not run")
+
+    monkeypatch.setattr(bv, "fetch_month_klines", _forbidden_fetch)
+
+    with pytest.raises(RuntimeError, match="unsupported/ambiguous Binance symbol"):
+        bv.build_binance_oos(root, end_date="2024-02-01", workers=1)
+
+    assert fetch_called is False
+    assert not root.exists()
 
 
 def test_build_binance_oos_refuses_universe_shrink_without_override(tmp_path, monkeypatch) -> None:
