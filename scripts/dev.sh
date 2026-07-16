@@ -23,7 +23,7 @@ Non-operational developer commands:
   doctor [--json] [--strict-lock]
                          inspect Git, Python, dependency, skill, and map state
   lint [RUFF_ARGS...]    run Ruff over package, scripts, and tests
-  types [MYPY_ARGS...]   run package and repository-doctor mypy
+  types [MYPY_ARGS...]   run package and supported developer-script mypy
   test [PYTEST_ARGS...]  run pytest (-q by default)
   check [PYTEST_ARGS...] run doctor, Ruff, mypy, and pytest in sequence
   help                   show this help
@@ -54,7 +54,11 @@ case "$command" in
     exec "$PYTHON_BIN" -m ruff check liquidity_migration scripts tests "$@"
     ;;
   types)
-    exec "$PYTHON_BIN" -m mypy liquidity_migration scripts/repo_doctor.py "$@"
+    exec "$PYTHON_BIN" -m mypy \
+      liquidity_migration \
+      scripts/repo_doctor.py \
+      scripts/build_trade_diagnostics.py \
+      "$@"
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest -q "$@"
@@ -65,7 +69,10 @@ case "$command" in
     echo "[dev] ruff"
     "$PYTHON_BIN" -m ruff check liquidity_migration scripts tests
     echo "[dev] mypy"
-    "$PYTHON_BIN" -m mypy liquidity_migration scripts/repo_doctor.py
+    "$PYTHON_BIN" -m mypy \
+      liquidity_migration \
+      scripts/repo_doctor.py \
+      scripts/build_trade_diagnostics.py
     echo "[dev] pytest"
     "$PYTHON_BIN" -m pytest -q "$@"
     ;;

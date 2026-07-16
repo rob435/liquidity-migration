@@ -111,6 +111,10 @@ def test_captured_market_provider_links_decision_to_raw_book_record(tmp_path: Pa
     assert market.input_key == market.metadata["capture_record_id"]
     assert market.metadata["update_id"] == 100
     assert market.metadata["sequence_gap"] is False
+    assert market.metadata["capture_segment_path"].endswith("segment-000000.jsonl")
+    assert market.metadata["capture_byte_offset"] >= 0
+    assert market.metadata["capture_byte_length"] > 0
+    assert len(market.metadata["capture_record_sha256"]) == 64
     recorder.close()
 
 

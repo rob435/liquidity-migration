@@ -166,6 +166,13 @@ def test_operational_mode_keeps_live_l2_and_decision_context_without_raw_segment
     assert rows[0]["record_id"] == context["record_id"]
     assert rows[0]["bids"] == [[level.price, level.qty] for level in book.bids]
     assert rows[0]["asks"] == [[level.price, level.qty] for level in book.asks]
+    segment = tmp_path / context["capture_segment_path"]
+    raw = segment.read_bytes()[
+        context["capture_byte_offset"] :
+        context["capture_byte_offset"] + context["capture_byte_length"]
+    ]
+    assert hashlib.sha256(raw).hexdigest() == context["capture_record_sha256"]
+    assert json.loads(raw) == rows[0]
 
 
 def test_current_book_observation_orders_wall_time_after_locked_snapshot(

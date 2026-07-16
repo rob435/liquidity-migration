@@ -88,13 +88,23 @@ def _command(tmp_path: Path) -> tuple[AccountExecutionKernel, str]:
 
 
 def _execution(command_id: str, *, exec_id: str = "exec-1", qty: str = "1") -> dict[str, object]:
-    return {"data": [{
+    return {"creationTime": "1201", "data": [{
         "orderLinkId": command_id,
         "orderId": "venue-1",
         "execId": exec_id,
         "execQty": qty,
         "execPrice": "10.1",
         "execFee": "0.001",
+        "feeRate": "0.00055",
+        "feeCurrency": "USDT",
+        "isMaker": False,
+        "execType": "Trade",
+        "execValue": "10.1",
+        "orderQty": "2",
+        "leavesQty": "1",
+        "closedSize": "0",
+        "orderType": "Market",
+        "createType": "CreateByUser",
         "execTime": "1200",
         "side": "Buy",
         "seq": "7",
@@ -402,7 +412,16 @@ def test_execution_before_create_ack_infers_ack_then_records_fill(tmp_path: Path
     assert state.orders[command_id].status == "partially_filled"
     assert state.orders[command_id].venue_order_id == "venue-1"
     assert state.positions["BUSDT"].signed_qty == pytest.approx(1.0)
-    assert state.executions["exec-1"]["metadata"]["source"] == "bybit_private_execution_ws"
+    metadata = state.executions["exec-1"]["metadata"]
+    assert metadata["source"] == "bybit_private_execution_ws"
+    assert metadata["is_maker"] is False
+    assert metadata["fee_rate"] == "0.00055"
+    assert metadata["fee_currency"] == "USDT"
+    assert metadata["execution_type"] == "Trade"
+    assert metadata["execution_value"] == "10.1"
+    assert metadata["order_qty"] == "2"
+    assert metadata["leaves_qty"] == "1"
+    assert metadata["message_creation_ts_ns"] == 1_201_000_000
 
 
 def test_missing_execution_fee_is_persisted_as_pending_not_final_zero(tmp_path: Path) -> None:

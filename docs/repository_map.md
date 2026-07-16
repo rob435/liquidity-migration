@@ -45,6 +45,7 @@ deploy references, and tests.
 | Market capture and liveness | `market_capture.py`, `ws_state_cache.py`, `account_owner_health.py`, `account_owner_readiness.py`, `strategy_cycle_health.py`, `run_diagnostics.py` | Capture, cache, owner health/readiness, strategy-completion, diagnostics, and liveness-script tests |
 | Operations and deployment | `scripts/ops.sh`, guarded runtime/deploy scripts, `deploy/systemd/`, `.github/workflows/vps-deploy.yml` | Runtime-script and ops tests; `docs/operations.md`, `deploy/systemd/README.md`, `STATE.md` |
 | Research integrity and reporting | Research modules, `scripts/equity_curves.*`, preregistrations, raw run artifacts | `docs/governance.md`, `docs/research_summary.md`, `docs/strategy_overhaul_lessons.md`, `docs/strategy_overhaul_migration_audit.md`, applicable research skills and report tests |
+| Trade diagnostics | Verified account journal, exact decision-book contexts, and the read-only command projection | `trade_diagnostics.py`, `scripts/build_trade_diagnostics.py`, `docs/trade_diagnostics.md`, and focused diagnostic tests |
 
 Prefixes are a discovery aid, not proof of ownership. Open the definition,
 callers, persistence format, runtime configuration, and focused tests before a

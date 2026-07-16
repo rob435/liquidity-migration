@@ -671,10 +671,30 @@ class SequenceAwareMarketRecorder:
             record["owner_invocation_id"] = self.owner_invocation_id
         record["record_id"] = capture_record_id(record)
         safe = json_safe(record)
+        location: CaptureAppendLocation | None = None
         if persist_to_disk:
             location = self.store.append(safe)
             self._publish_owner_readiness(safe, location=location)
-        return dict(safe)
+        output = dict(safe)
+        if location is not None:
+            try:
+                relative_path = location.path.relative_to(self.store.root).as_posix()
+            except ValueError as exc:
+                raise MarketCaptureError("capture append escaped its configured root") from exc
+            # These locator fields describe the stored canonical JSON line but
+            # are deliberately not part of that line or its record identity.
+            # They let a later read-only diagnostic open one exact context
+            # without scanning a capture root. The content hash remains valid
+            # if the root is copied to another device.
+            output.update(
+                {
+                    "capture_segment_path": relative_path,
+                    "capture_byte_offset": location.byte_offset,
+                    "capture_byte_length": location.byte_length,
+                    "capture_record_sha256": location.record_sha256,
+                }
+            )
+        return output
 
     def _publish_owner_market_readiness(
         self,

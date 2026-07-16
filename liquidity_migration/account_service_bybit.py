@@ -66,6 +66,16 @@ class CapturedBybitMarketProvider:
                     "update_id": record["update_id"],
                     "sequence_gap": record["sequence_gap"],
                     "sequence_gap_reason": record["sequence_gap_reason"],
+                    **{
+                        key: record[key]
+                        for key in (
+                            "capture_segment_path",
+                            "capture_byte_offset",
+                            "capture_byte_length",
+                            "capture_record_sha256",
+                        )
+                        if key in record
+                    },
                 },
             )
         return output

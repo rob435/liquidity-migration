@@ -3,12 +3,70 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from .account_kernel import MarketInputRef, OrderCommand
 from .bybit_errors import BybitRequestRejected
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import ExecutionObservation, ExecutionObservationType
+
+
+def bybit_private_execution_metadata(
+    row: Mapping[str, Any],
+    *,
+    message_creation_ts_ns: int,
+) -> dict[str, Any]:
+    """Preserve the documented execution facts shared by every fill path."""
+
+    fee_observed = row.get("execFee") not in (None, "") or row.get(
+        "exec_fee"
+    ) not in (None, "")
+    try:
+        cross_sequence = int(float(row.get("seq") or 0))
+    except (TypeError, ValueError):
+        cross_sequence = 0
+    return {
+        "cross_sequence": cross_sequence,
+        # Missing execFee is not evidence of a zero fee. The reducer still
+        # needs a numeric placeholder, so retain explicit unresolved provenance.
+        "fee_observed": fee_observed,
+        "fee_status": (
+            "observed_execution_fee"
+            if fee_observed
+            else "pending_missing_execution_fee"
+        ),
+        "fee_source": "bybit_private_execution.execFee",
+        "fee_rate": str(row.get("feeRate") or row.get("fee_rate") or ""),
+        "fee_currency": str(
+            row.get("feeCurrency") or row.get("fee_currency") or ""
+        ),
+        "is_maker": (
+            row.get("isMaker")
+            if type(row.get("isMaker")) is bool
+            else row.get("is_maker")
+            if type(row.get("is_maker")) is bool
+            else None
+        ),
+        "execution_type": str(
+            row.get("execType") or row.get("exec_type") or ""
+        ),
+        "execution_value": str(
+            row.get("execValue") or row.get("exec_value") or ""
+        ),
+        "order_qty": str(row.get("orderQty") or row.get("order_qty") or ""),
+        "leaves_qty": str(row.get("leavesQty") or row.get("leaves_qty") or ""),
+        "closed_size": str(
+            row.get("closedSize") or row.get("closed_size") or ""
+        ),
+        "order_type": str(
+            row.get("orderType") or row.get("order_type") or ""
+        ),
+        "create_type": str(
+            row.get("createType") or row.get("create_type") or ""
+        ),
+        "message_creation_ts_ns": int(message_creation_ts_ns),
+        "source": "bybit_private_execution_ws",
+    }
 
 
 class BybitDemoExecutionAdapter:

@@ -17,6 +17,7 @@ from .account_kernel import (
     AccountTransitionError,
     read_account_journal,
 )
+from .bybit_execution_adapter import bybit_private_execution_metadata
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import ExecutionObservation, ExecutionObservationType, KernelExecutionDriver
 
@@ -207,6 +208,9 @@ class BybitAccountExecutionConsumer:
 
     def on_execution(self, message: Mapping[str, Any], *, local_receive_ts_ns: int) -> None:
         observations: list[ExecutionObservation] = []
+        message_creation_ts_ns = _timestamp_ns(
+            message.get("creationTime") or message.get("creation_time")
+        )
         for row in _rows(message):
             # External/native adoption mutates the kernel immediately. Refresh
             # per row so multiple fills for the same venue order in one Bybit
@@ -221,6 +225,7 @@ class BybitAccountExecutionConsumer:
                         self.native_protection_manager.adopt_execution(
                             row,
                             local_receive_ts_ns=local_receive_ts_ns,
+                            message_creation_ts_ns=message_creation_ts_ns,
                         )
                     except AccountTransitionError as exc:
                         # Unknown/manual reductions must remain visible as a
@@ -252,9 +257,6 @@ class BybitAccountExecutionConsumer:
             price = _float(row.get("execPrice") or row.get("exec_price"))
             if not execution_id or signed_qty == 0.0 or price <= 0.0:
                 continue
-            fee_observed = row.get("execFee") not in (None, "") or row.get(
-                "exec_fee"
-            ) not in (None, "")
             observations.append(ExecutionObservation(
                 observation_type=ExecutionObservationType.FILL,
                 command_id=command_id,
@@ -265,20 +267,10 @@ class BybitAccountExecutionConsumer:
                 signed_qty=signed_qty,
                 price=price,
                 fee_usdt=_float(row.get("execFee") or row.get("exec_fee")),
-                metadata={
-                    "cross_sequence": int(_float(row.get("seq"))),
-                    # Missing execFee is not evidence of a zero fee.  The
-                    # reducer still needs a numeric placeholder, so preserve
-                    # explicit unresolved provenance beside it.
-                    "fee_observed": fee_observed,
-                    "fee_status": (
-                        "observed_execution_fee"
-                        if fee_observed
-                        else "pending_missing_execution_fee"
-                    ),
-                    "fee_source": "bybit_private_execution.execFee",
-                    "source": "bybit_private_execution_ws",
-                },
+                metadata=bybit_private_execution_metadata(
+                    row,
+                    message_creation_ts_ns=message_creation_ts_ns,
+                ),
             ))
         if observations:
             self.driver.ingest(observations)

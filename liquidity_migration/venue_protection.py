@@ -19,6 +19,7 @@ from .account_kernel import (
     PositionState,
 )
 from .account_strategy_state import canonical_component_execution_anchors
+from .bybit_execution_adapter import bybit_private_execution_metadata
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
 
@@ -521,6 +522,7 @@ class BybitNativeProtectionManager:
         row: Mapping[str, Any],
         *,
         local_receive_ts_ns: int,
+        message_creation_ts_ns: int = 0,
     ) -> tuple[Any, ...]:
         symbol = str(row.get("symbol") or "").upper()
         if not symbol:
@@ -555,9 +557,6 @@ class BybitNativeProtectionManager:
             if active is not None
             else f"external-reduction:{symbol}:{venue_order_id}"
         )
-        fee_observed = row.get("execFee") not in (None, "") or row.get(
-            "exec_fee"
-        ) not in (None, "")
         try:
             return self.kernel.adopt_external_protection_fill(
                 protection_key=protection_key,
@@ -575,6 +574,10 @@ class BybitNativeProtectionManager:
                 reason=reason,
                 execution_origin=execution_origin,
                 metadata={
+                    **bybit_private_execution_metadata(
+                        row,
+                        message_creation_ts_ns=message_creation_ts_ns,
+                    ),
                     "source": "bybit_private_execution_ws",
                     "external_order_link_id": str(
                         row.get("orderLinkId") or row.get("order_link_id") or ""
@@ -585,13 +588,6 @@ class BybitNativeProtectionManager:
                         row.get("stopOrderType") or row.get("stop_order_type") or ""
                     ),
                     "native_identity": identity_evidence,
-                    "fee_observed": fee_observed,
-                    "fee_status": (
-                        "observed_execution_fee"
-                        if fee_observed
-                        else "pending_missing_execution_fee"
-                    ),
-                    "fee_source": "bybit_private_execution.execFee",
                 },
             )
         except AccountTransitionError as exc:

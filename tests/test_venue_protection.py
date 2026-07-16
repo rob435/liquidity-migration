@@ -703,7 +703,7 @@ def test_native_terminal_before_execution_is_joined_by_venue_order_id(
     with pytest.raises(RuntimeError, match="execution recovery pending"):
         manager.require_recent_healthy(max_age_ns=1_000_000_000)
 
-    consumer.on_execution({"data": [{
+    consumer.on_execution({"creationTime": "2201", "data": [{
         "symbol": "BUSDT",
         "orderLinkId": "",
         "orderId": "native-race-order",
@@ -782,7 +782,7 @@ def test_manual_reduction_is_adopted_without_native_stop_label(tmp_path: Path) -
         clock=clock,
     )
 
-    consumer.on_execution({"data": [{
+    consumer.on_execution({"creationTime": "2201", "data": [{
         "symbol": "BUSDT",
         "orderLinkId": "manual-close",
         "orderId": "manual-order",
@@ -791,6 +791,15 @@ def test_manual_reduction_is_adopted_without_native_stop_label(tmp_path: Path) -
         "execQty": "2",
         "execPrice": "10.5",
         "execFee": "0.01",
+        "feeRate": "0.00055",
+        "feeCurrency": "USDT",
+        "isMaker": False,
+        "execType": "Trade",
+        "execValue": "21",
+        "orderQty": "2",
+        "leavesQty": "0",
+        "closedSize": "2",
+        "orderType": "Market",
         "execTime": "2200",
         "createType": "CreateByUser",
         "stopOrderType": "UNKNOWN",
@@ -805,6 +814,16 @@ def test_manual_reduction_is_adopted_without_native_stop_label(tmp_path: Path) -
     )
     assert execution["metadata"]["external_native_protection"] is False
     assert execution["metadata"]["native_identity"] == ""
+    assert execution["metadata"]["fee_rate"] == "0.00055"
+    assert execution["metadata"]["fee_currency"] == "USDT"
+    assert execution["metadata"]["is_maker"] is False
+    assert execution["metadata"]["execution_type"] == "Trade"
+    assert execution["metadata"]["execution_value"] == "21"
+    assert execution["metadata"]["order_qty"] == "2"
+    assert execution["metadata"]["leaves_qty"] == "0"
+    assert execution["metadata"]["closed_size"] == "2"
+    assert execution["metadata"]["order_type"] == "Market"
+    assert execution["metadata"]["message_creation_ts_ns"] == 2_201_000_000
     assert any(
         protection["status"] == "external_reduction_flat"
         and protection["metadata"]["external_native_protection"] is False
