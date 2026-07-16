@@ -148,10 +148,11 @@ def _entry_mount_id(
     cloexec = getattr(os, "O_CLOEXEC", None)
     if path_flag is None or nofollow is None or cloexec is None:  # pragma: no cover - Linux supplies these
         raise RuntimeError("Linux reset path safety requires O_PATH, O_NOFOLLOW, and O_CLOEXEC")
+    kind = "directory" if stat.S_ISDIR(observed.st_mode) else "entry"
     try:
         descriptor = os.open(name, path_flag | nofollow | cloexec, dir_fd=directory_fd)
     except OSError as exc:
-        raise ValueError(f"reset entry changed while inspected: {path}") from exc
+        raise ValueError(f"reset {kind} changed while inspected: {path}") from exc
     try:
         opened = os.fstat(descriptor)
         current = _entry_metadata(directory_fd, name)
@@ -160,7 +161,7 @@ def _entry_mount_id(
             (opened.st_dev, opened.st_ino, _file_type(opened.st_mode)) != expected
             or (current.st_dev, current.st_ino, _file_type(current.st_mode)) != expected
         ):
-            raise ValueError(f"reset entry changed while inspected: {path}")
+            raise ValueError(f"reset {kind} changed while inspected: {path}")
         return _mount_id_for_fd(descriptor)
     finally:
         os.close(descriptor)
