@@ -516,6 +516,21 @@ class _ApplyContext:
                 pass
         self.open_directories.clear()
 
+    def release_transient_directories(self) -> None:
+        """Close cached descendants while retaining the trusted anchor binding."""
+        for parts, descriptor in sorted(
+            tuple(self.open_directories.items()),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            if not parts:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            self.open_directories.pop(parts, None)
+
     def _validate_anchor(self) -> None:
         descriptor = self.open_directories[()]
         expected = self.plan.anchor_entry
@@ -919,11 +934,17 @@ def normalize_paper_runtime_roots(
 
         regular_entries = [entry for entry in plan.entries if entry.file_type == stat.S_IFREG]
         for entry in regular_entries:
-            _normalize_planned_regular(context, entry, uid=uid, gid=gid, mode=0o600)
+            try:
+                _normalize_planned_regular(context, entry, uid=uid, gid=gid, mode=0o600)
+            finally:
+                context.release_transient_directories()
 
         directory_entries = [entry for entry in plan.entries if entry.file_type == stat.S_IFDIR]
         for entry in sorted(directory_entries, key=lambda item: len(item.relative_parts), reverse=True):
-            _normalize_planned_directory(context, entry, uid=uid, gid=gid, mode=0o700)
+            try:
+                _normalize_planned_directory(context, entry, uid=uid, gid=gid, mode=0o700)
+            finally:
+                context.release_transient_directories()
         for target in plan.targets:
             planned_created_root = created_root_entries.get(target.relative_parts)
             if planned_created_root is None:
@@ -938,23 +959,26 @@ def normalize_paper_runtime_roots(
                 mode=0o700,
             )
         for entry in plan.entries:
-            if entry.file_type == stat.S_IFREG:
-                _parent_fd, _name, current = context.validate_entry(entry)
-                if (
-                    current.st_uid != uid
-                    or current.st_gid != gid
-                    or stat.S_IMODE(current.st_mode) != 0o600
-                ):
-                    raise RuntimeError(f"paper runtime file changed after normalization: {entry.path}")
-            elif entry.file_type == stat.S_IFDIR:
-                descriptor = context.directory_fd(entry.relative_parts)
-                current = os.fstat(descriptor)
-                if (
-                    current.st_uid != uid
-                    or current.st_gid != gid
-                    or stat.S_IMODE(current.st_mode) != 0o700
-                ):
-                    raise RuntimeError(f"paper runtime directory changed after normalization: {entry.path}")
+            try:
+                if entry.file_type == stat.S_IFREG:
+                    _parent_fd, _name, current = context.validate_entry(entry)
+                    if (
+                        current.st_uid != uid
+                        or current.st_gid != gid
+                        or stat.S_IMODE(current.st_mode) != 0o600
+                    ):
+                        raise RuntimeError(f"paper runtime file changed after normalization: {entry.path}")
+                elif entry.file_type == stat.S_IFDIR:
+                    descriptor = context.directory_fd(entry.relative_parts)
+                    current = os.fstat(descriptor)
+                    if (
+                        current.st_uid != uid
+                        or current.st_gid != gid
+                        or stat.S_IMODE(current.st_mode) != 0o700
+                    ):
+                        raise RuntimeError(f"paper runtime directory changed after normalization: {entry.path}")
+            finally:
+                context.release_transient_directories()
         context._validate_anchor()
         _verify_normalized_paper_tree(
             plan,

@@ -305,6 +305,42 @@ def test_paper_normalization_sets_exact_private_permissions_and_creates_locks(
     assert stat.S_IMODE((strategy / "cycle.parquet").stat().st_mode) == 0o600
 
 
+def test_paper_normalization_bounds_open_directory_cache_for_wide_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = tmp_path / "data"
+    root = anchor / "paper"
+    root.mkdir(parents=True)
+    for index in range(128):
+        child = root / f"partition-{index:03d}"
+        child.mkdir()
+        _file(child / "event.json")
+
+    original_directory_fd = safety._ApplyContext.directory_fd
+    maximum_open = 0
+
+    def observe_open_count(
+        context: safety._ApplyContext,
+        relative_parts: tuple[str, ...],
+    ) -> int:
+        nonlocal maximum_open
+        descriptor = original_directory_fd(context, relative_parts)
+        maximum_open = max(maximum_open, len(context.open_directories))
+        return descriptor
+
+    monkeypatch.setattr(safety._ApplyContext, "directory_fd", observe_open_count)
+
+    normalize_paper_runtime_roots(
+        anchor,
+        (root,),
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+
+    assert maximum_open <= 3
+
+
 def test_paper_normalization_batch_rejects_symlink_before_permissions_change(
     tmp_path: Path,
 ) -> None:
