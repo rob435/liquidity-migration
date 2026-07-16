@@ -60,7 +60,11 @@ do not apply this signal-plane adjustment.
 
 Manifest scope drops pre-listing and post-delist phantom rows caused by genuine
 empty archive objects while retaining mid-history gaps as failures. The
-binding convention is covered by the PIT tests and archived design receipt.
+same rule is applied per ticker incarnation when a persisted v5 `launchTime`
+shows that a venue symbol was reused: the relisting boundary separates the old
+post-delist tail from the new pre-trade interval, while any gap inside either
+traded incarnation still fails. The binding convention is covered by the PIT
+tests and archived design receipt.
 
 ## Current runner behavior
 

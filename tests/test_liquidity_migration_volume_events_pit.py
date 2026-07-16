@@ -125,6 +125,98 @@ def test_current_listing_provenance_does_not_require_prelisting_day() -> None:
     }
 
 
+def test_reused_ticker_is_bounded_per_v5_listing_incarnation() -> None:
+    manifest = pl.DataFrame(
+        {
+            "symbol": ["AAA"] * 8,
+            "date": [
+                "2025-01-01",
+                "2025-01-02",
+                "2025-01-03",
+                "2025-01-05",
+                "2025-01-06",
+                "2025-01-07",
+                "2025-01-08",
+                "2025-01-09",
+            ],
+            "url": [
+                "archive-old-1",
+                "archive-old-2",
+                "archive-empty-after-delisting",
+                "bybit_v5_listing",
+                "bybit_v5_listing",
+                "archive-new-1",
+                "archive-new-2",
+                "bybit_v5_listing",
+            ],
+            "source": [
+                "bybit_public_trading_archive",
+                "bybit_public_trading_archive",
+                "bybit_public_trading_archive",
+                "bybit_v5_listing",
+                "bybit_v5_listing",
+                "bybit_public_trading_archive",
+                "bybit_public_trading_archive",
+                "bybit_v5_listing",
+            ],
+            "v5_observed_launch_date": ["2025-01-05"] * 8,
+        }
+    )
+    klines = _klines(
+        [
+            ("AAA", "2025-01-01"),
+            ("AAA", "2025-01-02"),
+            ("AAA", "2025-01-07"),
+            ("AAA", "2025-01-08"),
+        ],
+        bars_per_day=24,
+    )
+
+    required = _required_pit_date_symbols(klines, manifest)
+
+    assert required == {
+        ("2025-01-01", "AAA"),
+        ("2025-01-02", "AAA"),
+        ("2025-01-07", "AAA"),
+        ("2025-01-08", "AAA"),
+        # Independently inferred active tail remains required.
+        ("2025-01-09", "AAA"),
+    }
+    assert ("2025-01-03", "AAA") not in required
+    assert ("2025-01-05", "AAA") not in required
+    assert ("2025-01-06", "AAA") not in required
+
+
+def test_reused_ticker_still_requires_gap_inside_new_incarnation() -> None:
+    manifest = pl.DataFrame(
+        {
+            "symbol": ["AAA"] * 5,
+            "date": [
+                "2025-01-01",
+                "2025-01-02",
+                "2025-01-07",
+                "2025-01-08",
+                "2025-01-09",
+            ],
+            "v5_observed_launch_date": ["2025-01-05"] * 5,
+        }
+    )
+    klines = _klines(
+        [
+            ("AAA", "2025-01-01"),
+            ("AAA", "2025-01-02"),
+            ("AAA", "2025-01-07"),
+            ("AAA", "2025-01-09"),
+        ],
+        bars_per_day=24,
+    )
+
+    required = _required_pit_date_symbols(klines, manifest)
+
+    assert ("2025-01-08", "AAA") in required
+    assert _full_pit_universe_pass(klines, manifest) is False
+
+
 def test_covered_set_requires_min_hourly_bars() -> None:
     # A day with < 20 hourly bars is treated as not-downloaded (data-presence gate).
     thin = _klines([("AAA", "2025-01-02")], bars_per_day=10)

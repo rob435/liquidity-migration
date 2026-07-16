@@ -91,3 +91,31 @@ One canonical Bybit attempt was interrupted after manifest/kline work and
 before ancillary completion. Its partial data state is retained and will be
 resumed/revalidated by the exact canonical command; no refreshed-tail strategy
 performance was inspected from that attempt.
+
+### Pre-outcome PIT-incarnation amendment — 2026-07-16 22:00:32 UTC
+
+The first automated canonical attempt failed before ancillary refresh or any
+backtest cell because the strict manifest/kline validator reported 12 missing
+symbol-days. Diagnosis against the persisted partitions and the public v5
+`instruments-info` response established that `DATAUSDT` and `KORUUSDT` are
+reused tickers: each has an older traded incarnation and a new 2026 listing.
+The existing validator collapses all rows for a symbol into one first/last
+kline span, so empty post-delisting and pre-relisting days are incorrectly
+classified as missing mid-incarnation data.
+
+Before any refreshed-tail strategy result is inspected, the deterministic
+repair is registered as follows: persist the observed v5 `launchTime` as
+listing-incarnation metadata; split required manifest/kline coverage at those
+observed incarnation starts; and derive each segment's lower and upper traded
+bounds only from klines inside that segment. A genuinely missing day inside a
+segment must continue to fail, and independently observed active-listing tail
+membership must continue to prevent an incomplete tail from self-passing.
+Tests must pin both properties. The duplicate request-window defect noticed in
+the same downloader inspection may be removed as a non-numerical efficiency
+fix.
+
+This changes PIT validation/data provenance only. It does not change the
+registered venues, window, four cells, strategies, features, costs, leverage,
+or interpretation rule. The failed attempt remains in the append-only run log,
+and the exact canonical command will be retried after the repair passes the
+repository gate.

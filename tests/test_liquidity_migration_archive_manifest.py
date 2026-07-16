@@ -280,6 +280,7 @@ def test_empty_manifest_has_expected_schema_and_no_rows() -> None:
         "membership_source",
         "membership_inferred",
         "first_archive_observed_date",
+        "v5_observed_launch_date",
         "membership_provenance_limitation",
     ]
     assert manifest.schema["date"] == pl.String
@@ -888,6 +889,56 @@ def test_stamp_bybit_manifest_provenance_preserves_distinct_source_classes() -> 
     assert "unresolved population provenance" in rows[2]["membership_provenance_limitation"]
 
 
+def test_stamp_bybit_manifest_provenance_preserves_v5_launch_date() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "date": "2025-01-01",
+                "symbol": "AAAUSDT",
+                "url": "https://public.bybit.com/trading/AAAUSDT/a.csv.gz",
+                "source": am.ARCHIVE_SCRAPE_SOURCE,
+                "v5_observed_launch_date": "2026-07-15",
+            }
+        ]
+    )
+
+    stamped = am.stamp_bybit_manifest_provenance(frame)
+
+    assert stamped["v5_observed_launch_date"].to_list() == ["2026-07-15"]
+    am.validate_bybit_manifest_provenance(stamped)
+
+
+def test_build_manifest_attaches_v5_launch_to_archive_rows(monkeypatch) -> None:
+    base_url = "https://archive.test/trading/"
+    monkeypatch.setattr(
+        am,
+        "fetch_directory_html",
+        lambda url: (
+            '<a href="AAAUSDT/">AAAUSDT/</a>'
+            if url == base_url
+            else '<a href="AAAUSDT2026-07-15.csv.gz">day</a>'
+        ),
+    )
+    launch_ms = int(datetime(2026, 7, 15, tzinfo=UTC).timestamp() * 1000)
+    monkeypatch.setattr(
+        am,
+        "fetch_v5_trading_perp_listings",
+        lambda **kwargs: {"AAAUSDT": launch_ms},
+    )
+
+    manifest = am.build_archive_trade_manifest(
+        base_url=base_url,
+        start="2026-07-15",
+        end="2026-07-16",
+        workers=1,
+    )
+
+    assert manifest["v5_observed_launch_date"].unique().to_list() == [
+        "2026-07-15"
+    ]
+    am.validate_bybit_manifest_provenance(manifest)
+
+
 def test_stamp_bybit_manifest_provenance_refuses_unattributed_source() -> None:
     frame = pl.DataFrame(
         [{"date": "2025-01-01", "symbol": "AAAUSDT", "url": "u", "source": "guess"}]
@@ -1091,6 +1142,32 @@ def test_union_with_persisted_manifest_dedupes_and_falls_back(tmp_path) -> None:
         ("BTCUSDT", "2024-01-01", "btc.csv.gz"),
         ("SOLUSDT", "2024-01-02", "sol.csv.gz"),
     ]
+
+
+def test_union_with_persisted_manifest_preserves_new_provenance_column(tmp_path) -> None:
+    persisted = _manifest([
+        ("BTCUSDT", "2024-01-01", "btc.csv.gz"),
+        ("ETHUSDT", "2024-01-01", "eth.csv.gz"),
+    ])
+    write_dataset(
+        persisted,
+        tmp_path,
+        "archive_trade_manifest",
+        partition_by=("date",),
+        append=False,
+    )
+    rebuilt = _manifest([("BTCUSDT", "2024-01-01", "btc.csv.gz")]).with_columns(
+        pl.lit("2026-07-01").alias("v5_observed_launch_date")
+    )
+
+    merged = am._union_with_persisted_manifest(tmp_path, rebuilt)
+
+    assert "v5_observed_launch_date" in merged.columns
+    values = {
+        row["symbol"]: row["v5_observed_launch_date"]
+        for row in merged.select("symbol", "v5_observed_launch_date").to_dicts()
+    }
+    assert values == {"BTCUSDT": "2026-07-01", "ETHUSDT": None}
 
 
 def test_run_archive_manifest_persist_is_non_destructive(tmp_path, monkeypatch) -> None:

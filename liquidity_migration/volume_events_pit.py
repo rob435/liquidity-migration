@@ -6,6 +6,7 @@ _common / trade_lifecycle.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any
 
@@ -91,6 +92,81 @@ def _current_listing_derived_date_symbols(
     return _date_symbol_set(archive_manifest.filter(predicate.fill_null(False)))
 
 
+def _observed_v5_launch_dates(
+    archive_manifest: pl.DataFrame,
+) -> dict[str, tuple[str, ...]]:
+    """Observed v5 listing starts, including a later reused-symbol incarnation."""
+
+    column = "v5_observed_launch_date"
+    if (
+        archive_manifest.is_empty()
+        or "symbol" not in archive_manifest.columns
+        or column not in archive_manifest.columns
+    ):
+        return {}
+    observed = (
+        archive_manifest.select("symbol", column)
+        .drop_nulls(["symbol", column])
+        .unique()
+    )
+    launches: dict[str, set[str]] = {}
+    for symbol, launch_date in observed.iter_rows():
+        value = str(launch_date)
+        if len(value) == 10:
+            launches.setdefault(str(symbol), set()).add(value)
+    return {
+        symbol: tuple(sorted(values))
+        for symbol, values in launches.items()
+    }
+
+
+def _incarnation_segment_bounds(
+    klines: pl.DataFrame,
+    archive_manifest: pl.DataFrame,
+    global_bounds: dict[str, tuple[str, str]],
+) -> tuple[
+    dict[str, tuple[str, ...]],
+    dict[tuple[str, int], tuple[str, str]],
+]:
+    """Return relisting boundaries and traded bounds inside each incarnation.
+
+    Symbols whose observed v5 launch is not later than their first stored kline
+    need no special treatment. For a reused ticker, only its distinct dates are
+    materialized here; the common one-incarnation path retains the cheaper
+    global min/max aggregation.
+    """
+
+    observed = _observed_v5_launch_dates(archive_manifest)
+    boundaries = {
+        symbol: tuple(day for day in days if day > bounds[0])
+        for symbol, days in observed.items()
+        if (bounds := global_bounds.get(symbol)) is not None
+        and any(day > bounds[0] for day in days)
+    }
+    boundaries = {symbol: days for symbol, days in boundaries.items() if days}
+    if not boundaries:
+        return {}, {}
+
+    date_rows = (
+        klines.filter(pl.col("symbol").is_in(list(boundaries)))
+        .select("symbol", "date")
+        .drop_nulls()
+        .unique()
+    )
+    segment_bounds: dict[tuple[str, int], tuple[str, str]] = {}
+    for symbol_raw, day_raw in date_rows.iter_rows():
+        symbol = str(symbol_raw)
+        day = str(day_raw)
+        segment = bisect_right(boundaries[symbol], day)
+        key = (symbol, segment)
+        current = segment_bounds.get(key)
+        if current is None:
+            segment_bounds[key] = (day, day)
+        else:
+            segment_bounds[key] = (min(current[0], day), max(current[1], day))
+    return boundaries, segment_bounds
+
+
 def _required_pit_date_symbols(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> set[tuple[str, str]]:
     """Archive-manifest (date, symbol) pairs that the klines are REQUIRED to cover for
     a full-PIT universe — i.e. only within each symbol's traded lifespan
@@ -112,10 +188,16 @@ def _required_pit_date_symbols(klines: pl.DataFrame, archive_manifest: pl.DataFr
     never be selected. Requiring klines for them is a false tripwire, NOT survivorship
     protection.
 
-    Survivorship IS preserved: any date within [first, last] — including a genuine
-    mid-history gap where a real trading day's klines are simply missing (observed:
-    FHEUSDT 2025-08-29..10-21, a 54-day archive-download gap, correctly still flagged and
-    then backfilled) — is still required and will still trip the gate. A
+    Reused tickers are split at every persisted v5 ``launchTime`` observed after
+    their first stored kline. Bounds are then derived separately inside each
+    incarnation, so an empty post-delisting/pre-relisting interval cannot be
+    mistaken for a mid-history download hole.
+
+    Survivorship IS preserved: any date within an incarnation's [first, last] —
+    including a genuine mid-history gap where a real trading day's klines are
+    simply missing (observed: FHEUSDT 2025-08-29..10-21, a 54-day
+    archive-download gap, correctly still flagged and then backfilled) — is
+    still required and will still trip the gate. A
     `bybit_v5_listing` pair is also required at or after the first observed kline even when
     it lies beyond the current kline tail: that provenance independently records a symbol
     reported `Trading` through the manifest build boundary. Inferring that upper boundary
@@ -123,9 +205,18 @@ def _required_pit_date_symbols(klines: pl.DataFrame, archive_manifest: pl.DataFr
     itself as a completed lifespan and false-pass."""
     bounds = _symbol_kline_date_bounds(klines)
     current_listing_pairs = _current_listing_derived_date_symbols(archive_manifest)
+    incarnation_starts, segment_bounds = _incarnation_segment_bounds(
+        klines,
+        archive_manifest,
+        bounds,
+    )
     out: set[tuple[str, str]] = set()
     for d, s in _date_symbol_set(archive_manifest):
-        span = bounds.get(s)
+        starts = incarnation_starts.get(s)
+        if starts is None:
+            span = bounds.get(s)
+        else:
+            span = segment_bounds.get((s, bisect_right(starts, d)))
         if span is not None and span[0] <= d and (
             d <= span[1] or (d, s) in current_listing_pairs
         ):

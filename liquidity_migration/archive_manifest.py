@@ -50,6 +50,7 @@ _BYBIT_MANIFEST_PROVENANCE_COLUMNS = (
     "membership_source",
     "membership_inferred",
     "first_archive_observed_date",
+    "v5_observed_launch_date",
     "membership_provenance_limitation",
 )
 
@@ -397,6 +398,7 @@ def stamp_bybit_manifest_provenance(
                 "membership_source": pl.String,
                 "membership_inferred": pl.Boolean,
                 "first_archive_observed_date": pl.String,
+                "v5_observed_launch_date": pl.String,
                 "membership_provenance_limitation": pl.String,
             }
         )
@@ -415,6 +417,14 @@ def stamp_bybit_manifest_provenance(
         .cast(pl.String, strict=False)
         .alias("source"),
     )
+    if "v5_observed_launch_date" not in frame.columns:
+        frame = frame.with_columns(
+            pl.lit(None, dtype=pl.String).alias("v5_observed_launch_date")
+        )
+    else:
+        frame = frame.with_columns(
+            pl.col("v5_observed_launch_date").cast(pl.String, strict=False)
+        )
     known_sources = {
         ARCHIVE_SCRAPE_SOURCE,
         V5_LISTING_SOURCE,
@@ -488,6 +498,17 @@ def validate_bybit_manifest_provenance(manifest: pl.DataFrame) -> None:
         raise RuntimeError(f"Bybit manifest lacks provenance columns: {missing}")
     if manifest.schema["membership_inferred"] != pl.Boolean:
         raise RuntimeError("Bybit manifest membership_inferred must be Boolean")
+    invalid_launch_dates = manifest.filter(
+        pl.col("v5_observed_launch_date").is_not_null()
+        & ~pl.col("v5_observed_launch_date")
+        .cast(pl.String)
+        .str.contains(r"^\d{4}-\d{2}-\d{2}$")
+    )
+    if not invalid_launch_dates.is_empty():
+        raise RuntimeError(
+            "Bybit manifest v5_observed_launch_date must be an ISO date; "
+            f"first invalid rows: {invalid_launch_dates.head(5).to_dicts()}"
+        )
     source = pl.col("source")
     first_observed = pl.col("first_archive_observed_date")
     limitation = pl.col("membership_provenance_limitation")
@@ -624,7 +645,26 @@ def build_archive_trade_manifest(
         "(delisted/non-Trading — survivorship-relevant)",
         len(scrape_symbols), len(trading_symbols), len(delisted_only),
     )
-    return stamp_bybit_manifest_provenance(pl.DataFrame(combined))
+    combined_frame = pl.DataFrame(combined)
+    if listings:
+        launch_frame = pl.DataFrame(
+            {
+                "symbol": list(listings),
+                "v5_observed_launch_date": [
+                    datetime.fromtimestamp(launch_ms / 1000, tz=UTC)
+                    .date()
+                    .isoformat()
+                    for launch_ms in listings.values()
+                ],
+            }
+        )
+        combined_frame = combined_frame.join(
+            launch_frame,
+            on="symbol",
+            how="left",
+            validate="m:1",
+        )
+    return stamp_bybit_manifest_provenance(combined_frame)
 
 
 def run_archive_manifest(
@@ -713,12 +753,31 @@ def _union_with_persisted_manifest(data_root: str | Path, manifest: pl.DataFrame
         return manifest
     if previous.is_empty() or not {"symbol", "date", "url"}.issubset(previous.columns):
         return manifest
-    # Align to the columns BOTH frames carry so the concat is schema-stable even
-    # if the prior manifest predates a column the new frame added (or vice-versa).
-    # Preserve the new frame's column order.
-    common = [c for c in manifest.columns if c in previous.columns]
+    # Preserve schema additions instead of collapsing to the intersection. A
+    # canonical rebuild may add provenance needed to interpret historical rows
+    # while the persisted root still has the prior schema. Missing values are
+    # explicitly null on the older side.
+    columns = [
+        *manifest.columns,
+        *(column for column in previous.columns if column not in manifest.columns),
+    ]
+
+    def align(frame: pl.DataFrame) -> pl.DataFrame:
+        additions: list[pl.Expr] = []
+        for column in columns:
+            if column in frame.columns:
+                continue
+            dtype = manifest.schema.get(
+                column,
+                previous.schema.get(column, pl.String),
+            )
+            additions.append(pl.lit(None, dtype=dtype).alias(column))
+        if additions:
+            frame = frame.with_columns(additions)
+        return frame.select(columns)
+
     combined = pl.concat(
-        [manifest.select(common), previous.select(common)], how="vertical_relaxed"
+        [align(manifest), align(previous)], how="vertical_relaxed"
     )
     return combined.unique(subset=["symbol", "date", "url"], keep="first").sort(["date", "symbol", "url"])
 

@@ -73,8 +73,11 @@ contract. It does not prove venue facts the sources never observed. Bybit
 current-listing-derived tail rows remain inference; they are not archive
 observations. Bybit manifest rows carry `membership_source`,
 `membership_inferred`, `first_archive_observed_date`, and
-`membership_provenance_limitation`; kline coverage is not silently upgraded to
-independent population evidence. See `docs/pit_gate.md`.
+`membership_provenance_limitation`. They also preserve
+`v5_observed_launch_date`: an observed v5 `launchTime` used to separate reused
+ticker incarnations during coverage validation. It does not upgrade inferred
+membership to an archive observation. Kline coverage is not silently upgraded
+to independent population evidence. See `docs/pit_gate.md`.
 
 A full-history root can still support a prospectively held-out time window, but
 only if that window has not influenced design. Once inspected or used to adapt
