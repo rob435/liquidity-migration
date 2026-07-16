@@ -51,7 +51,12 @@ through 2026-07-15 UTC.
 `--data-mode canonical` invokes `build_full_pit_bybit.sh` and
 `build_full_pit_binance.sh`. Their download stages reuse valid data where their
 owners support it, but the Binance monthly membership/kline pair is rebuilt in
-verified staging and published atomically.
+verified staging and published atomically. Canonical mode also regenerates the
+residual-momentum table from its fixed history start and atomically replaces
+the prior table; a full data reconstruction can legitimately change historical
+cross-sectional inputs, so retaining a previously “stable” feature overlap
+would mix evidence identities. Routine `tail` mode continues to require exact
+checked-overlap agreement before appending.
 
 All selected datasets must expose a partition for `end - 1 day`; the all-root
 manifest check must pass; and every requested backtest report must match the

@@ -70,6 +70,28 @@ def test_rmom_step_keeps_checked_append_for_current_schema(tmp_path: Path) -> No
     assert step.fingerprint_extra["full_rewrite"] is False
 
 
+def test_rmom_step_full_rewrites_after_canonical_data_refresh(tmp_path: Path) -> None:
+    pl.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "ts_ms": [1],
+            "residual_momentum": [0.1],
+            "is_provisional": [False],
+        }
+    ).write_parquet(tmp_path / "residual_momentum.parquet")
+
+    step = refresh._rmom_step(
+        tmp_path,
+        venue="bybit",
+        end=dt.date(2026, 7, 16),
+        force_full_rewrite=True,
+    )
+
+    assert "--full-rewrite" in step.command
+    assert step.fingerprint_extra["full_rewrite"] is True
+    assert step.fingerprint_extra["rewrite_reason"] == "canonical_data_mode"
+
+
 def test_run_ledger_resumes_exact_success_without_reexecuting(tmp_path: Path) -> None:
     output = tmp_path / "result.txt"
     step = refresh.CommandStep(

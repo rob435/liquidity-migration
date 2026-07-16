@@ -119,3 +119,21 @@ registered venues, window, four cells, strategies, features, costs, leverage,
 or interpretation rule. The failed attempt remains in the append-only run log,
 and the exact canonical command will be retried after the repair passes the
 repository gate.
+
+### Pre-outcome feature-regeneration amendment — 2026-07-16 22:35:48 UTC
+
+The repaired canonical run completed and validated the Bybit data root, then
+stopped before any backtest because the checked residual-momentum append found
+that the existing stable overlap no longer reproduced (`max_abs_diff =
+0.00164931328375`). Inspection showed that the stored artifact covered 847
+symbols, while the refreshed manifest and klines cover 916, and ended on
+2026-07-11. It is therefore not safe to preserve that artifact as the feature
+identity for a current canonical benchmark.
+
+Canonical data mode will now invoke the existing atomic `--full-rewrite`
+feature path from the fixed registered start. This is prospective and changes
+no residual-momentum formula, causal shift, factor definition, strategy,
+window, cost, leverage, cell, or interpretation rule. Routine `tail` mode keeps
+the checked overlap append and must continue to fail rather than overwrite when
+stable values move. The failed append and completed Bybit data receipt remain
+append-only evidence; no refreshed-tail performance has been inspected.

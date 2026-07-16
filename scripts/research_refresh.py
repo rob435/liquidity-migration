@@ -707,17 +707,27 @@ def _refresh_data(
         _require_coverage(root, venue=venue, end=end)
 
 
-def _rmom_step(root: Path, *, venue: str, end: dt.date) -> CommandStep:
+def _rmom_step(
+    root: Path,
+    *,
+    venue: str,
+    end: dt.date,
+    force_full_rewrite: bool = False,
+) -> CommandStep:
     path = root / "residual_momentum.parquet"
-    full_rewrite = False
+    full_rewrite = force_full_rewrite
+    rewrite_reason = "canonical_data_mode" if force_full_rewrite else ""
     schema: list[str] = []
     if path.is_file():
         try:
             schema = pl.read_parquet(path, n_rows=0).columns
         except Exception:  # noqa: BLE001 - the owner will perform an atomic replacement
             full_rewrite = True
+            rewrite_reason = rewrite_reason or "unreadable_existing_table"
         else:
-            full_rewrite = "is_provisional" not in schema
+            if "is_provisional" not in schema:
+                full_rewrite = True
+                rewrite_reason = rewrite_reason or "legacy_schema"
     command = [
         str(PYTHON),
         "-u",
@@ -736,7 +746,11 @@ def _rmom_step(root: Path, *, venue: str, end: dt.date) -> CommandStep:
         command=tuple(command),
         env={"POLARS_MAX_THREADS": "8"},
         expected_paths=(path,),
-        fingerprint_extra={"schema_before": schema, "full_rewrite": full_rewrite},
+        fingerprint_extra={
+            "schema_before": schema,
+            "full_rewrite": full_rewrite,
+            "rewrite_reason": rewrite_reason,
+        },
     )
 
 
@@ -1007,7 +1021,14 @@ def _plan(args: argparse.Namespace) -> int:
         if not args.skip_data:
             _refresh_data(venue=str(venue), root=root, end=end, args=args, ledger=None)
         if not args.skip_features and "continuous" in configuration["sleeves"]:
-            _print_step(_rmom_step(root, venue=str(venue), end=end))
+            _print_step(
+                _rmom_step(
+                    root,
+                    venue=str(venue),
+                    end=end,
+                    force_full_rewrite=args.data_mode == "canonical",
+                )
+            )
         if not args.skip_backtests:
             for sleeve in configuration["sleeves"]:
                 _print_step(
@@ -1116,7 +1137,14 @@ def _execute(args: argparse.Namespace) -> int:
         if not args.skip_data:
             _refresh_data(venue=venue, root=root, end=end, args=args, ledger=ledger)
         if not args.skip_features and "continuous" in sleeves:
-            ledger.run(_rmom_step(root, venue=venue, end=end))
+            ledger.run(
+                _rmom_step(
+                    root,
+                    venue=venue,
+                    end=end,
+                    force_full_rewrite=args.data_mode == "canonical",
+                )
+            )
             _validate_rmom(root, venue=venue, end=end)
         if not args.skip_backtests:
             for sleeve in sleeves:
