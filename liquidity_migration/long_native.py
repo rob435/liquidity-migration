@@ -900,11 +900,24 @@ def _run_long_pipeline(
             return True, (), False
         if kernel_decision_sink is not None:
             kernel_decision_sink.extend(decisions)
+        decision_symbols = {
+            decision.intent.intent.symbol.upper() for decision in decisions
+        }
+        market_prices = _market_prices(
+            max(decision.wall_ts_ns for decision in decisions) // 1_000_000
+        )
+        # The modeled decision reference is the executable book for a symbol
+        # being changed in this batch (for example a stop/TP price).  Supplying
+        # the bar close for that same symbol creates two contradictory books.
+        # HistoricalAccountSession injects every decision reference itself, so
+        # pass only marks required for the other active symbols.
+        for symbol in decision_symbols:
+            market_prices.pop(symbol, None)
         outputs = kernel_session.submit_decisions(
             decisions,
             equity_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT,
             batch_prefix=batch_prefix,
-            market_prices=_market_prices(max(decision.wall_ts_ns for decision in decisions) // 1_000_000),
+            market_prices=market_prices,
         )
         feedback = historical_submission_feedback(outputs)
         return feedback.accepted, feedback.rejection_keys, feedback.target_committed
@@ -1041,10 +1054,17 @@ def _run_long_pipeline(
         pending_exits.clear()
 
     def _scan_all_positions(through_ts: int) -> None:
+        exited: list[str] = []
         for symbol in list(open_positions):
             if _scan_position_exit(symbol, open_positions[symbol], through_ts):
-                del open_positions[symbol]
+                exited.append(symbol)
+        # Keep every just-exited position available as a mark source while the
+        # chronological exit groups are submitted.  A wide scan can discover
+        # several exits at different timestamps; deleting them first makes the
+        # earliest account batch lose prices for positions that close later.
         _flush_exits()
+        for symbol in exited:
+            del open_positions[symbol]
 
     for ts in dates_all:
         _scan_all_positions(int(ts))

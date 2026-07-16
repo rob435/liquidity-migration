@@ -716,6 +716,9 @@ def _run_trades(
             kernel_decision_sink.extend(decisions)
         if kernel_session is None:
             return True, (), False
+        decision_symbols = {
+            decision.intent.intent.symbol.upper() for decision in decisions
+        }
         outputs = kernel_session.submit_decisions(
             decisions,
             equity_usdt=config.deploy_capital_usd,
@@ -723,6 +726,7 @@ def _run_trades(
             market_prices={
                 position.state.symbol: position.last_mark_price
                 for position in open_positions.values()
+                if position.state.symbol.upper() not in decision_symbols
             },
         )
         feedback = historical_submission_feedback(outputs)

@@ -256,6 +256,31 @@ def test_final_bar_scan_honors_stop_without_later_feature_row(tmp_path: Path) ->
     assert decisions[-1].intent.intent.reason == "stop_loss"
 
 
+def test_wide_scan_keeps_marks_for_later_exit_groups(tmp_path: Path) -> None:
+    signal_ts = 1_700_000_000_000
+    later_ts = signal_ts + 4 * 24 * MS_PER_HOUR
+    inactive = _feature("WIFUSDT", later_ts)
+    inactive["close_location"] = 0.0
+
+    trades, stats, _events, _decisions, session = _run(
+        tmp_path,
+        [
+            _feature("WIFUSDT", signal_ts, day_return=0.30),
+            _feature("PEPEUSDT", signal_ts),
+            inactive,
+        ],
+        {
+            "WIFUSDT": _bars(signal_ts, retrace_hour=1, hours=120),
+            "PEPEUSDT": _bars(signal_ts, retrace_hour=6, hours=120),
+        },
+    )
+
+    assert trades.height == 2
+    assert set(trades["symbol"].to_list()) == {"WIFUSDT", "PEPEUSDT"}
+    assert stats["exits_time"] == 2
+    assert all(output.target_result.accepted for output in session.outputs)
+
+
 def test_report_is_descriptive_not_a_legacy_promotion_gate() -> None:
     report = format_long_native_report(
         {

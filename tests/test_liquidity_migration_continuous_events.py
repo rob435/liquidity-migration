@@ -201,6 +201,51 @@ def test_account_kernel_rejection_does_not_create_trade(tmp_path: Path) -> None:
     assert skips["skipped_account_kernel"] == 1
 
 
+def test_take_profit_reference_owns_decision_symbol_book(tmp_path: Path) -> None:
+    klines = _grid_klines(["A"], 8).with_columns(
+        pl.when(pl.col("ts_ms") == 2 * MS_PER_HOUR)
+        .then(pl.lit(80.0))
+        .otherwise(pl.col("low"))
+        .alias("low"),
+        pl.when(pl.col("ts_ms") == 2 * MS_PER_HOUR)
+        .then(pl.lit(95.0))
+        .otherwise(pl.col("close"))
+        .alias("close"),
+    )
+    bars = _indexed_price_bars_by_symbol(klines)
+    entries = pl.DataFrame(
+        {"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1_000_000.0]}
+    )
+    config = _active_test_config(
+        execution_strategy_id="continuous-tp-reference-test",
+        execution_leverage=10.0,
+        take_profit_pct=0.10,
+        hold_hours=4,
+    )
+    session = HistoricalAccountSession(
+        tmp_path / "account",
+        account_id="continuous-tp-reference-test",
+        risk_policy=AccountRiskPolicy(1e12, 1e12, 1e12, 1e12, 10.0),
+        instrument_rules=synthetic_historical_rules_for_symbols(
+            ["A"], max_leverage=10.0, observed_ts_ns=1
+        ),
+        execution_config=ExecutionTwinConfig(
+            fee_bps=0.0,
+            latency=LatencyProfile(0, 0, 0),
+            max_decision_age_ns=0,
+        ),
+        id_seed="continuous-tp-reference-test",
+    )
+
+    trades, skips = _run_trades(entries, bars, None, config, kernel_session=session)
+
+    assert skips["skipped_account_kernel"] == 0
+    assert trades.height == 1
+    assert trades["exit_reason"][0] == "take_profit"
+    assert trades["exit_price"][0] == pytest.approx(trades["entry_price"][0] * 0.90)
+    assert all(output.target_result.accepted for output in session.outputs)
+
+
 def test_cross_sectional_decile_keeps_singleton() -> None:
     klines = pl.DataFrame(
         {
