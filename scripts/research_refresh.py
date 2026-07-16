@@ -769,15 +769,23 @@ def _validate_rmom(root: Path, *, venue: str, end: dt.date) -> None:
         )
 
 
+def _report_root(run_dir: Path, *, venue: str) -> Path:
+    """Return the run-scoped derived-report root for one venue."""
+
+    if venue not in VALID_VENUES:
+        raise ValueError(f"unknown report venue: {venue}")
+    return run_dir / "backtests" / venue / "equity_curves"
+
+
 def _backtest_step(
     *,
     venue: str,
     sleeve: str,
     root: Path,
+    report_root: Path,
     start: dt.date,
     end: dt.date,
 ) -> CommandStep:
-    report_root = root / "reports" / "equity_curves"
     command = (
         "bash",
         str(REPO / "scripts" / "equity_curves.sh"),
@@ -797,6 +805,7 @@ def _backtest_step(
         "1",
         "--out",
         str(report_root),
+        "--fresh-output",
     )
     if sleeve == "long":
         expected = report_root / "long" / "long_native_research_report.json"
@@ -819,11 +828,10 @@ def _validate_backtest_report(
     *,
     venue: str,
     sleeve: str,
-    root: Path,
+    report_root: Path,
     start: dt.date,
     end: dt.date,
 ) -> None:
-    report_root = root / "reports" / "equity_curves"
     if sleeve == "long":
         path = report_root / "long" / "long_native_research_report.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -871,7 +879,7 @@ def _run_summary(
     coverage: dict[str, Any] = {}
     for venue in venues:
         root = roots[venue]
-        report_root = root / "reports" / "equity_curves"
+        report_root = _report_root(run_dir, venue=venue)
         coverage[venue] = coverage_snapshot(root, venue=venue)
         for sleeve in sleeves:
             key = f"{venue}.{sleeve}"
@@ -961,8 +969,17 @@ def _manifest_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "preregistration": preregistration,
         "modeled_leverage": 1.0,
         "chart_leverage": 1.0,
+        "report_layout": "run_scoped_by_venue_v1",
         "boundary_semantics": "[start, end) at UTC midnight; end is latest completed day boundary",
     }
+
+
+def _resolve_run_dir(args: argparse.Namespace, *, end: dt.date, code_commit: str) -> Path:
+    run_id = args.run_id or f"{end.isoformat()}-{code_commit[:12]}"
+    output_root = Path(args.output_root).expanduser()
+    if not output_root.is_absolute():
+        output_root = REPO / output_root
+    return output_root.resolve() / run_id
 
 
 def _prepare_run_manifest(
@@ -1009,6 +1026,7 @@ def _plan(args: argparse.Namespace) -> int:
     end = dt.date.fromisoformat(str(configuration["end_exclusive"]))
     start = dt.date.fromisoformat(str(configuration["window_start"]))
     roots = {venue: Path(path) for venue, path in _as_mapping(configuration["roots"]).items()}
+    run_dir = _resolve_run_dir(args, end=end, code_commit=_git("rev-parse", "HEAD"))
     print("research-refresh plan")
     print(f"  window: [{start}, {end}) UTC")
     print(f"  data mode: {args.data_mode}")
@@ -1036,6 +1054,7 @@ def _plan(args: argparse.Namespace) -> int:
                         venue=str(venue),
                         sleeve=str(sleeve),
                         root=root,
+                        report_root=_report_root(run_dir, venue=str(venue)),
                         start=start,
                         end=end,
                     )
@@ -1071,10 +1090,9 @@ def _run_reconciliation(
                 }
             )
         return None
-    roots = _as_mapping(configuration["roots"])
     report_root = Path(args.backtest_report_root).expanduser().resolve() if getattr(
         args, "backtest_report_root", None
-    ) else Path(str(roots["bybit"])) / "reports" / "equity_curves"
+    ) else _report_root(run_dir, venue="bybit")
     end = dt.date.fromisoformat(str(configuration["end_exclusive"]))
     start_ms = _date_ms(args.reconcile_start) if args.reconcile_start else None
     report = reconcile_account_roots_to_backtest(
@@ -1114,11 +1132,7 @@ def _execute(args: argparse.Namespace) -> int:
     dirty = bool(_git("status", "--porcelain=v1"))
     if dirty and not args.allow_dirty:
         raise RuntimeError("research refresh requires a clean source tree; use --allow-dirty only for exploration")
-    run_id = args.run_id or f"{end.isoformat()}-{code_commit[:12]}"
-    output_root = Path(args.output_root).expanduser()
-    if not output_root.is_absolute():
-        output_root = REPO / output_root
-    run_dir = output_root.resolve() / run_id
+    run_dir = _resolve_run_dir(args, end=end, code_commit=code_commit)
     _prepare_run_manifest(
         run_dir=run_dir,
         configuration=configuration,
@@ -1148,11 +1162,21 @@ def _execute(args: argparse.Namespace) -> int:
             _validate_rmom(root, venue=venue, end=end)
         if not args.skip_backtests:
             for sleeve in sleeves:
-                ledger.run(_backtest_step(venue=venue, sleeve=sleeve, root=root, start=start, end=end))
+                report_root = _report_root(run_dir, venue=venue)
+                ledger.run(
+                    _backtest_step(
+                        venue=venue,
+                        sleeve=sleeve,
+                        root=root,
+                        report_root=report_root,
+                        start=start,
+                        end=end,
+                    )
+                )
                 _validate_backtest_report(
                     venue=venue,
                     sleeve=sleeve,
-                    root=root,
+                    report_root=report_root,
                     start=start,
                     end=end,
                 )

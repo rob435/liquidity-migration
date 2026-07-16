@@ -137,3 +137,25 @@ window, cost, leverage, cell, or interpretation rule. Routine `tail` mode keeps
 the checked overlap append and must continue to fail rather than overwrite when
 stable values move. The failed append and completed Bybit data receipt remain
 append-only evidence; no refreshed-tail performance has been inspected.
+
+### Pre-outcome report-isolation amendment — 2026-07-16 23:09:54 UTC
+
+The first canonical-feature retry reached the Bybit LONG cell but failed before
+writing a performance report because the standard runner reused
+`<data-root>/reports/equity_curves`. That directory contained a prior
+historical account event tape ending on 2026-07-07; replaying the refreshed
+fixed window into that append-only tape correctly failed with `strategy event
+clock cannot move backward`. A diagnostic replay into a new temporary report
+directory completed, establishing that this is derived-artifact contamination,
+not a strategy-clock or numerical failure. No metrics from the diagnostic run
+were inspected or accepted.
+
+Before any refreshed-tail result is inspected, derived backtest artifacts will
+be isolated under the immutable refresh run directory and further separated by
+venue. Each sleeve command must start from a clean sleeve directory inside that
+run so a deterministic retry cannot append a new replay to a partial account
+journal. The append-only run ledger and logs retain every failed attempt; raw
+market data remains append-first where supported, and canonical residual
+momentum remains an atomic full rewrite as already registered. This changes no
+strategy, feature formula, data, cost, leverage, window, cell, or
+interpretation rule.

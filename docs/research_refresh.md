@@ -46,7 +46,7 @@ through 2026-07-15 UTC.
 | Binance klines/membership | Append strict current-month daily archives and rebuild membership from observed archive coverage. | Crossing a month that is not already materialized falls back to the atomic canonical monthly builder. |
 | Ancillary market data | Re-fetch from the stalest dataset boundary minus the overlap. | Writers reuse valid partitions. Tail mode is operational refresh evidence, not a substitute for a registered full-history rebuild. |
 | Residual momentum | Recompute a checked overlap, prove stable rows unchanged, then atomically append/refresh the provisional tail. | A legacy schema without `is_provisional` receives one explicit atomic full rewrite. |
-| Backtests | Reuse an identical completed component report; otherwise recompute the fixed window. | Incremental PnL would require a separately verified engine-state checkpoint. The tool does not invent one. |
+| Backtests | Reuse an identical completed run-scoped report; otherwise recompute the fixed window from a clean sleeve directory. | Incremental PnL would require a separately verified engine-state checkpoint. The tool does not invent one or append a new replay to an old account journal. |
 
 `--data-mode canonical` invokes `build_full_pit_bybit.sh` and
 `build_full_pit_binance.sh`. Their download stages reuse valid data where their
@@ -72,13 +72,15 @@ manifest.json       frozen code/config/root/window identity
 events.jsonl        append-only command start/failure/success/resume ledger
 logs/*.log          command output retained across attempts
 summary.<hash>.json immutable coverage, cell result, and artifact-hash card
+backtests/<venue>/  isolated LONG/CONTINUOUS reports and replay journals
 reconciliation/     optional immutable three-way output
 ```
 
 Reusing the same `--run-id` skips only a step whose exact command fingerprint
 succeeded and whose expected artifact still exists. Failures remain in the
-event ledger. Changed windows, roots, source commits, or run configuration are
-refused under an existing ID.
+event ledger and logs; a retry clears only that run's partial derived sleeve
+directory. Raw data is untouched. Changed windows, roots, source commits, or
+run configuration are refused under an existing ID.
 
 ## Demo / paper / backtest comparison
 

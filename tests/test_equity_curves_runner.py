@@ -66,6 +66,21 @@ def test_find_png_prefers_book_chart_over_component_chart(tmp_path: Path) -> Non
     assert equity_curves._find_png(tmp_path) == book
 
 
+def test_prepare_sleeve_output_removes_only_requested_derived_tree(tmp_path: Path) -> None:
+    sleeve = tmp_path / "equity_curves" / "long"
+    sibling = tmp_path / "equity_curves" / "continuous" / "keep.txt"
+    sleeve.mkdir(parents=True)
+    sibling.parent.mkdir(parents=True)
+    (sleeve / "partial-journal.jsonl").write_text("stale", encoding="utf-8")
+    sibling.write_text("keep", encoding="utf-8")
+
+    equity_curves._prepare_sleeve_output(sleeve, fresh=True)
+
+    assert sleeve.is_dir()
+    assert list(sleeve.iterdir()) == []
+    assert sibling.read_text(encoding="utf-8") == "keep"
+
+
 def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> None:
     captured = {}
 

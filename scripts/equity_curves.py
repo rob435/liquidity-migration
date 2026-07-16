@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import shutil
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -195,6 +196,16 @@ def _plot_equity_csv(out: Path, sleeve: str) -> Path | None:
     return png
 
 
+def _prepare_sleeve_output(out: Path, *, fresh: bool) -> None:
+    """Create one sleeve directory, optionally discarding only derived output."""
+
+    if fresh and (out.exists() or out.is_symlink()):
+        if out.is_symlink() or not out.is_dir():
+            raise RuntimeError(f"refusing to replace non-directory sleeve output: {out}")
+        shutil.rmtree(out)
+    out.mkdir(parents=True, exist_ok=True)
+
+
 def _label(payload: dict[str, Any]) -> str:
     return str(payload.get("run_label") or (payload.get("summary") or {}).get("run_label") or "-")
 
@@ -304,6 +315,14 @@ def main() -> int:
     p.add_argument("--root", default=DEFAULT_ROOT, help="Per-venue full-PIT data root.")
     p.add_argument("--config", default=DEFAULT_CONFIG, help="Cost-model config.")
     p.add_argument("--out", default=None, help="Report dir (default <root>/reports/equity_curves).")
+    p.add_argument(
+        "--fresh-output",
+        action="store_true",
+        help=(
+            "Remove each requested sleeve's derived report directory before running. "
+            "Use for isolated research-run outputs; raw market data is never removed."
+        ),
+    )
     args = p.parse_args()
 
     sleeves = [s.strip() for s in args.sleeves.split(",") if s.strip()]
@@ -325,7 +344,7 @@ def main() -> int:
     results: dict[str, dict[str, Any]] = {}
     for s in sleeves:
         out = out_root / s
-        out.mkdir(parents=True, exist_ok=True)
+        _prepare_sleeve_output(out, fresh=args.fresh_output)
         heading = "active LONG profile" if s == "long" else "active CONTINUOUS profile"
         print(f"=== {s.upper()} ({heading}) ===", flush=True)
         try:

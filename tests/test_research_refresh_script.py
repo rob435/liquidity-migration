@@ -133,6 +133,25 @@ def test_canonical_builder_freezes_end_and_strict_failure_ratio(tmp_path: Path) 
     assert step.expected_paths[-1] == tmp_path / "klines_1h" / "date=2026-07-15"
 
 
+def test_backtest_step_uses_run_scoped_fresh_report_root(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    report_root = tmp_path / "run" / "backtests" / "bybit" / "equity_curves"
+    step = refresh._backtest_step(
+        venue="bybit",
+        sleeve="long",
+        root=data_root,
+        report_root=report_root,
+        start=dt.date(2023, 7, 16),
+        end=dt.date(2026, 7, 16),
+    )
+
+    assert "--fresh-output" in step.command
+    assert step.command[step.command.index("--out") + 1] == str(report_root)
+    assert step.expected_paths == (
+        report_root / "long" / "long_native_research_report.json",
+    )
+
+
 def test_require_coverage_rejects_one_stale_ancillary(tmp_path: Path) -> None:
     _date_partitions(tmp_path, "bybit", "2026-07-15")
     stale = tmp_path / "funding" / "date=2026-07-15"
