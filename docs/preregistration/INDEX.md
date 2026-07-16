@@ -7,6 +7,12 @@ New decision-influencing work must follow
 exposure boundary, comparison, complete tested set, decision/stopping rule, and
 artifacts before inspecting affected outcomes.
 
+## Active exploratory refresh
+
+| Area | Record | Status |
+| --- | --- | --- |
+| Current LONG/CONTINUOUS benchmarks | `benchmark_refresh_2026-07-16.md` | Registered before fresh-tail download/outcome inspection; descriptive only |
+
 ## Archived outcomes
 
 | Area | Record | Status |
