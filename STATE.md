@@ -1,22 +1,22 @@
 # Operational State
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
-owner/journal checks, and cgroup evidence at 2026-07-16 15:08 UTC. These facts
-describe the deployed commit below; unrelated uncommitted workspace changes
-are not covered.
+owner/journal checks, generation-bound strategy receipts, and watchdog evidence
+at 2026-07-16 16:44 UTC. These facts describe the deployed implementation
+commit below; a later documentation-only receipt may leave the branch ahead.
 
 ## Live authority and topology
 
-- Installed and authorized commit:
-  `14d49d593ad7f1ad3e09162b48dc58221c52983d`, profile `operational`, receipt
-  SHA-256 `dfa12a9a70eb5338a4e5964318ca97c634d9f1a4058d8a9d9b52b4ae709707bd`.
+- Installed and authorized implementation commit:
+  `bd5e97343d89e823b978080aff00a7551a89a63e`, profile `operational`, receipt
+  SHA-256 `5d3159aeae55623ffff4491819126f9c9eae541d6f29ec99c9d8024324911120`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
-  liveness. Early manual cold-start checks surfaced stale cycle/book evidence
-  and one empty paper-follower cycle; the owner and producers recovered without
-  restart. The final watchdog at 15:08 UTC reported zero active alerts across
-  all ten monitored units.
+  liveness. A stdout-only watchdog run during current-generation cold start and
+  a second run after completed-cycle publication each reported zero active
+  alerts across all ten monitored units. The first scheduled systemd run under
+  the new exact authority also exited zero with no active alert at 16:44 UTC.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -26,17 +26,20 @@ are not covered.
 
 ## Verified health and resource state
 
-- Authenticated Bybit demo reads before install and after activation showed
-  zero non-flat positions and zero regular or conditional orders. Demo and
-  paper journals hash-verified with zero fills, working orders, non-flat
-  positions, or nonzero component targets.
+- Authenticated Bybit demo reads before install showed zero non-flat positions
+  and zero regular or conditional orders. After activation the demo owner's
+  fresh authenticated REST reconciliation again observed zero venue positions,
+  zero all-kind or conditional orders, and zero mismatches. Demo and paper
+  journals hash-verified with zero working orders, non-flat positions, or
+  nonzero aggregate targets.
 - Demo and paper owners publish healthy generation-bound status. Demo
   reconciliation is healthy with zero mismatches; live-L2 and owner-health ages
   are measured in seconds. With no active work, each owner subscribes only to
   the idle BTC book.
-- All four target producers have completed post-cutover cycles. The two latest
-  observed paper CONTINUOUS cycles each carried 204,039 followed kline rows.
-  Paper is explicitly
+- All four target producers have current-generation completed-cycle receipts
+  bound to their exact durable cycle. LONG demo/paper reported 231,787 current
+  kline rows; CONTINUOUS demo/paper reported 371,056. Completion-age liveness
+  was clean after publication. Paper is explicitly
   `integration_only_uncalibrated`; its cycles are routing/lifecycle evidence,
   not performance or fill-quality evidence.
 - The prior demo owner retained raw depth for the full universe, reached about
@@ -63,10 +66,14 @@ are not covered.
 - The stale L2/reconciliation alerts were genuine symptoms of the old owner's
   unbounded memory retention. Dynamic subscriptions and bounded state removed
   that cause.
-- Activation-time paper/cycle alerts were cold-start and cross-owner-reader
-  defects. Paper ownership is now verified against its explicit runtime UID,
-  reset-boundary rows are not treated as strategy cycles, and liveness has one
-  bounded cold-start window before returning to its three-minute cadence.
+- The 15:00--15:05 CONTINUOUS hung, owner queue-head, and paper empty-store
+  alerts mixed causal cycle-start time with completion health and accepted
+  unbound old-generation evidence. Liveness now consumes a strict receipt
+  published only after durable cycle evidence, binds it to the current systemd
+  invocation and exact cycle, and uses the producer manager's actual current
+  store size. A no-receipt service generation receives at most the existing
+  ten-minute SLA as startup grace; only the exact queue-head warm-up state is
+  suppressed inside that bound. Unknown or expired state still fails closed.
 - Live deployment of the hardened checkout found two further Linux-only
   boundaries. Wide-tree normalization now retains a bounded descriptor set
   instead of exhausting the process limit, and the non-root paper owner safely
