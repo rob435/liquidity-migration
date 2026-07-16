@@ -69,7 +69,6 @@ class RequestedMarketWarmupGate:
         recorder: SequenceAwareMarketRecorder,
         verified_rule_symbols: set[str],
         now_monotonic: float,
-        now_wall_ns: int,
         max_market_age_ns: int,
     ) -> RequestedMarketReadiness:
         if max_market_age_ns < 0:
@@ -115,7 +114,7 @@ class RequestedMarketWarmupGate:
 
         issues: list[str] = []
         for symbol in symbols:
-            book = recorder.current_book(symbol)
+            book, observed_wall_ns = recorder.current_book_with_observed_wall_ns(symbol)
             if book is None:
                 issues.append(f"{symbol}:no_snapshot")
                 continue
@@ -123,7 +122,7 @@ class RequestedMarketWarmupGate:
                 issues.append(f"{symbol}:sequence_gap")
             if not book.bids or not book.asks:
                 issues.append(f"{symbol}:empty_book")
-            age_ns = now_wall_ns - book.local_receive_ts_ns
+            age_ns = observed_wall_ns - book.local_receive_ts_ns
             if age_ns < 0:
                 issues.append(f"{symbol}:future_book")
             elif age_ns > max_market_age_ns:

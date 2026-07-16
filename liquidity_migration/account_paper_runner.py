@@ -340,7 +340,6 @@ def main(argv: list[str] | None = None) -> int:
                 recorder=recorder,
                 verified_rule_symbols=set(rules),
                 now_monotonic=now,
-                now_wall_ns=runtime_clock.wall_time_ns(),
                 max_market_age_ns=service.max_market_age_ns,
             )
             requested_symbols_ready = market_readiness.ready

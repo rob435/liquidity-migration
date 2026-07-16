@@ -533,7 +533,6 @@ def main(argv: list[str] | None = None) -> int:
                 recorder=recorder,
                 verified_rule_symbols=set(rules),
                 now_monotonic=now,
-                now_wall_ns=time.time_ns(),
                 max_market_age_ns=service.max_market_age_ns,
             )
             requested_symbols_ready = market_readiness.ready
@@ -677,11 +676,12 @@ def main(argv: list[str] | None = None) -> int:
             if notifier is not None and now - last_notification_poll >= max(args.notification_poll_seconds, 0.25):
                 midpoint_by_symbol: dict[str, float] = {}
                 unavailable_midpoint_symbols: list[str] = []
-                notification_wall_ns = time.time_ns()
                 for symbol, position in kernel._state_ref().positions.items():
                     if position.signed_qty == 0.0:
                         continue
-                    book = recorder.current_book(symbol)
+                    book, notification_wall_ns = (
+                        recorder.current_book_with_observed_wall_ns(symbol)
+                    )
                     book_age_ns = (
                         notification_wall_ns - book.local_receive_ts_ns
                         if book is not None

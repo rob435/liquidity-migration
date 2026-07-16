@@ -954,6 +954,29 @@ class SequenceAwareMarketRecorder:
                 return None
             return state.snapshot(depth=depth or self.config.depth)
 
+    def current_book_with_observed_wall_ns(
+        self,
+        symbol: str,
+        *,
+        depth: int | None = None,
+    ) -> tuple[L2BookSnapshot | None, int]:
+        """Return one locked book snapshot followed by its local observation time.
+
+        The shared lock prevents a WebSocket update from publishing a book with
+        a receive timestamp newer than the observation paired with that book.
+        A negative age can therefore only represent a real wall-clock
+        regression, not a read/update race.
+        """
+
+        with self._lock:
+            state = self.books.get(symbol.upper())
+            book = (
+                state.snapshot(depth=depth or self.config.depth)
+                if state is not None and state.has_snapshot
+                else None
+            )
+            return book, self.clock.wall_time_ns()
+
     def close(self) -> None:
         self.store.close()
 

@@ -168,6 +168,21 @@ def test_operational_mode_keeps_live_l2_and_decision_context_without_raw_segment
     assert rows[0]["asks"] == [[level.price, level.qty] for level in book.asks]
 
 
+def test_current_book_observation_orders_wall_time_after_locked_snapshot(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=1_001, current_monotonic_ns=0)
+    recorder = SequenceAwareMarketRecorder(tmp_path, config=_config(), clock=clock)
+    recorder.on_message(_snapshot(), local_receive_ts_ns=1_000)
+
+    book, observed_wall_ns = recorder.current_book_with_observed_wall_ns("BUSDT")
+
+    assert book is not None
+    assert book.local_receive_ts_ns == 1_000
+    assert observed_wall_ns == 1_001
+    recorder.close()
+
+
 def test_owner_market_readiness_covers_every_required_symbol_and_invalidates_changes(
     tmp_path: Path,
 ) -> None:

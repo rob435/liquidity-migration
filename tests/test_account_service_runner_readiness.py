@@ -23,11 +23,37 @@ from liquidity_migration.strategy_runtime import SleeveTargetIntent
 
 
 class _Recorder:
-    def __init__(self, books: dict[str, L2BookSnapshot] | None = None) -> None:
+    def __init__(
+        self,
+        books: dict[str, L2BookSnapshot] | None = None,
+        *,
+        observed_wall_ns: int = 1_000,
+    ) -> None:
         self.books = dict(books or {})
+        self.observed_wall_ns = observed_wall_ns
 
     def current_book(self, symbol: str) -> L2BookSnapshot | None:
         return self.books.get(symbol.upper())
+
+    def current_book_with_observed_wall_ns(
+        self,
+        symbol: str,
+    ) -> tuple[L2BookSnapshot | None, int]:
+        return self.current_book(symbol), self.observed_wall_ns
+
+
+class _UpdateBetweenClockAndBookReadRecorder(_Recorder):
+    """Recreate a WebSocket update overtaking a caller's earlier clock sample."""
+
+    def current_book(self, symbol: str) -> L2BookSnapshot | None:
+        self.books[symbol.upper()] = _book(symbol, local_receive_ts_ns=1_001)
+        return super().current_book(symbol)
+
+    def current_book_with_observed_wall_ns(
+        self,
+        symbol: str,
+    ) -> tuple[L2BookSnapshot | None, int]:
+        return self.current_book(symbol), 1_002
 
 
 def _inbox(tmp_path: Path) -> AccountIntentInbox:
@@ -96,14 +122,12 @@ def _evaluate(
     recorder: _Recorder,
     *,
     now_monotonic: float,
-    now_wall_ns: int = 1_000,
 ):
     return gate.evaluate(
         inbox=inbox,
         recorder=recorder,  # type: ignore[arg-type]
         verified_rule_symbols={"AUSDT", "BUSDT", "CUSDT"},
         now_monotonic=now_monotonic,
-        now_wall_ns=now_wall_ns,
         max_market_age_ns=100,
     )
 
@@ -162,6 +186,42 @@ def test_gap_or_stale_queue_head_book_remains_warming(tmp_path: Path) -> None:
     assert "AUSDT:stale_book" in stale.detail
 
 
+def test_book_update_after_caller_clock_sample_is_not_misclassified_as_future(
+    tmp_path: Path,
+) -> None:
+    inbox = _inbox(tmp_path)
+    inbox.submit(_request(inbox, request_id="head", symbols=("AUSDT",)))
+
+    readiness = _evaluate(
+        RequestedMarketWarmupGate(timeout_seconds=10.0),
+        inbox,
+        _UpdateBetweenClockAndBookReadRecorder(),
+        now_monotonic=1.0,
+    )
+
+    assert readiness.ready is True
+    assert readiness.detail == ""
+
+
+def test_genuine_wall_clock_regression_keeps_queue_head_blocked(tmp_path: Path) -> None:
+    inbox = _inbox(tmp_path)
+    inbox.submit(_request(inbox, request_id="head", symbols=("AUSDT",)))
+    recorder = _Recorder(
+        {"AUSDT": _book("AUSDT", local_receive_ts_ns=1_001)},
+        observed_wall_ns=1_000,
+    )
+
+    readiness = _evaluate(
+        RequestedMarketWarmupGate(timeout_seconds=10.0),
+        inbox,
+        recorder,
+        now_monotonic=1.0,
+    )
+
+    assert readiness.ready is False
+    assert "AUSDT:future_book" in readiness.detail
+
+
 def test_warmup_timeout_latches_health_closed_without_consuming_request(
     tmp_path: Path,
 ) -> None:
@@ -199,7 +259,6 @@ def test_missing_verified_rule_closes_epoch_immediately_and_latches(tmp_path: Pa
         recorder=recorder,  # type: ignore[arg-type]
         verified_rule_symbols=set(),
         now_monotonic=1.0,
-        now_wall_ns=1_000,
         max_market_age_ns=100,
     )
     assert missing.ready is False
@@ -211,7 +270,6 @@ def test_missing_verified_rule_closes_epoch_immediately_and_latches(tmp_path: Pa
         recorder=recorder,  # type: ignore[arg-type]
         verified_rule_symbols={"AUSDT"},
         now_monotonic=2.0,
-        now_wall_ns=1_000,
         max_market_age_ns=100,
     )
     assert still_closed.ready is False
