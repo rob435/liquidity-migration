@@ -91,6 +91,17 @@ portfolio, thesis-test, or parity artifacts; no runner framework, artifact
 registry, cache subsystem, or supervisor is authorized. The exact final line
 accounting belongs in the completion receipt.
 
+### Phase-3 replay recovery amendment — 2026-07-18
+
+The first full evaluator passed every input identity but projected beyond the
+two-hour stage stop because the Windows research adapter flushed every account
+transaction. Its partial journal is preserved and no performance value was
+inspected. The prospective recovery boundary is
+`docs/preregistration/strategy_overhaul_v2_phase3_replay_recovery_2026-07-18.md`:
+one exact retry may remove only those crash-durability flushes, must retain and
+verify the complete account event/hash chain, and has a 45-minute stop so total
+Phase-3 analysis compute remains below two hours.
+
 ## Phase 0 — Rebaseline (closed)
 
 Deliverable: `docs/research_rebaseline_2026-07-16.md`.

@@ -81,8 +81,10 @@ NOTIONAL_USD = 10_000.0
 NOTIONAL_WEIGHT = NOTIONAL_USD / CAPITAL_USD
 COMPLETION_CONTRACT = REPO / "docs/preregistration/strategy_overhaul_v2_completion_cycle_2026-07-17.md"
 BASE_CONTRACT = REPO / "docs/preregistration/strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md"
+RECOVERY_CONTRACT = REPO / "docs/preregistration/strategy_overhaul_v2_phase3_replay_recovery_2026-07-18.md"
 EXPECTED_COMPLETION_CONTRACT_SHA256 = "702ab2e84e0c6acdc5c14acd251a60a63f8fdca68928b0109b2d440999876cc8"
 EXPECTED_BASE_CONTRACT_SHA256 = "9b522bb09bc08e36eb8cdddcbc47d915fc580499895879c2d10070b4fe090879"
+EXPECTED_RECOVERY_CONTRACT_SHA256 = "d572818f7098a4ffda52c325881a98e49ed952b01b626c4e478c5288cb580095"
 EXPECTED_CANDIDATE_COMMIT = "fefb7b5c4fdd225c45540760488e38c94ec111a7"
 HORIZONS = (1, 6, 24, 72)
 
@@ -1031,7 +1033,6 @@ def _portable_atomic_replace(path: Path, data: bytes) -> None:
             if written <= 0:
                 raise OSError("portable account write made no progress")
             offset += written
-        os.fsync(descriptor)
     finally:
         os.close(descriptor)
     os.replace(temporary, path)
@@ -1065,7 +1066,6 @@ def _portable_append_projection(
                 if written <= 0:
                     raise OSError("portable account append made no progress")
                 offset += written
-        os.fsync(descriptor)
     finally:
         os.close(descriptor)
 
@@ -1194,7 +1194,7 @@ def _replay_account(
             "expected_fills": expected_fills,
             "event_counts": event_counts,
             "strategy_event_tape_hash": None if recorder is None else recorder.tape_hash,
-            "portable_boundary": "single_process_mutex_file_fsync_atomic_replace_no_directory_fsync",
+            "portable_boundary": "single_process_mutex_atomic_replace_append_no_fsync",
             "final_flat": True,
         }
     return output
@@ -1430,10 +1430,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     out = args.out.expanduser().resolve()
     contract = args.contract.expanduser().resolve(strict=True)
     base_contract = args.base_contract.expanduser().resolve(strict=True)
+    recovery_contract = RECOVERY_CONTRACT.resolve(strict=True)
     if _sha256(contract) != EXPECTED_COMPLETION_CONTRACT_SHA256:
         raise RuntimeError("completion contract identity differs from the registered bytes")
     if _sha256(base_contract) != EXPECTED_BASE_CONTRACT_SHA256:
         raise RuntimeError("base diagnostic contract identity differs from the registered bytes")
+    if _sha256(recovery_contract) != EXPECTED_RECOVERY_CONTRACT_SHA256:
+        raise RuntimeError("recovery contract identity differs from the registered bytes")
     started = time.perf_counter()
     manifests = _load_candidate_manifests(candidate_root)
     funnel, _label_structure, structural = _structural_frames(candidate_root)
@@ -1447,6 +1450,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "contract_sha256": _sha256(contract),
         "base_contract": str(base_contract),
         "base_contract_sha256": _sha256(base_contract),
+        "recovery_contract": str(recovery_contract),
+        "recovery_contract_sha256": _sha256(recovery_contract),
         "candidate_manifests": len(manifests),
         "candidate_manifest_file_sha256": [
             _sha256(_manifest_path(candidate_root, month)) for month, _start, _end in _month_specs()
@@ -1582,7 +1587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "active artifact comparison remains disabled because all 23 payloads are absent",
                 "CONTINUOUS current-profile thesis selection is disabled by invalid RMOM provenance",
                 "historical costs are modeled, not calibrated execution TCA",
-                "portable account I/O does not prove POSIX durability or deployment parity",
+                "portable account I/O proves neither crash/POSIX durability nor deployment parity",
                 "no demo, mainnet, size, capital, or real-money authority",
             ],
         }
@@ -1619,7 +1624,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "portfolio_kline_files_read": len(kline_files),
             "portfolio_kline_identity_covered_by_candidate_manifests": True,
             "account_transaction_identity": account_identity,
-            "portable_account_boundary": True,
+            "portable_account_boundary": "single_process_mutex_atomic_replace_append_no_fsync",
+            "crash_durability_claim": False,
         }
         manifest_payload: dict[str, Any] = {
             "schema_version": 1,

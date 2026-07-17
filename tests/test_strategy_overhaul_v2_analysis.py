@@ -4,6 +4,7 @@ import datetime as dt
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from liquidity_migration._common import MS_PER_HOUR
 from liquidity_migration.config import CostConfig
@@ -135,7 +136,7 @@ def test_barebones_portfolio_uses_fixed_lifecycle_and_separate_sleeves(tmp_path:
     assert len(files) == 5
 
 
-def test_portable_account_replay_reconciles_and_finishes_flat(tmp_path: Path) -> None:
+def test_portable_account_replay_reconciles_and_finishes_flat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     start_ms = int(dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc).timestamp() * 1000)
     ledger = pl.from_dicts(
         [
@@ -162,6 +163,7 @@ def test_portable_account_replay_reconciles_and_finishes_flat(tmp_path: Path) ->
         ]
     )
 
+    monkeypatch.setattr("scripts.analyze_strategy_overhaul_v2.os.fsync", lambda _fd: pytest.fail("unexpected fsync"))
     receipt = _replay_account(
         ledger,
         work_root=tmp_path / "account-work",
