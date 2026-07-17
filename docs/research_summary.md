@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated 2026-07-16. This is a decision log, not policy or deployment authority.
+Updated 2026-07-17 UTC. This is a decision log, not policy or deployment authority.
 Apply `docs/governance.md` and inspect the named artifacts before relying on a
 claim. Current host state belongs in `STATE.md`.
 
@@ -8,10 +8,57 @@ claim. Current host state belongs in `STATE.md`.
 
 | Object | Evidence read | Operating boundary |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Positive exploratory Bybit/Binance controls, but population-limited and materially exposed to short-fade tail risk | Demo components plus hedge; paper components only; no mainnet authority |
-| `LongV11aDivWeekendVol` | Positive internal cross-venue result, but strongly dependent on take-profit winners and not validated by its tiny skewed forward sample | Demo/paper profile only; no size or mainnet authority |
+| `continuous_ensemble_v2` | Positive current-profile descriptive curves on both canonical roots; Binance has one partially funded trade per component and the curve still does not prove live-runtime parity | Demo components plus hedge; paper components only; no mainnet authority |
+| `LongV11aDivWeekendVol` | Positive current full-PIT result on both venues, but still strongly dependent on take-profit winners and not validated by its tiny skewed forward sample | Demo/paper profile only; no size or mainnet authority |
 
 Binance is a research/replay venue, not a live execution venue.
+
+## Canonical benchmark refresh registered 2026-07-16
+
+The current descriptive benchmark uses `[2023-07-16, 2026-07-16)` at 1x
+modeled and chart leverage. Data therefore ends on the completed UTC day
+2026-07-15. It is exploratory, historically exposed evidence: there was no
+pass threshold, and it authorizes no strategy, parameter, deployment, sizing,
+or capital change.
+
+| Profile | Venue | Trades | Return | Max drawdown | Sharpe-like | MAR | Funding |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| LONG | Bybit | 183 | +35.38% | -3.27% | 2.22 | n/a | modeled, 100% |
+| LONG | Binance | 183 | +29.37% | -3.07% | 1.66 | n/a | modeled, 100% |
+| CONTINUOUS (`turn3p3/turn4p3/turn4p5`) | Bybit | 786 / 737 / 656 | +21.06% | -1.30% | 2.73 | 5.41 | modeled |
+| CONTINUOUS (`turn3p3/turn4p3/turn4p5`) | Binance | 768 / 703 / 611 | +17.35% | -1.41% | 2.46 | 4.10 | partial |
+
+CONTINUOUS annualized returns were 6.58% on Bybit and 5.48% on Binance;
+worst days were -0.93% and -0.58%, respectively. Binance's coarse `partial`
+label is localized to the same `HOOKUSDT` trade opened 2026-03-23 in each
+component: all other trades are labeled modeled (767/768, 702/703, and
+610/611). The report does not expose a funding-event or notional modeled
+fraction, so Binance's CONTINUOUS net-return comparison remains limited.
+
+Both venue directions agree, but they are correlated implementations over
+different listings, prices, funding histories, and fill proxies. Bybit's LONG
+return exceeded Binance by 6.01 percentage points and CONTINUOUS by 3.71
+points; that is robustness context, not venue independence or a causal venue
+effect. Binance had the shallower LONG drawdown and better CONTINUOUS worst
+day, while Bybit had the higher reported returns, Sharpes, and CONTINUOUS MAR.
+
+The Bybit canonical validator covered 916 symbols and 591,596 required
+symbol-days with zero missing requirements. Binance's atomic monthly plus
+current-month build published 14,385,584 hourly rows for 812 symbols and a
+599,001-symbol-day manifest with zero failed archive files. Both LONG reports
+are `full_pit_universe`, untainted, and warning-free. CONTINUOUS remains an
+`exploratory_historical_equity` reconstruction and does not replay the full
+demo account lifecycle or accepted-decision BTC-risk state.
+
+Primary receipts are under
+`reports/research-refresh/benchmark-refresh-2026-07-16-isolated/`,
+`reports/research-refresh/benchmark-refresh-2026-07-16-binance-atomic/`, and
+`reports/research-refresh/benchmark-refresh-2026-07-16-bybit-long-diagnostics/`.
+The corrected Bybit LONG event tape and all core CSVs are byte-identical to the
+pre-diagnostic run; only warning/path metadata and a ~1e-17 reduction-order
+difference changed. No frozen demo and paper account snapshots were available,
+so the three-way reconciliation correctly recorded
+`skipped_no_account_snapshots`; no demo/paper/backtest parity claim exists.
 
 ## Continuous v2
 
@@ -24,8 +71,9 @@ the BTC-vol regime; daily rebalance is disabled.
 The standard historical curve reconstructs the base components and hedge but
 does not apply the accepted-decision BTC-risk state. It also does not establish
 manifest-backed historical membership merely by reading a `full_pit` root.
-The controls below are therefore limited diagnostics, not complete replay of
-the active runtime or decision-grade historical-population evidence.
+The current canonical builders and separate validation receipts improve data
+provenance, but the curves remain limited diagnostics rather than complete
+replay of the active runtime or decision-grade historical-population evidence.
 
 The retained controls below were produced by the retired receipt-derived TP10
 reconstruction. The active code now reconstructs TP12 to match runtime, so
@@ -68,18 +116,19 @@ Durable mechanism reads:
 
 ## Long v11a
 
-Latest retained internal refresh through the 2026-06-23 signal day:
+Current descriptive refresh through the 2026-07-15 signal day:
 
 | Venue | Trades | Return | Max drawdown | Sharpe-like |
 | --- | ---: | ---: | ---: | ---: |
-| Bybit | 188 | +32.87% | -3.46% | 1.98 |
-| Binance | 190 | +27.59% | -4.00% | 1.46 |
+| Bybit | 183 | +35.38% | -3.27% | 2.22 |
+| Binance | 183 | +29.37% | -3.07% | 1.66 |
 
-The object remained positive after best-month removal, 2x/3x cost stress,
-worst-12-month windows, and a matched-symbol null on both venues. Removing the
-take-profit bucket changed Bybit/Binance returns to -0.92%/-5.99%, so the result
-is TP-tail dependent. A single forward ADA pair had roughly 9.47 hours of entry
-skew and 34,091.786 seconds of exit skew; that is execution disagreement, not
+The July refresh did not rerun the mechanism ablations. Earlier work remained
+positive after best-month removal, 2x/3x cost stress, worst-12-month windows,
+and a matched-symbol null on both venues. Removing the take-profit bucket
+changed Bybit/Binance returns to -0.92%/-5.99%, so the result remains TP-tail
+dependent. A single forward ADA pair had roughly 9.47 hours of entry skew and
+34,091.786 seconds of exit skew; that is execution disagreement, not
 validation.
 
 ## Execution evidence

@@ -200,3 +200,84 @@ LONG performance is already exposed, this is not a prospective evidentiary
 reset and the observed metrics remain descriptive. Both LONG cells will be
 rerun solely to produce truthful warning metadata and fresh artifact hashes;
 strategy decisions and numerical outputs must match the pre-fix cells.
+
+### Descriptive outcome — completed 2026-07-17 02:27:52 UTC
+
+All four registered cells completed over `[2023-07-16, 2026-07-16)` at 1x.
+The final Binance and corrected Bybit LONG runs used clean commit
+`f84dde629fccc5ca3a51dce2df2e81ac5d99318d`. Bybit CONTINUOUS came from the
+isolated clean run at `3d492e4`; the intervening source changes affect LONG
+warning diagnostics and Binance acquisition/publication, not CONTINUOUS
+strategy or numerical code. The retained run manifests make that split
+explicit rather than presenting the cells as one atomic execution.
+
+Canonical data gates:
+
+- Bybit: 916 manifest and kline symbols, 591,596 required symbol-days, zero
+  missing symbols or required days, `full_pit_universe_pass=true`, latest
+  manifest/kline partition 2026-07-15.
+- Binance: 19,749 monthly files plus 12,180 current-month daily checks staged
+  together; 14,385,584 hourly rows, 812 symbols, 599,001 manifest symbol-days,
+  zero failed monthly or daily files, latest manifest/kline partition
+  2026-07-15. The 547 daily 404s were absent archive objects, not failed
+  downloads, and were reconciled before atomic publication.
+
+Registered cell results:
+
+| Cell | Trades | Total return | Annualized | Max drawdown | Sharpe-like | MAR | Funding / warning status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Bybit LONG | 183 | +35.3783% | n/a | -3.2739% | 2.2217 | n/a | modeled 100%; `full_pit_universe`; no warnings |
+| Binance LONG | 183 | +29.3684% | n/a | -3.0682% | 1.6649 | n/a | modeled 100%; `full_pit_universe`; no warnings |
+| Bybit CONTINUOUS | 786 / 737 / 656 | +21.06% | +6.58% | -1.30% | 2.73 | 5.41 | all components modeled |
+| Binance CONTINUOUS | 768 / 703 / 611 | +17.35% | +5.48% | -1.41% | 2.46 | 4.10 | all components partial |
+
+The CONTINUOUS trade counts are component counts in
+`turn3p3/turn4p3/turn4p5` order, not additive portfolio trades. Worst daily
+returns were -0.93% on Bybit and -0.58% on Binance. Binance's `partial` funding
+label is caused by the same `2026-03-23-s-HOOKUSDT` trade in all three
+components; the remaining modeled counts are 767/768, 702/703, and 610/611.
+The report does not expose a funding-event or notional modeled fraction, so the
+Binance CONTINUOUS net-return read remains limited even though the partial
+scope is narrow.
+
+The post-exposure Bybit LONG diagnostic rerun removed only the false
+`WINDOW_CLIPPED_END` warning. Its strategy event tape, baskets, trade, equity,
+MTM equity, and monthly CSV SHA-256 values are byte-identical to the pre-fix
+run. The JSON's `realized_gross_mean` changed from
+`0.05360281970870105` to `0.05360281970870106` (~1e-17); paths and warning
+metadata changed as intended. No strategy decision or material numeric output
+changed.
+
+Primary artifact identities:
+
+- corrected Bybit LONG report SHA-256:
+  `8ed9a804c27552f499150955f7058ae4b2a16d0c88a43e583d90c0fc6650277f`;
+  run summary SHA-256:
+  `9cdc2c131f343cf05a4497a3cf516b46ff13ed9695ceab7abb4246127d3265cf`.
+- Bybit CONTINUOUS summary SHA-256:
+  `b42fa5a39ba01e6044f500a0e9f8a9b30eaac6ba4106c5bf37fa17c828f00880`.
+- Binance LONG report SHA-256:
+  `065cd4eceea7af8161e014b9fd0f65c6718d0264f4dbed33623fd0a14a61ec4e`;
+  CONTINUOUS summary SHA-256:
+  `3b5b22eca93bb7a26aa2d4f65878bd1565811c842e9f2ba32c32bbb75187b432`;
+  run summary SHA-256:
+  `389b1dc8c2e6549ab4ecb5b59add818d26a8188871840b73b4c53b0729b3bff8`.
+
+Both completed run ledgers record
+`reconcile.demo_paper_backtest=skipped_no_account_snapshots`. No frozen local
+demo and paper account roots were supplied, so no three-way equality,
+execution, or accounting claim is made. The new reconciliation command remains
+available for a later common-epoch snapshot.
+
+Interpretation: both profiles are directionally positive on both venues, and
+Bybit has the higher return and Sharpe in this descriptive window. This is
+correlated robustness context, not independent confirmation or evidence that
+the venue caused the difference. Listing sets, prices, funding evidence, and
+fill proxies differ. The registered run had no pass threshold and changes no
+profile, promotion state, deployment, capital boundary, or real-money
+authority.
+
+After the new run-scoped receipts were finalized, the mutable legacy
+`reports/equity_curves` caches under both shared roots were deleted (192 MB
+combined) because they had contaminated deterministic replay. Dated historical
+research receipts and all failed-run ledgers were preserved.
