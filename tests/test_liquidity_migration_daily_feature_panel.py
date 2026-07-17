@@ -578,6 +578,25 @@ def test_funding_day_key_snapped_to_day_floor() -> None:
     assert out["funding_rate_last"][0] == 3.0
 
 
+def test_funding_daily_sum_uses_raw_dynamic_settlements_not_default_8h_equivalent() -> None:
+    day_floor = _date_ms("2025-03-02")
+    funding = pl.DataFrame(
+        {
+            "symbol": ["S00"] * 4,
+            "ts_ms": [day_floor + hour * 3_600_000 for hour in range(1, 5)],
+            "funding_rate": [-0.005] * 4,
+            # This legacy column was derived from stale/default 8h metadata and
+            # must not replace the realized per-settlement rates above.
+            "funding_rate_8h_equiv": [-0.005, -0.04, -0.04, -0.04],
+        }
+    )
+
+    out = _aggregate_daily_funding(funding)
+
+    assert out["funding_rate_1d_sum"][0] == pytest.approx(-0.02)
+    assert out["funding_rate_last"][0] == pytest.approx(-0.005)
+
+
 def test_open_interest_day_key_snapped_to_day_floor() -> None:
     oi = _gap_edge_intraday("open_interest")
     out = _aggregate_daily_open_interest(oi)

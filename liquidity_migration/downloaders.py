@@ -689,6 +689,7 @@ def _normalize_binance_funding(symbol: str, rows: list[dict]) -> list[dict]:
             "mark_price": float(row["markPrice"]) if row.get("markPrice") not in (None, "") else None,
             "funding_interval_min": 8 * 60,
             "source": "binance_usdm_funding",
+            "funding_event_kind": "settlement",
         }
         for row in rows
     ]
@@ -755,6 +756,8 @@ def _normalize_funding(symbol: str, rows: list[dict]) -> list[dict]:
             "symbol": symbol,
             "funding_rate": float(row["fundingRate"]),
             "funding_interval_min": _funding_interval_min(row.get("fundingIntervalHour")),
+            "source": "bybit_funding_history",
+            "funding_event_kind": "settlement",
         }
         for row in rows
     ]

@@ -281,3 +281,75 @@ After the new run-scoped receipts were finalized, the mutable legacy
 `reports/equity_curves` caches under both shared roots were deleted (192 MB
 combined) because they had contaminated deterministic replay. Dated historical
 research receipts and all failed-run ledgers were preserved.
+
+### Outcome-exposed dynamic-funding correction and replacement refresh — 2026-07-17 09:53:44 UTC
+
+The completed CONTINUOUS net-performance cells above are invalid for their
+reported accounting claim. Inspection after completion found that the active
+historical runners derive one modal settlement interval per symbol over the
+whole loaded history and bucket funding rows into that fixed cadence. Both
+canonical funding datasets come from venue funding-history endpoints, where
+each distinct timestamp is an actual settlement. Symbols can change cadence
+temporarily during stressed funding regimes, so the modal bucket merged real
+hourly or four-hour settlements and materially undercharged carry.
+
+This defect and its approximate effect are already outcome-exposed. An
+exact-timestamp diagnostic over the original window estimated CONTINUOUS total
+return at 20.25% on Bybit and 16.58% on Binance versus the published 21.06% and
+17.35%; these are diagnostics, not replacement artifacts. Authenticated Bybit
+demo history for the later BLASTUSDT trade was also inspected before this
+amendment. It showed 18 hourly settlements whose funding exceeded the trade's
+take-profit price gain. No corrected result or fresh-tail result is untouched
+or confirmatory.
+
+The owner-supplied Bybit transaction paste has SHA-256
+`dfdb2384f455454d17fa959cdca0784e379be11333230ebbf03848339058a97a`.
+It contains 50 rows displayed in Europe/London local time from 2026-07-10
+11:03:04 through 2026-07-11 12:33:40 (10:03:04 through 11:33:40 UTC): 23 trade
+rows and 27 funding rows. In the same account interval, SKLUSDT has 15
+consecutive hourly settlements while B3USDT, BUSDT, and TACUSDT have four-hour
+settlements. After applying the BST offset and treating the displayed amount as
+a fee (positive paid, negative credited), all 27 rows match the canonical public
+Bybit funding timestamps and rates; maximum absolute rate difference is
+`2.89139633283665e-10`. Because the paste has shortened identifiers and no
+complete wallet, position, order, or closed-PnL series, it is settlement/cadence
+evidence only and is not a canonical account journal or a full-account
+reconciliation surface.
+
+Before replacement runs are inspected, the deterministic repair is frozen as
+follows:
+
+- canonical `funding` and `binance_usdm_funding` rows are settlement-history
+  events; every distinct `(symbol, ts_ms)` is charged exactly once;
+- overlapping identical rows are deduplicated, conflicting duplicate rates or
+  explicitly non-settlement row semantics fail closed, and no global/modal
+  cadence is inferred for accounting;
+- LONG and CONTINUOUS use the same exact-settlement lookup, while daily funding
+  aggregation sums raw settlement rates rather than a default-interval
+  normalization;
+- downloader rows identify settlement-history semantics prospectively, and
+  regression tests cover an 8h -> 1h -> 8h cadence change, four-hour cadence,
+  duplicate conflict, and the supplied mixed-cadence pattern;
+- strategy entries, exits, costs, weights, features, gates, hedge, leverage,
+  profiles, and parameters are unchanged.
+
+The complete tested set is frozen to two exploratory four-cell runs at 1x
+modeled exposure with presentation-only leverage disabled:
+
+1. a same-window attribution replay over `[2023-07-16, 2026-07-16)` for LONG
+   and CONTINUOUS on Bybit and Binance, under run ID
+   `funding-correction-same-window-2026-07-17`;
+2. after the normal append-first data/feature refresh, the rolling replacement
+   benchmark over `[2023-07-17, 2026-07-17)` for the same four cells, under run
+   ID `benchmark-replacement-2026-07-17`.
+
+Both runs must retain the existing strict PIT/data gates, full trade ledgers,
+equity/monthly/component artifacts, commands, warnings, logs, source/config/data
+identities, and hashes. All completed, failed, or retried cells remain visible.
+The same-window run attributes the accounting repair; the rolling run becomes
+the current descriptive comparison baseline. There is no pass threshold and no
+strategy-selection decision. A funding coverage failure, accounting mismatch,
+PIT failure, clipped tail, or incomplete cell limits or invalidates only the
+affected claim and cannot be waived. Neither run establishes daemon parity,
+forward alpha, promotion, sizing, deployment, mainnet readiness, or real-money
+authority.

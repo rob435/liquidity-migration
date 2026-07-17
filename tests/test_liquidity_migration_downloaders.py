@@ -144,6 +144,7 @@ def test_normalize_binance_funding_normalizes_rate_and_mark_price() -> None:
         "mark_price": 100.5,
         "funding_interval_min": 480,
         "source": "binance_usdm_funding",
+        "funding_event_kind": "settlement",
     }
     assert out[1]["funding_rate"] == -0.0002
 
@@ -252,6 +253,8 @@ def test_normalize_funding_converts_interval_hours_to_minutes() -> None:
         "symbol": "BTCUSDT",
         "funding_rate": 0.0001,
         "funding_interval_min": 240,
+        "source": "bybit_funding_history",
+        "funding_event_kind": "settlement",
     }
 
 

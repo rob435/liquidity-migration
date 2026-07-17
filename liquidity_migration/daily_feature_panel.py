@@ -149,10 +149,17 @@ def _aggregate_daily_klines(klines_1h: pl.DataFrame) -> pl.DataFrame:
 
 
 def _aggregate_daily_funding(funding: pl.DataFrame) -> pl.DataFrame:
-    """Per-(symbol, date): sum of funding payments and the last funding rate."""
+    """Per-(symbol, date): sum actual settlements and retain the last raw rate.
+
+    Canonical funding rows are venue settlement-history events. Summing an
+    ``8h_equiv`` rate derived from a default/static interval corrupts days where
+    the venue temporarily switches to hourly or four-hour settlement. Prefer the
+    raw per-settlement rate; retain the equivalent-rate fallback only for legacy
+    frames that do not carry ``funding_rate`` at all.
+    """
     if funding.is_empty():
         return funding
-    rate_col = "funding_rate_8h_equiv" if "funding_rate_8h_equiv" in funding.columns else "funding_rate"
+    rate_col = "funding_rate" if "funding_rate" in funding.columns else "funding_rate_8h_equiv"
     if rate_col not in funding.columns:
         return pl.DataFrame()
     if "date" not in funding.columns:

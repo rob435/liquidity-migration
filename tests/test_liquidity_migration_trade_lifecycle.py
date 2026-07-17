@@ -220,41 +220,53 @@ def test_funding_lookup_returns_none_without_rate_column():
     assert _funding_lookup(pl.DataFrame()) is None
 
 
-def test_derive_funding_interval_min_genuine_snapshot_and_calm():
-    """The settlement interval is derived data-intrinsically from the rate-change
-    cadence, NOT the stale stored funding_interval_min (which is an 8h default)."""
+def test_funding_lookup_preserves_temporary_hourly_settlement_cadence():
+    """A symbol can switch 8h -> 1h -> 8h during stressed funding.
+
+    The long calm regimes make 8h the modal gap, but every hourly history row is
+    still a real settlement and must be charged. This is the BLAST regression.
+    """
     hour = 3_600_000
-    # genuine 2h: rate changes every 2h stamp -> 120
-    bera = pl.DataFrame({"symbol": ["BERA"] * 12, "ts_ms": [h * 2 * hour for h in range(12)],
-                         "funding_rate": [0.0001 * i for i in range(12)], "funding_interval_min": [480] * 12})
-    # genuine 8h: rate changes every 8h stamp -> 480
-    btc = pl.DataFrame({"symbol": ["BTC"] * 12, "ts_ms": [h * 8 * hour for h in range(12)],
-                        "funding_rate": [0.0001 * i for i in range(12)], "funding_interval_min": [480] * 12})
-    # hourly SNAPSHOT of an 8h symbol: rate constant within each 8h block -> collapse to 480
-    snap = pl.DataFrame({"symbol": ["SNAP"] * 48, "ts_ms": [h * hour for h in range(48)],
-                         "funding_rate": [0.001 + 0.0001 * (h // 8) for h in range(48)],
-                         "funding_interval_min": [480] * 48})
-    out = tl.derive_funding_interval_min(pl.concat([bera, btc, snap]))
-    assert out == {"BERA": 120, "BTC": 480, "SNAP": 480}
+    before = [h * 8 * hour for h in range(30)]
+    burst = [h * hour for h in range(233, 251)]
+    after = [h * 8 * hour for h in range(32, 62)]
+    stamps = before + burst + after
+    funding = pl.DataFrame(
+        {
+            "symbol": ["BLAST"] * len(stamps),
+            "ts_ms": stamps,
+            "funding_rate": [-0.005] * len(stamps),
+            # Legacy/default metadata remains 8h throughout and is not accounting authority.
+            "funding_interval_min": [480] * len(stamps),
+            "funding_event_kind": ["settlement"] * len(stamps),
+        }
+    )
+
+    lookup = _funding_lookup(funding)
+    assert lookup["BLAST"]["events_ts"] == stamps
+    ret, mode, count = _perp_funding_return(
+        lookup,
+        symbol="BLAST",
+        side="short",
+        entry_ts_ms=232 * hour,
+        exit_ts_ms=250 * hour,
+    )
+    assert (ret, mode, count) == (pytest.approx(-0.09), "modeled", 18)
 
 
-def test_funding_lookup_collapses_snapshot_to_one_charge_per_settlement():
-    """With the authoritative interval, _funding_lookup collapses sub-interval snapshot
-    rows to one event per settlement -> exact-stamp dedup no longer over-charges."""
+def test_funding_lookup_preserves_mixed_account_settlement_cadences():
+    """The supplied Bybit ledger has simultaneous 1h and 4h symbol cadences."""
     hour = 3_600_000
-    # 6 settlements (8h apart), each sampled hourly (8 identical rows) -> 48 raw rows;
-    # the rate changes only across the 8h blocks.
-    rates = [0.001 + 0.0001 * (h // 8) for h in range(48)]
-    snap = pl.DataFrame({"symbol": ["AAA"] * 48, "ts_ms": [h * hour for h in range(48)],
-                         "funding_rate": rates, "funding_interval_min": [480] * 48})
-    # No interval -> exact-stamp keeps all 48 (would over-charge ~8x).
-    assert len(tl._funding_lookup(snap)["AAA"]["events_ts"]) == 48
-    # With the derived 480-min interval -> collapses to one event per 8h settlement.
-    intervals = tl.derive_funding_interval_min(snap)
-    assert intervals["AAA"] == 480
-    collapsed = tl._funding_lookup(snap, interval_by_symbol=intervals)["AAA"]
-    assert collapsed["events_ts"] == [h * 8 * hour for h in range(6)]
-    assert collapsed["events_rate"] == [0.001 + 0.0001 * b for b in range(6)]
+    rows = []
+    for h in range(15):
+        rows.append({"symbol": "SKL", "ts_ms": h * hour, "funding_rate": 0.001})
+    for symbol in ("B3", "B", "TAC"):
+        for h in range(0, 16, 4):
+            rows.append({"symbol": symbol, "ts_ms": h * hour, "funding_rate": -0.002})
+
+    lookup = _funding_lookup(pl.DataFrame(rows))
+    assert len(lookup["SKL"]["events_ts"]) == 15
+    assert all(len(lookup[symbol]["events_ts"]) == 4 for symbol in ("B3", "B", "TAC"))
 
 
 def test_perp_funding_return_signs_by_side_and_counts_events():
@@ -311,29 +323,34 @@ def test_perp_funding_return_modeled_with_zero_events_in_window():
     assert (ret, mode, count) == (0.0, "modeled", 0)
 
 
-def test_funding_lookup_collapses_intra_interval_snapshot_rows():
-    # Hourly snapshot rows of an 8h funding rate must collapse to one charge per settlement.
-    # Snapshot collapse is only safe with the AUTHORITATIVE interval, so it is passed explicitly
-    # (the stored funding_interval_min is no longer trusted — see the 4h-undercount test below).
-    hour = 3_600_000
+def test_funding_lookup_rejects_explicit_snapshot_semantics():
     funding = pl.DataFrame(
         {
-            "symbol": ["AAA"] * 24,
-            "ts_ms": [h * hour for h in range(24)],
-            "funding_rate": [0.001] * 24,
+            "symbol": ["AAA"],
+            "ts_ms": [0],
+            "funding_rate": [0.001],
+            "funding_event_kind": ["snapshot"],
         }
     )
-    lookup = _funding_lookup(funding, interval_by_symbol={"AAA": 480})
-    # 24 hourly rows span three 8h settlements -> three events, not 24.
-    assert lookup["AAA"]["events_ts"] == [0, 8 * hour, 16 * hour]
-    # Coverage span stays the raw first/last stamp.
-    assert lookup["AAA"]["start_ts_ms"] == 0
-    assert lookup["AAA"]["end_ts_ms"] == 23 * hour
-    # A hold spanning two settlements is charged twice, not ~16x.
-    _, mode, count = _perp_funding_return(
-        lookup, symbol="AAA", side="short", entry_ts_ms=1, exit_ts_ms=23 * hour
+    with pytest.raises(RuntimeError, match="requires settlement-history rows"):
+        _funding_lookup(funding)
+
+
+def test_funding_lookup_deduplicates_overlap_and_rejects_conflicting_rates():
+    identical = pl.DataFrame(
+        {
+            "symbol": ["AAA", "AAA", "AAA"],
+            "ts_ms": [0, 0, MS_PER_HOUR],
+            "funding_rate": [0.001, 0.001, 0.002],
+        }
     )
-    assert (mode, count) == ("modeled", 2)
+    assert _funding_lookup(identical)["AAA"]["events_ts"] == [0, MS_PER_HOUR]
+
+    conflicting = identical.with_columns(
+        pl.Series("funding_rate", [0.001, 0.003, 0.002])
+    )
+    with pytest.raises(RuntimeError, match="conflicting duplicate rates"):
+        _funding_lookup(conflicting)
 
 
 def test_funding_4h_settlements_not_undercounted():
@@ -350,12 +367,8 @@ def test_funding_4h_settlements_not_undercounted():
             "funding_interval_min": [480] * 6,  # WRONG stored value — now ignored for bucketing
         }
     )
-    # Default (no authoritative interval): exact-stamp dedup keeps all six distinct settlements.
     lookup = _funding_lookup(funding)
     assert lookup["BBB"]["events_ts"] == [h * hour for h in range(0, 24, 4)]
-    # And supplying the TRUE 4h interval gives the identical result (no merge).
-    lookup_true = _funding_lookup(funding, interval_by_symbol={"BBB": 240})
-    assert lookup_true["BBB"]["events_ts"] == [h * hour for h in range(0, 24, 4)]
     # Overlapping-fetch duplicate stamps are still deduped.
     dup = pl.DataFrame(
         {"symbol": ["CCC"] * 3, "ts_ms": [0, 0, 4 * hour], "funding_rate": [0.001, 0.001, 0.002]}

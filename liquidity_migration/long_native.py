@@ -34,7 +34,6 @@ from .trade_lifecycle import (
     _funding_lookup,
     _perp_funding_return,
     build_equity_curve,
-    derive_funding_interval_min,
     summarize_baskets,
     summarize_trade_backtest,
 )
@@ -179,7 +178,7 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
         "features": features,
         "bars_by_symbol": _bars_by_symbol(klines),
         "funding_lookup": (
-            _funding_lookup(funding, interval_by_symbol=derive_funding_interval_min(funding))
+            _funding_lookup(funding)
             if funding is not None and not funding.is_empty()
             else None
         ),
