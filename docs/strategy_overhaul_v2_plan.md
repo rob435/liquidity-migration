@@ -148,14 +148,14 @@ Exit criteria:
   on a future label;
 - a deployment is not implied; operational authorization remains separate.
 
-Status: the bounded demo markout path and command-table join are implemented in
-the current `main` implementation. They preserve actual lag and explicit
+Status: the bounded demo markout path, command-table join, and observer-only
+pre-gate funnel/path-label projector are implemented in the current `main`
+implementation. They preserve actual lag and explicit
 missingness, keep capture I/O off the private fill-accounting path, and retain
 symbols only while
 bounded tasks are pending. Per-owner-loop registration work and per-book-update
-mark writes are each capped at 128. The pre-gate decision funnel and
-claim-specific path labels are not implemented. Nothing in this phase is
-deployed.
+mark writes are each capped at 128. The funnel is not deployed and no runtime
+writer is configured. Nothing in this phase is deployed.
 
 Bounded engineering measurement, not an SLA: five local Python 3.13.5 runs on
 2026-07-16 registered 100 synthetic fills and persisted 100 schedules plus 400
@@ -278,6 +278,13 @@ inspected variants, and explicit non-conclusions. It publishes the new
 candidate tape, barebones ledger, and barebones curve, and links the existing
 active curves/ledgers without regenerating them. No rule changes occur in this
 phase.
+
+Status: in progress. The frozen first Bybit partition completed structurally at
+code `e126ecc`; its post-run receipt is
+`docs/strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md`. The pinned active
+artifacts were absent locally, so comparison is disabled. No label value,
+funnel outcome distribution, portfolio curve, evidence card, or thesis has been
+inspected or produced, and the registered scope has not been expanded.
 
 ## Phase 4 — Thesis selection
 

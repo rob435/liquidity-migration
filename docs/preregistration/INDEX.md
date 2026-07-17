@@ -13,6 +13,7 @@ artifacts before inspecting affected outcomes.
 | --- | --- | --- |
 | Current LONG/CONTINUOUS benchmarks | `benchmark_refresh_2026-07-16.md` | Registered before fresh-tail download/outcome inspection; descriptive only |
 | Strategy Overhaul V2 diagnostic epoch | `strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md` | Initial gates frozen before implementation; provenance/warm-up correction frozen before real candidate-label generation; first bounded partition only |
+| Strategy Overhaul V2 Phase-3 checkpoint | `../strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md` | First bounded partition structurally valid; outcome values not inspected and no expansion authorized |
 
 ## Archived outcomes
 

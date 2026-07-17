@@ -13,6 +13,22 @@ claim. Current host state belongs in `STATE.md`.
 
 Binance is a research/replay venue, not a live execution venue.
 
+## Strategy Overhaul V2 Phase-3 structural checkpoint
+
+The first preregistered Bybit candidate-tape partition for
+`[2026-07-05, 2026-07-06)` completed structurally at code `e126ecc`. It contains
+1,451 unique source keys (11 LONG and 1,440 CONTINUOUS) and 211 exactly matched
+path-label keys. The projector rejected and counted 956 invalid-OHLC input rows.
+The manifest-file SHA-256 is
+`b5d1985d636dcad2d161c81c93e00ace6d6b8307f87f3ff08c023c34dd87da38`;
+the full receipt is `docs/strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md`.
+
+This is integrity evidence only. The manifest records
+`outcomes_inspected=false`; no label distribution, return, MAE/MFE, P&L,
+effect, characteristic ranking, portfolio curve, or thesis was inspected. The
+23 pinned baseline artifacts were absent locally, so active comparison remains
+disabled. No strategy, parameter, deployment, size, or capital decision follows.
+
 ## Corrected canonical benchmark completed 2026-07-17
 
 The current descriptive benchmark uses `[2023-07-17, 2026-07-17)` at 1x
