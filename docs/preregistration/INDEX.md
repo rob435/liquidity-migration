@@ -1,6 +1,8 @@
 # Preregistration Index
 
-No confirmatory experiment is active as of 2026-07-15.
+No confirmatory outcome is active as of 2026-07-17. The V2 completion cycle
+reserves a later holdout, but a thesis-specific confirmatory contract must be
+frozen before that surface is generated or read.
 
 New decision-influencing work must follow
 `docs/parameter_pre_registration.md` and `docs/governance.md`: freeze the claim,
@@ -14,6 +16,7 @@ artifacts before inspecting affected outcomes.
 | Current LONG/CONTINUOUS benchmarks | `benchmark_refresh_2026-07-16.md` | Registered before fresh-tail download/outcome inspection; descriptive only |
 | Strategy Overhaul V2 diagnostic epoch | `strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md` | Initial gates frozen before implementation; provenance/warm-up correction frozen before real candidate-label generation; first bounded partition only |
 | Strategy Overhaul V2 Phase-3 checkpoint | `../strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md` | First bounded partition structurally valid; outcome values not inspected and no expansion authorized |
+| Strategy Overhaul V2 completion cycle | `strategy_overhaul_v2_completion_cycle_2026-07-17.md` | Prospectively freezes the full Phase-3 discovery calendar, untouched Phase-5 holdout, analysis, selection, accounting, artifact, and stopping rules; no outcome value inspected at registration |
 
 ## Archived outcomes
 

@@ -72,6 +72,25 @@ module, third entry point, runner telemetry, cache framework, or generalized
 research orchestration is authorized. The two-hour compute limit, one-partition
 limit, payload limit, and failed-baseline comparison boundary are unchanged.
 
+### Completion-cycle amendment — 2026-07-17
+
+The first bounded partition passed its structural stop, and the owner has now
+asked to complete the full plan without recreating the absent baseline. The
+prospective continuation is
+`docs/preregistration/strategy_overhaul_v2_completion_cycle_2026-07-17.md`.
+It replaces the one-partition stop with 43 sequential calendar-month discovery
+partitions, freezes a chronologically later holdout before any path value is
+read, and names one aggregate analysis/evaluator entry point. It does not relax
+the two-hour stage stop, four-payload analysis budget, immutable-baseline
+boundary, PIT/timing/accounting constraints, or deployment authority.
+
+The prospective engineering ceiling through the completed research cycle is
+one additional read-only entry point and 5,500 cumulative net production lines
+across Phases 1--6. The added surface must directly produce the diagnostic,
+portfolio, thesis-test, or parity artifacts; no runner framework, artifact
+registry, cache subsystem, or supervisor is authorized. The exact final line
+accounting belongs in the completion receipt.
+
 ## Phase 0 — Rebaseline (closed)
 
 Deliverable: `docs/research_rebaseline_2026-07-16.md`.
@@ -284,7 +303,9 @@ code `e126ecc`; its post-run receipt is
 `docs/strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md`. The pinned active
 artifacts were absent locally, so comparison is disabled. No label value,
 funnel outcome distribution, portfolio curve, evidence card, or thesis has been
-inspected or produced, and the registered scope has not been expanded.
+inspected or produced. The completion-cycle contract now prospectively expands the uninspected
+discovery surface and reserves the later holdout. The absent active payloads
+remain a comparison limitation, not a regeneration job.
 
 ## Phase 4 — Thesis selection
 
@@ -329,9 +350,11 @@ cell, and issue the evidence card. An inconclusive result stays inconclusive.
 
 For a supported thesis, implement the smallest profile change and compare
 decision keys, targets, lifecycle, and accounting against the registered model.
-Use offline/shadow first, then a separately authorized demo/paper epoch for
-execution agreement. Promotion, sizing, and mainnet require their own evidence
-and owner authority.
+Phase 6A is offline/shadow parity and belongs to this research cycle. Phase 6B
+is a forward demo/paper execution epoch and remains a separately authorized
+operational contract naming deployment and risk boundaries. A negative,
+inconclusive, or no-qualifying-thesis cycle has no implementation to parity-test.
+Promotion, sizing, and mainnet require their own evidence and owner authority.
 
 ## Deferred infrastructure work — not a Phase-3 prerequisite
 
@@ -370,10 +393,10 @@ rebuild for this queue.
 2. Implement the minimal observer-only row-level funnel at the existing LONG
    and CONTINUOUS candidate owners. Add writer-on/writer-off equivalence tests
    before emitting any outcome-bearing row.
-3. Generate one bounded, resumable partition of the new candidate tapes and
-   validate source-key completeness, gate transitions, causal availability,
-   missingness, and duplicate suppression. Then append only the remaining new
-   diagnostic partitions; do not regenerate the active benchmark artifacts.
+3. The first bounded partition is complete. Generate only the 43 discovery
+   months frozen by the completion-cycle contract, validate the joint source
+   population before reading outcomes, and leave the reserved holdout untouched.
+   Do not regenerate the active benchmark artifacts.
 4. Build the one preregistered barebones portfolio ledger/curve per sleeve from
    those tapes using the frozen collision, sizing, lifecycle, cost, funding,
    fill, and accounting rules. Compare them with the existing active artifacts

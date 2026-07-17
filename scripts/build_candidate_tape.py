@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import types
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -26,6 +27,33 @@ import polars as pl
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+
+
+def _install_import_only_windows_fcntl_guard() -> None:
+    """Let this read-only command import POSIX-owned strategy modules on Windows.
+
+    The transitive account imports require :mod:`fcntl`, although candidate
+    projection never enters a lock, journal, or account path.  Keep that
+    boundary fail-closed: an unexpected lock call raises instead of silently
+    pretending that Windows has POSIX flock semantics.
+    """
+
+    if os.name != "nt" or "fcntl" in sys.modules:
+        return
+    module = types.ModuleType("fcntl")
+    module.LOCK_SH = 1  # type: ignore[attr-defined]
+    module.LOCK_EX = 2  # type: ignore[attr-defined]
+    module.LOCK_NB = 4  # type: ignore[attr-defined]
+    module.LOCK_UN = 8  # type: ignore[attr-defined]
+
+    def _forbidden_flock(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("candidate projection must not invoke POSIX account locking")
+
+    module.flock = _forbidden_flock  # type: ignore[attr-defined]
+    sys.modules["fcntl"] = module
+
+
+_install_import_only_windows_fcntl_guard()
 
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms  # noqa: E402
 from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS  # noqa: E402
@@ -734,6 +762,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=REPO / "docs/preregistration/strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md",
     )
+    parser.add_argument(
+        "--base-contract",
+        type=Path,
+        default=REPO / "docs/preregistration/strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md",
+        help="source/gate contract retained by a prospective continuation",
+    )
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true")
     return parser
@@ -744,6 +778,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = args.root.expanduser().resolve(strict=True)
     out = args.out.expanduser().resolve()
     contract = args.contract.expanduser().resolve(strict=True)
+    base_contract = args.base_contract.expanduser().resolve(strict=True)
     if args.end <= args.start:
         raise ValueError("candidate partition end must be after start")
     read_start = args.start - dt.timedelta(days=LONG_WARMUP_DAYS)
@@ -762,6 +797,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "read_window": {"start": read_start.isoformat(), "end_exclusive": read_end.isoformat()},
         "contract": str(contract),
         "contract_sha256": _sha256(contract),
+        "base_contract": str(base_contract),
+        "base_contract_sha256": _sha256(base_contract),
         "kline_file_count": len(kline_files),
         "manifest_file_count": len(manifest_files),
         "residual_momentum_present": rmom_path.is_file(),
